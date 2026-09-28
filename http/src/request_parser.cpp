@@ -107,6 +107,10 @@ public:
     explicit Impl(IRequestSink& sink) noexcept : sink_(sink) {
         llhttp_init(&parser_, HTTP_REQUEST, &settings());
         parser_.data = this;
+        // Strict llhttp fails "HTTP/1.2" with the error it also uses for "HTTP/1.1x" or a bare
+        // LF, so a 505 could not be told from a 400. Leniently it parses any digit.digit and
+        // on_headers_complete() refuses the ones that are not 1.0 or 1.1.
+        llhttp_set_lenient_version(&parser_, 1);
     }
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
@@ -223,7 +227,7 @@ private:
             return ParseProgress::NeedMore;
         }
         if (err != HPE_PAUSED) {
-            return fail(error_for(err));
+            return fail(error_for());
         }
         // A pause stops llhttp right behind the bytes whose callback asked for it; that callback
         // has also moved state_ to say why.
@@ -243,13 +247,10 @@ private:
         return ParseProgress::MessageComplete;
     }
 
-    [[nodiscard]] ParseError error_for(llhttp_errno_t err) const noexcept {
+    [[nodiscard]] ParseError error_for() const noexcept {
         // Our own callbacks fail with HPE_USER or HPE_CB_*, having recorded why.
         if (rejection_) {
             return *rejection_;
-        }
-        if (err == HPE_INVALID_VERSION) {
-            return fatal(Status::HttpVersionNotSupported);
         }
         return fatal(Status::BadRequest);
     }
@@ -332,7 +333,8 @@ private:
     }
 
     int on_headers_complete() noexcept {
-        // llhttp also accepts 0.9 (including a request line with no version at all) and 2.0.
+        // Any digit.digit gets here, and so does a request line with no version at all, which
+        // llhttp reads as 0.9.
         if (llhttp_get_http_major(&parser_) != 1 || llhttp_get_http_minor(&parser_) > 1) {
             return reject(Status::HttpVersionNotSupported);
         }

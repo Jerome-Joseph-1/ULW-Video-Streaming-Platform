@@ -154,6 +154,18 @@ TEST(RequestLimits, VersionsOtherThanHttp1AreNotSupported) {
     }
 }
 
+// llhttp reports these with the same error code as a well-formed version it does not know.
+TEST(RequestLimits, MalformedVersionIsABadRequest) {
+    for (const std::string_view request :
+         {"GET / HTTP/1.1\nHost: a\r\n\r\n", "GET / HTTP/1.1x\r\nHost: a\r\n\r\n",
+          "GET / HTTP/1.10\r\nHost: a\r\n\r\n", "GET / HTTP/1.x\r\nHost: a\r\n\r\n",
+          "GET / HTTP/x.1\r\nHost: a\r\n\r\n", "GET / HTTP/11\r\nHost: a\r\n\r\n"}) {
+        const Outcome o = parse(request);
+        EXPECT_EQ(o.result, fatal(Status::BadRequest)) << request;
+        EXPECT_EQ(o.heads, 0U) << request;
+    }
+}
+
 TEST(RequestLimits, GarbledProtocolNameIsABadRequest) {
     const Outcome o = parse("GET / HTTX/1.1\r\n\r\n");
     EXPECT_EQ(o.result, fatal(Status::BadRequest));
