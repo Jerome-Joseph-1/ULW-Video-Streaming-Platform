@@ -193,6 +193,6 @@ ulw_add_test_suite(auth_unit_tests unit
     unit/auth/test_keys.cpp
     unit/auth/token_extractor_test.cpp)
 target_link_libraries(auth_unit_tests PRIVATE ulw::auth ulw::devtoken OpenSSL::Crypto)
-# White-box tests of the token and key-set parsers.
+# Most suites test the module's internals: parsers, signature and claim checks, verdict cache.
 target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/auth/src
     ${PROJECT_SOURCE_DIR}/tests)
