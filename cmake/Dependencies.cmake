@@ -5,6 +5,7 @@ include(FetchContent)
 set(ULW_THIRD_PARTY_DIR ${PROJECT_SOURCE_DIR}/third_party)
 
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
 
 if(ULW_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)

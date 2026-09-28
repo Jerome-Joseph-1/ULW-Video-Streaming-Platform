@@ -26,3 +26,10 @@ ulw_add_test_suite(os_unit_tests unit
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
+ulw_add_test_suite(net_unit_tests unit
+    unit/net/byte_queue_test.cpp
+    unit/net/slab_test.cpp
+    unit/net/timing_wheel_test.cpp)
+target_link_libraries(net_unit_tests PRIVATE ulw::net_lib)
+# White-box tests of the reactor internals.
+target_include_directories(net_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/net/src ${PROJECT_SOURCE_DIR}/tests)
