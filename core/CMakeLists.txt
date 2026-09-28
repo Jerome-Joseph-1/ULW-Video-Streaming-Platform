@@ -4,6 +4,7 @@ ulw_add_library(core_domain
     src/port_errors.cpp
     src/ids.cpp
     src/json.cpp
+    src/ladder.cpp
     src/storage_error.cpp
     src/storage_key.cpp
     src/upload.cpp
