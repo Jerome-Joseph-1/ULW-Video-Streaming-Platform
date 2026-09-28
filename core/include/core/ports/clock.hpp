@@ -5,7 +5,7 @@
 namespace core::ports {
 
 // Deadlines and timeouts use now(); anything that leaves the process (UUIDv7 timestamps,
-// JWT exp/nbf, presign dates) uses wall_now(). Tests advance both together.
+// JWT exp/nbf, presign dates) uses wall_now().
 class IClock {
 public:
     virtual ~IClock() = default;

@@ -33,9 +33,7 @@ struct VideoRecord {
 // reloading the row.
 class Video {
 public:
-    // Counted in bytes so the check needs no Unicode tables. 200 bytes still hold a 100-character
-    // title, about what players and cards show before truncating, in two-byte scripts such as
-    // Cyrillic or Greek.
+    // Bytes, not characters: 200 still hold a 100-character title in Cyrillic or Greek.
     static constexpr std::size_t kMaxTitleBytes = 200;
     // FFmpeg formats a log line into 1024 bytes, prefix included, so one full diagnostic fits.
     static constexpr std::size_t kMaxFailureReasonBytes = 1000;

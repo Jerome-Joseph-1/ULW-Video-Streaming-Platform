@@ -213,8 +213,8 @@ std::optional<std::string_view> Video::error_reason() const noexcept {
     return *data_.error_reason;
 }
 
-// Terminal states answer with their own error so a redelivered worker message can be
-// acknowledged as already applied rather than treated as an ordering bug.
+// AlreadyTerminal alone cannot tell a redelivered request from a conflicting one; the caller
+// compares state() with the state it asked for.
 std::expected<void, DomainError>
 Video::require_state(std::initializer_list<VideoState> allowed) const noexcept {
     if (is_terminal(data_.state)) {

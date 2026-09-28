@@ -59,13 +59,11 @@ using DeviceId = UuidId<struct DeviceTag>;
 // mint ids from. Stored inline because every authenticated request parses one.
 class UserId {
 public:
-    // OIDC allows 255 ASCII characters, but mainstream providers issue under 50 (Okta 20, Auth0
-    // about 35, Entra ID 43, Apple 44). 128 keeps ample headroom and halves what a token can make
-    // us store and index per row.
+    // OIDC allows 255 characters; common providers issue under 50, so 128 keeps headroom.
     static constexpr std::size_t kMaxLength = 128;
 
-    // [A-Za-z0-9._:@|+-] covers those formats (Auth0's "provider|id", URN-like "a:b", e-mail
-    // shaped subjects) and nothing that needs quoting in a log line or escaping in JSON.
+    // [A-Za-z0-9._:@|+-] covers "provider|id", URN-like and e-mail shaped subjects, and nothing
+    // that needs quoting in a log line or escaping in JSON.
     [[nodiscard]] static std::expected<UserId, DomainError> parse(std::string_view text) noexcept;
 
     [[nodiscard]] std::string_view view() const noexcept { return {chars_.data(), size_}; }

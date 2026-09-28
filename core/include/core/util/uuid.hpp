@@ -16,7 +16,6 @@ namespace core {
 class Uuid {
 public:
     static constexpr std::size_t kByteLength = 16;
-    // 32 hex digits in 8-4-4-4-12 groups joined by 4 dashes.
     static constexpr std::size_t kTextLength = 36;
 
     // Only the canonical lowercase form. Ids end up in URLs, storage keys and cache keys, where a

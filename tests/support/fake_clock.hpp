@@ -7,7 +7,8 @@
 
 namespace ulw::test {
 
-// Starts at a fixed instant so anything derived from time is reproducible.
+// Starts at a fixed instant so anything derived from time is reproducible. Tests advance both
+// clocks together.
 class FakeClock final : public core::ports::IClock {
 public:
     [[nodiscard]] core::MonoTime now() const noexcept override { return mono_; }
