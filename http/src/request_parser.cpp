@@ -372,6 +372,11 @@ private:
     // Returning HPE_PAUSED is how a callback pauses llhttp; llhttp_pause() must not be called
     // from inside one.
     int on_body(std::span<const std::byte> fragment) noexcept {
+        // llhttp flushes an open body span at the end of every execute, so resuming with
+        // nothing new to parse yields an empty one.
+        if (fragment.empty()) {
+            return 0;
+        }
         switch (sink_.on_body(fragment)) {
         case BodyVerdict::Continue:
             return 0;

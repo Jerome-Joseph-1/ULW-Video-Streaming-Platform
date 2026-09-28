@@ -37,6 +37,9 @@ public:
 
     [[nodiscard]] const std::vector<Received>& received() const noexcept { return received_; }
     [[nodiscard]] bool delivered_while_paused() const noexcept { return delivered_while_paused_; }
+    [[nodiscard]] bool delivered_empty_fragment() const noexcept {
+        return delivered_empty_fragment_;
+    }
 
     // One store attempt; true once nothing is staged.
     bool drain_once() {
@@ -54,6 +57,9 @@ public:
     BodyVerdict on_body(std::span<const std::byte> bytes) noexcept override {
         if (!staging_.empty()) {
             delivered_while_paused_ = true;
+        }
+        if (bytes.empty()) {
+            delivered_empty_fragment_ = true;
         }
         const std::size_t n = std::min(kStoreBytes, bytes.size());
         for (const std::byte b : bytes.first(n)) {
@@ -76,6 +82,7 @@ private:
     std::vector<Received> received_;
     std::string staging_;
     bool delivered_while_paused_ = false;
+    bool delivered_empty_fragment_ = false;
 };
 
 // Byte i is (i * 31 + 7) mod 251: no period that divides a chunk size, so a dropped,
@@ -97,6 +104,7 @@ struct ThrottledRun {
     std::vector<Received> received;
     http::ParseResult last;
     bool delivered_while_paused = false;
+    bool delivered_empty_fragment = false;
 };
 
 // Feeds `input` in `chunk`-sized receives. Whenever the parser pauses, one more receive is
@@ -135,7 +143,8 @@ ThrottledRun run_throttled(std::string_view input, std::size_t chunk) {
     }
     return {.received = sink.received(),
             .last = r,
-            .delivered_while_paused = sink.delivered_while_paused()};
+            .delivered_while_paused = sink.delivered_while_paused(),
+            .delivered_empty_fragment = sink.delivered_empty_fragment()};
 }
 
 TEST(Backpressure, ThrottledBodyArrivesByteExactAtEveryReceiveSize) {
@@ -153,6 +162,7 @@ TEST(Backpressure, ThrottledBodyArrivesByteExactAtEveryReceiveSize) {
         const ThrottledRun run = run_throttled(input, chunk);
         EXPECT_EQ(run.last, ParseProgress::NeedMore) << chunk;
         EXPECT_FALSE(run.delivered_while_paused) << chunk;
+        EXPECT_FALSE(run.delivered_empty_fragment) << chunk;
         EXPECT_TRUE(run.received == expected) << "receive size " << chunk;
     }
 }
@@ -169,6 +179,19 @@ TEST(Backpressure, PauseOnTheFinalBodyByteCompletesOnResume) {
     EXPECT_EQ(parser.resume(), ParseProgress::MessageComplete);
     EXPECT_EQ(sink.received().back().body, body);
     EXPECT_TRUE(sink.received().back().complete);
+}
+
+TEST(Backpressure, ResumingWithNothingNewDeliversNoEmptyFragment) {
+    ThrottledSink sink;
+    RequestParser parser{sink};
+    const std::string request = patch("/u", patterned(2 * ThrottledSink::kStoreBytes));
+
+    // The write ends inside the body, so llhttp still has the body span open when it pauses.
+    ASSERT_EQ(parser.feed(bytes_of(request).first(request.size() - 1)), ParseProgress::Paused);
+    ASSERT_TRUE(sink.drain_once());
+    EXPECT_EQ(parser.resume(), ParseProgress::NeedMore);
+    EXPECT_FALSE(sink.delivered_empty_fragment());
+    EXPECT_EQ(parser.feed(bytes_of(request).last(1)), ParseProgress::MessageComplete);
 }
 
 TEST(Backpressure, ResumeWithoutPauseIsHarmless) {
