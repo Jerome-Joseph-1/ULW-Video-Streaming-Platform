@@ -124,6 +124,12 @@ target_link_libraries(gateway_tests PRIVATE
     ulw::test_tls OpenSSL::Crypto)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Not a test: the M9 memory measurement, run by hand (see the file's header).
+ulw_add_executable(ulw_gateway_load load/gateway_load.cpp)
+target_link_libraries(ulw_gateway_load PRIVATE
+    ulw::gateway_lib ulw::catalog_memory ulw::storage_fake ulw::test_tls)
+target_include_directories(ulw_gateway_load PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 ulw_add_library(test_http_server support/http_test_server.cpp)
 target_include_directories(test_http_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(test_http_server PUBLIC ulw::os PRIVATE ulw::net_lib Threads::Threads)
