@@ -71,6 +71,7 @@ function(ulw_add_executable name)
 endfunction()
 
 add_subdirectory(core)
+add_subdirectory(os)
 add_subdirectory(apps/gateway)
 
 if(ULW_BUILD_TESTS)

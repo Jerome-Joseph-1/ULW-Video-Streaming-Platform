@@ -23,7 +23,7 @@ check() {
 check "core includes a platform or vendor header" \
     '#include <(unistd|sys/|netinet/|arpa/|openssl/|curl/|libpq|libav|liburing|linux/)' core
 check "cross-module relative include" \
-    '#include "\.\./\.\.' core net http codec rt infra apps tests
+    '#include "\.\./\.\.' core os net http codec rt infra apps tests
 check "vendor vocabulary in a core header" \
     'part_number|ETag|etag|s3_|multipart' core/include
 

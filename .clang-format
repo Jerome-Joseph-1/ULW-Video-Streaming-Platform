@@ -6,7 +6,7 @@ AllowShortFunctionsOnASingleLine: Inline
 PointerAlignment: Left
 IncludeBlocks: Regroup
 IncludeCategories:
-  - Regex: '^"(core|net|http|infra|codec|rt)/'
+  - Regex: '^"(core|os|net|http|infra|codec|rt)/'
     Priority: 1
   - Regex: '^"'
     Priority: 2
