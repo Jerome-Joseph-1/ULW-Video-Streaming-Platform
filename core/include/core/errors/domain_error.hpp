@@ -16,6 +16,12 @@ enum class DomainError : std::uint8_t {
     MissingFailureReason,
     InvalidDuration,
     CorruptRecord,
+    InvalidUploadSize,
+    InvalidChunkSize,
+    OffsetRegression,
+    OffsetBeyondSize,
+    UploadNotActive,
+    UploadIncomplete,
 };
 
 [[nodiscard]] std::string_view to_string(DomainError e) noexcept;

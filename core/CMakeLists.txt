@@ -4,6 +4,7 @@ ulw_add_library(core_domain
     src/ids.cpp
     src/storage_error.cpp
     src/storage_key.cpp
+    src/upload.cpp
     src/uuid.cpp
     src/version.cpp
     src/video.cpp)

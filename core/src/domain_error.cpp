@@ -26,6 +26,18 @@ std::string_view to_string(DomainError e) noexcept {
         return "invalid duration";
     case DomainError::CorruptRecord:
         return "corrupt record";
+    case DomainError::InvalidUploadSize:
+        return "invalid upload size";
+    case DomainError::InvalidChunkSize:
+        return "invalid chunk size";
+    case DomainError::OffsetRegression:
+        return "upload offset regressed";
+    case DomainError::OffsetBeyondSize:
+        return "upload offset beyond size";
+    case DomainError::UploadNotActive:
+        return "upload not active";
+    case DomainError::UploadIncomplete:
+        return "upload incomplete";
     }
     return "unknown domain error";
 }
