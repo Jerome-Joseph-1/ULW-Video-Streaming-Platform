@@ -109,7 +109,8 @@ void EchoServer::on_accept(os::UniqueFd conn) noexcept {
     if (draining_) {
         return;
     }
-    static_cast<void>(net::tune_connection(conn.get()));
+    // Tuning only trims latency; an untuned connection still echoes correctly.
+    [[maybe_unused]] const auto tuned = net::tune_connection(conn.get());
     const auto handle = sessions_.emplace(*this);
     if (!handle) {
         ++rejected_;

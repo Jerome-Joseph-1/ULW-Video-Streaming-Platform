@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <memory>
 #include <print>
 #include <string_view>
 #include <unistd.h>
@@ -50,8 +52,9 @@ bool parse(int argc, char** argv, Args& args) {
         const std::string_view flag = argv[i];
         const std::string_view v = argv[i + 1];
         auto num = [&](auto& out) {
-            const auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
-            return ec == std::errc{} && p == v.data() + v.size();
+            const char* const last = std::to_address(v.end());
+            const auto [p, ec] = std::from_chars(std::to_address(v.begin()), last, out);
+            return ec == std::errc{} && p == last;
         };
         bool ok = false;
         if (flag == "--port") {
@@ -96,9 +99,7 @@ int open_conn(std::uint16_t port) {
     return fd;
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     Args args;
     if (!parse(argc, argv, args)) {
         std::println(stderr, "usage: ulw_loadgen --port P --connections N --seconds S "
@@ -222,4 +223,18 @@ int main(int argc, char** argv) {
                  args.connections, still_open, connect_failures, closed_by_peer, errors, mismatches,
                  round_trips, static_cast<double>(round_trips) / secs, bytes_written);
     return mismatches == 0 && errors == 0 ? 0 : 1;
+}
+
+} // namespace
+
+// Formatting and allocation are all that can still throw; report it and exit.
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        static_cast<void>(std::fputs(e.what(), stderr));
+        return 1;
+    } catch (...) {
+        return 1;
+    }
 }

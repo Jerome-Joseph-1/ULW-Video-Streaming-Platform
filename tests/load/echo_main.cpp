@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <memory>
 #include <print>
 #include <string_view>
 
@@ -23,9 +25,10 @@ struct Args {
 };
 
 template <class T> bool parse_number(std::string_view text, T& out) {
-    const auto* end = text.data() + text.size();
-    const auto [ptr, ec] = std::from_chars(text.data(), end, out);
-    return ec == std::errc{} && ptr == end;
+    const char* const first = std::to_address(text.begin());
+    const char* const last = std::to_address(text.end());
+    const auto [ptr, ec] = std::from_chars(first, last, out);
+    return ec == std::errc{} && ptr == last;
 }
 
 bool parse(int argc, char** argv, Args& args) {
@@ -60,9 +63,7 @@ bool parse(int argc, char** argv, Args& args) {
     return argc % 2 == 1;
 }
 
-} // namespace
-
-int main(int argc, char** argv) try {
+int run(int argc, char** argv) {
     Args args;
     if (!parse(argc, argv, args)) {
         std::println(stderr, "usage: ulw_echo_server [--port N] [--reactor io_uring|epoll] "
@@ -105,7 +106,7 @@ int main(int argc, char** argv) try {
     std::println("listening port={} reactor={} nofile={}{}", port.value_or(0),
                  net::to_string(choice->kind), limits->soft,
                  choice->fell_back_from_io_uring ? " (io_uring unavailable)" : "");
-    std::fflush(stdout);
+    static_cast<void>(std::fflush(stdout));
 
     while (!server.finished()) {
         choice->reactor->run_once(core::Millis{1'000});
@@ -113,7 +114,18 @@ int main(int argc, char** argv) try {
     }
     std::println("drained rejected={}", server.rejected());
     return 0;
-} catch (const std::exception& e) {
-    std::println(stderr, "fatal: {}", e.what());
-    return 1;
+}
+
+} // namespace
+
+// Formatting and allocation are all that can still throw; report it and exit.
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        static_cast<void>(std::fputs(e.what(), stderr));
+        return 1;
+    } catch (...) {
+        return 1;
+    }
 }
