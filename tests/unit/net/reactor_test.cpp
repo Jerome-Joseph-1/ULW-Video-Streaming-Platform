@@ -213,6 +213,48 @@ TEST_P(ReactorTest, ResumingAfterPeerHalfCloseDeliversDataThenEof) {
     EXPECT_TRUE(server.received == data);
 }
 
+// The hangup must not overtake the bytes sent before it: they wait in the kernel until the
+// handler asks for them, and EOF follows them.
+TEST_P(ReactorTest, HangupWhileNotReceivingKeepsTheUnreadBytesForLater) {
+    auto [mine, peer] = ulw::test::unix_pair();
+    Conn server;
+    const auto id = reactor->attach(std::move(mine), server);
+    ASSERT_TRUE(id);
+    const auto data = pattern(1000);
+    ASSERT_EQ(write_some(peer.get(), data), data.size());
+    peer.reset();
+    ulw::test::pump_pending(*reactor);
+    EXPECT_FALSE(server.eof);
+    EXPECT_TRUE(server.received.empty());
+
+    reactor->start_receiving(*id);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return server.eof; }));
+    EXPECT_TRUE(server.received == data);
+    EXPECT_FALSE(server.error.has_value());
+}
+
+// With both directions shut the queued bytes can never leave; the handler must hear so instead
+// of waiting for an on_writable that cannot come.
+TEST_P(ReactorTest, QueuedBytesFailWhenThePeerHangsUpWhileNotReceiving) {
+    auto [mine, peer] = ulw::test::unix_pair();
+    Conn server;
+    const auto id = reactor->attach(std::move(mine), server);
+    ASSERT_TRUE(id);
+    // Several times what an AF_UNIX socket holds for an unread peer (net.core.wmem_default,
+    // 208 KiB), so most of it stays queued.
+    reactor->send(*id, pattern(kMiB));
+    ulw::test::pump_pending(*reactor);
+    ASSERT_GT(reactor->pending_send_bytes(*id), 0U);
+
+    ASSERT_EQ(::shutdown(peer.get(), SHUT_RDWR), 0);
+    ASSERT_TRUE(pump_until(*reactor, [&] {
+        return server.error.has_value() || server.eof || server.writable_calls > 0;
+    }));
+    EXPECT_EQ(server.error, EPIPE);
+    EXPECT_FALSE(server.eof);
+    EXPECT_EQ(server.writable_calls, 0);
+}
+
 TEST_P(ReactorTest, PeerResetIsReportedAsAnError) {
     Conn server;
     auto client = connect(server);

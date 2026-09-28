@@ -48,6 +48,10 @@ private:
         Kind kind = Kind::Free;
         bool in_set = false;
         bool receiving = false;
+        bool failed = false;
+        // The peer hung up while we were not receiving. The descriptor is out of the set, where
+        // the hangup would be reported on every wait, until start_receiving reads what is left.
+        bool hung_up = false;
         bool eof = false;
         bool accept_paused = false;
         std::uint32_t gen = 1;
@@ -75,9 +79,11 @@ private:
         return s.kind == Kind::Stream && s.gen == conn.gen ? &s : SlotPtr{nullptr};
     }
     [[nodiscard]] bool alive(int fd, std::uint32_t gen) const noexcept;
+    [[nodiscard]] static std::uint32_t wanted_events(const Slot& s) noexcept;
     void update_events(int fd, Slot& s) noexcept;
     void remove_from_set(int fd, Slot& s) noexcept;
     void release(Slot& s) noexcept;
+    void disable(int fd, Slot& s) noexcept;
     void fail(int fd, Slot& s, int err) noexcept;
 
     void dispatch(std::uint64_t token, std::uint32_t events) noexcept;

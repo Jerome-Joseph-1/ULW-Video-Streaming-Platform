@@ -83,10 +83,7 @@ bool EpollReactor::alive(int fd, std::uint32_t gen) const noexcept {
     return s.kind != Kind::Free && s.gen == gen;
 }
 
-void EpollReactor::update_events(int fd, Slot& s) noexcept {
-    if (!s.in_set) {
-        return;
-    }
+std::uint32_t EpollReactor::wanted_events(const Slot& s) noexcept {
     std::uint32_t want = 0;
     if (s.receiving) {
         want |= EPOLLIN | EPOLLRDHUP;
@@ -94,6 +91,14 @@ void EpollReactor::update_events(int fd, Slot& s) noexcept {
     if (!s.sendq.empty()) {
         want |= EPOLLOUT;
     }
+    return want;
+}
+
+void EpollReactor::update_events(int fd, Slot& s) noexcept {
+    if (!s.in_set) {
+        return;
+    }
+    const std::uint32_t want = wanted_events(s);
     if (want == s.events) {
         return;
     }
@@ -121,14 +126,21 @@ void EpollReactor::release(Slot& s) noexcept {
     s.stream = nullptr;
     s.ready = nullptr;
     s.acceptor = nullptr;
-    s.receiving = s.eof = s.accept_paused = false;
+    s.receiving = s.failed = s.hung_up = s.eof = s.accept_paused = false;
     s.kind = Kind::Free;
     ++s.gen;
 }
 
-void EpollReactor::fail(int fd, Slot& s, int err) noexcept {
+// From here on the connection only waits for begin_close. Bytes sent later are dropped, so the
+// peer never receives what was queued behind bytes that were lost.
+void EpollReactor::disable(int fd, Slot& s) noexcept {
     remove_from_set(fd, s);
+    s.failed = true;
     s.receiving = false;
+}
+
+void EpollReactor::fail(int fd, Slot& s, int err) noexcept {
+    disable(fd, s);
     deferred_errors_.push_back({.conn = ConnId{.fd = fd, .gen = s.gen}, .err = err});
 }
 
@@ -182,10 +194,23 @@ std::expected<ConnId, int> EpollReactor::attach(os::UniqueFd conn, IStreamHandle
 
 void EpollReactor::start_receiving(ConnId conn) noexcept {
     Slot* s = stream_slot(conn);
-    if (s == nullptr || s->eof) {
+    if (s == nullptr || s->eof || s->failed) {
         return;
     }
     s->receiving = true;
+    if (s->hung_up) {
+        // Level-triggered: back in the set, the descriptor reports its unread bytes and the
+        // hangup on the next wait, and reading them ends in EOF as it would have.
+        s->hung_up = false;
+        epoll_event ev{.events = wanted_events(*s), .data = {.u64 = make_token(conn.fd, s->gen)}};
+        if (::epoll_ctl(epfd_.get(), EPOLL_CTL_ADD, conn.fd, &ev) != 0) {
+            fail(conn.fd, *s, errno);
+            return;
+        }
+        s->in_set = true;
+        s->events = ev.events;
+        return;
+    }
     update_events(conn.fd, *s);
 }
 
@@ -200,7 +225,7 @@ void EpollReactor::stop_receiving(ConnId conn) noexcept {
 
 void EpollReactor::send(ConnId conn, std::span<const std::byte> bytes) noexcept {
     Slot* s = stream_slot(conn);
-    if (s == nullptr || !s->in_set || bytes.empty()) {
+    if (s == nullptr || s->failed || bytes.empty()) {
         return;
     }
     if (s->sendq.size() + bytes.size() > kMaxSendQueue) {
@@ -353,8 +378,7 @@ void EpollReactor::on_stream_event(int fd, Slot& s, std::uint32_t events) noexce
     const std::uint32_t gen = s.gen;
     if ((events & EPOLLERR) != 0) {
         const int err = socket_error(fd);
-        remove_from_set(fd, s);
-        s.receiving = false;
+        disable(fd, s);
         s.stream->on_error(err);
         return;
     }
@@ -369,14 +393,17 @@ void EpollReactor::on_stream_event(int fd, Slot& s, std::uint32_t events) noexce
             // Unread data may remain; it is read on the next wakeup and ends in EOF.
             return;
         }
-        // Both directions are gone. HUP is reported whatever the interest mask, so the
-        // descriptor has to leave the set or the loop spins on it.
-        remove_from_set(fd, s);
-        if (!s.eof) {
-            s.eof = true;
-            s.receiving = false;
-            s.stream->on_peer_eof();
+        // Both directions are gone, but that is not EOF yet: bytes the peer sent before it
+        // hung up may still be unread. Queued bytes can never leave, and trying reports why
+        // instead of leaving them stranded.
+        if (!s.sendq.empty()) {
+            flush(fd, s);
+            if (!alive(fd, gen) || s.failed) {
+                return;
+            }
         }
+        remove_from_set(fd, s);
+        s.hung_up = true;
         return;
     }
     if ((events & EPOLLOUT) != 0 && !s.sendq.empty()) {
@@ -411,8 +438,7 @@ void EpollReactor::read_ready(int fd, Slot& s) noexcept {
         }
         if (errno != EAGAIN) {
             const int err = errno;
-            remove_from_set(fd, s);
-            s.receiving = false;
+            disable(fd, s);
             s.stream->on_error(err);
         }
         return;
@@ -440,8 +466,7 @@ void EpollReactor::flush(int fd, Slot& s) noexcept {
             }
             if (errno != EAGAIN) {
                 const int err = errno;
-                remove_from_set(fd, s);
-                s.receiving = false;
+                disable(fd, s);
                 s.stream->on_error(err);
             }
             return;

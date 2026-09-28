@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ulw::test {
@@ -36,6 +37,15 @@ bool pump_until(net::IReactor& reactor, Pred pred,
         reactor.run_once(core::Millis{5});
     }
     return true;
+}
+
+// For asserting that something does not happen, without waiting on the clock. What the kernel
+// has already recorded is reported by the first zero-wait iteration, and whatever its handler
+// submits or defers is reported by the next; the other eight are margin.
+inline void pump_pending(net::IReactor& reactor) {
+    for (int i = 0; i < 10; ++i) {
+        reactor.run_once(core::Millis{0});
+    }
 }
 
 inline void pump_for(net::IReactor& reactor, std::chrono::milliseconds span) {
@@ -59,6 +69,16 @@ inline os::UniqueFd connect_loopback(std::uint16_t port) {
     }
     ::fcntl(fd.get(), F_SETFL, ::fcntl(fd.get(), F_GETFL) | O_NONBLOCK);
     return fd;
+}
+
+// A connected AF_UNIX stream pair: unlike loopback TCP, a close or shutdown on one end has
+// reached the other by the time the call returns.
+inline std::pair<os::UniqueFd, os::UniqueFd> unix_pair() {
+    std::array<int, 2> fds{-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds.data()) != 0) {
+        ADD_FAILURE() << "socketpair failed";
+    }
+    return {os::UniqueFd{fds[0]}, os::UniqueFd{fds[1]}};
 }
 
 // Nonblocking; returns bytes written (0 when the socket buffer is full).
