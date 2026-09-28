@@ -35,8 +35,13 @@ TEST(ExitCode, AnyOtherSignalAbove128IsAKill) {
     EXPECT_EQ(classify(255, Ending::Exited), TranscodeFailure::Killed);
 }
 
-TEST(ExitCode, TheCpuLimitIsABudgetNotAKill) {
-    EXPECT_EQ(classify(signalled(SIGXCPU), Ending::Exited), TranscodeFailure::OverBudget);
+TEST(ExitCode, ACpuLimitReachedIsABudgetWhateverTheSignal) {
+    // ffmpeg catches SIGXCPU; the hard limit's SIGKILL a second later is what ends it.
+    EXPECT_EQ(classify(signalled(SIGKILL), Ending::CpuExhausted), TranscodeFailure::OverBudget);
+    EXPECT_EQ(classify(signalled(SIGXCPU), Ending::CpuExhausted), TranscodeFailure::OverBudget);
+    // With CPU time to spare, the same signals came from someone else.
+    EXPECT_EQ(classify(signalled(SIGKILL), Ending::Exited), TranscodeFailure::Killed);
+    EXPECT_EQ(classify(signalled(SIGXCPU), Ending::Exited), TranscodeFailure::Killed);
 }
 
 TEST(ExitCode, TheSandboxHelpersOwnFailuresAreSandboxFailures) {

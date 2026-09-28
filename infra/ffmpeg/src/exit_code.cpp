@@ -12,6 +12,7 @@ std::optional<TranscodeFailure> classify(int exit_code, Ending ending) noexcept 
     case Ending::Stopped:
         return TranscodeFailure::Stopped;
     case Ending::TimedOut:
+    case Ending::CpuExhausted:
         return TranscodeFailure::OverBudget;
     case Ending::Exited:
         break;
@@ -25,10 +26,6 @@ std::optional<TranscodeFailure> classify(int exit_code, Ending ending) noexcept 
     }
     if (exit_code == kSignalled + SIGSEGV) {
         return TranscodeFailure::Crashed;
-    }
-    // RLIMIT_CPU sends SIGXCPU at the soft limit.
-    if (exit_code == kSignalled + SIGXCPU) {
-        return TranscodeFailure::OverBudget;
     }
     if (exit_code > kSignalled) {
         return TranscodeFailure::Killed;

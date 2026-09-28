@@ -247,8 +247,24 @@ TEST_F(SandboxTest, TheCpuLimitStopsASpinningProgram) {
     const auto child =
         run({"sh", "-c", "while :; do :; done"},
             {.writable = {}, .address_space_bytes = 0, .cpu = core::Seconds{1}, .wall = {}});
-    EXPECT_EQ(child.ending, Ending::Exited);
+    EXPECT_EQ(child.ending, Ending::CpuExhausted);
     EXPECT_EQ(child.exit_code, 128 + SIGXCPU);
+}
+
+TEST_F(SandboxTest, TheCpuLimitStopsAProgramThatIgnoresSigxcpu) {
+    const auto child =
+        run({"sh", "-c", "trap '' XCPU; while :; do :; done"},
+            {.writable = {}, .address_space_bytes = 0, .cpu = core::Seconds{1}, .wall = {}});
+    EXPECT_EQ(child.ending, Ending::CpuExhausted);
+    EXPECT_EQ(child.exit_code, 128 + SIGKILL);
+}
+
+TEST_F(SandboxTest, AFailureWithCpuTimeToSpareIsNotTheLimits) {
+    const auto child =
+        run({"sh", "-c", "kill -KILL $$"},
+            {.writable = {}, .address_space_bytes = 0, .cpu = core::Seconds{1}, .wall = {}});
+    EXPECT_EQ(child.ending, Ending::Exited);
+    EXPECT_EQ(child.exit_code, 128 + SIGKILL);
 }
 
 TEST_F(SandboxTest, TheAddressSpaceLimitRefusesALargeAllocation) {

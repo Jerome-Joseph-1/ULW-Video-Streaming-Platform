@@ -3,12 +3,14 @@
 #include "infra/ffmpeg/transcoder.hpp"
 #include "os/system_clock.hpp"
 
+#include "exit_code.hpp"
 #include "media_clips.hpp"
 #include "process.hpp"
 #include "support/temp_dir.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +19,7 @@
 #include <iterator>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -217,6 +220,26 @@ TEST_F(TranscoderTest, AStopRequestEndsTheTranscodePromptly) {
     EXPECT_EQ(stats.error().kind, TranscodeFailure::Stopped);
     // ffmpeg honoured SIGTERM: the SIGKILL that follows the grace period was never needed.
     EXPECT_LT(std::chrono::steady_clock::now() - stopped_at, infra::ffmpeg::kTerminationGrace);
+}
+
+TEST_F(TranscoderTest, FfmpegOutOfCpuTimeIsOverBudgetNotKilled) {
+    // ffmpeg catches SIGXCPU and starts a graceful exit, which the hard limit's SIGKILL cuts
+    // short; its exit status alone would read as a kill by somebody else.
+    const auto child = infra::ffmpeg::run_sandboxed(
+        {.helper = ULW_SANDBOX_BIN, .environment = {"PATH=" + search_path()}},
+        {.writable = work_.path(),
+         .address_space_bytes = std::uint64_t{4} << 30U,
+         .cpu = core::Seconds{1},
+         .wall = core::Millis{60'000}},
+        {"ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+         "testsrc2=size=1920x1080:rate=30", "-t", "600", "-c:v", "libx264", "-preset", "veryslow",
+         "-f", "null", "-"},
+        clock_, [](std::string_view) {}, {});
+    ASSERT_TRUE(child) << child.error();
+    EXPECT_NE(child->exit_code, 0);
+    EXPECT_EQ(child->ending, infra::ffmpeg::Ending::CpuExhausted) << child->exit_code;
+    EXPECT_EQ(infra::ffmpeg::classify(child->exit_code, child->ending),
+              TranscodeFailure::OverBudget);
 }
 
 TEST_F(TranscoderTest, AFileThatIsNotMediaIsRejected) {

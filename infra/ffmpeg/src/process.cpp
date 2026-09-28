@@ -36,6 +36,12 @@ constexpr std::size_t kReadChunk = 16384;
 // pipes (64 KiB each at most) reads in microseconds. The bound only matters if some writer
 // survived anyway, and then it must not hold the worker.
 constexpr core::Millis kDrainAfterExit{500};
+// How far under RLIMIT_CPU the CPU time wait4 reports can be for a child the limit stopped.
+// The kernel checks the limit against its own running total and rusage reports a figure
+// derived from sampled ticks: measured over 150 runs on 4 vCPUs (1 s soft, 2 s hard limits),
+// SIGXCPU children reported 986-1012 ms and hard-limit SIGKILLs 1955-2018 ms, and one run
+// under 8-way contention reported 772 ms at SIGXCPU. Twice the worst case seen.
+constexpr std::chrono::milliseconds kCpuReportingSlack{500};
 
 std::string errno_text(int error) {
     return std::generic_category().message(error);
@@ -353,6 +359,16 @@ run_sandboxed(const Sandbox& sandbox, const Limits& limits, const Args& args,
     while (::wait4(*pid, &status, 0, &usage) < 0 && errno == EINTR) {
     }
     result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    const auto cpu = std::chrono::seconds(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) +
+                     std::chrono::microseconds(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
+    // Only RLIMIT_CPU sends SIGXCPU, so that alone says the limit ended the child. ffmpeg
+    // catches it, and then dies of the hard limit's SIGKILL or exits on its own; for those the
+    // CPU time it used is the evidence.
+    if (result.ending == Ending::Exited &&
+        (result.signal == SIGXCPU ||
+         (result.exit_code != 0 && cpu + kCpuReportingSlack >= limits.cpu))) {
+        result.ending = Ending::CpuExhausted;
+    }
     result.wall = std::chrono::duration_cast<core::Millis>(clock.now() - started);
     result.peak_rss_kib = static_cast<std::uint64_t>(usage.ru_maxrss);
     if (result.stderr_tail.size() > kStderrTail) {

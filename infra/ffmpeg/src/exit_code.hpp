@@ -15,6 +15,9 @@ enum class Ending : std::uint8_t {
     TimedOut,
     // We killed it because the caller's stop token fired.
     Stopped,
+    // It failed after its CPU time had reached the limit: the kernel's SIGXCPU, or the SIGKILL
+    // one second later for a program that catches SIGXCPU, as ffmpeg does (exit 137).
+    CpuExhausted,
 };
 
 // The sandbox helper's own failures, numbered as env(1) and chroot(1) number theirs, so they
