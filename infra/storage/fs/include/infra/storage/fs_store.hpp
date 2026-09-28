@@ -4,7 +4,6 @@
 #include "core/ports/random.hpp"
 #include "core/ports/storage.hpp"
 #include "net/offload_pool.hpp"
-#include "net/reactor.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -17,21 +16,24 @@ namespace infra::storage {
 //   ingest/<ref>/data          bytes received so far
 //   ingest/<ref>/durable       offset known to be on disk (updated after fdatasync)
 //   ingest/<ref>/meta          key and total size
-// File I/O never runs on the reactor thread: writes are handed to the offload pool, and the
-// control operations block by contract and are called from the pool.
+// File I/O never runs on the reactor thread: writes go to the store's own offload pool, and
+// the control operations block by contract and are called from the caller's pool.
+//
+// The store owns the pool its writes run on, so that it can stop those threads before it
+// frees the jobs they hold, whatever order the caller tears things down in. The reactor that
+// pool completes on must outlive the store, and every session must be destroyed before it.
 class FsStore final : public core::ports::IIngestStore,
                       public core::ports::IObjectReader,
                       public core::ports::IObjectAdmin {
 public:
     struct Deps {
-        net::IReactor& reactor;
-        net::OffloadPool& pool;
         const core::ports::IClock& clock;
         core::ports::IRandom& random;
     };
 
-    // Throws std::invalid_argument for a zero chunk size.
-    FsStore(Deps deps, std::filesystem::path root, std::uint64_t chunk_size);
+    // Throws std::invalid_argument for a missing writer or a zero chunk size.
+    FsStore(Deps deps, std::unique_ptr<net::OffloadPool> writer, std::filesystem::path root,
+            std::uint64_t chunk_size);
     ~FsStore() override;
     FsStore(const FsStore&) = delete;
     FsStore& operator=(const FsStore&) = delete;
@@ -82,6 +84,9 @@ private:
     // Reactor-thread only. Jobs outlive the sessions that started them when a session is
     // aborted mid-write, so the store owns them.
     std::vector<std::unique_ptr<WriteJob>> jobs_;
+    // Last member, so it goes first: its threads finish the job in hand and drop the rest
+    // before any job, or anything a job touches, is freed.
+    std::unique_ptr<net::OffloadPool> writer_;
 };
 
 } // namespace infra::storage

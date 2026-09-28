@@ -9,6 +9,7 @@
 #include <chrono>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <latch>
 #include <stdexcept>
 
 namespace {
@@ -24,20 +25,23 @@ protected:
         auto r = net::make_reactor(ulw::test::reactor_kind_from_env(), clock, 1024);
         ASSERT_TRUE(r);
         reactor = std::move(*r);
-        auto p = net::OffloadPool::create(*reactor, 1);
-        ASSERT_TRUE(p);
-        pool = std::move(*p);
     }
     void TearDown() override {
-        pool.reset();
         reactor.reset();
         std::error_code ec;
         std::filesystem::remove_all(root, ec);
     }
 
-    [[nodiscard]] FsStore::Deps deps() {
-        return {.reactor = *reactor, .pool = *pool, .clock = clock, .random = random};
+    [[nodiscard]] FsStore::Deps deps() { return {.clock = clock, .random = random}; }
+
+    // One thread, so jobs run in the order they were submitted.
+    [[nodiscard]] std::unique_ptr<net::OffloadPool> writer() {
+        auto p = net::OffloadPool::create(*reactor, 1);
+        EXPECT_TRUE(p);
+        return std::move(*p);
     }
+
+    [[nodiscard]] FsStore make_store() { return {deps(), writer(), root, ulw::test::kLocalChunk}; }
 
     [[nodiscard]] core::ports::IngestId create(FsStore& store, std::uint64_t total) {
         auto id = store.create(key, total, *core::ContentType::parse("video/mp4"));
@@ -72,15 +76,46 @@ protected:
     ulw::test::FakeRandom random;
     std::filesystem::path root;
     std::unique_ptr<net::IReactor> reactor;
-    std::unique_ptr<net::OffloadPool> pool;
 };
 
+// Runs after everything submitted before it on a one-thread pool.
+struct Marker final : net::IOffloadJob {
+    std::latch ran{1};
+    void run() noexcept override { ran.count_down(); }
+    void complete() noexcept override {}
+};
+
+TEST_F(FsStoreTest, StoreCanGoWhileAWriteAwaitsCompletion) {
+    auto pool = writer();
+    net::OffloadPool& borrowed = *pool;
+    auto store = std::make_unique<FsStore>(deps(), std::move(pool), root, ulw::test::kLocalChunk);
+    const auto id = create(*store, 2 * ulw::test::kLocalChunk);
+    ulw::test::Observer obs;
+    auto session = store->open(id, 0, obs);
+    ASSERT_TRUE(session);
+    const auto data = ulw::test::pattern(ulw::test::kLocalChunk);
+    ASSERT_EQ((*session)->write(data), data.size());
+    Marker after;
+    borrowed.submit(after);
+    after.ran.wait();
+    // The write has run and its completion is waiting on the loop for a store that is gone.
+    session->reset();
+    store.reset();
+    for (int turn = 0; turn < 3; ++turn) {
+        static_cast<void>(reactor->run_once(core::Millis{0}));
+    }
+    FsStore reopened = make_store();
+    EXPECT_EQ(reopened.durable_offset(id), ulw::test::kLocalChunk);
+    EXPECT_EQ(obs.calls, 0);
+}
+
 TEST_F(FsStoreTest, ZeroChunkSizeIsAProgrammingError) {
-    EXPECT_THROW(FsStore(deps(), root, 0), std::invalid_argument);
+    EXPECT_THROW(FsStore(deps(), writer(), root, 0), std::invalid_argument);
+    EXPECT_THROW(FsStore(deps(), nullptr, root, ulw::test::kLocalChunk), std::invalid_argument);
 }
 
 TEST_F(FsStoreTest, CommitRefusesADataFileShorterThanTheObject) {
-    FsStore store(deps(), root, ulw::test::kLocalChunk);
+    FsStore store = make_store();
     const auto data = ulw::test::pattern(2 * ulw::test::kLocalChunk);
     const auto id = create(store, data.size());
     ulw::test::Observer obs;
@@ -96,7 +131,7 @@ TEST_F(FsStoreTest, CommitRefusesADataFileShorterThanTheObject) {
 }
 
 TEST_F(FsStoreTest, UnreadableMarkerIsAnErrorNotAnException) {
-    FsStore store(deps(), root, ulw::test::kLocalChunk);
+    FsStore store = make_store();
     const auto id = create(store, 100);
     // A symlink to itself: stat() fails with ELOOP even for root, which a permission bit
     // would not stop.

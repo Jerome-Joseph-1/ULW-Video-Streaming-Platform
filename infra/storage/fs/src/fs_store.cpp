@@ -347,14 +347,17 @@ private:
     std::optional<StorageError> error_;
 };
 
-FsStore::FsStore(Deps deps, fs::path root, std::uint64_t chunk_size)
-    : deps_(deps), root_(std::move(root)), chunk_size_(chunk_size) {
+FsStore::FsStore(Deps deps, std::unique_ptr<net::OffloadPool> writer, fs::path root,
+                 std::uint64_t chunk_size)
+    : deps_(deps), root_(std::move(root)), chunk_size_(chunk_size), writer_(std::move(writer)) {
+    if (writer_ == nullptr) {
+        throw std::invalid_argument("fs store has no writer pool");
+    }
     if (chunk_size_ == 0) {
         throw std::invalid_argument("fs store chunk size is zero");
     }
 }
 
-// Jobs still owned here may be running; the offload pool must be stopped first.
 FsStore::~FsStore() = default;
 
 fs::path FsStore::ingest_dir(const std::string& ref) const {
@@ -375,7 +378,7 @@ bool FsStore::valid_ref(const std::string& ref) {
 FsStore::WriteJob& FsStore::adopt_job(std::unique_ptr<WriteJob> job_ptr) {
     jobs_.push_back(std::move(job_ptr));
     WriteJob& job = *jobs_.back();
-    deps_.pool.submit(job);
+    writer_->submit(job);
     return job;
 }
 

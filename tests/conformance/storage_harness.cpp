@@ -30,16 +30,14 @@ public:
         std::string tmpl = (std::filesystem::temp_directory_path() / "ulw-fs-XXXXXX").string();
         root_ = ::mkdtemp(tmpl.data());
         reactor_ = make_loop();
-        // Two threads: enough to overlap one session's write with another's control call.
-        pool_ = std::move(*net::OffloadPool::create(*reactor_, 2));
+        // Two threads: enough for one upload's write to overlap another's.
+        auto writer = std::move(*net::OffloadPool::create(*reactor_, 2));
+        writer_ = writer.get();
         store_ = std::make_unique<infra::storage::FsStore>(
-            infra::storage::FsStore::Deps{
-                .reactor = *reactor_, .pool = *pool_, .clock = system_clock(), .random = random_},
-            root_, kLocalChunk);
+            infra::storage::FsStore::Deps{.clock = system_clock(), .random = random_},
+            std::move(writer), root_, kLocalChunk);
     }
     ~FsHarness() override {
-        // The pool first: its threads may still be running jobs the store owns.
-        pool_.reset();
         store_.reset();
         std::error_code ec;
         std::filesystem::remove_all(root_, ec);
@@ -54,7 +52,7 @@ public:
     // Every write the store accepted is a pool job, and a job has finished once its
     // complete() has run on the loop.
     void settle(Observer& /*observer*/) override {
-        if (!pump_until(*reactor_, [&] { return pool_->in_flight() == 0; }, kOperationLimit)) {
+        if (!pump_until(*reactor_, [&] { return writer_->in_flight() == 0; }, kOperationLimit)) {
             ADD_FAILURE() << "offload pool never drained";
         }
     }
@@ -62,7 +60,8 @@ public:
 private:
     std::filesystem::path root_;
     os::SystemRandom random_;
-    std::unique_ptr<net::OffloadPool> pool_;
+    // The store's, borrowed to tell when every write it accepted has completed.
+    net::OffloadPool* writer_ = nullptr;
     std::unique_ptr<infra::storage::FsStore> store_;
 };
 
