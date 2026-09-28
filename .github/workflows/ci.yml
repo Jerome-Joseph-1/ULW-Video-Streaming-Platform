@@ -85,9 +85,10 @@ jobs:
       - name: echo acceptance
         run: tests/load/echo_acceptance.sh build/ci ${{ matrix.reactor }} 20
 
-  # The storage laws and the wire behaviour the S3 adapter relies on, against a real
-  # S3-compatible server. The integration label runs one test at a time: some tests share a
-  # server they pause.
+  # The storage laws, the wire behaviour the S3 adapter relies on, and the store's reaper,
+  # against a real S3-compatible server. Nothing here passes -j, and nothing may: the reaper
+  # test aborts every upload in the shared bucket older than its cutoff, conformance runs
+  # included, which is also why those come after the integration label, not beside it.
   integration:
     name: integration (${{ matrix.preset }})
     runs-on: ubuntu-24.04
