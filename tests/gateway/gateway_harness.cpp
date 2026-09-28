@@ -182,6 +182,11 @@ void GatewayUnderTest::drain() {
 
 void GatewayUnderTest::advance(core::Millis d) {
     on_loop([&] { loop_->manual_clock.advance(d); });
+    // The turn that ran the task above read the clock before it moved, so the timers it made
+    // due fire at the end of the next turn. A task run after that turn has seen them fire, and
+    // bytes the test sends next cannot land ahead of them.
+    on_loop([] {});
+    on_loop([] {});
 }
 
 void GatewayUnderTest::refresh_keys() {

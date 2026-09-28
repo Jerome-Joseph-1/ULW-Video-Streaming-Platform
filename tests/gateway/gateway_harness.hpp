@@ -44,8 +44,8 @@ public:
     [[nodiscard]] std::size_t connections();
     [[nodiscard]] std::size_t claims();
     void drain();
-    // Manual clock only: moves time forward on the loop thread; due timers fire on the loop's
-    // next turn.
+    // Manual clock only: moves time forward on the loop thread and returns once the timers
+    // it made due have fired.
     void advance(core::Millis d);
     // Lets every connection waiting on an unknown signing key ("slow." tokens) continue.
     void refresh_keys();
