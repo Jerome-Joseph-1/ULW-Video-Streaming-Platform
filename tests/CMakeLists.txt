@@ -240,4 +240,12 @@ if(ULW_BUILD_WORKER)
     target_compile_definitions(ffmpeg_unit_tests
         PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>")
     add_dependencies(ffmpeg_unit_tests ulw_sandbox)
+
+    ulw_add_test_suite(worker_unit_tests unit
+        unit/worker/config_test.cpp
+        unit/worker/job_runner_test.cpp
+        unit/worker/lease_keeper_test.cpp
+        unit/worker/workspace_test.cpp)
+    target_link_libraries(worker_unit_tests PRIVATE ulw::worker_lib ulw::os)
+    target_include_directories(worker_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 endif()

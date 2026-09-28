@@ -87,6 +87,7 @@ add_subdirectory(apps/gateway)
 add_subdirectory(apps/migrate)
 if(ULW_BUILD_WORKER)
     add_subdirectory(infra/ffmpeg)
+    add_subdirectory(apps/worker)
 endif()
 
 if(ULW_BUILD_TESTS)
