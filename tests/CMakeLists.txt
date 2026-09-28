@@ -12,6 +12,7 @@ endfunction()
 ulw_add_test_suite(core_unit_tests unit
     unit/build_info_test.cpp
     unit/storage_key_test.cpp
+    unit/core/ids_test.cpp
     unit/core/uuid_test.cpp)
 target_link_libraries(core_unit_tests PRIVATE ulw::core_domain)
 target_include_directories(core_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
