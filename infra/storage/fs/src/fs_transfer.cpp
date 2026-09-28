@@ -102,6 +102,14 @@ std::expected<void, StorageError> FsTransfer::upload(const fs::path& source,
     if (::fsync(fd.get()) != 0 || ::rename(temp.c_str(), target.c_str()) != 0) {
         return discard(std::error_code(errno, std::generic_category()));
     }
+    // The rename lives in the directory; until that is flushed, a crash can bring back the old
+    // object, or none, after we reported the new one, and the worker marks a video ready on
+    // the strength of that report.
+    const os::UniqueFd dir(
+        ::open(target.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (!dir || ::fsync(dir.get()) != 0) {
+        return std::unexpected(from_error_code(std::error_code(errno, std::generic_category())));
+    }
     return {};
 }
 
