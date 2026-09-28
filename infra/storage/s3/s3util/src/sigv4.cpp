@@ -5,6 +5,8 @@
 #include "infra/s3util/crypto.hpp"
 #include "infra/s3util/url.hpp"
 
+#include "signing_key.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -183,17 +185,12 @@ Sha256Digest derive_signing_key(const SecretString& secret, const AmzDate& date,
 // key once. The secret is part of the key because an access key id can outlive a rotation.
 class Signer::KeyCache {
 public:
-    // Reserved so that growth never reallocates and strands unwiped copies of a key.
-    KeyCache() { entries_.reserve(kMaxEntries); }
+    KeyCache() = default;
     KeyCache(const KeyCache&) = delete;
     KeyCache& operator=(const KeyCache&) = delete;
     KeyCache(KeyCache&&) = delete;
     KeyCache& operator=(KeyCache&&) = delete;
-    ~KeyCache() {
-        for (auto& e : entries_) {
-            wipe(e.key);
-        }
-    }
+    ~KeyCache() = default;
 
     [[nodiscard]] Sha256Digest get(const AmzDate& date, std::string_view region,
                                    const Credentials& credentials) {
@@ -203,31 +200,33 @@ public:
                    e.secret.reveal() == credentials.secret_access_key().reveal();
         });
         if (hit != entries_.end()) {
-            return hit->key;
+            return hit->key.bytes();
         }
         Entry fresh{.date = std::string(date.date()),
                     .access_key_id = std::string(credentials.access_key_id()),
                     .secret = credentials.secret_access_key(),
-                    .key = derive_signing_key(credentials.secret_access_key(), date, region)};
+                    .key = detail::SigningKey{
+                        derive_signing_key(credentials.secret_access_key(), date, region)}};
         if (entries_.size() < kMaxEntries) {
             entries_.push_back(std::move(fresh));
-            return entries_.back().key;
+            return entries_.back().key.bytes();
         }
         // Overwritten in place, so the evicted key never survives in a vacated slot.
         auto& oldest = *std::ranges::min_element(entries_, {}, &Entry::date);
         oldest = std::move(fresh);
-        return oldest.key;
+        return oldest.key.bytes();
     }
 
 private:
     // Two dates straddling midnight, times old and new credentials during a rotation.
     static constexpr std::size_t kMaxEntries = 4;
 
+    // Moving an entry, into the vector or over the oldest one, wipes the key it moved from.
     struct Entry {
         std::string date;
         std::string access_key_id;
         SecretString secret;
-        Sha256Digest key;
+        detail::SigningKey key;
     };
 
     std::mutex mutex_;
