@@ -18,7 +18,7 @@ namespace infra::storage {
 //   objects/<key>              committed objects
 //   ingest/<ref>/data          bytes received so far
 //   ingest/<ref>/durable       offset known to be on disk (updated after fdatasync)
-//   ingest/<ref>/meta          key and total size
+//   ingest/<ref>/meta          key, total size and creation time
 //   ingest/<ref>/committed     present once commit has decided to move data into objects/
 //   staging/                   files being written, renamed into place once complete
 // File I/O never runs on the reactor thread: writes go to the store's own offload pool, and

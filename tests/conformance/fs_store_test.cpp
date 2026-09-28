@@ -164,8 +164,7 @@ TEST_F(FsStoreTest, UnreadableMarkerIsAnErrorNotAnException) {
     std::filesystem::create_symlink("committed", ingest(id) / "committed");
     EXPECT_FALSE(store.durable_offset(id).has_value());
     EXPECT_FALSE(store.commit(id).has_value());
-    const auto reaped =
-        store.reap_abandoned(std::chrono::system_clock::now() + std::chrono::hours(24));
+    const auto reaped = store.reap_abandoned(clock.wall_now() + std::chrono::hours(24));
     ASSERT_TRUE(reaped);
     EXPECT_EQ(*reaped, 0U);
     store.discard(id);
@@ -299,6 +298,19 @@ TEST_F(FsStoreTest, LostDataFileFailsTheResumedSessionAsCorrupt) {
     EXPECT_EQ(settled(**resumed), core::ports::IngestState::Failed);
     EXPECT_EQ((*resumed)->error(), core::ports::StorageError::Corrupt);
     EXPECT_EQ(store.durable_offset(id), ulw::test::kLocalChunk);
+}
+
+TEST_F(FsStoreTest, ReaperAgesIngestsByTheInjectedClock) {
+    FsStore store = make_store();
+    const auto id = create(store, 100);
+    auto reaped = store.reap_abandoned(clock.wall_now());
+    ASSERT_TRUE(reaped);
+    EXPECT_EQ(*reaped, 0U) << "an ingest created at the cutoff is not older than it";
+    clock.advance(core::Millis{1});
+    reaped = store.reap_abandoned(clock.wall_now());
+    ASSERT_TRUE(reaped);
+    EXPECT_EQ(*reaped, 1U);
+    EXPECT_EQ(store.durable_offset(id), std::unexpected(core::ports::StorageError::NotFound));
 }
 
 } // namespace

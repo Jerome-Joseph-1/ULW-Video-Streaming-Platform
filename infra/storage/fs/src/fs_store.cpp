@@ -6,12 +6,14 @@
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <fcntl.h>
 #include <fstream>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <unistd.h>
 
@@ -96,6 +98,35 @@ std::expected<std::uint64_t, StorageError> read_offset(const fs::path& p) {
         return std::unexpected(StorageError::Corrupt);
     }
     return value;
+}
+
+// meta holds "<key>\n<total bytes>\n<created, ms since the epoch>\n". The creation time
+// comes from the injected clock, not the file's mtime, so the reaper and create() agree on
+// what time it is.
+std::expected<core::WallTime, StorageError> read_created(const fs::path& meta) {
+    // The key, two numbers of at most 20 digits (UINT64_MAX), three newlines.
+    constexpr std::size_t kMaxMeta = core::StorageKey::kMaxLength + (2 * std::size_t{20}) + 3;
+    const auto text = read_text(meta, kMaxMeta);
+    if (!text) {
+        return std::unexpected(text.error());
+    }
+    std::string_view lines = *text;
+    if (std::ranges::count(lines, '\n') != 3 || !lines.ends_with('\n')) {
+        return std::unexpected(StorageError::Corrupt);
+    }
+    lines.remove_suffix(1);
+    const std::string_view last = lines.substr(lines.rfind('\n') + 1);
+    // The latest instant a WallTime can hold, so the conversion below cannot overflow.
+    constexpr auto kMaxMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(core::WallTime::duration::max());
+    std::uint64_t ms = 0;
+    const auto [ptr, ec] = std::from_chars(last.data(), last.data() + last.size(), ms);
+    if (ec != std::errc{} || ptr != last.data() + last.size() ||
+        ms > static_cast<std::uint64_t>(kMaxMs.count())) {
+        return std::unexpected(StorageError::Corrupt);
+    }
+    return core::WallTime{std::chrono::duration_cast<core::WallTime::duration>(
+        std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(ms)})};
 }
 
 // A new or renamed entry survives a crash only once its directory has been synced; syncing
@@ -495,7 +526,10 @@ std::expected<IngestId, StorageError> FsStore::create(const core::StorageKey& ke
     if (auto made = make_dirs(dir); !made) {
         return std::unexpected(made.error());
     }
-    const std::string meta = key.str() + "\n" + std::to_string(total_bytes) + "\n";
+    const auto created = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deps_.clock.wall_now().time_since_epoch());
+    const std::string meta = key.str() + "\n" + std::to_string(total_bytes) + "\n" +
+                             std::to_string(created.count()) + "\n";
     if (auto w = write_atomically(dir / "meta", std::as_bytes(std::span(meta)), staging_name());
         !w) {
         return std::unexpected(w.error());
@@ -683,17 +717,16 @@ std::expected<std::size_t, StorageError> FsStore::reap_abandoned(core::WallTime 
         }
         return 0;
     }
-    // file_clock and system_clock share an epoch on libstdc++; clock_cast makes it explicit.
-    const auto cutoff = std::chrono::clock_cast<fs::file_time_type::clock>(older_than);
     std::size_t reaped = 0;
     // Incremented by hand: the range-for increment throws on a failed readdir.
     for (auto it = fs::directory_iterator(ingest, ec); !ec && it != fs::directory_iterator();
          it.increment(ec)) {
-        std::error_code entry_ec;
-        const auto meta_time = fs::last_write_time(it->path() / "meta", entry_ec);
-        if (entry_ec || meta_time >= cutoff || committed(it->path()) != false) {
+        // An ingest whose age cannot be read is left alone rather than guessed at.
+        const auto created = read_created(it->path() / "meta");
+        if (!created || *created >= older_than || committed(it->path()) != false) {
             continue;
         }
+        std::error_code entry_ec;
         fs::remove_all(it->path(), entry_ec);
         if (!entry_ec) {
             ++reaped;
