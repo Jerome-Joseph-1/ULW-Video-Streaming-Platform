@@ -1,7 +1,9 @@
 ulw_add_library(s3util
     src/credentials.cpp
     src/crypto.cpp
+    src/errors.cpp
     src/profile.cpp
+    src/retry.cpp
     src/sigv4.cpp
     src/url.cpp
     src/xml.cpp
