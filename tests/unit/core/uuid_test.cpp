@@ -1,3 +1,4 @@
+#include "core/ports/clock.hpp"
 #include "core/util/time.hpp"
 #include "core/util/uuid.hpp"
 
@@ -119,6 +120,22 @@ TEST(UuidV7, CarriesWallClockMillisecondsBigEndian) {
     // FakeClock starts at 2026-01-01T00:00:00Z.
     EXPECT_EQ(timestamp_ms(id), 1'767'225'600'000U);
     EXPECT_TRUE(id.to_string().starts_with("019b76da-a800-7")) << id.to_string();
+}
+
+class PreEpochClock final : public core::ports::IClock {
+public:
+    [[nodiscard]] core::MonoTime now() const noexcept override { return {}; }
+    [[nodiscard]] core::WallTime wall_now() const noexcept override {
+        return core::WallTime{} - core::Millis{1};
+    }
+};
+
+TEST(UuidV7, ClampsAClockBeforeTheEpochToZero) {
+    const PreEpochClock clock;
+    FakeRandom random;
+    const Uuid id = Uuid::v7(clock, random);
+    EXPECT_EQ(timestamp_ms(id), 0U);
+    EXPECT_TRUE(id.to_string().starts_with("00000000-0000-7")) << id.to_string();
 }
 
 // Bytes 6-15 of a v7 id: byte 6 holds the version nibble, byte 8 the variant bits.

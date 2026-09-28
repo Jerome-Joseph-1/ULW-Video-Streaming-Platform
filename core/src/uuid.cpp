@@ -4,6 +4,7 @@
 #include "core/ports/random.hpp"
 #include "core/util/time.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <chrono>
@@ -58,8 +59,10 @@ std::optional<Uuid> Uuid::parse(std::string_view text) noexcept {
 }
 
 Uuid Uuid::v7(const ports::IClock& clock, ports::IRandom& random) noexcept {
-    const auto since_epoch = clock.wall_now().time_since_epoch();
-    auto ms = static_cast<std::uint64_t>(std::chrono::duration_cast<Millis>(since_epoch).count());
+    const auto since_epoch =
+        std::chrono::duration_cast<Millis>(clock.wall_now().time_since_epoch());
+    // The field is unsigned; a clock set before 1970 would otherwise wrap to the far future.
+    auto ms = static_cast<std::uint64_t>(std::max(since_epoch, Millis::zero()).count());
 
     Uuid id;
     const std::span<std::byte, kByteLength> bytes(id.bytes_);
