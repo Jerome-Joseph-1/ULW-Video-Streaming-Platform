@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 
 namespace {
@@ -269,17 +270,48 @@ TEST(S3Xml, ReadsMultipartUploadsWithTheirStartTimes) {
     EXPECT_EQ(r->uploads[1].initiated, initiated + std::chrono::nanoseconds(123'456'789));
 }
 
+std::string upload_initiated_at(std::string_view t) {
+    return "<ListMultipartUploadsResult><IsTruncated>false</IsTruncated>"
+           "<Upload><Key>k</Key><UploadId>u</UploadId><Initiated>" +
+           std::string(t) + "</Initiated></Upload></ListMultipartUploadsResult>";
+}
+
 TEST(S3Xml, RejectsStartTimesThatAreNotUtcTimestamps) {
     for (const std::string_view t :
          {"2010-11-10T20:48:33", "2010-11-10T20:48:33+01:00", "2010-13-10T20:48:33.000Z",
           "2010-02-30T20:48:33Z", "2010-11-10T24:00:00Z", "2010-11-10T20:60:33Z",
           "2010-11-10 20:48:33Z", "2010-11-10T20:48:33.Z", "2010-11-10T20:48:33.1234567890Z",
           "2010-11-10T20:48:33,000Z", "10-11-10T20:48:33Z", "", "yesterday"}) {
-        const std::string body = "<ListMultipartUploadsResult><IsTruncated>false</IsTruncated>"
-                                 "<Upload><Key>k</Key><UploadId>u</UploadId><Initiated>" +
-                                 std::string(t) +
-                                 "</Initiated></Upload></ListMultipartUploadsResult>";
-        EXPECT_EQ(parse_failure(parse_list_multipart_uploads(body)), XmlError::InvalidValue) << t;
+        EXPECT_EQ(parse_failure(parse_list_multipart_uploads(upload_initiated_at(t))),
+                  XmlError::InvalidValue)
+            << t;
+    }
+}
+
+// The edges below are those of int64 nanoseconds, which run from 1677-09-21 to 2262-04-11.
+static_assert(std::is_same_v<core::WallTime::duration, std::chrono::nanoseconds>);
+
+TEST(S3Xml, AcceptsStartTimesInTheFirstAndLastWholeYearsAWallTimeHolds) {
+    using namespace std::chrono_literals;
+    const auto first = parse_list_multipart_uploads(upload_initiated_at("1678-01-01T00:00:00Z"));
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->uploads.at(0).initiated,
+              core::WallTime{std::chrono::sys_days{std::chrono::year{1678} / 1 / 1}});
+
+    const auto last =
+        parse_list_multipart_uploads(upload_initiated_at("2261-12-31T23:59:59.999999999Z"));
+    ASSERT_TRUE(last.has_value());
+    EXPECT_EQ(last->uploads.at(0).initiated,
+              core::WallTime{std::chrono::sys_days{std::chrono::year{2262} / 1 / 1}} - 1ns);
+}
+
+TEST(S3Xml, RejectsStartTimesOutsideTheWholeYearsAWallTimeHolds) {
+    for (const std::string_view t :
+         {"1677-12-31T23:59:59.999999999Z", "2262-01-01T00:00:00Z", "2262-04-12T00:00:00Z",
+          "9999-12-31T23:59:59Z", "0112-06-15T12:00:00Z", "0000-01-01T00:00:00Z"}) {
+        EXPECT_EQ(parse_failure(parse_list_multipart_uploads(upload_initiated_at(t))),
+                  XmlError::InvalidValue)
+            << t;
     }
 }
 

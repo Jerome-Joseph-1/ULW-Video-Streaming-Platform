@@ -27,6 +27,17 @@ using detail::XmlNode;
 // S3 numbers parts 1..10000 inclusive.
 constexpr std::uint64_t kMaxPartNumber = 10'000;
 
+constexpr std::chrono::year year_of(core::WallTime t) noexcept {
+    return std::chrono::year_month_day{std::chrono::floor<std::chrono::days>(t)}.year();
+}
+
+// The whole years a WallTime holds: system_clock's range ends partway through the years at
+// either end (int64 nanoseconds on libstdc++ run from 1677-09-21 to 2262-04-11), and turning a
+// date outside it into a WallTime overflows.
+constexpr std::chrono::year kFirstWholeYear =
+    year_of(core::WallTime::min()) + std::chrono::years{1};
+constexpr std::chrono::year kLastWholeYear = year_of(core::WallTime::max()) - std::chrono::years{1};
+
 std::expected<std::optional<std::string>, XmlError>
 optional_text(const XmlDocument& doc, const XmlNode& parent, std::string_view name) {
     const auto node = doc.find(parent, name);
@@ -133,7 +144,7 @@ std::optional<core::WallTime> parse_timestamp(std::string_view s) {
     }
     const std::chrono::year_month_day date{std::chrono::year{*year}, std::chrono::month{*month},
                                            std::chrono::day{*day}};
-    if (!date.ok()) {
+    if (!date.ok() || date.year() < kFirstWholeYear || date.year() > kLastWholeYear) {
         return std::nullopt;
     }
     std::chrono::nanoseconds fraction{0};
