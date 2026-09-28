@@ -24,3 +24,9 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0018](0018-identity-from-askedin-jwts.md) | Identity is borrowed from Askedin | Accepted |
 | [0019](0019-chat-in-its-own-binary.md) | Chat runs in its own binary | Accepted |
 | [0020](0020-livekit-as-the-first-sfu.md) | LiveKit as the first SFU | Accepted |
+| [0021](0021-single-shot-buffer-select-recv.md) | Single-shot buffer-select receives, not multishot | Accepted |
+| [0022](0022-clang-19-minimum.md) | Clang 19 is the minimum Clang | Accepted |
+| [0023](0023-uuidv7-identifiers.md) | Identifiers are UUIDv7 | Accepted |
+| [0024](0024-playlists-served-inline-with-presigned-uris.md) | Playlists are rewritten and served inline | Accepted |
+| [0025](0025-ffmpeg-as-a-sandboxed-subprocess.md) | FFmpeg runs as a sandboxed subprocess | Accepted |
+| [0026](0026-ordinary-descriptors-for-accepted-sockets.md) | Accepted sockets use ordinary descriptors | Accepted |
