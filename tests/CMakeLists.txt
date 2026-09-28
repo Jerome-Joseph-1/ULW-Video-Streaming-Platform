@@ -62,5 +62,6 @@ ulw_add_test_suite(http_unit_tests unit
     unit/http/backpressure_test.cpp
     unit/http/parser_limits_test.cpp
     unit/http/request_framing_test.cpp
-    unit/http/request_parser_test.cpp)
+    unit/http/request_parser_test.cpp
+    unit/http/router_test.cpp)
 target_link_libraries(http_unit_tests PRIVATE ulw::http_lib)
