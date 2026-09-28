@@ -209,6 +209,17 @@ void UringReactor::cancel_all(int fd, Slot& s) noexcept {
     prepare(sqe, fd, s, Op::Cancel);
 }
 
+// From here on the connection only waits for begin_close, like an epoll descriptor that has
+// left the interest set: bytes sent later are dropped, so the peer never receives what was
+// queued behind bytes that were lost.
+void UringReactor::fail(int fd, Slot& s) noexcept {
+    s.failed = true;
+    s.receiving = false;
+    if (s.recv_armed) {
+        cancel_op(fd, s, Op::Recv);
+    }
+}
+
 void UringReactor::finalize(Slot& s) noexcept {
     assert(s.in_flight == 0);
     s.sendq.clear(pool_);
@@ -218,7 +229,7 @@ void UringReactor::finalize(Slot& s) noexcept {
     s.ready = nullptr;
     s.acceptor = nullptr;
     s.receiving = s.recv_armed = s.send_armed = s.poll_armed = false;
-    s.closing = s.eof = s.eof_delivered = s.delivery_queued = s.accept_paused = false;
+    s.closing = s.failed = s.eof = s.eof_delivered = s.delivery_queued = s.accept_paused = false;
     s.interest = Interest::None;
     s.kind = Kind::Free;
     ++s.gen;
@@ -282,7 +293,7 @@ std::expected<ConnId, int> UringReactor::attach(os::UniqueFd conn, IStreamHandle
 
 void UringReactor::start_receiving(ConnId conn) noexcept {
     Slot* s = stream_slot(conn);
-    if (s == nullptr || s->receiving || s->eof_delivered) {
+    if (s == nullptr || s->receiving || s->failed || s->eof_delivered) {
         return;
     }
     s->receiving = true;
@@ -308,10 +319,11 @@ void UringReactor::stop_receiving(ConnId conn) noexcept {
 
 void UringReactor::send(ConnId conn, std::span<const std::byte> bytes) noexcept {
     Slot* s = stream_slot(conn);
-    if (s == nullptr || bytes.empty()) {
+    if (s == nullptr || s->failed || bytes.empty()) {
         return;
     }
     if (s->sendq.size() + bytes.size() > kMaxSendQueue) {
+        fail(conn.fd, *s);
         deferred_errors_.push_back({.conn = conn, .err = ENOBUFS});
         return;
     }
@@ -489,7 +501,7 @@ void UringReactor::dispatch(const io_uring_cqe& cqe) noexcept {
 
 void UringReactor::on_recv(int fd, Slot& s, int res, std::span<const std::byte> data) noexcept {
     s.recv_armed = false;
-    if (s.closing) {
+    if (s.closing || s.failed) {
         return;
     }
     const std::uint32_t gen = s.gen;
@@ -513,7 +525,7 @@ void UringReactor::on_recv(int fd, Slot& s, int res, std::span<const std::byte> 
     } else if (res != -ENOBUFS && res != -ECANCELED) {
         // ENOBUFS means the ring ran dry this round; every buffer is back before the re-arm
         // below reaches the kernel, so it simply tries again.
-        s.receiving = false;
+        fail(fd, s);
         s.stream->on_error(-res);
         return;
     }
@@ -524,12 +536,12 @@ void UringReactor::on_recv(int fd, Slot& s, int res, std::span<const std::byte> 
 
 void UringReactor::on_send(int fd, Slot& s, int res) noexcept {
     s.send_armed = false;
-    if (s.closing) {
+    if (s.closing || s.failed) {
         return;
     }
     if (res < 0) {
         if (res != -ECANCELED) {
-            s.receiving = false;
+            fail(fd, s);
             s.stream->on_error(-res);
         }
         return;
@@ -632,7 +644,6 @@ void UringReactor::run_deferred() noexcept {
     errors.swap(deferred_errors_);
     for (const DeferredError& e : errors) {
         if (Slot* s = stream_slot(e.conn)) {
-            s->receiving = false;
             s->stream->on_error(e.err);
         }
     }

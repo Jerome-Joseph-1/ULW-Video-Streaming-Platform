@@ -307,6 +307,29 @@ TEST_P(ReactorTest, SendQueueBeyondItsCapFailsTheConnection) {
     EXPECT_EQ(*server.error, ENOBUFS);
 }
 
+// The rejected bytes leave a hole in the stream, so nothing sent after them may go out either.
+TEST_P(ReactorTest, NothingSentAfterARejectedSendReachesThePeer) {
+    Conn server;
+    auto client = connect(server);
+    const std::string_view head = "HEAD";
+    const std::string_view tail = "TAIL";
+    reactor->send(server.id, std::as_bytes(std::span(head)));
+    // Over the 4 MiB send-queue cap on its own.
+    reactor->send(server.id, pattern(5 * kMiB));
+    reactor->send(server.id, std::as_bytes(std::span(tail)));
+    ASSERT_TRUE(pump_until(*reactor, [&] { return server.error.has_value(); }));
+    EXPECT_EQ(*server.error, ENOBUFS);
+
+    reactor->begin_close(server.id);
+    std::vector<std::byte> got;
+    ASSERT_TRUE(pump_until(*reactor, [&] {
+        read_some(client.get(), got);
+        std::byte b{};
+        return ::recv(client.get(), &b, 1, MSG_DONTWAIT | MSG_PEEK) == 0;
+    }));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(got.data()), got.size()), head);
+}
+
 TEST_P(ReactorTest, AcceptsManyConnections) {
     constexpr std::size_t kClients = 200;
     std::vector<os::UniqueFd> clients;

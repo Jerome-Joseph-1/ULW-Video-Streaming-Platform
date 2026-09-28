@@ -57,6 +57,7 @@ private:
         bool send_armed = false;
         bool poll_armed = false;
         bool closing = false;
+        bool failed = false;
         bool eof = false;
         bool eof_delivered = false;
         bool delivery_queued = false;
@@ -101,6 +102,7 @@ private:
     void arm_accept(int fd, Slot& s) noexcept;
     void cancel_op(int fd, Slot& s, Op op) noexcept;
     void cancel_all(int fd, Slot& s) noexcept;
+    void fail(int fd, Slot& s) noexcept;
     void finalize(Slot& s) noexcept;
     void return_buffer(std::uint16_t bid) noexcept;
     void queue_delivery(int fd, Slot& s) noexcept;
