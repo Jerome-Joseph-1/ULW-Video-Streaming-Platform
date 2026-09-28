@@ -111,6 +111,7 @@ private:
     void on_poll(int fd, Slot& s, int res) noexcept;
     void on_accept(int fd, Slot& s, int res, bool more) noexcept;
     void run_deferred() noexcept;
+    void cancel_everything() noexcept;
 
     core::ports::IClock& clock_;
     io_uring ring_{};

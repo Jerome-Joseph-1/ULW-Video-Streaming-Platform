@@ -63,6 +63,40 @@ protected:
         return ::recv(fd, &b, 1, MSG_DONTWAIT) == 0;
     }
 
+    // The child's half of PortIsFreeTheMomentADrainedServerProcessExits.
+    int run_child_server() {
+        auto r = net::make_reactor(GetParam(), clock, 4096);
+        auto listener = net::listen_tcp({.port = port, .loopback_only = true});
+        if (!r || !listener) {
+            return 3;
+        }
+        ulw::test::EchoServer child(**r, {});
+        if (!(*r)->listen(std::move(*listener), child)) {
+            return 4;
+        }
+        std::vector<os::UniqueFd> clients;
+        for (int i = 0; i < 300; ++i) {
+            clients.push_back(connect_loopback(port));
+        }
+        pump_until(**r, [&] {
+            child.reap();
+            return child.connections() == clients.size();
+        });
+        for (auto& c : clients) {
+            write_some(c.get(), std::as_bytes(std::span(std::string_view("ping"))));
+        }
+        clients.clear();
+        pump_until(**r, [&] {
+            child.reap();
+            return child.connections() == 0;
+        });
+        // As on SIGTERM: drain starts inside an iteration and the loop exits as soon as
+        // nothing is left, without another trip into the kernel.
+        child.begin_drain();
+        child.reap();
+        return child.finished() ? 0 : 5;
+    }
+
     ulw::test::FakeClock clock;
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<ulw::test::EchoServer> server;
@@ -128,6 +162,27 @@ TEST_P(EchoServerTest, DrainDeadlineClosesPeersThatNeverReadTheirEcho) {
     EXPECT_EQ(server->connections(), 1U);
     advance(Millis{1'200});
     EXPECT_TRUE(settle([&] { return server->finished(); }));
+}
+
+// io_uring tears a ring down asynchronously, and for a ring whose task has exited that can
+// take a while; until then, requests still in flight keep their sockets, the listener
+// included, alive. A restarted process must find its port free the moment the old one exits.
+TEST_P(EchoServerTest, PortIsFreeTheMomentADrainedServerProcessExits) {
+    server.reset();
+    reactor.reset();
+    for (int round = 0; round < 5; ++round) {
+        const pid_t pid = ::fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) {
+            // Destructors must run, as they do when a real server returns from main.
+            ::_exit(run_child_server());
+        }
+        int status = 0;
+        ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+        ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << "child status " << status;
+        auto again = net::listen_tcp({.port = port, .loopback_only = true});
+        ASSERT_TRUE(again) << "round " << round << ": " << std::strerror(again.error());
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, EchoServerTest,

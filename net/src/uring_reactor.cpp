@@ -85,6 +85,9 @@ UringReactor::UringReactor(core::ports::IClock& clock, std::size_t max_fds)
 }
 
 UringReactor::~UringReactor() {
+    if (ring_ready_) {
+        cancel_everything();
+    }
     for (Slot& s : slots_) {
         s.sendq.clear(pool_);
         s.parked.clear(pool_);
@@ -93,9 +96,39 @@ UringReactor::~UringReactor() {
         io_uring_free_buf_ring(&ring_, buf_ring_, kBufCount, kBufGroup);
     }
     if (ring_ready_) {
-        // Exiting the ring cancels whatever is still in flight before the slots' descriptors
-        // close with them.
         io_uring_queue_exit(&ring_);
+    }
+}
+
+void UringReactor::cancel_everything() noexcept {
+    // io_uring_queue_exit tears the ring down asynchronously, and until it does, pending
+    // requests keep their sockets alive: a listener would still hold its port after the
+    // process has "stopped". Cancel and reap everything here so shutdown is synchronous.
+    std::size_t outstanding = orphans_;
+    for (const Slot& s : slots_) {
+        outstanding += s.in_flight;
+    }
+    if (outstanding == 0) {
+        return;
+    }
+    io_uring_sqe* sqe = next_sqe();
+    io_uring_prep_cancel64(sqe, 0, IORING_ASYNC_CANCEL_ANY);
+    io_uring_sqe_set_data64(sqe, 0);
+    const auto deadline = clock_.now() + core::Millis{1'000};
+    while (outstanding > 0 && clock_.now() < deadline) {
+        __kernel_timespec ts{.tv_sec = 0, .tv_nsec = 10'000'000};
+        io_uring_cqe* first = nullptr;
+        static_cast<void>(io_uring_submit_and_wait_timeout(&ring_, &first, 1, &ts, nullptr));
+        unsigned head = 0;
+        unsigned seen = 0;
+        io_uring_cqe* cqe = nullptr;
+        io_uring_for_each_cqe(&ring_, head, cqe) {
+            ++seen;
+            if (io_uring_cqe_get_data64(cqe) != 0 && (cqe->flags & IORING_CQE_F_MORE) == 0) {
+                --outstanding;
+            }
+        }
+        io_uring_cq_advance(&ring_, seen);
     }
 }
 
