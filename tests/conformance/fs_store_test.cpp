@@ -6,10 +6,12 @@
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <latch>
+#include <span>
 #include <stdexcept>
 
 namespace {
@@ -34,9 +36,9 @@ protected:
 
     [[nodiscard]] FsStore::Deps deps() { return {.clock = clock, .random = random}; }
 
-    // One thread, so jobs run in the order they were submitted.
-    [[nodiscard]] std::unique_ptr<net::OffloadPool> writer() {
-        auto p = net::OffloadPool::create(*reactor, 1);
+    // One thread by default, so jobs run in the order they were submitted.
+    [[nodiscard]] std::unique_ptr<net::OffloadPool> writer(std::size_t threads = 1) {
+        auto p = net::OffloadPool::create(*reactor, threads);
         EXPECT_TRUE(p);
         return std::move(*p);
     }
@@ -82,6 +84,17 @@ protected:
 struct Marker final : net::IOffloadJob {
     std::latch ran{1};
     void run() noexcept override { ran.count_down(); }
+    void complete() noexcept override {}
+};
+
+// Holds a pool thread until the test lets it go.
+struct Gate final : net::IOffloadJob {
+    std::latch started{1};
+    std::latch release{1};
+    void run() noexcept override {
+        started.count_down();
+        release.wait();
+    }
     void complete() noexcept override {}
 };
 
@@ -144,6 +157,45 @@ TEST_F(FsStoreTest, UnreadableMarkerIsAnErrorNotAnException) {
     EXPECT_EQ(*reaped, 0U);
     store.discard(id);
     EXPECT_TRUE(std::filesystem::exists(ingest(id) / "durable"));
+}
+
+// An aborted session's write can still be on the pool when the next session on the same
+// upload starts writing; run side by side, the two cut and extend the one data file under
+// each other and the older can publish a durable offset past what the newer left there.
+TEST_F(FsStoreTest, NextSessionWaitsForAnAbortedSessionsWrite) {
+    auto pool = writer(2);
+    net::OffloadPool& borrowed = *pool;
+    FsStore store(deps(), std::move(pool), root, ulw::test::kLocalChunk);
+    const auto data = ulw::test::pattern(2 * ulw::test::kLocalChunk, 3);
+    const auto id = create(store, data.size());
+    // Both threads held, so nothing the store hands over runs until the gates open.
+    std::array<Gate, 2> gates;
+    for (Gate& g : gates) {
+        borrowed.submit(g);
+        g.started.wait();
+    }
+    ulw::test::Observer first;
+    auto aborted = store.open(id, 0, first);
+    ASSERT_TRUE(aborted);
+    ASSERT_EQ((*aborted)->write(std::span(data).first(ulw::test::kLocalChunk)),
+              ulw::test::kLocalChunk);
+    (*aborted)->abort();
+    ulw::test::Observer second;
+    auto next = store.open(id, 0, second);
+    ASSERT_TRUE(next);
+    const std::size_t half = ulw::test::kLocalChunk / 2;
+    ASSERT_EQ((*next)->write(std::span(data).first(half)), half);
+    // The two gates and the aborted write; the new session's write waits off the pool, where
+    // a free thread cannot pick it up alongside the other.
+    EXPECT_EQ(borrowed.in_flight(), 3U);
+    for (Gate& g : gates) {
+        g.release.count_down();
+    }
+    ASSERT_TRUE(upload(**next, second, std::span(data).subspan(half)));
+    ASSERT_TRUE(store.commit(id));
+    const auto stored = store.fetch_small(key, data.size());
+    ASSERT_TRUE(stored);
+    EXPECT_TRUE(*stored == data);
 }
 
 } // namespace

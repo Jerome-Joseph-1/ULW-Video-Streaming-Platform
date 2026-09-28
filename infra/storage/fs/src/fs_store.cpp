@@ -223,6 +223,7 @@ public:
     [[nodiscard]] std::optional<StorageError> error() const noexcept { return error_; }
     [[nodiscard]] std::optional<std::uint64_t> durable() const noexcept { return durable_; }
     [[nodiscard]] bool final() const noexcept { return req_.final; }
+    [[nodiscard]] const fs::path& dir() const noexcept { return req_.dir; }
     [[nodiscard]] os::UniqueFd take_fd() noexcept { return std::move(req_.fd); }
     [[nodiscard]] std::vector<std::byte> take_buffer() noexcept {
         req_.bytes.clear();
@@ -410,16 +411,29 @@ bool FsStore::valid_ref(const std::string& ref) {
            });
 }
 
+// One job per upload on the pool at a time, in the order they were adopted. A session runs
+// one job at a time already; this also holds across sessions, where a job left running by an
+// aborted session would otherwise race the next session's first write to the same files.
+// For each upload, the first of its jobs in jobs_ is the one on the pool.
 FsStore::WriteJob& FsStore::adopt_job(std::unique_ptr<WriteJob> job_ptr) {
     jobs_.push_back(std::move(job_ptr));
     WriteJob& job = *jobs_.back();
-    writer_->submit(job);
+    const bool upload_busy = std::ranges::any_of(
+        jobs_.begin(), jobs_.end() - 1, [&](const auto& j) { return j->dir() == job.dir(); });
+    if (!upload_busy) {
+        writer_->submit(job);
+    }
     return job;
 }
 
 void FsStore::finish_job(WriteJob& job) noexcept {
     if (Session* owner = job.owner()) {
         owner->on_job_done(job);
+    }
+    const auto next = std::ranges::find_if(
+        jobs_, [&](const auto& j) { return j.get() != &job && j->dir() == job.dir(); });
+    if (next != jobs_.end()) {
+        writer_->submit(**next);
     }
     std::erase_if(jobs_, [&](const auto& j) { return j.get() == &job; });
 }
