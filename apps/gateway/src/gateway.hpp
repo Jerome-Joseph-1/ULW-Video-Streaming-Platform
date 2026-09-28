@@ -12,8 +12,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace gateway {
 
@@ -60,6 +62,8 @@ struct Counters {
     std::uint64_t requests = 0;
 };
 
+enum class Admission : std::uint8_t { Admitted, UserAtLimit, Full };
+
 // One shard of the gateway: a listener, the connections it accepted and the admission
 // counters for them. Everything runs on the shard's reactor thread.
 class Gateway final : public net::IAcceptHandler,
@@ -88,14 +92,20 @@ public:
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
     [[nodiscard]] std::size_t upload_slots_in_use() const noexcept { return upload_slots_; }
-    // Prometheus text exposition of the counters above.
+    // The counters above in the plain-text exposition format metric scrapers read.
     [[nodiscard]] std::string render_metrics() const;
 
-    [[nodiscard]] bool acquire_upload_slot(const core::UserId& user) noexcept;
+    [[nodiscard]] Admission acquire_upload_slot(const core::UserId& user) noexcept;
     void release_upload_slot(const core::UserId& user) noexcept;
     void retire(net::Slab<Connection>::Handle handle) noexcept;
+    // Discards an ingest nothing will ever reference, because its client left or the catalog
+    // refused it. Owned here rather than by a connection, which may serve its next request
+    // while the discard is still running.
+    void abandon(const core::ports::IngestId& ingest) noexcept;
 
 private:
+    class Discard;
+
     Deps deps_;
     Limits limits_;
     Counters counters_;
@@ -104,6 +114,7 @@ private:
     std::size_t upload_slots_ = 0;
     bool draining_ = false;
     net::TimerId drain_timer_;
+    std::vector<std::unique_ptr<Discard>> discards_;
 };
 
 } // namespace gateway

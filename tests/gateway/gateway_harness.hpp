@@ -19,6 +19,8 @@ struct GatewayOptions {
     std::uint64_t chunk = std::uint64_t{8} * 1024 * 1024;
     infra::storage::FaultPlan plan{};
     gateway::Limits limits{};
+    // Time moves only when the test calls advance(), so timeouts need no waiting.
+    bool manual_clock = false;
 };
 
 // A gateway shard on its own reactor thread, as in production, reachable over loopback.
@@ -42,6 +44,12 @@ public:
     [[nodiscard]] std::size_t connections();
     [[nodiscard]] std::size_t claims();
     void drain();
+    // Manual clock only: moves time forward on the loop thread; due timers fire on the loop's
+    // next turn.
+    void advance(core::Millis d);
+    // Lets every connection waiting on an unknown signing key ("slow:" tokens) continue.
+    void refresh_keys();
+    [[nodiscard]] std::size_t key_waiters();
 
 private:
     struct Loop;

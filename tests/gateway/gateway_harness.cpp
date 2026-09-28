@@ -8,6 +8,7 @@
 #include "os/system_random.hpp"
 
 #include "../conformance/storage_harness.hpp"
+#include "support/fake_clock.hpp"
 #include "support/fake_verifier.hpp"
 
 #include <sys/eventfd.h>
@@ -23,7 +24,9 @@
 namespace ulw::test {
 
 struct GatewayUnderTest::Loop final : net::IReadyHandler {
-    os::SystemClock clock;
+    os::SystemClock system_clock;
+    FakeClock manual_clock;
+    core::ports::IClock* clock = &system_clock;
     os::SystemRandom random;
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::OffloadPool> pool;
@@ -81,10 +84,13 @@ GatewayUnderTest::~GatewayUnderTest() {
 
 void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> ready) {
     Loop& l = *loop_;
-    l.reactor = std::move(*net::make_reactor(reactor_kind_from_env(), l.clock, 4096));
+    if (options.manual_clock) {
+        l.clock = &l.manual_clock;
+    }
+    l.reactor = std::move(*net::make_reactor(reactor_kind_from_env(), *l.clock, 4096));
     l.pool = std::move(*net::OffloadPool::create(*l.reactor, 4));
     if (options.backend == Backend::Fake) {
-        l.fake = std::make_unique<infra::storage::FakeStore>(*l.reactor, l.clock, options.chunk,
+        l.fake = std::make_unique<infra::storage::FakeStore>(*l.reactor, *l.clock, options.chunk,
                                                              options.plan);
         fake_ = l.fake.get();
         reader_ = l.fake.get();
@@ -92,7 +98,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
         std::string tmpl = (std::filesystem::temp_directory_path() / "ulw-gw-XXXXXX").string();
         l.root = ::mkdtemp(tmpl.data());
         l.fs = std::make_unique<infra::storage::FsStore>(
-            infra::storage::FsStore::Deps{.clock = l.clock, .random = l.random},
+            infra::storage::FsStore::Deps{.clock = *l.clock, .random = l.random},
             std::move(*net::OffloadPool::create(*l.reactor, 2)), l.root, options.chunk);
         reader_ = l.fs.get();
     }
@@ -104,7 +110,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
                                                                  .store = store,
                                                                  .catalog = *l.catalog,
                                                                  .verifier = l.verifier,
-                                                                 .clock = l.clock,
+                                                                 .clock = *l.clock,
                                                                  .random = l.random},
                                                    options.limits);
     auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
@@ -172,6 +178,20 @@ std::size_t GatewayUnderTest::claims() {
 
 void GatewayUnderTest::drain() {
     on_loop([&] { loop_->gateway->begin_drain(); });
+}
+
+void GatewayUnderTest::advance(core::Millis d) {
+    on_loop([&] { loop_->manual_clock.advance(d); });
+}
+
+void GatewayUnderTest::refresh_keys() {
+    on_loop([&] { loop_->verifier.refresh_keys(); });
+}
+
+std::size_t GatewayUnderTest::key_waiters() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->verifier.waiting(); });
+    return out;
 }
 
 } // namespace ulw::test

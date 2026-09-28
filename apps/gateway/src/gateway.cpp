@@ -8,6 +8,22 @@
 
 namespace gateway {
 
+class Gateway::Discard final : public net::IOffloadJob {
+public:
+    Discard(core::ports::IIngestStore& store, core::ports::IngestId ingest)
+        : store_(store), ingest_(std::move(ingest)) {}
+
+    void run() noexcept override { store_.discard(ingest_); }
+    // Destroyed by the next reap(), never from inside the pool's completion loop.
+    void complete() noexcept override { done_ = true; }
+    [[nodiscard]] bool done() const noexcept { return done_; }
+
+private:
+    core::ports::IIngestStore& store_;
+    core::ports::IngestId ingest_;
+    bool done_ = false;
+};
+
 Gateway::Gateway(Deps deps, Limits limits)
     : deps_(deps), limits_(std::move(limits)), connections_(limits_.max_connections) {}
 
@@ -62,26 +78,37 @@ void Gateway::begin_drain() noexcept {
     drain_timer_ = deps_.reactor.arm_timer(limits_.drain_deadline, *this);
 }
 
+// Whatever is still running now is cut off: the process is about to be killed anyway, and a
+// request the client can retry is better ended by us than by SIGKILL.
 void Gateway::on_timeout() noexcept {
     drain_timer_ = {};
-    connections_.for_each_live([](Connection& c) { c.drain(); });
+    connections_.for_each_live([](Connection& c) { c.abort(); });
 }
 
 void Gateway::reap() noexcept {
     connections_.reap([](Connection& c) { return c.quiescent(); });
+    std::erase_if(discards_, [](const auto& d) { return d->done(); });
 }
 
-bool Gateway::acquire_upload_slot(const core::UserId& user) noexcept {
+Admission Gateway::acquire_upload_slot(const core::UserId& user) noexcept {
     if (upload_slots_ >= limits_.max_upload_slots) {
-        return false;
+        return Admission::Full;
     }
     std::size_t& mine = uploads_by_user_[user];
     if (mine >= limits_.max_uploads_per_user) {
-        return false;
+        if (mine == 0) {
+            uploads_by_user_.erase(user);
+        }
+        return Admission::UserAtLimit;
     }
     ++mine;
     ++upload_slots_;
-    return true;
+    return Admission::Admitted;
+}
+
+void Gateway::abandon(const core::ports::IngestId& ingest) noexcept {
+    discards_.push_back(std::make_unique<Discard>(deps_.store, ingest));
+    deps_.pool.submit(*discards_.back());
 }
 
 void Gateway::release_upload_slot(const core::UserId& user) noexcept {

@@ -303,7 +303,7 @@ TEST(GatewayUpload, AdmissionCapsConcurrentUploadsPerUser) {
     HttpClient fourth(gw.port());
     const auto r = patch(fourth, up->upload_id, 0, data);
     ASSERT_TRUE(r);
-    EXPECT_EQ(r->status, 503);
+    EXPECT_EQ(r->status, 429);
     EXPECT_EQ(r->header("retry-after"), "5");
     EXPECT_EQ(gw.counters().admission_rejections, 1U);
     // Another user is not affected by alice's cap.
@@ -314,14 +314,15 @@ TEST(GatewayUpload, AdmissionCapsConcurrentUploadsPerUser) {
 }
 
 TEST(GatewayUpload, StalledBackendThrottlesTheClientInsteadOfBuffering) {
-    GatewayOptions options{.backend = Backend::Fake, .chunk = 8 * kMiB};
-    // Long enough that the stall is observed well before the gateway gives up on it.
-    options.limits.body_idle_timeout = core::Millis{3'000};
-    GatewayUnderTest gw(options);
+    GatewayUnderTest gw({.backend = Backend::Fake, .chunk = 8 * kMiB, .manual_clock = true});
     const auto data = ulw::test::pattern(8 * kMiB);
-    HttpClient c(gw.port());
-    const auto up = create_upload(c, data.size());
+    std::optional<Created> up;
+    {
+        HttpClient c(gw.port());
+        up = create_upload(c, data.size());
+    }
     ASSERT_TRUE(up);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
     gw.set_plan({.accept_zero = true});
 
     HttpClient uploader(gw.port());
@@ -350,12 +351,13 @@ TEST(GatewayUpload, StalledBackendThrottlesTheClientInsteadOfBuffering) {
 
     // With no progress for the body timeout the gateway gives up on the store, answers 503
     // and releases everything the upload held, whether or not the client is still there.
+    gw.advance(gateway::Limits{}.body_idle_timeout);
     const auto r = uploader.read_response();
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 503);
     EXPECT_EQ(gw.counters().timeouts_backend, 1U);
     uploader.close();
-    EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0 && gw.connections() == 1; }));
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0 && gw.connections() == 0; }));
 }
 
 TEST(GatewayUpload, FiftyConcurrentUploadsAllArriveIntact) {
@@ -427,17 +429,56 @@ TEST(GatewayUpload, SmugglingAttemptIsRefusedAndClosed) {
 }
 
 TEST(GatewayUpload, IdleConnectionIsClosedAfterTheHeaderTimeout) {
-    GatewayOptions options{};
-    options.limits.header_timeout = core::Millis{300};
-    GatewayUnderTest gw(options);
+    GatewayUnderTest gw({.manual_clock = true});
     HttpClient c(gw.port());
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 1; }));
+    gw.advance(gateway::Limits{}.header_timeout);
     EXPECT_TRUE(c.closed_by_peer());
     EXPECT_GE(gw.counters().timeouts_header, 1U);
 }
 
 TEST(GatewayUpload, StalledBodyGets408) {
-    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB};
-    options.limits.body_idle_timeout = core::Millis{300};
+    GatewayUnderTest gw({.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true});
+    HttpClient c(gw.port());
+    const auto up = create_upload(c, kMiB);
+    ASSERT_TRUE(up);
+    const std::string head = "PATCH /api/v1/uploads/" + up->upload_id +
+                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                             "Upload-Offset: 0\r\nContent-Length: 1000\r\n\r\nabc";
+    ASSERT_TRUE(c.send_raw(head));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 1; }));
+    gw.advance(gateway::Limits{}.body_idle_timeout);
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 408);
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0; }));
+}
+
+TEST(GatewayUpload, DrainClosesIdleConnectionsAndAnswersTheRequestInFlight) {
+    GatewayUnderTest gw({});
+    HttpClient idle(gw.port());
+    HttpClient busy(gw.port());
+    ASSERT_EQ(busy.request("GET", "/api/v1/healthz", "")->status, 200);
+    // Half a request: the drain must let it finish and tell it the process is going away.
+    ASSERT_TRUE(busy.send_raw("GET /api/v1/readyz HTTP/1.1\r\nHost: t\r\n"));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 2; }));
+    gw.drain();
+    EXPECT_TRUE(idle.closed_by_peer());
+    ASSERT_TRUE(busy.send_raw("\r\n"));
+    const auto r = busy.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 503);
+    EXPECT_EQ(r->body, "draining\n");
+    EXPECT_EQ(r->header("connection"), "close");
+    EXPECT_TRUE(busy.closed_by_peer());
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
+}
+
+TEST(GatewayUpload, TheDrainDeadlineEndsRequestsStillInFlight) {
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true};
+    // Only the deadline may end this upload, not the body timeout.
+    options.limits.body_idle_timeout = std::chrono::hours(1);
     GatewayUnderTest gw(options);
     HttpClient c(gw.port());
     const auto up = create_upload(c, kMiB);
@@ -446,22 +487,197 @@ TEST(GatewayUpload, StalledBodyGets408) {
                              " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
                              "Upload-Offset: 0\r\nContent-Length: 1000\r\n\r\nabc";
     ASSERT_TRUE(c.send_raw(head));
-    const auto r = c.read_response();
-    ASSERT_TRUE(r);
-    EXPECT_EQ(r->status, 408);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 1; }));
+    gw.drain();
+    gw.advance(options.limits.drain_deadline - core::Millis{1});
+    EXPECT_EQ(gw.claims(), 1U);
+    gw.advance(core::Millis{1});
     EXPECT_TRUE(c.closed_by_peer());
-    EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0; }));
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0 && gw.claims() == 0; }));
 }
 
-TEST(GatewayUpload, DrainAnswersReadyzWith503AndClosesIdleConnections) {
+TEST(GatewayUpload, AHeadDrippedAByteAtATimeIsCutAtTheHeaderTimeout) {
+    GatewayUnderTest gw({.manual_clock = true});
+    HttpClient c(gw.port());
+    const std::string head = "GET /api/v1/healthz HTTP/1.1\r\nHost: t\r\n\r\n";
+    const auto timeout = gateway::Limits{}.header_timeout;
+    // A byte every tenth of the timeout never lets the connection look idle; after one and a
+    // half timeouts the head is still unfinished and must have been cut.
+    constexpr int kDrips = 15;
+    static_assert(kDrips < 40, "the head must stay incomplete");
+    for (std::size_t i = 0; i < kDrips; ++i) {
+        if (!c.send_raw(std::string_view(head).substr(i, 1))) {
+            break;
+        }
+        gw.advance(timeout / 10);
+    }
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_EQ(gw.counters().timeouts_header, 1U);
+}
+
+TEST(GatewayUpload, AMalformedRequestPipelinedBehindAGoodOneGets400) {
+    const GatewayUnderTest gw({});
+    HttpClient c(gw.port());
+    ASSERT_TRUE(c.send_raw("GET /api/v1/healthz HTTP/1.1\r\nHost: t\r\n\r\nBROKEN\r\n\r\n"));
+    const auto first = c.read_response();
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->status, 200);
+    const auto second = c.read_response();
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->status, 400);
+    EXPECT_TRUE(second->header("x-request-id").has_value());
+    EXPECT_NE(second->header("x-request-id"), first->header("x-request-id"));
+}
+
+TEST(GatewayUpload, TheTotalCapRefusesEveryoneWith503) {
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB};
+    options.limits.max_upload_slots = 1;
+    GatewayUnderTest gw(options);
+    HttpClient setup(gw.port());
+    const auto held = create_upload(setup, kMiB);
+    ASSERT_TRUE(held);
+    HttpClient holder(gw.port());
+    const std::string head = "PATCH /api/v1/uploads/" + held->upload_id +
+                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                             "Upload-Offset: 0\r\nContent-Length: " +
+                             std::to_string(kMiB) + "\r\n\r\n";
+    ASSERT_TRUE(holder.send_raw(head));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 1; }));
+    HttpClient bob(gw.port());
+    const auto theirs = create_upload(bob, kMiB, kBob);
+    ASSERT_TRUE(theirs);
+    const auto r = patch(bob, theirs->upload_id, 0, ulw::test::pattern(kMiB), kBob);
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 503);
+    EXPECT_EQ(r->header("retry-after"), "5");
+}
+
+TEST(GatewayUpload, ASlotIsHeldOnlyForTheRequestThatTookIt) {
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB};
+    options.limits.max_uploads_per_user = 1;
+    const GatewayUnderTest gw(options);
+    const auto data = ulw::test::pattern(2 * kMiB);
+    HttpClient c(gw.port());
+    const auto first = create_upload(c, data.size());
+    const auto second = create_upload(c, data.size());
+    ASSERT_TRUE(first && second);
+    // Alternating uploads on one keep-alive connection: each PATCH takes the user's only slot
+    // and gives it back when answered.
+    EXPECT_EQ(patch(c, first->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+    EXPECT_EQ(patch(c, second->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+    HttpClient other(gw.port());
+    EXPECT_EQ(patch(other, first->upload_id, kMiB, std::span(data).subspan(kMiB))->status, 204);
+}
+
+TEST(GatewayUpload, ARefusedCreateLeavesNothingRunningForTheNextRequest) {
+    const GatewayUnderTest gw({.backend = Backend::Fake, .chunk = kMiB});
+    HttpClient alice(gw.port());
+    const auto up = create_upload(alice, kMiB);
+    ASSERT_TRUE(up);
+    HttpClient bob(gw.port());
+    const std::string body = R"({"filename":")" + std::string(300, 'a') +
+                             R"(","size_bytes":10,"content_type":"video/mp4"})";
+    const auto refused =
+        bob.request("POST", "/api/v1/uploads", kBob, std::as_bytes(std::span(body)));
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 400);
+    EXPECT_EQ(refused->header("connection"), "keep-alive");
+    // The same connection's next request must be judged on its own: bob may not cancel
+    // alice's upload.
+    const auto r = bob.request("DELETE", "/api/v1/uploads/" + up->upload_id, kBob);
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 404);
+    EXPECT_EQ(patch(alice, up->upload_id, 0, ulw::test::pattern(kMiB))->status, 204);
+}
+
+TEST(GatewayUpload, OnlyTheOwnerCancelsAndACancelledUploadTakesNothingMore) {
+    GatewayUnderTest gw({.backend = Backend::Fs, .chunk = kMiB});
+    const auto data = ulw::test::pattern(2 * kMiB);
+    HttpClient c(gw.port());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    const std::string path = "/api/v1/uploads/" + up->upload_id;
+    ASSERT_EQ(patch(c, up->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+    HttpClient bob(gw.port());
+    EXPECT_EQ(bob.request("DELETE", path, kBob)->status, 404);
+    EXPECT_EQ(c.request("DELETE", path, kAlice)->status, 204);
+    const auto late = patch(c, up->upload_id, kMiB, std::span(data).subspan(kMiB));
+    ASSERT_TRUE(late);
+    EXPECT_EQ(late->status, 409);
+    // Refused before its body was read, so that connection is closed.
+    HttpClient d(gw.port());
+    EXPECT_EQ(d.request("POST", path + "/commit", kAlice)->status, 409);
+    EXPECT_TRUE(gw.jobs().empty());
+}
+
+TEST(GatewayUpload, AResumeFromHeadIsAcceptedAfterAMultiChunkPatchWasCutOff) {
+    GatewayUnderTest gw({.backend = Backend::Fs, .chunk = kMiB});
+    const auto data = ulw::test::pattern(3 * kMiB, 9);
+    HttpClient c(gw.port());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    const std::string path = "/api/v1/uploads/" + up->upload_id;
+    {
+        // Two chunks declared, one and a half sent: some of it becomes durable in the store,
+        // but the request never finishes, so the catalog never hears of it.
+        HttpClient cut(gw.port());
+        const std::string head = "PATCH " + path +
+                                 " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                                 "Upload-Offset: 0\r\nContent-Length: " +
+                                 std::to_string(2 * kMiB) + "\r\n\r\n";
+        ASSERT_TRUE(cut.send_raw(head));
+        ASSERT_TRUE(cut.send_raw(std::span(data).first(kMiB + (kMiB / 2))));
+        // A fresh connection per poll: one connection serves at most
+        // max_requests_per_connection requests, and a slow store can take more polls than that.
+        ASSERT_TRUE(ulw::test::eventually([&] {
+            HttpClient probe(gw.port());
+            const auto h = probe.request("HEAD", path, kAlice);
+            return h && h->upload_offset() >= kMiB;
+        }));
+    }
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0; }));
+    const auto head = c.request("HEAD", path, kAlice);
+    ASSERT_TRUE(head && head->upload_offset());
+    std::uint64_t offset = *head->upload_offset();
+    EXPECT_GE(offset, kMiB);
+    while (offset < data.size()) {
+        const std::size_t n = std::min<std::uint64_t>(kMiB, data.size() - offset);
+        const auto r = patch(c, up->upload_id, offset, std::span(data).subspan(offset, n));
+        ASSERT_TRUE(r);
+        ASSERT_EQ(r->status, 204) << "at " << offset;
+        offset = *r->upload_offset();
+    }
+    ASSERT_EQ(c.request("POST", path + "/commit", kAlice)->status, 200);
+    const auto stored = gw.reader().fetch_small(
+        *core::StorageKey::parse("videos/" + up->video_id + "/raw"), data.size());
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(sha256(*stored), sha256(data));
+}
+
+TEST(GatewayUpload, ARequestWaitsForAKeyRefreshThenProceeds) {
     GatewayUnderTest gw({});
-    HttpClient idle(gw.port());
-    HttpClient busy(gw.port());
-    ASSERT_EQ(busy.request("GET", "/api/v1/healthz", "")->status, 200);
+    HttpClient c(gw.port());
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    ASSERT_TRUE(
+        c.send_request("POST", "/api/v1/uploads", "slow:alice", std::as_bytes(std::span(body))));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.key_waiters() == 1; }));
+    gw.refresh_keys();
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 201);
+}
+
+TEST(GatewayUpload, AConnectionClosedWhileWaitingForKeysIsForgotten) {
+    GatewayUnderTest gw({.manual_clock = true});
+    HttpClient c(gw.port());
+    ASSERT_TRUE(
+        c.send_request("GET", "/api/v1/videos/01890a5d-ac96-774b-bcce-b302099a8057", "slow:alice"));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.key_waiters() == 1; }));
     gw.drain();
-    EXPECT_TRUE(idle.closed_by_peer());
-    EXPECT_TRUE(busy.closed_by_peer());
-    EXPECT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
+    gw.advance(gateway::Limits{}.drain_deadline);
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_TRUE(
+        ulw::test::eventually([&] { return gw.key_waiters() == 0 && gw.connections() == 0; }));
 }
 
 } // namespace

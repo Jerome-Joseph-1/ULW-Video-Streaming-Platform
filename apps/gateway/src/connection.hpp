@@ -24,8 +24,8 @@ namespace gateway {
 // One client connection and the request it is serving. Every step that waits (a key refresh,
 // a catalog call, a blocking storage call on the offload pool, the object store taking bytes)
 // comes back through one of the callbacks below, and each of them calls advance(), which
-// looks at what is known and takes the next step. Responses are never sent from inside the
-// parser's callbacks.
+// looks at what is known and takes the next step. Nothing is sent from inside the parser's
+// callbacks: they record what arrived, and on_parse() acts on it once the parser returns.
 class Connection final : public net::IStreamHandler,
                          public net::ITimerHandler,
                          public http::IRequestSink,
@@ -45,6 +45,8 @@ public:
     void start(net::ConnId conn) noexcept;
     // The gateway is shutting down: finish the request in flight, then close.
     void drain() noexcept;
+    // The drain deadline passed: close now, whatever is in flight.
+    void abort() noexcept;
     // Nothing (the kernel, the catalog, the pool, the verifier) can still reach this object.
     [[nodiscard]] bool quiescent() const noexcept;
 
@@ -89,7 +91,6 @@ private:
         std::optional<std::uint64_t> upload_offset;
         std::optional<core::UploadId> upload_id;
         std::uint64_t content_length = 0;
-        std::uint64_t body_seen = 0;
         std::array<char, core::Uuid::kTextLength> request_id{};
         std::optional<http::Status> body_error;
         std::optional<RouteId> route;
@@ -108,6 +109,8 @@ private:
     // request meanwhile.
     struct ControlJob {
         ControlOp op = ControlOp::None;
+        // The request that started the job; a completion for any other request is stale.
+        std::uint64_t request = 0;
         std::optional<core::ports::IngestId> ingest;
         std::optional<core::StorageKey> key;
         std::uint64_t size = 0;
@@ -141,7 +144,8 @@ private:
     void on_created(ControlJob job) noexcept;
     void on_committed(ControlJob job) noexcept;
     [[nodiscard]] static core::ports::IngestId ingest_id(const core::ports::StoredUpload& s);
-    [[nodiscard]] static ControlJob discard_job(const core::ports::IngestId& ingest);
+    void on_offset(ControlJob job) noexcept;
+    void begin_append(std::uint64_t at) noexcept;
 
     void respond(http::ResponseHead head, std::string_view body) noexcept;
     void respond_json(http::Status status, std::string_view json) noexcept;
@@ -151,6 +155,7 @@ private:
     void fail_catalog(core::ports::CatalogError error) noexcept;
     void finish_request() noexcept;
     void release_claim() noexcept;
+    void release_slot() noexcept;
     void linger() noexcept;
     void close() noexcept;
     void arm_timer(core::Millis delay) noexcept;
@@ -168,6 +173,8 @@ private:
     core::MonoTime last_progress_;
     core::MonoTime request_started_;
     std::size_t requests_ = 0;
+    // Numbers each request on this connection, so late completions can tell whose they are.
+    std::uint64_t request_seq_ = 0;
     bool receiving_ = false;
     bool parser_paused_ = false;
     bool resume_pending_ = false;
@@ -177,6 +184,7 @@ private:
     int pending_ = 0;
     bool key_wait_ = false;
 
+    // The upload slot the current PATCH holds, released when that request ends.
     std::optional<core::UserId> slot_user_;
 
     // Body bytes the store has not taken yet. Only filled while the parser is paused, so it
@@ -187,6 +195,7 @@ private:
 
     // Only the pool thread touches this between submit and complete().
     ControlJob job_;
+    bool job_running_ = false;
 };
 
 } // namespace gateway

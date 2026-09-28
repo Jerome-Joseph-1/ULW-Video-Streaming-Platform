@@ -85,9 +85,7 @@ std::string_view state_name(core::VideoState s) noexcept {
 Connection::Connection(Handle handle, Gateway& gateway) : handle_(handle), gateway_(gateway) {}
 
 Connection::~Connection() {
-    if (slot_user_) {
-        gateway_.release_upload_slot(*slot_user_);
-    }
+    release_slot();
 }
 
 void Connection::start(net::ConnId conn) noexcept {
@@ -109,6 +107,10 @@ void Connection::drain() noexcept {
     }
 }
 
+void Connection::abort() noexcept {
+    close();
+}
+
 void Connection::arm_timer(core::Millis delay) noexcept {
     deps().reactor.cancel_timer(timer_);
     timer_ = deps().reactor.arm_timer(delay, *this);
@@ -117,6 +119,7 @@ void Connection::arm_timer(core::Millis delay) noexcept {
 // Every response carries the id, including one for a request that never parsed.
 void Connection::begin_request() noexcept {
     phase_ = Phase::Request;
+    ++request_seq_;
     request_started_ = now();
     core::Uuid::v7(deps().clock, deps().random).format_to(req_.request_id);
 }
@@ -137,6 +140,10 @@ void Connection::on_parse(http::ParseResult result) noexcept {
         return;
     }
     if (!result) {
+        if (phase_ == Phase::Idle) {
+            // Pipelined bytes that fail before a head exists still get an answer and an id.
+            begin_request();
+        }
         if (!req_.responded) {
             const auto status = result.error().status;
             req_.keep_alive = req_.keep_alive && !result.error().must_close;
@@ -157,14 +164,14 @@ void Connection::on_parse(http::ParseResult result) noexcept {
             receiving_ = true;
             deps().reactor.start_receiving(conn_);
         }
-        return;
+        break;
     case http::ParseProgress::Paused:
         parser_paused_ = true;
         if (receiving_) {
             receiving_ = false;
             deps().reactor.stop_receiving(conn_);
         }
-        return;
+        break;
     case http::ParseProgress::MessageComplete:
         parser_paused_ = true;
         if (receiving_) {
@@ -172,9 +179,9 @@ void Connection::on_parse(http::ParseResult result) noexcept {
             deps().reactor.stop_receiving(conn_);
         }
         req_.message_complete = true;
-        advance();
-        return;
+        break;
     }
+    advance();
 }
 
 http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
@@ -242,7 +249,6 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
             return http::HeadVerdict::reject(*req_.body_error);
         }
     }
-    advance();
     return http::HeadVerdict::accept();
 }
 
@@ -278,7 +284,6 @@ void Connection::on_keys_refreshed() noexcept {
 http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept {
     last_activity_ = now();
     last_progress_ = last_activity_;
-    req_.body_seen += bytes.size();
     if (req_.route == RouteId::CreateUpload) {
         std::ranges::transform(bytes, std::back_inserter(req_.body),
                                [](std::byte b) { return static_cast<char>(b); });
@@ -374,7 +379,24 @@ void Connection::start_create() noexcept {
         fail(Status::BadRequest);
         return;
     }
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
     const auto video = core::VideoId::generate(deps().clock, deps().random);
+    // Checked before the store is asked for anything, so a refusal leaves nothing behind.
+    const core::VideoRecord probe{.id = video,
+                                  .owner = claims->subject,
+                                  .title = std::string(title),
+                                  .state = core::VideoState::Init,
+                                  .version = 0,
+                                  .error_reason = std::nullopt,
+                                  .duration = std::nullopt};
+    if (!core::Video::rehydrate(probe)) {
+        fail(Status::BadRequest);
+        return;
+    }
     auto key = core::StorageKey::parse("videos/" + video.to_string() + "/raw");
     if (!key) {
         fail(Status::InternalServerError);
@@ -401,16 +423,21 @@ void Connection::start_append() noexcept {
         return;
     }
     req_.upload_id = *id;
-    if (!slot_user_) {
-        if (!gw().acquire_upload_slot(claims->subject)) {
-            ++gw().counters().admission_rejections;
-            fail(Status::ServiceUnavailable);
-            return;
-        }
+    switch (gw().acquire_upload_slot(claims->subject)) {
+    case Admission::Admitted:
         slot_user_ = claims->subject;
+        break;
+    case Admission::UserAtLimit:
+        ++gw().counters().admission_rejections;
+        fail(Status::TooManyRequests);
+        return;
+    case Admission::Full:
+        ++gw().counters().admission_rejections;
+        fail(Status::ServiceUnavailable);
+        return;
     }
     ++pending_;
-    deps().catalog.claim_upload(*id, [this](auto result) noexcept {
+    deps().catalog.claim_upload(*id, claims->subject, [this](auto result) noexcept {
         --pending_;
         on_claimed(std::move(result));
     });
@@ -444,27 +471,39 @@ void Connection::on_claimed(core::ports::CatalogResult<core::ports::StoredUpload
         return;
     }
     const core::UploadRecord& up = stored->upload;
-    if (!(up.owner == claims->subject)) {
-        release_claim();
-        fail(Status::NotFound);
-        return;
-    }
-    if (up.state != core::UploadState::Active || *offset != up.durable_offset) {
+    if (up.state != core::UploadState::Active) {
         release_claim();
         fail(Status::Conflict, up.durable_offset);
         return;
     }
-    if (req_.content_length > up.size_bytes - up.durable_offset) {
+    if (*offset != up.durable_offset) {
+        // The catalog lags the store whenever a chunk became durable but its PATCH never
+        // finished, and HEAD answers from the store. Ask the store before refusing.
+        submit(ControlOp::Offset);
+        return;
+    }
+    begin_append(up.durable_offset);
+}
+
+void Connection::begin_append(std::uint64_t at) noexcept {
+    const core::ports::StoredUpload* stored = get(req_.upload);
+    if (stored == nullptr) {
+        release_claim();
+        fail(Status::InternalServerError);
+        return;
+    }
+    const core::UploadRecord& up = stored->upload;
+    if (req_.content_length > up.size_bytes - at) {
         release_claim();
         fail(Status::BadRequest);
         return;
     }
     if (req_.content_length == 0) {
         release_claim();
-        respond({.status = Status::NoContent, .upload_offset = up.durable_offset}, {});
+        respond({.status = Status::NoContent, .upload_offset = at}, {});
         return;
     }
-    auto session = deps().store.open(ingest_id(*stored), up.durable_offset, *this);
+    auto session = deps().store.open(ingest_id(*stored), at, *this);
     if (!session) {
         release_claim();
         fail_storage(session.error());
@@ -472,13 +511,6 @@ void Connection::on_claimed(core::ports::CatalogResult<core::ports::StoredUpload
     }
     session_ = std::move(*session);
     drain_staging();
-}
-
-Connection::ControlJob Connection::discard_job(const core::ports::IngestId& ingest) {
-    ControlJob job;
-    job.op = ControlOp::Discard;
-    job.ingest = ingest;
-    return job;
 }
 
 core::ports::IngestId Connection::ingest_id(const core::ports::StoredUpload& s) {
@@ -692,7 +724,15 @@ void Connection::submit(ControlOp op) noexcept {
 }
 
 void Connection::start_job(ControlJob job) noexcept {
+    if (job_running_) {
+        // job_ belongs to the pool thread until complete(); a request never outlives its job,
+        // so reaching here is a bug, and overwriting job_ would be a data race.
+        fail(Status::InternalServerError);
+        return;
+    }
+    job.request = request_seq_;
     job_ = std::move(job);
+    job_running_ = true;
     ++pending_;
     deps().pool.submit(*this);
 }
@@ -726,12 +766,14 @@ void Connection::run() noexcept {
 
 void Connection::complete() noexcept {
     --pending_;
+    job_running_ = false;
     ControlJob job = std::exchange(job_, ControlJob{});
-    if (phase_ != Phase::Request) {
+    if (phase_ != Phase::Request || job.request != request_seq_) {
         if (job.op == ControlOp::Create && job.created && *job.created) {
-            // The client is gone; nothing will ever reference this ingest.
-            start_job(discard_job(**job.created));
+            // The request is gone; nothing will ever reference this ingest.
+            gw().abandon(**job.created);
         }
+        release_claim();
         return;
     }
     switch (job.op) {
@@ -739,17 +781,13 @@ void Connection::complete() noexcept {
         on_created(std::move(job));
         return;
     case ControlOp::Offset:
-        if (!job.offset || !*job.offset) {
-            fail_storage(job.offset ? job.offset->error() : StorageError::Permanent);
-            return;
-        }
-        respond({.status = Status::NoContent, .upload_offset = **job.offset}, {});
+        on_offset(std::move(job));
         return;
     case ControlOp::Commit:
         on_committed(std::move(job));
         return;
     case ControlOp::Discard:
-        if (req_.route == RouteId::CancelUpload && req_.upload_id) {
+        if (req_.upload_id) {
             ++pending_;
             deps().catalog.abort_upload(*req_.upload_id,
                                         [this](core::ports::CatalogResult<void> result) noexcept {
@@ -768,6 +806,50 @@ void Connection::complete() noexcept {
     case ControlOp::None:
         return;
     }
+}
+
+void Connection::on_offset(ControlJob job) noexcept {
+    if (!job.offset || !*job.offset) {
+        release_claim();
+        fail_storage(job.offset ? job.offset->error() : StorageError::Permanent);
+        return;
+    }
+    const std::uint64_t durable = **job.offset;
+    if (req_.route != RouteId::AppendChunk) {
+        respond({.status = Status::NoContent, .upload_offset = durable}, {});
+        return;
+    }
+    const std::uint64_t* offset = get(req_.upload_offset);
+    const core::UploadId* id = get(req_.upload_id);
+    const core::ports::StoredUpload* stored = get(req_.upload);
+    if (offset == nullptr || id == nullptr || stored == nullptr) {
+        release_claim();
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (*offset != durable) {
+        release_claim();
+        fail(Status::Conflict, durable);
+        return;
+    }
+    // The client resumes where the store says; bring the catalog up to it first, so that a
+    // commit or a HEAD after this request agrees with both.
+    ++pending_;
+    deps().catalog.record_progress(
+        *id, stored->upload.video_id, durable,
+        [this, durable](core::ports::CatalogResult<void> result) noexcept {
+            --pending_;
+            if (phase_ != Phase::Request) {
+                release_claim();
+                return;
+            }
+            if (!result) {
+                release_claim();
+                fail_catalog(result.error());
+                return;
+            }
+            begin_append(durable);
+        });
 }
 
 void Connection::on_created(ControlJob job) noexcept {
@@ -803,16 +885,21 @@ void Connection::on_created(ControlJob job) noexcept {
         .object_key = ingest.key,
     };
     if (!core::Video::rehydrate(rows.video) || !core::Upload::rehydrate(rows.upload)) {
-        // The title is the only field the client controls that the domain can still refuse.
-        start_job(discard_job(ingest));
-        fail(Status::BadRequest);
+        // start_create checked everything the client controls; the store's answer is at fault.
+        gw().abandon(ingest);
+        fail(Status::InternalServerError);
         return;
     }
     const std::uint64_t chunk = ingest.chunk_size;
     ++pending_;
     deps().catalog.create_upload(
-        std::move(rows), [this, chunk](core::ports::CatalogResult<void> result) noexcept {
+        std::move(rows), [this, chunk, ingest](core::ports::CatalogResult<void> result) noexcept {
             --pending_;
+            if (!result) {
+                // Discarding is safe even if the insert did land: the row then points at an
+                // ingest the upload reaper finds already gone, and discard is idempotent.
+                gw().abandon(ingest);
+            }
             const PendingCreate* created = get(req_.create);
             if (phase_ != Phase::Request || created == nullptr) {
                 return;
@@ -875,7 +962,7 @@ void Connection::fail(Status status, std::optional<std::uint64_t> upload_offset)
     if (status == Status::MethodNotAllowed) {
         head.allow = req_.allow;
     }
-    if (status == Status::ServiceUnavailable) {
+    if (status == Status::ServiceUnavailable || status == Status::TooManyRequests) {
         head.retry_after = kRetryAfter;
     }
     respond(head, {});
@@ -928,6 +1015,7 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
         session_->abort();
         session_.reset();
     }
+    release_slot();
     const bool keep = req_.keep_alive && req_.message_complete && !draining_;
     head.connection = keep ? http::Connection::KeepAlive : http::Connection::Close;
     head.request_id = request_id();
@@ -969,6 +1057,13 @@ void Connection::finish_request() noexcept {
     arm_timer(core::Millis{0});
 }
 
+void Connection::release_slot() noexcept {
+    if (slot_user_) {
+        gateway_.release_upload_slot(*slot_user_);
+        slot_user_.reset();
+    }
+}
+
 void Connection::release_claim() noexcept {
     const core::UploadId* id = get(req_.upload_id);
     if (req_.claimed && id != nullptr) {
@@ -1000,6 +1095,7 @@ void Connection::close() noexcept {
         session_.reset();
     }
     release_claim();
+    release_slot();
     if (key_wait_) {
         deps().verifier.cancel_wait(*this);
         key_wait_ = false;
@@ -1062,13 +1158,14 @@ void Connection::on_timeout() noexcept {
         return;
     }
     if (!req_.route) {
-        const auto idle = std::chrono::duration_cast<core::Millis>(t - last_activity_);
-        if (idle >= limits.header_timeout) {
+        // Measured from the request's first byte, not the latest: a client dripping one byte
+        // at a time must not hold a connection past the header timeout.
+        if (age >= limits.header_timeout) {
             ++gw().counters().timeouts_header;
             close();
             return;
         }
-        arm_timer(limits.header_timeout - idle);
+        arm_timer(limits.header_timeout - age);
         return;
     }
     if (!req_.message_complete && req_.content_length > 0) {

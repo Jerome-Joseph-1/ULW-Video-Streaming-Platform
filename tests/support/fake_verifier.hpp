@@ -33,6 +33,8 @@ public:
         std::erase(waiters_, &waiter);
     }
 
+    [[nodiscard]] std::size_t waiting() const noexcept { return waiters_.size(); }
+
     void refresh_keys() {
         refreshed_ = true;
         auto waiters = std::move(waiters_);
