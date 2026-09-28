@@ -58,6 +58,32 @@ jobs:
       - run: cmake --build --preset tsan
       - run: ctest --preset tsan-unit
 
+  reactor-matrix:
+    name: reactor-matrix (${{ matrix.reactor }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        reactor: [io_uring, epoll]
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      ULW_REACTOR: ${{ matrix.reactor }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-ci
+      - name: io_uring probe
+        run: |
+          gcc -O2 tools/io_uring_probe.c -o io_uring_probe -luring
+          ./io_uring_probe
+      - run: cmake --preset ci
+      - run: cmake --build --preset ci
+      - run: ctest --preset ci -R 'Reactors/.*${{ matrix.reactor == 'io_uring' && 'IoUring' || 'Epoll' }}$'
+      - name: echo acceptance
+        run: tests/load/echo_acceptance.sh build/ci ${{ matrix.reactor }} 20
+
   lint:
     name: boundaries + format + tidy
     runs-on: ubuntu-24.04
