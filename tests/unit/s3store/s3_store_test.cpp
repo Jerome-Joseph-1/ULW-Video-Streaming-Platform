@@ -14,6 +14,7 @@
 #include "support/fake_random.hpp"
 #include "support/http_test_server.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <deque>
 #include <functional>
@@ -23,6 +24,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -376,7 +378,8 @@ TEST_F(S3StoreTest, FetchSmallReturnsTheObjectAndRefusesOneOverTheLimitWithoutRe
     const auto key = *core::StorageKey::parse("videos/v1/manifest.json");
     const auto fits = store->fetch_small(key, 10);
     ASSERT_TRUE(fits);
-    EXPECT_EQ(std::string(reinterpret_cast<const char*>(fits->data()), fits->size()), "0123456789");
+    const auto expected = std::as_bytes(std::span(std::string_view("0123456789")));
+    EXPECT_TRUE(std::ranges::equal(*fits, expected));
     EXPECT_EQ(store->fetch_small(key, 9), std::unexpected(StorageError::Permanent));
     EXPECT_EQ(server.request_count(), 2U);
 }

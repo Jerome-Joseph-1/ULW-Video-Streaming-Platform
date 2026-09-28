@@ -1,5 +1,6 @@
 #include "infra/curl/multi.hpp"
 #include "net/reactor_factory.hpp"
+#include "net/socket.hpp"
 #include "os/system_clock.hpp"
 
 #include "support/eventually.hpp"
@@ -7,8 +8,6 @@
 #include "support/reactor_harness.hpp"
 #include "support/stalled_resolver.hpp"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
 
 #include <algorithm>
@@ -74,21 +73,18 @@ struct Trickle final : infra::curl::IBodySource {
 };
 
 std::string text(std::span<const std::byte> bytes) {
-    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+    std::string out(bytes.size(), '\0');
+    std::ranges::transform(bytes, out.begin(), [](std::byte b) { return static_cast<char>(b); });
+    return out;
 }
 
 std::uint16_t unused_port() {
-    const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    socklen_t len = sizeof addr;
-    if (!fd || ::bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 ||
-        ::getsockname(fd.get(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+    // The listener closes as this returns, so a connect to its port is refused.
+    const auto listener = net::listen_tcp({.port = 0, .loopback_only = true, .reuse_port = false});
+    if (!listener) {
         return 0;
     }
-    // Closed without listening, so a connect is refused.
-    return ntohs(addr.sin_port);
+    return net::local_port(listener->get()).value_or(0);
 }
 
 class MultiTest : public ::testing::TestWithParam<net::ReactorKind> {
