@@ -11,8 +11,9 @@ endfunction()
 
 ulw_add_test_suite(core_unit_tests unit
     unit/build_info_test.cpp
-    unit/storage_key_test.cpp
+    unit/core/content_type_test.cpp
     unit/core/ids_test.cpp
+    unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
     unit/core/video_test.cpp)

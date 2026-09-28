@@ -10,6 +10,7 @@ namespace core {
 
 // A bare media type ("type/subtype"), lowercased. Parameters are rejected: nothing
 // downstream consumes them and they are a common injection vector into signed headers.
+// Lowercasing canonicalises, not sanitises: RFC 9110 8.3.1 makes type and subtype caseless.
 class ContentType {
 public:
     static constexpr std::size_t kMaxLength = 127;

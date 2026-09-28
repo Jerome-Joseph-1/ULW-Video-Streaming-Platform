@@ -15,8 +15,10 @@ bool is_tchar(char c) noexcept {
     return kExtra.find(c) != std::string_view::npos;
 }
 
-bool is_token(std::string_view s) noexcept {
-    return !s.empty() && std::ranges::all_of(s, is_tchar);
+// '*' is a tchar, but in a type or subtype it makes a media range (an Accept pattern), which
+// cannot describe a stored object.
+bool is_concrete_token(std::string_view s) noexcept {
+    return !s.empty() && std::ranges::all_of(s, is_tchar) && s.find('*') == std::string_view::npos;
 }
 
 char to_lower(char c) noexcept {
@@ -30,8 +32,8 @@ std::expected<ContentType, DomainError> ContentType::parse(std::string_view text
         return std::unexpected(DomainError::InvalidContentType);
     }
     const std::size_t slash = text.find('/');
-    if (slash == std::string_view::npos || !is_token(text.substr(0, slash)) ||
-        !is_token(text.substr(slash + 1))) {
+    if (slash == std::string_view::npos || !is_concrete_token(text.substr(0, slash)) ||
+        !is_concrete_token(text.substr(slash + 1))) {
         return std::unexpected(DomainError::InvalidContentType);
     }
     std::string lowered(text);

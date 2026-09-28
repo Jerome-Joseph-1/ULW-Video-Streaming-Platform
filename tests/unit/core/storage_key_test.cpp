@@ -1,12 +1,13 @@
-#include "core/models/content_type.hpp"
+#include "core/errors/domain_error.hpp"
 #include "core/models/storage_key.hpp"
 
+#include <expected>
 #include <gtest/gtest.h>
 #include <string>
+#include <string_view>
 
 namespace {
 
-using core::ContentType;
 using core::DomainError;
 using core::StorageKey;
 
@@ -28,26 +29,14 @@ TEST(StorageKey, RejectsTraversalAndEmptySegments) {
 
 TEST(StorageKey, RejectsCharactersThatNeedEscaping) {
     for (const std::string_view k : {"a b", "a?b", "a%2Fb", "a\\b", "caf\xc3\xa9", "a\nb"}) {
-        EXPECT_FALSE(StorageKey::parse(k).has_value()) << k;
+        EXPECT_EQ(StorageKey::parse(k), std::unexpected(DomainError::InvalidStorageKey)) << k;
     }
 }
 
 TEST(StorageKey, EnforcesTheLengthBoundExactly) {
     EXPECT_TRUE(StorageKey::parse(std::string(StorageKey::kMaxLength, 'k')).has_value());
-    EXPECT_FALSE(StorageKey::parse(std::string(StorageKey::kMaxLength + 1, 'k')).has_value());
-}
-
-TEST(ContentType, LowercasesAValidMediaType) {
-    const auto t = ContentType::parse("Video/MP4");
-    ASSERT_TRUE(t.has_value());
-    EXPECT_EQ(t->view(), "video/mp4");
-}
-
-TEST(ContentType, RejectsParametersAndMalformedTypes) {
-    for (const std::string_view t : {"", "video", "video/", "/mp4", "video/mp4; codecs=avc1",
-                                     "video/mp4/x", "vid eo/mp4", "video/mp4\r\nX-Evil: 1"}) {
-        EXPECT_EQ(ContentType::parse(t), std::unexpected(DomainError::InvalidContentType)) << t;
-    }
+    EXPECT_EQ(StorageKey::parse(std::string(StorageKey::kMaxLength + 1, 'k')),
+              std::unexpected(DomainError::InvalidStorageKey));
 }
 
 } // namespace
