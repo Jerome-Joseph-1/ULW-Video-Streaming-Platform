@@ -31,32 +31,33 @@ using ulw::test::TestKey;
 
 constexpr std::string_view kPayload = R"({"sub":"alice","exp":1767229200})";
 
-// Key generation dominates this suite's run time, so each key is made once.
-struct KeyTrio {
-    TestKey rsa = TestKey::rsa("k");
-    TestKey p256 = TestKey::p256("k");
-    TestKey ed = TestKey::ed25519("k");
-
-    [[nodiscard]] const TestKey& for_alg(std::string_view alg) const {
-        if (alg == "ES256") {
-            return p256;
-        }
-        if (alg == "EdDSA") {
-            return ed;
-        }
-        return rsa;
-    }
-};
-
+// Key generation dominates this suite's run time and ctest runs every test in a process of
+// its own, so each key is made once per process and only when a test asks for it.
 const TestKey& key_for(std::string_view alg) {
-    static const KeyTrio keys;
-    return keys.for_alg(alg);
+    if (alg == "ES256") {
+        static const TestKey p256 = TestKey::p256("k");
+        return p256;
+    }
+    if (alg == "EdDSA") {
+        static const TestKey ed = TestKey::ed25519("k");
+        return ed;
+    }
+    static const TestKey rsa = TestKey::rsa("k");
+    return rsa;
 }
 
-// Same types, same kid, different key material.
+// Same type, same kid, different key material.
 const TestKey& other_key_for(std::string_view alg) {
-    static const KeyTrio keys;
-    return keys.for_alg(alg);
+    if (alg == "ES256") {
+        static const TestKey p256 = TestKey::p256("k");
+        return p256;
+    }
+    if (alg == "EdDSA") {
+        static const TestKey ed = TestKey::ed25519("k");
+        return ed;
+    }
+    static const TestKey rsa = TestKey::rsa("k");
+    return rsa;
 }
 
 PublicKey load(const std::string& jwk) {

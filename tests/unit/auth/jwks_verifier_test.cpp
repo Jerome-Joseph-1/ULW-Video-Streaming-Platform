@@ -39,18 +39,31 @@ using ulw::test::TestKey;
 
 constexpr std::string_view kUrl = "https://id.askedin.test/.well-known/jwks.json";
 
-struct Keys {
-    TestKey rsa = TestKey::rsa("rsa-1");
-    TestKey ec = TestKey::p256("ec-1");
-    TestKey ed = TestKey::ed25519("ed-1");
-    TestKey ed_next = TestKey::ed25519("ed-2");
-    TestKey rsa_small = TestKey::rsa("rsa-small", 1024);
-};
+// Key generation dominates this suite's run time and ctest runs every test in a process of
+// its own, so each key is made once per process and only when a test asks for it.
+const TestKey& rsa_key() {
+    static const TestKey key = TestKey::rsa("rsa-1");
+    return key;
+}
 
-// Key generation dominates this suite's run time, so the keys are made once.
-const Keys& keys() {
-    static const Keys k;
-    return k;
+const TestKey& ec_key() {
+    static const TestKey key = TestKey::p256("ec-1");
+    return key;
+}
+
+const TestKey& ed_key() {
+    static const TestKey key = TestKey::ed25519("ed-1");
+    return key;
+}
+
+const TestKey& next_ed_key() {
+    static const TestKey key = TestKey::ed25519("ed-2");
+    return key;
+}
+
+const TestKey& small_rsa_key() {
+    static const TestKey key = TestKey::rsa("rsa-small", 1024);
+    return key;
 }
 
 // Hands out one fetch at a time and completes it when the test says so.
@@ -108,7 +121,7 @@ struct CancellingWaiter final : CountingWaiter {
 std::string token_with_kid(std::string_view kid) {
     const std::string header = R"({"alg":"EdDSA","kid":")" + std::string(kid) + R"("})";
     const std::string input = encode_base64url(header) + '.' + encode_base64url(test_payload());
-    return input + '.' + encode_base64url(keys().ed.sign("EdDSA", input));
+    return input + '.' + encode_base64url(ed_key().sign("EdDSA", input));
 }
 
 std::unexpected<AuthError> refused(AuthError e) {
@@ -157,13 +170,13 @@ protected:
 };
 
 TEST_F(JwksVerifierTest, ATokenForTheSecondKeyVerifiesAfterItsOneFetch) {
-    const std::string for_second = signed_token(keys().ec, "ES256", test_payload());
+    const std::string for_second = signed_token(ec_key(), "ES256", test_payload());
     CountingWaiter waiter;
     EXPECT_FALSE(verify(for_second, waiter).has_value());
     EXPECT_EQ(fetcher_.requests, 1);
     EXPECT_EQ(fetcher_.urls.back(), kUrl);
 
-    fetcher_.respond(key_set({keys().rsa.jwk(), keys().ec.jwk()}));
+    fetcher_.respond(key_set({rsa_key().jwk(), ec_key().jwk()}));
     EXPECT_EQ(waiter.calls, 0) << "called from inside the fetch callback";
     pump();
     EXPECT_EQ(waiter.calls, 1);
@@ -173,7 +186,7 @@ TEST_F(JwksVerifierTest, ATokenForTheSecondKeyVerifiesAfterItsOneFetch) {
     ASSERT_TRUE(verified->has_value());
     EXPECT_EQ((*verified)->subject.view(), "alice");
     // The first key came with the same fetch.
-    EXPECT_TRUE(verify(signed_token(keys().rsa, "RS256", test_payload()))
+    EXPECT_TRUE(verify(signed_token(rsa_key(), "RS256", test_payload()))
                     .value_or(refused(AuthError::KeysUnavailable)));
     EXPECT_EQ(fetcher_.requests, 1);
     pump();
@@ -181,10 +194,10 @@ TEST_F(JwksVerifierTest, ATokenForTheSecondKeyVerifiesAfterItsOneFetch) {
 }
 
 TEST_F(JwksVerifierTest, EveryAlgorithmVerifiesAgainstThePublishedKeys) {
-    const std::string jwks = key_set({keys().rsa.jwk(), keys().ec.jwk(), keys().ed.jwk()});
-    EXPECT_TRUE(verify_through_fetch(signed_token(keys().rsa, "RS256", test_payload()), jwks));
-    for (const auto& [key, alg] : {std::pair{&keys().rsa, "PS256"}, std::pair{&keys().ec, "ES256"},
-                                   std::pair{&keys().ed, "EdDSA"}}) {
+    const std::string jwks = key_set({rsa_key().jwk(), ec_key().jwk(), ed_key().jwk()});
+    EXPECT_TRUE(verify_through_fetch(signed_token(rsa_key(), "RS256", test_payload()), jwks));
+    for (const auto& [key, alg] : {std::pair{&rsa_key(), "PS256"}, std::pair{&ec_key(), "ES256"},
+                                   std::pair{&ed_key(), "EdDSA"}}) {
         const std::optional<VerifyResult> result = verify(signed_token(*key, alg, test_payload()));
         ASSERT_TRUE(result.has_value()) << alg;
         EXPECT_TRUE(result->has_value()) << alg;
@@ -194,14 +207,14 @@ TEST_F(JwksVerifierTest, EveryAlgorithmVerifiesAgainstThePublishedKeys) {
 
 TEST_F(JwksVerifierTest, MissesDuringAFetchShareItAndEachWaiterHearsBackOnce) {
     std::array<CountingWaiter, 3> waiters{};
-    EXPECT_FALSE(verify(signed_token(keys().rsa, "RS256", test_payload()), waiters[0]));
-    EXPECT_FALSE(verify(signed_token(keys().ec, "ES256", test_payload()), waiters[1]));
+    EXPECT_FALSE(verify(signed_token(rsa_key(), "RS256", test_payload()), waiters[0]));
+    EXPECT_FALSE(verify(signed_token(ec_key(), "ES256", test_payload()), waiters[1]));
     EXPECT_FALSE(verify(token_with_kid("never-published"), waiters[2]));
     // The same waiter asking twice is still one waiter.
     EXPECT_FALSE(verify(token_with_kid("never-published"), waiters[2]));
     EXPECT_EQ(fetcher_.requests, 1);
 
-    fetcher_.respond(key_set({keys().rsa.jwk(), keys().ec.jwk()}));
+    fetcher_.respond(key_set({rsa_key().jwk(), ec_key().jwk()}));
     pump();
     pump();
     for (const CountingWaiter& w : waiters) {
@@ -213,10 +226,10 @@ TEST_F(JwksVerifierTest, MissesDuringAFetchShareItAndEachWaiterHearsBackOnce) {
 TEST_F(JwksVerifierTest, ACancelledWaiterIsNotCalled) {
     CountingWaiter stays;
     CountingWaiter leaves;
-    EXPECT_FALSE(verify(signed_token(keys().ed, "EdDSA", test_payload()), stays));
-    EXPECT_FALSE(verify(signed_token(keys().ed, "EdDSA", test_payload()), leaves));
+    EXPECT_FALSE(verify(signed_token(ed_key(), "EdDSA", test_payload()), stays));
+    EXPECT_FALSE(verify(signed_token(ed_key(), "EdDSA", test_payload()), leaves));
     verifier_->cancel_wait(leaves);
-    fetcher_.respond(key_set({keys().ed.jwk()}));
+    fetcher_.respond(key_set({ed_key().jwk()}));
     pump();
     EXPECT_EQ(stays.calls, 1);
     EXPECT_EQ(leaves.calls, 0);
@@ -227,17 +240,17 @@ TEST_F(JwksVerifierTest, AWaiterCancelledByAnEarlierWaitersCallbackIsNotCalled) 
     CancellingWaiter first;
     first.verifier = verifier_.get();
     first.victim = &victim;
-    EXPECT_FALSE(verify(signed_token(keys().ed, "EdDSA", test_payload()), first));
-    EXPECT_FALSE(verify(signed_token(keys().ed, "EdDSA", test_payload()), victim));
-    fetcher_.respond(key_set({keys().ed.jwk()}));
+    EXPECT_FALSE(verify(signed_token(ed_key(), "EdDSA", test_payload()), first));
+    EXPECT_FALSE(verify(signed_token(ed_key(), "EdDSA", test_payload()), victim));
+    fetcher_.respond(key_set({ed_key().jwk()}));
     pump();
     EXPECT_EQ(first.calls, 1);
     EXPECT_EQ(victim.calls, 0);
 }
 
 TEST_F(JwksVerifierTest, AnUnknownKidCostsOneFetchThenIsRefusedForAMinute) {
-    const std::string jwks = key_set({keys().ed.jwk()});
-    EXPECT_TRUE(verify_through_fetch(signed_token(keys().ed, "EdDSA", test_payload()), jwks));
+    const std::string jwks = key_set({ed_key().jwk()});
+    EXPECT_TRUE(verify_through_fetch(signed_token(ed_key(), "EdDSA", test_payload()), jwks));
     advance(seconds(11));
 
     const std::string stranger = token_with_kid("stranger");
@@ -254,8 +267,8 @@ TEST_F(JwksVerifierTest, AnUnknownKidCostsOneFetchThenIsRefusedForAMinute) {
 }
 
 TEST_F(JwksVerifierTest, DistinctJunkKidsCannotForceBackToBackFetches) {
-    EXPECT_TRUE(verify_through_fetch(signed_token(keys().ed, "EdDSA", test_payload()),
-                                     key_set({keys().ed.jwk()})));
+    EXPECT_TRUE(verify_through_fetch(signed_token(ed_key(), "EdDSA", test_payload()),
+                                     key_set({ed_key().jwk()})));
     for (int i = 0; i < 20; ++i) {
         EXPECT_EQ(verify(token_with_kid("junk-" + std::to_string(i))),
                   refused(AuthError::UnknownKey));
@@ -276,7 +289,7 @@ TEST_F(JwksVerifierTest, TokensThatCanNeverVerifyCauseNoFetch) {
     const std::string header = R"({"alg":"HS256","kid":"rsa-1"})";
     const std::string input = encode_base64url(header) + '.' + encode_base64url(test_payload());
     const std::string hs256 =
-        input + '.' + encode_base64url(ulw::test::hmac_sha256(keys().rsa.public_pem(), input));
+        input + '.' + encode_base64url(ulw::test::hmac_sha256(rsa_key().public_pem(), input));
     EXPECT_EQ(verify(hs256), refused(AuthError::UnsupportedAlgorithm));
 
     EXPECT_EQ(verify("a.b"), refused(AuthError::Malformed));
@@ -285,12 +298,12 @@ TEST_F(JwksVerifierTest, TokensThatCanNeverVerifyCauseNoFetch) {
 }
 
 TEST_F(JwksVerifierTest, ARotatedKeyIsPickedUpWithoutARestart) {
-    const std::string old_token = signed_token(keys().ed, "EdDSA", test_payload());
-    EXPECT_TRUE(verify_through_fetch(old_token, key_set({keys().ed.jwk()})));
+    const std::string old_token = signed_token(ed_key(), "EdDSA", test_payload());
+    EXPECT_TRUE(verify_through_fetch(old_token, key_set({ed_key().jwk()})));
     advance(seconds(11));
 
-    const std::string new_token = signed_token(keys().ed_next, "EdDSA", test_payload());
-    EXPECT_TRUE(verify_through_fetch(new_token, key_set({keys().ed_next.jwk()})));
+    const std::string new_token = signed_token(next_ed_key(), "EdDSA", test_payload());
+    EXPECT_TRUE(verify_through_fetch(new_token, key_set({next_ed_key().jwk()})));
     EXPECT_EQ(fetcher_.requests, 2);
     // The old key left the set with that fetch, and the verdict it had produced with it.
     EXPECT_EQ(verify(old_token), refused(AuthError::UnknownKey));
@@ -298,8 +311,8 @@ TEST_F(JwksVerifierTest, ARotatedKeyIsPickedUpWithoutARestart) {
 }
 
 TEST_F(JwksVerifierTest, KeysAreRefetchedEvery15MinutesAndServeUntilTheRefetchLands) {
-    EXPECT_TRUE(verify_through_fetch(signed_token(keys().ed, "EdDSA", test_payload()),
-                                     key_set({keys().ed.jwk()})));
+    EXPECT_TRUE(verify_through_fetch(signed_token(ed_key(), "EdDSA", test_payload()),
+                                     key_set({ed_key().jwk()})));
     advance(minutes(15) - seconds(1));
     EXPECT_EQ(fetcher_.requests, 1);
     advance(milliseconds(1200));
@@ -307,20 +320,20 @@ TEST_F(JwksVerifierTest, KeysAreRefetchedEvery15MinutesAndServeUntilTheRefetchLa
     ASSERT_TRUE(fetcher_.in_flight());
 
     // Stale, and still answering at once.
-    const std::string bob = signed_token(keys().ed, "EdDSA", test_payload({{"sub", R"("bob")"}}));
+    const std::string bob = signed_token(ed_key(), "EdDSA", test_payload({{"sub", R"("bob")"}}));
     const std::optional<VerifyResult> during = verify(bob);
     ASSERT_TRUE(during.has_value());
     EXPECT_TRUE(during->has_value());
 
-    fetcher_.respond(key_set({keys().ed_next.jwk()}));
+    fetcher_.respond(key_set({next_ed_key().jwk()}));
     EXPECT_EQ(verify(bob), refused(AuthError::UnknownKey));
     advance(minutes(15) + milliseconds(200));
     EXPECT_EQ(fetcher_.requests, 3);
 }
 
 TEST_F(JwksVerifierTest, AFailedRefetchKeepsTheKeysAndRetriesWithCappedBackoff) {
-    EXPECT_TRUE(verify_through_fetch(signed_token(keys().ed, "EdDSA", test_payload()),
-                                     key_set({keys().ed.jwk()})));
+    EXPECT_TRUE(verify_through_fetch(signed_token(ed_key(), "EdDSA", test_payload()),
+                                     key_set({ed_key().jwk()})));
     advance(minutes(15) + milliseconds(200));
     ASSERT_EQ(fetcher_.requests, 2);
 
@@ -328,7 +341,7 @@ TEST_F(JwksVerifierTest, AFailedRefetchKeepsTheKeysAndRetriesWithCappedBackoff) 
     for (const int delay : {1, 2, 4, 8, 16, 32, 60, 60}) {
         fetcher_.respond(std::nullopt);
         const std::string fresh = signed_token(
-            keys().ed, "EdDSA", test_payload({{"sub", '"' + std::to_string(delay) + '"'}}));
+            ed_key(), "EdDSA", test_payload({{"sub", '"' + std::to_string(delay) + '"'}}));
         const std::optional<VerifyResult> kept = verify(fresh);
         ASSERT_TRUE(kept.has_value());
         EXPECT_TRUE(kept->has_value()) << "old keys dropped after a failed fetch";
@@ -340,7 +353,7 @@ TEST_F(JwksVerifierTest, AFailedRefetchKeepsTheKeysAndRetriesWithCappedBackoff) 
         EXPECT_EQ(fetcher_.requests, ++expected_requests) << "no retry, delay " << delay;
     }
 
-    fetcher_.respond(key_set({keys().ed.jwk()}));
+    fetcher_.respond(key_set({ed_key().jwk()}));
     advance(minutes(14));
     EXPECT_EQ(fetcher_.requests, expected_requests);
     advance(minutes(1) + milliseconds(200));
@@ -348,13 +361,13 @@ TEST_F(JwksVerifierTest, AFailedRefetchKeepsTheKeysAndRetriesWithCappedBackoff) 
 }
 
 TEST_F(JwksVerifierTest, AFailedFirstFetchAnswersKeysUnavailableUntilARetryLands) {
-    const std::string token = signed_token(keys().ed, "EdDSA", test_payload());
+    const std::string token = signed_token(ed_key(), "EdDSA", test_payload());
     EXPECT_EQ(verify_through_fetch(token, ""), refused(AuthError::KeysUnavailable));
     EXPECT_EQ(fetcher_.requests, 1);
 
     advance(milliseconds(1200));
     EXPECT_EQ(fetcher_.requests, 2);
-    fetcher_.respond(key_set({keys().ed.jwk()}));
+    fetcher_.respond(key_set({ed_key().jwk()}));
     pump();
     EXPECT_EQ(waiter_.calls, 0);
     const std::optional<VerifyResult> result = verify(token);
@@ -363,16 +376,16 @@ TEST_F(JwksVerifierTest, AFailedFirstFetchAnswersKeysUnavailableUntilARetryLands
 }
 
 TEST_F(JwksVerifierTest, ASetWithoutAUsableKeyCountsAsAFailedFetch) {
-    const std::string token = signed_token(keys().ed, "EdDSA", test_payload());
+    const std::string token = signed_token(ed_key(), "EdDSA", test_payload());
     EXPECT_EQ(verify_through_fetch(token, R"({"keys":[]})"), refused(AuthError::KeysUnavailable));
 
     advance(milliseconds(1200));
-    fetcher_.respond(key_set({keys().ed.jwk()}));
+    fetcher_.respond(key_set({ed_key().jwk()}));
     EXPECT_TRUE(verify(token).value_or(refused(AuthError::KeysUnavailable)).has_value());
 
     advance(minutes(15) + milliseconds(200));
-    fetcher_.respond(key_set({keys().rsa_small.jwk()}));
-    const std::string bob = signed_token(keys().ed, "EdDSA", test_payload({{"sub", R"("bob")"}}));
+    fetcher_.respond(key_set({small_rsa_key().jwk()}));
+    const std::string bob = signed_token(ed_key(), "EdDSA", test_payload({{"sub", R"("bob")"}}));
     EXPECT_TRUE(verify(bob).value_or(refused(AuthError::KeysUnavailable)).has_value());
     const int before = fetcher_.requests;
     advance(milliseconds(1200));
@@ -380,8 +393,8 @@ TEST_F(JwksVerifierTest, ASetWithoutAUsableKeyCountsAsAFailedFetch) {
 }
 
 TEST_F(JwksVerifierTest, AFetchCompletedInsideFetchStillCallsTheWaiterFromTheLoop) {
-    fetcher_.answer_inside_fetch = key_set({keys().ed.jwk()});
-    const std::string token = signed_token(keys().ed, "EdDSA", test_payload());
+    fetcher_.answer_inside_fetch = key_set({ed_key().jwk()});
+    const std::string token = signed_token(ed_key(), "EdDSA", test_payload());
     CountingWaiter waiter;
     EXPECT_FALSE(verify(token, waiter).has_value());
     EXPECT_EQ(waiter.calls, 0);
@@ -392,8 +405,8 @@ TEST_F(JwksVerifierTest, AFetchCompletedInsideFetchStillCallsTheWaiterFromTheLoo
 
 TEST_F(JwksVerifierTest, AVerdictIsNotReusedPastTheTokensExpiry) {
     const std::string short_lived =
-        signed_token(keys().ed, "EdDSA", test_payload({{"exp", ulw::test::numeric_date(120)}}));
-    EXPECT_TRUE(verify_through_fetch(short_lived, key_set({keys().ed.jwk()})));
+        signed_token(ed_key(), "EdDSA", test_payload({{"exp", ulw::test::numeric_date(120)}}));
+    EXPECT_TRUE(verify_through_fetch(short_lived, key_set({ed_key().jwk()})));
     advance(seconds(179));
     EXPECT_TRUE(verify(short_lived).value_or(refused(AuthError::KeysUnavailable)).has_value());
     advance(seconds(1));
@@ -401,7 +414,7 @@ TEST_F(JwksVerifierTest, AVerdictIsNotReusedPastTheTokensExpiry) {
 }
 
 TEST_F(JwksVerifierTest, DestructionCancelsTheFetchInFlight) {
-    EXPECT_FALSE(verify(signed_token(keys().ed, "EdDSA", test_payload())).has_value());
+    EXPECT_FALSE(verify(signed_token(ed_key(), "EdDSA", test_payload())).has_value());
     ASSERT_TRUE(fetcher_.in_flight());
     verifier_.reset();
     EXPECT_EQ(fetcher_.cancels, 1);
@@ -410,9 +423,9 @@ TEST_F(JwksVerifierTest, DestructionCancelsTheFetchInFlight) {
 
 TEST_F(JwksVerifierTest, DestructionCancelsTheArmedTimers) {
     CountingWaiter waiter;
-    EXPECT_FALSE(verify(signed_token(keys().ed, "EdDSA", test_payload()), waiter).has_value());
+    EXPECT_FALSE(verify(signed_token(ed_key(), "EdDSA", test_payload()), waiter).has_value());
     // Arms both the notification for the next iteration and the 15-minute refetch.
-    fetcher_.respond(key_set({keys().ed.jwk()}));
+    fetcher_.respond(key_set({ed_key().jwk()}));
     verifier_.reset();
     // Either timer left armed would fire into freed memory here.
     pump();

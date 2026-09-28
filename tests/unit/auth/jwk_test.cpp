@@ -21,7 +21,8 @@ using infra::auth::detail::parse_key_set;
 using ulw::test::key_set;
 using ulw::test::TestKey;
 
-// Key generation dominates this suite's run time, so each key is made once.
+// Key generation dominates this suite's run time and ctest runs every test in a process of
+// its own, so each key is made once per process and only when a test asks for it.
 const TestKey& rsa_key() {
     static const TestKey key = TestKey::rsa("rsa");
     return key;
@@ -44,14 +45,10 @@ protected:
         EXPECT_TRUE(set.has_value()) << json;
         return set ? std::move(*set) : KeySet{};
     }
-
-    const TestKey* rsa_ = &rsa_key();
-    const TestKey* p256_ = &p256_key();
-    const TestKey* ed_ = &ed_key();
 };
 
 TEST_F(JwkSetTest, LoadsRsaP256AndEd25519Keys) {
-    const KeySet set = parse(key_set({rsa_->jwk(), p256_->jwk(), ed_->jwk()}));
+    const KeySet set = parse(key_set({rsa_key().jwk(), p256_key().jwk(), ed_key().jwk()}));
     EXPECT_EQ(set.skipped, 0U);
     ASSERT_EQ(set.keys.size(), 3U);
     ASSERT_NE(set.find("rsa"), nullptr);
@@ -64,7 +61,7 @@ TEST_F(JwkSetTest, LoadsRsaP256AndEd25519Keys) {
 }
 
 TEST_F(JwkSetTest, TheKeyTypeDecidesWhichAlgorithmsItVerifies) {
-    const KeySet set = parse(key_set({rsa_->jwk(), p256_->jwk(), ed_->jwk()}));
+    const KeySet set = parse(key_set({rsa_key().jwk(), p256_key().jwk(), ed_key().jwk()}));
     ASSERT_EQ(set.keys.size(), 3U);
     const auto& rsa = *set.find("rsa");
     EXPECT_TRUE(key_allows(rsa, Algorithm::RS256));
@@ -82,7 +79,7 @@ TEST_F(JwkSetTest, TheKeyTypeDecidesWhichAlgorithmsItVerifies) {
 }
 
 TEST_F(JwkSetTest, AnAlgInTheJwkNarrowsTheKeyToThatAlgorithm) {
-    const KeySet set = parse(key_set({rsa_->jwk(R"(,"alg":"PS256","use":"sig")")}));
+    const KeySet set = parse(key_set({rsa_key().jwk(R"(,"alg":"PS256","use":"sig")")}));
     ASSERT_EQ(set.keys.size(), 1U);
     EXPECT_TRUE(key_allows(set.keys[0], Algorithm::PS256));
     EXPECT_FALSE(key_allows(set.keys[0], Algorithm::RS256));
@@ -90,12 +87,12 @@ TEST_F(JwkSetTest, AnAlgInTheJwkNarrowsTheKeyToThatAlgorithm) {
 
 TEST_F(JwkSetTest, SkipsKeysWhoseAlgDoesNotFitTheirType) {
     const KeySet set = parse(key_set({
-        rsa_->jwk(R"(,"alg":"ES256")"),
-        rsa_->jwk(R"(,"alg":"HS256")"),
-        rsa_->jwk(R"(,"alg":"RS512")"),
-        p256_->jwk(R"(,"alg":"EdDSA")"),
-        ed_->jwk(R"(,"alg":"none")"),
-        ed_->jwk(R"(,"alg":7)"),
+        rsa_key().jwk(R"(,"alg":"ES256")"),
+        rsa_key().jwk(R"(,"alg":"HS256")"),
+        rsa_key().jwk(R"(,"alg":"RS512")"),
+        p256_key().jwk(R"(,"alg":"EdDSA")"),
+        ed_key().jwk(R"(,"alg":"none")"),
+        ed_key().jwk(R"(,"alg":7)"),
     }));
     EXPECT_TRUE(set.keys.empty());
     EXPECT_EQ(set.skipped, 6U);
@@ -103,7 +100,7 @@ TEST_F(JwkSetTest, SkipsKeysWhoseAlgDoesNotFitTheirType) {
 
 TEST_F(JwkSetTest, SkipsRsaModuliUnder2048Bits) {
     const TestKey small = TestKey::rsa("small", 1024);
-    const KeySet set = parse(key_set({small.jwk(), rsa_->jwk()}));
+    const KeySet set = parse(key_set({small.jwk(), rsa_key().jwk()}));
     EXPECT_EQ(set.find("small"), nullptr);
     EXPECT_NE(set.find("rsa"), nullptr);
     EXPECT_EQ(set.skipped, 1U);
@@ -124,9 +121,9 @@ TEST_F(JwkSetTest, SkipsUnknownKeyTypesAndCurves) {
 
 TEST_F(JwkSetTest, SkipsKeysNotPublishedForVerification) {
     const KeySet set = parse(key_set({
-        rsa_->jwk(R"(,"use":"enc")"),
-        p256_->jwk(R"(,"key_ops":["encrypt","wrapKey"])"),
-        ed_->jwk(R"(,"key_ops":["sign","verify"])"),
+        rsa_key().jwk(R"(,"use":"enc")"),
+        p256_key().jwk(R"(,"key_ops":["encrypt","wrapKey"])"),
+        ed_key().jwk(R"(,"key_ops":["sign","verify"])"),
     }));
     ASSERT_EQ(set.keys.size(), 1U);
     EXPECT_EQ(set.keys[0].kid, "ed");
@@ -134,8 +131,8 @@ TEST_F(JwkSetTest, SkipsKeysNotPublishedForVerification) {
 }
 
 TEST_F(JwkSetTest, SkipsKeysWithoutAUsableKid) {
-    std::string no_kid = ed_->jwk();
-    const std::string member = R"("kid":")" + ed_->kid() + R"(",)";
+    std::string no_kid = ed_key().jwk();
+    const std::string member = R"("kid":")" + ed_key().kid() + R"(",)";
     no_kid.erase(no_kid.find(member), member.size());
     ASSERT_EQ(no_kid.find("kid"), std::string::npos) << no_kid;
     const KeySet set = parse(key_set({no_kid}));
@@ -145,15 +142,15 @@ TEST_F(JwkSetTest, SkipsKeysWithoutAUsableKid) {
 
 TEST_F(JwkSetTest, KeepsTheFirstKeyUnderARepeatedKid) {
     const TestKey twin = TestKey::ed25519("ed");
-    const KeySet set = parse(key_set({ed_->jwk(), twin.jwk()}));
+    const KeySet set = parse(key_set({ed_key().jwk(), twin.jwk()}));
     ASSERT_EQ(set.keys.size(), 1U);
     EXPECT_EQ(set.skipped, 1U);
-    const KeySet only_first = parse(key_set({ed_->jwk()}));
+    const KeySet only_first = parse(key_set({ed_key().jwk()}));
     EXPECT_EQ(EVP_PKEY_eq(set.keys[0].pkey.get(), only_first.keys[0].pkey.get()), 1);
 }
 
 TEST_F(JwkSetTest, SkipsPointsOffTheCurveAndCoordinatesOfTheWrongLength) {
-    const std::string good = p256_->jwk();
+    const std::string good = p256_key().jwk();
     // Flipping one character of y moves the point off the curve.
     std::string off_curve = good;
     const std::size_t y = off_curve.find(R"("y":")") + 5;
@@ -170,7 +167,7 @@ TEST_F(JwkSetTest, SkipsPointsOffTheCurveAndCoordinatesOfTheWrongLength) {
 }
 
 TEST_F(JwkSetTest, SkipsRsaKeysWithADegeneratePublicExponent) {
-    std::string e_one = rsa_->jwk();
+    std::string e_one = rsa_key().jwk();
     const std::size_t e = e_one.find(R"("e":")") + 5;
     e_one.replace(e, e_one.find('"', e) - e, "AQ");
     const KeySet set = parse(key_set({e_one}));
