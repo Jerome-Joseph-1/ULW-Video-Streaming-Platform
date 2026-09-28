@@ -31,6 +31,9 @@ struct PublicKey {
 // The algorithm is the key's to choose: the header only picks among what the key allows.
 [[nodiscard]] bool key_allows(const PublicKey& key, Algorithm alg) noexcept;
 
+// Same key material and the same algorithms allowed.
+[[nodiscard]] bool same_key(const PublicKey& a, const PublicKey& b) noexcept;
+
 struct KeySet {
     std::vector<PublicKey> keys;
     // Members of the document this service cannot use: another key type or curve, an

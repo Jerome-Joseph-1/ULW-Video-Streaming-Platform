@@ -222,6 +222,10 @@ bool key_allows(const PublicKey& key, Algorithm alg) noexcept {
     return false;
 }
 
+bool same_key(const PublicKey& a, const PublicKey& b) noexcept {
+    return a.type == b.type && a.alg == b.alg && EVP_PKEY_eq(a.pkey.get(), b.pkey.get()) == 1;
+}
+
 const PublicKey* KeySet::find(std::string_view kid) const noexcept {
     const auto it = std::ranges::find(keys, kid, &PublicKey::kid);
     return it == keys.end() ? nullptr : &*it;
