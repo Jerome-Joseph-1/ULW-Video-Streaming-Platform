@@ -67,6 +67,14 @@ ulw_add_test_suite(http_unit_tests unit
     unit/http/router_test.cpp)
 target_link_libraries(http_unit_tests PRIVATE ulw::http_lib)
 
+# Every build replays the committed corpus through the fuzz entry point, so an input that once
+# broke the parser fails ctest wherever the unit tests run, not only under libFuzzer.
+ulw_add_executable(http_fuzz_replay fuzz/http_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(http_fuzz_replay PRIVATE ulw::http_lib)
+add_test(NAME http_fuzz_corpus
+    COMMAND http_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/http)
+set_tests_properties(http_fuzz_corpus PROPERTIES LABELS unit)
+
 if(ULW_FUZZ)
     ulw_add_executable(http_fuzz fuzz/http_fuzz.cpp)
     target_link_libraries(http_fuzz PRIVATE ulw::http_lib)
