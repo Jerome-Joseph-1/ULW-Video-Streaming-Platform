@@ -263,6 +263,42 @@ TEST_P(MultiTest, HandlerMayDestroyItsTransferFromTheCallback) {
     EXPECT_EQ((*outcome.result)->status, 204);
 }
 
+TEST_P(MultiTest, HostNameIsResolvedOffTheLoop) {
+    const HttpTestServer server([](const ServedRequest&) {
+        return Reply{.status = 200, .headers = {}, .body = "resolved"};
+    });
+    Outcome outcome;
+    const auto transfer = get("http://localhost:" + std::to_string(server.port()) + "/", outcome);
+    ASSERT_TRUE(settle(outcome));
+    ASSERT_TRUE(outcome.result->has_value()) << outcome.result->error().detail;
+    EXPECT_EQ((*outcome.result)->body, "resolved");
+}
+
+TEST_P(MultiTest, TransferWhoseSocketTheReactorRefusesFailsInsteadOfHanging) {
+    const HttpTestServer server([](const ServedRequest&) { return Reply{}; });
+    // Held open so that every descriptor libcurl gets lies beyond the reactor's table.
+    const os::UniqueFd lowest{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+    ASSERT_TRUE(lowest);
+    auto small = net::make_reactor(GetParam(), clock, static_cast<std::size_t>(lowest.get()));
+    ASSERT_TRUE(small);
+    auto small_multi = infra::curl::Multi::create(**small);
+    ASSERT_TRUE(small_multi);
+    Outcome outcome;
+    auto transfer = Transfer::start(
+        **small_multi,
+        Request{
+            .method = Method::Get, .url = server.base_url() + "/", .headers = {}, .max_body = 0},
+        outcome);
+    ASSERT_TRUE(transfer);
+    ASSERT_TRUE(pump_until(**small, [&] { return outcome.calls > 0; }));
+    EXPECT_EQ(outcome.calls, 1);
+    ASSERT_FALSE(outcome.result->has_value());
+    EXPECT_EQ(outcome.result->error().kind, FailureKind::Local);
+    EXPECT_EQ(outcome.result->error().detail, "socket not watchable");
+    transfer->reset();
+    small_multi->reset();
+}
+
 TEST_P(MultiTest, ConcurrentTransfersEachCompleteExactlyOnceWithTheirOwnResponse) {
     const HttpTestServer server([](const ServedRequest& r) {
         return Reply{.status = 200, .headers = {}, .body = r.target};
