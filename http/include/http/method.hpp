@@ -5,8 +5,9 @@
 
 namespace http {
 
-// The methods the gateway routes. Everything else llhttp knows (CONNECT, TRACE, the WebDAV
-// set) parses fine and arrives as Other, so the answer is a status code, not a parse error.
+// The methods the gateway routes. Everything else llhttp knows (TRACE, the WebDAV set) parses
+// fine and arrives as Other, so the answer is a status code, not a parse error. CONNECT never
+// arrives: the parser refuses it, because llhttp would treat what follows as a tunnel.
 enum class Method : std::uint8_t { Get, Head, Post, Put, Patch, Delete, Options, Other };
 
 class MethodSet {

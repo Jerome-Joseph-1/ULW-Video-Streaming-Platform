@@ -3,8 +3,11 @@
 
 #include "recording_sink.hpp"
 
+#include <array>
 #include <cstddef>
+#include <format>
 #include <gtest/gtest.h>
+#include <string>
 #include <string_view>
 
 namespace {
@@ -12,6 +15,7 @@ namespace {
 using http::RequestParser;
 using http::Status;
 using ulw::test::bytes_of;
+using ulw::test::drive;
 using ulw::test::fatal;
 using ulw::test::RecordingSink;
 
@@ -69,6 +73,21 @@ TEST(RequestFraming, ChunkedAsANonFinalCodingIsABadRequest) {
     const Outcome o = parse("POST /a HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n");
     EXPECT_EQ(o.result, fatal(Status::BadRequest));
     EXPECT_EQ(o.heads, 0U);
+}
+
+TEST(RequestFraming, ConnectIsRefusedSoItsBodyCannotPassForARequest) {
+    const std::string smuggled = "GET /admin HTTP/1.1\r\nHost: a\r\n\r\n";
+    const std::string with_body =
+        std::format("CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\nContent-Length: {}\r\n\r\n{}",
+                    smuggled.size(), smuggled);
+    const std::array<std::string_view, 2> requests{with_body,
+                                                   "CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\n\r\n"};
+    for (const std::string_view request : requests) {
+        RecordingSink sink;
+        RequestParser parser{sink};
+        EXPECT_EQ(drive(parser, request, request.size()), fatal(Status::NotImplemented)) << request;
+        EXPECT_EQ(sink.requests().size(), 0U) << request;
+    }
 }
 
 TEST(RequestFraming, SimilarlyNamedFieldIsNotATransferCoding) {

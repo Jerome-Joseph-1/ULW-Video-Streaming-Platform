@@ -336,6 +336,12 @@ private:
         if (llhttp_get_http_major(&parser_) != 1 || llhttp_get_http_minor(&parser_) > 1) {
             return reject(Status::HttpVersionNotSupported);
         }
+        // After a CONNECT head llhttp treats the connection as a tunnel and skips whatever body
+        // it declares, so those bytes would be parsed as the next request. Nothing here
+        // tunnels, so the length does not matter.
+        if (llhttp_get_method(&parser_) == HTTP_CONNECT) {
+            return reject(Status::NotImplemented);
+        }
         const Method method = to_method(llhttp_get_method(&parser_));
         // Content-Length is the only body framing accepted. A second one is a second chance to
         // disagree with a proxy about where the body ends, and nothing here needs streaming
