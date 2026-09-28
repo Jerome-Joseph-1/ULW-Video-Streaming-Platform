@@ -171,12 +171,14 @@ public:
                                  .has_audio = true};
     std::deque<core::ports::TranscodeError> run_failures;
     std::optional<core::ports::TranscodeError> probe_failure;
-    std::optional<core::ports::TranscodeError> verify_failure;
+    // Taken one per call to verify().
+    std::deque<core::ports::TranscodeError> verify_failures;
     // Runs inside run(), before it writes anything, with the stop token it was given.
     std::function<void(core::ports::ITranscodeProgress&, const std::stop_token&)> during_run;
     // Runs once run() has written its output, with the directory it wrote.
     std::function<void(const std::filesystem::path&)> after_run;
     int runs = 0;
+    int verifies = 0;
 
     core::ports::TranscodeResult<core::ports::MediaInfo> probe(const std::filesystem::path& input,
                                                                std::stop_token /*stop*/) override {
@@ -231,8 +233,11 @@ public:
                                               const core::ports::MediaInfo& /*media*/,
                                               std::span<const core::Rung> /*ladder*/,
                                               std::stop_token /*stop*/) override {
-        if (verify_failure) {
-            return std::unexpected(*verify_failure);
+        ++verifies;
+        if (!verify_failures.empty()) {
+            auto failure = verify_failures.front();
+            verify_failures.pop_front();
+            return std::unexpected(std::move(failure));
         }
         return {};
     }

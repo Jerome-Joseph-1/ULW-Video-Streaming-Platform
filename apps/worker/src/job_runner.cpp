@@ -215,8 +215,10 @@ public:
         metrics_.transcode = stats->wall;
         metrics_.ffmpeg_peak_rss_kib = stats->peak_rss_kib;
 
-        const auto verified =
-            deps_.transcoder.verify(workspace->output(), *media, ladder, abandon_.get_token());
+        const auto verified = with_rerun([&] {
+            return deps_.transcoder.verify(workspace->output(), *media, ladder,
+                                           abandon_.get_token());
+        });
         if (!verified) {
             return transcode_failure("verify", verified.error(), *workspace);
         }

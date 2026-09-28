@@ -142,6 +142,23 @@ TEST_F(JobRunnerTest, ASecondCrashFailsTheJobForGood) {
               std::vector<std::string>{"queue fail permanent the decoder crashed on this file"});
 }
 
+TEST_F(JobRunnerTest, ACrashWhileVerifyingIsVerifiedOnceMore) {
+    // ffprobe or ffmpeg reading our own output crashed: the same exit code rule applies.
+    transcoder.verify_failures.push_back(failure(TranscodeFailure::Crashed, 139));
+    EXPECT_EQ(run(), JobOutcome::Done);
+    EXPECT_EQ(transcoder.verifies, 2);
+    EXPECT_EQ(transcoder.runs, 1);
+}
+
+TEST_F(JobRunnerTest, ASecondCrashWhileVerifyingFailsTheJobForGood) {
+    transcoder.verify_failures.push_back(failure(TranscodeFailure::Crashed, 139));
+    transcoder.verify_failures.push_back(failure(TranscodeFailure::Crashed, 139));
+    EXPECT_EQ(run(), JobOutcome::Failed);
+    EXPECT_EQ(transcoder.verifies, 2);
+    EXPECT_EQ(writes(),
+              std::vector<std::string>{"queue fail permanent the decoder crashed on this file"});
+}
+
 TEST_F(JobRunnerTest, ARejectedInputFailsTheJobWithoutARerun) {
     transcoder.run_failures.push_back(failure(TranscodeFailure::Rejected));
     EXPECT_EQ(run(), JobOutcome::Failed);
@@ -158,7 +175,7 @@ TEST_F(JobRunnerTest, AKilledTranscoderGivesTheJobBack) {
 }
 
 TEST_F(JobRunnerTest, OutputThatFailsVerificationIsNeverPublished) {
-    transcoder.verify_failure = failure(TranscodeFailure::Unverified, 0);
+    transcoder.verify_failures.push_back(failure(TranscodeFailure::Unverified, 0));
     EXPECT_EQ(run(), JobOutcome::Failed);
     EXPECT_EQ(writes(), std::vector<std::string>{
                             "queue fail permanent the transcoded output failed verification"});
@@ -181,7 +198,7 @@ TEST_F(JobRunnerTest, OutputThatFailsVerificationOnAFullDiskIsRetriedNotFailed) 
     transcoder.during_run = [this](core::ports::ITranscodeProgress&, const std::stop_token&) {
         free_bytes = 4096;
     };
-    transcoder.verify_failure = failure(TranscodeFailure::Unverified, 0);
+    transcoder.verify_failures.push_back(failure(TranscodeFailure::Unverified, 0));
     EXPECT_EQ(run(), JobOutcome::Requeued);
     EXPECT_EQ(writes(), std::vector<std::string>{"queue fail retryable scratch space ran out"});
 }
