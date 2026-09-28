@@ -7,10 +7,6 @@
 #  - performance-enum-size: enum width is not a hot-path concern anywhere here.
 #  - bugprone-easily-swappable-parameters: fires on every (fd, generation)-style pair; strong
 #    types are used where a swap would be plausible.
-#  - cppcoreguidelines-pro-type-reinterpret-cast, cppcoreguidelines-pro-type-union-access,
-#    cppcoreguidelines-pro-bounds-pointer-arithmetic,
-#    cppcoreguidelines-pro-bounds-constant-array-index: sockaddr, epoll_event, io_uring and
-#    buffer-ring code cannot be written without them; they are confined to net/ and infra/.
 Checks: >
   bugprone-*,
   cert-*,
@@ -29,11 +25,7 @@ Checks: >
   -cppcoreguidelines-avoid-const-or-ref-data-members,
   -misc-include-cleaner,
   -performance-enum-size,
-  -bugprone-easily-swappable-parameters,
-  -cppcoreguidelines-pro-type-reinterpret-cast,
-  -cppcoreguidelines-pro-type-union-access,
-  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
-  -cppcoreguidelines-pro-bounds-constant-array-index
+  -bugprone-easily-swappable-parameters
 WarningsAsErrors: 'bugprone-*,clang-analyzer-*,cert-*,concurrency-*'
 HeaderFilterRegex: '.*/(core|os|net|http|codec|rt|infra|apps|tests)/.*\.(hpp|h)$'
 FormatStyle: file

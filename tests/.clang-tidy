@@ -3,7 +3,9 @@
 #  - ASSERT_* returns from the test on failure, which the optional-access and
 #    null-dereference analyses cannot see;
 #  - test registration creates static objects;
-#  - assertion macros inflate cognitive complexity.
+#  - assertion macros inflate cognitive complexity;
+#  - gtest's own macros allocate with a bare new (owning-memory);
+#  - tests call strerror and other functions that are not thread-safe (mt-unsafe).
 InheritParentConfig: true
 Checks: >
   -cppcoreguidelines-non-private-member-variables-in-classes,
