@@ -2,9 +2,7 @@
 
 #include "net/reactor.hpp"
 
-#include <condition_variable>
 #include <cstddef>
-#include <deque>
 #include <expected>
 #include <memory>
 #include <mutex>
@@ -12,6 +10,10 @@
 #include <vector>
 
 namespace net {
+
+namespace detail {
+class JobQueue;
+} // namespace detail
 
 // Work that must not run on the reactor thread: blocking storage control calls, file I/O.
 class IOffloadJob {
@@ -25,14 +27,16 @@ public:
 
 // A fixed set of threads fed from the reactor thread. Completions come back through an
 // eventfd the reactor watches, so complete() always runs on the loop, never concurrently
-// with a handler. A submitted job must stay alive until its complete() has run.
+// with a handler. A submitted job must stay alive until its complete() has run or the pool
+// has been destroyed.
 class OffloadPool final : public IReadyHandler {
 public:
     [[nodiscard]] static std::expected<std::unique_ptr<OffloadPool>, int>
     create(IReactor& reactor, std::size_t threads);
 
     OffloadPool(IReactor& reactor, os::UniqueFd event_fd, std::size_t threads);
-    // Stops the threads. Jobs still queued never run and never complete.
+    // Stops the threads. A job already running finishes first; jobs still queued never run
+    // and never complete.
     ~OffloadPool() override;
     OffloadPool(const OffloadPool&) = delete;
     OffloadPool& operator=(const OffloadPool&) = delete;
@@ -50,9 +54,7 @@ private:
     os::UniqueFd event_fd_;
     std::size_t in_flight_ = 0;
 
-    std::mutex queue_mutex_;
-    std::condition_variable_any queue_cv_;
-    std::deque<IOffloadJob*> queue_;
+    std::unique_ptr<detail::JobQueue> queue_;
 
     std::mutex done_mutex_;
     std::vector<IOffloadJob*> done_;

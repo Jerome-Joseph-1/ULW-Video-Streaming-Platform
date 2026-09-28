@@ -1,5 +1,7 @@
 #include "net/offload_pool.hpp"
 
+#include "job_queue.hpp"
+
 #include <sys/eventfd.h>
 
 #include <cerrno>
@@ -23,7 +25,8 @@ std::expected<std::unique_ptr<OffloadPool>, int> OffloadPool::create(IReactor& r
 }
 
 OffloadPool::OffloadPool(IReactor& reactor, os::UniqueFd event_fd, std::size_t threads)
-    : reactor_(reactor), event_fd_(std::move(event_fd)) {
+    : reactor_(reactor), event_fd_(std::move(event_fd)),
+      queue_(std::make_unique<detail::JobQueue>()) {
     threads_.reserve(threads);
     for (std::size_t i = 0; i < threads; ++i) {
         threads_.emplace_back([this](const std::stop_token& stop) { worker(stop); });
@@ -34,31 +37,17 @@ OffloadPool::~OffloadPool() {
     for (auto& t : threads_) {
         t.request_stop();
     }
-    queue_cv_.notify_all();
     threads_.clear();
     reactor_.unwatch(event_fd_.get());
 }
 
 void OffloadPool::submit(IOffloadJob& job) {
     ++in_flight_;
-    {
-        const std::scoped_lock lock(queue_mutex_);
-        queue_.push_back(&job);
-    }
-    queue_cv_.notify_one();
+    queue_->push(job);
 }
 
 void OffloadPool::worker(const std::stop_token& stop) noexcept {
-    for (;;) {
-        IOffloadJob* job = nullptr;
-        {
-            std::unique_lock lock(queue_mutex_);
-            if (!queue_cv_.wait(lock, stop, [this] { return !queue_.empty(); })) {
-                return;
-            }
-            job = queue_.front();
-            queue_.pop_front();
-        }
+    while (IOffloadJob* job = queue_->pop(stop)) {
         job->run();
         {
             const std::scoped_lock lock(done_mutex_);

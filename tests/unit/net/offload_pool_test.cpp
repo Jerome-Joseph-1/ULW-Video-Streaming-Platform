@@ -2,10 +2,13 @@
 #include "net/reactor_factory.hpp"
 #include "os/system_clock.hpp"
 
+#include "job_queue.hpp"
 #include "support/reactor_harness.hpp"
 
 #include <atomic>
 #include <gtest/gtest.h>
+#include <latch>
+#include <stop_token>
 #include <thread>
 #include <vector>
 
@@ -29,6 +32,19 @@ struct Job final : net::IOffloadJob {
         completed_on = std::this_thread::get_id();
         ++completions;
     }
+};
+
+// Holds a pool thread until the test lets it go.
+struct GateJob final : net::IOffloadJob {
+    std::latch started{1};
+    std::latch release{1};
+    std::atomic<bool> finished{false};
+    void run() noexcept override {
+        started.count_down();
+        release.wait();
+        finished = true;
+    }
+    void complete() noexcept override {}
 };
 
 class OffloadPoolTest : public ::testing::TestWithParam<net::ReactorKind> {
@@ -75,6 +91,39 @@ TEST_P(OffloadPoolTest, EveryJobRunsAndCompletesExactlyOnce) {
         EXPECT_EQ(jobs[i].completions, 1);
         EXPECT_EQ(jobs[i].result, static_cast<int>(2 * i));
     }
+}
+
+TEST_P(OffloadPoolTest, DestructorLetsARunningJobFinish) {
+    GateJob running;
+    pool->submit(running);
+    running.started.wait();
+    std::jthread teardown([&] { pool.reset(); });
+    running.release.count_down();
+    teardown.join();
+    EXPECT_TRUE(running.finished);
+}
+
+TEST(OffloadQueue, StopLeavesQueuedJobsUntaken) {
+    net::detail::JobQueue queue;
+    Job first;
+    Job second;
+    queue.push(first);
+    queue.push(second);
+    const std::stop_source stop;
+    EXPECT_EQ(queue.pop(stop.get_token()), &first);
+    stop.request_stop();
+    EXPECT_EQ(queue.pop(stop.get_token()), nullptr);
+}
+
+TEST(OffloadQueue, StopReleasesAnIdleWorker) {
+    net::detail::JobQueue queue;
+    const std::stop_source stop;
+    Job never;
+    net::IOffloadJob* taken = &never;
+    std::jthread worker([&] { taken = queue.pop(stop.get_token()); });
+    stop.request_stop();
+    worker.join();
+    EXPECT_EQ(taken, nullptr);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, OffloadPoolTest,
