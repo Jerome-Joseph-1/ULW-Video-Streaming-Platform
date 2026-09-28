@@ -15,7 +15,7 @@ namespace core {
 // so a key read back from storage is byte-identical to the one written.
 class StorageKey {
 public:
-    // S3 allows 1024 bytes of UTF-8; ASCII-only keys make bytes and characters agree.
+    // Object stores cap keys at 1024 bytes; ASCII-only keys make that 1024 characters too.
     static constexpr std::size_t kMaxLength = 1024;
 
     [[nodiscard]] static std::expected<StorageKey, DomainError> parse(std::string_view text);
