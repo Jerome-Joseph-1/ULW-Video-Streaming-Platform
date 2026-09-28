@@ -229,6 +229,10 @@ public:
             return JobOutcome::FencedOut;
         }
         auto renditions = publish(workspace->output(), ladder, media->has_audio);
+        if (!renditions && keeper_.lost()) {
+            log("job={} publish stopped: {}", id(), renditions.error());
+            return JobOutcome::Abandoned;
+        }
         if (!renditions) {
             log("job={} publish: {}", id(), renditions.error());
             return fail("publishing the output failed", /*retryable=*/true);
@@ -315,6 +319,11 @@ private:
 
     std::expected<void, std::string> upload(const fs::path& file, const std::string& key,
                                             Output kind) {
+        // The new owner may be publishing the same keys; the finish would be fenced out, but
+        // every object written after the loss could overwrite one of theirs.
+        if (keeper_.lost()) {
+            return std::unexpected("lease lost before " + key);
+        }
         // ffmpeg ran on hostile input with write access to this tree; a link it left could
         // name any file the worker can read, such as its own /proc/self/environ.
         std::error_code ec;

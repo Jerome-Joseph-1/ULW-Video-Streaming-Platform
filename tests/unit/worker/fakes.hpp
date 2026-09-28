@@ -118,6 +118,9 @@ class FakeTransfer final : public core::ports::IObjectTransfer {
 public:
     explicit FakeTransfer(Journal& journal) : journal_(journal) {}
 
+    // Runs after each upload, with the key it wrote.
+    std::function<void(const std::string&)> after_upload;
+
     void put(const std::string& key, std::string bytes) { objects_[key] = std::move(bytes); }
     [[nodiscard]] const std::map<std::string, std::string>& objects() const { return objects_; }
 
@@ -146,6 +149,9 @@ public:
             .read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         objects_[key.str()] = std::move(bytes);
         journal_.add("upload " + key.str() + " " + std::string(type.view()));
+        if (after_upload) {
+            after_upload(key.str());
+        }
         return {};
     }
 

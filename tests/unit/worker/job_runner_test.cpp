@@ -9,11 +9,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -274,6 +277,32 @@ TEST_F(JobRunnerTest, ALeaseLostMidTranscodeStopsItAndWritesNothingMore) {
     EXPECT_EQ(run(), JobOutcome::Abandoned);
     EXPECT_TRUE(writes().empty());
     EXPECT_TRUE(scratch_is_empty());
+}
+
+TEST_F(JobRunnerTest, ALeaseLostWhilePublishingStopsTheUploadsBeforeTheMaster) {
+    // The lease is still held at the heartbeat just before publishing, and lost after the
+    // first object is written.
+    intervals.heartbeat = std::chrono::milliseconds(1);
+    std::stop_token abandon;
+    transcoder.during_run = [&abandon](core::ports::ITranscodeProgress&,
+                                       const std::stop_token& stop) { abandon = stop; };
+    bool lost = false;
+    transfer.after_upload = [&](const std::string&) {
+        if (lost) {
+            return;
+        }
+        lease_queue.answer_heartbeat(false);
+        std::mutex m;
+        std::condition_variable_any cv;
+        std::unique_lock lock(m);
+        cv.wait_for(lock, abandon, std::chrono::seconds(10), [] { return false; });
+        lost = abandon.stop_requested();
+    };
+    EXPECT_EQ(run(), JobOutcome::Abandoned);
+    ASSERT_TRUE(lost);
+    EXPECT_EQ(writes(),
+              std::vector<std::string>{"upload " + kPrefix + "720p/init_0.mp4 video/mp4"});
+    EXPECT_EQ(transfer.objects().count(kPrefix + "master.m3u8"), 0U);
 }
 
 TEST_F(JobRunnerTest, ShutdownMidTranscodeGivesTheJobBackAtOnce) {
