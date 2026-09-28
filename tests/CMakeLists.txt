@@ -248,4 +248,24 @@ if(ULW_BUILD_WORKER)
         unit/worker/workspace_test.cpp)
     target_link_libraries(worker_unit_tests PRIVATE ulw::worker_lib ulw::os)
     target_include_directories(worker_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+    # The adapter on real ffmpeg, and the worker binary against the Postgres and MinIO of
+    # deploy/local/compose.yaml.
+    ulw_add_test_suite(worker_integration_tests integration
+        integration/ffmpeg_transcoder_test.cpp
+        integration/postgres_harness.cpp
+        integration/worker_test.cpp
+        support/child_process.cpp)
+    target_link_libraries(worker_integration_tests PRIVATE
+        ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
+        ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
+    target_include_directories(worker_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/infra/postgres/src ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src)
+    target_compile_definitions(worker_integration_tests PRIVATE
+        ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
+        ULW_WORKER_BIN="$<TARGET_FILE:transcode_worker>")
+    if(ULW_CONFORMANCE_LIVE)
+        target_compile_definitions(worker_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+    endif()
+    add_dependencies(worker_integration_tests transcode_worker ulw_sandbox)
 endif()
