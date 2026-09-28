@@ -35,8 +35,10 @@ struct CompactJws {
 };
 
 // Rejects alg "none" and every algorithm outside the four above before any key is looked up,
-// so such a token can never cause a key fetch.
+// so such a token can never cause a key fetch. `signing_input` views `token`.
 [[nodiscard]] std::expected<CompactJws, core::ports::AuthError>
 parse_compact(std::string_view token);
+// A temporary token would leave `signing_input` dangling.
+std::expected<CompactJws, core::ports::AuthError> parse_compact(std::string&& token) = delete;
 
 } // namespace infra::auth::detail

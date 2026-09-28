@@ -131,10 +131,11 @@ TEST_P(SignatureTest, RejectsAnyFlippedSignatureBit) {
 }
 
 TEST_P(SignatureTest, RejectsATruncatedSignature) {
-    const auto jws = parse_compact(token());
+    const std::string good = token();
+    const auto jws = parse_compact(good);
     ASSERT_TRUE(jws.has_value());
     const std::string shorter = jws->signature.substr(0, jws->signature.size() - 1);
-    EXPECT_EQ(check(replace_segment(token(), 2, encode_base64url(shorter)), key_),
+    EXPECT_EQ(check(replace_segment(good, 2, encode_base64url(shorter)), key_),
               std::unexpected(AuthError::BadSignature));
 }
 

@@ -106,7 +106,8 @@ TEST(CompactJwsTest, RejectsSegmentsThatAreNotStrictBase64Url) {
     // byte leaves spare bits, and setting them must not yield a second valid spelling.
     const std::string sig = encode_base64url(std::string_view{"16 byte sig here"});
     ASSERT_EQ(sig.back(), 'Q');
-    ASSERT_TRUE(parse_compact(header + '.' + kPayload + '.' + sig).has_value());
+    const std::string canonical = header + '.' + kPayload + '.' + sig;
+    ASSERT_TRUE(parse_compact(canonical).has_value());
     EXPECT_EQ(error_of(header + '.' + kPayload + '.' + sig.substr(0, sig.size() - 1) + 'R'),
               AuthError::Malformed);
 }

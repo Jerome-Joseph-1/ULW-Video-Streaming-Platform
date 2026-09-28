@@ -1,5 +1,6 @@
 ulw_add_library(auth
     src/base64url.cpp
+    src/claims.cpp
     src/jwk.cpp
     src/jws.cpp
     src/signature.cpp)
