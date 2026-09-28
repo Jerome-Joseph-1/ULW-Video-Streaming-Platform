@@ -1,0 +1,220 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "ULW_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Development (RelWithDebInfo)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Debug + ASan/UBSan",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ULW_SANITIZE": "address,undefined"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "Debug + TSan",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ULW_SANITIZE": "thread"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI (dev + -Werror)",
+      "inherits": "dev",
+      "cacheVariables": {
+        "ULW_WERROR": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release + LTO",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ULW_LTO": "ON"
+      }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "libFuzzer (clang)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "ULW_FUZZ": "ON",
+        "ULW_SANITIZE": "address,undefined"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "timeout": 600
+      }
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "timeout": 600
+      }
+    },
+    {
+      "name": "unit",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "timeout": 600
+      }
+    },
+    {
+      "name": "tsan-unit",
+      "configurePreset": "tsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "timeout": 600
+      }
+    },
+    {
+      "name": "conformance",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "conformance"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "timeout": 600
+      }
+    },
+    {
+      "name": "integration",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "integration"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "timeout": 600
+      }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "ci",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "ci"
+        },
+        {
+          "type": "build",
+          "name": "ci"
+        },
+        {
+          "type": "test",
+          "name": "ci"
+        }
+      ]
+    }
+  ]
+}

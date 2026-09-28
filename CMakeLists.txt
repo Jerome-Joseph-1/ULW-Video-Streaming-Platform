@@ -1,0 +1,79 @@
+cmake_minimum_required(VERSION 3.28)
+
+project(ulw VERSION 0.1.0 LANGUAGES CXX C)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR "In-source builds are not supported; use a preset (cmake --preset dev).")
+endif()
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# No C++ modules here; scanning costs build time and injects GCC-only flags that break clang-tidy.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+
+option(ULW_BUILD_TESTS "Build the test suites" ON)
+option(ULW_BUILD_WORKER "Build the transcode worker" ON)
+option(ULW_WERROR "Treat warnings as errors" OFF)
+option(ULW_FUZZ "Build libFuzzer targets (clang only)" OFF)
+option(ULW_LTO "Enable link-time optimisation" OFF)
+option(ULW_CONFORMANCE_LIVE "Run storage conformance against live backends (MinIO, R2)" OFF)
+set(ULW_SANITIZE "" CACHE STRING "Sanitizers: address,undefined | thread | empty")
+set_property(CACHE ULW_SANITIZE PROPERTY STRINGS "" "address,undefined" "thread")
+
+if(ULW_FUZZ AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "ULW_FUZZ requires clang (libFuzzer).")
+endif()
+
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_C_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+endif()
+
+find_program(MOLD_PROGRAM mold)
+if(MOLD_PROGRAM AND NOT ULW_LTO)
+    add_link_options(-fuse-ld=mold)
+endif()
+
+if(ULW_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ulw_ipo_ok OUTPUT ulw_ipo_msg)
+    if(NOT ulw_ipo_ok)
+        message(FATAL_ERROR "LTO requested but unsupported: ${ulw_ipo_msg}")
+    endif()
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+endif()
+
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(Warnings)
+include(Sanitizers)
+include(Dependencies)
+include(BuildInfo)
+
+function(ulw_add_library name)
+    add_library(${name} STATIC ${ARGN})
+    add_library(ulw::${name} ALIAS ${name})
+    target_compile_features(${name} PUBLIC cxx_std_23)
+    target_link_libraries(${name} PRIVATE ulw_warnings ulw_sanitize)
+endfunction()
+
+function(ulw_add_executable name)
+    add_executable(${name} ${ARGN})
+    target_compile_features(${name} PRIVATE cxx_std_23)
+    target_link_libraries(${name} PRIVATE ulw_warnings ulw_sanitize)
+endfunction()
+
+add_subdirectory(core)
+add_subdirectory(apps/gateway)
+
+if(ULW_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
