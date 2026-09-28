@@ -1,0 +1,47 @@
+#include "core/errors/domain_error.hpp"
+
+#include <string_view>
+
+namespace core {
+
+std::string_view to_string(DomainError e) noexcept {
+    switch (e) {
+    case DomainError::InvalidTransition:
+        return "invalid state transition";
+    case DomainError::AlreadyTerminal:
+        return "already in a terminal state";
+    case DomainError::EmptyIdentifier:
+        return "empty identifier";
+    case DomainError::MalformedIdentifier:
+        return "malformed identifier";
+    case DomainError::InvalidStorageKey:
+        return "invalid storage key";
+    case DomainError::InvalidContentType:
+        return "invalid content type";
+    case DomainError::InvalidTitle:
+        return "invalid title";
+    case DomainError::MissingFailureReason:
+        return "missing failure reason";
+    case DomainError::InvalidDuration:
+        return "invalid duration";
+    case DomainError::CorruptRecord:
+        return "corrupt record";
+    case DomainError::InvalidUploadSize:
+        return "invalid upload size";
+    case DomainError::InvalidChunkSize:
+        return "invalid chunk size";
+    case DomainError::OffsetRegression:
+        return "upload offset regressed";
+    case DomainError::OffsetBeyondSize:
+        return "upload offset beyond size";
+    case DomainError::UploadNotActive:
+        return "upload not active";
+    case DomainError::UploadIncomplete:
+        return "upload incomplete";
+    case DomainError::InvalidFailureReason:
+        return "invalid failure reason";
+    }
+    return "unknown domain error";
+}
+
+} // namespace core

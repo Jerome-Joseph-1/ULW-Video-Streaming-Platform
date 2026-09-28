@@ -12,7 +12,7 @@ runs:
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y -qq --no-install-recommends \
-          g++-14 clang-18 clang-tidy-18 clang-format-18 lld-18 libclang-rt-18-dev \
+          g++-14 clang-19 clang-tidy-19 clang-format-18 lld-19 libclang-rt-19-dev \
           ninja-build ccache mold jq pkg-config \
           libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev
     # Ubuntu 24.04 runners randomise more mmap bits than TSan/ASan's shadow layout allows.

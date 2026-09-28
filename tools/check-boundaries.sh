@@ -11,10 +11,15 @@ fail() {
 }
 
 check() {
+    local flags=-rnE
+    if [[ $1 == -i ]]; then
+        flags=-rniE
+        shift
+    fi
     local what=$1 pattern=$2
     shift 2
     local hits
-    hits=$(grep -rnE --include='*.hpp' --include='*.h' --include='*.cpp' --include='*.cc' \
+    hits=$(grep "$flags" --include='*.hpp' --include='*.h' --include='*.cpp' --include='*.cc' \
         "$pattern" "$@" 2>/dev/null || true)
     [[ -n $hits ]] && fail "$what" "$hits"
     return 0
@@ -23,9 +28,10 @@ check() {
 check "core includes a platform or vendor header" \
     '#include <(unistd|sys/|netinet/|arpa/|openssl/|curl/|libpq|libav|liburing|linux/)' core
 check "cross-module relative include" \
-    '#include "\.\./\.\.' core net http codec rt infra apps tests
-check "vendor vocabulary in a core header" \
-    'part_number|ETag|etag|s3_|multipart' core/include
+    '#include "\.\./\.\.' core os net http codec rt infra apps tests
+# Anchored at a word or '_' boundary so that identifiers such as DeviceTag do not read as "etag".
+check -i "vendor vocabulary in a core header" \
+    'part_number|multipart|(\b|_)(etag|pg_|s3(\b|_))' core/include
 
 if [[ -d codec ]]; then
     check "codec depends on rt/infra/apps" '#include "(rt|infra|apps)/' codec

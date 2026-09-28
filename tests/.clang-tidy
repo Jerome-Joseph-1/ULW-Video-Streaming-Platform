@@ -1,0 +1,18 @@
+# Test code follows googletest idioms that these checks misread:
+#  - fixtures expose members to TEST_F bodies by design;
+#  - ASSERT_* returns from the test on failure, which the optional-access and
+#    null-dereference analyses cannot see;
+#  - test registration creates static objects;
+#  - assertion macros inflate cognitive complexity;
+#  - gtest's own macros allocate with a bare new (owning-memory);
+#  - tests call strerror and other functions that are not thread-safe (mt-unsafe).
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -misc-non-private-member-variables-in-classes,
+  -bugprone-unchecked-optional-access,
+  -cert-err58-cpp,
+  -readability-function-cognitive-complexity,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-owning-memory,
+  -concurrency-mt-unsafe
