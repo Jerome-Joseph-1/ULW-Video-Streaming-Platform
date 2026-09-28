@@ -441,6 +441,29 @@ TEST_P(ReactorTest, ChangingWatchInterestTakesEffect) {
     reactor->unwatch(efd.get());
 }
 
+// A hung-up descriptor is ready for everything, so a watch with no interest would otherwise
+// report it on every iteration.
+TEST_P(ReactorTest, WatchWithNoInterestStaysQuietUntilInterestReturns) {
+    struct Ready final : net::IReadyHandler {
+        int calls = 0;
+        net::Interest last = net::Interest::None;
+        void on_ready(net::Interest i) noexcept override {
+            ++calls;
+            last = i;
+        }
+    } ready;
+    auto [mine, peer] = ulw::test::unix_pair();
+    ASSERT_TRUE(reactor->watch(mine.get(), net::Interest::None, ready));
+    peer.reset();
+    ulw::test::pump_pending(*reactor);
+    EXPECT_EQ(ready.calls, 0);
+
+    ASSERT_TRUE(reactor->watch(mine.get(), net::Interest::Read, ready));
+    ASSERT_TRUE(pump_until(*reactor, [&] { return ready.calls > 0; }));
+    EXPECT_TRUE(net::has(ready.last, net::Interest::Read));
+    reactor->unwatch(mine.get());
+}
+
 class ReactorTimerTest : public ::testing::TestWithParam<ReactorKind> {
 protected:
     void SetUp() override {

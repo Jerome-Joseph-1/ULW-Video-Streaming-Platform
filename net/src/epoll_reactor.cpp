@@ -280,14 +280,19 @@ std::expected<void, int> EpollReactor::watch(int fd, Interest interest, IReadyHa
     if (has(interest, Interest::Write)) {
         want |= EPOLLOUT;
     }
-    epoll_event ev{.events = want, .data = {.u64 = make_token(fd, s.gen)}};
-    const int op = s.kind == Kind::Watch ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-    if (::epoll_ctl(epfd_.get(), op, fd, &ev) != 0) {
-        return std::unexpected(errno);
+    if (want == 0) {
+        // HUP and ERR are reported whatever the mask, so no interest has to mean out of the
+        // set, or a hung-up descriptor is reported on every wait.
+        remove_from_set(fd, s);
+    } else {
+        epoll_event ev{.events = want, .data = {.u64 = make_token(fd, s.gen)}};
+        if (::epoll_ctl(epfd_.get(), s.in_set ? EPOLL_CTL_MOD : EPOLL_CTL_ADD, fd, &ev) != 0) {
+            return std::unexpected(errno);
+        }
+        s.in_set = true;
+        s.events = want;
     }
     s.kind = Kind::Watch;
-    s.in_set = true;
-    s.events = want;
     s.ready = &handler;
     return {};
 }
