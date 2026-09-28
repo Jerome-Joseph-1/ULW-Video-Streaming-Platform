@@ -1,7 +1,7 @@
 #include "http_test_server.hpp"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include "net/socket.hpp"
+
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 
@@ -102,21 +102,19 @@ std::optional<std::string_view> ServedRequest::query(std::string_view name) cons
 }
 
 HttpTestServer::HttpTestServer(Handler handler) : handler_(std::move(handler)) {
-    listener_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+    // Nonblocking, which the accept loop is fine with: it accepts only once poll says a
+    // connection is waiting.
+    auto listener = net::listen_tcp({.port = 0, .loopback_only = true, .reuse_port = false});
     stop_fd_ = os::UniqueFd{::eventfd(0, EFD_CLOEXEC)};
-    if (!listener_ || !stop_fd_) {
+    if (!listener || !stop_fd_) {
         throw std::runtime_error("test server: socket");
     }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    socklen_t len = sizeof addr;
-    if (::bind(listener_.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 ||
-        ::listen(listener_.get(), 64) != 0 ||
-        ::getsockname(listener_.get(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+    listener_ = std::move(*listener);
+    const auto port = net::local_port(listener_.get());
+    if (!port) {
         throw std::runtime_error("test server: bind");
     }
-    port_ = ntohs(addr.sin_port);
+    port_ = *port;
     thread_ = std::jthread([this](const std::stop_token& stop) { serve(stop); });
 }
 

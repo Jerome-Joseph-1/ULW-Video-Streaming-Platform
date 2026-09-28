@@ -116,7 +116,7 @@ target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 ulw_add_library(test_http_server support/http_test_server.cpp)
 target_include_directories(test_http_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
-target_link_libraries(test_http_server PUBLIC ulw::os PRIVATE Threads::Threads)
+target_link_libraries(test_http_server PUBLIC ulw::os PRIVATE ulw::net_lib Threads::Threads)
 
 # Shared, so that its getaddrinfo() comes before libc's for libcurl too. It takes the warning
 # flags but not ulw_warnings' link options: -pie means nothing to a shared library.
