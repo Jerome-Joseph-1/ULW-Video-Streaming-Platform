@@ -289,6 +289,34 @@ private:
     CatalogCallback<void> done_;
 };
 
+// Owns the owner it binds: the statement goes out on a later iteration, and again after a
+// serialization failure, long after the caller's UserId may be gone.
+class TryLock final : public Operation {
+public:
+    TryLock(std::int64_t key, const core::UploadId& upload, const core::UserId& owner,
+            Query::Done done) noexcept
+        : key_(key), upload_(upload), owner_(owner), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{
+            .sql = kTryLock,
+            .params = Params{}.add_int(key_).add_uuid(upload_.uuid()).add_text(owner_.view())};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        done_(std::move(outcome));
+        return std::nullopt;
+    }
+
+    void abandon(DbError error) noexcept override { done_(std::unexpected(error)); }
+
+private:
+    std::int64_t key_;
+    core::UploadId upload_;
+    core::UserId owner_;
+    Query::Done done_;
+};
+
 class CommitUpload final : public Operation {
 public:
     CommitUpload(const core::UploadId& upload, const core::VideoId& video, std::string request_id,
@@ -464,10 +492,8 @@ public:
         }
         const std::int64_t key = lock_key(id);
         claims_.emplace(id, Claim{.key = key, .session = 0, .state = ClaimState::Locking});
-        locks_.submit(std::make_unique<Query>(
-            Statement{.sql = kTryLock,
-                      .params = Params{}.add_int(key).add_uuid(id.uuid()).add_text(owner.view())},
-            [this, id, done = std::move(done)](Outcome outcome) mutable noexcept {
+        locks_.submit(std::make_unique<TryLock>(
+            key, id, owner, [this, id, done = std::move(done)](Outcome outcome) mutable noexcept {
                 locked(id, std::move(outcome), std::move(done));
             }));
     }

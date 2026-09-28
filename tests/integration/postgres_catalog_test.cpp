@@ -368,6 +368,21 @@ TEST_P(CatalogTest, AClaimByAnotherUserIsNotFoundAndLocksNothing) {
     EXPECT_TRUE(claim(*other, u.upload.id));
 }
 
+TEST_P(CatalogTest, ClaimOutlivesTheOwnerItWasGiven) {
+    const NewUpload u = new_upload();
+    ASSERT_TRUE(create(*catalog, u));
+    // The port asks callers to keep only the callback's captures alive. The owner goes before
+    // the statement is sent, and another id of the same length takes over its memory.
+    auto owner = std::make_unique<core::UserId>(tester());
+    Reply<StoredUpload> reply;
+    catalog->claim_upload(u.upload.id, *owner, reply.callback());
+    owner.reset();
+    const auto intruder = std::make_unique<core::UserId>(*core::UserId::parse("auth0|intrud"));
+    const auto held = ulw::test::wait(*reactor, reply);
+    ASSERT_TRUE(held) << core::ports::to_string(held.error());
+    EXPECT_EQ(held->upload.owner, tester());
+}
+
 TEST_P(CatalogTest, SecondClaimInOneProcessIsRefusedOnALaterIteration) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
