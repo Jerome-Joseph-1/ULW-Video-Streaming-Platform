@@ -18,19 +18,25 @@
 #include "support/live_s3.hpp"
 #include "support/temp_dir.hpp"
 
+#include <sys/wait.h>
+
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <fcntl.h>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <grp.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -125,6 +131,31 @@ void remove_prefix(const ulw::test::LiveS3& target, const std::string& prefix) {
     }
 }
 
+// Root reads any process's environment, so as root the test runs its targets and the reader
+// as nobody instead, without capabilities, like any other user.
+constexpr uid_t kNobody = 65534;
+
+// Can another process of the user `pid` runs as, holding no capabilities, read its environment?
+bool environ_readable_by_its_user(pid_t pid) {
+    const std::string path = "/proc/" + std::to_string(pid) + "/environ";
+    const pid_t reader = ::fork();
+    if (reader == 0) {
+        if (::geteuid() == 0 &&
+            (::setgroups(0, nullptr) != 0 || ::setresgid(kNobody, kNobody, kNobody) != 0 ||
+             ::setresuid(kNobody, kNobody, kNobody) != 0)) {
+            std::_Exit(2);
+        }
+        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        char byte = 0;
+        std::_Exit(fd >= 0 && ::read(fd, &byte, 1) == 1 ? 0 : 1);
+    }
+    int status = 0;
+    while (::waitpid(reader, &status, 0) < 0 && errno == EINTR) {
+    }
+    EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) != 2) << "could not become nobody";
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 template <class Pred> bool within(std::chrono::milliseconds limit, Pred pred) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
     while (!pred()) {
@@ -173,15 +204,22 @@ protected:
         return video;
     }
 
+    // `wrapper`, when given, starts the worker: its argv comes first.
     std::unique_ptr<ChildProcess> start_worker(const std::string& node,
-                                               const std::vector<std::string>& storage_env) {
+                                               const std::vector<std::string>& storage_env,
+                                               std::vector<std::string> wrapper = {}) {
         auto scratch = std::make_unique<TempDir>("ulw-worker-" + node);
         std::vector<std::string> env{"ULW_DATABASE_URL=" + db_->conninfo(), "ULW_NODE_ID=" + node,
                                      "ULW_SCRATCH_DIR=" + scratch->path().string(),
                                      "PATH=" + env_or("PATH", "/usr/bin:/bin")};
         env.insert(env.end(), storage_env.begin(), storage_env.end());
+        if (!wrapper.empty()) {
+            // The wrapper may start it as another user.
+            fs::permissions(scratch->path(), fs::perms::all);
+        }
         scratch_dirs_.push_back(std::move(scratch));
-        auto worker = ChildProcess::start({ULW_WORKER_BIN}, env);
+        wrapper.emplace_back(ULW_WORKER_BIN);
+        auto worker = ChildProcess::start(wrapper, env);
         EXPECT_NE(worker, nullptr);
         return worker;
     }
@@ -386,6 +424,25 @@ TEST_F(WorkerTest, SigtermMidTranscodeGivesTheJobBackAndExitsCleanly) {
     EXPECT_EQ(job_row(video), "queued 1 1 worker stopped");
     EXPECT_EQ(column("SELECT state FROM videos WHERE id = $1", video), "processing");
     EXPECT_TRUE(fs::is_empty(scratch_dirs_.back()->path()));
+}
+
+TEST_F(WorkerTest, ItsEnvironmentIsUnreadableToOtherProcessesOfItsUser) {
+    // It holds the database password and the storage keys.
+    std::vector<std::string> as_user;
+    if (::geteuid() == 0) {
+        as_user = {"/usr/bin/setpriv", "--reuid=" + std::to_string(kNobody),
+                   "--regid=" + std::to_string(kNobody), "--clear-groups", "--"};
+    }
+    const auto worker = start_worker("worker-a", fs_env(), as_user);
+    ASSERT_TRUE(worker->wait_for_output("sandbox=", kExitPatience)) << worker->output();
+    // An ordinary process of the same user is readable, so the refusal is the worker's doing.
+    as_user.insert(as_user.end(), {"/bin/sleep", "300"});
+    const auto ordinary = ChildProcess::start(as_user, {"ULW_DATABASE_URL=x"});
+    ASSERT_NE(ordinary, nullptr);
+    EXPECT_TRUE(within(seconds(10), [&] { return environ_readable_by_its_user(ordinary->pid()); }));
+    EXPECT_FALSE(environ_readable_by_its_user(worker->pid()));
+    worker->signal(SIGTERM);
+    EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
 }
 
 TEST_F(WorkerTest, AnUndecodableUploadFailsTheVideoWithAReason) {
