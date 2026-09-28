@@ -123,6 +123,11 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     // Otherwise libcurl swaps signal handlers around every call, which races between threads;
     // with it, sends use MSG_NOSIGNAL instead.
     set(curl_easy_setopt(e, CURLOPT_NOSIGNAL, 1L));
+    // Removing a handle whose name lookup is still running would otherwise join the resolver
+    // thread, holding the reactor for as long as getaddrinfo takes (libcurl 8.5,
+    // Curl_resolver_kill). The same join sits on the connect-timeout path. With this set the
+    // thread is left to finish on its own and frees what it holds when it does.
+    set(curl_easy_setopt(e, CURLOPT_QUICK_EXIT, 1L));
     // A redirect would send a signed request to wherever the Location header points.
     set(curl_easy_setopt(e, CURLOPT_FOLLOWLOCATION, 0L));
     // Over HTTP/2 every part to one host would share one connection and one flow-control

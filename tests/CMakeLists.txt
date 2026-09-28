@@ -118,11 +118,20 @@ ulw_add_library(test_http_server support/http_test_server.cpp)
 target_include_directories(test_http_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(test_http_server PUBLIC ulw::os PRIVATE Threads::Threads)
 
+# Shared, so that its getaddrinfo() comes before libc's for libcurl too. It takes the warning
+# flags but not ulw_warnings' link options: -pie means nothing to a shared library.
+add_library(test_stalled_resolver SHARED support/stalled_resolver.cpp)
+target_compile_features(test_stalled_resolver PRIVATE cxx_std_23)
+target_compile_options(test_stalled_resolver
+    PRIVATE $<TARGET_PROPERTY:ulw_warnings,INTERFACE_COMPILE_OPTIONS>)
+target_link_libraries(test_stalled_resolver PRIVATE ulw_sanitize ${CMAKE_DL_LIBS})
+
 ulw_add_test_suite(curl_unit_tests unit
     unit/curl/fetcher_test.cpp
     unit/curl/http_test.cpp
     unit/curl/multi_test.cpp)
-target_link_libraries(curl_unit_tests PRIVATE ulw::curl_multi ulw::test_http_server)
+target_link_libraries(curl_unit_tests PRIVATE ulw::curl_multi ulw::test_http_server
+    test_stalled_resolver)
 target_include_directories(curl_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(storage_s3_unit_tests unit

@@ -2,20 +2,27 @@
 #include "net/reactor_factory.hpp"
 #include "os/system_clock.hpp"
 
+#include "support/eventually.hpp"
 #include "support/http_test_server.hpp"
 #include "support/reactor_harness.hpp"
+#include "support/stalled_resolver.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <gtest/gtest.h>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -263,15 +270,46 @@ TEST_P(MultiTest, HandlerMayDestroyItsTransferFromTheCallback) {
     EXPECT_EQ((*outcome.result)->status, 204);
 }
 
-TEST_P(MultiTest, HostNameIsResolvedOffTheLoop) {
-    const HttpTestServer server([](const ServedRequest&) {
-        return Reply{.status = 200, .headers = {}, .body = "resolved"};
+TEST_P(MultiTest, AStalledLookupHoldsUpNeitherTheLoopNorItsOwnCancellation) {
+    const HttpTestServer server([](const ServedRequest& r) {
+        return Reply{.status = 200, .headers = {}, .body = r.target};
     });
-    Outcome outcome;
-    const auto transfer = get("http://localhost:" + std::to_string(server.port()) + "/", outcome);
-    ASSERT_TRUE(settle(outcome));
-    ASSERT_TRUE(outcome.result->has_value()) << outcome.result->error().detail;
-    EXPECT_EQ((*outcome.result)->body, "resolved");
+    Outcome stalled;
+    auto lookup = get("http://" + std::string(ulw::test::kStalledDomain) + "/", stalled);
+    ASSERT_TRUE(pump_until(*reactor, [] { return ulw::test::stalled_lookups() == 1; }));
+
+    Outcome before;
+    const auto first = get(server.base_url() + "/before", before);
+    ASSERT_TRUE(settle(before));
+    ASSERT_TRUE(before.result->has_value()) << before.result->error().detail;
+    EXPECT_EQ((*before.result)->body, "/before");
+
+    // Should cancelling wait for the lookup, as it would for as long as a slow DNS server
+    // takes, the watchdog lets the lookup go so that the test fails instead of hanging.
+    std::jthread watchdog([](const std::stop_token& stop) {
+        std::mutex mutex;
+        std::condition_variable_any wake;
+        std::unique_lock lock(mutex);
+        if (!wake.wait_for(lock, stop, std::chrono::seconds(5),
+                           [&] { return stop.stop_requested(); })) {
+            ulw::test::release_stalled_lookups();
+        }
+    });
+    lookup.reset();
+    const std::size_t still_stalled = ulw::test::stalled_lookups();
+    watchdog.request_stop();
+    watchdog.join();
+    EXPECT_EQ(still_stalled, 1U) << "cancelling waited for getaddrinfo to return";
+    EXPECT_EQ(stalled.calls, 0);
+
+    Outcome after;
+    const auto second = get(server.base_url() + "/after", after);
+    ASSERT_TRUE(settle(after));
+    ASSERT_TRUE(after.result->has_value()) << after.result->error().detail;
+    EXPECT_EQ((*after.result)->body, "/after");
+
+    ulw::test::release_stalled_lookups();
+    EXPECT_TRUE(ulw::test::eventually([] { return ulw::test::stalled_lookups() == 0; }));
 }
 
 TEST_P(MultiTest, TransferWhoseSocketTheReactorRefusesFailsInsteadOfHanging) {
