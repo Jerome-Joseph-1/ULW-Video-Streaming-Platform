@@ -8,7 +8,7 @@
 
 namespace gateway {
 
-// Fetches the verifier's key set over HTTPS on the reactor's libcurl multi.
+// Fetches the verifier's key set over HTTPS on a libcurl multi driven by the reactor.
 class KeySetFetcher final : public infra::auth::IKeySetFetcher {
 public:
     explicit KeySetFetcher(infra::curl::Multi& multi) noexcept;

@@ -16,7 +16,11 @@ namespace infra::curl {
 namespace {
 
 // A ceiling on descriptors and on the sockets the store holds open for us. Transfers beyond
-// it wait in libcurl's queue for a connection to come free rather than failing.
+// it wait in libcurl's queue for a connection to come free rather than failing. Nothing in
+// libcurl limits that wait: a queued transfer has no connection, and 8.5 checks neither the
+// connect timeout nor CURLOPT_TIMEOUT without one. So whatever shares a multi with uploads
+// must be able to wait behind them; the gateway gives its key fetches a multi of their own,
+// and a part stuck in the queue takes no bytes, which the gateway's body timeout ends.
 constexpr long kMaxConnections = 64;
 
 } // namespace

@@ -76,6 +76,9 @@ struct Services {
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::OffloadPool> pool;
     std::unique_ptr<infra::curl::Multi> multi;
+    // Key set fetches get a multi of their own: the store's is capped at 64 connections, and
+    // slow uploads holding all of them would otherwise queue a key refresh behind them.
+    std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<infra::s3util::EnvCredentialProvider> credentials;
     std::unique_ptr<core::ports::IIngestStore> store;
     std::unique_ptr<infra::postgres::PgUploadCatalog> catalog;
@@ -154,7 +157,12 @@ std::expected<void, std::string> make_verifier(const gateway::Config& config, Se
         s.verifier = std::make_unique<infra::auth::Ed25519LocalVerifier>(std::move(*local));
         return {};
     }
-    s.key_fetcher = std::make_unique<gateway::KeySetFetcher>(*s.multi);
+    auto key_multi = infra::curl::Multi::create(*s.reactor);
+    if (!key_multi) {
+        return std::unexpected("libcurl multi for key fetches failed to start");
+    }
+    s.key_multi = std::move(*key_multi);
+    s.key_fetcher = std::make_unique<gateway::KeySetFetcher>(*s.key_multi);
     s.verifier = std::make_unique<infra::auth::JwksVerifier>(
         *s.reactor, *s.key_fetcher,
         infra::auth::JwksConfig{.url = config.jwks_url, .claims = std::move(rules)});
