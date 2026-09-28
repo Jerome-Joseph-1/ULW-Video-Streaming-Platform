@@ -8,6 +8,7 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(OpenSSL 3.0 REQUIRED)
 find_package(CURL 8.0 REQUIRED)
+pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
 
 FetchContent_Declare(llhttp
     URL ${ULW_THIRD_PARTY_DIR}/llhttp-9.2.1.tar.gz

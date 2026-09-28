@@ -151,3 +151,11 @@ target_include_directories(s3_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/te
 if(ULW_CONFORMANCE_LIVE)
     target_compile_definitions(s3_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
 endif()
+
+ulw_add_test_suite(postgres_unit_tests unit
+    unit/postgres/params_test.cpp
+    unit/postgres/sqlstate_test.cpp
+    unit/postgres/text_test.cpp)
+target_link_libraries(postgres_unit_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
+# White-box tests of the adapter internals.
+target_include_directories(postgres_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/postgres/src)
