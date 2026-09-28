@@ -38,6 +38,7 @@ ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
     unit/net/echo_server_test.cpp
     unit/net/reactor_test.cpp
+    unit/net/signals_test.cpp
     unit/net/slab_test.cpp
     unit/net/timing_wheel_test.cpp)
 target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo)
