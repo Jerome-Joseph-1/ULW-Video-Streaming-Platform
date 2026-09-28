@@ -153,7 +153,10 @@ Migrator::Migrator(Migrator&&) noexcept = default;
 Migrator& Migrator::operator=(Migrator&&) noexcept = default;
 
 std::expected<Migrator, MigrationError> Migrator::connect(const std::string& conninfo) {
-    auto conn = SyncConnection::open(conninfo);
+    // No statement_timeout: DDL runs as long as it must, and lock_timeout bounds its waits.
+    auto conn =
+        SyncConnection::open(conninfo, SessionSettings{.application_name = "ulw-migrate",
+                                                       .statement_timeout = core::Millis{0}});
     if (!conn) {
         return std::unexpected(failed("connecting", conn.error()));
     }

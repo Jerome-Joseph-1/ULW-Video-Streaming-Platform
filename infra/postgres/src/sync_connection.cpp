@@ -1,5 +1,7 @@
 #include "sync_connection.hpp"
 
+#include "conninfo.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -20,11 +22,33 @@ std::string trimmed(const char* message) {
 
 } // namespace
 
-std::expected<SyncConnection, DbFailure> SyncConnection::open(const std::string& conninfo) {
-    // Defaults the connection string may override: without connect_timeout a dead host holds
-    // PQconnectdb for the kernel's TCP timeout, minutes. 5 s is dozens of LAN round trips.
-    const std::array<const char*, 3> keywords{"connect_timeout", "dbname", nullptr};
-    const std::array<const char*, 3> values{"5", conninfo.c_str(), nullptr};
+std::expected<SyncConnection, DbFailure> SyncConnection::open(const std::string& conninfo,
+                                                              const SessionSettings& settings) {
+    const auto target = parse_conninfo(conninfo);
+    if (!target) {
+        return std::unexpected(DbFailure{.error = DbError::Rejected, .message = target.error()});
+    }
+    const std::string options = session_options(settings.statement_timeout, target->options);
+    // Entries before dbname are defaults the connection string may override; options after it
+    // already carries the string's own. Without connect_timeout a dead host holds
+    // PQconnectdbParams for the kernel's TCP timeout, minutes; 5 s is dozens of LAN round trips.
+    // Four settings besides the keepalives, and the null pair that ends the list.
+    constexpr std::size_t kEntries = 4 + kKeepalives.size() + 1;
+    std::array<const char*, kEntries> keywords{};
+    std::array<const char*, kEntries> values{};
+    std::size_t n = 0;
+    const auto add = [&](const char* keyword, const char* value) {
+        keywords.at(n) = keyword;
+        values.at(n) = value;
+        ++n;
+    };
+    add("fallback_application_name", settings.application_name);
+    add("connect_timeout", "5");
+    for (const auto& [keyword, value] : kKeepalives) {
+        add(keyword, value);
+    }
+    add("dbname", conninfo.c_str());
+    add("options", options.c_str());
     ConnHandle conn{PQconnectdbParams(keywords.data(), values.data(), 1)};
     if (!conn) {
         return std::unexpected(

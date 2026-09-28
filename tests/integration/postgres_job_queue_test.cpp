@@ -2,6 +2,7 @@
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
+#include "job_session.hpp"
 #include "postgres_harness.hpp"
 
 #include <algorithm>
@@ -291,6 +292,38 @@ TEST_F(JobQueueTest, WaitForWorkReturnsAfterItsIntervalWithoutANotification) {
     auto waiting = std::async(std::launch::async,
                               [&] { queue->wait_for_work(std::chrono::milliseconds(200)); });
     EXPECT_EQ(waiting.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+}
+
+TEST_F(JobQueueTest, QueueSessionIsNamedForTheServer) {
+    ASSERT_TRUE(queue->claim(node("worker-a")));
+    EXPECT_EQ(scalar(*conn, "SELECT count(*) FROM pg_stat_activity "
+                            "WHERE datname = current_database() AND application_name = 'ulw-jobs'"),
+              "1");
+}
+
+TEST_F(JobQueueTest, QueueSessionBoundsStatementsIdleTransactionsAndSilentPeers) {
+    auto session = SyncConnection::open(db->conninfo(), infra::postgres::kJobSession);
+    ASSERT_TRUE(session) << session.error().message;
+    EXPECT_EQ(scalar(*session, "SHOW application_name"), "ulw-jobs");
+    EXPECT_EQ(scalar(*session, "SHOW statement_timeout"), "10s");
+    EXPECT_EQ(scalar(*session, "SHOW idle_in_transaction_session_timeout"), "10s");
+    EXPECT_EQ(scalar(*session, "SHOW tcp_keepalives_idle"), "10");
+    EXPECT_EQ(scalar(*session, "SHOW tcp_keepalives_interval"), "5");
+    EXPECT_EQ(scalar(*session, "SHOW tcp_keepalives_count"), "3");
+}
+
+TEST_F(JobQueueTest, ConnectionStringOptionsOverrideTheQueueSessionDefaults) {
+    auto session = SyncConnection::open(db->conninfo() + " options='-c statement_timeout=1234'",
+                                        infra::postgres::kJobSession);
+    ASSERT_TRUE(session) << session.error().message;
+    EXPECT_EQ(scalar(*session, "SHOW statement_timeout"), "1234ms");
+    EXPECT_EQ(scalar(*session, "SHOW idle_in_transaction_session_timeout"), "10s");
+}
+
+TEST_F(JobQueueTest, UnparsableConnectionStringIsRejectedNotRetried) {
+    const auto session = SyncConnection::open("host='unterminated", infra::postgres::kJobSession);
+    ASSERT_FALSE(session);
+    EXPECT_EQ(session.error().error, infra::postgres::DbError::Rejected);
 }
 
 TEST_F(JobQueueTest, CallAfterALostSessionReconnects) {

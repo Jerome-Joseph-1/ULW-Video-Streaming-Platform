@@ -19,10 +19,19 @@ struct DbFailure {
     std::string message;
 };
 
+struct SessionSettings {
+    // Names the session in pg_stat_activity unless the connection string names it.
+    const char* application_name = "";
+    // Also bounds how long a transaction may sit idle. Zero bounds neither, for DDL that may
+    // run long.
+    core::Millis statement_timeout{0};
+};
+
 // A blocking session for the worker and the migrator. Never used on a reactor thread.
 class SyncConnection {
 public:
-    [[nodiscard]] static std::expected<SyncConnection, DbFailure> open(const std::string& conninfo);
+    [[nodiscard]] static std::expected<SyncConnection, DbFailure>
+    open(const std::string& conninfo, const SessionSettings& settings);
 
     [[nodiscard]] std::expected<Result, DbFailure> exec(Sql sql, const Params& params = {});
     // Simple-query protocol: `script` may hold several statements and binds nothing. For

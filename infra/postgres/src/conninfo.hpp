@@ -2,12 +2,14 @@
 
 #include "core/util/time.hpp"
 
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace infra::postgres {
@@ -43,6 +45,21 @@ struct Endpoints {
 // match the hosts.
 [[nodiscard]] std::optional<Endpoints>
 expand_endpoints(const ConnTarget& target, std::span<const std::vector<std::string>> addresses);
+
+// Client-side keepalive defaults, placed before the connection string so that it may override
+// them. With the server-side twin in session_options, a peer that vanished without closing the
+// socket is noticed after 10 s idle and 3 unanswered probes 5 s apart, 25 s in all, instead of
+// the kernel's two hours.
+inline constexpr std::array<std::pair<const char*, const char*>, 3> kKeepalives{{
+    {"keepalives_idle", "10"},
+    {"keepalives_interval", "5"},
+    {"keepalives_count", "3"},
+}};
+
+// The `options` a session connects with: ours first, then the connection string's own `options`
+// (`own`), which therefore win. A zero statement_timeout leaves statements and transactions
+// unbounded.
+[[nodiscard]] std::string session_options(core::Millis statement_timeout, std::string_view own);
 
 // libpq resolves host names with a blocking getaddrinfo inside PQconnectStart. The reactor's
 // sessions resolve beforehand on the offload pool and hand libpq addresses instead.

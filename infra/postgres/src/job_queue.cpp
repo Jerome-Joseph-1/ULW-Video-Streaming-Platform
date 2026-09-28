@@ -1,5 +1,6 @@
 #include "infra/postgres/job_queue.hpp"
 
+#include "job_session.hpp"
 #include "params.hpp"
 #include "result.hpp"
 #include "sql.hpp"
@@ -147,7 +148,7 @@ public:
             return &*conn_;
         }
         conn_.reset();
-        auto opened = SyncConnection::open(conninfo_);
+        auto opened = SyncConnection::open(conninfo_, kJobSession);
         if (!opened) {
             return std::unexpected(JobQueueError::Unavailable);
         }

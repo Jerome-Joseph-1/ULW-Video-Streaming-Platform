@@ -42,6 +42,10 @@ std::string random_suffix() {
     return std::format("{:016x}", any(device));
 }
 
+// Apart from "ulw-test", which the pool tests give their sessions and then terminate.
+constexpr infra::postgres::SessionSettings kFixtureSession{.application_name = "ulw-test-fixture",
+                                                           .statement_timeout = core::Millis{0}};
+
 } // namespace
 
 std::string admin_url() {
@@ -65,7 +69,7 @@ std::string with_database(const std::string& url, const std::string& database) {
 
 void ScratchDatabase::open(std::unique_ptr<ScratchDatabase>& out, Schema schema) {
     const bool configured = std::getenv("ULW_TEST_DATABASE_URL") != nullptr;
-    auto admin = infra::postgres::SyncConnection::open(admin_url());
+    auto admin = infra::postgres::SyncConnection::open(admin_url(), kFixtureSession);
     if (!admin) {
         if (!configured) {
             GTEST_SKIP() << "no Postgres at " << kDefaultUrl
@@ -96,7 +100,7 @@ ScratchDatabase::~ScratchDatabase() {
 }
 
 infra::postgres::SyncConnection ScratchDatabase::session() const {
-    auto conn = infra::postgres::SyncConnection::open(conninfo_);
+    auto conn = infra::postgres::SyncConnection::open(conninfo_, kFixtureSession);
     if (!conn) {
         // Nothing sensible can follow; a test only asks for a session on a database it made.
         std::println(stderr, "session on the scratch database: {}", conn.error().message);

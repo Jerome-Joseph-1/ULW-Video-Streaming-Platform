@@ -168,16 +168,26 @@ ConnectPlan::ConnectPlan(std::string conninfo, std::string application_name,
             return classify_host(h) == HostForm::Name;
         });
     }
+    options_ = session_options(statement_timeout, target_.options);
+}
+
+std::string session_options(core::Millis statement_timeout, std::string_view own) {
     // The server's own keepalive decides how long a vanished client keeps its session, and with
-    // it its advisory locks: 10 s idle, then 3 probes 5 s apart, instead of the kernel's two
-    // hours. The connection string's own options come last so that they win.
-    options_ = std::format("-c statement_timeout={} -c tcp_keepalives_idle=10 "
-                           "-c tcp_keepalives_interval=5 -c tcp_keepalives_count=3",
+    // it its locks: the same 10 s idle and 3 probes 5 s apart as kKeepalives on our side.
+    std::string out = "-c tcp_keepalives_idle=10 -c tcp_keepalives_interval=5 "
+                      "-c tcp_keepalives_count=3";
+    if (statement_timeout.count() > 0) {
+        // Each of our transactions sends a statement the moment the one before it answers, so
+        // one left idle as long as a statement may run belongs to a client that stalled or
+        // died, and its row and advisory locks go with the session the server ends.
+        out += std::format(" -c statement_timeout={0} -c idle_in_transaction_session_timeout={0}",
                            statement_timeout.count());
-    if (!target_.options.empty()) {
-        options_ += ' ';
-        options_ += target_.options;
     }
+    if (!own.empty()) {
+        out += ' ';
+        out += own;
+    }
+    return out;
 }
 
 std::optional<Endpoints> ConnectPlan::resolve() const {
@@ -199,11 +209,9 @@ ConnectPlan::Arrays ConnectPlan::arrays(const Endpoints* endpoints) const {
     // Entries before dbname are defaults the connection string may override; entries after it
     // override the string (libpq applies the arrays in order, last non-empty value wins).
     add("fallback_application_name", application_name_.c_str());
-    // The client-side twin of the server keepalive above: a session whose server vanished is
-    // noticed in 25 s rather than hours.
-    add("keepalives_idle", "10");
-    add("keepalives_interval", "5");
-    add("keepalives_count", "3");
+    for (const auto& [keyword, value] : kKeepalives) {
+        add(keyword, value);
+    }
     add("dbname", conninfo_.c_str());
     add("options", options_.c_str());
     if (endpoints != nullptr) {

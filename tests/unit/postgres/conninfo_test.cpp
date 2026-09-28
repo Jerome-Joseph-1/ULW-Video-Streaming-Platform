@@ -14,6 +14,7 @@ using infra::postgres::ConnTarget;
 using infra::postgres::expand_endpoints;
 using infra::postgres::HostForm;
 using infra::postgres::parse_conninfo;
+using infra::postgres::session_options;
 
 TEST(ClassifyHost, SocketsNumericAddressesAndNames) {
     EXPECT_EQ(classify_host(""), HostForm::Socket);
@@ -132,6 +133,21 @@ TEST(ConnectPlan, WithoutEndpointsLeavesTheHostToTheString) {
     const auto arrays = plan.arrays(nullptr);
     EXPECT_EQ(index_of(arrays.keywords, "hostaddr"), -1);
     EXPECT_EQ(index_of(arrays.keywords, "host"), -1);
+}
+
+TEST(SessionOptions, BoundsStatementsAndIdleTransactionsAlike) {
+    const std::string options = session_options(core::Millis{9900}, "");
+    EXPECT_NE(options.find("-c statement_timeout=9900"), std::string::npos);
+    EXPECT_NE(options.find("-c idle_in_transaction_session_timeout=9900"), std::string::npos);
+    EXPECT_NE(options.find("-c tcp_keepalives_idle=10"), std::string::npos);
+}
+
+TEST(SessionOptions, ZeroTimeoutLeavesStatementsUnboundedButKeepsKeepalives) {
+    const std::string options = session_options(core::Millis{0}, "-c work_mem=4MB");
+    EXPECT_EQ(options.find("statement_timeout"), std::string::npos);
+    EXPECT_EQ(options.find("idle_in_transaction"), std::string::npos);
+    EXPECT_NE(options.find("-c tcp_keepalives_count=3"), std::string::npos);
+    EXPECT_TRUE(options.ends_with(" -c work_mem=4MB")) << options;
 }
 
 } // namespace
