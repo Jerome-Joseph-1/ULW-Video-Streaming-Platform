@@ -104,3 +104,14 @@ ulw_add_test_suite(gateway_tests unit
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness OpenSSL::Crypto)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+ulw_add_library(test_http_server support/http_test_server.cpp)
+target_include_directories(test_http_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_http_server PUBLIC ulw::os PRIVATE Threads::Threads)
+
+ulw_add_test_suite(curl_unit_tests unit
+    unit/curl/fetcher_test.cpp
+    unit/curl/http_test.cpp
+    unit/curl/multi_test.cpp)
+target_link_libraries(curl_unit_tests PRIVATE ulw::curl_multi ulw::test_http_server)
+target_include_directories(curl_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
