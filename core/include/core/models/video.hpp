@@ -37,6 +37,8 @@ public:
     // title, about what players and cards show before truncating, in two-byte scripts such as
     // Cyrillic or Greek.
     static constexpr std::size_t kMaxTitleBytes = 200;
+    // FFmpeg formats a log line into 1024 bytes, prefix included, so one full diagnostic fits.
+    static constexpr std::size_t kMaxFailureReasonBytes = 1000;
 
     [[nodiscard]] static std::expected<Video, DomainError> create(VideoId id, const UserId& owner,
                                                                   std::string title);

@@ -69,24 +69,24 @@ std::size_t utf8_sequence_length(std::string_view text) noexcept {
     return 0;
 }
 
-// Titles are echoed verbatim into JSON and stored in a UTF-8 text column, so a malformed one is
-// rejected here as the client's error instead of failing later on the way out.
-bool is_valid_title(std::string_view title) noexcept {
-    if (title.empty() || title.size() > Video::kMaxTitleBytes) {
+// Titles and failure reasons are echoed verbatim into JSON and stored in a UTF-8 text column, so
+// malformed text is rejected here instead of failing later on the way out.
+bool is_valid_text(std::string_view text, std::size_t max_bytes) noexcept {
+    if (text.empty() || text.size() > max_bytes) {
         return false;
     }
-    while (!title.empty()) {
+    while (!text.empty()) {
         // Every byte of a multi-byte sequence is 0x80 or above, so testing lead bytes catches
         // every ASCII control character.
-        const auto lead = static_cast<unsigned char>(title.front());
+        const auto lead = static_cast<unsigned char>(text.front());
         if (lead < 0x20U || lead == 0x7FU) {
             return false;
         }
-        const std::size_t length = utf8_sequence_length(title);
+        const std::size_t length = utf8_sequence_length(text);
         if (length == 0) {
             return false;
         }
-        title.remove_prefix(length);
+        text.remove_prefix(length);
     }
     return true;
 }
@@ -112,7 +112,7 @@ bool is_terminal(VideoState state) noexcept {
 }
 
 std::expected<void, DomainError> validate(const VideoRecord& record) noexcept {
-    if (!is_valid_title(record.title)) {
+    if (!is_valid_text(record.title, Video::kMaxTitleBytes)) {
         return std::unexpected(DomainError::InvalidTitle);
     }
     const bool failed = record.state == VideoState::Failed;
@@ -125,6 +125,9 @@ std::expected<void, DomainError> validate(const VideoRecord& record) noexcept {
     }
     if (ready != record.duration.has_value() || (!failed && record.error_reason)) {
         return std::unexpected(DomainError::CorruptRecord);
+    }
+    if (failed && !is_valid_text(*record.error_reason, Video::kMaxFailureReasonBytes)) {
+        return std::unexpected(DomainError::InvalidFailureReason);
     }
     // At the maximum the next bump would wrap and defeat the repository's version check.
     if (record.version < lowest_reachable_version(record.state) ||
@@ -193,6 +196,9 @@ std::expected<void, DomainError> Video::mark_failed(std::string reason) noexcept
     }
     if (reason.empty()) {
         return std::unexpected(DomainError::MissingFailureReason);
+    }
+    if (!is_valid_text(reason, kMaxFailureReasonBytes)) {
+        return std::unexpected(DomainError::InvalidFailureReason);
     }
     data_.error_reason = std::move(reason);
     enter(VideoState::Failed);

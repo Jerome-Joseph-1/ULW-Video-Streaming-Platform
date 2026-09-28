@@ -259,6 +259,25 @@ TEST(Video, MarkFailedRejectsAnEmptyReasonWithoutSideEffects) {
     EXPECT_EQ(observe(video), before);
 }
 
+TEST(Video, MarkFailedRejectsMalformedReasonsWithoutSideEffects) {
+    for (const std::string& reason :
+         {std::string("worker lost\n"), std::string("exit \x01"), std::string("truncated \xc3"),
+          std::string(Video::kMaxFailureReasonBytes + 1, 'r')}) {
+        Video video = video_in(VideoState::Processing);
+        const auto before = observe(video);
+        EXPECT_EQ(video.mark_failed(reason), std::unexpected(DomainError::InvalidFailureReason))
+            << reason.size();
+        EXPECT_EQ(observe(video), before);
+    }
+}
+
+TEST(Video, FailureReasonLimitIsInclusive) {
+    Video video = video_in(VideoState::Processing);
+    const std::string longest(Video::kMaxFailureReasonBytes, 'r');
+    ASSERT_TRUE(video.mark_failed(longest).has_value());
+    EXPECT_EQ(video.error_reason(), longest);
+}
+
 TEST(Video, StateIsJudgedBeforeArguments) {
     Video ready = video_in(VideoState::Ready);
     EXPECT_EQ(ready.mark_ready(Millis{-1}), std::unexpected(DomainError::AlreadyTerminal));
@@ -337,6 +356,13 @@ TEST(Video, RehydrateRejectsRecordsThatContradictTheirState) {
         CorruptCase{.name = "failed with empty reason",
                     .record = with_reason(record_in(VideoState::Failed), ""),
                     .error = DomainError::MissingFailureReason},
+        CorruptCase{.name = "failed with a control character in the reason",
+                    .record = with_reason(record_in(VideoState::Failed), "decoder\tcrashed"),
+                    .error = DomainError::InvalidFailureReason},
+        CorruptCase{.name = "failed with an oversized reason",
+                    .record = with_reason(record_in(VideoState::Failed),
+                                          std::string(Video::kMaxFailureReasonBytes + 1, 'r')),
+                    .error = DomainError::InvalidFailureReason},
         CorruptCase{.name = "ready without duration",
                     .record = with_duration(record_in(VideoState::Ready), std::nullopt),
                     .error = DomainError::CorruptRecord},
