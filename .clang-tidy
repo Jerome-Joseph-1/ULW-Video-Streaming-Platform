@@ -1,3 +1,16 @@
+# Disabled checks, and why:
+#  - modernize-use-trailing-return-type, readability-identifier-length,
+#    cppcoreguidelines-pro-type-vararg, *-magic-numbers: project policy.
+#  - cppcoreguidelines-avoid-const-or-ref-data-members: `T&` members are how this codebase
+#    spells "borrows something that outlives you".
+#  - misc-include-cleaner: misattributes POSIX and project symbols to the wrong headers.
+#  - performance-enum-size: enum width is not a hot-path concern anywhere here.
+#  - bugprone-easily-swappable-parameters: fires on every (fd, generation)-style pair; strong
+#    types are used where a swap would be plausible.
+#  - cppcoreguidelines-pro-type-reinterpret-cast, cppcoreguidelines-pro-type-union-access,
+#    cppcoreguidelines-pro-bounds-pointer-arithmetic,
+#    cppcoreguidelines-pro-bounds-constant-array-index: sockaddr, epoll_event, io_uring and
+#    buffer-ring code cannot be written without them; they are confined to net/ and infra/.
 Checks: >
   bugprone-*,
   cert-*,
@@ -12,7 +25,22 @@ Checks: >
   -modernize-use-trailing-return-type,
   -readability-identifier-length,
   -cppcoreguidelines-pro-type-vararg,
-  -*-magic-numbers
+  -*-magic-numbers,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -misc-include-cleaner,
+  -performance-enum-size,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index
 WarningsAsErrors: 'bugprone-*,clang-analyzer-*,cert-*,concurrency-*'
-HeaderFilterRegex: '.*/(core|net|http|codec|rt|infra|apps|tests)/.*\.(hpp|h)$'
+HeaderFilterRegex: '.*/(core|os|net|http|codec|rt|infra|apps|tests)/.*\.(hpp|h)$'
 FormatStyle: file
+CheckOptions:
+  # Pure interfaces declare only a virtual destructor.
+  cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor: true
+  cppcoreguidelines-special-member-functions.AllowMissingMoveFunctionsWhenCopyIsDeleted: true
+  misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic: true
+  # Allocation failure terminates the process; it is not a recoverable error on any path.
+  bugprone-exception-escape.IgnoredExceptions: 'std::bad_alloc;std::length_error;std::bad_array_new_length'

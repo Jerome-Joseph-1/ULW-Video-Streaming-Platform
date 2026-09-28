@@ -5,7 +5,7 @@ FFmpeg HLS transcode worker, and a realtime plane for chat, calls and live strea
 
 ## Build
 
-Needs GCC 14 or Clang 18 (with libstdc++ 14), CMake 3.28+, Ninja, and the development
+Needs GCC 14 or Clang 19 (with libstdc++ 14), CMake 3.28+, Ninja, and the development
 packages for OpenSSL 3, libcurl, libpq and liburing 2.5+.
 
 ```sh
@@ -15,7 +15,9 @@ ctest --preset dev
 ```
 
 Other presets: `debug`, `asan`, `tsan`, `ci` (warnings are errors), `release` (LTO), `fuzz`
-(clang). `ctest --preset unit` runs the unit tests under ASan/UBSan.
+(clang). `ctest --preset unit` runs the unit tests under ASan/UBSan. Clang 18 cannot be
+used: libstdc++ only provides `std::expected` when `__cpp_concepts >= 202002`, which Clang
+first reports in 19.
 
 ## Checks
 

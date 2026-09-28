@@ -29,8 +29,8 @@ jobs:
       matrix:
         include:
           - { compiler: gcc, cc: gcc-14, cxx: g++-14, preset: ci, test: ci }
-          - { compiler: clang, cc: clang-18, cxx: clang++-18, preset: ci, test: ci }
-          - { compiler: clang, cc: clang-18, cxx: clang++-18, preset: asan, test: unit }
+          - { compiler: clang, cc: clang-19, cxx: clang++-19, preset: ci, test: ci }
+          - { compiler: clang, cc: clang-19, cxx: clang++-19, preset: asan, test: unit }
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
@@ -47,8 +47,8 @@ jobs:
   tsan:
     runs-on: ubuntu-24.04
     env:
-      CC: clang-18
-      CXX: clang++-18
+      CC: clang-19
+      CXX: clang++-19
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
@@ -62,8 +62,8 @@ jobs:
     name: boundaries + format + tidy
     runs-on: ubuntu-24.04
     env:
-      CC: clang-18
-      CXX: clang++-18
+      CC: clang-19
+      CXX: clang++-19
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -6,7 +6,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 build_dir=$1
 shift
-tidy=${CLANG_TIDY:-clang-tidy-18}
+tidy=${CLANG_TIDY:-clang-tidy-19}
 
 if [[ $# -eq 0 ]]; then
     mapfile -t files < <(jq -r '.[].file' "$build_dir/compile_commands.json" |
