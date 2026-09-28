@@ -59,6 +59,8 @@ TEST(TranscodeArgs, ReproduceTheSpecCommandForAFullLadder) {
                         "-loglevel",
                         "warning",
                         "-y",
+                        "-format_whitelist",
+                        "mov,matroska,mpegts,avi,flv,asf,mpeg,ogg",
                         "-i",
                         "in",
                         "-filter_complex",
@@ -267,6 +269,31 @@ TEST(ParseProbe, RefusesWhatCannotBeTranscoded) {
                   .error(),
               "no duration");
     EXPECT_FALSE(parse_probe(""));
+}
+
+TEST(Demuxers, EveryInputIsOpenedWithAClosedListOfThem) {
+    const auto ladder = core::choose_ladder(720);
+    const auto source_first = [](const Args& args, std::string_view input) {
+        const auto list = std::ranges::find(args, "-format_whitelist");
+        return list != args.end() && list < std::ranges::find(args, input);
+    };
+    const Args probe = infra::ffmpeg::probe_args("ffprobe", "in");
+    const Args encode = transcode_args("ffmpeg", "in", "out", media(720), ladder, 2);
+    EXPECT_EQ(after(probe, "-format_whitelist"), "mov,matroska,mpegts,avi,flv,asf,mpeg,ogg");
+    EXPECT_EQ(after(encode, "-format_whitelist"), after(probe, "-format_whitelist"));
+    EXPECT_TRUE(source_first(probe, "in"));
+    EXPECT_TRUE(source_first(encode, "in"));
+    // Nothing that reads a list of other files is on it.
+    for (const std::string_view format : {"hls", "dash", "imf", "concat"}) {
+        EXPECT_EQ(after(probe, "-format_whitelist").find(format), std::string::npos) << format;
+    }
+
+    const Args keyframes = infra::ffmpeg::keyframe_args("ffprobe", "out/360p/index.m3u8");
+    const Args decode = infra::ffmpeg::decode_args("ffmpeg", "out/master.m3u8");
+    EXPECT_EQ(after(keyframes, "-format_whitelist"), "hls,mov");
+    EXPECT_EQ(after(decode, "-format_whitelist"), "hls,mov");
+    EXPECT_TRUE(source_first(keyframes, "out/360p/index.m3u8"));
+    EXPECT_TRUE(source_first(decode, "out/master.m3u8"));
 }
 
 TEST(ParseKeyframes, ReadsOneTimePerLine) {

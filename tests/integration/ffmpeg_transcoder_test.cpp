@@ -242,6 +242,41 @@ TEST_F(TranscoderTest, FfmpegOutOfCpuTimeIsOverBudgetNotKilled) {
               TranscodeFailure::OverBudget);
 }
 
+TEST_F(TranscoderTest, AManifestThatNamesAFileOutsideTheWorkspaceIsRefused) {
+    // An upload is only ever one file; a DASH manifest makes ffmpeg read whatever it names.
+    const ulw::test::TempDir elsewhere("ulw-elsewhere");
+    const fs::path secret = elsewhere.path() / "secret.mp4";
+    ASSERT_TRUE(ulw::test::make_clip(
+        secret, {.size = "640x360", .rate = "30", .seconds = 2, .audio = false}));
+    // Named as the worker names every upload, with nothing to hint at the format.
+    const fs::path upload = work_.path() / "source";
+    std::ofstream(upload)
+        << "<?xml version=\"1.0\"?>\n"
+           "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" "
+           "mediaPresentationDuration=\"PT2S\" minBufferTime=\"PT1S\" "
+           "profiles=\"urn:mpeg:dash:profile:isoff-on-demand:2011\"><Period>"
+           "<AdaptationSet mimeType=\"video/mp4\"><Representation id=\"1\" bandwidth=\"100000\" "
+           "width=\"640\" height=\"360\" codecs=\"avc1.64001e\"><BaseURL>"
+        << secret.string()
+        << "</BaseURL><SegmentBase/></Representation></AdaptationSet></Period></MPD>\n";
+    // Without the whitelist, ffprobe follows the manifest and describes the file it names.
+    ASSERT_EQ(ulw::test::run_process({"ffprobe", "-v", "error", upload.string()}).exit_code, 0);
+
+    const auto media = transcoder_.probe(upload, {});
+    ASSERT_FALSE(media);
+    EXPECT_EQ(media.error().kind, TranscodeFailure::Rejected);
+
+    const MediaInfo claimed{.width = 640,
+                            .height = 360,
+                            .frame_rate = {.num = 30, .den = 1},
+                            .duration = core::Millis{2000},
+                            .has_audio = false};
+    const auto ladder = core::choose_ladder(claimed.height);
+    const auto stats = transcoder_.run(upload, out(), claimed, ladder, progress_, {});
+    ASSERT_FALSE(stats);
+    EXPECT_FALSE(fs::exists(out() / "master.m3u8"));
+}
+
 TEST_F(TranscoderTest, AFileThatIsNotMediaIsRejected) {
     std::ofstream(source()) << "this is not a video";
     const auto media = transcoder_.probe(source(), {});

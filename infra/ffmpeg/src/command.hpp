@@ -24,6 +24,14 @@ inline constexpr std::uint32_t kSegmentSeconds = 4;
 // argv, program name first.
 using Args = std::vector<std::string>;
 
+// The demuxers an upload may be read with. Left to probe, ffmpeg picks among all of them, and
+// playlist and manifest formats (DASH, HLS, IMF, concat) open whatever local paths the upload
+// names, outside the workspace too. These are the containers cameras, phones and editors
+// write: MP4 and QuickTime (mov), MKV and WebM, MPEG-TS, AVI, FLV, WMV (asf), MPEG-PS and Ogg.
+inline constexpr std::string_view kSourceFormats = "mov,matroska,mpegts,avi,flv,asf,mpeg,ogg";
+// What verification reads of our own output: the HLS playlists and their fMP4 segments.
+inline constexpr std::string_view kOutputFormats = "hls,mov";
+
 [[nodiscard]] Args probe_args(const std::string& ffprobe, const std::filesystem::path& input);
 // What probe_args prints, or why it describes nothing that can be transcoded.
 [[nodiscard]] std::expected<core::ports::MediaInfo, std::string> parse_probe(std::string_view text);

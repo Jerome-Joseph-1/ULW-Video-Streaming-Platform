@@ -104,6 +104,8 @@ Args probe_args(const std::string& ffprobe, const std::filesystem::path& input) 
             "stream=codec_type,width,height,r_frame_rate:stream_side_data=rotation:format=duration",
             "-of",
             "default=nw=1",
+            "-format_whitelist",
+            std::string(kSourceFormats),
             input.string()};
 }
 
@@ -170,8 +172,9 @@ std::expected<MediaInfo, std::string> parse_probe(std::string_view text) {
 Args transcode_args(const std::string& ffmpeg, const std::filesystem::path& input,
                     const std::filesystem::path& out_dir, const MediaInfo& media,
                     std::span<const core::Rung> ladder, unsigned threads) {
-    Args args{ffmpeg,    "-nostdin", "-hide_banner", "-loglevel",
-              "warning", "-y",       "-i",           input.string()};
+    Args args{ffmpeg,    "-nostdin",    "-hide_banner",      "-loglevel",
+              "warning", "-y",          "-format_whitelist", std::string(kSourceFormats),
+              "-i",      input.string()};
 
     std::string graph = "[0:v]split=" + std::to_string(ladder.size());
     for (std::size_t i = 1; i <= ladder.size(); ++i) {
@@ -249,6 +252,8 @@ Args keyframe_args(const std::string& ffprobe, const std::filesystem::path& play
             "frame=pts_time",
             "-of",
             "default=nw=1:nk=1",
+            "-format_whitelist",
+            std::string(kOutputFormats),
             playlist.string()};
 }
 
@@ -274,7 +279,17 @@ std::optional<std::vector<std::string>> parse_keyframes(std::string_view text) {
 }
 
 Args decode_args(const std::string& ffmpeg, const std::filesystem::path& master) {
-    return {ffmpeg, "-nostdin", "-v", "error", "-i", master.string(), "-f", "null", "-"};
+    return {ffmpeg,
+            "-nostdin",
+            "-v",
+            "error",
+            "-format_whitelist",
+            std::string(kOutputFormats),
+            "-i",
+            master.string(),
+            "-f",
+            "null",
+            "-"};
 }
 
 std::optional<std::string> check_media_playlist(std::string_view text) {
