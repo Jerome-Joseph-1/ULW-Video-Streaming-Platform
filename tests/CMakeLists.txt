@@ -14,6 +14,8 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/content_type_test.cpp
     unit/core/error_messages_test.cpp
     unit/core/ids_test.cpp
+    unit/core/json_test.cpp
+    unit/core/parse_test.cpp
     unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
@@ -27,6 +29,7 @@ ulw_add_test_suite(os_unit_tests unit
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
+
 ulw_add_library(test_echo support/echo_server.cpp)
 target_include_directories(test_echo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(test_echo PUBLIC ulw::net_lib)
