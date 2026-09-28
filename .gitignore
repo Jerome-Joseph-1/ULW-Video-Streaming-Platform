@@ -1,0 +1,16 @@
+/build/
+/out/
+compile_commands.json
+.cache/
+*.swp
+*~
+.env
+.env.*
+!.env.example
+*.kubeconfig
+/deploy/local/.state/
+/tests/e2e/node_modules/
+/tests/e2e/test-results/
+/tests/e2e/playwright-report/
+/target/
+__pycache__/
