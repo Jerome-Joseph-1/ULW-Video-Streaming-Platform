@@ -53,6 +53,9 @@ private:
     // Zero-delay timers skip the wheel and fire on the next tick_to, whether or not a tick
     // boundary has passed; routing them through a slot would delay them by up to 100 ms.
     std::vector<TimerId> immediate_;
+    // The batch tick_to is firing. A member, and swapped rather than moved, so both buffers
+    // keep their capacity and a steady stream of zero-delay timers never allocates.
+    std::vector<TimerId> firing_;
     std::array<std::uint32_t, kSlots> heads_{};
     std::int64_t last_tick_;
     std::size_t armed_ = 0;

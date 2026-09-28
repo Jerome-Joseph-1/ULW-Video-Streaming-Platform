@@ -97,9 +97,8 @@ std::size_t TimingWheel::tick_to(core::MonoTime now) noexcept {
     std::size_t fired = 0;
     if (!immediate_.empty()) {
         // Swapped out first: handlers that re-arm with zero delay run on the next call.
-        std::vector<TimerId> due;
-        due.swap(immediate_);
-        for (const TimerId id : due) {
+        firing_.swap(immediate_);
+        for (const TimerId id : firing_) {
             Entry& e = entries_[id.index];
             if (e.gen != id.gen || e.handler == nullptr) {
                 continue;
@@ -110,6 +109,7 @@ std::size_t TimingWheel::tick_to(core::MonoTime now) noexcept {
             handler->on_timeout();
             ++fired;
         }
+        firing_.clear();
     }
     const std::int64_t target = tick_of(now);
     // After a stall longer than a revolution every slot has been visited once; stepping
