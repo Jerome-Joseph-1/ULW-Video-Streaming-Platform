@@ -241,6 +241,24 @@ TEST_P(PartSessionTest, RefusedCredentialsSurfaceAsUnauthorized) {
     EXPECT_EQ(session->durable_offset(), 0U);
 }
 
+TEST_P(PartSessionTest, APartAnsweredWithoutAnETagIsNotDurable) {
+    respond_with([](const ServedRequest& r) {
+        if (r.query("partNumber") == "2") {
+            return Reply{.status = 200, .headers = {}, .body = {}};
+        }
+        return Reply{.status = 200, .headers = {{"ETag", "\"e\""}}, .body = {}};
+    });
+    const auto data = ulw::test::pattern(3 * kChunk);
+    Observer obs;
+    auto session = open(data.size(), 0, obs);
+    static_cast<void>(write_all(*session, obs, data));
+    ASSERT_TRUE(settled(*session));
+    EXPECT_EQ(session->state(), IngestState::Failed);
+    EXPECT_EQ(session->error(), StorageError::Transient);
+    EXPECT_EQ(session->durable_offset(), kChunk);
+    EXPECT_EQ(server.request_count(), 2U);
+}
+
 TEST_P(PartSessionTest, ABadSignatureOnAPartIsPermanentAndCounted) {
     respond_with([](const ServedRequest&) {
         return Reply{.status = 403,
