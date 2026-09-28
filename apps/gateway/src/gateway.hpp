@@ -41,6 +41,17 @@ struct Limits {
     std::size_t max_uploads_per_user = 3;
     core::Millis header_timeout{10'000};
     core::Millis body_idle_timeout{30'000};
+    // A chunk body must average at least this rate over each window the gateway spends reading
+    // it, or it is answered 408; time the store holds the body up does not count. Every upload
+    // part holds one of the store's 64 connections until its last byte, so without a floor a
+    // few dozen clients sending a byte now and then would hold them all for the six-hour
+    // backstop. At 8 KiB/s an 8 MiB part lets its connection go within 8 MiB / 8 KiB/s =
+    // 1024 s. The floor is half of what each of a user's 3 concurrent uploads gets from a
+    // 384 kbit/s (UMTS) uplink: 48,000 B/s / 3 = 16,000 B/s, halved for a link running at
+    // half its nominal rate.
+    std::uint64_t min_body_bytes_per_second = std::uint64_t{8} * 1024;
+    // Long enough to average out a mobile link's stalls and the slow start after each one.
+    core::Millis body_rate_window{30'000};
     core::Millis request_backstop = std::chrono::duration_cast<core::Millis>(std::chrono::hours(6));
     core::Millis drain_deadline{30'000};
     std::size_t max_requests_per_connection = 1000;
@@ -56,6 +67,7 @@ struct Counters {
     std::uint64_t admission_rejections = 0;
     std::uint64_t timeouts_header = 0;
     std::uint64_t timeouts_body = 0;
+    std::uint64_t timeouts_body_rate = 0;
     std::uint64_t timeouts_backend = 0;
     std::uint64_t timeouts_backstop = 0;
     std::uint64_t bytes_ingested = 0;

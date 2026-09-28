@@ -116,6 +116,29 @@ void Connection::arm_timer(core::Millis delay) noexcept {
     timer_ = deps().reactor.arm_timer(delay, *this);
 }
 
+void Connection::restart_rate_window() noexcept {
+    rate_window_start_ = now();
+    rate_window_bytes_ = 0;
+}
+
+std::optional<core::Millis> Connection::check_body_rate(core::MonoTime t) noexcept {
+    const Limits& limits = gw().limits();
+    const auto span = std::chrono::duration_cast<core::Millis>(t - rate_window_start_);
+    if (span < limits.body_rate_window) {
+        return limits.body_rate_window - span;
+    }
+    // Over the time that actually passed, which a late timer makes longer than the window.
+    const std::uint64_t floor =
+        limits.min_body_bytes_per_second * static_cast<std::uint64_t>(span.count()) / 1000;
+    if (rate_window_bytes_ < floor) {
+        ++gw().counters().timeouts_body_rate;
+        fail(Status::RequestTimeout);
+        return std::nullopt;
+    }
+    restart_rate_window();
+    return limits.body_rate_window;
+}
+
 // Every response carries the id, including one for a request that never parsed.
 void Connection::begin_request() noexcept {
     phase_ = Phase::Request;
@@ -203,6 +226,7 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     req_.params = match->params;
     if (head.content_length > 0) {
         last_progress_ = now();
+        restart_rate_window();
         arm_timer(gw().limits().body_idle_timeout);
     }
 
@@ -290,6 +314,7 @@ http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept
         return http::BodyVerdict::Continue;
     }
     gw().counters().bytes_ingested += bytes.size();
+    rate_window_bytes_ += bytes.size();
     if (!session_ || staging_head_ < staging_.size()) {
         if (staging_.size() - staging_head_ + bytes.size() > kMaxStaging) {
             req_.body_error = Status::ContentTooLarge;
@@ -533,6 +558,8 @@ void Connection::drain_staging() noexcept {
     staging_head_ = 0;
     if (parser_paused_ && !req_.message_complete) {
         parser_paused_ = false;
+        // The time the store held the body up is not the client's to answer for.
+        restart_rate_window();
         on_parse(parser_.resume());
     }
 }
@@ -1183,7 +1210,17 @@ void Connection::on_timeout() noexcept {
             }
             return;
         }
-        arm_timer(limits.body_idle_timeout - idle);
+        core::Millis next = limits.body_idle_timeout - idle;
+        // While the parser is paused the store is what holds the body up, and reading
+        // restarts the window when it resumes.
+        if (req_.route == RouteId::AppendChunk && !parser_paused_) {
+            const auto window_left = check_body_rate(t);
+            if (!window_left) {
+                return;
+            }
+            next = std::min(next, *window_left);
+        }
+        arm_timer(next);
         return;
     }
     // Waiting on the catalog or the store: their own timeouts end the wait; this only keeps
