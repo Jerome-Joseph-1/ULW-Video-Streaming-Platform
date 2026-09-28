@@ -69,10 +69,11 @@ public:
         return http::HeadVerdict::accept();
     }
 
-    void on_body(std::span<const std::byte> bytes) noexcept override {
+    http::BodyVerdict on_body(std::span<const std::byte> bytes) noexcept override {
         for (const std::byte b : bytes) {
             requests_.back().body.push_back(static_cast<char>(b));
         }
+        return http::BodyVerdict::Continue;
     }
 
     void on_message_complete() noexcept override { requests_.back().complete = true; }

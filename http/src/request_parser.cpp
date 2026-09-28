@@ -26,6 +26,8 @@ namespace {
 
 enum class State : std::uint8_t {
     Parsing,
+    // The sink paused inside a body; llhttp is paused with it.
+    PausedInBody,
     // A request ended or was rejected; its views stay valid until reset_for_next_request().
     AwaitingReset,
     // Reset, with retained bytes that must be parsed before anything fed later.
@@ -116,6 +118,7 @@ public:
         switch (state_) {
         case State::Parsing:
             return execute(bytes, /*from_tail=*/false);
+        case State::PausedInBody:
         case State::AwaitingReset:
         case State::AwaitingResume:
             if (!retain(bytes)) {
@@ -137,6 +140,10 @@ public:
         switch (state_) {
         case State::Parsing:
             return ParseProgress::NeedMore;
+        case State::PausedInBody:
+            llhttp_resume(&parser_);
+            state_ = State::Parsing;
+            return execute(unparsed_, /*from_tail=*/true);
         case State::AwaitingReset:
             return ParseProgress::Paused;
         case State::AwaitingResume:
@@ -218,7 +225,8 @@ private:
         if (err != HPE_PAUSED) {
             return fail(error_for(err));
         }
-        // A pause stops llhttp right behind the byte whose callback asked for it.
+        // A pause stops llhttp right behind the bytes whose callback asked for it; that callback
+        // has also moved state_ to say why.
         const auto consumed = static_cast<std::size_t>(llhttp_get_error_pos(&parser_) - begin);
         if (from_tail) {
             unparsed_.erase(unparsed_.begin(),
@@ -226,7 +234,9 @@ private:
         } else if (!retain(input.subspan(consumed))) {
             return fail(fatal(Status::ContentTooLarge));
         }
-        state_ = State::AwaitingReset;
+        if (state_ == State::PausedInBody) {
+            return ParseProgress::Paused;
+        }
         if (rejection_) {
             return std::unexpected(*rejection_);
         }
@@ -352,18 +362,31 @@ private:
         // Only a bodiless request on a persistent connection ends at a known boundary.
         const bool must_close = !keep_alive_ || content_length_ > 0;
         rejection_ = ParseError{.status = *rejected, .must_close = must_close};
-        return must_close ? -1 : HPE_PAUSED;
+        if (must_close) {
+            return -1;
+        }
+        state_ = State::AwaitingReset;
+        return HPE_PAUSED;
     }
 
+    // Returning HPE_PAUSED is how a callback pauses llhttp; llhttp_pause() must not be called
+    // from inside one.
     int on_body(std::span<const std::byte> fragment) noexcept {
-        sink_.on_body(fragment);
-        return 0;
+        switch (sink_.on_body(fragment)) {
+        case BodyVerdict::Continue:
+            return 0;
+        case BodyVerdict::Pause:
+            break;
+        }
+        state_ = State::PausedInBody;
+        return HPE_PAUSED;
     }
 
     // Pausing here lets the connection finish this request, a durable write and its response,
     // before the next pipelined request reaches the sink.
     int on_message_complete() noexcept {
         sink_.on_message_complete();
+        state_ = State::AwaitingReset;
         return HPE_PAUSED;
     }
 

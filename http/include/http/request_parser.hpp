@@ -14,7 +14,8 @@ namespace http {
 enum class ParseProgress : std::uint8_t {
     // Every byte was consumed and more are needed.
     NeedMore,
-    // Bytes are being held back; nothing was parsed.
+    // Stopped until resume(): the sink paused inside a body, or a finished request still
+    // awaits reset_for_next_request(). Bytes fed meanwhile are held, in order.
     Paused,
     // A request ended and the parser stopped behind it. Finish that request, then
     // reset_for_next_request() and resume() to parse whatever was pipelined after it.
@@ -55,8 +56,8 @@ public:
     RequestParser(RequestParser&&) = delete;
     RequestParser& operator=(RequestParser&&) = delete;
 
-    // While paused, the bytes are retained in order and parsed by the next resume().
     [[nodiscard]] ParseResult feed(std::span<const std::byte> bytes) noexcept;
+    // Continues with the held bytes; call it once the sink has drained what it kept.
     [[nodiscard]] ParseResult resume() noexcept;
     // Only acts after MessageComplete or a rejection that left the connection usable;
     // anywhere else it is ignored, so a stray call can never splice a body into a new request.

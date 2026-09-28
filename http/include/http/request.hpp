@@ -47,12 +47,16 @@ private:
     std::optional<Status> rejection_;
 };
 
+enum class BodyVerdict : std::uint8_t { Continue, Pause };
+
 // Called from inside RequestParser::feed() and resume(), never re-entrantly.
 class IRequestSink {
 public:
     // A rejection stops the parser, which reports the status to its caller.
     [[nodiscard]] virtual HeadVerdict on_head(const RequestHead& head) noexcept = 0;
-    virtual void on_body(std::span<const std::byte> bytes) noexcept = 0;
+    // `bytes` is only valid during the call. Whatever the sink cannot pass on it keeps itself;
+    // Pause then stops the parser behind `bytes` until resume().
+    [[nodiscard]] virtual BodyVerdict on_body(std::span<const std::byte> bytes) noexcept = 0;
     virtual void on_message_complete() noexcept = 0;
 
 protected:
