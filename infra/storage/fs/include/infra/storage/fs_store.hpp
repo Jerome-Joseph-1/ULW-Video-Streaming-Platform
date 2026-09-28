@@ -8,6 +8,7 @@
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@ namespace infra::storage {
 //   ingest/<ref>/data          bytes received so far
 //   ingest/<ref>/durable       offset known to be on disk (updated after fdatasync)
 //   ingest/<ref>/meta          key and total size
+//   ingest/<ref>/committed     present once commit has decided to move data into objects/
 //   staging/                   files being written, renamed into place once complete
 // File I/O never runs on the reactor thread: writes go to the store's own offload pool, and
 // the control operations block by contract and are called from the caller's pool.
@@ -88,6 +90,9 @@ private:
     std::uint64_t chunk_size_;
     const std::string staging_prefix_;
     std::atomic<std::uint64_t> staged_{0};
+    // Commits are a few metadata operations each; one lock for every upload is simpler than
+    // one per upload, and concurrent commits of one upload must not both try the move.
+    std::mutex commit_mutex_;
     // Reactor-thread only. Jobs outlive the sessions that started them when a session is
     // aborted mid-write, so the store owns them.
     std::vector<std::unique_ptr<WriteJob>> jobs_;

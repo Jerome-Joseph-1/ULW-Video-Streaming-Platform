@@ -8,11 +8,14 @@
 
 #include <array>
 #include <chrono>
+#include <expected>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <latch>
 #include <span>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 
@@ -71,6 +74,16 @@ protected:
 
     [[nodiscard]] std::filesystem::path ingest(const core::ports::IngestId& id) const {
         return root / "ingest" / id.backend_ref;
+    }
+
+    // Turns the loop until the session has stopped writing, and says how it ended.
+    [[nodiscard]] core::ports::IngestState settled(const core::ports::IIngestSession& session) {
+        static_cast<void>(ulw::test::pump_until(*reactor, [&] {
+            const auto state = session.state();
+            return state == core::ports::IngestState::Committed ||
+                   state == core::ports::IngestState::Failed;
+        }));
+        return session.state();
     }
 
     const core::StorageKey key = *core::StorageKey::parse("videos/fs/raw");
@@ -192,6 +205,77 @@ TEST_F(FsStoreTest, NextSessionWaitsForAnAbortedSessionsWrite) {
         g.release.count_down();
     }
     ASSERT_TRUE(upload(**next, second, std::span(data).subspan(half)));
+    ASSERT_TRUE(store.commit(id));
+    const auto stored = store.fetch_small(key, data.size());
+    ASSERT_TRUE(stored);
+    EXPECT_TRUE(*stored == data);
+}
+
+// What a crash between the commit marker and the move leaves behind.
+TEST_F(FsStoreTest, CommitFinishesAMoveDecidedBeforeACrash) {
+    FsStore store = make_store();
+    const auto data = ulw::test::pattern(ulw::test::kLocalChunk + 100, 4);
+    const auto id = create(store, data.size());
+    ulw::test::Observer obs;
+    auto session = store.open(id, 0, obs);
+    ASSERT_TRUE(session);
+    ASSERT_TRUE(upload(**session, obs, data));
+    ASSERT_TRUE(std::ofstream(ingest(id) / "committed"));
+    ASSERT_TRUE(store.commit(id));
+    ASSERT_TRUE(store.commit(id));
+    const auto stored = store.fetch_small(key, data.size());
+    ASSERT_TRUE(stored);
+    EXPECT_TRUE(*stored == data);
+}
+
+TEST_F(FsStoreTest, ConcurrentCommitsOfOneUploadBothSucceed) {
+    FsStore store = make_store();
+    // Several rounds, since whether the two commits overlap is up to the scheduler.
+    for (std::size_t round = 0; round < 16; ++round) {
+        const auto data = ulw::test::pattern(1000, round);
+        const auto id = create(store, data.size());
+        ulw::test::Observer obs;
+        auto session = store.open(id, 0, obs);
+        ASSERT_TRUE(session);
+        ASSERT_TRUE(upload(**session, obs, data));
+        std::latch go{2};
+        std::expected<void, core::ports::StorageError> first;
+        std::expected<void, core::ports::StorageError> second;
+        {
+            const std::jthread a([&] {
+                go.arrive_and_wait();
+                first = store.commit(id);
+            });
+            const std::jthread b([&] {
+                go.arrive_and_wait();
+                second = store.commit(id);
+            });
+        }
+        EXPECT_TRUE(first) << "round " << round;
+        EXPECT_TRUE(second) << "round " << round;
+        const auto stored = store.fetch_small(key, data.size());
+        ASSERT_TRUE(stored);
+        EXPECT_TRUE(*stored == data);
+    }
+}
+
+// A caller that missed the commit may reopen the upload; its bytes must go nowhere, and a
+// retried commit must not move anything over the object.
+TEST_F(FsStoreTest, SessionOpenedAfterCommitLeavesTheObjectAlone) {
+    FsStore store = make_store();
+    const auto data = ulw::test::pattern(ulw::test::kLocalChunk + 100, 6);
+    const auto id = create(store, data.size());
+    ulw::test::Observer obs;
+    auto session = store.open(id, 0, obs);
+    ASSERT_TRUE(session);
+    ASSERT_TRUE(upload(**session, obs, data));
+    ASSERT_TRUE(store.commit(id));
+    ulw::test::Observer late_obs;
+    auto late = store.open(id, 0, late_obs);
+    ASSERT_TRUE(late);
+    ASSERT_GT((*late)->write(std::span(data).first(100)), 0U);
+    EXPECT_EQ(settled(**late), core::ports::IngestState::Failed);
+    EXPECT_EQ((*late)->error(), core::ports::StorageError::PreconditionFailed);
     ASSERT_TRUE(store.commit(id));
     const auto stored = store.fetch_small(key, data.size());
     ASSERT_TRUE(stored);

@@ -232,8 +232,16 @@ public:
 
 private:
     std::expected<void, StorageError> open_data(std::uint64_t durable) {
-        req_.fd =
-            os::UniqueFd{::open((req_.dir / "data").c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600)};
+        // Created only while nothing is durable: recreated after a commit moved it, a retried
+        // commit would move the new file over the object.
+        const int flags = O_WRONLY | O_CLOEXEC | (durable == 0 ? O_CREAT : 0);
+        req_.fd = os::UniqueFd{::open((req_.dir / "data").c_str(), flags, 0600)};
+        if (!req_.fd && errno == ENOENT) {
+            // Moved into objects/ by a commit, or else lost in a crash.
+            const auto done = committed(req_.dir);
+            return std::unexpected(done && *done ? StorageError::PreconditionFailed
+                                                 : StorageError::Corrupt);
+        }
         struct stat st {};
         if (!req_.fd || ::fstat(req_.fd.get(), &st) != 0) {
             return std::unexpected(from_errno(errno));
@@ -491,42 +499,55 @@ std::expected<void, StorageError> FsStore::commit(const IngestId& id) {
     if (!valid_ref(id.backend_ref)) {
         return std::unexpected(StorageError::NotFound);
     }
+    const std::scoped_lock lock(commit_mutex_);
     const fs::path dir = ingest_dir(id.backend_ref);
-    const auto done = committed(dir);
-    if (!done) {
-        return std::unexpected(done.error());
+    const auto decided = committed(dir);
+    if (!decided) {
+        return std::unexpected(decided.error());
     }
-    if (*done) {
-        return {};
+    if (!*decided) {
+        const auto durable = read_offset(dir / "durable");
+        if (!durable) {
+            return std::unexpected(durable.error());
+        }
+        if (*durable != id.total_bytes) {
+            return std::unexpected(StorageError::PreconditionFailed);
+        }
     }
-    const auto durable = read_offset(dir / "durable");
-    if (!durable) {
-        return std::unexpected(durable.error());
-    }
-    if (*durable != id.total_bytes) {
-        return std::unexpected(StorageError::PreconditionFailed);
-    }
-    const fs::path target = object_path(id.key);
     std::error_code ec;
-    fs::create_directories(target.parent_path(), ec);
+    const auto size = fs::file_size(dir / "data", ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+        // Already moved, by an earlier commit that decided first. Otherwise every byte was
+        // reported durable and the file holding them is gone.
+        return *decided ? std::expected<void, StorageError>{}
+                        : std::unexpected(StorageError::Corrupt);
+    }
     if (ec) {
         return std::unexpected(from_error_code(ec));
     }
-    const auto size = fs::file_size(dir / "data", ec);
-    if (ec && ec != std::errc::no_such_file_or_directory) {
-        return std::unexpected(from_error_code(ec));
-    }
-    // Every byte was reported durable and none is ever written past the end, so a missing or
-    // short file lost bytes in a crash. Extending it, as a resize would, publishes zeros.
-    if (ec || size != id.total_bytes) {
+    // Nothing is ever written past the end, so a short file lost bytes in a crash. Extending
+    // it, as a resize would, publishes zeros.
+    if (size != id.total_bytes) {
         return std::unexpected(StorageError::Corrupt);
+    }
+    // The marker goes down before the move, so that a retry after a failure or a crash
+    // anywhere below finishes the move instead of finding the data gone and nothing to say
+    // where it went.
+    if (!*decided) {
+        if (auto w = write_atomically(dir / "committed", {}, staging_name()); !w) {
+            return w;
+        }
+    }
+    const fs::path target = object_path(id.key);
+    fs::create_directories(target.parent_path(), ec);
+    if (ec) {
+        return std::unexpected(from_error_code(ec));
     }
     fs::rename(dir / "data", target, ec);
     if (ec) {
         return std::unexpected(from_error_code(ec));
     }
-    // The marker makes a retried commit succeed once the data file has moved.
-    return write_atomically(dir / "committed", {}, staging_name());
+    return {};
 }
 
 void FsStore::discard(const IngestId& id) noexcept {
