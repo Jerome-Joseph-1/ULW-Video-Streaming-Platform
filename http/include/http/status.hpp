@@ -10,12 +10,14 @@ enum class Status : std::uint16_t {
     Created = 201,
     NoContent = 204,
     BadRequest = 400,
+    Unauthorized = 401,
     NotFound = 404,
     MethodNotAllowed = 405,
     RequestTimeout = 408,
     Conflict = 409,
     LengthRequired = 411,
     ContentTooLarge = 413,
+    TooManyRequests = 429,
     RequestHeaderFieldsTooLarge = 431,
     InternalServerError = 500,
     NotImplemented = 501,
@@ -38,6 +40,8 @@ enum class Status : std::uint16_t {
         return "No Content";
     case Status::BadRequest:
         return "Bad Request";
+    case Status::Unauthorized:
+        return "Unauthorized";
     case Status::NotFound:
         return "Not Found";
     case Status::MethodNotAllowed:
@@ -50,6 +54,8 @@ enum class Status : std::uint16_t {
         return "Length Required";
     case Status::ContentTooLarge:
         return "Content Too Large";
+    case Status::TooManyRequests:
+        return "Too Many Requests";
     case Status::RequestHeaderFieldsTooLarge:
         return "Request Header Fields Too Large";
     case Status::InternalServerError:
