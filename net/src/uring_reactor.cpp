@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
+#include <charconv>
 #include <cstdlib>
+#include <memory>
 #include <poll.h>
 
 namespace net::detail {
@@ -59,6 +61,13 @@ bool is_transient_accept_error(int err) noexcept {
 }
 
 } // namespace
+
+bool io_uring_disabled(std::string_view sysctl) noexcept {
+    const char* const end = std::to_address(sysctl.end());
+    int value = 0;
+    const auto [ptr, ec] = std::from_chars(std::to_address(sysctl.begin()), end, value);
+    return ec == std::errc{} && ptr == end && value == 2;
+}
 
 std::expected<std::unique_ptr<UringReactor>, int> UringReactor::create(core::ports::IClock& clock,
                                                                        std::size_t max_fds) {

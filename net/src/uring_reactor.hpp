@@ -9,9 +9,14 @@
 #include <liburing.h>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace net::detail {
+
+// `sysctl` is the value of kernel.io_uring_disabled: 0 enabled, 1 restricted to a group,
+// 2 disabled. io_uring_setup itself refuses the restricted case, so only an outright 2 counts.
+[[nodiscard]] bool io_uring_disabled(std::string_view sysctl) noexcept;
 
 // Must be created on the thread that will run it: SINGLE_ISSUER binds the ring to its
 // creator, and DEFER_TASKRUN only posts completions when that thread enters the kernel.

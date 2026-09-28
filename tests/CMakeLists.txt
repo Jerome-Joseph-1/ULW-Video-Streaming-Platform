@@ -37,6 +37,7 @@ ulw_add_executable(ulw_loadgen load/loadgen.cpp)
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
     unit/net/echo_server_test.cpp
+    unit/net/reactor_factory_test.cpp
     unit/net/reactor_test.cpp
     unit/net/signals_test.cpp
     unit/net/slab_test.cpp

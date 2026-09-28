@@ -5,17 +5,17 @@
 
 #include <cerrno>
 #include <fstream>
+#include <string>
 
 namespace net {
 
 namespace {
 
+// Kernels without the sysctl have no file, and io_uring stays enabled.
 bool io_uring_disabled_by_sysctl() {
-    // 0: enabled, 1: restricted to a group, 2: disabled. Setup itself reports the
-    // restricted case, so only an outright 2 is decided here.
     std::ifstream in("/proc/sys/kernel/io_uring_disabled");
-    int value = 0;
-    return in >> value && value == 2;
+    std::string value;
+    return std::getline(in, value) && detail::io_uring_disabled(value);
 }
 
 } // namespace
