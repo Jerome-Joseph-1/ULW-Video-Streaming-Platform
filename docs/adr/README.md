@@ -15,3 +15,12 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0009](0009-storage-port-at-the-durable-offset.md) | Storage is abstracted at the durable offset, not the part | Accepted |
 | [0010](0010-io-uring-primary-reactor.md) | io_uring is the primary reactor, epoll the fallback | Accepted |
 | [0011](0011-cloudflare-r2-object-storage.md) | Cloudflare R2 for production object storage | Accepted |
+| [0012](0012-realtime-media-is-a-separate-tier.md) | Realtime media is a separate tier that proxies bytes | Accepted |
+| [0013](0013-webrtc-ingress-through-stunner.md) | WebRTC media ingresses through STUNner | Accepted |
+| [0014](0014-live-viewers-get-hls-from-r2.md) | Live-stream viewers get HLS from R2, not WebRTC fan-out | Accepted |
+| [0015](0015-single-owner-rooms-with-fenced-writes.md) | One owning node per room, with generation-fenced writes | Accepted |
+| [0016](0016-end-to-end-encryption-for-private-chat-only.md) | End-to-end encryption for private chat only | Accepted |
+| [0017](0017-sans-io-protocol-codecs.md) | Protocol codecs are sans-IO | Accepted |
+| [0018](0018-identity-from-askedin-jwts.md) | Identity is borrowed from Askedin | Accepted |
+| [0019](0019-chat-in-its-own-binary.md) | Chat runs in its own binary | Accepted |
+| [0020](0020-livekit-as-the-first-sfu.md) | LiveKit as the first SFU | Accepted |
