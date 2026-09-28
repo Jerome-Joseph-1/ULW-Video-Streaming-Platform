@@ -38,6 +38,11 @@ ulw_add_executable(ulw_echo_server load/echo_main.cpp)
 target_link_libraries(ulw_echo_server PRIVATE ulw::test_echo)
 ulw_add_executable(ulw_loadgen load/loadgen.cpp)
 
+# A CA and server certificates generated at run time, and the OpenSSL client side of tests.
+ulw_add_library(test_tls support/tls_pki.cpp)
+target_include_directories(test_tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_tls PUBLIC ulw::net_lib OpenSSL::SSL)
+
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
     unit/net/echo_server_test.cpp
@@ -46,8 +51,9 @@ ulw_add_test_suite(net_unit_tests unit
     unit/net/reactor_test.cpp
     unit/net/signals_test.cpp
     unit/net/slab_test.cpp
-    unit/net/timing_wheel_test.cpp)
-target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo)
+    unit/net/timing_wheel_test.cpp
+    unit/net/transport_tls_test.cpp)
+target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo ulw::test_tls)
 # White-box tests of the reactor internals.
 target_include_directories(net_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/net/src ${PROJECT_SOURCE_DIR}/tests)
 

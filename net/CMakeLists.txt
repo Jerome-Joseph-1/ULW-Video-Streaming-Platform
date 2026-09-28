@@ -9,8 +9,10 @@ ulw_add_library(net_lib
     src/signals.cpp
     src/socket.cpp
     src/timing_wheel.cpp
+    src/transport_plain.cpp
+    src/transport_tls.cpp
     src/uring_reactor.cpp)
 target_include_directories(net_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(net_lib
     PUBLIC ulw::core_domain ulw::os
-    PRIVATE PkgConfig::LIBURING Threads::Threads)
+    PRIVATE PkgConfig::LIBURING OpenSSL::SSL Threads::Threads)
