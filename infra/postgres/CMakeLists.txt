@@ -18,6 +18,7 @@ ulw_add_library(pg_store
     src/result.cpp
     src/sqlstate.cpp
     src/sync_connection.cpp
+    src/upload_catalog.cpp
     ${ulw_bundled_migrations})
 target_include_directories(pg_store PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(pg_store

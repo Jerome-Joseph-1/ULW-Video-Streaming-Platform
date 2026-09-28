@@ -1,11 +1,17 @@
 #pragma once
 
+#include "core/ports/catalog.hpp"
+#include "net/reactor.hpp"
+
+#include "support/reactor_harness.hpp"
 #include "sync_connection.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ulw::test {
@@ -73,6 +79,35 @@ private:
     std::string container_;
     bool paused_ = false;
 };
+
+// The result a catalog call delivers, once the reactor has delivered it.
+template <class T> class Reply {
+public:
+    [[nodiscard]] core::ports::CatalogCallback<T> callback() {
+        return [this](core::ports::CatalogResult<T> r) noexcept {
+            ++calls_;
+            result_ = std::move(r);
+        };
+    }
+    [[nodiscard]] bool ready() const noexcept { return result_.has_value(); }
+    [[nodiscard]] int calls() const noexcept { return calls_; }
+    [[nodiscard]] const core::ports::CatalogResult<T>& get() const { return *result_; }
+
+private:
+    std::optional<core::ports::CatalogResult<T>> result_;
+    int calls_ = 0;
+};
+
+// Pumps until the reply arrives; a reply that never comes fails the test.
+template <class T>
+core::ports::CatalogResult<T> wait(net::IReactor& reactor, Reply<T>& reply,
+                                   std::chrono::milliseconds limit = std::chrono::seconds(15)) {
+    if (!pump_until(reactor, [&] { return reply.ready(); }, limit)) {
+        ADD_FAILURE() << "catalog call never answered";
+        return std::unexpected(core::ports::CatalogError::Unavailable);
+    }
+    return reply.get();
+}
 
 // The first column of the first row of `sql`, as text; "" for NULL or no rows.
 [[nodiscard]] std::string scalar(infra::postgres::SyncConnection& conn, infra::postgres::Sql sql,
