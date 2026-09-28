@@ -21,5 +21,6 @@ target_include_directories(core_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(core_unit_tests PRIVATE ULW_EXPECTED_VERSION="${PROJECT_VERSION}")
 
 ulw_add_test_suite(os_unit_tests unit
+    unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
