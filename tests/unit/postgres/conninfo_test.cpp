@@ -97,6 +97,28 @@ TEST(ConnectPlan, LooksUpOnlyNamesWithoutAHostaddr) {
         ConnectPlan("host=db.internal hostaddr=10.0.0.5 dbname=ulw", "t", timeout).needs_lookup());
 }
 
+TEST(ConnectPlan, ResolvesANameIntoAddressesForLibpq) {
+    const ConnectPlan plan("host=localhost port=5432 dbname=ulw", "t", core::Millis{5000});
+    ASSERT_TRUE(plan.needs_lookup());
+    const auto endpoints = plan.resolve();
+    ASSERT_TRUE(endpoints);
+    // One entry per address, each naming the host for TLS and handing libpq a numeric address,
+    // which it connects to without a lookup of its own.
+    std::string_view hostaddrs = endpoints->hostaddr;
+    std::size_t entries = 0;
+    for (;;) {
+        const std::size_t comma = hostaddrs.find(',');
+        EXPECT_EQ(classify_host(hostaddrs.substr(0, comma)), HostForm::Numeric) << hostaddrs;
+        ++entries;
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        hostaddrs.remove_prefix(comma + 1);
+    }
+    EXPECT_TRUE(endpoints->host.starts_with("localhost"));
+    EXPECT_EQ(std::ranges::count(endpoints->host, ','), static_cast<std::ptrdiff_t>(entries) - 1);
+}
+
 std::ptrdiff_t index_of(const std::vector<const char*>& keywords, std::string_view keyword) {
     const auto it =
         std::ranges::find_if(keywords, [&](const char* k) { return k != nullptr && keyword == k; });

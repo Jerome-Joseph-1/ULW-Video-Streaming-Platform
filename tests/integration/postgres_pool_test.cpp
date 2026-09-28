@@ -17,6 +17,7 @@
 #include <expected>
 #include <format>
 #include <gtest/gtest.h>
+#include <latch>
 #include <memory>
 #include <optional>
 #include <string>
@@ -77,6 +78,17 @@ private:
     net::TimerId timer_;
     bool started_ = false;
     int ticks_ = 0;
+};
+
+// Occupies an offload thread until released, holding back every job queued behind it.
+class OffloadBlocker final : public net::IOffloadJob {
+public:
+    void run() noexcept override { released_.wait(); }
+    void complete() noexcept override {}
+    void release() noexcept { released_.count_down(); }
+
+private:
+    std::latch released_{1};
 };
 
 // listen_tcp binds ::1 when the host has IPv6, where 127.0.0.1 would not reach it.
@@ -267,13 +279,19 @@ TEST_P(PoolTest, ServerStatementTimeoutEndsAStatementButKeepsTheSession) {
     EXPECT_EQ(pool->sessions_lost(), 0U);
 }
 
-TEST_P(PoolTest, ResolvesHostNamesOffTheLoop) {
+TEST_P(PoolTest, ResolvesHostNamesOnTheOffloadPool) {
     ScratchDatabase::open(db);
     if (IsSkipped() || HasFatalFailure()) {
         return;
     }
+    OffloadBlocker blocker;
+    offload->submit(blocker);
     // A later keyword wins in a key=value string.
-    start(db->conninfo() + " host=localhost");
+    start(db->conninfo() + " host=localhost", 1);
+    // The lookup waits behind the blocker, so no session can connect and the query sits out its
+    // deadline. Had libpq resolved the name itself, on the loop, the query would have answered.
+    EXPECT_EQ(ask("SELECT 1"), std::unexpected(DbError::Timeout));
+    blocker.release();
     EXPECT_EQ(ask("SELECT 1"), Answer{"1"});
 }
 
