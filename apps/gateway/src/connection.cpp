@@ -259,7 +259,11 @@ void Connection::authenticate() noexcept {
         return;
     }
     if (!*result) {
-        req_.body_error = Status::Unauthorized;
+        // An outage at the key server says nothing about the token; a 401 would sign out a
+        // user whose session is fine, where a 503 asks them to retry.
+        req_.body_error = result->error() == core::ports::AuthError::KeysUnavailable
+                              ? Status::ServiceUnavailable
+                              : Status::Unauthorized;
         return;
     }
     req_.claims = **result;

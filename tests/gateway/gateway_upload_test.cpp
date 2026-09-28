@@ -110,6 +110,16 @@ TEST(GatewayUpload, InboundUserHeadersAreIgnored) {
     EXPECT_EQ(r->status, 401);
 }
 
+TEST(GatewayUpload, AKeyServerOutageIsARetryNotASignOut) {
+    const GatewayUnderTest gw({});
+    HttpClient c(gw.port());
+    const auto r =
+        c.request("GET", "/api/v1/videos/01890a5d-ac96-774b-bcce-b302099a8057", "down.alice");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 503);
+    EXPECT_EQ(r->header("retry-after"), "5");
+}
+
 TEST(GatewayUpload, TheAuthCookieStandsInForTheHeader) {
     const GatewayUnderTest gw({});
     HttpClient c(gw.port());

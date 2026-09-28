@@ -45,6 +45,7 @@ std::optional<std::string> read_key_set(const std::string& path) {
     constexpr std::size_t kMaxKeySet = std::size_t{64} * 1024;
     std::ifstream in(path, std::ios::binary);
     std::string out;
+    // One page per read; the whole file is at most sixteen of them.
     std::array<char, 4096> buf{};
     while (in) {
         in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
@@ -232,9 +233,13 @@ int run() {
     if (auto r = s.reactor->listen(std::move(*listener), *s.gateway); !r) {
         return fail("register listener", errno_text(r.error()));
     }
-    std::println("gateway_server {} ({}) port={} reactor={}{}", info.version, info.git_sha,
+    // Says which keys tokens are checked against, so a development key set left configured in
+    // a real deployment shows on the first line of the log.
+    std::println("gateway_server {} ({}) port={} reactor={}{} keys={}", info.version, info.git_sha,
                  config->port, net::to_string(choice->kind),
-                 choice->fell_back_from_io_uring ? " (io_uring unavailable)" : "");
+                 choice->fell_back_from_io_uring ? " (io_uring unavailable)" : "",
+                 config->dev_jwks_file.empty() ? config->jwks_url
+                                               : "DEVELOPMENT " + config->dev_jwks_file);
     static_cast<void>(std::fflush(stdout));
 
     while (!s.gateway->finished()) {
