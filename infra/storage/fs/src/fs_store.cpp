@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <unistd.h>
@@ -323,7 +324,11 @@ private:
 };
 
 FsStore::FsStore(Deps deps, fs::path root, std::uint64_t chunk_size)
-    : deps_(deps), root_(std::move(root)), chunk_size_(chunk_size) {}
+    : deps_(deps), root_(std::move(root)), chunk_size_(chunk_size) {
+    if (chunk_size_ == 0) {
+        throw std::invalid_argument("fs store chunk size is zero");
+    }
+}
 
 // Jobs still owned here may be running; the offload pool must be stopped first.
 FsStore::~FsStore() = default;
@@ -390,7 +395,7 @@ std::expected<IngestId, StorageError> FsStore::create(const core::StorageKey& ke
 
 std::expected<std::unique_ptr<core::ports::IIngestSession>, StorageError>
 FsStore::open(const IngestId& id, std::uint64_t offset, core::ports::IIngestObserver& observer) {
-    if (!valid_ref(id.backend_ref) || offset > id.total_bytes) {
+    if (!valid_ref(id.backend_ref) || id.chunk_size == 0 || offset > id.total_bytes) {
         return std::unexpected(StorageError::PreconditionFailed);
     }
     // Whether `offset` is really durable is checked by the first write job: finding out here

@@ -30,6 +30,7 @@ public:
         core::ports::IRandom& random;
     };
 
+    // Throws std::invalid_argument for a zero chunk size.
     FsStore(Deps deps, std::filesystem::path root, std::uint64_t chunk_size);
     ~FsStore() override;
     FsStore(const FsStore&) = delete;

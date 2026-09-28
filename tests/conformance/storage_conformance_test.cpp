@@ -201,6 +201,14 @@ TEST_P(StoreConformance, DiscardMakesTheObjectUnreadable) {
               std::unexpected(StorageError::NotFound));
 }
 
+TEST_P(StoreConformance, OpenRefusesAnIngestWithoutAChunkSize) {
+    IngestId id = create("no-chunk", 2 * chunk);
+    // The id comes back from the database; a damaged row must not reach a division.
+    id.chunk_size = 0;
+    ulw::test::Observer obs;
+    EXPECT_FALSE(harness->ingest().open(id, 0, obs).has_value());
+}
+
 TEST_P(StoreConformance, KeysRoundTripExactly) {
     for (const std::string_view k : {"a/b/c", "video-01J8/raw", "a.b_c-d/1"}) {
         const auto data = ulw::test::pattern(1000, k.size());

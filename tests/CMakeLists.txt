@@ -55,5 +55,6 @@ target_link_libraries(test_storage_harness PUBLIC ulw::storage_fake ulw::storage
 
 ulw_add_test_suite(storage_conformance_tests conformance
     conformance/fake_store_faults_test.cpp
+    conformance/fs_store_test.cpp
     conformance/storage_conformance_test.cpp)
 target_link_libraries(storage_conformance_tests PRIVATE ulw::test_storage_harness)

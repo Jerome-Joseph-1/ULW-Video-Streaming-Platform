@@ -214,7 +214,7 @@ FakeStore::open(const IngestId& id, std::uint64_t offset, core::ports::IIngestOb
         if (it == ingests_.end()) {
             return std::unexpected(StorageError::NotFound);
         }
-        if ((offset % chunk_size_ != 0 && offset != it->second.total) ||
+        if (id.chunk_size == 0 || (offset % chunk_size_ != 0 && offset != it->second.total) ||
             offset > contiguous_bytes(it->second)) {
             return std::unexpected(StorageError::PreconditionFailed);
         }
