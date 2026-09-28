@@ -1,0 +1,177 @@
+#include "gateway_harness.hpp"
+
+#include "infra/storage/fs_store.hpp"
+#include "net/offload_pool.hpp"
+#include "net/reactor_factory.hpp"
+#include "net/socket.hpp"
+#include "os/system_clock.hpp"
+#include "os/system_random.hpp"
+
+#include "../conformance/storage_harness.hpp"
+#include "support/fake_verifier.hpp"
+
+#include <sys/eventfd.h>
+
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <deque>
+#include <filesystem>
+#include <mutex>
+#include <unistd.h>
+
+namespace ulw::test {
+
+struct GatewayUnderTest::Loop final : net::IReadyHandler {
+    os::SystemClock clock;
+    os::SystemRandom random;
+    std::unique_ptr<net::IReactor> reactor;
+    std::unique_ptr<net::OffloadPool> pool;
+    std::unique_ptr<infra::storage::FakeStore> fake;
+    std::unique_ptr<infra::storage::FsStore> fs;
+    std::unique_ptr<infra::catalog::MemoryCatalog> catalog;
+    FakeVerifier verifier;
+    std::unique_ptr<gateway::Gateway> gateway;
+    std::filesystem::path root;
+
+    os::UniqueFd wake{::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)};
+    std::mutex mutex;
+    std::deque<std::packaged_task<void()>> tasks;
+    std::atomic<bool> stop{false};
+
+    void on_ready(net::Interest /*ready*/) noexcept override {
+        std::uint64_t n = 0;
+        [[maybe_unused]] const ssize_t got = ::read(wake.get(), &n, sizeof n);
+        std::deque<std::packaged_task<void()>> batch;
+        {
+            const std::scoped_lock lock(mutex);
+            batch.swap(tasks);
+        }
+        for (auto& t : batch) {
+            t();
+        }
+    }
+
+    void post(std::packaged_task<void()> task) {
+        {
+            const std::scoped_lock lock(mutex);
+            tasks.push_back(std::move(task));
+        }
+        const std::uint64_t one = 1;
+        [[maybe_unused]] const ssize_t put = ::write(wake.get(), &one, sizeof one);
+    }
+};
+
+GatewayUnderTest::GatewayUnderTest(GatewayOptions options) : loop_(std::make_unique<Loop>()) {
+    std::promise<void> ready;
+    auto started = ready.get_future();
+    thread_ =
+        std::jthread([this, options = std::move(options), ready = std::move(ready)]() mutable {
+            run(options, std::move(ready));
+        });
+    started.get();
+}
+
+GatewayUnderTest::~GatewayUnderTest() {
+    // Set from the loop itself: flipping it from here could let the loop exit before running
+    // the task that is supposed to wake it, and this would wait forever.
+    on_loop([this] { loop_->stop = true; });
+    thread_.join();
+}
+
+void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> ready) {
+    Loop& l = *loop_;
+    l.reactor = std::move(*net::make_reactor(reactor_kind_from_env(), l.clock, 4096));
+    l.pool = std::move(*net::OffloadPool::create(*l.reactor, 4));
+    if (options.backend == Backend::Fake) {
+        l.fake = std::make_unique<infra::storage::FakeStore>(*l.reactor, l.clock, options.chunk,
+                                                             options.plan);
+        fake_ = l.fake.get();
+        reader_ = l.fake.get();
+    } else {
+        std::string tmpl = (std::filesystem::temp_directory_path() / "ulw-gw-XXXXXX").string();
+        l.root = ::mkdtemp(tmpl.data());
+        l.fs = std::make_unique<infra::storage::FsStore>(
+            infra::storage::FsStore::Deps{.clock = l.clock, .random = l.random},
+            std::move(*net::OffloadPool::create(*l.reactor, 2)), l.root, options.chunk);
+        reader_ = l.fs.get();
+    }
+    l.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*l.reactor);
+    core::ports::IIngestStore& store =
+        l.fake ? static_cast<core::ports::IIngestStore&>(*l.fake) : *l.fs;
+    l.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *l.reactor,
+                                                                 .pool = *l.pool,
+                                                                 .store = store,
+                                                                 .catalog = *l.catalog,
+                                                                 .verifier = l.verifier,
+                                                                 .clock = l.clock,
+                                                                 .random = l.random},
+                                                   options.limits);
+    auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
+    port_ = *net::local_port(listener->get());
+    if (!l.reactor->listen(std::move(*listener), *l.gateway) ||
+        !l.reactor->watch(l.wake.get(), net::Interest::Read, l)) {
+        // Nothing a test could do without a listening gateway.
+        static_cast<void>(std::fputs("gateway harness: listen or watch failed\n", stderr));
+        std::abort();
+    }
+    ready.set_value();
+
+    while (!l.stop) {
+        l.reactor->run_once(core::Millis{50});
+        l.gateway->reap();
+    }
+    l.reactor->unwatch(l.wake.get());
+    // The pool first: a job it is running points at a connection the gateway owns.
+    l.pool.reset();
+    l.gateway.reset();
+    l.fs.reset();
+    l.fake.reset();
+    l.catalog.reset();
+    l.reactor.reset();
+    if (!l.root.empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(l.root, ec);
+    }
+}
+
+void GatewayUnderTest::on_loop(std::function<void()> fn) {
+    std::packaged_task<void()> task(std::move(fn));
+    auto done = task.get_future();
+    loop_->post(std::move(task));
+    done.get();
+}
+
+void GatewayUnderTest::set_plan(const infra::storage::FaultPlan& plan) {
+    fake_->set_plan(plan);
+}
+
+std::vector<infra::catalog::MemoryCatalog::Job> GatewayUnderTest::jobs() {
+    std::vector<infra::catalog::MemoryCatalog::Job> out;
+    on_loop([&] { out = loop_->catalog->jobs(); });
+    return out;
+}
+
+gateway::Counters GatewayUnderTest::counters() {
+    gateway::Counters out;
+    on_loop([&] { out = loop_->gateway->counters(); });
+    return out;
+}
+
+std::size_t GatewayUnderTest::connections() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->gateway->connections(); });
+    return out;
+}
+
+std::size_t GatewayUnderTest::claims() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->catalog->claims(); });
+    return out;
+}
+
+void GatewayUnderTest::drain() {
+    on_loop([&] { loop_->gateway->begin_drain(); });
+}
+
+} // namespace ulw::test
