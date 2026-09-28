@@ -101,6 +101,16 @@ std::expected<void, StorageError> write_atomically(const fs::path& p,
     return {};
 }
 
+// A marker that cannot be read is an error, not an absent marker.
+std::expected<bool, StorageError> committed(const fs::path& dir) {
+    std::error_code ec;
+    const bool present = fs::exists(dir / "committed", ec);
+    if (ec) {
+        return std::unexpected(from_error_code(ec));
+    }
+    return present;
+}
+
 std::expected<void, StorageError> write_offset(const fs::path& p, std::uint64_t value) {
     std::array<char, 24> buf{};
     const auto [end, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value);
@@ -408,7 +418,11 @@ std::expected<std::uint64_t, StorageError> FsStore::durable_offset(const IngestI
         return std::unexpected(StorageError::NotFound);
     }
     const fs::path dir = ingest_dir(id.backend_ref);
-    if (fs::exists(dir / "committed")) {
+    const auto done = committed(dir);
+    if (!done) {
+        return std::unexpected(done.error());
+    }
+    if (*done) {
         return id.total_bytes;
     }
     return read_offset(dir / "durable");
@@ -419,7 +433,11 @@ std::expected<void, StorageError> FsStore::commit(const IngestId& id) {
         return std::unexpected(StorageError::NotFound);
     }
     const fs::path dir = ingest_dir(id.backend_ref);
-    if (fs::exists(dir / "committed")) {
+    const auto done = committed(dir);
+    if (!done) {
+        return std::unexpected(done.error());
+    }
+    if (*done) {
         return {};
     }
     const auto durable = read_offset(dir / "durable");
@@ -452,8 +470,9 @@ void FsStore::discard(const IngestId& id) noexcept {
         return;
     }
     const fs::path dir = ingest_dir(id.backend_ref);
-    std::error_code ec;
-    if (!fs::exists(dir / "committed", ec)) {
+    // Only when known to be uncommitted: the marker is what lets a retried commit succeed.
+    if (committed(dir) == false) {
+        std::error_code ec;
         fs::remove_all(dir, ec);
     }
 }
@@ -510,6 +529,9 @@ std::expected<std::vector<core::StorageKey>, StorageError> FsStore::list(std::st
     const fs::path objects = root_ / "objects";
     std::error_code ec;
     if (!fs::exists(objects, ec)) {
+        if (ec) {
+            return std::unexpected(from_error_code(ec));
+        }
         return keys;
     }
     for (auto it = fs::recursive_directory_iterator(objects, ec);
@@ -535,21 +557,29 @@ std::expected<std::size_t, StorageError> FsStore::reap_abandoned(core::WallTime 
     const fs::path ingest = root_ / "ingest";
     std::error_code ec;
     if (!fs::exists(ingest, ec)) {
+        if (ec) {
+            return std::unexpected(from_error_code(ec));
+        }
         return 0;
     }
     // file_clock and system_clock share an epoch on libstdc++; clock_cast makes it explicit.
     const auto cutoff = std::chrono::clock_cast<fs::file_time_type::clock>(older_than);
     std::size_t reaped = 0;
-    for (const auto& entry : fs::directory_iterator(ingest, ec)) {
-        const auto meta_time = fs::last_write_time(entry.path() / "meta", ec);
-        if (ec || meta_time >= cutoff || fs::exists(entry.path() / "committed")) {
-            ec.clear();
+    // Incremented by hand: the range-for increment throws on a failed readdir.
+    for (auto it = fs::directory_iterator(ingest, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        std::error_code entry_ec;
+        const auto meta_time = fs::last_write_time(it->path() / "meta", entry_ec);
+        if (entry_ec || meta_time >= cutoff || committed(it->path()) != false) {
             continue;
         }
-        fs::remove_all(entry.path(), ec);
-        if (!ec) {
+        fs::remove_all(it->path(), entry_ec);
+        if (!entry_ec) {
             ++reaped;
         }
+    }
+    if (ec) {
+        return std::unexpected(from_error_code(ec));
     }
     return reaped;
 }

@@ -6,6 +6,7 @@
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <stdexcept>
@@ -38,6 +39,7 @@ protected:
         return {.reactor = *reactor, .pool = *pool, .clock = clock, .random = random};
     }
 
+    const core::StorageKey key = *core::StorageKey::parse("videos/fs/raw");
     ulw::test::FakeClock clock;
     ulw::test::FakeRandom random;
     std::filesystem::path root;
@@ -47,6 +49,24 @@ protected:
 
 TEST_F(FsStoreTest, ZeroChunkSizeIsAProgrammingError) {
     EXPECT_THROW(FsStore(deps(), root, 0), std::invalid_argument);
+}
+
+TEST_F(FsStoreTest, UnreadableMarkerIsAnErrorNotAnException) {
+    FsStore store(deps(), root, ulw::test::kLocalChunk);
+    const auto id = store.create(key, 100, *core::ContentType::parse("video/mp4"));
+    ASSERT_TRUE(id);
+    const auto ingest = root / "ingest" / id->backend_ref;
+    // A symlink to itself: stat() fails with ELOOP even for root, which a permission bit
+    // would not stop.
+    std::filesystem::create_symlink("committed", ingest / "committed");
+    EXPECT_FALSE(store.durable_offset(*id).has_value());
+    EXPECT_FALSE(store.commit(*id).has_value());
+    const auto reaped =
+        store.reap_abandoned(std::chrono::system_clock::now() + std::chrono::hours(24));
+    ASSERT_TRUE(reaped);
+    EXPECT_EQ(*reaped, 0U);
+    store.discard(*id);
+    EXPECT_TRUE(std::filesystem::exists(ingest / "durable"));
 }
 
 } // namespace
