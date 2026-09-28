@@ -175,6 +175,33 @@ TEST_F(JwkSetTest, SkipsRsaKeysWithADegeneratePublicExponent) {
     EXPECT_EQ(set.skipped, 1U);
 }
 
+// A key whose modulus is `bytes` long, top bit set so it has exactly 8 x bytes bits, and whose
+// last byte is `last`.
+std::string rsa_jwk_with_modulus(std::size_t bytes, char last) {
+    std::string n(bytes, '\x5a');
+    n.front() = '\xc3';
+    n.back() = last;
+    return R"({"kty":"RSA","kid":"odd-shape","n":")" + infra::auth::encode_base64url(n) +
+           R"(","e":"AQAB"})";
+}
+
+TEST_F(JwkSetTest, SkipsRsaKeysWithAnEvenModulus) {
+    // 256 bytes is 2048 bits, the floor, so only the parity can refuse it.
+    const KeySet even = parse(key_set({rsa_jwk_with_modulus(256, '\x02')}));
+    EXPECT_TRUE(even.keys.empty());
+    EXPECT_EQ(even.skipped, 1U);
+    const KeySet odd = parse(key_set({rsa_jwk_with_modulus(256, '\x03')}));
+    EXPECT_EQ(odd.keys.size(), 1U);
+}
+
+TEST_F(JwkSetTest, SkipsRsaModuliOver8192Bits) {
+    const KeySet at_cap = parse(key_set({rsa_jwk_with_modulus(1024, '\x03')}));
+    EXPECT_EQ(at_cap.keys.size(), 1U);
+    const KeySet over = parse(key_set({rsa_jwk_with_modulus(1025, '\x03')}));
+    EXPECT_TRUE(over.keys.empty());
+    EXPECT_EQ(over.skipped, 1U);
+}
+
 TEST_F(JwkSetTest, SkipsMembersThatAreNotObjects) {
     const KeySet set = parse(R"({"keys":[1,"key",null,[]]})");
     EXPECT_TRUE(set.keys.empty());

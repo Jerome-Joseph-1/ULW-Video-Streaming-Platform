@@ -46,6 +46,9 @@ using Bignum = std::unique_ptr<BIGNUM, BignumFree>;
 // NIST SP 800-131A disallows RSA signatures below 2048 bits (under 112-bit strength) after
 // 2013.
 constexpr int kMinRsaBits = 2048;
+// Verification cost grows with the square of the modulus; 8192 bits is past anything an
+// issuer deploys and caps one signature check at about sixteen times a 2048-bit one.
+constexpr int kMaxRsaBits = 8192;
 // RFC 7518 sections 6.2.1.2 and 6.2.1.3: P-256 coordinates are exactly 32 octets. RFC 8037
 // section 2: an Ed25519 public key is 32 octets.
 constexpr std::size_t kCoordinateBytes = 32;
@@ -67,9 +70,12 @@ std::optional<std::string> binary_member(const core::json::Value& object, std::s
     return bytes;
 }
 
-// OpenSSL imports RSA integers as they come. The public-key check is what refuses an even
-// modulus or a public exponent of 1, under which any padded digest is its own signature.
-Pkey import_public(const char* type, OSSL_PARAM_BLD* bld) {
+enum class Check : std::uint8_t { Full, Imported };
+
+// OpenSSL imports key material as it comes. For an EC key the public-key check is what puts
+// the point on the curve; RSA's check (a gcd and a primality round on the modulus) costs
+// milliseconds per key on the reactor thread, so rsa_key does the checks that matter by hand.
+Pkey import_public(const char* type, OSSL_PARAM_BLD* bld, Check check_level) {
     const std::unique_ptr<OSSL_PARAM, ParamFree> params{OSSL_PARAM_BLD_to_param(bld)};
     const std::unique_ptr<EVP_PKEY_CTX, PkeyCtxFree> ctx{
         EVP_PKEY_CTX_new_from_name(nullptr, type, nullptr)};
@@ -79,6 +85,9 @@ Pkey import_public(const char* type, OSSL_PARAM_BLD* bld) {
         return {};
     }
     Pkey key{raw};
+    if (check_level == Check::Imported) {
+        return key;
+    }
     const std::unique_ptr<EVP_PKEY_CTX, PkeyCtxFree> check{
         EVP_PKEY_CTX_new_from_pkey(nullptr, key.get(), nullptr)};
     if (!check || EVP_PKEY_public_check(check.get()) != 1) {
@@ -95,17 +104,23 @@ Pkey rsa_key(const core::json::Value& jwk) {
     }
     const Bignum bn_n{BN_bin2bn(bytes_of(*n), static_cast<int>(n->size()), nullptr)};
     const Bignum bn_e{BN_bin2bn(bytes_of(*e), static_cast<int>(e->size()), nullptr)};
+    if (!bn_n || !bn_e) {
+        return {};
+    }
+    // An even modulus factors at once, and an exponent of 1 makes every padded digest its own
+    // signature. The ceiling bounds what one key costs to verify with.
+    const int bits = BN_num_bits(bn_n.get());
+    if (bits < kMinRsaBits || bits > kMaxRsaBits || BN_is_odd(bn_n.get()) == 0 ||
+        BN_is_odd(bn_e.get()) == 0 || BN_is_one(bn_e.get()) != 0 ||
+        BN_cmp(bn_e.get(), bn_n.get()) >= 0) {
+        return {};
+    }
     const ParamBuild bld{OSSL_PARAM_BLD_new()};
-    if (!bn_n || !bn_e || !bld ||
-        OSSL_PARAM_BLD_push_BN(bld.get(), OSSL_PKEY_PARAM_RSA_N, bn_n.get()) != 1 ||
+    if (!bld || OSSL_PARAM_BLD_push_BN(bld.get(), OSSL_PKEY_PARAM_RSA_N, bn_n.get()) != 1 ||
         OSSL_PARAM_BLD_push_BN(bld.get(), OSSL_PKEY_PARAM_RSA_E, bn_e.get()) != 1) {
         return {};
     }
-    Pkey key = import_public("RSA", bld.get());
-    if (!key || EVP_PKEY_get_bits(key.get()) < kMinRsaBits) {
-        return {};
-    }
-    return key;
+    return import_public("RSA", bld.get(), Check::Imported);
 }
 
 Pkey p256_key(const core::json::Value& jwk) {
@@ -123,7 +138,7 @@ Pkey p256_key(const core::json::Value& jwk) {
                                          point.size()) != 1) {
         return {};
     }
-    return import_public("EC", bld.get());
+    return import_public("EC", bld.get(), Check::Full);
 }
 
 Pkey ed25519_key(const core::json::Value& jwk) {
@@ -134,7 +149,7 @@ Pkey ed25519_key(const core::json::Value& jwk) {
                                          x->size()) != 1) {
         return {};
     }
-    return import_public("ED25519", bld.get());
+    return import_public("ED25519", bld.get(), Check::Full);
 }
 
 std::optional<KeyType> key_type(const core::json::Value& jwk) noexcept {

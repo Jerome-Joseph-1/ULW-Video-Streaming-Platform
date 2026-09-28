@@ -10,7 +10,9 @@ namespace infra::auth {
 namespace {
 
 bool equals_ignoring_case(std::string_view a, std::string_view b) noexcept {
-    const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c; };
+    const auto lower = [](char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+    };
     return a.size() == b.size() &&
            std::ranges::equal(a, b, [&](char x, char y) { return lower(x) == lower(y); });
 }
