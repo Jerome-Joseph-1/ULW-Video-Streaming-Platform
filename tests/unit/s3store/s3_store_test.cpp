@@ -206,6 +206,18 @@ TEST_F(S3StoreTest, RetryAfterBeyondTheBackoffCapGivesUpAtOnce) {
     EXPECT_EQ(server.request_count(), 1U);
 }
 
+TEST_F(S3StoreTest, ABadSignatureFailsAtOnceAndIsCountedForSomeoneToLookAt) {
+    then({xml(403, error_xml("SignatureDoesNotMatch")), xml(403, error_xml("AccessDenied"))});
+    const auto key = *core::StorageKey::parse("videos/v1/raw");
+    const auto type = *core::ContentType::parse("video/mp4");
+    EXPECT_EQ(store->create(key, 10, type), std::unexpected(StorageError::Permanent));
+    EXPECT_EQ(server.request_count(), 1U);
+    EXPECT_EQ(store->paging_errors(), 1U);
+    // Refused by policy, which is someone's decision rather than our bug.
+    EXPECT_EQ(store->create(key, 10, type), std::unexpected(StorageError::Unauthorized));
+    EXPECT_EQ(store->paging_errors(), 1U);
+}
+
 TEST_F(S3StoreTest, RefusalIsNotRetried) {
     then({xml(403, error_xml("AccessDenied"))});
     const auto id = store->create(*core::StorageKey::parse("videos/v1/raw"), 10,

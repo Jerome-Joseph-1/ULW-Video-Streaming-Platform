@@ -116,7 +116,9 @@ void PartSession::on_transfer_done(curl::Result result) noexcept {
     if (!result) {
         fail(failed(result.error()).error);
     } else if (!is_success(*result)) {
-        fail(failed(*result).error);
+        const Failed failure = failed(*result);
+        deps_.pages.note(failure);
+        fail(failure.error);
     } else if (!result->header("etag")) {
         // Not something an S3 implementation sends; whatever mangled it may not do so twice.
         fail(StorageError::Transient);

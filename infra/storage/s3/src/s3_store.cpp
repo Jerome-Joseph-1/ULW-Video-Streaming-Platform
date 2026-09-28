@@ -192,17 +192,23 @@ S3Store::create(Deps deps, const S3StoreOptions& options) {
     }
     auto endpoint = std::make_unique<s3::Endpoint>(std::move(*bucket), deps.profile,
                                                    deps.credentials, deps.clock);
-    auto control = std::make_unique<Control>(*endpoint, options.retry, deps.random);
-    return std::make_unique<S3Store>(Token{}, std::move(deps), options.part_size,
+    auto pages = std::make_unique<s3::PageCount>();
+    auto control = std::make_unique<Control>(*endpoint, options.retry, deps.random, *pages);
+    return std::make_unique<S3Store>(Token{}, std::move(deps), options.part_size, std::move(pages),
                                      std::move(endpoint), std::move(control));
 }
 
 S3Store::S3Store(Token /*token*/, Deps deps, std::uint64_t part_size,
-                 std::unique_ptr<s3::Endpoint> endpoint, std::unique_ptr<s3::Control> control)
-    : deps_(std::move(deps)), part_size_(part_size), endpoint_(std::move(endpoint)),
-      control_(std::move(control)) {}
+                 std::unique_ptr<s3::PageCount> pages, std::unique_ptr<s3::Endpoint> endpoint,
+                 std::unique_ptr<s3::Control> control)
+    : deps_(std::move(deps)), part_size_(part_size), pages_(std::move(pages)),
+      endpoint_(std::move(endpoint)), control_(std::move(control)) {}
 
 S3Store::~S3Store() = default;
+
+std::uint64_t S3Store::paging_errors() const noexcept {
+    return pages_->value();
+}
 
 std::expected<IngestId, StorageError> S3Store::create(const core::StorageKey& key,
                                                       std::uint64_t total_bytes,
@@ -246,9 +252,11 @@ S3Store::open(const IngestId& id, std::uint64_t offset, core::ports::IIngestObse
     }
     // Whether the parts before `offset` really exist would take a ListParts, which cannot run
     // on the reactor thread; a gap shows up at commit, which refuses to complete around it.
-    return std::make_unique<s3::PartSession>(
-        s3::SessionDeps{.reactor = deps_.reactor, .multi = deps_.multi, .endpoint = *endpoint_}, id,
-        offset, observer);
+    return std::make_unique<s3::PartSession>(s3::SessionDeps{.reactor = deps_.reactor,
+                                                             .multi = deps_.multi,
+                                                             .endpoint = *endpoint_,
+                                                             .pages = *pages_},
+                                             id, offset, observer);
 }
 
 std::expected<std::uint64_t, StorageError> S3Store::durable_offset(const IngestId& id) {

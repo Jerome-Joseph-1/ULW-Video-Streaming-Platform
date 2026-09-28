@@ -25,8 +25,8 @@ namespace infra::storage::s3 {
 class Control {
 public:
     Control(const Endpoint& endpoint, const s3util::RetryPolicy::Config& retry,
-            core::ports::IRandom& random)
-        : endpoint_(endpoint), policy_(retry), random_(random) {}
+            core::ports::IRandom& random, PageCount& pages)
+        : endpoint_(endpoint), policy_(retry), random_(random), pages_(pages) {}
 
     // One attempt: a 2xx response, or why there is none.
     [[nodiscard]] std::expected<curl::Response, Failed>
@@ -48,6 +48,7 @@ public:
                     return std::move(*result);
                 }
             }
+            pages_.note(result.error());
             if (!wait_before_retry(retries, result.error())) {
                 return std::unexpected(result.error().error);
             }
@@ -61,6 +62,7 @@ private:
     const Endpoint& endpoint_;
     s3util::RetryPolicy policy_;
     core::ports::IRandom& random_;
+    PageCount& pages_;
 };
 
 } // namespace infra::storage::s3

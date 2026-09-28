@@ -5,6 +5,7 @@
 #include "net/reactor.hpp"
 
 #include "endpoint.hpp"
+#include "failure.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,7 @@ struct SessionDeps {
     net::IReactor& reactor;
     curl::Multi& multi;
     const Endpoint& endpoint;
+    PageCount& pages;
 };
 
 // Streams an ingest into its multipart upload, one UploadPart in flight at a time. Bytes pass

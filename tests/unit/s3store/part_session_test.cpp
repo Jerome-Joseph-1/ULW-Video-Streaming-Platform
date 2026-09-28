@@ -81,10 +81,10 @@ protected:
                           .backend_ref = "upload-7",
                           .total_bytes = total,
                           .chunk_size = kChunk};
-        return std::make_unique<PartSession>(infra::storage::s3::SessionDeps{.reactor = *reactor,
-                                                                             .multi = *multi,
-                                                                             .endpoint = *endpoint},
-                                             id, offset, observer);
+        return std::make_unique<PartSession>(
+            infra::storage::s3::SessionDeps{
+                .reactor = *reactor, .multi = *multi, .endpoint = *endpoint, .pages = pages},
+            id, offset, observer);
     }
 
     static std::size_t write(PartSession& s, Observer& o, std::span<const std::byte> bytes) {
@@ -150,6 +150,7 @@ protected:
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<infra::curl::Multi> multi;
     std::unique_ptr<infra::storage::s3::Endpoint> endpoint;
+    infra::storage::s3::PageCount pages;
 };
 
 TEST_P(PartSessionTest, EachPartIsOneUnsignedPutOfExactlyItsLength) {
@@ -238,6 +239,21 @@ TEST_P(PartSessionTest, RefusedCredentialsSurfaceAsUnauthorized) {
     ASSERT_TRUE(settled(*session));
     EXPECT_EQ(session->error(), StorageError::Unauthorized);
     EXPECT_EQ(session->durable_offset(), 0U);
+}
+
+TEST_P(PartSessionTest, ABadSignatureOnAPartIsPermanentAndCounted) {
+    respond_with([](const ServedRequest&) {
+        return Reply{.status = 403,
+                     .headers = {},
+                     .body = "<Error><Code>SignatureDoesNotMatch</Code></Error>"};
+    });
+    const auto data = ulw::test::pattern(kChunk);
+    Observer obs;
+    auto session = open(data.size(), 0, obs);
+    static_cast<void>(write_all(*session, obs, data));
+    ASSERT_TRUE(settled(*session));
+    EXPECT_EQ(session->error(), StorageError::Permanent);
+    EXPECT_EQ(pages.value(), 1U);
 }
 
 TEST_P(PartSessionTest, FinishMidPartCancelsThatPartAndKeepsOnlyWholeOnes) {

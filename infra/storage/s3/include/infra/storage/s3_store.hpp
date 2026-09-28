@@ -24,6 +24,7 @@ namespace infra::storage {
 namespace s3 {
 class Control;
 class Endpoint;
+class PageCount;
 } // namespace s3
 
 struct S3StoreOptions {
@@ -65,8 +66,8 @@ public:
     [[nodiscard]] static std::expected<std::unique_ptr<S3Store>, S3ConfigError>
     create(Deps deps, const S3StoreOptions& options = {});
 
-    S3Store(Token token, Deps deps, std::uint64_t part_size, std::unique_ptr<s3::Endpoint> endpoint,
-            std::unique_ptr<s3::Control> control);
+    S3Store(Token token, Deps deps, std::uint64_t part_size, std::unique_ptr<s3::PageCount> pages,
+            std::unique_ptr<s3::Endpoint> endpoint, std::unique_ptr<s3::Control> control);
     // Sessions must be destroyed first.
     ~S3Store() override;
     S3Store(const S3Store&) = delete;
@@ -87,6 +88,10 @@ public:
     [[nodiscard]] std::uint64_t preferred_chunk_size() const noexcept override {
         return part_size_;
     }
+    // Failures only a fix on our side can cure: S3 refused our signature, our credentials or
+    // clock, or the bucket we are configured with. Whoever hit one saw an ordinary error, so a
+    // metric on this count is what should page someone. Safe from any thread.
+    [[nodiscard]] std::uint64_t paging_errors() const noexcept;
 
     // The ttl is capped at the profile's longest presign; the grant reports the one used.
     [[nodiscard]] std::expected<core::ports::ReadGrant, core::ports::StorageError>
@@ -108,6 +113,8 @@ public:
 private:
     Deps deps_;
     std::uint64_t part_size_;
+    // Declared before the control, which notes failures in it, so that it outlives it.
+    std::unique_ptr<s3::PageCount> pages_;
     std::unique_ptr<s3::Endpoint> endpoint_;
     std::unique_ptr<s3::Control> control_;
 };
