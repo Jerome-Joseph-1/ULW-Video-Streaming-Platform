@@ -290,6 +290,26 @@ protected:
                       video.to_string() + "/hls/720p/index.m3u8");
     }
 
+    // One video through a worker configured with `storage_env`, against `target` read back
+    // directly.
+    void run_against(const ulw::test::LiveS3& target, const std::vector<std::string>& storage_env) {
+        auto store = infra::storage::S3Transfer::create({.credentials = target.credentials,
+                                                         .clock = clock_,
+                                                         .random = random_,
+                                                         .profile = target.profile,
+                                                         .bucket = target.bucket});
+        ASSERT_TRUE(store);
+        const auto video = queue_video(**store);
+        const auto worker = start_worker("worker-a", storage_env);
+        ASSERT_TRUE(worker->wait_for_output("outcome=", kJobPatience)) << worker->output();
+        EXPECT_NE(worker->output().find("outcome=done"), std::string::npos) << worker->output();
+        expect_ready(video);
+        expect_published_hls(**store, video);
+        worker->signal(SIGTERM);
+        EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
+        remove_prefix(target, "videos/" + video.to_string() + "/");
+    }
+
     os::SystemClock clock_;
     os::SystemRandom random_;
     std::unique_ptr<ScratchDatabase> db_;
@@ -326,27 +346,24 @@ TEST_F(WorkerTest, RunsAgainstMinio) {
         GTEST_SKIP() << "MinIO unreachable; start deploy/local/compose.yaml";
 #endif
     }
-    auto store = infra::storage::S3Transfer::create({.credentials = minio.credentials,
-                                                     .clock = clock_,
-                                                     .random = random_,
-                                                     .profile = minio.profile,
-                                                     .bucket = minio.bucket});
-    ASSERT_TRUE(store);
-    const auto video = queue_video(**store);
-    const auto worker = start_worker(
-        "worker-a",
-        {"ULW_STORAGE=minio",
-         "ULW_S3_ENDPOINT=" + env_or("ULW_MINIO_ENDPOINT", "http://127.0.0.1:9000"),
-         "ULW_BUCKET=" + minio.bucket,
-         "ULW_S3_ACCESS_KEY_ID=" + env_or("ULW_MINIO_ACCESS_KEY", "ulw-dev"),
-         "ULW_S3_SECRET_ACCESS_KEY=" + env_or("ULW_MINIO_SECRET_KEY", "ulw-dev-secret")});
-    ASSERT_TRUE(worker->wait_for_output("outcome=", kJobPatience)) << worker->output();
-    EXPECT_NE(worker->output().find("outcome=done"), std::string::npos) << worker->output();
-    expect_ready(video);
-    expect_published_hls(**store, video);
-    worker->signal(SIGTERM);
-    EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
-    remove_prefix(minio, "videos/" + video.to_string() + "/");
+    run_against(minio,
+                {"ULW_STORAGE=minio",
+                 "ULW_S3_ENDPOINT=" + env_or("ULW_MINIO_ENDPOINT", "http://127.0.0.1:9000"),
+                 "ULW_BUCKET=" + minio.bucket,
+                 "ULW_S3_ACCESS_KEY_ID=" + env_or("ULW_MINIO_ACCESS_KEY", "ulw-dev"),
+                 "ULW_S3_SECRET_ACCESS_KEY=" + env_or("ULW_MINIO_SECRET_KEY", "ulw-dev-secret")});
+}
+
+TEST_F(WorkerTest, RunsAgainstR2WhenItsCredentialsAreSet) {
+    const auto r2 = ulw::test::r2_from_env();
+    if (!r2) {
+        GTEST_SKIP() << "no R2 credentials: set ULW_R2_ACCOUNT_ID, ULW_R2_ACCESS_KEY_ID, "
+                        "ULW_R2_SECRET_ACCESS_KEY and ULW_R2_BUCKET";
+    }
+    run_against(*r2, {"ULW_STORAGE=r2", "ULW_R2_ACCOUNT_ID=" + env_or("ULW_R2_ACCOUNT_ID", ""),
+                      "ULW_BUCKET=" + r2->bucket,
+                      "ULW_S3_ACCESS_KEY_ID=" + env_or("ULW_R2_ACCESS_KEY_ID", ""),
+                      "ULW_S3_SECRET_ACCESS_KEY=" + env_or("ULW_R2_SECRET_ACCESS_KEY", "")});
 }
 
 TEST_F(WorkerTest, ASigkilledWorkersJobIsRetriedByAnotherAndItsFfmpegDiesWithIt) {
