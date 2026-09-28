@@ -14,6 +14,7 @@
 #include "support/fake_random.hpp"
 #include "support/http_test_server.hpp"
 
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <gtest/gtest.h>
@@ -339,6 +340,110 @@ TEST_F(S3StoreTest, OpenAcceptsOnlyPartBoundariesAndTheEnd) {
     EXPECT_EQ(store->open(foreign, 0, observer).error(), StorageError::NotFound);
     EXPECT_EQ(store->durable_offset(foreign), std::unexpected(StorageError::NotFound));
     EXPECT_EQ(server.request_count(), 0U);
+}
+
+TEST_F(S3StoreTest, GrantReadPresignsAGetAndCapsTheTtlAtTheProfileLimit) {
+    const auto key = *core::StorageKey::parse("videos/v1/hls/index.m3u8");
+    const auto week = store->grant_read(key, core::Seconds{30 * 24 * 3600});
+    ASSERT_TRUE(week);
+    EXPECT_EQ(week->kind, core::ports::ReadGrant::Kind::RedirectUrl);
+    EXPECT_EQ(week->ttl, core::Seconds{604'800});
+    EXPECT_TRUE(week->value.starts_with(server.base_url() + "/media/videos/v1/hls/index.m3u8?"));
+    EXPECT_NE(week->value.find("X-Amz-Expires=604800"), std::string::npos);
+    EXPECT_NE(week->value.find("X-Amz-Signature="), std::string::npos);
+    const auto minute = store->grant_read(key, core::Seconds{60});
+    ASSERT_TRUE(minute);
+    EXPECT_EQ(minute->ttl, core::Seconds{60});
+    EXPECT_NE(minute->value.find("X-Amz-Expires=60&"), std::string::npos);
+    EXPECT_EQ(store->grant_read(key, core::Seconds{0}), std::unexpected(StorageError::Permanent));
+    EXPECT_EQ(server.request_count(), 0U);
+}
+
+TEST_F(S3StoreTest, FetchSmallReturnsTheObjectAndRefusesOneOverTheLimitWithoutRetrying) {
+    then({xml(200, "0123456789"), xml(200, "0123456789")});
+    const auto key = *core::StorageKey::parse("videos/v1/manifest.json");
+    const auto fits = store->fetch_small(key, 10);
+    ASSERT_TRUE(fits);
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(fits->data()), fits->size()), "0123456789");
+    EXPECT_EQ(store->fetch_small(key, 9), std::unexpected(StorageError::Permanent));
+    EXPECT_EQ(server.request_count(), 2U);
+}
+
+TEST_F(S3StoreTest, FetchSmallOfAMissingObjectIsNotFoundEvenWithATinyLimit) {
+    then({xml(404, error_xml("NoSuchKey"))});
+    EXPECT_EQ(store->fetch_small(*core::StorageKey::parse("videos/v1/none"), 1),
+              std::unexpected(StorageError::NotFound));
+}
+
+TEST_F(S3StoreTest, PutSendsTheBytesSignedOverTheirHash) {
+    then({xml(200, {})});
+    const std::string body = "#EXTM3U\n";
+    ASSERT_TRUE(store->put(*core::StorageKey::parse("videos/v1/hls/index.m3u8"),
+                           std::as_bytes(std::span(body))));
+    const auto sent = server.requests().at(0);
+    EXPECT_EQ(sent.method, "PUT");
+    EXPECT_EQ(sent.target, "/media/videos/v1/hls/index.m3u8");
+    EXPECT_EQ(sent.body, body);
+    EXPECT_EQ(sent.header("x-amz-content-sha256"),
+              infra::s3util::payload_sha256(std::as_bytes(std::span(body))));
+}
+
+TEST_F(S3StoreTest, RemovingAMissingObjectSucceeds) {
+    then({xml(204, {}), xml(404, error_xml("NoSuchKey"))});
+    const auto key = *core::StorageKey::parse("videos/v1/raw");
+    EXPECT_TRUE(store->remove(key));
+    EXPECT_TRUE(store->remove(key));
+    EXPECT_EQ(server.requests().at(0).method, "DELETE");
+}
+
+TEST_F(S3StoreTest, ListFollowsContinuationTokensAndSkipsKeysItCannotName) {
+    then({xml(200, "<ListBucketResult><IsTruncated>true</IsTruncated>"
+                   "<NextContinuationToken>t/1=</NextContinuationToken>"
+                   "<Contents><Key>videos/a</Key></Contents>"
+                   "<Contents><Key>videos/not a key</Key></Contents></ListBucketResult>"),
+          xml(200, "<ListBucketResult><IsTruncated>false</IsTruncated>"
+                   "<Contents><Key>videos/b</Key></Contents></ListBucketResult>")});
+    const auto keys = store->list("videos/");
+    ASSERT_TRUE(keys);
+    ASSERT_EQ(keys->size(), 2U);
+    EXPECT_EQ((*keys)[0].str(), "videos/a");
+    EXPECT_EQ((*keys)[1].str(), "videos/b");
+    const auto sent = server.requests();
+    ASSERT_EQ(sent.size(), 2U);
+    EXPECT_EQ(sent[0].path(), "/media");
+    EXPECT_EQ(sent[0].query("list-type"), "2");
+    EXPECT_EQ(sent[0].query("prefix"), "videos%2F");
+    EXPECT_EQ(sent[0].query("continuation-token"), std::nullopt);
+    EXPECT_EQ(sent[1].query("continuation-token"), "t%2F1%3D");
+}
+
+TEST_F(S3StoreTest, ReapAbortsOnlyUploadsStartedBeforeTheCutoff) {
+    const auto upload = [](std::string_view key, std::string_view id, std::string_view when) {
+        return "<Upload><Key>" + std::string(key) + "</Key><UploadId>" + std::string(id) +
+               "</UploadId><Initiated>" + std::string(when) + "</Initiated></Upload>";
+    };
+    then({xml(200, "<ListMultipartUploadsResult><IsTruncated>true</IsTruncated>"
+                   "<NextKeyMarker>videos/b</NextKeyMarker>"
+                   "<NextUploadIdMarker>u-b</NextUploadIdMarker>" +
+                       upload("videos/a", "u-a", "2025-12-30T00:00:00.000Z") +
+                       upload("videos/b", "u-b", "2026-01-01T00:00:00.000Z") +
+                       "</ListMultipartUploadsResult>"),
+          xml(204, {}),
+          xml(200, "<ListMultipartUploadsResult><IsTruncated>false</IsTruncated>" +
+                       upload("videos/c", "u-c", "2025-06-01T12:00:00Z") +
+                       "</ListMultipartUploadsResult>"),
+          xml(204, {})});
+    // 2025-12-31T00:00:00Z
+    const core::WallTime cutoff{std::chrono::seconds(1767139200)};
+    EXPECT_EQ(store->reap_abandoned(cutoff), 2U);
+    const auto sent = server.requests();
+    ASSERT_EQ(sent.size(), 4U);
+    EXPECT_EQ(sent[0].target, "/media?uploads=");
+    EXPECT_EQ(sent[1].method, "DELETE");
+    EXPECT_EQ(sent[1].target, "/media/videos/a?uploadId=u-a");
+    EXPECT_EQ(sent[2].query("key-marker"), "videos%2Fb");
+    EXPECT_EQ(sent[2].query("upload-id-marker"), "u-b");
+    EXPECT_EQ(sent[3].target, "/media/videos/c?uploadId=u-c");
 }
 
 } // namespace

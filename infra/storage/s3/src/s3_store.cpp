@@ -81,6 +81,23 @@ std::uint64_t whole_parts(const std::vector<s3util::UploadedPart>& parts,
     return n;
 }
 
+// One listing request, retried, and its page parsed.
+template <typename Page, typename Parse>
+std::expected<Page, StorageError> fetch_page(const Control& control,
+                                             const s3util::RequestTarget& target, Parse parse) {
+    return control.retrying<Page>([&]() -> std::expected<Page, Failed> {
+        auto response = control.send(curl::Method::Get, target, {}, {}, kMaxDocumentBytes);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+        auto parsed = parse(response->body);
+        if (!parsed) {
+            return std::unexpected(s3::failed(parsed.error()));
+        }
+        return std::move(*parsed);
+    });
+}
+
 std::expected<std::vector<s3util::UploadedPart>, StorageError>
 list_parts(const Control& control, const s3util::Bucket& bucket, const IngestId& id) {
     std::vector<s3util::UploadedPart> parts;
@@ -92,19 +109,8 @@ list_parts(const Control& control, const s3util::Bucket& bucket, const IngestId&
         if (marker) {
             query.push_back({.name = "part-number-marker", .value = std::to_string(*marker)});
         }
-        const auto target = bucket.object(id.key, std::move(query));
-        auto page = control.retrying<s3util::ListPartsResult>(
-            [&]() -> std::expected<s3util::ListPartsResult, Failed> {
-                auto response = control.send(curl::Method::Get, target, {}, {}, kMaxDocumentBytes);
-                if (!response) {
-                    return std::unexpected(response.error());
-                }
-                auto parsed = s3util::parse_list_parts(response->body);
-                if (!parsed) {
-                    return std::unexpected(s3::failed(parsed.error()));
-                }
-                return std::move(*parsed);
-            });
+        auto page = fetch_page<s3util::ListPartsResult>(
+            control, bucket.object(id.key, std::move(query)), s3util::parse_list_parts);
         if (!page) {
             return std::unexpected(page.error());
         }
@@ -152,6 +158,20 @@ std::expected<void, StorageError> completed(const Control& control, const s3util
         return std::unexpected(StorageError::NotFound);
     }
     return {};
+}
+
+// Aborts one multipart upload; NotFound means it was already gone.
+std::expected<void, StorageError> abort_upload(const Control& control, const s3util::Bucket& bucket,
+                                               const core::StorageKey& key,
+                                               const std::string& upload_id) {
+    const auto target = bucket.object(key, {{.name = "uploadId", .value = upload_id}});
+    return control.retrying<void>([&]() -> std::expected<void, Failed> {
+        auto response = control.send(curl::Method::Delete, target, {}, {}, 0);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+        return {};
+    });
 }
 
 } // namespace
@@ -298,18 +318,129 @@ void S3Store::discard(const IngestId& id) noexcept {
     if (!plausible(id, deps_.profile)) {
         return;
     }
-    const auto target =
-        endpoint_->bucket().object(id.key, {{.name = "uploadId", .value = id.backend_ref}});
-    // 204 and NoSuchUpload both mean the upload is gone, which is all discard promises; any
-    // other failure leaves it for the reaper.
+    // Gone already counts as done, which is all discard promises; any other failure leaves
+    // the upload for the reaper.
     [[maybe_unused]] const auto aborted =
-        control_->retrying<void>([&]() -> std::expected<void, Failed> {
-            auto response = control_->send(curl::Method::Delete, target, {}, {}, 0);
-            if (!response && response.error().error != StorageError::NotFound) {
+        abort_upload(*control_, endpoint_->bucket(), id.key, id.backend_ref);
+}
+
+std::expected<core::ports::ReadGrant, StorageError> S3Store::grant_read(const core::StorageKey& key,
+                                                                        core::Seconds ttl) {
+    const core::Seconds granted = std::min(ttl, deps_.profile.max_presign_ttl);
+    auto url = endpoint_->presign_get(endpoint_->bucket().object(key), granted);
+    if (!url) {
+        return std::unexpected(StorageError::Permanent);
+    }
+    return core::ports::ReadGrant{.kind = core::ports::ReadGrant::Kind::RedirectUrl,
+                                  .value = std::move(*url),
+                                  .ttl = granted};
+}
+
+std::expected<std::vector<std::byte>, StorageError>
+S3Store::fetch_small(const core::StorageKey& key, std::size_t max) {
+    const auto target = endpoint_->bucket().object(key);
+    // A body over `max` fails the exchange rather than arriving cut short, and that failure
+    // is Permanent, so it is not fetched again.
+    return control_->retrying<std::vector<std::byte>>(
+        [&]() -> std::expected<std::vector<std::byte>, Failed> {
+            auto response = control_->send(curl::Method::Get, target, {}, {}, max);
+            if (!response) {
                 return std::unexpected(response.error());
             }
-            return {};
+            const auto bytes = std::as_bytes(std::span(response->body));
+            return std::vector<std::byte>(bytes.begin(), bytes.end());
         });
+}
+
+std::expected<void, StorageError> S3Store::put(const core::StorageKey& key,
+                                               std::span<const std::byte> bytes) {
+    const auto target = endpoint_->bucket().object(key);
+    return control_->retrying<void>([&]() -> std::expected<void, Failed> {
+        auto response = control_->send(curl::Method::Put, target, {}, bytes, 0);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+        return {};
+    });
+}
+
+std::expected<void, StorageError> S3Store::remove(const core::StorageKey& key) {
+    const auto target = endpoint_->bucket().object(key);
+    return control_->retrying<void>([&]() -> std::expected<void, Failed> {
+        auto response = control_->send(curl::Method::Delete, target, {}, {}, 0);
+        // S3 answers 204 for a key that never existed; other implementations say 404.
+        if (!response && response.error().error != StorageError::NotFound) {
+            return std::unexpected(response.error());
+        }
+        return {};
+    });
+}
+
+std::expected<std::vector<core::StorageKey>, StorageError> S3Store::list(std::string_view prefix) {
+    std::vector<core::StorageKey> keys;
+    std::optional<std::string> token;
+    while (true) {
+        std::vector<s3util::QueryParam> query{{.name = "list-type", .value = "2"},
+                                              {.name = "prefix", .value = std::string(prefix)}};
+        if (token) {
+            query.push_back({.name = "continuation-token", .value = *token});
+        }
+        auto page = fetch_page<s3util::ListObjectsResult>(
+            *control_, endpoint_->bucket().root(std::move(query)), s3util::parse_list_objects_v2);
+        if (!page) {
+            return std::unexpected(page.error());
+        }
+        for (const std::string& name : page->keys) {
+            // Keys this system did not write, and could not address, are not ours to report.
+            if (auto key = core::StorageKey::parse(name)) {
+                keys.push_back(std::move(*key));
+            }
+        }
+        if (!page->is_truncated) {
+            return keys;
+        }
+        // A token that does not change would page forever.
+        if (!page->next_continuation_token || page->next_continuation_token == token) {
+            return std::unexpected(StorageError::Permanent);
+        }
+        token = std::move(page->next_continuation_token);
+    }
+}
+
+std::expected<std::size_t, StorageError> S3Store::reap_abandoned(core::WallTime older_than) {
+    std::size_t reaped = 0;
+    std::optional<std::string> key_marker;
+    std::optional<std::string> upload_marker;
+    while (true) {
+        std::vector<s3util::QueryParam> query{{.name = "uploads", .value = ""}};
+        if (key_marker && upload_marker) {
+            query.push_back({.name = "key-marker", .value = *key_marker});
+            query.push_back({.name = "upload-id-marker", .value = *upload_marker});
+        }
+        auto page = fetch_page<s3util::ListMultipartUploadsResult>(
+            *control_, endpoint_->bucket().root(std::move(query)),
+            s3util::parse_list_multipart_uploads);
+        if (!page) {
+            return std::unexpected(page.error());
+        }
+        for (const auto& upload : page->uploads) {
+            const auto key = core::StorageKey::parse(upload.key);
+            if (upload.initiated >= older_than || !key) {
+                continue;
+            }
+            if (abort_upload(*control_, endpoint_->bucket(), *key, upload.upload_id)) {
+                ++reaped;
+            }
+        }
+        if (!page->is_truncated) {
+            return reaped;
+        }
+        if (page->next_key_marker == key_marker && page->next_upload_id_marker == upload_marker) {
+            return std::unexpected(StorageError::Permanent);
+        }
+        key_marker = std::move(page->next_key_marker);
+        upload_marker = std::move(page->next_upload_id_marker);
+    }
 }
 
 } // namespace infra::storage
