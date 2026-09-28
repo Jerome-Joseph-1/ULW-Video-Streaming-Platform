@@ -233,6 +233,16 @@ TEST_P(TransferLaws, UploadingAMissingFileFailsAndCreatesNothing) {
     EXPECT_EQ(transfer().size(k).error(), StorageError::NotFound);
 }
 
+TEST_P(TransferLaws, AnUploadNeverFollowsASymbolicLink) {
+    // What the worker uploads, a sandboxed ffmpeg wrote; a link there could name any file the
+    // worker can read.
+    write_file(local("private"), pattern(100, 7));
+    fs::create_symlink(local("private"), local("link"));
+    const auto k = key("through-a-link");
+    EXPECT_FALSE(transfer().upload(local("link"), k, segment_type()));
+    EXPECT_EQ(transfer().size(k).error(), StorageError::NotFound);
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, TransferLaws, ::testing::ValuesIn(backends()),
                          [](const auto& param_info) { return param_info.param.name; });
 

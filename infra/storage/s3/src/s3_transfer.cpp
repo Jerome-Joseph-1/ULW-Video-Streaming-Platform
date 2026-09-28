@@ -191,7 +191,9 @@ S3Transfer::download(const core::StorageKey& key, const std::filesystem::path& d
 std::expected<void, StorageError> S3Transfer::upload(const std::filesystem::path& source,
                                                      const core::StorageKey& key,
                                                      const core::ContentType& type) {
-    const os::UniqueFd fd(::open(source.c_str(), O_RDONLY | O_CLOEXEC));
+    // Never through a link: the worker uploads what a sandboxed ffmpeg wrote, and a link there
+    // could name any file the worker can read.
+    const os::UniqueFd fd(::open(source.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
     struct stat st {};
     if (!fd || ::fstat(fd.get(), &st) != 0) {
         return std::unexpected(StorageError::Permanent);

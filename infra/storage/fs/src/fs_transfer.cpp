@@ -2,7 +2,10 @@
 
 #include "os/unique_fd.hpp"
 
+#include <sys/sendfile.h>
+
 #include <cerrno>
+#include <cstddef>
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
@@ -81,9 +84,19 @@ std::expected<void, StorageError> FsTransfer::upload(const fs::path& source,
         fs::remove(temp, ignored);
         return std::unexpected(from_error_code(why));
     };
-    fs::copy_file(source, temp, fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        return discard(ec);
+    // Never through a link: the worker uploads what a sandboxed ffmpeg wrote, and a link there
+    // could name any file the worker can read.
+    const os::UniqueFd in(::open(source.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+    if (!in) {
+        return discard(std::error_code(errno, std::generic_category()));
+    }
+    ssize_t copied = 0;
+    // sendfile moves under 2 GiB a call; the loop takes the rest.
+    constexpr std::size_t kChunk = std::size_t{1} << 30U;
+    while ((copied = ::sendfile(fd.get(), in.get(), nullptr, kChunk)) > 0) {
+    }
+    if (copied < 0) {
+        return discard(std::error_code(errno, std::generic_category()));
     }
     // Readers see the old object or the new one: flushed first, then renamed over the target.
     if (::fsync(fd.get()) != 0 || ::rename(temp.c_str(), target.c_str()) != 0) {
