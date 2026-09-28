@@ -298,6 +298,23 @@ TEST_P(StoreConformance, KeysRoundTripExactly) {
     }
 }
 
+TEST_P(StoreConformance, KeysThatLookLikeTemporaryFilesAreOrdinaryKeys) {
+    const auto staged = ulw::test::pattern(100, 1);
+    const auto plain = ulw::test::pattern(200, 2);
+    ASSERT_TRUE(harness->admin().put(key("scratch/x.tmp"), staged));
+    ASSERT_TRUE(harness->admin().put(key("scratch/x"), plain));
+    const auto first = harness->reader().fetch_small(key("scratch/x.tmp"), staged.size());
+    ASSERT_TRUE(first) << "writing x disturbed x.tmp";
+    EXPECT_TRUE(*first == staged);
+    const auto second = harness->reader().fetch_small(key("scratch/x"), plain.size());
+    ASSERT_TRUE(second);
+    EXPECT_TRUE(*second == plain);
+    const auto listed = harness->admin().list(harness->key_prefix() + "scratch/");
+    ASSERT_TRUE(listed);
+    EXPECT_TRUE(std::ranges::find(*listed, key("scratch/x.tmp")) != listed->end());
+    EXPECT_TRUE(std::ranges::find(*listed, key("scratch/x")) != listed->end());
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, StoreConformance,
                          ::testing::ValuesIn(ulw::test::store_factories()),
                          [](const ::testing::TestParamInfo<ulw::test::StoreFactory>& p) {

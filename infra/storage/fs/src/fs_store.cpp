@@ -52,6 +52,26 @@ StorageError from_error_code(const std::error_code& ec) noexcept {
     return from_errno(ec.value());
 }
 
+// 16 bytes, like a UUID: ingest refs are unguessable and never collide.
+constexpr std::size_t kRefBytes = 16;
+// 8 bytes tell apart the stores sharing a root, including this process's predecessors;
+// a counter makes each name unique within one store.
+constexpr std::size_t kStagingPrefixBytes = 8;
+
+std::string random_hex(core::ports::IRandom& random, std::size_t bytes) {
+    std::array<std::byte, kRefBytes> raw{};
+    const auto used = std::span(raw).first(bytes);
+    random.fill(used);
+    std::string hex;
+    hex.reserve(2 * bytes);
+    for (const std::byte b : used) {
+        constexpr std::string_view kHex = "0123456789abcdef";
+        hex.push_back(kHex[std::to_integer<std::size_t>(b) >> 4U]);
+        hex.push_back(kHex[std::to_integer<std::size_t>(b) & 0xFU]);
+    }
+    return hex;
+}
+
 std::expected<std::string, StorageError> read_text(const fs::path& p, std::size_t max) {
     std::ifstream in(p, std::ios::binary);
     if (!in) {
@@ -78,11 +98,15 @@ std::expected<std::uint64_t, StorageError> read_offset(const fs::path& p) {
 }
 
 // Write to a temporary, flush it, rename over the target: readers see the old content or the
-// new, never a torn file.
-std::expected<void, StorageError> write_atomically(const fs::path& p,
-                                                   std::span<const std::byte> bytes) {
-    const fs::path tmp = fs::path(p).concat(".tmp");
-    const os::UniqueFd fd{::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600)};
+// new, never a torn file. `tmp` must be a name no one else is using.
+std::expected<void, StorageError>
+write_atomically(const fs::path& p, std::span<const std::byte> bytes, const fs::path& tmp) {
+    os::UniqueFd fd{::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600)};
+    if (!fd && errno == ENOENT) {
+        std::error_code ec;
+        fs::create_directories(tmp.parent_path(), ec);
+        fd = os::UniqueFd{::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600)};
+    }
     if (!fd) {
         return std::unexpected(from_errno(errno));
     }
@@ -98,7 +122,9 @@ std::expected<void, StorageError> write_atomically(const fs::path& p,
         done += static_cast<std::size_t>(n);
     }
     if (::fdatasync(fd.get()) != 0 || ::rename(tmp.c_str(), p.c_str()) != 0) {
-        return std::unexpected(from_errno(errno));
+        const int err = errno;
+        ::unlink(tmp.c_str());
+        return std::unexpected(from_errno(err));
     }
     return {};
 }
@@ -113,10 +139,11 @@ std::expected<bool, StorageError> committed(const fs::path& dir) {
     return present;
 }
 
-std::expected<void, StorageError> write_offset(const fs::path& p, std::uint64_t value) {
+std::expected<void, StorageError> write_offset(const fs::path& p, std::uint64_t value,
+                                               const fs::path& tmp) {
     std::array<char, 24> buf{};
     const auto [end, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value);
-    return write_atomically(p, std::as_bytes(std::span(buf.data(), end)));
+    return write_atomically(p, std::as_bytes(std::span(buf.data(), end)), tmp);
 }
 
 } // namespace
@@ -181,7 +208,7 @@ public:
                 error_ = from_errno(errno);
                 return;
             }
-            if (auto w = write_offset(req_.dir / "durable", end); !w) {
+            if (auto w = write_offset(req_.dir / "durable", end, store_.staging_name()); !w) {
                 error_ = w.error();
                 return;
             }
@@ -349,7 +376,8 @@ private:
 
 FsStore::FsStore(Deps deps, std::unique_ptr<net::OffloadPool> writer, fs::path root,
                  std::uint64_t chunk_size)
-    : deps_(deps), root_(std::move(root)), chunk_size_(chunk_size), writer_(std::move(writer)) {
+    : deps_(deps), root_(std::move(root)), chunk_size_(chunk_size),
+      staging_prefix_(random_hex(deps_.random, kStagingPrefixBytes)), writer_(std::move(writer)) {
     if (writer_ == nullptr) {
         throw std::invalid_argument("fs store has no writer pool");
     }
@@ -366,6 +394,13 @@ fs::path FsStore::ingest_dir(const std::string& ref) const {
 
 fs::path FsStore::object_path(const core::StorageKey& key) const {
     return root_ / "objects" / key.str();
+}
+
+// Outside objects/, so no key can collide with a temporary and list() never sees one.
+fs::path FsStore::staging_name() {
+    return root_ / "staging" /
+           (staging_prefix_ + "-" +
+            std::to_string(staged_.fetch_add(1, std::memory_order_relaxed)));
 }
 
 bool FsStore::valid_ref(const std::string& ref) {
@@ -392,15 +427,7 @@ void FsStore::finish_job(WriteJob& job) noexcept {
 std::expected<IngestId, StorageError> FsStore::create(const core::StorageKey& key,
                                                       std::uint64_t total_bytes,
                                                       const core::ContentType& /*type*/) {
-    std::array<std::byte, 16> raw{};
-    deps_.random.fill(raw);
-    std::string ref;
-    ref.reserve(32);
-    for (const std::byte b : raw) {
-        constexpr std::string_view kHex = "0123456789abcdef";
-        ref.push_back(kHex[std::to_integer<std::size_t>(b) >> 4U]);
-        ref.push_back(kHex[std::to_integer<std::size_t>(b) & 0xFU]);
-    }
+    std::string ref = random_hex(deps_.random, kRefBytes);
     const fs::path dir = ingest_dir(ref);
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -408,10 +435,11 @@ std::expected<IngestId, StorageError> FsStore::create(const core::StorageKey& ke
         return std::unexpected(from_error_code(ec));
     }
     const std::string meta = key.str() + "\n" + std::to_string(total_bytes) + "\n";
-    if (auto w = write_atomically(dir / "meta", std::as_bytes(std::span(meta))); !w) {
+    if (auto w = write_atomically(dir / "meta", std::as_bytes(std::span(meta)), staging_name());
+        !w) {
         return std::unexpected(w.error());
     }
-    if (auto w = write_offset(dir / "durable", 0); !w) {
+    if (auto w = write_offset(dir / "durable", 0, staging_name()); !w) {
         return std::unexpected(w.error());
     }
     return IngestId{.key = key,
@@ -484,7 +512,7 @@ std::expected<void, StorageError> FsStore::commit(const IngestId& id) {
         return std::unexpected(from_error_code(ec));
     }
     // The marker makes a retried commit succeed once the data file has moved.
-    return write_atomically(dir / "committed", {});
+    return write_atomically(dir / "committed", {}, staging_name());
 }
 
 void FsStore::discard(const IngestId& id) noexcept {
@@ -534,7 +562,7 @@ std::expected<void, StorageError> FsStore::put(const core::StorageKey& key,
     if (ec) {
         return std::unexpected(from_error_code(ec));
     }
-    return write_atomically(p, bytes);
+    return write_atomically(p, bytes, staging_name());
 }
 
 std::expected<void, StorageError> FsStore::remove(const core::StorageKey& key) {
@@ -563,7 +591,7 @@ std::expected<std::vector<core::StorageKey>, StorageError> FsStore::list(std::st
             continue;
         }
         const std::string rel = fs::relative(it->path(), objects, ec).generic_string();
-        if (rel.starts_with(prefix) && !rel.ends_with(".tmp")) {
+        if (rel.starts_with(prefix)) {
             if (auto k = core::StorageKey::parse(rel)) {
                 keys.push_back(*std::move(k));
             }

@@ -5,8 +5,10 @@
 #include "core/ports/storage.hpp"
 #include "net/offload_pool.hpp"
 
+#include <atomic>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace infra::storage {
@@ -16,6 +18,7 @@ namespace infra::storage {
 //   ingest/<ref>/data          bytes received so far
 //   ingest/<ref>/durable       offset known to be on disk (updated after fdatasync)
 //   ingest/<ref>/meta          key and total size
+//   staging/                   files being written, renamed into place once complete
 // File I/O never runs on the reactor thread: writes go to the store's own offload pool, and
 // the control operations block by contract and are called from the caller's pool.
 //
@@ -74,6 +77,8 @@ private:
 
     [[nodiscard]] std::filesystem::path ingest_dir(const std::string& ref) const;
     [[nodiscard]] std::filesystem::path object_path(const core::StorageKey& key) const;
+    // Thread-safe.
+    [[nodiscard]] std::filesystem::path staging_name();
     [[nodiscard]] static bool valid_ref(const std::string& ref);
     WriteJob& adopt_job(std::unique_ptr<WriteJob> job);
     void finish_job(WriteJob& job) noexcept;
@@ -81,6 +86,8 @@ private:
     Deps deps_;
     std::filesystem::path root_;
     std::uint64_t chunk_size_;
+    const std::string staging_prefix_;
+    std::atomic<std::uint64_t> staged_{0};
     // Reactor-thread only. Jobs outlive the sessions that started them when a session is
     // aborted mid-write, so the store owns them.
     std::vector<std::unique_ptr<WriteJob>> jobs_;
