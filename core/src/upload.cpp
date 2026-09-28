@@ -29,17 +29,15 @@ std::expected<void, DomainError> validate(const UploadRecord& record) noexcept {
 
 } // namespace
 
-std::expected<Upload, DomainError> Upload::create(UploadId id, VideoId video_id,
-                                                  const UserId& owner, std::uint64_t size_bytes,
-                                                  std::uint64_t chunk_size, WallTime expires_at) {
-    return rehydrate(UploadRecord{.id = id,
-                                  .video_id = video_id,
-                                  .owner = owner,
-                                  .size_bytes = size_bytes,
-                                  .chunk_size = chunk_size,
+std::expected<Upload, DomainError> Upload::create(const UploadParams& params) {
+    return rehydrate(UploadRecord{.id = params.id,
+                                  .video_id = params.video_id,
+                                  .owner = params.owner,
+                                  .size_bytes = params.size_bytes,
+                                  .chunk_size = params.chunk_size,
                                   .durable_offset = 0,
                                   .state = UploadState::Active,
-                                  .expires_at = expires_at});
+                                  .expires_at = params.expires_at});
 }
 
 std::expected<Upload, DomainError> Upload::rehydrate(const UploadRecord& record) {

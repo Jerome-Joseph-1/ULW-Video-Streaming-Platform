@@ -49,6 +49,15 @@ core::WallTime expiry() {
     return ulw::test::FakeClock{}.wall_now() + std::chrono::hours{24};
 }
 
+core::UploadParams params(std::uint64_t size_bytes, std::uint64_t chunk_size) {
+    return {.id = upload_id(),
+            .video_id = video_id(),
+            .owner = owner(),
+            .size_bytes = size_bytes,
+            .chunk_size = chunk_size,
+            .expires_at = expiry()};
+}
+
 UploadRecord record_in(UploadState state, std::uint64_t durable_offset) {
     return UploadRecord{.id = upload_id(),
                         .video_id = video_id(),
@@ -76,7 +85,7 @@ auto observe(const Upload& upload) {
 }
 
 TEST(Upload, CreateStartsActiveAtOffsetZero) {
-    const auto upload = Upload::create(upload_id(), video_id(), owner(), kSize, kChunk, expiry());
+    const auto upload = Upload::create(params(kSize, kChunk));
     ASSERT_TRUE(upload.has_value());
     EXPECT_EQ(upload->id(), upload_id());
     EXPECT_EQ(upload->video_id(), video_id());
@@ -90,7 +99,7 @@ TEST(Upload, CreateStartsActiveAtOffsetZero) {
 
 TEST(Upload, CreateEnforcesTheSizeBoundsExactly) {
     const auto create = [](std::uint64_t size_bytes, std::uint64_t chunk_size) {
-        return Upload::create(upload_id(), video_id(), owner(), size_bytes, chunk_size, expiry());
+        return Upload::create(params(size_bytes, chunk_size));
     };
     EXPECT_TRUE(create(1, kChunk).has_value());
     EXPECT_TRUE(create(Upload::kMaxSizeBytes, kChunk).has_value());

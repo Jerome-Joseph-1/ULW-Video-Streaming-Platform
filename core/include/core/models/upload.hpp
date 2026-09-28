@@ -23,17 +23,24 @@ struct UploadRecord {
     WallTime expires_at;
 };
 
+// Named fields so a caller cannot swap the two sizes without it showing at the call site.
+struct UploadParams {
+    UploadId id;
+    VideoId video_id;
+    UserId owner;
+    std::uint64_t size_bytes = 0;
+    std::uint64_t chunk_size = 0;
+    WallTime expires_at;
+};
+
 // One resumable upload. The durable offset never moves backwards, so a client resuming from any
 // offset the server once reported cannot leave a gap. Rejected calls leave the object untouched.
 class Upload {
 public:
-    // S3-compatible stores assemble an object from at most 10,000 parts, which at 8 MiB chunks is
-    // 78 GiB. 50 GiB is the product cap and keeps clear of that ceiling.
+    // 50 GiB: a product cap on one source file, not a storage limit.
     static constexpr std::uint64_t kMaxSizeBytes = 50ULL << 30U;
 
-    [[nodiscard]] static std::expected<Upload, DomainError>
-    create(UploadId id, VideoId video_id, const UserId& owner, std::uint64_t size_bytes,
-           std::uint64_t chunk_size, WallTime expires_at);
+    [[nodiscard]] static std::expected<Upload, DomainError> create(const UploadParams& params);
     [[nodiscard]] static std::expected<Upload, DomainError> rehydrate(const UploadRecord& record);
 
     // Moving to the current offset succeeds without effect: a retried progress report is not an
