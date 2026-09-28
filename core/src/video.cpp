@@ -7,8 +7,10 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <initializer_list>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -89,6 +91,22 @@ bool is_valid_title(std::string_view title) noexcept {
     return true;
 }
 
+// Every transition bumps the version: leaving Init takes at least one, and reaching Ready at
+// least two (Init -> Processing -> Ready).
+std::uint64_t lowest_reachable_version(VideoState state) noexcept {
+    switch (state) {
+    case VideoState::Init:
+        return 0;
+    case VideoState::Uploading:
+    case VideoState::Processing:
+    case VideoState::Failed:
+        return 1;
+    case VideoState::Ready:
+        return 2;
+    }
+    return std::numeric_limits<std::uint64_t>::max();
+}
+
 bool is_terminal(VideoState state) noexcept {
     return state == VideoState::Ready || state == VideoState::Failed;
 }
@@ -106,6 +124,11 @@ std::expected<void, DomainError> validate(const VideoRecord& record) noexcept {
         return std::unexpected(DomainError::InvalidDuration);
     }
     if (ready != record.duration.has_value() || (!failed && record.error_reason)) {
+        return std::unexpected(DomainError::CorruptRecord);
+    }
+    // At the maximum the next bump would wrap and defeat the repository's version check.
+    if (record.version < lowest_reachable_version(record.state) ||
+        record.version == std::numeric_limits<std::uint64_t>::max()) {
         return std::unexpected(DomainError::CorruptRecord);
     }
     return {};

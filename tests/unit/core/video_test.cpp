@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <expected>
 #include <gtest/gtest.h>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -311,6 +312,23 @@ VideoRecord with_duration(VideoRecord record, std::optional<Millis> duration) {
     return record;
 }
 
+VideoRecord with_version(VideoRecord record, std::uint64_t version) {
+    record.version = version;
+    return record;
+}
+
+TEST(Video, RehydrateAcceptsTheLowestReachableVersions) {
+    for (const auto& [state, version] :
+         {std::pair{VideoState::Init, 0U}, std::pair{VideoState::Uploading, 1U},
+          std::pair{VideoState::Processing, 1U}, std::pair{VideoState::Failed, 1U},
+          std::pair{VideoState::Ready, 2U}}) {
+        EXPECT_TRUE(Video::rehydrate(with_version(record_in(state), version)).has_value())
+            << std::to_underlying(state);
+    }
+    const std::uint64_t highest = std::numeric_limits<std::uint64_t>::max() - 1;
+    EXPECT_TRUE(Video::rehydrate(with_version(record_in(VideoState::Init), highest)).has_value());
+}
+
 TEST(Video, RehydrateRejectsRecordsThatContradictTheirState) {
     const std::array cases{
         CorruptCase{.name = "failed without reason",
@@ -333,6 +351,22 @@ TEST(Video, RehydrateRejectsRecordsThatContradictTheirState) {
                     .error = DomainError::CorruptRecord},
         CorruptCase{.name = "failed with duration",
                     .record = with_duration(record_in(VideoState::Failed), kDuration),
+                    .error = DomainError::CorruptRecord},
+        CorruptCase{.name = "uploading at version 0",
+                    .record = with_version(record_in(VideoState::Uploading), 0),
+                    .error = DomainError::CorruptRecord},
+        CorruptCase{.name = "processing at version 0",
+                    .record = with_version(record_in(VideoState::Processing), 0),
+                    .error = DomainError::CorruptRecord},
+        CorruptCase{.name = "failed at version 0",
+                    .record = with_version(record_in(VideoState::Failed), 0),
+                    .error = DomainError::CorruptRecord},
+        CorruptCase{.name = "ready at version 1",
+                    .record = with_version(record_in(VideoState::Ready), 1),
+                    .error = DomainError::CorruptRecord},
+        CorruptCase{.name = "version that cannot be bumped",
+                    .record = with_version(record_in(VideoState::Init),
+                                           std::numeric_limits<std::uint64_t>::max()),
                     .error = DomainError::CorruptRecord},
         CorruptCase{.name = "empty title",
                     .record = with_title(record_in(VideoState::Init), ""),
