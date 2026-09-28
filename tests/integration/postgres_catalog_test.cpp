@@ -435,17 +435,23 @@ TEST_P(CatalogTest, LosingTheLockSessionLosesEveryClaim) {
     EXPECT_TRUE(claim(*other, u.upload.id));
 }
 
-TEST_P(CatalogTest, FailedClaimOfAMissingUploadLetsGoOfItsLock) {
-    const core::UploadId missing = new_upload().upload.id;
-    ASSERT_EQ(claim(*catalog, missing).error(), CatalogError::NotFound);
+TEST_P(CatalogTest, ClaimThatLoadsACorruptRowLetsGoOfItsLock) {
+    const NewUpload u = new_upload();
+    ASSERT_TRUE(create(*catalog, u));
+    // The owner still matches, so the lock is taken; only the load afterwards fails.
+    auto conn = db->session();
+    ASSERT_TRUE(conn.exec("UPDATE uploads SET chunk_size = 0 WHERE id = $1",
+                          Params{}.add_uuid(u.upload.id.uuid())));
+    ASSERT_EQ(claim(*catalog, u.upload.id).error(), CatalogError::Corrupt);
     other = make_catalog();
+    // The unlock travels on another session than the next claim; wait for it to land.
     CatalogResult<StoredUpload> seen = std::unexpected(CatalogError::Conflict);
     const bool settled = ulw::test::pump_until(*reactor, [&] {
-        seen = claim(*other, missing);
+        seen = claim(*other, u.upload.id);
         return seen || seen.error() != CatalogError::Conflict;
     });
     ASSERT_TRUE(settled);
-    EXPECT_EQ(seen.error(), CatalogError::NotFound);
+    EXPECT_EQ(seen.error(), CatalogError::Corrupt);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, CatalogTest,
