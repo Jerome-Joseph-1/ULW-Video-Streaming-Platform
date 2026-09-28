@@ -103,7 +103,8 @@ TEST_P(StoreConformance, AbortIsIdempotentAndSafe) {
     ulw::test::Observer obs;
     auto session = harness->ingest().open(id, 0, obs);
     ASSERT_TRUE(session);
-    ASSERT_TRUE(harness->write_all(**session, obs, std::span(data).first(chunk / 2)));
+    // A whole chunk, so the backend has work of its own in flight when the abort lands.
+    ASSERT_TRUE(harness->write_all(**session, obs, std::span(data).first(chunk + (chunk / 2))));
     (*session)->abort();
     (*session)->abort();
     const int calls = obs.calls;
@@ -118,7 +119,10 @@ TEST_P(StoreConformance, AbortIsIdempotentAndSafe) {
     ASSERT_TRUE(reopened);
     ASSERT_TRUE(harness->write_all(**reopened, again, std::span(data).subspan(*at)));
     ASSERT_TRUE(harness->finish(**reopened, again));
-    EXPECT_TRUE(harness->ingest().commit(id));
+    ASSERT_TRUE(harness->ingest().commit(id));
+    const auto stored = harness->reader().fetch_small(id.key, data.size());
+    ASSERT_TRUE(stored);
+    EXPECT_TRUE(*stored == data);
 }
 
 TEST_P(StoreConformance, CommitIsIdempotent) {
