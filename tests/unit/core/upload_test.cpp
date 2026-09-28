@@ -160,10 +160,19 @@ TEST(Upload, AbortEndsAnActiveUploadAndKeepsItsOffset) {
 
 enum class Op : std::uint8_t { AdvanceTo, Complete, Abort };
 
-std::expected<void, DomainError> apply(Upload& upload, Op op) {
-    switch (op) {
+struct FinishedCase {
+    UploadState state;
+    std::uint64_t durable_offset;
+    Op op;
+    // Only Op::AdvanceTo uses it. It differs from durable_offset, so an update that runs before
+    // the state check shows up as a changed field.
+    std::uint64_t advance_target;
+};
+
+std::expected<void, DomainError> apply(Upload& upload, const FinishedCase& c) {
+    switch (c.op) {
     case Op::AdvanceTo:
-        return upload.advance_to(upload.durable_offset());
+        return upload.advance_to(c.advance_target);
     case Op::Complete:
         return upload.complete();
     case Op::Abort:
@@ -171,11 +180,6 @@ std::expected<void, DomainError> apply(Upload& upload, Op op) {
     }
     std::unreachable();
 }
-
-struct FinishedCase {
-    UploadState state;
-    Op op;
-};
 
 std::string name_of(const FinishedCase& c) {
     constexpr std::array<std::string_view, 3> kStates{"Active", "Completed", "Aborted"};
@@ -192,24 +196,23 @@ class FinishedUpload : public testing::TestWithParam<FinishedCase> {};
 
 TEST_P(FinishedUpload, RejectsEveryOperationWithoutSideEffects) {
     const FinishedCase& c = GetParam();
-    // At full size every operation would succeed on an active upload, so only the state can
-    // explain a rejection.
-    Upload upload = upload_in(c.state, kSize);
+    Upload upload = upload_in(c.state, c.durable_offset);
     const auto before = observe(upload);
-    EXPECT_EQ(apply(upload, c.op), std::unexpected(DomainError::UploadNotActive));
+    EXPECT_EQ(apply(upload, c), std::unexpected(DomainError::UploadNotActive));
     EXPECT_EQ(observe(upload), before);
 }
 
-INSTANTIATE_TEST_SUITE_P(Upload, FinishedUpload,
-                         testing::Values(FinishedCase{UploadState::Completed, Op::AdvanceTo},
-                                         FinishedCase{UploadState::Completed, Op::Complete},
-                                         FinishedCase{UploadState::Completed, Op::Abort},
-                                         FinishedCase{UploadState::Aborted, Op::AdvanceTo},
-                                         FinishedCase{UploadState::Aborted, Op::Complete},
-                                         FinishedCase{UploadState::Aborted, Op::Abort}),
-                         [](const testing::TestParamInfo<FinishedCase>& p) {
-                             return name_of(p.param);
-                         });
+// A completed upload always sits at its size; the aborted one stops mid-way so that advancing to
+// the end would be a legal move for an active upload.
+INSTANTIATE_TEST_SUITE_P(
+    Upload, FinishedUpload,
+    testing::Values(FinishedCase{UploadState::Completed, kSize, Op::AdvanceTo, kSize - 1},
+                    FinishedCase{UploadState::Completed, kSize, Op::Complete, kSize},
+                    FinishedCase{UploadState::Completed, kSize, Op::Abort, kSize},
+                    FinishedCase{UploadState::Aborted, kChunk, Op::AdvanceTo, kSize},
+                    FinishedCase{UploadState::Aborted, kChunk, Op::Complete, kSize},
+                    FinishedCase{UploadState::Aborted, kChunk, Op::Abort, kSize}),
+    [](const testing::TestParamInfo<FinishedCase>& p) { return name_of(p.param); });
 
 TEST(Upload, ExpiresExactlyAtTheDeadline) {
     const Upload upload = upload_in(UploadState::Active, 0);

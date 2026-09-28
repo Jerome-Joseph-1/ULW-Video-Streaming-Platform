@@ -12,7 +12,6 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -23,14 +22,6 @@ using ulw::test::FakeClock;
 using ulw::test::FakeRandom;
 
 constexpr std::string_view kSample = "0192f3c4-7a1b-7c2d-8e3f-0123456789ab";
-
-// For literals the test knows are valid; throwing fails only the current test.
-Uuid uuid(std::string_view text) {
-    if (const std::optional<Uuid> id = Uuid::parse(text)) {
-        return *id;
-    }
-    throw std::invalid_argument(std::string(text));
-}
 
 std::optional<std::string> reparse(std::string_view text) {
     return Uuid::parse(text).transform(&Uuid::to_string);
@@ -53,7 +44,7 @@ TEST(Uuid, ParsesAndReformatsTheCanonicalForm) {
 }
 
 TEST(Uuid, DecodesDigitsInBigEndianByteOrder) {
-    const Uuid id = uuid("00112233-4455-6677-8899-aabbccddeeff");
+    const Uuid id = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff").value();
     std::array<std::byte, Uuid::kByteLength> expected{};
     for (std::size_t i = 0; i < expected.size(); ++i) {
         expected.at(i) = static_cast<std::byte>(i * 0x11U);
@@ -88,28 +79,28 @@ TEST(Uuid, RejectsEveryNonCanonicalSpelling) {
 
 TEST(Uuid, FormatToWritesTheCanonicalTextIntoTheCallerBuffer) {
     std::array<char, Uuid::kTextLength> buffer{};
-    uuid(kSample).format_to(buffer);
+    Uuid::parse(kSample).value().format_to(buffer);
     EXPECT_EQ(std::string_view(buffer.data(), buffer.size()), kSample);
 }
 
 TEST(Uuid, OrdersByLeadingBytesFirst) {
-    const Uuid low = uuid("0fffffff-ffff-ffff-ffff-ffffffffffff");
-    const Uuid high = uuid("10000000-0000-0000-0000-000000000000");
+    const Uuid low = Uuid::parse("0fffffff-ffff-ffff-ffff-ffffffffffff").value();
+    const Uuid high = Uuid::parse("10000000-0000-0000-0000-000000000000").value();
     EXPECT_LT(low, high);
     EXPECT_NE(low, high);
 }
 
 TEST(Uuid, HashChangesWithEveryDigit) {
     const std::hash<Uuid> hash;
-    const Uuid base = uuid(kSample);
-    EXPECT_EQ(hash(uuid(kSample)), hash(base));
+    const Uuid base = Uuid::parse(kSample).value();
+    EXPECT_EQ(hash(Uuid::parse(kSample).value()), hash(base));
     for (std::size_t at = 0; at < kSample.size(); ++at) {
         if (kSample[at] == '-') {
             continue;
         }
         std::string text(kSample);
         text[at] = text[at] == '0' ? '1' : '0';
-        EXPECT_NE(hash(uuid(text)), hash(base)) << "digit " << at;
+        EXPECT_NE(hash(Uuid::parse(text).value()), hash(base)) << "digit " << at;
     }
 }
 

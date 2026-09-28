@@ -29,6 +29,10 @@ using core::VideoState;
 constexpr std::string_view kTitle = "Launch keynote";
 constexpr std::string_view kReason = "decoder rejected stream";
 constexpr Millis kDuration{90'000};
+// What apply() passes. Distinct from the stored values above, so a rejected call that writes
+// before it checks shows up as a changed field.
+constexpr std::string_view kNewReason = "worker lost";
+constexpr Millis kNewDuration{120'000};
 // Not 0, so a transition that resets the version instead of incrementing it is caught.
 constexpr std::uint64_t kVersion = 5;
 
@@ -81,9 +85,9 @@ std::expected<void, DomainError> apply(Video& video, Op op) {
     case Op::StartProcessing:
         return video.start_processing();
     case Op::MarkReady:
-        return video.mark_ready(kDuration);
+        return video.mark_ready(kNewDuration);
     case Op::MarkFailed:
-        return video.mark_failed(std::string(kReason));
+        return video.mark_failed(std::string(kNewReason));
     }
     std::unreachable();
 }
@@ -118,9 +122,9 @@ TEST_P(LegalTransition, EntersTheTargetStateAndBumpsTheVersionOnce) {
     EXPECT_EQ(video.id(), video_id());
     EXPECT_EQ(video.title(), kTitle);
     EXPECT_EQ(video.duration(),
-              c.to == VideoState::Ready ? std::optional(kDuration) : std::nullopt);
+              c.to == VideoState::Ready ? std::optional(kNewDuration) : std::nullopt);
     EXPECT_EQ(video.error_reason(),
-              c.to == VideoState::Failed ? std::optional(kReason) : std::nullopt);
+              c.to == VideoState::Failed ? std::optional(kNewReason) : std::nullopt);
 }
 
 INSTANTIATE_TEST_SUITE_P(
