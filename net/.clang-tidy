@@ -1,0 +1,8 @@
+# sockaddr, epoll_event, io_uring CQEs and the buffer ring cannot be handled without these;
+# they stay enabled everywhere outside the OS-facing modules.
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index

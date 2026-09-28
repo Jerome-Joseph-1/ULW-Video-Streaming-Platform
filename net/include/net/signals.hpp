@@ -11,10 +11,8 @@ enum class Signal { Terminate, Reload };
 
 class ISignalHandler {
 public:
+    virtual ~ISignalHandler() = default;
     virtual void on_signal(Signal signal) noexcept = 0;
-
-protected:
-    ~ISignalHandler() = default;
 };
 
 // Blocks SIGTERM, SIGINT and SIGHUP and ignores SIGPIPE. Must run before any thread is
@@ -29,7 +27,7 @@ public:
     create(IReactor& reactor, ISignalHandler& handler);
 
     SignalWatcher(IReactor& reactor, ISignalHandler& handler, os::UniqueFd fd) noexcept;
-    ~SignalWatcher();
+    ~SignalWatcher() override;
     SignalWatcher(const SignalWatcher&) = delete;
     SignalWatcher& operator=(const SignalWatcher&) = delete;
 

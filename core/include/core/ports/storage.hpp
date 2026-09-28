@@ -42,12 +42,10 @@ struct IngestId {
 
 class IIngestObserver {
 public:
+    virtual ~IIngestObserver() = default;
     // Runs on the reactor thread, never re-entrantly from inside a session call: write() may
     // now accept more bytes, or state() has changed.
     virtual void on_ingest_progress() noexcept = 0;
-
-protected:
-    ~IIngestObserver() = default;
 };
 
 // One in-flight chunk. Every member runs on the reactor thread and never blocks.

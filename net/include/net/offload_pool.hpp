@@ -16,13 +16,11 @@ namespace net {
 // Work that must not run on the reactor thread: blocking storage control calls, file I/O.
 class IOffloadJob {
 public:
+    virtual ~IOffloadJob() = default;
     // On a pool thread. May block.
     virtual void run() noexcept = 0;
     // Back on the reactor thread, once run() has returned.
     virtual void complete() noexcept = 0;
-
-protected:
-    ~IOffloadJob() = default;
 };
 
 // A fixed set of threads fed from the reactor thread. Completions come back through an
@@ -35,7 +33,7 @@ public:
 
     OffloadPool(IReactor& reactor, os::UniqueFd event_fd, std::size_t threads);
     // Stops the threads. Jobs still queued never run and never complete.
-    ~OffloadPool();
+    ~OffloadPool() override;
     OffloadPool(const OffloadPool&) = delete;
     OffloadPool& operator=(const OffloadPool&) = delete;
 
