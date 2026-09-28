@@ -36,7 +36,9 @@ namespace {
 constexpr core::Millis kKeyLifetime = std::chrono::minutes(15);
 constexpr core::Millis kVerdictLifetime = kKeyLifetime;
 
-// A kid still missing after a fetch is refused without another fetch for this long.
+// A kid still missing after a fetch is refused without another fetch for this long: a client
+// replaying one stale token costs a fetch a minute at most, and a key published just after
+// the fetch that missed it is not locked out for longer.
 constexpr core::Millis kUnknownKidMemory = std::chrono::seconds(60);
 
 // Fetches for unseen kids are at least this far apart, which caps what junk kids can cost the

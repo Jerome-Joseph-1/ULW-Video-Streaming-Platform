@@ -43,8 +43,8 @@ struct BignumFree {
 using ParamBuild = std::unique_ptr<OSSL_PARAM_BLD, ParamBuildFree>;
 using Bignum = std::unique_ptr<BIGNUM, BignumFree>;
 
-// NIST SP 800-57 part 1 puts RSA below 2048 bits under 112 bits of security, which it has
-// disallowed for signatures since 2013.
+// NIST SP 800-131A disallows RSA signatures below 2048 bits (under 112-bit strength) after
+// 2013.
 constexpr int kMinRsaBits = 2048;
 // RFC 7518 sections 6.2.1.2 and 6.2.1.3: P-256 coordinates are exactly 32 octets. RFC 8037
 // section 2: an Ed25519 public key is 32 octets.
@@ -67,9 +67,8 @@ std::optional<std::string> binary_member(const core::json::Value& object, std::s
     return bytes;
 }
 
-// OpenSSL imports any integers or octets it is handed; the public-key check is what refuses
-// an even modulus, a public exponent of 1 (under which any padded digest is its own
-// signature) and a point off the curve.
+// OpenSSL imports RSA integers as they come. The public-key check is what refuses an even
+// modulus or a public exponent of 1, under which any padded digest is its own signature.
 Pkey import_public(const char* type, OSSL_PARAM_BLD* bld) {
     const std::unique_ptr<OSSL_PARAM, ParamFree> params{OSSL_PARAM_BLD_to_param(bld)};
     const std::unique_ptr<EVP_PKEY_CTX, PkeyCtxFree> ctx{
