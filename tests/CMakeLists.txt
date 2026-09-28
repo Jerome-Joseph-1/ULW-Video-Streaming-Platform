@@ -79,6 +79,15 @@ ulw_add_test_suite(storage_conformance_tests conformance
     conformance/fs_store_test.cpp
     conformance/storage_conformance_test.cpp)
 target_link_libraries(storage_conformance_tests PRIVATE ulw::test_storage_harness)
+
+ulw_add_test_suite(transfer_conformance_tests conformance
+    conformance/object_transfer_conformance_test.cpp)
+target_link_libraries(transfer_conformance_tests PRIVATE ulw::storage_fs_transfer)
+target_include_directories(transfer_conformance_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+if(ULW_CONFORMANCE_LIVE)
+    target_link_libraries(transfer_conformance_tests PRIVATE ulw::storage_s3 ulw::test_live_s3)
+    target_compile_definitions(transfer_conformance_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 ulw_add_test_suite(http_unit_tests unit
     unit/http/backpressure_test.cpp
     unit/http/parser_limits_test.cpp
