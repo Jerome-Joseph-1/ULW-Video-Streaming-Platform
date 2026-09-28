@@ -11,7 +11,7 @@ namespace gateway {
 // Fetches the verifier's key set over HTTPS on the reactor's libcurl multi.
 class KeySetFetcher final : public infra::auth::IKeySetFetcher {
 public:
-    explicit KeySetFetcher(infra::curl::Multi& multi) noexcept : http_(multi) {}
+    explicit KeySetFetcher(infra::curl::Multi& multi) noexcept;
 
     void fetch(std::string_view url, infra::auth::IKeySetReceiver& receiver) noexcept override;
     void cancel(infra::auth::IKeySetReceiver& receiver) noexcept override;

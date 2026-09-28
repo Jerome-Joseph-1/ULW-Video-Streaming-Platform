@@ -136,6 +136,9 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     set(curl_easy_setopt(e, CURLOPT_CONNECTTIMEOUT_MS, kConnectTimeoutMs));
     set(curl_easy_setopt(e, CURLOPT_LOW_SPEED_LIMIT, kLowSpeedBytes));
     set(curl_easy_setopt(e, CURLOPT_LOW_SPEED_TIME, kLowSpeedSeconds));
+    // The option is read through varargs as a long, whatever the duration's own type.
+    const long timeout_ms = request.timeout.count();
+    set(curl_easy_setopt(e, CURLOPT_TIMEOUT_MS, timeout_ms));
     set(curl_easy_setopt(e, CURLOPT_ERRORBUFFER, error_.data()));
     set(curl_easy_setopt(e, CURLOPT_HTTPHEADER, header_list_.get()));
     set(curl_easy_setopt(e, CURLOPT_HEADERFUNCTION, &Exchange::on_header));

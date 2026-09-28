@@ -25,17 +25,21 @@ private:
     std::unique_ptr<Transfer> transfer_;
 };
 
-HttpFetcher::HttpFetcher(Multi& multi) noexcept : multi_(multi) {}
+HttpFetcher::HttpFetcher(Multi& multi, core::Millis timeout) noexcept
+    : multi_(multi), timeout_(timeout) {}
 
 HttpFetcher::~HttpFetcher() = default;
 
 std::expected<void, Failure> HttpFetcher::get(std::string url, std::size_t max_body,
                                               Callback done) {
     auto fetch = std::make_unique<Fetch>(*this, std::move(done));
-    auto transfer = Transfer::start(
-        multi_,
-        Request{.method = Method::Get, .url = std::move(url), .headers = {}, .max_body = max_body},
-        *fetch);
+    auto transfer = Transfer::start(multi_,
+                                    Request{.method = Method::Get,
+                                            .url = std::move(url),
+                                            .headers = {},
+                                            .max_body = max_body,
+                                            .timeout = timeout_},
+                                    *fetch);
     if (!transfer) {
         return std::unexpected(std::move(transfer.error()));
     }

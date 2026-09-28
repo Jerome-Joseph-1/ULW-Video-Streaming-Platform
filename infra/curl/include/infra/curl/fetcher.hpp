@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/util/time.hpp"
 #include "infra/curl/http.hpp"
 #include "infra/curl/multi.hpp"
 
@@ -18,7 +19,8 @@ public:
     // Runs once per fetch, on the reactor thread, never from inside get().
     using Callback = std::move_only_function<void(Result) noexcept>;
 
-    explicit HttpFetcher(Multi& multi) noexcept;
+    // A fetch still unanswered after `timeout` fails with FailureKind::Timeout.
+    HttpFetcher(Multi& multi, core::Millis timeout) noexcept;
     // Pending fetches are cancelled; their callbacks never run.
     ~HttpFetcher();
     HttpFetcher(const HttpFetcher&) = delete;
@@ -36,6 +38,7 @@ private:
     void finished(Fetch& fetch, Result result) noexcept;
 
     Multi& multi_;
+    core::Millis timeout_;
     std::vector<std::unique_ptr<Fetch>> fetches_;
 };
 

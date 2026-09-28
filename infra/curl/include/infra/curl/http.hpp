@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -23,6 +24,11 @@ struct Request {
     // Largest 2xx body kept; a longer one fails the exchange with BodyTooLarge. Error bodies
     // have a fixed bound of their own, so a small limit never hides why a request failed.
     std::size_t max_body = 0;
+    // The whole exchange, from the moment the transfer is added; zero leaves it unbounded.
+    // libcurl only enforces it once the transfer has a connection: one queued behind
+    // MAX_TOTAL_CONNECTIONS waits unbounded and, if it waited too long, fails as soon as it
+    // leaves the queue.
+    std::chrono::milliseconds timeout{0};
 };
 
 struct Response {
