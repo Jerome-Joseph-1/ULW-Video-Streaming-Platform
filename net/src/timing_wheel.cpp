@@ -24,9 +24,15 @@ TimerId TimingWheel::arm(core::MonoTime now, core::Millis delay, ITimerHandler& 
     Entry& e = entries_[index];
     e.deadline = now + std::max(delay, core::Millis{0});
     e.handler = &handler;
-    insert(index);
     ++armed_;
-    return TimerId{.index = index, .gen = e.gen};
+    const TimerId id{.index = index, .gen = e.gen};
+    if (delay <= core::Millis{0}) {
+        e.slot = kImmediate;
+        immediate_.push_back(id);
+    } else {
+        insert(index);
+    }
+    return id;
 }
 
 void TimingWheel::insert(std::uint32_t index) noexcept {
@@ -74,17 +80,38 @@ void TimingWheel::cancel(TimerId id) noexcept {
     if (id.index >= entries_.size()) {
         return;
     }
-    const Entry& e = entries_[id.index];
+    Entry& e = entries_[id.index];
     if (e.gen != id.gen || e.handler == nullptr) {
         return;
     }
-    unlink(id.index);
+    if (e.slot == kImmediate) {
+        // Left in immediate_; the generation bump makes tick_to skip it.
+        e.slot = kNil;
+    } else {
+        unlink(id.index);
+    }
     release(id.index);
 }
 
 std::size_t TimingWheel::tick_to(core::MonoTime now) noexcept {
-    const std::int64_t target = tick_of(now);
     std::size_t fired = 0;
+    if (!immediate_.empty()) {
+        // Swapped out first: handlers that re-arm with zero delay run on the next call.
+        std::vector<TimerId> due;
+        due.swap(immediate_);
+        for (const TimerId id : due) {
+            Entry& e = entries_[id.index];
+            if (e.gen != id.gen || e.handler == nullptr) {
+                continue;
+            }
+            ITimerHandler* handler = e.handler;
+            e.slot = kNil;
+            release(id.index);
+            handler->on_timeout();
+            ++fired;
+        }
+    }
+    const std::int64_t target = tick_of(now);
     // After a stall longer than a revolution every slot has been visited once; stepping
     // further would only revisit them.
     std::int64_t steps = std::min<std::int64_t>(target - last_tick_, kSlots);
@@ -117,6 +144,9 @@ std::size_t TimingWheel::tick_to(core::MonoTime now) noexcept {
 std::optional<core::Millis> TimingWheel::next_expiry(core::MonoTime now) const noexcept {
     if (armed_ == 0) {
         return std::nullopt;
+    }
+    if (!immediate_.empty()) {
+        return core::Millis{0};
     }
     for (std::int64_t tick = last_tick_ + 1; tick < last_tick_ + static_cast<std::int64_t>(kSlots);
          ++tick) {

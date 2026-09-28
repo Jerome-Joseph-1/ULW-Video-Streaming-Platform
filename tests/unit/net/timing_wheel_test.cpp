@@ -189,6 +189,27 @@ TEST_F(TimingWheelTest, HandlerMayCancelANotYetDueTimerSharingItsBucket) {
     EXPECT_EQ(wheel.armed(), 0U);
 }
 
+TEST_F(TimingWheelTest, ZeroDelayFiresOnTheNextPassWithoutWaitingForATick) {
+    Recorder r;
+    wheel.arm(clock.now(), Millis{0}, r);
+    EXPECT_EQ(wheel.next_expiry(clock.now()), Millis{0});
+    wheel.tick_to(clock.now());
+    EXPECT_EQ(r.fired, 1);
+    EXPECT_EQ(wheel.armed(), 0U);
+}
+
+TEST_F(TimingWheelTest, CancelledZeroDelayTimerDoesNotFireEvenIfItsSlotIsReused) {
+    Recorder cancelled;
+    Recorder reused;
+    const auto id = wheel.arm(clock.now(), Millis{0}, cancelled);
+    wheel.cancel(id);
+    const auto again = wheel.arm(clock.now(), Millis{0}, reused);
+    EXPECT_EQ(again.index, id.index);
+    wheel.tick_to(clock.now());
+    EXPECT_EQ(cancelled.fired, 0);
+    EXPECT_EQ(reused.fired, 1);
+}
+
 TEST_F(TimingWheelTest, NextExpiryReportsTheNearestOccupiedTick) {
     EXPECT_FALSE(wheel.next_expiry(clock.now()).has_value());
     Recorder r;
