@@ -51,6 +51,14 @@ public:
     core::ports::IObjectReader& reader() override { return *store_; }
     core::ports::IObjectAdmin& admin() override { return *store_; }
 
+    // Every write the store accepted is a pool job, and a job has finished once its
+    // complete() has run on the loop.
+    void settle(Observer& /*observer*/) override {
+        if (!pump_until(*reactor_, [&] { return pool_->in_flight() == 0; }, kOperationLimit)) {
+            ADD_FAILURE() << "offload pool never drained";
+        }
+    }
+
 private:
     std::filesystem::path root_;
     os::SystemRandom random_;
@@ -137,6 +145,18 @@ core::ports::IObjectReader& FakeHarness::reader() {
 }
 core::ports::IObjectAdmin& FakeHarness::admin() {
     return *store_;
+}
+
+// The fake does all its asynchronous work in zero-delay timers, and nothing else is on this
+// loop, so a turn that dispatches nothing means no work is left.
+void FakeHarness::settle(Observer& /*observer*/) {
+    const auto limit = std::chrono::steady_clock::now() + kOperationLimit;
+    while (reactor_->run_once(core::Millis{0}) != 0) {
+        if (std::chrono::steady_clock::now() > limit) {
+            ADD_FAILURE() << "fake store never went idle";
+            return;
+        }
+    }
 }
 
 std::vector<StoreFactory> store_factories() {

@@ -40,7 +40,7 @@ public:
     virtual core::ports::IObjectAdmin& admin() = 0;
     // Keeps one run's keys apart from another's on shared live buckets.
     [[nodiscard]] virtual std::string key_prefix() const { return {}; }
-    // How long the backend may stay silent while still finishing work it accepted.
+    // How long a live backend may stay silent while still finishing work it accepted.
     [[nodiscard]] virtual std::chrono::milliseconds quiet_period() const {
         return std::chrono::milliseconds(50);
     }
@@ -51,8 +51,10 @@ public:
     [[nodiscard]] bool write_all(core::ports::IIngestSession& session, Observer& observer,
                                  std::span<const std::byte> bytes);
     [[nodiscard]] bool finish(core::ports::IIngestSession& session, Observer& observer);
-    // Turns the loop until the backend has been quiet for quiet_period().
-    void settle(Observer& observer);
+    // Turns the loop until the backend has finished every piece of work it accepted. A live
+    // bucket gives no signal for that, so the default waits for quiet_period() of silence;
+    // local backends override it with one that does not depend on timing.
+    virtual void settle(Observer& observer);
 
 protected:
     std::unique_ptr<net::IReactor> reactor_;
@@ -81,6 +83,7 @@ public:
     core::ports::IIngestStore& ingest() override;
     core::ports::IObjectReader& reader() override;
     core::ports::IObjectAdmin& admin() override;
+    void settle(Observer& observer) override;
     [[nodiscard]] infra::storage::FakeStore& fake() { return *store_; }
 
 private:
