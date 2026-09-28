@@ -47,3 +47,13 @@ ulw_add_test_suite(net_unit_tests unit
 target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo)
 # White-box tests of the reactor internals.
 target_include_directories(net_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/net/src ${PROJECT_SOURCE_DIR}/tests)
+
+ulw_add_library(test_storage_harness conformance/storage_harness.cpp)
+target_include_directories(test_storage_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/conformance)
+target_link_libraries(test_storage_harness PUBLIC ulw::storage_fake ulw::storage_fs ulw::net_lib GTest::gtest)
+
+ulw_add_test_suite(storage_conformance_tests conformance
+    conformance/fake_store_faults_test.cpp
+    conformance/storage_conformance_test.cpp)
+target_link_libraries(storage_conformance_tests PRIVATE ulw::test_storage_harness)

@@ -167,7 +167,7 @@
     },
     {
       "name": "conformance",
-      "configurePreset": "dev",
+      "configurePreset": "ci",
       "output": {
         "outputOnFailure": true
       },
@@ -183,7 +183,7 @@
     },
     {
       "name": "integration",
-      "configurePreset": "dev",
+      "configurePreset": "ci",
       "output": {
         "outputOnFailure": true
       },
