@@ -7,21 +7,22 @@
 
 namespace ulw::test {
 
-// "user:<sub>" verifies as <sub>; anything else is a bad signature. "slow:<sub>" behaves like
-// a token whose key is not cached yet: the first attempt waits for refresh_keys().
+// "user.<sub>" verifies as <sub>; anything else is a bad signature. "slow.<sub>" behaves like
+// a token whose key is not cached yet: the first attempt waits for refresh_keys(). Dots, not
+// colons, so the tokens pass the gateway's check that a token looks like a compact JWS.
 class FakeVerifier final : public core::ports::IJwtVerifier {
 public:
     std::optional<core::ports::VerifyResult> verify(std::string_view token, core::WallTime now,
                                                     core::ports::IKeyWaiter& waiter) override {
-        if (token.starts_with("slow:") && !refreshed_) {
+        if (token.starts_with("slow.") && !refreshed_) {
             waiters_.push_back(&waiter);
             return std::nullopt;
         }
-        const std::size_t colon = token.find(':');
-        if (colon == std::string_view::npos) {
+        const std::size_t dot = token.find('.');
+        if (dot == std::string_view::npos) {
             return std::unexpected(core::ports::AuthError::BadSignature);
         }
-        auto user = core::UserId::parse(token.substr(colon + 1));
+        auto user = core::UserId::parse(token.substr(dot + 1));
         if (!user) {
             return std::unexpected(core::ports::AuthError::MissingSubject);
         }

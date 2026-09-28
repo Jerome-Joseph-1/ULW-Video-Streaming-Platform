@@ -2,6 +2,7 @@
 
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
+#include "infra/auth/token_extractor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -32,36 +33,6 @@ constexpr std::chrono::seconds kRetryAfter{5};
 // behaviour.
 template <class T> [[nodiscard]] const T* get(const std::optional<T>& o) noexcept {
     return o ? &*o : nullptr;
-}
-
-// Authorization: Bearer <token>, else the configured cookie. Inbound x-user-* fields are never
-// consulted.
-std::optional<std::string_view> find_token(std::span<const http::HeaderField> headers,
-                                           std::string_view cookie) noexcept {
-    if (const auto auth = http::find_header(headers, "authorization")) {
-        constexpr std::string_view kBearer = "Bearer ";
-        if (auth->size() > kBearer.size() && auth->starts_with(kBearer)) {
-            return auth->substr(kBearer.size());
-        }
-        return std::nullopt;
-    }
-    const auto header = http::find_header(headers, "cookie");
-    if (!header) {
-        return std::nullopt;
-    }
-    std::string_view rest = *header;
-    while (!rest.empty()) {
-        const std::size_t semi = rest.find(';');
-        std::string_view pair = rest.substr(0, semi);
-        rest = semi == std::string_view::npos ? std::string_view{} : rest.substr(semi + 1);
-        while (!pair.empty() && pair.front() == ' ') {
-            pair.remove_prefix(1);
-        }
-        if (pair.size() > cookie.size() && pair.starts_with(cookie) && pair[cookie.size()] == '=') {
-            return pair.substr(cookie.size() + 1);
-        }
-    }
-    return std::nullopt;
 }
 
 std::string_view state_name(core::VideoState s) noexcept {
@@ -263,7 +234,11 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     if (!requires_auth(match->id)) {
         req_.authenticated = true;
     } else {
-        const auto token = find_token(head.headers, gw().limits().auth_cookie);
+        infra::auth::TokenExtractor extractor(gw().limits().auth_cookie);
+        for (const http::HeaderField& h : head.headers) {
+            extractor.on_header(h.name, h.value);
+        }
+        const auto token = extractor.token();
         if (!token) {
             return http::HeadVerdict::reject(Status::Unauthorized);
         }

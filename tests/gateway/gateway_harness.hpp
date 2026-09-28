@@ -47,7 +47,7 @@ public:
     // Manual clock only: moves time forward on the loop thread; due timers fire on the loop's
     // next turn.
     void advance(core::Millis d);
-    // Lets every connection waiting on an unknown signing key ("slow:" tokens) continue.
+    // Lets every connection waiting on an unknown signing key ("slow." tokens) continue.
     void refresh_keys();
     [[nodiscard]] std::size_t key_waiters();
 
