@@ -10,6 +10,7 @@ function(ulw_add_test_suite name label)
 endfunction()
 
 ulw_add_test_suite(core_unit_tests unit
-    unit/build_info_test.cpp)
+    unit/build_info_test.cpp
+    unit/storage_key_test.cpp)
 target_link_libraries(core_unit_tests PRIVATE ulw::core_domain)
 target_compile_definitions(core_unit_tests PRIVATE ULW_EXPECTED_VERSION="${PROJECT_VERSION}")
