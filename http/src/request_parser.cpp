@@ -127,9 +127,11 @@ bool append(std::span<char> arena, std::size_t& used, std::string_view fragment)
 
 class RequestParser::Impl {
 public:
-    explicit Impl(IRequestSink& sink) noexcept : sink_(sink) {
+    explicit Impl(IRequestSink& sink) : sink_(sink) {
         llhttp_init(&parser_, HTTP_REQUEST, &settings());
         parser_.data = this;
+        // Held bytes never exceed this, so holding more never allocates on the data path.
+        unparsed_.reserve(kMaxRetainedBytes);
         // Strict llhttp fails "HTTP/1.2" with the error it also uses for "HTTP/1.1x" or a bare
         // LF, so a 505 could not be told from a 400. Leniently it parses any digit.digit and
         // on_headers_complete() refuses the ones that are not 1.0 or 1.1.
@@ -170,14 +172,14 @@ public:
         case State::PausedInBody:
             llhttp_resume(&parser_);
             state_ = State::Parsing;
-            return execute(unparsed_, /*from_tail=*/true);
+            return execute(held(), /*from_tail=*/true);
         case State::AwaitingReset:
             return ParseProgress::Paused;
         case State::AwaitingResume:
             state_ = State::Parsing;
-            return execute(unparsed_, /*from_tail=*/true);
+            return execute(held(), /*from_tail=*/true);
         case State::Closed:
-            if (!unparsed_.empty()) {
+            if (!held().empty()) {
                 return fail(fatal(Status::BadRequest));
             }
             return ParseProgress::NeedMore;
@@ -265,7 +267,7 @@ private:
         }
         if (err == HPE_OK) {
             if (from_tail) {
-                unparsed_.clear();
+                forget_held();
             }
             return ParseProgress::NeedMore;
         }
@@ -276,8 +278,7 @@ private:
         // has also moved state_ to say why.
         const auto consumed = static_cast<std::size_t>(llhttp_get_error_pos(&parser_) - begin);
         if (from_tail) {
-            unparsed_.erase(unparsed_.begin(),
-                            unparsed_.begin() + static_cast<std::ptrdiff_t>(consumed));
+            held_from_ += consumed;
         } else if (!retain(input.subspan(consumed))) {
             return fail(fatal(Status::ContentTooLarge));
         }
@@ -301,14 +302,29 @@ private:
     ParseResult fail(ParseError error) noexcept {
         state_ = State::Failed;
         failure_ = error;
-        unparsed_.clear();
+        forget_held();
         return std::unexpected(error);
     }
 
+    [[nodiscard]] std::span<const std::byte> held() const noexcept {
+        return std::span{unparsed_}.subspan(held_from_);
+    }
+
+    void forget_held() noexcept {
+        unparsed_.clear();
+        held_from_ = 0;
+    }
+
     bool retain(std::span<const std::byte> bytes) noexcept {
-        if (bytes.size() > kMaxRetainedBytes - unparsed_.size()) {
+        if (bytes.size() > kMaxRetainedBytes - held().size()) {
             return false;
         }
+        // Parsing held bytes only moves held_from_, and the parsed prefix is dropped here rather
+        // than after every request, so a burst of pipelined requests costs one pass, not one
+        // shift of the remainder per request.
+        unparsed_.erase(unparsed_.begin(),
+                        unparsed_.begin() + static_cast<std::ptrdiff_t>(held_from_));
+        held_from_ = 0;
         unparsed_.insert(unparsed_.end(), bytes.begin(), bytes.end());
         return true;
     }
@@ -463,7 +479,9 @@ private:
     ParseError failure_ = fatal(Status::BadRequest);
     // Set by a callback that refused the request; cleared only by reset_for_next_request().
     std::optional<ParseError> rejection_;
+    // Bytes fed while stopped; those before held_from_ have been parsed since.
     std::vector<std::byte> unparsed_;
+    std::size_t held_from_ = 0;
 
     std::array<char, kMaxTargetBytes> target_{};
     std::size_t target_size_ = 0;

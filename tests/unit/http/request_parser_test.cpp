@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstddef>
+#include <format>
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
@@ -126,6 +127,38 @@ TEST(RequestParser, BytesHeldWhileStoppedAreBounded) {
     const std::string filler(RequestParser::kMaxRetainedBytes, 'x');
     EXPECT_EQ(parser.feed(bytes_of(filler)), ParseProgress::Paused);
     EXPECT_EQ(parser.feed(bytes_of("x")), fatal(Status::ContentTooLarge));
+}
+
+TEST(RequestParser, OnlyBytesNotYetParsedCountAsHeld) {
+    RecordingSink sink;
+    RequestParser parser{sink};
+    constexpr std::string_view kShort = "GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+    ASSERT_EQ(parser.feed(bytes_of(kShort)), ParseProgress::MessageComplete);
+    std::string held;
+    while (held.size() + kShort.size() <= RequestParser::kMaxRetainedBytes) {
+        held += kShort;
+    }
+    held.append(RequestParser::kMaxRetainedBytes - held.size(), '\n');
+    ASSERT_EQ(parser.feed(bytes_of(held)), ParseProgress::Paused);
+
+    parser.reset_for_next_request();
+    ASSERT_EQ(parser.resume(), ParseProgress::MessageComplete);
+    EXPECT_EQ(parser.feed(bytes_of(kShort)), ParseProgress::Paused);
+    EXPECT_EQ(parser.feed(bytes_of("x")), fatal(Status::ContentTooLarge));
+}
+
+TEST(RequestParser, APipelinedBurstIsParsedWholeAndInOrder) {
+    std::string burst;
+    std::size_t count = 0;
+    while (burst.size() < RequestParser::kMaxRetainedBytes / 2) {
+        burst += std::format("GET /{} HTTP/1.1\r\nHost: a\r\n\r\n", count++);
+    }
+
+    const auto requests = parse_in_chunks(burst, burst.size());
+    ASSERT_EQ(requests.size(), count);
+    for (std::size_t i = 0; i < count; ++i) {
+        ASSERT_EQ(requests[i].target, std::format("/{}", i));
+    }
 }
 
 TEST(RequestParser, HeaderLookupIgnoresCaseAndSurroundingWhitespace) {
