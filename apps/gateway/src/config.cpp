@@ -74,6 +74,35 @@ std::expected<void, ConfigError> load_storage(const EnvLookup& env, Config& conf
     return {};
 }
 
+std::expected<void, ConfigError> load_transport(const EnvLookup& env, Config& config) {
+    const std::string kind = lookup(env, "ULW_TRANSPORT").value_or("plain");
+    auto cert = lookup(env, "ULW_TLS_CERT_FILE");
+    auto key = lookup(env, "ULW_TLS_KEY_FILE");
+    if (kind == "plain") {
+        // Files set for a transport that ignores them would mean a deployment that believes it
+        // serves TLS and serves plaintext.
+        if (cert || key) {
+            return error(cert ? "ULW_TLS_CERT_FILE" : "ULW_TLS_KEY_FILE",
+                         "set, but ULW_TRANSPORT is plain");
+        }
+        config.transport = Transport::Plain;
+        return {};
+    }
+    if (kind != "tls") {
+        return error("ULW_TRANSPORT", "expected plain or tls");
+    }
+    if (!cert) {
+        return error("ULW_TLS_CERT_FILE", "not set; ULW_TRANSPORT=tls needs it");
+    }
+    if (!key) {
+        return error("ULW_TLS_KEY_FILE", "not set; ULW_TRANSPORT=tls needs it");
+    }
+    config.transport = Transport::Tls;
+    config.tls_certificate_chain = std::move(*cert);
+    config.tls_private_key = std::move(*key);
+    return {};
+}
+
 std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config) {
     auto url = lookup(env, "JWKS_URL");
     auto file = lookup(env, "ULW_DEV_JWKS_FILE");
@@ -115,6 +144,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
             return error("ULW_REACTOR", "expected io_uring or epoll");
         }
         config.reactor = *kind;
+    }
+    if (auto r = load_transport(env, config); !r) {
+        return std::unexpected(std::move(r.error()));
     }
     // More threads than this would only queue on the object store's per-host connection cap.
     const auto threads = number<std::size_t>(env, "ULW_OFFLOAD_THREADS", 4, 1, 64);

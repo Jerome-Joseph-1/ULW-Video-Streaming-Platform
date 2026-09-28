@@ -46,6 +46,7 @@ TEST_F(ConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->jwt_audience, "askedin-platform");
     EXPECT_EQ(config->limits.auth_cookie, "auth_token");
     EXPECT_TRUE(config->dev_jwks_file.empty());
+    EXPECT_EQ(config->transport, gateway::Transport::Plain);
 }
 
 TEST_F(ConfigTest, EachRequiredVariableIsNamedWhenMissing) {
@@ -103,11 +104,33 @@ TEST_F(ConfigTest, MinioIsReachedThroughItsEndpoint) {
     EXPECT_EQ(config->storage_location, "http://127.0.0.1:9000");
 }
 
+TEST_F(ConfigTest, TlsNeedsBothTheCertificateAndTheKey) {
+    env["ULW_TRANSPORT"] = "tls";
+    EXPECT_EQ(refused_variable(), "ULW_TLS_CERT_FILE");
+    env["ULW_TLS_CERT_FILE"] = "/run/tls/chain.pem";
+    EXPECT_EQ(refused_variable(), "ULW_TLS_KEY_FILE");
+    env["ULW_TLS_KEY_FILE"] = "/run/tls/key.pem";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->transport, gateway::Transport::Tls);
+    EXPECT_EQ(config->tls_certificate_chain, "/run/tls/chain.pem");
+    EXPECT_EQ(config->tls_private_key, "/run/tls/key.pem");
+}
+
+TEST_F(ConfigTest, CertificateFilesWithoutTlsAreRefusedRatherThanIgnored) {
+    env["ULW_TLS_CERT_FILE"] = "/run/tls/chain.pem";
+    EXPECT_EQ(refused_variable(), "ULW_TLS_CERT_FILE");
+    env.erase("ULW_TLS_CERT_FILE");
+    env["ULW_TRANSPORT"] = "plain";
+    env["ULW_TLS_KEY_FILE"] = "/run/tls/key.pem";
+    EXPECT_EQ(refused_variable(), "ULW_TLS_KEY_FILE");
+}
+
 TEST_F(ConfigTest, UnknownChoicesAndOutOfRangeNumbersAreRefused) {
     const std::vector<std::pair<std::string, std::string>> bad = {
         {"ULW_STORAGE", "gcs"},        {"ULW_REACTOR", "kqueue"},     {"ULW_LISTEN_PORT", "0"},
         {"ULW_LISTEN_PORT", "65536"},  {"ULW_LISTEN_PORT", "80x"},    {"ULW_OFFLOAD_THREADS", "0"},
-        {"ULW_OFFLOAD_THREADS", "65"}, {"ULW_OFFLOAD_THREADS", "-1"},
+        {"ULW_OFFLOAD_THREADS", "65"}, {"ULW_OFFLOAD_THREADS", "-1"}, {"ULW_TRANSPORT", "ssl"},
     };
     for (const auto& [name, value] : bad) {
         env[name] = value;

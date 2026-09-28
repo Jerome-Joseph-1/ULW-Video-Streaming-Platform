@@ -9,6 +9,7 @@
 #include "net/offload_pool.hpp"
 #include "net/reactor.hpp"
 #include "net/slab.hpp"
+#include "net/transport.hpp"
 
 #include "gateway.hpp"
 #include "routes.hpp"
@@ -42,7 +43,7 @@ public:
     Connection(Connection&&) = delete;
     Connection& operator=(Connection&&) = delete;
 
-    void start(net::ConnId conn) noexcept;
+    void start(std::unique_ptr<net::ITransport> transport) noexcept;
     // The gateway is shutting down: finish the request in flight, then close.
     void drain() noexcept;
     // The drain deadline passed: close now, whatever is in flight.
@@ -167,7 +168,8 @@ private:
 
     Handle handle_;
     Gateway& gateway_;
-    net::ConnId conn_;
+    // Set by start(); plaintext either way, whatever the socket carries.
+    std::unique_ptr<net::ITransport> transport_;
     http::RequestParser parser_{*this};
     Phase phase_ = Phase::Idle;
     Request req_;

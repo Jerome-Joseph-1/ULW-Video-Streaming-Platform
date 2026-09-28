@@ -10,6 +10,7 @@
 #include "../conformance/storage_harness.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_verifier.hpp"
+#include "support/tls_pki.hpp"
 
 #include <sys/eventfd.h>
 
@@ -29,6 +30,7 @@ struct GatewayUnderTest::Loop final : net::IReadyHandler {
     core::ports::IClock* clock = &system_clock;
     os::SystemRandom random;
     std::unique_ptr<net::IReactor> reactor;
+    std::unique_ptr<net::ITransportFactory> transports;
     std::unique_ptr<net::OffloadPool> pool;
     std::unique_ptr<infra::storage::FakeStore> fake;
     std::unique_ptr<infra::storage::FsStore> fs;
@@ -66,6 +68,9 @@ struct GatewayUnderTest::Loop final : net::IReadyHandler {
 };
 
 GatewayUnderTest::GatewayUnderTest(GatewayOptions options) : loop_(std::make_unique<Loop>()) {
+    if (options.transport == gateway::Transport::Tls) {
+        client_tls_ = TestPki::shared().client_context();
+    }
     std::promise<void> ready;
     auto started = ready.get_future();
     thread_ =
@@ -88,6 +93,17 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
         l.clock = &l.manual_clock;
     }
     l.reactor = std::move(*net::make_reactor(reactor_kind_from_env(), *l.clock, 4096));
+    if (options.transport == gateway::Transport::Tls) {
+        auto tls = net::make_tls_transports(*l.reactor,
+                                            options.tls_files.value_or(TestPki::shared().server()));
+        if (!tls) {
+            static_cast<void>(std::fputs("gateway harness: tls transport refused\n", stderr));
+            std::abort();
+        }
+        l.transports = std::move(*tls);
+    } else {
+        l.transports = net::make_plain_transports(*l.reactor);
+    }
     l.pool = std::move(*net::OffloadPool::create(*l.reactor, 4));
     if (options.backend == Backend::Fake) {
         l.fake = std::make_unique<infra::storage::FakeStore>(*l.reactor, *l.clock, options.chunk,
@@ -106,6 +122,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     core::ports::IIngestStore& store =
         l.fake ? static_cast<core::ports::IIngestStore&>(*l.fake) : *l.fs;
     l.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *l.reactor,
+                                                                 .transports = *l.transports,
                                                                  .pool = *l.pool,
                                                                  .store = store,
                                                                  .catalog = *l.catalog,
@@ -134,6 +151,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     l.fs.reset();
     l.fake.reset();
     l.catalog.reset();
+    l.transports.reset();
     l.reactor.reset();
     if (!l.root.empty()) {
         std::error_code ec;
@@ -196,6 +214,16 @@ void GatewayUnderTest::refresh_keys() {
 std::size_t GatewayUnderTest::key_waiters() {
     std::size_t out = 0;
     on_loop([&] { out = loop_->verifier.waiting(); });
+    return out;
+}
+
+void GatewayUnderTest::reload_certificate() {
+    on_loop([&] { loop_->gateway->on_signal(net::Signal::Reload); });
+}
+
+std::string GatewayUnderTest::metrics() {
+    std::string out;
+    on_loop([&] { out = loop_->gateway->render_metrics(); });
     return out;
 }
 

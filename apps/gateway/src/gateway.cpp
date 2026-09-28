@@ -4,6 +4,7 @@
 
 #include "connection.hpp"
 
+#include <cstdio>
 #include <format>
 
 namespace gateway {
@@ -46,14 +47,14 @@ void Gateway::on_accept(os::UniqueFd conn) noexcept {
         return;
     }
     Connection* c = connections_.get(*handle);
-    auto id = deps_.reactor.attach(std::move(conn), *c);
-    if (!id) {
+    auto transport = deps_.transports.attach(std::move(conn), *c);
+    if (!transport) {
         ++counters_.connections_rejected;
         connections_.retire(*handle);
         return;
     }
     ++counters_.connections_accepted;
-    c->start(*id);
+    c->start(std::move(*transport));
 }
 
 void Gateway::on_signal(net::Signal signal) noexcept {
@@ -62,6 +63,16 @@ void Gateway::on_signal(net::Signal signal) noexcept {
         begin_drain();
         return;
     case net::Signal::Reload:
+        // A renewed certificate is picked up without dropping a connection; a bad one is
+        // reported and the old one stays in service.
+        if (const auto r = deps_.transports.reload(); !r) {
+            ++counters_.certificate_reload_failures;
+            static_cast<void>(std::fputs("gateway_server: certificate reload failed, keeping the "
+                                         "old one: ",
+                                         stderr));
+            static_cast<void>(std::fputs(r.error().c_str(), stderr));
+            static_cast<void>(std::fputc('\n', stderr));
+        }
         return;
     }
 }
@@ -139,11 +150,14 @@ std::string Gateway::render_metrics() const {
                        "timeouts_total{{kind=\"body\"}} {}\n"
                        "timeouts_total{{kind=\"body_rate\"}} {}\n"
                        "timeouts_total{{kind=\"backend\"}} {}\n"
-                       "timeouts_total{{kind=\"backstop\"}} {}\n",
+                       "timeouts_total{{kind=\"backstop\"}} {}\n"
+                       "tls_handshakes_in_flight {}\n"
+                       "certificate_reload_failures_total {}\n",
                        c.requests, c.connections_accepted, c.connections_rejected,
                        connections_.size(), upload_slots_, c.admission_rejections, c.bytes_ingested,
                        c.timeouts_header, c.timeouts_body, c.timeouts_body_rate, c.timeouts_backend,
-                       c.timeouts_backstop);
+                       c.timeouts_backstop, deps_.transports.handshakes_in_flight(),
+                       c.certificate_reload_failures);
 }
 
 } // namespace gateway

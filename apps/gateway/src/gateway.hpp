@@ -9,6 +9,7 @@
 #include "net/reactor.hpp"
 #include "net/signals.hpp"
 #include "net/slab.hpp"
+#include "net/transport.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -23,6 +24,8 @@ class Connection;
 
 struct Deps {
     net::IReactor& reactor;
+    // Every client socket's bytes go through this, never straight to the reactor.
+    net::ITransportFactory& transports;
     net::OffloadPool& pool;
     core::ports::IIngestStore& store;
     core::ports::IUploadCatalog& catalog;
@@ -72,6 +75,7 @@ struct Counters {
     std::uint64_t timeouts_backstop = 0;
     std::uint64_t bytes_ingested = 0;
     std::uint64_t requests = 0;
+    std::uint64_t certificate_reload_failures = 0;
 };
 
 enum class Admission : std::uint8_t { Admitted, UserAtLimit, Full };
