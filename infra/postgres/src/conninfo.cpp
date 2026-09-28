@@ -117,6 +117,8 @@ std::expected<ConnTarget, std::string> parse_conninfo(const std::string& conninf
             target.ports = split_list(o->val);
         } else if (keyword == "hostaddr") {
             target.has_hostaddr = *o->val != '\0';
+        } else if (keyword == "service") {
+            target.has_service = *o->val != '\0';
         } else if (keyword == "options") {
             target.options = o->val;
         }
@@ -158,18 +160,30 @@ std::optional<Endpoints> expand_endpoints(const ConnTarget& target,
     return out;
 }
 
-ConnectPlan::ConnectPlan(std::string conninfo, std::string application_name,
-                         core::Millis statement_timeout)
-    : conninfo_(std::move(conninfo)), application_name_(std::move(application_name)) {
-    auto parsed = parse_conninfo(conninfo_);
-    if (parsed) {
-        target_ = std::move(*parsed);
-        lookup_ = !target_.has_hostaddr && std::ranges::any_of(target_.hosts, [](const auto& h) {
-            return classify_host(h) == HostForm::Name;
-        });
+std::expected<ConnectPlan, std::string> ConnectPlan::create(std::string conninfo,
+                                                            std::string application_name,
+                                                            core::Millis statement_timeout) {
+    auto target = parse_conninfo(conninfo);
+    if (!target) {
+        return std::unexpected(std::move(target.error()));
     }
-    options_ = session_options(statement_timeout, target_.options);
+    if (target->has_service) {
+        return std::unexpected("connection string names a service; give host or hostaddr");
+    }
+    if (target->hosts.empty() && !target->has_hostaddr) {
+        return std::unexpected("connection string names no host");
+    }
+    return ConnectPlan{std::move(conninfo), std::move(application_name), std::move(*target),
+                       statement_timeout};
 }
+
+ConnectPlan::ConnectPlan(std::string conninfo, std::string application_name, ConnTarget target,
+                         core::Millis statement_timeout)
+    : conninfo_(std::move(conninfo)), application_name_(std::move(application_name)),
+      options_(session_options(statement_timeout, target.options)), target_(std::move(target)),
+      lookup_(!target_.has_hostaddr && std::ranges::any_of(target_.hosts, [](const auto& h) {
+          return classify_host(h) == HostForm::Name;
+      })) {}
 
 std::string session_options(core::Millis statement_timeout, std::string_view own) {
     // The server's own keepalive decides how long a vanished client keeps its session, and with

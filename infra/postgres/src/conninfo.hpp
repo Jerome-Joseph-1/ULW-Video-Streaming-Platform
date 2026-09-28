@@ -26,6 +26,7 @@ struct ConnTarget {
     // Empty, one for every host, or one per host.
     std::vector<std::string> ports;
     bool has_hostaddr = false;
+    bool has_service = false;
     std::string options;
 };
 
@@ -65,7 +66,11 @@ inline constexpr std::array<std::pair<const char*, const char*>, 3> kKeepalives{
 // sessions resolve beforehand on the offload pool and hand libpq addresses instead.
 class ConnectPlan {
 public:
-    ConnectPlan(std::string conninfo, std::string application_name, core::Millis statement_timeout);
+    // Refuses a string that does not parse, and one that would leave libpq to find the host
+    // itself, with a blocking lookup nothing here can see coming: a `service`, whose file may
+    // name the host, or no host at all, which falls back on PGHOST.
+    [[nodiscard]] static std::expected<ConnectPlan, std::string>
+    create(std::string conninfo, std::string application_name, core::Millis statement_timeout);
 
     [[nodiscard]] bool needs_lookup() const noexcept { return lookup_; }
     // Blocks on DNS: offload threads only.
@@ -79,6 +84,9 @@ public:
     [[nodiscard]] Arrays arrays(const Endpoints* endpoints) const;
 
 private:
+    ConnectPlan(std::string conninfo, std::string application_name, ConnTarget target,
+                core::Millis statement_timeout);
+
     std::string conninfo_;
     std::string application_name_;
     std::string options_;

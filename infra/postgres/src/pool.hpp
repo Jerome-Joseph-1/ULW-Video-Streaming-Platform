@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <memory>
 #include <string>
 #include <vector>
@@ -33,8 +34,18 @@ struct PoolConfig {
 // The offload pool must be stopped before this is destroyed, since a lookup may be running.
 // Operations still outstanding are dropped without being told.
 class Pool {
+    struct Token {
+        explicit Token() = default;
+    };
+
 public:
-    Pool(net::IReactor& reactor, net::OffloadPool& offload, PoolConfig config);
+    // Refuses a connection string ConnectPlan::create refuses, before any session starts.
+    [[nodiscard]] static std::expected<std::unique_ptr<Pool>, std::string>
+    create(net::IReactor& reactor, net::OffloadPool& offload, PoolConfig config);
+
+    // Only create() can make the token.
+    Pool(Token token, net::IReactor& reactor, net::OffloadPool& offload, PoolConfig config,
+         ConnectPlan plan);
     ~Pool();
     Pool(const Pool&) = delete;
     Pool& operator=(const Pool&) = delete;

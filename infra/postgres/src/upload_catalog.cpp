@@ -457,22 +457,10 @@ private:
 
 class PgUploadCatalog::Impl {
 public:
-    Impl(net::IReactor& reactor, net::OffloadPool& offload, const CatalogConfig& config)
-        : main_(reactor, offload,
-                PoolConfig{.conninfo = config.conninfo,
-                           .application_name = "ulw-catalog",
-                           .connections = std::clamp<std::size_t>(config.connections, 8, 16),
-                           .connect_timeout = config.connect_timeout,
-                           .request_timeout = config.request_timeout}),
-          locks_(reactor, offload,
-                 PoolConfig{.conninfo = config.conninfo,
-                            .application_name = "ulw-claims",
-                            .connections = 1,
-                            .connect_timeout = config.connect_timeout,
-                            .request_timeout = config.request_timeout}),
-          deferred_(reactor) {}
+    Impl(net::IReactor& reactor, std::unique_ptr<Pool> main, std::unique_ptr<Pool> locks)
+        : main_(std::move(main)), locks_(std::move(locks)), deferred_(reactor) {}
 
-    Pool& main() noexcept { return main_; }
+    Pool& main() noexcept { return *main_; }
 
     template <class T> void refuse(CatalogCallback<T> done, CatalogError error) {
         deferred_.post(
@@ -492,7 +480,7 @@ public:
         }
         const std::int64_t key = lock_key(id);
         claims_.emplace(id, Claim{.key = key, .session = 0, .state = ClaimState::Locking});
-        locks_.submit(std::make_unique<TryLock>(
+        locks_->submit(std::make_unique<TryLock>(
             key, id, owner, [this, id, done = std::move(done)](Outcome outcome) mutable noexcept {
                 locked(id, std::move(outcome), std::move(done));
             }));
@@ -526,7 +514,7 @@ private:
         ClaimState state = ClaimState::Locking;
     };
 
-    [[nodiscard]] std::uint64_t live_session() const noexcept { return locks_.sessions_lost(); }
+    [[nodiscard]] std::uint64_t live_session() const noexcept { return locks_->sessions_lost(); }
 
     void locked(const core::UploadId& id, Outcome outcome, CatalogCallback<StoredUpload> done) {
         const auto it = claims_.find(id);
@@ -552,7 +540,7 @@ private:
         // The session that answered is the live one: a lost session abandons its queries.
         it->second.session = live_session();
         it->second.state = ClaimState::Loading;
-        main_.submit(std::make_unique<Query>(
+        main_->submit(std::make_unique<Query>(
             Statement{.sql = kFindUpload, .params = Params{}.add_uuid(id.uuid())},
             [this, id, done = std::move(done)](Outcome row) mutable noexcept {
                 loaded(id, std::move(row), std::move(done));
@@ -584,21 +572,46 @@ private:
     }
 
     void unlock(std::int64_t key) {
-        locks_.submit(
+        locks_->submit(
             std::make_unique<Query>(Statement{.sql = kUnlock, .params = Params{}.add_int(key)},
                                     [](Outcome /*outcome*/) noexcept {}));
     }
 
-    Pool main_;
+    std::unique_ptr<Pool> main_;
     // One session holds every claim this process has.
-    Pool locks_;
+    std::unique_ptr<Pool> locks_;
     DeferredCalls deferred_;
     std::unordered_map<core::UploadId, Claim> claims_;
 };
 
-PgUploadCatalog::PgUploadCatalog(net::IReactor& reactor, net::OffloadPool& offload,
-                                 const CatalogConfig& config)
-    : impl_(std::make_unique<Impl>(reactor, offload, config)) {}
+std::expected<std::unique_ptr<PgUploadCatalog>, std::string>
+PgUploadCatalog::create(net::IReactor& reactor, net::OffloadPool& offload,
+                        const CatalogConfig& config) {
+    auto main =
+        Pool::create(reactor, offload,
+                     PoolConfig{.conninfo = config.conninfo,
+                                .application_name = "ulw-catalog",
+                                .connections = std::clamp<std::size_t>(config.connections, 8, 16),
+                                .connect_timeout = config.connect_timeout,
+                                .request_timeout = config.request_timeout});
+    if (!main) {
+        return std::unexpected(std::move(main.error()));
+    }
+    auto locks = Pool::create(reactor, offload,
+                              PoolConfig{.conninfo = config.conninfo,
+                                         .application_name = "ulw-claims",
+                                         .connections = 1,
+                                         .connect_timeout = config.connect_timeout,
+                                         .request_timeout = config.request_timeout});
+    if (!locks) {
+        return std::unexpected(std::move(locks.error()));
+    }
+    return std::make_unique<PgUploadCatalog>(
+        Token{}, std::make_unique<Impl>(reactor, std::move(*main), std::move(*locks)));
+}
+
+PgUploadCatalog::PgUploadCatalog(Token /*token*/, std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
 
 PgUploadCatalog::~PgUploadCatalog() = default;
 

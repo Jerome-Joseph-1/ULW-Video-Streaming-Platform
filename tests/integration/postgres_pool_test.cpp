@@ -155,12 +155,14 @@ protected:
 
     void start(const std::string& conninfo, std::size_t connections = 4,
                core::Millis request_timeout = kTimeout) {
-        pool = std::make_unique<Pool>(*reactor, *offload,
-                                      PoolConfig{.conninfo = conninfo,
-                                                 .application_name = "ulw-test",
-                                                 .connections = connections,
-                                                 .connect_timeout = kTimeout,
-                                                 .request_timeout = request_timeout});
+        auto made = Pool::create(*reactor, *offload,
+                                 PoolConfig{.conninfo = conninfo,
+                                            .application_name = "ulw-test",
+                                            .connections = connections,
+                                            .connect_timeout = kTimeout,
+                                            .request_timeout = request_timeout});
+        ASSERT_TRUE(made) << made.error();
+        pool = std::move(*made);
     }
 
     Answer ask(Sql sql, const Params& params = {}) {
@@ -197,7 +199,7 @@ TEST_P(PoolTest, AnswersOnALaterIterationNeverInsideSubmit) {
     if (IsSkipped() || HasFatalFailure()) {
         return;
     }
-    start(db->conninfo());
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo()));
     std::optional<Answer> answer;
     pool->submit(query(Statement{.sql = "SELECT 6 * 7", .params = {}}, answer));
     EXPECT_FALSE(answer);
@@ -210,7 +212,7 @@ TEST_P(PoolTest, StartsOperationsInSubmissionOrder) {
     if (IsSkipped() || HasFatalFailure()) {
         return;
     }
-    start(db->conninfo(), 1);
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
     constexpr std::size_t kQueries = 5;
     std::vector<std::string> order;
     for (std::size_t i = 0; i < kQueries; ++i) {
@@ -232,7 +234,7 @@ TEST_P(PoolTest, RollsBackATransactionAnOperationLeftOpen) {
     }
     auto conn = db->session();
     ASSERT_TRUE(conn.exec("CREATE TABLE probe (x integer)"));
-    start(db->conninfo(), 1);
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
     bool finished = false;
     pool->submit(std::make_unique<LeavesTransactionOpen>(finished));
     ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return finished; }));
@@ -258,7 +260,7 @@ TEST_P(PoolTest, RerunsAnOperationThatLostASerializationRace) {
             END IF;
             RETURN n;
         END $$;)sql"));
-    start(db->conninfo(), 1);
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
     EXPECT_EQ(ask("SELECT flaky($1)", Params{}.add_int(3)), Answer{"3"});
 
     ASSERT_TRUE(conn.exec("SELECT setval('tries', 1, false)"));
@@ -271,7 +273,7 @@ TEST_P(PoolTest, ServerStatementTimeoutEndsAStatementButKeepsTheSession) {
     if (IsSkipped() || HasFatalFailure()) {
         return;
     }
-    start(db->conninfo(), 1);
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
     // Connected first: time spent queued for a session would eat into the server's head start.
     ASSERT_EQ(ask("SELECT 1"), Answer{"1"});
     EXPECT_EQ(ask("SELECT pg_sleep(30)"), std::unexpected(DbError::Timeout));
@@ -287,7 +289,7 @@ TEST_P(PoolTest, ResolvesHostNamesOnTheOffloadPool) {
     OffloadBlocker blocker;
     offload->submit(blocker);
     // A later keyword wins in a key=value string.
-    start(db->conninfo() + " host=localhost", 1);
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo() + " host=localhost", 1));
     // The lookup waits behind the blocker, so no session can connect and the query sits out its
     // deadline. Had libpq resolved the name itself, on the loop, the query would have answered.
     EXPECT_EQ(ask("SELECT 1"), std::unexpected(DbError::Timeout));
@@ -301,8 +303,8 @@ TEST_P(PoolTest, ServerThatNeverAnswersNeverStallsTheLoop) {
     ASSERT_TRUE(listener);
     const auto port = net::local_port(listener->get());
     ASSERT_TRUE(port);
-    start(std::format("host={} port={} user=nobody dbname=none", loopback_of(listener->get()),
-                      *port));
+    ASSERT_NO_FATAL_FAILURE(start(std::format("host={} port={} user=nobody dbname=none",
+                                              loopback_of(listener->get()), *port)));
 
     Ticker ticker(*reactor);
     ticker.start();
@@ -326,7 +328,8 @@ TEST_P(PoolTest, RefusedConnectionsFailOperationsWithoutWaitingOutTheirDeadline)
         port = *net::local_port(probe->get());
         host = loopback_of(probe->get());
     }
-    start(std::format("host={} port={} user=x dbname=x", host, port), 4, core::Millis{30000});
+    ASSERT_NO_FATAL_FAILURE(
+        start(std::format("host={} port={} user=x dbname=x", host, port), 4, core::Millis{30000}));
     const auto before = Clock::now();
     EXPECT_EQ(ask("SELECT 1"), std::unexpected(DbError::ConnectionLost));
     EXPECT_LT(Clock::now() - before, std::chrono::seconds(5));
@@ -337,7 +340,7 @@ TEST_P(PoolTest, ReconnectsAfterTheServerEndsItsSessions) {
     if (IsSkipped() || HasFatalFailure()) {
         return;
     }
-    start(db->conninfo());
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo()));
     ASSERT_EQ(ask("SELECT 1"), Answer{"1"});
     auto conn = db->session();
     ASSERT_NE(scalar(conn, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
@@ -361,7 +364,7 @@ TEST_P(PoolTest, PausedDatabaseNeverStallsTheLoop) {
     if (!container) {
         GTEST_SKIP() << "docker cannot pause the Postgres container (set ULW_TEST_PG_CONTAINER)";
     }
-    start(db->conninfo());
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo()));
     ASSERT_EQ(ask("SELECT 1"), Answer{"1"});
     {
         const ulw::test::PausedServer paused(*container);

@@ -5,6 +5,7 @@
 #include "net/reactor.hpp"
 
 #include <cstddef>
+#include <expected>
 #include <memory>
 #include <string>
 
@@ -35,8 +36,19 @@ struct CatalogConfig {
 // The offload pool resolves host names and must be stopped before this is destroyed. Calls
 // still outstanding at destruction are dropped without their callbacks.
 class PgUploadCatalog final : public core::ports::IUploadCatalog {
+    class Impl;
+    struct Token {
+        explicit Token() = default;
+    };
+
 public:
-    PgUploadCatalog(net::IReactor& reactor, net::OffloadPool& offload, const CatalogConfig& config);
+    // Refuses a connection string that does not parse, and one that names a `service` or no
+    // host: libpq would then look the host up itself, blocking the loop.
+    [[nodiscard]] static std::expected<std::unique_ptr<PgUploadCatalog>, std::string>
+    create(net::IReactor& reactor, net::OffloadPool& offload, const CatalogConfig& config);
+
+    // Only create() can make the token.
+    PgUploadCatalog(Token token, std::unique_ptr<Impl> impl) noexcept;
     ~PgUploadCatalog() override;
     PgUploadCatalog(const PgUploadCatalog&) = delete;
     PgUploadCatalog& operator=(const PgUploadCatalog&) = delete;
@@ -61,7 +73,6 @@ public:
                     core::ports::CatalogCallback<core::VideoRecord> done) override;
 
 private:
-    class Impl;
     std::unique_ptr<Impl> impl_;
 };
 

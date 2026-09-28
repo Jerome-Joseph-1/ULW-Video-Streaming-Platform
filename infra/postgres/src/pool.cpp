@@ -363,9 +363,19 @@ private:
     std::optional<Endpoints> resolved_;
 };
 
-Pool::Pool(net::IReactor& reactor, net::OffloadPool& offload, PoolConfig config)
-    : reactor_(reactor), offload_(offload), config_(std::move(config)),
-      plan_(config_.conninfo, config_.application_name, statement_timeout(config_.request_timeout)),
+std::expected<std::unique_ptr<Pool>, std::string>
+Pool::create(net::IReactor& reactor, net::OffloadPool& offload, PoolConfig config) {
+    auto plan = ConnectPlan::create(config.conninfo, config.application_name,
+                                    statement_timeout(config.request_timeout));
+    if (!plan) {
+        return std::unexpected(std::move(plan.error()));
+    }
+    return std::make_unique<Pool>(Token{}, reactor, offload, std::move(config), std::move(*plan));
+}
+
+Pool::Pool(Token /*token*/, net::IReactor& reactor, net::OffloadPool& offload, PoolConfig config,
+           ConnectPlan plan)
+    : reactor_(reactor), offload_(offload), config_(std::move(config)), plan_(std::move(plan)),
       kick_(reactor, [this]() noexcept { dispatch(); }),
       watchdog_(reactor, [this]() noexcept { watch_deadlines(); }) {
     connections_.reserve(config_.connections);

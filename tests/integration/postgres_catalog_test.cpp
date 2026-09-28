@@ -48,6 +48,7 @@ protected:
         ASSERT_TRUE(p);
         offload = std::move(*p);
         catalog = make_catalog();
+        ASSERT_TRUE(catalog);
     }
 
     void TearDown() override {
@@ -60,8 +61,13 @@ protected:
     }
 
     std::unique_ptr<PgUploadCatalog> make_catalog() {
-        return std::make_unique<PgUploadCatalog>(*reactor, *offload,
-                                                 CatalogConfig{.conninfo = db->conninfo()});
+        auto made =
+            PgUploadCatalog::create(*reactor, *offload, CatalogConfig{.conninfo = db->conninfo()});
+        if (!made) {
+            ADD_FAILURE() << made.error();
+            return nullptr;
+        }
+        return std::move(*made);
     }
 
     NewUpload new_upload(std::uint64_t size = 3 * kChunk) {
@@ -282,6 +288,7 @@ TEST_P(CatalogTest, ConcurrentCommitsFromTwoGatewaysQueueOneJob) {
     ASSERT_TRUE(create(*catalog, u));
     fill(u);
     other = make_catalog();
+    ASSERT_TRUE(other);
     Reply<void> first;
     Reply<void> second;
     catalog->commit_upload(u.upload.id, u.video.id, "req-1", first.callback());
@@ -347,6 +354,7 @@ TEST_P(CatalogTest, ClaimReturnsTheUploadAndRefusesASecondGateway) {
     EXPECT_EQ(held->object_key, u.object_key);
 
     other = make_catalog();
+    ASSERT_TRUE(other);
     EXPECT_EQ(claim(*other, u.upload.id).error(), CatalogError::Conflict);
     catalog->release_upload(u.upload.id);
     // The unlock travels on another session than the next claim; wait for it to land.
@@ -365,6 +373,7 @@ TEST_P(CatalogTest, AClaimByAnotherUserIsNotFoundAndLocksNothing) {
     EXPECT_EQ(claim(*catalog, u.upload.id, *core::UserId::parse("auth0|intruder")).error(),
               CatalogError::NotFound);
     other = make_catalog();
+    ASSERT_TRUE(other);
     EXPECT_TRUE(claim(*other, u.upload.id));
 }
 
@@ -398,6 +407,7 @@ TEST_P(CatalogTest, KilledGatewayFreesItsClaimsAtOnce) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
     other = make_catalog();
+    ASSERT_TRUE(other);
     ASSERT_TRUE(claim(*other, u.upload.id));
     ASSERT_EQ(claim(*catalog, u.upload.id).error(), CatalogError::Conflict);
 
@@ -432,6 +442,7 @@ TEST_P(CatalogTest, LosingTheLockSessionLosesEveryClaim) {
     EXPECT_EQ(recorded.error(), CatalogError::Conflict);
 
     other = make_catalog();
+    ASSERT_TRUE(other);
     EXPECT_TRUE(claim(*other, u.upload.id));
 }
 
@@ -444,6 +455,7 @@ TEST_P(CatalogTest, ClaimThatLoadsACorruptRowLetsGoOfItsLock) {
                           Params{}.add_uuid(u.upload.id.uuid())));
     ASSERT_EQ(claim(*catalog, u.upload.id).error(), CatalogError::Corrupt);
     other = make_catalog();
+    ASSERT_TRUE(other);
     // The unlock travels on another session than the next claim; wait for it to land.
     CatalogResult<StoredUpload> seen = std::unexpected(CatalogError::Conflict);
     const bool settled = ulw::test::pump_until(*reactor, [&] {
@@ -452,6 +464,15 @@ TEST_P(CatalogTest, ClaimThatLoadsACorruptRowLetsGoOfItsLock) {
     });
     ASSERT_TRUE(settled);
     EXPECT_EQ(seen.error(), CatalogError::Corrupt);
+}
+
+TEST_P(CatalogTest, RefusesConnectionStringsLibpqWouldResolveOnTheLoop) {
+    for (const std::string conninfo :
+         {"service=ulw dbname=ulw", "dbname=ulw user=ulw", "host='unterminated"}) {
+        const auto made =
+            PgUploadCatalog::create(*reactor, *offload, CatalogConfig{.conninfo = conninfo});
+        EXPECT_FALSE(made) << conninfo;
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, CatalogTest,

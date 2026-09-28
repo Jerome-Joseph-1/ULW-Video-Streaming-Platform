@@ -88,19 +88,42 @@ TEST(ExpandEndpoints, FailsWhenPortsDoNotMatchHosts) {
     EXPECT_FALSE(expand_endpoints(target, addresses));
 }
 
+bool needs_lookup(const std::string& conninfo) {
+    const auto plan = ConnectPlan::create(conninfo, "t", core::Millis{5000});
+    EXPECT_TRUE(plan) << conninfo;
+    return plan && plan->needs_lookup();
+}
+
 TEST(ConnectPlan, LooksUpOnlyNamesWithoutAHostaddr) {
+    EXPECT_TRUE(needs_lookup("postgresql://u@db.internal/ulw"));
+    EXPECT_FALSE(needs_lookup("postgresql://u@127.0.0.1/ulw"));
+    EXPECT_FALSE(needs_lookup("host=/tmp dbname=ulw"));
+    EXPECT_FALSE(needs_lookup("host=db.internal hostaddr=10.0.0.5 dbname=ulw"));
+    EXPECT_FALSE(needs_lookup("hostaddr=10.0.0.5 dbname=ulw"));
+}
+
+TEST(ConnectPlan, RefusesStringsThatLeaveTheHostToLibpq) {
     const core::Millis timeout{5000};
-    EXPECT_TRUE(ConnectPlan("postgresql://u@db.internal/ulw", "t", timeout).needs_lookup());
-    EXPECT_FALSE(ConnectPlan("postgresql://u@127.0.0.1/ulw", "t", timeout).needs_lookup());
-    EXPECT_FALSE(ConnectPlan("host=/tmp dbname=ulw", "t", timeout).needs_lookup());
-    EXPECT_FALSE(
-        ConnectPlan("host=db.internal hostaddr=10.0.0.5 dbname=ulw", "t", timeout).needs_lookup());
+    // A service file may name a host, and with no host libpq falls back on PGHOST: either way
+    // a name only libpq sees, which it would resolve with a blocking lookup.
+    EXPECT_FALSE(ConnectPlan::create("service=ulw", "t", timeout));
+    EXPECT_FALSE(ConnectPlan::create("service=ulw host=127.0.0.1", "t", timeout));
+    EXPECT_FALSE(ConnectPlan::create("dbname=ulw user=ulw", "t", timeout));
+    EXPECT_FALSE(ConnectPlan::create("postgresql:///ulw", "t", timeout));
+}
+
+TEST(ConnectPlan, ReportsWhyAStringDoesNotParse) {
+    const auto plan = ConnectPlan::create("host='unterminated", "t", core::Millis{5000});
+    ASSERT_FALSE(plan);
+    EXPECT_FALSE(plan.error().empty());
 }
 
 TEST(ConnectPlan, ResolvesANameIntoAddressesForLibpq) {
-    const ConnectPlan plan("host=localhost port=5432 dbname=ulw", "t", core::Millis{5000});
-    ASSERT_TRUE(plan.needs_lookup());
-    const auto endpoints = plan.resolve();
+    const auto plan =
+        ConnectPlan::create("host=localhost port=5432 dbname=ulw", "t", core::Millis{5000});
+    ASSERT_TRUE(plan);
+    ASSERT_TRUE(plan->needs_lookup());
+    const auto endpoints = plan->resolve();
     ASSERT_TRUE(endpoints);
     // One entry per address, each naming the host for TLS and handing libpq a numeric address,
     // which it connects to without a lookup of its own.
@@ -126,11 +149,13 @@ std::ptrdiff_t index_of(const std::vector<const char*>& keywords, std::string_vi
 }
 
 TEST(ConnectPlan, DefaultsPrecedeTheStringAndOverridesFollowIt) {
-    const ConnectPlan plan("postgresql://u@db.internal/ulw?options=-c%20work_mem%3D4MB",
-                           "ulw-catalog", core::Millis{4000});
+    const auto plan =
+        ConnectPlan::create("postgresql://u@db.internal/ulw?options=-c%20work_mem%3D4MB",
+                            "ulw-catalog", core::Millis{4000});
+    ASSERT_TRUE(plan);
     const infra::postgres::Endpoints endpoints{
         .host = "db.internal", .hostaddr = "10.0.0.5", .port = ""};
-    const auto arrays = plan.arrays(&endpoints);
+    const auto arrays = plan->arrays(&endpoints);
     ASSERT_EQ(arrays.keywords.size(), arrays.values.size());
     EXPECT_EQ(arrays.keywords.back(), nullptr);
     const auto dbname = index_of(arrays.keywords, "dbname");
@@ -151,8 +176,9 @@ TEST(ConnectPlan, DefaultsPrecedeTheStringAndOverridesFollowIt) {
 }
 
 TEST(ConnectPlan, WithoutEndpointsLeavesTheHostToTheString) {
-    const ConnectPlan plan("postgresql://u@127.0.0.1/ulw", "t", core::Millis{4000});
-    const auto arrays = plan.arrays(nullptr);
+    const auto plan = ConnectPlan::create("postgresql://u@127.0.0.1/ulw", "t", core::Millis{4000});
+    ASSERT_TRUE(plan);
+    const auto arrays = plan->arrays(nullptr);
     EXPECT_EQ(index_of(arrays.keywords, "hostaddr"), -1);
     EXPECT_EQ(index_of(arrays.keywords, "host"), -1);
 }
