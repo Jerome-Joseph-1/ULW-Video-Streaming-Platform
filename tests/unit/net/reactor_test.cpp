@@ -2,6 +2,7 @@
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
 
+#include "send_queue.hpp"
 #include "support/fake_clock.hpp"
 #include "support/reactor_harness.hpp"
 
@@ -356,8 +357,7 @@ TEST_P(ReactorTest, NothingSentAfterARejectedSendReachesThePeer) {
     const std::string_view head = "HEAD";
     const std::string_view tail = "TAIL";
     reactor->send(server.id, std::as_bytes(std::span(head)));
-    // Over the 4 MiB send-queue cap on its own.
-    reactor->send(server.id, pattern(5 * kMiB));
+    reactor->send(server.id, pattern(net::detail::kMaxSendQueue + 1));
     reactor->send(server.id, std::as_bytes(std::span(tail)));
     ASSERT_TRUE(pump_until(*reactor, [&] { return server.error.has_value(); }));
     EXPECT_EQ(*server.error, ENOBUFS);

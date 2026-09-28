@@ -11,17 +11,23 @@ namespace net::detail {
 
 namespace {
 
-// Level-triggered: a handler that stops early leaves the event pending instead of lost.
+// Half the 512 connections admission control allows a process (ADR-0007): with every one of
+// them ready, two waits take them all, and level triggering keeps the rest pending meanwhile.
 constexpr int kMaxEvents = 256;
 // 4 x 64 KiB per wakeup bounds how long one busy connection can hold the loop.
 constexpr int kMaxReadsPerEvent = 4;
+// A full backlog (1024, set in listen_tcp) is taken in 16 wakeups, and established
+// connections get their turn between them.
 constexpr int kMaxAcceptsPerEvent = 64;
-constexpr core::Millis kAcceptRetry{100};
-// The largest legitimate response is a rewritten media playlist for a 6 h video:
-// 5400 segments x ~400 bytes of presigned URL = 2.2 MB. Anything above 4 MiB is a peer that
-// stopped reading.
-constexpr std::size_t kMaxSendQueue = std::size_t{4} * 1024 * 1024;
+// The shortest delay the wheel expresses. Descriptors come back as soon as connections close;
+// the pause only has to keep a listener that cannot accept from spinning the loop.
+constexpr core::Millis kAcceptRetry = TimingWheel::kTick;
+// 16 chunks x 16 KiB = 256 KiB per sendmsg, where the call's fixed cost is already small next
+// to the copy; the iovec and span arrays together take 512 bytes of stack.
 constexpr std::size_t kMaxIov = 16;
+// epoll_wait takes an int of milliseconds. A minute keeps any max_wait inside it, and a
+// caller that wanted longer is back in its loop and simply waits again.
+constexpr core::Millis kMaxWait{60'000};
 
 std::uint64_t make_token(int fd, std::uint32_t gen) noexcept {
     return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(fd)) << 32U) | gen;
@@ -324,7 +330,7 @@ int EpollReactor::run_once(core::Millis max_wait) {
     }
     std::array<epoll_event, kMaxEvents> events{};
     const auto timeout_ms =
-        static_cast<int>(std::clamp<core::Millis::rep>(wait.count(), 0, 60'000));
+        static_cast<int>(std::clamp<core::Millis::rep>(wait.count(), 0, kMaxWait.count()));
     // EINTR is the only error a valid epoll descriptor can return here.
     const int n = std::max(0, ::epoll_wait(epfd_.get(), events.data(), kMaxEvents, timeout_ms));
     now_ = clock_.now();

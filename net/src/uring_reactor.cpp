@@ -20,9 +20,17 @@ constexpr std::uint16_t kBufGroup = 1;
 // only touched once the kernel writes into them, so idle connections cost nothing here.
 constexpr unsigned kBufCount = 256;
 constexpr std::size_t kBufSize = std::size_t{64} * 1024;
-constexpr core::Millis kAcceptRetry{100};
-constexpr std::size_t kMaxSendQueue = std::size_t{4} * 1024 * 1024;
+// The shortest delay the wheel expresses. Descriptors come back as soon as connections close;
+// the pause only has to keep a listener that cannot accept from spinning the loop.
+constexpr core::Millis kAcceptRetry = TimingWheel::kTick;
+// A cancelled socket operation reports back within microseconds of the cancel reaching the
+// kernel. A second without the last completion means it will not, and exiting beats hanging
+// in a destructor. The wait is sliced so the deadline is overshot by 10 ms at most.
+constexpr core::Millis kCancelGrace{1'000};
+constexpr std::chrono::nanoseconds kCancelSlice = core::Millis{10};
 
+// user_data: descriptor in the top 24 bits (16 M, far past any RLIMIT_NOFILE the slot table is
+// sized for), generation in the next 32, operation in the low 8.
 constexpr unsigned kSlotShift = 40;
 constexpr unsigned kGenShift = 8;
 
@@ -114,9 +122,9 @@ void UringReactor::cancel_everything() noexcept {
     io_uring_sqe* sqe = next_sqe();
     io_uring_prep_cancel64(sqe, 0, IORING_ASYNC_CANCEL_ANY);
     io_uring_sqe_set_data64(sqe, 0);
-    const auto deadline = clock_.now() + core::Millis{1'000};
+    const auto deadline = clock_.now() + kCancelGrace;
     while (outstanding > 0 && clock_.now() < deadline) {
-        __kernel_timespec ts{.tv_sec = 0, .tv_nsec = 10'000'000};
+        __kernel_timespec ts{.tv_sec = 0, .tv_nsec = kCancelSlice.count()};
         io_uring_cqe* first = nullptr;
         static_cast<void>(io_uring_submit_and_wait_timeout(&ring_, &first, 1, &ts, nullptr));
         unsigned head = 0;

@@ -12,6 +12,11 @@ namespace net::detail {
 // 16 KiB matches the largest TLS record, so an encrypted record never straddles two chunks.
 inline constexpr std::size_t kChunkSize = std::size_t{16} * 1024;
 
+// The largest legitimate response is a rewritten media playlist for a 6 h video: 5400 segments
+// x ~400 bytes of presigned URL = 2.2 MB. A queue past 4 MiB belongs to a peer that stopped
+// reading, and both reactors fail the connection with ENOBUFS.
+inline constexpr std::size_t kMaxSendQueue = std::size_t{4} * 1024 * 1024;
+
 // `data` is left uninitialised: zeroing 16 KiB per chunk buys nothing when bytes are only
 // read after being written.
 struct Chunk { // NOLINT(cppcoreguidelines-pro-type-member-init)
