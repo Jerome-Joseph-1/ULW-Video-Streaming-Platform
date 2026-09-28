@@ -21,9 +21,12 @@ min_rt_per_sec=1000
 #    the 256 KiB watermark plus one 64 KiB read, so RSS may move by one such queue at most; a
 #    server that kept reading would grow at the clients' write rate, hundreds of MB/s.
 max_noread_growth_kb=$((256 + 64))
-#  - An idle connection cost 60 to 370 bytes. 1 KiB each still fails a design with a
-#    per-connection read buffer, which costs 64 KiB each.
-max_idle_growth_kb=$idle_clients
+#  - An idle connection costs 60 to 370 bytes of heap, but RSS moves in whole pages, and where
+#    transparent huge pages are "always" (GitHub's runners) in 2 MiB steps: 5000 idle
+#    connections measured +1.8 MB here and +17.2 MB there, with the same binary. 8 KiB each
+#    (40 MB) covers that rounding and still fails a design with a per-connection read buffer,
+#    which costs 64 KiB each (320 MB), by a factor of eight.
+max_idle_growth_kb=$((idle_clients * 8))
 
 work=$(mktemp -d)
 pid=
