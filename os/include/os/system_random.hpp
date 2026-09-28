@@ -2,6 +2,9 @@
 
 #include "core/ports/random.hpp"
 
+#include <cstddef>
+#include <span>
+
 namespace os {
 
 // getrandom(2) from the kernel CSPRNG. Blocks only before the pool is first seeded, which

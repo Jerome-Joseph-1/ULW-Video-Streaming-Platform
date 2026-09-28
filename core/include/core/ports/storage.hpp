@@ -16,7 +16,7 @@
 
 namespace core::ports {
 
-enum class StorageError {
+enum class StorageError : std::uint8_t {
     NotFound,
     AlreadyExists,
     PreconditionFailed,
@@ -29,7 +29,7 @@ enum class StorageError {
 
 [[nodiscard]] std::string_view to_string(StorageError e) noexcept;
 
-enum class IngestState { Open, Finalizing, Committed, Failed };
+enum class IngestState : std::uint8_t { Open, Finalizing, Committed, Failed };
 
 // One resumable ingest. Only the key means anything outside the adapter; the rest is
 // opaque adapter state that the caller persists verbatim and hands back unchanged.
@@ -86,10 +86,10 @@ public:
 };
 
 struct ReadGrant {
-    enum class Kind { RedirectUrl, ServeLocally };
-    Kind kind;
+    enum class Kind : std::uint8_t { RedirectUrl, ServeLocally };
+    Kind kind{};
     std::string value;
-    Seconds ttl;
+    Seconds ttl{};
 };
 
 class IObjectReader {

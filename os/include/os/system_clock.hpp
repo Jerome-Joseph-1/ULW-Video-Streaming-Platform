@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ports/clock.hpp"
+#include "core/util/time.hpp"
 
 namespace os {
 

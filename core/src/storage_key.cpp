@@ -1,5 +1,12 @@
 #include "core/models/storage_key.hpp"
 
+#include "core/errors/domain_error.hpp"
+
+#include <cstddef>
+#include <expected>
+#include <string>
+#include <string_view>
+
 namespace core {
 
 namespace {

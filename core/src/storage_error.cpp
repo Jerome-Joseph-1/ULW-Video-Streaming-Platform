@@ -1,5 +1,7 @@
 #include "core/ports/storage.hpp"
 
+#include <string_view>
+
 namespace core::ports {
 
 std::string_view to_string(StorageError e) noexcept {

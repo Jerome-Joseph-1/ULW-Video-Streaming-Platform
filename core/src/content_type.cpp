@@ -1,6 +1,13 @@
 #include "core/models/content_type.hpp"
 
+#include "core/errors/domain_error.hpp"
+
 #include <algorithm>
+#include <cstddef>
+#include <expected>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace core {
 

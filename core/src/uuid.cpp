@@ -27,7 +27,7 @@ constexpr std::array<std::size_t, Uuid::kByteLength> kDigitOffsets{0,  2,  4,  6
 constexpr std::array<std::size_t, 4> kDashOffsets{8, 13, 18, 23};
 constexpr std::string_view kHexDigits = "0123456789abcdef";
 
-std::optional<std::byte> decode_hex_pair(char high, char low) noexcept {
+[[nodiscard]] std::optional<std::byte> decode_hex_pair(char high, char low) noexcept {
     const std::size_t h = kHexDigits.find(high);
     const std::size_t l = kHexDigits.find(low);
     if (h == std::string_view::npos || l == std::string_view::npos) {

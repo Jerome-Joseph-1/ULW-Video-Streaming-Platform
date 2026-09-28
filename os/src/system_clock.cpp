@@ -1,5 +1,9 @@
 #include "os/system_clock.hpp"
 
+#include "core/util/time.hpp"
+
+#include <chrono>
+
 namespace os {
 
 core::MonoTime SystemClock::now() const noexcept {

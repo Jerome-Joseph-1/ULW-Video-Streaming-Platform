@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -78,6 +79,7 @@ private:
 
     std::array<char, kMaxLength> chars_{};
     std::uint8_t size_ = 0;
+    static_assert(kMaxLength <= std::numeric_limits<std::uint8_t>::max());
 };
 
 // A node's name, taken from its pod hostname. Kubernetes forms that hostname by truncating the pod
@@ -99,6 +101,7 @@ private:
 
     std::array<char, kMaxLength> chars_{};
     std::uint8_t size_ = 0;
+    static_assert(kMaxLength <= std::numeric_limits<std::uint8_t>::max());
 };
 
 } // namespace core

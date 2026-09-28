@@ -2,9 +2,11 @@
 
 #include "core/errors/domain_error.hpp"
 
+#include <cstddef>
 #include <expected>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace core {
 

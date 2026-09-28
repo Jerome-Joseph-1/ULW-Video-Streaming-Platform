@@ -2,7 +2,9 @@
 
 #include "core/ports/random.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace ulw::test {
 

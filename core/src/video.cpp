@@ -52,7 +52,7 @@ constexpr std::array<Utf8Row, 8> kUtf8Rows{{
 }};
 
 // Length of the well-formed sequence that starts `text`, or 0 if it does not start with one.
-std::size_t utf8_sequence_length(std::string_view text) noexcept {
+[[nodiscard]] std::size_t utf8_sequence_length(std::string_view text) noexcept {
     if (static_cast<unsigned char>(text.front()) < 0x80U) {
         return 1;
     }
@@ -71,7 +71,7 @@ std::size_t utf8_sequence_length(std::string_view text) noexcept {
 
 // Titles and failure reasons are echoed verbatim into JSON and stored in a UTF-8 text column, so
 // malformed text is rejected here instead of failing later on the way out.
-bool is_valid_text(std::string_view text, std::size_t max_bytes) noexcept {
+[[nodiscard]] bool is_valid_text(std::string_view text, std::size_t max_bytes) noexcept {
     if (text.empty() || text.size() > max_bytes) {
         return false;
     }
@@ -111,7 +111,7 @@ bool is_terminal(VideoState state) noexcept {
     return state == VideoState::Ready || state == VideoState::Failed;
 }
 
-std::expected<void, DomainError> validate(const VideoRecord& record) noexcept {
+[[nodiscard]] std::expected<void, DomainError> validate(const VideoRecord& record) noexcept {
     if (!is_valid_text(record.title, Video::kMaxTitleBytes)) {
         return std::unexpected(DomainError::InvalidTitle);
     }
@@ -162,7 +162,7 @@ std::expected<Video, DomainError> Video::rehydrate(const VideoRecord& record) {
 }
 
 std::expected<void, DomainError> Video::start_upload() noexcept {
-    if (auto ok = require_state({VideoState::Init}); !ok) {
+    if (const auto ok = require_state({VideoState::Init}); !ok) {
         return ok;
     }
     enter(VideoState::Uploading);
@@ -170,7 +170,7 @@ std::expected<void, DomainError> Video::start_upload() noexcept {
 }
 
 std::expected<void, DomainError> Video::start_processing() noexcept {
-    if (auto ok = require_state({VideoState::Init, VideoState::Uploading}); !ok) {
+    if (const auto ok = require_state({VideoState::Init, VideoState::Uploading}); !ok) {
         return ok;
     }
     enter(VideoState::Processing);
@@ -178,7 +178,7 @@ std::expected<void, DomainError> Video::start_processing() noexcept {
 }
 
 std::expected<void, DomainError> Video::mark_ready(Millis duration) noexcept {
-    if (auto ok = require_state({VideoState::Processing}); !ok) {
+    if (const auto ok = require_state({VideoState::Processing}); !ok) {
         return ok;
     }
     if (duration < Millis::zero()) {
@@ -190,7 +190,8 @@ std::expected<void, DomainError> Video::mark_ready(Millis duration) noexcept {
 }
 
 std::expected<void, DomainError> Video::mark_failed(std::string reason) noexcept {
-    if (auto ok = require_state({VideoState::Init, VideoState::Uploading, VideoState::Processing});
+    if (const auto ok =
+            require_state({VideoState::Init, VideoState::Uploading, VideoState::Processing});
         !ok) {
         return ok;
     }

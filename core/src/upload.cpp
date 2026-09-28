@@ -1,8 +1,6 @@
 #include "core/models/upload.hpp"
 
 #include "core/errors/domain_error.hpp"
-#include "core/models/ids.hpp"
-#include "core/util/time.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -11,7 +9,7 @@ namespace core {
 
 namespace {
 
-std::expected<void, DomainError> validate(const UploadRecord& record) noexcept {
+[[nodiscard]] std::expected<void, DomainError> validate(const UploadRecord& record) noexcept {
     if (record.size_bytes == 0 || record.size_bytes > Upload::kMaxSizeBytes) {
         return std::unexpected(DomainError::InvalidUploadSize);
     }
