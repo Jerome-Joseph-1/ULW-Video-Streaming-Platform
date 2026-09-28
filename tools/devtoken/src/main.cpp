@@ -1,19 +1,15 @@
 #include "core/models/ids.hpp"
 #include "core/util/time.hpp"
 #include "os/system_clock.hpp"
-#include "os/unique_fd.hpp"
 
 #include "devtoken/dev_key.hpp"
-
-#include <sys/stat.h>
+#include "devtoken/key_file.hpp"
 
 #include <cerrno>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <expected>
-#include <fcntl.h>
 #include <format>
 #include <optional>
 #include <print>
@@ -21,7 +17,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -40,11 +35,6 @@ constexpr std::string_view kUsage = R"(usage:
 // JWT_AUDIENCE's default (ADR-0018).
 constexpr std::string_view kDefaultAudience = "askedin-platform";
 constexpr std::int64_t kDefaultTtlSeconds = 3600;
-// A week covers a test environment left running over a weekend; a longer-lived token is one
-// that ends up pasted somewhere it outlives its purpose.
-constexpr std::int64_t kMaxTtlSeconds = std::int64_t{7} * 24 * 3600;
-// A private JWK is about 200 bytes; anything much larger is not one.
-constexpr std::size_t kMaxKeyFileBytes = 4096;
 
 constexpr int kUsageError = 2;
 
@@ -64,43 +54,8 @@ int usage() {
     return kUsageError;
 }
 
-std::expected<std::string, int> read_key_file(const std::string& path) {
-    const os::UniqueFd fd{::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
-    if (!fd) {
-        return std::unexpected(errno);
-    }
-    struct stat st {};
-    if (::fstat(fd.get(), &st) != 0) {
-        return std::unexpected(errno);
-    }
-    // As ssh does with a private key: one that others can read has already leaked.
-    if (!S_ISREG(st.st_mode) || (st.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
-        return std::unexpected(EPERM);
-    }
-    std::string contents(kMaxKeyFileBytes + 1, '\0');
-    std::size_t filled = 0;
-    while (filled < contents.size()) {
-        const ssize_t n = ::read(fd.get(), contents.data() + filled, contents.size() - filled);
-        if (n < 0 && errno == EINTR) {
-            continue;
-        }
-        if (n < 0) {
-            return std::unexpected(errno);
-        }
-        if (n == 0) {
-            break;
-        }
-        filled += static_cast<std::size_t>(n);
-    }
-    if (filled > kMaxKeyFileBytes) {
-        return std::unexpected(EFBIG);
-    }
-    contents.resize(filled);
-    return contents;
-}
-
 std::optional<devtoken::DevKey> load_key(const std::string& path) {
-    const std::expected<std::string, int> text = read_key_file(path);
+    const std::expected<std::string, int> text = devtoken::read_key_file(path);
     if (!text && text.error() == EPERM) {
         fail(path + ": key file must be a regular file with mode 0600");
         return std::nullopt;
@@ -127,26 +82,8 @@ int keygen(const std::string& path) {
     if (!jwk) {
         return fail(devtoken::to_string(jwk.error()));
     }
-    // O_EXCL: an existing key is never replaced, since tokens and key sets made from it would
-    // silently stop verifying.
-    const os::UniqueFd fd{
-        ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600)};
-    if (!fd) {
-        return fail("cannot create", path, errno);
-    }
-    std::size_t written = 0;
-    while (written < jwk->size()) {
-        const ssize_t n = ::write(fd.get(), jwk->data() + written, jwk->size() - written);
-        if (n < 0 && errno == EINTR) {
-            continue;
-        }
-        if (n < 0) {
-            const int err = errno;
-            // A torn key file would block the next keygen and load as nothing.
-            ::unlink(path.c_str());
-            return fail("cannot write", path, err);
-        }
-        written += static_cast<std::size_t>(n);
+    if (auto written = devtoken::write_new_key_file(path, *jwk); !written) {
+        return fail("cannot create", path, written.error());
     }
     std::println("{}: key {}", path, key->kid());
     return 0;
@@ -159,16 +96,6 @@ int jwks(const std::string& path) {
     }
     std::print("{}", key->public_jwks());
     return 0;
-}
-
-std::optional<std::int64_t> parse_ttl(std::string_view text) {
-    std::int64_t value = 0;
-    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (ec != std::errc{} || end != text.data() + text.size() || value < 1 ||
-        value > kMaxTtlSeconds) {
-        return std::nullopt;
-    }
-    return value;
 }
 
 int mint(const std::string& path, std::span<const std::string_view> options) {
@@ -192,11 +119,12 @@ int mint(const std::string& path, std::span<const std::string_view> options) {
         } else if (name == "--email") {
             request.email = value;
         } else if (name == "--ttl") {
-            const std::optional<std::int64_t> ttl = parse_ttl(value);
+            const std::optional<core::Seconds> ttl = devtoken::parse_ttl(value);
             if (!ttl) {
-                return fail(std::format("--ttl takes whole seconds from 1 to {}", kMaxTtlSeconds));
+                return fail(std::format("--ttl takes whole seconds from 1 to {}",
+                                        devtoken::kMaxTtl.count()));
             }
-            request.ttl = core::Seconds{*ttl};
+            request.ttl = *ttl;
         } else {
             return usage();
         }

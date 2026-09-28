@@ -2,15 +2,23 @@
 #include "infra/auth/local_verifier.hpp"
 
 #include "devtoken/dev_key.hpp"
+#include "devtoken/key_file.hpp"
 #include "support/fake_clock.hpp"
 #include "test_claims.hpp"
 
+#include <sys/stat.h>
+
+#include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <expected>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <ios>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 #include <utility>
 
 namespace {
@@ -122,6 +130,71 @@ TEST(DevTokenTest, RefusesKeyFilesThatAreNotItsOwn) {
     EXPECT_EQ(
         DevKey::from_private_jwk(R"({"kty":"OKP","crv":"Ed25519","d":"AAAA","x":"AAAA"})").error(),
         DevKeyError::Malformed);
+}
+
+TEST(DevTokenTest, TheTtlIsWholeSecondsUpToAWeek) {
+    EXPECT_EQ(devtoken::parse_ttl("1"), std::chrono::seconds(1));
+    EXPECT_EQ(devtoken::parse_ttl("604800"), devtoken::kMaxTtl);
+    for (const std::string_view bad : {"", "0", "-5", "604801", "1.5", "60s", " 60"}) {
+        EXPECT_FALSE(devtoken::parse_ttl(bad).has_value()) << bad;
+    }
+}
+
+// Each test gets its own directory, removed afterwards.
+class KeyFileTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        std::string tmpl =
+            (std::filesystem::temp_directory_path() / "ulw-devtoken-XXXXXX").string();
+        ASSERT_NE(::mkdtemp(tmpl.data()), nullptr);
+        dir = tmpl;
+    }
+    void TearDown() override { std::filesystem::remove_all(dir); }
+
+    [[nodiscard]] std::string path(std::string_view name) const { return (dir / name).string(); }
+
+    std::filesystem::path dir;
+};
+
+TEST_F(KeyFileTest, ANewKeyFileIsOwnerOnlyWhateverTheUmask) {
+    const ::mode_t saved = ::umask(0);
+    const auto written = devtoken::write_new_key_file(path("k"), "secret");
+    ::umask(saved);
+    ASSERT_TRUE(written);
+    struct stat st {};
+    ASSERT_EQ(::stat(path("k").c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777U, 0600U);
+    EXPECT_EQ(devtoken::read_key_file(path("k")), "secret");
+}
+
+TEST_F(KeyFileTest, AnExistingKeyFileIsNeverReplaced) {
+    ASSERT_TRUE(devtoken::write_new_key_file(path("k"), "first"));
+    EXPECT_EQ(devtoken::write_new_key_file(path("k"), "second").error(), EEXIST);
+    EXPECT_EQ(devtoken::read_key_file(path("k")), "first");
+}
+
+TEST_F(KeyFileTest, AKeyOthersCanReadIsRefused) {
+    ASSERT_TRUE(devtoken::write_new_key_file(path("k"), "secret"));
+    for (const ::mode_t mode : {0640U, 0604U, 0660U}) {
+        ASSERT_EQ(::chmod(path("k").c_str(), mode), 0);
+        EXPECT_EQ(devtoken::read_key_file(path("k")).error(), EPERM) << std::oct << mode;
+    }
+}
+
+TEST_F(KeyFileTest, ASymlinkIsNotFollowed) {
+    ASSERT_TRUE(devtoken::write_new_key_file(path("real"), "secret"));
+    ASSERT_EQ(::symlink(path("real").c_str(), path("link").c_str()), 0);
+    EXPECT_EQ(devtoken::read_key_file(path("link")).error(), ELOOP);
+    EXPECT_EQ(devtoken::write_new_key_file(path("link"), "other").error(), EEXIST);
+}
+
+TEST_F(KeyFileTest, AnOversizedFileIsNotAKey) {
+    ASSERT_TRUE(devtoken::write_new_key_file(path("big"),
+                                             std::string(devtoken::kMaxKeyFileBytes + 1, 'k')));
+    EXPECT_EQ(devtoken::read_key_file(path("big")).error(), EFBIG);
+    ASSERT_TRUE(
+        devtoken::write_new_key_file(path("max"), std::string(devtoken::kMaxKeyFileBytes, 'k')));
+    EXPECT_TRUE(devtoken::read_key_file(path("max")).has_value());
 }
 
 } // namespace

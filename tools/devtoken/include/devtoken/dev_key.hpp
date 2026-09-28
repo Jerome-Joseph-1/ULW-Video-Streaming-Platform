@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -20,6 +21,13 @@ enum class DevKeyError : std::uint8_t {
 };
 
 [[nodiscard]] std::string_view to_string(DevKeyError e) noexcept;
+
+// A week covers a test environment left running over a weekend; a longer-lived token is one
+// that ends up pasted somewhere it outlives its purpose.
+inline constexpr core::Seconds kMaxTtl{std::int64_t{7} * 24 * 3600};
+
+// Whole seconds from 1 to kMaxTtl, nothing else.
+[[nodiscard]] std::optional<core::Seconds> parse_ttl(std::string_view text) noexcept;
 
 struct MintRequest {
     std::string issuer;

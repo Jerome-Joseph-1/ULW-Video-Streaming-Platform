@@ -1,6 +1,7 @@
 #include "devtoken/dev_key.hpp"
 
 #include "core/util/json.hpp"
+#include "core/util/parse.hpp"
 #include "core/util/time.hpp"
 #include "infra/auth/base64url.hpp"
 
@@ -23,6 +24,10 @@ namespace {
 
 // RFC 8032 section 5.1.5: both halves of an Ed25519 key are 32 bytes.
 constexpr std::size_t kKeyBytes = 32;
+// RFC 8032 section 5.1.6: a signature is R then S, 32 bytes each.
+constexpr std::size_t kEd25519SignatureBytes = 64;
+// FIPS 180-4: SHA-256 digests are 256 bits.
+constexpr std::size_t kSha256Bytes = 32;
 
 struct MdCtxFree {
     void operator()(EVP_MD_CTX* ctx) const noexcept { EVP_MD_CTX_free(ctx); }
@@ -38,7 +43,7 @@ std::expected<std::string, DevKeyError> thumbprint(std::string_view x) {
     // RFC 7638 section 3.2: the required members only, in lexical order, without whitespace.
     const std::string canonical =
         R"({"crv":"Ed25519","kty":"OKP","x":")" + std::string(x) + R"("})";
-    std::array<unsigned char, 32> digest{};
+    std::array<unsigned char, kSha256Bytes> digest{};
     std::size_t written = 0;
     if (EVP_Q_digest(nullptr, "SHA256", nullptr, canonical.data(), canonical.size(), digest.data(),
                      &written) != 1) {
@@ -175,7 +180,7 @@ std::expected<std::string, DevKeyError> DevKey::mint(const MintRequest& request,
     const std::string input =
         infra::auth::encode_base64url(header) + '.' + infra::auth::encode_base64url(payload);
     const std::unique_ptr<EVP_MD_CTX, MdCtxFree> ctx{EVP_MD_CTX_new()};
-    std::array<unsigned char, 64> signature{};
+    std::array<unsigned char, kEd25519SignatureBytes> signature{};
     std::size_t len = signature.size();
     const auto* bytes = reinterpret_cast<const unsigned char*>(input.data());
     if (!ctx ||
@@ -187,6 +192,14 @@ std::expected<std::string, DevKeyError> DevKey::mint(const MintRequest& request,
         return std::unexpected(DevKeyError::Crypto);
     }
     return input + '.' + infra::auth::encode_base64url(signature);
+}
+
+std::optional<core::Seconds> parse_ttl(std::string_view text) noexcept {
+    const std::optional<std::int64_t> value = core::parse_integer<std::int64_t>(text);
+    if (!value || *value < 1 || *value > kMaxTtl.count()) {
+        return std::nullopt;
+    }
+    return core::Seconds{*value};
 }
 
 } // namespace devtoken
