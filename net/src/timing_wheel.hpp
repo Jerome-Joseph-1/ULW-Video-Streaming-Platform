@@ -28,6 +28,7 @@ public:
 
 private:
     static constexpr std::uint32_t kNil = UINT32_MAX;
+    static constexpr std::uint32_t kImmediate = UINT32_MAX - 1;
 
     struct Entry {
         core::MonoTime deadline;
@@ -49,6 +50,12 @@ private:
 
     std::vector<Entry> entries_;
     std::vector<std::uint32_t> free_;
+    // Zero-delay timers skip the wheel and fire on the next tick_to, whether or not a tick
+    // boundary has passed; routing them through a slot would delay them by up to 100 ms.
+    std::vector<TimerId> immediate_;
+    // The batch tick_to is firing. A member, and swapped rather than moved, so both buffers
+    // keep their capacity and a steady stream of zero-delay timers never allocates.
+    std::vector<TimerId> firing_;
     std::array<std::uint32_t, kSlots> heads_{};
     std::int64_t last_tick_;
     std::size_t armed_ = 0;

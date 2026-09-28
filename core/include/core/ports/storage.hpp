@@ -42,12 +42,10 @@ struct IngestId {
 
 class IIngestObserver {
 public:
+    virtual ~IIngestObserver() = default;
     // Runs on the reactor thread, never re-entrantly from inside a session call: write() may
     // now accept more bytes, or state() has changed.
     virtual void on_ingest_progress() noexcept = 0;
-
-protected:
-    ~IIngestObserver() = default;
 };
 
 // One in-flight chunk. Every member runs on the reactor thread and never blocks.
@@ -74,7 +72,10 @@ public:
     [[nodiscard]] virtual std::expected<IngestId, StorageError>
     create(const StorageKey& key, std::uint64_t total_bytes, const ContentType& type) = 0;
     // `offset` must be a value durable_offset() has reported; the caller's cached copy is
-    // fine because a stale-low offset only re-sends bytes the backend already holds.
+    // fine because a stale-low offset only re-sends bytes the backend already holds. open()
+    // refuses only offsets it can rule out without blocking. Past the durable offset is not
+    // one of them: such a session fails with PreconditionFailed instead, and nothing it took
+    // becomes durable.
     [[nodiscard]] virtual std::expected<std::unique_ptr<IIngestSession>, StorageError>
     open(const IngestId& id, std::uint64_t offset, IIngestObserver& observer) = 0;
     [[nodiscard]] virtual std::expected<std::uint64_t, StorageError>

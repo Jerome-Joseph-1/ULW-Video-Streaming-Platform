@@ -1,0 +1,8 @@
+# Byte buffers handed to POSIX file and socket calls need these; they stay enabled everywhere
+# outside the OS-facing modules.
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index

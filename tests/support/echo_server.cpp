@@ -11,7 +11,7 @@ public:
     Session(Handle handle, EchoServer& server) noexcept : handle_(handle), server_(server) {}
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
-    ~Session() = default;
+    ~Session() override = default;
 
     void start(net::ConnId conn) noexcept {
         conn_ = conn;

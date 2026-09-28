@@ -23,7 +23,7 @@ class EchoServer final : public net::IAcceptHandler,
                          public net::ITimerHandler {
 public:
     EchoServer(net::IReactor& reactor, EchoOptions options);
-    ~EchoServer();
+    ~EchoServer() override;
     EchoServer(const EchoServer&) = delete;
     EchoServer& operator=(const EchoServer&) = delete;
 

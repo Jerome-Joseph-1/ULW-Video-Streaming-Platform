@@ -40,41 +40,33 @@ struct TimerId {
 // Mode A: the reactor owns the socket and hands over bytes it has already read.
 class IStreamHandler {
 public:
+    virtual ~IStreamHandler() = default;
     virtual void on_data(BorrowedBytes bytes) noexcept = 0;
     // The send queue drained. Only meaningful if pending_send_bytes() was non-zero after the
     // last send(): a reactor may write synchronously and skip the callback.
     virtual void on_writable() noexcept = 0;
     virtual void on_peer_eof() noexcept = 0;
     virtual void on_error(int err) noexcept = 0;
-
-protected:
-    ~IStreamHandler() = default;
 };
 
 // Mode B: readiness for a descriptor some library owns (libcurl, libpq, signalfd).
 class IReadyHandler {
 public:
+    virtual ~IReadyHandler() = default;
     virtual void on_ready(Interest ready) noexcept = 0;
-
-protected:
-    ~IReadyHandler() = default;
 };
 
 class ITimerHandler {
 public:
+    virtual ~ITimerHandler() = default;
     virtual void on_timeout() noexcept = 0;
-
-protected:
-    ~ITimerHandler() = default;
 };
 
 class IAcceptHandler {
 public:
+    virtual ~IAcceptHandler() = default;
     // The socket is nonblocking and close-on-exec.
     virtual void on_accept(os::UniqueFd conn) noexcept = 0;
-
-protected:
-    ~IAcceptHandler() = default;
 };
 
 // Single-threaded: every member must be called on the thread that runs run_once(), and
