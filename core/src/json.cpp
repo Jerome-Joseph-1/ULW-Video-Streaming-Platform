@@ -135,7 +135,7 @@ private:
     // Recursion is bounded by limits_.max_depth, checked on entry.
     // NOLINTNEXTLINE(misc-no-recursion)
     bool value(Value& out, std::size_t depth) {
-        if (depth > limits_.max_depth) {
+        if (depth >= limits_.max_depth) {
             return set_error("nesting too deep");
         }
         skip_ws();

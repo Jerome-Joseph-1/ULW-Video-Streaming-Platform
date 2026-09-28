@@ -69,8 +69,9 @@ TEST(Json, RejectsTrailingDataAndUnterminatedInput) {
 }
 
 TEST(Json, BoundsNestingDepth) {
+    // max_depth counts nested values: 32 arrays inside one another is the most allowed.
     const std::string ok = std::string(32, '[') + std::string(32, ']');
-    const std::string deep = std::string(34, '[') + std::string(34, ']');
+    const std::string deep = std::string(33, '[') + std::string(33, ']');
     EXPECT_TRUE(parse(ok));
     EXPECT_FALSE(parse(deep));
 }
