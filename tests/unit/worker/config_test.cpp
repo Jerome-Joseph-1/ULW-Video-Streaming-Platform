@@ -11,13 +11,11 @@ using worker::StorageBackend;
 
 class WorkerConfigTest : public ::testing::Test {
 protected:
-    [[nodiscard]] std::expected<Config, worker::ConfigError> load(unsigned cores = 4) const {
-        return worker::load_config(
-            [this](std::string_view name) -> std::optional<std::string> {
-                const auto it = env.find(std::string(name));
-                return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
-            },
-            cores);
+    [[nodiscard]] std::expected<Config, worker::ConfigError> load() const {
+        return worker::load_config([this](std::string_view name) -> std::optional<std::string> {
+            const auto it = env.find(std::string(name));
+            return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
+        });
     }
 
     [[nodiscard]] std::string refused_variable() const {
@@ -115,11 +113,11 @@ TEST_F(WorkerConfigTest, PathsMustBeAbsolute) {
     EXPECT_EQ(config->sandbox, "/opt/ulw/ulw_sandbox");
 }
 
-TEST_F(WorkerConfigTest, ThreadsDefaultToTheCoresWithinBoundsAndMayBeSet) {
-    EXPECT_EQ(load(0)->ffmpeg_threads, 1U);
-    EXPECT_EQ(load(256)->ffmpeg_threads, 64U);
+TEST_F(WorkerConfigTest, ThreadsDefaultToAFixedNumberAndMayBeSet) {
+    // Not the host's cores, which say nothing of the container's share of them.
+    EXPECT_EQ(load()->ffmpeg_threads, 4U);
     env["ULW_FFMPEG_THREADS"] = "3";
-    EXPECT_EQ(load(16)->ffmpeg_threads, 3U);
+    EXPECT_EQ(load()->ffmpeg_threads, 3U);
     for (const char* bad : {"0", "65", "two", "-1", "4 "}) {
         env["ULW_FFMPEG_THREADS"] = bad;
         EXPECT_EQ(refused_variable(), "ULW_FFMPEG_THREADS") << bad;

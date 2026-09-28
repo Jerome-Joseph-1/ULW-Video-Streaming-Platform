@@ -64,8 +64,11 @@ struct JobSettings {
 };
 
 // One claimed job, start to finish: workspace, download, probe, transcode, verify, publish,
-// fenced finish. Output keys are a function of the video alone and the output is
-// deterministic, so a rerun, or a zombie that publishes late, rewrites identical bytes.
+// fenced finish. Output keys are a function of the video alone, but not the bytes under them:
+// x264 with a VBV and frame threads differs run to run even at one thread count. A rerun, or a
+// zombie that wrote before it noticed its lost lease, still leaves a rendition that plays:
+// every run puts its keyframes at the same times, each segment starts on one, the init
+// segments and playlists match, and the master is written last.
 class JobRunner {
 public:
     JobRunner(JobDeps deps, JobSettings settings);

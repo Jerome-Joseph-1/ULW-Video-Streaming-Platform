@@ -178,7 +178,6 @@ protected:
         auto scratch = std::make_unique<TempDir>("ulw-worker-" + node);
         std::vector<std::string> env{"ULW_DATABASE_URL=" + db_->conninfo(), "ULW_NODE_ID=" + node,
                                      "ULW_SCRATCH_DIR=" + scratch->path().string(),
-                                     "ULW_FFMPEG_THREADS=2",
                                      "PATH=" + env_or("PATH", "/usr/bin:/bin")};
         env.insert(env.end(), storage_env.begin(), storage_env.end());
         scratch_dirs_.push_back(std::move(scratch));

@@ -2,7 +2,6 @@
 
 #include "core/util/parse.hpp"
 
-#include <algorithm>
 #include <utility>
 
 namespace worker {
@@ -13,6 +12,11 @@ namespace {
 // sized in megabytes, and a workspace holds a whole upload.
 constexpr std::string_view kDefaultScratch = "/var/tmp/ulw-worker";
 constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
+// A number of our own: the host's core count says nothing of the container's CPU quota, and
+// x264's memory grows with its threads. Four held the full ladder of a 1080p source at 556 MB
+// resident, inside the 2 GB a worker is sized at (about 200 MB per rendition, brief 8.1), at
+// 0.73x realtime on 4 cores.
+constexpr unsigned kDefaultThreads = 4;
 // Past this, x264's frame threads stop scaling and only multiply the lookahead memory.
 constexpr unsigned kMaxThreads = 64;
 
@@ -100,7 +104,7 @@ std::expected<core::NodeId, ConfigError> load_node(const EnvLookup& env) {
 
 } // namespace
 
-std::expected<Config, ConfigError> load_config(const EnvLookup& env, unsigned cores) {
+std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     auto database = required(env, "ULW_DATABASE_URL");
     if (!database) {
         return std::unexpected(std::move(database.error()));
@@ -121,7 +125,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env, unsigned co
     if (!sandbox) {
         return std::unexpected(std::move(sandbox.error()));
     }
-    unsigned threads = std::clamp(cores, 1U, kMaxThreads);
+    unsigned threads = kDefaultThreads;
     if (const auto text = lookup(env, "ULW_FFMPEG_THREADS")) {
         const auto value = core::parse_integer<unsigned>(*text);
         if (!value || *value < 1 || *value > kMaxThreads) {

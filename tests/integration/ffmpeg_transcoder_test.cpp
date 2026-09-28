@@ -17,9 +17,11 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <iterator>
+#include <map>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -43,6 +45,20 @@ std::vector<std::string> entries(const fs::path& dir) {
     }
     std::ranges::sort(names);
     return names;
+}
+
+// Every file under `dir`, by its path relative to it, with its bytes.
+std::map<std::string, std::string> tree(const fs::path& dir) {
+    std::map<std::string, std::string> files;
+    for (const auto& e : fs::recursive_directory_iterator(dir)) {
+        if (e.is_regular_file()) {
+            std::ifstream in(e.path(), std::ios::binary);
+            std::string bytes(e.file_size(), '\0');
+            in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            files[fs::relative(e.path(), dir).string()] = std::move(bytes);
+        }
+    }
+    return files;
 }
 
 struct Recorder final : core::ports::ITranscodeProgress {
@@ -275,6 +291,33 @@ TEST_F(TranscoderTest, AManifestThatNamesAFileOutsideTheWorkspaceIsRefused) {
     const auto stats = transcoder_.run(upload, out(), claimed, ladder, progress_, {});
     ASSERT_FALSE(stats);
     EXPECT_FALSE(fs::exists(out() / "master.m3u8"));
+}
+
+TEST_F(TranscoderTest, SegmentsOfTwoRunsMixIntoARenditionThatPlays) {
+    // A rerun, or a zombie's late upload, overwrites some keys of another run's output; x264
+    // with a VBV and frame threads writes different bytes each time, so this is what readers
+    // may get.
+    const auto media = transcode({.size = "1280x720", .rate = "30000/1001", .seconds = 9});
+    const fs::path again = work_.path() / "again";
+    const auto stats = transcoder_.run(source(), again, media, ladder_, progress_, {});
+    ASSERT_TRUE(stats) << stats.error().detail;
+    const auto first = tree(out());
+    const auto second = tree(again);
+    ASSERT_EQ(first.size(), second.size());
+    for (const auto& [name, bytes] : first) {
+        ASSERT_TRUE(second.contains(name)) << name;
+        if (!name.ends_with(".m4s")) {
+            EXPECT_EQ(second.at(name), bytes) << name;
+        }
+    }
+    // Take every other segment from the second run.
+    for (const auto& [name, bytes] : second) {
+        if (name.ends_with("1.m4s")) {
+            fs::copy_file(again / name, out() / name, fs::copy_options::overwrite_existing);
+        }
+    }
+    const auto verified = transcoder_.verify(out(), media, ladder_, {});
+    EXPECT_TRUE(verified) << verified.error().detail;
 }
 
 TEST_F(TranscoderTest, AFileThatIsNotMediaIsRejected) {

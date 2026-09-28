@@ -42,8 +42,7 @@ struct ConfigError {
 using EnvLookup = std::function<std::optional<std::string>(std::string_view name)>;
 
 // Everything comes from the environment, as for the gateway: arguments are visible to every
-// user through /proc, and the database URL carries a password. `cores` is the default for
-// ULW_FFMPEG_THREADS.
-[[nodiscard]] std::expected<Config, ConfigError> load_config(const EnvLookup& env, unsigned cores);
+// user through /proc, and the database URL carries a password.
+[[nodiscard]] std::expected<Config, ConfigError> load_config(const EnvLookup& env);
 
 } // namespace worker

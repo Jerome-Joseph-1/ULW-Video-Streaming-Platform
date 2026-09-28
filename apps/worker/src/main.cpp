@@ -117,8 +117,7 @@ void watch_signals(const std::stop_token& stop, std::stop_source& shutdown, sigs
 
 int run() {
     const auto info = core::build_info();
-    const unsigned cores = std::max(1U, std::thread::hardware_concurrency());
-    auto config = worker::load_config(read_env, cores);
+    auto config = worker::load_config(read_env);
     if (!config) {
         return fail(config.error().variable, config.error().reason);
     }
