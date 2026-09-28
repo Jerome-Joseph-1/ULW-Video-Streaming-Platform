@@ -69,4 +69,26 @@ using Result = std::expected<Response, Failure>;
 // POST and must be empty otherwise.
 [[nodiscard]] Result perform(const Request& request, std::span<const std::byte> body = {});
 
+// Feeds a blocking streamed upload. Nothing can wake a blocked transfer, so returning 0 before
+// the declared length is a read failure and aborts the exchange.
+class IUploadSource {
+public:
+    virtual ~IUploadSource() = default;
+    virtual std::size_t read_upload(std::span<std::byte> out) noexcept = 0;
+};
+
+// Takes a 2xx body as it arrives; false aborts the exchange with FailureKind::Local.
+class IDownloadSink {
+public:
+    virtual ~IDownloadSink() = default;
+    [[nodiscard]] virtual bool write_download(std::span<const std::byte> bytes) noexcept = 0;
+};
+
+// perform(), with a 2xx body of any size handed to `sink` instead of kept in Response::body.
+// An error body is still kept there, bounded, so the caller can tell why.
+[[nodiscard]] Result perform_download(const Request& request, IDownloadSink& sink);
+// perform() for a PUT or POST of exactly `length` bytes pulled from `source`.
+[[nodiscard]] Result perform_upload(const Request& request, std::uint64_t length,
+                                    IUploadSource& source);
+
 } // namespace infra::curl

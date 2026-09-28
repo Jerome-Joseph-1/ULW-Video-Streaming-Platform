@@ -24,12 +24,18 @@ class Exchange {
     };
 
 public:
-    // `source` supplies exactly `upload_length` bytes for PUT and POST; other methods ignore both.
-    [[nodiscard]] static std::expected<std::unique_ptr<Exchange>, Failure>
-    create(const Request& request, std::uint64_t upload_length, IBodySource* source);
+    // On a reactor, a source that runs dry pauses the upload until resume_body(). In a
+    // blocking curl_easy_perform nothing could resume it, so there it aborts the exchange.
+    enum class Mode : std::uint8_t { Reactor, Blocking };
 
-    Exchange(Token token, std::size_t max_body, std::uint64_t upload_length,
-             IBodySource* source) noexcept;
+    // `source` supplies exactly `upload_length` bytes for PUT and POST; other methods ignore
+    // both. With a `sink`, a 2xx body goes there instead of into the response.
+    [[nodiscard]] static std::expected<std::unique_ptr<Exchange>, Failure>
+    create(const Request& request, std::uint64_t upload_length, IBodySource* source,
+           Mode mode = Mode::Reactor, IDownloadSink* sink = nullptr);
+
+    Exchange(Token token, std::size_t max_body, std::uint64_t upload_length, IBodySource* source,
+             Mode mode, IDownloadSink* sink) noexcept;
     Exchange(const Exchange&) = delete;
     Exchange& operator=(const Exchange&) = delete;
     ~Exchange() = default;
@@ -64,6 +70,8 @@ private:
     std::size_t max_body_;
     std::uint64_t upload_left_;
     IBodySource* source_;
+    Mode mode_;
+    IDownloadSink* sink_;
     bool paused_ = false;
     bool oversize_ = false;
     Response response_;
