@@ -1,0 +1,232 @@
+// ulw_sandbox --writable DIR --address-space BYTES --cpu-seconds N -- PROGRAM [ARGS...]
+//
+// Confines itself and then execs PROGRAM: an empty network namespace (unshare -n), every
+// mount read-only except DIR, the given RLIMIT_AS and RLIMIT_CPU, no core dumps, no
+// descriptors beyond the standard three, and no capabilities, so the program cannot undo any
+// of it. posix_spawn cannot do any of this in the child,
+// hence a separate program. Without a PROGRAM it sets everything up and exits 0, which is
+// how the worker checks at startup that the host allows it.
+//
+// Exit codes of its own: 125 when a confinement step fails, 126 when PROGRAM cannot be
+// executed, 127 when it is not found.
+#include "core/util/parse.hpp"
+
+#include <linux/capability.h>
+#include <linux/securebits.h>
+#include <sys/mount.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+
+#include <array>
+#include <cerrno>
+#include <csignal>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fcntl.h>
+#include <filesystem>
+#include <format>
+#include <optional>
+#include <print>
+#include <sched.h>
+#include <span>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <unistd.h>
+#include <vector>
+
+namespace {
+
+constexpr int kSetupFailed = 125;
+constexpr int kCannotExecute = 126;
+constexpr int kNotFound = 127;
+
+struct Options {
+    std::filesystem::path writable;
+    rlim_t address_space = 0;
+    rlim_t cpu_seconds = 0;
+    std::vector<char*> program;
+};
+
+[[noreturn]] void die(std::string_view step, int error) {
+    std::println(stderr, "ulw_sandbox: {}: {}", step, std::generic_category().message(error));
+    std::_Exit(kSetupFailed);
+}
+
+[[noreturn]] void usage() {
+    std::println(stderr, "usage: ulw_sandbox --writable DIR --address-space BYTES "
+                         "--cpu-seconds N -- [PROGRAM ARGS...]");
+    std::_Exit(kSetupFailed);
+}
+
+Options parse(std::span<char*> args) {
+    Options options;
+    std::size_t i = 1;
+    for (; i < args.size(); ++i) {
+        const std::string_view flag = args[i];
+        if (flag == "--") {
+            ++i;
+            break;
+        }
+        if (i + 1 == args.size()) {
+            usage();
+        }
+        const std::string_view value = args[++i];
+        if (flag == "--writable") {
+            options.writable = value;
+        } else if (flag == "--address-space") {
+            options.address_space = core::parse_integer<rlim_t>(value).value_or(0);
+        } else if (flag == "--cpu-seconds") {
+            options.cpu_seconds = core::parse_integer<rlim_t>(value).value_or(0);
+        } else {
+            usage();
+        }
+    }
+    if (options.writable.empty() || options.address_space == 0 || options.cpu_seconds == 0) {
+        usage();
+    }
+    for (; i < args.size(); ++i) {
+        options.program.push_back(args[i]);
+    }
+    options.program.push_back(nullptr);
+    return options;
+}
+
+bool write_file(const char* path, std::string_view text) {
+    const int fd = ::open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+    const bool ok = ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
+    ::close(fd);
+    return ok;
+}
+
+// As root (or with CAP_SYS_ADMIN) the namespaces come directly. Otherwise a user namespace
+// grants the capability inside it; our own ids map to themselves, so files keep their owners.
+void enter_namespaces() {
+    if (::unshare(CLONE_NEWNET | CLONE_NEWNS) == 0) {
+        return;
+    }
+    if (errno != EPERM) {
+        die("unshare", errno);
+    }
+    const uid_t uid = ::geteuid();
+    const gid_t gid = ::getegid();
+    if (::unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS) != 0) {
+        die("unshare with a user namespace", errno);
+    }
+    // The kernel refuses a gid_map from an unprivileged writer until setgroups is denied.
+    if (!write_file("/proc/self/setgroups", "deny") ||
+        !write_file("/proc/self/uid_map", std::format("{} {} 1", uid, uid)) ||
+        !write_file("/proc/self/gid_map", std::format("{} {} 1", gid, gid))) {
+        die("id maps", errno);
+    }
+}
+
+void confine_filesystem(const std::filesystem::path& writable) {
+    // Nothing done here may leak back into the parent's mount namespace.
+    if (::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) {
+        die("make mounts private", errno);
+    }
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::canonical(writable, ec);
+    if (ec) {
+        die("writable directory", ec.value());
+    }
+    // A mount of its own, so it can be made writable again after everything else is not.
+    if (::mount(dir.c_str(), dir.c_str(), nullptr, MS_BIND | MS_REC, nullptr) != 0) {
+        die("bind the writable directory", errno);
+    }
+    mount_attr read_only{};
+    read_only.attr_set = MOUNT_ATTR_RDONLY;
+    if (::mount_setattr(AT_FDCWD, "/", AT_RECURSIVE, &read_only, sizeof read_only) != 0) {
+        die("make mounts read-only", errno);
+    }
+    mount_attr writable_again{};
+    writable_again.attr_clr = MOUNT_ATTR_RDONLY;
+    if (::mount_setattr(AT_FDCWD, dir.c_str(), 0, &writable_again, sizeof writable_again) != 0) {
+        die("make the writable directory writable", errno);
+    }
+    if (::chdir(dir.c_str()) != 0) {
+        die("chdir", errno);
+    }
+}
+
+// Mounts made read-only here can be made writable again by anyone holding CAP_SYS_ADMIN in
+// this mount namespace, and we are root in it. Every capability goes, for good: the bounding
+// set, the sets we hold, and root's right to regain them at execve.
+void drop_capabilities() {
+    constexpr unsigned long kNoRootEver = SECBIT_NOROOT | SECBIT_NOROOT_LOCKED |
+                                          SECBIT_NO_SETUID_FIXUP | SECBIT_NO_SETUID_FIXUP_LOCKED |
+                                          SECBIT_KEEP_CAPS_LOCKED;
+    if (::prctl(PR_SET_SECUREBITS, kNoRootEver) != 0) {
+        die("securebits", errno);
+    }
+    // Capabilities are numbered below 64; numbers this kernel does not know fail with EINVAL.
+    constexpr unsigned long kCapabilitySlots = 64;
+    for (unsigned long cap = 0; cap < kCapabilitySlots; ++cap) {
+        if (::prctl(PR_CAPBSET_DROP, cap) != 0 && errno != EINVAL) {
+            die("drop the bounding set", errno);
+        }
+    }
+    __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+    std::array<__user_cap_data_struct, _LINUX_CAPABILITY_U32S_3> none{};
+    if (::syscall(SYS_capset, &header, none.data()) != 0) {
+        die("capset", errno);
+    }
+    if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        die("no new privileges", errno);
+    }
+}
+
+void set_limit(int resource, rlim_t soft, rlim_t hard, std::string_view name) {
+    const rlimit limit{.rlim_cur = soft, .rlim_max = hard};
+    if (::setrlimit(resource, &limit) != 0) {
+        die(name, errno);
+    }
+}
+
+int run(std::span<char*> args) {
+    const Options options = parse(args);
+
+    // The worker may die without killing us; nothing must outlive it. The check after the
+    // prctl catches a worker that died before it.
+    const pid_t parent = ::getppid();
+    if (::prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || ::getppid() != parent) {
+        die("parent death signal", errno);
+    }
+    enter_namespaces();
+    confine_filesystem(options.writable);
+    set_limit(RLIMIT_AS, options.address_space, options.address_space, "RLIMIT_AS");
+    // SIGXCPU at the soft limit; the hard limit one second later is SIGKILL for a child that
+    // catches SIGXCPU.
+    set_limit(RLIMIT_CPU, options.cpu_seconds, options.cpu_seconds + 1, "RLIMIT_CPU");
+    // A crash dump of a hostile input is hostile data in the scratch directory we upload from.
+    set_limit(RLIMIT_CORE, 0, 0, "RLIMIT_CORE");
+    if (::close_range(3, ~0U, 0) != 0) {
+        die("close descriptors", errno);
+    }
+    drop_capabilities();
+    if (options.program.front() == nullptr) {
+        return EXIT_SUCCESS;
+    }
+    ::execvp(options.program.front(), options.program.data());
+    const int error = errno;
+    std::println(stderr, "ulw_sandbox: exec {}: {}", options.program.front(),
+                 std::generic_category().message(error));
+    return error == ENOENT ? kNotFound : kCannotExecute;
+}
+
+} // namespace
+
+// Formatting and allocation are all that can throw; either is a setup failure.
+int main(int argc, char** argv) {
+    try {
+        return run(std::span(argv, static_cast<std::size_t>(argc)));
+    } catch (...) {
+        return kSetupFailed;
+    }
+}

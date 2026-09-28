@@ -226,3 +226,18 @@ target_link_libraries(auth_unit_tests PRIVATE ulw::auth ulw::devtoken OpenSSL::C
 # Most suites test the module's internals: parsers, signature and claim checks, verdict cache.
 target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/auth/src
     ${PROJECT_SOURCE_DIR}/tests)
+
+if(ULW_BUILD_WORKER)
+    ulw_add_test_suite(ffmpeg_unit_tests unit
+        unit/ffmpeg/command_test.cpp
+        unit/ffmpeg/exit_code_test.cpp
+        unit/ffmpeg/progress_test.cpp
+        unit/ffmpeg/sandbox_test.cpp)
+    target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
+    # White-box tests of the adapter internals, and the real sandbox helper.
+    target_include_directories(ffmpeg_unit_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${PROJECT_SOURCE_DIR}/tests)
+    target_compile_definitions(ffmpeg_unit_tests
+        PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>")
+    add_dependencies(ffmpeg_unit_tests ulw_sandbox)
+endif()
