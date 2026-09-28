@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -97,6 +98,44 @@ std::expected<std::uint64_t, StorageError> read_offset(const fs::path& p) {
     return value;
 }
 
+// A new or renamed entry survives a crash only once its directory has been synced; syncing
+// the file itself says nothing about the name that points at it.
+std::expected<void, StorageError> sync_dir(const fs::path& dir) {
+    const os::UniqueFd fd{::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
+    if (!fd || ::fsync(fd.get()) != 0) {
+        return std::unexpected(from_errno(errno));
+    }
+    return {};
+}
+
+// create_directories, with each directory it creates made durable in its parent.
+std::expected<void, StorageError> make_dirs(const fs::path& dir) {
+    std::vector<fs::path> missing;
+    std::error_code ec;
+    for (fs::path p = dir; !p.empty(); p = p.parent_path()) {
+        const auto st = fs::status(p, ec);
+        if (fs::is_directory(st)) {
+            break;
+        }
+        if (ec && st.type() != fs::file_type::not_found) {
+            return std::unexpected(from_error_code(ec));
+        }
+        missing.push_back(p);
+    }
+    for (const fs::path& p : std::views::reverse(missing)) {
+        // False without an error when a concurrent call created it first, which is fine.
+        fs::create_directory(p, ec);
+        if (ec) {
+            return std::unexpected(from_error_code(ec));
+        }
+        const fs::path parent = p.parent_path();
+        if (auto synced = sync_dir(parent.empty() ? fs::path(".") : parent); !synced) {
+            return synced;
+        }
+    }
+    return {};
+}
+
 // Write to a temporary, flush it, rename over the target: readers see the old content or the
 // new, never a torn file. `tmp` must be a name no one else is using.
 std::expected<void, StorageError>
@@ -126,7 +165,7 @@ write_atomically(const fs::path& p, std::span<const std::byte> bytes, const fs::
         ::unlink(tmp.c_str());
         return std::unexpected(from_errno(err));
     }
-    return {};
+    return sync_dir(p.parent_path());
 }
 
 // A marker that cannot be read is an error, not an absent marker.
@@ -233,7 +272,9 @@ public:
 private:
     std::expected<void, StorageError> open_data(std::uint64_t durable) {
         // Created only while nothing is durable: recreated after a commit moved it, a retried
-        // commit would move the new file over the object.
+        // commit would move the new file over the object. The new entry needs no directory
+        // sync of its own; publishing the durable offset renames a file into the same
+        // directory and syncs it, and that makes this entry durable too.
         const int flags = O_WRONLY | O_CLOEXEC | (durable == 0 ? O_CREAT : 0);
         req_.fd = os::UniqueFd{::open((req_.dir / "data").c_str(), flags, 0600)};
         if (!req_.fd && errno == ENOENT) {
@@ -451,10 +492,8 @@ std::expected<IngestId, StorageError> FsStore::create(const core::StorageKey& ke
                                                       const core::ContentType& /*type*/) {
     std::string ref = random_hex(deps_.random, kRefBytes);
     const fs::path dir = ingest_dir(ref);
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    if (ec) {
-        return std::unexpected(from_error_code(ec));
+    if (auto made = make_dirs(dir); !made) {
+        return std::unexpected(made.error());
     }
     const std::string meta = key.str() + "\n" + std::to_string(total_bytes) + "\n";
     if (auto w = write_atomically(dir / "meta", std::as_bytes(std::span(meta)), staging_name());
@@ -539,15 +578,14 @@ std::expected<void, StorageError> FsStore::commit(const IngestId& id) {
         }
     }
     const fs::path target = object_path(id.key);
-    fs::create_directories(target.parent_path(), ec);
-    if (ec) {
-        return std::unexpected(from_error_code(ec));
+    if (auto made = make_dirs(target.parent_path()); !made) {
+        return made;
     }
     fs::rename(dir / "data", target, ec);
     if (ec) {
         return std::unexpected(from_error_code(ec));
     }
-    return {};
+    return sync_dir(target.parent_path());
 }
 
 void FsStore::discard(const IngestId& id) noexcept {
@@ -592,10 +630,8 @@ FsStore::fetch_small(const core::StorageKey& key, std::size_t max) {
 std::expected<void, StorageError> FsStore::put(const core::StorageKey& key,
                                                std::span<const std::byte> bytes) {
     const fs::path p = object_path(key);
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-    if (ec) {
-        return std::unexpected(from_error_code(ec));
+    if (auto made = make_dirs(p.parent_path()); !made) {
+        return made;
     }
     return write_atomically(p, bytes, staging_name());
 }

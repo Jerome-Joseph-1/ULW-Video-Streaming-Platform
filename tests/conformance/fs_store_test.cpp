@@ -282,4 +282,23 @@ TEST_F(FsStoreTest, SessionOpenedAfterCommitLeavesTheObjectAlone) {
     EXPECT_TRUE(*stored == data);
 }
 
+// The durable offset survived a crash that lost the data file's directory entry.
+TEST_F(FsStoreTest, LostDataFileFailsTheResumedSessionAsCorrupt) {
+    FsStore store = make_store();
+    const auto data = ulw::test::pattern(2 * ulw::test::kLocalChunk, 7);
+    const auto id = create(store, data.size());
+    ulw::test::Observer obs;
+    auto session = store.open(id, 0, obs);
+    ASSERT_TRUE(session);
+    ASSERT_TRUE(upload(**session, obs, std::span(data).first(ulw::test::kLocalChunk)));
+    std::filesystem::remove(ingest(id) / "data");
+    ulw::test::Observer resumed_obs;
+    auto resumed = store.open(id, ulw::test::kLocalChunk, resumed_obs);
+    ASSERT_TRUE(resumed);
+    ASSERT_GT((*resumed)->write(std::span(data).subspan(ulw::test::kLocalChunk)), 0U);
+    EXPECT_EQ(settled(**resumed), core::ports::IngestState::Failed);
+    EXPECT_EQ((*resumed)->error(), core::ports::StorageError::Corrupt);
+    EXPECT_EQ(store.durable_offset(id), ulw::test::kLocalChunk);
+}
+
 } // namespace
