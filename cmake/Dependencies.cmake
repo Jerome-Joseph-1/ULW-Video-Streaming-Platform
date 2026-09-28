@@ -7,6 +7,16 @@ set(ULW_THIRD_PARTY_DIR ${PROJECT_SOURCE_DIR}/third_party)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 
+# llhttp's own options default to a shared library; only the static one is linked.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
+FetchContent_Declare(llhttp
+    URL ${ULW_THIRD_PARTY_DIR}/llhttp-9.2.1.tar.gz
+    URL_HASH SHA256=3c163891446e529604b590f9ad097b2e98b5ef7e4d3ddcf1cf98b62ca668f23e
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SYSTEM)
+FetchContent_MakeAvailable(llhttp)
+
 if(ULW_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)
