@@ -58,10 +58,11 @@ void MemoryCatalog::find_upload(const core::UploadId& id, CatalogCallback<Stored
     });
 }
 
-void MemoryCatalog::claim_upload(const core::UploadId& id, CatalogCallback<StoredUpload> done) {
+void MemoryCatalog::claim_upload(const core::UploadId& id, const core::UserId& owner,
+                                 CatalogCallback<StoredUpload> done) {
     const auto it = uploads_.find(id);
     core::ports::CatalogResult<StoredUpload> result = std::unexpected(CatalogError::NotFound);
-    if (it != uploads_.end()) {
+    if (it != uploads_.end() && it->second.upload.owner == owner) {
         if (claimed_.insert(id).second) {
             result = it->second;
         } else {

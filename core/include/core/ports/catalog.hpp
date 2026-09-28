@@ -55,8 +55,11 @@ public:
 
     // Exclusive right to append to one upload, across every gateway process. Refused with
     // Conflict while someone else holds it; released by release_upload or when the holding
-    // process's database session ends, so a killed gateway frees its uploads at once.
-    virtual void claim_upload(const UploadId& id, CatalogCallback<StoredUpload> done) = 0;
+    // process's database session ends, so a killed gateway frees its uploads at once. Refused
+    // with NotFound, before any claim is taken, when `owner` does not own the upload: knowing
+    // an upload's id must not be enough to lock its owner out.
+    virtual void claim_upload(const UploadId& id, const UserId& owner,
+                              CatalogCallback<StoredUpload> done) = 0;
     virtual void release_upload(const UploadId& id) noexcept = 0;
 
     // Records a durable offset reached by the holder of the claim, and moves the video from

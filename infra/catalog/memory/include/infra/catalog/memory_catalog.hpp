@@ -11,7 +11,7 @@
 namespace infra::catalog {
 
 // The catalog without a database, for tests and single-process development. Same contract as
-// the Postgres catalog: results arrive on a later loop iteration, commit is one atomic step
+// the durable catalog: results arrive on a later loop iteration, commit is one atomic step
 // and queues at most one live job per video.
 class MemoryCatalog final : public core::ports::IUploadCatalog, public net::ITimerHandler {
 public:
@@ -30,7 +30,7 @@ public:
                        core::ports::CatalogCallback<void> done) override;
     void find_upload(const core::UploadId& id,
                      core::ports::CatalogCallback<core::ports::StoredUpload> done) override;
-    void claim_upload(const core::UploadId& id,
+    void claim_upload(const core::UploadId& id, const core::UserId& owner,
                       core::ports::CatalogCallback<core::ports::StoredUpload> done) override;
     void release_upload(const core::UploadId& id) noexcept override;
     void record_progress(const core::UploadId& id, const core::VideoId& video,
