@@ -189,7 +189,8 @@ ulw_add_test_suite(auth_unit_tests unit
     unit/auth/result_cache_test.cpp
     unit/auth/signature_test.cpp
     unit/auth/test_claims.cpp
-    unit/auth/test_keys.cpp)
+    unit/auth/test_keys.cpp
+    unit/auth/token_extractor_test.cpp)
 target_link_libraries(auth_unit_tests PRIVATE ulw::auth OpenSSL::Crypto)
 # White-box tests of the token and key-set parsers.
 target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/auth/src
