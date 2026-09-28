@@ -26,11 +26,20 @@ ulw_add_test_suite(os_unit_tests unit
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
+ulw_add_library(test_echo support/echo_server.cpp)
+target_include_directories(test_echo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_echo PUBLIC ulw::net_lib)
+
+ulw_add_executable(ulw_echo_server load/echo_main.cpp)
+target_link_libraries(ulw_echo_server PRIVATE ulw::test_echo)
+ulw_add_executable(ulw_loadgen load/loadgen.cpp)
+
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
+    unit/net/echo_server_test.cpp
     unit/net/reactor_test.cpp
     unit/net/slab_test.cpp
     unit/net/timing_wheel_test.cpp)
-target_link_libraries(net_unit_tests PRIVATE ulw::net_lib)
+target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo)
 # White-box tests of the reactor internals.
 target_include_directories(net_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/net/src ${PROJECT_SOURCE_DIR}/tests)

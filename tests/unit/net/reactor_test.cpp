@@ -453,12 +453,11 @@ TEST_P(ReactorTimerTest, ListenerPausesOnDescriptorExhaustionAndResumes) {
     ASSERT_TRUE(pump_until(*reactor, [&] { return acceptor.accepted.size() == clients.size(); }));
 }
 
-const auto kKinds = ::testing::Values(ReactorKind::IoUring, ReactorKind::Epoll);
-const auto kName = [](const ::testing::TestParamInfo<ReactorKind>& info) {
-    return std::string(info.param == ReactorKind::IoUring ? "IoUring" : "Epoll");
-};
-
-INSTANTIATE_TEST_SUITE_P(Reactors, ReactorTest, kKinds, kName);
-INSTANTIATE_TEST_SUITE_P(Reactors, ReactorTimerTest, kKinds, kName);
+INSTANTIATE_TEST_SUITE_P(Reactors, ReactorTest,
+                         ::testing::Values(ReactorKind::IoUring, ReactorKind::Epoll),
+                         ulw::test::reactor_name);
+INSTANTIATE_TEST_SUITE_P(Reactors, ReactorTimerTest,
+                         ::testing::Values(ReactorKind::IoUring, ReactorKind::Epoll),
+                         ulw::test::reactor_name);
 
 } // namespace

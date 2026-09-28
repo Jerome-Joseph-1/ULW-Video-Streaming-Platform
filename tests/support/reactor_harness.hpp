@@ -1,6 +1,7 @@
 #pragma once
 
 #include "net/reactor.hpp"
+#include "net/reactor_factory.hpp"
 #include "os/unique_fd.hpp"
 
 #include <arpa/inet.h>
@@ -12,7 +13,9 @@
 #include <chrono>
 #include <cstdint>
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace ulw::test {
@@ -75,6 +78,11 @@ inline std::size_t read_some(int fd, std::vector<std::byte>& into) {
         into.insert(into.end(), buf.begin(), buf.begin() + n);
         total += static_cast<std::size_t>(n);
     }
+}
+
+// Parameter-name generator for suites instantiated over both reactors.
+inline std::string reactor_name(const ::testing::TestParamInfo<net::ReactorKind>& param) {
+    return param.param == net::ReactorKind::IoUring ? "IoUring" : "Epoll";
 }
 
 inline std::vector<std::byte> pattern(std::size_t n, std::size_t seed = 0) {
