@@ -14,6 +14,15 @@ MappedError map_error(int http_status, std::string_view s3_error_code) noexcept 
     if (is("SignatureDoesNotMatch")) {
         return {.error = StorageError::Permanent, .page = true};
     }
+    // Bad or expired credentials and a skewed clock fail every request alike until someone
+    // fixes the deployment.
+    if (is("InvalidAccessKeyId") || is("ExpiredToken") || is("RequestTimeTooSkewed")) {
+        return {.error = StorageError::Unauthorized, .page = true};
+    }
+    // Not NotFound: a misconfigured bucket would otherwise look like every object missing.
+    if (is("NoSuchBucket")) {
+        return {.error = StorageError::Permanent, .page = true};
+    }
     if (is("NoSuchUpload") || is("NoSuchKey") || http_status == 404) {
         return {.error = StorageError::NotFound, .page = false};
     }
@@ -31,9 +40,10 @@ MappedError map_error(int http_status, std::string_view s3_error_code) noexcept 
     }
     // InternalError and ServiceUnavailable are the codes of a 5xx, and they also turn up in
     // the 200 of a completion or copy that failed late. RequestTimeout is a 400 for an upload
-    // body that stalled, which a fresh attempt usually gets through.
+    // body that stalled, which a fresh attempt usually gets through. OperationAborted is a 409
+    // for a conflicting operation still in flight on the same key, which S3 says to retry.
     if ((http_status >= 500 && http_status <= 599) || is("InternalError") ||
-        is("ServiceUnavailable") || is("RequestTimeout")) {
+        is("ServiceUnavailable") || is("RequestTimeout") || is("OperationAborted")) {
         return {.error = StorageError::Transient, .page = false};
     }
     return {.error = StorageError::Permanent, .page = false};

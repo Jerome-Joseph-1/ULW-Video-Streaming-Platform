@@ -8,8 +8,9 @@ namespace infra::s3util {
 
 struct MappedError {
     core::ports::StorageError error = core::ports::StorageError::Permanent;
-    // The request was wrong in a way only a fix on our side can cure: retrying will not help
-    // and the client cannot act on it, so a person has to look.
+    // The request or the deployment was wrong in a way only a fix on our side can cure (a bad
+    // signature, credentials, clock or bucket): retrying will not help and the client cannot
+    // act on it, so a person has to look.
     bool page = false;
 };
 
