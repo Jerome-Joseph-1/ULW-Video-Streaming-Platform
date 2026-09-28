@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <ranges>
+#include <span>
 
 namespace net::detail {
 
@@ -334,8 +336,7 @@ int EpollReactor::run_once(core::Millis max_wait) {
     // EINTR is the only error a valid epoll descriptor can return here.
     const int n = std::max(0, ::epoll_wait(epfd_.get(), events.data(), kMaxEvents, timeout_ms));
     now_ = clock_.now();
-    for (int i = 0; i < n; ++i) {
-        const auto& ev = events[static_cast<std::size_t>(i)];
+    for (const epoll_event& ev : std::span(events).first(static_cast<std::size_t>(n))) {
         dispatch(ev.data.u64, ev.events);
     }
     run_deferred();
@@ -461,11 +462,10 @@ void EpollReactor::flush(int fd, Slot& s) noexcept {
     std::array<iovec, kMaxIov> iov{};
     while (!s.sendq.empty()) {
         const std::size_t count = s.sendq.gather(spans);
-        for (std::size_t i = 0; i < count; ++i) {
+        for (auto&& [out, bytes] : std::views::zip(iov, std::span(spans).first(count))) {
             // iovec is shared with readv, hence non-const; sendmsg never writes through it.
             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-            iov[i] = {.iov_base = const_cast<std::byte*>(spans[i].data()),
-                      .iov_len = spans[i].size()};
+            out = {.iov_base = const_cast<std::byte*>(bytes.data()), .iov_len = bytes.size()};
         }
         msghdr msg{};
         msg.msg_iov = iov.data();

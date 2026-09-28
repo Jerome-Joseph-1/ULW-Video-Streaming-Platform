@@ -52,9 +52,10 @@ TEST_F(TimingWheelTest, FiresAtMostOneTickLate) {
 TEST_F(TimingWheelTest, FiresInDeadlineOrderAcrossTicks) {
     std::vector<int> log;
     std::array<Recorder, 3> r;
-    for (int i = 0; i < 3; ++i) {
-        r[static_cast<std::size_t>(i)].log = &log;
-        r[static_cast<std::size_t>(i)].id = i + 1;
+    int id = 0;
+    for (Recorder& each : r) {
+        each.log = &log;
+        each.id = ++id;
     }
     auto& [a, b, c] = r;
     wheel.arm(clock.now(), Millis{900}, c);

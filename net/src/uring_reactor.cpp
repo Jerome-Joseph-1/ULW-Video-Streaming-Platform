@@ -179,6 +179,8 @@ void UringReactor::arm_recv(int fd, Slot& s) noexcept {
     io_uring_sqe* sqe = next_sqe();
     io_uring_prep_recv(sqe, fd, nullptr, 0, 0);
     sqe->flags |= IOSQE_BUFFER_SELECT;
+    // The SQE is the kernel's ABI struct, unions included, and liburing 2.5 has no setter.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access)
     sqe->buf_group = kBufGroup;
     prepare(sqe, fd, s, Op::Recv);
     s.recv_armed = true;

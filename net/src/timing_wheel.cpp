@@ -42,11 +42,11 @@ void TimingWheel::insert(std::uint32_t index) noexcept {
     const auto slot = static_cast<std::uint32_t>(tick % static_cast<std::int64_t>(kSlots));
     e.slot = slot;
     e.prev = kNil;
-    e.next = heads_[slot];
+    e.next = head(slot);
     if (e.next != kNil) {
         entries_[e.next].prev = index;
     }
-    heads_[slot] = index;
+    head(slot) = index;
 }
 
 void TimingWheel::unlink(std::uint32_t index) noexcept {
@@ -54,7 +54,7 @@ void TimingWheel::unlink(std::uint32_t index) noexcept {
     if (e.prev != kNil) {
         entries_[e.prev].next = e.next;
     } else {
-        heads_[e.slot] = e.next;
+        head(e.slot) = e.next;
     }
     if (e.next != kNil) {
         entries_[e.next].prev = e.prev;
@@ -97,8 +97,8 @@ std::size_t TimingWheel::tick_to(core::MonoTime now) noexcept {
         // Take entries off the live bucket one at a time: a handler may cancel any timer,
         // including the next one here, so no link may be held across a call. insert() never
         // targets the slot being fired, which keeps re-armed timers out of this pass.
-        while (heads_[slot] != kNil) {
-            const std::uint32_t index = heads_[slot];
+        while (head(slot) != kNil) {
+            const std::uint32_t index = head(slot);
             unlink(index);
             const Entry& e = entries_[index];
             if (e.deadline <= now) {
@@ -120,7 +120,7 @@ std::optional<core::Millis> TimingWheel::next_expiry(core::MonoTime now) const n
     }
     for (std::int64_t tick = last_tick_ + 1; tick < last_tick_ + static_cast<std::int64_t>(kSlots);
          ++tick) {
-        if (heads_[static_cast<std::size_t>(tick % static_cast<std::int64_t>(kSlots))] != kNil) {
+        if (head(static_cast<std::size_t>(tick % static_cast<std::int64_t>(kSlots))) != kNil) {
             const core::MonoTime at{core::Millis{tick * kTick.count()}};
             return std::max(core::Millis{0}, std::chrono::ceil<core::Millis>(at - now));
         }

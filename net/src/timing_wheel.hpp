@@ -39,6 +39,10 @@ private:
     };
 
     [[nodiscard]] static std::int64_t tick_of(core::MonoTime t) noexcept;
+    // Every slot number is a tick taken modulo kSlots, so the index is always in range.
+    [[nodiscard]] auto& head(this auto& self, std::size_t slot) noexcept {
+        return self.heads_[slot]; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+    }
     void insert(std::uint32_t index) noexcept;
     void unlink(std::uint32_t index) noexcept;
     void release(std::uint32_t index) noexcept;

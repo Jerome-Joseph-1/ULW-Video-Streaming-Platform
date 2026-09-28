@@ -9,6 +9,7 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -64,6 +65,8 @@ inline os::UniqueFd connect_loopback(std::uint16_t port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    // connect() takes every address family through the generic sockaddr header.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (::connect(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
         return {};
     }
@@ -98,6 +101,12 @@ inline std::size_t read_some(int fd, std::vector<std::byte>& into) {
         into.insert(into.end(), buf.begin(), buf.begin() + n);
         total += static_cast<std::size_t>(n);
     }
+}
+
+inline std::string as_text(std::span<const std::byte> bytes) {
+    std::string text(bytes.size(), '\0');
+    std::ranges::transform(bytes, text.begin(), [](std::byte b) { return static_cast<char>(b); });
+    return text;
 }
 
 // Parameter-name generator for suites instantiated over both reactors.

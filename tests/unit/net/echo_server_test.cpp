@@ -60,6 +60,8 @@ protected:
 
     // Writes until both directions are saturated: the kernel buffers are full and the server
     // has stopped reading with its own echo queued, which is the state a drain must bound.
+    // Saturated means 200 writes in a row found no room, each after a loop iteration in which
+    // the server could have read and did not.
     bool saturate(int client) {
         const auto data = ulw::test::pattern(ulw::test::kMiB);
         int stalled = 0;
@@ -85,9 +87,9 @@ protected:
         if (!(*r)->listen(std::move(*listener), child)) {
             return 4;
         }
-        std::vector<os::UniqueFd> clients;
-        for (int i = 0; i < 300; ++i) {
-            clients.push_back(connect_loopback(port));
+        std::vector<os::UniqueFd> clients(300);
+        for (auto& c : clients) {
+            c = connect_loopback(port);
         }
         pump_until(**r, [&] {
             child.reap();
@@ -143,11 +145,11 @@ TEST_P(EchoServerTest, ActivityPushesTheIdleDeadlineBack) {
 }
 
 TEST_P(EchoServerTest, DrainClosesIdleConnectionsAndRefusesNewOnes) {
-    std::vector<os::UniqueFd> clients;
-    for (int i = 0; i < 5; ++i) {
-        clients.push_back(connect_loopback(port));
+    std::vector<os::UniqueFd> clients(5);
+    for (auto& c : clients) {
+        c = connect_loopback(port);
     }
-    ASSERT_TRUE(settle([&] { return server->connections() == 5; }));
+    ASSERT_TRUE(settle([&] { return server->connections() == clients.size(); }));
     server->begin_drain();
     ASSERT_TRUE(settle([&] { return server->finished(); }));
     EXPECT_FALSE(connect_loopback(port));

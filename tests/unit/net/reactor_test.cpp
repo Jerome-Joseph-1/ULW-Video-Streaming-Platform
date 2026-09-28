@@ -108,7 +108,7 @@ TEST_P(ReactorTest, EchoesBytesBack) {
         read_some(client.get(), echoed);
         return echoed.size() >= msg.size();
     }));
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(echoed.data()), echoed.size()), msg);
+    EXPECT_EQ(ulw::test::as_text(echoed), msg);
 }
 
 TEST_P(ReactorTest, LargeTransferArrivesByteExactUnderBackpressure) {
@@ -369,7 +369,7 @@ TEST_P(ReactorTest, NothingSentAfterARejectedSendReachesThePeer) {
         std::byte b{};
         return ::recv(client.get(), &b, 1, MSG_DONTWAIT | MSG_PEEK) == 0;
     }));
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(got.data()), got.size()), head);
+    EXPECT_EQ(ulw::test::as_text(got), head);
 }
 
 TEST_P(ReactorTest, AcceptsManyConnections) {
