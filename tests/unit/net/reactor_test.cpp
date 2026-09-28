@@ -372,6 +372,28 @@ TEST_P(ReactorTest, NothingSentAfterARejectedSendReachesThePeer) {
     EXPECT_EQ(ulw::test::as_text(got), head);
 }
 
+TEST_P(ReactorTest, ShutdownWriteSendsQueuedBytesThenEof) {
+    Conn server;
+    auto client = connect(server);
+    const auto data = pattern(2 * kMiB);
+    reactor->send(server.id, data);
+    reactor->shutdown_write(server.id);
+    std::vector<std::byte> got;
+    bool eof = false;
+    ASSERT_TRUE(pump_until(*reactor, [&] {
+        read_some(client.get(), got);
+        std::byte b{};
+        eof = got.size() == data.size() && ::recv(client.get(), &b, 1, MSG_DONTWAIT) == 0;
+        return eof;
+    }));
+    EXPECT_TRUE(got == data);
+    // The read side stays open: the peer can still be heard after our FIN.
+    reactor->start_receiving(server.id);
+    const std::string_view late = "late";
+    ASSERT_EQ(write_some(client.get(), std::as_bytes(std::span(late))), late.size());
+    ASSERT_TRUE(pump_until(*reactor, [&] { return server.received.size() == late.size(); }));
+}
+
 TEST_P(ReactorTest, AcceptsManyConnections) {
     constexpr std::size_t kClients = 200;
     std::vector<os::UniqueFd> clients;

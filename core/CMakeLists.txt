@@ -1,7 +1,9 @@
 ulw_add_library(core_domain
     src/content_type.cpp
     src/domain_error.cpp
+    src/port_errors.cpp
     src/ids.cpp
+    src/json.cpp
     src/storage_error.cpp
     src/storage_key.cpp
     src/upload.cpp

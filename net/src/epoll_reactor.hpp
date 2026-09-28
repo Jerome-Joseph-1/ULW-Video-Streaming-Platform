@@ -31,6 +31,7 @@ public:
     void stop_receiving(ConnId conn) noexcept override;
     void send(ConnId conn, std::span<const std::byte> bytes) noexcept override;
     [[nodiscard]] std::size_t pending_send_bytes(ConnId conn) const noexcept override;
+    void shutdown_write(ConnId conn) noexcept override;
     void begin_close(ConnId conn) noexcept override;
     [[nodiscard]] bool is_quiescent(ConnId conn) const noexcept override;
     [[nodiscard]] std::expected<void, int> watch(int fd, Interest interest,
@@ -53,6 +54,7 @@ private:
         // the hangup would be reported on every wait, until start_receiving reads what is left.
         bool hung_up = false;
         bool eof = false;
+        bool shut_pending = false;
         bool accept_paused = false;
         std::uint32_t gen = 1;
         std::uint32_t events = 0;

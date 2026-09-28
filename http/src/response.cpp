@@ -135,6 +135,8 @@ std::string_view fixed_response(Status status, Connection connection) noexcept {
         return fixed<Status::NoContent>(connection);
     case Status::BadRequest:
         return fixed<Status::BadRequest>(connection);
+    case Status::Unauthorized:
+        return fixed<Status::Unauthorized>(connection);
     case Status::NotFound:
         return fixed<Status::NotFound>(connection);
     case Status::MethodNotAllowed:
@@ -147,6 +149,8 @@ std::string_view fixed_response(Status status, Connection connection) noexcept {
         return fixed<Status::LengthRequired>(connection);
     case Status::ContentTooLarge:
         return fixed<Status::ContentTooLarge>(connection);
+    case Status::TooManyRequests:
+        return fixed<Status::TooManyRequests>(connection);
     case Status::RequestHeaderFieldsTooLarge:
         return fixed<Status::RequestHeaderFieldsTooLarge>(connection);
     case Status::InternalServerError:

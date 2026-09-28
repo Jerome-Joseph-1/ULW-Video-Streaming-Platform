@@ -14,6 +14,8 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/content_type_test.cpp
     unit/core/error_messages_test.cpp
     unit/core/ids_test.cpp
+    unit/core/json_test.cpp
+    unit/core/parse_test.cpp
     unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
@@ -27,6 +29,7 @@ ulw_add_test_suite(os_unit_tests unit
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
+
 ulw_add_library(test_echo support/echo_server.cpp)
 target_include_directories(test_echo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(test_echo PUBLIC ulw::net_lib)
@@ -94,3 +97,10 @@ target_link_libraries(s3util_unit_tests PRIVATE ulw::s3util)
 # signing_key_test.cpp checks a private helper directly.
 target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/infra/storage/s3/s3util/src)
+
+ulw_add_test_suite(gateway_tests unit
+    gateway/gateway_harness.cpp
+    gateway/gateway_upload_test.cpp)
+target_link_libraries(gateway_tests PRIVATE
+    ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness OpenSSL::Crypto)
+target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
