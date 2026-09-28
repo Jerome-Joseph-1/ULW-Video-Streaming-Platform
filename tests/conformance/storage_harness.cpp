@@ -94,12 +94,14 @@ public:
             infra::storage::S3StoreOptions{.part_size = kPartSize}));
     }
     ~S3Harness() override {
-        // What a law committed would otherwise pile up in a bucket that outlives the run.
+        // What a law committed or left unfinished would otherwise pile up in a bucket that
+        // outlives the run.
         if (auto keys = store_->list(prefix_)) {
             for (const auto& key : *keys) {
                 [[maybe_unused]] const auto removed = store_->remove(key);
             }
         }
+        abort_uploads(target_, prefix_);
         store_.reset();
         multi_.reset();
     }
