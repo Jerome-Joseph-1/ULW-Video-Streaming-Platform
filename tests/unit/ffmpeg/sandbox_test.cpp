@@ -16,12 +16,14 @@
 #include <csignal>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <pthread.h>
 #include <stop_token>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -33,6 +35,28 @@ using infra::ffmpeg::Limits;
 using infra::ffmpeg::Sandbox;
 
 constexpr std::uint64_t kGiB = std::uint64_t{1} << 30U;
+
+// Is a process with exactly this command line running anywhere on the host? Zombies count
+// as gone.
+bool host_runs(const std::vector<std::string>& argv) {
+    std::string wanted;
+    for (const std::string& arg : argv) {
+        wanted += arg;
+        wanted.push_back('\0');
+    }
+    for (const auto& entry : fs::directory_iterator("/proc")) {
+        std::ifstream cmdline(entry.path() / "cmdline", std::ios::binary);
+        std::string text;
+        std::getline(cmdline, text, '\n');
+        std::ifstream stat(entry.path() / "stat");
+        std::string state;
+        std::getline(stat, state);
+        if (text == wanted && state.find(") Z ") == std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
 
 class SandboxTest : public ::testing::Test {
 protected:
@@ -156,6 +180,47 @@ TEST_F(SandboxTest, TheWallClockDeadlineTerminatesAnOverrun) {
     EXPECT_EQ(child.ending, Ending::TimedOut);
     EXPECT_EQ(child.exit_code, 128 + SIGTERM);
     EXPECT_LT(std::chrono::steady_clock::now() - started, infra::ffmpeg::kTerminationGrace);
+}
+
+// A descendant that left the program's session and process group, with the program's stdout
+// still open: `until` holds the program back until that descendant is sleeping.
+constexpr std::string_view kDetachedSleeper =
+    "setsid sleep $0 & until [ \"$(cat /proc/$!/comm 2>/dev/null)\" = sleep ]; do :; done; "
+    "echo up; ";
+
+TEST_F(SandboxTest, NothingTheProgramStartedOutlivesIt) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto child = run({"sh", "-c", std::string(kDetachedSleeper) + "exit 0", "20.25"},
+                           {.writable = {}, .address_space_bytes = 0, .cpu = {}, .wall = {}});
+    EXPECT_EQ(child.ending, Ending::Exited);
+    EXPECT_EQ(child.exit_code, 0);
+    EXPECT_EQ(stdout_, "up\n");
+    // Not the sleeper's 20 s, nor the 30 s wall deadline.
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(10));
+    EXPECT_FALSE(host_runs({"sleep", "20.25"}));
+}
+
+TEST_F(SandboxTest, TheWallClockDeadlineHoldsWithADetachedDescendantAlive) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto child =
+        run({"sh", "-c", std::string(kDetachedSleeper) + "exec sleep 21.5", "20.75"},
+            {.writable = {}, .address_space_bytes = 0, .cpu = {}, .wall = core::Millis{1000}});
+    EXPECT_EQ(child.ending, Ending::TimedOut);
+    EXPECT_EQ(child.exit_code, 128 + SIGTERM);
+    EXPECT_EQ(stdout_, "up\n");
+    EXPECT_LT(std::chrono::steady_clock::now() - started,
+              core::Millis{1000} + infra::ffmpeg::kTerminationGrace);
+    EXPECT_FALSE(host_runs({"sleep", "20.75"}));
+    EXPECT_FALSE(host_runs({"sleep", "21.5"}));
+}
+
+TEST_F(SandboxTest, TheProgramSeesOnlyItsOwnPidNamespace) {
+    // pid 1 is the helper, the program its child; the worker, and everything else on the
+    // host, is not in this /proc at all.
+    const auto child = run(
+        {"sh", "-c", "echo $$; cat /proc/1/comm; test -e /proc/$0", std::to_string(::getpid())});
+    EXPECT_EQ(child.exit_code, 1);
+    EXPECT_EQ(stdout_, "2\nulw_sandbox\n");
 }
 
 TEST_F(SandboxTest, AStopRequestTerminatesTheProgramEvenWhenWeBlockSigterm) {

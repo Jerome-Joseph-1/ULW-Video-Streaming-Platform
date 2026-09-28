@@ -1,11 +1,18 @@
 // ulw_sandbox --writable DIR --address-space BYTES --cpu-seconds N -- PROGRAM [ARGS...]
 //
-// Confines itself and then execs PROGRAM: an empty network namespace (unshare -n), every
-// mount read-only except DIR, the given RLIMIT_AS and RLIMIT_CPU, no core dumps, no
-// descriptors beyond the standard three, and no capabilities, so the program cannot undo any
-// of it. posix_spawn cannot do any of this in the child,
-// hence a separate program. Without a PROGRAM it sets everything up and exits 0, which is
-// how the worker checks at startup that the host allows it.
+// Runs PROGRAM confined: an empty network namespace (unshare -n), a pid namespace with a
+// /proc of its own, every mount read-only except DIR, the given RLIMIT_AS and RLIMIT_CPU, no
+// core dumps, no descriptors beyond the standard three, and no capabilities, so the program
+// cannot undo any of it. posix_spawn cannot do any of this in the child, hence a separate
+// program. Without a PROGRAM it sets everything up and exits 0, which is how the worker checks
+// at startup that the host allows it.
+//
+// Three processes: this helper, which the worker started; its child, pid 1 of the new pid
+// namespace; and PROGRAM, pid 1's child. When pid 1 exits the kernel kills everything left in
+// the namespace, so nothing PROGRAM started, not even a descendant that left its session,
+// outlives it or keeps its pipes open. pid 1 dies with the helper, and the helper with the
+// worker. SIGTERM and SIGINT sent to the helper are passed down to PROGRAM, and the helper
+// exits with PROGRAM's status: its exit code, or 128 + the signal that killed it.
 //
 // Exit codes of its own: 125 when a confinement step fails, 126 when PROGRAM cannot be
 // executed, 127 when it is not found.
@@ -17,6 +24,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 
 #include <array>
 #include <cerrno>
@@ -28,7 +36,9 @@
 #include <filesystem>
 #include <format>
 #include <optional>
+#include <poll.h>
 #include <print>
+#include <pthread.h>
 #include <sched.h>
 #include <span>
 #include <string>
@@ -106,8 +116,10 @@ bool write_file(const char* path, std::string_view text) {
 
 // As root (or with CAP_SYS_ADMIN) the namespaces come directly. Otherwise a user namespace
 // grants the capability inside it; our own ids map to themselves, so files keep their owners.
+// The new pid namespace is our children's, not ours.
 void enter_namespaces() {
-    if (::unshare(CLONE_NEWNET | CLONE_NEWNS) == 0) {
+    constexpr int kNamespaces = CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID;
+    if (::unshare(kNamespaces) == 0) {
         return;
     }
     if (errno != EPERM) {
@@ -115,7 +127,7 @@ void enter_namespaces() {
     }
     const uid_t uid = ::geteuid();
     const gid_t gid = ::getegid();
-    if (::unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS) != 0) {
+    if (::unshare(CLONE_NEWUSER | kNamespaces) != 0) {
         die("unshare with a user namespace", errno);
     }
     // The kernel refuses a gid_map from an unprivileged writer until setgroups is denied.
@@ -130,6 +142,11 @@ void confine_filesystem(const std::filesystem::path& writable) {
     // Nothing done here may leak back into the parent's mount namespace.
     if (::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) {
         die("make mounts private", errno);
+    }
+    // The host's /proc lists every process there, the worker included; this one lists the
+    // namespace's own.
+    if (::mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) {
+        die("mount /proc", errno);
     }
     std::error_code ec;
     const std::filesystem::path dir = std::filesystem::canonical(writable, ec);
@@ -189,16 +206,44 @@ void set_limit(int resource, rlim_t soft, rlim_t hard, std::string_view name) {
     }
 }
 
-int run(std::span<char*> args) {
-    const Options options = parse(args);
+// 128 + the signal for a signalled process, as a shell reports it.
+int exit_code_of(int status) {
+    constexpr int kSignalled = 128;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : kSignalled + WTERMSIG(status);
+}
 
-    // The worker may die without killing us; nothing must outlive it. The check after the
-    // prctl catches a worker that died before it.
-    const pid_t parent = ::getppid();
-    if (::prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || ::getppid() != parent) {
+// Waits for `child` to exit, passing SIGTERM and SIGINT on to it, and reaps every other
+// process that ends up as ours on the way: pid 1 inherits the program's orphans.
+// `signals` must be blocked, so that they queue until taken here.
+int wait_passing_signals(pid_t child, const sigset_t& signals) {
+    while (true) {
+        const int sig = ::sigwaitinfo(&signals, nullptr);
+        if (sig == SIGTERM || sig == SIGINT) {
+            static_cast<void>(::kill(child, sig));
+            continue;
+        }
+        int status = 0;
+        pid_t reaped = 0;
+        while ((reaped = ::waitpid(-1, &status, WNOHANG)) > 0) {
+            if (reaped == child) {
+                return exit_code_of(status);
+            }
+        }
+    }
+}
+
+// pid 1 of the new pid namespace: confines itself, then starts the program as its child.
+[[noreturn]] void run_init(const Options& options, int lifeline, const sigset_t& signals) {
+    // The helper may die without killing us, and then the namespace must go too. getppid()
+    // is 0 here, the helper being outside the namespace, so the lifeline tells instead: its
+    // other end closes when the helper exits.
+    if (::prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
         die("parent death signal", errno);
     }
-    enter_namespaces();
+    pollfd helper_gone{.fd = lifeline, .events = 0, .revents = 0};
+    if (::poll(&helper_gone, 1, 0) != 0) {
+        std::_Exit(kSetupFailed);
+    }
     confine_filesystem(options.writable);
     set_limit(RLIMIT_AS, options.address_space, options.address_space, "RLIMIT_AS");
     // SIGXCPU at the soft limit; the hard limit one second later is SIGKILL for a child that
@@ -211,13 +256,62 @@ int run(std::span<char*> args) {
     }
     drop_capabilities();
     if (options.program.front() == nullptr) {
-        return EXIT_SUCCESS;
+        std::_Exit(EXIT_SUCCESS);
     }
-    ::execvp(options.program.front(), options.program.data());
-    const int error = errno;
-    std::println(stderr, "ulw_sandbox: exec {}: {}", options.program.front(),
-                 std::generic_category().message(error));
-    return error == ENOENT ? kNotFound : kCannotExecute;
+    // This helper runs no threads, so the forked child may do anything.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+    const pid_t program = ::fork();
+    if (program < 0) {
+        die("fork the program", errno);
+    }
+    if (program == 0) {
+        sigset_t none;
+        sigemptyset(&none);
+        ::pthread_sigmask(SIG_SETMASK, &none, nullptr);
+        ::execvp(options.program.front(), options.program.data());
+        const int error = errno;
+        std::println(stderr, "ulw_sandbox: exec {}: {}", options.program.front(),
+                     std::generic_category().message(error));
+        std::_Exit(error == ENOENT ? kNotFound : kCannotExecute);
+    }
+    std::_Exit(wait_passing_signals(program, signals));
+}
+
+int run(std::span<char*> args) {
+    const Options options = parse(args);
+
+    // The worker may die without killing us; nothing must outlive it. The check after the
+    // prctl catches a worker that died before it.
+    const pid_t parent = ::getppid();
+    if (::prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || ::getppid() != parent) {
+        die("parent death signal", errno);
+    }
+    enter_namespaces();
+
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGTERM);
+    sigaddset(&signals, SIGINT);
+    sigaddset(&signals, SIGCHLD);
+    if (const int rc = ::pthread_sigmask(SIG_BLOCK, &signals, nullptr); rc != 0) {
+        die("block signals", rc);
+    }
+    std::array<int, 2> lifeline{};
+    if (::pipe2(lifeline.data(), O_CLOEXEC) != 0) {
+        die("lifeline", errno);
+    }
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): no threads here, as above.
+    const pid_t init = ::fork();
+    if (init < 0) {
+        die("fork into the pid namespace", errno);
+    }
+    if (init == 0) {
+        ::close(lifeline[1]);
+        run_init(options, lifeline[0], signals);
+    }
+    // Our end of the lifeline stays open until we exit.
+    ::close(lifeline[0]);
+    return wait_passing_signals(init, signals);
 }
 
 } // namespace

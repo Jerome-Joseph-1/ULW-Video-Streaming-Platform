@@ -4,6 +4,7 @@
 
 #include <sys/eventfd.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 #include <algorithm>
@@ -31,6 +32,10 @@ namespace {
 // lines of it.
 constexpr std::size_t kStderrTail = 4096;
 constexpr std::size_t kReadChunk = 16384;
+// Once the helper has exited, so has everything in its pid namespace, and what is left in the
+// pipes (64 KiB each at most) reads in microseconds. The bound only matters if some writer
+// survived anyway, and then it must not hold the worker.
+constexpr core::Millis kDrainAfterExit{500};
 
 std::string errno_text(int error) {
     return std::generic_category().message(error);
@@ -132,10 +137,11 @@ std::vector<std::string> helper_argv(const Sandbox& sandbox, const Limits& limit
     return argv;
 }
 
-// The child and its process group. It may have exited already; the group id stays ours
-// until we reap it, so the signal cannot reach a stranger.
-void signal_group(pid_t pid, int sig) noexcept {
-    static_cast<void>(::kill(-pid, sig));
+// The helper passes SIGTERM on to the program; SIGKILL takes the helper, and with it the
+// program's whole pid namespace. The child may have exited already; its pid stays ours until
+// we reap it, so the signal cannot reach a stranger.
+void signal_child(pid_t pid, int sig) noexcept {
+    static_cast<void>(::kill(pid, sig));
 }
 
 // Reads what is there; false at end of file or on an error.
@@ -205,16 +211,17 @@ std::expected<pid_t, std::string> spawn(const Sandbox& sandbox, const Limits& li
     return pid;
 }
 
-// Watches one running child until both its outputs end: hands stdout on, keeps the tail of
-// stderr, and ends the child at the deadline or on request, SIGTERM first and SIGKILL after
-// the grace period.
+// Watches one running child until it exits: hands stdout on, keeps the tail of stderr, and
+// ends the child at the deadline or on request, SIGTERM first and SIGKILL after the grace
+// period. After the exit, reads what is left in the pipes for kDrainAfterExit at most.
 class Supervisor {
 public:
     Supervisor(pid_t pid, const core::ports::IClock& clock, core::MonoTime deadline,
                ChildExit& result) noexcept
         : pid_(pid), clock_(clock), deadline_(deadline), result_(result) {}
 
-    void run(const Channels& channels, const std::function<void(std::string_view)>& on_stdout) {
+    void run(const Channels& channels, int exited,
+             const std::function<void(std::string_view)>& on_stdout) {
         const auto keep_tail = [this](std::string_view bytes) {
             result_.stderr_bytes += bytes.size();
             result_.stderr_tail.append(bytes);
@@ -222,42 +229,37 @@ public:
                 result_.stderr_tail.erase(0, result_.stderr_tail.size() - kStderrTail);
             }
         };
-        bool out_open = true;
-        bool err_open = true;
-        bool wake_armed = true;
-        while (out_open || err_open) {
+        while (true) {
             const core::MonoTime now = clock_.now();
-            if (now >= deadline_) {
-                terminate(Ending::TimedOut, now);
+            if (drained(now)) {
+                return;
             }
-            if (kill_at_ && now >= *kill_at_) {
-                signal_group(pid_, SIGKILL);
-                kill_at_ = now + kTerminationGrace;
+            if (!drain_until_) {
+                enforce_deadlines(now);
             }
-            std::array<pollfd, 3> fds{
+            const bool running = !drain_until_;
+            std::array<pollfd, 4> fds{
                 pollfd{
-                    .fd = out_open ? channels.out.read.get() : -1, .events = POLLIN, .revents = 0},
+                    .fd = out_open_ ? channels.out.read.get() : -1, .events = POLLIN, .revents = 0},
                 pollfd{
-                    .fd = err_open ? channels.err.read.get() : -1, .events = POLLIN, .revents = 0},
-                pollfd{
-                    .fd = wake_armed ? channels.wake.get() : -1, .events = POLLIN, .revents = 0}};
-            if (::poll(fds.data(), fds.size(), poll_timeout(now, kill_at_.value_or(deadline_))) <
-                    0 &&
-                errno != EINTR) {
+                    .fd = err_open_ ? channels.err.read.get() : -1, .events = POLLIN, .revents = 0},
+                pollfd{.fd = wake_armed_ && running ? channels.wake.get() : -1,
+                       .events = POLLIN,
+                       .revents = 0},
+                pollfd{.fd = running ? exited : -1, .events = POLLIN, .revents = 0}};
+            const core::MonoTime next = drain_until_.value_or(kill_at_.value_or(deadline_));
+            if (::poll(fds.data(), fds.size(), poll_timeout(now, next)) < 0 && errno != EINTR) {
                 // Nothing sensible is left to wait on; make sure the child goes.
-                signal_group(pid_, SIGKILL);
+                signal_child(pid_, SIGKILL);
                 return;
             }
             if (fds[0].revents != 0) {
-                out_open = drain(channels.out.read.get(), on_stdout);
+                out_open_ = drain(channels.out.read.get(), on_stdout);
             }
             if (fds[1].revents != 0) {
-                err_open = drain(channels.err.read.get(), keep_tail);
+                err_open_ = drain(channels.err.read.get(), keep_tail);
             }
-            if (fds[2].revents != 0) {
-                wake_armed = false;
-                terminate(Ending::Stopped, clock_.now());
-            }
+            on_events(fds[2].revents != 0, fds[3].revents != 0);
         }
     }
 
@@ -268,8 +270,34 @@ private:
             return;
         }
         result_.ending = why;
-        signal_group(pid_, SIGTERM);
+        signal_child(pid_, SIGTERM);
         kill_at_ = now + kTerminationGrace;
+    }
+
+    // After the child's exit: both pipes ended, or the drain ran out of time.
+    [[nodiscard]] bool drained(core::MonoTime now) const noexcept {
+        return drain_until_ && (!(out_open_ || err_open_) || now >= *drain_until_);
+    }
+
+    // A stop request, or the child's exit.
+    void on_events(bool stop_requested, bool exited) noexcept {
+        if (stop_requested) {
+            wake_armed_ = false;
+            terminate(Ending::Stopped, clock_.now());
+        }
+        if (exited) {
+            drain_until_ = clock_.now() + kDrainAfterExit;
+        }
+    }
+
+    void enforce_deadlines(core::MonoTime now) noexcept {
+        if (now >= deadline_) {
+            terminate(Ending::TimedOut, now);
+        }
+        if (kill_at_ && now >= *kill_at_) {
+            signal_child(pid_, SIGKILL);
+            kill_at_ = now + kTerminationGrace;
+        }
     }
 
     pid_t pid_;
@@ -277,6 +305,11 @@ private:
     core::MonoTime deadline_;
     ChildExit& result_;
     std::optional<core::MonoTime> kill_at_;
+    bool out_open_ = true;
+    bool err_open_ = true;
+    bool wake_armed_ = true;
+    // Set once the child has exited.
+    std::optional<core::MonoTime> drain_until_;
 };
 
 } // namespace
@@ -294,6 +327,17 @@ run_sandboxed(const Sandbox& sandbox, const Limits& limits, const Args& args,
     if (!pid) {
         return std::unexpected(pid.error());
     }
+    // Readable once the child has exited. The child is not reaped yet, so the pid is still it.
+    // The syscall itself: glibc 2.39 declares pidfd_open without C linkage for C++.
+    const os::UniqueFd exited(static_cast<int>(::syscall(SYS_pidfd_open, *pid, 0)));
+    if (!exited) {
+        const int error = errno;
+        signal_child(*pid, SIGKILL);
+        int status = 0;
+        while (::waitpid(*pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        return std::unexpected("pidfd_open: " + errno_text(error));
+    }
     const int wake = channels->wake.get();
     const std::stop_callback on_stop(stop, [wake]() noexcept {
         const std::uint64_t one = 1;
@@ -302,7 +346,7 @@ run_sandboxed(const Sandbox& sandbox, const Limits& limits, const Args& args,
     });
 
     ChildExit result;
-    Supervisor(*pid, clock, started + limits.wall, result).run(*channels, on_stdout);
+    Supervisor(*pid, clock, started + limits.wall, result).run(*channels, exited.get(), on_stdout);
 
     int status = 0;
     rusage usage{};
