@@ -7,6 +7,7 @@ namespace http {
 enum class Status : std::uint16_t {
     BadRequest = 400,
     NotFound = 404,
+    LengthRequired = 411,
     ContentTooLarge = 413,
     RequestHeaderFieldsTooLarge = 431,
     HttpVersionNotSupported = 505,

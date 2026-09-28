@@ -60,5 +60,6 @@ ulw_add_test_suite(storage_conformance_tests conformance
 target_link_libraries(storage_conformance_tests PRIVATE ulw::test_storage_harness)
 ulw_add_test_suite(http_unit_tests unit
     unit/http/parser_limits_test.cpp
+    unit/http/request_framing_test.cpp
     unit/http/request_parser_test.cpp)
 target_link_libraries(http_unit_tests PRIVATE ulw::http_lib)

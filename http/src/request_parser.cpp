@@ -162,6 +162,7 @@ public:
         header_count_ = 0;
         in_name_ = false;
         content_length_ = 0;
+        transfer_coded_ = false;
         rejection_.reset();
         llhttp_reset(&parser_);
         // llhttp_reset() also forgets that the connection is closing, which llhttp would
@@ -314,6 +315,8 @@ private:
                 return reject(Status::ContentTooLarge);
             }
             content_length_ = *length;
+        } else if (detail::iequals(field.name, "transfer-encoding")) {
+            transfer_coded_ = true;
         }
         return 0;
     }
@@ -323,9 +326,19 @@ private:
         if (llhttp_get_http_major(&parser_) != 1 || llhttp_get_http_minor(&parser_) > 1) {
             return reject(Status::HttpVersionNotSupported);
         }
+        const Method method = to_method(llhttp_get_method(&parser_));
+        // Content-Length is the only body framing accepted. A second one is a second chance to
+        // disagree with a proxy about where the body ends, and nothing here needs streaming
+        // bodies of unknown length. llhttp has already refused Transfer-Encoding alongside
+        // Content-Length.
+        if (transfer_coded_) {
+            const bool takes_body =
+                method == Method::Post || method == Method::Put || method == Method::Patch;
+            return reject(takes_body ? Status::LengthRequired : Status::BadRequest);
+        }
         keep_alive_ = llhttp_should_keep_alive(&parser_) != 0;
         const RequestHead head{
-            .method = to_method(llhttp_get_method(&parser_)),
+            .method = method,
             .target = {target_.data(), target_size_},
             .version_minor = llhttp_get_http_minor(&parser_),
             .content_length = content_length_,
@@ -372,6 +385,7 @@ private:
     std::size_t value_begin_ = 0;
     bool in_name_ = false;
     std::uint64_t content_length_ = 0;
+    bool transfer_coded_ = false;
     bool keep_alive_ = true;
 };
 
