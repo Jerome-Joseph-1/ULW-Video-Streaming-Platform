@@ -173,7 +173,8 @@ int run() {
                               .store = *storage->transfer,
                               .transcoder = transcoder,
                               .clock = clock,
-                              .random = random},
+                              .random = random,
+                              .free_space = worker::free_space},
                              {.scratch = config->scratch, .node = config->node, .lease = {}});
 
     std::stop_source shutdown;

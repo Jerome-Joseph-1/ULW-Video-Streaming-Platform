@@ -32,6 +32,12 @@ using core::ports::TranscodeFailure;
 
 enum class Output : std::uint8_t { Segment, Init, Playlist };
 
+// ffmpeg 6.1's HLS muxer exits 0 when a write fails for want of space, leaving truncated
+// output that then fails verification, as bad input would. A failed write leaves free what it
+// could not use, less than one segment: the largest, 4 s of 1080p at its 5350 kbit/s peak,
+// is 2.7 MB. Below 16 MiB the disk is taken to have filled up under the job.
+constexpr std::uint64_t kNearlyFull = std::uint64_t{16} << 20U;
+
 const core::ContentType& content_type(Output output) {
     // Parsed once each; the literals are valid media types.
     static const auto segment = *core::ContentType::parse("video/iso.segment");
@@ -176,13 +182,21 @@ public:
         const auto media = with_rerun(
             [&] { return deps_.transcoder.probe(workspace->source(), abandon_.get_token()); });
         if (!media) {
-            return transcode_failure("probe", media.error());
+            return transcode_failure("probe", media.error(), *workspace);
         }
         metrics_.media = media->duration;
         const auto ladder = core::choose_ladder(media->height);
         log("job={} probed {}x{} {}/{} fps {} ms audio={} rungs={}", id(), media->width,
             media->height, media->frame_rate.num, media->frame_rate.den, media->duration.count(),
             media->has_audio, ladder.size());
+        // The source is on disk by now, so what is free has to hold the output alone.
+        const std::uint64_t needed = output_bytes(media->duration, ladder, media->has_audio);
+        if (const auto available = deps_.free_space(workspace->dir());
+            !available || *available < needed) {
+            log("job={} workspace: {} bytes free, the output needs {}", id(), available.value_or(0),
+                needed);
+            return fail("no scratch space for the output", /*retryable=*/true);
+        }
 
         KeeperProgress progress(keeper_, media->duration);
         const auto stats = with_rerun([&] {
@@ -194,7 +208,7 @@ public:
         });
         if (!stats) {
             metrics_.ffmpeg_exit = stats.error().exit_code;
-            return transcode_failure("transcode", stats.error());
+            return transcode_failure("transcode", stats.error(), *workspace);
         }
         metrics_.ffmpeg_exit = 0;
         metrics_.transcode = stats->wall;
@@ -203,7 +217,7 @@ public:
         const auto verified =
             deps_.transcoder.verify(workspace->output(), *media, ladder, abandon_.get_token());
         if (!verified) {
-            return transcode_failure("verify", verified.error());
+            return transcode_failure("verify", verified.error(), *workspace);
         }
         if (abandoned()) {
             return stop_outcome();
@@ -247,8 +261,15 @@ private:
         return result;
     }
 
-    JobOutcome transcode_failure(std::string_view step, const TranscodeError& error) {
+    JobOutcome transcode_failure(std::string_view step, const TranscodeError& error,
+                                 const Workspace& workspace) {
         log("job={} {} failed: {}", id(), step, error.detail);
+        if (error.kind != TranscodeFailure::Stopped) {
+            if (const auto left = deps_.free_space(workspace.dir()); left && *left < kNearlyFull) {
+                log("job={} workspace: {} bytes left, the disk filled up", id(), *left);
+                return fail("scratch space ran out", /*retryable=*/true);
+            }
+        }
         switch (disposition(error.kind, rerun_)) {
         case Disposition::Abandon:
             return stop_outcome();
@@ -365,8 +386,8 @@ private:
     std::stop_callback<RequestStop> on_shutdown_;
 };
 
-JobRunner::JobRunner(const JobDeps& deps, JobSettings settings)
-    : deps_(deps), settings_(std::move(settings)) {}
+JobRunner::JobRunner(JobDeps deps, JobSettings settings)
+    : deps_(std::move(deps)), settings_(std::move(settings)) {}
 
 JobOutcome JobRunner::run(const core::ports::ClaimedJob& job, const std::stop_token& shutdown) {
     const auto started = deps_.clock.now();

@@ -60,6 +60,26 @@ Workspace::~Workspace() {
     }
 }
 
+std::uint64_t output_bytes(core::Millis duration, std::span<const core::Rung> ladder,
+                           bool has_audio) noexcept {
+    std::uint64_t kbps = 0;
+    for (const core::Rung& rung : ladder) {
+        kbps += rung.video_kbps + (has_audio ? core::kAudioKbps : 0);
+    }
+    // kbit/s x ms is bits; / 8 is bytes.
+    const std::uint64_t bytes = kbps * static_cast<std::uint64_t>(duration.count()) / 8;
+    return bytes / 4 * 5;
+}
+
+std::optional<std::uint64_t> free_space(const fs::path& dir) {
+    std::error_code ec;
+    const fs::space_info space = fs::space(dir, ec);
+    if (ec) {
+        return std::nullopt;
+    }
+    return space.available;
+}
+
 std::size_t sweep_workspaces(const fs::path& root) {
     std::vector<fs::path> leftovers;
     std::error_code ec;

@@ -8,6 +8,7 @@
 #include "core/ports/transcoder.hpp"
 
 #include "lease_keeper.hpp"
+#include "workspace.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -53,6 +54,7 @@ struct JobDeps {
     core::ports::ITranscoder& transcoder;
     const core::ports::IClock& clock;
     core::ports::IRandom& random;
+    FreeSpace free_space;
 };
 
 struct JobSettings {
@@ -66,7 +68,7 @@ struct JobSettings {
 // deterministic, so a rerun, or a zombie that publishes late, rewrites identical bytes.
 class JobRunner {
 public:
-    JobRunner(const JobDeps& deps, JobSettings settings);
+    JobRunner(JobDeps deps, JobSettings settings);
 
     // `shutdown` abandons a job still downloading or transcoding and gives it back to the
     // queue; one already publishing is finished.

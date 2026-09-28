@@ -1,3 +1,5 @@
+#include "core/models/ladder.hpp"
+
 #include "support/fake_random.hpp"
 #include "support/temp_dir.hpp"
 #include "workspace.hpp"
@@ -49,6 +51,18 @@ TEST_F(WorkspaceTest, RefusesASourceThatNeedsMoreThanAThirdOfTheFreeSpace) {
               WorkspaceError::InsufficientSpace);
     EXPECT_TRUE(fs::is_empty(root.path()));
     EXPECT_TRUE(Workspace::create(root.path(), free / 16, random));
+}
+
+TEST(OutputBytes, IsTheLadderAtItsTargetRatesWithAMargin) {
+    const auto ladder = core::choose_ladder(720);
+    // A minute of 2800 + 800 kbit/s video and 2 x 128 kbit/s audio is 28.92 MB; x 5/4.
+    EXPECT_EQ(worker::output_bytes(core::Millis{60'000}, ladder, true), 36'150'000U);
+    // 27 MB without the audio.
+    EXPECT_EQ(worker::output_bytes(core::Millis{60'000}, ladder, false), 33'750'000U);
+    // The full ladder for twelve hours: 8984 kbit/s, 48.5 GB, 60.6 GB with the margin.
+    EXPECT_EQ(
+        worker::output_bytes(core::Millis{12LL * 3600 * 1000}, core::choose_ladder(1080), true),
+        60'642'000'000U);
 }
 
 TEST_F(WorkspaceTest, AMovedFromWorkspaceRemovesNothing) {

@@ -1,4 +1,5 @@
 #include "core/models/ids.hpp"
+#include "core/models/ladder.hpp"
 #include "os/system_clock.hpp"
 
 #include "fakes.hpp"
@@ -8,8 +9,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,7 +55,8 @@ protected:
                                   .store = transfer,
                                   .transcoder = transcoder,
                                   .clock = clock,
-                                  .random = random},
+                                  .random = random,
+                                  .free_space = free_space()},
                                  {.scratch = scratch.path(),
                                   .node = *core::NodeId::parse("worker-a"),
                                   .lease = intervals});
@@ -63,6 +67,10 @@ protected:
         std::vector<std::string> out;
         std::ranges::copy_if(journal.events(), std::back_inserter(out), is_write);
         return out;
+    }
+
+    [[nodiscard]] worker::FreeSpace free_space() {
+        return [this](const std::filesystem::path&) { return free_bytes; };
     }
 
     [[nodiscard]] bool scratch_is_empty() const {
@@ -77,6 +85,8 @@ protected:
     os::SystemClock clock;
     ulw::test::FakeRandom random;
     ulw::test::TempDir scratch{"ulw-worker-test"};
+    // What the scratch filesystem reports free, whenever the runner asks.
+    std::optional<std::uint64_t> free_bytes = std::uint64_t{1} << 40U;
     // Long enough that the keeper stays out of the way unless a test shortens it.
     worker::LeaseKeeper::Intervals intervals{.heartbeat = std::chrono::hours(1),
                                              .progress = std::chrono::hours(1)};
@@ -150,6 +160,37 @@ TEST_F(JobRunnerTest, OutputThatFailsVerificationIsNeverPublished) {
                             "queue fail permanent the transcoded output failed verification"});
 }
 
+TEST_F(JobRunnerTest, AnOutputTheScratchSpaceCannotHoldGivesTheJobBackBeforeTranscoding) {
+    // 8 s of 720p and 360p with audio: 3856 kbit/s, 3.86 MB, 4.82 MB with the margin.
+    free_bytes = worker::output_bytes(transcoder.media.duration, core::choose_ladder(720), true);
+    ASSERT_EQ(*free_bytes, 4'820'000U);
+    *free_bytes -= 1;
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_EQ(transcoder.runs, 0);
+    EXPECT_EQ(writes(),
+              std::vector<std::string>{"queue fail retryable no scratch space for the output"});
+    EXPECT_TRUE(scratch_is_empty());
+}
+
+TEST_F(JobRunnerTest, OutputThatFailsVerificationOnAFullDiskIsRetriedNotFailed) {
+    // ffmpeg exits 0 on a full disk and leaves output that cannot pass verification.
+    transcoder.during_run = [this](core::ports::ITranscodeProgress&, const std::stop_token&) {
+        free_bytes = 4096;
+    };
+    transcoder.verify_failure = failure(TranscodeFailure::Unverified, 0);
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_EQ(writes(), std::vector<std::string>{"queue fail retryable scratch space ran out"});
+}
+
+TEST_F(JobRunnerTest, ATranscodeThatFailsOnAFullDiskIsRetriedNotFailed) {
+    transcoder.during_run = [this](core::ports::ITranscodeProgress&, const std::stop_token&) {
+        free_bytes = 0;
+    };
+    transcoder.run_failures.push_back(failure(TranscodeFailure::Rejected, 1));
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_EQ(writes(), std::vector<std::string>{"queue fail retryable scratch space ran out"});
+}
+
 TEST_F(JobRunnerTest, AMissingSourceFailsTheJob) {
     FakeTransfer empty(journal);
     const core::ports::ClaimedJob job{.lease = {.job = core::ports::JobId{7}, .fence = 3},
@@ -163,7 +204,8 @@ TEST_F(JobRunnerTest, AMissingSourceFailsTheJob) {
          .store = empty,
          .transcoder = transcoder,
          .clock = clock,
-         .random = random},
+         .random = random,
+         .free_space = free_space()},
         {.scratch = scratch.path(), .node = *core::NodeId::parse("worker-a"), .lease = intervals});
     EXPECT_EQ(runner.run(job, {}), JobOutcome::Failed);
     EXPECT_EQ(writes(),
