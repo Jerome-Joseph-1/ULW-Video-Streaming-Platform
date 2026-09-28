@@ -138,7 +138,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .storage_location = std::move(storage->location),
                   .bucket = std::move(storage->bucket),
                   .node = *node,
-                  .scratch = std::move(*scratch),
+                  // Startup clears it: two workers given one scratch root, as by the
+                  // default, must not clear each other's jobs.
+                  .scratch = *scratch / node->view(),
                   .sandbox = std::move(*sandbox),
                   .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
                   .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),

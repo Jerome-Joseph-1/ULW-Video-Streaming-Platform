@@ -39,7 +39,7 @@ TEST_F(WorkerConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->storage_location, "0123456789abcdef0123456789abcdef");
     EXPECT_EQ(config->bucket, "ulw-media");
     EXPECT_EQ(config->node.view(), "transcode-worker-7d9f-x2x");
-    EXPECT_EQ(config->scratch, "/var/tmp/ulw-worker");
+    EXPECT_EQ(config->scratch, "/var/tmp/ulw-worker/transcode-worker-7d9f-x2x");
     EXPECT_TRUE(config->sandbox.empty());
     EXPECT_EQ(config->ffmpeg, "ffmpeg");
     EXPECT_EQ(config->ffprobe, "ffprobe");
@@ -109,7 +109,7 @@ TEST_F(WorkerConfigTest, PathsMustBeAbsolute) {
     env["ULW_SANDBOX_BIN"] = "/opt/ulw/ulw_sandbox";
     const auto config = load();
     ASSERT_TRUE(config);
-    EXPECT_EQ(config->scratch, "/data/scratch");
+    EXPECT_EQ(config->scratch, "/data/scratch/transcode-worker-7d9f-x2x");
     EXPECT_EQ(config->sandbox, "/opt/ulw/ulw_sandbox");
 }
 
@@ -122,6 +122,16 @@ TEST_F(WorkerConfigTest, ThreadsDefaultToAFixedNumberAndMayBeSet) {
         env["ULW_FFMPEG_THREADS"] = bad;
         EXPECT_EQ(refused_variable(), "ULW_FFMPEG_THREADS") << bad;
     }
+}
+
+TEST_F(WorkerConfigTest, WorkersSharingAScratchRootEachGetADirectoryOfTheirOwn) {
+    // Startup clears the scratch directory; one worker must not clear another's live jobs.
+    const auto first = load();
+    env["HOSTNAME"] = "transcode-worker-7d9f-y3y";
+    const auto second = load();
+    ASSERT_TRUE(first && second);
+    EXPECT_NE(first->scratch, second->scratch);
+    EXPECT_EQ(first->scratch.parent_path(), second->scratch.parent_path());
 }
 
 TEST_F(WorkerConfigTest, TheChildrensPathComesFromOurs) {

@@ -331,7 +331,7 @@ TEST_F(WorkerTest, AnUploadedMp4BecomesHlsAndTheVideoReady) {
     // Metrics for the job, and a workspace that is gone.
     EXPECT_NE(worker->output().find("realtime="), std::string::npos);
     EXPECT_NE(worker->output().find("ffmpeg_peak_rss_kib="), std::string::npos);
-    EXPECT_TRUE(fs::is_empty(scratch_dirs_.back()->path()));
+    EXPECT_TRUE(fs::is_empty(scratch_dirs_.back()->path() / "worker-a"));
 
     worker->signal(SIGTERM);
     EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
@@ -440,7 +440,7 @@ TEST_F(WorkerTest, SigtermMidTranscodeGivesTheJobBackAndExitsCleanly) {
     EXPECT_NE(a->output().find("outcome=requeued"), std::string::npos) << a->output();
     EXPECT_EQ(job_row(video), "queued 1 1 worker stopped");
     EXPECT_EQ(column("SELECT state FROM videos WHERE id = $1", video), "processing");
-    EXPECT_TRUE(fs::is_empty(scratch_dirs_.back()->path()));
+    EXPECT_TRUE(fs::is_empty(scratch_dirs_.back()->path() / "worker-a"));
 }
 
 TEST_F(WorkerTest, ItsEnvironmentIsUnreadableToOtherProcessesOfItsUser) {

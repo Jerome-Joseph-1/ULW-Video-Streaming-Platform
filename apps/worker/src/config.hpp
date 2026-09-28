@@ -22,7 +22,8 @@ struct Config {
     std::string bucket;
     // The lease holder's name in the jobs table.
     core::NodeId node;
-    // Workspaces go under it; it belongs to this worker alone, because startup clears it.
+    // Workspaces go under it: ULW_SCRATCH_DIR/<node>, this worker's alone, which startup
+    // clears.
     std::filesystem::path scratch;
     // The ulw_sandbox helper; empty means the one installed beside this executable.
     std::filesystem::path sandbox;
