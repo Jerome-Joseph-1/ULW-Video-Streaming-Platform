@@ -153,6 +153,7 @@ if(ULW_CONFORMANCE_LIVE)
 endif()
 
 ulw_add_test_suite(postgres_unit_tests unit
+    unit/postgres/conninfo_test.cpp
     unit/postgres/migrations_test.cpp
     unit/postgres/params_test.cpp
     unit/postgres/sqlstate_test.cpp
@@ -166,7 +167,8 @@ target_compile_definitions(postgres_unit_tests
 # Against a live Postgres: ULW_TEST_DATABASE_URL, or the one deploy/local/compose.yaml runs.
 ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_harness.cpp
-    integration/postgres_migrate_test.cpp)
+    integration/postgres_migrate_test.cpp
+    integration/postgres_pool_test.cpp)
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)

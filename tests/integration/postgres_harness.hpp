@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,27 @@ struct ProcessResult {
 // and returns its exit code and combined stdout and stderr.
 [[nodiscard]] ProcessResult run_process(const std::vector<std::string>& argv,
                                         const std::vector<std::string>& env = {});
+
+// The container of ULW_TEST_PG_CONTAINER (default ulw-pg) when docker can control it.
+[[nodiscard]] std::optional<std::string> postgres_container();
+
+// docker pause for as long as it lives: the server stops answering while every socket to it
+// stays open, which is what a hung or partitioned database looks like from here.
+class PausedServer {
+public:
+    explicit PausedServer(std::string container);
+    ~PausedServer();
+    PausedServer(const PausedServer&) = delete;
+    PausedServer& operator=(const PausedServer&) = delete;
+    PausedServer(PausedServer&&) = delete;
+    PausedServer& operator=(PausedServer&&) = delete;
+
+    [[nodiscard]] bool paused() const noexcept { return paused_; }
+
+private:
+    std::string container_;
+    bool paused_ = false;
+};
 
 // The first column of the first row of `sql`, as text; "" for NULL or no rows.
 [[nodiscard]] std::string scalar(infra::postgres::SyncConnection& conn, infra::postgres::Sql sql,

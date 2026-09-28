@@ -160,6 +160,27 @@ ProcessResult run_process(const std::vector<std::string>& argv,
     return result;
 }
 
+std::optional<std::string> postgres_container() {
+    const char* configured = std::getenv("ULW_TEST_PG_CONTAINER");
+    std::string name = configured != nullptr && *configured != '\0' ? configured : "ulw-pg";
+    const ProcessResult running =
+        run_process({"docker", "inspect", "--format", "{{.State.Running}}", name});
+    if (running.exit_code != 0 || !running.output.starts_with("true")) {
+        return std::nullopt;
+    }
+    return name;
+}
+
+PausedServer::PausedServer(std::string container) : container_(std::move(container)) {
+    paused_ = run_process({"docker", "pause", container_}).exit_code == 0;
+}
+
+PausedServer::~PausedServer() {
+    if (paused_) {
+        EXPECT_EQ(run_process({"docker", "unpause", container_}).exit_code, 0);
+    }
+}
+
 std::string scalar(infra::postgres::SyncConnection& conn, infra::postgres::Sql sql,
                    const infra::postgres::Params& params) {
     auto result = conn.exec(sql, params);
