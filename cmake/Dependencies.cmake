@@ -6,6 +6,7 @@ set(ULW_THIRD_PARTY_DIR ${PROJECT_SOURCE_DIR}/third_party)
 
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(OpenSSL 3.0 REQUIRED)
 
 FetchContent_Declare(llhttp
     URL ${ULW_THIRD_PARTY_DIR}/llhttp-9.2.1.tar.gz
@@ -21,7 +22,6 @@ block()
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
     FetchContent_MakeAvailable(llhttp)
 endblock()
-find_package(OpenSSL 3.0 REQUIRED)
 
 if(ULW_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
