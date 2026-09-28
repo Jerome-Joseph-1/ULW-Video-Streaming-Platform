@@ -1,0 +1,16 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Inline
+PointerAlignment: Left
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"(core|net|http|infra|codec|rt)/'
+    Priority: 1
+  - Regex: '^"'
+    Priority: 2
+  - Regex: '^<(sys|netinet|arpa|linux)/'
+    Priority: 3
+  - Regex: '^<'
+    Priority: 4

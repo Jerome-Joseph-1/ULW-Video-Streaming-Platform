@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1:check_initialization_order=1
+  UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+  TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+
+jobs:
+  build-test:
+    name: build-test (${{ matrix.compiler }}/${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { compiler: gcc, cc: gcc-14, cxx: g++-14, preset: ci, test: ci }
+          - { compiler: clang, cc: clang-18, cxx: clang++-18, preset: ci, test: ci }
+          - { compiler: clang, cc: clang-18, cxx: clang++-18, preset: asan, test: unit }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: ${{ matrix.compiler }}-${{ matrix.preset }}
+      - run: cmake --preset ${{ matrix.preset }}
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --preset ${{ matrix.test }}
+      - run: ccache --show-stats
+
+  tsan:
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: clang-tsan
+      - run: cmake --preset tsan
+      - run: cmake --build --preset tsan
+      - run: ctest --preset tsan-unit
+
+  lint:
+    name: boundaries + format + tidy
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: clang-lint
+      - run: tools/check-boundaries.sh
+      - run: python3 tools/check-docs.py
+      - run: tools/check-format.sh
+      - run: cmake --preset ci
+      # Generated headers must exist before clang-tidy can parse the sources.
+      - run: cmake --build --preset ci --target ulw_build_info
+      - name: clang-tidy (changed files)
+        if: github.event_name == 'pull_request'
+        run: |
+          mapfile -t changed < <(git diff --name-only --diff-filter=ACMR \
+            "origin/${{ github.base_ref }}...HEAD")
+          tools/run-clang-tidy.sh build/ci "${changed[@]}"
+      - name: clang-tidy (full tree)
+        if: github.event_name != 'pull_request'
+        run: tools/run-clang-tidy.sh build/ci

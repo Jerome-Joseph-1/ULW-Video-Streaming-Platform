@@ -1,0 +1,34 @@
+name: setup
+description: Install the toolchain and restore the ccache for one job.
+inputs:
+  cache-key:
+    description: Distinguishes ccache contents between jobs.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends \
+          g++-14 clang-18 clang-tidy-18 clang-format-18 lld-18 libclang-rt-18-dev \
+          ninja-build ccache mold jq pkg-config \
+          libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev
+    # Ubuntu 24.04 runners randomise more mmap bits than TSan/ASan's shadow layout allows.
+    - name: Relax mmap randomisation for sanitizers
+      shell: bash
+      run: sudo sysctl -w vm.mmap_rnd_bits=28
+    - name: Restore ccache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ccache
+        key: ccache-${{ inputs.cache-key }}-${{ github.sha }}
+        restore-keys: ccache-${{ inputs.cache-key }}-
+    - name: Configure ccache
+      shell: bash
+      run: |
+        echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+        export CCACHE_DIR=$HOME/.cache/ccache
+        ccache --set-config=max_size=400M
+        ccache --zero-stats
