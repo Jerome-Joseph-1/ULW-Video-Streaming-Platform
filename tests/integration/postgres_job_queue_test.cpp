@@ -22,6 +22,7 @@
 namespace {
 
 using core::ports::ClaimedJob;
+using core::ports::JobQueueError;
 using core::ports::Rendition;
 using infra::postgres::Params;
 using infra::postgres::PgJobQueue;
@@ -267,6 +268,36 @@ TEST_F(JobQueueTest, PermanentFailureFailsTheVideoAtOnce) {
     EXPECT_EQ(video_column(video, "SELECT state::text FROM videos WHERE id = $1"), "failed");
     EXPECT_EQ(video_column(video, "SELECT error_reason FROM videos WHERE id = $1"),
               "not a video file");
+}
+
+TEST_F(JobQueueTest, ProgressOutsideAPercentIsInvalidRatherThanAnOutage) {
+    queue_job();
+    const auto job = claim(*queue, "worker-a");
+    ASSERT_TRUE(job);
+    EXPECT_EQ(queue->report_progress(job->lease, 200).error(), JobQueueError::Invalid);
+    EXPECT_EQ(queue->report_progress(job->lease, 50), true);
+}
+
+TEST_F(JobQueueTest, FinishRefusedForItsRenditionsIsInvalidAndWritesNothing) {
+    const auto video = queue_job();
+    const auto job = claim(*queue, "worker-a");
+    ASSERT_TRUE(job);
+    const std::array twice{
+        Rendition{.height = 720,
+                  .bitrate_bps = 3'000'000,
+                  .playlist = *core::StorageKey::parse("v/720.m3u8")},
+        Rendition{.height = 720,
+                  .bitrate_bps = 2'500'000,
+                  .playlist = *core::StorageKey::parse("v/720b.m3u8")},
+    };
+    EXPECT_EQ(queue->finish(job->lease, core::Millis{61'000}, twice).error(),
+              JobQueueError::Invalid);
+    EXPECT_EQ(video_column(video, "SELECT state FROM videos WHERE id = $1"), "processing");
+    EXPECT_EQ(video_column(video, "SELECT count(*) FROM renditions WHERE video_id = $1"), "0");
+    const std::array once{Rendition{.height = 720,
+                                    .bitrate_bps = 3'000'000,
+                                    .playlist = *core::StorageKey::parse("v/720.m3u8")}};
+    EXPECT_EQ(queue->finish(job->lease, core::Millis{61'000}, once), true);
 }
 
 TEST_F(JobQueueTest, HeartbeatRenewsOnlyTheHoldersLease) {

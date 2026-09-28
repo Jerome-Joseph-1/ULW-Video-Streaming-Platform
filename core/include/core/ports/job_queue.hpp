@@ -15,10 +15,14 @@
 namespace core::ports {
 
 enum class JobQueueError : std::uint8_t {
-    // The database is unreachable or refused the statement; the call may be retried.
+    // The database is unreachable, timed out or lost a race; the call may be retried.
     Unavailable,
     // A stored row violates a domain invariant.
     Corrupt,
+    // The database refused the call's own values (a percent above 100, two renditions of one
+    // height) or the statement itself. The same call fails the same way every time it is made,
+    // so it is a bug to report, not an outage to wait out.
+    Invalid,
 };
 
 template <class T> using JobQueueResult = std::expected<T, JobQueueError>;

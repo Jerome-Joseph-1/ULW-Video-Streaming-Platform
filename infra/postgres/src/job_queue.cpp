@@ -99,6 +99,25 @@ video AS (
      WHERE id IN (SELECT video_id FROM exhausted) AND state = 'processing')
 SELECT (SELECT count(*) FROM requeued) + (SELECT count(*) FROM exhausted))sql";
 
+JobQueueError to_queue_error(DbError e) noexcept {
+    switch (e) {
+    case DbError::Retry:
+    case DbError::ConnectionLost:
+    case DbError::Timeout:
+    case DbError::LockTimeout:
+        return JobQueueError::Unavailable;
+    case DbError::Duplicate:
+    case DbError::Constraint:
+    case DbError::Rejected:
+        return JobQueueError::Invalid;
+    }
+    return JobQueueError::Unavailable;
+}
+
+template <class T> JobQueueResult<T> failure(const DbFailure& f) {
+    return std::unexpected(to_queue_error(f.error));
+}
+
 // Fences count the claims of one job and job ids count jobs; both stay far below 2^63.
 Params& add_lease(Params& params, const JobLease& lease) noexcept {
     return params.add_int(std::to_underlying(lease.job))
@@ -150,11 +169,11 @@ public:
         conn_.reset();
         auto opened = SyncConnection::open(conninfo_, kJobSession);
         if (!opened) {
-            return std::unexpected(JobQueueError::Unavailable);
+            return failure<SyncConnection*>(opened.error());
         }
         // Before the first claim: a job queued after a claim that found nothing must wake us.
-        if (!opened->exec("LISTEN job_available")) {
-            return std::unexpected(JobQueueError::Unavailable);
+        if (auto listening = opened->exec("LISTEN job_available"); !listening) {
+            return failure<SyncConnection*>(listening.error());
         }
         conn_.emplace(std::move(*opened));
         return &*conn_;
@@ -167,7 +186,7 @@ public:
         }
         auto result = (*conn)->exec(sql, params);
         if (!result) {
-            return std::unexpected(JobQueueError::Unavailable);
+            return failure<Result>(result.error());
         }
         return std::move(*result);
     }
@@ -220,13 +239,13 @@ JobQueueResult<bool> PgJobQueue::finish(const JobLease& lease, core::Millis dura
     SyncConnection& db = **conn;
     auto tx = Transaction::begin(db);
     if (!tx) {
-        return std::unexpected(JobQueueError::Unavailable);
+        return failure<bool>(tx.error());
     }
     Params lease_params;
     add_lease(lease_params, lease);
     auto job = db.exec(kFinishJob, lease_params);
     if (!job) {
-        return std::unexpected(JobQueueError::Unavailable);
+        return failure<bool>(job.error());
     }
     if (job->rows() == 0) {
         return false;
@@ -241,23 +260,24 @@ JobQueueResult<bool> PgJobQueue::finish(const JobLease& lease, core::Millis dura
                                           .add_int(static_cast<std::int64_t>(lease.fence))
                                           .add_int(std::to_underlying(lease.job)));
     if (!ready) {
-        return std::unexpected(JobQueueError::Unavailable);
+        return failure<bool>(ready.error());
     }
     // The job was running under our fence, so its video must be processing.
     if (ready->affected() != 1) {
         return std::unexpected(JobQueueError::Corrupt);
     }
     for (const core::ports::Rendition& r : renditions) {
-        if (!db.exec(kRendition, Params{}
-                                     .add_uuid(video->uuid())
-                                     .add_int(r.height)
-                                     .add_int(r.bitrate_bps)
-                                     .add_text(r.playlist.view()))) {
-            return std::unexpected(JobQueueError::Unavailable);
+        if (auto recorded = db.exec(kRendition, Params{}
+                                                    .add_uuid(video->uuid())
+                                                    .add_int(r.height)
+                                                    .add_int(r.bitrate_bps)
+                                                    .add_text(r.playlist.view()));
+            !recorded) {
+            return failure<bool>(recorded.error());
         }
     }
-    if (!tx->commit()) {
-        return std::unexpected(JobQueueError::Unavailable);
+    if (auto committed = tx->commit(); !committed) {
+        return failure<bool>(committed.error());
     }
     return true;
 }
