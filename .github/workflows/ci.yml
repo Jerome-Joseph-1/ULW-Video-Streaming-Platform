@@ -80,7 +80,8 @@ jobs:
           ./io_uring_probe
       - run: cmake --preset ci
       - run: cmake --build --preset ci
-      - run: ctest --preset ci -R 'Reactors/.*${{ matrix.reactor == 'io_uring' && 'IoUring' || 'Epoll' }}$'
+      # gtest_discover_tests appends "  # GetParam() = ..." to parameterised test names.
+      - run: ctest --preset ci -R 'Reactors/.*/${{ matrix.reactor == 'io_uring' && 'IoUring' || 'Epoll' }}( |$)'
       - name: echo acceptance
         run: tests/load/echo_acceptance.sh build/ci ${{ matrix.reactor }} 20
 

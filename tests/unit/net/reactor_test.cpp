@@ -73,9 +73,13 @@ protected:
     // Connects a client and attaches the accepted side to `server`.
     os::UniqueFd connect(Conn& server) {
         auto client = connect_loopback(port);
-        EXPECT_TRUE(client);
         const std::size_t before = acceptor.accepted.size();
-        EXPECT_TRUE(pump_until(*reactor, [&] { return acceptor.accepted.size() > before; }));
+        // Returning an empty client makes the caller's first use of it fail, rather than
+        // attaching a connection that was never accepted.
+        if (!client || !pump_until(*reactor, [&] { return acceptor.accepted.size() > before; })) {
+            ADD_FAILURE() << "loopback connection was not accepted";
+            return {};
+        }
         server.reactor = reactor.get();
         auto id = reactor->attach(std::move(acceptor.accepted.back()), server);
         acceptor.accepted.pop_back();

@@ -24,10 +24,16 @@ std::expected<void, int> set_int(int fd, int level, int name, int value) noexcep
 } // namespace
 
 std::expected<os::UniqueFd, int> listen_tcp(const ListenOptions& options) {
-    bool v6 = true;
-    os::UniqueFd fd{::socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
-    if (!fd && errno == EAFNOSUPPORT) {
-        v6 = false;
+    // Loopback means 127.0.0.1: a socket bound to ::1 takes no IPv4 connections whatever
+    // IPV6_V6ONLY says, and local probes dial 127.0.0.1. Otherwise one dual-stack socket
+    // serves both families, falling back to IPv4 on hosts without IPv6.
+    bool v6 = !options.loopback_only;
+    os::UniqueFd fd;
+    if (v6) {
+        fd = os::UniqueFd{::socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
+        v6 = fd || errno != EAFNOSUPPORT;
+    }
+    if (!v6) {
         fd = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
     }
     if (!fd) {
@@ -49,7 +55,7 @@ std::expected<os::UniqueFd, int> listen_tcp(const ListenOptions& options) {
         sockaddr_in6 addr{};
         addr.sin6_family = AF_INET6;
         addr.sin6_port = htons(options.port);
-        addr.sin6_addr = options.loopback_only ? in6addr_loopback : in6addr_any;
+        addr.sin6_addr = in6addr_any;
         rc = ::bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr);
     } else {
         sockaddr_in addr{};
