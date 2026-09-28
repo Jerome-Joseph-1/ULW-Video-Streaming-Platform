@@ -42,6 +42,12 @@ public:
     static constexpr std::size_t kMaxHeaderBytes = std::size_t{16} * 1024;
     // Apache's LimitRequestFields default; a browser sends about 20.
     static constexpr std::size_t kMaxHeaderCount = 100;
+    // Every byte before the body, counted as it arrives, so what llhttp skips without storing
+    // (blank lines before the request line, whitespace before a value) is bounded as well. The
+    // limits above plus their syntax: under 32 bytes of request line beside the target (method,
+    // two spaces, "HTTP/1.1", CRLF), 4 per field (": " and CRLF) and the closing blank line.
+    static constexpr std::size_t kMaxHeadBytes =
+        kMaxTargetBytes + kMaxHeaderBytes + 32 + (4 * kMaxHeaderCount) + 2;
     // Only an upload PATCH carries a real body, and it carries one chunk. Chunks are capped at
     // 16 MiB so a dropped connection costs at most that much re-upload.
     static constexpr std::uint64_t kMaxContentLength = std::uint64_t{16} * 1024 * 1024;

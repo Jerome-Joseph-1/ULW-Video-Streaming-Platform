@@ -195,6 +195,9 @@ public:
         header_bytes_used_ = 0;
         header_count_ = 0;
         single_valued_seen_.reset();
+        head_bytes_ = 0;
+        headers_begun_ = false;
+        head_complete_ = false;
         in_name_ = false;
         content_length_ = 0;
         transfer_coded_ = false;
@@ -243,7 +246,23 @@ private:
 
     ParseResult execute(std::span<const std::byte> input, bool from_tail) noexcept {
         const char* const begin = input.empty() ? &kNoInput : as_chars(input);
-        const llhttp_errno_t err = llhttp_execute(&parser_, begin, input.size());
+        // Until the head is complete llhttp gets no more than the head budget has left, so the
+        // bytes it skips without a callback run out where the budget does.
+        const std::size_t first =
+            head_complete_ ? input.size() : std::min(input.size(), kMaxHeadBytes - head_bytes_);
+        llhttp_errno_t err = llhttp_execute(&parser_, begin, first);
+        if (err == HPE_OK && !head_complete_) {
+            head_bytes_ += first;
+            if (head_bytes_ == kMaxHeadBytes) {
+                return fail(fatal(headers_begun_ ? Status::RequestHeaderFieldsTooLarge
+                                                 : Status::BadRequest));
+            }
+        }
+        // Only reached with the head complete: the budget failed above otherwise.
+        if (err == HPE_OK && first < input.size()) {
+            const std::span<const std::byte> rest = input.subspan(first);
+            err = llhttp_execute(&parser_, as_chars(rest), rest.size());
+        }
         if (err == HPE_OK) {
             if (from_tail) {
                 unparsed_.clear();
@@ -307,6 +326,7 @@ private:
     }
 
     int on_header_field(std::string_view fragment) noexcept {
+        headers_begun_ = true;
         if (!in_name_) {
             if (header_count_ == kMaxHeaderCount) {
                 return reject(Status::RequestHeaderFieldsTooLarge);
@@ -363,6 +383,7 @@ private:
     }
 
     int on_headers_complete() noexcept {
+        head_complete_ = true;
         // Any digit.digit gets here, and so does a request line with no version at all, which
         // llhttp reads as 0.9.
         if (llhttp_get_http_major(&parser_) != 1 || llhttp_get_http_minor(&parser_) > 1) {
@@ -451,6 +472,9 @@ private:
     std::array<HeaderField, kMaxHeaderCount> headers_{};
     std::size_t header_count_ = 0;
     std::bitset<kSingleValued.size()> single_valued_seen_;
+    std::size_t head_bytes_ = 0;
+    bool headers_begun_ = false;
+    bool head_complete_ = false;
     std::size_t name_begin_ = 0;
     std::size_t value_begin_ = 0;
     bool in_name_ = false;

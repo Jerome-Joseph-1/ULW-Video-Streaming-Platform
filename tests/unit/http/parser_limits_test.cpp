@@ -109,6 +109,49 @@ TEST(RequestLimits, OneHeaderOverTheCountIsRejected) {
     EXPECT_EQ(o.heads, 0U);
 }
 
+// A head of exactly `size` bytes whose padding before a value llhttp skips without storing.
+std::string get_padded_to(std::size_t size) {
+    constexpr std::string_view kBefore = "GET / HTTP/1.1\r\nHost: a\r\nX-Pad:";
+    constexpr std::string_view kAfter = "v\r\n\r\n";
+    return std::string{kBefore} + std::string(size - kBefore.size() - kAfter.size(), ' ') +
+           std::string{kAfter};
+}
+
+TEST(RequestLimits, HeadFillingItsBudgetExactlyIsAccepted) {
+    const std::string input = get_padded_to(RequestParser::kMaxHeadBytes);
+    for (const std::size_t chunk : {std::size_t{1}, std::size_t{4096}, input.size()}) {
+        RecordingSink sink;
+        RequestParser parser{sink};
+        EXPECT_EQ(drive(parser, input, chunk), ParseProgress::NeedMore) << chunk;
+        EXPECT_EQ(sink.requests().size(), 1U) << chunk;
+    }
+}
+
+TEST(RequestLimits, PaddingBeforeAValueCountsAgainstTheHeadBudget) {
+    const std::string input = get_padded_to(RequestParser::kMaxHeadBytes + 1);
+    for (const std::size_t chunk : {std::size_t{1}, std::size_t{4096}, input.size()}) {
+        RecordingSink sink;
+        RequestParser parser{sink};
+        EXPECT_EQ(drive(parser, input, chunk), kTooLarge) << chunk;
+        EXPECT_TRUE(sink.requests().empty()) << chunk;
+    }
+}
+
+TEST(RequestLimits, BlankLinesBeforeTheRequestLineCountAgainstTheHeadBudget) {
+    std::string input;
+    while (input.size() < RequestParser::kMaxHeadBytes) {
+        input += "\r\n";
+    }
+    input += "GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+
+    for (const std::size_t chunk : {std::size_t{1}, input.size()}) {
+        RecordingSink sink;
+        RequestParser parser{sink};
+        EXPECT_EQ(drive(parser, input, chunk), fatal(Status::BadRequest)) << chunk;
+        EXPECT_TRUE(sink.requests().empty()) << chunk;
+    }
+}
+
 std::string patch_with_length(std::string_view length) {
     return std::format("PATCH /u HTTP/1.1\r\nHost: a\r\nContent-Length: {}\r\n\r\n", length);
 }
