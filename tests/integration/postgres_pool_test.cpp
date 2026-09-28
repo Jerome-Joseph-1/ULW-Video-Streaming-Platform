@@ -93,10 +93,10 @@ private:
 
 // listen_tcp binds ::1 when the host has IPv6, where 127.0.0.1 would not reach it.
 std::string loopback_of(int fd) {
-    sockaddr_storage addr{};
-    socklen_t len = sizeof addr;
-    EXPECT_EQ(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len), 0);
-    return addr.ss_family == AF_INET6 ? "::1" : "127.0.0.1";
+    int domain = 0;
+    socklen_t len = sizeof domain;
+    EXPECT_EQ(::getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &len), 0);
+    return domain == AF_INET6 ? "::1" : "127.0.0.1";
 }
 
 // The first cell of a statement's result, or the error it ended with.

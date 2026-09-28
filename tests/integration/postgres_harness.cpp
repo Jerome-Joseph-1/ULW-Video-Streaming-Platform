@@ -58,6 +58,8 @@ std::string with_database(const std::string& url, const std::string& database) {
     const infra::postgres::ConninfoHandle options{PQconninfoParse(url.c_str(), &error)};
     PQfreemem(error);
     std::string out;
+    // libpq ends the array with an entry whose keyword is null, and gives no length.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     for (const PQconninfoOption* o = options.get(); o != nullptr && o->keyword != nullptr; ++o) {
         if (o->val != nullptr && std::string_view{o->keyword} != "dbname") {
             out += std::format("{}={} ", o->keyword, single_quoted(o->val));
@@ -128,6 +130,8 @@ ProcessResult run_process(const std::vector<std::string>& argv,
     }
     arg_ptrs.push_back(nullptr);
     std::vector<std::string> vars;
+    // environ is null-terminated, with no length beside it.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     for (char** e = ::environ; *e != nullptr; ++e) {
         vars.emplace_back(*e);
     }
