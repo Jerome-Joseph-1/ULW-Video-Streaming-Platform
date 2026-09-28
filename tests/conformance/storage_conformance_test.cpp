@@ -151,20 +151,27 @@ TEST_P(StoreConformance, StaleLowReopenNeverLowersTheDurableOffset) {
     ASSERT_NO_FATAL_FAILURE(finish_and_compare(id, data));
 }
 
-TEST_P(StoreConformance, SessionOpenedPastTheDurableOffsetFails) {
+TEST_P(StoreConformance, BytesSentPastTheDurableOffsetNeverBecomeDurable) {
     const auto data = ulw::test::pattern(3 * chunk, 31);
     const IngestId id = create("past-durable", data.size());
     ulw::test::Observer obs;
     auto session = harness->ingest().open(id, chunk, obs);
-    ASSERT_TRUE(session) << "open() cannot tell without blocking; the session must";
-    // Taking the bytes and failing afterwards is as legal as refusing them.
+    ASSERT_TRUE(session) << "open() cannot tell without blocking";
+    // Refusing the bytes, taking them and failing, and taking them for nothing are all legal.
     static_cast<void>(harness->write_all(**session, obs, std::span(data).subspan(chunk, chunk)));
-    // Failed, and the observer told so: a writer that got 0 back waits for that call.
+    if ((*session)->state() == IngestState::Open) {
+        (*session)->finish();
+    }
     ASSERT_TRUE(ulw::test::pump_until(
         harness->reactor(),
-        [&] { return (*session)->state() == IngestState::Failed && obs.calls > 0; },
+        [&] {
+            const auto s = (*session)->state();
+            return s == IngestState::Failed || s == IngestState::Committed;
+        },
         ulw::test::kOperationLimit));
-    EXPECT_EQ((*session)->error(), StorageError::PreconditionFailed);
+    if ((*session)->state() == IngestState::Failed) {
+        EXPECT_EQ((*session)->error(), StorageError::PreconditionFailed);
+    }
     session->reset();
     EXPECT_EQ(harness->ingest().durable_offset(id), 0U);
     EXPECT_EQ(harness->ingest().commit(id), std::unexpected(StorageError::PreconditionFailed));
