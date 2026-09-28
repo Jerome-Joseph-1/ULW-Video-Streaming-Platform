@@ -249,6 +249,7 @@ void UringReactor::finalize(Slot& s) noexcept {
     s.acceptor = nullptr;
     s.receiving = s.recv_armed = s.send_armed = s.poll_armed = false;
     s.closing = s.failed = s.eof = s.eof_delivered = s.delivery_queued = s.accept_paused = false;
+    s.shut_pending = false;
     s.interest = Interest::None;
     s.kind = Kind::Free;
     ++s.gen;
@@ -355,6 +356,18 @@ void UringReactor::send(ConnId conn, std::span<const std::byte> bytes) noexcept 
 std::size_t UringReactor::pending_send_bytes(ConnId conn) const noexcept {
     const Slot* s = stream_slot(conn);
     return s == nullptr ? 0 : s->sendq.size();
+}
+
+void UringReactor::shutdown_write(ConnId conn) noexcept {
+    Slot* s = stream_slot(conn);
+    if (s == nullptr) {
+        return;
+    }
+    if (s->sendq.empty() && !s->send_armed) {
+        static_cast<void>(::shutdown(conn.fd, SHUT_WR));
+    } else {
+        s->shut_pending = true;
+    }
 }
 
 void UringReactor::begin_close(ConnId conn) noexcept {
@@ -569,6 +582,10 @@ void UringReactor::on_send(int fd, Slot& s, int res) noexcept {
     if (!s.sendq.empty()) {
         arm_send(fd, s);
         return;
+    }
+    if (s.shut_pending) {
+        s.shut_pending = false;
+        static_cast<void>(::shutdown(fd, SHUT_WR));
     }
     s.stream->on_writable();
 }

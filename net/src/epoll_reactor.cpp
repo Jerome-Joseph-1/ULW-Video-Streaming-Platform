@@ -134,7 +134,7 @@ void EpollReactor::release(Slot& s) noexcept {
     s.stream = nullptr;
     s.ready = nullptr;
     s.acceptor = nullptr;
-    s.receiving = s.failed = s.hung_up = s.eof = s.accept_paused = false;
+    s.receiving = s.failed = s.hung_up = s.eof = s.accept_paused = s.shut_pending = false;
     s.kind = Kind::Free;
     ++s.gen;
 }
@@ -258,6 +258,18 @@ void EpollReactor::send(ConnId conn, std::span<const std::byte> bytes) noexcept 
 std::size_t EpollReactor::pending_send_bytes(ConnId conn) const noexcept {
     const Slot* s = stream_slot(conn);
     return s == nullptr ? 0 : s->sendq.size();
+}
+
+void EpollReactor::shutdown_write(ConnId conn) noexcept {
+    Slot* s = stream_slot(conn);
+    if (s == nullptr) {
+        return;
+    }
+    if (s->sendq.empty()) {
+        static_cast<void>(::shutdown(conn.fd, SHUT_WR));
+    } else {
+        s->shut_pending = true;
+    }
 }
 
 void EpollReactor::begin_close(ConnId conn) noexcept {
@@ -483,6 +495,10 @@ void EpollReactor::flush(int fd, Slot& s) noexcept {
             return;
         }
         s.sendq.consume(static_cast<std::size_t>(n), pool_);
+    }
+    if (s.shut_pending) {
+        s.shut_pending = false;
+        static_cast<void>(::shutdown(fd, SHUT_WR));
     }
     update_events(fd, s);
     s.stream->on_writable();

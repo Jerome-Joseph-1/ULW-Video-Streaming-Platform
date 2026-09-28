@@ -89,6 +89,10 @@ public:
     // Copies `bytes` into the connection's send queue; partial writes are the reactor's job.
     virtual void send(ConnId conn, std::span<const std::byte> bytes) noexcept = 0;
     [[nodiscard]] virtual std::size_t pending_send_bytes(ConnId conn) const noexcept = 0;
+    // Sends FIN once the send queue has drained, keeping the read side open. Closing with
+    // unread input makes the kernel send RST, which can destroy a response the peer has not
+    // read yet; an error response is followed by this, a short drain, then begin_close.
+    virtual void shutdown_write(ConnId conn) noexcept = 0;
     // Drops unsent bytes, cancels in-flight work and closes the socket once the kernel holds
     // no reference to it. No callback for this connection follows.
     virtual void begin_close(ConnId conn) noexcept = 0;
