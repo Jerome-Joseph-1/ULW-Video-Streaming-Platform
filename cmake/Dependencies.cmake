@@ -16,6 +16,7 @@ FetchContent_Declare(llhttp
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     SYSTEM)
 FetchContent_MakeAvailable(llhttp)
+find_package(OpenSSL 3.0 REQUIRED)
 
 if(ULW_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
