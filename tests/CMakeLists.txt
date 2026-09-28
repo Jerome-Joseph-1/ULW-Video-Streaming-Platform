@@ -183,6 +183,7 @@ ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
     unit/auth/jwk_test.cpp
     unit/auth/jws_test.cpp
+    unit/auth/signature_test.cpp
     unit/auth/test_keys.cpp)
 target_link_libraries(auth_unit_tests PRIVATE ulw::auth OpenSSL::Crypto)
 # White-box tests of the token and key-set parsers.

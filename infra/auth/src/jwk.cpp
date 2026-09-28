@@ -52,7 +52,6 @@ constexpr std::size_t kCoordinateBytes = 32;
 
 const unsigned char* bytes_of(const std::string& s) noexcept {
     // char and unsigned char may alias each other.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     return reinterpret_cast<const unsigned char*>(s.data());
 }
 

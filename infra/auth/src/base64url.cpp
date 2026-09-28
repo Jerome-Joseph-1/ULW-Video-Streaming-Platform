@@ -58,7 +58,6 @@ std::string encode_base64url(std::span<const unsigned char> bytes) {
 
 std::string encode_base64url(std::string_view bytes) {
     // char and unsigned char may alias each other.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     return encode_base64url({reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size()});
 }
 
