@@ -7,6 +7,22 @@ set(ULW_THIRD_PARTY_DIR ${PROJECT_SOURCE_DIR}/third_party)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 
+FetchContent_Declare(llhttp
+    URL ${ULW_THIRD_PARTY_DIR}/llhttp-9.2.1.tar.gz
+    URL_HASH SHA256=3c163891446e529604b590f9ad097b2e98b5ef7e4d3ddcf1cf98b62ca668f23e
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SYSTEM)
+# llhttp's own options default to a shared library; only the static one is linked. Scoped
+# to this block so the choice never reaches the cache or any other target. llhttp asks for
+# CMake 3.5, under which option() would overwrite these instead of deferring to them.
+block()
+    set(BUILD_SHARED_LIBS OFF)
+    set(BUILD_STATIC_LIBS ON)
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    FetchContent_MakeAvailable(llhttp)
+endblock()
+find_package(OpenSSL 3.0 REQUIRED)
+
 if(ULW_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)

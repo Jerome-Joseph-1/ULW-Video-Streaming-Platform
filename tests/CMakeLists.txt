@@ -58,3 +58,39 @@ ulw_add_test_suite(storage_conformance_tests conformance
     conformance/fs_store_test.cpp
     conformance/storage_conformance_test.cpp)
 target_link_libraries(storage_conformance_tests PRIVATE ulw::test_storage_harness)
+ulw_add_test_suite(http_unit_tests unit
+    unit/http/backpressure_test.cpp
+    unit/http/parser_limits_test.cpp
+    unit/http/request_framing_test.cpp
+    unit/http/request_parser_test.cpp
+    unit/http/response_test.cpp
+    unit/http/router_test.cpp)
+target_link_libraries(http_unit_tests PRIVATE ulw::http_lib)
+
+# Every build replays the committed corpus through the fuzz entry point, so an input that once
+# broke the parser fails ctest wherever the unit tests run, not only under libFuzzer.
+ulw_add_executable(http_fuzz_replay fuzz/http_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(http_fuzz_replay PRIVATE ulw::http_lib)
+add_test(NAME http_fuzz_corpus
+    COMMAND http_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/http)
+set_tests_properties(http_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(http_fuzz fuzz/http_fuzz.cpp)
+    target_link_libraries(http_fuzz PRIVATE ulw::http_lib)
+    target_compile_options(http_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(http_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
+ulw_add_test_suite(s3util_unit_tests unit
+    unit/s3/credentials_test.cpp
+    unit/s3/errors_test.cpp
+    unit/s3/profile_test.cpp
+    unit/s3/retry_test.cpp
+    unit/s3/signing_key_test.cpp
+    unit/s3/sigv4_test.cpp
+    unit/s3/url_test.cpp
+    unit/s3/xml_test.cpp)
+target_link_libraries(s3util_unit_tests PRIVATE ulw::s3util)
+# signing_key_test.cpp checks a private helper directly.
+target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/infra/storage/s3/s3util/src)

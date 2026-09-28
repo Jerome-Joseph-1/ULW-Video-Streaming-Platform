@@ -75,6 +75,8 @@ add_subdirectory(os)
 add_subdirectory(net)
 add_subdirectory(infra/storage/fake)
 add_subdirectory(infra/storage/fs)
+add_subdirectory(http)
+add_subdirectory(infra/storage/s3/s3util)
 add_subdirectory(apps/gateway)
 
 if(ULW_BUILD_TESTS)
