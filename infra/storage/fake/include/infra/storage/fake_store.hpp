@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -88,6 +89,8 @@ private:
 
     enum class Attempt { Stored, Throttled, Failed };
 
+    [[nodiscard]] std::optional<core::ports::StorageError> check_resume(const std::string& ref,
+                                                                        std::uint64_t offset) const;
     [[nodiscard]] Attempt store_chunk(const std::string& ref, std::uint64_t index,
                                       const std::vector<std::byte>& bytes,
                                       core::ports::StorageError& error);

@@ -23,6 +23,16 @@ public:
         if (state_ != IngestState::Open) {
             return 0;
         }
+        if (!resume_checked_) {
+            resume_checked_ = true;
+            // Where open() left it, as an object store must: finding out needs a listing.
+            if (const auto err = store_.check_resume(id_.backend_ref, next_)) {
+                error_ = err;
+                state_ = IngestState::Failed;
+                schedule();
+                return 0;
+            }
+        }
         FaultPlan plan;
         {
             const std::scoped_lock lock(store_.mutex_);
@@ -168,6 +178,7 @@ private:
     IngestState state_ = IngestState::Open;
     std::optional<StorageError> error_;
     net::TimerId timer_;
+    bool resume_checked_ = false;
     bool aborted_ = false;
 };
 
@@ -214,12 +225,27 @@ FakeStore::open(const IngestId& id, std::uint64_t offset, core::ports::IIngestOb
         if (it == ingests_.end()) {
             return std::unexpected(StorageError::NotFound);
         }
-        if (id.chunk_size == 0 || (offset % chunk_size_ != 0 && offset != it->second.total) ||
-            offset > contiguous_bytes(it->second)) {
+        // Only offsets the fake could never have reported; whether this one is durable is
+        // the session's to find out, as it would be on a real bucket.
+        if (id.chunk_size == 0 || offset > it->second.total ||
+            (offset % chunk_size_ != 0 && offset != it->second.total)) {
             return std::unexpected(StorageError::PreconditionFailed);
         }
     }
     return std::make_unique<Session>(*this, id, offset, observer);
+}
+
+std::optional<StorageError> FakeStore::check_resume(const std::string& ref,
+                                                    std::uint64_t offset) const {
+    const std::scoped_lock lock(mutex_);
+    const auto it = ingests_.find(ref);
+    if (it == ingests_.end()) {
+        return StorageError::NotFound;
+    }
+    if (offset > contiguous_bytes(it->second)) {
+        return StorageError::PreconditionFailed;
+    }
+    return std::nullopt;
 }
 
 FakeStore::Attempt FakeStore::store_chunk(const std::string& ref, std::uint64_t index,

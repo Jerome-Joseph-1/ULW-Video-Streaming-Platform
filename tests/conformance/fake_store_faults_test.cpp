@@ -81,11 +81,12 @@ TEST_F(FakeStoreFaults, CappedWritesWakeTheWriterUntilEverythingIsTaken) {
     EXPECT_TRUE(*h.reader().fetch_small(key, data.size()) == data);
 }
 
-TEST_F(FakeStoreFaults, OpeningPastTheDurableOffsetIsRefused) {
+TEST_F(FakeStoreFaults, OpeningBetweenChunkBoundariesIsRefused) {
     const auto id = create(3 * kLocalChunk);
     ulw::test::Observer obs;
-    EXPECT_EQ(h.ingest().open(id, kLocalChunk, obs).error(), StorageError::PreconditionFailed);
     EXPECT_EQ(h.ingest().open(id, 10, obs).error(), StorageError::PreconditionFailed);
+    EXPECT_EQ(h.ingest().open(id, (3 * kLocalChunk) + 1, obs).error(),
+              StorageError::PreconditionFailed);
 }
 
 } // namespace
