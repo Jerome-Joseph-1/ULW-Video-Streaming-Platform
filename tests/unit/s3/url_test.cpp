@@ -9,6 +9,7 @@
 
 namespace {
 
+using infra::s3util::Addressing;
 using infra::s3util::Bucket;
 using infra::s3util::canonical_query;
 using infra::s3util::ProfileError;
@@ -20,6 +21,12 @@ using infra::s3util::uri_encode_path;
 
 core::StorageKey key(std::string_view text) {
     return core::StorageKey::parse(text).value();
+}
+
+S3Profile virtual_hosted(std::string_view endpoint) {
+    S3Profile profile = S3Profile::minio(endpoint).value();
+    profile.addressing = Addressing::VirtualHosted;
+    return profile;
 }
 
 TEST(UriEncode, LeavesOnlyUnreservedCharactersBare) {
@@ -89,18 +96,17 @@ TEST(Bucket, PathStylePutsTheBucketInThePath) {
 }
 
 TEST(Bucket, VirtualHostedPutsTheBucketInTheHost) {
-    const auto profile = S3Profile::aws("eu-west-1").value();
-    const auto bucket = Bucket::make(profile, "media");
+    const auto bucket = Bucket::make(virtual_hosted("https://storage.example"), "media");
     ASSERT_TRUE(bucket.has_value());
 
     const auto target = bucket->object(key("hls/v1/720p/seg_00001.m4s"));
-    EXPECT_EQ(target.host, "media.s3.eu-west-1.amazonaws.com");
+    EXPECT_EQ(target.host, "media.storage.example");
     EXPECT_EQ(target.path, "/hls/v1/720p/seg_00001.m4s");
-    EXPECT_EQ(to_url(target), "https://media.s3.eu-west-1.amazonaws.com/hls/v1/720p/seg_00001.m4s");
+    EXPECT_EQ(to_url(target), "https://media.storage.example/hls/v1/720p/seg_00001.m4s");
 
     const auto root = bucket->root({{.name = "uploads", .value = ""}});
     EXPECT_EQ(root.path, "/");
-    EXPECT_EQ(to_url(root), "https://media.s3.eu-west-1.amazonaws.com/?uploads=");
+    EXPECT_EQ(to_url(root), "https://media.storage.example/?uploads=");
 }
 
 TEST(Bucket, RejectsNamesThatCouldEscapeTheHostOrPath) {
@@ -118,9 +124,9 @@ TEST(Bucket, RejectsNamesThatCouldEscapeTheHostOrPath) {
 
 TEST(Bucket, RefusesDottedNamesOnlyWhenTheyWouldBecomeAHostLabel) {
     const auto path_style = S3Profile::minio("http://localhost:9000").value();
-    const auto virtual_hosted = S3Profile::aws("us-east-1").value();
     EXPECT_TRUE(Bucket::make(path_style, "media.example").has_value());
-    EXPECT_FALSE(Bucket::make(virtual_hosted, "media.example").has_value());
+    EXPECT_FALSE(
+        Bucket::make(virtual_hosted("https://storage.example"), "media.example").has_value());
 }
 
 } // namespace

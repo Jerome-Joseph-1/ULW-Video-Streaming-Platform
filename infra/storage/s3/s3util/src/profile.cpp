@@ -51,21 +51,9 @@ bool is_hostname(std::string_view s) noexcept {
     }
 }
 
-bool is_region(std::string_view s) noexcept {
-    return is_dns_label(s) && s.front() >= 'a' && s.front() <= 'z';
-}
-
 bool is_r2_account_id(std::string_view s) noexcept {
     // Cloudflare account ids are 128-bit, printed as 32 lowercase hex digits.
     return s.size() == 32 && std::ranges::all_of(s, is_lower_hex);
-}
-
-S3Profile https_profile(std::string host, std::string region, Addressing addressing) {
-    S3Profile p;
-    p.endpoint = Endpoint{.scheme = Scheme::Https, .host = std::move(host), .port = kHttpsPort};
-    p.region = std::move(region);
-    p.addressing = addressing;
-    return p;
 }
 
 } // namespace
@@ -122,38 +110,20 @@ std::expected<S3Profile, ProfileError> S3Profile::minio(std::string_view endpoin
     return p;
 }
 
-std::expected<S3Profile, ProfileError> S3Profile::aws(std::string_view region) {
-    if (!is_region(region)) {
-        return std::unexpected(ProfileError::InvalidRegion);
-    }
-    auto p = https_profile("s3." + std::string(region) + ".amazonaws.com", std::string(region),
-                           Addressing::VirtualHosted);
-    p.supports_conditional_put = true;
-    return p;
-}
-
 // R2 has one logical region, "auto", and rejects a completion whose non-final parts differ
 // in size, so the uploader must cut every part but the last to the same length.
 std::expected<S3Profile, ProfileError> S3Profile::r2(std::string_view account_id) {
     if (!is_r2_account_id(account_id)) {
         return std::unexpected(ProfileError::InvalidAccountId);
     }
-    auto p = https_profile(std::string(account_id) + ".r2.cloudflarestorage.com", "auto",
-                           Addressing::PathStyle);
+    S3Profile p;
+    p.endpoint = Endpoint{.scheme = Scheme::Https,
+                          .host = std::string(account_id) + ".r2.cloudflarestorage.com",
+                          .port = kHttpsPort};
+    p.region = "auto";
+    p.addressing = Addressing::PathStyle;
     p.uniform_parts_required = true;
     p.supports_conditional_put = true;
-    return p;
-}
-
-// B2 states its part limits in decimal units, 5 MB to 5 GB: the 5 MiB default already clears
-// the floor, but the ceiling has to come down from 5 GiB. Its S3 API has no conditional PUT.
-std::expected<S3Profile, ProfileError> S3Profile::b2(std::string_view region) {
-    if (!is_region(region)) {
-        return std::unexpected(ProfileError::InvalidRegion);
-    }
-    auto p = https_profile("s3." + std::string(region) + ".backblazeb2.com", std::string(region),
-                           Addressing::PathStyle);
-    p.max_part_bytes = 5'000'000'000;
     return p;
 }
 

@@ -23,15 +23,6 @@ TEST(S3Profile, MinioIsPathStyleInTheDefaultRegionOnTheGivenEndpoint) {
     EXPECT_EQ(p->region, "us-east-1");
     EXPECT_EQ(p->addressing, Addressing::PathStyle);
     EXPECT_TRUE(p->supports_conditional_put);
-}
-
-TEST(S3Profile, AwsIsVirtualHostedOnTheRegionalEndpoint) {
-    const auto p = S3Profile::aws("eu-west-1");
-    ASSERT_TRUE(p.has_value());
-    EXPECT_EQ(p->endpoint.scheme, Scheme::Https);
-    EXPECT_EQ(authority(p->endpoint), "s3.eu-west-1.amazonaws.com");
-    EXPECT_EQ(p->region, "eu-west-1");
-    EXPECT_EQ(p->addressing, Addressing::VirtualHosted);
     EXPECT_EQ(p->min_part_bytes, 5U * 1024 * 1024);
     EXPECT_EQ(p->max_part_bytes, 5ULL * 1024 * 1024 * 1024);
     EXPECT_EQ(p->max_parts, 10'000U);
@@ -47,28 +38,6 @@ TEST(S3Profile, R2SignsForRegionAutoAndRequiresUniformParts) {
     EXPECT_EQ(p->region, "auto");
     EXPECT_EQ(p->addressing, Addressing::PathStyle);
     EXPECT_TRUE(p->uniform_parts_required);
-}
-
-TEST(S3Profile, B2CapsPartsAtItsDecimalGigabyteLimit) {
-    const auto p = S3Profile::b2("us-west-004");
-    ASSERT_TRUE(p.has_value());
-    EXPECT_EQ(authority(p->endpoint), "s3.us-west-004.backblazeb2.com");
-    EXPECT_EQ(p->region, "us-west-004");
-    EXPECT_EQ(p->addressing, Addressing::PathStyle);
-    EXPECT_EQ(p->max_part_bytes, 5'000'000'000U);
-    EXPECT_GE(p->min_part_bytes, 5'000'000U);
-    EXPECT_FALSE(p->supports_conditional_put);
-}
-
-TEST(S3Profile, RejectsRegionsThatCouldReshapeTheHostname) {
-    for (const std::string_view r :
-         {"", "us-east-1.evil.example", "us-east-1/x", "us-east-1:80", "US-EAST-1", "-us-east-1",
-          "us-east-1-", "1us-east", "us east", "us-east-1\r\nX-Evil: 1", "us_east_1"}) {
-        EXPECT_EQ(S3Profile::aws(r).error_or(ProfileError::InvalidEndpoint),
-                  ProfileError::InvalidRegion)
-            << r;
-        EXPECT_FALSE(S3Profile::b2(r).has_value()) << r;
-    }
 }
 
 TEST(S3Profile, RejectsAccountIdsThatAreNotThirtyTwoLowercaseHexDigits) {
@@ -119,7 +88,7 @@ TEST(Endpoint, RejectsAnythingButSchemeHostAndPort) {
                                      "http://.minio",
                                      "http://minio.",
                                      "http://mi nio"}) {
-        EXPECT_EQ(parse_endpoint(e).error_or(ProfileError::InvalidRegion),
+        EXPECT_EQ(parse_endpoint(e).error_or(ProfileError::InvalidAccountId),
                   ProfileError::InvalidEndpoint)
             << e;
         EXPECT_FALSE(S3Profile::minio(e).has_value()) << e;

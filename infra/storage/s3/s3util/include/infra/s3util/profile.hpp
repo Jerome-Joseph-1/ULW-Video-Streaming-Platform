@@ -15,7 +15,6 @@ enum class Addressing : std::uint8_t { PathStyle, VirtualHosted };
 
 enum class ProfileError : std::uint8_t {
     InvalidEndpoint,
-    InvalidRegion,
     InvalidAccountId,
     InvalidBucket,
 };
@@ -49,9 +48,7 @@ struct S3Profile {
     bool supports_conditional_put = false;
 
     [[nodiscard]] static std::expected<S3Profile, ProfileError> minio(std::string_view endpoint);
-    [[nodiscard]] static std::expected<S3Profile, ProfileError> aws(std::string_view region);
     [[nodiscard]] static std::expected<S3Profile, ProfileError> r2(std::string_view account_id);
-    [[nodiscard]] static std::expected<S3Profile, ProfileError> b2(std::string_view region);
 };
 
 } // namespace infra::s3util
