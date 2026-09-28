@@ -1,6 +1,5 @@
 #include "core/models/ladder.hpp"
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -37,10 +36,14 @@ std::vector<Rung> choose_ladder(std::uint32_t source_height) {
     if (!ladder.empty()) {
         return ladder;
     }
-    // H.264 in 4:2:0 needs an even height. The bitrate shrinks with the height from the
-    // 360p rung's, which keeps bits per line about the same.
+    // H.264 in 4:2:0 needs an even height, so a single line cannot be encoded without being
+    // upscaled. The bitrate shrinks with the height from the 360p rung's, which keeps bits per
+    // line about the same.
+    const std::uint32_t height = source_height & ~std::uint32_t{1};
+    if (height == 0) {
+        return ladder;
+    }
     const Step& smallest = kSteps.back();
-    const std::uint32_t height = std::max<std::uint32_t>(2, source_height & ~std::uint32_t{1});
     const auto kbps =
         static_cast<std::uint32_t>(std::uint64_t{smallest.video_kbps} * height / smallest.height);
     ladder.push_back({.name = name_of(height), .height = height, .video_kbps = kbps});

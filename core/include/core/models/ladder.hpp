@@ -20,7 +20,7 @@ inline constexpr std::uint32_t kAudioKbps = 128;
 
 // 1080p, 720p and 360p, tallest first, each only when the source is at least that tall, so
 // nothing is ever upscaled. A source shorter than 360 lines gets a single rung at its own
-// height.
+// height, rounded down to even; one of a single line gets none.
 [[nodiscard]] std::vector<Rung> choose_ladder(std::uint32_t source_height);
 
 } // namespace core

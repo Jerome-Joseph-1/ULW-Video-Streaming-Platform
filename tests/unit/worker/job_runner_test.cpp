@@ -159,6 +159,15 @@ TEST_F(JobRunnerTest, ASecondCrashWhileVerifyingFailsTheJobForGood) {
               std::vector<std::string>{"queue fail permanent the decoder crashed on this file"});
 }
 
+TEST_F(JobRunnerTest, ASourceTooSmallForAnyRungFailsTheJob) {
+    transcoder.media.width = 640;
+    transcoder.media.height = 1;
+    EXPECT_EQ(run(), JobOutcome::Failed);
+    EXPECT_EQ(transcoder.runs, 0);
+    EXPECT_EQ(writes(),
+              std::vector<std::string>{"queue fail permanent the video is too small to encode"});
+}
+
 TEST_F(JobRunnerTest, ARejectedInputFailsTheJobWithoutARerun) {
     transcoder.run_failures.push_back(failure(TranscodeFailure::Rejected));
     EXPECT_EQ(run(), JobOutcome::Failed);

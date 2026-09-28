@@ -36,7 +36,7 @@ TEST(Ladder, A480pSourceGets360pOnly) {
 }
 
 TEST(Ladder, NoRungIsTallerThanTheSource) {
-    for (const std::uint32_t source : {360U, 719U, 720U, 1079U, 1080U}) {
+    for (const std::uint32_t source : {1U, 2U, 3U, 360U, 719U, 720U, 1079U, 1080U}) {
         for (const Rung& r : choose_ladder(source)) {
             EXPECT_LE(r.height, source) << "source " << source;
         }
@@ -54,11 +54,12 @@ TEST(Ladder, ASourceBelowTheLowestRungKeepsItsOwnEvenHeight) {
     EXPECT_EQ(ladder[0].video_kbps, 533U);
 }
 
-TEST(Ladder, ADegenerateHeightStillGetsAnEncodableRung) {
-    const auto ladder = choose_ladder(1);
-    ASSERT_EQ(ladder.size(), 1U);
-    EXPECT_EQ(ladder[0].height, 2U);
-    EXPECT_GT(ladder[0].video_kbps, 0U);
+TEST(Ladder, ASingleLineGetsNoRungRatherThanAnUpscaledOne) {
+    EXPECT_TRUE(choose_ladder(1).empty());
+    EXPECT_TRUE(choose_ladder(0).empty());
+    EXPECT_EQ(heights(choose_ladder(2)), (std::vector<std::uint32_t>{2}));
+    EXPECT_EQ(heights(choose_ladder(3)), (std::vector<std::uint32_t>{2}));
+    EXPECT_GT(choose_ladder(2)[0].video_kbps, 0U);
 }
 
 } // namespace

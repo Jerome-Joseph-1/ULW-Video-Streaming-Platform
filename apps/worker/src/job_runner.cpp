@@ -190,6 +190,9 @@ public:
         log("job={} probed {}x{} {}/{} fps {} ms audio={} rungs={}", id(), media->width,
             media->height, media->frame_rate.num, media->frame_rate.den, media->duration.count(),
             media->has_audio, ladder.size());
+        if (ladder.empty()) {
+            return fail("the video is too small to encode", /*retryable=*/false);
+        }
         // The source is on disk by now, so what is free has to hold the output alone.
         const std::uint64_t needed = output_bytes(media->duration, ladder, media->has_audio);
         if (const auto available = deps_.free_space(workspace->dir());
