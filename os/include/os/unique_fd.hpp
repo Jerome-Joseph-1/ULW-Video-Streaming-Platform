@@ -22,8 +22,7 @@ public:
     ~UniqueFd() { reset(); }
 
     [[nodiscard]] int get() const noexcept { return fd_; }
-    [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
-    explicit operator bool() const noexcept { return valid(); }
+    explicit operator bool() const noexcept { return fd_ >= 0; }
 
     [[nodiscard]] int release() noexcept { return std::exchange(fd_, -1); }
     void reset(int fd = -1) noexcept;
