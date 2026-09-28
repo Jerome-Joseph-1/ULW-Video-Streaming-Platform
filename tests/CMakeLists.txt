@@ -178,3 +178,12 @@ target_include_directories(postgres_integration_tests
 target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
+
+ulw_add_test_suite(auth_unit_tests unit
+    unit/auth/base64url_test.cpp
+    unit/auth/jwk_test.cpp
+    unit/auth/jws_test.cpp
+    unit/auth/test_keys.cpp)
+target_link_libraries(auth_unit_tests PRIVATE ulw::auth OpenSSL::Crypto)
+# White-box tests of the token and key-set parsers.
+target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/auth/src)
