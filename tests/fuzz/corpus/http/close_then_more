@@ -1,5 +1,7 @@
 DELETE /api/v1/uploads/u2 HTTP/1.1
+Host: a
 Connection: close
 
 GET / HTTP/1.1
+Host: a
 

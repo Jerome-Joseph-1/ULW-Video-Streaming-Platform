@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -91,6 +92,28 @@ std::optional<std::uint64_t> parse_content_length(std::string_view text) noexcep
     return value;
 }
 
+// Fields the gateway reads with find_header(), which returns the first copy. A second copy is a
+// second chance for something in front of this server to act on a different value than it does.
+//   host           RFC 9112 3.2 answers more than one, or none on HTTP/1.1, with 400.
+//   authorization  the bearer token.
+//   cookie         the session token when there is no bearer; RFC 6265 5.4 allows one field.
+//   upload-offset  where an upload chunk lands.
+//   content-type   a singleton (RFC 9110 8.3) that says how a body is to be read.
+// Content-Length is not listed because llhttp refuses a second one itself.
+constexpr std::array<std::string_view, 5> kSingleValued{"host", "authorization", "cookie",
+                                                        "upload-offset", "content-type"};
+constexpr std::size_t kHostField = 0;
+static_assert(kSingleValued[kHostField] == "host");
+
+std::optional<std::size_t> single_valued_index(std::string_view name) noexcept {
+    const auto* const it = std::ranges::find_if(
+        kSingleValued, [name](std::string_view field) { return detail::iequals(field, name); });
+    if (it == kSingleValued.end()) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(it - kSingleValued.begin());
+}
+
 bool append(std::span<char> arena, std::size_t& used, std::string_view fragment) noexcept {
     if (fragment.size() > arena.size() - used) {
         return false;
@@ -171,6 +194,7 @@ public:
         target_size_ = 0;
         header_bytes_used_ = 0;
         header_count_ = 0;
+        single_valued_seen_.reset();
         in_name_ = false;
         content_length_ = 0;
         transfer_coded_ = false;
@@ -317,6 +341,12 @@ private:
             .value = trim_ows(stored.substr(value_begin_)),
         };
         std::span{headers_}[header_count_++] = field;
+        if (const auto index = single_valued_index(field.name)) {
+            if (single_valued_seen_.test(*index)) {
+                return reject(Status::BadRequest);
+            }
+            single_valued_seen_.set(*index);
+        }
         if (detail::iequals(field.name, "content-length")) {
             const auto length = parse_content_length(field.value);
             if (!length) {
@@ -337,6 +367,9 @@ private:
         // llhttp reads as 0.9.
         if (llhttp_get_http_major(&parser_) != 1 || llhttp_get_http_minor(&parser_) > 1) {
             return reject(Status::HttpVersionNotSupported);
+        }
+        if (llhttp_get_http_minor(&parser_) == 1 && !single_valued_seen_.test(kHostField)) {
+            return reject(Status::BadRequest);
         }
         // After a CONNECT head llhttp treats the connection as a tunnel and skips whatever body
         // it declares, so those bytes would be parsed as the next request. Nothing here
@@ -417,6 +450,7 @@ private:
     std::size_t header_bytes_used_ = 0;
     std::array<HeaderField, kMaxHeaderCount> headers_{};
     std::size_t header_count_ = 0;
+    std::bitset<kSingleValued.size()> single_valued_seen_;
     std::size_t name_begin_ = 0;
     std::size_t value_begin_ = 0;
     bool in_name_ = false;

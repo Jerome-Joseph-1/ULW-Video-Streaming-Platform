@@ -148,6 +148,7 @@ TEST(RequestParser, ResetForgetsThePreviousRequest) {
     sink.look_up({"authorization"});
     RequestParser parser{sink};
     const std::string_view first = "PATCH /a HTTP/1.1\r\n"
+                                   "Host: x\r\n"
                                    "Authorization: Bearer secret\r\n"
                                    "Content-Length: 3\r\n"
                                    "\r\n"
@@ -167,10 +168,59 @@ TEST(RequestParser, ResetForgetsThePreviousRequest) {
     EXPECT_EQ(r.body, "");
 }
 
+TEST(RequestParser, Http11RequestWithoutHostIsABadRequest) {
+    RecordingSink sink;
+    RequestParser parser{sink};
+
+    EXPECT_EQ(parser.feed(bytes_of("GET / HTTP/1.1\r\nAccept: */*\r\n\r\n")),
+              fatal(Status::BadRequest));
+    EXPECT_TRUE(sink.requests().empty());
+}
+
+TEST(RequestParser, Http10RequestMayOmitHost) {
+    RecordingSink sink;
+    RequestParser parser{sink};
+
+    EXPECT_EQ(parser.feed(bytes_of("GET / HTTP/1.0\r\n\r\n")), ParseProgress::MessageComplete);
+    EXPECT_EQ(sink.requests().size(), 1U);
+}
+
+TEST(RequestParser, SecondCopyOfAFieldReadAsSingleValuedIsABadRequest) {
+    const std::string head = "PATCH /u HTTP/1.1\r\n"
+                             "Host: a\r\n"
+                             "Authorization: Bearer t\r\n"
+                             "Cookie: s=1\r\n"
+                             "Upload-Offset: 0\r\n"
+                             "Content-Type: application/offset+octet-stream\r\n";
+    for (const std::string_view repeat :
+         {"Host: a", "HOST: b", "authorization: Bearer u", "Cookie: s=2", "Upload-Offset: 5",
+          "Content-type: text/plain"}) {
+        RecordingSink sink;
+        RequestParser parser{sink};
+        const std::string request = head + std::string{repeat} + "\r\n\r\n";
+
+        EXPECT_EQ(parser.feed(bytes_of(request)), fatal(Status::BadRequest)) << repeat;
+        EXPECT_TRUE(sink.requests().empty()) << repeat;
+    }
+}
+
+TEST(RequestParser, OtherFieldsMayRepeatAndLookupFindsTheFirst) {
+    RecordingSink sink;
+    sink.look_up({"accept"});
+    RequestParser parser{sink};
+
+    EXPECT_EQ(parser.feed(bytes_of("GET / HTTP/1.1\r\nHost: a\r\nAccept: a\r\nAccept: b\r\n\r\n")),
+              ParseProgress::MessageComplete);
+    ASSERT_EQ(sink.requests().size(), 1U);
+    EXPECT_EQ(sink.requests()[0].headers,
+              (Headers{{"Host", "a"}, {"Accept", "a"}, {"Accept", "b"}}));
+    EXPECT_EQ(sink.requests()[0].found.front(), "a");
+}
+
 TEST(RequestParser, MethodsOutsideTheRoutedSetAreOther) {
-    const auto requests = parse_in_chunks("PROPFIND /a HTTP/1.1\r\n\r\n"
-                                          "OPTIONS * HTTP/1.1\r\n\r\n"
-                                          "DELETE /b HTTP/1.1\r\n\r\n",
+    const auto requests = parse_in_chunks("PROPFIND /a HTTP/1.1\r\nHost: a\r\n\r\n"
+                                          "OPTIONS * HTTP/1.1\r\nHost: a\r\n\r\n"
+                                          "DELETE /b HTTP/1.1\r\nHost: a\r\n\r\n",
                                           7);
     ASSERT_EQ(requests.size(), 3U);
     EXPECT_EQ(requests[0].method, Method::Other);
@@ -192,7 +242,7 @@ TEST(RequestParser, Http10IsPersistentOnlyWhenAsked) {
 TEST(RequestParser, NothingMayFollowARequestThatClosesTheConnection) {
     RecordingSink sink;
     RequestParser parser{sink};
-    const std::string_view closing = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n";
+    const std::string_view closing = "GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n";
 
     ASSERT_EQ(parser.feed(bytes_of(closing)), ParseProgress::MessageComplete);
     EXPECT_FALSE(sink.requests().back().keep_alive);
@@ -205,7 +255,8 @@ TEST(RequestParser, NothingMayFollowARequestThatClosesTheConnection) {
 TEST(RequestParser, PipelinedBytesAfterAClosingRequestAreRejected) {
     RecordingSink sink;
     RequestParser parser{sink};
-    const std::string input = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n" + std::string{kGet};
+    const std::string input =
+        "GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n" + std::string{kGet};
 
     ASSERT_EQ(parser.feed(bytes_of(input)), ParseProgress::MessageComplete);
     parser.reset_for_next_request();
@@ -229,7 +280,7 @@ TEST(RequestParser, RejectedBodilessRequestLeavesTheConnectionUsable) {
     RecordingSink sink;
     sink.reject("/nope", Status::NotFound);
     RequestParser parser{sink};
-    const std::string input = "GET /nope HTTP/1.1\r\n\r\n" + std::string{kPatch};
+    const std::string input = "GET /nope HTTP/1.1\r\nHost: a\r\n\r\n" + std::string{kPatch};
 
     EXPECT_EQ(parser.feed(bytes_of(input)), recoverable(Status::NotFound));
     parser.reset_for_next_request();

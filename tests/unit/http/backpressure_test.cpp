@@ -96,8 +96,8 @@ std::string patterned(std::size_t size) {
 }
 
 std::string patch(std::string_view target, std::string_view body) {
-    return std::format("PATCH {} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}", target, body.size(),
-                       body);
+    return std::format("PATCH {} HTTP/1.1\r\nHost: a\r\nContent-Length: {}\r\n\r\n{}", target,
+                       body.size(), body);
 }
 
 struct ThrottledRun {
@@ -151,7 +151,7 @@ TEST(Backpressure, ThrottledBodyArrivesByteExactAtEveryReceiveSize) {
     const std::string big = patterned(8192);
     const std::string small = patterned(300);
     const std::string input = patch("/api/v1/uploads/a", big) + patch("/api/v1/uploads/b", small) +
-                              "GET /api/v1/videos/v HTTP/1.1\r\n\r\n";
+                              "GET /api/v1/videos/v HTTP/1.1\r\nHost: a\r\n\r\n";
     const std::vector<Received> expected{
         {.target = "/api/v1/uploads/a", .body = big, .complete = true},
         {.target = "/api/v1/uploads/b", .body = small, .complete = true},
@@ -199,14 +199,16 @@ TEST(Backpressure, ResumeWithoutPauseIsHarmless) {
     RequestParser parser{sink};
 
     EXPECT_EQ(parser.resume(), ParseProgress::NeedMore);
-    EXPECT_EQ(parser.feed(bytes_of("GET / HTTP/1.1\r\n\r\n")), ParseProgress::MessageComplete);
+    EXPECT_EQ(parser.feed(bytes_of("GET / HTTP/1.1\r\nHost: a\r\n\r\n")),
+              ParseProgress::MessageComplete);
 }
 
 TEST(Backpressure, BytesArrivingWhilePausedAreBounded) {
     ThrottledSink sink;
     RequestParser parser{sink};
-    const std::string head = std::format("PATCH /u HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
-                                         RequestParser::kMaxContentLength);
+    const std::string head =
+        std::format("PATCH /u HTTP/1.1\r\nHost: a\r\nContent-Length: {}\r\n\r\n",
+                    RequestParser::kMaxContentLength);
     ASSERT_EQ(parser.feed(bytes_of(head + patterned(ThrottledSink::kStoreBytes + 1))),
               ParseProgress::Paused);
 
@@ -218,7 +220,7 @@ TEST(Backpressure, BytesArrivingWhilePausedAreBounded) {
 TEST(Backpressure, StrayResetWhilePausedCannotSpliceTheBodyIntoANewRequest) {
     ThrottledSink sink;
     RequestParser parser{sink};
-    const std::string_view smuggled = "GET /admin HTTP/1.1\r\n\r\n";
+    const std::string_view smuggled = "GET /admin HTTP/1.1\r\nHost: a\r\n\r\n";
     const std::string body = patterned(ThrottledSink::kStoreBytes + 50) + std::string{smuggled};
     const std::string request = patch("/u", body);
     const std::size_t split = request.size() - smuggled.size();

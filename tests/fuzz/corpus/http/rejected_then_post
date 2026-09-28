@@ -1,6 +1,8 @@
 GET /reject HTTP/1.1
+Host: a
 
 POST /api/v1/uploads HTTP/1.1
+Host: a
 Content-Length: 2
 
 {}

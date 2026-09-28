@@ -34,7 +34,7 @@ Outcome parse(std::string_view input) {
 }
 
 std::string get_with_target_bytes(std::size_t n) {
-    return "GET /" + std::string(n - 1, 'a') + " HTTP/1.1\r\n\r\n";
+    return "GET /" + std::string(n - 1, 'a') + " HTTP/1.1\r\nHost: a\r\n\r\n";
 }
 
 TEST(RequestLimits, TargetAtTheLimitIsAccepted) {
@@ -79,18 +79,19 @@ TEST(RequestLimits, HeaderBudgetIsExactAcrossFragments) {
 TEST(RequestLimits, HeadersFillingTheBudgetExactlyAreAccepted) {
     RecordingSink sink;
     RequestParser parser{sink};
-    const std::string value(RequestParser::kMaxHeaderBytes - std::string_view{"X-Fill"}.size(),
-                            'a');
+    // Only names and values count: "Host" and "a" take 5 bytes, "X-Fill" 6.
+    const std::string value(RequestParser::kMaxHeaderBytes - 5 - 6, 'a');
 
-    ASSERT_EQ(drive(parser, "GET / HTTP/1.1\r\nX-Fill: " + value + "\r\n\r\n", 4096),
+    ASSERT_EQ(drive(parser, "GET / HTTP/1.1\r\nHost: a\r\nX-Fill: " + value + "\r\n\r\n", 4096),
               ParseProgress::NeedMore);
     ASSERT_EQ(sink.requests().size(), 1U);
-    EXPECT_EQ(sink.requests()[0].headers.front().second, value);
+    EXPECT_EQ(sink.requests()[0].headers.back().second, value);
 }
 
+// Host is one of the `count`.
 std::string get_with_headers(std::size_t count) {
-    std::string request = "GET / HTTP/1.1\r\n";
-    for (std::size_t i = 0; i < count; ++i) {
+    std::string request = "GET / HTTP/1.1\r\nHost: a\r\n";
+    for (std::size_t i = 1; i < count; ++i) {
         request += std::format("H{}: v\r\n", i);
     }
     return request + "\r\n";
@@ -109,7 +110,7 @@ TEST(RequestLimits, OneHeaderOverTheCountIsRejected) {
 }
 
 std::string patch_with_length(std::string_view length) {
-    return std::format("PATCH /u HTTP/1.1\r\nContent-Length: {}\r\n\r\n", length);
+    return std::format("PATCH /u HTTP/1.1\r\nHost: a\r\nContent-Length: {}\r\n\r\n", length);
 }
 
 TEST(RequestLimits, ContentLengthAtTheLimitIsAccepted) {

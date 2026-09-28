@@ -1,4 +1,5 @@
 POST /a HTTP/1.1
+Host: a
 Content-Length: 4
 Transfer-Encoding: chunked
 

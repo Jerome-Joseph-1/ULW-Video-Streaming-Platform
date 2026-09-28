@@ -29,6 +29,8 @@ struct RequestHead {
 };
 
 // The first field with this name, compared case-insensitively. Present-but-empty is "".
+// Reading a single-valued field this way is only sound if the parser refuses a second copy of
+// it: such a name belongs in kSingleValued in request_parser.cpp.
 [[nodiscard]] std::optional<std::string_view> find_header(std::span<const HeaderField> headers,
                                                           std::string_view name) noexcept;
 
