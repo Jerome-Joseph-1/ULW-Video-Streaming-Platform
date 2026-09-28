@@ -94,13 +94,13 @@ std::size_t TimingWheel::tick_to(core::MonoTime now) noexcept {
     while (steps-- > 0) {
         ++last_tick_;
         const auto slot = static_cast<std::size_t>(last_tick_ % static_cast<std::int64_t>(kSlots));
-        // Detach the whole bucket first: handlers re-arm, and re-inserted timers must not be
-        // visited again in this pass.
-        std::uint32_t index = std::exchange(heads_[slot], kNil);
-        while (index != kNil) {
-            Entry& e = entries_[index];
-            const std::uint32_t next = e.next;
-            e.prev = e.next = e.slot = kNil;
+        // Take entries off the live bucket one at a time: a handler may cancel any timer,
+        // including the next one here, so no link may be held across a call. insert() never
+        // targets the slot being fired, which keeps re-armed timers out of this pass.
+        while (heads_[slot] != kNil) {
+            const std::uint32_t index = heads_[slot];
+            unlink(index);
+            const Entry& e = entries_[index];
             if (e.deadline <= now) {
                 ITimerHandler* handler = e.handler;
                 release(index);
@@ -109,7 +109,6 @@ std::size_t TimingWheel::tick_to(core::MonoTime now) noexcept {
             } else {
                 insert(index);
             }
-            index = next;
         }
     }
     return fired;

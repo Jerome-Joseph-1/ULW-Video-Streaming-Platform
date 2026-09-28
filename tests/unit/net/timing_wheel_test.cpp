@@ -128,6 +128,66 @@ TEST_F(TimingWheelTest, HandlerMayRearmItselfWithoutBeingFiredTwiceInOnePass) {
     EXPECT_EQ(wheel.armed(), 0U);
 }
 
+struct Canceller final : net::ITimerHandler {
+    TimingWheel* wheel = nullptr;
+    net::TimerId victim;
+    int fired = 0;
+    void on_timeout() noexcept override {
+        ++fired;
+        wheel->cancel(victim);
+    }
+};
+
+TEST_F(TimingWheelTest, HandlerMayCancelADueTimerInItsOwnBucket) {
+    Recorder first;
+    Recorder last;
+    Canceller a;
+    Canceller b;
+    a.wheel = &wheel;
+    b.wheel = &wheel;
+    wheel.arm(clock.now(), Millis{100}, first);
+    const auto id_a = wheel.arm(clock.now(), Millis{100}, a);
+    const auto id_b = wheel.arm(clock.now(), Millis{100}, b);
+    wheel.arm(clock.now(), Millis{100}, last);
+    // Whichever of the pair fires first cancels the other, which sits next to it in the bucket.
+    a.victim = id_b;
+    b.victim = id_a;
+    advance(Millis{100});
+    EXPECT_EQ(a.fired + b.fired, 1);
+    EXPECT_EQ(first.fired, 1);
+    EXPECT_EQ(last.fired, 1);
+    EXPECT_EQ(wheel.armed(), 0U);
+
+    // A timer released twice would sit on the free list twice and be handed out to both.
+    Recorder x;
+    Recorder y;
+    const auto id_x = wheel.arm(clock.now(), Millis{100}, x);
+    const auto id_y = wheel.arm(clock.now(), Millis{100}, y);
+    EXPECT_NE(id_x.index, id_y.index);
+    advance(Millis{100});
+    EXPECT_EQ(x.fired, 1);
+    EXPECT_EQ(y.fired, 1);
+}
+
+TEST_F(TimingWheelTest, HandlerMayCancelANotYetDueTimerSharingItsBucket) {
+    Recorder last;
+    Recorder pending;
+    Canceller head;
+    head.wheel = &wheel;
+    // 51.1 s is the furthest slot one revolution reaches, so the 60 s timer is clamped into it
+    // and would go round again; the handler cancels it before it does.
+    wheel.arm(clock.now(), Millis{51'100}, last);
+    head.victim = wheel.arm(clock.now(), Millis{60'000}, pending);
+    wheel.arm(clock.now(), Millis{51'100}, head);
+    advance(Millis{51'100});
+    EXPECT_EQ(head.fired, 1);
+    EXPECT_EQ(last.fired, 1);
+    EXPECT_EQ(wheel.armed(), 0U);
+    advance(Millis{60'000});
+    EXPECT_EQ(pending.fired, 0);
+    EXPECT_EQ(wheel.armed(), 0U);
+}
+
 TEST_F(TimingWheelTest, NextExpiryReportsTheNearestOccupiedTick) {
     EXPECT_FALSE(wheel.next_expiry(clock.now()).has_value());
     Recorder r;

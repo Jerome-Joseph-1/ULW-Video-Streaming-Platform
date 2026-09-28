@@ -58,6 +58,17 @@ protected:
         server->reap();
     }
 
+    // Writes until both directions are saturated: the kernel buffers are full and the server
+    // has stopped reading with its own echo queued, which is the state a drain must bound.
+    bool saturate(int client) {
+        const auto data = ulw::test::pattern(ulw::test::kMiB);
+        int stalled = 0;
+        return settle([&] {
+            stalled = write_some(client, data) == 0 ? stalled + 1 : 0;
+            return stalled > 200;
+        });
+    }
+
     static bool closed_by_peer(int fd) {
         std::byte b{};
         return ::recv(fd, &b, 1, MSG_DONTWAIT) == 0;
@@ -147,14 +158,7 @@ TEST_P(EchoServerTest, DrainDeadlineClosesPeersThatNeverReadTheirEcho) {
     restart({.idle_timeout = Millis{600'000}});
     auto client = connect_loopback(port);
     ASSERT_TRUE(settle([&] { return server->connections() == 1; }));
-    // Write until both directions are saturated: the kernel buffers are full and the server
-    // has stopped reading with its own echo queued, which is the state a drain must bound.
-    const auto data = ulw::test::pattern(ulw::test::kMiB);
-    int stalled = 0;
-    ASSERT_TRUE(settle([&] {
-        stalled = write_some(client.get(), data) == 0 ? stalled + 1 : 0;
-        return stalled > 200;
-    }));
+    ASSERT_TRUE(saturate(client.get()));
     server->begin_drain();
     advance(Millis{29'000});
     ulw::test::pump_for(*reactor, std::chrono::milliseconds(50));
@@ -162,6 +166,22 @@ TEST_P(EchoServerTest, DrainDeadlineClosesPeersThatNeverReadTheirEcho) {
     EXPECT_EQ(server->connections(), 1U);
     advance(Millis{1'200});
     EXPECT_TRUE(settle([&] { return server->finished(); }));
+}
+
+// The idle timer (600 s) is clamped into the wheel's furthest slot, 51.1 s out. A drain begun
+// 21.1 s in has its 30 s deadline land in that same slot, ahead of the idle timer, and closing
+// the session from the deadline cancels the idle timer while the slot is being fired.
+TEST_P(EchoServerTest, DrainDeadlineClosesASessionWhoseIdleTimerSharesItsSlot) {
+    restart({.idle_timeout = Millis{600'000}});
+    auto client = connect_loopback(port);
+    ASSERT_TRUE(settle([&] { return server->connections() == 1; }));
+    ASSERT_TRUE(saturate(client.get()));
+    advance(Millis{21'100});
+    server->begin_drain();
+    advance(Millis{30'000});
+    ASSERT_TRUE(settle([&] { return server->finished(); }));
+    // The cancelled idle timer must be gone, not merely skipped for one pass.
+    advance(Millis{600'000});
 }
 
 // io_uring tears a ring down asynchronously, and for a ring whose task has exited that can
