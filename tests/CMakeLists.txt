@@ -77,5 +77,6 @@ ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
     unit/s3/profile_test.cpp
     unit/s3/sigv4_test.cpp
-    unit/s3/url_test.cpp)
+    unit/s3/url_test.cpp
+    unit/s3/xml_test.cpp)
 target_link_libraries(s3util_unit_tests PRIVATE ulw::s3util)
