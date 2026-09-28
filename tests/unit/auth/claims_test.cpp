@@ -7,6 +7,7 @@
 #include "jwk.hpp"
 #include "jws.hpp"
 #include "support/fake_clock.hpp"
+#include "test_claims.hpp"
 #include "test_keys.hpp"
 
 #include <chrono>
@@ -26,44 +27,10 @@ using core::ports::AuthError;
 using infra::auth::ClaimRules;
 using infra::auth::detail::check_claims;
 
-const ClaimRules kRules{.issuer = "https://id.askedin.test", .audience = "askedin-platform"};
+using ulw::test::numeric_date;
+using ulw::test::test_payload;
 
-using Change = std::pair<std::string_view, std::optional<std::string>>;
-
-// The FakeClock's wall time, in NumericDate seconds.
-std::int64_t now_seconds() {
-    const ulw::test::FakeClock clock;
-    return std::chrono::duration_cast<core::Seconds>(clock.wall_now().time_since_epoch()).count();
-}
-
-std::string at(std::int64_t offset_seconds) {
-    return std::to_string(now_seconds() + offset_seconds);
-}
-
-// A payload that passes every rule, with members replaced (raw JSON) or removed (nullopt).
-std::string payload(std::initializer_list<Change> changes = {}) {
-    std::vector<std::pair<std::string, std::string>> members{
-        {"iss", R"("https://id.askedin.test")"},
-        {"aud", R"("askedin-platform")"},
-        {"sub", R"("alice")"},
-        {"email", R"("alice@example.com")"},
-        {"exp", at(3600)},
-    };
-    for (const auto& [name, value] : changes) {
-        std::erase_if(members, [&](const auto& m) { return m.first == name; });
-        if (value) {
-            members.emplace_back(name, *value);
-        }
-    }
-    std::string out = "{";
-    for (const auto& [name, value] : members) {
-        out += out.size() > 1 ? ",\"" : "\"";
-        out += name;
-        out += "\":";
-        out += value;
-    }
-    return out + '}';
-}
+const ClaimRules& kRules = ulw::test::kTestRules;
 
 class ClaimsTest : public ::testing::Test {
 protected:
@@ -80,7 +47,7 @@ protected:
 };
 
 TEST_F(ClaimsTest, ATokenThatMeetsEveryRuleYieldsItsClaims) {
-    const auto claims = check(payload());
+    const auto claims = check(test_payload());
     ASSERT_TRUE(claims.has_value());
     EXPECT_EQ(claims->subject.view(), "alice");
     EXPECT_EQ(claims->email, "alice@example.com");
@@ -88,101 +55,106 @@ TEST_F(ClaimsTest, ATokenThatMeetsEveryRuleYieldsItsClaims) {
 }
 
 TEST_F(ClaimsTest, TheIssuerMustMatchExactly) {
-    EXPECT_EQ(error_of(payload({{"iss", R"("https://id.askedin.test/")"}})),
+    EXPECT_EQ(error_of(test_payload({{"iss", R"("https://id.askedin.test/")"}})),
               AuthError::WrongIssuer);
-    EXPECT_EQ(error_of(payload({{"iss", R"("https://evil.test")"}})), AuthError::WrongIssuer);
-    EXPECT_EQ(error_of(payload({{"iss", std::nullopt}})), AuthError::WrongIssuer);
-    EXPECT_EQ(error_of(payload({{"iss", "7"}})), AuthError::WrongIssuer);
+    EXPECT_EQ(error_of(test_payload({{"iss", R"("https://evil.test")"}})), AuthError::WrongIssuer);
+    EXPECT_EQ(error_of(test_payload({{"iss", std::nullopt}})), AuthError::WrongIssuer);
+    EXPECT_EQ(error_of(test_payload({{"iss", "7"}})), AuthError::WrongIssuer);
 }
 
 TEST_F(ClaimsTest, TheAudienceMayBeOneStringOrAnArrayHoldingOurs) {
-    EXPECT_TRUE(check(payload({{"aud", R"(["other","askedin-platform"])"}})).has_value());
-    EXPECT_EQ(error_of(payload({{"aud", R"("askedin-platform-stage")"}})),
+    EXPECT_TRUE(check(test_payload({{"aud", R"(["other","askedin-platform"])"}})).has_value());
+    EXPECT_EQ(error_of(test_payload({{"aud", R"("askedin-platform-stage")"}})),
               AuthError::WrongAudience);
-    EXPECT_EQ(error_of(payload({{"aud", R"(["other","another"])"}})), AuthError::WrongAudience);
-    EXPECT_EQ(error_of(payload({{"aud", "[]"}})), AuthError::WrongAudience);
-    EXPECT_EQ(error_of(payload({{"aud", std::nullopt}})), AuthError::WrongAudience);
-    EXPECT_EQ(error_of(payload({{"aud", R"(["askedin-platform",7])"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"aud", R"({"aud":"askedin-platform"})"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"aud", R"(["other","another"])"}})),
+              AuthError::WrongAudience);
+    EXPECT_EQ(error_of(test_payload({{"aud", "[]"}})), AuthError::WrongAudience);
+    EXPECT_EQ(error_of(test_payload({{"aud", std::nullopt}})), AuthError::WrongAudience);
+    EXPECT_EQ(error_of(test_payload({{"aud", R"(["askedin-platform",7])"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"aud", R"({"aud":"askedin-platform"})"}})),
+              AuthError::Malformed);
 }
 
 TEST_F(ClaimsTest, ExpiryAllowsTheSkewAndNotOneSecondMore) {
-    EXPECT_TRUE(check(payload({{"exp", at(-59)}})).has_value());
-    EXPECT_EQ(error_of(payload({{"exp", at(-60)}})), AuthError::Expired);
-    EXPECT_EQ(error_of(payload({{"exp", at(-86400)}})), AuthError::Expired);
+    EXPECT_TRUE(check(test_payload({{"exp", numeric_date(-59)}})).has_value());
+    EXPECT_EQ(error_of(test_payload({{"exp", numeric_date(-60)}})), AuthError::Expired);
+    EXPECT_EQ(error_of(test_payload({{"exp", numeric_date(-86400)}})), AuthError::Expired);
 }
 
 TEST_F(ClaimsTest, NotBeforeAllowsTheSkewAndNotOneSecondMore) {
-    EXPECT_TRUE(check(payload({{"nbf", at(60)}})).has_value());
-    EXPECT_EQ(error_of(payload({{"nbf", at(61)}})), AuthError::NotYetValid);
-    EXPECT_TRUE(check(payload({{"nbf", at(-3600)}})).has_value());
+    EXPECT_TRUE(check(test_payload({{"nbf", numeric_date(60)}})).has_value());
+    EXPECT_EQ(error_of(test_payload({{"nbf", numeric_date(61)}})), AuthError::NotYetValid);
+    EXPECT_TRUE(check(test_payload({{"nbf", numeric_date(-3600)}})).has_value());
 }
 
 TEST_F(ClaimsTest, ExpiryIsRequiredAndMustBeAnIntegerTheClockCanHold) {
-    EXPECT_EQ(error_of(payload({{"exp", std::nullopt}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"exp", '"' + at(3600) + '"'}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"exp", at(3600) + ".5"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"exp", "1e10"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"exp", std::nullopt}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"exp", '"' + numeric_date(3600) + '"'}})),
+              AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"exp", numeric_date(3600) + ".5"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"exp", "1e10"}})), AuthError::Malformed);
     // Past what a nanosecond system_clock can represent (year 2262).
-    EXPECT_EQ(error_of(payload({{"exp", "9300000000"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"exp", "18446744073709551615"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"nbf", R"("soon")"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"exp", "9300000000"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"exp", "18446744073709551615"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"nbf", R"("soon")"}})), AuthError::Malformed);
 }
 
 TEST_F(ClaimsTest, TheSubjectFallsBackToAskedinsIdClaim) {
-    const auto by_string = check(payload({{"sub", std::nullopt}, {"id", R"("u-42")"}}));
+    const auto by_string = check(test_payload({{"sub", std::nullopt}, {"id", R"("u-42")"}}));
     ASSERT_TRUE(by_string.has_value());
     EXPECT_EQ(by_string->subject.view(), "u-42");
-    const auto by_number = check(payload({{"sub", std::nullopt}, {"id", "18446744073709551615"}}));
+    const auto by_number =
+        check(test_payload({{"sub", std::nullopt}, {"id", "18446744073709551615"}}));
     ASSERT_TRUE(by_number.has_value());
     EXPECT_EQ(by_number->subject.view(), "18446744073709551615");
-    const auto sub_wins = check(payload({{"id", R"("u-42")"}}));
+    const auto sub_wins = check(test_payload({{"id", R"("u-42")"}}));
     ASSERT_TRUE(sub_wins.has_value());
     EXPECT_EQ(sub_wins->subject.view(), "alice");
 }
 
 TEST_F(ClaimsTest, AnAbsentOrEmptySubjectIsMissing) {
-    EXPECT_EQ(error_of(payload({{"sub", std::nullopt}})), AuthError::MissingSubject);
-    EXPECT_EQ(error_of(payload({{"sub", R"("")"}})), AuthError::MissingSubject);
-    EXPECT_EQ(error_of(payload({{"sub", std::nullopt}, {"id", R"("")"}})),
+    EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}})), AuthError::MissingSubject);
+    EXPECT_EQ(error_of(test_payload({{"sub", R"("")"}})), AuthError::MissingSubject);
+    EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}, {"id", R"("")"}})),
               AuthError::MissingSubject);
 }
 
 TEST_F(ClaimsTest, ASubjectOutsideTheUserIdFormIsMalformed) {
-    EXPECT_EQ(error_of(payload({{"sub", R"("alice smith")"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"sub", R"("alice\nsmith")"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"sub", '"' + std::string(129, 'a') + '"'}})),
+    EXPECT_EQ(error_of(test_payload({{"sub", R"("alice smith")"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"sub", R"("alice\nsmith")"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"sub", '"' + std::string(129, 'a') + '"'}})),
               AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"sub", "42"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"sub", std::nullopt}, {"id", "-1"}})), AuthError::Malformed);
-    EXPECT_TRUE(check(payload({{"sub", '"' + std::string(128, 'a') + '"'}})).has_value());
+    EXPECT_EQ(error_of(test_payload({{"sub", "42"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}, {"id", "-1"}})), AuthError::Malformed);
+    EXPECT_TRUE(check(test_payload({{"sub", '"' + std::string(128, 'a') + '"'}})).has_value());
 }
 
 TEST_F(ClaimsTest, EmailIsOptionalButMustBeAPrintableString) {
-    const auto absent = check(payload({{"email", std::nullopt}}));
+    const auto absent = check(test_payload({{"email", std::nullopt}}));
     ASSERT_TRUE(absent.has_value());
     EXPECT_EQ(absent->email, "");
-    const auto null = check(payload({{"email", "null"}}));
+    const auto null = check(test_payload({{"email", "null"}}));
     ASSERT_TRUE(null.has_value());
     EXPECT_EQ(null->email, "");
-    EXPECT_EQ(error_of(payload({{"email", "7"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"email", R"("a@b.test\r\nX-Injected: 1")"}})),
+    EXPECT_EQ(error_of(test_payload({{"email", "7"}})), AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"email", R"("a@b.test\r\nX-Injected: 1")"}})),
               AuthError::Malformed);
-    EXPECT_EQ(error_of(payload({{"email", '"' + std::string(255, 'a') + '"'}})),
+    EXPECT_EQ(error_of(test_payload({{"email", '"' + std::string(255, 'a') + '"'}})),
               AuthError::Malformed);
 }
 
 TEST_F(ClaimsTest, APayloadMustBeAnObjectWithoutRepeatedClaims) {
     EXPECT_EQ(error_of("[]"), AuthError::Malformed);
     EXPECT_EQ(error_of("not json"), AuthError::Malformed);
-    std::string repeated = payload();
+    std::string repeated = test_payload();
     repeated.insert(repeated.size() - 1, R"(,"sub":"mallory")");
     EXPECT_EQ(error_of(repeated), AuthError::Malformed);
 }
 
 TEST_F(ClaimsTest, TheIssuerIsJudgedBeforeTheClock) {
-    EXPECT_EQ(error_of(payload({{"iss", R"("https://evil.test")"}, {"exp", at(-3600)}})),
-              AuthError::WrongIssuer);
+    EXPECT_EQ(
+        error_of(test_payload({{"iss", R"("https://evil.test")"}, {"exp", numeric_date(-3600)}})),
+        AuthError::WrongIssuer);
 }
 
 // Claims are read only once the signature holds: a forged token reports its signature, not
@@ -194,7 +166,7 @@ TEST_F(ClaimsTest, AuthenticationJudgesTheSignatureBeforeAnyClaim) {
     ASSERT_TRUE(set && set->keys.size() == 1);
     const auto& key = set->keys.front();
 
-    const std::string expired = payload({{"exp", at(-3600)}});
+    const std::string expired = test_payload({{"exp", numeric_date(-3600)}});
     // parse_compact keeps views into the token, so each token outlives its parse.
     const std::string genuine_token = ulw::test::signed_token(signer, "EdDSA", expired);
     const auto genuine = infra::auth::detail::parse_compact(genuine_token);
@@ -208,7 +180,7 @@ TEST_F(ClaimsTest, AuthenticationJudgesTheSignatureBeforeAnyClaim) {
     EXPECT_EQ(infra::auth::detail::authenticate(*forged, key, kRules, clock_.wall_now()),
               std::unexpected(AuthError::BadSignature));
 
-    const std::string good_token = ulw::test::signed_token(signer, "EdDSA", payload());
+    const std::string good_token = ulw::test::signed_token(signer, "EdDSA", test_payload());
     const auto good = infra::auth::detail::parse_compact(good_token);
     ASSERT_TRUE(good.has_value());
     EXPECT_TRUE(infra::auth::detail::authenticate(*good, key, kRules, clock_.wall_now()));
