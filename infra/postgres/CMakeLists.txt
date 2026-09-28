@@ -12,6 +12,7 @@ add_custom_command(
 
 ulw_add_library(pg_store
     src/conninfo.cpp
+    src/job_queue.cpp
     src/migrator.cpp
     src/params.cpp
     src/pool.cpp

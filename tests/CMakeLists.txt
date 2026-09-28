@@ -169,6 +169,7 @@ target_compile_definitions(postgres_unit_tests
 ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_catalog_test.cpp
     integration/postgres_harness.cpp
+    integration/postgres_job_queue_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp)
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
