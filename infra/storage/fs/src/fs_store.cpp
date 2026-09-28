@@ -1,5 +1,7 @@
 #include "infra/storage/fs_store.hpp"
 
+#include <sys/stat.h>
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -127,11 +129,10 @@ public:
     struct Request {
         fs::path dir;
         os::UniqueFd fd;
-        // Where to truncate the file before the first write; only used while fd is unset.
+        // The offset the session was opened at; only used while fd is unset.
         std::uint64_t open_at = 0;
         std::vector<std::byte> bytes;
         std::uint64_t at = 0;
-        std::uint64_t synced = 0;
         std::uint64_t chunk = 0;
         bool final = false;
     };
@@ -140,25 +141,18 @@ public:
         : store_(store), owner_(&owner), req_(std::move(request)) {}
 
     void run() noexcept override {
+        const auto on_disk = read_offset(req_.dir / "durable");
+        if (!on_disk) {
+            error_ = on_disk.error();
+            return;
+        }
         if (!req_.fd) {
-            req_.fd = os::UniqueFd{
-                ::open((req_.dir / "data").c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600)};
-            if (!req_.fd) {
-                error_ = from_errno(errno);
-                return;
-            }
-            const auto on_disk = read_offset(req_.dir / "durable");
-            if (!on_disk) {
-                error_ = on_disk.error();
-                return;
-            }
             if (req_.open_at > *on_disk) {
                 error_ = StorageError::PreconditionFailed;
                 return;
             }
-            // Bytes past the durable offset may be torn by a crash; the resume point wins.
-            if (::ftruncate(req_.fd.get(), static_cast<off_t>(req_.open_at)) != 0) {
-                error_ = from_errno(errno);
+            if (auto opened = open_data(*on_disk); !opened) {
+                error_ = opened.error();
                 return;
             }
         }
@@ -176,10 +170,13 @@ public:
             }
             done += static_cast<std::size_t>(n);
         }
+        durable_ = *on_disk;
         const std::uint64_t end = req_.at + req_.bytes.size();
-        // Syncing once per chunk mirrors the object stores, where bytes become durable a
-        // part at a time, and keeps fdatasync off the per-buffer path.
-        if (req_.final || end / req_.chunk > req_.synced / req_.chunk) {
+        // Only a write that reaches past the durable offset publishes, so the offset never
+        // drops when a session reopened below it re-sends what is already there. Syncing
+        // once per chunk mirrors the object stores, where bytes become durable a part at a
+        // time, and keeps fdatasync off the per-buffer path.
+        if (end > *on_disk && (req_.final || end / req_.chunk > *on_disk / req_.chunk)) {
             if (::fdatasync(req_.fd.get()) != 0) {
                 error_ = from_errno(errno);
                 return;
@@ -206,6 +203,26 @@ public:
     }
 
 private:
+    std::expected<void, StorageError> open_data(std::uint64_t durable) {
+        req_.fd =
+            os::UniqueFd{::open((req_.dir / "data").c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600)};
+        struct stat st {};
+        if (!req_.fd || ::fstat(req_.fd.get(), &st) != 0) {
+            return std::unexpected(from_errno(errno));
+        }
+        const auto size = static_cast<std::uint64_t>(st.st_size);
+        // A crash lost bytes that were reported durable; writing on would leave zeros there.
+        if (size < durable) {
+            return std::unexpected(StorageError::Corrupt);
+        }
+        // Bytes past the durable offset may be torn by a crash. Cut back to it and no further:
+        // a session opened below it re-sends bytes the file already holds.
+        if (size > durable && ::ftruncate(req_.fd.get(), static_cast<off_t>(durable)) != 0) {
+            return std::unexpected(from_errno(errno));
+        }
+        return {};
+    }
+
     FsStore& store_;
     Session* owner_;
     Request req_;
@@ -279,8 +296,7 @@ public:
             return;
         }
         if (const auto d = job.durable()) {
-            durable_ = *d;
-            synced_ = *d;
+            durable_ = std::max(durable_, *d);
         }
         if (state_ == IngestState::Finalizing) {
             if (job.final()) {
@@ -312,7 +328,6 @@ private:
                                                          .open_at = open_at_,
                                                          .bytes = std::move(bytes),
                                                          .at = at,
-                                                         .synced = synced_,
                                                          .chunk = id_.chunk_size,
                                                          .final = finalizing}));
     }
@@ -322,7 +337,6 @@ private:
     core::ports::IIngestObserver& observer_;
     std::uint64_t open_at_;
     std::uint64_t durable_;
-    std::uint64_t synced_ = durable_;
     std::uint64_t next_;
     std::uint64_t handed_;
     std::vector<std::byte> front_;
@@ -453,11 +467,16 @@ std::expected<void, StorageError> FsStore::commit(const IngestId& id) {
     if (ec) {
         return std::unexpected(from_error_code(ec));
     }
-    // A data file longer than the durable offset holds bytes from an abandoned attempt.
-    fs::resize_file(dir / "data", id.total_bytes, ec);
-    if (!ec) {
-        fs::rename(dir / "data", target, ec);
+    const auto size = fs::file_size(dir / "data", ec);
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        return std::unexpected(from_error_code(ec));
     }
+    // Every byte was reported durable and none is ever written past the end, so a missing or
+    // short file lost bytes in a crash. Extending it, as a resize would, publishes zeros.
+    if (ec || size != id.total_bytes) {
+        return std::unexpected(StorageError::Corrupt);
+    }
+    fs::rename(dir / "data", target, ec);
     if (ec) {
         return std::unexpected(from_error_code(ec));
     }

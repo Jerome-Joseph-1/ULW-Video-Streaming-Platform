@@ -32,6 +32,39 @@ protected:
         return *id;
     }
 
+    // Opens at `from`, writes data[from, to) and finishes.
+    void send(const IngestId& id, std::span<const std::byte> data, std::uint64_t from,
+              std::uint64_t to) {
+        ulw::test::Observer obs;
+        auto session = harness->ingest().open(id, from, obs);
+        ASSERT_TRUE(session);
+        ASSERT_TRUE(harness->write_all(**session, obs, data.subspan(from, to - from)));
+        ASSERT_TRUE(harness->finish(**session, obs));
+    }
+
+    // Opens at `from`, writes `count` bytes, aborts, and lets the backend finish whatever it
+    // had already accepted.
+    void send_and_abort(const IngestId& id, std::span<const std::byte> data, std::uint64_t from,
+                        std::uint64_t count) {
+        ulw::test::Observer obs;
+        auto session = harness->ingest().open(id, from, obs);
+        ASSERT_TRUE(session);
+        ASSERT_TRUE(harness->write_all(**session, obs, data.subspan(from, count)));
+        (*session)->abort();
+        harness->settle(obs);
+    }
+
+    // Resumes wherever the store says, commits, and reads the object back.
+    void finish_and_compare(const IngestId& id, std::span<const std::byte> data) {
+        const auto at = harness->ingest().durable_offset(id);
+        ASSERT_TRUE(at);
+        ASSERT_NO_FATAL_FAILURE(send(id, data, *at, data.size()));
+        ASSERT_TRUE(harness->ingest().commit(id));
+        const auto stored = harness->reader().fetch_small(id.key, data.size());
+        ASSERT_TRUE(stored);
+        EXPECT_TRUE(std::ranges::equal(*stored, data));
+    }
+
     std::unique_ptr<StorageHarness> harness;
     std::uint64_t chunk = 0;
 };
@@ -95,6 +128,27 @@ TEST_P(StoreConformance, DurableOffsetIsALegalResumePoint) {
     const auto stored = harness->reader().fetch_small(id.key, data.size());
     ASSERT_TRUE(stored);
     EXPECT_TRUE(*stored == data);
+}
+
+// A caller's cached offset may lag the store's, so reopening below the durable offset is
+// legal and must only ever re-send bytes the store already holds.
+TEST_P(StoreConformance, StaleLowReopenKeepsTheBytesAlreadyDurable) {
+    const auto data = ulw::test::pattern(3 * chunk, 23);
+    const IngestId id = create("stale-short", data.size());
+    ASSERT_NO_FATAL_FAILURE(send(id, data, 0, 2 * chunk));
+    ASSERT_NO_FATAL_FAILURE(send_and_abort(id, data, 0, chunk / 2));
+    EXPECT_EQ(harness->ingest().durable_offset(id), 2 * chunk);
+    ASSERT_NO_FATAL_FAILURE(finish_and_compare(id, data));
+}
+
+TEST_P(StoreConformance, StaleLowReopenNeverLowersTheDurableOffset) {
+    const auto data = ulw::test::pattern(3 * chunk, 29);
+    const IngestId id = create("stale-long", data.size());
+    ASSERT_NO_FATAL_FAILURE(send(id, data, 0, 2 * chunk));
+    // Past a chunk boundary, where a backend makes what it received durable.
+    ASSERT_NO_FATAL_FAILURE(send_and_abort(id, data, 0, chunk + (chunk / 2)));
+    EXPECT_EQ(harness->ingest().durable_offset(id), 2 * chunk);
+    ASSERT_NO_FATAL_FAILURE(finish_and_compare(id, data));
 }
 
 TEST_P(StoreConformance, AbortIsIdempotentAndSafe) {
