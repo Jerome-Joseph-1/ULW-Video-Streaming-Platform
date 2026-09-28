@@ -85,10 +85,11 @@ jobs:
       - name: echo acceptance
         run: tests/load/echo_acceptance.sh build/ci ${{ matrix.reactor }} 20
 
-  # The storage laws, the wire behaviour the S3 adapter relies on, and the store's reaper,
-  # against a real S3-compatible server. Nothing here passes -j, and nothing may: the reaper
-  # test aborts every upload in the shared bucket older than its cutoff, conformance runs
-  # included, which is also why those come after the integration label, not beside it.
+  # The storage laws, the wire behaviour the S3 adapter relies on, the store's reaper, and the
+  # catalog and job queue, against real servers. Nothing here passes -j, and nothing may: the
+  # pool test docker-pauses the Postgres every other catalog and queue test is using, and the
+  # reaper test aborts every upload in the shared bucket older than its cutoff, conformance
+  # runs included, which is also why those come after the integration label, not beside it.
   integration:
     name: integration (${{ matrix.preset }})
     runs-on: ubuntu-24.04
@@ -98,25 +99,39 @@ jobs:
         include:
           - { preset: ci, cc: gcc-14, cxx: g++-14 }
           - { preset: asan, cc: clang-19, cxx: clang++-19 }
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           cache-key: ${{ matrix.cc }}-${{ matrix.preset }}-integration
       - name: Start MinIO
-        run: docker compose -f deploy/local/docker-compose.minio.yml up -d --wait
+        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
       - run: cmake --preset ${{ matrix.preset }} -DULW_CONFORMANCE_LIVE=ON
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --test-dir build/${{ matrix.preset }} -L integration --output-on-failure
+        env:
+          # The job context exists only in steps, not in the job's own env.
+          ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
       - name: storage conformance on both reactors
         run: |
           ULW_REACTOR=io_uring ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
           ULW_REACTOR=epoll ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
       - if: failure()
-        run: docker compose -f deploy/local/docker-compose.minio.yml logs
+        run: docker compose -f deploy/local/compose.yaml logs minio
 
   lint:
     name: boundaries + format + tidy

@@ -49,7 +49,7 @@ protected:
             FAIL() << "MinIO unreachable at " << where;
 #else
             GTEST_SKIP() << "MinIO unreachable at " << where
-                         << "; start deploy/local/docker-compose.minio.yml or set "
+                         << "; start deploy/local/compose.yaml or set "
                             "ULW_MINIO_ENDPOINT";
 #endif
         }
