@@ -5,12 +5,14 @@
 #include "infra/s3util/profile.hpp"
 #include "infra/s3util/sigv4.hpp"
 #include "infra/s3util/url.hpp"
+#include "infra/s3util/xml.hpp"
 
 #include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ulw::test {
 
@@ -39,6 +41,12 @@ struct LiveS3 {
 
 // Creates the bucket when it is missing. False when the endpoint is unreachable or refuses.
 [[nodiscard]] bool ensure_bucket(const LiveS3& target);
+
+// Multipart uploads still open under `prefix`, every page of them; nullopt if a listing fails.
+[[nodiscard]] std::optional<std::vector<infra::s3util::MultipartUpload>>
+open_uploads(const LiveS3& target, std::string_view prefix);
+// Aborts every upload open under `prefix`, as far as it can: for cleaning up after a run.
+void abort_uploads(const LiveS3& target, std::string_view prefix);
 
 // "<what>-<16 hex digits>/", fresh per call: no two runs, concurrent or not, share a key, which
 // also keeps R2's one-write-per-second-per-key limit out of reach.

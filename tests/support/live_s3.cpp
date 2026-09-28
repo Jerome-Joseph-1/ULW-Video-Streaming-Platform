@@ -1,10 +1,13 @@
 #include "live_s3.hpp"
 
+#include "core/models/storage_key.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <iterator>
 #include <string>
 #include <utility>
 
@@ -90,6 +93,63 @@ bool ensure_bucket(const LiveS3& target) {
     const auto created = send(target, infra::curl::Method::Put, bucket->root());
     // 409 is BucketAlreadyOwnedByYou from a run that raced this one.
     return created && (created->status == 200 || created->status == 409);
+}
+
+std::optional<std::vector<infra::s3util::MultipartUpload>> open_uploads(const LiveS3& target,
+                                                                        std::string_view prefix) {
+    const auto bucket = infra::s3util::Bucket::make(target.profile, target.bucket);
+    if (!bucket) {
+        return std::nullopt;
+    }
+    std::vector<infra::s3util::MultipartUpload> uploads;
+    std::optional<std::string> key_marker;
+    std::optional<std::string> upload_marker;
+    while (true) {
+        // Filtered here rather than with a prefix parameter: MinIO lists nothing for a prefix
+        // that is not a whole object key.
+        std::vector<infra::s3util::QueryParam> query{{.name = "uploads", .value = ""}};
+        if (key_marker && upload_marker) {
+            query.push_back({.name = "key-marker", .value = *key_marker});
+            query.push_back({.name = "upload-id-marker", .value = *upload_marker});
+        }
+        const auto r = send(target, infra::curl::Method::Get, bucket->root(std::move(query)));
+        if (!r || r->status != 200) {
+            return std::nullopt;
+        }
+        auto page = infra::s3util::parse_list_multipart_uploads(r->body);
+        if (!page) {
+            return std::nullopt;
+        }
+        for (auto& upload : page->uploads) {
+            if (upload.key.starts_with(prefix)) {
+                uploads.push_back(std::move(upload));
+            }
+        }
+        if (!page->is_truncated) {
+            return uploads;
+        }
+        if (page->next_key_marker == key_marker && page->next_upload_id_marker == upload_marker) {
+            return std::nullopt;
+        }
+        key_marker = std::move(page->next_key_marker);
+        upload_marker = std::move(page->next_upload_id_marker);
+    }
+}
+
+void abort_uploads(const LiveS3& target, std::string_view prefix) {
+    const auto bucket = infra::s3util::Bucket::make(target.profile, target.bucket);
+    const auto uploads = open_uploads(target, prefix);
+    if (!bucket || !uploads) {
+        return;
+    }
+    for (const auto& upload : *uploads) {
+        const auto key = core::StorageKey::parse(upload.key);
+        if (key) {
+            [[maybe_unused]] const auto aborted =
+                send(target, infra::curl::Method::Delete,
+                     bucket->object(*key, {{.name = "uploadId", .value = upload.upload_id}}));
+        }
+    }
 }
 
 std::string unique_prefix(std::string_view what) {

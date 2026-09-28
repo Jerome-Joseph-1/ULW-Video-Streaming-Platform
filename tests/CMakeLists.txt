@@ -143,8 +143,10 @@ target_include_directories(storage_s3_unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/infra/storage/s3/src ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(s3_integration_tests integration
+    integration/s3_store_live_test.cpp
     integration/s3_wire_claims_test.cpp)
-target_link_libraries(s3_integration_tests PRIVATE ulw::test_live_s3 ulw::core_domain)
+target_link_libraries(s3_integration_tests PRIVATE ulw::test_live_s3 ulw::core_domain
+    ulw::storage_s3)
 target_include_directories(s3_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 if(ULW_CONFORMANCE_LIVE)
     target_compile_definitions(s3_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
