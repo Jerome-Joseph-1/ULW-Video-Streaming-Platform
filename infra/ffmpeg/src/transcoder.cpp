@@ -115,6 +115,13 @@ FfmpegTranscoder::FfmpegTranscoder(TranscoderConfig config, const core::ports::I
     : config_(std::move(config)), clock_(clock) {}
 
 TranscodeResult<MediaInfo> FfmpegTranscoder::probe(const fs::path& input, std::stop_token stop) {
+    std::error_code ec;
+    const std::uint64_t source_bytes = fs::file_size(input, ec);
+    if (ec) {
+        return std::unexpected(TranscodeError{.kind = TranscodeFailure::Rejected,
+                                              .exit_code = 0,
+                                              .detail = "source: " + ec.message()});
+    }
     const Sandbox sandbox{.helper = config_.sandbox,
                           .environment = {"PATH=" + config_.search_path}};
     std::string output;
@@ -127,7 +134,7 @@ TranscodeResult<MediaInfo> FfmpegTranscoder::probe(const fs::path& input, std::s
     if (const auto failure = classify(child->exit_code, child->ending)) {
         return std::unexpected(error_of(*failure, *child, "ffprobe"));
     }
-    auto media = parse_probe(output);
+    auto media = parse_probe(output, source_bytes);
     if (!media) {
         return std::unexpected(TranscodeError{.kind = TranscodeFailure::Rejected,
                                               .exit_code = 0,

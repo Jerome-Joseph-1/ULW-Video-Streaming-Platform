@@ -32,9 +32,21 @@ inline constexpr std::string_view kSourceFormats = "mov,matroska,mpegts,avi,flv,
 // What verification reads of our own output: the HLS playlists and their fMP4 segments.
 inline constexpr std::string_view kOutputFormats = "hls,mov";
 
+// The longest video we take. There is no longer one in the product brief; twelve hours is what
+// the largest video sites allow in one upload, and the 50 GiB upload cap
+// (core::Upload::kMaxSizeBytes) holds twelve hours at 9.9 Mbit/s. The transcode budgets scale
+// with the duration, so this also bounds how long one attempt may hold a worker.
+inline constexpr core::Millis kMaxDuration{12LL * 3600 * 1000};
+// A duration comes from the upload's own headers. The sparsest real video, a still 240p frame
+// at 1 fps in a single GOP, came to 230 bit/s through x264 into MP4 over ten minutes; a file
+// with fewer bits than this for each second it declares cannot hold what it declares.
+inline constexpr std::uint64_t kMinSourceBitsPerSecond = 128;
+
 [[nodiscard]] Args probe_args(const std::string& ffprobe, const std::filesystem::path& input);
-// What probe_args prints, or why it describes nothing that can be transcoded.
-[[nodiscard]] std::expected<core::ports::MediaInfo, std::string> parse_probe(std::string_view text);
+// What probe_args prints for a file of `source_bytes`, or why it describes nothing that can be
+// transcoded.
+[[nodiscard]] std::expected<core::ports::MediaInfo, std::string>
+parse_probe(std::string_view text, std::uint64_t source_bytes);
 
 [[nodiscard]] Args transcode_args(const std::string& ffmpeg, const std::filesystem::path& input,
                                   const std::filesystem::path& out_dir,

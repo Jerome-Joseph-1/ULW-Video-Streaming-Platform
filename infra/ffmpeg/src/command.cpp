@@ -18,8 +18,8 @@ namespace {
 using core::ports::FrameRate;
 using core::ports::MediaInfo;
 
-// Longer than any real upload (a day) and small enough that milliseconds fit an int32 column.
-constexpr std::uint64_t kMaxDurationSeconds = 24ULL * 3600;
+// Far past kMaxDuration, and small enough that its milliseconds cannot overflow.
+constexpr std::uint64_t kMaxParsedSeconds = std::uint64_t{1} << 32U;
 
 std::optional<std::pair<std::string_view, std::string_view>> split_line(std::string_view line) {
     const std::size_t eq = line.find('=');
@@ -58,7 +58,7 @@ std::optional<FrameRate> parse_rate(std::string_view text) {
 std::optional<core::Millis> parse_seconds(std::string_view text) {
     const std::size_t dot = text.find('.');
     const auto whole = core::parse_integer<std::uint64_t>(text.substr(0, dot));
-    if (!whole || *whole > kMaxDurationSeconds) {
+    if (!whole || *whole > kMaxParsedSeconds) {
         return std::nullopt;
     }
     std::uint64_t millis = 0;
@@ -73,6 +73,23 @@ std::optional<core::Millis> parse_seconds(std::string_view text) {
         millis = core::parse_integer<std::uint64_t>(first_three).value_or(0);
     }
     return core::Millis{static_cast<std::int64_t>((*whole * 1000) + millis)};
+}
+
+std::expected<core::Millis, std::string>
+checked_duration(const std::optional<core::Millis>& duration, std::uint64_t source_bytes) {
+    if (!duration || *duration <= core::Millis::zero()) {
+        return std::unexpected("no duration");
+    }
+    if (*duration > kMaxDuration) {
+        return std::unexpected("longer than the 12 hour maximum");
+    }
+    constexpr std::uint64_t kBitsPerByte = 8;
+    constexpr std::uint64_t kMillisPerSecond = 1000;
+    const auto declared = static_cast<std::uint64_t>(duration->count());
+    if (declared * kMinSourceBitsPerSecond / kMillisPerSecond / kBitsPerByte > source_bytes) {
+        return std::unexpected("declared duration is too long for the file size");
+    }
+    return *duration;
 }
 
 struct Stream {
@@ -109,7 +126,8 @@ Args probe_args(const std::string& ffprobe, const std::filesystem::path& input) 
             input.string()};
 }
 
-std::expected<MediaInfo, std::string> parse_probe(std::string_view text) {
+std::expected<MediaInfo, std::string> parse_probe(std::string_view text,
+                                                  std::uint64_t source_bytes) {
     std::optional<Stream> video;
     bool has_audio = false;
     std::optional<Stream> current;
@@ -156,8 +174,9 @@ std::expected<MediaInfo, std::string> parse_probe(std::string_view text) {
     if (!video->rate) {
         return std::unexpected("video stream has no frame rate");
     }
-    if (!duration || *duration <= core::Millis::zero()) {
-        return std::unexpected("no duration");
+    const auto length = checked_duration(duration, source_bytes);
+    if (!length) {
+        return std::unexpected(length.error());
     }
     // ffmpeg applies the container's display rotation while decoding, so a quarter turn
     // swaps the dimensions the ladder has to fit.
@@ -165,7 +184,7 @@ std::expected<MediaInfo, std::string> parse_probe(std::string_view text) {
     return MediaInfo{.width = quarter_turn ? *video->height : *video->width,
                      .height = quarter_turn ? *video->width : *video->height,
                      .frame_rate = *video->rate,
-                     .duration = *duration,
+                     .duration = *length,
                      .has_audio = has_audio};
 }
 

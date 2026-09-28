@@ -15,7 +15,6 @@ using core::ports::FrameRate;
 using core::ports::MediaInfo;
 using infra::ffmpeg::Args;
 using infra::ffmpeg::gop_frames;
-using infra::ffmpeg::parse_probe;
 using infra::ffmpeg::transcode_args;
 
 MediaInfo media(std::uint32_t height, bool audio = true, FrameRate rate = {.num = 30, .den = 1}) {
@@ -24,6 +23,11 @@ MediaInfo media(std::uint32_t height, bool audio = true, FrameRate rate = {.num 
                      .frame_rate = rate,
                      .duration = core::Millis{60'000},
                      .has_audio = audio};
+}
+
+// A file large enough for any duration these tests declare.
+auto probe(std::string_view text) {
+    return infra::ffmpeg::parse_probe(text, std::uint64_t{1} << 30U);
 }
 
 // The value that follows `flag`, or "" when the flag is absent.
@@ -217,7 +221,7 @@ constexpr std::string_view kProbed = "codec_type=video\n"
                                      "duration=6.006000\n";
 
 TEST(ParseProbe, ReadsDimensionsRateDurationAndAudio) {
-    const auto info = parse_probe(kProbed);
+    const auto info = probe(kProbed);
     ASSERT_TRUE(info) << info.error();
     EXPECT_EQ(info->width, 1280U);
     EXPECT_EQ(info->height, 720U);
@@ -227,48 +231,70 @@ TEST(ParseProbe, ReadsDimensionsRateDurationAndAudio) {
 }
 
 TEST(ParseProbe, AQuarterTurnSwapsTheDisplayedDimensions) {
-    const auto info = parse_probe("codec_type=video\nwidth=1920\nheight=1080\n"
-                                  "r_frame_rate=30/1\nrotation=-90\nduration=2.5\n");
+    const auto info = probe("codec_type=video\nwidth=1920\nheight=1080\n"
+                            "r_frame_rate=30/1\nrotation=-90\nduration=2.5\n");
     ASSERT_TRUE(info) << info.error();
     EXPECT_EQ(info->width, 1080U);
     EXPECT_EQ(info->height, 1920U);
     EXPECT_FALSE(info->has_audio);
     EXPECT_EQ(info->duration, core::Millis{2500});
-    const auto upside_down = parse_probe("codec_type=video\nwidth=1920\nheight=1080\n"
-                                         "r_frame_rate=30/1\nrotation=180\nduration=2\n");
+    const auto upside_down = probe("codec_type=video\nwidth=1920\nheight=1080\n"
+                                   "r_frame_rate=30/1\nrotation=180\nduration=2\n");
     ASSERT_TRUE(upside_down);
     EXPECT_EQ(upside_down->height, 1080U);
 }
 
 TEST(ParseProbe, TheFirstVideoStreamIsTheOneDescribed) {
-    const auto info = parse_probe("codec_type=audio\nr_frame_rate=0/0\n"
-                                  "codec_type=video\nwidth=640\nheight=360\nr_frame_rate=25/1\n"
-                                  "codec_type=video\nwidth=1920\nheight=1080\nr_frame_rate=25/1\n"
-                                  "duration=1.000000\n");
+    const auto info = probe("codec_type=audio\nr_frame_rate=0/0\n"
+                            "codec_type=video\nwidth=640\nheight=360\nr_frame_rate=25/1\n"
+                            "codec_type=video\nwidth=1920\nheight=1080\nr_frame_rate=25/1\n"
+                            "duration=1.000000\n");
     ASSERT_TRUE(info) << info.error();
     EXPECT_EQ(info->height, 360U);
     EXPECT_TRUE(info->has_audio);
 }
 
 TEST(ParseProbe, RefusesWhatCannotBeTranscoded) {
-    EXPECT_EQ(parse_probe("codec_type=audio\nduration=3.0\n").error(), "no video stream");
-    EXPECT_EQ(parse_probe("codec_type=video\nwidth=N/A\nheight=N/A\nr_frame_rate=25/1\n"
-                          "duration=1.0\n")
+    EXPECT_EQ(probe("codec_type=audio\nduration=3.0\n").error(), "no video stream");
+    EXPECT_EQ(probe("codec_type=video\nwidth=N/A\nheight=N/A\nr_frame_rate=25/1\n"
+                    "duration=1.0\n")
                   .error(),
               "video stream has no dimensions");
-    EXPECT_EQ(parse_probe("codec_type=video\nwidth=64\nheight=64\nr_frame_rate=0/0\n"
-                          "duration=1.0\n")
+    EXPECT_EQ(probe("codec_type=video\nwidth=64\nheight=64\nr_frame_rate=0/0\n"
+                    "duration=1.0\n")
                   .error(),
               "video stream has no frame rate");
-    EXPECT_EQ(parse_probe("codec_type=video\nwidth=64\nheight=64\nr_frame_rate=25/1\n"
-                          "duration=N/A\n")
+    EXPECT_EQ(probe("codec_type=video\nwidth=64\nheight=64\nr_frame_rate=25/1\n"
+                    "duration=N/A\n")
                   .error(),
               "no duration");
-    EXPECT_EQ(parse_probe("codec_type=video\nwidth=64\nheight=64\nr_frame_rate=25/1\n"
-                          "duration=-1.0\n")
+    EXPECT_EQ(probe("codec_type=video\nwidth=64\nheight=64\nr_frame_rate=25/1\n"
+                    "duration=-1.0\n")
                   .error(),
               "no duration");
-    EXPECT_FALSE(parse_probe(""));
+    EXPECT_FALSE(probe(""));
+}
+
+TEST(ParseProbe, RefusesADurationPastTheProductMaximum) {
+    constexpr std::string_view kStream =
+        "codec_type=video\nwidth=64\nheight=64\nr_frame_rate=25/1\n";
+    EXPECT_TRUE(probe(std::string(kStream) + "duration=43200.000000\n"));
+    EXPECT_EQ(probe(std::string(kStream) + "duration=43200.001000\n").error(),
+              "longer than the 12 hour maximum");
+    EXPECT_EQ(probe(std::string(kStream) + "duration=86400.000000\n").error(),
+              "longer than the 12 hour maximum");
+}
+
+TEST(ParseProbe, RefusesADurationTheFileIsTooSmallToHold) {
+    // A few kilobytes that declare a day would otherwise buy four days of worker time.
+    const std::string text = "codec_type=video\nwidth=64\nheight=64\nr_frame_rate=25/1\n"
+                             "duration=3600.000000\n";
+    // An hour at 128 bit/s is 57 600 bytes.
+    EXPECT_TRUE(infra::ffmpeg::parse_probe(text, 57'600));
+    EXPECT_EQ(infra::ffmpeg::parse_probe(text, 57'599).error(),
+              "declared duration is too long for the file size");
+    EXPECT_EQ(infra::ffmpeg::parse_probe(text, 4096).error(),
+              "declared duration is too long for the file size");
 }
 
 TEST(Demuxers, EveryInputIsOpenedWithAClosedListOfThem) {
