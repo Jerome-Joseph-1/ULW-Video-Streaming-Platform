@@ -1,0 +1,6 @@
+GET /reject HTTP/1.1
+
+POST /api/v1/uploads HTTP/1.1
+Content-Length: 2
+
+{}

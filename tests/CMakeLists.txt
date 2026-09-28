@@ -66,3 +66,10 @@ ulw_add_test_suite(http_unit_tests unit
     unit/http/response_test.cpp
     unit/http/router_test.cpp)
 target_link_libraries(http_unit_tests PRIVATE ulw::http_lib)
+
+if(ULW_FUZZ)
+    ulw_add_executable(http_fuzz fuzz/http_fuzz.cpp)
+    target_link_libraries(http_fuzz PRIVATE ulw::http_lib)
+    target_compile_options(http_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(http_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
