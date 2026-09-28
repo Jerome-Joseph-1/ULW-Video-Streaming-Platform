@@ -56,6 +56,15 @@ target_include_directories(test_storage_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DI
     ${CMAKE_CURRENT_SOURCE_DIR}/conformance)
 target_link_libraries(test_storage_harness PUBLIC ulw::storage_fake ulw::storage_fs ulw::net_lib GTest::gtest)
 
+ulw_add_library(test_live_s3 support/live_s3.cpp)
+target_include_directories(test_live_s3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_live_s3 PUBLIC ulw::curl_multi ulw::s3util ulw::os)
+
+if(ULW_CONFORMANCE_LIVE)
+    target_link_libraries(test_storage_harness PUBLIC ulw::storage_s3 ulw::test_live_s3)
+    target_compile_definitions(test_storage_harness PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
+
 ulw_add_test_suite(storage_conformance_tests conformance
     conformance/fake_store_faults_test.cpp
     conformance/fs_store_test.cpp
@@ -104,3 +113,41 @@ ulw_add_test_suite(gateway_tests unit
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness OpenSSL::Crypto)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+ulw_add_library(test_http_server support/http_test_server.cpp)
+target_include_directories(test_http_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_http_server PUBLIC ulw::os PRIVATE ulw::net_lib Threads::Threads)
+
+# Shared, so that its getaddrinfo() comes before libc's for libcurl too. It takes the warning
+# flags but not ulw_warnings' link options: -pie means nothing to a shared library.
+add_library(test_stalled_resolver SHARED support/stalled_resolver.cpp)
+target_compile_features(test_stalled_resolver PRIVATE cxx_std_23)
+target_compile_options(test_stalled_resolver
+    PRIVATE $<TARGET_PROPERTY:ulw_warnings,INTERFACE_COMPILE_OPTIONS>)
+target_link_libraries(test_stalled_resolver PRIVATE ulw_sanitize ${CMAKE_DL_LIBS})
+
+ulw_add_test_suite(curl_unit_tests unit
+    unit/curl/fetcher_test.cpp
+    unit/curl/http_test.cpp
+    unit/curl/multi_test.cpp)
+target_link_libraries(curl_unit_tests PRIVATE ulw::curl_multi ulw::test_http_server
+    test_stalled_resolver)
+target_include_directories(curl_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+ulw_add_test_suite(storage_s3_unit_tests unit
+    unit/s3store/part_session_test.cpp
+    unit/s3store/s3_store_test.cpp)
+target_link_libraries(storage_s3_unit_tests PRIVATE ulw::storage_s3 ulw::test_http_server)
+# White-box tests of the adapter's internals.
+target_include_directories(storage_s3_unit_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/infra/storage/s3/src ${PROJECT_SOURCE_DIR}/tests)
+
+ulw_add_test_suite(s3_integration_tests integration
+    integration/s3_store_live_test.cpp
+    integration/s3_wire_claims_test.cpp)
+target_link_libraries(s3_integration_tests PRIVATE ulw::test_live_s3 ulw::core_domain
+    ulw::storage_s3)
+target_include_directories(s3_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(s3_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()

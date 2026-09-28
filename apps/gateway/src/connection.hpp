@@ -159,6 +159,10 @@ private:
     void linger() noexcept;
     void close() noexcept;
     void arm_timer(core::Millis delay) noexcept;
+    void restart_rate_window() noexcept;
+    // Ends a chunk body that fell below the minimum rate, or returns how long until the
+    // current window closes.
+    [[nodiscard]] std::optional<core::Millis> check_body_rate(core::MonoTime t) noexcept;
     [[nodiscard]] core::MonoTime now() const noexcept { return deps().reactor.now(); }
 
     Handle handle_;
@@ -172,6 +176,10 @@ private:
     // Bytes moved in either direction of the body pump: from the client or into the store.
     core::MonoTime last_progress_;
     core::MonoTime request_started_;
+    // The stretch of a chunk body over which the minimum rate is judged, and the client bytes
+    // it has brought. Restarted whenever reading resumes after the store held the body up.
+    core::MonoTime rate_window_start_;
+    std::uint64_t rate_window_bytes_ = 0;
     std::size_t requests_ = 0;
     // Numbers each request on this connection, so late completions can tell whose they are.
     std::uint64_t request_seq_ = 0;

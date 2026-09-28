@@ -74,8 +74,9 @@ public:
     // `offset` must be a value durable_offset() has reported; the caller's cached copy is
     // fine because a stale-low offset only re-sends bytes the backend already holds. open()
     // refuses only offsets it can rule out without blocking. Past the durable offset is not
-    // one of them: such a session fails with PreconditionFailed instead, and nothing it took
-    // becomes durable.
+    // one of them: nothing such a session takes ever becomes durable, and commit refuses until
+    // the gap is filled from the real durable offset. A backend that can tell cheaply fails
+    // the session with PreconditionFailed; an object store only finds the gap at commit.
     [[nodiscard]] virtual std::expected<std::unique_ptr<IIngestSession>, StorageError>
     open(const IngestId& id, std::uint64_t offset, IIngestObserver& observer) = 0;
     [[nodiscard]] virtual std::expected<std::uint64_t, StorageError>

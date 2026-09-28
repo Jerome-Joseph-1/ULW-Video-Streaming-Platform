@@ -10,6 +10,13 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 
+#ifdef ULW_CONFORMANCE_LIVE
+#include "infra/curl/multi.hpp"
+#include "infra/storage/s3_store.hpp"
+
+#include "support/live_s3.hpp"
+#endif
+
 namespace ulw::test {
 
 namespace {
@@ -64,6 +71,69 @@ private:
     net::OffloadPool* writer_ = nullptr;
     std::unique_ptr<infra::storage::FsStore> store_;
 };
+
+#ifdef ULW_CONFORMANCE_LIVE
+// A live bucket through the S3 adapter. Parts are 5 MiB, the smallest S3, MinIO and R2 accept
+// for any part but the last, so every law still spans several parts.
+class S3Harness final : public StorageHarness {
+public:
+    static constexpr std::uint64_t kPartSize = std::uint64_t{5} << 20U;
+
+    explicit S3Harness(LiveS3 target)
+        : target_(std::move(target)), prefix_(unique_prefix("conformance")) {
+        reactor_ = make_loop();
+        multi_ = std::move(*infra::curl::Multi::create(*reactor_));
+        store_ = std::move(*infra::storage::S3Store::create(
+            infra::storage::S3Store::Deps{.reactor = *reactor_,
+                                          .multi = *multi_,
+                                          .credentials = target_.credentials,
+                                          .clock = system_clock(),
+                                          .random = random_,
+                                          .profile = target_.profile,
+                                          .bucket = target_.bucket},
+            infra::storage::S3StoreOptions{.part_size = kPartSize}));
+    }
+    ~S3Harness() override {
+        // What a law committed or left unfinished would otherwise pile up in a bucket that
+        // outlives the run.
+        if (auto keys = store_->list(prefix_)) {
+            for (const auto& key : *keys) {
+                [[maybe_unused]] const auto removed = store_->remove(key);
+            }
+        }
+        abort_uploads(target_, prefix_);
+        store_.reset();
+        multi_.reset();
+    }
+    S3Harness(const S3Harness&) = delete;
+    S3Harness& operator=(const S3Harness&) = delete;
+
+    core::ports::IIngestStore& ingest() override { return *store_; }
+    core::ports::IObjectReader& reader() override { return *store_; }
+    core::ports::IObjectAdmin& admin() override { return *store_; }
+    [[nodiscard]] std::string key_prefix() const override { return prefix_; }
+    // A part is durable only once the store answers it, a network round trip away.
+    [[nodiscard]] std::chrono::milliseconds quiet_period() const override {
+        return std::chrono::seconds(2);
+    }
+
+private:
+    LiveS3 target_;
+    std::string prefix_;
+    os::SystemRandom random_;
+    std::unique_ptr<infra::curl::Multi> multi_;
+    std::unique_ptr<infra::storage::S3Store> store_;
+};
+
+// Under ULW_CONFORMANCE_LIVE an unreachable backend is a failure, not a skip: the harness
+// comes back null and the suite's SetUp asserts on it.
+std::unique_ptr<StorageHarness> live_harness(LiveS3 target) {
+    if (!ensure_bucket(target)) {
+        return nullptr;
+    }
+    return std::make_unique<S3Harness>(std::move(target));
+}
+#endif
 
 } // namespace
 
@@ -162,6 +232,12 @@ std::vector<StoreFactory> store_factories() {
     std::vector<StoreFactory> out;
     out.push_back({"fake", [] { return std::make_unique<FakeHarness>(); }});
     out.push_back({"fs", [] { return std::make_unique<FsHarness>(); }});
+#ifdef ULW_CONFORMANCE_LIVE
+    out.push_back({"minio", [] { return live_harness(minio_from_env()); }});
+    if (auto r2 = r2_from_env()) {
+        out.push_back({"r2", [r2 = *std::move(r2)] { return live_harness(r2); }});
+    }
+#endif
     return out;
 }
 

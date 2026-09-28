@@ -455,6 +455,76 @@ TEST(GatewayUpload, StalledBodyGets408) {
     EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0; }));
 }
 
+std::string patch_head(const std::string& upload, std::uint64_t length) {
+    return "PATCH /api/v1/uploads/" + upload +
+           " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+           "Upload-Offset: 0\r\nContent-Length: " +
+           std::to_string(length) + "\r\n\r\n";
+}
+
+// What the minimum body rate asks for over `span`.
+std::uint64_t floor_over(const gateway::Limits& limits, core::Millis span) {
+    return limits.min_body_bytes_per_second * static_cast<std::uint64_t>(span.count()) / 1000;
+}
+
+// Sends `data` `per_step` bytes at a time with `step` of manual time after each, and stops
+// once the gateway has answered. Each send is waited for, so none lands after its step.
+void trickle(GatewayUnderTest& gw, HttpClient& c, std::span<const std::byte> data,
+             std::uint64_t per_step, core::Millis step, std::size_t max_steps) {
+    const std::uint64_t base = gw.counters().bytes_ingested;
+    std::size_t sent = 0;
+    for (std::size_t i = 0; i < max_steps && sent < data.size(); ++i) {
+        const std::size_t n = std::min<std::uint64_t>(per_step, data.size() - sent);
+        if (!c.send_raw(data.subspan(sent, n))) {
+            return;
+        }
+        sent += n;
+        if (!ulw::test::eventually([&] { return gw.counters().bytes_ingested == base + sent; })) {
+            return;
+        }
+        gw.advance(step);
+    }
+}
+
+TEST(GatewayUpload, AChunkTrickledBelowTheMinimumRateGets408) {
+    GatewayUnderTest gw({.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true});
+    const gateway::Limits limits;
+    HttpClient c(gw.port());
+    const auto up = create_upload(c, kMiB);
+    ASSERT_TRUE(up);
+    const auto data = ulw::test::pattern(kMiB);
+    ASSERT_TRUE(c.send_raw(patch_head(up->upload_id, data.size())));
+    // A byte short of the floor over one window, sent in tenths of it: the body never stops
+    // for long enough to look idle.
+    const core::Millis step = limits.body_rate_window / 10;
+    trickle(gw, c, data, floor_over(limits, step) - 1, step, 10);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().timeouts_body_rate == 1; }));
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 408);
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_EQ(gw.counters().timeouts_body, 0U);
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0; }));
+}
+
+TEST(GatewayUpload, AChunkSentAtExactlyTheMinimumRateIsAccepted) {
+    GatewayUnderTest gw({.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true});
+    const gateway::Limits limits;
+    HttpClient c(gw.port());
+    const auto up = create_upload(c, kMiB);
+    ASSERT_TRUE(up);
+    const auto data = ulw::test::pattern(kMiB);
+    ASSERT_TRUE(c.send_raw(patch_head(up->upload_id, data.size())));
+    const core::Millis step = limits.body_rate_window / 10;
+    const std::uint64_t per_step = floor_over(limits, step);
+    trickle(gw, c, data, per_step, step, (data.size() / per_step) + 1);
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 204);
+    EXPECT_EQ(r->upload_offset(), kMiB);
+    EXPECT_EQ(gw.counters().timeouts_body_rate, 0U);
+}
+
 TEST(GatewayUpload, DrainClosesIdleConnectionsAndAnswersTheRequestInFlight) {
     GatewayUnderTest gw({});
     HttpClient idle(gw.port());

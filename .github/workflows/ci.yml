@@ -85,6 +85,39 @@ jobs:
       - name: echo acceptance
         run: tests/load/echo_acceptance.sh build/ci ${{ matrix.reactor }} 20
 
+  # The storage laws, the wire behaviour the S3 adapter relies on, and the store's reaper,
+  # against a real S3-compatible server. Nothing here passes -j, and nothing may: the reaper
+  # test aborts every upload in the shared bucket older than its cutoff, conformance runs
+  # included, which is also why those come after the integration label, not beside it.
+  integration:
+    name: integration (${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { preset: ci, cc: gcc-14, cxx: g++-14 }
+          - { preset: asan, cc: clang-19, cxx: clang++-19 }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: ${{ matrix.cc }}-${{ matrix.preset }}-integration
+      - name: Start MinIO
+        run: docker compose -f deploy/local/docker-compose.minio.yml up -d --wait
+      - run: cmake --preset ${{ matrix.preset }} -DULW_CONFORMANCE_LIVE=ON
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --test-dir build/${{ matrix.preset }} -L integration --output-on-failure
+      - name: storage conformance on both reactors
+        run: |
+          ULW_REACTOR=io_uring ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
+          ULW_REACTOR=epoll ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
+      - if: failure()
+        run: docker compose -f deploy/local/docker-compose.minio.yml logs
+
   lint:
     name: boundaries + format + tidy
     runs-on: ubuntu-24.04

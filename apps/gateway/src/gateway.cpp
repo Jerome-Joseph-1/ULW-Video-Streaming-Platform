@@ -137,11 +137,13 @@ std::string Gateway::render_metrics() const {
                        "bytes_ingested_total {}\n"
                        "timeouts_total{{kind=\"header\"}} {}\n"
                        "timeouts_total{{kind=\"body\"}} {}\n"
+                       "timeouts_total{{kind=\"body_rate\"}} {}\n"
                        "timeouts_total{{kind=\"backend\"}} {}\n"
                        "timeouts_total{{kind=\"backstop\"}} {}\n",
                        c.requests, c.connections_accepted, c.connections_rejected,
                        connections_.size(), upload_slots_, c.admission_rejections, c.bytes_ingested,
-                       c.timeouts_header, c.timeouts_body, c.timeouts_backend, c.timeouts_backstop);
+                       c.timeouts_header, c.timeouts_body, c.timeouts_body_rate, c.timeouts_backend,
+                       c.timeouts_backstop);
 }
 
 } // namespace gateway

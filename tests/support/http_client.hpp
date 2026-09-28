@@ -8,9 +8,12 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -33,7 +36,7 @@ struct HttpResponse {
             return std::nullopt;
         }
         std::uint64_t v = 0;
-        std::from_chars(h->data(), h->data() + h->size(), v);
+        std::from_chars(std::to_address(h->begin()), std::to_address(h->end()), v);
         return v;
     }
 };
@@ -52,6 +55,8 @@ public:
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        // connect() takes every address family through the generic sockaddr header.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         if (::connect(fd_.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
             fd_.reset();
         }
@@ -83,7 +88,7 @@ public:
             head += "Authorization: Bearer " + std::string(token) + "\r\n";
         }
         for (const auto& [k, v] : extra) {
-            head += k + ": " + v + "\r\n";
+            head.append(k).append(": ").append(v).append("\r\n");
         }
         if (!body.empty() || method == "POST" || method == "PATCH") {
             head += "Content-Length: " + std::to_string(body.size()) + "\r\n";
@@ -98,12 +103,12 @@ public:
             if (auto r = parse(head_request)) {
                 return r;
             }
-            char buf[65536];
-            const ssize_t n = ::recv(fd_.get(), buf, sizeof buf, 0);
+            std::array<char, 65536> buf{};
+            const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), 0);
             if (n <= 0) {
                 return std::nullopt;
             }
-            in_.append(buf, static_cast<std::size_t>(n));
+            in_.append(buf.data(), static_cast<std::size_t>(n));
         }
     }
 
@@ -130,10 +135,13 @@ private:
             return std::nullopt;
         }
         HttpResponse r;
-        std::string_view head(in_.data(), end);
+        const std::string_view head(in_.data(), end);
         const std::size_t line_end = head.find("\r\n");
         const std::string_view status_line = head.substr(0, line_end);
-        std::from_chars(status_line.data() + 9, status_line.data() + 12, r.status);
+        // "HTTP/1.1 " is nine characters; the status code is the three after it.
+        const std::string_view code =
+            status_line.substr(std::min<std::size_t>(9, status_line.size()), 3);
+        std::from_chars(std::to_address(code.begin()), std::to_address(code.end()), r.status);
         std::size_t pos = line_end == std::string_view::npos ? head.size() : line_end + 2;
         while (pos < head.size()) {
             std::size_t next = head.find("\r\n", pos);
@@ -155,7 +163,7 @@ private:
         }
         std::size_t length = 0;
         if (const auto cl = r.header("content-length"); cl && !head_request) {
-            std::from_chars(cl->data(), cl->data() + cl->size(), length);
+            std::from_chars(std::to_address(cl->begin()), std::to_address(cl->end()), length);
         }
         if (in_.size() < end + 4 + length) {
             return std::nullopt;
