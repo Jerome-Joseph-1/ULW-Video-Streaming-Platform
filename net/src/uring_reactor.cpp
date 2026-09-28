@@ -620,9 +620,9 @@ void UringReactor::AcceptRetry::on_timeout() noexcept {
 }
 
 void UringReactor::run_deferred() noexcept {
-    std::vector<ConnId> deliveries;
-    deliveries.swap(deliveries_);
-    for (const ConnId conn : deliveries) {
+    // Handlers queue more while this runs; they land in the swapped-in queue, for next time.
+    delivering_.swap(deliveries_);
+    for (const ConnId conn : delivering_) {
         Slot* s = stream_slot(conn);
         if (s == nullptr) {
             continue;
@@ -647,14 +647,15 @@ void UringReactor::run_deferred() noexcept {
             arm_recv(conn.fd, *s);
         }
     }
+    delivering_.clear();
 
-    std::vector<DeferredError> errors;
-    errors.swap(deferred_errors_);
-    for (const DeferredError& e : errors) {
+    reporting_.swap(deferred_errors_);
+    for (const DeferredError& e : reporting_) {
         if (Slot* s = stream_slot(e.conn)) {
             s->stream->on_error(e.err);
         }
     }
+    reporting_.clear();
 }
 
 } // namespace net::detail

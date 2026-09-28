@@ -130,6 +130,10 @@ private:
     std::vector<int> listeners_;
     std::vector<ConnId> deliveries_;
     std::vector<DeferredError> deferred_errors_;
+    // run_deferred trades these for the queues above and hands them back empty, so neither
+    // pair gives up its capacity and a warm loop queues without allocating.
+    std::vector<ConnId> delivering_;
+    std::vector<DeferredError> reporting_;
     AcceptRetry accept_retry_;
 };
 
