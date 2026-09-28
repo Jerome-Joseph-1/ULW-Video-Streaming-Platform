@@ -1,6 +1,7 @@
 ulw_add_library(http_lib
     src/request.cpp
     src/request_parser.cpp
+    src/response.cpp
     src/router.cpp)
 target_include_directories(http_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(http_lib PRIVATE llhttp_static)
