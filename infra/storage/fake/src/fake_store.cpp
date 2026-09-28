@@ -35,7 +35,7 @@ public:
             std::min<std::uint64_t>({bytes.size(), plan.accept_per_call, id_.total_bytes - next_});
         std::size_t taken = 0;
         while (taken < limit) {
-            const std::uint64_t chunk_len = store_.chunk_length(id_.total_bytes, index_of(next_));
+            const std::uint64_t chunk_len = filling_length();
             if (filling_.size() == chunk_len) {
                 break;
             }
@@ -62,8 +62,7 @@ public:
     }
 
     [[nodiscard]] bool wants_more() const noexcept override {
-        const bool chunk_waiting =
-            uploading_ && filling_.size() == store_.chunk_length(id_.total_bytes, index_of(next_));
+        const bool chunk_waiting = uploading_ && filling_.size() == filling_length();
         return state_ == IngestState::Open && next_ < id_.total_bytes && !chunk_waiting;
     }
 
@@ -103,8 +102,7 @@ public:
             case Attempt::Stored:
                 durable_ += uploading_->length;
                 uploading_.reset();
-                if (!filling_.empty() &&
-                    filling_.size() == store_.chunk_length(id_.total_bytes, index_of(next_ - 1))) {
+                if (!filling_.empty() && filling_.size() == filling_length()) {
                     start_upload();
                 }
                 break;
@@ -136,13 +134,19 @@ private:
         std::vector<std::byte> bytes;
     };
 
-    [[nodiscard]] std::uint64_t index_of(std::uint64_t offset) const noexcept {
-        return offset / id_.chunk_size;
+    // The chunk filling_ holds starts where its bytes do, not at next_: once it is full,
+    // next_ is already the first byte of the chunk after it, which may be the short tail.
+    [[nodiscard]] std::uint64_t filling_index() const noexcept {
+        return (next_ - filling_.size()) / id_.chunk_size;
+    }
+
+    [[nodiscard]] std::uint64_t filling_length() const noexcept {
+        return store_.chunk_length(id_.total_bytes, filling_index());
     }
 
     void start_upload() noexcept {
         const std::uint64_t length = filling_.size();
-        const std::uint64_t index = (next_ - length) / id_.chunk_size;
+        const std::uint64_t index = filling_index();
         uploading_ = Upload{.index = index, .length = length, .bytes = std::move(filling_)};
         filling_.clear();
         schedule();

@@ -131,6 +131,16 @@ TEST_P(StoreConformance, CommitIsIdempotent) {
     EXPECT_TRUE(*stored == data);
 }
 
+TEST_P(StoreConformance, ObjectEndingInAShortChunkCommitsWhole) {
+    const auto data = ulw::test::pattern((2 * chunk) + (chunk / 2), 5);
+    const IngestId id = ulw::test::upload_whole(*harness, key("short-tail"), data);
+    EXPECT_EQ(harness->ingest().durable_offset(id), data.size());
+    ASSERT_TRUE(harness->ingest().commit(id));
+    const auto stored = harness->reader().fetch_small(id.key, data.size());
+    ASSERT_TRUE(stored);
+    EXPECT_TRUE(*stored == data);
+}
+
 TEST_P(StoreConformance, WriteReportsBackpressureNotFailure) {
     const auto data = ulw::test::pattern(4 * chunk);
     const IngestId id = create("backpressure", data.size());
