@@ -56,6 +56,15 @@ target_include_directories(test_storage_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DI
     ${CMAKE_CURRENT_SOURCE_DIR}/conformance)
 target_link_libraries(test_storage_harness PUBLIC ulw::storage_fake ulw::storage_fs ulw::net_lib GTest::gtest)
 
+ulw_add_library(test_live_s3 support/live_s3.cpp)
+target_include_directories(test_live_s3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_live_s3 PUBLIC ulw::curl_multi ulw::s3util ulw::os)
+
+if(ULW_CONFORMANCE_LIVE)
+    target_link_libraries(test_storage_harness PUBLIC ulw::storage_s3 ulw::test_live_s3)
+    target_compile_definitions(test_storage_harness PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
+
 ulw_add_test_suite(storage_conformance_tests conformance
     conformance/fake_store_faults_test.cpp
     conformance/fs_store_test.cpp
