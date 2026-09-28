@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <optional>
 #include <span>
 #include <stop_token>
@@ -314,6 +315,12 @@ private:
 
     std::expected<void, std::string> upload(const fs::path& file, const std::string& key,
                                             Output kind) {
+        // ffmpeg ran on hostile input with write access to this tree; a link it left could
+        // name any file the worker can read, such as its own /proc/self/environ.
+        std::error_code ec;
+        if (!fs::is_regular_file(fs::symlink_status(file, ec))) {
+            return std::unexpected("not a regular file: " + file.filename().string());
+        }
         const auto parsed = core::StorageKey::parse(key);
         if (!parsed) {
             return std::unexpected("unaddressable output " + key);
@@ -324,37 +331,50 @@ private:
         return {};
     }
 
+    // A rung's init and media segments, in name order.
+    std::expected<void, std::string> publish_segments(const fs::path& dir,
+                                                      const std::string& rung) {
+        std::vector<fs::path> files;
+        std::error_code ec;
+        if (!fs::is_directory(fs::symlink_status(dir, ec))) {
+            return std::unexpected(rung + ": not a directory");
+        }
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            files.push_back(entry.path());
+        }
+        if (ec) {
+            return std::unexpected(rung + ": " + ec.message());
+        }
+        std::ranges::sort(files);
+        for (const fs::path& file : files) {
+            const std::string name = file.filename().string();
+            if (name == "index.m3u8") {
+                continue;
+            }
+            std::optional<Output> kind;
+            if (file.extension() == ".m4s") {
+                kind = Output::Segment;
+            } else if (file.extension() == ".mp4") {
+                kind = Output::Init;
+            } else {
+                return std::unexpected("unexpected output " + name);
+            }
+            if (auto r =
+                    upload(file, output_key(job_.video, std::format("{}/{}", rung, name)), *kind);
+                !r) {
+                return r;
+            }
+        }
+        return {};
+    }
+
     // Segments, then media playlists, then the master: a reader who finds a playlist finds
     // everything it names, and the master, written last, is the commit point.
     std::expected<std::vector<core::ports::Rendition>, std::string>
     publish(const fs::path& out, std::span<const core::Rung> ladder, bool has_audio) {
         for (const core::Rung& rung : ladder) {
-            std::vector<fs::path> files;
-            std::error_code ec;
-            for (const auto& entry : fs::directory_iterator(out / rung.name, ec)) {
-                files.push_back(entry.path());
-            }
-            if (ec) {
-                return std::unexpected(rung.name + ": " + ec.message());
-            }
-            std::ranges::sort(files);
-            for (const fs::path& file : files) {
-                const std::string name = file.filename().string();
-                if (name == "index.m3u8") {
-                    continue;
-                }
-                std::optional<Output> kind;
-                if (file.extension() == ".m4s") {
-                    kind = Output::Segment;
-                } else if (file.extension() == ".mp4") {
-                    kind = Output::Init;
-                } else {
-                    return std::unexpected("unexpected output " + name);
-                }
-                if (auto r = upload(file, output_key(job_.video, rung.name + "/" + name), *kind);
-                    !r) {
-                    return std::unexpected(r.error());
-                }
+            if (auto r = publish_segments(out / rung.name, rung.name); !r) {
+                return std::unexpected(r.error());
             }
         }
         std::vector<core::ports::Rendition> renditions;

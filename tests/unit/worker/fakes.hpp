@@ -168,6 +168,8 @@ public:
     std::optional<core::ports::TranscodeError> verify_failure;
     // Runs inside run(), before it writes anything, with the stop token it was given.
     std::function<void(core::ports::ITranscodeProgress&, const std::stop_token&)> during_run;
+    // Runs once run() has written its output, with the directory it wrote.
+    std::function<void(const std::filesystem::path&)> after_run;
     int runs = 0;
 
     core::ports::TranscodeResult<core::ports::MediaInfo> probe(const std::filesystem::path& input,
@@ -212,6 +214,9 @@ public:
             std::ofstream(dir / "seg_00000.m4s") << "segment 0";
             std::ofstream(dir / "seg_00001.m4s") << "segment 1";
             std::ofstream(dir / "index.m3u8") << "#EXTM3U\n";
+        }
+        if (after_run) {
+            after_run(out_dir);
         }
         return core::ports::TranscodeStats{.wall = core::Millis{4000}, .peak_rss_kib = 1234};
     }

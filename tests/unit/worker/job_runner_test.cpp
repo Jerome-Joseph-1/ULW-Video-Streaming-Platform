@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
@@ -189,6 +190,53 @@ TEST_F(JobRunnerTest, ATranscodeThatFailsOnAFullDiskIsRetriedNotFailed) {
     transcoder.run_failures.push_back(failure(TranscodeFailure::Rejected, 1));
     EXPECT_EQ(run(), JobOutcome::Requeued);
     EXPECT_EQ(writes(), std::vector<std::string>{"queue fail retryable scratch space ran out"});
+}
+
+// Whatever the worker can read and a sandboxed ffmpeg cannot: its environment, say.
+class JobRunnerLinkTest : public JobRunnerTest {
+protected:
+    JobRunnerLinkTest() { std::ofstream(secret_.path() / "environ") << "ULW_DATABASE_URL=secret"; }
+
+    [[nodiscard]] bool secret_uploaded() const {
+        return std::ranges::any_of(transfer.objects(), [](const auto& object) {
+            return object.second.find("secret") != std::string::npos;
+        });
+    }
+
+    ulw::test::TempDir secret_{"ulw-worker-secret"};
+};
+
+TEST_F(JobRunnerLinkTest, ALinkAmongTheSegmentsIsNeverFollowed) {
+    transcoder.after_run = [this](const std::filesystem::path& out) {
+        std::filesystem::create_symlink(secret_.path() / "environ", out / "720p" / "seg_00002.m4s");
+    };
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_FALSE(secret_uploaded());
+    EXPECT_EQ(transfer.objects().count(kPrefix + "master.m3u8"), 0U);
+}
+
+TEST_F(JobRunnerLinkTest, ALinkedMasterPlaylistIsNeverFollowed) {
+    transcoder.after_run = [this](const std::filesystem::path& out) {
+        std::filesystem::remove(out / "master.m3u8");
+        std::filesystem::create_symlink(secret_.path() / "environ", out / "master.m3u8");
+    };
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_FALSE(secret_uploaded());
+    EXPECT_EQ(transfer.objects().count(kPrefix + "master.m3u8"), 0U);
+}
+
+TEST_F(JobRunnerLinkTest, ALinkedRungDirectoryIsNeverFollowed) {
+    // Every name in it is one publish expects, and every file in it is a regular file.
+    const auto elsewhere = secret_.path() / "rung";
+    std::filesystem::create_directory(elsewhere);
+    std::filesystem::copy_file(secret_.path() / "environ", elsewhere / "seg_00000.m4s");
+    std::ofstream(elsewhere / "index.m3u8") << "#EXTM3U\n";
+    transcoder.after_run = [elsewhere](const std::filesystem::path& out) {
+        std::filesystem::remove_all(out / "360p");
+        std::filesystem::create_directory_symlink(elsewhere, out / "360p");
+    };
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_FALSE(secret_uploaded());
 }
 
 TEST_F(JobRunnerTest, AMissingSourceFailsTheJob) {
