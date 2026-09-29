@@ -1,13 +1,15 @@
 // ulw_sandbox --writable DIR --address-space BYTES --cpu-seconds N [--file-size BYTES]
-//             -- PROGRAM [ARGS...]
+//             [--no-syscall-filter] -- PROGRAM [ARGS...]
 //
 // Runs PROGRAM confined: an empty network namespace (unshare -n), a pid namespace with a
 // /proc of its own, every mount read-only except DIR, the given RLIMIT_AS and RLIMIT_CPU, and
 // when asked for RLIMIT_FSIZE, the size a file may grow to (SIGXFSZ ends a program at it), no
-// core dumps, no descriptors beyond the standard three, and no capabilities, so the program
-// cannot undo any of it. posix_spawn cannot do any of this in the child, hence a separate
-// program. Without a PROGRAM it sets everything up and exits 0, which is how the worker checks
-// at startup that the host allows it.
+// core dumps, no descriptors beyond the standard three, no capabilities, so the program
+// cannot undo any of it, and last a seccomp filter that kills it for any system call ffmpeg
+// has no use for (seccomp_filter.hpp). --no-syscall-filter leaves that one out, for tests that
+// need an ordinary shell as the program. posix_spawn cannot do any of this in the child, hence a
+// separate program. Without a PROGRAM it sets everything up and exits 0, which is how the worker
+// checks at startup that the host allows it.
 //
 // Three processes: this helper, which the worker started; its child, pid 1 of the new pid
 // namespace; and PROGRAM, pid 1's child. When pid 1 exits the kernel kills everything left in
@@ -21,6 +23,8 @@
 // Exit codes of its own: 125 when a confinement step fails, 126 when PROGRAM cannot be
 // executed, 127 when it is not found.
 #include "core/util/parse.hpp"
+
+#include "seccomp_filter.hpp"
 
 #include <linux/capability.h>
 #include <linux/securebits.h>
@@ -63,6 +67,7 @@ struct Options {
     rlim_t cpu_seconds = 0;
     // 0: no limit on the size of a file the program writes.
     rlim_t file_size = 0;
+    bool syscall_filter = true;
     std::vector<char*> program;
 };
 
@@ -73,7 +78,8 @@ struct Options {
 
 [[noreturn]] void usage() {
     std::println(stderr, "usage: ulw_sandbox --writable DIR --address-space BYTES "
-                         "--cpu-seconds N -- [PROGRAM ARGS...]");
+                         "--cpu-seconds N [--file-size BYTES] [--no-syscall-filter] -- "
+                         "[PROGRAM ARGS...]");
     std::_Exit(kSetupFailed);
 }
 
@@ -85,6 +91,10 @@ Options parse(std::span<char*> args) {
         if (flag == "--") {
             ++i;
             break;
+        }
+        if (flag == "--no-syscall-filter") {
+            options.syscall_filter = false;
+            continue;
         }
         if (i + 1 == args.size()) {
             usage();
@@ -270,9 +280,8 @@ int wait_passing_signals(pid_t child, const sigset_t& signals) {
         die("close descriptors", errno);
     }
     drop_capabilities();
-    if (options.program.front() == nullptr) {
-        std::_Exit(EXIT_SUCCESS);
-    }
+    // Even with nothing to run, the child is started and filtered, which is how the worker
+    // learns at startup that the host lets it install the filter.
     // This helper runs no threads, so the forked child may do anything.
     // NOLINTNEXTLINE(concurrency-mt-unsafe)
     const pid_t program = ::fork();
@@ -283,6 +292,14 @@ int wait_passing_signals(pid_t child, const sigset_t& signals) {
         sigset_t none;
         sigemptyset(&none);
         ::pthread_sigmask(SIG_SETMASK, &none, nullptr);
+        // After everything else, which the filter would not let the child do, and not in pid 1,
+        // which forks the program.
+        if (options.syscall_filter && !infra::ffmpeg::seccomp::install()) {
+            die("syscall filter", errno);
+        }
+        if (options.program.front() == nullptr) {
+            std::_Exit(EXIT_SUCCESS);
+        }
         ::execvp(options.program.front(), options.program.data());
         const int error = errno;
         std::println(stderr, "ulw_sandbox: exec {}: {}", options.program.front(),

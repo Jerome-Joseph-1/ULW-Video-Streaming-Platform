@@ -1,4 +1,5 @@
 #include "core/errors/domain_error.hpp"
+#include "core/ports/media.hpp"
 #include "core/ports/storage.hpp"
 
 #include <cstdint>
@@ -10,6 +11,7 @@
 namespace {
 
 using core::DomainError;
+using core::ports::MediaError;
 using core::ports::StorageError;
 
 // Walks every value up to `last` and then one past it: the fallback message there proves `last`
@@ -32,6 +34,10 @@ TEST(DomainError, EveryEnumeratorHasItsOwnMessage) {
 
 TEST(StorageError, EveryEnumeratorHasItsOwnMessage) {
     expect_distinct_messages(StorageError::Corrupt, "unknown storage error");
+}
+
+TEST(MediaError, EveryEnumeratorHasItsOwnMessage) {
+    expect_distinct_messages(MediaError::Closed, "unknown media error");
 }
 
 } // namespace

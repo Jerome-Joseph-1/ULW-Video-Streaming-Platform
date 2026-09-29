@@ -1,0 +1,83 @@
+# Aborts uploads past their expires_at, fails their videos, and releases what the store holds
+# for them (docs/adr/0049). One pass per run; the gateway image carries ulw_reaper, so the
+# reaper's SQL and advisory-lock key always come from the build the gateways run.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: upload-reaper
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: upload-reaper
+    app.kubernetes.io/part-of: ulw
+spec:
+  schedule: "*/15 * * * *"
+  # A pass that overruns its slot is not started twice beside itself.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A failed pass is the next slot's to repeat; the Job's failure is what alerts.
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: upload-reaper
+            app.kubernetes.io/part-of: ulw
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reaper
+              image: git.askedin.com/askedin/askedin-monorepo/video-gateway:master
+              imagePullPolicy: Always
+              command: ["/usr/local/bin/ulw_reaper"]
+              env:
+                - name: ULW_STORAGE
+                  value: r2
+                - name: ULW_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: video-gateway-secrets
+                      key: ULW_DATABASE_URL
+                - name: ULW_R2_ACCOUNT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: video-gateway-secrets
+                      key: ULW_R2_ACCOUNT_ID
+                - name: ULW_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: video-gateway-secrets
+                      key: ULW_BUCKET
+                - name: ULW_S3_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: video-gateway-secrets
+                      key: ULW_S3_ACCESS_KEY_ID
+                - name: ULW_S3_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: video-gateway-secrets
+                      key: ULW_S3_SECRET_ACCESS_KEY
+              # One libpq session and one libcurl handle, working through a batch of 100 rows
+              # at a time.
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]

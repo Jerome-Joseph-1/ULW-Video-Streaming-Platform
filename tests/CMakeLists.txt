@@ -307,6 +307,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_job_queue_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
+    integration/postgres_upload_reaper_test.cpp
     PROPERTIES RESOURCE_LOCK postgres)
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests
@@ -314,6 +315,25 @@ target_include_directories(postgres_integration_tests
 target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
+
+ulw_add_test_suite(reaper_unit_tests unit
+    unit/reaper/config_test.cpp
+    unit/reaper/reaper_test.cpp)
+target_link_libraries(reaper_unit_tests PRIVATE ulw::reaper_lib)
+target_include_directories(reaper_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+# The reaper against the Postgres and MinIO of deploy/local/compose.yaml.
+ulw_add_test_suite(reaper_integration_tests integration
+    integration/postgres_harness.cpp
+    integration/upload_reaper_live_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(reaper_integration_tests PRIVATE
+    ulw::reaper_lib ulw::pg_store ulw::storage_s3 ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
+target_include_directories(reaper_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(reaper_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 
 # The room registry's store against a live Postgres, as the suite above.
 ulw_add_test_suite(room_store_integration_tests integration
@@ -454,20 +474,27 @@ target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/a
     ${PROJECT_SOURCE_DIR}/tests)
 
 if(ULW_BUILD_WORKER)
+    # Run under the sandbox's syscall filter, so like the helper it links nothing instrumented.
+    add_executable(ulw_syscall_probe support/syscall_probe_main.cpp)
+    target_compile_features(ulw_syscall_probe PRIVATE cxx_std_23)
+    target_link_libraries(ulw_syscall_probe PRIVATE ulw_warnings)
+
     ulw_add_test_suite(ffmpeg_unit_tests unit
         unit/ffmpeg/command_test.cpp
         unit/ffmpeg/exit_code_test.cpp
         unit/ffmpeg/hls_rewrite_test.cpp
         unit/ffmpeg/live_command_test.cpp
         unit/ffmpeg/progress_test.cpp
-        unit/ffmpeg/sandbox_test.cpp)
+        unit/ffmpeg/sandbox_test.cpp
+        unit/ffmpeg/seccomp_filter_test.cpp)
     target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
     # White-box tests of the adapter internals, and the real sandbox helper.
     target_include_directories(ffmpeg_unit_tests
         PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${PROJECT_SOURCE_DIR}/tests)
     target_compile_definitions(ffmpeg_unit_tests
-        PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>")
-    add_dependencies(ffmpeg_unit_tests ulw_sandbox)
+        PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
+                ULW_SYSCALL_PROBE_BIN="$<TARGET_FILE:ulw_syscall_probe>")
+    add_dependencies(ffmpeg_unit_tests ulw_sandbox ulw_syscall_probe)
 
     ulw_add_test_suite(worker_unit_tests unit
         unit/worker/config_test.cpp
@@ -558,6 +585,20 @@ if(ULW_BUILD_WORKER)
     endif()
     add_dependencies(playback_integration_tests gateway_server)
 endif()
+
+ulw_add_test_suite(sfu_unit_tests unit
+    unit/sfu/access_token_test.cpp
+    unit/sfu/livekit_sfu_test.cpp
+    unit/sfu/room_service_test.cpp)
+target_link_libraries(sfu_unit_tests PRIVATE ulw::sfu_livekit ulw::auth ulw::test_http_server
+    OpenSSL::Crypto)
+# White-box tests of token minting and of how RoomService answers are read.
+target_include_directories(sfu_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src
+    ${PROJECT_SOURCE_DIR}/tests)
+
+# The signalling side of the call suite, tests/call/run.sh.
+ulw_add_executable(ulw_call_harness call/harness_main.cpp)
+target_link_libraries(ulw_call_harness PRIVATE ulw::sfu_livekit ulw::os)
 
 ulw_add_test_suite(sdp_unit_tests unit
     unit/sdp/attributes_test.cpp

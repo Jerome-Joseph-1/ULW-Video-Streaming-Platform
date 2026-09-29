@@ -46,6 +46,10 @@ TEST(ExitCode, AnyOtherSignalIsAKill) {
     EXPECT_EQ(classify(255, kExited, Ending::Exited), TranscodeFailure::Killed);
 }
 
+TEST(ExitCode, AKillBySeccompIsItsOwnKindNeitherARejectionNorAPlainKill) {
+    EXPECT_EQ(killed_by(SIGSYS), TranscodeFailure::SyscallBlocked);
+}
+
 TEST(ExitCode, ACpuLimitReachedIsABudgetWhateverTheSignal) {
     // ffmpeg catches SIGXCPU; the hard limit's SIGKILL a second later is what ends it.
     EXPECT_EQ(killed_by(SIGKILL, Ending::CpuExhausted), TranscodeFailure::OverBudget);

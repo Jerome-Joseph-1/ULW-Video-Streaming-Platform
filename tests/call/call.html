@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ULW call peer</title>
+<script>
+  // The SDK keeps its peer connections private. Recording them as they are made lets the test
+  // read ICE state and RTP statistics through the standard API instead of SDK internals.
+  window.peerConnections = [];
+  const Native = window.RTCPeerConnection;
+  window.RTCPeerConnection = class extends Native {
+    constructor(...args) {
+      super(...args);
+      window.peerConnections.push(this);
+    }
+  };
+</script>
+<script src="/livekit-client.umd.js"></script>
+</head>
+<body>
+<script>
+  const { Room, RoomEvent } = LivekitClient;
+  window.events = [];
+  const note = (type, detail = {}) => window.events.push({ type, at: Date.now(), ...detail });
+
+  window.join = async ({ url, token }) => {
+    // Off so that every packet sent is counted as received. Layer selection is left to these two
+    // in the product (ADR-0050, M28); they are not the default to copy.
+    const room = new Room({ adaptiveStream: false, dynacast: false });
+    window.room = room;
+    room.on(RoomEvent.ParticipantConnected, (p) => note('participant-connected', { who: p.identity }));
+    room.on(RoomEvent.ParticipantDisconnected, (p) => note('participant-disconnected', { who: p.identity }));
+    room.on(RoomEvent.TrackSubscribed, (track, _pub, p) =>
+      note('track-subscribed', { who: p.identity, kind: track.kind }));
+    room.on(RoomEvent.TrackUnsubscribed, (track, _pub, p) =>
+      note('track-unsubscribed', { who: p.identity, kind: track.kind }));
+    room.on(RoomEvent.Reconnecting, () => note('reconnecting'));
+    room.on(RoomEvent.Disconnected, (reason) => note('disconnected', { reason }));
+    await room.connect(url, token);
+    await room.localParticipant.enableCameraAndMicrophone();
+    return room.localParticipant.identity;
+  };
+
+  // What a client that kept its last credential would do after being put out: try again with it.
+  window.tryConnect = async ({ url, token }) => {
+    const room = new Room();
+    try {
+      await room.connect(url, token);
+      const identity = room.localParticipant.identity;
+      await room.disconnect();
+      return { admitted: true, identity };
+    } catch (e) {
+      return { admitted: false, error: String(e.message ?? e) };
+    }
+  };
+
+  // A WHIP client (RFC 9725) in a few lines: the ingest path takes a plain peer connection, no
+  // SDK. Candidates go in the offer, so nothing trickles. Headless Chrome gathers its host
+  // candidates at once but never reports gathering complete here, so the offer goes after one
+  // second; LiveKit learns the browser's real address from its first connectivity check anyway.
+  window.whipPublish = async ({ url, token }) => {
+    const media = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
+    for (const track of media.getTracks()) pc.addTransceiver(track, { direction: 'sendonly' });
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1000);
+      pc.addEventListener('icegatheringstatechange', () => {
+        if (pc.iceGatheringState === 'complete') resolve();
+      });
+    });
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/sdp', authorization: `Bearer ${token}` },
+      body: pc.localDescription.sdp,
+    });
+    if (response.status === 201) {
+      await pc.setRemoteDescription({ type: 'answer', sdp: await response.text() });
+    }
+    return response.status;
+  };
+
+  window.selectedPaths = async () => {
+    const out = [];
+    for (const pc of window.peerConnections.filter((c) => c.connectionState !== 'closed')) {
+      const stats = new Map();
+      (await pc.getStats()).forEach((s) => stats.set(s.id, s));
+      for (const s of stats.values()) {
+        if (s.type !== 'transport' || !s.selectedCandidatePairId) continue;
+        const pair = stats.get(s.selectedCandidatePairId);
+        out.push({ local: stats.get(pair.localCandidateId).candidateType,
+                   remote: stats.get(pair.remoteCandidateId).candidateType });
+      }
+    }
+    return out;
+  };
+
+  // Connections of rooms already left are closed and have nothing more to say.
+  window.mediaStats = async () => {
+    const out = [];
+    for (const pc of window.peerConnections.filter((c) => c.connectionState !== 'closed')) {
+      const inbound = { audio: 0, video: 0 };
+      (await pc.getStats()).forEach((s) => {
+        if (s.type === 'inbound-rtp') inbound[s.kind] += s.packetsReceived;
+      });
+      out.push({ ice: pc.iceConnectionState, inbound });
+    }
+    return out;
+  };
+</script>
+</body>
+</html>

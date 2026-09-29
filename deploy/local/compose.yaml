@@ -9,6 +9,10 @@
 # otherwise; the tests that pause it (docker pause) find it by container name, ulw-pg, or by
 # ULW_TEST_PG_CONTAINER. The live storage suites (ULW_CONFORMANCE_LIVE=ON) use MinIO on
 # 127.0.0.1:9000 with the credentials below, which tests/support/live_s3.cpp defaults to.
+# The call suite (tests/call/run.sh) uses the LiveKit server on 127.0.0.1:7880 with the fake API
+# key below; it runs only when asked for:
+#
+#   docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit
 services:
   postgres:
     # postgres:16 (16.15), pinned by digest so every checkout tests against the same server.
@@ -37,12 +41,58 @@ services:
       # or the E2E suite's page server is on (ADR-0028). The server's default, spelled out so
       # it is not lost to a change of image.
       MINIO_API_CORS_ALLOW_ORIGIN: "*"
+      # Incomplete multipart uploads are aborted after 7 days, as R2's lifecycle rule does.
+      # MinIO takes no AbortIncompleteMultipartUpload rule; this server-wide setting is its
+      # equivalent, and its 24 hour default would cut short uploads the gateway allows 6 days.
+      MINIO_API_STALE_UPLOADS_EXPIRY: 168h
+      # `mc admin config get local api` keeps showing the stored stale_uploads_expiry=24h and
+      # lists this override as a comment line: '# MINIO_API_STALE_UPLOADS_EXPIRY=168h'.
     ports:
       - "127.0.0.1:9000:9000"
     tmpfs:
       - /data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  livekit:
+    # livekit/livekit-server v1.13.7, pinned by digest (ADR-0020).
+    image: docker.io/livekit/livekit-server@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3
+    container_name: ulw-livekit
+    profiles: ["calls"]
+    environment:
+      # The key and secret are fake and guard nothing but loopback ports. HS256 wants a key of
+      # at least 256 bits (RFC 7518 section 3.2), hence the padding.
+      LIVEKIT_CONFIG: |
+        port: 7880
+        bind_addresses: ["0.0.0.0"]
+        keys:
+          ulw-dev-key: ulw-dev-secret-testtest123-not-a-real-secret
+        rtc:
+          # ICE candidates advertise loopback: the browsers under test run on this host, and
+          # nothing else may reach the SFU. STUNner fronts it everywhere else (ADR-0013).
+          node_ip: 127.0.0.1
+          use_external_ip: false
+          tcp_port: 7881
+          # One UDP port per peer connection, and a participant holds two (publish and
+          # subscribe): 20 ports carry the 10 connections of five 1:1 calls, more than any local
+          # run makes, while keeping the published range, and docker's per-port forwarders, small.
+          port_range_start: 50000
+          port_range_end: 50019
+        room:
+          # Rooms exist only because the signalling server opened them; a ticket for a room
+          # that has gone must not bring it back with default settings.
+          auto_create: false
+        logging:
+          level: info
+    ports:
+      - "127.0.0.1:7880:7880"
+      - "127.0.0.1:7881:7881"
+      - "127.0.0.1:50000-50019:50000-50019/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7880/"]
       interval: 2s
       timeout: 2s
       retries: 15
