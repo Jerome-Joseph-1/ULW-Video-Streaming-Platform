@@ -40,6 +40,9 @@ enum class TranscodeFailure : std::uint8_t {
     OverBudget,
     // The caller's stop token fired.
     Stopped,
+    // The sandbox's syscall filter killed the child (SIGSYS): the input drove ffmpeg to a call
+    // outside its allowlist. Treated as a crash, since a gap in the allowlist is ours to fix.
+    SyscallBlocked,
     // The sandbox could not be set up or the program could not be started.
     Sandbox,
     // The output exists but failed verification.
