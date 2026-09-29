@@ -466,6 +466,13 @@ void Session::on_timeout() noexcept {
     }
 }
 
+// A lossy client that fell behind is owed messages until its connection has drained.
+void Session::on_writable() noexcept {
+    if (phase_ == Phase::Open && client_) {
+        server_.chat().drained(*client_);
+    }
+}
+
 void Session::on_peer_eof() noexcept {
     close();
 }

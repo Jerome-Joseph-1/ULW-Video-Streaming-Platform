@@ -87,6 +87,7 @@ public:
             return false;
         }
         got.emplace_back(text);
+        unsent += growth;
         return true;
     }
     [[nodiscard]] std::size_t unsent_bytes() const noexcept override { return unsent; }
@@ -97,6 +98,8 @@ public:
 
     std::vector<std::string> got;
     std::size_t unsent = 0;
+    // Added to unsent by every push, for a connection that is not reading.
+    std::size_t growth = 0;
     bool closing = false;
     int failures = 0;
 };
@@ -349,7 +352,9 @@ TEST_F(ChatServiceTest, AFailedJoinIsReportedAndTheNextJoinAsksAgain) {
     EXPECT_EQ(rooms_.joins.size(), 1U);
 }
 
-TEST_F(ChatServiceTest, AClientBehindInALossyRoomIsSkippedAndCountedWhileADurableOneIsNot) {
+constexpr std::size_t kBehind = std::size_t{64} * 1024 + 1;
+
+TEST_F(ChatServiceTest, ALossyClientThatFellBehindIsSentWhatItMissedInOrderOnceItDrains) {
     FakeClient viewer;
     FakeClient member;
     const auto v = attach(viewer);
@@ -360,15 +365,122 @@ TEST_F(ChatServiceTest, AClientBehindInALossyRoomIsSkippedAndCountedWhileADurabl
     viewer.take();
     member.take();
     deliver(room, 1);
-    viewer.unsent = member.unsent = std::size_t{64} * 1024 + 1;
+    viewer.unsent = member.unsent = kBehind;
     deliver(room, 2);
-    viewer.unsent = member.unsent = 0;
     deliver(room, 3);
-    EXPECT_EQ(seqs(viewer.take()), (std::vector<std::uint64_t>{1, 3}));
+    // Room again on its socket, but 2 and 3 are still owed: 4 must not overtake them.
+    viewer.unsent = member.unsent = 0;
+    deliver(room, 4);
+    EXPECT_EQ(seqs(viewer.take()), std::vector<std::uint64_t>{1});
+    service_->drained(v);
+    EXPECT_EQ(seqs(viewer.take()), (std::vector<std::uint64_t>{2, 3, 4}));
+    deliver(room, 5);
+    EXPECT_EQ(seqs(viewer.take()), std::vector<std::uint64_t>{5});
+    // Caught up, a drain sends nothing twice.
+    service_->drained(v);
+    EXPECT_TRUE(viewer.take().empty());
     // A durable client is never skipped; one too far behind is closed by its connection, and
     // resumes.
-    EXPECT_EQ(seqs(member.take()), (std::vector<std::uint64_t>{1, 2, 3}));
-    EXPECT_EQ(service_->counters().lossy_drops, 1U);
+    EXPECT_EQ(seqs(member.take()), (std::vector<std::uint64_t>{1, 2, 3, 4, 5}));
+    EXPECT_EQ(service_->counters().lossy_drops, 0U);
+    EXPECT_EQ(service_->counters().delivered, 10U);
+}
+
+TEST_F(ChatServiceTest, AStalledLossyClientIsOwedOnlyTheNewestAndTheOlderAreCountedAsDropped) {
+    FakeClient stalled;
+    FakeClient keeping_up;
+    FakeClient member;
+    const auto s = attach(stalled);
+    const auto k = attach(keeping_up, "carol");
+    const auto m = attach(member, "bob");
+    join(s, std::nullopt, chat::Delivery::Lossy);
+    join(k, std::nullopt, chat::Delivery::Lossy);
+    join(m);
+    rt::IMember& room = rooms_.admit();
+    for (FakeClient* c : {&stalled, &keeping_up, &member}) {
+        c->take();
+    }
+    stalled.unsent = kBehind;
+    constexpr std::uint64_t kSent = 200;
+    std::vector<std::uint64_t> all;
+    for (std::uint64_t seq = 1; seq <= kSent; ++seq) {
+        deliver(room, seq);
+        all.push_back(seq);
+    }
+    EXPECT_TRUE(stalled.take().empty());
+    // Dropped as they fall out of the newest 64, not later: a client that never reads again
+    // is counted all the same.
+    EXPECT_EQ(service_->counters().lossy_drops, kSent - 64);
+    EXPECT_EQ(seqs(keeping_up.take()), all);
+    EXPECT_EQ(seqs(member.take()), all);
+
+    stalled.unsent = 0;
+    service_->drained(s);
+    std::vector<std::uint64_t> newest(all.end() - 64, all.end());
+    EXPECT_EQ(seqs(stalled.take()), newest);
+    EXPECT_EQ(service_->counters().lossy_drops, kSent - 64);
+}
+
+TEST_F(ChatServiceTest, CatchingUpStopsWhenTheConnectionIsBehindAgainAndGoesOnAtTheNextDrain) {
+    FakeClient viewer;
+    const auto v = attach(viewer);
+    join(v, std::nullopt, chat::Delivery::Lossy);
+    rt::IMember& room = rooms_.admit();
+    viewer.take();
+    viewer.unsent = kBehind;
+    for (std::uint64_t seq = 1; seq <= 5; ++seq) {
+        deliver(room, seq);
+    }
+    // Each message it is sent sits 40 KiB deep on its socket: two of them are past the backlog.
+    viewer.growth = std::size_t{40} * 1024;
+    for (const std::vector<std::uint64_t>& expected :
+         {std::vector<std::uint64_t>{1, 2}, {3, 4}, {5}}) {
+        viewer.unsent = 0;
+        service_->drained(v);
+        EXPECT_EQ(seqs(viewer.take()), expected);
+    }
+    viewer.unsent = 0;
+    deliver(room, 6);
+    EXPECT_EQ(seqs(viewer.take()), std::vector<std::uint64_t>{6});
+}
+
+class SmallLossyBuffer : public ChatServiceTest {
+protected:
+    // Four ordinary messages per room ("hi" and its overhead are 258 bytes each).
+    SmallLossyBuffer() : ChatServiceTest({.room_buffer_bytes = 4 * 258}) {}
+};
+
+TEST_F(SmallLossyBuffer, WhatTheRoomNoLongerKeepsIsDroppedForAClientBehindAsItGoes) {
+    FakeClient viewer;
+    const auto v = attach(viewer);
+    join(v, std::nullopt, chat::Delivery::Lossy);
+    rt::IMember& room = rooms_.admit();
+    viewer.take();
+    viewer.unsent = kBehind;
+    for (std::uint64_t seq = 1; seq <= 10; ++seq) {
+        deliver(room, seq);
+    }
+    EXPECT_EQ(service_->counters().lossy_drops, 6U);
+    viewer.unsent = 0;
+    service_->drained(v);
+    EXPECT_EQ(seqs(viewer.take()), (std::vector<std::uint64_t>{7, 8, 9, 10}));
+}
+
+TEST_F(ChatServiceTest, JoiningAgainForgetsWhatALossyClientWasOwed) {
+    FakeClient viewer;
+    const auto v = attach(viewer);
+    join(v, std::nullopt, chat::Delivery::Lossy);
+    rt::IMember& room = rooms_.admit();
+    viewer.take();
+    viewer.unsent = kBehind;
+    deliver(room, 1);
+    deliver(room, 2);
+    viewer.unsent = 0;
+    join(v);
+    EXPECT_EQ(seen(viewer.take().at(0)).type, "joined");
+    deliver(room, 3);
+    service_->drained(v);
+    EXPECT_EQ(seqs(viewer.take()), std::vector<std::uint64_t>{3});
 }
 
 TEST_F(ChatServiceTest, AClientResumingAfterASeqGetsWhatThisNodeKeptSinceInOrder) {

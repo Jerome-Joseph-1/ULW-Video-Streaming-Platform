@@ -1,3 +1,4 @@
+#include "core/util/json.hpp"
 #include "infra/auth/base64url.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <future>
 #include <gtest/gtest.h>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -318,6 +320,89 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     // loaded machine, on the real clock the reactor's timers run on.
     EXPECT_GE(lasted, std::chrono::milliseconds(1'100));
     EXPECT_LT(lasted, std::chrono::milliseconds(1'900));
+}
+
+// The seq of a message frame, or nullopt for anything else.
+std::optional<std::uint64_t> message_seq(const std::string& text) {
+    const auto json = core::json::parse(text);
+    if (!json || json->find("type") == nullptr ||
+        json->find("type")->as_string() != std::optional<std::string_view>("message")) {
+        return std::nullopt;
+    }
+    return json->find("seq")->as_u64();
+}
+
+TEST_P(ChatSessionTest, AViewerThatStopsReadingSkipsToTheNewestWhileOthersMissNothing) {
+    node_.reset();
+    // One sender's burst stands in for a busy room's many senders.
+    node_ = std::make_unique<Node>(
+        GetParam(), chat::Limits{.service = {.send_burst = 1'000,
+                                             .max_send_bytes_in_flight = std::size_t{1} << 20U}});
+    auto viewer = open_as("viewer");
+    auto reader = open_as("reader");
+    auto sender = open_as("sender");
+    ASSERT_TRUE(viewer && reader && sender);
+    const std::string room = std::string(kRoom);
+    ASSERT_TRUE(
+        viewer->send_text(R"({"type":"join","room":")" + room + R"(","delivery":"lossy"})"));
+    for (auto* ws : {&*reader, &*sender}) {
+        ASSERT_TRUE(ws->send_text(R"({"type":"join","room":")" + room + R"("})"));
+    }
+    for (auto* ws : {&*viewer, &*reader, &*sender}) {
+        ASSERT_EQ(ws->next_text(seconds(10)).value_or("").find(R"("type":"joined")"), 1U);
+    }
+
+    // The viewer reads nothing from here on. 400 messages of about 2.8 KiB on the wire are
+    // 1.1 MiB: past what its socket buffers take (64 KiB of send buffer and the client's
+    // receive window), the 64 KiB a lossy client may have queued, and the 64 it is owed.
+    constexpr std::uint64_t kMessages = 400;
+    const std::string body = infra::auth::encode_base64url(std::string(2'000, 'x'));
+    std::uint64_t heard = 0;
+    for (std::uint64_t i = 0; i < kMessages; i += 10) {
+        for (std::uint64_t k = i; k < i + 10; ++k) {
+            ASSERT_TRUE(sender->send_text(R"({"type":"send","room":")" + room + R"(","id":"s)" +
+                                          std::to_string(k) + R"(","body":")" + body + R"("})"));
+        }
+        // The durable reader keeps up, and gets every message in order. So does the sender,
+        // which would otherwise be closed for falling behind.
+        while (heard < i + 10) {
+            const auto text = reader->next_text(seconds(10));
+            ASSERT_TRUE(text);
+            if (const auto seq = message_seq(*text)) {
+                ASSERT_EQ(*seq, ++heard);
+            }
+        }
+        for (std::uint64_t own = 0; own < heard;) {
+            const auto text = sender->next_text(seconds(10));
+            ASSERT_TRUE(text);
+            own = message_seq(*text).value_or(own);
+        }
+    }
+
+    std::vector<std::uint64_t> seqs;
+    while (seqs.empty() || seqs.back() < kMessages) {
+        const auto text = viewer->next_text(seconds(10));
+        ASSERT_TRUE(text) << "the viewer stopped at " << (seqs.empty() ? 0 : seqs.back());
+        if (const auto seq = message_seq(*text)) {
+            seqs.push_back(*seq);
+        }
+    }
+    EXPECT_EQ(std::ranges::adjacent_find(seqs, std::ranges::greater_equal{}), seqs.end())
+        << "seqs rise, each once";
+    EXPECT_LT(seqs.size(), kMessages) << "a viewer that stopped reading was sent everything";
+    // What it missed is a gap it can see, and what it got last are the newest, without a hole.
+    ASSERT_GE(seqs.size(), 64U);
+    EXPECT_EQ(seqs[seqs.size() - 64], kMessages - 63);
+    const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
+    const std::string drops = "lossy_drops_total ";
+    const std::size_t at = metrics.body.find(drops);
+    ASSERT_NE(at, std::string::npos);
+    EXPECT_EQ(
+        metrics.body.substr(at + drops.size(), metrics.body.find('\n', at) - at - drops.size()),
+        std::to_string(kMessages - seqs.size()));
+    std::cout << "a viewer that stopped reading got " << seqs.size() << " of " << kMessages
+              << ", ending with seqs " << seqs[seqs.size() - 64] << ".." << seqs.back()
+              << "; the rest counted as dropped\n";
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

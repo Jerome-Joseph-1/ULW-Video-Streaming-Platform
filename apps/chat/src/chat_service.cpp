@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <iterator>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace chat {
 
@@ -21,6 +23,10 @@ struct ChatService::Room final : rt::IMember {
         ClientId id;
         IClient* client;
         Delivery delivery;
+        // A lossy client that fell behind: the first seq it has not been sent. Nothing new
+        // reaches it until its connection drains; then it is sent the kept messages from
+        // there on.
+        std::optional<std::uint64_t> behind;
     };
     // Clients that asked to join while the room plane has not answered yet.
     struct Waiting {
@@ -71,6 +77,7 @@ ClientId ChatService::attach(IClient& client, const core::UserId& user) {
     clients_.emplace(id.value, Client{.client = &client,
                                       .user = user,
                                       .rooms = {},
+                                      .behind = {},
                                       .send_bytes_in_flight = 0,
                                       .replayed_bytes = 0,
                                       .replay_window_start = clock_.now()});
@@ -205,9 +212,14 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
     }
     const auto it = std::ranges::find(room.subscribers, id, &Room::Subscriber::id);
     if (it == room.subscribers.end()) {
-        room.subscribers.push_back({.id = id, .client = c->client, .delivery = join.delivery});
+        room.subscribers.push_back(
+            {.id = id, .client = c->client, .delivery = join.delivery, .behind = std::nullopt});
     } else {
+        // What it was owed as a lossy client is not sent now that it has joined again; the seqs
+        // it sees show the gap.
         it->delivery = join.delivery;
+        it->behind.reset();
+        std::erase(c->behind, room.id);
     }
     std::string out;
     write_joined(out, room.id, room.head);
@@ -339,15 +351,93 @@ void ChatService::delivered(Room& room, const rt::Message& message) noexcept {
         // Only a client resuming later misses it, and sees the gap.
         ++counters_.allocation_failures;
     }
-    for (const Room::Subscriber& s : room.subscribers) {
-        if (s.delivery == Delivery::Lossy && s.client->unsent_bytes() > limits_.lossy_backlog) {
-            ++counters_.lossy_drops;
+    for (Room::Subscriber& s : room.subscribers) {
+        if (s.delivery == Delivery::Lossy &&
+            (s.behind || s.client->unsent_bytes() > limits_.lossy_backlog)) {
+            if (!s.behind) {
+                s.behind = message.seq;
+                fell_behind(s.id, room.id);
+            }
+            // Owed the newest lossy_depth at most: the oldest beyond that are dropped.
+            const std::uint64_t oldest_owed =
+                message.seq >= limits_.lossy_depth ? message.seq - limits_.lossy_depth + 1 : 0;
+            if (*s.behind < oldest_owed) {
+                counters_.lossy_drops += oldest_owed - *s.behind;
+                s.behind = oldest_owed;
+            }
             continue;
         }
         if (s.client->push(text)) {
             ++counters_.delivered;
         }
     }
+}
+
+void ChatService::fell_behind(ClientId id, const core::RoomId& room) noexcept {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    try {
+        c->behind.push_back(room);
+    } catch (const std::bad_alloc&) {
+        // Without the note it would never be sent what it is owed: it pays with its
+        // connection, as for any delivery it could not be given.
+        ++counters_.allocation_failures;
+        c->client->allocation_failed();
+    }
+}
+
+void ChatService::drained(ClientId id) noexcept {
+    Client* c = find(id);
+    if (c == nullptr || c->behind.empty()) {
+        return;
+    }
+    // catch_up takes rooms off the list as the client catches up in them.
+    const std::vector<core::RoomId> behind = std::exchange(c->behind, {});
+    for (const core::RoomId& room : behind) {
+        Room* r = find(room);
+        if (r == nullptr) {
+            continue;
+        }
+        try {
+            catch_up(*r, id, *c);
+        } catch (const std::bad_alloc&) {
+            ++counters_.allocation_failures;
+            c->client->allocation_failed();
+            return;
+        }
+    }
+}
+
+// The kept messages from where the client fell behind, oldest first, for as long as its
+// connection takes them. Anything it was owed that is no longer kept was counted as dropped
+// when it went.
+void ChatService::catch_up(Room& room, ClientId id, Client& c) {
+    const auto s = std::ranges::find(room.subscribers, id, &Room::Subscriber::id);
+    if (s == room.subscribers.end() || !s->behind) {
+        return;
+    }
+    std::string out;
+    for (auto it = std::ranges::lower_bound(room.kept, *s->behind, {}, &Room::Kept::seq);
+         it != room.kept.end(); ++it) {
+        if (c.client->unsent_bytes() > limits_.lossy_backlog) {
+            s->behind = it->seq;
+            c.behind.push_back(room.id);
+            return;
+        }
+        out.clear();
+        write_message(out, rt::Message{.room = room.id,
+                                       .seq = it->seq,
+                                       .sender = it->sender,
+                                       .key = it->key,
+                                       .body = it->body});
+        if (!c.client->push(out)) {
+            return;
+        }
+        ++counters_.delivered;
+    }
+    s->behind.reset();
 }
 
 void ChatService::keep(Room& room, const rt::Message& message) {
@@ -371,6 +461,13 @@ void ChatService::keep(Room& room, const rt::Message& message) {
 }
 
 void ChatService::drop_oldest(Room& room) noexcept {
+    const std::uint64_t seq = room.kept.front().seq;
+    for (Room::Subscriber& s : room.subscribers) {
+        if (s.behind && *s.behind <= seq) {
+            counters_.lossy_drops += seq + 1 - *s.behind;
+            s.behind = seq + 1;
+        }
+    }
     const std::size_t cost = room.kept.front().body.size() + kMessageOverhead;
     room.kept_bytes -= cost;
     buffered_bytes_ -= cost;

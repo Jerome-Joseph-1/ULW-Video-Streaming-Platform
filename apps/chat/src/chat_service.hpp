@@ -67,10 +67,16 @@ struct ServiceLimits {
     // rest of it. They sit in an owner's queue or on the node channel meanwhile, so they are
     // part of the connection's memory: two of the largest messages, or dozens of ordinary ones.
     std::size_t max_send_bytes_in_flight = std::size_t{128} * 1024;
-    // A lossy client this far behind is skipped until it catches up. A quarter of the backlog
-    // that closes a connection (Limits::max_backlog), so one largest delivery on top still
-    // leaves a lossy client open.
+    // A lossy client this far behind is given nothing more until its connection has drained;
+    // then it is sent the messages it missed that are still owed, oldest first. A quarter of
+    // the backlog that closes a connection (Limits::max_backlog), so one largest delivery on
+    // top still leaves a lossy client open.
     std::size_t lossy_backlog = std::size_t{64} * 1024;
+    // What a lossy client that fell behind is owed at most: the newest this many of the room's
+    // messages, and only those the room still keeps. Older ones are dropped, oldest first, and
+    // counted. A phone shows 15 to 20 lines of chat; three screens of the newest is what a
+    // viewer who stalled wants to see again, and anything older is history (ADR-0057).
+    std::uint64_t lossy_depth = 64;
     // What a client's resumes may queue on its connection within one linger: half the backlog
     // that closes it, so that resuming cannot itself get the client closed. Messages past it
     // are left out, oldest first; the client sees the gap.
@@ -91,7 +97,7 @@ struct ServiceLimits {
 struct ServiceCounters {
     std::uint64_t delivered = 0;
     std::uint64_t rate_limited = 0;
-    // Deliveries skipped because a lossy client was behind.
+    // Messages a lossy client was moved past, never to be sent them, because it was behind.
     std::uint64_t lossy_drops = 0;
     // Messages sent again to a client resuming a room.
     std::uint64_t replayed = 0;
@@ -126,6 +132,9 @@ public:
     void detach(ClientId id) noexcept;
     void join(ClientId id, const Join& join);
     void send(ClientId id, Send send);
+    // The client's connection has sent everything it had queued: a lossy client that fell
+    // behind is sent what it is still owed.
+    void drained(ClientId id) noexcept;
     // Leaves the rooms no client here has used for `linger`. Cheap to call often.
     void sweep() noexcept;
 
@@ -140,6 +149,8 @@ private:
         IClient* client;
         core::UserId user;
         std::vector<core::RoomId> rooms;
+        // Of `rooms`, those in which it is lossy and behind.
+        std::vector<core::RoomId> behind;
         std::size_t send_bytes_in_flight = 0;
         // What resumes queued since the window started.
         std::size_t replayed_bytes = 0;
@@ -155,6 +166,8 @@ private:
     void sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key, std::size_t bytes,
               std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
+    void fell_behind(ClientId id, const core::RoomId& room) noexcept;
+    void catch_up(Room& room, ClientId id, Client& c);
     void replay(const Room& room, Client& c, std::uint64_t after);
     void keep(Room& room, const rt::Message& message);
     void drop_oldest(Room& room) noexcept;

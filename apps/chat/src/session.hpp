@@ -44,7 +44,7 @@ public:
     [[nodiscard]] net::ConnId conn() const noexcept { return conn_; }
 
     void on_data(net::BorrowedBytes bytes) noexcept override;
-    void on_writable() noexcept override {}
+    void on_writable() noexcept override;
     void on_peer_eof() noexcept override;
     void on_error(int err) noexcept override;
     void on_timeout() noexcept override;
