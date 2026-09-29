@@ -1,13 +1,14 @@
 # Videos and playback
 
-A video is created by an upload ([uploads.md](uploads.md)), transcoded to HLS by the worker, and
-played through the gateway. The gateway authorizes each playlist request and rewrites the
+A video is created by an upload ([uploads.md](uploads.md)) or by the end of a live stream
+([live.md](live.md#when-a-stream-ends)), transcoded to HLS by the worker, and played through the
+gateway. The gateway authorizes each playlist request and rewrites the
 playlist; the segment bytes come straight from the object store over presigned URLs and never
 pass through the gateway (ADR-0002, ADR-0024).
 
-Only the video's owner (the user whose token created the upload) can see or play it in this
-version. For anyone else every endpoint below answers `404`, exactly as for a video that does
-not exist.
+Only the video's owner (the user whose token created the upload, or the broadcaster of the
+stream it recorded) can see or play it in this version. For anyone else every endpoint below
+answers `404`, exactly as for a video that does not exist.
 
 ## Lifecycle
 
@@ -17,7 +18,7 @@ not exist.
 |---|---|---|
 | `init` | `POST /api/v1/uploads` | no |
 | `uploading` | The first `PATCH` to the upload completes, even one that made nothing durable yet | no |
-| `processing` | `POST /api/v1/uploads/{id}/commit` succeeds; a transcode job is queued | no |
+| `processing` | `POST /api/v1/uploads/{id}/commit` succeeds, or a live stream's recording is stored; a transcode job is queued | no |
 | `ready` | The worker has published the HLS renditions; `duration_ms` is set | yes |
 | `failed` | Transcoding failed for good (the worker retries a job before giving up) | never |
 

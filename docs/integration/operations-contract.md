@@ -72,6 +72,26 @@ effective configuration, secrets as `<redacted>`.
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
 
+<!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
+
+The live packager (one process per stream, environment only, no Askedin overlay yet) takes
+`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above and `ULW_SCRATCH_DIR`. It records an
+ended stream as a video (ADR-0054) when given both of these, and is live-only with neither;
+one without the other stops it at startup:
+
+| Variable | Live packager | Notes |
+|---|---|---|
+| `ULW_DATABASE_URL` | with recording | Secret; the same database as the gateway's |
+| `ULW_STREAM_OWNER` | with recording | The broadcaster's Askedin user id (`sub`), who owns the video |
+
+It exits `0` once the stream has ended and its video and job are queued, or once drained by
+SIGTERM, and non-zero otherwise; run it with a restart on failure, so a packager killed between
+the end and the job, or unable to reach the store or the database then, records the stream on
+its next start. Started for a stream that has already ended, it takes no publisher and only
+records. The bucket needs lifecycle rules on `live/`: expiry after days, not hours (the
+recording is read back from the segments after the stream, and the job may wait in the queue),
+and aborting incomplete multipart uploads after a day.
+
 ## Probes and metrics
 
 <!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (advance, readiness_body), apps/gateway/src/health.hpp, apps/gateway/src/health.cpp, apps/gateway/src/gateway.cpp (render_metrics) -->
