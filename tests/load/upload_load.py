@@ -14,8 +14,8 @@ binary (tools/devtoken/src/main.cpp), one token per subject, and round-robins th
 
 Each upload holds one keep-alive connection for its create, PATCHes and commit. It PATCHes the
 gateway's chunk_size (from the 201 response) at a time, optionally streamed at --rate bytes/s so
-the socket stays open for as long as a slow client's would, then POSTs a commit. Chunk bytes come from a small repeating buffer, or from --payload, a
-file every upload sends.
+the socket stays open for as long as a slow client's would, then POSTs a commit. Every upload
+sends the same bytes: a repeating filler of --size, or --payload, a file.
 """
 import argparse
 import http.client
@@ -42,8 +42,7 @@ SAFE_RATE = 16 * 1024
 
 
 def chunk_bytes(n):
-    """n bytes built by repeating FILL, without ever materializing more than one copy plus the
-    remainder — the memory-flat requirement for uploads far larger than FILL."""
+    """n bytes built by repeating FILL. Built once per run and shared by every upload."""
     whole, rest = divmod(n, len(FILL))
     return FILL * whole + FILL[:rest]
 
@@ -160,17 +159,23 @@ def patch_streamed(conn, path, token, offset, piece, rate):
     conn.endheaders()
     step = max(1, rate // 4)
     started = time.monotonic()
-    for sent in range(0, len(piece), step):
-        conn.send(piece[sent:sent + step])
-        ahead = min(sent + step, len(piece)) / rate - (time.monotonic() - started)
-        if ahead > 0:
-            time.sleep(ahead)
+    try:
+        for sent in range(0, len(piece), step):
+            conn.send(piece[sent:sent + step])
+            ahead = min(sent + step, len(piece)) / rate - (time.monotonic() - started)
+            if ahead > 0:
+                time.sleep(ahead)
+    except OSError:
+        # The gateway answers a body it refuses (408, 503) and closes; the answer is what the
+        # run should record, not the broken pipe that follows it. When none was sent,
+        # getresponse raises the error that is.
+        pass
     response = conn.getresponse()
     data = response.read()
     return response.status, {k.lower(): v for k, v in response.getheaders()}, data
 
 
-def run_one_upload(base, token, size, chunk_cap, rate, results, payload=None, index=0):
+def run_one_upload(base, token, size, chunk_cap, rate, results, payload, index):
     with results.lock:
         results.attempted += 1
     conn = connect(base, 120)
@@ -203,7 +208,7 @@ def upload(conn, base, token, size, chunk_cap, rate, results, payload, index):
     upload_id = created["upload_id"]
     chunk_size = min(created["chunk_size"], chunk_cap) if chunk_cap else created["chunk_size"]
     offset = created["durable_offset"]
-    body = payload if payload is not None else chunk_bytes(size)
+    body = payload
     while offset < size:
         piece = body[offset:offset + chunk_size]
         piece_started = time.monotonic()
@@ -302,11 +307,15 @@ def main():
             sys.exit("upload_load: --devtoken-key needs --issuer and --users")
         tokens = mint_tokens(args.devtoken, args.devtoken_key, args.issuer, args.users)
 
-    payload = None
     if args.payload:
         with open(args.payload, "rb") as f:
             payload = f.read()
         args.size = len(payload)
+    else:
+        payload = chunk_bytes(args.size)
+    # One buffer for every upload, sliced without copying: 500 uploads of 16 MiB would otherwise
+    # hold 8 GiB of client memory.
+    payload = memoryview(payload)
 
     base = urllib.parse.urlsplit(args.url)
     results = Results()
