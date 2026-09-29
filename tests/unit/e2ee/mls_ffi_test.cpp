@@ -311,4 +311,25 @@ TEST_F(MlsFfi, MergingWithNothingPendingIsRejected) {
     expect_intact();
 }
 
+// Groups share their client's state, so freeing both clients first must leave both groups
+// working; under the asan preset a group reaching into a freed client is a use after free.
+TEST_F(MlsFfi, GroupsOutliveTheirClients) {
+    alice_device.reset();
+    bob_device.reset();
+    Bytes plain;
+    ASSERT_EQ(process(bob, encrypt(alice, "clients gone"), &plain), ULW_MLS_STATUS_OK);
+    EXPECT_EQ(plain, bytes("clients gone"));
+    ASSERT_EQ(process(alice, encrypt(bob, "still here"), &plain), ULW_MLS_STATUS_OK);
+    EXPECT_EQ(plain, bytes("still here"));
+    // A commit needs the signer and the store, both the client's.
+    UlwMlsBuffer commit{};
+    const UlwMlsBytes entry{.data = spare_package.data(), .len = spare_package.size()};
+    UlwMlsBuffer carol_welcome{};
+    ASSERT_EQ(ulw_mls_group_add(alice.get(), &entry, 1, &commit, &carol_welcome),
+              ULW_MLS_STATUS_OK);
+    ulw_mls_buffer_free(commit);
+    ulw_mls_buffer_free(carol_welcome);
+    EXPECT_EQ(ulw_mls_group_merge_pending_commit(alice.get()), ULW_MLS_STATUS_OK);
+}
+
 } // namespace
