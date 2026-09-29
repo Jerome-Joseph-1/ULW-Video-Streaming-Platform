@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 #include "core/ports/clock.hpp"
+#include "core/ports/message_store.hpp"
 #include "rt/message_key.hpp"
 #include "rt/room_router.hpp"
 
@@ -114,6 +115,8 @@ struct ServiceCounters {
     std::uint64_t lossy_drops = 0;
     // Messages sent again to a client resuming a room.
     std::uint64_t replayed = 0;
+    // Messages sent to clients from history.
+    std::uint64_t history_messages = 0;
     std::uint64_t allocation_failures = 0;
 };
 
@@ -131,7 +134,10 @@ struct ClientId {
 // thread.
 class ChatService {
 public:
-    ChatService(IRooms& rooms, const core::ports::IClock& clock, ServiceLimits limits);
+    // `messages` answers whether a room admits a user. Its answers must never reach a destroyed
+    // service: destroy the store first, which drops what it still owes.
+    ChatService(IRooms& rooms, core::ports::IMessageStore& messages,
+                const core::ports::IClock& clock, ServiceLimits limits);
     // Leaves every room, which also drops what the room plane owes for sends still in flight:
     // nothing calls back into a destroyed service. The room plane must outlive it.
     ~ChatService();
@@ -145,6 +151,9 @@ public:
     void detach(ClientId id) noexcept;
     void join(ClientId id, const Join& join);
     void send(ClientId id, Send send);
+    // A page of the room's stored messages, as message frames and then a history frame, for a
+    // client in the room. Cut short to what the client can take while it is behind.
+    void history(ClientId id, const History& history);
     // The client's connection has sent everything it had queued: a lossy client that fell
     // behind is sent what it is still owed.
     void drained(ClientId id) noexcept;
@@ -162,6 +171,8 @@ private:
         IClient* client;
         core::UserId user;
         std::vector<core::RoomId> rooms;
+        // Of `rooms`, those whose member list has not answered yet.
+        std::vector<core::RoomId> admitting;
         // Of `rooms`, those in which it is lossy and behind.
         std::vector<core::RoomId> behind;
         std::size_t send_bytes_in_flight = 0;
@@ -173,11 +184,17 @@ private:
     [[nodiscard]] Client* find(ClientId id) noexcept;
     [[nodiscard]] Room* find(const core::RoomId& room) noexcept;
     [[nodiscard]] bool admit_join(const core::UserId& user);
+    void admitted(ClientId id, const Join& join,
+                  core::ports::MessageResult<core::ports::Admission> result) noexcept;
+    void enter(ClientId id, const Join& join);
     void joined(const core::RoomId& room,
                 std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void delivered(Room& room, const rt::Message& message) noexcept;
     void sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key, std::size_t bytes,
               std::expected<std::uint64_t, rt::RouteError> result) noexcept;
+    void
+    page_read(ClientId id, const core::RoomId& room,
+              core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
     void fell_behind(ClientId id, const core::RoomId& room) noexcept;
     void catch_up(Room& room, ClientId id, Client& c);
@@ -190,6 +207,7 @@ private:
                 const std::optional<rt::MessageKey>& id = std::nullopt) noexcept;
 
     IRooms& rooms_plane_;
+    core::ports::IMessageStore& messages_;
     const core::ports::IClock& clock_;
     ServiceLimits limits_;
     ServiceCounters counters_;

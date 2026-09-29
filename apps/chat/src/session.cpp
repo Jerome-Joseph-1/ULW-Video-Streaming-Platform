@@ -356,6 +356,10 @@ void Session::command(const codec::ws::Frame& frame) {
         chat.join(*client_, *j);
         return;
     }
+    if (const auto* h = std::get_if<History>(&*parsed)) {
+        chat.history(*client_, *h);
+        return;
+    }
     chat.send(*client_, std::move(std::get<Send>(*parsed)));
 }
 

@@ -1,5 +1,6 @@
 #include "core/util/json.hpp"
 #include "infra/auth/base64url.hpp"
+#include "infra/messages/memory_message_store.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
@@ -71,6 +72,18 @@ private:
         ulw::test::MemoryRooms db;
         ulw::test::FakeVerifier verifier;
         auto store = std::make_unique<ulw::test::MemoryRoomStore>(**reactor, db);
+        auto messages = std::make_unique<infra::messages::MemoryMessageStore>(**reactor);
+        // The rooms these tests join as live, recorded so as the server side does: a join alone
+        // cannot open a room.
+        for (const std::string_view room :
+             {kRoom, std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f901"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f902"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f903"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f904"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f905"}}) {
+            messages->record_live(*core::RoomId::parse(room),
+                                  [](core::ports::MessageResult<void> /*recorded*/) noexcept {});
+        }
         chat::RoomLog log(*core::NodeId::parse("chat-1"));
         os::SystemRandom random;
         rt::RoomRouter router(**reactor, *store, clock, random,
@@ -83,8 +96,11 @@ private:
             return;
         }
         auto server = std::make_unique<chat::ChatServer>(
-            chat::Deps{
-                .reactor = **reactor, .router = router, .verifier = verifier, .clock = clock},
+            chat::Deps{.reactor = **reactor,
+                       .router = router,
+                       .messages = *messages,
+                       .verifier = verifier,
+                       .clock = clock},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
             limits_);
         if (!(*reactor)->listen(std::move(*clients), *server)) {
@@ -104,6 +120,7 @@ private:
             (*reactor)->run_once(core::Millis{5});
             server->reap();
         }
+        messages.reset();
         server.reset();
         store.reset();
     }
@@ -167,7 +184,8 @@ TEST_P(ChatSessionTest, TheCookieCountsOnlyFromAnAllowedPage) {
 TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
+                                 R"(","kind":"live"})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
     // base64url of `hi "there"`.
@@ -191,7 +209,8 @@ TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"not_json"})");
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":"not-a-room"})"));
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"bad_room"})");
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
+                                 R"(","kind":"live"})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
 }
@@ -255,7 +274,8 @@ TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryCo
     node_.reset();
     node_ = std::make_unique<Node>(GetParam(), chat::Limits{.service = {.join_burst = 2}});
     const auto join = [](WsClient& ws, std::string_view room) {
-        EXPECT_TRUE(ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"("})"));
+        EXPECT_TRUE(
+            ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"(","kind":"live"})"));
         const auto answer = ws.next_text(seconds(10));
         return answer.value_or("").find(R"("type":"joined")") != std::string::npos;
     };
@@ -274,7 +294,8 @@ TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryCo
 TEST_P(ChatSessionTest, SendsInFlightAreBoundedInBytes) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
+                                 R"(","kind":"live"})"));
     ASSERT_TRUE(alice->next_text(seconds(10)));
     // Three sends of 45 KiB while the store answers nothing: two fit the connection's 128 KiB,
     // the third does not, however few sends that is.

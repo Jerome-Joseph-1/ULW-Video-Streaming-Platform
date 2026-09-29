@@ -15,4 +15,4 @@ target_link_libraries(chat_lib PRIVATE OpenSSL::Crypto)
 
 ulw_add_executable(chat_server
     src/main.cpp)
-target_link_libraries(chat_server PRIVATE ulw::chat_lib ulw::os ulw::pg_rooms)
+target_link_libraries(chat_server PRIVATE ulw::chat_lib ulw::os ulw::pg_rooms ulw::pg_store)

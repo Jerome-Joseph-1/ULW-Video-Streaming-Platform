@@ -34,6 +34,54 @@ TEST(Envelope, AJoinNamesItsRoomAndMayAskToResumeAndToBeLossy) {
     ASSERT_TRUE(resume);
     EXPECT_EQ(std::get<chat::Join>(*resume).after, 41U);
     EXPECT_EQ(std::get<chat::Join>(*resume).delivery, chat::Delivery::Lossy);
+    EXPECT_EQ(join.kind, core::ports::RoomKind::GroupChat);
+
+    for (const auto& [text, kind] : {std::pair{"direct", core::ports::RoomKind::DirectChat},
+                                     std::pair{"group", core::ports::RoomKind::GroupChat},
+                                     std::pair{"live", core::ports::RoomKind::StreamLiveChat}}) {
+        const auto named = chat::parse_command(
+            std::string{
+                R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":")"} +
+            text + R"("})");
+        ASSERT_TRUE(named) << text;
+        EXPECT_EQ(std::get<chat::Join>(*named).kind, kind) << text;
+    }
+    EXPECT_EQ(chat::parse_command(
+                  R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":"open"})"),
+              std::unexpected(EnvelopeError::Malformed));
+}
+
+TEST(Envelope, AHistoryPageRunsBackFromTheNewestUnlessGivenACursor) {
+    const auto newest =
+        chat::parse_command(R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
+    ASSERT_TRUE(newest);
+    const auto& h = std::get<chat::History>(*newest);
+    EXPECT_EQ(h.room, room());
+    EXPECT_FALSE(h.before);
+    EXPECT_FALSE(h.after);
+    EXPECT_EQ(h.limit, chat::kDefaultHistoryLimit);
+
+    const auto back = chat::parse_command(
+        R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","before":90,"limit":100})");
+    ASSERT_TRUE(back);
+    EXPECT_EQ(std::get<chat::History>(*back).before, 90U);
+    EXPECT_EQ(std::get<chat::History>(*back).limit, 100U);
+
+    const auto forth = chat::parse_command(
+        R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","after":0,"limit":1})");
+    ASSERT_TRUE(forth);
+    EXPECT_EQ(std::get<chat::History>(*forth).after, 0U);
+}
+
+TEST(Envelope, AHistoryPageWithBothCursorsOrALimitOutOfRangeIsMalformed) {
+    for (const std::string_view extra :
+         {R"(,"before":9,"after":2)", R"(,"limit":0)", R"(,"limit":101)", R"(,"after":-1)",
+          R"(,"before":"9")", R"(,"from":9)"}) {
+        const std::string text =
+            std::string{R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")"} +
+            std::string{extra} + "}";
+        EXPECT_EQ(chat::parse_command(text), std::unexpected(EnvelopeError::Malformed)) << text;
+    }
 }
 
 TEST(Envelope, AStreamsLiveChatIsJoinedByTheStreamsNameAndNeverByItsRoom) {
@@ -41,6 +89,7 @@ TEST(Envelope, AStreamsLiveChatIsJoinedByTheStreamsNameAndNeverByItsRoom) {
     ASSERT_TRUE(c);
     EXPECT_EQ(std::get<chat::Join>(*c).room, chat::live_chat_room("show-1"));
     EXPECT_EQ(std::get<chat::Join>(*c).after, 3U);
+    EXPECT_EQ(std::get<chat::Join>(*c).kind, core::ports::RoomKind::StreamLiveChat);
 
     const std::string live = chat::live_chat_room("show-1").to_string();
     EXPECT_EQ(chat::parse_command(R"({"type":"join","room":")" + live + R"("})"),
@@ -50,6 +99,8 @@ TEST(Envelope, AStreamsLiveChatIsJoinedByTheStreamsNameAndNeverByItsRoom) {
     EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":""})"),
               std::unexpected(EnvelopeError::BadStream));
     EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":7})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":"show-1","kind":"live"})"),
               std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":"show-1","room":")" +
                                   std::string(kRoom) + R"("})"),
@@ -179,6 +230,9 @@ TEST(Envelope, RepliesAreTheDocumentedShapes) {
     EXPECT_EQ(
         out,
         R"({"type":"error","reason":"rate_limited","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","id":"m-3","retry_after_ms":500})");
+    out.clear();
+    chat::write_history(out, room(), 3);
+    EXPECT_EQ(out, R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","count":3})");
     out.clear();
     chat::write_error(out, chat::reason(EnvelopeError::NotJson));
     EXPECT_EQ(out, R"({"type":"error","reason":"not_json"})");

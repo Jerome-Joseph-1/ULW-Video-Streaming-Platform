@@ -15,6 +15,7 @@ ulw_add_library(pg_store
     src/e2ee_directory.cpp
     src/health_check.cpp
     src/job_queue.cpp
+    src/message_store.cpp
     src/migrator.cpp
     src/params.cpp
     src/pool.cpp

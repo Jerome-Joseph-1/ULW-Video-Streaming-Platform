@@ -6,6 +6,7 @@
 #include <iterator>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace chat {
@@ -17,6 +18,15 @@ namespace {
 constexpr std::size_t kMessageOverhead = 256;
 // Rooms are looked over for lingering this often; a room lingers a second longer at most.
 constexpr core::Millis kSweepEvery{1'000};
+
+// The error a join is refused with, for an answer other than Admitted.
+[[nodiscard]] std::string_view
+refusal(const core::ports::MessageResult<core::ports::Admission>& result) noexcept {
+    if (!result) {
+        return "unavailable";
+    }
+    return *result == core::ports::Admission::NotLive ? "not_live" : "not_member";
+}
 
 } // namespace
 
@@ -65,8 +75,10 @@ struct ChatService::Room final : rt::IMember {
     core::MonoTime unused_since;
 };
 
-ChatService::ChatService(IRooms& rooms, const core::ports::IClock& clock, ServiceLimits limits)
-    : rooms_plane_(rooms), clock_(clock), limits_(limits), next_sweep_(clock.now()) {}
+ChatService::ChatService(IRooms& rooms, core::ports::IMessageStore& messages,
+                         const core::ports::IClock& clock, ServiceLimits limits)
+    : rooms_plane_(rooms), messages_(messages), clock_(clock), limits_(limits),
+      next_sweep_(clock.now()) {}
 
 ChatService::~ChatService() {
     for (auto& [id, room] : rooms_) {
@@ -81,6 +93,7 @@ ClientId ChatService::attach(IClient& client, const core::UserId& user) {
     clients_.emplace(id.value, Client{.client = &client,
                                       .user = user,
                                       .rooms = {},
+                                      .admitting = {},
                                       .behind = {},
                                       .send_bytes_in_flight = 0,
                                       .replayed_bytes = 0,
@@ -133,6 +146,11 @@ void ChatService::join(ClientId id, const Join& join) {
     // Joining a room the client is in again is how it asks for what it missed. That costs a
     // join when it asks for a resume, which is work for this node; otherwise it is free.
     const bool known = std::ranges::find(c->rooms, join.room) != c->rooms.end();
+    // Asked again before the member list answered: the first ask answers both.
+    if (std::ranges::find(c->admitting, join.room) != c->admitting.end()) {
+        answer(*c->client, "busy", join.room);
+        return;
+    }
     if (known && join.after && !admit_join(c->user)) {
         answer(*c->client, "busy", join.room);
         return;
@@ -146,8 +164,52 @@ void ChatService::join(ClientId id, const Join& join) {
             answer(*c->client, "busy", join.room);
             return;
         }
+        // Whether the user may be in the room at all. Asked only for rooms new to the
+        // connection, whose joins are rate limited. The room counts against the connection
+        // while the answer is on its way, which comes on a later iteration, never from inside
+        // the call; a call that could not be made leaves nothing behind.
         c->rooms.push_back(join.room);
+        c->admitting.push_back(join.room);
+        try {
+            messages_.admits(
+                join.room, c->user, join.kind,
+                [this, id,
+                 join](core::ports::MessageResult<core::ports::Admission> result) noexcept {
+                    admitted(id, join, result);
+                });
+        } catch (...) {
+            std::erase(c->admitting, join.room);
+            std::erase(c->rooms, join.room);
+            throw;
+        }
+        return;
     }
+    enter(id, join);
+}
+
+void ChatService::admitted(ClientId id, const Join& join,
+                           core::ports::MessageResult<core::ports::Admission> result) noexcept {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    std::erase(c->admitting, join.room);
+    if (!result || *result != core::ports::Admission::Admitted) {
+        std::erase(c->rooms, join.room);
+        answer(*c->client, refusal(result), join.room);
+        return;
+    }
+    try {
+        enter(id, join);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        std::erase(c->rooms, join.room);
+        c->client->allocation_failed();
+    }
+}
+
+// Into a room the client may be in: joined on the room plane once for the node, and subscribed.
+void ChatService::enter(ClientId id, const Join& join) {
     auto it = rooms_.find(join.room);
     if (it == rooms_.end()) {
         auto made = std::make_unique<Room>(*this, join.room);
@@ -321,6 +383,91 @@ void ChatService::send(ClientId id, Send send) {
                        bytes](std::expected<std::uint64_t, rt::RouteError> result) noexcept {
                           sent(id, room, key, bytes, result);
                       });
+}
+
+void ChatService::history(ClientId id, const History& history) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    Room* r = find(history.room);
+    if (r == nullptr || !r->joined ||
+        std::ranges::find(r->subscribers, id, &Room::Subscriber::id) == r->subscribers.end()) {
+        answer(*c->client, reason(rt::RouteError::NotJoined), history.room);
+        return;
+    }
+    // A read of the store, and up to a resume's worth of output: charged as a resume is.
+    if (!admit_join(c->user)) {
+        answer(*c->client, "busy", history.room);
+        return;
+    }
+    auto done =
+        [this, id, room = history.room](
+            core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
+            page_read(id, room, std::move(page));
+        };
+    if (history.after) {
+        messages_.history_after(history.room, *history.after, history.limit, std::move(done));
+    } else {
+        messages_.history_before(history.room, history.before, history.limit, std::move(done));
+    }
+}
+
+// The page's messages in the store's order, as many as fit what the client may still queue,
+// then the count. A client too far behind for even one gets busy, not an empty page, which
+// would read as the end of the room.
+void ChatService::page_read(
+    ClientId id, const core::RoomId& room,
+    core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    if (!page) {
+        answer(*c->client, reason(rt::RouteError::Unavailable), room);
+        return;
+    }
+    try {
+        const std::size_t budget =
+            limits_.replay_budget - std::min(c->client->unsent_bytes(), limits_.replay_budget);
+        // Every stored key came from a message key; one that is not is a row nothing here
+        // wrote, and the page is not sent at all rather than sent with a hole in it.
+        if (!std::ranges::all_of(*page, [](const core::ports::StoredMessage& m) {
+                return rt::MessageKey::parse(m.key).has_value();
+            })) {
+            answer(*c->client, reason(rt::RouteError::Unavailable), room);
+            return;
+        }
+        std::size_t used = 0;
+        std::size_t count = 0;
+        std::string out;
+        for (const core::ports::StoredMessage& m : *page) {
+            const std::size_t cost = message_wire_size(m.body.size());
+            const auto key = rt::MessageKey::parse(m.key);
+            if (used + cost > budget || !key) {
+                break;
+            }
+            used += cost;
+            out.clear();
+            write_message(
+                out,
+                rt::Message{
+                    .room = room, .seq = m.seq, .sender = m.sender, .key = *key, .body = m.body});
+            c->client->push(out);
+            ++count;
+        }
+        if (count == 0 && !page->empty()) {
+            answer(*c->client, reason(rt::RouteError::Busy), room);
+            return;
+        }
+        counters_.history_messages += count;
+        out.clear();
+        write_history(out, room, count);
+        c->client->push(out);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        c->client->allocation_failed();
+    }
 }
 
 void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key,
