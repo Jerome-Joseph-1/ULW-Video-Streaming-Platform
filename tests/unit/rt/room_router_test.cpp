@@ -7,6 +7,7 @@
 #include "node_auth.hpp"
 #include "support/fake_random.hpp"
 #include "support/reactor_harness.hpp"
+#include "support/reserve_port.hpp"
 #include "wire.hpp"
 
 #include <arpa/inet.h>
@@ -640,12 +641,8 @@ TEST_P(RoomRouterTest, AJoinFailsWhenTheOwnerCannotBeReachedAndThePeerIsReported
     ASSERT_TRUE(join(a, alice));
     Node& b = start("chat-b");
     // Where chat-a says it listens, nothing does.
-    std::uint16_t dead = 0;
-    {
-        auto probe = net::listen_tcp({.port = 0, .loopback_only = true});
-        ASSERT_TRUE(probe);
-        dead = *net::local_port(probe->get());
-    }
+    const std::uint16_t dead = ulw::test::reserve_port();
+    ASSERT_NE(dead, 0);
     db_.addresses["chat-a"] = "127.0.0.1:" + std::to_string(dead);
     Member bob;
     EXPECT_EQ(join(b, bob), std::unexpected(RouteError::Unavailable));

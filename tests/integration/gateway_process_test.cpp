@@ -8,8 +8,8 @@
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
 #include "support/fake_notify.hpp"
-#include "support/free_port.hpp"
 #include "support/http_client.hpp"
+#include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
 
 #include <sys/stat.h>
@@ -114,12 +114,16 @@ TEST_F(GatewayConfigTest, NoPasswordReachesTheLogWhenTheDatabaseUrlIsBadOrUnreac
 
     auto unreachable = env;
     unreachable.emplace_back("ULW_DATABASE_URL=postgresql://ulw:Sup3rSecret@127.0.0.1:1/ulw");
-    unreachable.push_back("ULW_LISTEN_PORT=" + std::to_string(ulw::test::free_port()));
-    const auto gateway = ChildProcess::start({ULW_GATEWAY_BIN}, unreachable);
+    auto started = ulw::test::start_until_listening(
+        [&] {
+            auto with_port = unreachable;
+            with_port.push_back("ULW_LISTEN_PORT=" + std::to_string(ulw::test::reserve_port()));
+            return ChildProcess::start({ULW_GATEWAY_BIN}, with_port);
+        },
+        R"("event":"dependency down","dependency":"database")", kPatience);
+    const auto gateway = std::move(started.process);
     ASSERT_NE(gateway, nullptr);
-    ASSERT_TRUE(
-        gateway->wait_for_output(R"("event":"dependency down","dependency":"database")", kPatience))
-        << gateway->output();
+    ASSERT_TRUE(started.ready) << gateway->output();
     gateway->signal(SIGTERM);
     EXPECT_EQ(gateway->wait_exit(kPatience), 0);
     EXPECT_EQ(gateway->output().find("Sup3r"), std::string::npos) << gateway->output();
@@ -207,23 +211,29 @@ protected:
         if (IsSkipped() || HasFatalFailure()) {
             return;
         }
-        port_ = ulw::test::free_port();
-        ASSERT_NE(port_, 0);
         notify_path_ = (files_.path() / "notify").string();
         manager_ = std::make_unique<ulw::test::FakeNotifySocket>(notify_path_);
         ASSERT_TRUE(manager_->bound());
         auto env = base_env();
         std::erase_if(env, [](const std::string& e) { return e.starts_with("ULW_DATABASE_URL="); });
         env.push_back("ULW_DATABASE_URL=" + db_->conninfo());
-        env.push_back("ULW_LISTEN_PORT=" + std::to_string(port_));
         env.push_back("NOTIFY_SOCKET=" + notify_path_);
         // Two seconds, so the loop pings every second, on its idle tick.
         env.emplace_back("WATCHDOG_USEC=2000000");
         if (const char* reactor = std::getenv("ULW_REACTOR")) {
             env.push_back("ULW_REACTOR=" + std::string(reactor));
         }
-        gateway_ = ChildProcess::start({ULW_GATEWAY_BIN}, env);
+        auto started = ulw::test::start_until_listening(
+            [&] {
+                port_ = ulw::test::reserve_port();
+                auto with_port = env;
+                with_port.push_back("ULW_LISTEN_PORT=" + std::to_string(port_));
+                return port_ == 0 ? nullptr : ChildProcess::start({ULW_GATEWAY_BIN}, with_port);
+            },
+            R"("event":"listening")", kPatience);
+        gateway_ = std::move(started.process);
         ASSERT_NE(gateway_, nullptr);
+        ASSERT_TRUE(started.ready) << gateway_->output();
     }
 
     [[nodiscard]] std::optional<ulw::test::HttpResponse> get(std::string_view path) const {

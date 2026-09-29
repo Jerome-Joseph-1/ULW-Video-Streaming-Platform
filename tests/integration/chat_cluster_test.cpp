@@ -5,7 +5,7 @@
 // rate-limited send is refused and reaches nobody; a repeated send is delivered once; a client
 // that comes back resumes from its last seq; no body shows in any log or in the database.
 // ULW_CHAT_CLUSTER_PORTS=9101,9102,9103 pins the client ports (the CI job does); otherwise
-// free ones are taken.
+// ones outside the ephemeral range are reserved.
 
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
@@ -18,12 +18,9 @@
 #include "support/child_process.hpp"
 #include "support/eventually.hpp"
 #include "support/reactor_harness.hpp"
+#include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
 #include "support/ws_client.hpp"
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include <algorithm>
 #include <array>
@@ -50,23 +47,8 @@ using ulw::test::WsClient;
 
 constexpr std::string_view kIssuer = "https://auth.test.askedin.com";
 
-std::uint16_t free_port() {
-    const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    socklen_t len = sizeof addr;
-    // bind() and getsockname() take every address family through the generic header.
-    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
-    if (::bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 ||
-        ::getsockname(fd.get(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-        return 0;
-    }
-    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
-    return ntohs(addr.sin_port);
-}
-
-std::vector<std::uint16_t> client_ports() {
+// Empty when the ports are not pinned: each node then reserves its own.
+std::vector<std::uint16_t> pinned_client_ports() {
     std::vector<std::uint16_t> ports;
     // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
     const char* pinned = std::getenv("ULW_CHAT_CLUSTER_PORTS");
@@ -75,9 +57,6 @@ std::vector<std::uint16_t> client_ports() {
         const std::size_t comma = rest.find(',');
         ports.push_back(core::parse_integer<std::uint16_t>(rest.substr(0, comma)).value_or(0));
         rest = comma == std::string_view::npos ? "" : rest.substr(comma + 1);
-    }
-    while (ports.size() < 3) {
-        ports.push_back(free_port());
     }
     return ports;
 }
@@ -185,6 +164,7 @@ private:
 struct Node {
     std::string name;
     std::uint16_t port = 0;
+    bool port_pinned = false;
     std::uint16_t node_port = 0;
     std::unique_ptr<ChildProcess> process;
 };
@@ -215,13 +195,13 @@ protected:
                                           .ttl = seconds(600)},
                                          clock_.wall_now()));
         }
-        const auto ports = client_ports();
+        const auto pinned = pinned_client_ports();
         for (std::size_t i = 0; i < 3; ++i) {
             nodes_.push_back({.name = "chat-" + std::to_string(i + 1),
-                              .port = ports[i],
-                              .node_port = free_port(),
+                              .port = i < pinned.size() ? pinned[i] : std::uint16_t{0},
+                              .port_pinned = i < pinned.size(),
+                              .node_port = 0,
                               .process = nullptr});
-            ASSERT_NE(nodes_.back().port, 0);
             ASSERT_NO_FATAL_FAILURE(start(nodes_.back(), jwks.string()));
         }
         for (const Node& n : nodes_) {
@@ -234,8 +214,6 @@ protected:
     void start(Node& node, const std::string& jwks) {
         std::vector<std::string> env{
             "ULW_NODE_ID=" + node.name,
-            "ULW_LISTEN_PORT=" + std::to_string(node.port),
-            "ULW_NODE_ADDRESS=127.0.0.1:" + std::to_string(node.node_port),
             "ULW_DEV_LOOPBACK_NODES=1",
             "ULW_NODE_SECRET=" + node_secret_,
             "ULW_DATABASE_URL=" + db_->conninfo(),
@@ -249,10 +227,25 @@ protected:
                 env.push_back(std::string(passed) + "=" + value);
             }
         }
-        node.process = ChildProcess::start({ULW_CHAT_BIN}, env);
-        ASSERT_NE(node.process, nullptr);
-        ASSERT_TRUE(node.process->wait_for_output(R"("msg":"listening")", seconds(30)))
-            << node.process->output();
+        auto started = ulw::test::start_until_listening(
+            [&] {
+                if (!node.port_pinned) {
+                    node.port = ulw::test::reserve_port();
+                }
+                node.node_port = ulw::test::reserve_port();
+                if (node.port == 0 || node.node_port == 0) {
+                    return std::unique_ptr<ChildProcess>();
+                }
+                auto with_ports = env;
+                with_ports.push_back("ULW_LISTEN_PORT=" + std::to_string(node.port));
+                with_ports.push_back("ULW_NODE_ADDRESS=127.0.0.1:" +
+                                     std::to_string(node.node_port));
+                return ChildProcess::start({ULW_CHAT_BIN}, with_ports);
+            },
+            R"("msg":"listening")", seconds(30));
+        node.process = std::move(started.process);
+        ASSERT_NE(node.process, nullptr) << "no port to listen on";
+        ASSERT_TRUE(started.ready) << node.process->output();
     }
 
     std::unique_ptr<Client> connect(const Node& node, std::size_t user) {
