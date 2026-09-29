@@ -1,4 +1,4 @@
-# 0034. Layered configuration from a TOML subset, the environment and flags
+# 0036. Layered configuration from a TOML subset, the environment and flags
 
 Status: Accepted
 Date: 2026-09-29

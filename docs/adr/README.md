@@ -40,7 +40,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0034](0034-rtp-and-rtcp-read-in-place.md) | RTP and RTCP are read in place, for tooling and tests | Accepted |
 | [0035](0035-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
-| [0033](0033-json-logs-metrics-and-readiness-off-the-loop.md) | JSON logs, metrics and readiness, none of them waiting on the loop | Accepted |
-| [0034](0034-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
-| [0035](0035-a-job-result-the-queue-refuses-fails-the-job.md) | A job result the queue refuses fails the job | Accepted |
-| [0036](0036-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged against the memory limit and requests in flight | Accepted |
+| [0035](0035-json-logs-metrics-and-readiness-off-the-loop.md) | JSON logs, metrics and readiness, none of them waiting on the loop | Accepted |
+| [0036](0036-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
+| [0037](0037-a-job-result-the-queue-refuses-fails-the-job.md) | A job result the queue refuses fails the job | Accepted |
+| [0038](0038-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged against the memory limit and requests in flight | Accepted |

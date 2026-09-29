@@ -1,4 +1,4 @@
-# 0033. JSON logs, metrics and readiness, none of them waiting on the loop
+# 0035. JSON logs, metrics and readiness, none of them waiting on the loop
 
 Status: Accepted
 Date: 2026-09-29

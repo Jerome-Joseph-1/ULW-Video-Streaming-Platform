@@ -1,4 +1,4 @@
-# 0036. Soak flatness judged against the memory limit and requests in flight
+# 0038. Soak flatness judged against the memory limit and requests in flight
 
 Status: Accepted
 Date: 2026-09-29
