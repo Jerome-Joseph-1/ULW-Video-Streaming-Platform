@@ -25,6 +25,7 @@ constexpr std::array kAllStatuses{
     Status::Created,
     Status::NoContent,
     Status::BadRequest,
+    Status::Forbidden,
     Status::NotFound,
     Status::MethodNotAllowed,
     Status::RequestTimeout,

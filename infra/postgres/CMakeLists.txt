@@ -26,3 +26,12 @@ target_include_directories(pg_store PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOU
 target_link_libraries(pg_store
     PUBLIC ulw::core_domain ulw::net_lib
     PRIVATE PkgConfig::LIBPQ)
+
+# The room registry's store, apart from pg_store so that only chat_server links the realtime
+# runtime. It drives the same pool, from the same sources.
+ulw_add_library(pg_rooms
+    src/room_store.cpp)
+target_include_directories(pg_rooms PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(pg_rooms
+    PUBLIC ulw::rt_lib ulw::net_lib
+    PRIVATE ulw::pg_store PkgConfig::LIBPQ)

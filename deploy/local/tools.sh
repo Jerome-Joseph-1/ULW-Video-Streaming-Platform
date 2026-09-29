@@ -23,12 +23,17 @@ pins=(
     # metrics-server, for the load check's kubectl top (metrics-server.sh installs it).
     "metrics-server.yaml v0.9.0 1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b
      https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"
+    # STUNner's CRDs, from its Helm chart at the v1.2.1 tag (deploy/stunner/up.sh). The chart's
+    # other templates are rendered in deploy/askedin/stunner/; its Gateway API CRDs are not
+    # used, since Envoy Gateway's install.yaml above carries a release of its own.
+    "stunner-crds.yaml v1.2.1 720ab0c18e0e51b8cee18259685061e03cc0d3d01e90a0c0fc20c5144351b279
+     https://raw.githubusercontent.com/l7mp/stunner-helm/08555494a2fdb53c0f8a0146cfa1c951dbb83f1b/helm/stunner/crds/stunner-crds.yaml"
     # Docker's default seccomp profile, from which seccomp-profile.py derives the worker's.
     "moby-seccomp-default.json 85e237f 785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334
      https://raw.githubusercontent.com/moby/profiles/85e237f1fe229a0c61c9c7d8e743fa780d3b97ca/seccomp/default.json"
     # kubeconform's schemas for the built-in kinds the manifests use, Kubernetes v1.37.0, from
     # yannh/kubernetes-json-schema at a fixed commit. The CRD kinds' schemas are generated
-    # from the CRDs in envoy-gateway.yaml (crd-schemas.py).
+    # from the CRDs in envoy-gateway.yaml and stunner-crds.yaml (crd-schemas.py).
     "schemas/serviceaccount-v1.json a6f9a32 8193d6c3561475c6d3d5c44e1faedb1df53905373d904bc17015694326d659cf
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/serviceaccount-v1.json"
     "schemas/clusterrole-rbac-v1.json a6f9a32 3fd79fbc322d89090be016a046630b6a399941547e7fbf7501645ee379e4fccb
@@ -43,6 +48,10 @@ pins=(
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/service-v1.json"
     "schemas/namespace-v1.json a6f9a32 324fae677b98d1a6d54340db0c334d053e8ffbafceb3f73326e41de2610d5843
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/namespace-v1.json"
+    "schemas/role-rbac-v1.json a6f9a32 09e6af32ea82c8ed3ca322261d67de0a776ec79da15635a599e43e63afbec4af
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/role-rbac-v1.json"
+    "schemas/rolebinding-rbac-v1.json a6f9a32 005bd663d1ffdf7434209ea0808f9101a537f3d1bbba86c7dc97e062927b7fcf
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/rolebinding-rbac-v1.json"
     "schemas/networkpolicy-networking-v1.json a6f9a32 f6324cc464f62228b0418f438d167208e4f86c7e3677ba30f608e79a8b26ba79
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/networkpolicy-networking-v1.json"
     "schemas/cronjob-batch-v1.json a6f9a32 84c4990d07d34fb8f7b62f1fda442e8ba25da93dc77bb737c4a901e4d6ae8780
