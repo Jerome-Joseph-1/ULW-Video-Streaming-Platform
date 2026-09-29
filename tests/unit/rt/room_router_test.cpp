@@ -770,6 +770,26 @@ TEST_P(RoomRouterTest, NoRoomIsClaimedBeforeTheNodeHasAdvertised) {
     EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-b"));
 }
 
+TEST_P(RoomRouterTest, AFloodOfIdleConnectionsCannotCrowdOutARealNode) {
+    Node& a = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    // More idle connections than there are peer slots in all.
+    std::vector<std::unique_ptr<RawPeer>> flood;
+    for (int i = 0; i < 64; ++i) {
+        flood.push_back(std::make_unique<RawPeer>(*reactor_, a.port));
+        ulw::test::pump_pending(*reactor_);
+    }
+    // The oldest were dropped to make room for the newer, never the other way round.
+    EXPECT_TRUE(flood.front()->hung_up());
+    EXPECT_GT(a.router->counters().handshakes_evicted, 0U);
+
+    Node& b = start("chat-b");
+    Member bob;
+    EXPECT_TRUE(join(b, bob));
+    EXPECT_EQ(send(b, bob, "bob", "through the flood"), 1U);
+}
+
 INSTANTIATE_TEST_SUITE_P(Reactors, RoomRouterTest,
                          ::testing::Values(ReactorKind::IoUring, ReactorKind::Epoll),
                          ulw::test::reactor_name);

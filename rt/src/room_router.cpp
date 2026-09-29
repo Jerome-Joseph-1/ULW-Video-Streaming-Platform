@@ -41,6 +41,13 @@ constexpr std::size_t kMaxUnsentBytes = std::size_t{1} << 20U;
 // node once; the rest is room for the dead ones a rolling restart leaves until they close, and
 // for scaling out. Each may hold a frame in its decoder and kMaxPeerBacklog unsent.
 constexpr std::size_t kMaxPeers = 32;
+// Connections still in their handshake, which anyone who reaches the port can open. They get
+// slots of their own, and past this many the oldest is dropped for the newest: a flood of
+// idle connections churns among themselves instead of filling the slots real nodes need, and
+// a real node's handshake, done in milliseconds, is never the oldest for long.
+constexpr std::size_t kMaxHandshaking = 8;
+// Slots beyond both, for connections closed and not yet reaped.
+constexpr std::size_t kInboundSlots = kMaxPeers + (2 * kMaxHandshaking);
 // From a connection's start to the end of its handshake: a round trip on the private network
 // and two MACs take milliseconds, and the dialer's address lookup is bounded by kStoreTimeout.
 // A peer that takes longer is stuck or is not a node, and gives its slot back.
@@ -120,6 +127,9 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 close();
             }
         }
+
+        [[nodiscard]] bool authenticated() const noexcept { return state_ == State::Authenticated; }
+        [[nodiscard]] core::MonoTime accepted() const noexcept { return accepted_; }
 
         [[nodiscard]] bool handshake_overdue(core::MonoTime now) const noexcept {
             return state_ != State::Authenticated && now - accepted_ > kHandshakeTimeout;
@@ -207,6 +217,10 @@ class RoomRouter::Impl final : public IRegistryObserver,
                                                    dialer_nonce_, own_nonce_);
             if (!expected || !auth::same_tag(*expected, proof->mac)) {
                 router_.refused("bad proof");
+                return false;
+            }
+            if (router_.authenticated_peers() >= kMaxPeers) {
+                router_.refused("too many peers");
                 return false;
             }
             state_ = State::Authenticated;
@@ -506,7 +520,7 @@ public:
          core::ports::IRandom& random, RouterConfig config, IRouterEvents& events)
         : reactor_(reactor), store_(store), clock_(clock), random_(random),
           config_(std::move(config)), events_(events), incarnation_(core::Uuid::v7(clock, random)),
-          registry_(store, clock, config_.self, incarnation_, *this), inbound_(kMaxPeers) {}
+          registry_(store, clock, config_.self, incarnation_, *this), inbound_(kInboundSlots) {}
 
     ~Impl() override {
         reactor_.cancel_timer(timer_);
@@ -701,6 +715,7 @@ public:
 
     void on_accept(os::UniqueFd conn) noexcept override {
         [[maybe_unused]] const auto tuned = net::tune_connection(conn.get());
+        make_room_for_a_handshake();
         const auto handle = inbound_.emplace(*this);
         if (!handle) {
             return;
@@ -712,6 +727,35 @@ public:
             return;
         }
         in->start(*id);
+    }
+
+    [[nodiscard]] std::size_t authenticated_peers() noexcept {
+        std::size_t n = 0;
+        inbound_.for_each_live([&](const Inbound& in) {
+            if (in.authenticated()) {
+                ++n;
+            }
+        });
+        return n;
+    }
+
+    void make_room_for_a_handshake() noexcept {
+        inbound_.reap([this](Inbound& in) { return reactor_.is_quiescent(in.conn()); });
+        std::size_t handshaking = 0;
+        Inbound* oldest = nullptr;
+        inbound_.for_each_live([&](Inbound& in) {
+            if (in.authenticated()) {
+                return;
+            }
+            ++handshaking;
+            if (oldest == nullptr || in.accepted() < oldest->accepted()) {
+                oldest = &in;
+            }
+        });
+        if (handshaking >= kMaxHandshaking && oldest != nullptr) {
+            ++counters_.handshakes_evicted;
+            oldest->close();
+        }
     }
 
     void on_timeout() noexcept override {

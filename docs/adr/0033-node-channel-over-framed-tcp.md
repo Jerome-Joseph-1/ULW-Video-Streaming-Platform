@@ -38,7 +38,10 @@ runs as a Deployment, so replicas have neither stable names nor a fixed list of 
   checks that tag and the node id it dialled, then sends `Proof`, the same HMAC under the
   dialer's role. Tags are compared in constant time. A frame out of this order, a wrong tag or
   a handshake unfinished after 5 s closes the connection, and nothing the peer sent is acted
-  on: no subscription, no send, no room created by a lookup. Fresh nonces on both sides make a
+  on: no subscription, no send, no room created by a lookup. Connections still in their
+  handshake have slots of their own (8), apart from the 32 for authenticated nodes, and past
+  that the oldest is dropped for the newest, so idle connections from anyone who reaches the
+  port churn among themselves instead of locking real nodes out. Fresh nonces on both sides make a
   recorded exchange worthless; the role in each tag keeps one side's tag from being reflected
   as the other's. Mutual TLS would also do, but it brings certificates to issue, rotate and
   check per pod, for a channel that only has to tell our nodes from everything else; a shared

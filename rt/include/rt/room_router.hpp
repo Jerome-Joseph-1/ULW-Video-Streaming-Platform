@@ -103,6 +103,8 @@ struct RouterCounters {
     std::uint64_t allocation_failures = 0;
     // Node-channel handshakes that failed.
     std::uint64_t peers_refused = 0;
+    // Unfinished node-channel handshakes dropped to make room for a newer one.
+    std::uint64_t handshakes_evicted = 0;
     // Node-channel connections closed because the other end stopped reading.
     std::uint64_t slow_peers = 0;
 };
