@@ -6,6 +6,7 @@
 
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
+#include "infra/auth/base64url.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
@@ -77,14 +78,14 @@ std::vector<std::uint16_t> client_ports() {
     return ports;
 }
 
-// A server message, the fields the test looks at.
+// A server message, the fields the test looks at. The body is decoded: what the sender sent.
 struct Seen {
     std::string type;
     std::uint64_t seq = 0;
     std::string sender;
+    std::string id;
     std::string body;
     std::string reason;
-    std::optional<std::uint64_t> ref;
 };
 
 std::optional<Seen> parse_seen(const std::string& text) {
@@ -99,14 +100,11 @@ std::optional<Seen> parse_seen(const std::string& text) {
     Seen s{.type = string("type"),
            .seq = 0,
            .sender = string("sender"),
-           .body = string("body"),
-           .reason = string("reason"),
-           .ref = std::nullopt};
+           .id = string("id"),
+           .body = infra::auth::decode_base64url(string("body")).value_or("<not base64url>"),
+           .reason = string("reason")};
     if (const core::json::Value* seq = json->find("seq")) {
         s.seq = seq->as_u64().value_or(0);
-    }
-    if (const core::json::Value* ref = json->find("ref")) {
-        s.ref = ref->as_u64();
     }
     return s;
 }
@@ -258,26 +256,24 @@ protected:
     }
 
     static std::string send_command(const std::string& room, const std::string& body,
-                                    std::uint64_t ref) {
-        std::string out = R"({"type":"send","room":")" + room + R"(","ref":)" +
-                          std::to_string(ref) + R"(,"body":)";
-        core::json::append_string(out, body);
-        out += '}';
-        return out;
+                                    const std::string& id) {
+        return R"({"type":"send","room":")" + room + R"(","id":")" + id + R"(","body":")" +
+               infra::auth::encode_base64url(body) + R"("})";
     }
+
+    static std::string ref(std::uint64_t n) { return "r" + std::to_string(n); }
 
     // Sends until the client gets its own message back: then its node routes to the room's
     // current owner and receives what that owner sequences. Returns the message's seq.
     std::optional<std::uint64_t> send_until_heard(Client& client, const std::string& body) {
         for (int attempt = 0; attempt < 10; ++attempt) {
-            const std::uint64_t ref = next_ref_++;
+            const std::string id = ref(next_ref_++);
             const std::string text = body + " #" + std::to_string(attempt);
-            if (!client.send(send_command(room_, text, ref))) {
+            if (!client.send(send_command(room_, text, id))) {
                 return std::nullopt;
             }
             const auto outcome = client.wait_for([&](const Seen& s) {
-                return (s.type == "message" && s.body == text) ||
-                       (s.type == "error" && s.ref == ref);
+                return (s.type == "message" && s.body == text) || (s.type == "error" && s.id == id);
             });
             if (outcome && outcome->type == "message") {
                 last_body_[client.name()] = text;
@@ -327,8 +323,8 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
 
     // Clients on different nodes see each other's messages, each under the one seq its owner
     // gave it.
-    ASSERT_TRUE(bob->send(send_command(room_, "hello from chat-2", 1)));
-    ASSERT_TRUE(alice->send(send_command(room_, "hello from chat-1", 2)));
+    ASSERT_TRUE(bob->send(send_command(room_, "hello from chat-2", ref(1))));
+    ASSERT_TRUE(alice->send(send_command(room_, "hello from chat-1", ref(2))));
     std::optional<std::uint64_t> from_bob;
     std::optional<std::uint64_t> from_alice;
     for (Client* c : {alice.get(), bob.get(), carol.get()}) {
@@ -349,7 +345,7 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     ASSERT_TRUE(watch.exec("LISTEN room_owner"));
     Node& stalled = nodes_[0];
     stalled.process->signal(SIGSTOP);
-    ASSERT_TRUE(alice->send(send_command(room_, "stale", 7)));
+    ASSERT_TRUE(alice->send(send_command(room_, "stale", ref(7))));
 
     // A survivor claims the room under a higher generation.
     const auto deadline = std::chrono::steady_clock::now() + seconds(30);
@@ -373,7 +369,7 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     const std::string fenced = R"("msg":"fenced out","node":"chat-1","room":")" + room_ +
                                R"(","generation":1,"write":"append"})";
     ASSERT_TRUE(stalled.process->wait_for_output(fenced, seconds(30))) << stalled.process->output();
-    const auto refused = alice->wait_for([](const Seen& s) { return s.ref == 7U; });
+    const auto refused = alice->wait_for([](const Seen& s) { return s.id == ref(7); });
     ASSERT_TRUE(refused);
     EXPECT_EQ(refused->type, "error");
     // "fenced" when the append's own answer comes back first; "unavailable" when the resumed
@@ -420,6 +416,7 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
          {"hello from chat-2", "hello from chat-1", "stale", "bob after the failover",
           "carol after the failover", "alice is back"}) {
         secrets.push_back(body);
+        secrets.push_back(infra::auth::encode_base64url(body));
     }
     for (const Node& n : nodes_) {
         const std::string& output = n.process->output();

@@ -5,6 +5,7 @@
 #include "core/ports/random.hpp"
 #include "net/reactor.hpp"
 #include "os/unique_fd.hpp"
+#include "rt/message_key.hpp"
 #include "rt/registry.hpp"
 #include "rt/room_store.hpp"
 
@@ -26,6 +27,7 @@ struct Message {
     core::RoomId room;
     std::uint64_t seq = 0;
     core::UserId sender;
+    MessageKey key;
     std::span<const std::byte> body;
 };
 
@@ -110,6 +112,8 @@ struct RouterCounters {
     std::uint64_t handshakes_evicted = 0;
     // Node-channel connections closed because the other end stopped reading.
     std::uint64_t slow_peers = 0;
+    // Sends answered with the seq their key already had, instead of being sequenced again.
+    std::uint64_t duplicates = 0;
 };
 
 // One node's share of the room plane (ADR-0015, ADR-0035). Members join rooms here, wherever
@@ -139,9 +143,11 @@ public:
     void join(const core::RoomId& room, IMember& member, JoinCallback done);
     // Also drops a join still in progress, whose callback is then never called.
     void leave(const core::RoomId& room, IMember& member) noexcept;
-    // Answers with the message's sequence number once its owner has sequenced it.
+    // Answers with the message's sequence number once its owner has sequenced it. A message
+    // whose sender and key were sequenced lately, as seen here or by the owner, is not
+    // sequenced again: the answer is the seq it got the first time.
     void send(const core::RoomId& room, IMember& from, const core::UserId& sender,
-              std::vector<std::byte> body, SendCallback done);
+              const MessageKey& key, std::vector<std::byte> body, SendCallback done);
 
     // For a drain: stops owning rooms and makes them claimable at once.
     void release_rooms(StoreCallback<void> done);

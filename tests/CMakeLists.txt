@@ -166,6 +166,7 @@ if(ULW_FUZZ)
     target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
 ulw_add_test_suite(rt_unit_tests unit
+    unit/rt/recent_keys_test.cpp
     unit/rt/registry_test.cpp
     unit/rt/room_router_test.cpp
     unit/rt/wire_test.cpp)
@@ -284,6 +285,7 @@ target_include_directories(room_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
     unit/chat/envelope_test.cpp
     unit/chat/session_test.cpp
@@ -297,7 +299,7 @@ ulw_add_test_suite(chat_cluster_tests integration
     integration/postgres_harness.cpp
     support/child_process.cpp
     PROPERTIES RESOURCE_LOCK postgres)
-target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::codec_ws
+target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::auth ulw::codec_ws
     ulw::net_lib ulw::os PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
