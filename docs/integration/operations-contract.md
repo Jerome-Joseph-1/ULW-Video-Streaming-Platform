@@ -184,6 +184,10 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `allocation_failures_total`, `rooms_active`, `rooms_joined`, `room_reassignments_total`,
 `fenced_writes_total`, `forwards_total`, `forward_timeouts_total`, `peers_lost_total`,
 `peers_refused_total`, `slow_peers_total`. Chat is a draft ([chat.md](chat.md)).
+`lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
+moved past because they were behind (ADR-0057): a node whose count climbs has viewers that
+cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at
+64 KiB, so chat's pod memory is bounded at about 810 MiB of its 1 GiB, kernel buffers included.
 
 ## Shutdown
 

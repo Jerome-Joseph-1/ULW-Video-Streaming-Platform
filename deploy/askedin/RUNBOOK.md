@@ -201,13 +201,15 @@ chat pods.
 
 A stream's live chat admits anyone, and only the server side opens one: a client's join can
 record a room only as closed, and a join that asks for `"kind":"live"` anywhere else is refused
-with `not_live`. Until the product calls `IMessageStore::record_live`, record a stream's chat
-room live, before anyone joins it, as the service's role:
+with `not_live`. A stream's chat room is named by the stream (docs/adr/0057), and viewers join
+it by the stream's name. Until the product calls `IMessageStore::record_live` when a stream goes
+on air, open a stream's chat before its viewers arrive, as the service's role, with the stream's
+name for `<stream>`:
 
 ```sql
 INSERT INTO chat_rooms (room_id, kind)
-SELECT '<room uuid>', 'stream_live_chat'
- WHERE NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = '<room uuid>')
+SELECT live_chat_room('<stream>'), 'stream_live_chat'
+ WHERE NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = live_chat_room('<stream>'))
 ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind
 RETURNING kind;
 ```

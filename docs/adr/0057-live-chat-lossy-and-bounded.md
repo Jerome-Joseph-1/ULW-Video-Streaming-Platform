@@ -13,8 +13,9 @@ bounded depth while the node's memory stays flat, and the other viewers are unaf
 
 What was there: ADR-0043's lossy delivery skipped every new message while a client had more
 than 64 KiB unsent, so a viewer that stalled read the oldest of its backlog first and lost
-whatever came while it was stalled. Nothing tied a room to a stream, and ADR-0052 (M19) records
-a room's kind at its first join and stores every message of every room before delivery. Below
+whatever came while it was stalled. Nothing tied a room to a stream. ADR-0052 (M19) records a
+room's kind, lets only the server open a room to anyone (`record_live`), and stores every
+message of every room before delivery. Below
 the process, the kernel autotuned each connection's send buffer up to `tcp_wmem`'s 4 MiB, so a
 viewer that stopped reading held megabytes of the pod's memory before the service noticed it
 was behind at all.
@@ -40,9 +41,9 @@ How a live chat is tied to its stream:
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
-| The first join names the kind (ADR-0052's `"kind":"live"` on any room id) | Nothing to add | Rejected: any client makes an open room of any id, and a squatter can take a stream's room first as a closed group |
-| A table from stream to room, written when the stream starts | Only real streams get chats | Rejected: the packager would have to reach chat's database, and a viewer who opens the page before the publisher cannot join |
-| The room id derived from the stream's name, as a version 8 UUID; joined only by the name | No table; every node and client computes the same room; the id says the kind | Accepted |
+| A room id the product hands out with each stream, joined as `"kind":"live"` | ADR-0052 already has it | Rejected as the only way: every viewer needs the id from somewhere, and nothing says which rooms are streams' |
+| A table from stream to room, written when the stream starts | Any room can be a stream's | Rejected: one more table and lookup per join, for a mapping a hash gives |
+| The room id derived from the stream's name, as a version 8 UUID, joined by the name and opened by the server side | No table; every node, client and SQL statement computes the same room; the id says the kind | Accepted |
 
 Whether live chat is stored (ADR-0052):
 
@@ -65,11 +66,16 @@ How senders are limited in a room of thousands:
 - **Joining.** `{"type":"join","stream":"<name>"}`, with the stream's name as the live
   packager takes it (1 to 64 of `[A-Za-z0-9_-]`, `apps/live-packager/src/stream_id.hpp`). The
   room is the first 16 bytes of SHA-256 over `ulw-live-chat:` and the name, with the version
-  set to 8 and the RFC 9562 variant (`apps/chat/src/live_chat.cpp`); `joined` names it, and
-  sends and history use it like any room id. A join that names a version 8 id as `room` is
-  refused `bad_room`: nothing else makes one, so a room is a live chat exactly when its id says
-  so, and nobody can create it ahead of its stream as anything else. The room is open: anyone
-  authenticated may join, whether or not the stream is on air.
+  set to 8 and the RFC 9562 variant (`apps/chat/src/live_chat.cpp`, and the same in SQL as
+  `live_chat_room(stream)`, migration 0007); `joined` names it, and sends and history use it
+  like any room id. A join that names a version 8 id as `room` is refused `bad_room`: nothing
+  else makes one, so nobody can create a stream's room ahead of it as a closed room.
+- **Opening.** A stream join asks for the live kind, so under ADR-0052 it is admitted only once
+  the server side has recorded the room live (`record_live`, or the runbook's statement with
+  `live_chat_room`), and refused `not_live` before. Whatever starts a stream opens its chat;
+  until the product does that, operators do it by the stream's name. Opened, it admits anyone
+  signed in. The profile below follows the id, so it applies to exactly the rooms a stream join
+  reaches.
 - **Delivery.** Every viewer of a live chat is lossy, whatever its join asked; a stalled
   viewer is never closed for it. Every lossy client, in any room, is served the same way: while
   it has 64 KiB or less unsent it is pushed each message as the room gets it; past that it gets
@@ -106,7 +112,9 @@ How senders are limited in a room of thousands:
   the room keeps its newest 1000: the append that stores seq N of a lossy room deletes seq
   N - 1000 in the same statement, one more primary key write. 1000 messages of at most 2000
   bytes are about 2 MiB a room; at the 60 a second of three nodes that is 17 s of the busiest
-  chat, and minutes of an ordinary one, which is as far back as a late viewer pages.
+  chat, and minutes of an ordinary one, which is as far back as a late viewer pages. A
+  message's key goes with its row, so a resend of it after 1000 newer messages would be
+  sequenced again; the resend window is a minute (ADR-0043).
 
 ## Consequences
 
@@ -120,10 +128,11 @@ How senders are limited in a room of thousands:
 - `lossy_drops_total` counts seqs lossy clients were moved past, including gaps of the room
   itself that a behind client was waiting across. A node whose count climbs has viewers that
   cannot keep up, not a fault of its own.
-- A stream's chat exists as soon as someone joins it, even for a stream that never goes on air.
-  Joins are rate limited per user (ADR-0036), and every such room is bounded in storage, but
-  rooms of ended streams keep their last 1000 messages. Reopen with a retention job when the
-  table shows them.
+- A stream's chat exists from when it is opened, and stays open after the stream ends. Every
+  such room is bounded in storage, but rooms of ended streams keep their last 1000 messages.
+  Reopen with a retention job when the table shows them.
+- A room an operator opens by id with `"kind":"live"` joins (ADR-0052) is open to anyone but
+  gets none of this profile: it is not a stream's. The runbook opens rooms by stream name only.
 - Each node's allowance is its own, so the room's total is 60 a second on three nodes and grows
   with nodes. The owner's ceiling is far above it; if chat ever runs on dozens of nodes, move
   the limit to the owner.
