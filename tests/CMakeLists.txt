@@ -344,3 +344,15 @@ if(ULW_BUILD_WORKER)
     endif()
     add_dependencies(playback_integration_tests gateway_server)
 endif()
+
+ulw_add_test_suite(sdp_unit_tests unit
+    unit/sdp/attributes_test.cpp
+    unit/sdp/chromium_test.cpp
+    unit/sdp/parser_test.cpp
+    unit/sdp/property_test.cpp
+    unit/sdp/serializer_test.cpp
+    unit/sdp/validate_test.cpp)
+target_link_libraries(sdp_unit_tests PRIVATE ulw::codec_sdp)
+# Chromium's offer and answer, captured by e2e/sdp_roundtrip.spec.mjs.
+target_compile_definitions(sdp_unit_tests
+    PRIVATE ULW_SDP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/sdp")
