@@ -43,7 +43,7 @@ Client to server:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`) | Subscribe this connection to the room. Joining an unknown room creates it, as the `kind` it names (see [Member lists](#member-lists)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
+| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names; `"live"` joins only a room the server opened (see [Member lists](#member-lists)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 
@@ -100,17 +100,19 @@ delivered, and the `id` stays with the first message. Send the new message under
 
 ### Member lists
 
-<!-- apps/chat/src/chat_service.cpp (join, admitted), migrations/0005_chat_messages.sql (chat_members) -->
+<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms) -->
 
-Who may join a room depends on its kind, which the room's first join sets and nothing changes
-afterwards:
+Who may join a room depends on its kind, which is recorded once and never changes:
 
 - **Direct and group chats** (`"kind":"direct"` or `"group"`, the default) admit only their
   members. Anyone else's `join` is refused with `not_member`, so they can neither send to the
-  room nor read its history. A direct or group chat with no members admits nobody.
-- **A stream's live chat** (`"kind":"live"`) admits anyone. Later joins need not name the kind.
-  A room whose members were listed before its first join is a group chat, whatever that join
-  asks for.
+  room nor read its history. A direct or group chat with no members admits nobody. The first
+  join of a room with no kind recorded records the kind it names; so does listing its first
+  member (as a group chat).
+- **A stream's live chat** admits anyone. Only the server opens one, before anyone joins it; a
+  client cannot. A join that says `"kind":"live"` is admitted in a room the server opened, and
+  refused with `not_live` in any other, which it leaves as it was. Joins of a live room need
+  not name the kind.
 
 No client command changes a member list; they are set by the service's operators, and later by
 the product, in the database. A member removed from the list keeps receiving the room's
@@ -126,6 +128,7 @@ messages, and can read its history, until that connection closes; the next `join
 | `bad_id` | `id` is not a message id | Fix the client |
 | `bad_body` | `body` is not base64url | Fix the client |
 | `not_member` | The room has a member list without you | Do not retry |
+| `not_live` | `"kind":"live"` for a room the server has not opened as a stream's live chat | Do not retry; join without `kind` if it is a group chat you are a member of |
 | `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
 | `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |
 | `rate_limited` | Past the send allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered |

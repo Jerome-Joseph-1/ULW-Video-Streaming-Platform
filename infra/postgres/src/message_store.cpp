@@ -198,7 +198,7 @@ private:
 class Admits final : public Operation {
 public:
     Admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
-           MessageCallback<bool> done)
+           MessageCallback<core::ports::Admission> done)
         : room_(room), user_(user), asked_(asked), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
@@ -213,13 +213,23 @@ public:
             done_(std::unexpected(MessageStoreError::Unavailable));
             return std::nullopt;
         }
-        const auto kind = outcome->get(0, 0).and_then(kind_of);
+        const auto text = outcome->get(0, 0);
         const auto member = outcome->get(0, 1).and_then(parse_bool);
-        if (!kind || !member) {
+        if (!member) {
             done_(std::unexpected(MessageStoreError::Corrupt));
             return std::nullopt;
         }
-        done_(core::ports::admits_anyone(*kind) || *member);
+        // No kind: the join asked for the open kind of a room with none recorded.
+        if (!text) {
+            done_(core::ports::Admission::NotLive);
+            return std::nullopt;
+        }
+        const auto kind = kind_of(*text);
+        if (!kind) {
+            done_(std::unexpected(MessageStoreError::Corrupt));
+            return std::nullopt;
+        }
+        done_(core::ports::admission(asked_, *kind, *member));
         return std::nullopt;
     }
 
@@ -231,7 +241,47 @@ private:
     core::RoomId room_;
     core::UserId user_;
     core::ports::RoomKind asked_;
-    MessageCallback<bool> done_;
+    MessageCallback<core::ports::Admission> done_;
+};
+
+class RecordLive final : public Operation {
+public:
+    RecordLive(const core::RoomId& room, MessageCallback<void> done)
+        : room_(room), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = message_sql::kRecordLive,
+                         .params = Params{}.add_uuid(room_.uuid())};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+            return std::nullopt;
+        }
+        // No row: the room lists members and has no kind recorded.
+        if (outcome->rows() == 0) {
+            done_(std::unexpected(MessageStoreError::Conflict));
+            return std::nullopt;
+        }
+        const auto kind = outcome->get(0, 0).and_then(kind_of);
+        if (!kind) {
+            done_(std::unexpected(MessageStoreError::Corrupt));
+        } else if (*kind != core::ports::RoomKind::StreamLiveChat) {
+            done_(std::unexpected(MessageStoreError::Conflict));
+        } else {
+            done_({});
+        }
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    MessageCallback<void> done_;
 };
 
 } // namespace
@@ -316,8 +366,13 @@ void PgMessageStore::members(const core::RoomId& room, std::optional<core::UserI
 }
 
 void PgMessageStore::admits(const core::RoomId& room, const core::UserId& user,
-                            core::ports::RoomKind asked, MessageCallback<bool> done) {
+                            core::ports::RoomKind asked,
+                            MessageCallback<core::ports::Admission> done) {
     impl_->pool().submit(std::make_unique<Admits>(room, user, asked, std::move(done)));
+}
+
+void PgMessageStore::record_live(const core::RoomId& room, MessageCallback<void> done) {
+    impl_->pool().submit(std::make_unique<RecordLive>(room, std::move(done)));
 }
 
 } // namespace infra::postgres

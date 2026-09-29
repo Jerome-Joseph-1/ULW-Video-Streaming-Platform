@@ -302,14 +302,32 @@ protected:
 
     static std::string ref(std::uint64_t n) { return "r" + std::to_string(n); }
 
-    // Lists members for a room, as the service's operators do.
+    // Lists members for a room, as the service's operators do (RUNBOOK section 3): the room is
+    // recorded closed first.
     void list_members(const std::string& room, const std::vector<std::string>& users) const {
         auto conn = db_->session();
+        ASSERT_TRUE(conn.exec("INSERT INTO chat_rooms (room_id, kind) "
+                              "VALUES ($1::text::uuid, 'group_chat') "
+                              "ON CONFLICT (room_id) DO NOTHING",
+                              Params{}.add_text(room)));
         for (const std::string& user : users) {
             ASSERT_TRUE(
                 conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::text::uuid, $2)",
                           Params{}.add_text(room).add_text(user)));
         }
+    }
+
+    // Records a room as a stream's live chat, as the server side does (RUNBOOK section 3); the
+    // kind it is then recorded as.
+    [[nodiscard]] std::string record_live(const std::string& room) const {
+        auto conn = db_->session();
+        return ulw::test::scalar(
+            conn,
+            "INSERT INTO chat_rooms (room_id, kind) "
+            "SELECT $1::text::uuid, 'stream_live_chat' WHERE NOT EXISTS "
+            "(SELECT 1 FROM chat_members WHERE room_id = $1::text::uuid) "
+            "ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind RETURNING kind",
+            Params{}.add_text(room));
     }
 
     // A join of `room` with `fields` added; "joined", or the error's reason.
@@ -979,12 +997,28 @@ TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedL
     auto bob = connect(nodes_[1], 1);
     ASSERT_TRUE(alice && bob);
     EXPECT_EQ(join_answer(*alice, nobody), "not_member");
-    // Its first join recorded it as a group chat; asking for live afterwards opens nothing.
-    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_member");
+    // Its first join recorded it as a group chat; asking for live afterwards opens nothing, and
+    // neither can the server.
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+    EXPECT_EQ(record_live(nobody), "group_chat");
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+}
+
+TEST_P(ChatClusterTest, AJoinThatAsksForLiveCannotOpenARoomTheServerDidNot) {
+    const std::string room = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    EXPECT_EQ(join_answer(*alice, room, R"(,"kind":"live")"), "not_live");
+    auto conn = db_->session();
+    EXPECT_EQ(ulw::test::scalar(conn,
+                                "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
+                                Params{}.add_text(room)),
+              "0");
 }
 
 TEST_P(ChatClusterTest, ALiveRoomAdmitsAnyone) {
     const std::string live = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_EQ(record_live(live), "stream_live_chat");
     auto alice = connect(nodes_[0], 0);
     auto carol = connect(nodes_[2], 2);
     ASSERT_TRUE(alice && carol);

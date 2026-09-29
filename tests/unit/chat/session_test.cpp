@@ -71,6 +71,17 @@ private:
         ulw::test::FakeVerifier verifier;
         auto store = std::make_unique<ulw::test::MemoryRoomStore>(**reactor, db);
         auto messages = std::make_unique<infra::messages::MemoryMessageStore>(**reactor);
+        // The rooms these tests join as live, recorded so as the server side does: a join alone
+        // cannot open a room.
+        for (const std::string_view room :
+             {kRoom, std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f901"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f902"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f903"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f904"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f905"}}) {
+            messages->record_live(*core::RoomId::parse(room),
+                                  [](core::ports::MessageResult<void> /*recorded*/) noexcept {});
+        }
         chat::RoomLog log(*core::NodeId::parse("chat-1"));
         os::SystemRandom random;
         rt::RoomRouter router(**reactor, *store, clock, random,

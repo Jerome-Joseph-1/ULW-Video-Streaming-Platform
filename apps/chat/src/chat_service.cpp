@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iterator>
 #include <string>
+#include <string_view>
 
 namespace chat {
 
@@ -13,6 +14,15 @@ namespace {
 constexpr std::size_t kMessageOverhead = 256;
 // Rooms are looked over for lingering this often; a room lingers a second longer at most.
 constexpr core::Millis kSweepEvery{1'000};
+
+// The error a join is refused with, for an answer other than Admitted.
+[[nodiscard]] std::string_view
+refusal(const core::ports::MessageResult<core::ports::Admission>& result) noexcept {
+    if (!result) {
+        return "unavailable";
+    }
+    return *result == core::ports::Admission::NotLive ? "not_live" : "not_member";
+}
 
 } // namespace
 
@@ -150,10 +160,12 @@ void ChatService::join(ClientId id, const Join& join) {
         c->rooms.push_back(join.room);
         c->admitting.push_back(join.room);
         try {
-            messages_.admits(join.room, c->user, join.kind,
-                             [this, id, join](core::ports::MessageResult<bool> result) noexcept {
-                                 admitted(id, join, result);
-                             });
+            messages_.admits(
+                join.room, c->user, join.kind,
+                [this, id,
+                 join](core::ports::MessageResult<core::ports::Admission> result) noexcept {
+                    admitted(id, join, result);
+                });
         } catch (...) {
             std::erase(c->admitting, join.room);
             std::erase(c->rooms, join.room);
@@ -165,15 +177,15 @@ void ChatService::join(ClientId id, const Join& join) {
 }
 
 void ChatService::admitted(ClientId id, const Join& join,
-                           core::ports::MessageResult<bool> result) noexcept {
+                           core::ports::MessageResult<core::ports::Admission> result) noexcept {
     Client* c = find(id);
     if (c == nullptr) {
         return;
     }
     std::erase(c->admitting, join.room);
-    if (!result || !*result) {
+    if (!result || *result != core::ports::Admission::Admitted) {
         std::erase(c->rooms, join.room);
-        answer(*c->client, result ? "not_member" : "unavailable", join.room);
+        answer(*c->client, refusal(result), join.room);
         return;
     }
     try {

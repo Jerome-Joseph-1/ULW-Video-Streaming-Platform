@@ -30,6 +30,7 @@
 
 namespace {
 
+using core::ports::Admission;
 using core::ports::kMaxHistoryBytes;
 using core::ports::kMaxHistoryRows;
 using core::ports::kMaxMessageBody;
@@ -529,49 +530,86 @@ TEST_P(MessageStoreConformance, AKeyUsedAgainGetsItsSeqWithTheSameBodyAndIsAConf
 TEST_P(MessageStoreConformance, AGroupRoomAdmitsOnlyItsMembersEvenWhileItHasNone) {
     const core::RoomId room = new_room();
     const auto admits = [&](const core::UserId& user) {
-        return ask<bool>([&](auto done) {
+        return ask<Admission>([&](auto done) {
             store().admits(room, user, core::ports::RoomKind::GroupChat, std::move(done));
         });
     };
-    EXPECT_EQ(admits(alice_), false);
-    EXPECT_EQ(admits(bob_), false);
+    EXPECT_EQ(admits(alice_), Admission::NotMember);
+    EXPECT_EQ(admits(bob_), Admission::NotMember);
     ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(room, alice_, std::move(done)); }));
-    EXPECT_EQ(admits(alice_), true);
-    EXPECT_EQ(admits(bob_), false);
+    EXPECT_EQ(admits(alice_), Admission::Admitted);
+    EXPECT_EQ(admits(bob_), Admission::NotMember);
     ASSERT_TRUE(
         ask<void>([&](auto done) { store().remove_member(room, alice_, std::move(done)); }));
-    EXPECT_EQ(admits(alice_), false);
+    EXPECT_EQ(admits(alice_), Admission::NotMember);
 }
 
-TEST_P(MessageStoreConformance, ALiveRoomAdmitsAnyone) {
+TEST_P(MessageStoreConformance, AJoinThatAsksForLiveInARoomWithNoKindIsRefusedAndRecordsNothing) {
     const core::RoomId room = new_room();
-    EXPECT_EQ(ask<bool>([&](auto done) {
-                  store().admits(room, alice_, core::ports::RoomKind::StreamLiveChat,
-                                 std::move(done));
-              }),
-              true);
-    EXPECT_EQ(ask<bool>([&](auto done) {
-                  store().admits(room, bob_, core::ports::RoomKind::StreamLiveChat,
-                                 std::move(done));
-              }),
-              true);
+    const auto admits = [&](const core::UserId& user, core::ports::RoomKind asked) {
+        return ask<Admission>(
+            [&](auto done) { store().admits(room, user, asked, std::move(done)); });
+    };
+    EXPECT_EQ(admits(alice_, core::ports::RoomKind::StreamLiveChat), Admission::NotLive);
+    EXPECT_EQ(admits(bob_, core::ports::RoomKind::StreamLiveChat), Admission::NotLive);
+    // Still unrecorded: the server can open it, which it could not had the joins closed it.
+    ASSERT_TRUE(ask<void>([&](auto done) { store().record_live(room, std::move(done)); }));
+    EXPECT_EQ(admits(alice_, core::ports::RoomKind::StreamLiveChat), Admission::Admitted);
 }
 
-TEST_P(MessageStoreConformance, TheFirstJoinRecordsTheKindAndALaterOneCannotOpenTheRoom) {
-    const core::RoomId group = new_room();
+TEST_P(MessageStoreConformance, ARoomRecordedLiveAdmitsAnyoneWhateverKindTheJoinNames) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store().record_live(room, std::move(done)); }));
+    // Recording it again changes nothing.
+    ASSERT_TRUE(ask<void>([&](auto done) { store().record_live(room, std::move(done)); }));
+    for (const auto asked : {core::ports::RoomKind::StreamLiveChat,
+                             core::ports::RoomKind::GroupChat, core::ports::RoomKind::DirectChat}) {
+        EXPECT_EQ(
+            ask<Admission>([&](auto done) { store().admits(room, bob_, asked, std::move(done)); }),
+            Admission::Admitted);
+    }
+}
+
+TEST_P(MessageStoreConformance, AJoinCannotOpenARoomRecordedClosed) {
     const auto admits = [&](const core::RoomId& room, core::ports::RoomKind asked) {
-        return ask<bool>([&](auto done) { store().admits(room, bob_, asked, std::move(done)); });
+        return ask<Admission>(
+            [&](auto done) { store().admits(room, bob_, asked, std::move(done)); });
     };
-    EXPECT_EQ(admits(group, core::ports::RoomKind::DirectChat), false);
-    EXPECT_EQ(admits(group, core::ports::RoomKind::StreamLiveChat), false);
-    // A room someone listed members for is private, whatever its first join says.
+    // Recorded by its first join.
+    const core::RoomId group = new_room();
+    EXPECT_EQ(admits(group, core::ports::RoomKind::DirectChat), Admission::NotMember);
+    EXPECT_EQ(admits(group, core::ports::RoomKind::StreamLiveChat), Admission::NotLive);
+    EXPECT_EQ(admits(group, core::ports::RoomKind::GroupChat), Admission::NotMember);
+    // Recorded by its first member, before any join.
     const core::RoomId listed = new_room();
     ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(listed, alice_, std::move(done)); }));
-    EXPECT_EQ(admits(listed, core::ports::RoomKind::StreamLiveChat), false);
-    // A live room stays open to a join that names another kind.
-    const core::RoomId live = new_room();
-    EXPECT_EQ(admits(live, core::ports::RoomKind::StreamLiveChat), true);
-    EXPECT_EQ(admits(live, core::ports::RoomKind::GroupChat), true);
+    EXPECT_EQ(admits(listed, core::ports::RoomKind::StreamLiveChat), Admission::NotLive);
+    EXPECT_EQ(admits(listed, core::ports::RoomKind::GroupChat), Admission::NotMember);
+}
+
+TEST_P(MessageStoreConformance, RecordLiveRefusesARoomThatIsClosedOrListsMembers) {
+    const auto record_live = [&](const core::RoomId& room) {
+        return ask<void>([&](auto done) { store().record_live(room, std::move(done)); });
+    };
+    const MessageResult<void> conflict{std::unexpected(MessageStoreError::Conflict)};
+    const core::RoomId joined = new_room();
+    ASSERT_EQ(ask<Admission>([&](auto done) {
+                  store().admits(joined, bob_, core::ports::RoomKind::GroupChat, std::move(done));
+              }),
+              Admission::NotMember);
+    EXPECT_EQ(record_live(joined), conflict);
+    const core::RoomId listed = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(listed, alice_, std::move(done)); }));
+    EXPECT_EQ(record_live(listed), conflict);
+    // A room whose members all left is still closed.
+    ASSERT_TRUE(
+        ask<void>([&](auto done) { store().remove_member(listed, alice_, std::move(done)); }));
+    EXPECT_EQ(record_live(listed), conflict);
+    EXPECT_EQ(ask<Admission>([&](auto done) {
+                  store().admits(listed, bob_, core::ports::RoomKind::StreamLiveChat,
+                                 std::move(done));
+              }),
+              Admission::NotLive);
 }
 
 // The in-memory store's own writer, which the Postgres store does

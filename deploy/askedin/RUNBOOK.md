@@ -180,16 +180,50 @@ ALTER DATABASE ulw_stage SET auto_explain.log_parameter_max_length = 0;
 as `ulw_stage` then print `0`.
 
 Chat rooms other than a stream's live chat admit only their listed members (docs/adr/0052).
-Until the product manages the lists, they are rows in `chat_members`, set as the service's role:
+Until the product manages the lists, they are rows in `chat_members`, set as the service's role.
+Record the room as closed in the same transaction, before its first member, as the service's own
+statement does, so that it can never be recorded live while it lists anyone:
 
 ```sql
-INSERT INTO chat_members (room_id, user_id) VALUES ('<room uuid>', '<user sub>');
+BEGIN;
+INSERT INTO chat_rooms (room_id, kind) VALUES ('<room uuid>', 'group_chat')
+ON CONFLICT (room_id) DO NOTHING;
+INSERT INTO chat_members (room_id, user_id) VALUES ('<room uuid>', '<user sub>')
+ON CONFLICT (room_id, user_id) DO NOTHING;
+COMMIT;
+
 DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user sub>';
 ```
 
 A member removed this way keeps receiving the room's messages, and can read its history, until
 their connection closes; their next join is refused. To cut them off at once, also restart the
 chat pods.
+
+A stream's live chat admits anyone, and only the server side opens one: a client's join can
+record a room only as closed, and a join that asks for `"kind":"live"` anywhere else is refused
+with `not_live`. Until the product calls `IMessageStore::record_live`, record a stream's chat
+room live, before anyone joins it, as the service's role:
+
+```sql
+INSERT INTO chat_rooms (room_id, kind)
+SELECT '<room uuid>', 'stream_live_chat'
+ WHERE NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = '<room uuid>')
+ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind
+RETURNING kind;
+```
+
+It must print `stream_live_chat`. Anything else (`group_chat`, `direct_chat`, or no row, when the
+room lists members) means the room is closed, and stays so: a recorded kind never changes, so a
+room that was joined or listed before it was opened needs a new room id.
+
+The chat nodes speak a versioned channel to each other (docs/adr/0043), and a node refuses a
+peer of another version. A release that changes the version (M19 moves it from 2 to 3) splits a
+rolling update in two: until the last old pod is gone, old and new nodes cannot reach each
+other, rooms owned across the split are unreachable from the other side, and their joins and
+sends fail as `unavailable` (clients retry them). Roll such a release out with the chat
+Deployment's strategy set to `Recreate` (`spec.strategy: {type: Recreate}`), which stops every
+old pod before starting the new ones: a short full outage instead of a split one. Releases
+that keep the version roll as usual.
 
 ### 3a. Lifecycle rule and upload reaper
 

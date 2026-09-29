@@ -66,7 +66,10 @@ What bounds a page of history:
   `conflict` and is delivered to nobody. Answering the old seq instead would have the owner fan
   out the new body under a seq whose stored body is the old one, so that history and what
   members saw disagree. The router's cache of recent keys keeps a digest of each body for the
-  same reason, and gives the same answer without asking the store. Reply status `Conflict` is
+  same reason, and gives the same answer without asking the store. The digest is FNV-1a,
+  which is not cryptographic: a sender can make two bodies collide, but the cache is keyed by
+  sender and key, so a collision can only have the sender's own resend of their own key
+  answered as a repeat, which the store, comparing the bytes, would have refused. Reply status `Conflict` is
   new on the node channel, whose version is therefore 3 (ADR-0043's nodes speak 2).
 - **A repeat the store recognised is not delivered again.** The answer is a seq the owner has
   already passed, and the owner, seeing it at or below its head, answers the sender and
@@ -114,20 +117,31 @@ What bounds a page of history:
   the same way. No client command changes it; it is the operators' (and later the product's) to
   set.
 - **Who may be in a room follows from its kind, never from an empty list.** Direct and group
-  chats are closed: `admits(room, user, asked)` is true only for their members, and a closed
-  room with no members admits nobody. A stream's live chat is open to anyone. The kind is
-  recorded in `chat_rooms` by the room's first join, as the join names it (`"kind"` in the
-  envelope; a join that names none asks for a group chat), so a room is closed unless it was
-  created as live. A room that already lists members is recorded as a group chat whatever its
-  first join asks, and a recorded kind never changes: a later join cannot open a closed room.
-  A first join racing another waits for it and reads the kind it recorded. The chat service
-  asks before a client joins a room new to its connection, which is before the room plane
-  resolves, and so creates, the room. `room_state`'s `kind` (0003), written as `group_chat` for
-  every room until now, is copied from the recorded kind when the room is created, and its
-  `delivery` is lossy for a live chat and durable otherwise. A room created without a chat join
-  recording its kind first takes the kind one function in the room store chooses from the room
-  alone: a group chat, closed. Which kinds admit anyone is one function too
-  (`core::ports::admits_anyone`), so a new kind is a case in each, not a new rule.
+  chats are closed: `admits(room, user, asked)` admits only their members, and a closed room
+  with no members admits nobody. A stream's live chat is open to anyone. The kind is recorded
+  in `chat_rooms`, once, and never changes.
+- **A client can never widen who may be in a room.** A join records a kind only for a room
+  with none recorded, and only a closed one: the kind it names (`"kind"` in the envelope,
+  `"direct"` or `"group"`; a join that names none asks for a group chat). A join that asks for
+  `"live"` in a room not recorded as live is answered `Admission::NotLive`, which reaches the
+  client as `not_live`, and records nothing. Recording a room as live is a server-side step
+  only: `IMessageStore::record_live(room)`, or the SQL in the runbook (section 3), which refuse
+  a room that lists members or is recorded as another kind. Adding a member records an
+  unrecorded room as a group chat in the same statement, before its member row, so a member
+  insert in flight holds the `chat_rooms` key that `record_live` waits on: the closed record
+  wins, and a room is never both listed and open. (A `record_live` that commits first and a
+  member added after it leave a live room with a member list, which changes nothing: a live
+  room admits anyone.) A join reads the recorded kind first and writes only for an unrecorded
+  room, so the joins of a recorded room take no row lock and cause no WAL flush; a first join
+  racing another waits for it and reads the kind it recorded. Rooms that existed before this
+  ADR are recorded as group chats by migration 0006. The chat service asks before a client
+  joins a room new to its connection, which is before the room plane resolves, and so creates,
+  the room. `room_state`'s `kind` (0003), written as `group_chat` for every room until now, is
+  copied from the recorded kind when the room is created, and its `delivery` is lossy for a
+  live chat and durable otherwise. A room created without a kind recorded first takes the kind
+  one function in the room store chooses from the room alone (`kind_of_unrecorded`): a group
+  chat, closed. Which kinds admit anyone is one function too (`core::ports::admits_anyone`),
+  so a new kind is a case in each, not a new rule.
 - **A member removed from the list keeps what they have until they reconnect.** The check runs
   at a join, not per message: a connection already in the room goes on receiving its messages,
   and may read its history, until it closes. Cutting it off at once needs the service to watch

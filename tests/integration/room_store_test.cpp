@@ -153,7 +153,7 @@ TEST_P(RoomStoreTest, TheFirstNodeToResolveARoomCreatesItUnderGenerationOne) {
               "1 0 group_chat durable");
 }
 
-TEST_P(RoomStoreTest, ARoomTakesTheKindItsFirstChatJoinRecorded) {
+TEST_P(RoomStoreTest, ARoomTakesTheKindRecordedForIt) {
     const core::RoomId room = new_room();
     ASSERT_TRUE(
         conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
