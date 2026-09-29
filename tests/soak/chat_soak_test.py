@@ -73,7 +73,8 @@ class JudgeTest(unittest.TestCase):
 
 class CoverageTest(unittest.TestCase):
     def totals(self):
-        t = {"sighups": 1, "history_pages": 3, "presence": 2}
+        t = {"sighups": 1, "history_pages": 3, "presence": 2, "prefill_sends": 7,
+             "prefill_frames": len(NODES) * chat_soak.PREFILL_FRAMES}
         t.update({f"upgrade_{s}": 1 for s in (401, 404, 426)})
         t.update({f"error_{r}": 1 for r in ("not_json", "malformed", "bad_room", "bad_id",
                                             "bad_body", "not_joined")})
@@ -100,6 +101,13 @@ class CoverageTest(unittest.TestCase):
         ok, report = coverage([self.row(fenced=0)], self.totals(), self.features(True, True))
         self.assertFalse(ok)
         self.assertIn("  stale owner writes fenced out: NO", report)
+
+    def test_a_warm_up_without_its_prefill_is_not_a_run_to_judge(self):
+        totals = self.totals()
+        totals["prefill_frames"] -= 1
+        ok, report = coverage([self.row()], totals, self.features(True, True))
+        self.assertFalse(ok)
+        self.assertIn("  warm-up prefill ran: NO", report)
 
     def test_absent_commands_are_not_required(self):
         totals = self.totals()

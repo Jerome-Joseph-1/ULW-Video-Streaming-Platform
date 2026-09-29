@@ -40,12 +40,16 @@ The load (--clients and --pause scale it):
               generation, and then continued (SIGCONT): its writes in flight are fenced out
   SIGHUP      every 10 minutes, between the owner changes, to every node; chat_server takes it
               and reloads nothing today (it serves plain WebSocket behind the edge's TLS)
+  prefill     in the warm-up only: large frames that fill io_uring's receive pool, and 60
+              more senders in the pool rooms that bring each node's order of kept messages to
+              its cap (PREFILL_FRAME, PREFILL_SENDERS, ADR-0055)
 Commands the running chat_server does not know are found at the start by trying each one and
 reading `malformed` as absent: `kind` on join (rooms are then made "live", which admit anyone),
 `history` (M19) and `watch`/`unwatch` (M18). What is absent is left out of the mix and named in
 the summary.
 
-Every connection comes from its own address in 127/8 (loopback_source()).
+Every connection comes from its own address in 127/8 (loopback_source()), and every node runs
+without transparent huge pages (without_huge_pages()).
 
 Not driven: the JWKS fetch path (the nodes verify against a local key set), database outages,
 and a node restart (a new process would start a new RSS series; ownership changes come from
@@ -85,6 +89,7 @@ set for 6 hours.
 import argparse
 import base64
 import csv
+import ctypes
 import http.client
 import json
 import os
@@ -140,6 +145,24 @@ SLOW_READ = 8 * 1024
 SLOW_RCVBUF = 16 * 1024
 HOSE_BODY = 32 * 1024
 HOSE_MESSAGES = 32
+# The warm-up prefill (ADR-0055). Two structures of each node grow to a fixed size more slowly
+# than the warm-up lasts at this load, and a line fitted after the warm-up would read their
+# last climb as a leak:
+#  - io_uring's receive pool, 256 buffers of 64 KiB whose pages count in RSS once the kernel has
+#    written into them: PREFILL_FRAMES frames of PREFILL_FRAME bytes that are not JSON (answered
+#    not_json, never sequenced or stored), sent back to back over loopback's 64 KiB MSS, fill
+#    whole buffers and go round the ring about four times;
+#  - the chat service's order of kept messages, 131,072 entries (about 3 MB) at its cap, of which
+#    the soak's own ~60 messages a second into each node fill about half in the warm-up:
+#    PREFILL_SENDERS more, two messages a second each (the send limit), into the pool rooms that
+#    every node is already in, so each message counts on all three nodes. The pool rooms are
+#    at their own 256 KiB already, so this keeps nothing more than the load does: no room is
+#    made that would later free its memory, and the bodies are drawn as the clients' are.
+# Both stop PREFILL_MARGIN_MINUTES before the warm-up ends.
+PREFILL_FRAME = 60 * 1024
+PREFILL_FRAMES = 1024
+PREFILL_SENDERS = 60
+PREFILL_MARGIN_MINUTES = 2
 # Longer than rt::kOwnerStaleAfter (5 s), so another node claims the stopped node's rooms.
 OWNER_STOP_S = 8.0
 MIX = [("send", 70), ("resend", 6), ("history", 8), ("watch", 6), ("ping", 5), ("bad", 5)]
@@ -169,6 +192,15 @@ def fd_bound(clients):
     return clients + VISITORS_IN_FLIGHT + SLOW_MAX + 3
 
 
+def without_huge_pages():
+    """Runs in each node's process before exec: PR_SET_THP_DISABLE (41) holds across execve. RSS
+    is the leak signal here, and where transparent huge pages are "always" (GitHub's runners)
+    khugepaged can collapse a partly touched 2 MiB range and add the rest of it to RSS with
+    nothing allocated (#50)."""
+    if ctypes.CDLL(None, use_errno=True).prctl(41, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_THP_DISABLE")
+
+
 def loopback_source():
     """A source address anywhere in 127/8. From 127.0.0.1 alone, new connections keep drawing
     ports whose 4-tuples a node still holds in TIME_WAIT (it closes first after a Close), and
@@ -196,14 +228,15 @@ class Ws:
         self.buf = bytearray(rest)
 
     @classmethod
-    def connect(cls, port, token=None, path="/rt", upgrade=True, rcvbuf=None):
+    def connect(cls, port, token=None, path="/rt", upgrade=True, rcvbuf=None, mss=ETHERNET_MSS):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             if rcvbuf:
                 # Before connect, or the window is already advertised.
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
             s.bind((loopback_source(), 0))
-            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, ETHERNET_MSS)
+            if mss:
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, mss)
             s.settimeout(5)
             s.connect(("127.0.0.1", port))
             head = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
@@ -394,7 +427,8 @@ class Stack:
                 env["ULW_REACTOR"] = os.environ["ULW_REACTOR"]
             out = open(self.out / f"{node}.log", "ab")
             self.procs[node] = subprocess.Popen([self.bin / "chat_server"], env=env, stdout=out,
-                                                stderr=subprocess.STDOUT)
+                                                stderr=subprocess.STDOUT,
+                                                preexec_fn=without_huge_pages)
         deadline = time.time() + 60
         for node in NODES:
             while True:
@@ -856,6 +890,59 @@ class Slow(Actor):
             threading.Thread(target=self.one, args=(kind, 7000 + self.i), daemon=True).start()
 
 
+class Prefill(Actor):
+    """The warm-up prefill: see PREFILL_FRAME and PREFILL_SENDERS."""
+
+    def __init__(self, stack, counts, stop, rooms, until):
+        super().__init__(stack, counts, stop, rooms, 8000)
+        self.until = until
+
+    def fill_pool(self, node):
+        ws = Ws.connect(self.stack.ports[node], self.stack.tokens["fill"], mss=None)
+        try:
+            junk = b"x" * PREFILL_FRAME
+            for i in range(PREFILL_FRAMES):
+                ws.send(0x1, junk)
+                self.counts.add("prefill_frames")
+                if i % 16 == 15:
+                    while ws.recv(0.05) is not None:
+                        pass
+        finally:
+            ws.close(clean=True)
+
+    def send(self, index):
+        actor = Actor(self.stack, self.counts, self.stop, self.rooms, 8001 + index)
+        room = self.rooms.pool[index % len(self.rooms.pool)]
+        actor.connect(f"p{index // len(NODES):02d}", node=NODES[index % len(NODES)])
+        try:
+            actor.join_room(room)
+            while time.time() < self.until and not self.stop.is_set():
+                actor.pump(0.5)
+                if room in actor.joined and time.monotonic() >= actor.hold_until:
+                    actor.send_message(room)
+                    self.counts.add("prefill_sends")
+        finally:
+            actor.hang_up()
+
+    def guarded(self, action, *args):
+        try:
+            action(*args)
+        except (OSError, Closed, Refused):
+            self.counts.add("prefill_transport_errors")
+        except Exception as e:  # as in Client.run
+            unexpected(self.counts, "prefill", e)
+
+    def run(self):
+        parts = [threading.Thread(target=self.guarded, args=(self.fill_pool, n), daemon=True)
+                 for n in NODES]
+        parts += [threading.Thread(target=self.guarded, args=(self.send, i), daemon=True)
+                  for i in range(PREFILL_SENDERS)]
+        for t in parts:
+            t.start()
+        for t in parts:
+            t.join()
+
+
 class Signals(threading.Thread):
     """Owner changes by SIGSTOP and SIGCONT, one node in turn, and SIGHUP to all between."""
 
@@ -954,7 +1041,10 @@ def coverage(rows, totals, features):
               ("bad commands answered", all(totals.get(f"error_{r}", 0) > 0 for r in (
                   "not_json", "malformed", "bad_room", "bad_id", "bad_body", "not_joined"))),
               ("SIGHUPs taken", totals.get("sighups", 0) > 0),
-              ("no exception in the soak itself", totals.get("soak_exceptions", 0) == 0)]
+              ("no exception in the soak itself", totals.get("soak_exceptions", 0) == 0),
+              ("warm-up prefill ran",
+               totals.get("prefill_frames", 0) == len(NODES) * PREFILL_FRAMES and
+               totals.get("prefill_sends", 0) > 0)]
     if features.history:
         checks.append(("history pages", totals.get("history_pages", 0) > 0))
     if features.presence:
@@ -1002,7 +1092,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     stack = Stack(args, out)
     users = ([f"c{i:02d}" for i in range(args.clients)] + [f"v{i:02d}" for i in range(VISITORS)] +
-             [f"slow{i}" for i in range(SLOW_MAX)] + ["burst", "hose", "probe"])
+             [f"slow{i}" for i in range(SLOW_MAX)] + ["burst", "hose", "probe", "fill"] +
+             [f"p{i:02d}" for i in range(PREFILL_SENDERS // len(NODES))])
     stack.copy_binaries()
     stack.prepare(users)
     stack.start()
@@ -1020,7 +1111,9 @@ def main():
     threads = [Client(stack, counts, stop, rooms, i, client_users, args.pause, scale)
                for i in range(args.clients)]
     threads += [Visitors(stack, counts, stop, rooms), Burst(stack, counts, stop, rooms),
-                Slow(stack, counts, stop, rooms), Signals(stack, counts, stop, every)]
+                Slow(stack, counts, stop, rooms), Signals(stack, counts, stop, every),
+                Prefill(stack, counts, stop, rooms,
+                        time.time() + (warmup - PREFILL_MARGIN_MINUTES) * 60)]
     for t in threads:
         t.start()
 
