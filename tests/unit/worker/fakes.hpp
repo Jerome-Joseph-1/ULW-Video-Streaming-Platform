@@ -63,6 +63,11 @@ public:
         const std::scoped_lock lock(mutex_);
         writes_ = held;
     }
+    // Every later `call` ("heartbeat", "progress", "finish" or "fail") fails with `error`.
+    void refuse(const std::string& call, core::ports::JobQueueError error) {
+        const std::scoped_lock lock(mutex_);
+        refusals_.insert_or_assign(call, error);
+    }
 
     core::ports::JobQueueResult<std::optional<core::ports::ClaimedJob>>
     claim(const core::NodeId& /*worker*/) override {
@@ -71,12 +76,12 @@ public:
     core::ports::JobQueueResult<bool> heartbeat(const core::ports::JobLease& /*lease*/,
                                                 const core::NodeId& /*worker*/) override {
         journal_.add(name_ + " heartbeat");
-        return reply(heartbeat_);
+        return reply("heartbeat", heartbeat_);
     }
     core::ports::JobQueueResult<bool> report_progress(const core::ports::JobLease& /*lease*/,
                                                       std::uint8_t percent) override {
         journal_.add(name_ + " progress " + std::to_string(percent));
-        return reply(writes_);
+        return reply("progress", writes_);
     }
     core::ports::JobQueueResult<bool>
     finish(const core::ports::JobLease& /*lease*/, core::Millis duration,
@@ -87,20 +92,24 @@ public:
                      r.playlist.str();
         }
         journal_.add(std::move(event));
-        return reply(writes_);
+        return reply("finish", writes_);
     }
     core::ports::JobQueueResult<bool> fail(const core::ports::JobLease& /*lease*/,
                                            std::string_view reason, bool retryable) override {
         journal_.add(name_ + " fail " + (retryable ? "retryable " : "permanent ") +
                      std::string(reason));
-        return reply(writes_);
+        return reply("fail", writes_);
     }
     core::ports::JobQueueResult<std::size_t> reap_expired() override { return 0; }
     void wait_for_work(core::Millis /*max_wait*/) override {}
 
 private:
-    core::ports::JobQueueResult<bool> reply(const std::optional<bool>& answer) {
+    core::ports::JobQueueResult<bool> reply(const std::string& call,
+                                            const std::optional<bool>& answer) {
         const std::scoped_lock lock(mutex_);
+        if (const auto it = refusals_.find(call); it != refusals_.end()) {
+            return std::unexpected(it->second);
+        }
         if (!answer) {
             return std::unexpected(core::ports::JobQueueError::Unavailable);
         }
@@ -112,6 +121,7 @@ private:
     std::mutex mutex_;
     std::optional<bool> heartbeat_ = true;
     std::optional<bool> writes_ = true;
+    std::map<std::string, core::ports::JobQueueError> refusals_;
 };
 
 class FakeTransfer final : public core::ports::IObjectTransfer {

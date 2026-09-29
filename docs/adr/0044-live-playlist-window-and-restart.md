@@ -1,4 +1,4 @@
-# 0040. The live playlist is a window the packager owns, and it continues across a restart
+# 0044. The live playlist is a window the packager owns, and it continues across a restart
 
 Status: Accepted
 Date: 2026-09-29

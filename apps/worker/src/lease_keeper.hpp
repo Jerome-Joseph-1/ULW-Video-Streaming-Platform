@@ -4,12 +4,15 @@
 #include "core/ports/job_queue.hpp"
 #include "core/util/time.hpp"
 
+#include "ops/log.hpp"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <stop_token>
+#include <string_view>
 #include <thread>
 
 namespace worker {
@@ -29,7 +32,7 @@ public:
 
     // `queue` is used from the keeper's thread only, so it must not be the one the job uses.
     // `heartbeat`, when there is one, is touched on every beat.
-    LeaseKeeper(core::ports::IJobQueue& queue, const core::NodeId& node,
+    LeaseKeeper(core::ports::IJobQueue& queue, ops::Logger& log, const core::NodeId& node,
                 const core::ports::JobLease& lease, const Intervals& intervals,
                 std::stop_source abandon, const Heartbeat* heartbeat = nullptr);
     ~LeaseKeeper();
@@ -47,9 +50,10 @@ private:
     // Each false when the queue refused the lease.
     [[nodiscard]] bool write_progress();
     [[nodiscard]] bool beat();
-    void lose(const char* how);
+    void lose(std::string_view call);
 
     core::ports::IJobQueue& queue_;
+    ops::Logger& log_;
     core::NodeId node_;
     core::ports::JobLease lease_;
     Intervals intervals_;

@@ -30,6 +30,10 @@ struct ConnTarget {
     std::string options;
 };
 
+// All a caller learns of a string that does not parse: it may be logged, and anything more
+// specific could quote the password.
+inline constexpr std::string_view kUnparsable = "the connection string does not parse";
+
 [[nodiscard]] std::expected<ConnTarget, std::string> parse_conninfo(const std::string& conninfo);
 
 // The host, hostaddr and port lists for PQconnectStartParams, comma-joined.

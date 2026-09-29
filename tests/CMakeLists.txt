@@ -35,6 +35,30 @@ ulw_add_test_suite(os_unit_tests unit
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
 
+ulw_add_test_suite(ops_unit_tests unit
+    unit/ops/async_log_test.cpp
+    unit/ops/log_test.cpp
+    unit/ops/metrics_test.cpp
+    unit/ops/notify_test.cpp
+    unit/ops/process_test.cpp
+    unit/ops/settings_test.cpp
+    unit/ops/toml_test.cpp)
+target_link_libraries(ops_unit_tests PRIVATE ulw::ops)
+target_include_directories(ops_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+ulw_add_executable(toml_fuzz_replay fuzz/toml_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(toml_fuzz_replay PRIVATE ulw::ops)
+add_test(NAME toml_fuzz_corpus
+    COMMAND toml_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/toml)
+set_tests_properties(toml_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(toml_fuzz fuzz/toml_fuzz.cpp)
+    target_link_libraries(toml_fuzz PRIVATE ulw::ops)
+    target_compile_options(toml_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(toml_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
+
 ulw_add_library(test_echo support/echo_server.cpp)
 target_include_directories(test_echo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(test_echo PUBLIC ulw::net_lib)
@@ -192,9 +216,11 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
     gateway/gateway_harness.cpp
+    gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
+    gateway/health_test.cpp
     gateway/key_fetcher_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
@@ -303,6 +329,20 @@ target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
 add_dependencies(chat_cluster_tests chat_server)
+
+# gateway_server as its service manager runs it, against a scratch database.
+ulw_add_test_suite(gateway_process_tests integration
+    integration/gateway_process_test.cpp
+    integration/postgres_harness.cpp
+    support/child_process.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(gateway_process_tests PRIVATE
+    ulw::pg_store ulw::devtoken ulw::os ulw::test_tls PkgConfig::LIBPQ)
+target_include_directories(gateway_process_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+target_compile_definitions(gateway_process_tests PRIVATE
+    ULW_GATEWAY_BIN="$<TARGET_FILE:gateway_server>")
+add_dependencies(gateway_process_tests gateway_server)
 
 # The directory contract runs against the in-memory directory here and against Postgres in
 # e2ee_integration_tests.

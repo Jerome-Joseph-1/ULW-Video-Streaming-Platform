@@ -3,6 +3,8 @@
 #include "infra/auth/jwks_verifier.hpp"
 #include "infra/curl/fetcher.hpp"
 
+#include "ops/log.hpp"
+
 #include <cstdint>
 #include <vector>
 
@@ -11,7 +13,7 @@ namespace gateway {
 // Fetches the verifier's key set over HTTPS on a libcurl multi driven by the reactor.
 class KeySetFetcher final : public infra::auth::IKeySetFetcher {
 public:
-    explicit KeySetFetcher(infra::curl::Multi& multi) noexcept;
+    KeySetFetcher(infra::curl::Multi& multi, ops::Logger& log) noexcept;
 
     void fetch(std::string_view url, infra::auth::IKeySetReceiver& receiver) noexcept override;
     void cancel(infra::auth::IKeySetReceiver& receiver) noexcept override;
@@ -29,6 +31,7 @@ private:
     void finished(std::uint64_t fetch, infra::curl::Result result) noexcept;
 
     infra::curl::HttpFetcher http_;
+    ops::Logger& log_;
     std::vector<Waiting> waiting_;
     std::uint64_t next_fetch_ = 0;
 };
