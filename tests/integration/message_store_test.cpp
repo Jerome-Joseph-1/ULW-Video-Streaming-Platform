@@ -236,16 +236,17 @@ TEST_F(MessageStoreTest, AMemberInsertInFlightAndAFirstJoinNeverLeaveTheRoomOpen
 }
 
 // A room the room plane created closed keeps its kind and delivery in room_state, so it cannot be
-// opened afterwards: chat_rooms and room_state would disagree. One opened before it was created
-// is created live, and opening it again still answers ok.
+// opened afterwards: chat_rooms and room_state would disagree. Its creation recorded it closed in
+// chat_rooms as well, as a first join would have. One opened before it was created is created
+// live, and opening it again still answers ok.
 TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
     const core::RoomId closed = new_room();
     ASSERT_NE(own(closed), 0U);
     EXPECT_EQ(ask<void>([&](auto done) { store_->record_live(closed, std::move(done)); }),
               MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
-    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_rooms WHERE room_id = $1",
+    EXPECT_EQ(scalar(*conn_, "SELECT kind FROM chat_rooms WHERE room_id = $1",
                      Params{}.add_uuid(closed.uuid())),
-              "0");
+              "group_chat");
     EXPECT_EQ(scalar(*conn_,
                      "SELECT concat_ws(' ', kind, delivery) FROM room_state "
                      "WHERE room_id = $1",
@@ -261,6 +262,57 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
                      "WHERE room_id = $1",
                      Params{}.add_uuid(live.uuid())),
               "stream_live_chat lossy");
+}
+
+// The server opening a room, its transaction not yet committed, when the room plane creates the
+// room with no join before it (as it creates presence rooms): the creation records the room in
+// chat_rooms in its own statement, so it waits on the open record and takes the live kind. Were
+// it to read chat_rooms instead, it would miss the record, create the room closed, and leave
+// chat_rooms saying live once the server's transaction committed.
+TEST_F(MessageStoreTest, ARoomCreatedWhileTheServerOpensItIsCreatedLive) {
+    const core::RoomId room = new_room();
+    auto opening = db_->session();
+    ASSERT_TRUE(opening.exec("BEGIN"));
+    ASSERT_EQ(
+        scalar(opening, infra::postgres::message_sql::kRecordLive, Params{}.add_uuid(room.uuid())),
+        "stream_live_chat");
+
+    std::optional<rt::StoreResult<rt::Ownership>> created;
+    rooms_->resolve(room, node_, [&](rt::StoreResult<rt::Ownership> r) noexcept { created = r; });
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] {
+        return created.has_value() ||
+               scalar(*conn_, "SELECT count(*) FROM pg_stat_activity WHERE "
+                              "datname = current_database() AND wait_event_type = 'Lock'") == "1";
+    }));
+    EXPECT_FALSE(created.has_value()) << "the creation did not wait on the open record";
+    ASSERT_TRUE(opening.exec("COMMIT"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return created.has_value(); }));
+
+    ASSERT_TRUE(*created);
+    EXPECT_EQ((*created)->generation, 1U);
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', r.kind, s.kind, s.delivery) "
+                     "FROM chat_rooms r JOIN room_state s USING (room_id) WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "stream_live_chat stream_live_chat lossy");
+}
+
+// A presence room is created with no join, and recorded closed as it is created: the server
+// cannot open it afterwards, and room_state keeps it a presence room.
+TEST_F(MessageStoreTest, APresenceRoomIsRecordedClosedAsItIsCreated) {
+    std::string text = new_room().to_string();
+    text.replace(0, 2, "02");
+    text[14] = '8';
+    const core::RoomId room = *core::RoomId::parse(text);
+    ASSERT_TRUE(rt::is_ephemeral_room(room));
+    ASSERT_NE(own(room), 0U);
+    EXPECT_EQ(ask<void>([&](auto done) { store_->record_live(room, std::move(done)); }),
+              MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', r.kind, s.kind, s.delivery) "
+                     "FROM chat_rooms r JOIN room_state s USING (room_id) WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "group_chat presence durable");
 }
 
 // A join reads a recorded room's kind and writes nothing.

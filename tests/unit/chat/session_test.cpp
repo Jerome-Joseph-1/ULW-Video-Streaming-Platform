@@ -121,7 +121,8 @@ private:
             return;
         }
         auto server = std::make_unique<chat::ChatServer>(
-            chat::Deps{.reactor = **reactor,
+            chat::Deps{.node = *core::NodeId::parse("chat-1"),
+                       .reactor = **reactor,
                        .router = router,
                        .messages = *messages,
                        .verifier = verifier,
@@ -317,7 +318,8 @@ TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
 
 TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryConnection) {
     node_.reset();
-    node_ = std::make_unique<Node>(GetParam(), chat::Limits{.service = {.join_burst = 2}});
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.service = {.join_burst = 2}, .presence = {}});
     const auto join = [](WsClient& ws, std::string_view room) {
         EXPECT_TRUE(
             ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"(","kind":"live"})"));
@@ -369,7 +371,8 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     node_ = std::make_unique<Node>(GetParam(),
                                    chat::Limits{.ping_interval = core::Millis{1'000},
                                                 .idle_timeout = core::Millis{1'100},
-                                                .service = {}},
+                                                .service = {},
+                                                .presence = {}},
                                    true);
     auto quiet = open_as("alice");
     ASSERT_TRUE(quiet);
@@ -388,6 +391,27 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     }
     EXPECT_EQ(later_pings, 0);
     EXPECT_FALSE(quiet->connected());
+}
+
+TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {
+    node_.reset();
+    chat::Limits limits;
+    limits.presence.grace = core::Millis{200};
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    auto bob = open_as("bob");
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(bob->send_text(R"({"type":"watch","user":"alice"})"));
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"watching","user":"alice","status":"offline"})");
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"presence","user":"alice","status":"online"})");
+    alice.reset();
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"presence","user":"alice","status":"offline"})");
+    ASSERT_TRUE(bob->send_text(R"({"type":"watch","user":"not a user"})"));
+    EXPECT_EQ(bob->next_text(seconds(10)), R"({"type":"error","reason":"bad_user"})");
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

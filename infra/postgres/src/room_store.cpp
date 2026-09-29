@@ -24,21 +24,36 @@ using rt::StoreError;
 using rt::StoreResult;
 
 // A room nobody has asked for before is created by the first node that resolves it. Both rows
-// in one statement: a room never exists without its sequence counter. Its kind is the one its
-// first chat join recorded in chat_rooms, which runs before the room is resolved; a room no
-// chat join recorded takes $3 (kind_of_unrecorded). A live chat is delivered lossy.
+// in one statement: a room never exists without its sequence counter. Its kind is the one
+// recorded in chat_rooms, by its first chat join (which runs before the room is resolved) or by
+// the server's record_live. A room created with no kind recorded, a presence room or any other
+// the room plane creates without a join, is recorded here as $3 (kind_of_unrecorded), in the
+// same statement, as a join records it before its member row: a record_live in flight holds the
+// chat_rooms key this waits on, and one that comes later waits on this statement's and finds the
+// room closed. Reading chat_rooms instead would miss a record_live that has not committed, and
+// copy a closed kind into room_state while chat_rooms then said live. The update that does
+// nothing on a conflict returns the kind already recorded, committed after this statement's
+// snapshot or not. A live chat is delivered lossy. An ephemeral room (rt::is_ephemeral_room,
+// $4) is a presence room in room_state whatever chat_rooms says: open to the nodes that speak in
+// it and never stored; in chat_rooms it is a closed room with no members, which no join is
+// admitted to and record_live refuses.
 constexpr Sql kCreateRoom = R"sql(
 WITH created AS (
     INSERT INTO room_assignments (room_id, owner_node) VALUES ($1, $2)
     ON CONFLICT (room_id) DO NOTHING
     RETURNING owner_generation),
+recorded AS (
+    INSERT INTO chat_rooms (room_id, kind)
+    SELECT $1, $3 FROM created
+    ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind
+    RETURNING kind),
 kind AS (
-    SELECT coalesce((SELECT kind FROM chat_rooms WHERE room_id = $1), $3) AS kind)
+    SELECT CASE WHEN $4 THEN 'presence' ELSE (SELECT kind FROM recorded) END AS kind)
 INSERT INTO room_state (room_id, owner_generation, kind, delivery)
 SELECT $1, created.owner_generation, kind.kind,
        CASE WHEN kind.kind = 'stream_live_chat' THEN 'lossy' ELSE 'durable' END
   FROM created, kind
-RETURNING owner_generation)sql";
+RETURNING owner_generation, last_seq)sql";
 
 // The kind of a room created without a chat join recording one first: closed, so that no room
 // is open by default. The one place a room's kind is chosen from the room alone.
@@ -65,10 +80,15 @@ WITH claimed AS (
     RETURNING owner_generation)
 UPDATE room_state SET owner_generation = claimed.owner_generation
   FROM claimed WHERE room_state.room_id = $1
-RETURNING room_state.owner_generation)sql";
+RETURNING room_state.owner_generation, room_state.last_seq)sql";
 
-constexpr Sql kReadOwner =
-    "SELECT owner_node, owner_generation FROM room_assignments WHERE room_id = $1";
+// The owner, and where the room's count stands: the lookup may find the asking node itself
+// holding the room (its own claim, racing this one, committed first), and it starts its head
+// there as after any claim.
+constexpr Sql kReadOwner = R"sql(
+SELECT a.owner_node, a.owner_generation, s.last_seq
+  FROM room_assignments a JOIN room_state s USING (room_id)
+ WHERE a.room_id = $1)sql";
 
 // Any number of rooms is one statement.
 constexpr Sql kClaimStale = R"sql(
@@ -80,7 +100,7 @@ WITH claimed AS (
     RETURNING room_id, owner_generation)
 UPDATE room_state SET owner_generation = claimed.owner_generation
   FROM claimed WHERE room_state.room_id = claimed.room_id
-RETURNING room_state.room_id, room_state.owner_generation)sql";
+RETURNING room_state.room_id, room_state.owner_generation, room_state.last_seq)sql";
 
 // Owner writes: each matches a room only under the generation its writer holds.
 constexpr Sql kHeartbeat = R"sql(
@@ -118,6 +138,14 @@ stored AS (
 SELECT seq, same FROM prior WHERE EXISTS (SELECT 1 FROM next)
 UNION ALL
 SELECT seq, true FROM stored)sql";
+
+// An ephemeral room's write: the fenced seq and nothing else. Its events repeat themselves by
+// design and their keys are never looked up again, so there is no row to find a repeat by, and
+// never another body under the key: its answer reads as the message statement's does.
+constexpr Sql kAppendSeq = R"sql(
+UPDATE room_state SET last_seq = last_seq + 1
+ WHERE room_id = $1 AND owner_generation = $2
+RETURNING last_seq, true)sql";
 
 // '-infinity' is older than any staleness bound, so the rooms are claimable at once.
 constexpr Sql kRelease = R"sql(
@@ -160,6 +188,11 @@ std::optional<std::uint64_t> generation_at(const Result& r, int row, int column)
     return static_cast<std::uint64_t>(*value);
 }
 
+// A room's last_seq: 0 for a room nothing was written to, and never negative.
+std::optional<std::uint64_t> seq_at(const Result& r, int row, int column) noexcept {
+    return r.get(row, column).and_then(parse_uint64);
+}
+
 // Room lists and generations bind as array literals. Uuids and integers need no quoting.
 template <class Items, class Text> std::string array_literal(const Items& items, Text text) {
     std::string out = "{";
@@ -199,7 +232,8 @@ public:
                          .params = Params{}
                                        .add_uuid(room_.uuid())
                                        .add_text(node_.view())
-                                       .add_text(kind_of_unrecorded(room_))};
+                                       .add_text(kind_of_unrecorded(room_))
+                                       .add_bool(rt::is_ephemeral_room(room_))};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -238,10 +272,11 @@ private:
 
     std::optional<Statement> mine(const Result& r) noexcept {
         const auto generation = generation_at(r, 0, 0);
-        if (!generation) {
+        const auto last_seq = seq_at(r, 0, 1);
+        if (!generation || !last_seq) {
             return finish(std::unexpected(StoreError::Corrupt));
         }
-        return finish(Ownership{.node = node_, .generation = *generation});
+        return finish(Ownership{.node = node_, .generation = *generation, .last_seq = *last_seq});
     }
 
     // Held, and not stale, when the claim ran. The room was created by then, so no row means
@@ -252,10 +287,11 @@ private:
         }
         const auto node = r.get(0, 0).transform(core::NodeId::parse);
         const auto generation = generation_at(r, 0, 1);
-        if (!node || !*node || !generation) {
+        const auto last_seq = seq_at(r, 0, 2);
+        if (!node || !*node || !generation || !last_seq) {
             return std::unexpected(StoreError::Corrupt);
         }
-        return Ownership{.node = **node, .generation = *generation};
+        return Ownership{.node = **node, .generation = *generation, .last_seq = *last_seq};
     }
 
     std::optional<Statement> finish(StoreResult<Ownership> result) noexcept {
@@ -303,10 +339,11 @@ private:
         for (int row = 0; row < r.rows(); ++row) {
             const auto room = domain_at<core::RoomId>(r, row, 0);
             const auto generation = generation_at(r, row, 1);
-            if (!room || !generation) {
+            const auto last_seq = seq_at(r, row, 2);
+            if (!room || !generation || !last_seq) {
                 return std::unexpected(StoreError::Corrupt);
             }
-            claimed.push_back({.room = *room, .generation = *generation});
+            claimed.push_back({.room = *room, .generation = *generation, .last_seq = *last_seq});
         }
         return claimed;
     }
@@ -404,6 +441,11 @@ public:
           body_(message.body.begin(), message.body.end()), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
+        if (rt::is_ephemeral_room(room_)) {
+            return Statement{.sql = kAppendSeq,
+                             .params =
+                                 Params{}.add_uuid(room_.uuid()).add_int(as_int(generation_))};
+        }
         return Statement{.sql = kAppendMessage,
                          .params = Params{}
                                        .add_uuid(room_.uuid())

@@ -3,6 +3,7 @@
 #include "core/ports/message_store.hpp"
 #include "net/reactor.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
@@ -30,7 +31,8 @@ public:
     // durable store does, a key the sender already used in the room is answered with that
     // message's seq when the body is the same, and is Conflict when it is not; nothing is
     // written either way. A seq already taken by another message is Conflict. Over
-    // kMaxMessageBody is TooLarge.
+    // kMaxMessageBody is TooLarge. An ephemeral room's
+    // (rt::is_ephemeral_room) message is not kept: only its seq counts, for last_seq.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
                 std::string key, std::vector<std::byte> body, core::WallTime sent_at,
                 core::ports::MessageCallback<std::uint64_t> done);
@@ -64,6 +66,8 @@ private:
         std::map<std::uint64_t, core::ports::StoredMessage> messages;
         // (sender, key) of every stored message, and its seq.
         std::map<std::pair<std::string, std::string>, std::uint64_t> keys;
+        // The highest seq appended to an ephemeral room, which keeps no messages.
+        std::uint64_t last = 0;
     };
 
     void defer(std::move_only_function<void() noexcept> fn);

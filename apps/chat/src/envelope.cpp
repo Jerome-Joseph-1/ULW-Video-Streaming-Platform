@@ -3,6 +3,8 @@
 #include "core/util/json.hpp"
 #include "infra/auth/base64url.hpp"
 
+#include "presence_room.hpp"
+
 #include <algorithm>
 #include <array>
 #include <format>
@@ -20,7 +22,7 @@ std::expected<core::RoomId, EnvelopeError> room_of(const core::json::Value& mess
         return std::unexpected(EnvelopeError::Malformed);
     }
     const auto id = core::RoomId::parse(*text);
-    if (!id) {
+    if (!id || is_presence_room(*id)) {
         return std::unexpected(EnvelopeError::BadRoom);
     }
     return *id;
@@ -135,6 +137,21 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
     return history;
 }
 
+std::expected<core::UserId, EnvelopeError> user_of(const core::json::Value& message) {
+    if (!only(message, {"type", "user"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto text = string_of(message, "user");
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto user = core::UserId::parse(*text);
+    if (!user) {
+        return std::unexpected(EnvelopeError::BadUser);
+    }
+    return *user;
+}
+
 void append_room(std::string& out, const core::RoomId& room) {
     std::array<char, core::Uuid::kTextLength> text{};
     room.format_to(text);
@@ -169,6 +186,16 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     }
     if (name == "history") {
         return history_of(*message);
+    }
+    if (name == "watch" || name == "unwatch") {
+        const auto user = user_of(*message);
+        if (!user) {
+            return std::unexpected(user.error());
+        }
+        if (name == "watch") {
+            return Watch{.user = *user};
+        }
+        return Unwatch{.user = *user};
     }
     return std::unexpected(EnvelopeError::Malformed);
 }
@@ -233,6 +260,23 @@ std::size_t message_wire_size(std::size_t body) noexcept {
     return (((body * 4) + 2) / 3) + kAround;
 }
 
+void write_presence(std::string& out, std::string_view type, const core::UserId& user,
+                    bool online) {
+    out += R"({"type":")";
+    out += type;
+    out += R"(","user":)";
+    core::json::append_string(out, user.view());
+    out += online ? R"(,"status":"online"})" : R"(,"status":"offline"})";
+}
+
+void write_user_error(std::string& out, std::string_view reason, const core::UserId& user) {
+    out += R"({"type":"error","reason":)";
+    core::json::append_string(out, reason);
+    out += R"(,"user":)";
+    core::json::append_string(out, user.view());
+    out += '}';
+}
+
 void write_rate_limited(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                         core::Millis retry_after) {
     write_error(out, "rate_limited", room, id);
@@ -252,6 +296,8 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "bad_id";
     case EnvelopeError::BadBody:
         return "bad_body";
+    case EnvelopeError::BadUser:
+        return "bad_user";
     }
     return "malformed";
 }

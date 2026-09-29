@@ -1,7 +1,7 @@
 # Chat
 
-> **Draft until phase 2 is tagged.** Messages, acks, resume, history and member lists below are
-> what `main` does. M18 adds presence messages; nothing else here is expected to change before
+> **Draft until phase 2 is tagged.** Messages, acks, resume, history, member lists and
+> [presence](#presence) below are what `main` does. Nothing here is expected to change before
 > the tag, but it is not a compatibility promise until then.
 
 Chat is its own service, `chat_server`, separate from the video gateway (ADR-0019). Clients hold
@@ -158,3 +158,66 @@ messages, and can read its history, until that connection closes; the next `join
 | Handshake | 10 s from accept to a complete upgrade request | Connection closed |
 | Idle | The server pings after 30 s of silence and closes after 75 s with nothing received | Answer pings (browsers do this themselves) |
 | Server drain | Close `1001`, then 5 s | Reconnect |
+
+## Presence
+
+<!-- apps/chat/src/presence.hpp (PresenceLimits), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), docs/adr/0056-presence-over-the-room-plane.md -->
+
+A client can watch other users and hear when they come online and go offline. A user is online
+while they have at least one open socket to any chat node, and for a grace of 10 s after their
+last one closes: a page reload or a reconnect, even through another node, within the grace is
+never reported. Nothing needs to be joined first.
+
+Client to server:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `watch` | `user` | Hear this user's presence on this connection. Watching the same user again is answered again. |
+| `unwatch` | `user` | Stop. Not answered; unwatching a user not watched does nothing. |
+
+Server to client:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `watching` | `user`, `status` (`online` or `offline`) | The answer to `watch`: what the node knows now. |
+| `presence` | `user`, `status` (`online` or `offline`) | The user's status changed. Sent once per change, to every connection watching them. |
+| `error` | `reason`, `user` | The watch was refused (below). |
+
+```json
+{"type":"watch","user":"user-42"}
+{"type":"watching","user":"user-42","status":"offline"}
+{"type":"presence","user":"user-42","status":"online"}
+{"type":"presence","user":"user-42","status":"offline"}
+```
+
+`user` is the watched user's id as it appears in `sender` ([auth.md](auth.md)). A `watching`
+that says `offline` may be followed within a round trip by `presence` `online`: the node had not
+yet heard from the node the user is connected through. Treat `watching` as the starting state
+and apply each `presence` in order.
+
+When a user goes offline:
+
+- after closing their last socket normally: 10 s later (the grace);
+- when their connection dies without a close: once the server notices, at most 75 s later (the
+  idle timeout in [Limits](#limits)), plus the grace;
+- when the node they were on stops (a crash, or a deploy draining it) and they do not reconnect:
+  up to 150 s later.
+
+Watches last as long as the connection. After a reconnect, watch again.
+
+Errors for `watch` and `unwatch`:
+
+| `reason` | Meaning | Client action |
+|---|---|---|
+| `malformed` | Missing `user`, or another field | Fix the client |
+| `bad_user` | `user` is not a user id | Fix the client |
+| `watching_self` | `user` is the connection's own user | Nothing to watch: the connection is online |
+| `too_many_watches` | This connection already watches 128 users | Unwatch some first |
+| `busy` | This node watches as many users as it takes, or this user started watching users no connection on this node was watching (unwatching and watching again counts each time) faster than 128 at once and then 1 a second | Back off and retry |
+
+Room ids of UUID version 8 (the third group starts with `8`) whose first byte is `02` (the id
+starts with `02`) are reserved for presence: `join`, `send` or `history` naming one is refused
+with `bad_room`. Presence events are never stored.
+
+Anyone signed in may watch anyone: there is no check of who may see whose presence yet. That is
+an open item before production ([ADR-0056](../adr/0056-presence-over-the-room-plane.md)).

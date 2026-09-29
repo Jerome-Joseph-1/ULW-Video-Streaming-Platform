@@ -369,6 +369,24 @@ TEST_P(RoomRouterTest, AJoinIsAnsweredWithTheRoomsHeadWhereverTheOwnerIs) {
     EXPECT_EQ(join(a, again), 2U);
 }
 
+TEST_P(RoomRouterTest, ANodeThatTakesOverARoomItNeverSawAnswersJoinsWithTheStoredHead) {
+    Node& a = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    for (const char* text : {"one", "two", "three"}) {
+        ASSERT_TRUE(send(a, alice, "alice", text));
+    }
+    a.store->reachable = false;
+    db_.make_stale(room_);
+    // chat-c delivered nothing and sequenced nothing: all it knows of the room is what its
+    // claim read from the store.
+    Node& c = start("chat-c");
+    Member carol;
+    EXPECT_EQ(join(c, carol), 3U);
+    EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-c"));
+    EXPECT_EQ(send(c, carol, "carol", "four"), 4U);
+}
+
 TEST_P(RoomRouterTest, AWriteUnderAGenerationThatMovedOnIsFencedAndDeliveredNowhere) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");

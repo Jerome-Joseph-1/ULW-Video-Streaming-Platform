@@ -56,9 +56,8 @@ public:
         r.owner = node;
         ++r.generation;
         r.stale = false;
-        const rt::Ownership owner{.node = node, .generation = r.generation};
-        announce(room, owner);
-        return owner;
+        announce(room, rt::Ownership{.node = node, .generation = r.generation, .last_seq = 0});
+        return rt::Ownership{.node = node, .generation = r.generation, .last_seq = r.last_seq};
     }
 
     void announce(const core::RoomId& room, const rt::Ownership& owner) {
@@ -107,14 +106,15 @@ public:
             const auto it = db_.rooms.find(room);
             if (it == db_.rooms.end()) {
                 db_.rooms.emplace(room, MemoryRooms::Room{.owner = node});
-                const rt::Ownership created{.node = node, .generation = 1};
+                const rt::Ownership created{.node = node, .generation = 1, .last_seq = 0};
                 db_.announce(room, created);
                 return created;
             }
             if (it->second.owner == node || it->second.stale) {
                 return db_.take(room, node);
             }
-            return rt::Ownership{.node = it->second.owner, .generation = it->second.generation};
+            return rt::Ownership{
+                .node = it->second.owner, .generation = it->second.generation, .last_seq = 0};
         });
     }
 
@@ -125,8 +125,9 @@ public:
             for (const core::RoomId& room : rooms) {
                 const auto it = db_.rooms.find(room);
                 if (it != db_.rooms.end() && it->second.stale) {
+                    const rt::Ownership taken = db_.take(room, node);
                     claimed.push_back(
-                        {.room = room, .generation = db_.take(room, node).generation});
+                        {.room = room, .generation = taken.generation, .last_seq = taken.last_seq});
                 }
             }
             return rt::StoreResult<std::vector<rt::OwnedRoom>>{claimed};
@@ -150,7 +151,8 @@ public:
         });
     }
 
-    // Keeps the message with its seq, as a store with history does, in the same write.
+    // Keeps the message with its seq, as a store with history does, in the same write; for an
+    // ephemeral room, only the seq.
     void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& message,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override {
         std::string body(ulw::test::as_text(message.body));
@@ -163,6 +165,10 @@ public:
                    if (r.generation != generation) {
                        db_.refused_appends.emplace_back(room, generation);
                        return Answer{std::nullopt};
+                   }
+                   // An ephemeral room's seq is taken, and its message is not kept.
+                   if (rt::is_ephemeral_room(room)) {
+                       return Answer{++r.last_seq};
                    }
                    // A key stored already: the same message again, or another under its key.
                    if (const auto it = db_.keys.find(key); it != db_.keys.end()) {
@@ -217,7 +223,8 @@ public:
                 const auto it = db_.rooms.find(room);
                 if (it != db_.rooms.end()) {
                     owners.emplace_back(room, rt::Ownership{.node = it->second.owner,
-                                                            .generation = it->second.generation});
+                                                            .generation = it->second.generation,
+                                                            .last_seq = 0});
                 }
             }
             return rt::StoreResult<std::vector<std::pair<core::RoomId, rt::Ownership>>>{owners};

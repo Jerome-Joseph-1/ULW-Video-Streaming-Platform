@@ -9,6 +9,7 @@
 #include "net/reactor_factory.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
+#include "rt/room_store.hpp"
 
 #include "integration/postgres_harness.hpp"
 #include "message_store_harness.hpp"
@@ -408,6 +409,20 @@ TEST_P(MessageStoreConformance, LastSeqIsZeroForAnEmptyRoomAndTheNewestOtherwise
     ASSERT_TRUE(write(room, alice_, bytes("b")));
     EXPECT_EQ(last_seq(room), 2U);
     EXPECT_EQ(last_seq(core::RoomId::generate(clock_, random_)), 0U);
+}
+
+TEST_P(MessageStoreConformance, AnEphemeralRoomCountsItsSeqsAndKeepsNoMessage) {
+    std::string text = core::RoomId::generate(clock_, random_).to_string();
+    text.replace(0, 2, "02");
+    text[14] = '8';
+    const core::RoomId room = *core::RoomId::parse(text);
+    ASSERT_TRUE(rt::is_ephemeral_room(room));
+    backend_->open(room);
+    ASSERT_EQ(write(room, alice_, bytes("online")), 1U);
+    ASSERT_EQ(write(room, bob_, bytes("online")), 2U);
+    EXPECT_EQ(before(room, std::nullopt, 10), Page{});
+    EXPECT_EQ(after(room, 0, 10), Page{});
+    EXPECT_EQ(last_seq(room), 2U);
 }
 
 TEST_P(MessageStoreConformance, RoomsAreKeptApart) {
