@@ -120,8 +120,8 @@ protected:
     rt::StoreResult<std::optional<std::uint64_t>>
     write(const core::RoomId& room, std::uint64_t generation, std::vector<std::byte> body) {
         return ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
-            rooms_->append_message(room, generation, alice_, std::move(body), at(0),
-                                   std::move(done));
+            rooms_->append_message(room, generation, alice_, std::format("m{}", ++keys_),
+                                   std::move(body), at(0), std::move(done));
         });
     }
 
@@ -134,11 +134,12 @@ protected:
     // `count` rows for `room` straight into the table: seeding 10k messages through the
     // adapter would time the seeding, not the reads.
     void seed(const core::RoomId& room, std::int64_t count) {
-        ASSERT_TRUE(
-            conn_->exec("INSERT INTO chat_messages (room_id, seq, sender, body, sent_at) "
-                        "SELECT $1, n, 'auth0|alice', convert_to('message ' || n, 'UTF8'), now() "
-                        "FROM generate_series(1, $2) AS n",
-                        Params{}.add_uuid(room.uuid()).add_int(count)));
+        ASSERT_TRUE(conn_->exec(
+            "INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at) "
+            "SELECT $1, n, 'auth0|alice', 'm' || n, convert_to('message ' || n, 'UTF8'), "
+            "now() "
+            "FROM generate_series(1, $2) AS n",
+            Params{}.add_uuid(room.uuid()).add_int(count)));
     }
 
     std::string explain(Sql sql, const core::RoomId& room, std::int64_t cursor) {
@@ -170,6 +171,7 @@ protected:
     std::unique_ptr<PgMessageStore> store_;
     std::unique_ptr<infra::postgres::PgRoomStore> rooms_;
     const core::NodeId node_ = *core::NodeId::parse("chat-a");
+    std::uint64_t keys_ = 0;
     const core::UserId alice_ = *core::UserId::parse("auth0|alice");
 };
 

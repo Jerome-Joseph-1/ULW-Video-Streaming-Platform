@@ -94,9 +94,16 @@ protected:
         return owner ? owner->generation : 0;
     }
 
+    // A message under a key of its own.
     Seq send(const core::RoomId& room, std::uint64_t generation, std::string_view body) {
+        return send(room, generation, body, std::format("m{}", ++keys_));
+    }
+
+    Seq send(const core::RoomId& room, std::uint64_t generation, std::string_view body,
+             std::string_view key) {
         return ask<std::optional<std::uint64_t>>([&](auto done) {
-            rooms_->append_message(room, generation, alice_, bytes(body), at(0), std::move(done));
+            rooms_->append_message(room, generation, alice_, key, bytes(body), at(0),
+                                   std::move(done));
         });
     }
 
@@ -133,6 +140,7 @@ protected:
     const core::NodeId a_ = *core::NodeId::parse("chat-a");
     const core::NodeId b_ = *core::NodeId::parse("chat-b");
     const core::UserId alice_ = *core::UserId::parse("auth0|alice");
+    std::uint64_t keys_ = 0;
 };
 
 TEST_F(SequencedAppendTest, EachMessageIsStoredUnderTheSeqItTook) {
@@ -145,8 +153,10 @@ TEST_F(SequencedAppendTest, EachMessageIsStoredUnderTheSeqItTook) {
 
     const auto stored = history(room);
     ASSERT_EQ(stored.size(), 3U);
-    EXPECT_EQ(stored[0],
-              (StoredMessage{.seq = 1, .sender = alice_, .sent_at = at(0), .body = bytes("one")}));
+    EXPECT_EQ(
+        stored[0],
+        (StoredMessage{
+            .seq = 1, .sender = alice_, .key = "m1", .sent_at = at(0), .body = bytes("one")}));
     EXPECT_EQ(stored[2].seq, 3U);
     EXPECT_EQ(stored[2].body, bytes("three"));
 }
@@ -169,13 +179,59 @@ TEST_F(SequencedAppendTest, AFencedWriterTakesNoSeqAndStoresNoRow) {
     EXPECT_EQ(stored[1].body, bytes("from the new owner"));
 }
 
+TEST_F(SequencedAppendTest, ARepeatAfterALostAnswerGetsTheOriginalSeqAndStoresNothing) {
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = owned_by(room, a_);
+    ASSERT_EQ(send(room, generation, "hello", "k1"), Seq{1});
+    ASSERT_EQ(send(room, generation, "later", "k2"), Seq{2});
+    // The first answer was lost; the client sends the same message again.
+    EXPECT_EQ(send(room, generation, "hello", "k1"), Seq{1});
+    EXPECT_EQ(last_seq(room), "2");
+    const auto stored = history(room);
+    ASSERT_EQ(stored.size(), 2U);
+    EXPECT_EQ(stored[0].key, "k1");
+    EXPECT_EQ(stored[1].key, "k2");
+}
+
+TEST_F(SequencedAppendTest, ARepeatThroughTheNextOwnerGetsTheOriginalSeq) {
+    const core::RoomId room = new_room();
+    const std::uint64_t first = owned_by(room, a_);
+    ASSERT_EQ(send(room, first, "hello", "k1"), Seq{1});
+    go_quiet(room);
+    const std::uint64_t second = owned_by(room, b_);
+
+    EXPECT_EQ(send(room, second, "hello", "k1"), Seq{1});
+    // The former owner's repeat is fenced like any of its writes: no answer to deliver on.
+    EXPECT_EQ(send(room, first, "hello", "k1"), Seq{std::nullopt});
+    EXPECT_EQ(last_seq(room), "1");
+    EXPECT_EQ(history(room).size(), 1U);
+}
+
+TEST_F(SequencedAppendTest, ConcurrentRepeatsOfOneKeyStoreItOnce) {
+    constexpr std::size_t kRepeats = 8;
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = owned_by(room, a_);
+    std::vector<Seq> answers;
+    for (std::size_t i = 0; i < kRepeats; ++i) {
+        rooms_->append_message(room, generation, alice_, "k1", bytes("hello"), at(0),
+                               [&answers](Seq r) noexcept { answers.push_back(r); });
+    }
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answers.size() == kRepeats; }));
+    for (const Seq& answer : answers) {
+        EXPECT_EQ(answer, Seq{1});
+    }
+    EXPECT_EQ(last_seq(room), "1");
+    EXPECT_EQ(history(room).size(), 1U);
+}
+
 TEST_F(SequencedAppendTest, AnInsertThatFailsGivesTheSeqBack) {
     const core::RoomId room = new_room();
     const std::uint64_t generation = owned_by(room, a_);
     // A row where the next seq would go, which nothing but a broken writer leaves.
-    ASSERT_TRUE(conn_->exec("INSERT INTO chat_messages (room_id, seq, sender, body, sent_at) "
-                            "VALUES ($1, 1, 'auth0|mallory', '\\x00', now())",
-                            Params{}.add_uuid(room.uuid())));
+    ASSERT_TRUE(
+        conn_->exec("INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at) "
+                    "VALUES ($1, 1, 'auth0|mallory', 'k', '\\x00', now())",
+                    Params{}.add_uuid(room.uuid())));
     EXPECT_EQ(send(room, generation, "lost"), Seq{std::unexpected(rt::StoreError::Unavailable)});
     // The seq was not taken without its row.
     EXPECT_EQ(last_seq(room), "0");

@@ -14,8 +14,8 @@ namespace infra::postgres::message_sql {
 // order and one row ahead of what it emits, so the limit stops the scan early.
 // $1 room, $2 cursor (exclusive), $3 row limit, $4 byte bound.
 inline constexpr std::string_view kHistoryBeforeText = R"sql(
-SELECT seq, sender, (extract(epoch FROM sent_at) * 1000000)::bigint, body
-  FROM (SELECT seq, sender, sent_at, body,
+SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body
+  FROM (SELECT seq, sender, msg_key, sent_at, body,
                sum(octet_length(body)) OVER (ORDER BY seq DESC) AS running
           FROM chat_messages
          WHERE room_id = $1 AND seq < $2
@@ -28,8 +28,8 @@ SELECT seq, sender, (extract(epoch FROM sent_at) * 1000000)::bigint, body
 inline constexpr Sql kHistoryBefore = kHistoryBeforeText.data();
 
 inline constexpr std::string_view kHistoryAfterText = R"sql(
-SELECT seq, sender, (extract(epoch FROM sent_at) * 1000000)::bigint, body
-  FROM (SELECT seq, sender, sent_at, body,
+SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body
+  FROM (SELECT seq, sender, msg_key, sent_at, body,
                sum(octet_length(body)) OVER (ORDER BY seq) AS running
           FROM chat_messages
          WHERE room_id = $1 AND seq > $2

@@ -43,9 +43,17 @@ What bounds a page of history:
   runs one statement: the fenced increment of `room_state.last_seq` and, from its result, the
   message's `INSERT` into `chat_messages`. It answers the new seq, or nothing when the
   generation is no longer the room's; then no seq was taken and no row written. If the insert
-  fails, the statement fails whole and the seq is not taken. It is not idempotent: a repeat
-  after a lost answer is a second message under the next seq, as a repeated send is today
-  (ADR-0035); clients deduplicate by their own message ids.
+  fails, the statement fails whole and the seq is not taken.
+- **Repeats are recognised by the sender's message key.** A client that got `unavailable`
+  sends the same message again under the same key, to the same owner or, after a takeover, to
+  the next one; either may have no memory of it, since a lost answer means it was never fanned
+  out. So the key is stored with the message (`msg_key`, unique per room and sender), and
+  `append_message` first looks for it: found, the statement takes no seq and answers the one
+  the message was stored under; the `room_state` row is still updated by nothing, so a fenced
+  former owner gets no answer for it either. Two repeats in flight at once both miss the
+  lookup; the second fails on the key's unique index, whole, and is run once more, when it
+  finds the first. The index holds the room, sender and key, never the body. A key reused with
+  a different body is the same message to the store: the first body stays.
 - **Every room, durable or lossy, writes this way**, before delivery. Storing the row costs
   nothing measurable over taking the seq alone (below), so there is no cheaper path for lossy
   rooms to keep, and E2EE rooms are always durable.

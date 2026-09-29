@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <format>
 #include <functional>
 #include <gtest/gtest.h>
 #include <map>
@@ -53,7 +54,7 @@ public:
     // Makes `room` writable by this test, as its owner.
     virtual void open(const core::RoomId& room) = 0;
     // Stores a message under the room's next seq and answers that seq.
-    virtual void write(const core::RoomId& room, const core::UserId& sender,
+    virtual void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                        std::vector<std::byte> body, MessageCallback<std::uint64_t> done) = 0;
 
 protected:
@@ -80,11 +81,11 @@ public:
     core::ports::IMessageStore& store() override { return *store_; }
     void open(const core::RoomId& /*room*/) override {}
 
-    void write(const core::RoomId& room, const core::UserId& sender, std::vector<std::byte> body,
-               MessageCallback<std::uint64_t> done) override {
+    void write(const core::RoomId& room, const core::UserId& sender, std::string key,
+               std::vector<std::byte> body, MessageCallback<std::uint64_t> done) override {
         const std::uint64_t seq = next_[room] + 1;
         store_->append(
-            room, seq, sender, std::move(body), std::chrono::system_clock::now(),
+            room, seq, sender, std::move(key), std::move(body), std::chrono::system_clock::now(),
             [this, room, seq, done = std::move(done)](MessageResult<void> r) mutable noexcept {
                 if (r) {
                     next_[room] = seq;
@@ -150,10 +151,11 @@ public:
         generations_[room] = owner->generation;
     }
 
-    void write(const core::RoomId& room, const core::UserId& sender, std::vector<std::byte> body,
-               MessageCallback<std::uint64_t> done) override {
+    void write(const core::RoomId& room, const core::UserId& sender, std::string key,
+               std::vector<std::byte> body, MessageCallback<std::uint64_t> done) override {
         rooms_->append_message(
-            room, generations_.at(room), sender, std::move(body), std::chrono::system_clock::now(),
+            room, generations_.at(room), sender, key, std::move(body),
+            std::chrono::system_clock::now(),
             [done = std::move(done)](
                 rt::StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
                 if (!r || !*r) {
@@ -211,10 +213,13 @@ protected:
         return ulw::test::ask<T>(backend_->reactor(), std::move(call));
     }
 
+    // Each call a message of its own, under a key never used before.
     MessageResult<std::uint64_t> write(const core::RoomId& room, const core::UserId& sender,
                                        std::vector<std::byte> body) {
-        return ask<std::uint64_t>(
-            [&](auto done) { backend_->write(room, sender, std::move(body), std::move(done)); });
+        return ask<std::uint64_t>([&](auto done) {
+            backend_->write(room, sender, std::format("m{}", ++keys_), std::move(body),
+                            std::move(done));
+        });
     }
 
     // Messages 1..count, one at a time as an owner writes a room's messages, each carrying
@@ -268,6 +273,7 @@ protected:
     os::SystemClock clock_;
     os::SystemRandom random_;
     std::unique_ptr<Backend> backend_;
+    std::uint64_t keys_ = 0;
     const core::UserId alice_ = user("auth0|alice");
     const core::UserId bob_ = user("auth0|bob");
 };
@@ -278,7 +284,10 @@ TEST_P(MessageStoreConformance, AMessageComesBackWithEveryByteItWasStoredWith) {
     for (std::size_t i = 0; i < every.size(); ++i) {
         every[i] = static_cast<std::byte>(i);
     }
-    ASSERT_EQ(write(room, alice_, every), 1U);
+    ASSERT_EQ(ask<std::uint64_t>([&](auto done) {
+                  backend_->write(room, alice_, "01J9Z-key_0", every, std::move(done));
+              }),
+              1U);
     ASSERT_EQ(write(room, bob_, {}), 2U);
 
     const auto page = before(room, std::nullopt, 10);
@@ -289,6 +298,7 @@ TEST_P(MessageStoreConformance, AMessageComesBackWithEveryByteItWasStoredWith) {
     EXPECT_TRUE((*page)[0].body.empty());
     EXPECT_EQ((*page)[1].seq, 1U);
     EXPECT_EQ((*page)[1].sender, alice_);
+    EXPECT_EQ((*page)[1].key, "01J9Z-key_0");
     EXPECT_EQ((*page)[1].body, every);
 }
 
@@ -499,10 +509,11 @@ protected:
         store_.emplace(*reactor_);
     }
 
-    MessageResult<void> append(std::uint64_t seq, const core::UserId& sender,
+    MessageResult<void> append(std::uint64_t seq, const core::UserId& sender, std::string key,
                                std::vector<std::byte> body, core::WallTime sent_at) {
         return ulw::test::ask<void>(*reactor_, [&](auto done) {
-            store_->append(room_, seq, sender, std::move(body), sent_at, std::move(done));
+            store_->append(room_, seq, sender, std::move(key), std::move(body), sent_at,
+                           std::move(done));
         });
     }
 
@@ -525,34 +536,44 @@ protected:
 };
 
 TEST_F(MemoryMessageStoreAppend, RepeatingAnAppendSucceedsAndKeepsTheFirstSentAt) {
-    ASSERT_TRUE(append(1, alice_, bytes("hello"), at(1)));
-    EXPECT_TRUE(append(1, alice_, bytes("hello"), at(9)));
+    ASSERT_TRUE(append(1, alice_, "k1", bytes("hello"), at(1)));
+    EXPECT_TRUE(append(1, alice_, "k1", bytes("hello"), at(9)));
     const Page page = all();
     ASSERT_EQ(page.size(), 1U);
     EXPECT_EQ(page.front().sent_at, at(1));
 }
 
-TEST_F(MemoryMessageStoreAppend, OtherBytesOrAnotherSenderUnderAStoredSeqConflict) {
+TEST_F(MemoryMessageStoreAppend, OtherBytesAnotherSenderOrKeyUnderAStoredSeqConflict) {
     const auto conflict = MessageResult<void>{std::unexpected(MessageStoreError::Conflict)};
-    ASSERT_TRUE(append(1, alice_, bytes("hello"), at(1)));
-    EXPECT_EQ(append(1, alice_, bytes("hellp"), at(1)), conflict);
-    EXPECT_EQ(append(1, alice_, bytes("hello!"), at(1)), conflict);
-    EXPECT_EQ(append(1, bob_, bytes("hello"), at(1)), conflict);
+    ASSERT_TRUE(append(1, alice_, "k1", bytes("hello"), at(1)));
+    EXPECT_EQ(append(1, alice_, "k1", bytes("hellp"), at(1)), conflict);
+    EXPECT_EQ(append(1, alice_, "k1", bytes("hello!"), at(1)), conflict);
+    EXPECT_EQ(append(1, bob_, "k1", bytes("hello"), at(1)), conflict);
+    EXPECT_EQ(append(1, alice_, "other", bytes("hello"), at(1)), conflict);
     const Page page = all();
     ASSERT_EQ(page.size(), 1U);
     EXPECT_EQ(page.front().body, bytes("hello"));
 }
 
+TEST_F(MemoryMessageStoreAppend, AKeyTheSenderUsedUnderAnotherSeqConflicts) {
+    ASSERT_TRUE(append(1, alice_, "k1", bytes("hello"), at(1)));
+    EXPECT_EQ(append(2, alice_, "k1", bytes("hello"), at(1)),
+              MessageResult<void>{std::unexpected(MessageStoreError::Conflict)});
+    // Keys are per sender.
+    EXPECT_TRUE(append(2, bob_, "k1", bytes("hello"), at(1)));
+    EXPECT_EQ(all().size(), 2U);
+}
+
 TEST_F(MemoryMessageStoreAppend, AGapInSeqIsSkippedNotFilled) {
-    ASSERT_TRUE(append(1, alice_, bytes("a"), at(0)));
-    ASSERT_TRUE(append(4, alice_, bytes("b"), at(0)));
+    ASSERT_TRUE(append(1, alice_, "k1", bytes("a"), at(0)));
+    ASSERT_TRUE(append(4, alice_, "k4", bytes("b"), at(0)));
     const Page page = all();
     ASSERT_EQ(page.size(), 2U);
     EXPECT_EQ(page[1].seq, 4U);
 }
 
 TEST_F(MemoryMessageStoreAppend, ABodyOverTheBoundIsRefusedAndNothingIsStored) {
-    EXPECT_EQ(append(1, alice_, std::vector<std::byte>(kMaxMessageBody + 1), at(0)),
+    EXPECT_EQ(append(1, alice_, "k1", std::vector<std::byte>(kMaxMessageBody + 1), at(0)),
               MessageResult<void>{std::unexpected(MessageStoreError::TooLarge)});
     EXPECT_TRUE(all().empty());
 }

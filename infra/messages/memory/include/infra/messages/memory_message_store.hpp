@@ -6,7 +6,9 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace infra::messages {
@@ -24,11 +26,11 @@ public:
     MemoryMessageStore(MemoryMessageStore&&) = delete;
     MemoryMessageStore& operator=(MemoryMessageStore&&) = delete;
 
-    // Stores a message under `seq` (from 1). Idempotent: the same seq with the same sender and
-    // body succeeds and keeps the first sent_at; any other is Conflict. Over kMaxMessageBody is
-    // TooLarge.
+    // Stores a message under `seq` (from 1). Idempotent: the same seq with the same sender, key
+    // and body succeeds and keeps the first sent_at. Any other under a stored seq, or a key the
+    // sender already used under another seq, is Conflict. Over kMaxMessageBody is TooLarge.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
-                std::vector<std::byte> body, core::WallTime sent_at,
+                std::string key, std::vector<std::byte> body, core::WallTime sent_at,
                 core::ports::MessageCallback<void> done);
     void history_before(
         const core::RoomId& room, std::optional<std::uint64_t> before, std::size_t limit,
@@ -53,7 +55,11 @@ private:
             return a.view() < b.view();
         }
     };
-    using Room = std::map<std::uint64_t, core::ports::StoredMessage>;
+    struct Room {
+        std::map<std::uint64_t, core::ports::StoredMessage> messages;
+        // (sender, key) of every stored message.
+        std::set<std::pair<std::string, std::string>> keys;
+    };
 
     void defer(std::move_only_function<void() noexcept> fn);
 

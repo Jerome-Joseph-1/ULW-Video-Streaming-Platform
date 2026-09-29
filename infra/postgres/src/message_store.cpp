@@ -65,14 +65,16 @@ MessageResult<std::vector<StoredMessage>> decode_page(const Result& r) {
     for (int row = 0; row < r.rows(); ++row) {
         const auto seq = r.get(row, 0).and_then(parse_uint64);
         const auto sender = domain_at<core::UserId>(r, row, 1);
-        const auto micros = r.get(row, 2).and_then(parse_int64);
-        auto body = r.get(row, 3).and_then(parse_bytea);
-        if (!seq || !sender || !micros || !body) {
+        const auto key = r.get(row, 2);
+        const auto micros = r.get(row, 3).and_then(parse_int64);
+        auto body = r.get(row, 4).and_then(parse_bytea);
+        if (!seq || !sender || !key || !micros || !body) {
             return std::unexpected(MessageStoreError::Corrupt);
         }
         page.push_back(StoredMessage{
             .seq = *seq,
             .sender = *sender,
+            .key = std::string{*key},
             .sent_at = core::WallTime{std::chrono::microseconds{*micros}},
             .body = std::move(*body),
         });

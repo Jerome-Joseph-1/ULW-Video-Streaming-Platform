@@ -88,16 +88,28 @@ UPDATE room_state SET last_seq = last_seq + 1
 RETURNING last_seq)sql";
 
 // The fenced append and the message's row in one statement, so one transaction and one commit:
-// a seq is taken only with its row, and a fenced writer takes neither. A row already at the
-// new seq (written by nothing but this statement) fails the whole statement, seq included.
+// a seq is taken only with its row, and a fenced writer takes neither. A message whose key the
+// sender already used in the room answers the seq it was stored under and takes none; the
+// room_state row is still updated (by nothing), so that the answer, too, is fenced. A
+// concurrent repeat of the same key that commits first makes this one fail on the key's
+// unique index, whole, seq included; run again, it finds the stored row.
 constexpr Sql kAppendMessage = R"sql(
-WITH next AS (
-    UPDATE room_state SET last_seq = last_seq + 1
+WITH prior AS (
+    SELECT seq FROM chat_messages WHERE room_id = $1 AND sender = $3 AND msg_key = $4),
+next AS (
+    UPDATE room_state
+       SET last_seq = last_seq + CASE WHEN EXISTS (SELECT 1 FROM prior) THEN 0 ELSE 1 END
      WHERE room_id = $1 AND owner_generation = $2
-    RETURNING last_seq)
-INSERT INTO chat_messages (room_id, seq, sender, body, sent_at)
-SELECT $1, last_seq, $3, $4, timestamptz 'epoch' + $5 * interval '1 microsecond' FROM next
-RETURNING seq)sql";
+    RETURNING last_seq),
+stored AS (
+    INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at)
+    SELECT $1, last_seq, $3, $4, $5, timestamptz 'epoch' + $6 * interval '1 microsecond'
+      FROM next
+     WHERE NOT EXISTS (SELECT 1 FROM prior)
+    RETURNING seq)
+SELECT seq FROM prior WHERE EXISTS (SELECT 1 FROM next)
+UNION ALL
+SELECT seq FROM stored)sql";
 
 // '-infinity' is older than any staleness bound, so the rooms are claimable at once.
 constexpr Sql kRelease = R"sql(
@@ -400,9 +412,9 @@ private:
 class AppendMessage final : public Operation {
 public:
     AppendMessage(const core::RoomId& room, std::uint64_t generation, const core::UserId& sender,
-                  std::vector<std::byte> body, core::WallTime sent_at,
+                  std::string_view key, std::vector<std::byte> body, core::WallTime sent_at,
                   StoreCallback<std::optional<std::uint64_t>> done)
-        : room_(room), generation_(generation), sender_(sender), body_(std::move(body)),
+        : room_(room), generation_(generation), sender_(sender), key_(key), body_(std::move(body)),
           sent_at_(
               std::chrono::floor<std::chrono::microseconds>(sent_at.time_since_epoch()).count()),
           done_(std::move(done)) {}
@@ -413,11 +425,18 @@ public:
                                        .add_uuid(room_.uuid())
                                        .add_int(as_int(generation_))
                                        .add_text(sender_.view())
+                                       .add_text(key_)
                                        .add_bytea(body_)
                                        .add_int(sent_at_)};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        // A concurrent repeat of this key won the insert; the next run finds its row. Counted
+        // apart from start(), which the pool also calls to rerun, so that this happens once.
+        if (!outcome && outcome.error() == DbError::Duplicate && !reran_) {
+            reran_ = true;
+            return start();
+        }
         if (!outcome) {
             done_(std::unexpected(StoreError::Unavailable));
             return std::nullopt;
@@ -434,8 +453,10 @@ private:
     core::RoomId room_;
     std::uint64_t generation_;
     core::UserId sender_;
+    std::string key_;
     std::vector<std::byte> body_;
     std::int64_t sent_at_;
+    bool reran_ = false;
     StoreCallback<std::optional<std::uint64_t>> done_;
 };
 
@@ -665,15 +686,15 @@ void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
 }
 
 void PgRoomStore::append_message(const core::RoomId& room, std::uint64_t generation,
-                                 const core::UserId& sender, std::vector<std::byte> body,
-                                 core::WallTime sent_at,
+                                 const core::UserId& sender, std::string_view key,
+                                 std::vector<std::byte> body, core::WallTime sent_at,
                                  StoreCallback<std::optional<std::uint64_t>> done) {
     if (body.size() > core::ports::kMaxMessageBody) {
         // The client edge never decodes a larger message (ADR-0029); one here is a caller's bug.
         std::abort();
     }
-    impl_->pool().submit(std::make_unique<AppendMessage>(room, generation, sender, std::move(body),
-                                                         sent_at, std::move(done)));
+    impl_->pool().submit(std::make_unique<AppendMessage>(
+        room, generation, sender, key, std::move(body), sent_at, std::move(done)));
 }
 
 void PgRoomStore::release(const core::NodeId& node, std::vector<OwnedRoom> rooms,

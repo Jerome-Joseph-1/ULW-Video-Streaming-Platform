@@ -56,20 +56,29 @@ void MemoryMessageStore::on_timeout() noexcept {
 }
 
 void MemoryMessageStore::append(const core::RoomId& room, std::uint64_t seq,
-                                const core::UserId& sender, std::vector<std::byte> body,
-                                core::WallTime sent_at, MessageCallback<void> done) {
+                                const core::UserId& sender, std::string key,
+                                std::vector<std::byte> body, core::WallTime sent_at,
+                                MessageCallback<void> done) {
     MessageResult<void> result{};
-    Room& messages = rooms_[room];
+    Room& r = rooms_[room];
+    std::pair<std::string, std::string> sender_key{sender.view(), key};
     if (body.size() > core::ports::kMaxMessageBody) {
         result = std::unexpected(MessageStoreError::TooLarge);
-    } else if (const auto it = messages.find(seq); it == messages.end()) {
-        messages.emplace(
+    } else if (const auto it = r.messages.find(seq); it != r.messages.end()) {
+        const StoredMessage& stored = it->second;
+        if (stored.sender != sender || stored.key != key || stored.body != body) {
+            result = std::unexpected(MessageStoreError::Conflict);
+        }
+    } else if (r.keys.contains(sender_key)) {
+        result = std::unexpected(MessageStoreError::Conflict);
+    } else {
+        r.keys.insert(std::move(sender_key));
+        r.messages.emplace(
             seq, StoredMessage{.seq = seq,
                                .sender = sender,
+                               .key = std::move(key),
                                .sent_at = std::chrono::floor<std::chrono::microseconds>(sent_at),
                                .body = std::move(body)});
-    } else if (it->second.sender != sender || it->second.body != body) {
-        result = std::unexpected(MessageStoreError::Conflict);
     }
     defer([done = std::move(done), result]() mutable noexcept { done(result); });
 }
@@ -79,7 +88,7 @@ void MemoryMessageStore::history_before(const core::RoomId& room,
                                         MessageCallback<std::vector<StoredMessage>> done) {
     std::vector<StoredMessage> out;
     if (const auto it = rooms_.find(room); it != rooms_.end()) {
-        const Room& messages = it->second;
+        const auto& messages = it->second.messages;
         const auto end = before ? messages.lower_bound(*before) : messages.end();
         out = page(std::ranges::subrange(messages.begin(), end) | std::views::reverse |
                        std::views::values,
@@ -95,7 +104,7 @@ void MemoryMessageStore::history_after(const core::RoomId& room, std::uint64_t a
                                        MessageCallback<std::vector<StoredMessage>> done) {
     std::vector<StoredMessage> out;
     if (const auto it = rooms_.find(room); it != rooms_.end()) {
-        const Room& messages = it->second;
+        const auto& messages = it->second.messages;
         out = page(std::ranges::subrange(messages.upper_bound(after), messages.end()) |
                        std::views::values,
                    limit);
@@ -107,8 +116,8 @@ void MemoryMessageStore::history_after(const core::RoomId& room, std::uint64_t a
 
 void MemoryMessageStore::last_seq(const core::RoomId& room, MessageCallback<std::uint64_t> done) {
     std::uint64_t seq = 0;
-    if (const auto it = rooms_.find(room); it != rooms_.end() && !it->second.empty()) {
-        seq = it->second.rbegin()->first;
+    if (const auto it = rooms_.find(room); it != rooms_.end() && !it->second.messages.empty()) {
+        seq = it->second.messages.rbegin()->first;
     }
     defer([done = std::move(done), seq]() mutable noexcept { done(seq); });
 }

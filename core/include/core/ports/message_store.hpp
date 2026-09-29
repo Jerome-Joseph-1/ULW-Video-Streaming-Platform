@@ -8,6 +8,7 @@
 #include <expected>
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace core::ports {
@@ -23,6 +24,9 @@ inline constexpr std::size_t kMaxMessageBody = std::size_t{64} * 1024;
 // about one screenful of scrollback and still inside the byte bound.
 inline constexpr std::size_t kMaxHistoryBytes = std::size_t{256} * 1024;
 inline constexpr std::size_t kMaxHistoryRows = 256;
+// The id a sender gives each message, so that sending it again is recognised as the same
+// message: at most 64 characters, as the room plane's message key allows.
+inline constexpr std::size_t kMaxMessageKey = 64;
 // A user id is at most 128 bytes: 1024 of them are 128 KiB, the size of a history page's
 // share of that same client budget.
 inline constexpr std::size_t kMaxMembersPage = 1024;
@@ -45,6 +49,8 @@ template <class T> using MessageCallback = std::move_only_function<void(MessageR
 struct StoredMessage {
     std::uint64_t seq = 0;
     UserId sender;
+    // The sender's id for the message, unique per room and sender.
+    std::string key;
     // Microsecond precision: what the store keeps.
     WallTime sent_at;
     std::vector<std::byte> body;
