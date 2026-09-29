@@ -71,6 +71,10 @@ jobs:
           sudo iptables -I DOCKER-USER -s 198.18.0.0/24 -m conntrack --ctstate DNAT -j ACCEPT
       - run: make e2e-up
         timeout-minutes: 45
+      # kubeconform, then kubectl apply --dry-run=server of the Askedin overlays and STUNner's
+      # manifests against this cluster's API server and installed CRDs.
+      - run: make validate-manifests
+        timeout-minutes: 5
       - run: make e2e-test
         timeout-minutes: 20
       # STUNner and LiveKit are already up (e2e-up); this checks them from the outside network.
