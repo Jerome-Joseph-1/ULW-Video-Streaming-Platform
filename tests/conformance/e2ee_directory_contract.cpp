@@ -136,6 +136,34 @@ TEST_P(DirectoryContract, ReplayedRegistrationSucceeds) {
     EXPECT_TRUE(enrol(alice, device));
 }
 
+TEST_P(DirectoryContract, UsersLiveDevicesAreCapped) {
+    std::vector<core::DeviceId> devices;
+    for (std::size_t i = 0; i < core::ports::kMaxDevicesPerUser; ++i) {
+        devices.push_back(new_device());
+        ASSERT_TRUE(enrol(alice, devices.back())) << i;
+    }
+    const core::DeviceId extra = new_device();
+    EXPECT_EQ(enrol(alice, extra).error(), E2eeError::Full);
+    EXPECT_TRUE(enrol(alice, devices.front())) << "a replay at the cap still succeeds";
+    EXPECT_TRUE(enrol(bob, new_device())) << "the cap is per user";
+    ASSERT_TRUE(retire(alice, devices.front()));
+    EXPECT_TRUE(enrol(alice, extra)) << "retiring a device frees its place";
+}
+
+TEST_P(DirectoryContract, OnlyTheNewestTombstonesAreKept) {
+    std::vector<core::DeviceId> retired;
+    for (std::size_t i = 0; i < core::ports::kRetiredDevicesKept + 2; ++i) {
+        retired.push_back(new_device());
+        ASSERT_TRUE(enrol(alice, retired.back()));
+        ASSERT_TRUE(retire(alice, retired.back()));
+    }
+    // The two oldest tombstones were dropped, so their ids read as new; the rest stay retired.
+    EXPECT_TRUE(enrol(alice, retired[0]));
+    EXPECT_TRUE(enrol(alice, retired[1]));
+    EXPECT_EQ(enrol(alice, retired[2]).error(), E2eeError::Revoked);
+    EXPECT_EQ(enrol(alice, retired.back()).error(), E2eeError::Revoked);
+}
+
 TEST_P(DirectoryContract, AnotherUsersDeviceIsOutOfReach) {
     const core::DeviceId device = stocked_device(2);
     EXPECT_EQ(enrol(bob, device).error(), E2eeError::Conflict);

@@ -48,8 +48,13 @@ private:
     struct Device {
         core::UserId user;
         bool revoked = false;
+        // Orders retirements, so the oldest tombstones are the ones dropped.
+        std::uint64_t retired_seq = 0;
         std::deque<core::ports::KeyPackageBytes> packages;
     };
+
+    [[nodiscard]] std::size_t live_devices_of(const core::UserId& user) const;
+    void drop_old_tombstones(const core::UserId& user);
 
     // The device if `user` owns it and it is live; NotFound or Revoked otherwise.
     [[nodiscard]] core::ports::E2eeResult<Device*> live_device(const core::UserId& user,
@@ -61,6 +66,7 @@ private:
     net::TimerId timer_;
     std::vector<std::move_only_function<void() noexcept>> pending_;
     std::unordered_map<core::DeviceId, Device> devices_;
+    std::uint64_t retirements_ = 0;
     // Each room's accepted commits; the one at index n moved the room out of epoch n.
     std::unordered_map<core::RoomId, std::vector<core::ports::CommitBytes>> commits_;
 };

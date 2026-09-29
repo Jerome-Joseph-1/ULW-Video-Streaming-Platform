@@ -1,5 +1,6 @@
 #include "infra/e2ee/memory_directory.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace infra::e2ee {
@@ -50,15 +51,43 @@ E2eeResult<MemoryDirectory::Device*> MemoryDirectory::live_device(const core::Us
     return &it->second;
 }
 
+std::size_t MemoryDirectory::live_devices_of(const core::UserId& user) const {
+    return static_cast<std::size_t>(std::ranges::count_if(devices_, [&](const auto& entry) {
+        return entry.second.user == user && !entry.second.revoked;
+    }));
+}
+
+void MemoryDirectory::drop_old_tombstones(const core::UserId& user) {
+    std::vector<std::pair<std::uint64_t, core::DeviceId>> tombstones;
+    for (const auto& [id, d] : devices_) {
+        if (d.user == user && d.revoked) {
+            tombstones.emplace_back(d.retired_seq, id);
+        }
+    }
+    if (tombstones.size() <= core::ports::kRetiredDevicesKept) {
+        return;
+    }
+    std::ranges::sort(tombstones);
+    const std::size_t excess = tombstones.size() - core::ports::kRetiredDevicesKept;
+    for (std::size_t i = 0; i < excess; ++i) {
+        devices_.erase(tombstones[i].second);
+    }
+}
+
 void MemoryDirectory::register_device(const core::UserId& user, const core::DeviceId& device,
                                       E2eeCallback<void> done) {
-    const auto [it, inserted] =
-        devices_.try_emplace(device, Device{.user = user, .revoked = false, .packages = {}});
     E2eeResult<void> result;
-    if (!inserted && it->second.user != user) {
-        result = std::unexpected(E2eeError::Conflict);
-    } else if (it->second.revoked) {
-        result = std::unexpected(E2eeError::Revoked);
+    if (const auto it = devices_.find(device); it != devices_.end()) {
+        if (it->second.user != user) {
+            result = std::unexpected(E2eeError::Conflict);
+        } else if (it->second.revoked) {
+            result = std::unexpected(E2eeError::Revoked);
+        }
+    } else if (live_devices_of(user) >= core::ports::kMaxDevicesPerUser) {
+        result = std::unexpected(E2eeError::Full);
+    } else {
+        devices_.emplace(device,
+                         Device{.user = user, .revoked = false, .retired_seq = 0, .packages = {}});
     }
     reply(std::move(done), std::move(result));
 }
@@ -70,8 +99,12 @@ void MemoryDirectory::deregister_device(const core::UserId& user, const core::De
         reply<void>(std::move(done), std::unexpected(E2eeError::NotFound));
         return;
     }
-    it->second.revoked = true;
-    it->second.packages.clear();
+    if (!it->second.revoked) {
+        it->second.revoked = true;
+        it->second.retired_seq = ++retirements_;
+        it->second.packages.clear();
+        drop_old_tombstones(user);
+    }
     reply<void>(std::move(done), {});
 }
 

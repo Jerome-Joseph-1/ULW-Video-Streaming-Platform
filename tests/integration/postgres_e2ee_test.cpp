@@ -247,6 +247,34 @@ TEST_F(E2eeRaceTest, DeregistrationAmidFetchesAndPublishesLeavesNothingToHandOut
     EXPECT_EQ(ulw::test::await(harness_->reactor(), after).error(), E2eeError::Revoked);
 }
 
+TEST_F(E2eeRaceTest, ConcurrentRegistrationsNeverPassTheDeviceCap) {
+    // SetUp registered one device; the lock on the user is held while the rest queue.
+    constexpr std::size_t kRegistrations = 24;
+    gate_.emplace(harness_->db().session());
+    ASSERT_TRUE(gate_->exec("BEGIN"));
+    ASSERT_TRUE(gate_->exec("SELECT pg_advisory_xact_lock(3, hashtext($1))",
+                            Params{}.add_text(alice_.view())));
+    std::vector<Answer<void>> answers(kRegistrations);
+    for (auto& a : answers) {
+        harness_->registry().register_device(alice_, core::DeviceId::generate(clock_, random_),
+                                             a.callback());
+    }
+    release_when_waiting(kRegistrations);
+    await_all(answers);
+
+    const auto won =
+        std::ranges::count_if(answers, [](const auto& a) { return a.get().has_value(); });
+    EXPECT_EQ(static_cast<std::size_t>(won), core::ports::kMaxDevicesPerUser - 1);
+    for (const auto& a : answers) {
+        if (!a.get()) {
+            EXPECT_EQ(a.get().error(), E2eeError::Full);
+        }
+    }
+    auto conn = harness_->db().session();
+    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM devices WHERE revoked_at IS NULL"),
+              std::to_string(core::ports::kMaxDevicesPerUser));
+}
+
 TEST_F(E2eeRaceTest, ConcurrentCommitsForOneEpochHaveExactlyOneWinner) {
     const auto room = core::RoomId::generate(clock_, random_);
     hold_device();

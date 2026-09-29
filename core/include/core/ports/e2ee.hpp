@@ -23,8 +23,8 @@ enum class E2eeError : std::uint8_t {
     // The device has no key package left. This is the replenish signal: whoever asked should
     // tell the device to publish more, and try again after it has.
     Exhausted,
-    // Publishing the batch would take the device above kMaxKeyPackagesPerDevice. Nothing was
-    // stored.
+    // Publishing the batch would take the device above kMaxKeyPackagesPerDevice, or registering
+    // the device would take its user above kMaxDevicesPerUser. Nothing was stored.
     Full,
     // A batch that is empty or holds more than kMaxKeyPackagesPerDevice, a package that is empty
     // or above kMaxKeyPackageBytes, or a commit that is empty or above kMaxCommitBytes: no call
@@ -63,6 +63,18 @@ inline constexpr std::size_t kMaxKeyPackagesPerDevice = 100;
 // that arrive in the meantime.
 inline constexpr std::size_t kKeyPackageLowWater = kMaxKeyPackagesPerDevice / 5;
 
+// Clients are browsers (ADR-0016), and every browser profile is a device. A phone, a tablet and
+// a couple of computers with a few browsers each stay under 10; 16 leaves room for profiles
+// wiped without deregistering, which the user retires from the device list. It also bounds what
+// one user can make the directory hold: 16 * 800 KiB of key packages.
+inline constexpr std::size_t kMaxDevicesPerUser = 16;
+
+// A retired id is refused if it comes back, which stops a stale client from reviving a device
+// its groups removed. Only the most recent retirements need that: a client that has been gone
+// for 64 retirements has long since been removed everywhere. Older tombstones are dropped, so
+// churning devices cannot grow a user's rows without bound.
+inline constexpr std::size_t kRetiredDevicesKept = 64;
+
 // Checks a batch against the size bounds before anything is stored: Invalid, or nothing.
 [[nodiscard]] E2eeResult<void> check_key_package_batch(std::span<const KeyPackageBytes> batch);
 
@@ -95,10 +107,12 @@ public:
     virtual ~IDeviceRegistry() = default;
 
     // `device` is a UUIDv7 the client mints, so a registration replayed after its reply was
-    // lost succeeds again without a second row.
+    // lost succeeds again without a second row. Full when the user already has
+    // kMaxDevicesPerUser live devices.
     virtual void register_device(const UserId& user, const DeviceId& device,
                                  E2eeCallback<void> done) = 0;
-    // One atomic step: the device is retired and every key package it published is gone. A
+    // One atomic step: the device is retired and every key package it published is gone; the
+    // user's tombstones beyond the kRetiredDevicesKept most recent are dropped. A
     // fetch that has not returned by then gets Revoked; one that returned first got its package
     // before the device was retired.
     virtual void deregister_device(const UserId& user, const DeviceId& device,

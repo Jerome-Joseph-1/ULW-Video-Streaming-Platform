@@ -39,7 +39,12 @@ never parses a package.
   at all; publishes of one device serialise on its row lock and count on a snapshot taken after
   the lock, so concurrent publishes never pass the cap.
 - `deregister_device` retires the row (`revoked_at`) and deletes its packages in one transaction.
-  A retired id never comes back, and fetches of it report `Revoked`.
+  A retired id does not come back, and fetches of it report `Revoked`.
+- A user has at most 16 live devices; registering a 17th is `Full` until one is retired.
+  Registrations of one user serialise on a transaction-scoped advisory lock, so concurrent ones
+  cannot pass the cap. Each user keeps only the 64 newest tombstones, so registering and
+  retiring in a loop cannot grow the table without bound. Together these cap a user at 80 device
+  rows and 16 * 800 KiB of key packages.
 - `submit_commit(room, user, device, epoch, commit)` claims an epoch transition and stores the
   opaque commit in the same row of `mls_epochs`: the primary key `(room_id, epoch)` lets the
   first commit win and the rest see `StaleEpoch`. A claim and its commit cannot be separated,
@@ -54,6 +59,9 @@ never parses a package.
 - The server stores public key material only and never parses it: a malformed package is the
   inviting client's problem to report, and the directory cannot check lifetimes or ciphersuites.
 - An exhausted device cannot be invited until it comes online and publishes again.
+- A browser profile wiped without deregistering keeps its place among the 16 until the user
+  retires it from the device list. An id whose tombstone was dropped can be registered again;
+  by then every group has long since removed it.
 - `mls_epochs` gains a row, and up to 64 KiB, per commit, and nothing prunes it yet; the room
   lifecycle owns that. A malicious member can still stall a room with a well-formed but
   unprocessable commit; MLS gives the others no way to skip it short of re-forming the group.

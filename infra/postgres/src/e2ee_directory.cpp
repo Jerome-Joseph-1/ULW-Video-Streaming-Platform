@@ -26,13 +26,30 @@ constexpr auto kMaxEpoch = static_cast<std::uint64_t>(std::numeric_limits<std::i
 constexpr Sql kBegin = "BEGIN";
 constexpr Sql kCommit = "COMMIT";
 
-// A conflict leaves the existing row alone; the next statement, on a fresh snapshot, reads who
-// holds it. Reading it in this statement would miss a row a concurrent registration committed
-// after the snapshot was taken.
-constexpr Sql kInsertDevice =
-    "INSERT INTO devices (id, user_id) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING";
+// Registrations of one user queue on this transaction-scoped lock, so the live count the insert
+// reads on its fresh snapshot cannot be passed by a registration running beside it. The
+// two-key form keeps these apart from upload claims, which use the single-key space; the first
+// key names the purpose.
+constexpr Sql kLockUser = "SELECT pg_advisory_xact_lock(3, hashtext($1))";
+
+// A conflict, or a user at the cap, inserts nothing; the next statement, on a fresh snapshot,
+// reads who holds the id. Reading it in this statement would miss a row a concurrent
+// registration of the same id committed after the snapshot was taken.
+constexpr Sql kInsertDevice = R"sql(
+INSERT INTO devices (id, user_id)
+SELECT $1, $2
+ WHERE (SELECT count(*) FROM devices WHERE user_id = $2 AND revoked_at IS NULL) < $3
+ON CONFLICT (id) DO NOTHING)sql";
 constexpr Sql kDeviceHolder =
     "SELECT user_id = $2, revoked_at IS NOT NULL FROM devices WHERE id = $1";
+
+// Keeps the user's newest tombstones; ids are never reused, so ties in revoked_at are harmless.
+constexpr Sql kDropTombstones = R"sql(
+DELETE FROM devices
+ WHERE id IN (SELECT id FROM devices
+               WHERE user_id = $1 AND revoked_at IS NOT NULL
+               ORDER BY revoked_at DESC, id DESC
+              OFFSET $2))sql";
 
 // Retiring the device takes its row lock, which every fetch, publish and commit claim of the
 // device also takes. The packages are deleted by a second statement in the same transaction,
@@ -151,37 +168,66 @@ public:
         : user_(user), device_(device), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
-        reading_holder_ = false;
-        return Statement{.sql = kInsertDevice, .params = device_params(device_, user_)};
+        step_ = Step::Begin;
+        return Statement{.sql = kBegin, .params = {}};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
         if (!outcome) {
             return finish(failure<void>(outcome.error()));
         }
-        if (!reading_holder_) {
+        switch (step_) {
+        case Step::Begin:
+            step_ = Step::Lock;
+            return Statement{.sql = kLockUser, .params = Params{}.add_text(user_.view())};
+        case Step::Lock:
+            step_ = Step::Insert;
+            return Statement{
+                .sql = kInsertDevice,
+                .params = device_params(device_, user_)
+                              .add_int(static_cast<std::int64_t>(core::ports::kMaxDevicesPerUser))};
+        case Step::Insert:
             if (outcome->affected() == 1) {
-                return finish({});
+                result_ = {};
+                step_ = Step::Commit;
+                return Statement{.sql = kCommit, .params = {}};
             }
-            reading_holder_ = true;
+            step_ = Step::Holder;
             return Statement{.sql = kDeviceHolder, .params = device_params(device_, user_)};
+        case Step::Holder:
+            // Nothing to commit: the transaction wrote nothing, and the pool rolls it back.
+            return finish(held(*outcome));
+        case Step::Commit:
+            return finish(result_);
         }
-        const auto same_user = outcome->get(0, 0).and_then(parse_bool);
-        const auto revoked = outcome->get(0, 1).and_then(parse_bool);
-        if (!same_user || !revoked) {
-            return finish(std::unexpected(E2eeError::Corrupt));
-        }
-        if (!*same_user) {
-            return finish(std::unexpected(E2eeError::Conflict));
-        }
-        // Ours already: a replay of this registration, or of one since retired.
-        return finish(*revoked ? E2eeResult<void>{std::unexpected(E2eeError::Revoked)}
-                               : E2eeResult<void>{});
+        return finish(std::unexpected(E2eeError::Unavailable));
     }
 
     void abandon(DbError error) noexcept override { done_(failure<void>(error)); }
 
 private:
+    enum class Step : std::uint8_t { Begin, Lock, Insert, Holder, Commit };
+
+    // Why the insert wrote nothing: the id is taken, or the user is at the cap.
+    static E2eeResult<void> held(const Result& row) {
+        if (row.rows() == 0) {
+            return std::unexpected(E2eeError::Full);
+        }
+        const auto same_user = row.get(0, 0).and_then(parse_bool);
+        const auto revoked = row.get(0, 1).and_then(parse_bool);
+        if (!same_user || !revoked) {
+            return std::unexpected(E2eeError::Corrupt);
+        }
+        if (!*same_user) {
+            return std::unexpected(E2eeError::Conflict);
+        }
+        // Ours already: a replay of this registration, or of one since retired.
+        if (*revoked) {
+            return std::unexpected(E2eeError::Revoked);
+        }
+        return {};
+    }
+
     std::optional<Statement> finish(E2eeResult<void> result) noexcept {
         done_(result);
         return std::nullopt;
@@ -189,7 +235,8 @@ private:
 
     core::UserId user_;
     core::DeviceId device_;
-    bool reading_holder_ = false;
+    Step step_ = Step::Begin;
+    E2eeResult<void> result_;
     E2eeCallback<void> done_;
 };
 
@@ -220,6 +267,13 @@ public:
             step_ = Step::Drop;
             return Statement{.sql = kDropPackages, .params = Params{}.add_uuid(device_.uuid())};
         case Step::Drop:
+            step_ = Step::Prune;
+            return Statement{.sql = kDropTombstones,
+                             .params = Params{}
+                                           .add_text(user_.view())
+                                           .add_int(static_cast<std::int64_t>(
+                                               core::ports::kRetiredDevicesKept))};
+        case Step::Prune:
             step_ = Step::Commit;
             return Statement{.sql = kCommit, .params = {}};
         case Step::Commit:
@@ -231,7 +285,7 @@ public:
     void abandon(DbError error) noexcept override { done_(failure<void>(error)); }
 
 private:
-    enum class Step : std::uint8_t { Begin, Retire, Drop, Commit };
+    enum class Step : std::uint8_t { Begin, Retire, Drop, Prune, Commit };
 
     std::optional<Statement> finish(E2eeResult<void> result) noexcept {
         done_(result);
