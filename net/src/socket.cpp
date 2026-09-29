@@ -103,6 +103,26 @@ int connect_result(int fd) noexcept {
     return error;
 }
 
+std::expected<os::UniqueFd, int> listen_on(std::string_view address) noexcept {
+    const std::optional<Endpoint> endpoint = parse_endpoint(address);
+    if (!endpoint) {
+        return std::unexpected(EINVAL);
+    }
+    os::UniqueFd fd{
+        ::socket(endpoint->addr.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
+    if (!fd) {
+        return std::unexpected(errno);
+    }
+    if (auto r = set_int(fd.get(), SOL_SOCKET, SO_REUSEADDR, 1); !r) {
+        return std::unexpected(r.error());
+    }
+    if (::bind(fd.get(), reinterpret_cast<const sockaddr*>(&endpoint->addr), endpoint->len) != 0 ||
+        ::listen(fd.get(), kBacklog) != 0) {
+        return std::unexpected(errno);
+    }
+    return fd;
+}
+
 std::expected<os::UniqueFd, int> listen_tcp(const ListenOptions& options) {
     // Loopback means 127.0.0.1: a socket bound to ::1 takes no IPv4 connections whatever
     // IPV6_V6ONLY says, and local probes dial 127.0.0.1. Otherwise one dual-stack socket

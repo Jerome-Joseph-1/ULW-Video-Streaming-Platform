@@ -27,6 +27,7 @@ protected:
     std::map<std::string, std::string, std::less<>> env{
         {"HOSTNAME", "chat-5d9f7c6b8-x2k4q"},
         {"ULW_NODE_ADDRESS", "10.42.0.17:9201"},
+        {"ULW_NODE_SECRET", "test-only-node-secret-0123456789abcdef"},
         {"ULW_DATABASE_URL", "postgresql://ulw@db/ulw"},
         {"JWKS_URL", "https://auth.example.test/.well-known/jwks.json"},
         {"JWT_ISSUER", "https://auth.example.test"},
@@ -39,7 +40,7 @@ TEST_F(ChatConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->node.view(), "chat-5d9f7c6b8-x2k4q");
     EXPECT_EQ(config->port, 9101);
     EXPECT_EQ(config->node_address, "10.42.0.17:9201");
-    EXPECT_EQ(config->node_port, 9201);
+    EXPECT_EQ(config->node_secret, "test-only-node-secret-0123456789abcdef");
     EXPECT_EQ(config->reactor, net::ReactorKind::IoUring);
     EXPECT_EQ(config->jwt_audience, "askedin-platform");
     EXPECT_EQ(config->auth_cookie, "auth_token");
@@ -55,7 +56,7 @@ TEST_F(ChatConfigTest, AnExplicitNodeIdWinsOverTheHostname) {
 
 TEST_F(ChatConfigTest, EachRequiredVariableIsNamedWhenMissing) {
     for (const std::string name :
-         {"ULW_NODE_ADDRESS", "ULW_DATABASE_URL", "JWKS_URL", "JWT_ISSUER"}) {
+         {"ULW_NODE_ADDRESS", "ULW_NODE_SECRET", "ULW_DATABASE_URL", "JWKS_URL", "JWT_ISSUER"}) {
         const std::string saved = env.at(name);
         env.erase(name);
         EXPECT_EQ(refused_variable(), name);
@@ -80,9 +81,15 @@ TEST_F(ChatConfigTest, TheNodeAddressMustBeNumericAndApartFromTheClientPort) {
     }
     env["ULW_NODE_ADDRESS"] = "[fd00::1]:9201";
     ASSERT_TRUE(load());
-    EXPECT_EQ(load()->node_port, 9201);
     env["ULW_NODE_ADDRESS"] = "10.42.0.17:9101";
     EXPECT_EQ(refused_variable(), "ULW_NODE_ADDRESS");
+}
+
+TEST_F(ChatConfigTest, ANodeSecretShorterThan32BytesIsRefused) {
+    env["ULW_NODE_SECRET"] = std::string(31, 'k');
+    EXPECT_EQ(refused_variable(), "ULW_NODE_SECRET");
+    env["ULW_NODE_SECRET"] = std::string(32, 'k');
+    EXPECT_TRUE(load());
 }
 
 TEST_F(ChatConfigTest, OutOfRangeAndMalformedValuesAreRefused) {

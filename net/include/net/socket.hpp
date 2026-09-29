@@ -31,6 +31,9 @@ struct ListenOptions {
 // Starts a nonblocking, close-on-exec connect to a numeric endpoint. It has finished once the
 // socket turns writable (watch it for Write), and connect_result() then says how.
 [[nodiscard]] std::expected<os::UniqueFd, int> start_connect(std::string_view address) noexcept;
+// Listens on exactly one numeric endpoint, for a port that must not be reachable on every
+// interface. Nonblocking, close-on-exec, backlog 1024.
+[[nodiscard]] std::expected<os::UniqueFd, int> listen_on(std::string_view address) noexcept;
 // 0 once a started connect has succeeded, otherwise the errno it failed with.
 [[nodiscard]] int connect_result(int fd) noexcept;
 

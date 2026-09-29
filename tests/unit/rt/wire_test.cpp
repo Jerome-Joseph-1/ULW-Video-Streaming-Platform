@@ -77,18 +77,32 @@ protected:
 TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     const auto body = bytes("opaque \x01\x02 bytes");
     std::vector<std::byte> out;
-    wire::encode_hello(out, node_);
+    wire::Nonce nonce{};
+    nonce.fill(std::byte{0x42});
+    wire::Mac mac{};
+    mac.fill(std::byte{0x17});
+    wire::encode_hello(out, node_, nonce);
+    wire::encode_challenge(out, node_, nonce, mac);
+    wire::encode_proof(out, mac);
     wire::encode_subscribe(out, 7, room_);
     wire::encode_unsubscribe(out, room_);
     wire::encode_send(out, 1ULL << 40U, room_, alice_, body);
     wire::encode_reply(out, 9, wire::Status::Fenced, 12);
     wire::encode_deliver(out, room_, 13, alice_, body);
 
-    const auto frames = decode_all(out);
-    ASSERT_EQ(frames.size(), 6U);
+    auto frames = decode_all(out);
+    ASSERT_EQ(frames.size(), 8U);
     const auto& hello = std::get<wire::Hello>(frames[0]);
     EXPECT_EQ(hello.version, wire::kVersion);
     EXPECT_EQ(hello.node, node_);
+    EXPECT_EQ(hello.nonce, nonce);
+    const auto& challenge = std::get<wire::Challenge>(frames[1]);
+    EXPECT_EQ(challenge.node, node_);
+    EXPECT_EQ(challenge.nonce, nonce);
+    EXPECT_EQ(challenge.mac, mac);
+    EXPECT_EQ(std::get<wire::Proof>(frames[2]).mac, mac);
+    // The rest keep their places once the handshake frames are set aside.
+    frames.erase(frames.begin() + 1, frames.begin() + 3);
     const auto& subscribe = std::get<wire::Subscribe>(frames[1]);
     EXPECT_EQ(subscribe.request, 7U);
     EXPECT_EQ(subscribe.room, room_);
@@ -157,7 +171,7 @@ TEST_F(WireTest, AZeroLengthIsRefused) {
 TEST_F(WireTest, AnUnknownTypeIsRefused) {
     EXPECT_EQ(error_of(raw(0, "")), wire::DecodeError::UnknownType);
     wire::Decoder fresh;
-    fresh.feed(raw(7, ""));
+    fresh.feed(raw(9, ""));
     EXPECT_EQ(fresh.next(), std::unexpected(wire::DecodeError::UnknownType));
 }
 
@@ -200,7 +214,7 @@ TEST_F(WireTest, AReplyWithAStatusNobodyDefinedIsMalformed) {
 }
 
 TEST_F(WireTest, NothingIsDecodedAfterAnError) {
-    std::vector<std::byte> in = raw(9, "");
+    std::vector<std::byte> in = raw(0, "");
     wire::encode_subscribe(in, 1, room_);
     EXPECT_EQ(error_of(in), wire::DecodeError::UnknownType);
     EXPECT_FALSE(decoder_.next());

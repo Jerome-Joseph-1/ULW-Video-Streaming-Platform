@@ -42,6 +42,11 @@ void RoomLog::on_peer_lost(const core::NodeId& peer) noexcept {
               peer.view());
 }
 
+// `why` is one of the router's fixed reasons; nothing a peer sent is echoed.
+void RoomLog::on_peer_refused(std::string_view why) noexcept {
+    log_event(R"("level":"warn","msg":"node refused","node":"{}","why":"{}")", self_.view(), why);
+}
+
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(limits), sessions_(limits_.max_connections) {
 }
@@ -140,14 +145,15 @@ std::string ChatServer::render_metrics() const {
                        "fenced_writes_total {}\n"
                        "forwards_total {}\n"
                        "forward_timeouts_total {}\n"
-                       "peers_lost_total {}\n",
+                       "peers_lost_total {}\n"
+                       "peers_refused_total {}\n",
                        c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
                        c.auth_failures, c.origin_rejections, c.messages_received,
                        c.messages_delivered, c.protocol_errors, c.control_floods, c.slow_consumers,
                        c.allocation_failures + router.allocation_failures,
                        deps_.router.rooms_owned(), deps_.router.rooms_joined(),
                        registry.reassignments, registry.fenced_writes, router.forwarded,
-                       router.forward_timeouts, router.peers_lost);
+                       router.forward_timeouts, router.peers_lost, router.peers_refused);
 }
 
 } // namespace chat

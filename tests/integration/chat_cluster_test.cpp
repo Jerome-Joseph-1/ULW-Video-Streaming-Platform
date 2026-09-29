@@ -25,6 +25,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <format>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -178,6 +179,12 @@ protected:
             return;
         }
         room_ = core::RoomId::generate(clock_, random_).to_string();
+        // Made up per run: no real secret lives in the repository.
+        std::array<std::byte, 32> secret{};
+        random_.fill(secret);
+        for (const std::byte b : secret) {
+            node_secret_ += std::format("{:02x}", std::to_integer<unsigned>(b));
+        }
         auto key = devtoken::DevKey::generate();
         ASSERT_TRUE(key);
         const auto jwks = files_.path() / "jwks.json";
@@ -211,6 +218,7 @@ protected:
             "ULW_NODE_ID=" + node.name,
             "ULW_LISTEN_PORT=" + std::to_string(node.port),
             "ULW_NODE_ADDRESS=127.0.0.1:" + std::to_string(node.node_port),
+            "ULW_NODE_SECRET=" + node_secret_,
             "ULW_DATABASE_URL=" + db_->conninfo(),
             "ULW_DEV_JWKS_FILE=" + jwks,
             "JWT_ISSUER=" + std::string(kIssuer),
@@ -300,6 +308,7 @@ protected:
     std::vector<std::string> tokens_;
     std::vector<Node> nodes_;
     std::string room_;
+    std::string node_secret_;
     std::uint64_t next_ref_ = 100;
     std::unordered_map<std::string, std::string> last_body_;
 };

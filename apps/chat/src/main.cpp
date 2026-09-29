@@ -9,6 +9,7 @@
 #include "net/socket.hpp"
 #include "os/limits.hpp"
 #include "os/system_clock.hpp"
+#include "os/system_random.hpp"
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
@@ -77,6 +78,7 @@ int fail(std::string_view what, std::string_view why, int code = EXIT_FAILURE) {
 // Owns everything the server borrows, in construction order.
 struct Services {
     os::SystemClock clock;
+    os::SystemRandom random;
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::OffloadPool> offload;
     std::unique_ptr<infra::postgres::PgRoomStore> store;
@@ -164,10 +166,13 @@ int run() {
     }
 
     s.room_log = std::make_unique<chat::RoomLog>(config->node);
-    s.router = std::make_unique<rt::RoomRouter>(
-        *s.reactor, *s.store, s.clock,
-        rt::RouterConfig{.self = config->node, .advertise = config->node_address}, *s.room_log);
-    auto node_listener = net::listen_tcp({.port = config->node_port});
+    s.router = std::make_unique<rt::RoomRouter>(*s.reactor, *s.store, s.clock, s.random,
+                                                rt::RouterConfig{.self = config->node,
+                                                                 .advertise = config->node_address,
+                                                                 .secret = config->node_secret},
+                                                *s.room_log);
+    // Only the address other nodes dial, never every interface (ADR-0037).
+    auto node_listener = net::listen_on(config->node_address);
     if (!node_listener) {
         return fail("listen on the node port", errno_text(node_listener.error()));
     }

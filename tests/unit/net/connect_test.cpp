@@ -4,6 +4,8 @@
 
 #include "support/reactor_harness.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 #include <cerrno>
@@ -111,6 +113,29 @@ TEST_P(ConnectTest, AClosedPortIsReportedAsRefused) {
         return;
     }
     EXPECT_EQ(finish(*fd), ECONNREFUSED);
+}
+
+TEST(ListenOn, TakesConnectionsOnlyAtTheAddressItWasGiven) {
+    std::uint16_t port = 0;
+    {
+        auto probe = net::listen_tcp({.port = 0, .loopback_only = true});
+        ASSERT_TRUE(probe);
+        port = *net::local_port(probe->get());
+    }
+    const auto listener = net::listen_on("127.0.0.1:" + std::to_string(port));
+    ASSERT_TRUE(listener);
+    // The same port on another loopback address belongs to no listener.
+    const os::UniqueFd elsewhere{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK + 1);
+    // connect() takes every address family through the generic sockaddr header.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    EXPECT_NE(::connect(elsewhere.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr), 0);
+    EXPECT_EQ(errno, ECONNREFUSED);
+    EXPECT_TRUE(ulw::test::connect_loopback(port));
+    EXPECT_EQ(net::listen_on("localhost:9201"), std::unexpected(EINVAL));
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ConnectTest,

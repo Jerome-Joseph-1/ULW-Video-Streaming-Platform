@@ -3,6 +3,7 @@
 #include "net/slab.hpp"
 #include "net/socket.hpp"
 
+#include "node_auth.hpp"
 #include "wire.hpp"
 
 #include <algorithm>
@@ -33,6 +34,10 @@ constexpr std::size_t kMaxUnsentBytes = std::size_t{1} << 20U;
 // Connections from other nodes at once. A deployment runs a handful of replicas, each dialling
 // this node once; the rest is room for the dead ones a rolling restart leaves until they close.
 constexpr std::size_t kMaxPeers = 256;
+// From a connection's start to the end of its handshake: a round trip on the private network
+// and two MACs take milliseconds, and the dialer's address lookup is bounded by kStoreTimeout.
+// A peer that takes longer is stuck or is not a node, and gives its slot back.
+constexpr core::Millis kHandshakeTimeout{5'000};
 
 using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq) noexcept>;
 
@@ -82,15 +87,21 @@ class RoomRouter::Impl final : public IRegistryObserver,
 
         void start(net::ConnId conn) noexcept {
             conn_ = conn;
+            accepted_ = router_.clock_.now();
             router_.reactor_.start_receiving(conn_);
         }
 
         [[nodiscard]] net::ConnId conn() const noexcept { return conn_; }
 
+        // Frames for the dialer. Only an authenticated peer is ever sent any.
         void send(std::span<const std::byte> frame) noexcept {
-            if (!closed_) {
+            if (!closed_ && state_ == State::Authenticated) {
                 router_.reactor_.send(conn_, frame);
             }
+        }
+
+        [[nodiscard]] bool handshake_overdue(core::MonoTime now) const noexcept {
+            return state_ != State::Authenticated && now - accepted_ > kHandshakeTimeout;
         }
 
         void on_data(net::BorrowedBytes bytes) noexcept override {
@@ -131,13 +142,57 @@ class RoomRouter::Impl final : public IRegistryObserver,
         }
 
     private:
-        // false: the peer broke the protocol.
+        enum class State : std::uint8_t { AwaitHello, AwaitProof, Authenticated };
+
+        // false: the peer broke the protocol, or is not a node holding the secret.
         bool handle(const wire::Frame& frame) {
-            if (!greeted_) {
-                const auto* hello = std::get_if<wire::Hello>(&frame);
-                greeted_ = hello != nullptr && hello->version == wire::kVersion;
-                return greeted_;
+            switch (state_) {
+            case State::AwaitHello:
+                return greet(std::get_if<wire::Hello>(&frame));
+            case State::AwaitProof:
+                return verify(std::get_if<wire::Proof>(&frame));
+            case State::Authenticated:
+                return serve(frame);
             }
+            return false;
+        }
+
+        bool greet(const wire::Hello* hello) {
+            if (hello == nullptr || hello->version != wire::kVersion) {
+                router_.refused("no hello");
+                return false;
+            }
+            dialer_.emplace(hello->node);
+            dialer_nonce_ = hello->nonce;
+            router_.random_.fill(own_nonce_);
+            const auto tag = auth::acceptor_tag(router_.secret(), hello->node, router_.config_.self,
+                                                dialer_nonce_, own_nonce_);
+            if (!tag) {
+                return false;
+            }
+            std::vector<std::byte> challenge;
+            wire::encode_challenge(challenge, router_.config_.self, own_nonce_, *tag);
+            router_.reactor_.send(conn_, challenge);
+            state_ = State::AwaitProof;
+            return true;
+        }
+
+        bool verify(const wire::Proof* proof) {
+            if (proof == nullptr || !dialer_) {
+                router_.refused("no proof");
+                return false;
+            }
+            const auto expected = auth::dialer_tag(router_.secret(), *dialer_, router_.config_.self,
+                                                   dialer_nonce_, own_nonce_);
+            if (!expected || !auth::same_tag(*expected, proof->mac)) {
+                router_.refused("bad proof");
+                return false;
+            }
+            state_ = State::Authenticated;
+            return true;
+        }
+
+        bool serve(const wire::Frame& frame) {
             if (const auto* f = std::get_if<wire::Subscribe>(&frame)) {
                 router_.on_subscribe(handle_, f->request, f->room);
                 return true;
@@ -156,8 +211,12 @@ class RoomRouter::Impl final : public IRegistryObserver,
         Handle handle_;
         Impl& router_;
         net::ConnId conn_;
+        core::MonoTime accepted_;
         wire::Decoder decoder_;
-        bool greeted_ = false;
+        State state_ = State::AwaitHello;
+        std::optional<core::NodeId> dialer_;
+        wire::Nonce dialer_nonce_{};
+        wire::Nonce own_nonce_{};
         bool closed_ = false;
     };
 
@@ -166,7 +225,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
     class Outbound final : public net::IStreamHandler, public net::IReadyHandler {
     public:
         Outbound(Impl& router, core::NodeId node, std::uint64_t id) noexcept
-            : router_(router), node_(node), id_(id) {}
+            : router_(router), node_(node), id_(id), created_(router.clock_.now()) {}
         Outbound(const Outbound&) = delete;
         Outbound& operator=(const Outbound&) = delete;
         Outbound(Outbound&&) = delete;
@@ -176,7 +235,6 @@ class RoomRouter::Impl final : public IRegistryObserver,
         [[nodiscard]] const core::NodeId& node() const noexcept { return node_; }
 
         void locate() {
-            wire::encode_hello(unsent_, router_.config_.self);
             router_.store_.find_address(
                 node_, [&router = router_, node = node_,
                         id = id_](StoreResult<std::optional<std::string>> address) noexcept {
@@ -196,6 +254,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
             send(frame);
         }
 
+        // Until the owner has proven itself, frames wait here; they reach nobody else.
         void send(std::span<const std::byte> frame) {
             if (state_ == State::Open) {
                 router_.reactor_.send(conn_, frame);
@@ -236,10 +295,14 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 router_.reactor_.unwatch(connecting_.get());
                 connecting_.reset();
             }
-            if (state_ == State::Open) {
+            if (state_ == State::Handshaking || state_ == State::Open) {
                 router_.reactor_.begin_close(conn_);
             }
             state_ = State::Closed;
+        }
+
+        [[nodiscard]] bool handshake_overdue(core::MonoTime now) const noexcept {
+            return state_ != State::Open && now - created_ > kHandshakeTimeout;
         }
 
         [[nodiscard]] bool quiescent(const net::IReactor& reactor) const noexcept {
@@ -265,11 +328,12 @@ class RoomRouter::Impl final : public IRegistryObserver,
             }
             conn_ = *id;
             opened_ = true;
-            state_ = State::Open;
+            state_ = State::Handshaking;
+            router_.random_.fill(own_nonce_);
+            std::vector<std::byte> hello;
+            wire::encode_hello(hello, router_.config_.self, own_nonce_);
             router_.reactor_.start_receiving(conn_);
-            router_.reactor_.send(conn_, unsent_);
-            unsent_.clear();
-            unsent_.shrink_to_fit();
+            router_.reactor_.send(conn_, hello);
         }
 
         // ---- open
@@ -277,7 +341,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
         void on_data(net::BorrowedBytes bytes) noexcept override {
             try {
                 decoder_.feed(bytes);
-                while (state_ == State::Open) {
+                while (state_ == State::Handshaking || state_ == State::Open) {
                     auto next = decoder_.next();
                     if (!next) {
                         router_.link_down(*this);
@@ -303,7 +367,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
         void on_error(int /*err*/) noexcept override { router_.link_down(*this); }
 
     private:
-        enum class State : std::uint8_t { Locating, Connecting, Open, Closed };
+        enum class State : std::uint8_t { Locating, Connecting, Handshaking, Open, Closed };
 
         struct Pending {
             std::uint64_t request;
@@ -338,8 +402,11 @@ class RoomRouter::Impl final : public IRegistryObserver,
             state_ = State::Connecting;
         }
 
-        // false: the peer broke the protocol.
+        // false: the peer broke the protocol, or is not the node it should be.
         bool handle(const wire::Frame& frame) {
+            if (state_ == State::Handshaking) {
+                return answer(std::get_if<wire::Challenge>(&frame));
+            }
             if (const auto* f = std::get_if<wire::Reply>(&frame)) {
                 const auto it = std::ranges::find(pending_, f->request, &Pending::request);
                 // Already failed by its deadline.
@@ -359,9 +426,38 @@ class RoomRouter::Impl final : public IRegistryObserver,
             return false;
         }
 
+        // The owner proves itself first; only then does this node prove itself and send.
+        bool answer(const wire::Challenge* challenge) {
+            if (challenge == nullptr || challenge->node != node_) {
+                router_.refused("no challenge");
+                return false;
+            }
+            const auto expected = auth::acceptor_tag(router_.secret(), router_.config_.self, node_,
+                                                     own_nonce_, challenge->nonce);
+            if (!expected || !auth::same_tag(*expected, challenge->mac)) {
+                router_.refused("bad challenge");
+                return false;
+            }
+            const auto tag = auth::dialer_tag(router_.secret(), router_.config_.self, node_,
+                                              own_nonce_, challenge->nonce);
+            if (!tag) {
+                return false;
+            }
+            std::vector<std::byte> proof;
+            wire::encode_proof(proof, *tag);
+            router_.reactor_.send(conn_, proof);
+            router_.reactor_.send(conn_, unsent_);
+            unsent_.clear();
+            unsent_.shrink_to_fit();
+            state_ = State::Open;
+            return true;
+        }
+
         Impl& router_;
         core::NodeId node_;
         std::uint64_t id_;
+        core::MonoTime created_;
+        wire::Nonce own_nonce_{};
         State state_ = State::Locating;
         os::UniqueFd connecting_;
         net::ConnId conn_;
@@ -373,9 +469,10 @@ class RoomRouter::Impl final : public IRegistryObserver,
 
 public:
     Impl(net::IReactor& reactor, IRoomStore& store, const core::ports::IClock& clock,
-         RouterConfig config, IRouterEvents& events)
-        : reactor_(reactor), store_(store), clock_(clock), config_(std::move(config)),
-          events_(events), registry_(store, clock, config_.self, *this), inbound_(kMaxPeers) {}
+         core::ports::IRandom& random, RouterConfig config, IRouterEvents& events)
+        : reactor_(reactor), store_(store), clock_(clock), random_(random),
+          config_(std::move(config)), events_(events), registry_(store, clock, config_.self, *this),
+          inbound_(kMaxPeers) {}
 
     ~Impl() override {
         reactor_.cancel_timer(timer_);
@@ -612,6 +709,20 @@ private:
 
     void tick() {
         const core::MonoTime now = clock_.now();
+        inbound_.for_each_live([now](Inbound& in) {
+            if (in.handshake_overdue(now)) {
+                in.close();
+            }
+        });
+        std::vector<Outbound*> stuck;
+        for (auto& [node, link] : outbound_) {
+            if (link->handshake_overdue(now)) {
+                stuck.push_back(link.get());
+            }
+        }
+        for (Outbound* link : stuck) {
+            link_down(*link);
+        }
         std::vector<RequestDone> expired;
         for (auto& [node, link] : outbound_) {
             link->expire(now, expired);
@@ -1013,6 +1124,15 @@ private:
         closing_.push_back(std::move(gone));
     }
 
+    [[nodiscard]] std::span<const std::byte> secret() const noexcept {
+        return std::as_bytes(std::span{config_.secret});
+    }
+
+    void refused(std::string_view why) noexcept {
+        ++counters_.peers_refused;
+        events_.on_peer_refused(why);
+    }
+
     void advertise() {
         advertising_ = true;
         store_.advertise(config_.self, config_.advertise, [this](StoreResult<void> r) noexcept {
@@ -1024,6 +1144,7 @@ private:
     net::IReactor& reactor_;
     IRoomStore& store_;
     const core::ports::IClock& clock_;
+    core::ports::IRandom& random_;
     RouterConfig config_;
     IRouterEvents& events_;
     RoomRegistry registry_;
@@ -1043,8 +1164,8 @@ private:
 };
 
 RoomRouter::RoomRouter(net::IReactor& reactor, IRoomStore& store, const core::ports::IClock& clock,
-                       RouterConfig config, IRouterEvents& events)
-    : impl_(std::make_unique<Impl>(reactor, store, clock, std::move(config), events)) {}
+                       core::ports::IRandom& random, RouterConfig config, IRouterEvents& events)
+    : impl_(std::make_unique<Impl>(reactor, store, clock, random, std::move(config), events)) {}
 
 RoomRouter::~RoomRouter() = default;
 

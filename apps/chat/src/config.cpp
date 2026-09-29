@@ -2,6 +2,7 @@
 
 #include "core/util/parse.hpp"
 #include "net/socket.hpp"
+#include "rt/room_router.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -101,6 +102,14 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
         return error("ULW_NODE_ADDRESS", "uses ULW_LISTEN_PORT, which clients already take");
     }
 
+    auto node_secret = lookup(env, "ULW_NODE_SECRET");
+    if (!node_secret) {
+        return error("ULW_NODE_SECRET", "not set");
+    }
+    if (node_secret->size() < rt::kMinNodeSecretBytes) {
+        return error("ULW_NODE_SECRET", "shorter than 32 bytes");
+    }
+
     net::ReactorKind reactor = net::ReactorKind::IoUring;
     if (const auto name = lookup(env, "ULW_REACTOR")) {
         const auto kind = net::parse_reactor_kind(*name);
@@ -139,7 +148,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     return Config{.node = *node,
                   .port = port,
                   .node_address = std::move(*node_address),
-                  .node_port = node_port,
+                  .node_secret = std::move(*node_secret),
                   .reactor = reactor,
                   .database_url = std::move(*database),
                   .jwks_url = std::move(url).value_or(""),

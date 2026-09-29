@@ -1,6 +1,7 @@
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
+#include "os/system_random.hpp"
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
@@ -64,9 +65,11 @@ private:
         ulw::test::FakeVerifier verifier;
         auto store = std::make_unique<ulw::test::MemoryRoomStore>(**reactor, db);
         chat::RoomLog log(*core::NodeId::parse("chat-1"));
-        rt::RoomRouter router(**reactor, *store, clock,
+        os::SystemRandom random;
+        rt::RoomRouter router(**reactor, *store, clock, random,
                               {.self = *core::NodeId::parse("chat-1"),
-                               .advertise = "127.0.0.1:" + std::to_string(node_port)},
+                               .advertise = "127.0.0.1:" + std::to_string(node_port),
+                               .secret = "session-test-node-secret-0123456789"},
                               log);
         if (!router.start(std::move(*peers))) {
             port.set_value(0);

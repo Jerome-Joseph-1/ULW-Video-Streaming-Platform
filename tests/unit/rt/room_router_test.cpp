@@ -4,9 +4,15 @@
 #include "rt/room_router.hpp"
 
 #include "memory_room_store.hpp"
+#include "node_auth.hpp"
 #include "support/fake_random.hpp"
 #include "support/reactor_harness.hpp"
+#include "wire.hpp"
 
+#include <sys/socket.h>
+
+#include <array>
+#include <cerrno>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
@@ -19,6 +25,7 @@ namespace {
 using net::ReactorKind;
 using rt::RouteError;
 using ulw::test::pump_until;
+namespace wire = rt::wire;
 
 struct Received {
     std::uint64_t seq;
@@ -49,6 +56,7 @@ public:
     void on_peer_lost(const core::NodeId& peer) noexcept override {
         lost.emplace_back(peer.view());
     }
+    void on_peer_refused(std::string_view why) noexcept override { refused.emplace_back(why); }
 
     struct Fence {
         core::RoomId room;
@@ -58,13 +66,65 @@ public:
     std::vector<Fence> fenced;
     std::vector<std::uint64_t> took;
     std::vector<std::string> lost;
+    std::vector<std::string> refused;
 };
+
+// A test value, made up for these tests; real deployments take theirs from the environment.
+constexpr std::string_view kSecret = "unit-test-node-secret-000000000000000";
 
 struct Node {
     std::unique_ptr<ulw::test::MemoryRoomStore> store;
     Events events;
     std::unique_ptr<rt::RoomRouter> router;
     std::uint16_t port = 0;
+};
+
+// A process on the node-channel port that speaks the frames but may not hold the secret.
+class RawPeer {
+public:
+    RawPeer(net::IReactor& reactor, std::uint16_t port)
+        : reactor_(reactor), fd_(ulw::test::connect_loopback(port)) {}
+
+    void send(const std::vector<std::byte>& bytes) {
+        sent_.insert(sent_.end(), bytes.begin(), bytes.end());
+        ASSERT_EQ(ulw::test::write_some(fd_.get(), bytes), bytes.size());
+    }
+
+    // Everything sent so far, for a replay.
+    [[nodiscard]] const std::vector<std::byte>& sent() const noexcept { return sent_; }
+
+    // The next frame from the node, or nullopt once it has closed the connection.
+    std::optional<wire::Frame> next() {
+        std::optional<wire::Frame> frame;
+        const bool got = ulw::test::pump_until(reactor_, [&] {
+            if (auto decoded = decoder_.next(); decoded && *decoded) {
+                frame = **decoded;
+                return true;
+            }
+            std::array<std::byte, 4096> buf{};
+            const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), MSG_DONTWAIT);
+            if (n == 0 || (n < 0 && errno != EAGAIN)) {
+                closed_ = true;
+                return true;
+            }
+            if (n > 0) {
+                decoder_.feed(std::span{buf}.first(static_cast<std::size_t>(n)));
+            }
+            return false;
+        });
+        EXPECT_TRUE(got) << "the node neither answered nor hung up";
+        return frame;
+    }
+
+    // Reads until the node hangs up; false if it answers anything first.
+    bool hung_up() { return !next() && closed_; }
+
+private:
+    net::IReactor& reactor_;
+    os::UniqueFd fd_;
+    wire::Decoder decoder_;
+    std::vector<std::byte> sent_;
+    bool closed_ = false;
 };
 
 class RoomRouterTest : public ::testing::TestWithParam<ReactorKind> {
@@ -85,16 +145,17 @@ protected:
         }
     }
 
-    Node& start(std::string_view name) {
+    Node& start(std::string_view name, std::string_view secret = kSecret) {
         auto node = std::make_unique<Node>();
         node->store = std::make_unique<ulw::test::MemoryRoomStore>(*reactor_, db_);
         auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
         EXPECT_TRUE(listener);
         node->port = *net::local_port(listener->get());
         node->router = std::make_unique<rt::RoomRouter>(
-            *reactor_, *node->store, clock_,
+            *reactor_, *node->store, clock_, random_,
             rt::RouterConfig{.self = *core::NodeId::parse(name),
-                             .advertise = "127.0.0.1:" + std::to_string(node->port)},
+                             .advertise = "127.0.0.1:" + std::to_string(node->port),
+                             .secret = std::string(secret)},
             node->events);
         EXPECT_TRUE(node->router->start(std::move(*listener)));
         Node& out = *node;
@@ -266,6 +327,86 @@ TEST_P(RoomRouterTest, RoomsReleasedByADrainAreTakenAtOnceByANodeWithMembers) {
     ASSERT_TRUE(pump([&] { return db_.rooms.at(room_).owner == *core::NodeId::parse("chat-b"); }));
     EXPECT_EQ(b.events.took, std::vector<std::uint64_t>{2});
     EXPECT_EQ(send(b, bob, "bob", "still here"), 1U);
+}
+
+// ---- the node channel's handshake (ADR-0037)
+
+TEST_P(RoomRouterTest, APeerThatSkipsTheHandshakeIsCutOffBeforeAnythingHappens) {
+    const Node& a = start("chat-a");
+    RawPeer peer(*reactor_, a.port);
+    std::vector<std::byte> frames;
+    wire::encode_subscribe(frames, 1, room_);
+    const auto body = std::as_bytes(std::span{std::string_view{"forged"}});
+    wire::encode_send(frames, 2, room_, *core::UserId::parse("alice"), body);
+    peer.send(frames);
+    EXPECT_TRUE(peer.hung_up());
+    // No room was made for it, and nothing was sequenced.
+    EXPECT_TRUE(db_.rooms.empty());
+    EXPECT_EQ(a.events.refused, std::vector<std::string>{"no hello"});
+}
+
+TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {
+    const Node& a = start("chat-a");
+    RawPeer peer(*reactor_, a.port);
+    std::vector<std::byte> frames;
+    wire::encode_hello(frames, *core::NodeId::parse("chat-x"), wire::Nonce{});
+    wire::encode_subscribe(frames, 1, room_);
+    peer.send(frames);
+    const auto challenge = peer.next();
+    ASSERT_TRUE(challenge && std::holds_alternative<wire::Challenge>(*challenge));
+    EXPECT_TRUE(peer.hung_up());
+    EXPECT_TRUE(db_.rooms.empty());
+    EXPECT_EQ(a.events.refused, std::vector<std::string>{"no proof"});
+}
+
+TEST_P(RoomRouterTest, NodesWithDifferentSecretsNeverTalk) {
+    Node& a = start("chat-a", "first-secret-0000000000000000000000000");
+    Node& b = start("chat-b", "second-secret-000000000000000000000000");
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    EXPECT_EQ(join(b, bob), std::unexpected(RouteError::Unavailable));
+    // chat-b checks chat-a's tag first, and never proves itself to a node that failed.
+    EXPECT_EQ(b.events.refused, std::vector<std::string>{"bad challenge"});
+    EXPECT_TRUE(a.events.refused.empty());
+    EXPECT_EQ(db_.rooms.at(room_).last_seq, 0U);
+}
+
+TEST_P(RoomRouterTest, ARecordedHandshakeReplaysToNothing) {
+    Node& a = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    const core::NodeId x = *core::NodeId::parse("chat-x");
+    const auto secret = std::as_bytes(std::span{kSecret});
+
+    // A genuine handshake with the secret works, and its subscription is taken.
+    RawPeer genuine(*reactor_, a.port);
+    wire::Nonce mine{};
+    random_.fill(mine);
+    std::vector<std::byte> hello;
+    wire::encode_hello(hello, x, mine);
+    genuine.send(hello);
+    const auto challenge = genuine.next();
+    ASSERT_TRUE(challenge);
+    const auto& c = std::get<wire::Challenge>(*challenge);
+    const auto expected =
+        rt::auth::acceptor_tag(secret, x, *core::NodeId::parse("chat-a"), mine, c.nonce);
+    ASSERT_TRUE(expected && rt::auth::same_tag(*expected, c.mac));
+    std::vector<std::byte> rest;
+    wire::encode_proof(rest, *rt::auth::dialer_tag(secret, x, c.node, mine, c.nonce));
+    wire::encode_subscribe(rest, 1, room_);
+    genuine.send(rest);
+    const auto reply = genuine.next();
+    ASSERT_TRUE(reply);
+    EXPECT_EQ(std::get<wire::Reply>(*reply).status, wire::Status::Ok);
+
+    // The same bytes again: the node's fresh nonce makes the recorded proof worthless.
+    RawPeer replay(*reactor_, a.port);
+    replay.send(genuine.sent());
+    const auto second = replay.next();
+    ASSERT_TRUE(second && std::holds_alternative<wire::Challenge>(*second));
+    EXPECT_TRUE(replay.hung_up());
+    EXPECT_EQ(a.events.refused, std::vector<std::string>{"bad proof"});
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, RoomRouterTest,

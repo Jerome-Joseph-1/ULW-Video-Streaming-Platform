@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 #include "core/ports/clock.hpp"
+#include "core/ports/random.hpp"
 #include "net/reactor.hpp"
 #include "os/unique_fd.hpp"
 #include "rt/registry.hpp"
@@ -14,6 +15,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace rt {
@@ -63,12 +65,22 @@ public:
     virtual void on_took_room(const core::RoomId& room, std::uint64_t generation) noexcept = 0;
     // The connection to another node failed; the rooms routed through it are looked up again.
     virtual void on_peer_lost(const core::NodeId& peer) noexcept = 0;
+    // A node-channel peer failed the handshake: it does not hold the secret, or is not the
+    // node it was dialled as. Nothing it sent was acted on.
+    virtual void on_peer_refused(std::string_view why) noexcept = 0;
 };
+
+// A node secret shorter than this is refused at startup: HMAC-SHA256 is as strong as its key,
+// up to the hash's own 32 bytes.
+inline constexpr std::size_t kMinNodeSecretBytes = 32;
 
 struct RouterConfig {
     core::NodeId self;
     // The numeric host:port other nodes dial, published through the store.
     std::string advertise;
+    // Shared by every node of the deployment; each end of a node-channel connection proves it
+    // holds it before anything else is exchanged (ADR-0037). kMinNodeSecretBytes at least.
+    std::string secret;
 };
 
 struct RouterCounters {
@@ -78,6 +90,8 @@ struct RouterCounters {
     std::uint64_t delivered = 0;
     // Node-channel connections closed because an allocation failed while reading from them.
     std::uint64_t allocation_failures = 0;
+    // Node-channel handshakes that failed.
+    std::uint64_t peers_refused = 0;
 };
 
 // One node's share of the room plane (ADR-0015, ADR-0037). Members join rooms here, wherever
@@ -88,8 +102,9 @@ struct RouterCounters {
 // Callbacks may run inside the call that takes them when the answer is known at once.
 class RoomRouter {
 public:
+    // `random` makes the handshake nonces, and must be unpredictable to other nodes.
     RoomRouter(net::IReactor& reactor, IRoomStore& store, const core::ports::IClock& clock,
-               RouterConfig config, IRouterEvents& events);
+               core::ports::IRandom& random, RouterConfig config, IRouterEvents& events);
     // The store must be destroyed before the router, the reactor after it.
     ~RoomRouter();
     RoomRouter(const RoomRouter&) = delete;

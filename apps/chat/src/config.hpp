@@ -17,10 +17,12 @@ struct Config {
     core::NodeId node;
     // Clients: WebSocket upgrades on /rt, and the health and metrics endpoints.
     std::uint16_t port = 9101;
-    // The numeric host:port other chat nodes dial for this one's node channel. The channel
-    // listens on its port, on every interface.
+    // The numeric host:port other chat nodes dial for this one's node channel, and the only
+    // address the channel listens on.
     std::string node_address;
-    std::uint16_t node_port = 0;
+    // ULW_NODE_SECRET: what every node proves it holds before the node channel carries anything
+    // (ADR-0037). Never logged.
+    std::string node_secret;
     net::ReactorKind reactor = net::ReactorKind::IoUring;
     std::string database_url;
     // Exactly one of the two: Askedin's JWKS, or a local key set for offline development.

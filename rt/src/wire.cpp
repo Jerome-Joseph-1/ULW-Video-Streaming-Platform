@@ -1,5 +1,6 @@
 #include "wire.hpp"
 
+#include <algorithm>
 #include <array>
 #include <string_view>
 #include <utility>
@@ -85,6 +86,17 @@ public:
         return v;
     }
 
+    template <std::size_t N>
+    [[nodiscard]] std::optional<std::array<std::byte, N>> fixed() noexcept {
+        const auto bytes = take(N);
+        if (!bytes) {
+            return std::nullopt;
+        }
+        std::array<std::byte, N> out{};
+        std::ranges::copy(*bytes, out.begin());
+        return out;
+    }
+
     [[nodiscard]] std::optional<std::uint8_t> u8() noexcept {
         const auto bytes = take(1);
         if (!bytes) {
@@ -141,10 +153,27 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
     case Type::Hello: {
         const auto version = in.u8();
         const auto node = in.short_text().transform(core::NodeId::parse);
-        if (!version || !node || !*node) {
+        const auto nonce = in.fixed<kNonceBytes>();
+        if (!version || !node || !*node || !nonce) {
             return std::nullopt;
         }
-        return Hello{.version = *version, .node = **node};
+        return Hello{.version = *version, .node = **node, .nonce = *nonce};
+    }
+    case Type::Challenge: {
+        const auto node = in.short_text().transform(core::NodeId::parse);
+        const auto nonce = in.fixed<kNonceBytes>();
+        const auto mac = in.fixed<kMacBytes>();
+        if (!node || !*node || !nonce || !mac) {
+            return std::nullopt;
+        }
+        return Challenge{.node = **node, .nonce = *nonce, .mac = *mac};
+    }
+    case Type::Proof: {
+        const auto mac = in.fixed<kMacBytes>();
+        if (!mac) {
+            return std::nullopt;
+        }
+        return Proof{.mac = *mac};
     }
     case Type::Subscribe: {
         const auto request = in.u64();
@@ -202,7 +231,7 @@ std::optional<Frame> parse(Type type, Cursor in) noexcept {
 
 std::optional<Type> type_of(std::uint8_t byte) noexcept {
     if (byte < static_cast<std::uint8_t>(Type::Hello) ||
-        byte > static_cast<std::uint8_t>(Type::Deliver)) {
+        byte > static_cast<std::uint8_t>(Type::Proof)) {
         return std::nullopt;
     }
     return static_cast<Type>(byte);
@@ -210,10 +239,26 @@ std::optional<Type> type_of(std::uint8_t byte) noexcept {
 
 } // namespace
 
-void encode_hello(std::vector<std::byte>& out, const core::NodeId& node) {
+void encode_hello(std::vector<std::byte>& out, const core::NodeId& node, const Nonce& nonce) {
     const std::size_t at = begin(out, Type::Hello);
     put_u8(out, kVersion);
     put_short(out, node.view());
+    out.insert(out.end(), nonce.begin(), nonce.end());
+    end(out, at);
+}
+
+void encode_challenge(std::vector<std::byte>& out, const core::NodeId& node, const Nonce& nonce,
+                      const Mac& mac) {
+    const std::size_t at = begin(out, Type::Challenge);
+    put_short(out, node.view());
+    out.insert(out.end(), nonce.begin(), nonce.end());
+    out.insert(out.end(), mac.begin(), mac.end());
+    end(out, at);
+}
+
+void encode_proof(std::vector<std::byte>& out, const Mac& mac) {
+    const std::size_t at = begin(out, Type::Proof);
+    out.insert(out.end(), mac.begin(), mac.end());
     end(out, at);
 }
 

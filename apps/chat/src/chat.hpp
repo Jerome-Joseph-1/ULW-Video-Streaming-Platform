@@ -85,6 +85,7 @@ public:
                        rt::OwnerWrite write) noexcept override;
     void on_took_room(const core::RoomId& room, std::uint64_t generation) noexcept override;
     void on_peer_lost(const core::NodeId& peer) noexcept override;
+    void on_peer_refused(std::string_view why) noexcept override;
 
 private:
     core::NodeId self_;
