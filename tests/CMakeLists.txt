@@ -375,6 +375,10 @@ endif()
 
 ulw_add_test_suite(rtp_unit_tests unit
     unit/rtp/demux_test.cpp
+    unit/rtp/pcap_test.cpp
     unit/rtp/rtcp_test.cpp
     unit/rtp/rtp_test.cpp)
 target_link_libraries(rtp_unit_tests PRIVATE ulw::codec_rtp)
+# The capture and tshark's reading of it, from media/capture_rtp.sh.
+target_compile_definitions(rtp_unit_tests
+    PRIVATE ULW_RTP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/rtp")
