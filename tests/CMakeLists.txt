@@ -49,6 +49,7 @@ target_link_libraries(test_tls PUBLIC ulw::net_lib OpenSSL::SSL)
 
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
+    unit/net/connect_test.cpp
     unit/net/echo_server_test.cpp
     unit/net/offload_pool_test.cpp
     unit/net/reactor_factory_test.cpp
@@ -164,6 +165,15 @@ if(ULW_FUZZ)
     target_compile_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
     target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
+ulw_add_test_suite(rt_unit_tests unit
+    unit/rt/registry_test.cpp
+    unit/rt/room_router_test.cpp
+    unit/rt/wire_test.cpp)
+target_link_libraries(rt_unit_tests PRIVATE ulw::rt_lib)
+# The node channel's frame codec is internal to the module.
+target_include_directories(rt_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/rt/src)
+
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
     unit/s3/errors_test.cpp
@@ -262,6 +272,36 @@ target_include_directories(postgres_integration_tests
 target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
+
+# The room registry's store against a live Postgres, as the suite above.
+ulw_add_test_suite(room_store_integration_tests integration
+    integration/postgres_harness.cpp
+    integration/room_store_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(room_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg_store
+    PkgConfig::LIBPQ)
+target_include_directories(room_store_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
+ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/config_test.cpp
+    unit/chat/envelope_test.cpp
+    unit/chat/session_test.cpp)
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
+target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+# The M16 acceptance: three chat_server processes on the Postgres the suites above use.
+ulw_add_test_suite(chat_cluster_tests integration
+    integration/chat_cluster_test.cpp
+    integration/postgres_harness.cpp
+    support/child_process.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::codec_ws
+    ulw::net_lib ulw::os PkgConfig::LIBPQ)
+target_include_directories(chat_cluster_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
+add_dependencies(chat_cluster_tests chat_server)
 
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
