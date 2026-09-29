@@ -15,7 +15,7 @@ enum class HandshakeError : std::uint8_t {
     NotGet,
     // Not HTTP/1.1, no Host, or a body.
     Malformed,
-    // Sec-WebSocket-Key missing, repeated, or not 16 bytes in base64.
+    // Sec-WebSocket-Key missing, repeated, or not 16 bytes in canonical base64.
     BadKey,
     // No "Upgrade: websocket" or no "Connection: upgrade".
     NotAnUpgrade,
@@ -48,7 +48,10 @@ private:
     std::array<char, kHead.size() + std::tuple_size_v<AcceptKey> + kTail.size()> bytes_{};
 };
 
-// RFC 6455 section 4.2.1, on a head from http::RequestParser.
+// RFC 6455 section 4.2.1, on a head from http::RequestParser. Origin is not looked at: which
+// origins may connect is policy. A server that browsers reach must refuse foreign origins
+// before calling this (RFC 6455 section 10.2), or any page can open a socket with the user's
+// cookies; the chat server's handshake owns that check.
 [[nodiscard]] std::expected<UpgradeResponse, HandshakeError>
 accept_handshake(const http::RequestHead& head) noexcept;
 

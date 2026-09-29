@@ -159,6 +159,7 @@ TEST(WsHandshake, RefusesAKeyThatIsNotSixteenBytesOfBase64) {
              "dGhlIHNhbXBsZSBub25jZQ",   // no padding
              "dGhlIHNhbXBsZSBub25j*Q==", // outside the alphabet
              "dGhlIHNhbXBsZSBub25jZSE=", // 17 bytes
+             "dGhlIHNhbXBsZSBub25jZR==", // padding bits set
              "",
          }) {
         EXPECT_EQ(judge(replace(kRfcRequest, "dGhlIHNhbXBsZSBub25jZQ==", key)),

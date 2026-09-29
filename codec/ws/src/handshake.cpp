@@ -73,9 +73,13 @@ bool is_base64(char c) noexcept {
            c == '/';
 }
 
+// The 22nd character carries the last 2 bits of the 16 bytes and 4 bits of padding, which
+// canonical base64 leaves zero: only A, Q, g and w (0, 16, 32, 48) can end a real 16-byte key.
 bool is_valid_key(std::string_view key) noexcept {
+    constexpr std::string_view kLastCharacters = "AQgw";
     return key.size() == kKeyLength && key.ends_with("==") &&
-           std::ranges::all_of(key.substr(0, kKeyLength - 2), is_base64);
+           std::ranges::all_of(key.substr(0, kKeyLength - 2), is_base64) &&
+           kLastCharacters.contains(key[kKeyLength - 3]);
 }
 
 } // namespace
