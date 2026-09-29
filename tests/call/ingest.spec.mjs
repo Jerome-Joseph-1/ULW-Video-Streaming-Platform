@@ -150,12 +150,16 @@ test('a whipsink publisher is exactly one producer, and a second session replace
 
     // The same stream publishing again, as an encoder that reconnects does: one identity, so
     // the new session takes the old one's place instead of standing beside it.
+    // One listing has to show all of it at once: the new session joins with no tracks and
+    // publishes them a moment later, so a second listing could catch it in between.
     sources.push(whipsink(stream.ticket));
-    await expect.poll(async () => (await producers(stream.name)).map((p) => p.sid),
-      { timeout: 20_000 }).toEqual([expect.not.stringMatching(`^${first.sid}$`)]);
-    const now = await producers(stream.name);
-    expect(now).toHaveLength(1);
-    expect(now[0].kinds).toEqual(['AUDIO', 'VIDEO']);
+    let now = [];
+    await expect.poll(async () => {
+      now = await producers(stream.name);
+      return now;
+    }, { timeout: 20_000 }).toEqual([{ identity: stream.identity,
+      sid: expect.not.stringMatching(`^${first.sid}$`), kinds: ['AUDIO', 'VIDEO'] }]);
+    metrics.first = first.sid;
     metrics.producers = now;
     await sfu.close(stream.room, 1);
   } finally {
