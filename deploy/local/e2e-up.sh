@@ -123,7 +123,8 @@ start "$pg" --tmpfs /var/lib/postgresql/data --env "POSTGRES_PASSWORD=$password"
 # refuses AbortIncompleteMultipartUpload in a bucket lifecycle and has this server-wide setting
 # instead, whose default of 24 hours would cut short uploads the gateway allows 6 days.
 start "$minio" --tmpfs /data --env MINIO_ROOT_USER=ulw-e2e --env "MINIO_ROOT_PASSWORD=$password" \
-    --env 'MINIO_API_CORS_ALLOW_ORIGIN=*' --env MINIO_API_STALE_UPLOADS_EXPIRY=168h --publish 127.0.0.1:19000:9000 "$minio_image" server /data
+    --env 'MINIO_API_CORS_ALLOW_ORIGIN=*' --env MINIO_API_STALE_UPLOADS_EXPIRY=168h \
+    --publish 127.0.0.1:19000:9000 "$minio_image" server /data
 
 until docker exec "$pg" pg_isready --quiet --username postgres; do sleep 1; done
 until docker exec "$minio" mc alias set local http://127.0.0.1:9000 ulw-e2e "$password" \
