@@ -525,12 +525,43 @@ TEST_P(ReactorTimerTest, CancelledTimerDoesNotFire) {
     EXPECT_EQ(c.fired, 0);
 }
 
-TEST_P(ReactorTimerTest, NowAdvancesOncePerIteration) {
-    const auto before = reactor->now();
-    clock.advance(Millis{1'234});
-    EXPECT_EQ(reactor->now(), before);
+// Advances the clock from inside a callback, as a slow handler would.
+struct SlowHandler final : net::ITimerHandler {
+    SlowHandler(ulw::test::FakeClock& c, net::IReactor& r) : clock(c), reactor(r) {}
+    void on_timeout() noexcept override {
+        before = reactor.now();
+        clock.advance(Millis{1'234});
+        after = reactor.now();
+    }
+    ulw::test::FakeClock& clock;
+    net::IReactor& reactor;
+    core::MonoTime before;
+    core::MonoTime after;
+};
+
+TEST_P(ReactorTimerTest, NowHoldsStillThroughAnIteration) {
+    SlowHandler slow(clock, *reactor);
+    reactor->arm_timer(Millis{0}, slow);
     reactor->run_once(Millis{0});
+    EXPECT_EQ(slow.after, slow.before);
     EXPECT_EQ(reactor->now(), clock.now());
+}
+
+// Whatever the owner does between iterations (building a pool, migrating a schema before the
+// loop first runs) takes real time, and a deadline set afterwards must not have paid for it.
+TEST_P(ReactorTimerTest, NowBetweenIterationsIsTheClocks) {
+    clock.advance(Millis{5'000});
+    EXPECT_EQ(reactor->now(), clock.now());
+}
+
+TEST_P(ReactorTimerTest, TimerArmedBetweenIterationsCountsFromWhenItWasArmed) {
+    clock.advance(Millis{5'000});
+    Counter c;
+    reactor->arm_timer(Millis{1'000}, c);
+    advance(Millis{900});
+    EXPECT_EQ(c.fired, 0);
+    advance(Millis{200});
+    EXPECT_EQ(c.fired, 1);
 }
 
 // Descriptor exhaustion must not turn a readable listener into a busy loop.

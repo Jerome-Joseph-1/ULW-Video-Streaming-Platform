@@ -49,7 +49,9 @@ public:
     void unwatch(int fd) noexcept override;
     TimerId arm_timer(core::Millis delay, ITimerHandler& handler) override;
     void cancel_timer(TimerId timer) noexcept override;
-    [[nodiscard]] core::MonoTime now() const noexcept override { return now_; }
+    [[nodiscard]] core::MonoTime now() const noexcept override {
+        return iterating_ ? now_ : clock_.now();
+    }
     int run_once(core::Millis max_wait) override;
 
 private:
@@ -125,6 +127,9 @@ private:
     TimingWheel wheel_;
     ChunkPool pool_;
     core::MonoTime now_;
+    // Set while run_once dispatches. Outside it now_ is as old as whatever the owner has done
+    // since the last wait, so now() reads the clock instead.
+    bool iterating_ = false;
     // One buffer serves every connection: it is lent only for the duration of on_data.
     using ReadBuffer = std::array<std::byte, std::size_t{64} * 1024>;
     std::unique_ptr<ReadBuffer> read_buf_;

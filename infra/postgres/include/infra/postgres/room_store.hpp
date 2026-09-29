@@ -56,7 +56,7 @@ public:
     void heartbeat(const core::NodeId& node, const core::Uuid& incarnation,
                    std::vector<rt::OwnedRoom> rooms,
                    rt::StoreCallback<std::vector<core::RoomId>> done) override;
-    void append(const core::RoomId& room, std::uint64_t generation,
+    void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& message,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override;
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
                  rt::StoreCallback<void> done) override;

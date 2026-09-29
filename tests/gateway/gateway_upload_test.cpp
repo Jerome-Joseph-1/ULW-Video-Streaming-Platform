@@ -360,7 +360,7 @@ TEST_P(GatewayUpload, AdmissionCapsConcurrentUploadsPerUser) {
     EXPECT_EQ(patch(bob, theirs->upload_id, 0, data, kBob)->status, 204);
 }
 
-TEST_P(GatewayUpload, StalledBackendThrottlesTheClientInsteadOfBuffering) {
+TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut) {
     GatewayUnderTest gw(
         over_transport({.backend = Backend::Fake, .chunk = 8 * kMiB, .manual_clock = true}));
     const auto data = ulw::test::pattern(8 * kMiB);
@@ -395,14 +395,28 @@ TEST_P(GatewayUpload, StalledBackendThrottlesTheClientInsteadOfBuffering) {
     const auto ingested = gw.counters().bytes_ingested;
     EXPECT_LE(ingested, (std::uint64_t{256} * 1024) + (std::uint64_t{64} * 1024));
 
-    // With no progress for the body timeout the gateway gives up on the store, answers 503
-    // and releases everything the upload held, whether or not the client is still there.
-    gw.advance(gateway::Limits{}.body_idle_timeout);
-    const auto r = uploader.read_response();
-    ASSERT_TRUE(r);
-    EXPECT_EQ(r->status, 503);
-    EXPECT_EQ(gw.counters().timeouts_backend, 1U);
-    uploader.close();
+    // A store that holds the body up is busy as far as the gateway can tell: a store slow to
+    // take a part looks exactly like this. Only the store, or the request backstop, ends it.
+    const gateway::Limits limits;
+    // Ten body timeouts, far past the 30 s the gateway once allowed a store holding a body.
+    constexpr int kBodyTimeouts = 10;
+    for (int i = 0; i < kBodyTimeouts; ++i) {
+        gw.advance(limits.body_idle_timeout);
+    }
+    const gateway::Counters held = gw.counters();
+    EXPECT_EQ(held.timeouts_body + held.timeouts_body_rate + held.timeouts_backstop, 0U);
+    EXPECT_EQ(gw.claims(), 1U);
+    EXPECT_EQ(gw.connections(), 1U);
+    // A stall is observed when it ends, and this one has not.
+    EXPECT_NE(gw.metrics().find("\nbackend_write_stall_seconds_count 0\n"), std::string::npos);
+
+    gw.advance(limits.request_backstop);
+    EXPECT_TRUE(uploader.closed_by_peer());
+    EXPECT_EQ(gw.counters().timeouts_backstop, 1U);
+    // The stall that ended the request is counted, at its full length: past every bucket.
+    const std::string m = gw.metrics();
+    EXPECT_NE(m.find("\nbackend_write_stall_seconds_count 1\n"), std::string::npos) << m;
+    EXPECT_NE(m.find("backend_write_stall_seconds_bucket{le=\"300\"} 0\n"), std::string::npos);
     EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0 && gw.connections() == 0; }));
 }
 

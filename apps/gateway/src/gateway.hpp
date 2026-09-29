@@ -12,8 +12,12 @@
 #include "net/slab.hpp"
 #include "net/transport.hpp"
 
+#include "health.hpp"
+#include "ops/log.hpp"
+#include "ops/metrics.hpp"
 #include "view_recorder.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -38,6 +42,9 @@ struct Deps {
     core::ports::IJwtVerifier& verifier;
     const core::ports::IClock& clock;
     core::ports::IRandom& random;
+    ops::Logger& log;
+    // Written by the health probe's thread; only read here.
+    const Health& health;
 };
 
 struct Limits {
@@ -80,12 +87,16 @@ struct Limits {
 
 struct Counters {
     std::uint64_t connections_accepted = 0;
-    std::uint64_t connections_rejected = 0;
+    // The slab was full.
+    std::uint64_t rejected_capacity = 0;
+    // The socket refused its options, or the transport refused the socket.
+    std::uint64_t rejected_socket = 0;
+    // Accepted by the kernel after the drain began.
+    std::uint64_t rejected_draining = 0;
     std::uint64_t admission_rejections = 0;
     std::uint64_t timeouts_header = 0;
     std::uint64_t timeouts_body = 0;
     std::uint64_t timeouts_body_rate = 0;
-    std::uint64_t timeouts_backend = 0;
     std::uint64_t timeouts_backstop = 0;
     std::uint64_t bytes_ingested = 0;
     std::uint64_t requests = 0;
@@ -96,6 +107,8 @@ struct Counters {
     // A stored playlist broke a rewriting rule: the worker wrote something wrong.
     std::uint64_t playlists_rejected = 0;
     std::uint64_t presign_failures = 0;
+    // By status class: 1xx, 2xx, 3xx, 4xx, 5xx.
+    std::array<std::uint64_t, 5> responses{};
 };
 
 enum class Admission : std::uint8_t { Admitted, UserAtLimit, Full };
@@ -125,7 +138,7 @@ public:
     [[nodiscard]] bool finished() const noexcept {
         return draining_ && connections_.size() == 0 && views_.idle();
     }
-    [[nodiscard]] bool ready() const noexcept { return !draining_; }
+    [[nodiscard]] bool draining() const noexcept { return draining_; }
     [[nodiscard]] std::size_t connections() const noexcept { return connections_.size(); }
 
     [[nodiscard]] const Deps& deps() const noexcept { return deps_; }
@@ -133,8 +146,12 @@ public:
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
     [[nodiscard]] std::size_t upload_slots_in_use() const noexcept { return upload_slots_; }
     [[nodiscard]] ViewRecorder& views() noexcept { return views_; }
-    // The counters above in the plain-text exposition format metric scrapers read.
-    [[nodiscard]] std::string render_metrics() const;
+    // From a chunk's first byte handed to the store to the store holding all of it durably.
+    [[nodiscard]] ops::Histogram& part_upload_duration() noexcept { return part_upload_; }
+    // Each stretch a chunk's body waited because the store took nothing more.
+    [[nodiscard]] ops::Histogram& backend_write_stall() noexcept { return write_stall_; }
+    // Everything the gateway counts, in the text format metric scrapers read.
+    [[nodiscard]] std::string render_metrics();
 
     [[nodiscard]] Admission acquire_upload_slot(const core::UserId& user) noexcept;
     void release_upload_slot(const core::UserId& user) noexcept;
@@ -157,6 +174,8 @@ private:
     net::TimerId drain_timer_;
     std::vector<std::unique_ptr<Discard>> discards_;
     ViewRecorder views_;
+    ops::Histogram part_upload_;
+    ops::Histogram write_stall_;
 };
 
 } // namespace gateway

@@ -1,6 +1,9 @@
+#include "os/system_clock.hpp"
+
 #include "fakes.hpp"
 #include "heartbeat.hpp"
 #include "lease_keeper.hpp"
+#include "support/memory_log.hpp"
 #include "support/temp_dir.hpp"
 
 #include <chrono>
@@ -24,6 +27,13 @@ core::NodeId node() {
     return *core::NodeId::parse("worker-a");
 }
 
+// What the keepers under test log; each test reads only the lines it caused.
+struct TestLog {
+    os::SystemClock clock;
+    ulw::test::MemoryLog lines;
+    ops::Logger log{lines, clock, "worker", ops::Level::Debug};
+};
+
 std::size_t count(const Journal& journal, const std::string& event) {
     const auto events = journal.events();
     return static_cast<std::size_t>(std::ranges::count(events, event));
@@ -31,9 +41,10 @@ std::size_t count(const Journal& journal, const std::string& event) {
 
 TEST(LeaseKeeper, BeatsEveryIntervalWhileTheJobRuns) {
     Journal journal;
+    TestLog logs;
     FakeQueue queue(journal, "lease");
     const std::stop_source abandon;
-    const LeaseKeeper keeper(queue, node(), kLease,
+    const LeaseKeeper keeper(queue, logs.log, node(), kLease,
                              {.heartbeat = milliseconds(1), .progress = std::chrono::hours(1)},
                              abandon);
     // The third beat can only come after the first two were answered as held.
@@ -50,10 +61,11 @@ TEST(LeaseKeeper, TouchesTheHeartbeatOnEveryBeatEvenWithTheDatabaseUnreachable) 
     const ulw::test::TempDir dir;
     const worker::Heartbeat heartbeat(dir.path() / "heartbeat");
     Journal journal;
+    TestLog logs;
     FakeQueue queue(journal, "lease");
     queue.answer_heartbeat(std::nullopt);
     const std::stop_source abandon;
-    const LeaseKeeper keeper(queue, node(), kLease,
+    const LeaseKeeper keeper(queue, logs.log, node(), kLease,
                              {.heartbeat = milliseconds(1), .progress = std::chrono::hours(1)},
                              abandon, &heartbeat);
     EXPECT_TRUE(
@@ -64,10 +76,11 @@ TEST(LeaseKeeper, TouchesTheHeartbeatOnEveryBeatEvenWithTheDatabaseUnreachable) 
 
 TEST(LeaseKeeper, AHeartbeatMatchingNoRowAbandonsTheJob) {
     Journal journal;
+    TestLog logs;
     FakeQueue queue(journal, "lease");
     queue.answer_heartbeat(false);
     const std::stop_source abandon;
-    const LeaseKeeper keeper(queue, node(), kLease,
+    const LeaseKeeper keeper(queue, logs.log, node(), kLease,
                              {.heartbeat = milliseconds(1), .progress = std::chrono::hours(1)},
                              abandon);
     std::mutex m;
@@ -83,10 +96,11 @@ TEST(LeaseKeeper, AHeartbeatMatchingNoRowAbandonsTheJob) {
 
 TEST(LeaseKeeper, AProgressWriteMatchingNoRowAlsoAbandonsTheJob) {
     Journal journal;
+    TestLog logs;
     FakeQueue queue(journal, "lease");
     queue.answer_writes(false);
     const std::stop_source abandon;
-    LeaseKeeper keeper(queue, node(), kLease,
+    LeaseKeeper keeper(queue, logs.log, node(), kLease,
                        {.heartbeat = std::chrono::hours(1), .progress = milliseconds(1)}, abandon);
     keeper.report(10);
     EXPECT_TRUE(
@@ -101,9 +115,10 @@ TEST(LeaseKeeper, AProgressWriteMatchingNoRowAlsoAbandonsTheJob) {
 
 TEST(LeaseKeeper, WritesProgressOnlyWhenItChanged) {
     Journal journal;
+    TestLog logs;
     FakeQueue queue(journal, "lease");
     const std::stop_source abandon;
-    LeaseKeeper keeper(queue, node(), kLease,
+    LeaseKeeper keeper(queue, logs.log, node(), kLease,
                        {.heartbeat = std::chrono::hours(1), .progress = milliseconds(1)}, abandon);
     keeper.report(40);
     ASSERT_TRUE(
@@ -117,10 +132,11 @@ TEST(LeaseKeeper, WritesProgressOnlyWhenItChanged) {
 
 TEST(LeaseKeeper, AnUnreachableDatabaseIsNotALostLease) {
     Journal journal;
+    TestLog logs;
     FakeQueue queue(journal, "lease");
     queue.answer_heartbeat(std::nullopt);
     const std::stop_source abandon;
-    const LeaseKeeper keeper(queue, node(), kLease,
+    const LeaseKeeper keeper(queue, logs.log, node(), kLease,
                              {.heartbeat = milliseconds(1), .progress = std::chrono::hours(1)},
                              abandon);
     std::size_t beats = 0;
@@ -128,6 +144,28 @@ TEST(LeaseKeeper, AnUnreachableDatabaseIsNotALostLease) {
         [&](const std::string& e) { return e == "lease heartbeat" && ++beats >= 3; }, kPatience));
     EXPECT_FALSE(keeper.lost());
     EXPECT_FALSE(abandon.stop_requested());
+}
+
+TEST(LeaseKeeper, AProgressValueTheDatabaseRefusesIsReportedOnceAndNotResent) {
+    Journal journal;
+    TestLog logs;
+    FakeQueue queue(journal, "lease");
+    queue.refuse("progress", core::ports::JobQueueError::Invalid);
+    const std::stop_source abandon;
+    LeaseKeeper keeper(queue, logs.log, node(), kLease,
+                       {.heartbeat = std::chrono::hours(1), .progress = milliseconds(1)}, abandon);
+    keeper.report(40);
+    ASSERT_TRUE(
+        journal.wait_for([](const std::string& e) { return e == "lease progress 40"; }, kPatience));
+    keeper.report(41);
+    ASSERT_TRUE(
+        journal.wait_for([](const std::string& e) { return e == "lease progress 41"; }, kPatience));
+    EXPECT_EQ(count(journal, "lease progress 40"), 1U);
+    EXPECT_FALSE(keeper.lost());
+    const auto errors = logs.lines.events("job queue call failed");
+    ASSERT_GE(errors.size(), 1U);
+    EXPECT_NE(errors[0].find(R"("level":"error")"), std::string::npos) << errors[0];
+    EXPECT_NE(errors[0].find(R"("call":"progress","error":"invalid")"), std::string::npos);
 }
 
 } // namespace

@@ -6,6 +6,7 @@
 #include "operation.hpp"
 #include "pool.hpp"
 #include "postgres_harness.hpp"
+#include "support/fake_clock.hpp"
 #include "support/reactor_harness.hpp"
 
 #include <sys/socket.h>
@@ -189,6 +190,8 @@ protected:
     }
 
     os::SystemClock clock;
+    // For a test that swaps in a reactor of its own; it must outlive that reactor.
+    ulw::test::FakeClock fake_clock;
     std::unique_ptr<ScratchDatabase> db;
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::OffloadPool> offload;
@@ -206,6 +209,27 @@ TEST_P(PoolTest, AnswersOnALaterIterationNeverInsideSubmit) {
     EXPECT_FALSE(answer);
     ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return answer.has_value(); }));
     EXPECT_EQ(*answer, Answer{"42"});
+}
+
+// Creating a scratch database and migrating it takes a second or more under a sanitizer, all
+// before the loop first runs. None of it may count against the first request's deadline.
+TEST_P(PoolTest, SetupBeforeTheLoopFirstRunsIsNotChargedToTheFirstRequest) {
+    offload.reset();
+    auto r = net::make_reactor(GetParam(), fake_clock, 4096);
+    ASSERT_TRUE(r) << "reactor: " << std::strerror(r.error());
+    reactor = std::move(*r);
+    auto p = net::OffloadPool::create(*reactor, 1);
+    ASSERT_TRUE(p);
+    offload = std::move(*p);
+    ScratchDatabase::open(db);
+    if (IsSkipped() || HasFatalFailure()) {
+        return;
+    }
+    // Five request timeouts: the clock stands still from here on, so a deadline counted from
+    // before this can only have expired, and one counted from submit() never will.
+    fake_clock.advance(kTimeout * 5);
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
+    EXPECT_EQ(ask("SELECT 1"), Answer{"1"});
 }
 
 TEST_P(PoolTest, StartsOperationsInSubmissionOrder) {

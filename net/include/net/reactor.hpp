@@ -172,7 +172,9 @@ public:
     virtual TimerId arm_timer(core::Millis delay, ITimerHandler& handler) = 0;
     virtual void cancel_timer(TimerId timer) noexcept = 0;
 
-    // Sampled once per iteration, before dispatch.
+    // Sampled once per iteration, before dispatch, and held for every callback in it. Between
+    // iterations (before the first, or while the owner does other work) it is the clock's own
+    // reading, so a deadline or timer set up there counts from when it was set.
     [[nodiscard]] virtual core::MonoTime now() const noexcept = 0;
     // Waits at most `max_wait`, dispatches, fires due timers. Returns events dispatched.
     virtual int run_once(core::Millis max_wait) = 0;
