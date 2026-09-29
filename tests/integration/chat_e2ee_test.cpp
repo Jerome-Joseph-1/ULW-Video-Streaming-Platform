@@ -51,14 +51,14 @@ constexpr std::size_t kMessages = 1000;
 // application messages in. version 2 + wire_format 2 + group_id (a 1-byte length and the room's
 // 36-byte uuid text) 37 + epoch 8 + content_type 1 + authenticated_data (empty: its 1-byte
 // length) 1 + encrypted_sender_data's 1-byte length 1 + ciphertext's length 2 (a two-byte varint
-// holds 64 to 16383, and these ciphertexts are 595 to 1618 bytes) = 54.
+// holds 64 to 16383, and these ciphertexts are 596 to 1619 bytes) = 54.
 constexpr std::size_t kFramingBytes = 54;
 // The rest is AES-GCM output: the encrypted sender data (leaf index, generation and reuse guard,
 // 12 bytes, and a 16-byte tag) 28, and the ciphertext of the content (the plaintext with its
-// two-byte length, the 64-byte signature with its one-byte length, no padding) and a 16-byte tag,
-// plaintext + 83. So a body is its plaintext and 165 bytes, and the test checks that it is, since
-// the bound below rests on this layout.
-constexpr std::size_t kSealedBytes = 28 + 83;
+// two-byte length, the 64-byte signature with its two-byte length, since a one-byte varint stops
+// at 63, no padding) and a 16-byte tag, plaintext + 84. So a body is its plaintext and 166 bytes,
+// and the test checks that it is, since the bound below rests on this layout.
+constexpr std::size_t kSealedBytes = 28 + 84;
 
 std::span<const std::byte> bytes_of(std::string_view text) {
     return std::as_bytes(std::span{text});
@@ -139,22 +139,25 @@ protected:
                                             const std::string& id) {
         // Three links, each refused at most once or twice per token: far fewer tries than this.
         for (int attempt = 0; attempt < 64; ++attempt) {
+            // The link whose bucket refills first, unless the next one in turn has a token too.
+            auto pick =
+                static_cast<std::size_t>(std::ranges::min_element(d.refilled) - d.refilled.begin());
+            // The socket's wait counts whole milliseconds, rounded down, so it can end short.
+            while (Clock::now() < d.refilled[pick]) {
+                (void)d.links[0]->wait_for(
+                    [](const Seen&) { return false; },
+                    std::chrono::ceil<std::chrono::milliseconds>(d.refilled[pick] - Clock::now()));
+            }
             const auto now = Clock::now();
-            std::optional<std::size_t> ready;
-            for (std::size_t k = 0; k < d.links.size() && !ready; ++k) {
+            for (std::size_t k = 0; k < d.links.size(); ++k) {
                 const std::size_t j = (d.next_link + k) % d.links.size();
                 if (d.refilled[j] <= now) {
-                    ready = j;
+                    pick = j;
+                    break;
                 }
             }
-            if (!ready) {
-                const auto wait = std::chrono::ceil<std::chrono::milliseconds>(
-                    *std::ranges::min_element(d.refilled) - now);
-                (void)d.links[0]->wait_for([](const Seen&) { return false; }, wait);
-                continue;
-            }
-            d.next_link = (*ready + 1) % d.links.size();
-            Client& link = *d.links[*ready];
+            d.next_link = (pick + 1) % d.links.size();
+            Client& link = *d.links[pick];
             // An id per try: a refused try was never sequenced, and its answer must not be
             // mistaken for the next one's.
             const std::string try_id = std::format("{}-{}", id, attempt);
@@ -176,7 +179,7 @@ protected:
                 ADD_FAILURE() << try_id << " refused: " << answer->reason;
                 return std::nullopt;
             }
-            d.refilled[*ready] = Clock::now() + std::chrono::milliseconds(*answer->retry_after_ms);
+            d.refilled[pick] = Clock::now() + std::chrono::milliseconds(*answer->retry_after_ms);
         }
         ADD_FAILURE() << id << " never accepted";
         return std::nullopt;
