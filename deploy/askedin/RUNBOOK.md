@@ -104,7 +104,9 @@ The worker gets no JWT settings at all.
    `woodpecker.yml` into its pipeline directory. Give Woodpecker the secrets `registry_user`,
    `registry_password` and `kubeconfig`; the kubeconfig's user needs only `get`, `list`, `watch`
    and `patch` on deployments and `get`, `list`, `watch` on replicasets, in `apps` and
-   `apps-stage` (`rollout restart` and `rollout status`).
+   `apps-stage` (`rollout restart` and `rollout status`). The image steps run the buildx plugin,
+   which Woodpecker 3 runs privileged only when the server lists it: add the exact reference
+   from `woodpecker.yml` (tag and digest) to the server's `WOODPECKER_PLUGINS_PRIVILEGED`.
 2. Push to `development`. Woodpecker pushes `video-gateway:development` and
    `video-worker:development`; the restart step fails on the first run because the deployments
    do not exist yet. That is expected.

@@ -16,6 +16,8 @@ pins=(
      https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl"
     "kubeconform.tar.gz v0.8.0 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
      https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz"
+    "woodpecker-cli.tar.gz v3.18.0 23e9b44eaa9dead25f39ad7ac69407f69769e1a8ce98795667bd3109c009ded7
+     https://github.com/woodpecker-ci/woodpecker/releases/download/v3.18.0/woodpecker-cli_linux_amd64.tar.gz"
     "envoy-gateway.yaml v1.9.2 0412a72907e57ff9b73c56a7bf6df5190bf0f6e4f8bb4bba34e38630bbab5778
      https://github.com/envoyproxy/gateway/releases/download/v1.9.2/install.yaml"
     # Docker's default seccomp profile, from which seccomp-profile.py derives the worker's.
@@ -55,7 +57,9 @@ for pin in "${pins[@]}"; do
 done
 
 chmod 0755 "$tools/kind" "$tools/kubectl"
-if [[ ! -x $tools/kubeconform || $tools/kubeconform -ot $tools/kubeconform.tar.gz ]]; then
-    tar -xzmf "$tools/kubeconform.tar.gz" -C "$tools" kubeconform
-fi
+for tool in kubeconform woodpecker-cli; do
+    if [[ ! -x $tools/$tool || $tools/$tool -ot $tools/$tool.tar.gz ]]; then
+        tar -xzmf "$tools/$tool.tar.gz" -C "$tools" "$tool"
+    fi
+done
 echo "$tools"
