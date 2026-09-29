@@ -245,9 +245,10 @@ their connection closes; their next join is refused. To cut them off at once, al
 chat pods.
 
 A stream's live chat admits anyone, and only the server side opens one: a client's join can
-record a room only as closed, and a join that asks for `"kind":"live"` anywhere else is refused
-with `not_live`. A stream's chat room is named by the stream (docs/adr/0057), and viewers join
-it by the stream's name. Until the product calls `IMessageStore::record_live` when a stream goes
+record a room only as closed, and a stream join is refused with `not_live` until the stream's
+chat is open. A stream's chat room is named by the stream (docs/adr/0057), and viewers join it
+by the stream's name. Only such a room can be live: the database refuses any other id
+(`chat_rooms_live_is_a_stream`), since every chat node tells a live chat by its id alone. Until the product calls `IMessageStore::record_live` when a stream goes
 on air, open a stream's chat before its viewers arrive, as the service's role, with the stream's
 name for `<stream>`:
 

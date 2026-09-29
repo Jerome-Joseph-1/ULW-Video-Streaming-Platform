@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <format>
 #include <openssl/evp.h>
 #include <span>
@@ -30,16 +29,14 @@ bool is_stream_name(std::string_view text) noexcept {
     return !text.empty() && text.size() <= kMaxLength && std::ranges::all_of(text, allowed);
 }
 
-core::RoomId live_chat_room(std::string_view stream) {
+std::optional<core::RoomId> live_chat_room(std::string_view stream) {
     const std::string input = "ulw-live-chat:" + std::string(stream);
     std::array<unsigned char, 32> digest{};
     std::size_t written = 0;
-    // A digest of a few dozen bytes fails only when OpenSSL cannot allocate; there is nothing
-    // to do then but stop, as for any allocation failure outside a peer's input.
     if (EVP_Q_digest(nullptr, "SHA256", nullptr, input.data(), input.size(), digest.data(),
                      &written) == 0 ||
         written != digest.size()) {
-        std::abort();
+        return std::nullopt;
     }
     digest[kVersionByte] = static_cast<unsigned char>((digest[kVersionByte] & 0x0FU) | kVersion8);
     digest[kVariantByte] = static_cast<unsigned char>((digest[kVariantByte] & 0x3FU) | kVariant);
@@ -52,12 +49,11 @@ core::RoomId live_chat_room(std::string_view stream) {
         text += std::format("{:02x}", b);
         ++at;
     }
-    // Canonical by construction.
-    return *core::RoomId::parse(text);
-}
-
-bool is_live_chat(const core::RoomId& room) noexcept {
-    return (std::to_integer<unsigned>(room.uuid().bytes()[kVersionByte]) & 0xF0U) == kVersion8;
+    const auto room = core::RoomId::parse(text);
+    if (!room) {
+        return std::nullopt;
+    }
+    return *room;
 }
 
 } // namespace chat

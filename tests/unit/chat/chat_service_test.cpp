@@ -2,7 +2,6 @@
 #include "infra/auth/base64url.hpp"
 
 #include "chat_service.hpp"
-#include "live_chat.hpp"
 #include "support/fake_clock.hpp"
 
 #include <algorithm>
@@ -22,6 +21,8 @@ using rt::RouteError;
 
 constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
 constexpr std::string_view kOtherRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fe";
+// The stream show-1's live chat (tests/unit/chat/live_chat_test.cpp).
+constexpr std::string_view kLiveRoom = "1b9ed0d6-b6e8-86ac-b432-d7070ba83b94";
 
 core::RoomId room_id(std::string_view text = kRoom) {
     return *core::RoomId::parse(text);
@@ -755,7 +756,7 @@ TEST_F(ChatServiceTest, JoiningAgainForgetsWhatALossyClientWasOwed) {
 }
 
 TEST_F(ChatServiceTest, EveryViewerOfALiveChatIsLossyWhateverItsJoinAsked) {
-    const std::string live = chat::live_chat_room("show-1").to_string();
+    const std::string live{kLiveRoom};
     FakeClient viewer;
     const auto v = attach(viewer);
     join(v, std::nullopt, chat::Delivery::Durable, live);
@@ -771,7 +772,7 @@ TEST_F(ChatServiceTest, EveryViewerOfALiveChatIsLossyWhateverItsJoinAsked) {
 }
 
 TEST_F(ChatServiceTest, ALiveChatTakesItsAllowanceFromAllSendersHereAndTheRestKeepTheirs) {
-    const std::string live = chat::live_chat_room("show-1").to_string();
+    const std::string live{kLiveRoom};
     std::vector<std::unique_ptr<FakeClient>> clients;
     std::vector<chat::ClientId> ids;
     for (int user = 0; user < 5; ++user) {
@@ -809,7 +810,7 @@ TEST_F(ChatServiceTest, ALiveChatTakesItsAllowanceFromAllSendersHereAndTheRestKe
 }
 
 TEST_F(ChatServiceTest, ALiveChatMessageIsALineAndNoLonger) {
-    const std::string live = chat::live_chat_room("show-1").to_string();
+    const std::string live{kLiveRoom};
     FakeClient alice;
     const auto a = attach(alice);
     join(a, std::nullopt, chat::Delivery::Lossy, live);

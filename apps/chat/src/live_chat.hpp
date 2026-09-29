@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 
+#include <optional>
 #include <string_view>
 
 namespace chat {
@@ -11,12 +12,10 @@ namespace chat {
 [[nodiscard]] bool is_stream_name(std::string_view text) noexcept;
 
 // The room of a stream's live chat: the first 16 bytes of SHA-256 over "ulw-live-chat:" and
-// the name, as an RFC 9562 version 8 UUID. Every node, and any client or service that knows the
-// stream, finds the same room, with no table to look it up in. `stream` must be a stream name.
-[[nodiscard]] core::RoomId live_chat_room(std::string_view stream);
-
-// Whether the room is some stream's live chat. Nothing else here makes a version 8 id (ours
-// are version 7, ADR-0023), and a client cannot join one by its id, only by its stream.
-[[nodiscard]] bool is_live_chat(const core::RoomId& room) noexcept;
+// the name, as an RFC 9562 version 8 UUID (core::ports::is_stream_chat, and live_chat_room() in
+// SQL). Every node, and any client or service that knows the stream, finds the same room, with
+// no table to look it up in. `stream` must be a stream name. nullopt when the digest could not
+// be made, which OpenSSL reports only when it cannot allocate.
+[[nodiscard]] std::optional<core::RoomId> live_chat_room(std::string_view stream);
 
 } // namespace chat

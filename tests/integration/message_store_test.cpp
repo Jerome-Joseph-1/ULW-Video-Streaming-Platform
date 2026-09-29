@@ -158,6 +158,12 @@ protected:
     }
 
     core::RoomId new_room() { return core::RoomId::generate(clock_, random_); }
+    // A room with a stream's kind of id (version 8), the only kind record_live opens.
+    core::RoomId stream_room() {
+        std::string text = new_room().to_string();
+        text[14] = '8';
+        return *core::RoomId::parse(text);
+    }
 
     os::SystemClock clock_;
     os::SystemRandom random_;
@@ -176,7 +182,7 @@ protected:
 // server tries to open the room: the member's statement recorded the room closed first, so
 // record_live waits on that record and is refused.
 TEST_F(MessageStoreTest, AMemberInsertInFlightKeepsTheRoomClosedToRecordLive) {
-    const core::RoomId room = new_room();
+    const core::RoomId room = stream_room();
     auto adding = db_->session();
     ASSERT_TRUE(adding.exec("BEGIN"));
     ASSERT_TRUE(adding.exec(infra::postgres::message_sql::kAddMember,
@@ -239,7 +245,7 @@ TEST_F(MessageStoreTest, AMemberInsertInFlightAndAFirstJoinNeverLeaveTheRoomOpen
 // opened afterwards: chat_rooms and room_state would disagree. One opened before it was created
 // is created live, and opening it again still answers ok.
 TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
-    const core::RoomId closed = new_room();
+    const core::RoomId closed = stream_room();
     ASSERT_NE(own(closed), 0U);
     EXPECT_EQ(ask<void>([&](auto done) { store_->record_live(closed, std::move(done)); }),
               MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
@@ -252,7 +258,7 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
                      Params{}.add_uuid(closed.uuid())),
               "group_chat durable");
 
-    const core::RoomId live = new_room();
+    const core::RoomId live = stream_room();
     ASSERT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
     ASSERT_NE(own(live), 0U);
     EXPECT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
@@ -261,6 +267,19 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
                      "WHERE room_id = $1",
                      Params{}.add_uuid(live.uuid())),
               "stream_live_chat lossy");
+}
+
+// ADR-0057: the database itself refuses to record any other room live, so an operator's
+// statement cannot open a room whose id every node takes for a closed one.
+TEST_F(MessageStoreTest, OnlyAStreamsRoomCanBeRecordedLive) {
+    EXPECT_FALSE(
+        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                    Params{}.add_uuid(new_room().uuid())));
+    EXPECT_TRUE(
+        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                    Params{}.add_uuid(stream_room().uuid())));
+    EXPECT_TRUE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'group_chat')",
+                            Params{}.add_uuid(stream_room().uuid())));
 }
 
 // A join reads a recorded room's kind and writes nothing.

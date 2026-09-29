@@ -336,19 +336,32 @@ protected:
         }
     }
 
-    // Records a room as a stream's live chat, as the server side does (RUNBOOK section 3); the
-    // kind it is then recorded as.
-    [[nodiscard]] std::string record_live(const std::string& room) const {
+    // Opens a stream's live chat, as the server side does (RUNBOOK section 3); the kind its
+    // room is then recorded as.
+    [[nodiscard]] std::string record_live(const std::string& stream) const {
         auto conn = db_->session();
         return ulw::test::scalar(
             conn,
             "INSERT INTO chat_rooms (room_id, kind) "
-            "SELECT $1::text::uuid, 'stream_live_chat' WHERE NOT EXISTS "
-            "(SELECT 1 FROM chat_members WHERE room_id = $1::text::uuid) "
-            "AND NOT EXISTS (SELECT 1 FROM room_state WHERE room_id = $1::text::uuid "
+            "SELECT live_chat_room($1), 'stream_live_chat' WHERE NOT EXISTS "
+            "(SELECT 1 FROM chat_members WHERE room_id = live_chat_room($1)) "
+            "AND NOT EXISTS (SELECT 1 FROM room_state WHERE room_id = live_chat_room($1) "
             "AND kind <> 'stream_live_chat') "
             "ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind RETURNING kind",
-            Params{}.add_text(room));
+            Params{}.add_text(stream));
+    }
+
+    // A join of a stream's live chat; "joined", or the error's reason.
+    static std::string stream_join_answer(Client& client, const std::string& stream) {
+        if (!client.send(R"({"type":"join","stream":")" + stream + R"("})")) {
+            return "not sent";
+        }
+        const auto answer =
+            client.wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
+        if (!answer) {
+            return "no answer";
+        }
+        return answer->type == "joined" ? "joined" : answer->reason;
     }
 
     // A join of `room` with `fields` added; "joined", or the error's reason.
@@ -1019,34 +1032,45 @@ TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedL
     auto bob = connect(nodes_[1], 1);
     ASSERT_TRUE(alice && bob);
     EXPECT_EQ(join_answer(*alice, nobody), "not_member");
-    // Its first join recorded it as a group chat; asking for live afterwards opens nothing, and
-    // neither can the server.
-    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
-    EXPECT_EQ(record_live(nobody), "group_chat");
-    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+    // Its first join recorded it as a group chat. A room id cannot ask to be a live chat (only a
+    // stream's room is one, ADR-0057), and the database refuses to record it as one.
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "malformed");
+    auto conn = db_->session();
+    EXPECT_FALSE(
+        conn.exec("UPDATE chat_rooms SET kind = 'stream_live_chat' WHERE room_id = $1::text::uuid",
+                  Params{}.add_text(nobody)));
+    EXPECT_EQ(ulw::test::scalar(conn, "SELECT kind FROM chat_rooms WHERE room_id = $1::text::uuid",
+                                Params{}.add_text(nobody)),
+              "group_chat");
 }
 
-TEST_P(ChatClusterTest, AJoinThatAsksForLiveCannotOpenARoomTheServerDidNot) {
-    const std::string room = core::RoomId::generate(clock_, random_).to_string();
+TEST_P(ChatClusterTest, AStreamsChatRefusesViewersUntilTheServerOpensItAndRecordsNothing) {
+    const std::string stream = "unopened-" + room_.substr(0, 8);
     auto alice = connect(nodes_[0], 0);
     ASSERT_TRUE(alice);
-    EXPECT_EQ(join_answer(*alice, room, R"(,"kind":"live")"), "not_live");
+    EXPECT_EQ(stream_join_answer(*alice, stream), "not_live");
     auto conn = db_->session();
-    EXPECT_EQ(ulw::test::scalar(conn,
-                                "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
-                                Params{}.add_text(room)),
+    EXPECT_EQ(ulw::test::scalar(
+                  conn, "SELECT count(*) FROM chat_rooms WHERE room_id = live_chat_room($1)",
+                  Params{}.add_text(stream)),
               "0");
 }
 
-TEST_P(ChatClusterTest, ALiveRoomAdmitsAnyone) {
-    const std::string live = core::RoomId::generate(clock_, random_).to_string();
-    ASSERT_EQ(record_live(live), "stream_live_chat");
+TEST_P(ChatClusterTest, AnOpenedStreamsChatAdmitsAnyoneByTheStreamsName) {
+    const std::string stream = "open-" + room_.substr(0, 8);
+    ASSERT_EQ(record_live(stream), "stream_live_chat");
     auto alice = connect(nodes_[0], 0);
     auto carol = connect(nodes_[2], 2);
     ASSERT_TRUE(alice && carol);
-    EXPECT_EQ(join_answer(*alice, live, R"(,"kind":"live")"), "joined");
-    // Joins after the first need not know what the room is.
-    EXPECT_EQ(join_answer(*carol, live), "joined");
+    EXPECT_EQ(stream_join_answer(*alice, stream), "joined");
+    EXPECT_EQ(stream_join_answer(*carol, stream), "joined");
+    const auto joined = alice->wait_for([](const Seen& s) { return s.type == "joined"; });
+    ASSERT_TRUE(joined);
+    const std::string live = joined->room;
+    // Named by its id, it is not joined: a stream's room is reached only by the stream.
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(bob);
+    EXPECT_EQ(join_answer(*bob, live), "bad_room");
     ASSERT_TRUE(carol->send(send_command(live, "hello, stream", "live-1")));
     ASSERT_TRUE(alice->message("hello, stream"));
 }
@@ -1077,21 +1101,7 @@ std::uint64_t resident_kib(pid_t pid) {
 
 TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     const std::string stream = "m32-" + room_.substr(0, 8);
-    // A stream's chat is open once whoever started the stream records it (ADR-0057); before
-    // that a viewer is refused, and nothing is recorded for it.
-    auto early = connect_as(nodes_[0], "early-viewer");
-    ASSERT_TRUE(early);
-    ASSERT_TRUE(early->send(R"({"type":"join","stream":")" + stream + R"("})"));
-    const auto not_yet =
-        early->wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
-    ASSERT_TRUE(not_yet);
-    EXPECT_EQ(not_yet->reason, "not_live");
-    {
-        auto conn = db_->session();
-        ASSERT_EQ(record_live(ulw::test::scalar(conn, "SELECT live_chat_room($1)",
-                                                Params{}.add_text(stream))),
-                  "stream_live_chat");
-    }
+    ASSERT_EQ(record_live(stream), "stream_live_chat");
     const auto join_live = [&](Client& c) {
         EXPECT_TRUE(c.send(R"({"type":"join","stream":")" + stream + R"("})"));
         const auto joined =

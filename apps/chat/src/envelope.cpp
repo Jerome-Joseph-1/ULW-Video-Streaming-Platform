@@ -47,7 +47,7 @@ std::optional<std::string_view> string_of(const core::json::Value& message, std:
 std::expected<core::RoomId, EnvelopeError> joined_room_of(const core::json::Value& message) {
     if (message.find("stream") == nullptr) {
         auto room = room_of(message);
-        if (room && is_live_chat(*room)) {
+        if (room && core::ports::is_stream_chat(*room)) {
             return std::unexpected(EnvelopeError::BadRoom);
         }
         return room;
@@ -59,7 +59,11 @@ std::expected<core::RoomId, EnvelopeError> joined_room_of(const core::json::Valu
     if (!is_stream_name(*stream)) {
         return std::unexpected(EnvelopeError::BadStream);
     }
-    return live_chat_room(*stream);
+    const auto room = live_chat_room(*stream);
+    if (!room) {
+        return std::unexpected(EnvelopeError::Unavailable);
+    }
+    return *room;
 }
 
 std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) {
@@ -73,8 +77,8 @@ std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) 
     Join join{.room = *room,
               .after = std::nullopt,
               .delivery = Delivery::Durable,
-              .kind = is_live_chat(*room) ? core::ports::RoomKind::StreamLiveChat
-                                          : core::ports::RoomKind::GroupChat};
+              .kind = core::ports::is_stream_chat(*room) ? core::ports::RoomKind::StreamLiveChat
+                                                         : core::ports::RoomKind::GroupChat};
     if (const core::json::Value* after = message.find("after")) {
         join.after = after->as_u64();
         if (!join.after) {
@@ -93,8 +97,6 @@ std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) 
         const auto kind = string_of(message, "kind");
         if (kind == "direct") {
             join.kind = core::ports::RoomKind::DirectChat;
-        } else if (kind == "live") {
-            join.kind = core::ports::RoomKind::StreamLiveChat;
         } else if (kind != "group") {
             return std::unexpected(EnvelopeError::Malformed);
         }
@@ -277,6 +279,8 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "bad_body";
     case EnvelopeError::BadStream:
         return "bad_stream";
+    case EnvelopeError::Unavailable:
+        return "unavailable";
     }
     return "malformed";
 }

@@ -50,6 +50,17 @@ enum class RoomKind : std::uint8_t {
     return false;
 }
 
+// Whether the room is a stream's live chat by its id (ADR-0057): the one room a stream's name
+// derives, a version 8 UUID, which nothing else mints (room ids are version 7, ADR-0023). Only
+// such a room is ever recorded as StreamLiveChat, so the id alone says which rooms get the live
+// chat's bounds, on every node, with no lookup.
+[[nodiscard]] inline bool is_stream_chat(const RoomId& room) noexcept {
+    // RFC 9562 section 4: the version is the high nibble of byte 6.
+    constexpr std::size_t kVersionByte = 6;
+    constexpr unsigned kVersion8 = 0x80U;
+    return (std::to_integer<unsigned>(room.uuid().bytes()[kVersionByte]) & 0xF0U) == kVersion8;
+}
+
 // What admits answers for a join.
 enum class Admission : std::uint8_t {
     Admitted,
@@ -142,9 +153,10 @@ public:
                         MessageCallback<Admission> done) = 0;
     // Records the room as a stream's live chat, which admits anyone: a server-side step (the
     // stream's owner opening its chat), never a client's. Conflict, and nothing recorded, when the
-    // room lists members, is recorded as another kind, or was created on the room plane as
-    // another kind (whose kind and delivery are fixed when it is created); recording it again
-    // does nothing. The in-memory store keeps no room plane, so only the first two apply to it.
+    // room is not a stream's chat (is_stream_chat), lists members, is recorded as another kind,
+    // or was created on the room plane as another kind (whose kind and delivery are fixed when it
+    // is created); recording it again does nothing. The in-memory store keeps no room plane, so
+    // only the first three apply to it.
     virtual void record_live(const RoomId& room, MessageCallback<void> done) = 0;
 };
 

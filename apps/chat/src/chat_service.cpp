@@ -1,7 +1,5 @@
 #include "chat_service.hpp"
 
-#include "live_chat.hpp"
-
 #include <algorithm>
 #include <iterator>
 #include <optional>
@@ -278,7 +276,8 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
     }
     // An audience of thousands is not held back by its slowest viewer, nor closed for being
     // one: a live chat is lossy whatever the join asked for.
-    const Delivery delivery = is_live_chat(room.id) ? Delivery::Lossy : join.delivery;
+    const Delivery delivery =
+        core::ports::is_stream_chat(room.id) ? Delivery::Lossy : join.delivery;
     const auto it = std::ranges::find(room.subscribers, id, &Room::Subscriber::id);
     if (it == room.subscribers.end()) {
         room.subscribers.push_back(
@@ -351,7 +350,7 @@ void ChatService::send(ClientId id, Send send) {
         answer(*c->client, reason(rt::RouteError::Busy), send.room, send.id);
         return;
     }
-    const bool live = is_live_chat(send.room);
+    const bool live = core::ports::is_stream_chat(send.room);
     if (live && send.body.size() > limits_.live_body) {
         answer(*c->client, "too_large", send.room, send.id);
         return;

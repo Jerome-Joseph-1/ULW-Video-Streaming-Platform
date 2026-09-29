@@ -17,3 +17,9 @@ BEGIN
     RETURN encode(digest, 'hex')::uuid;
 END
 $$;
+
+-- A room recorded live is a stream's: its id is version 8, as live_chat_room makes them. The id
+-- is then what tells every node that a room gets the live chat's bounds (ADR-0057), with no
+-- recorded kind to look up, and an operator's statement cannot open any other room.
+ALTER TABLE chat_rooms ADD CONSTRAINT chat_rooms_live_is_a_stream
+    CHECK (kind <> 'stream_live_chat' OR get_byte(uuid_send(room_id), 6) >> 4 = 8);

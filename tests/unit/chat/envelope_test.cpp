@@ -37,8 +37,7 @@ TEST(Envelope, AJoinNamesItsRoomAndMayAskToResumeAndToBeLossy) {
     EXPECT_EQ(join.kind, core::ports::RoomKind::GroupChat);
 
     for (const auto& [text, kind] : {std::pair{"direct", core::ports::RoomKind::DirectChat},
-                                     std::pair{"group", core::ports::RoomKind::GroupChat},
-                                     std::pair{"live", core::ports::RoomKind::StreamLiveChat}}) {
+                                     std::pair{"group", core::ports::RoomKind::GroupChat}}) {
         const auto named = chat::parse_command(
             std::string{
                 R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":")"} +
@@ -46,9 +45,16 @@ TEST(Envelope, AJoinNamesItsRoomAndMayAskToResumeAndToBeLossy) {
         ASSERT_TRUE(named) << text;
         EXPECT_EQ(std::get<chat::Join>(*named).kind, kind) << text;
     }
-    EXPECT_EQ(chat::parse_command(
-                  R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":"open"})"),
-              std::unexpected(EnvelopeError::Malformed));
+    // A live chat is joined by its stream (ADR-0057), so a room id cannot ask to be one.
+    for (const char* text : {"open", "live"}) {
+        EXPECT_EQ(
+            chat::parse_command(
+                std::string{
+                    R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":")"} +
+                text + R"("})"),
+            std::unexpected(EnvelopeError::Malformed))
+            << text;
+    }
 }
 
 TEST(Envelope, AHistoryPageRunsBackFromTheNewestUnlessGivenACursor) {
@@ -87,11 +93,11 @@ TEST(Envelope, AHistoryPageWithBothCursorsOrALimitOutOfRangeIsMalformed) {
 TEST(Envelope, AStreamsLiveChatIsJoinedByTheStreamsNameAndNeverByItsRoom) {
     const auto c = chat::parse_command(R"({"type":"join","stream":"show-1","after":3})");
     ASSERT_TRUE(c);
-    EXPECT_EQ(std::get<chat::Join>(*c).room, chat::live_chat_room("show-1"));
+    EXPECT_EQ(std::get<chat::Join>(*c).room, *chat::live_chat_room("show-1"));
     EXPECT_EQ(std::get<chat::Join>(*c).after, 3U);
     EXPECT_EQ(std::get<chat::Join>(*c).kind, core::ports::RoomKind::StreamLiveChat);
 
-    const std::string live = chat::live_chat_room("show-1").to_string();
+    const std::string live = chat::live_chat_room("show-1")->to_string();
     EXPECT_EQ(chat::parse_command(R"({"type":"join","room":")" + live + R"("})"),
               std::unexpected(EnvelopeError::BadRoom));
     EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":"show/1"})"),
@@ -110,7 +116,7 @@ TEST(Envelope, AStreamsLiveChatIsJoinedByTheStreamsNameAndNeverByItsRoom) {
     const auto send =
         chat::parse_command(R"({"type":"send","room":")" + live + R"(","id":"a","body":"aGk"})");
     ASSERT_TRUE(send);
-    EXPECT_EQ(std::get<chat::Send>(*send).room, chat::live_chat_room("show-1"));
+    EXPECT_EQ(std::get<chat::Send>(*send).room, *chat::live_chat_room("show-1"));
 }
 
 TEST(Envelope, ASendCarriesItsIdAndTheBytesItsBodyEncodes) {

@@ -43,7 +43,7 @@ Client to server:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `join` | `room`, or `stream` for a live stream's chat; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`; not with `stream`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names; `"live"` joins only a room the server opened (see [Member lists](#member-lists)). `stream` names a live stream as its playback URL does, and joins its chat (see [A stream's live chat](#a-streams-live-chat)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
+| `join` | `room`, or `stream` for a live stream's chat; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, or `"direct"`; not with `stream`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names (see [Member lists](#member-lists)). `stream` names a live stream as its playback URL does, and joins its chat (see [A stream's live chat](#a-streams-live-chat)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 
@@ -109,10 +109,9 @@ Who may join a room depends on its kind, which is recorded once and never change
   room nor read its history. A direct or group chat with no members admits nobody. The first
   join of a room with no kind recorded records the kind it names; so does listing its first
   member (as a group chat).
-- **A stream's live chat** admits anyone. Only the server opens one, before anyone joins it; a
-  client cannot. A join that says `"kind":"live"` is admitted in a room the server opened, and
-  refused with `not_live` in any other, which it leaves as it was. Joins of a live room need
-  not name the kind.
+- **A stream's live chat** admits anyone. Only the server opens one, and only a stream's room
+  can be one; a client cannot. It is joined by the stream's name (see
+  [A stream's live chat](#a-streams-live-chat)), and refused with `not_live` until it is open.
 
 No client command changes a member list; they are set by the service's operators, and later by
 the product, in the database. A member removed from the list keeps receiving the room's
@@ -141,7 +140,8 @@ messages, and can read its history, until that connection closes; the next `join
   a second, from all its senders together; past it the send is `rate_limited` with
   `retry_after_ms`, and costs the sender nothing of their own allowance.
 - **History** keeps the chat's newest 1000 messages; older ones are deleted as new ones are
-  stored.
+  stored, and a page below them is empty. A resend under an `id` whose message is already that
+  old is stored again, as a new message.
 - A viewer whose client stops reading altogether for 20 s is disconnected by the server's
   kernel (TCP user timeout). Reconnect and join the stream again.
 
@@ -151,18 +151,18 @@ messages, and can read its history, until that connection closes; the next `join
 |---|---|---|
 | `not_json` | The frame is not JSON | Fix the client |
 | `malformed` | Not an object, unknown or missing `type`, missing or unknown field, a value of the wrong kind, both `before` and `after`, a `limit` out of range | Fix the client |
-| `bad_room` | `room` is not a canonical lowercase UUID | Fix the client |
+| `bad_room` | `room` is not a canonical lowercase UUID, or is a stream's chat room given to `join` | Fix the client; join a stream's chat by `stream` |
 | `bad_id` | `id` is not a message id | Fix the client |
 | `bad_body` | `body` is not base64url | Fix the client |
 | `bad_stream` | `stream` is not a stream name | Fix the client |
 | `not_member` | The room has a member list without you | Do not retry |
-| `not_live` | `"kind":"live"`, or a `stream` join, for a room the server has not opened as a stream's live chat | For a stream: retry once it is on air. Otherwise do not retry; join without `kind` if it is a group chat you are a member of |
+| `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |
 | `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
 | `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |
 | `rate_limited` | Past the send allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered |
 | `busy` | Join or history allowance exceeded, too many sends awaiting answers, the room's owner queue is full, or too much unread output for a history page | Back off and retry |
-| `unavailable` | The room's owner or the store could not be reached | Retry; resend a `send` with the same `id` |
+| `unavailable` | The room's owner or the store could not be reached, or the server could not take the command just then | Retry; resend a `send` with the same `id` |
 | `fenced` | The room changed owners while the write was in flight | Retry with the same `id` |
 | `conflict` | This `id` was already used for a different message in the room | Send it under a new `id` |
 
