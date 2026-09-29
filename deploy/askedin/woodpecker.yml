@@ -1,0 +1,80 @@
+# Builds and pushes the VOD images, then restarts the deployments that run them. It never
+# applies a manifest: ArgoCD owns those, from master (namespace apps) and development
+# (apps-stage). The overlays name each image by the branch tag this pushes, with
+# imagePullPolicy Always, so a restart is all it takes to run the new build and ArgoCD never
+# sees a drift.
+#
+# Secrets (Woodpecker repository secrets):
+#   registry_user, registry_password   push access to git.askedin.com's container registry
+#   kubeconfig                          a kubeconfig allowed to `rollout restart` and read
+#                                       rollout status in apps and apps-stage, nothing more
+# See RUNBOOK.md for creating the restricted kubeconfig.
+
+when:
+  - event: push
+    branch: [development, master]
+
+steps:
+  - name: video-gateway-image
+    # woodpeckerci/plugin-docker-buildx 6.1.2
+    image: woodpeckerci/plugin-docker-buildx:6.1.2@sha256:d26b69cbe748b8a219c707e7889d5ffb3f9214bc3c480c30fe857ff85954267c
+    settings:
+      registry: git.askedin.com
+      repo: git.askedin.com/askedin/askedin-monorepo/video-gateway
+      dockerfile: deploy/docker/Dockerfile
+      context: .
+      target: gateway
+      platforms: linux/amd64
+      build_args:
+        ULW_GIT_SHA: ${CI_COMMIT_SHA}
+      tags:
+        - ${CI_COMMIT_BRANCH}
+        - ${CI_COMMIT_SHA}
+      username:
+        from_secret: registry_user
+      password:
+        from_secret: registry_password
+
+  - name: video-worker-image
+    image: woodpeckerci/plugin-docker-buildx:6.1.2@sha256:d26b69cbe748b8a219c707e7889d5ffb3f9214bc3c480c30fe857ff85954267c
+    settings:
+      registry: git.askedin.com
+      repo: git.askedin.com/askedin/askedin-monorepo/video-worker
+      dockerfile: deploy/docker/Dockerfile
+      context: .
+      target: worker
+      platforms: linux/amd64
+      build_args:
+        ULW_GIT_SHA: ${CI_COMMIT_SHA}
+      tags:
+        - ${CI_COMMIT_BRANCH}
+        - ${CI_COMMIT_SHA}
+      username:
+        from_secret: registry_user
+      password:
+        from_secret: registry_password
+
+  - name: rollout-restart
+    # alpine/k8s 1.37.0 (kubectl v1.37.0)
+    image: alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+    depends_on: [video-gateway-image, video-worker-image]
+    environment:
+      KUBECONFIG_CONTENT:
+        from_secret: kubeconfig
+    commands:
+      - |
+        set -eu
+        case "$CI_COMMIT_BRANCH" in
+          master) namespace=apps ;;
+          development) namespace=apps-stage ;;
+        esac
+        umask 077
+        export KUBECONFIG="$CI_WORKSPACE/.kubeconfig"
+        trap 'rm -f "$KUBECONFIG"' EXIT
+        printf '%s' "$KUBECONFIG_CONTENT" > "$KUBECONFIG"
+        # The gateway's init container migrates the schema before the new pods serve, so the
+        # gateway goes first and the worker only once it is healthy.
+        kubectl -n "$namespace" rollout restart deployment/video-gateway
+        kubectl -n "$namespace" rollout status deployment/video-gateway --timeout=10m
+        kubectl -n "$namespace" rollout restart deployment/video-worker
+        kubectl -n "$namespace" rollout status deployment/video-worker --timeout=10m
