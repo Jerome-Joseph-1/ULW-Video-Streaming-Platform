@@ -42,4 +42,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
 | [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted |
 | [0038](0038-single-use-key-packages-in-postgres.md) | Single-use key packages in Postgres, with a replenish signal | Accepted |
-| [0050](0050-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted |
+| [0039](0039-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted |

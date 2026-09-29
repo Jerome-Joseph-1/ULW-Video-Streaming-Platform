@@ -62,7 +62,7 @@ public:
 
     // Stores a message under a `seq` (from 1) taken elsewhere, for stores whose sequence counter
     // is not beside the messages. A room store that keeps both writes them in one step instead
-    // (ADR-0050), so that no seq exists without its message. Idempotent: appending a seq again
+    // (ADR-0039), so that no seq exists without its message. Idempotent: appending a seq again
     // with the same sender and body succeeds and keeps the first sent_at, so a write whose
     // answer was lost can be repeated. Any other sender or body is Conflict.
     virtual void append(const RoomId& room, std::uint64_t seq, const UserId& sender,
