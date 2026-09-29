@@ -1,0 +1,101 @@
+#pragma once
+
+#include "core/models/ids.hpp"
+#include "core/util/time.hpp"
+
+#include <cstdint>
+#include <expected>
+#include <functional>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace rt {
+
+// An owner renews its rooms this often. Seconds, not minutes: a room is unavailable from its
+// owner's death until the stale bound below has passed, and a beat costs one statement.
+inline constexpr core::Millis kOwnerHeartbeat{1'000};
+// A store call that has not answered by then is abandoned. Every statement touches a handful
+// of rows by primary key and answers in about a millisecond; two seconds is a server that is
+// stuck, and waiting longer would only hold a beat past the next one.
+inline constexpr core::Millis kStoreTimeout{2'000};
+// A room whose heartbeat is older than this may be taken from its owner. A healthy owner whose
+// beat is stuck and times out (2 s) beats again at the next tick, so its heartbeat is never
+// older than 1 + 2 + 1 = 4 s; the fifth second is margin for scheduling. heartbeat_at and the
+// comparison both use the database's clock, so skew between nodes does not enter.
+inline constexpr core::Millis kOwnerStaleAfter{5'000};
+
+struct Ownership {
+    core::NodeId node;
+    std::uint64_t generation = 0;
+
+    friend bool operator==(const Ownership&, const Ownership&) = default;
+};
+
+struct OwnedRoom {
+    core::RoomId room;
+    std::uint64_t generation = 0;
+};
+
+enum class StoreError : std::uint8_t {
+    // Unreachable, timed out, or lost a race it cannot settle; a later call may succeed.
+    Unavailable,
+    // A stored value that no writer here produces.
+    Corrupt,
+};
+
+template <class T> using StoreResult = std::expected<T, StoreError>;
+template <class T> using StoreCallback = std::move_only_function<void(StoreResult<T>) noexcept>;
+
+// Called on the reactor thread.
+class IOwnershipListener {
+public:
+    virtual ~IOwnershipListener() = default;
+    // A room was created or changed hands. Only a hint: it may arrive late, or not at all.
+    virtual void on_owner_changed(const core::RoomId& room, const Ownership& owner) noexcept = 0;
+    // Changes may have gone unreported since the last call; nothing learnt from them holds.
+    virtual void on_resync() noexcept = 0;
+};
+
+// Where rooms' owners, generations and sequence numbers are kept (ADR-0015), and where nodes
+// publish the address of their node channel. Every call answers on the reactor thread, never
+// from inside the call itself. Calls outstanding when the store is destroyed are dropped
+// unanswered.
+class IRoomStore {
+public:
+    virtual ~IRoomStore() = default;
+
+    // At most one listener, for as long as the store lives.
+    virtual void watch(IOwnershipListener& listener) noexcept = 0;
+
+    // The room's owner. `node` takes the room, under a new generation, when the room does not
+    // exist yet, when its owner's heartbeat is older than kOwnerStaleAfter, or when it is
+    // already recorded as `node`'s: an earlier run of that node may have written under the
+    // recorded generation, and must be fenced out.
+    virtual void resolve(const core::RoomId& room, const core::NodeId& node,
+                         StoreCallback<Ownership> done) = 0;
+    // Takes each of `rooms` whose owner's heartbeat is stale; answers with those it took.
+    virtual void claim_stale(std::vector<core::RoomId> rooms, const core::NodeId& node,
+                             StoreCallback<std::vector<OwnedRoom>> done) = 0;
+    // An owner write: renews each room `node` still holds at the given generation, and answers
+    // with those. A room missing from the answer was fenced out.
+    virtual void heartbeat(const core::NodeId& node, std::vector<OwnedRoom> rooms,
+                           StoreCallback<std::vector<core::RoomId>> done) = 0;
+    // An owner write: the room's next sequence number, or nullopt when `generation` is no
+    // longer the room's. Then nothing was written.
+    virtual void append(const core::RoomId& room, std::uint64_t generation,
+                        StoreCallback<std::optional<std::uint64_t>> done) = 0;
+    // An owner write, for a node about to stop: the rooms it still holds at these generations
+    // become claimable at once instead of after kOwnerStaleAfter.
+    virtual void release(const core::NodeId& node, std::vector<OwnedRoom> rooms,
+                         StoreCallback<void> done) = 0;
+
+    // Records the numeric host:port where `node` takes node-channel connections.
+    virtual void advertise(const core::NodeId& node, std::string address,
+                           StoreCallback<void> done) = 0;
+    // nullopt for a node that never advertised.
+    virtual void find_address(const core::NodeId& node,
+                              StoreCallback<std::optional<std::string>> done) = 0;
+};
+
+} // namespace rt

@@ -165,6 +165,11 @@ if(ULW_FUZZ)
     target_compile_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
     target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
+ulw_add_test_suite(rt_unit_tests unit
+    unit/rt/registry_test.cpp)
+target_link_libraries(rt_unit_tests PRIVATE ulw::rt_lib)
+target_include_directories(rt_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
     unit/s3/errors_test.cpp
