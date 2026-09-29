@@ -79,7 +79,7 @@ struct RecorderSettings {
                                             core::Seconds max_duration) noexcept;
 
 // Once the stream's stored playlist ends: the recording, streamed into the store under the
-// source key of a video id made for it, and the one video and job it becomes (ADR-0054). Every
+// source key of a video id made for it, and the one video and job it becomes (ADR-0055). Every
 // step can be repeated: a stream with a row is left alone, and a run that loses the race for
 // the row, or finds the playlist changed, removes what it stored.
 [[nodiscard]] RecordResult record_stream(const RecorderDeps& deps, const RecorderSettings& settings,

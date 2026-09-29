@@ -99,20 +99,22 @@ bool RoomRegistry::append(const core::RoomId& room, const Outgoing& message, App
     if (!generation) {
         return false;
     }
-    store_.append(room, *generation, message,
-                  [this, room, generation = *generation, done = std::move(done)](
-                      StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
-                      if (!r) {
-                          done(std::unexpected(AppendError::Unavailable));
-                          return;
-                      }
-                      if (!*r) {
-                          fenced(room, generation, OwnerWrite::Append);
-                          done(std::unexpected(AppendError::Fenced));
-                          return;
-                      }
-                      done(**r);
-                  });
+    store_.append(
+        room, *generation, message,
+        [this, room, generation = *generation,
+         done = std::move(done)](StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
+            if (!r) {
+                done(std::unexpected(r.error() == StoreError::Conflict ? AppendError::Conflict
+                                                                       : AppendError::Unavailable));
+                return;
+            }
+            if (!*r) {
+                fenced(room, generation, OwnerWrite::Append);
+                done(std::unexpected(AppendError::Fenced));
+                return;
+            }
+            done(**r);
+        });
     return true;
 }
 

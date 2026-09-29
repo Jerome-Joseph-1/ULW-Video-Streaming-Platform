@@ -59,6 +59,7 @@ struct Access {
 struct Deps {
     net::IReactor& reactor;
     rt::RoomRouter& router;
+    core::ports::IMessageStore& messages;
     core::ports::IJwtVerifier& verifier;
     const core::ports::IClock& clock;
 };

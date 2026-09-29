@@ -37,7 +37,7 @@ struct NewRecording {
     core::StorageKey source;
 };
 
-// Turns an ended live stream into an ordinary video and its transcode job (ADR-0054), for
+// Turns an ended live stream into an ordinary video and its transcode job (ADR-0055), for
 // the live packager, which has no reactor. Every call blocks and opens a session of its own:
 // a packager makes a few in its life.
 class PgLiveRecordings {

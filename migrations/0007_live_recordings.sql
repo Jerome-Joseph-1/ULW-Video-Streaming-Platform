@@ -1,4 +1,4 @@
--- What each ended live stream became (ADR-0054): its video, or why it could not be recorded.
+-- What each ended live stream became (ADR-0055): its video, or why it could not be recorded.
 -- A stream's end can be seen more than once, by a packager that restarts or is started again
 -- for an ended stream, or by two at once; the stream id as the key makes every sighting after
 -- the first write nothing. No foreign key: the row outlives a purged video, so a purge does

@@ -18,7 +18,7 @@ namespace live {
 
 enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
 
-// Where the stream's recording is queued as a video once the stream ends (ADR-0054).
+// Where the stream's recording is queued as a video once the stream ends (ADR-0055).
 struct RecordingTarget {
     // A secret: it holds the database password, and is never logged.
     std::string database_url;

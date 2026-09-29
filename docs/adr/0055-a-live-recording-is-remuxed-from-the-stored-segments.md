@@ -1,4 +1,4 @@
-# 0054. A live recording is remuxed from its stored segments into one object, and queued once per stream
+# 0055. A live recording is remuxed from its stored segments into one object, and queued once per stream
 
 Status: Accepted
 Date: 2026-09-29

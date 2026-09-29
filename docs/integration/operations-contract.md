@@ -9,7 +9,8 @@ page does not repeat it.
 
 | Dependency | Used by | Requirement |
 |---|---|---|
-| Postgres 16 | gateway, worker | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
+| Postgres 16 | gateway, worker, chat | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
+| Postgres log settings | chat | Bound parameters stay out of the server log: `log_parameter_max_length_on_error = 0` (the default), and `log_parameter_max_length = 0` whenever statement logging is on (`log_statement` `mod` or `all`, `log_min_duration_statement`, `log_min_duration_sample`, `log_transaction_sample_rate`), with `auto_explain.log_parameter_max_length = 0` if auto_explain is loaded. Otherwise chat message bodies, plaintext or ciphertext, are written to the log (ADR-0054). RUNBOOK step 3 sets them on the database. |
 | R2 bucket | gateway, worker | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
 | R2 API tokens | gateway, worker | One per component (ADR-0066). The gateway's token must allow, on `videos/<video id>/raw` and `videos/<video id>/hls/...`: CreateMultipartUpload, UploadPart, ListParts, CompleteMultipartUpload, AbortMultipartUpload (which must be permitted), HeadObject, GetObject (playlists it rewrites, and presigned GET for segments and init) and PutObject. The upload reaper runs with the gateway's secret and additionally needs ListMultipartUploads (bucket level), ListObjectsV2 and DeleteObject. |
 | Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS (`JWKS_URL` must be `https://`). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
@@ -90,7 +91,7 @@ The Kubernetes secret names and the lines that create them are in the RUNBOOK, s
 
 The live packager (one process per stream, environment only, no Askedin overlay yet) takes
 `ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR`, `ULW_FFMPEG` and
-`ULW_FFPROBE`. It records an ended stream as a video (ADR-0054) when given both of these, and is
+`ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |
@@ -238,6 +239,8 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `connections_accepted_total`, `connections_rejected_total{reason="capacity"}`,
 `connections_current`, `websocket_upgrades_total`, `auth_failures_total`,
 `origin_rejections_total`, `messages_received_total`, `messages_delivered_total`,
+`messages_rate_limited_total`, `messages_deduplicated_total`, `lossy_drops_total`,
+`messages_replayed_total`, `history_messages_total`, `messages_kept_bytes`,
 `protocol_errors_total`, `control_floods_total`, `slow_consumers_total`,
 `allocation_failures_total`, `rooms_active`, `rooms_joined`, `room_reassignments_total`,
 `fenced_writes_total`, `forwards_total`, `forward_timeouts_total`, `peers_lost_total`,

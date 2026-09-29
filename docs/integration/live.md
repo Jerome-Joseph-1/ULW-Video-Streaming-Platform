@@ -82,7 +82,7 @@ FFmpeg 8.0 or later publish with WHIP.
 
 ## When a stream ends
 
-<!-- apps/live-packager/src/recorder.cpp, infra/postgres/src/live_recordings.cpp, docs/adr/0054-a-live-recording-is-remuxed-from-the-stored-segments.md -->
+<!-- apps/live-packager/src/recorder.cpp, infra/postgres/src/live_recordings.cpp, docs/adr/0055-a-live-recording-is-remuxed-from-the-stored-segments.md -->
 
 A stream ends when its broadcaster disconnects, when it is ended explicitly, when it reaches
 12 hours, or when it breaks; its live playlist then ends with `EXT-X-ENDLIST` and players stop
