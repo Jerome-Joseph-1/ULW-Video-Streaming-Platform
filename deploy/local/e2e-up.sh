@@ -7,12 +7,17 @@
 #
 #   ULW_BUILDER    build with this docker buildx builder instead of the default one; the images
 #                  then reach the node as OCI archives and never enter the local image store
-#                  Behind a proxy on the host's loopback, the builder needs host networking: a
-#                  docker-container builder created with --driver-opt network=host, the proxy
-#                  and its CA (env.HTTPS_PROXY, env.SSL_CERT_FILE) as driver options, and a
-#                  buildkitd config holding [worker.oci] networkMode = "host", so the RUN steps
-#                  reach the proxy too. Pin its image, moby/buildkit, by digest. Its build
-#                  cache is several GB: `docker buildx prune -a` once the images are loaded.
+#                  Behind a proxy on the host's loopback the builder needs host networking:
+#                    docker buildx create --name B --driver docker-container \
+#                      --driver-opt image=moby/buildkit@sha256:<pinned digest> \
+#                      --driver-opt network=host --driver-opt env.HTTPS_PROXY=$HTTPS_PROXY \
+#                      --driver-opt env.SSL_CERT_FILE=/proxy-ca.crt --buildkitd-config F
+#                  where F holds [worker.oci] networkMode = "host" (so the RUN steps reach the
+#                  proxy too). buildkitd reads the proxy's CA from that path, so once the
+#                  builder exists (docker buildx inspect B --bootstrap), copy the file in and
+#                  restart it: docker cp <ca bundle> buildx_buildkit_B0:/proxy-ca.crt, then
+#                  docker restart buildx_buildkit_B0. Its build cache is several GB:
+#                  `docker buildx prune -a --builder B` once the images are loaded.
 #   ULW_CA_BUNDLE  CA bundle handed to image builds (build secret ca-bundle) on machines whose
 #                  outbound HTTPS goes through a TLS-inspecting proxy
 set -euo pipefail
