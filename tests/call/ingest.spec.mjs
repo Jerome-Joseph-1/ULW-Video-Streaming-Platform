@@ -1,8 +1,10 @@
 // M30 acceptance: live ingest over WHIP (RFC 9725), straight to the SFU with a publisher ticket
-// (ADR-0056). A GStreamer whipsink publisher is exactly one producer; its DELETE ends the session
-// at once; a candidate trickled after the answer is what the connection is built on; and a
-// published stream reaches the M31 packager through the SFU's recorder and becomes a live HLS
-// playlist that ends with the session.
+// (ADR-0056). A GStreamer whipsink publisher is exactly one producer; a DELETE ends the session at
+// once, with a fresh ticket when the first has expired, and a stale session's DELETE leaves its
+// replacement alone; a candidate trickled after the answer is what the connection is built on;
+// and a published stream reaches the M31 packager through the SFU's recorder and becomes a live
+// HLS playlist that ends with the session. One probe pins a LiveKit behaviour ADR-0056 relies on
+// knowing: a publisher ticket brings its closed generation's room back.
 import { expect, test } from '@playwright/test';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
@@ -30,21 +32,32 @@ function metricsFile(name, metrics) {
   console.log(JSON.stringify(metrics));
 }
 
+function sign(claims) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const unsigned = `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode(claims)}`;
+  const signature = createHmac('sha256', process.env.LIVEKIT_API_SECRET).update(unsigned)
+    .digest('base64url');
+  return `${unsigned}.${signature}`;
+}
+
+// A ticket as the adapter issued it, two minutes past its expiry: past LiveKit's minute of
+// allowed skew as well.
+function expired(ticket) {
+  const claims = JSON.parse(Buffer.from(ticket.token.split('.')[1], 'base64url').toString());
+  const now = Math.floor(Date.now() / 1000);
+  return { ...ticket, token: sign({ ...claims, nbf: now - 180, exp: now - 120 }) };
+}
+
 // RoomService.ListParticipants, with a token of its own: the port has no use for it, the test
 // needs to see what the SFU sees.
 async function participants(roomName) {
   const now = Math.floor(Date.now() / 1000);
-  const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  const unsigned = `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode({
-    iss: process.env.LIVEKIT_API_KEY, nbf: now, exp: now + 60,
-    video: { roomAdmin: true, room: roomName },
-  })}`;
-  const signature = createHmac('sha256', process.env.LIVEKIT_API_SECRET).update(unsigned)
-    .digest('base64url');
+  const token = sign({ iss: process.env.LIVEKIT_API_KEY, nbf: now, exp: now + 60,
+    video: { roomAdmin: true, room: roomName } });
   const response = await fetch(
     `${process.env.LIVEKIT_API_URL}/twirp/livekit.RoomService/ListParticipants`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${unsigned}.${signature}` },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ room: roomName }),
     });
   expect(response.status).toBe(200);
@@ -91,11 +104,17 @@ function whipsink(ticket) {
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve(code ?? signal)));
   return {
     output: () => output,
+    // The session's resource, once the POST has been answered: whipsink logs its Location.
+    resource: () => {
+      const location = /WHIP resource: "([^"]+)"/.exec(output)?.[1];
+      return location && new URL(location, ticket.url).href;
+    },
     exited,
     async stop() {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGINT');
       return exited;
     },
+    running: () => child.exitCode === null && child.signalCode === null,
     kill() {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     },
@@ -108,9 +127,13 @@ function whipsink(ticket) {
 async function openStream(sfu) {
   const room = randomUUID();
   const device = randomUUID();
-  await sfu.open(room, 1, 0);
+  await sfu.open(room, 1, 0, 'stream');
   const ticket = await sfu.ticket(room, 1, 'streamer', device, 'publisher');
-  return { room, device, ticket, name: `${room}:1`, identity: `streamer/${device}` };
+  return {
+    room, device, ticket, name: `${room}:1`, identity: `streamer/${device}`,
+    // What a client asks the stream service for before each request after its POST.
+    fresh: () => sfu.ticket(room, 1, 'streamer', device, 'publisher'),
+  };
 }
 
 test('a whipsink publisher is exactly one producer, and a second session replaces it', async () => {
@@ -167,6 +190,112 @@ test("whipsink's DELETE ends the session at once", async () => {
   }
 });
 
+async function deleteSession(resource, ticket) {
+  return (await fetch(resource, { method: 'DELETE',
+    headers: { authorization: `Bearer ${ticket.token}` } })).status;
+}
+
+// A client's DELETE after its POST ticket has expired: refused with that one, accepted with a
+// fresh one from the stream service, and the session ends although the source keeps sending.
+test('a DELETE with a fresh ticket ends the session once the first has expired', async () => {
+  const sfu = startSignalling();
+  let source;
+  const metrics = {};
+  try {
+    const stream = await openStream(sfu);
+    metrics.room = stream.name;
+    source = whipsink(stream.ticket);
+    await expect.poll(async () => (await producers(stream.name)).length, { timeout: 20_000 })
+      .toBe(1);
+    const resource = source.resource();
+    expect(resource).toMatch(/\/whip\/v1\/PA_/);
+
+    expect(await deleteSession(resource, expired(stream.ticket))).toBe(401);
+    expect(await producers(stream.name)).toHaveLength(1);
+
+    const start = Date.now();
+    expect(await deleteSession(resource, await stream.fresh())).toBe(200);
+    await expect.poll(async () => (await participants(stream.name)).length,
+      { timeout: kDeleteBoundMs, intervals: [100] }).toBe(0);
+    metrics.goneAfterMs = Date.now() - start;
+    // The DELETE ended it, not the source: gst is still sending.
+    expect(source.running()).toBe(true);
+    await sfu.close(stream.room, 1);
+  } finally {
+    source?.kill();
+    sfu.stop();
+    metricsFile('fresh-delete', metrics);
+  }
+});
+
+// A replaced session's resource is gone; deleting it must not take the stream's current session
+// with it, though both are the same participant identity.
+test("a replaced session's DELETE leaves the session that replaced it", async () => {
+  const sfu = startSignalling();
+  const sources = [];
+  const metrics = {};
+  try {
+    const stream = await openStream(sfu);
+    metrics.room = stream.name;
+    sources.push(whipsink(stream.ticket));
+    await expect.poll(async () => (await producers(stream.name)).length, { timeout: 20_000 })
+      .toBe(1);
+    const [first] = await producers(stream.name);
+    const stale = sources[0].resource();
+
+    sources.push(whipsink(stream.ticket));
+    await expect.poll(async () => (await producers(stream.name)).map((p) => p.sid),
+      { timeout: 20_000 }).toEqual([expect.not.stringMatching(`^${first.sid}$`)]);
+    const [current] = await producers(stream.name);
+
+    metrics.staleDeleteStatus = await deleteSession(stale, await stream.fresh());
+    expect(metrics.staleDeleteStatus).toBe(200);
+    // The DELETE has been answered, so whatever it did to the room is done; the listing after
+    // it and a second one a round trip later both still show the current session.
+    for (let i = 0; i < 2; ++i) {
+      expect(await producers(stream.name)).toEqual([current]);
+    }
+    await sfu.close(stream.room, 1);
+  } finally {
+    for (const source of sources) source.kill();
+    sfu.stop();
+    metricsFile('stale-delete', metrics);
+  }
+});
+
+// Not what the platform wants, what LiveKit v1.13.7 does, pinned so that an upgrade that changes
+// it is noticed (ADR-0056): its WHIP POST creates the room its token names without the
+// auto_create check, so a publisher ticket brings a closed generation's room back while it lasts.
+test('a publisher ticket brings its closed generation back (LiveKit v1.13.7)', async () => {
+  const sfu = startSignalling();
+  const metrics = {};
+  let resource;
+  let stream;
+  try {
+    stream = await openStream(sfu);
+    metrics.room = stream.name;
+    await sfu.close(stream.room, 1);
+    const offer = readFileSync(path.join(here, '../data/sdp/chromium_offer.sdp'), 'utf8');
+    const created = await fetch(stream.ticket.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/sdp', authorization: `Bearer ${stream.ticket.token}` },
+      body: offer,
+    });
+    metrics.status = created.status;
+    expect(created.status).toBe(201);
+    resource = new URL(created.headers.get('location'), stream.ticket.url).href;
+    expect(await participants(stream.name)).toHaveLength(1);
+  } finally {
+    if (resource) await deleteSession(resource, stream.ticket).catch(() => {});
+    if (stream) {
+      await sfu.open(stream.room, 1, 0, 'stream').catch(() => {});
+      await sfu.close(stream.room, 1).catch(() => {});
+    }
+    sfu.stop();
+    metricsFile('revive-probe', metrics);
+  }
+});
+
 test('a candidate trickled after the answer is honoured', async () => {
   const sfu = startSignalling();
   const pageServer = await servePage();
@@ -179,6 +308,7 @@ test('a candidate trickled after the answer is honoured', async () => {
     const stream = await openStream(sfu);
     metrics.room = stream.name;
     const page = await browser.newPage();
+    await page.exposeFunction('freshTicket', () => stream.fresh());
     await page.goto(`http://127.0.0.1:${pageServer.address().port}/`);
     const publish = await page.evaluate((t) => window.whipTrickled(t), stream.ticket);
     metrics.publish = publish;
@@ -263,7 +393,9 @@ function readPlaylist(file) {
 // A packager for a new stream, a whipsink publisher in the stream's room, and the relay between
 // them: the call a stream service makes once its publisher is in. The recorder joins the room,
 // takes that one participant, and calls the packager's listener (ADR-0046).
-async function relayedStream(sfu, root, metrics) {
+// The harness is started here, once the packager's port is known: where relays go is the
+// adapter's configuration, not the caller's (ADR-0056).
+async function relayedStream(root, metrics) {
   const streamId = `whip-${randomBytes(6).toString('hex')}`;
   const passphrase = randomBytes(16).toString('hex');
   const packager = startPackager(streamId, passphrase, root);
@@ -272,15 +404,19 @@ async function relayedStream(sfu, root, metrics) {
     { timeout: 30_000 }).toBe(true);
   const port = /ingest=127\.0\.0\.1:(\d+)/.exec(packager.output())[1];
 
+  const sfu = startSignalling({ ULW_LIVE_PACKAGER_SRT: `srt://127.0.0.1:${port}` });
   const stream = await openStream(sfu);
   metrics.room = stream.name;
   const source = whipsink(stream.ticket);
   await expect.poll(async () => (await producers(stream.name)).length, { timeout: 20_000 })
     .toBe(1);
   const relayed = Date.now();
-  await sfu.relay(stream.room, 1, 'streamer', stream.device, kSegmentSeconds,
-    `srt://127.0.0.1:${port}?streamid=${streamId}&passphrase=${passphrase}`);
-  return { packager, stream, source, relayed };
+  const id = await sfu.relay(stream.room, 1, 'streamer', stream.device, streamId,
+    kSegmentSeconds, passphrase);
+  // Asking again, as a stream service retrying a lost answer would, finds the same relay.
+  expect(await sfu.relay(stream.room, 1, 'streamer', stream.device, streamId, kSegmentSeconds,
+    passphrase)).toBe(id);
+  return { sfu, packager, stream, source, relayed };
 }
 
 async function segmentsListed(packager, atLeast, sequences = []) {
@@ -300,13 +436,12 @@ async function streamEnded(packager, sequences = []) {
 }
 
 test('a WHIP publish becomes a live playlist that ends with the session', async () => {
-  const sfu = startSignalling();
   const root = mkdtempSync(path.join(tmpdir(), 'ulw-ingest-'));
   const metrics = {};
   let relay;
   try {
-    relay = await relayedStream(sfu, root, metrics);
-    const { packager, stream, source } = relay;
+    relay = await relayedStream(root, metrics);
+    const { sfu, packager, stream, source } = relay;
     const sequences = [];
     await segmentsListed(packager, 3, sequences);
     metrics.threeSegmentsAfterMs = Date.now() - relay.relayed;
@@ -334,7 +469,7 @@ test('a WHIP publish becomes a live playlist that ends with the session', async 
   } finally {
     relay?.source.kill();
     relay?.packager.kill();
-    sfu.stop();
+    relay?.sfu.stop();
     rmSync(root, { recursive: true, force: true });
     metricsFile('packager', metrics);
   }

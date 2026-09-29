@@ -2,8 +2,9 @@
 # Prints the directory holding GStreamer's whipsink, for GST_PLUGIN_PATH, building it first
 # when the cache lacks it. whipsink is gst-plugins-rs's webrtchttp plugin, which Ubuntu does not
 # package: the crate is fetched by version and SHA-256 and built against the system's GStreamer
-# with whipsink/Cargo.lock, whose checksums pin every crate it pulls in. Needs cargo and the
-# GStreamer development packages (libgstreamer-plugins-bad1.0-dev brings the WebRTC library).
+# with whipsink/Cargo.lock, whose checksums pin every crate it pulls in, by the Rust release
+# whipsink/rust-toolchain.toml names. Needs rustup and the GStreamer development packages
+# (libgstreamer-plugins-bad1.0-dev brings the WebRTC library).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 
@@ -19,8 +20,11 @@ if ! pkg-config --exists gstreamer-webrtc-1.0 gstreamer-sdp-1.0; then
         "(libgstreamer-plugins-bad1.0-dev)" >&2
     exit 1
 fi
-# A lock file changed since the last build means another set of crates.
-if [[ ! -f $lib ]] || ! cmp -s "$here/whipsink/Cargo.lock" "$dir/Cargo.lock"; then
+# The build is kept while its inputs are: the crates (the lock file), the compiler
+# (whipsink/rust-toolchain.toml) and the GStreamer it links against.
+inputs=$(sha256sum "$here/whipsink/Cargo.lock" "$here/whipsink/rust-toolchain.toml" | cut -d' ' -f1)
+stamp="$inputs gstreamer-$(pkg-config --modversion gstreamer-webrtc-1.0)"
+if [[ ! -f $lib ]] || [[ $(cat "$dir/.ulw-stamp" 2>/dev/null) != "$stamp" ]]; then
     mkdir -p "$cache"
     crate=$(mktemp "$cache/download.XXXXXX")
     trap 'rm -f "$crate"' EXIT
@@ -32,7 +36,10 @@ if [[ ! -f $lib ]] || ! cmp -s "$here/whipsink/Cargo.lock" "$dir/Cargo.lock"; th
     fi
     rm -rf "$dir"
     tar -xzf "$crate" -C "$cache"
-    cp "$here/whipsink/Cargo.lock" "$dir/Cargo.lock"
-    (cd "$dir" && cargo build --release --locked --quiet) >&2
+    cp "$here/whipsink/Cargo.lock" "$here/whipsink/rust-toolchain.toml" "$dir/"
+    # rustup installs the pinned release, checked against the channel's signed manifest.
+    (cd "$dir" && rustup toolchain install --no-self-update >/dev/null &&
+        cargo build --release --locked --quiet) >&2
+    echo "$stamp" >"$dir/.ulw-stamp"
 fi
 dirname "$lib"

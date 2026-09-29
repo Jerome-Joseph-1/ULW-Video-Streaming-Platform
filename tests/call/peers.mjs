@@ -11,26 +11,32 @@ const here = path.dirname(new URL(import.meta.url).pathname);
 const harness = process.env.ULW_CALL_HARNESS;
 
 // The call handler's stand-in: one harness process for the whole test, holding the rooms it
-// opened as the handler would, driven one command line at a time.
-export function startSignalling() {
-  const child = spawn(harness, [], { stdio: ['pipe', 'pipe', 'inherit'] });
+// opened as the handler would, driven one command line at a time. `env` adds to the harness's
+// environment (ULW_LIVE_PACKAGER_SRT, where relays go).
+export function startSignalling(env = {}) {
+  const child = spawn(harness, [], { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, ...env } });
   const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
-  const send = async (...words) => {
+  // `shown` is the command as an error may repeat it: without a relay's passphrase.
+  const send = async (words, shown = words) => {
     child.stdin.write(`${words.join(' ')}\n`);
     const { value, done } = await lines.next();
-    if (done) throw new Error(`harness exited during: ${words.join(' ')}`);
-    if (value.startsWith('error')) throw new Error(`${words.join(' ')}: ${value}`);
+    if (done) throw new Error(`harness exited during: ${shown.join(' ')}`);
+    if (value.startsWith('error')) throw new Error(`${shown.join(' ')}: ${value}`);
     return value;
   };
   return {
     // A call admits its two members; a stream's room has no limit of its own, since its one
     // publisher is joined there by the recorder that relays it.
-    open: (room, generation, max = 2) => send('open', room, generation, max),
+    open: (room, generation, max = 2, kind = 'call') =>
+      send(['open', room, generation, max, kind]),
     ticket: async (room, generation, user, device, role = 'member') =>
-      JSON.parse(await send('join', room, generation, user, device, role)),
-    relay: (room, generation, user, device, keyframeSeconds, url) =>
-      send('relay', room, generation, user, device, keyframeSeconds, url),
-    close: (room, generation) => send('close', room, generation),
+      JSON.parse(await send(['join', room, generation, user, device, role])),
+    // The relay's id at the media server.
+    relay: async (room, generation, user, device, stream, keyframeSeconds, passphrase) => {
+      const words = ['relay', room, generation, user, device, stream, keyframeSeconds];
+      return (await send([...words, passphrase], [...words, '<passphrase>'])).slice('ok '.length);
+    },
+    close: (room, generation) => send(['close', room, generation]),
     stop: () => child.stdin.end(),
   };
 }
