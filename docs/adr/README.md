@@ -46,4 +46,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0040](0040-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
 | [0041](0041-a-job-result-the-queue-refuses-fails-the-job.md) | A job result the queue refuses fails the job | Accepted |
 | [0042](0042-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged per unit of work against the memory limit | Accepted |
+| [0043](0043-chat-service-policy-between-edge-and-rooms.md) | The chat service: policy between the client edge and the room plane | Accepted |
 | [0044](0044-openmls-behind-a-narrow-c-api.md) | OpenMLS behind a narrow C API, pinned by Cargo.lock | Accepted |

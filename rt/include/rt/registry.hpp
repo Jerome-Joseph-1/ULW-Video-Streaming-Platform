@@ -85,7 +85,8 @@ public:
 
     // Takes the room's next sequence number, fenced on the generation this node owns it
     // under. false, and nothing is written, when this node does not own the room.
-    [[nodiscard]] bool append(const core::RoomId& room, AppendCallback done);
+    [[nodiscard]] bool append(const core::RoomId& room, const Outgoing& message,
+                              AppendCallback done);
 
     // Rooms with members on this node. Their owners are kept cached and watched: when one goes
     // quiet for kOwnerStaleAfter, this node takes the room over.

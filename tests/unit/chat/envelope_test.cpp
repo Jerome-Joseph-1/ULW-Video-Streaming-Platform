@@ -1,8 +1,11 @@
 #include "core/util/json.hpp"
+#include "infra/auth/base64url.hpp"
 
 #include "envelope.hpp"
 
+#include <algorithm>
 #include <gtest/gtest.h>
+#include <span>
 #include <string>
 #include <variant>
 
@@ -16,92 +19,139 @@ core::RoomId room() {
     return *core::RoomId::parse(kRoom);
 }
 
-TEST(Envelope, AJoinNamesItsRoom) {
+TEST(Envelope, AJoinNamesItsRoomAndMayAskToResumeAndToBeLossy) {
     const auto c =
         chat::parse_command(R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
     ASSERT_TRUE(c);
-    EXPECT_EQ(std::get<chat::Join>(*c).room, room());
+    const auto& join = std::get<chat::Join>(*c);
+    EXPECT_EQ(join.room, room());
+    EXPECT_FALSE(join.after);
+    EXPECT_EQ(join.delivery, chat::Delivery::Durable);
+
+    const auto resume = chat::parse_command(
+        R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","after":41,"delivery":"lossy"})");
+    ASSERT_TRUE(resume);
+    EXPECT_EQ(std::get<chat::Join>(*resume).after, 41U);
+    EXPECT_EQ(std::get<chat::Join>(*resume).delivery, chat::Delivery::Lossy);
 }
 
-TEST(Envelope, ASendCarriesItsBodyAsItCameAndAnOptionalRef) {
-    const auto c = chat::parse_command(
-        R"({"ref":42,"type":"send","body":"café \"quoted\"\n","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
+TEST(Envelope, ASendCarriesItsIdAndTheBytesItsBodyEncodes) {
+    const std::string bytes("\x00\xff opaque \xc3", 11);
+    const auto c = chat::parse_command(R"({"id":"0f4c2a9e-5b1d","type":"send","body":")" +
+                                       infra::auth::encode_base64url(bytes) +
+                                       R"(","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
     ASSERT_TRUE(c);
     const auto& send = std::get<chat::Send>(*c);
     EXPECT_EQ(send.room, room());
-    EXPECT_EQ(send.ref, 42U);
-    EXPECT_EQ(send.body, "caf\xc3\xa9 \"quoted\"\n");
+    EXPECT_EQ(send.id.view(), "0f4c2a9e-5b1d");
+    const auto expected = std::as_bytes(std::span{bytes});
+    EXPECT_TRUE(std::ranges::equal(send.body, expected));
 
-    const auto bare = chat::parse_command(
-        R"({"type":"send","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","body":""})");
-    ASSERT_TRUE(bare);
-    EXPECT_FALSE(std::get<chat::Send>(*bare).ref);
+    const auto empty = chat::parse_command(
+        R"({"type":"send","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","id":"a","body":""})");
+    ASSERT_TRUE(empty);
+    EXPECT_TRUE(std::get<chat::Send>(*empty).body.empty());
 }
 
 TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
+    const std::string room = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
     EXPECT_EQ(chat::parse_command("{"), std::unexpected(EnvelopeError::NotJson));
     EXPECT_EQ(chat::parse_command("[]"), std::unexpected(EnvelopeError::Malformed));
-    EXPECT_EQ(
-        chat::parse_command(R"({"type":"leave","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})"),
-        std::unexpected(EnvelopeError::Malformed));
-    EXPECT_EQ(chat::parse_command(R"({"room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})"),
+    EXPECT_EQ(chat::parse_command(R"({"type":"leave",)" + room + "}"),
               std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command("{" + room + "}"), std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::parse_command(R"({"type":"join"})"), std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(
         chat::parse_command(R"({"type":"join","room":"01A0EB86-6CCA-7DCE-84CC-3BB47615F9FD"})"),
         std::unexpected(EnvelopeError::BadRoom));
-    EXPECT_EQ(
-        chat::parse_command(R"({"type":"send","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})"),
-        std::unexpected(EnvelopeError::Malformed));
-    EXPECT_EQ(chat::parse_command(
-                  R"({"type":"send","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","body":7})"),
+    EXPECT_EQ(chat::parse_command(R"({"type":"join",)" + room + R"(,"after":-1})"),
               std::unexpected(EnvelopeError::Malformed));
-    EXPECT_EQ(
-        chat::parse_command(
-            R"({"type":"send","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","body":"","ref":-1})"),
-        std::unexpected(EnvelopeError::Malformed));
-    // A misspelt field is refused, not ignored.
-    EXPECT_EQ(
-        chat::parse_command(
-            R"({"type":"send","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","body":"","reff":1})"),
-        std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"join",)" + room + R"(,"delivery":"best"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    // Every send names its id and its body.
+    EXPECT_EQ(chat::parse_command(R"({"type":"send",)" + room + R"(,"body":""})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"send",)" + room + R"(,"id":"a"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"send",)" + room + R"(,"id":7,"body":""})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"send",)" + room + R"(,"id":"a b","body":""})"),
+              std::unexpected(EnvelopeError::BadId));
+    EXPECT_EQ(chat::parse_command(R"({"type":"send",)" + room + R"(,"id":"a","body":"a+b/"})"),
+              std::unexpected(EnvelopeError::BadBody));
+    EXPECT_EQ(chat::parse_command(R"({"type":"send",)" + room + R"(,"id":"a","body":"aGk="})"),
+              std::unexpected(EnvelopeError::BadBody));
+    // A misspelt field is refused, not ignored; so is the M16 "ref".
+    EXPECT_EQ(chat::parse_command(R"({"type":"send",)" + room + R"(,"id":"a","body":"","ref":1})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"join",)" + room + R"(,"afterr":1})"),
+              std::unexpected(EnvelopeError::Malformed));
     // A second copy of a field is refused by the parser.
-    EXPECT_EQ(chat::parse_command(
-                  R"({"type":"join","type":"send","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})"),
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","type":"send",)" + room + "}"),
               std::unexpected(EnvelopeError::NotJson));
 }
 
-TEST(Envelope, AMessageReturnsItsBodyExactlyAndEscapedAsJson) {
-    const std::string body = "line one\n\"two\"\\ \x7f caf\xc3\xa9";
+TEST(Envelope, AMessageReturnsItsBodyBytesExactlyAndItsId) {
+    const std::string body("line one\n\"two\"\\ \x7f \x00\xfe", 20);
     const auto sender = *core::UserId::parse("auth0|alice");
     std::string out;
-    chat::write_message(
-        out, {.room = room(), .seq = 9, .sender = sender, .body = std::as_bytes(std::span{body})});
+    chat::write_message(out, {.room = room(),
+                              .seq = 9,
+                              .sender = sender,
+                              .key = *rt::MessageKey::parse("k_1-A"),
+                              .body = std::as_bytes(std::span{body})});
     const auto json = core::json::parse(out);
     ASSERT_TRUE(json) << out;
     EXPECT_EQ(json->find("type")->as_string(), "message");
     EXPECT_EQ(json->find("room")->as_string(), kRoom);
     EXPECT_EQ(json->find("seq")->as_u64(), 9U);
     EXPECT_EQ(json->find("sender")->as_string(), "auth0|alice");
-    EXPECT_EQ(json->find("body")->as_string(), body);
+    EXPECT_EQ(json->find("id")->as_string(), "k_1-A");
+    const auto encoded = json->find("body")->as_string();
+    ASSERT_TRUE(encoded);
+    EXPECT_EQ(infra::auth::decode_base64url(*encoded), body);
+    // Nothing of the body shows through as text.
+    EXPECT_EQ(out.find("line one"), std::string::npos);
+}
+
+TEST(Envelope, AMessagesWireSizeBoundsWhatWriteMessageMakes) {
+    const std::string longest_sender(core::UserId::kMaxLength, 's');
+    const std::string longest_id(rt::MessageKey::kMaxLength, 'i');
+    for (const std::size_t size :
+         {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{48} * 1024}) {
+        const std::string body(size, 'b');
+        std::string out;
+        chat::write_message(out, {.room = room(),
+                                  .seq = UINT64_MAX,
+                                  .sender = *core::UserId::parse(longest_sender),
+                                  .key = *rt::MessageKey::parse(longest_id),
+                                  .body = std::as_bytes(std::span{body})});
+        // The frame header of a text message under 64 KiB is 4 bytes.
+        EXPECT_LE(out.size() + 4, chat::message_wire_size(size)) << size;
+        EXPECT_GE(out.size() + 4 + 8, chat::message_wire_size(size)) << size;
+    }
 }
 
 TEST(Envelope, RepliesAreTheDocumentedShapes) {
+    const auto id = *rt::MessageKey::parse("m-3");
     std::string out;
-    chat::write_joined(out, room());
-    EXPECT_EQ(out, R"({"type":"joined","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
+    chat::write_joined(out, room(), 12);
+    EXPECT_EQ(out, R"({"type":"joined","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","seq":12})");
     out.clear();
-    chat::write_sent(out, room(), 3, 17);
-    EXPECT_EQ(out,
-              R"({"type":"sent","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","ref":3,"seq":17})");
-    out.clear();
-    chat::write_sent(out, room(), std::nullopt, 17);
-    EXPECT_EQ(out, R"({"type":"sent","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","seq":17})");
-    out.clear();
-    chat::write_error(out, chat::reason(rt::RouteError::Fenced), room(), 3);
+    chat::write_sent(out, room(), id, 17);
     EXPECT_EQ(
         out,
-        R"({"type":"error","reason":"fenced","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","ref":3})");
+        R"({"type":"sent","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","id":"m-3","seq":17})");
+    out.clear();
+    chat::write_error(out, chat::reason(rt::RouteError::Fenced), room(), id);
+    EXPECT_EQ(
+        out,
+        R"({"type":"error","reason":"fenced","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","id":"m-3"})");
+    out.clear();
+    chat::write_rate_limited(out, room(), id, core::Millis{500});
+    EXPECT_EQ(
+        out,
+        R"({"type":"error","reason":"rate_limited","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","id":"m-3","retry_after_ms":500})");
     out.clear();
     chat::write_error(out, chat::reason(EnvelopeError::NotJson));
     EXPECT_EQ(out, R"({"type":"error","reason":"not_json"})");

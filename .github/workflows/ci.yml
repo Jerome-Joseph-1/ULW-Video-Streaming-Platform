@@ -135,9 +135,11 @@ jobs:
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
 
-  # The M16 acceptance: three chat_server processes on ports 9101-9103 over one Postgres, their
-  # room's owner stopped until a survivor takes over, then resumed to be fenced out. The test is
-  # parameterised over both reactors, so one run covers io_uring and epoll.
+  # The M16 and M17 acceptance: three chat_server processes on ports 9101-9103 over one
+  # Postgres. Their room's owner stopped until a survivor takes over, then resumed to be fenced
+  # out; clients on every node seeing one order, rate limits, retries, resume, and no body in any
+  # log or table. The tests are parameterised over both reactors, so one run covers io_uring and
+  # epoll.
   cluster:
     runs-on: ubuntu-24.04
     services:
