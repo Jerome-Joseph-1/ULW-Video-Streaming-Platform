@@ -179,7 +179,7 @@ TEST_F(GatewayAsRoot, BindsAPrivilegedPortThenServesAsTheUserItNames) {
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 200);
     gateway->signal(SIGTERM);
-    EXPECT_EQ(gateway->wait_exit(kPatience), 0);
+    EXPECT_EQ(gateway->wait_exit(kPatience), 0) << gateway->output();
 }
 
 // libpq quotes the token it cannot parse, which here is the password, and a failed connection
