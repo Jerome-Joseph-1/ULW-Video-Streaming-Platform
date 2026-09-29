@@ -42,3 +42,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
 | [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted |
 | [0038](0038-single-use-key-packages-in-postgres.md) | Single-use key packages in Postgres, with a replenish signal | Accepted |
+| [0039](0039-openmls-behind-a-narrow-c-api.md) | OpenMLS behind a narrow C API, pinned by Cargo.lock | Accepted |
