@@ -3,6 +3,7 @@
 #include "core/ports/message_store.hpp"
 #include "net/reactor.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
@@ -28,7 +29,8 @@ public:
 
     // Stores a message under `seq` (from 1). Idempotent: the same seq with the same sender, key
     // and body succeeds and keeps the first sent_at. Any other under a stored seq, or a key the
-    // sender already used under another seq, is Conflict. Over kMaxMessageBody is TooLarge.
+    // sender already used under another seq, is Conflict. Over kMaxMessageBody is TooLarge. An
+    // ephemeral room's (rt::is_ephemeral_room) is not kept: only its seq counts, for last_seq.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
                 std::string key, std::vector<std::byte> body, core::WallTime sent_at,
                 core::ports::MessageCallback<void> done);
@@ -61,6 +63,8 @@ private:
         std::map<std::uint64_t, core::ports::StoredMessage> messages;
         // (sender, key) of every stored message.
         std::set<std::pair<std::string, std::string>> keys;
+        // The highest seq appended to an ephemeral room, which keeps no messages.
+        std::uint64_t last = 0;
     };
 
     void defer(std::move_only_function<void() noexcept> fn);

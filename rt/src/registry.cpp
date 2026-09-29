@@ -19,6 +19,16 @@ std::optional<std::uint64_t> RoomRegistry::owned(const core::RoomId& room) const
     return it->second;
 }
 
+std::uint64_t RoomRegistry::taken_at(const core::RoomId& room) const noexcept {
+    const auto it = taken_at_.find(room);
+    return it == taken_at_.end() ? 0 : it->second;
+}
+
+void RoomRegistry::disown(const core::RoomId& room) noexcept {
+    owned_.erase(room);
+    taken_at_.erase(room);
+}
+
 std::optional<Ownership> RoomRegistry::known_owner(const core::RoomId& room) const noexcept {
     if (const auto generation = owned(room)) {
         return Ownership{.node = self_, .generation = *generation};
@@ -50,7 +60,7 @@ void RoomRegistry::resolved(const core::RoomId& room, StoreResult<Ownership> res
     resolving_.erase(it);
     if (result) {
         if (result->node == self_) {
-            acquired(room, result->generation);
+            acquired(room, result->generation, result->last_seq);
         } else if (learn(room, *result)) {
             observer_.on_owner_changed(room, *result);
         }
@@ -60,12 +70,14 @@ void RoomRegistry::resolved(const core::RoomId& room, StoreResult<Ownership> res
     }
 }
 
-void RoomRegistry::acquired(const core::RoomId& room, std::uint64_t generation) {
+void RoomRegistry::acquired(const core::RoomId& room, std::uint64_t generation,
+                            std::uint64_t last_seq) {
     const auto previous = owned(room);
     if (previous && *previous >= generation) {
         return;
     }
     owned_[room] = generation;
+    taken_at_[room] = last_seq;
     // Generation 1 is the room's creation; any later one took the room from an earlier owner.
     if (generation > 1) {
         ++counters_.reassignments;
@@ -118,9 +130,8 @@ bool RoomRegistry::append(const core::RoomId& room, const Outgoing& message, App
 
 void RoomRegistry::fenced(const core::RoomId& room, std::uint64_t generation, OwnerWrite write) {
     ++counters_.fenced_writes;
-    const auto it = owned_.find(room);
-    if (it != owned_.end() && it->second == generation) {
-        owned_.erase(it);
+    if (owned(room) == generation) {
+        disown(room);
     }
     const auto cached = cache_.find(room);
     if (cached != cache_.end() && cached->second.node == self_ &&
@@ -154,7 +165,7 @@ void RoomRegistry::beat() {
     std::vector<OwnedRoom> rooms;
     rooms.reserve(owned_.size());
     for (const auto& [room, generation] : owned_) {
-        rooms.push_back({.room = room, .generation = generation});
+        rooms.push_back({.room = room, .generation = generation, .last_seq = 0});
     }
     // The rooms as sent: one taken after this point is not in the answer, and must not be
     // judged by it.
@@ -200,7 +211,7 @@ void RoomRegistry::sweep() {
                                return;
                            }
                            for (const OwnedRoom& r : *claimed) {
-                               acquired(r.room, r.generation);
+                               acquired(r.room, r.generation, r.last_seq);
                            }
                        });
 }
@@ -209,10 +220,11 @@ void RoomRegistry::release_all(StoreCallback<void> done) {
     std::vector<OwnedRoom> rooms;
     rooms.reserve(owned_.size());
     for (const auto& [room, generation] : owned_) {
-        rooms.push_back({.room = room, .generation = generation});
+        rooms.push_back({.room = room, .generation = generation, .last_seq = 0});
         cache_.erase(room);
     }
     owned_.clear();
+    taken_at_.clear();
     store_.release(self_, std::move(rooms), std::move(done));
 }
 
@@ -221,8 +233,8 @@ void RoomRegistry::release(const core::RoomId& room) {
     if (it == owned_.end()) {
         return;
     }
-    std::vector<OwnedRoom> rooms{{.room = room, .generation = it->second}};
-    owned_.erase(it);
+    std::vector<OwnedRoom> rooms{{.room = room, .generation = it->second, .last_seq = 0}};
+    disown(room);
     cache_.erase(room);
     // Failing leaves the room to go stale instead, which costs a claimant kOwnerStaleAfter.
     store_.release(self_, std::move(rooms), [](const StoreResult<void>&) noexcept {});

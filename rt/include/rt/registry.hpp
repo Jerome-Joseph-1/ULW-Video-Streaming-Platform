@@ -72,6 +72,8 @@ public:
     // The generation this node owns `room` under, if it does.
     [[nodiscard]] std::optional<std::uint64_t> owned(const core::RoomId& room) const noexcept;
     [[nodiscard]] std::size_t rooms_owned() const noexcept { return owned_.size(); }
+    // The room's last_seq when this node took it, if it owns it; its head starts there.
+    [[nodiscard]] std::uint64_t taken_at(const core::RoomId& room) const noexcept;
     // The owner to route to without asking the store: a cached other node, or this one when it
     // owns the room. A cache entry naming this node without the ownership to match (a claim
     // whose answer was lost) is not an answer.
@@ -110,7 +112,8 @@ public:
 
 private:
     void resolved(const core::RoomId& room, StoreResult<Ownership> result);
-    void acquired(const core::RoomId& room, std::uint64_t generation);
+    void acquired(const core::RoomId& room, std::uint64_t generation, std::uint64_t last_seq);
+    void disown(const core::RoomId& room) noexcept;
     // Caches `owner` unless a newer generation is known; true when the cache changed.
     bool learn(const core::RoomId& room, const Ownership& owner);
     void fenced(const core::RoomId& room, std::uint64_t generation, OwnerWrite write);
@@ -123,6 +126,8 @@ private:
     core::Uuid incarnation_;
     IRegistryObserver& observer_;
     std::unordered_map<core::RoomId, std::uint64_t> owned_;
+    // Beside owned_, and erased with it.
+    std::unordered_map<core::RoomId, std::uint64_t> taken_at_;
     std::unordered_map<core::RoomId, Ownership> cache_;
     std::unordered_map<core::RoomId, std::vector<StoreCallback<Ownership>>> resolving_;
     std::unordered_set<core::RoomId> interest_;

@@ -153,6 +153,46 @@ TEST_P(RoomStoreTest, TheFirstNodeToResolveARoomCreatesItUnderGenerationOne) {
               "1 0 group_chat durable");
 }
 
+TEST_P(RoomStoreTest, ANodeTakingARoomOverLearnsWhereItsCountStands) {
+    const core::RoomId room = new_room();
+    EXPECT_EQ(resolve(room, a_)->last_seq, 0U);
+    ASSERT_EQ(append(room, 1), Seq{1});
+    ASSERT_EQ(append(room, 1), Seq{2});
+    go_quiet(room);
+    const auto taken = resolve(room, b_);
+    ASSERT_TRUE(taken);
+    EXPECT_EQ(taken->node, b_);
+    EXPECT_EQ(taken->last_seq, 2U);
+    // Another node's answer names the owner only.
+    EXPECT_EQ(resolve(room, c_)->last_seq, 0U);
+    ASSERT_EQ(append(room, 2), Seq{3});
+    go_quiet(room);
+    const auto claimed = claim_stale({room}, c_);
+    ASSERT_TRUE(claimed);
+    ASSERT_EQ(claimed->size(), 1U);
+    EXPECT_EQ(claimed->front().last_seq, 3U);
+}
+
+TEST_P(RoomStoreTest, AnEphemeralRoomTakesFencedSeqsAndStoresNoMessage) {
+    // Version 8, as presence rooms are.
+    const core::RoomId room = *core::RoomId::parse("01a0eb86-6cca-8dce-84cc-3bb47615f9fd");
+    ASSERT_TRUE(rt::is_ephemeral_room(room));
+    ASSERT_TRUE(resolve(room, a_));
+    EXPECT_EQ(scalar(*conn_, "SELECT kind FROM room_state WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "presence");
+    EXPECT_EQ(append(room, 1), Seq{1});
+    EXPECT_EQ(append(room, 1), Seq{2});
+    go_quiet(room);
+    ASSERT_EQ(resolve(room, b_)->generation, 2U);
+    EXPECT_EQ(append(room, 1), Seq{std::nullopt}) << "fenced as any other room's";
+    EXPECT_EQ(append(room, 2), Seq{3});
+    EXPECT_EQ(last_seq(room), "3");
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_messages WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "0");
+}
+
 TEST_P(RoomStoreTest, AnOwnerWhoseHeartbeatIsFreshKeepsItsRoom) {
     const core::RoomId room = new_room();
     ASSERT_TRUE(resolve(room, a_));

@@ -861,6 +861,11 @@ private:
         if (const auto o = owned_.find(room); o != owned_.end()) {
             latest = o->second.head;
         }
+        // Taken over, its head is where the store's count stood, not the 0 of a fresh queue:
+        // a member joining now must see what the old owner sequenced as behind it.
+        if (registry_.owned(room)) {
+            latest = std::max(latest, registry_.taken_at(room));
+        }
         if (const auto l = local_.find(room); l != local_.end()) {
             latest = std::max({latest, l->second.delivered, l->second.head});
         }

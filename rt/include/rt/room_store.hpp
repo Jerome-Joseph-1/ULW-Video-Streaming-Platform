@@ -4,6 +4,7 @@
 #include "core/util/time.hpp"
 #include "rt/message_key.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -28,16 +29,31 @@ inline constexpr core::Millis kStoreTimeout{2'000};
 // comparison both use the database's clock, so skew between nodes does not enter.
 inline constexpr core::Millis kOwnerStaleAfter{5'000};
 
+// Rooms whose writes are sequenced and fanned out like any other's but never kept: RFC 9562
+// version 8 ids, which chat_server derives for presence (ADR-0053) and no client can name. A
+// store takes their seqs, fenced as ever, and stores no message for them.
+[[nodiscard]] inline bool is_ephemeral_room(const core::RoomId& room) noexcept {
+    return (room.uuid().bytes()[6] & std::byte{0xF0}) == std::byte{0x80};
+}
+
 struct Ownership {
     core::NodeId node;
     std::uint64_t generation = 0;
+    // The room's last_seq as the answer that made or gave the room to the asking node found it;
+    // 0 in any other answer. A new owner starts counting its head from it, not from 0.
+    std::uint64_t last_seq = 0;
 
-    friend bool operator==(const Ownership&, const Ownership&) = default;
+    // Who holds the room, under which generation: last_seq describes an answer, not the owner.
+    friend bool operator==(const Ownership& a, const Ownership& b) noexcept {
+        return a.node == b.node && a.generation == b.generation;
+    }
 };
 
 struct OwnedRoom {
     core::RoomId room;
     std::uint64_t generation = 0;
+    // As Ownership::last_seq, in the answer to claim_stale.
+    std::uint64_t last_seq = 0;
 
     friend bool operator==(const OwnedRoom&, const OwnedRoom&) = default;
 };
