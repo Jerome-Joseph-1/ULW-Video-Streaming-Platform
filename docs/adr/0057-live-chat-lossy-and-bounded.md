@@ -74,15 +74,23 @@ How senders are limited in a room of thousands:
   the server side has recorded the room live (`record_live`, or the runbook's statement with
   `live_chat_room`), and refused `not_live` before. Whatever starts a stream opens its chat;
   until the product does that, operators do it by the stream's name. Opened, it admits anyone
-  signed in. The profile below follows the id, so it applies to exactly the rooms a stream join
-  reaches.
+  signed in.
+- **One source of truth: the id.** Every node tells a live chat by its id alone
+  (`core::ports::is_stream_chat`), with no recorded kind to look up per message, and the
+  recorded kind can never disagree with it: `record_live` refuses any room whose id is not
+  version 8, the database refuses to record one live (`chat_rooms_live_is_a_stream`, migration
+  0007), and a join cannot name the live kind for a room id (ADR-0052's `"kind":"live"` is
+  gone; a stream is joined by its name). So a room gets every bound below exactly when it is
+  open to anyone.
 - **Delivery.** Every viewer of a live chat is lossy, whatever its join asked; a stalled
   viewer is never closed for it. Every lossy client, in any room, is served the same way: while
   it has 64 KiB or less unsent it is pushed each message as the room gets it; past that it gets
   nothing new and keeps a cursor, the first seq it has not been sent. It is owed at most the
   room's newest 64 messages: as the room moves on, and as the room's kept messages (256 KiB)
   age out, the cursor moves past what it can no longer be sent, and each seq it moves past is
-  counted in `lossy_drops_total` at once, whether or not the client ever reads again. When
+  counted in `lossy_drops_total` at once, whether or not the client ever reads again; so is
+  what it is still owed when it joins again or leaves, and any seq it is moved past that the
+  room never kept (a message that could not be kept, or a gap of the room's own). When
   its connection's queue drains (the reactor's `on_writable`), it is sent the kept messages
   from the cursor, oldest first, until it is 64 KiB behind again or has caught up; only then
   do new messages reach it directly again, so it never sees them out of order. 64 is three
@@ -103,7 +111,12 @@ How senders are limited in a room of thousands:
   past it the send is `rate_limited` with `retry_after_ms`, and the sender keeps the token its
   own bucket gave. Three nodes make 60 a second, more than anyone reads and 18 KB/s to each
   viewer at 300 bytes a message; the owner's ceiling of about 1000 a second holds for sixteen
-  nodes with room to spare.
+  nodes with room to spare. The node's allowance is shared, so ten accounts each within their
+  own two a second take all of a node's twenty, and everyone else on that node is turned away
+  until they slow down; `retry_after_ms` tells each when the next token comes, so the refused
+  retry together. Accepted for now: per-user fairness inside the room's allowance (a smaller
+  share per user as the room gets busier) is the next step if abuse shows up, and a random
+  spread on `retry_after_ms` would take an injected random source for little gain.
 - **Fan-out.** Unchanged from ADR-0035 and ADR-0043: the owner sequences once and sends one
   `Deliver` to each node with viewers; each node encodes each message once and hands it to its
   viewers. Thousands of viewers cost the owner one frame per node, and a node one copy per
@@ -112,9 +125,11 @@ How senders are limited in a room of thousands:
   the room keeps its newest 1000: the append that stores seq N of a lossy room deletes seq
   N - 1000 in the same statement, one more primary key write. 1000 messages of at most 2000
   bytes are about 2 MiB a room; at the 60 a second of three nodes that is 17 s of the busiest
-  chat, and minutes of an ordinary one, which is as far back as a late viewer pages. A
-  message's key goes with its row, so a resend of it after 1000 newer messages would be
-  sequenced again; the resend window is a minute (ADR-0043).
+  chat, and minutes of an ordinary one, which is as far back as a late viewer pages. History
+  below seq N - 1000 is empty: a page asked for there answers a count of 0, as at the start of
+  the room. A message's key (`msg_key`) goes with its row, so a resend of it after 1000 newer
+  messages is stored and delivered again under a new seq; ADR-0043's resend window is a minute,
+  which a room reaches 1000 messages within only past 17 a second.
 
 ## Consequences
 
@@ -131,8 +146,12 @@ How senders are limited in a room of thousands:
 - A stream's chat exists from when it is opened, and stays open after the stream ends. Every
   such room is bounded in storage, but rooms of ended streams keep their last 1000 messages.
   Reopen with a retention job when the table shows them.
-- A room an operator opens by id with `"kind":"live"` joins (ADR-0052) is open to anyone but
-  gets none of this profile: it is not a stream's. The runbook opens rooms by stream name only.
+- Only a stream's room can be open to anyone. A product that wants an open room of its own
+  names a stream for it.
+- Stale entries in the node's order of kept messages (each busy live chat drops its own oldest
+  with every message) no longer count against the 131072 messages kept across rooms; they are
+  cleared out whenever they are as many as the bound, so a quiet group chat keeps what it
+  resumes from however busy the live chats beside it.
 - Each node's allowance is its own, so the room's total is 60 a second on three nodes and grows
   with nodes. The owner's ceiling is far above it; if chat ever runs on dozens of nodes, move
   the limit to the owner.
