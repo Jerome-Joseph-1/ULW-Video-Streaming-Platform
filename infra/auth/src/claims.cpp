@@ -147,6 +147,8 @@ VerifyResult check_claims(std::string_view payload, const ClaimRules& rules, cor
     if (!expires_at) {
         return std::unexpected(expires_at.error());
     }
+    // `iat` is deliberately not read: the token contract (docs/integration/auth.md) asks for
+    // exp and nbf only, and a second clock check would refuse tokens nbf already admits.
     // Written against `now` so that no addition can run past the clock's range.
     if (now - kClockSkew >= *expires_at) {
         return std::unexpected(AuthError::Expired);

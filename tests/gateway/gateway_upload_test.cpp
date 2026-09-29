@@ -6,9 +6,11 @@
 #include "support/reactor_harness.hpp"
 
 #include <array>
+#include <charconv>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <openssl/evp.h>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -433,6 +435,23 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     const auto ingested = gw.counters().bytes_ingested;
     EXPECT_LE(ingested, (std::uint64_t{256} * 1024) + (std::uint64_t{64} * 1024));
 
+    // The staging bound (4 x 64 KiB) plus the vector's growth slack. The upload is 8 MiB, so a
+    // gateway that queued what the client keeps sending would leave this bound far behind.
+    constexpr std::uint64_t kHeldBound = std::uint64_t{1} << 20;
+    const auto buffered = [&gw] {
+        const std::string m = gw.metrics();
+        constexpr std::string_view kKey = "\nbuffer_bytes_in_use ";
+        const std::size_t at = m.find(kKey);
+        std::uint64_t value = kHeldBound + 1;
+        if (at != std::string::npos) {
+            std::from_chars(m.data() + at + kKey.size(), m.data() + m.size(), value);
+        }
+        return value;
+    };
+    const std::uint64_t held_once_stalled = buffered();
+    EXPECT_GT(held_once_stalled, 0U);
+    EXPECT_LE(held_once_stalled, kHeldBound);
+
     // A store that holds the body up is busy as far as the gateway can tell: a store slow to
     // take a part looks exactly like this. Only the store, or the request backstop, ends it.
     const gateway::Limits limits;
@@ -440,7 +459,13 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     constexpr int kBodyTimeouts = 10;
     for (int i = 0; i < kBodyTimeouts; ++i) {
         gw.advance(limits.body_idle_timeout);
+        // The client keeps pushing into a full socket; nothing more may land in the gateway.
+        if (i == 0 || i == kBodyTimeouts - 1) {
+            EXPECT_EQ(uploader.send_some(std::span(data).subspan(sent, 1024)), 0U);
+        }
+        EXPECT_EQ(buffered(), held_once_stalled);
     }
+    EXPECT_EQ(gw.counters().bytes_ingested, ingested);
     const gateway::Counters held = gw.counters();
     EXPECT_EQ(held.timeouts_body + held.timeouts_body_rate + held.timeouts_backstop, 0U);
     EXPECT_EQ(gw.claims(), 1U);

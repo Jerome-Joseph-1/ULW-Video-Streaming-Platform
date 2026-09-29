@@ -87,6 +87,17 @@ TEST_F(ClaimsTest, NotBeforeAllowsTheSkewAndNotOneSecondMore) {
     EXPECT_TRUE(check(test_payload({{"nbf", numeric_date(-3600)}})).has_value());
 }
 
+// Askedin's contract asks for exp and nbf only (docs/integration/auth.md), so issued-at is
+// never consulted: a token minted by a skewed issuer clock still verifies while nbf/exp allow.
+TEST_F(ClaimsTest, IssuedAtIsNotConsultedWhateverItSays) {
+    EXPECT_TRUE(check(test_payload({{"iat", numeric_date(30)}})).has_value());
+    EXPECT_TRUE(check(test_payload({{"iat", numeric_date(61)}})).has_value());
+    EXPECT_TRUE(check(test_payload({{"iat", numeric_date(86400)}})).has_value());
+    EXPECT_TRUE(check(test_payload({{"iat", R"("yesterday")"}})).has_value());
+    EXPECT_EQ(error_of(test_payload({{"iat", numeric_date(-60)}, {"exp", numeric_date(-60)}})),
+              AuthError::Expired);
+}
+
 TEST_F(ClaimsTest, ExpiryIsRequiredAndMustBeAnIntegerTheClockCanHold) {
     EXPECT_EQ(error_of(test_payload({{"exp", std::nullopt}})), AuthError::Malformed);
     EXPECT_EQ(error_of(test_payload({{"exp", '"' + numeric_date(3600) + '"'}})),
