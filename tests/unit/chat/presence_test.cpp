@@ -1,3 +1,4 @@
+#include "core/ports/message_store.hpp"
 #include "core/util/json.hpp"
 #include "net/reactor_factory.hpp"
 
@@ -273,23 +274,27 @@ TEST(PresenceRoom, EveryNodeDerivesTheSameVersion8RoomForAUserAndAnotherForAnoth
 // is the presence tag, never a stream chat's (ADR-0056), so the two kinds of derived room never
 // share an id.
 TEST(PresenceRoom, AUsersRoomIsPinnedAndTaggedAsAPresenceRoom) {
+    using core::ports::NamedRoom;
     const core::RoomId alice = chat::presence_room(user("alice"));
+    // SHA-256 of "ulw presence room\nalice": byte 0 set to 0x02, then the version and variant.
     EXPECT_EQ(alice.to_string(), "0245c53c-9c67-87a9-b59f-58fd4886aa2e");
-    EXPECT_EQ(rt::kPresenceRoomTag, 0x02U);
-    EXPECT_NE(rt::kPresenceRoomTag, rt::kStreamChatRoomTag);
-    EXPECT_EQ(std::to_integer<std::uint8_t>(alice.uuid().bytes()[0]), rt::kPresenceRoomTag);
-    EXPECT_TRUE(rt::is_named_room(alice, rt::kPresenceRoomTag));
-    EXPECT_FALSE(rt::is_named_room(alice, rt::kStreamChatRoomTag));
-    for (const char* name : {"bob", "carol", "auth0|dave", ""}) {
-        if (const auto u = core::UserId::parse(name)) {
-            EXPECT_EQ(std::to_integer<std::uint8_t>(chat::presence_room(*u).uuid().bytes()[0]),
-                      rt::kPresenceRoomTag)
-                << name;
-        }
+    EXPECT_EQ(static_cast<std::uint8_t>(NamedRoom::Presence), 0x02U);
+    EXPECT_EQ(static_cast<std::uint8_t>(NamedRoom::StreamChat), 0x01U);
+    EXPECT_EQ(std::to_integer<std::uint8_t>(alice.uuid().bytes()[0]),
+              static_cast<std::uint8_t>(NamedRoom::Presence));
+    EXPECT_TRUE(core::ports::is_named_room(alice, NamedRoom::Presence));
+    EXPECT_FALSE(core::ports::is_named_room(alice, NamedRoom::StreamChat));
+    EXPECT_FALSE(core::ports::is_stream_chat(alice));
+    for (const char* name : {"bob", "carol", "auth0|dave"}) {
+        const auto u = core::UserId::parse(name);
+        ASSERT_TRUE(u) << name;
+        EXPECT_TRUE(core::ports::is_named_room(chat::presence_room(*u), NamedRoom::Presence))
+            << name;
     }
     // A stream chat's derived id, version 8 and tagged 0x01, is not a presence room.
-    EXPECT_FALSE(
-        chat::is_presence_room(*core::RoomId::parse("01a0eb86-6cca-8dce-84cc-3bb47615f9fd")));
+    const core::RoomId stream = *core::RoomId::parse("01a0eb86-6cca-8dce-84cc-3bb47615f9fd");
+    EXPECT_TRUE(core::ports::is_stream_chat(stream));
+    EXPECT_FALSE(chat::is_presence_room(stream));
 }
 
 TEST_F(PresenceTest, AUserNobodyWatchesCostsNoEventAndNoRoomOnceTheGraceIsOver) {

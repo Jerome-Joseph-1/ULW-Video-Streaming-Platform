@@ -45,12 +45,14 @@ a word.
   its start time, so a restarted node is a new sender and its last run's announcements run out
   on their own.
 - **Kind tag.** Rooms derived from a name share version 8, so the first byte of the id says
-  what names the room: `0x01` is a stream's live chat (M32, `core::ports::is_stream_chat`),
-  `0x02` a user's presence room. `presence_room()` overwrites the digest's first byte with
-  `0x02` and keeps the RFC's version and variant bits, which leaves 114 bits of the digest, so
-  a presence room and a stream's chat can never share an id however their names collide. The
-  tags live in `rt/room_store.hpp` (`rt::kPresenceRoomTag`, `rt::kStreamChatRoomTag`) until
-  M32 moves them to its shared header. A unit test pins alice's room id and its tag.
+  what names the room: `core::ports::NamedRoom` has `StreamChat = 0x01`, a stream's live chat
+  (M32, `core::ports::is_stream_chat`), and `Presence = 0x02`, a user's presence room.
+  `presence_room()` overwrites the digest's first byte with `NamedRoom::Presence` and leaves
+  the RFC's version and variant bits as they are, the rest of the digest filling the other
+  bits, so a presence room and a stream's chat can never share an id however their names
+  collide. The enum, `is_named_room()` and `is_stream_chat()` are in
+  `core/include/core/ports/message_store.hpp` with the names and values M32 gives them, so M32
+  merges onto them unchanged. A unit test pins alice's room id and its tag.
 - **Ephemeral.** A version 8 id tagged `0x02` is the room plane's ephemeral kind
   (`rt::is_ephemeral_room`); other version 8 ids, a stream's chat among them, are ordinary
   rooms whose messages are kept. The store creates an ephemeral room with kind `presence` in
