@@ -33,7 +33,8 @@ enum class Type : std::uint8_t {
     Hello = 1,
     // Dialer to owner: deliver the room's messages to me. Answered with a Reply.
     Subscribe = 2,
-    // Dialer to owner: stop delivering the room's messages. Not answered.
+    // Dialer to owner: stop delivering the room's messages. Owner to dialer: this node no
+    // longer owns the room; look up its new owner. Not answered either way.
     Unsubscribe = 3,
     // Dialer to owner: sequence this message. Answered with a Reply.
     Send = 4,

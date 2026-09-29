@@ -271,6 +271,39 @@ TEST_P(RoomRouterTest, AWriteUnderAGenerationThatMovedOnIsFencedAndDeliveredNowh
     EXPECT_EQ(bob.got, expected);
 }
 
+TEST_P(RoomRouterTest, AnOwnerThatLetsARoomGoTellsItsSubscribersWhoMissedTheNotice) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Node& c = start("chat-c");
+    Member alice;
+    Member bob;
+    Member carol;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    // chat-b hears of no takeover from here on.
+    b.store->deaf = true;
+    a.store->reachable = false;
+    db_.make_stale(room_);
+    ASSERT_TRUE(join(c, carol));
+    ASSERT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-c"));
+    a.store->reachable = true;
+
+    // chat-b still routes to chat-a, whose write is fenced; chat-a then tells chat-b, which
+    // finds chat-c well before any periodic lookup would.
+    EXPECT_EQ(send(b, bob, "bob", "to the old owner"), std::unexpected(RouteError::Fenced));
+    std::expected<std::uint64_t, RouteError> sent = std::unexpected(RouteError::Unavailable);
+    ASSERT_TRUE(pump_until(
+        *reactor_,
+        [&] {
+            sent = send(b, bob, "bob", "to the new owner");
+            return sent.has_value();
+        },
+        std::chrono::seconds(5)));
+    ASSERT_TRUE(pump([&] { return !carol.got.empty() && !bob.got.empty(); }));
+    EXPECT_EQ(carol.got.back().body, "to the new owner");
+    EXPECT_EQ(bob.got.back().body, "to the new owner");
+}
+
 TEST_P(RoomRouterTest, SendingToARoomTheMemberHasNotJoinedIsRefused) {
     Node& a = start("chat-a");
     Member alice;

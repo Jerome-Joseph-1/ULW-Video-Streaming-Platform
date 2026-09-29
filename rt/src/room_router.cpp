@@ -38,6 +38,10 @@ constexpr std::size_t kMaxPeers = 256;
 // and two MACs take milliseconds, and the dialer's address lookup is bounded by kStoreTimeout.
 // A peer that takes longer is stuck or is not a node, and gives its slot back.
 constexpr core::Millis kHandshakeTimeout{5'000};
+// How long a room can go routed to an owner that let it go when the notification saying so was
+// lost: one store lookup per such room this often, against a room unreachable that long in the
+// rare case a notification goes missing.
+constexpr core::Millis kRevalidate{10'000};
 
 using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq) noexcept>;
 
@@ -423,6 +427,10 @@ class RoomRouter::Impl final : public IRegistryObserver,
                     Message{.room = f->room, .seq = f->seq, .sender = f->sender, .body = f->body});
                 return true;
             }
+            if (const auto* f = std::get_if<wire::Unsubscribe>(&frame)) {
+                router_.disowned(f->room, node_);
+                return true;
+            }
             return false;
         }
 
@@ -591,7 +599,7 @@ public:
         }
         registry_.release_all(std::move(done));
         for (auto& [room, o] : released) {
-            fail_writes(o, RouteError::Unavailable);
+            disown(room, o, RouteError::Unavailable);
         }
     }
 
@@ -641,8 +649,9 @@ public:
             return;
         }
         if (const auto it = owned_.find(room); it != owned_.end()) {
-            fail_writes(it->second, RouteError::Fenced);
+            OwnedRoomState gone = std::move(it->second);
             owned_.erase(it);
+            disown(room, gone, RouteError::Fenced);
         }
         const auto it = local_.find(room);
         if (it == local_.end()) {
@@ -749,6 +758,21 @@ private:
         }
         // Rooms whose owner could not be reached are tried again, once a beat.
         find_orphans();
+        if (now >= next_revalidation_) {
+            next_revalidation_ = now + kRevalidate;
+            revalidate();
+        }
+    }
+
+    // Notifications are hints and a listening session can miss them; every room routed to
+    // another node is looked up again now and then, and a newer owner found this way is
+    // subscribed to like one a notification named.
+    void revalidate() {
+        for (const auto& [room, lr] : local_) {
+            if (remote_owner(lr) && !lr.subscribing) {
+                registry_.resolve(room, [](const StoreResult<Ownership>&) noexcept {});
+            }
+        }
     }
 
     void find_orphans() {
@@ -901,6 +925,16 @@ private:
         it->second->send(frame);
     }
 
+    // The owner `node` let the room go; find where it went now, not at the next beat.
+    void disowned(const core::RoomId& room, const core::NodeId& node) {
+        const auto it = local_.find(room);
+        if (it == local_.end() || remote_owner(it->second) != node) {
+            return;
+        }
+        lost_owner(room);
+        find_owner(room);
+    }
+
     // The node this one routed the room to is not its owner, or not reachable.
     void lost_owner(const core::RoomId& room) {
         registry_.forget(room);
@@ -934,8 +968,9 @@ private:
             });
         // Not owned any more, and not through a fence either: the rooms were released.
         if (!started) {
-            fail_writes(it->second, RouteError::Unavailable);
+            OwnedRoomState gone = std::move(it->second);
             owned_.erase(it);
+            disown(room, gone, RouteError::Unavailable);
         }
     }
 
@@ -1009,6 +1044,19 @@ private:
         in->send(frame);
     }
 
+    // This node no longer owns the room: its writes are answered, and the nodes subscribed to
+    // it are told to look for the new owner rather than wait for deliveries that never come.
+    void disown(const core::RoomId& room, OwnedRoomState& o, RouteError error) {
+        std::vector<std::byte> frame;
+        wire::encode_unsubscribe(frame, room);
+        for (const net::Slab<Inbound>::Handle& h : o.subscribers) {
+            if (Inbound* in = inbound_.get(h)) {
+                in->send(frame);
+            }
+        }
+        fail_writes(o, error);
+    }
+
     void fail_writes(OwnedRoomState& o, RouteError error) {
         std::deque<Write> writes = std::move(o.writes);
         o.writes.clear();
@@ -1080,14 +1128,15 @@ private:
             reply(peer, request, wire::Status::Unavailable, 0);
             return;
         }
-        registry_.resolve(
-            room, [this, room, write = std::move(write)](StoreResult<Ownership>) mutable noexcept {
-                if (registry_.owned(room)) {
-                    enqueue(room, std::move(write));
-                    return;
-                }
-                answer(write, std::unexpected(RouteError::Unavailable));
-            });
+        registry_.resolve(room, [this, peer, request, room, write = std::move(write)](
+                                    StoreResult<Ownership> owner) mutable noexcept {
+            if (registry_.owned(room)) {
+                enqueue(room, std::move(write));
+                return;
+            }
+            // Another node owns it: the sender's route is stale, and it must hear so.
+            reply(peer, request, owner ? wire::Status::NotOwner : wire::Status::Unavailable, 0);
+        });
     }
 
     void reply(net::Slab<Inbound>::Handle peer, std::uint64_t request, wire::Status status,
@@ -1179,6 +1228,7 @@ private:
     std::uint64_t next_link_ = 1;
     net::TimerId timer_;
     core::MonoTime next_beat_;
+    core::MonoTime next_revalidation_;
     bool advertised_ = false;
     bool draining_ = false;
     bool advertising_ = false;

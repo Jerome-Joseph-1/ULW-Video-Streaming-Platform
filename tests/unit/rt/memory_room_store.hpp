@@ -66,7 +66,7 @@ public:
     MemoryRoomStore(net::IReactor& reactor, MemoryRooms& db) : reactor_(reactor), db_(db) {
         db_.subscribe([this](const core::RoomId& room, const rt::Ownership& owner) {
             later([this, room, owner] {
-                if (listener_ != nullptr) {
+                if (listener_ != nullptr && !deaf) {
                     listener_->on_owner_changed(room, owner);
                 }
             });
@@ -81,6 +81,8 @@ public:
     // While false, every call fails as it would with the database out of reach, and nothing
     // it asked for happens.
     bool reachable = true;
+    // While true, ownership notices are lost on the way, as over a dead listening session.
+    bool deaf = false;
 
     void watch(rt::IOwnershipListener& listener) noexcept override { listener_ = &listener; }
     // For a node about to be destroyed while the others carry on.
