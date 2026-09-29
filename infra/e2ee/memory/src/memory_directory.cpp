@@ -9,6 +9,7 @@ using core::ports::E2eeError;
 using core::ports::E2eeResult;
 using core::ports::FetchedKeyPackage;
 using core::ports::KeyPackageBytes;
+using core::ports::StoredCommit;
 
 MemoryDirectory::MemoryDirectory(net::IReactor& reactor) : reactor_(reactor) {}
 
@@ -117,18 +118,34 @@ void MemoryDirectory::fetch_key_package(const core::UserId& user, const core::De
 
 void MemoryDirectory::submit_commit(const core::RoomId& room, const core::UserId& user,
                                     const core::DeviceId& committer, std::uint64_t epoch,
-                                    E2eeCallback<void> done) {
+                                    core::ports::CommitBytes commit, E2eeCallback<void> done) {
+    if (commit.empty() || commit.size() > core::ports::kMaxCommitBytes) {
+        reply<void>(std::move(done), std::unexpected(E2eeError::Invalid));
+        return;
+    }
     if (auto live = live_device(user, committer); !live) {
         reply<void>(std::move(done), std::unexpected(live.error()));
         return;
     }
-    std::uint64_t& next = next_epoch_[room];
-    if (epoch != next) {
+    auto& accepted = commits_[room];
+    if (epoch != accepted.size()) {
         reply<void>(std::move(done), std::unexpected(E2eeError::StaleEpoch));
         return;
     }
-    ++next;
+    accepted.push_back(std::move(commit));
     reply<void>(std::move(done), {});
+}
+
+void MemoryDirectory::fetch_commits(const core::RoomId& room, std::uint64_t from_epoch,
+                                    E2eeCallback<std::vector<StoredCommit>> done) {
+    std::vector<StoredCommit> page;
+    if (const auto it = commits_.find(room); it != commits_.end()) {
+        for (std::uint64_t e = from_epoch;
+             e < it->second.size() && page.size() < core::ports::kCommitPage; ++e) {
+            page.push_back(StoredCommit{.epoch = e, .commit = it->second[e]});
+        }
+    }
+    reply<std::vector<StoredCommit>>(std::move(done), std::move(page));
 }
 
 } // namespace infra::e2ee

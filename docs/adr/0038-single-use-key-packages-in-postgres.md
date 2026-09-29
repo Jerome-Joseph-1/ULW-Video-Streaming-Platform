@@ -40,17 +40,23 @@ never parses a package.
   the lock, so concurrent publishes never pass the cap.
 - `deregister_device` retires the row (`revoked_at`) and deletes its packages in one transaction.
   A retired id never comes back, and fetches of it report `Revoked`.
-- `submit_commit(room, user, device, epoch)` claims an epoch transition: the primary key
-  `(room_id, epoch)` of `mls_epochs` lets the first claim win and the rest see `StaleEpoch`. The
-  commit's bytes travel through the room as an ordinary opaque message, so the room owner
-  (ADR-0015) can order commits without the server ever reading one.
+- `submit_commit(room, user, device, epoch, commit)` claims an epoch transition and stores the
+  opaque commit in the same row of `mls_epochs`: the primary key `(room_id, epoch)` lets the
+  first commit win and the rest see `StaleEpoch`. A claim and its commit cannot be separated,
+  so a crash can never spend an epoch on a commit nobody received and wedge the room.
+  `fetch_commits(room, from_epoch)` hands them out in order, a page of 32 at a time, for members
+  that missed the room's copy. Commits are at most 64 KiB. The room owner (ADR-0015) still fans
+  each accepted commit out as an ordinary opaque message; the chat service and router need no
+  change, and the server never reads a commit.
 
 ## Consequences
 
 - The server stores public key material only and never parses it: a malformed package is the
   inviting client's problem to report, and the directory cannot check lifetimes or ciphersuites.
 - An exhausted device cannot be invited until it comes online and publishes again.
-- `mls_epochs` gains a row per commit and nothing prunes it yet; the room lifecycle owns that.
+- `mls_epochs` gains a row, and up to 64 KiB, per commit, and nothing prunes it yet; the room
+  lifecycle owns that. A malicious member can still stall a room with a well-formed but
+  unprocessable commit; MLS gives the others no way to skip it short of re-forming the group.
 - Claims check the committer's device, not its membership in the room: membership lives with
   chat, which calls `submit_commit` from the room owner.
 - Multi-device key management stays open (ADR-0016): one person's devices are unrelated members,

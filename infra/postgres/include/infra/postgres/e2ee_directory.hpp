@@ -63,7 +63,11 @@ public:
                            core::ports::E2eeCallback<core::ports::FetchedKeyPackage> done) override;
     void submit_commit(const core::RoomId& room, const core::UserId& user,
                        const core::DeviceId& committer, std::uint64_t epoch,
+                       core::ports::CommitBytes commit,
                        core::ports::E2eeCallback<void> done) override;
+    void
+    fetch_commits(const core::RoomId& room, std::uint64_t from_epoch,
+                  core::ports::E2eeCallback<std::vector<core::ports::StoredCommit>> done) override;
 
 private:
     std::unique_ptr<Impl> impl_;

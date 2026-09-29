@@ -72,6 +72,9 @@ core::ports::E2eeResult<T> await(net::IReactor& reactor, Answer<T>& answer,
 // A recognisable package: `size` bytes counting up from `seed`.
 [[nodiscard]] core::ports::KeyPackageBytes package_of(std::size_t size, std::uint8_t seed);
 
+// A recognisable commit body for `epoch` by `author`.
+[[nodiscard]] core::ports::CommitBytes commit_body(std::uint64_t epoch, std::uint8_t author);
+
 // The behaviour every directory shares, run against each implementation; the executable that
 // links this instantiates it with its factories.
 class DirectoryContract : public ::testing::TestWithParam<DirectoryFactory> {
@@ -121,10 +124,24 @@ protected:
             harness_->delivery().fetch_key_package(user, device, std::move(done));
         });
     }
+    // A commit whose body names its epoch and author, so a fetch shows whose commit won.
     core::ports::E2eeResult<void> commit(const core::RoomId& room, const core::UserId& user,
-                                         const core::DeviceId& device, std::uint64_t epoch) {
+                                         const core::DeviceId& device, std::uint64_t epoch,
+                                         std::uint8_t author = 0) {
+        return commit_bytes(room, user, device, epoch, commit_body(epoch, author));
+    }
+    core::ports::E2eeResult<void> commit_bytes(const core::RoomId& room, const core::UserId& user,
+                                               const core::DeviceId& device, std::uint64_t epoch,
+                                               core::ports::CommitBytes body) {
         return call<void>([&](auto done) {
-            harness_->delivery().submit_commit(room, user, device, epoch, std::move(done));
+            harness_->delivery().submit_commit(room, user, device, epoch, std::move(body),
+                                               std::move(done));
+        });
+    }
+    core::ports::E2eeResult<std::vector<core::ports::StoredCommit>>
+    commits(const core::RoomId& room, std::uint64_t from_epoch) {
+        return call<std::vector<core::ports::StoredCommit>>([&](auto done) {
+            harness_->delivery().fetch_commits(room, from_epoch, std::move(done));
         });
     }
 

@@ -26,8 +26,9 @@ enum class E2eeError : std::uint8_t {
     // Publishing the batch would take the device above kMaxKeyPackagesPerDevice. Nothing was
     // stored.
     Full,
-    // A batch that is empty or holds more than kMaxKeyPackagesPerDevice, or a package that is
-    // empty or above kMaxKeyPackageBytes: no device could ever store it. Nothing was stored.
+    // A batch that is empty or holds more than kMaxKeyPackagesPerDevice, a package that is empty
+    // or above kMaxKeyPackageBytes, or a commit that is empty or above kMaxCommitBytes: no call
+    // could ever store it. Nothing was stored.
     Invalid,
     // Another commit already moved the room out of this epoch, or the room is not at it yet.
     StaleEpoch,
@@ -64,6 +65,22 @@ inline constexpr std::size_t kKeyPackageLowWater = kMaxKeyPackagesPerDevice / 5;
 
 // Checks a batch against the size bounds before anything is stored: Invalid, or nothing.
 [[nodiscard]] E2eeResult<void> check_key_package_batch(std::span<const KeyPackageBytes> batch);
+
+// An MLS commit exactly as its sender serialised it. Like a key package, never parsed here.
+using CommitBytes = std::vector<std::byte>;
+
+// Chat groups are small (ADR-0016). A commit carries one HPKE ciphertext of about 80 bytes per
+// node on its update path, 7 of them in a 128-member tree, plus a key package (about 300 bytes)
+// per member it adds: adding 100 members at once stays near 31 KiB. 64 KiB is twice that.
+inline constexpr std::size_t kMaxCommitBytes = std::size_t{64} * 1024;
+
+// A member coming back after a long absence catches up a page at a time.
+inline constexpr std::size_t kCommitPage = 32;
+
+struct StoredCommit {
+    std::uint64_t epoch = 0;
+    CommitBytes commit;
+};
 
 struct FetchedKeyPackage {
     KeyPackageBytes package;
@@ -102,13 +119,18 @@ public:
     // any number of concurrent fetchers exactly one receives it.
     virtual void fetch_key_package(const UserId& user, const DeviceId& device,
                                    E2eeCallback<FetchedKeyPackage> done) = 0;
-    // Claims the transition out of `epoch` in `room` for a commit that `user`'s `committer`
-    // built at that epoch. Epochs are claimed in order from 0, and the first claim for an epoch
-    // wins; every other is StaleEpoch, and its sender must process the winning commit and build
-    // its change again on top. The commit itself reaches the members through the room as an
-    // ordinary opaque message once its claim is accepted, so the server never reads it.
+    // Records `commit`, which `user`'s `committer` built at `epoch`, as the room's transition out
+    // of that epoch. Epochs are taken in order from 0 and the first commit for an epoch wins;
+    // every other is StaleEpoch, and its sender must process the winning commit and build its
+    // change again on top. The claim and the commit are one row, so no accepted epoch can lack
+    // its commit: a member that missed the room's copy fetches it with fetch_commits.
     virtual void submit_commit(const RoomId& room, const UserId& user, const DeviceId& committer,
-                               std::uint64_t epoch, E2eeCallback<void> done) = 0;
+                               std::uint64_t epoch, CommitBytes commit,
+                               E2eeCallback<void> done) = 0;
+    // The accepted commits of `room` from `from_epoch` on, oldest first, at most kCommitPage of
+    // them; empty once the caller is current. Who may read a room is chat's decision.
+    virtual void fetch_commits(const RoomId& room, std::uint64_t from_epoch,
+                               E2eeCallback<std::vector<StoredCommit>> done) = 0;
 };
 
 } // namespace core::ports

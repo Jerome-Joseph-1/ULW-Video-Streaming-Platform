@@ -17,6 +17,11 @@ core::ports::KeyPackageBytes package_of(std::size_t size, std::uint8_t seed) {
     return out;
 }
 
+core::ports::CommitBytes commit_body(std::uint64_t epoch, std::uint8_t author) {
+    // Epochs in tests stay far below 256.
+    return package_of(120, static_cast<std::uint8_t>((epoch * 16) + author));
+}
+
 namespace {
 
 using core::ports::E2eeError;
@@ -180,6 +185,62 @@ TEST_P(DirectoryContract, CommitEpochsAreClaimedInOrderAndOnce) {
     EXPECT_EQ(commit(room, alice, laptop, 2).error(), E2eeError::StaleEpoch);
     EXPECT_TRUE(commit(room, alice, laptop, 1));
     EXPECT_TRUE(commit(new_room(), alice, laptop, 0)) << "rooms count epochs separately";
+}
+
+TEST_P(DirectoryContract, AcceptedCommitsAreKeptForMembersToFetch) {
+    const core::DeviceId phone = stocked_device(0);
+    const core::DeviceId laptop = stocked_device(0);
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(commit(room, alice, phone, 0, 1));
+    ASSERT_EQ(commit(room, alice, laptop, 0, 2).error(), E2eeError::StaleEpoch);
+    ASSERT_TRUE(commit(room, alice, laptop, 1, 2));
+    ASSERT_TRUE(commit(room, alice, phone, 2, 1));
+
+    const auto all = commits(room, 0);
+    ASSERT_TRUE(all);
+    ASSERT_EQ(all->size(), 3U);
+    // The winner's body for each epoch; the refused commit left nothing behind.
+    for (std::uint64_t e = 0; e < 3; ++e) {
+        EXPECT_EQ((*all)[e].epoch, e);
+    }
+    EXPECT_EQ((*all)[0].commit, commit_body(0, 1));
+    EXPECT_EQ((*all)[1].commit, commit_body(1, 2));
+    EXPECT_EQ((*all)[2].commit, commit_body(2, 1));
+
+    const auto tail = commits(room, 2);
+    ASSERT_TRUE(tail);
+    ASSERT_EQ(tail->size(), 1U);
+    EXPECT_EQ(tail->front().epoch, 2U);
+    EXPECT_TRUE(commits(room, 3)->empty()) << "a current member has nothing to fetch";
+    EXPECT_TRUE(commits(new_room(), 0)->empty());
+}
+
+TEST_P(DirectoryContract, CommitsComeAPageAtATime) {
+    const core::DeviceId phone = stocked_device(0);
+    const core::RoomId room = new_room();
+    const std::uint64_t total = core::ports::kCommitPage + 3;
+    for (std::uint64_t e = 0; e < total; ++e) {
+        ASSERT_TRUE(commit(room, alice, phone, e));
+    }
+    const auto first = commits(room, 0);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->size(), core::ports::kCommitPage);
+    const auto rest = commits(room, first->back().epoch + 1);
+    ASSERT_TRUE(rest);
+    ASSERT_EQ(rest->size(), 3U);
+    EXPECT_EQ(rest->back().epoch, total - 1);
+}
+
+TEST_P(DirectoryContract, EmptyOrOversizedCommitIsInvalid) {
+    const core::DeviceId phone = stocked_device(0);
+    const core::RoomId room = new_room();
+    EXPECT_EQ(commit_bytes(room, alice, phone, 0, {}).error(), E2eeError::Invalid);
+    EXPECT_EQ(commit_bytes(room, alice, phone, 0,
+                           core::ports::CommitBytes(core::ports::kMaxCommitBytes + 1))
+                  .error(),
+              E2eeError::Invalid);
+    EXPECT_TRUE(commit_bytes(room, alice, phone, 0,
+                             core::ports::CommitBytes(core::ports::kMaxCommitBytes)));
 }
 
 } // namespace

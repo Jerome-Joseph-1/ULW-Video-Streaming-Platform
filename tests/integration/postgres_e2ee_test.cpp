@@ -251,8 +251,10 @@ TEST_F(E2eeRaceTest, ConcurrentCommitsForOneEpochHaveExactlyOneWinner) {
     const auto room = core::RoomId::generate(clock_, random_);
     hold_device();
     std::vector<Answer<void>> answers(kContenders);
-    for (auto& a : answers) {
-        harness_->delivery().submit_commit(room, alice_, device_, 0, a.callback());
+    for (std::size_t i = 0; i < answers.size(); ++i) {
+        harness_->delivery().submit_commit(room, alice_, device_, 0,
+                                           ulw::test::commit_body(0, static_cast<std::uint8_t>(i)),
+                                           answers[i].callback());
     }
     release_when_waiting(kContenders);
     await_all(answers);
@@ -269,6 +271,20 @@ TEST_F(E2eeRaceTest, ConcurrentCommitsForOneEpochHaveExactlyOneWinner) {
     EXPECT_EQ(scalar(conn, "SELECT count(*) FROM mls_epochs WHERE room_id = $1",
                      Params{}.add_uuid(room.uuid())),
               "1");
+    // The row holds the winner's commit, not a loser's.
+    Answer<std::vector<core::ports::StoredCommit>> stored;
+    harness_->delivery().fetch_commits(room, 0, stored.callback());
+    const auto page = ulw::test::await(harness_->reactor(), stored);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 1U);
+    std::size_t winner = answers.size();
+    for (std::size_t i = 0; i < answers.size(); ++i) {
+        if (answers[i].get()) {
+            winner = i;
+        }
+    }
+    ASSERT_LT(winner, answers.size());
+    EXPECT_EQ(page->front().commit, ulw::test::commit_body(0, static_cast<std::uint8_t>(winner)));
 }
 
 } // namespace

@@ -36,7 +36,11 @@ public:
                            core::ports::E2eeCallback<core::ports::FetchedKeyPackage> done) override;
     void submit_commit(const core::RoomId& room, const core::UserId& user,
                        const core::DeviceId& committer, std::uint64_t epoch,
+                       core::ports::CommitBytes commit,
                        core::ports::E2eeCallback<void> done) override;
+    void
+    fetch_commits(const core::RoomId& room, std::uint64_t from_epoch,
+                  core::ports::E2eeCallback<std::vector<core::ports::StoredCommit>> done) override;
 
     void on_timeout() noexcept override;
 
@@ -57,8 +61,8 @@ private:
     net::TimerId timer_;
     std::vector<std::move_only_function<void() noexcept>> pending_;
     std::unordered_map<core::DeviceId, Device> devices_;
-    // The epoch each room's next commit must have been built at.
-    std::unordered_map<core::RoomId, std::uint64_t> next_epoch_;
+    // Each room's accepted commits; the one at index n moved the room out of epoch n.
+    std::unordered_map<core::RoomId, std::vector<core::ports::CommitBytes>> commits_;
 };
 
 } // namespace infra::e2ee

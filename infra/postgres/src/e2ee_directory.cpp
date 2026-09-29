@@ -19,6 +19,9 @@ using core::ports::E2eeError;
 using core::ports::E2eeResult;
 using core::ports::FetchedKeyPackage;
 using core::ports::KeyPackageBytes;
+using core::ports::StoredCommit;
+
+constexpr auto kMaxEpoch = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
 
 constexpr Sql kBegin = "BEGIN";
 constexpr Sql kCommit = "COMMIT";
@@ -92,20 +95,28 @@ SELECT device.revoked, (SELECT body FROM taken),
 
 // The primary key (room_id, epoch) settles two claims for the same epoch: the second waits for
 // the first and then does nothing. The max() check refuses a claim for an epoch the room has
-// not reached, so epochs are claimed in order with no gaps.
+// not reached, so epochs are claimed in order with no gaps. The commit is stored in the row
+// that claims the epoch: were the claim committed apart from the commit, a crash between the
+// two would spend the epoch on a commit no member could ever receive, and wedge the room.
 constexpr Sql kClaimEpoch = R"sql(
 WITH device AS (
     SELECT revoked_at IS NOT NULL AS revoked FROM devices
      WHERE id = $3 AND user_id = $4
        FOR SHARE),
 claimed AS (
-    INSERT INTO mls_epochs (room_id, epoch, device_id)
-    SELECT $1, $2, $3
+    INSERT INTO mls_epochs (room_id, epoch, device_id, body)
+    SELECT $1, $2, $3, $5
      WHERE EXISTS (SELECT 1 FROM device WHERE NOT revoked)
        AND $2 = (SELECT coalesce(max(epoch) + 1, 0) FROM mls_epochs WHERE room_id = $1)
     ON CONFLICT DO NOTHING
     RETURNING 1)
 SELECT device.revoked, (SELECT count(*) FROM claimed) FROM device)sql";
+
+constexpr Sql kFetchCommits = R"sql(
+SELECT epoch, body FROM mls_epochs
+ WHERE room_id = $1 AND epoch >= $2
+ ORDER BY epoch
+ LIMIT $3)sql";
 
 E2eeError to_e2ee_error(DbError e) noexcept {
     switch (e) {
@@ -359,8 +370,10 @@ private:
 class ClaimEpoch final : public Operation {
 public:
     ClaimEpoch(const core::RoomId& room, const core::UserId& user, const core::DeviceId& device,
-               std::int64_t epoch, E2eeCallback<void> done) noexcept
-        : room_(room), user_(user), device_(device), epoch_(epoch), done_(std::move(done)) {}
+               std::int64_t epoch, core::ports::CommitBytes commit,
+               E2eeCallback<void> done) noexcept
+        : room_(room), user_(user), device_(device), epoch_(epoch), commit_(std::move(commit)),
+          done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
         return Statement{.sql = kClaimEpoch,
@@ -368,7 +381,8 @@ public:
                                        .add_uuid(room_.uuid())
                                        .add_int(epoch_)
                                        .add_uuid(device_.uuid())
-                                       .add_text(user_.view())};
+                                       .add_text(user_.view())
+                                       .add_bytea(commit_)};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -401,8 +415,24 @@ private:
     core::UserId user_;
     core::DeviceId device_;
     std::int64_t epoch_;
+    core::ports::CommitBytes commit_;
     E2eeCallback<void> done_;
 };
+
+E2eeResult<std::vector<StoredCommit>> decode_commits(const Result& rows) {
+    std::vector<StoredCommit> page;
+    page.reserve(static_cast<std::size_t>(rows.rows()));
+    for (int i = 0; i < rows.rows(); ++i) {
+        const auto epoch = rows.get(i, 0).and_then(parse_uint64);
+        const auto body = rows.get(i, 1);
+        auto commit = body ? parse_bytea(*body) : std::nullopt;
+        if (!epoch || !commit) {
+            return std::unexpected(E2eeError::Corrupt);
+        }
+        page.push_back(StoredCommit{.epoch = *epoch, .commit = std::move(*commit)});
+    }
+    return page;
+}
 
 } // namespace
 
@@ -474,14 +504,33 @@ void PgE2eeDirectory::fetch_key_package(const core::UserId& user, const core::De
 
 void PgE2eeDirectory::submit_commit(const core::RoomId& room, const core::UserId& user,
                                     const core::DeviceId& committer, std::uint64_t epoch,
-                                    E2eeCallback<void> done) {
+                                    core::ports::CommitBytes commit, E2eeCallback<void> done) {
+    if (commit.empty() || commit.size() > core::ports::kMaxCommitBytes) {
+        impl_->refuse(std::move(done), E2eeError::Invalid);
+        return;
+    }
     // An MLS epoch counts commits; no group comes near 2^63 of them.
-    if (epoch > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    if (epoch > kMaxEpoch) {
         impl_->refuse(std::move(done), E2eeError::StaleEpoch);
         return;
     }
-    impl_->pool().submit(std::make_unique<ClaimEpoch>(
-        room, user, committer, static_cast<std::int64_t>(epoch), std::move(done)));
+    impl_->pool().submit(std::make_unique<ClaimEpoch>(room, user, committer,
+                                                      static_cast<std::int64_t>(epoch),
+                                                      std::move(commit), std::move(done)));
+}
+
+void PgE2eeDirectory::fetch_commits(const core::RoomId& room, std::uint64_t from_epoch,
+                                    E2eeCallback<std::vector<StoredCommit>> done) {
+    impl_->pool().submit(std::make_unique<Query>(
+        Statement{.sql = kFetchCommits,
+                  .params = Params{}
+                                .add_uuid(room.uuid())
+                                .add_int(static_cast<std::int64_t>(std::min(from_epoch, kMaxEpoch)))
+                                .add_int(static_cast<std::int64_t>(core::ports::kCommitPage))},
+        [done = std::move(done)](Outcome outcome) mutable noexcept {
+            done(outcome ? decode_commits(*outcome)
+                         : failure<std::vector<StoredCommit>>(outcome.error()));
+        }));
 }
 
 } // namespace infra::postgres
