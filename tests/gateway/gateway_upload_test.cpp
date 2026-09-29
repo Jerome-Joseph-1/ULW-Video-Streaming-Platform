@@ -219,7 +219,7 @@ TEST_P(GatewayUpload, CommitBeforeEveryByteArrivedIs409) {
 }
 
 TEST_P(GatewayUpload, OnlyTheFirstAcceptedPatchMovesTheVideoFromInitToUploading) {
-    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
     const auto data = ulw::test::pattern(3 * kMiB);
     HttpClient c(gw.endpoint());
     const auto up = create_upload(c, data.size());
