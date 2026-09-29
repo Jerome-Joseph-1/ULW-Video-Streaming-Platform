@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <format>
 #include <openssl/evp.h>
+#include <span>
 #include <string>
 
 namespace chat {
@@ -43,11 +44,13 @@ core::RoomId live_chat_room(std::string_view stream) {
     digest[kVersionByte] = static_cast<unsigned char>((digest[kVersionByte] & 0x0FU) | kVersion8);
     digest[kVariantByte] = static_cast<unsigned char>((digest[kVariantByte] & 0x3FU) | kVariant);
     std::string text;
-    for (std::size_t i = 0; i < core::Uuid::kByteLength; ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) {
+    std::size_t at = 0;
+    for (const unsigned char b : std::span(digest).first<core::Uuid::kByteLength>()) {
+        if (at == 4 || at == 6 || at == 8 || at == 10) {
             text += '-';
         }
-        text += std::format("{:02x}", digest[i]);
+        text += std::format("{:02x}", b);
+        ++at;
     }
     // Canonical by construction.
     return *core::RoomId::parse(text);

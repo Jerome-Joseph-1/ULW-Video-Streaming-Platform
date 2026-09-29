@@ -585,11 +585,15 @@ void ChatService::drained(ClientId id) noexcept {
 // when it went.
 void ChatService::catch_up(Room& room, ClientId id, Client& c) {
     const auto s = std::ranges::find(room.subscribers, id, &Room::Subscriber::id);
-    if (s == room.subscribers.end() || !s->behind) {
+    if (s == room.subscribers.end()) {
+        return;
+    }
+    const std::optional<std::uint64_t> from = s->behind;
+    if (!from) {
         return;
     }
     std::string out;
-    for (auto it = std::ranges::lower_bound(room.kept, *s->behind, {}, &Room::Kept::seq);
+    for (auto it = std::ranges::lower_bound(room.kept, *from, {}, &Room::Kept::seq);
          it != room.kept.end(); ++it) {
         if (c.client->unsent_bytes() > limits_.lossy_backlog) {
             s->behind = it->seq;

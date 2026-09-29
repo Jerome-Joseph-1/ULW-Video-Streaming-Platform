@@ -90,8 +90,9 @@ TEST(CapSendBuffer, APeerThatStopsReadingHoldsOnlyTheCapInTheKernel) {
     std::size_t held = 0;
     for (;;) {
         const ssize_t n = ::send(conn.get(), chunk.data(), chunk.size(), MSG_NOSIGNAL);
+        const int err = n < 0 ? errno : 0;
         if (n <= 0) {
-            ASSERT_EQ(errno, EAGAIN);
+            ASSERT_EQ(err, EAGAIN);
             break;
         }
         held += static_cast<std::size_t>(n);

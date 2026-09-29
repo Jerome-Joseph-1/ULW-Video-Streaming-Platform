@@ -15,6 +15,7 @@
 #include "unit/rt/memory_room_store.hpp"
 
 #include <atomic>
+#include <format>
 #include <future>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -381,8 +382,8 @@ TEST_P(ChatSessionTest, AViewerThatStopsReadingSkipsToTheNewestWhileOthersMissNo
     std::uint64_t heard = 0;
     for (std::uint64_t i = 0; i < kMessages; i += 10) {
         for (std::uint64_t k = i; k < i + 10; ++k) {
-            ASSERT_TRUE(sender->send_text(R"({"type":"send","room":")" + room + R"(","id":"s)" +
-                                          std::to_string(k) + R"(","body":")" + body + R"("})"));
+            ASSERT_TRUE(sender->send_text(std::format(
+                R"({{"type":"send","room":"{}","id":"s{}","body":"{}"}})", room, k, body)));
         }
         // The durable reader keeps up, and gets every message in order. So does the sender,
         // which would otherwise be closed for falling behind.

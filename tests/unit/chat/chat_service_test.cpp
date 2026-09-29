@@ -623,7 +623,7 @@ TEST_F(ChatServiceTest, AFailedJoinIsReportedAndTheNextJoinAsksAgain) {
     EXPECT_EQ(rooms_.joins.size(), 1U);
 }
 
-constexpr std::size_t kBehind = std::size_t{64} * 1024 + 1;
+constexpr std::size_t kBehind = (std::size_t{64} * 1024) + 1;
 
 TEST_F(ChatServiceTest, ALossyClientThatFellBehindIsSentWhatItMissedInOrderOnceItDrains) {
     FakeClient viewer;
@@ -687,7 +687,7 @@ TEST_F(ChatServiceTest, AStalledLossyClientIsOwedOnlyTheNewestAndTheOlderAreCoun
 
     stalled.unsent = 0;
     service_->drained(s);
-    std::vector<std::uint64_t> newest(all.end() - 64, all.end());
+    const std::vector<std::uint64_t> newest(all.end() - 64, all.end());
     EXPECT_EQ(seqs(stalled.take()), newest);
     EXPECT_EQ(service_->counters().lossy_drops, kSent - 64);
 }
@@ -718,7 +718,7 @@ TEST_F(ChatServiceTest, CatchingUpStopsWhenTheConnectionIsBehindAgainAndGoesOnAt
 class SmallLossyBuffer : public ChatServiceTest {
 protected:
     // Four ordinary messages per room ("hi" and its overhead are 258 bytes each).
-    SmallLossyBuffer() : ChatServiceTest({.room_buffer_bytes = 4 * 258}) {}
+    SmallLossyBuffer() : ChatServiceTest({.room_buffer_bytes = std::size_t{4} * 258}) {}
 };
 
 TEST_F(SmallLossyBuffer, WhatTheRoomNoLongerKeepsIsDroppedForAClientBehindAsItGoes) {
