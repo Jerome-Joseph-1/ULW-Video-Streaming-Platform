@@ -7,7 +7,8 @@
 #
 # With --server, it also asks the sandbox cluster's API server (e2e-up.sh must have run) to
 # dry-run the Askedin overlays, prod and stage, and STUNner's manifests, which checks them
-# against the admission chain and the CRDs as installed. Only the sandbox: its kubeconfig is the only one this script uses.
+# against the admission chain and the CRDs as installed. Only the sandbox: its kubeconfig is
+# the only one this script uses.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)

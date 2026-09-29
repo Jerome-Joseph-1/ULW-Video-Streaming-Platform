@@ -244,8 +244,9 @@ each client a TURN credential minted from a secret it shares with STUNner (docs/
 ### Check the cluster first
 
 ```sh
+# v1.x, from Envoy Gateway:
 kubectl get crd gateways.gateway.networking.k8s.io \
-  -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}'   # v1.x from Envoy Gateway
+  -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}'
 kubectl get svc -A | grep -w 3478        # nothing may hold UDP 3478 yet
 ```
 
@@ -285,7 +286,7 @@ New keys for `.env.stage` and `.env.prod` (names only):
 
 ```
 TURN_SECRET              32+ random bytes, base64; the same value in both files
-TURN_HOST                the address browsers reach STUNner at: the node's public IP or a DNS name for it
+TURN_HOST                where browsers reach STUNner: the node's public IP, or a DNS name for it
 LIVEKIT_KEYS             "<api key>: <api secret>", the secret at least 32 characters
 ```
 

@@ -1,8 +1,8 @@
 # The sandbox cluster's name, kubeconfig and context, and the helpers that create it and load
 # images into it; sourced by the scripts beside it and deploy/stunner/up.sh after they set
-# $here (deploy/local) and $tools. Every kubectl call they make goes through kubectl() below, which names
-# the kubeconfig and context outright: neither a KUBECONFIG in the caller's environment nor a
-# missing file can point one at another cluster.
+# $here (deploy/local) and $tools. Every kubectl call they make goes through kubectl() below,
+# which names the kubeconfig and context outright: neither a KUBECONFIG in the caller's
+# environment nor a missing file can point one at another cluster.
 cluster=ulw-e2e
 kubeconfig=$here/.state/kubeconfig
 context=kind-$cluster

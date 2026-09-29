@@ -37,7 +37,8 @@ pinned "$livekit_image" "$livekit_digest"
 # release e2e-up.sh installs, so the two never disagree about their version. Only the CRDs: the
 # rest of that file runs Envoy Gateway, which is e2e-up.sh's to start.
 log "installing the Gateway API and STUNner CRDs"
-python3 - "$tools/envoy-gateway.yaml" <<'EOF' | kubectl apply --server-side --force-conflicts -f - >/dev/null
+gateway_api_crds() {
+    python3 - "$tools/envoy-gateway.yaml" <<'EOF'
 import sys
 import yaml
 
@@ -47,10 +48,13 @@ with open(sys.argv[1], encoding="utf-8") as f:
             and d["spec"]["group"] == "gateway.networking.k8s.io"]
 yaml.safe_dump_all(crds, sys.stdout)
 EOF
+}
+gateway_api_crds | kubectl apply --server-side --force-conflicts -f - >/dev/null
 kubectl apply --server-side --force-conflicts -f "$tools/stunner-crds.yaml" >/dev/null
-kubectl wait --for=condition=Established --timeout=60s crd/gatewayclasses.gateway.networking.k8s.io \
-    crd/gateways.gateway.networking.k8s.io crd/gatewayconfigs.stunner.l7mp.io \
-    crd/dataplanes.stunner.l7mp.io crd/udproutes.stunner.l7mp.io >/dev/null
+kubectl wait --for=condition=Established --timeout=60s \
+    crd/gatewayclasses.gateway.networking.k8s.io crd/gateways.gateway.networking.k8s.io \
+    crd/gatewayconfigs.stunner.l7mp.io crd/dataplanes.stunner.l7mp.io \
+    crd/udproutes.stunner.l7mp.io >/dev/null
 
 apply_stdin() { kubectl apply -f - >/dev/null; }
 for ns in stunner-system apps-stage; do
