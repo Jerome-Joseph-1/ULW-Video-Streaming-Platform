@@ -213,6 +213,17 @@ TEST_P(GatewayPlayback, AStoredPlaylistPointingOutsideItsVideoIsRefusedAndCounte
     EXPECT_NE(gw.metrics().find("playlists_rejected_total 1\n"), std::string::npos);
 }
 
+TEST_P(GatewayPlayback, AStoredPlaylistWithATagThatCouldRedirectThePlayerIsRefused) {
+    GatewayUnderTest gw(options());
+    publish(gw);
+    gw.put_object(key("master.m3u8"),
+                  std::string(kMaster) +
+                      "#EXT-X-CONTENT-STEERING:SERVER-URI=\"https://evil.example/steer\"\n");
+    HttpClient c(gw.endpoint());
+    EXPECT_EQ(c.request("GET", path("master.m3u8"), kAlice)->status, 500);
+    EXPECT_EQ(gw.counters().playlists_rejected, 1U);
+}
+
 TEST_P(GatewayPlayback, AReadyVideoWithoutItsPlaylistsIsAServerError) {
     GatewayUnderTest gw(options());
     gw.put_video(video(core::VideoState::Ready));

@@ -169,13 +169,53 @@ TEST(HlsMedia, NeverLeavesABlankLineAfterExtinf) {
                     "#EXT-X-ENDLIST\n");
 }
 
-TEST(HlsMedia, KeepsCommentsAndUnknownTagsVerbatim) {
+TEST(HlsMedia, KeepsCommentsVerbatim) {
     RecordingSigner s;
-    const auto out = rewrite_media("#EXTM3U\n# a comment, URI=\"x\"\n#EXT-X-FUTURE:URI=\"x\"\n",
-                                   kDir, s.signer());
+    const auto out = rewrite_media("#EXTM3U\n# a comment, URI=\"x\"\n", kDir, s.signer());
     ASSERT_TRUE(out);
-    EXPECT_EQ(*out, "#EXTM3U\n# a comment, URI=\"x\"\n#EXT-X-FUTURE:URI=\"x\"\n");
+    EXPECT_EQ(*out, "#EXTM3U\n# a comment, URI=\"x\"\n");
     EXPECT_TRUE(s.keys.empty());
+}
+
+TEST(HlsPlaylist, RefusesTagsThatCouldCarryAUriItDoesNotHandle) {
+    constexpr std::string_view kSteering =
+        R"(#EXT-X-CONTENT-STEERING:SERVER-URI="https://evil.example/steer",PATHWAY-ID="a")";
+    constexpr std::string_view kInterstitial =
+        R"(#EXT-X-DATERANGE:ID="ad",CLASS="com.apple.hls.interstitial",)"
+        R"(START-DATE="2026-01-01T00:00:00Z",X-ASSET-URI="https://evil.example/ad.m3u8")";
+    for (const std::string_view line :
+         {kSteering, kInterstitial, std::string_view{R"(#EXT-X-FUTURE:URI="x")"},
+          std::string_view{"#EXT-X-FUTURE"},
+          std::string_view{R"(#EXT-X-STREAM-INF:BANDWIDTH=1,X-EVIL-URI="https://evil.example/")"},
+          std::string_view{R"(#EXT-X-MAP:X-OTHER-URI="https://evil.example/",URI="init.mp4")"},
+          std::string_view{R"(#EXT-X-STREAM-INF:BANDWIDTH=1,URI="720p/index.m3u8")"}}) {
+        RecordingSigner s;
+        const std::string text = "#EXTM3U\n" + std::string(line) + "\n";
+        EXPECT_EQ(rewrite_media(text, kDir, s.signer()), std::unexpected(PlaylistError::UnknownTag))
+            << line;
+        EXPECT_EQ(rewrite_master(text, kRoute), std::unexpected(PlaylistError::UnknownTag)) << line;
+    }
+}
+
+TEST(HlsPlaylist, PassesEveryTagTheWorkersFfmpegWrites) {
+    RecordingSigner s;
+    EXPECT_TRUE(rewrite_media(kMedia, kDir, s.signer()));
+    EXPECT_TRUE(rewrite_master(kMaster, kRoute));
+}
+
+TEST(HlsMedia, SignsAtMostTheBoundNumberOfUris) {
+    std::string text = "#EXTM3U\n";
+    for (std::size_t i = 0; i < core::hls::kMaxPlaylistUris; ++i) {
+        text += "#EXTINF:4,\nseg.m4s\n";
+    }
+    RecordingSigner s;
+    ASSERT_TRUE(rewrite_media(text, kDir, s.signer()));
+    EXPECT_EQ(s.keys.size(), core::hls::kMaxPlaylistUris);
+
+    text += "#EXTINF:4,\nseg.m4s\n";
+    RecordingSigner t;
+    EXPECT_EQ(rewrite_media(text, kDir, t.signer()), std::unexpected(PlaylistError::TooManyUris));
+    EXPECT_EQ(t.keys.size(), core::hls::kMaxPlaylistUris);
 }
 
 TEST(HlsMedia, FailsWhenTheSignerRefuses) {

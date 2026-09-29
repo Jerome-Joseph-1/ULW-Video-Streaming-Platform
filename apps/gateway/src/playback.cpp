@@ -37,6 +37,8 @@ PlaylistFailure from_rewrite(core::hls::PlaylistError e) noexcept {
     case core::hls::PlaylistError::Malformed:
     case core::hls::PlaylistError::UnsafeUri:
     case core::hls::PlaylistError::UnroutableVariant:
+    case core::hls::PlaylistError::UnknownTag:
+    case core::hls::PlaylistError::TooManyUris:
         return PlaylistFailure::Rejected;
     }
     return PlaylistFailure::Rejected;

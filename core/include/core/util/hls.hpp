@@ -3,6 +3,7 @@
 #include "core/models/storage_key.hpp"
 #include "core/util/time.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -26,7 +27,17 @@ enum class PlaylistError : std::uint8_t {
     UnroutableVariant,
     // The signer refused a URI.
     Unsigned,
+    // A tag the rewriter does not know, or an attribute other than URI whose name ends in URI:
+    // either could hand a player a URL no one checked.
+    UnknownTag,
+    // More URIs than kMaxPlaylistUris.
+    TooManyUris,
 };
+
+// The worker's longest video is 12 h in 4 s segments: 10,800 segment URIs and one init
+// segment. Rounded up to 2^14 for slack. It bounds the signing work and the response too:
+// at ~600 bytes a signed URL, 16,384 of them come to 9.8 MB.
+inline constexpr std::size_t kMaxPlaylistUris = 16'384;
 
 [[nodiscard]] std::string_view to_string(PlaylistError e) noexcept;
 

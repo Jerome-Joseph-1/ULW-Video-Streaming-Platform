@@ -26,6 +26,55 @@ constexpr std::array<std::string_view, 9> kUriTags{
     "#EXT-X-RENDITION-REPORT:",
 };
 
+// Tags that never carry a URI, passed through as they are. Anything else that starts with
+// #EXT is refused: a tag this list does not know may name a URL a player acts on
+// (EXT-X-CONTENT-STEERING's SERVER-URI, an interstitial EXT-X-DATERANGE's X-ASSET-URI), which
+// would reach the viewer unsigned and unchecked.
+constexpr std::array<std::string_view, 19> kUriFreeTags{
+    "#EXTM3U",
+    "#EXT-X-VERSION",
+    "#EXT-X-INDEPENDENT-SEGMENTS",
+    "#EXT-X-START",
+    "#EXT-X-STREAM-INF",
+    "#EXT-X-TARGETDURATION",
+    "#EXT-X-MEDIA-SEQUENCE",
+    "#EXT-X-DISCONTINUITY-SEQUENCE",
+    "#EXT-X-PLAYLIST-TYPE",
+    "#EXT-X-I-FRAMES-ONLY",
+    "#EXT-X-ENDLIST",
+    "#EXTINF",
+    "#EXT-X-BYTERANGE",
+    "#EXT-X-DISCONTINUITY",
+    "#EXT-X-PROGRAM-DATE-TIME",
+    "#EXT-X-GAP",
+    "#EXT-X-BITRATE",
+    "#EXT-X-SERVER-CONTROL",
+    "#EXT-X-PART-INF",
+};
+
+// Of those, the ones with attribute lists. Their attributes are checked too, so that a custom
+// X-...-URI attribute cannot ride along on a known tag.
+constexpr std::array<std::string_view, 4> kAttributeTags{
+    "#EXT-X-START:",
+    "#EXT-X-STREAM-INF:",
+    "#EXT-X-SERVER-CONTROL:",
+    "#EXT-X-PART-INF:",
+};
+
+bool is_tag(std::string_view line, std::string_view tag) noexcept {
+    return line.starts_with(tag) && (line.size() == tag.size() || line[tag.size()] == ':');
+}
+
+bool is_uri_free(std::string_view line) noexcept {
+    return std::ranges::any_of(kUriFreeTags,
+                               [&](std::string_view tag) { return is_tag(line, tag); });
+}
+
+bool has_attribute_list(std::string_view line) noexcept {
+    return std::ranges::any_of(kAttributeTags,
+                               [&](std::string_view tag) { return line.starts_with(tag); });
+}
+
 // Calls `fn` with each line, without its terminator; a CR before the LF is dropped too.
 template <class Fn> std::expected<void, PlaylistError> for_each_line(std::string_view text, Fn fn) {
     while (!text.empty()) {
@@ -93,6 +142,23 @@ std::expected<std::string_view, PlaylistError> rendition_of(std::string_view uri
     return name;
 }
 
+// The value that starts `rest`, quotes included, for the attribute `name`. A URI must be a
+// closed quoted string; any other value may run to the next comma.
+std::expected<std::string_view, PlaylistError> attribute_value(std::string_view rest,
+                                                               std::string_view name) {
+    if (!rest.starts_with('"')) {
+        if (name == "URI") {
+            return std::unexpected(PlaylistError::Malformed);
+        }
+        return rest.substr(0, rest.find(','));
+    }
+    const std::size_t close = rest.find('"', 1);
+    if (close == std::string_view::npos) {
+        return std::unexpected(PlaylistError::Malformed);
+    }
+    return rest.substr(0, close + 1);
+}
+
 // Copies a tag line to `out` with each quoted URI attribute replaced by map(uri).
 template <class Map>
 std::expected<void, PlaylistError> rewrite_attributes(std::string_view line, std::string& out,
@@ -106,33 +172,28 @@ std::expected<void, PlaylistError> rewrite_attributes(std::string_view line, std
             return std::unexpected(PlaylistError::Malformed);
         }
         const std::string_view name = rest.substr(0, eq);
+        // A URI under any other name is one this rewriter does not handle.
+        if (name != "URI" && name.ends_with("URI")) {
+            return std::unexpected(PlaylistError::UnknownTag);
+        }
         out.append(rest.substr(0, eq + 1));
         rest.remove_prefix(eq + 1);
-        std::string_view value;
-        if (rest.starts_with('"')) {
-            const std::size_t close = rest.find('"', 1);
-            if (close == std::string_view::npos) {
-                return std::unexpected(PlaylistError::Malformed);
-            }
-            value = rest.substr(0, close + 1);
-        } else {
-            if (name == "URI") {
-                return std::unexpected(PlaylistError::Malformed);
-            }
-            value = rest.substr(0, rest.find(','));
+        const auto value = attribute_value(rest, name);
+        if (!value) {
+            return std::unexpected(value.error());
         }
-        rest.remove_prefix(value.size());
+        rest.remove_prefix(value->size());
         if (!rest.empty() && !rest.starts_with(',')) {
             return std::unexpected(PlaylistError::Malformed);
         }
         if (name == "URI") {
-            auto mapped = map(value.substr(1, value.size() - 2));
+            auto mapped = map(value->substr(1, value->size() - 2));
             if (!mapped) {
                 return std::unexpected(mapped.error());
             }
             out.append(1, '"').append(*mapped).append(1, '"');
         } else {
-            out.append(value);
+            out.append(*value);
         }
         if (!rest.empty()) {
             out.append(1, ',');
@@ -145,10 +206,20 @@ std::expected<void, PlaylistError> rewrite_attributes(std::string_view line, std
 // Blank lines are dropped: RFC 8216 ignores them, and some players mistake one after #EXTINF
 // for a segment with an empty URI.
 template <class Map>
-std::expected<std::string, PlaylistError> rewrite(std::string_view text, const Map& map) {
+std::expected<std::string, PlaylistError> rewrite(std::string_view text, const Map& map_one) {
     if (auto r = check_header(text); !r) {
         return std::unexpected(r.error());
     }
+    std::size_t uris = 0;
+    const auto map = [&](std::string_view uri) -> std::expected<std::string, PlaylistError> {
+        if (++uris > kMaxPlaylistUris) {
+            return std::unexpected(PlaylistError::TooManyUris);
+        }
+        return map_one(uri);
+    };
+    const auto no_uri = [](std::string_view) -> std::expected<std::string, PlaylistError> {
+        return std::unexpected(PlaylistError::UnknownTag);
+    };
     std::string out;
     // Signed URLs make a media playlist several times longer than the stored one.
     out.reserve(text.size() * 4);
@@ -166,8 +237,15 @@ std::expected<std::string, PlaylistError> rewrite(std::string_view text, const M
             if (auto a = rewrite_attributes(line, out, map); !a) {
                 return a;
             }
-        } else {
+        } else if (has_attribute_list(line)) {
+            if (auto a = rewrite_attributes(line, out, no_uri); !a) {
+                return a;
+            }
+        } else if (is_uri_free(line) || !line.starts_with("#EXT")) {
+            // A tag without attributes, or a comment, which players ignore.
             out.append(line);
+        } else {
+            return std::unexpected(PlaylistError::UnknownTag);
         }
         out.append(1, '\n');
         return {};
@@ -190,6 +268,10 @@ std::string_view to_string(PlaylistError e) noexcept {
         return "unroutable variant uri";
     case PlaylistError::Unsigned:
         return "playlist uri not signed";
+    case PlaylistError::UnknownTag:
+        return "playlist tag or attribute that may carry a uri";
+    case PlaylistError::TooManyUris:
+        return "too many playlist uris";
     }
     return "playlist error";
 }
