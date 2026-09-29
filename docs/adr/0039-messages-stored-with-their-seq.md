@@ -85,11 +85,12 @@ What bounds a page of history:
   none can carry a body. The in-memory store implements the same port, and keeps a writer of
   its own, `append(room, seq, ...)`, for whatever takes seqs in tests and single-process runs:
   it has no counter to take them from.
-- **Opaque bodies.** `body` is `bytea NOT NULL`, bound as a binary parameter and read back with
-  `encode(body, 'hex')`, so the server's `bytea_output` setting does not matter. Nothing parses,
-  collates or indexes it: the only index is the primary key `(room_id, seq)`, and the table has
-  no check constraint, because a violated check writes the failing row, body and all, into the
-  error and the server log. The body bound, 64 KiB (`kMaxMessageBody`), is the WebSocket
+- **Opaque bodies.** `body` is `bytea NOT NULL`, bound as a binary parameter and read back in
+  bytea's hex text form (`bytea_output = hex`, the server default, as the key-package store
+  also requires; anything else is read as `Corrupt`, never guessed at). Nothing parses, collates
+  or indexes it: the indexes are the primary key `(room_id, seq)` and the key's `(room_id,
+  sender, msg_key)`, and the table has no check constraint, because a violated check writes the
+  failing row, body and all, into the error and the server log. The body bound, 64 KiB (`kMaxMessageBody`), is the WebSocket
   decoder's message bound (ADR-0029), checked before anything is sent. MLS ciphertext and
   commits are bodies like any other.
 - **Pages.** At most `min(limit, 256)` rows whose bodies add up to at most 256 KiB. The query
@@ -127,10 +128,26 @@ What bounds a page of history:
   table, shows an index scan of `chat_messages_pkey` (backward for older pages, forward for
   newer) reading 101 rows, the page and the window's one row of lookahead, in 0.14-0.2 ms,
   with no sort.
-- Bodies bound as parameters stay out of statement text, `pg_stat_activity` and the server's
-  error log. Parameters are still written to the server log if it runs with `log_statement =
-  all` (or `mod`), or logs slow statements, unless `log_parameter_max_length` is 0; production
-  Postgres must keep one of those off. A test writes a known plaintext and finds it in no log.
+- Bodies bound as parameters stay out of statement text and `pg_stat_activity`, but the server
+  still writes bound parameters, bodies included (bytea prints as `\x` and hex), to its log:
+  - with every statement it logs: `log_statement = mod` or `all` (an append is an `INSERT`),
+    `log_min_duration_statement`, `log_min_duration_sample` or `log_transaction_sample_rate`,
+    unless `log_parameter_max_length = 0`;
+  - with every plan auto_explain logs, unless `auto_explain.log_parameter_max_length = 0`;
+  - with any error in a statement that carries a body, unless
+    `log_parameter_max_length_on_error = 0`, which is the default.
+
+  So production Postgres runs with `log_parameter_max_length_on_error = 0`, and with
+  `log_parameter_max_length = 0` (and auto_explain's, if it is loaded) whenever any of that
+  statement logging is on. The RUNBOOK sets all three on the service's database, and the
+  operations contract lists them. Nothing checks them at startup yet; the chat server's
+  readiness probe could. A test runs the store's writes, an erroring one included, under those
+  settings with every statement logged, and under the same with parameters logged, and
+  searches the server's log for the body as text, hex and base64: found only in the second.
+- A violated `NOT NULL` also writes the failing row, body and all, like a check constraint.
+  None can be violated: every column is bound from a typed value that has no null (the room's
+  uuid, the seq from `room_state`, the sender's id, the key, the body, which binds as an empty
+  value when empty, and `now()`).
 - The history endpoint that serves these pages to clients, and the join answer that tells a
   client the room's head seq so it can see a gap, are the chat service's.
 - History is never deleted. Retention, and what a user's deletion request removes, are open.

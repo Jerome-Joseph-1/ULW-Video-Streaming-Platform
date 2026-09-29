@@ -1,11 +1,13 @@
 -- Every message a room's owner sequenced (ADR-0015), by (room, seq). The body is opaque bytes,
 -- plaintext or MLS ciphertext alike: bytea, never text, so that nothing can collate, search or
 -- index what it says. The table has no check constraint: a violated one reports the failing
--- row, body included, in the error and the server log. The store bounds the body's size
--- before it sends one.
+-- row, body included, in the error and the server log. A violated NOT NULL reports it too; the
+-- store binds every column from a value that cannot be null, and bounds the body's size before
+-- it sends one. Bound parameters reach the log by other routes too (ADR-0039 lists the
+-- settings that keep them out).
 --
 -- History pages walk the primary key in either direction; a backward scan of (room_id, seq) is
--- the (room_id, seq DESC) order, so no second index is needed. No foreign key to room_state:
+-- the (room_id, seq DESC) order, so they need no other index. No foreign key to room_state:
 -- a seq exists only because the room's owner took it from room_state, and rooms are never
 -- deleted, so the check could not fail and would cost a lookup per message.
 --

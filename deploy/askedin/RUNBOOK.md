@@ -131,6 +131,20 @@ CREATE DATABASE ulw_stage OWNER ulw_stage;
 ```
 
 The role owns its database, which gives the migrations their DDL rights (docs/adr/0031).
+
+Chat message bodies travel as bound parameters, which the server writes to its log whenever it
+logs a statement with its parameters or an error in one (docs/adr/0039). Keep them out, on the
+same database, as the same superuser, whatever statement logging is on now or later:
+
+```sql
+ALTER DATABASE ulw_stage SET log_parameter_max_length = 0;
+ALTER DATABASE ulw_stage SET log_parameter_max_length_on_error = 0;
+-- Only where auto_explain is loaded:
+ALTER DATABASE ulw_stage SET auto_explain.log_parameter_max_length = 0;
+```
+
+`SHOW log_parameter_max_length;` and `SHOW log_parameter_max_length_on_error;` in a new session
+as `ulw_stage` then print `0`.
 `VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
 password percent-encoded.
 
