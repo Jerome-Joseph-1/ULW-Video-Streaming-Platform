@@ -19,3 +19,4 @@ __pycache__/
 /tests/call/node_modules/
 /tests/call/test-results/
 /load-report/
+/diagnostics/
