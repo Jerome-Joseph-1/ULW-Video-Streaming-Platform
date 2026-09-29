@@ -54,7 +54,8 @@ std::expected<LiveRemuxResult, std::string> LiveRemuxer::run(const LiveRemuxJob&
     const Limits limits{.writable = job.out_dir,
                         .address_space_bytes = kRemuxAddressSpace,
                         .cpu = core::Seconds{job.max_duration.count() / kWallPerCpu},
-                        .wall = std::chrono::duration_cast<core::Millis>(job.max_duration)};
+                        .wall = std::chrono::duration_cast<core::Millis>(job.max_duration),
+                        .file_size_bytes = live_max_file_bytes(job.max_kbps, job.segment_seconds)};
     const auto child = run_sandboxed(
         sandbox, limits, live_remux_args(config_.ffmpeg, job), clock_, [](std::string_view) {},
         stop, job.input);

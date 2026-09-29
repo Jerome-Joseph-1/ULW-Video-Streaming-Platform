@@ -17,6 +17,7 @@ LiveRemuxJob job() {
             .listed_segments = 20,
             .first_sequence = 41,
             .epoch = 3,
+            .max_kbps = 20'000,
             .max_duration = core::Seconds{3600}};
 }
 
@@ -56,7 +57,17 @@ TEST(LiveRemuxArgs, ContinueTheNumberingAndNameTheInitSegmentForItsEpoch) {
     EXPECT_EQ(after(args, "-start_number"), "41");
     EXPECT_EQ(after(args, "-hls_fmp4_init_filename"), "init_3.mp4");
     EXPECT_EQ(args.back(), "/scratch/media/index.m3u8");
-    EXPECT_EQ(after(args, "-hls_segment_filename"), "/scratch/media/seg_%d.m4s");
+    EXPECT_EQ(after(args, "-hls_segment_filename"), "/scratch/media/seg_3_%d.m4s");
+}
+
+TEST(LiveSegmentName, CarriesTheEpochAndTheSequence) {
+    EXPECT_EQ(infra::ffmpeg::live_segment_name(3, 41), "seg_3_41.m4s");
+}
+
+TEST(LiveMaxFileBytes, IsTwiceTheLongestSegmentTheContractAllowsAtTheMaximumBitrate) {
+    // 2 s + 0.5 s at 20 Mbit/s = 6.25 MB, twice.
+    EXPECT_EQ(infra::ffmpeg::live_max_file_bytes(20'000, 2), 12'500'000U);
+    EXPECT_EQ(infra::ffmpeg::live_max_file_bytes(1'000, 10), 2'625'000U);
 }
 
 TEST(LiveRemuxArgs, TheSegmentPatternProducesTheNamesTheTrackerExpects) {
@@ -66,7 +77,7 @@ TEST(LiveRemuxArgs, TheSegmentPatternProducesTheNamesTheTrackerExpects) {
     ASSERT_TRUE(pattern.starts_with(prefix));
     std::string expected = pattern.substr(prefix.size());
     expected.replace(expected.find("%d"), 2, "41");
-    EXPECT_EQ(expected, infra::ffmpeg::live_segment_name(41));
+    EXPECT_EQ(expected, infra::ffmpeg::live_segment_name(3, 41));
 }
 
 TEST(LiveRemuxArgs, WriteSegmentsUnderATemporaryNameUntilTheyAreClosed) {
