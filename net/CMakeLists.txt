@@ -8,6 +8,7 @@ ulw_add_library(net_lib
     src/reactor_factory.cpp
     src/send_queue.cpp
     src/signals.cpp
+    src/sockaddr.cpp
     src/socket.cpp
     src/timing_wheel.cpp
     src/transport_plain.cpp

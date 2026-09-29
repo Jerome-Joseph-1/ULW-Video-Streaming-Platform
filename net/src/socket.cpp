@@ -2,6 +2,8 @@
 
 #include "core/util/parse.hpp"
 
+#include "sockaddr.hpp"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -12,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <span>
 
 namespace net {
 
@@ -250,6 +253,41 @@ std::expected<void, int> tune_connection(int fd) noexcept {
         }
     }
     return {};
+}
+
+std::expected<os::UniqueFd, int> bind_udp(const SocketAddr& local) {
+    const bool v6 = local.family == AddrFamily::V6;
+    os::UniqueFd fd{
+        ::socket(v6 ? AF_INET6 : AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
+    if (!fd) {
+        return std::unexpected(errno);
+    }
+    if (v6) {
+        if (auto r = set_int(fd.get(), IPPROTO_IPV6, IPV6_V6ONLY, 0); !r) {
+            return std::unexpected(r.error());
+        }
+    }
+    sockaddr_storage addr{};
+    const auto len = detail::to_sockaddr(local, v6, addr);
+    if (!len) {
+        return std::unexpected(len.error());
+    }
+    if (::bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr), *len) != 0) {
+        return std::unexpected(errno);
+    }
+    return fd;
+}
+
+std::expected<SocketAddr, int> local_addr(int fd) noexcept {
+    sockaddr_storage addr{};
+    socklen_t len = sizeof addr;
+    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        return std::unexpected(errno);
+    }
+    if (addr.ss_family != AF_INET && addr.ss_family != AF_INET6) {
+        return std::unexpected(EAFNOSUPPORT);
+    }
+    return detail::from_sockaddr(std::as_bytes(std::span(&addr, 1)).first(len));
 }
 
 } // namespace net
