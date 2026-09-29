@@ -41,6 +41,15 @@ target_link_libraries(test_echo PUBLIC ulw::net_lib)
 ulw_add_executable(ulw_echo_server load/echo_main.cpp)
 target_link_libraries(ulw_echo_server PRIVATE ulw::test_echo)
 ulw_add_executable(ulw_loadgen load/loadgen.cpp)
+ulw_add_executable(ulw_datagram_soak load/datagram_soak.cpp)
+target_link_libraries(ulw_datagram_soak PRIVATE ulw::net_lib Threads::Threads)
+# The short form of the M23 soak: 5000 peers for 20 s on each reactor.
+foreach(reactor io_uring epoll)
+    add_test(NAME datagram_soak_${reactor}
+        COMMAND ulw_datagram_soak --reactor ${reactor} --peers 5000 --duration-s 20 --sample-s 5
+                --max-rss-growth-kb 1024)
+    set_tests_properties(datagram_soak_${reactor} PROPERTIES LABELS unit)
+endforeach()
 
 # A CA and server certificates generated at run time, and the OpenSSL client side of tests.
 ulw_add_library(test_tls support/tls_pki.cpp)
