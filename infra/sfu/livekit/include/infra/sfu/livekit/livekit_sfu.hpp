@@ -20,6 +20,11 @@ struct Config {
     std::string client_url;
     std::string api_key;
     std::string api_secret;
+    // Where LiveKit's recorder calls a stream's packager, "srt://live-{stream}.apps:9000":
+    // "{stream}" becomes the stream's id, and a relay is then refused unless the id is a DNS
+    // label (lowercase letters, digits and '-', at most 63). Empty where nothing is relayed;
+    // relay is then refused.
+    std::string packager_srt;
 };
 
 enum class ConfigError : std::uint8_t {
@@ -28,13 +33,15 @@ enum class ConfigError : std::uint8_t {
     MissingApiKey,
     // Shorter than 32 bytes, or implausibly long.
     BadApiSecret,
+    BadPackagerAddress,
 };
 
 [[nodiscard]] std::string_view to_string(ConfigError e) noexcept;
 
 // Each generation of a room is the LiveKit room "<room id>:<generation>"; a participant is the
-// LiveKit identity "<user>/<device>". Room control goes over RoomService (Twirp, JSON over HTTP) on
-// `reactor` through `multi`; all three arguments must outlive the returned ISfu.
+// LiveKit identity "<user>/<device>". Room control goes over RoomService, and relaying a live
+// stream's publisher over Egress (Twirp, JSON over HTTP), on `reactor` through `multi`; all
+// three arguments must outlive the returned ISfu.
 [[nodiscard]] std::expected<std::unique_ptr<core::ports::ISfu>, ConfigError>
 make_sfu(net::IReactor& reactor, curl::Multi& multi, const core::ports::IClock& clock,
          Config config);

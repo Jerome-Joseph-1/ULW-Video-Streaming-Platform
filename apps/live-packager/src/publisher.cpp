@@ -171,7 +171,8 @@ Publisher::Publisher(PublisherConfig config, core::ports::IObjectTransfer& store
 
 std::expected<Publisher, PublishError> Publisher::open(PublisherConfig config,
                                                        core::ports::IObjectTransfer& store,
-                                                       const core::ports::IClock& clock) {
+                                                       const core::ports::IClock& clock,
+                                                       std::optional<std::uint32_t>* claimed) {
     std::error_code ec;
     fs::create_directories(config.outbox, ec);
     if (ec) {
@@ -194,9 +195,12 @@ std::expected<Publisher, PublishError> Publisher::open(PublisherConfig config,
         if (!seen) {
             return std::unexpected(seen.error());
         }
-        const auto claimed = claim_from(store, config, std::max(floor, *seen + 1));
-        if (!claimed) {
-            return std::unexpected(claimed.error());
+        const auto claim = claim_from(store, config, std::max(floor, *seen + 1));
+        if (!claim) {
+            return std::unexpected(claim.error());
+        }
+        if (claimed != nullptr) {
+            *claimed = *claim;
         }
         auto after = read_stored(store, config.stream, config.outbox);
         if (!after) {
@@ -206,7 +210,7 @@ std::expected<Publisher, PublishError> Publisher::open(PublisherConfig config,
         if (!newest) {
             return std::unexpected(newest.error());
         }
-        if (*newest >= static_cast<std::int64_t>(*claimed)) {
+        if (*newest >= static_cast<std::int64_t>(*claim)) {
             floor = *newest + 1;
             continue;
         }
@@ -216,10 +220,10 @@ std::expected<Publisher, PublishError> Publisher::open(PublisherConfig config,
         std::optional<MediaPlaylist> playlist = std::move(after->playlist);
         if (playlist && !playlist->segments.empty()) {
             LiveWindow window = LiveWindow::resume(config.window, std::move(*playlist));
-            return Publisher(std::move(config), store, clock, std::move(window), *claimed, true);
+            return Publisher(std::move(config), store, clock, std::move(window), *claim, true);
         }
         LiveWindow window = LiveWindow::fresh(config.window);
-        return Publisher(std::move(config), store, clock, std::move(window), *claimed, false);
+        return Publisher(std::move(config), store, clock, std::move(window), *claim, false);
     }
     return std::unexpected(PublishError::ClaimFailed);
 }
@@ -240,11 +244,7 @@ std::expected<void, PublishError> Publisher::put(const fs::path& file, std::stri
     return {};
 }
 
-std::expected<void, PublishError> Publisher::publish_playlist(const MediaPlaylist& playlist) {
-    // A packager that started after this one claimed the next epoch. The check comes right
-    // before the write and cannot be atomic with it, so a stale writer can still land one
-    // playlist that a newer one overwrites at its first; what it cannot do is write objects the
-    // newer playlist lists, which carry their epoch in their names.
+std::expected<void, PublishError> Publisher::check_not_superseded() {
     const auto newer =
         core::StorageKey::parse(config_.stream.key_prefix() + epoch_claim_name(epoch_ + 1));
     if (!newer) {
@@ -257,6 +257,37 @@ std::expected<void, PublishError> Publisher::publish_playlist(const MediaPlaylis
     // Cannot tell whether the stream has moved on: not writing is the safe answer.
     if (seen.error() != core::ports::StorageError::NotFound) {
         return std::unexpected(PublishError::UploadFailed);
+    }
+    return {};
+}
+
+std::expected<void, PublishError> Publisher::mark_ending() {
+    // A stale run's epoch over a newer ender's would have every recorder take the newer run's
+    // claim for a packager still publishing. The check is not atomic with the write, as for the
+    // playlist; the recorder takes the highest of this and the stream's other evidence.
+    if (auto current = check_not_superseded(); !current) {
+        return current;
+    }
+    const fs::path file = config_.outbox / kEndedByName;
+    {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << epoch_ << '\n';
+        // A write the disk refuses shows only when the buffer goes out.
+        out.close();
+        if (out.fail()) {
+            return std::unexpected(PublishError::UploadFailed);
+        }
+    }
+    return put(file, kEndedByName, claim_type());
+}
+
+std::expected<void, PublishError> Publisher::publish_playlist(const MediaPlaylist& playlist) {
+    // A packager that started after this one claimed the next epoch. The check comes right
+    // before the write and cannot be atomic with it, so a stale writer can still land one
+    // playlist that a newer one overwrites at its first; what it cannot do is write objects the
+    // newer playlist lists, which carry their epoch in their names.
+    if (auto current = check_not_superseded(); !current) {
+        return current;
     }
     const fs::path file = config_.outbox / kPlaylistName;
     {
@@ -331,6 +362,10 @@ FinishResult Publisher::finish(std::string_view ffmpeg_playlist) {
         result.problem = pumped.error();
     }
     if (result.problem == PublishError::Superseded || window_.playlist().segments.empty()) {
+        return result;
+    }
+    if (const auto marked = mark_ending(); !marked) {
+        result.problem = marked.error();
         return result;
     }
     if (const auto ended = publish_playlist(window_.ended()); ended) {

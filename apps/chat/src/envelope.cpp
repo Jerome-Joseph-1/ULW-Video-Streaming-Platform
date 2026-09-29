@@ -41,14 +41,17 @@ std::optional<std::string_view> string_of(const core::json::Value& message, std:
 }
 
 std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "after", "delivery"})) {
+    if (!only(message, {"type", "room", "after", "delivery", "kind"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     auto room = room_of(message);
     if (!room) {
         return std::unexpected(room.error());
     }
-    Join join{.room = *room, .after = std::nullopt, .delivery = Delivery::Durable};
+    Join join{.room = *room,
+              .after = std::nullopt,
+              .delivery = Delivery::Durable,
+              .kind = core::ports::RoomKind::GroupChat};
     if (const core::json::Value* after = message.find("after")) {
         join.after = after->as_u64();
         if (!join.after) {
@@ -60,6 +63,16 @@ std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) 
         if (delivery == "lossy") {
             join.delivery = Delivery::Lossy;
         } else if (delivery != "durable") {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+    }
+    if (message.find("kind") != nullptr) {
+        const auto kind = string_of(message, "kind");
+        if (kind == "direct") {
+            join.kind = core::ports::RoomKind::DirectChat;
+        } else if (kind == "live") {
+            join.kind = core::ports::RoomKind::StreamLiveChat;
+        } else if (kind != "group") {
             return std::unexpected(EnvelopeError::Malformed);
         }
     }
@@ -89,6 +102,37 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
         return std::unexpected(EnvelopeError::BadBody);
     }
     return Send{.room = *room, .id = *id, .body = std::move(*body)};
+}
+
+[[nodiscard]] std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "before", "after", "limit"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    History history{.room = *room, .before = std::nullopt, .after = std::nullopt};
+    const auto seq_at = [&](std::string_view field, std::optional<std::uint64_t>& into) {
+        const core::json::Value* v = message.find(field);
+        if (v == nullptr) {
+            return true;
+        }
+        into = v->as_u64();
+        return into.has_value();
+    };
+    if (!seq_at("before", history.before) || !seq_at("after", history.after) ||
+        (history.before && history.after)) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    if (const core::json::Value* limit = message.find("limit")) {
+        const auto n = limit->as_u64();
+        if (!n || *n == 0 || *n > kMaxHistoryLimit) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        history.limit = static_cast<std::size_t>(*n);
+    }
+    return history;
 }
 
 void append_room(std::string& out, const core::RoomId& room) {
@@ -123,6 +167,9 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     if (name == "send") {
         return send_of(*message);
     }
+    if (name == "history") {
+        return history_of(*message);
+    }
     return std::unexpected(EnvelopeError::Malformed);
 }
 
@@ -155,6 +202,12 @@ void write_message(std::string& out, const rt::Message& message) {
     // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     out += infra::auth::encode_base64url(octets);
     out += R"("})";
+}
+
+void write_history(std::string& out, const core::RoomId& room, std::size_t count) {
+    out += R"({"type":"history",)";
+    append_room(out, room);
+    std::format_to(std::back_inserter(out), R"(,"count":{}}})", count);
 }
 
 void write_error(std::string& out, std::string_view reason, const std::optional<core::RoomId>& room,
@@ -213,6 +266,8 @@ std::string_view reason(rt::RouteError e) noexcept {
         return "unavailable";
     case rt::RouteError::Busy:
         return "busy";
+    case rt::RouteError::Conflict:
+        return "conflict";
     }
     return "unavailable";
 }

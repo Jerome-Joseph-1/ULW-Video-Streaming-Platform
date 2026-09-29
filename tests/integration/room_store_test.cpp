@@ -90,10 +90,12 @@ protected:
 
     StoreResult<std::optional<std::uint64_t>> append(const core::RoomId& room,
                                                      std::uint64_t generation) {
+        // A key of its own each time: a repeated key is the same message, and takes no seq.
+        const std::string key = "k" + std::to_string(++keys_);
         return ask<std::optional<std::uint64_t>>([&](auto done) {
             store_->append(room, generation,
                            {.sender = *core::UserId::parse("alice"),
-                            .key = *rt::MessageKey::parse("k1"),
+                            .key = *rt::MessageKey::parse(key),
                             .body = {}},
                            std::move(done));
         });
@@ -135,6 +137,7 @@ protected:
     std::optional<infra::postgres::SyncConnection> conn_;
     // This run of every node the tests play.
     const core::Uuid run_ = core::Uuid::v7(clock_, random_);
+    std::uint64_t keys_ = 0;
     const core::NodeId a_ = node("chat-a");
     const core::NodeId b_ = node("chat-b");
     const core::NodeId c_ = node("chat-c");
@@ -148,6 +151,18 @@ TEST_P(RoomStoreTest, TheFirstNodeToResolveARoomCreatesItUnderGenerationOne) {
                      "FROM room_state WHERE room_id = $1",
                      Params{}.add_uuid(room.uuid())),
               "1 0 group_chat durable");
+}
+
+TEST_P(RoomStoreTest, ARoomTakesTheKindRecordedForIt) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(
+        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                    Params{}.add_uuid(room.uuid())));
+    ASSERT_TRUE(resolve(room, a_));
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', kind, delivery) FROM room_state WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "stream_live_chat lossy");
 }
 
 TEST_P(RoomStoreTest, AnOwnerWhoseHeartbeatIsFreshKeepsItsRoom) {

@@ -9,8 +9,9 @@ ulw_add_library(chat_lib
 target_include_directories(chat_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 target_link_libraries(chat_lib PUBLIC
     ulw::core_domain ulw::net_lib ulw::http_lib ulw::codec_ws ulw::rt_lib ulw::auth
-    ulw::curl_multi)
+    ulw::curl_multi
+    PRIVATE ulw::ops)
 
 ulw_add_executable(chat_server
     src/main.cpp)
-target_link_libraries(chat_server PRIVATE ulw::chat_lib ulw::os ulw::pg_rooms)
+target_link_libraries(chat_server PRIVATE ulw::chat_lib ulw::os ulw::ops ulw::pg_rooms ulw::pg_store)

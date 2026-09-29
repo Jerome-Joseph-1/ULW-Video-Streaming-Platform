@@ -26,6 +26,12 @@ A request is refused with `401` when:
 Two `Authorization` headers, or two `Cookie` headers, are refused earlier, by the HTTP parser,
 with `400` and the connection closed.
 
+A `401` carries `WWW-Authenticate` (RFC 6750): `Bearer` when no token was found, and
+`Bearer error="invalid_token"` when one was found and refused. The body is empty.
+
+A valid token that has made more than 300 requests in a minute on one gateway instance gets
+`429` with `Retry-After` ([uploads.md](uploads.md#limits-and-admission)).
+
 `x-user-id` and every other `x-user-*` header are ignored. They are never read, so they can
 neither grant nor change an identity. There is no header a client or an in-cluster caller can
 set to act as a user.

@@ -170,7 +170,8 @@ std::string_view fixed_response(Status status, Connection connection) noexcept {
 
 std::expected<std::size_t, WriteError> write_response_head(const ResponseHead& head,
                                                            std::span<char> out) noexcept {
-    const std::array values{head.content_type, head.cache_control, head.location, head.request_id};
+    const std::array values{head.content_type, head.cache_control, head.location,
+                            head.www_authenticate, head.request_id};
     if (!std::ranges::all_of(values, is_field_value) ||
         (head.retry_after && head.retry_after->count() < 0)) {
         return std::unexpected(WriteError::InvalidFieldValue);
@@ -191,6 +192,7 @@ std::expected<std::size_t, WriteError> write_response_head(const ResponseHead& h
     if (head.retry_after) {
         w.put("Retry-After: {}\r\n", head.retry_after->count());
     }
+    w.field("WWW-Authenticate", head.www_authenticate);
     if (!head.allow.empty()) {
         std::string_view separator = "Allow: ";
         for (const auto& [method, token] : kAllowTokens) {

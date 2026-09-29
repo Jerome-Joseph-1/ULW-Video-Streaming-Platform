@@ -8,6 +8,7 @@
 #include "postgres_harness.hpp"
 #include "support/fake_clock.hpp"
 #include "support/reactor_harness.hpp"
+#include "support/reserve_port.hpp"
 
 #include <sys/socket.h>
 
@@ -344,17 +345,11 @@ TEST_P(PoolTest, ServerThatNeverAnswersNeverStallsTheLoop) {
 }
 
 TEST_P(PoolTest, RefusedConnectionsFailOperationsWithoutWaitingOutTheirDeadline) {
-    // Bound and closed again: nothing listens there.
-    std::uint16_t port = 0;
-    std::string host;
-    {
-        auto probe = net::listen_tcp({.port = 0, .loopback_only = true});
-        ASSERT_TRUE(probe);
-        port = *net::local_port(probe->get());
-        host = loopback_of(probe->get());
-    }
+    // Reserved and not bound: nothing listens there.
+    const std::uint16_t port = ulw::test::reserve_port();
+    ASSERT_NE(port, 0);
     ASSERT_NO_FATAL_FAILURE(
-        start(std::format("host={} port={} user=x dbname=x", host, port), 4, core::Millis{30000}));
+        start(std::format("host=127.0.0.1 port={} user=x dbname=x", port), 4, core::Millis{30000}));
     const auto before = Clock::now();
     EXPECT_EQ(ask("SELECT 1"), std::unexpected(DbError::ConnectionLost));
     EXPECT_LT(Clock::now() - before, std::chrono::seconds(5));

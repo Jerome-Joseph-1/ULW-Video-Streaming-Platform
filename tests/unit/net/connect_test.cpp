@@ -3,6 +3,7 @@
 #include "os/system_clock.hpp"
 
 #include "support/reactor_harness.hpp"
+#include "support/reserve_port.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -116,12 +117,8 @@ TEST_P(ConnectTest, ConnectsWithoutBlockingAndTheSocketCarriesBytes) {
 }
 
 TEST_P(ConnectTest, AClosedPortIsReportedAsRefused) {
-    std::uint16_t port = 0;
-    {
-        auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
-        ASSERT_TRUE(listener);
-        port = *net::local_port(listener->get());
-    }
+    const std::uint16_t port = ulw::test::reserve_port();
+    ASSERT_NE(port, 0);
     auto fd = net::start_connect("127.0.0.1:" + std::to_string(port));
     if (!fd) {
         // Loopback may refuse inside connect() itself.
@@ -132,12 +129,8 @@ TEST_P(ConnectTest, AClosedPortIsReportedAsRefused) {
 }
 
 TEST(ListenOn, TakesConnectionsOnlyAtTheAddressItWasGiven) {
-    std::uint16_t port = 0;
-    {
-        auto probe = net::listen_tcp({.port = 0, .loopback_only = true});
-        ASSERT_TRUE(probe);
-        port = *net::local_port(probe->get());
-    }
+    const std::uint16_t port = ulw::test::reserve_port();
+    ASSERT_NE(port, 0);
     const auto listener = net::listen_on("127.0.0.1:" + std::to_string(port));
     ASSERT_TRUE(listener);
     // The same port on another loopback address belongs to no listener.

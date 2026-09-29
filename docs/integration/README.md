@@ -24,7 +24,7 @@ against in HTML comments, for maintainers.
 | [videos-and-playback.md](videos-and-playback.md) | Video states, playlists, presigned segments, CORS, players | Stable |
 | [operations-contract.md](operations-contract.md) | What the platform provides; health, readiness, metrics | Stable |
 | [versioning.md](versioning.md) | Compatibility and how changes are announced | Stable (policy is a proposal) |
-| [chat.md](chat.md) | WebSocket endpoint and envelope | Draft until M19 |
+| [chat.md](chat.md) | WebSocket endpoint, envelope, resume, history and member lists | Draft until phase 2 |
 | [calls.md](calls.md) | 1:1 and group calls | Draft until M26 |
 | [live.md](live.md) | Live streams | Draft until M33 |
 | [e2ee.md](e2ee.md) | End-to-end encrypted chat | Draft until M22 |
@@ -78,8 +78,9 @@ error; a real client resumes from `HEAD` and stops polling on `failed`
 
 - Ids are UUIDv7 in lowercase canonical form (`01a0ece4-69d0-781f-822e-f9f2e975cd5f`). Other
   spellings are `404`, not normalised.
-- Error responses have an empty body. The status code, `Upload-Offset`, `Retry-After` and
-  `Allow` headers carry everything.
+- Error responses have an empty body. The status code, `Upload-Offset`, `Retry-After`,
+  `Allow` and `WWW-Authenticate` headers carry everything. A `429` or `503` always carries
+  `Retry-After`; wait that long before retrying.
 - Every response has `X-Request-Id`. Quote it in bug reports.
 - Only the owner can see a video or an upload. Anything else answers `404`.
 - HTTP/1.1 with `Content-Length`; chunked request bodies are refused.

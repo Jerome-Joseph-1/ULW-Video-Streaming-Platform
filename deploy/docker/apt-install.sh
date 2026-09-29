@@ -10,15 +10,19 @@ set -eu
 : "${UBUNTU_SNAPSHOT:?}"
 
 if [ ! -e /etc/ssl/certs/ca-certificates.crt ]; then
-    # The bootstrap brings ca-certificates and openssl (with libssl3t64) at whatever the live
-    # archive has; the pinned install below must take both back to the snapshot's versions.
-    case " $* " in
-    *" ca-certificates="*" openssl="* | *" openssl="*" ca-certificates="*) ;;
-    *)
-        echo "apt-install: the first install in an image must pin ca-certificates and openssl" >&2
-        exit 1
-        ;;
-    esac
+    # The bootstrap brings ca-certificates, openssl and libssl3t64 at whatever the live archive
+    # has; the pinned install below must take all three back to the snapshot's versions. apt
+    # downgrades only what is named, so libssl3t64 left unpinned stays at the live version and a
+    # pinned libssl-dev, which wants its exact version, cannot be installed.
+    for pkg in ca-certificates openssl libssl3t64; do
+        case " $* " in
+        *" $pkg="*) ;;
+        *)
+            echo "apt-install: the first install in an image must pin ca-certificates, openssl and libssl3t64" >&2
+            exit 1
+            ;;
+        esac
+    done
     apt-get update -q
     apt-get install -qy --no-install-recommends ca-certificates
 fi
