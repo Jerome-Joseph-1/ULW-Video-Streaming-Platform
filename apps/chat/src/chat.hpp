@@ -24,14 +24,21 @@ struct Limits {
     // and service.max_send_bytes_in_flight of sends: 64 + 256 + 128 = 448 KiB, and 1280 of them
     // 560 MiB at the very worst. The router adds its owner queues (64 MiB), node-channel
     // connections (32 x ~2.1 MiB) and recent message keys (10 MiB), and the chat service the
-    // messages it keeps for resuming clients (32 MiB): about 730 MiB in all, inside a 1 GiB pod
-    // with room for the kernel's socket buffers (ADR-0036, ADR-0043). A connection that is only
-    // listening costs a few KiB.
+    // messages it keeps for resuming clients (32 MiB): about 730 MiB in all. The kernel's send
+    // buffers add 80 MiB (socket_send_buffer), 810 MiB inside a 1 GiB pod (ADR-0036, ADR-0043,
+    // ADR-0057). A connection that is only listening costs a few KiB.
     std::size_t max_connections = 1280;
     // Output a client has not read yet. A delivery is at most 64 KiB, so this is four of the
     // largest, or thousands of ordinary ones: a reader that far behind is closed, and resumes
     // from its last seq when it reconnects.
     std::size_t max_backlog = std::size_t{256} * 1024;
+    // The kernel's send buffer of each client connection, which Linux doubles to 64 KiB.
+    // Autotuned, it grows to tcp_wmem's 4 MiB for a peer that stops reading: 5 GiB over 1280
+    // connections, charged to the pod although outside the process. Fixed, they hold 80 MiB at
+    // most, and a lossy client's lag is set by the service's limits, not by the kernel's
+    // megabytes ahead of them (ADR-0057). 64 KiB a round trip is 640 KB/s at 100 ms, a
+    // history page in four round trips.
+    int socket_send_buffer = 32 * 1024;
     // ADR-0029: a read of tiny control frames decodes into thousands of Frames. A client sends
     // a Pong per Ping and perhaps a Ping of its own now and then; 8 in one read, or more than
     // a burst of 20 refilling at 10 a second, is a flood, and closes the connection with 1008.

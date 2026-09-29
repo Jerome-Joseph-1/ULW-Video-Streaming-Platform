@@ -24,6 +24,10 @@ struct ListenOptions {
 // TCP_NODELAY, keepalive 60/10/3, TCP_USER_TIMEOUT 20 s. Buffer sizes are deliberately left
 // alone: setting SO_RCVBUF or SO_SNDBUF switches off the kernel's autotuning.
 [[nodiscard]] std::expected<void, int> tune_connection(int fd) noexcept;
+// Fixes the kernel's send buffer at `bytes` (Linux doubles it for its own bookkeeping), for a
+// server whose connections carry little and must not each hold megabytes for a peer that
+// stopped reading. Autotuning is off for that socket from then on.
+[[nodiscard]] std::expected<void, int> cap_send_buffer(int fd, int bytes) noexcept;
 
 // A numeric "ipv4:port" or "[ipv6]:port": what start_connect accepts. Names are refused, since
 // resolving one would block the loop.

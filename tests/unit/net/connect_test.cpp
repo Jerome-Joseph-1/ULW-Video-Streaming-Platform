@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -59,6 +60,43 @@ TEST(NumericEndpoint, StartConnectRefusesANameWithEinval) {
     const auto fd = net::start_connect("localhost:80");
     ASSERT_FALSE(fd);
     EXPECT_EQ(fd.error(), EINVAL);
+}
+
+TEST(CapSendBuffer, APeerThatStopsReadingHoldsOnlyTheCapInTheKernel) {
+    auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
+    ASSERT_TRUE(listener);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(*net::local_port(listener->get()));
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const os::UniqueFd peer{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): connect() takes any family.
+    ASSERT_EQ(::connect(peer.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr), 0);
+    const os::UniqueFd conn{
+        ::accept4(listener->get(), nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK)};
+    ASSERT_TRUE(conn);
+
+    constexpr int kCap = 64 * 1024;
+    ASSERT_TRUE(net::cap_send_buffer(conn.get(), kCap));
+    int reported = 0;
+    socklen_t len = sizeof reported;
+    ASSERT_EQ(::getsockopt(conn.get(), SOL_SOCKET, SO_SNDBUF, &reported, &len), 0);
+    EXPECT_EQ(reported, 2 * kCap) << "Linux reports twice what was set";
+
+    // Autotuned, loopback grows the buffer to tcp_wmem's maximum (4 MiB by default) for a
+    // peer that never reads. Capped, the kernel holds the doubled cap and whatever the peer's
+    // receive window took, a few hundred KiB.
+    const std::vector<std::byte> chunk(4096, std::byte{'x'});
+    std::size_t held = 0;
+    for (;;) {
+        const ssize_t n = ::send(conn.get(), chunk.data(), chunk.size(), MSG_NOSIGNAL);
+        if (n <= 0) {
+            ASSERT_EQ(errno, EAGAIN);
+            break;
+        }
+        held += static_cast<std::size_t>(n);
+    }
+    EXPECT_LT(held, std::size_t{1} << 20U);
 }
 
 class Writable final : public net::IReadyHandler {

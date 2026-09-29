@@ -246,4 +246,8 @@ std::expected<void, int> tune_connection(int fd) noexcept {
     return {};
 }
 
+std::expected<void, int> cap_send_buffer(int fd, int bytes) noexcept {
+    return set_int(fd, SOL_SOCKET, SO_SNDBUF, bytes);
+}
+
 } // namespace net

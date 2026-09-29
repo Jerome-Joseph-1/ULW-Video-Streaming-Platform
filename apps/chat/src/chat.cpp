@@ -68,7 +68,8 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
     if (draining_) {
         return;
     }
-    if (!net::tune_connection(conn.get())) {
+    if (!net::tune_connection(conn.get()) ||
+        !net::cap_send_buffer(conn.get(), limits_.socket_send_buffer)) {
         ++counters_.connections_rejected;
         return;
     }
