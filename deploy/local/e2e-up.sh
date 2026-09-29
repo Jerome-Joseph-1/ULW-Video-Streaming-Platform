@@ -43,13 +43,7 @@ log() { echo "e2e-up: $*" >&2; }
 
 mkdir -p "$state/images" "$state/pki"
 
-if ! kind get clusters | grep -qx "$cluster"; then
-    log "creating kind cluster $cluster"
-    kind create cluster --name "$cluster" --config "$here/kind.yaml" --kubeconfig "$kubeconfig" \
-        --wait 180s
-fi
-# Rewritten on every run, so the file always describes this cluster, whatever became of it.
-kind export kubeconfig --name "$cluster" --kubeconfig "$kubeconfig"
+create_cluster
 require_sandbox
 
 # The worker's seccomp profile, where the target's runbook installs it on k8s-prod.

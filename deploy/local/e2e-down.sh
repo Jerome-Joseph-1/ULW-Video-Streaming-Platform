@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Removes everything e2e-up.sh created: the kind cluster, the Postgres and MinIO containers
-# (their data was tmpfs), the images it put in the local image store, and deploy/local/.state
-# with the sandbox CA and kubeconfig. The tools in .tools stay; they are pinned and verified.
+# Removes everything e2e-up.sh created: the kind cluster and the network outside it, the
+# Postgres and MinIO containers (their data was tmpfs), the images it put in the local image
+# store, and deploy/local/.state with the sandbox CA and kubeconfig. The tools in .tools stay;
+# they are pinned and verified.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -18,4 +19,5 @@ docker image rm "${built_images[@]}" "$eg_image" "${eg_image%:*}@$eg_digest" "$e
     "${envoy_image%:*}@$envoy_digest" "$kube_router_image" \
     "${kube_router_image%:*}@$kube_router_digest" "$metrics_server_image" \
     "${ULW_METRICS_SERVER_REPO:-$metrics_server_repo}@$metrics_server_digest" >/dev/null 2>&1 || true
+docker network rm "$outside_network" >/dev/null 2>&1 || true
 rm -rf "$here/.state"
