@@ -1,0 +1,37 @@
+# What the sandbox changes in the stage video-worker, and why:
+# - images come from the node, never a registry;
+# - MinIO stands in for R2;
+# - one kind node on a 4-core machine cannot set aside the 2 CPUs and 30 GiB of scratch the
+#   target requests next to the control plane, so the sandbox asks for less. The memory is
+#   left as the target has it: that is the number part B measures against.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-worker
+  namespace: apps-stage
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          imagePullPolicy: Never
+          env:
+            - name: ULW_STORAGE
+              value: minio
+            - name: ULW_R2_ACCOUNT_ID
+              $patch: delete
+            - name: ULW_S3_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: video-worker-secrets
+                  key: ULW_S3_ENDPOINT
+          resources:
+            requests:
+              cpu: 500m
+              ephemeral-storage: 2Gi
+            limits:
+              ephemeral-storage: 4Gi
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 4Gi

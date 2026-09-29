@@ -55,6 +55,8 @@ struct JobDeps {
     const core::ports::IClock& clock;
     core::ports::IRandom& random;
     FreeSpace free_space;
+    // Touched by the lease keeper while a job runs; none in tests that do not look at it.
+    const Heartbeat* heartbeat = nullptr;
 };
 
 struct JobSettings {

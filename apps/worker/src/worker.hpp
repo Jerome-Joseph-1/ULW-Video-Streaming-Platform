@@ -3,6 +3,7 @@
 #include "core/models/ids.hpp"
 #include "core/ports/job_queue.hpp"
 
+#include "heartbeat.hpp"
 #include "job_runner.hpp"
 
 #include <stop_token>
@@ -13,8 +14,9 @@ namespace worker {
 inline constexpr core::Millis kPollInterval{5000};
 
 // Claims jobs one at a time and runs each to completion until `shutdown` fires. Between jobs
-// it returns lapsed leases to the queue: nothing else runs the reaper.
+// it returns lapsed leases to the queue: nothing else runs the reaper. Every pass touches
+// `heartbeat`.
 void run_worker(core::ports::IJobQueue& queue, JobRunner& runner, const core::NodeId& node,
-                const std::stop_token& shutdown);
+                const Heartbeat& heartbeat, const std::stop_token& shutdown);
 
 } // namespace worker

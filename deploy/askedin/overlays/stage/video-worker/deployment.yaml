@@ -1,0 +1,132 @@
+# The transcode worker: claims jobs from Postgres, runs ffmpeg in ulw_sandbox, publishes HLS to
+# R2. It serves nothing, so it has no Service, no HTTPRoute and no JWT configuration.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-worker
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/name: video-worker
+    app.kubernetes.io/part-of: ulw
+spec:
+  replicas: 1
+  # A second worker during a rollout would need a second 2 GiB on the node; the queue simply
+  # waits for the replacement (leases requeue whatever the old pod gave up).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: video-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: video-worker
+        app.kubernetes.io/part-of: ulw
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # On SIGTERM the worker stops ffmpeg and hands its job back as retryable, which takes
+      # seconds; the default 30 s covers it.
+      terminationGracePeriodSeconds: 30
+      # ulw_sandbox gives every ffmpeg fresh user, network, mount and pid namespaces with a
+      # /proc of its own (docs/adr/0025, 0034). A pod in the host's user namespace may not mount
+      # a proc over the runtime's masked /proc, and the runtime's default seccomp profile
+      # refuses unshare and mount without CAP_SYS_ADMIN. So the pod gets a user namespace of
+      # its own (its uid 10001 is an unprivileged id on the node), an unmasked /proc, and
+      # ulw-worker.json: the default profile plus unshare, mount and mount_setattr, installed
+      # on the node once (RUNBOOK.md).
+      hostUsers: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/ulw-worker.json
+      containers:
+        - name: worker
+          image: git.askedin.com/askedin/askedin-monorepo/video-worker:development
+          imagePullPolicy: Always
+          env:
+            - name: ULW_STORAGE
+              value: r2
+            - name: ULW_SCRATCH_DIR
+              value: /var/tmp/ulw-worker
+            # x264 threads. Four held the full 1080p ladder at 556 MB resident and 0.73x
+            # realtime (apps/worker/src/config.cpp); the CPU limit below matches it.
+            - name: ULW_FFMPEG_THREADS
+              value: "4"
+            - name: ULW_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: video-worker-secrets
+                  key: ULW_DATABASE_URL
+            - name: ULW_R2_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: video-worker-secrets
+                  key: ULW_R2_ACCOUNT_ID
+            - name: ULW_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: video-worker-secrets
+                  key: ULW_BUCKET
+            - name: ULW_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: video-worker-secrets
+                  key: ULW_S3_ACCESS_KEY_ID
+            - name: ULW_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: video-worker-secrets
+                  key: ULW_S3_SECRET_ACCESS_KEY
+          # Memory (brief 8.1): about 200 MB per rendition encoded in parallel, three
+          # renditions, plus the worker and ffmpeg's demuxer; the 1080p ladder measured 556 MB
+          # resident with four threads. The worker is sized at 2 GiB, request equal to limit so
+          # it is never the pod the node reclaims first.
+          # CPU: four x264 threads can use four cores. Stage shares k8s-prod's 8 vCPU with prod
+          # and ~20 other pods, so it reserves one and transcodes at full speed only when the
+          # node is otherwise quiet; prod reserves two.
+          # Disk: a job starts only with three times its source free in the workspace
+          # (apps/worker/src/workspace.cpp), so stage's 10 GiB of scratch takes sources up to
+          # 3.3 GiB, enough for test uploads; prod has 30 GiB. The check reads the node's free
+          # space, not the emptyDir's limit, so a larger source can pass it and get the pod
+          # evicted at the limit instead.
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              ephemeral-storage: 10Gi
+            limits:
+              cpu: "4"
+              memory: 2Gi
+              ephemeral-storage: 12Gi
+          # The worker touches <scratch>/heartbeat-<pod> on every pass of its job loop (at
+          # least every 5 s when idle) and on every lease beat while a job runs (every 20 s).
+          # Two minutes without either is a wedged process; a database that cannot be reached
+          # does not stop the touches, so an outage does not restart it.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - find /var/tmp/ulw-worker -maxdepth 1 -name 'heartbeat-*' -mmin -2 | grep -q .
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            procMount: Unmasked
+          volumeMounts:
+            - name: scratch
+              mountPath: /var/tmp/ulw-worker
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 10Gi

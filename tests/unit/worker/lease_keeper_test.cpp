@@ -1,8 +1,12 @@
 #include "fakes.hpp"
+#include "heartbeat.hpp"
 #include "lease_keeper.hpp"
+#include "support/temp_dir.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <optional>
 #include <stop_token>
 #include <string>
 
@@ -38,6 +42,24 @@ TEST(LeaseKeeper, BeatsEveryIntervalWhileTheJobRuns) {
         [&](const std::string& e) { return e == "lease heartbeat" && ++beats >= 3; }, kPatience));
     EXPECT_FALSE(keeper.lost());
     EXPECT_FALSE(abandon.stop_requested());
+}
+
+// The pod's liveness probe reads this file: it must stay fresh while a job runs, including
+// while the database is out of reach, which is no reason to restart the worker.
+TEST(LeaseKeeper, TouchesTheHeartbeatOnEveryBeatEvenWithTheDatabaseUnreachable) {
+    const ulw::test::TempDir dir;
+    const worker::Heartbeat heartbeat(dir.path() / "heartbeat");
+    Journal journal;
+    FakeQueue queue(journal, "lease");
+    queue.answer_heartbeat(std::nullopt);
+    const std::stop_source abandon;
+    const LeaseKeeper keeper(queue, node(), kLease,
+                             {.heartbeat = milliseconds(1), .progress = std::chrono::hours(1)},
+                             abandon, &heartbeat);
+    EXPECT_TRUE(
+        journal.wait_for([](const std::string& e) { return e == "lease heartbeat"; }, kPatience));
+    EXPECT_TRUE(std::filesystem::is_regular_file(heartbeat.file()));
+    EXPECT_FALSE(keeper.lost());
 }
 
 TEST(LeaseKeeper, AHeartbeatMatchingNoRowAbandonsTheJob) {

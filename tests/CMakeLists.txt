@@ -148,6 +148,11 @@ add_test(NAME autobahn_checker
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/autobahn/check_results_test.py)
 set_tests_properties(autobahn_checker PROPERTIES LABELS unit)
 
+# The sandbox scripts' refusal to reach any cluster but the kind sandbox: tests/cluster.
+add_test(NAME cluster_guard
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/cluster/guard_test.py)
+set_tests_properties(cluster_guard PROPERTIES LABELS unit)
+
 ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
 target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
 add_test(NAME ws_fuzz_corpus COMMAND ws_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/ws)
@@ -293,6 +298,7 @@ if(ULW_BUILD_WORKER)
 
     ulw_add_test_suite(worker_unit_tests unit
         unit/worker/config_test.cpp
+        unit/worker/heartbeat_test.cpp
         unit/worker/job_runner_test.cpp
         unit/worker/lease_keeper_test.cpp
         unit/worker/workspace_test.cpp)

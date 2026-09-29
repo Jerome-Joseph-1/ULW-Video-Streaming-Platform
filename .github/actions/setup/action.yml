@@ -14,7 +14,7 @@ runs:
         sudo apt-get install -y -qq --no-install-recommends \
           g++-14 clang-19 clang-tidy-19 clang-format-18 lld-19 libclang-rt-19-dev \
           ninja-build ccache mold jq pkg-config \
-          libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev ffmpeg
+          libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev ffmpeg python3-yaml
     # The worker runs ffmpeg in a network namespace of its own (ADR-0025). The runners'
     # AppArmor policy refuses unprivileged user namespaces, and the worker refuses to start
     # without its sandbox, so its tests would only skip.

@@ -159,7 +159,8 @@ public:
     Attempt(const JobDeps& deps, const JobSettings& settings, const core::ports::ClaimedJob& job,
             const std::stop_token& shutdown)
         : deps_(deps), settings_(settings), job_(job),
-          keeper_(deps.lease_queue, settings.node, job.lease, settings.lease, abandon_),
+          keeper_(deps.lease_queue, settings.node, job.lease, settings.lease, abandon_,
+                  deps.heartbeat),
           on_shutdown_(shutdown, RequestStop{&abandon_}) {}
 
     JobOutcome execute() {

@@ -167,13 +167,18 @@ int run() {
                                                 .search_path = config->search_path,
                                                 .threads = config->ffmpeg_threads},
                                                clock);
+    // Beside the node's scratch directory rather than in it, which holds workspaces only; named
+    // for the node, so two workers sharing a scratch root keep a heartbeat each.
+    const worker::Heartbeat heartbeat(config->scratch.parent_path() /
+                                      ("heartbeat-" + std::string(config->node.view())));
     worker::JobRunner runner({.queue = queue,
                               .lease_queue = lease_queue,
                               .store = *storage->transfer,
                               .transcoder = transcoder,
                               .clock = clock,
                               .random = random,
-                              .free_space = worker::free_space},
+                              .free_space = worker::free_space,
+                              .heartbeat = &heartbeat},
                              {.scratch = config->scratch, .node = config->node, .lease = {}});
 
     std::stop_source shutdown;
@@ -183,7 +188,7 @@ int run() {
     worker::log("{} ({}) node={} storage={} scratch={} threads={} sandbox={}", info.version,
                 info.git_sha, config->node.view(), to_string(config->storage),
                 config->scratch.string(), config->ffmpeg_threads, sandbox.string());
-    worker::run_worker(queue, runner, config->node, shutdown.get_token());
+    worker::run_worker(queue, runner, config->node, heartbeat, shutdown.get_token());
     worker::log("stopped");
     return EXIT_SUCCESS;
 }

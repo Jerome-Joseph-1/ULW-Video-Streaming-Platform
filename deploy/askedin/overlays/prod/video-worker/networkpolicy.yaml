@@ -1,0 +1,14 @@
+# The worker serves nothing; it only reaches out to Postgres and the object store.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: video-worker
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: video-worker
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: video-worker
+  policyTypes: ["Ingress"]

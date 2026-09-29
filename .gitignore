@@ -15,3 +15,4 @@ compile_commands.json
 /tests/e2e/.browsers/
 /target/
 __pycache__/
+/deploy/local/.tools/

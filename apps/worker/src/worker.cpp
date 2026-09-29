@@ -7,8 +7,9 @@
 namespace worker {
 
 void run_worker(core::ports::IJobQueue& queue, JobRunner& runner, const core::NodeId& node,
-                const std::stop_token& shutdown) {
+                const Heartbeat& heartbeat, const std::stop_token& shutdown) {
     while (!shutdown.stop_requested()) {
+        heartbeat.beat();
         if (const auto reaped = queue.reap_expired(); reaped && *reaped > 0) {
             log("requeued {} jobs whose lease lapsed", *reaped);
         }

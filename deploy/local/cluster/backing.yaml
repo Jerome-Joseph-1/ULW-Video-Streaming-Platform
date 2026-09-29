@@ -1,0 +1,22 @@
+# Postgres and MinIO run outside the cluster, as Postgres and MinIO run on the k8s-prod host
+# rather than in K3s. e2e-up.sh starts them as containers on the kind network and points these
+# Services at them with an EndpointSlice each, since their addresses are only known then.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: apps-stage
+spec:
+  ports:
+    - name: postgres
+      port: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: apps-stage
+spec:
+  ports:
+    - name: s3
+      port: 9000

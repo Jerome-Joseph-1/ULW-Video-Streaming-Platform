@@ -1,5 +1,6 @@
 #include "lease_keeper.hpp"
 
+#include "heartbeat.hpp"
 #include "log.hpp"
 
 #include <algorithm>
@@ -10,9 +11,10 @@ namespace worker {
 
 LeaseKeeper::LeaseKeeper(core::ports::IJobQueue& queue, const core::NodeId& node,
                          const core::ports::JobLease& lease, const Intervals& intervals,
-                         std::stop_source abandon)
+                         std::stop_source abandon, const Heartbeat* heartbeat)
     : queue_(queue), node_(node), lease_(lease), intervals_(intervals),
-      abandon_(std::move(abandon)), thread_([this](const std::stop_token& stop) { run(stop); }) {}
+      abandon_(std::move(abandon)), heartbeat_(heartbeat),
+      thread_([this](const std::stop_token& stop) { run(stop); }) {}
 
 LeaseKeeper::~LeaseKeeper() = default;
 
@@ -44,6 +46,11 @@ bool LeaseKeeper::write_progress() {
 }
 
 bool LeaseKeeper::beat() {
+    // Touched whatever the database says: the process is alive and beating, and an unreachable
+    // database is no reason for the kubelet to restart it.
+    if (heartbeat_ != nullptr) {
+        heartbeat_->beat();
+    }
     const auto r = queue_.heartbeat(lease_, node_);
     if (r && !*r) {
         lose("heartbeat");

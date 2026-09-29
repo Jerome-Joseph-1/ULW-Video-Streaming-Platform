@@ -1,0 +1,38 @@
+# What the sandbox changes in the stage video-gateway, and why:
+# - images come from the node, never a registry;
+# - MinIO stands in for R2, so ULW_S3_ENDPOINT replaces ULW_R2_ACCOUNT_ID;
+# - the mock auth-service's certificate is signed by the sandbox CA, which replaces the system
+#   bundle libcurl reads, so the JWKS fetch is verified exactly as against Askedin's.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-gateway
+  namespace: apps-stage
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: migrate
+          imagePullPolicy: Never
+      containers:
+        - name: gateway
+          imagePullPolicy: Never
+          env:
+            - name: ULW_STORAGE
+              value: minio
+            - name: ULW_R2_ACCOUNT_ID
+              $patch: delete
+            - name: ULW_S3_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: video-gateway-secrets
+                  key: ULW_S3_ENDPOINT
+          volumeMounts:
+            - name: sandbox-ca
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              subPath: ca.crt
+              readOnly: true
+      volumes:
+        - name: sandbox-ca
+          configMap:
+            name: sandbox-ca

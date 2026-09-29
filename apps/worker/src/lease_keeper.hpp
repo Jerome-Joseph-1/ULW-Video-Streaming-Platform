@@ -14,6 +14,8 @@
 
 namespace worker {
 
+class Heartbeat;
+
 // Keeps one job's lease alive from a thread of its own while the job runs, and writes its
 // progress. When the queue says the lease is gone, it fires `abandon`, and the job must stop
 // without writing anything more.
@@ -26,9 +28,10 @@ public:
     };
 
     // `queue` is used from the keeper's thread only, so it must not be the one the job uses.
+    // `heartbeat`, when there is one, is touched on every beat.
     LeaseKeeper(core::ports::IJobQueue& queue, const core::NodeId& node,
                 const core::ports::JobLease& lease, const Intervals& intervals,
-                std::stop_source abandon);
+                std::stop_source abandon, const Heartbeat* heartbeat = nullptr);
     ~LeaseKeeper();
     LeaseKeeper(const LeaseKeeper&) = delete;
     LeaseKeeper& operator=(const LeaseKeeper&) = delete;
@@ -51,6 +54,7 @@ private:
     core::ports::JobLease lease_;
     Intervals intervals_;
     std::stop_source abandon_;
+    const Heartbeat* heartbeat_;
     std::atomic<std::uint8_t> percent_{0};
     std::atomic<bool> lost_{false};
     // What the jobs row last took; the keeper's thread alone touches it.
