@@ -1,8 +1,8 @@
+# git's answer wins when there is one: a ULW_GIT_SHA left in a build directory's cache must not
+# go on stamping later commits. It is only for trees without git metadata.
 find_package(Git QUIET)
 set(sha "unknown")
-if(GIT_SHA)
-    set(sha ${GIT_SHA})
-elseif(GIT_FOUND)
+if(GIT_FOUND)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} -C ${SOURCE_DIR} rev-parse --short=12 HEAD
         OUTPUT_VARIABLE git_out OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -16,6 +16,9 @@ elseif(GIT_FOUND)
             string(APPEND sha "-dirty")
         endif()
     endif()
+endif()
+if(sha STREQUAL "unknown" AND GIT_SHA)
+    set(sha ${GIT_SHA})
 endif()
 set(content "#define ULW_VERSION \"${VERSION}\"\n#define ULW_GIT_SHA \"${sha}\"\n")
 if(EXISTS ${OUTPUT})
