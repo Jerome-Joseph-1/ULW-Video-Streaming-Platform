@@ -47,6 +47,7 @@ set to act as a user.
 | `exp` | Required, NumericDate. Refused once `now - 60 s >= exp`. |
 | `nbf` | Optional. Refused while `now + 60 s < nbf`. |
 | Clock skew | 60 s on both `exp` and `nbf` |
+| `iat` | Not consulted. Present or not, in the future or not, of any type, it changes nothing; only `exp` and `nbf` bound a token's lifetime. |
 | `email` | Optional string, at most 254 bytes, no control characters. `null` counts as absent. |
 
 The signature is checked before any claim is read.
