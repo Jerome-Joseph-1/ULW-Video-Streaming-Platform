@@ -61,11 +61,13 @@ a session no row names.
   An active upload's session is never that old, so what it finds has no live row: the
   create-then-crash orphans, and sessions whose `discard` failed. The bound is why the sweep is
   safe to run against a bucket shared with live uploads; it is also why it is a second net, not
-  the first. The count is `parts_orphaned_total`.
-- Counters are printed to stdout in Prometheus text format at the end of a pass
-  (`uploads_expired_total`, `parts_orphaned_total`): a process that lives for seconds has no
-  endpoint to scrape, and each pass reports its own increment. Whatever collects the CronJob's
-  output (a textfile collector, a Pushgateway) sums them.
+  the first. The count of sessions it aborted is `reaper_parts_orphaned_last_run`.
+- The pass's numbers are printed to stdout in Prometheus text format as gauges named for one
+  run (`reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run`,
+  `reaper_parts_orphaned_last_run`): a process that lives for seconds has no endpoint to scrape,
+  and a textfile collector or a Pushgateway replaces a value with the next run's rather than
+  adding to it, so a counter would reset every 15 minutes. An alert reads the release-failed
+  gauge and the Job's failure; a total, if wanted, is a query over the runs.
 - The bucket keeps a lifecycle rule aborting incomplete multipart uploads under `videos/` after
   7 days, as the backstop for a reaper that is not running. The RUNBOOK has the exact R2 rule.
   MinIO rejects a bucket lifecycle rule holding `AbortIncompleteMultipartUpload` (it answers

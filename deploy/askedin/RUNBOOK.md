@@ -167,7 +167,8 @@ lifecycle rules, as "Abort incomplete multipart uploads" with prefix `videos/` a
 The reaper is a CronJob running the gateway image's `ulw_reaper` with the gateway's secret. It
 aborts uploads past their `expires_at`, fails their videos with "upload expired", releases their
 multipart sessions, and aborts sessions older than the uploads' lifetime that no upload owns. It
-prints `uploads_expired_total` and `parts_orphaned_total` for its pass on stdout; a non-zero
+prints `reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run` and
+`reaper_parts_orphaned_last_run` for its pass on stdout, as gauges; a non-zero
 exit means a phase failed, and the Job's log says which.
 
 ```yaml

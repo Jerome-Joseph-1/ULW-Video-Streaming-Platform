@@ -76,11 +76,14 @@ Report run_once(core::ports::IUploadExpiry& uploads, core::ports::IIngestStore& 
 }
 
 std::string metrics_text(const Report& report) {
-    return std::format("# TYPE uploads_expired_total counter\n"
-                       "uploads_expired_total {}\n"
-                       "# TYPE parts_orphaned_total counter\n"
-                       "parts_orphaned_total {}\n",
-                       report.uploads_expired, report.parts_orphaned);
+    return std::format("# TYPE reaper_uploads_expired_last_run gauge\n"
+                       "reaper_uploads_expired_last_run {}\n"
+                       "# TYPE reaper_uploads_release_failed_last_run gauge\n"
+                       "reaper_uploads_release_failed_last_run {}\n"
+                       "# TYPE reaper_parts_orphaned_last_run gauge\n"
+                       "reaper_parts_orphaned_last_run {}\n",
+                       report.uploads_expired, report.uploads_release_failed,
+                       report.parts_orphaned);
 }
 
 } // namespace reaper

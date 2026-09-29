@@ -195,8 +195,10 @@ TEST_F(ReaperTest, CountsTheSessionsTheSweepAborted) {
     const auto report = run();
     EXPECT_EQ(report.parts_orphaned, 4U);
     EXPECT_EQ(reaper::metrics_text(report),
-              "# TYPE uploads_expired_total counter\nuploads_expired_total 0\n"
-              "# TYPE parts_orphaned_total counter\nparts_orphaned_total 4\n");
+              "# TYPE reaper_uploads_expired_last_run gauge\nreaper_uploads_expired_last_run 0\n"
+              "# TYPE reaper_uploads_release_failed_last_run gauge\n"
+              "reaper_uploads_release_failed_last_run 0\n"
+              "# TYPE reaper_parts_orphaned_last_run gauge\nreaper_parts_orphaned_last_run 4\n");
 }
 
 TEST_F(ReaperTest, ACatalogFailureIsReportedAndTheSweepStillRuns) {
