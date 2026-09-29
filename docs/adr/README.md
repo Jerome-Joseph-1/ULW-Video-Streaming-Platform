@@ -40,4 +40,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0034](0034-rtp-and-rtcp-read-in-place.md) | RTP and RTCP are read in place, for tooling and tests | Accepted |
 | [0035](0035-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
-| [0041](0041-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
+| [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted |
+| [0038](0038-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
