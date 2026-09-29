@@ -40,3 +40,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0034](0034-rtp-and-rtcp-read-in-place.md) | RTP and RTCP are read in place, for tooling and tests | Accepted |
 | [0035](0035-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
+| [0049](0049-chat-service-policy-between-edge-and-rooms.md) | The chat service: policy between the client edge and the room plane | Accepted |
