@@ -99,7 +99,7 @@ protected:
         return std::move(*got);
     }
 
-    RelayResult relay(IMediaRoom& room, MediaRelay target) {
+    RelayResult relay(IMediaRoom& room, const MediaRelay& target) {
         std::optional<RelayResult> got;
         room.relay(*core::UserId::parse("streamer"), *core::DeviceId::parse(kDevice), target,
                    [&](RelayResult r) noexcept { got = std::move(r); });

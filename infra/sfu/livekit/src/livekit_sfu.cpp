@@ -209,14 +209,18 @@ std::expected<std::optional<std::string>, MediaError> running_relay(std::string_
     }
     for (const core::json::Value& item : *items->as_array()) {
         const core::json::Value* participant = item.find("participant");
-        const core::json::Value* named = participant ? participant->find("identity") : nullptr;
-        const core::json::Value* id = item.find("egress_id");
+        const core::json::Value* named =
+            participant != nullptr ? participant->find("identity") : nullptr;
         const core::json::Value* status = item.find("status");
         const bool live = status != nullptr && (status->as_string() == "EGRESS_STARTING" ||
                                                 status->as_string() == "EGRESS_ACTIVE");
-        if (live && named != nullptr && named->as_string() == identity && id != nullptr &&
-            id->as_string()) {
-            return std::string(*id->as_string());
+        if (!live || named == nullptr || named->as_string() != identity) {
+            continue;
+        }
+        const core::json::Value* id = item.find("egress_id");
+        const auto text = id != nullptr ? id->as_string() : std::nullopt;
+        if (text.has_value()) {
+            return std::string(*text);
         }
     }
     return std::nullopt;
@@ -287,11 +291,12 @@ private:
         }
         const auto info = core::json::parse(*started);
         const core::json::Value* id = info ? info->find("egress_id") : nullptr;
+        const auto text = id != nullptr ? id->as_string() : std::nullopt;
         // Started, perhaps, with no id to show for it: the retry's listing will find it.
-        if (id == nullptr || !id->as_string()) {
+        if (!text.has_value()) {
             return std::unexpected(MediaError::Unavailable);
         }
-        return std::string(*id->as_string());
+        return std::string(*text);
     }
 
     void finish(const std::string& key, const RelayResult& result) noexcept {
