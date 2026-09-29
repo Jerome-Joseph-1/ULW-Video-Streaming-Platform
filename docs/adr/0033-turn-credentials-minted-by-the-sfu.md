@@ -37,6 +37,10 @@ repository, l7mp.io, is unreachable from the build machines; GitHub is not).
   stay Envoy Gateway's.
 - `authType: ephemeral`, shared secret in Secret `stunner-secrets`. LiveKit gets the same secret
   and STUNner's address, and mints credentials with a 4 h lifetime.
+- STUNner is cluster-wide, so there is one TURN secret per cluster, and LiveKit in every
+  environment reads that same value from its own `sfu-secrets`. `stunner-secrets` is created
+  by a step of its own, once per cluster, which refuses when the stage and prod env files
+  disagree; it carries no `ASKEDIN_ENV`, since it belongs to neither.
 - One Gateway, one listener, `TURN-UDP` on 3478, `externalTrafficPolicy: Local`; a UDPRoute to
   LiveKit's single UDP port (7882). LiveKit advertises only its pod address and has ICE over TCP
   off, so the relay is the only path media can take.
@@ -56,9 +60,12 @@ repository, l7mp.io, is unreachable from the build machines; GitHub is not).
 - STUNner v1.2.1 (pion/turn) answers a bad MESSAGE-INTEGRITY and an expired credential with 400,
   and a refused permission with an error carrying no ERROR-CODE; RFC 8656 asks for 401 and 403.
   Clients only look at the class, but a monitor that counts 401s would see none.
-- Stage and prod share the GatewayClass and its secret when prod arrives; a stage credential
-  would then pass authentication on the prod listener, reaching only prod LiveKit's UDP port.
-  Split the GatewayConfig per environment if that matters.
+- Stage and prod share the GatewayClass and its secret; a stage credential passes
+  authentication on the prod listener once prod has one, reaching only prod LiveKit's UDP
+  port. Split the GatewayConfig, and the secret with it, per environment if that matters.
+- The secret sits in two env files that must agree. The per-cluster step checks that, but
+  only when someone runs it: a `TURN_SECRET` changed in one file and pushed with
+  `create-k8s-secrets.sh` alone breaks that environment's relay until the step runs.
 - Docker 27 or later is needed for the sandbox's routed network.
 - Reopen if the call service needs to decide who may relay independently of LiveKit (for
   example, TURN for a peer-to-peer path that bypasses the SFU), or if STUNner's free tier stops

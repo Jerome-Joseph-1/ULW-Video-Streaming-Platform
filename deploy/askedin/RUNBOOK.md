@@ -256,36 +256,69 @@ media arrives on that one port, and LiveKit's own UDP port (7882) stays inside t
 
 ### Secrets
 
-New keys for `.env.stage` (names only):
+STUNner holds one shared secret for the whole cluster, and LiveKit in each environment signs
+its clients' TURN credentials with that same secret (docs/adr/0033). So `TURN_SECRET` is not a
+per-environment value, even though it lives in both env files: a copy that differs breaks
+every call of the environment whose LiveKit holds it.
+
+New keys for `.env.stage` and `.env.prod` (names only):
 
 ```
-TURN_SECRET              32+ random bytes, base64; STUNner's shared secret, also given to LiveKit
+TURN_SECRET              32+ random bytes, base64; the same value in both files
 TURN_HOST                the address browsers reach STUNner at: the node's public IP or a DNS name for it
 LIVEKIT_KEYS             "<api key>: <api secret>", the secret at least 32 characters
 ```
 
-Lines for `scripts/create-k8s-secrets.sh`, stage only for now (`$NS` is `apps-stage`):
+STUNner's secret is created by a script of its own, `scripts/create-turn-secret.sh`, run once
+per cluster and never from `create-k8s-secrets.sh`, which runs per environment. It refuses when
+the two env files disagree:
 
 ```sh
+#!/usr/bin/env bash
+# STUNner's shared TURN secret: one per cluster, used by stage and prod alike.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+turn_secret() { (set -a; source "$1"; printf '%s' "${TURN_SECRET:?TURN_SECRET missing from $1}"); }
+stage=$(turn_secret .env.stage)
+prod=$(turn_secret .env.prod)
+if [[ $stage != "$prod" ]]; then
+    echo "create-turn-secret: TURN_SECRET differs between .env.stage and .env.prod;" \
+        "STUNner has one per cluster, so set both to the same value" >&2
+    exit 1
+fi
+# From a file descriptor, so the secret never appears in a process list.
 kubectl -n stunner-system create secret generic stunner-secrets \
-  --from-literal=type=ephemeral \
-  --from-literal=secret="$TURN_SECRET" \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" create secret generic sfu-secrets \
-  --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
-  --from-literal=LIVEKIT_KEYS="$LIVEKIT_KEYS" \
-  --from-literal=TURN_HOST="$TURN_HOST" \
-  --from-literal=TURN_SECRET="$TURN_SECRET" \
-  --dry-run=client -o yaml | kubectl apply -f -
+    --from-literal=type=ephemeral --from-file=secret=<(printf '%s' "$stage") \
+    --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-`stunner-system` must exist first (the operator step below creates it). The call service gets
-the same `LIVEKIT_KEYS` pair once it ships. Add LiveKit to the rollout-restart list; STUNner
-rereads its secret by itself:
+The secret carries no `ASKEDIN_ENV`: it belongs to neither environment. `stunner-system` must
+exist first (the operator step below creates it).
+
+Lines for `scripts/create-k8s-secrets.sh`, per environment as usual; only stage runs LiveKit so
+far, so guard them until prod does:
+
+```sh
+if [[ $NS == apps-stage ]]; then
+  kubectl -n "$NS" create secret generic sfu-secrets \
+    --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
+    --from-literal=LIVEKIT_KEYS="$LIVEKIT_KEYS" \
+    --from-literal=TURN_HOST="$TURN_HOST" \
+    --from-literal=TURN_SECRET="$TURN_SECRET" \
+    --dry-run=client -o yaml | kubectl apply -f -
+fi
+```
+
+The call service gets the same `LIVEKIT_KEYS` pair once it ships. Add LiveKit to the
+rollout-restart list; STUNner rereads its secret by itself:
 
 ```sh
 kubectl -n "$NS" rollout restart deployment/livekit
 ```
+
+To rotate `TURN_SECRET`: change it in both env files, run `scripts/create-turn-secret.sh`, then
+`create-k8s-secrets.sh` for each environment, which restarts LiveKit. Calls in progress
+reconnect once with credentials under the new secret.
 
 ### Install, once per cluster
 
@@ -298,7 +331,7 @@ echo "720ab0c18e0e51b8cee18259685061e03cc0d3d01e90a0c0fc20c5144351b279  stunner-
 kubectl apply --server-side -f stunner-crds.yaml
 kubectl apply -f stunner/operator.yaml
 kubectl -n stunner-system rollout status deployment/stunner-gateway-operator-controller-manager
-# now the secrets above
+scripts/create-turn-secret.sh          # and create-k8s-secrets.sh for stage, as above
 kubectl apply -f stunner/dataplane.yaml -f stunner/gatewayclass.yaml
 ```
 
