@@ -59,10 +59,6 @@ std::vector<std::byte> bytes(std::string_view text) {
     return out;
 }
 
-core::WallTime at(std::int64_t second) {
-    return core::WallTime{std::chrono::seconds{1'790'000'000 + second}};
-}
-
 double millis(std::chrono::steady_clock::duration d) {
     return std::chrono::duration<double, std::milli>(d).count();
 }
@@ -120,8 +116,8 @@ protected:
     rt::StoreResult<std::optional<std::uint64_t>>
     write(const core::RoomId& room, std::uint64_t generation, std::vector<std::byte> body) {
         return ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
-            rooms_->append_message(room, generation, alice_, std::format("m{}", ++keys_),
-                                   std::move(body), at(0), std::move(done));
+            rooms_->append_message(room, generation, alice_, std::format("m{}", ++keys_), body,
+                                   std::move(done));
         });
     }
 

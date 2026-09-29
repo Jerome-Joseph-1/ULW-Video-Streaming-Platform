@@ -6,7 +6,6 @@
 #include "pool.hpp"
 #include "result.hpp"
 
-#include <chrono>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -103,7 +102,7 @@ next AS (
     RETURNING last_seq),
 stored AS (
     INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at)
-    SELECT $1, last_seq, $3, $4, $5, timestamptz 'epoch' + $6 * interval '1 microsecond'
+    SELECT $1, last_seq, $3, $4, $5, now()
       FROM next
      WHERE NOT EXISTS (SELECT 1 FROM prior)
     RETURNING seq)
@@ -408,16 +407,15 @@ private:
     StoreCallback<std::optional<std::uint64_t>> done_;
 };
 
-// Keeps the sender and body the statement binds: the pool sends it on a later iteration.
+// Keeps copies of the sender, key and body the statement binds: the caller's are views valid
+// only during its call, and the pool sends the statement on a later iteration.
 class AppendMessage final : public Operation {
 public:
     AppendMessage(const core::RoomId& room, std::uint64_t generation, const core::UserId& sender,
-                  std::string_view key, std::vector<std::byte> body, core::WallTime sent_at,
+                  std::string_view key, std::span<const std::byte> body,
                   StoreCallback<std::optional<std::uint64_t>> done)
-        : room_(room), generation_(generation), sender_(sender), key_(key), body_(std::move(body)),
-          sent_at_(
-              std::chrono::floor<std::chrono::microseconds>(sent_at.time_since_epoch()).count()),
-          done_(std::move(done)) {}
+        : room_(room), generation_(generation), sender_(sender), key_(key),
+          body_(body.begin(), body.end()), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
         return Statement{.sql = kAppendMessage,
@@ -426,8 +424,7 @@ public:
                                        .add_int(as_int(generation_))
                                        .add_text(sender_.view())
                                        .add_text(key_)
-                                       .add_bytea(body_)
-                                       .add_int(sent_at_)};
+                                       .add_bytea(body_)};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -455,7 +452,6 @@ private:
     core::UserId sender_;
     std::string key_;
     std::vector<std::byte> body_;
-    std::int64_t sent_at_;
     bool reran_ = false;
     StoreCallback<std::optional<std::uint64_t>> done_;
 };
@@ -687,14 +683,14 @@ void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
 
 void PgRoomStore::append_message(const core::RoomId& room, std::uint64_t generation,
                                  const core::UserId& sender, std::string_view key,
-                                 std::vector<std::byte> body, core::WallTime sent_at,
+                                 std::span<const std::byte> body,
                                  StoreCallback<std::optional<std::uint64_t>> done) {
     if (body.size() > core::ports::kMaxMessageBody) {
         // The client edge never decodes a larger message (ADR-0029); one here is a caller's bug.
         std::abort();
     }
-    impl_->pool().submit(std::make_unique<AppendMessage>(
-        room, generation, sender, key, std::move(body), sent_at, std::move(done)));
+    impl_->pool().submit(
+        std::make_unique<AppendMessage>(room, generation, sender, key, body, std::move(done)));
 }
 
 void PgRoomStore::release(const core::NodeId& node, std::vector<OwnedRoom> rooms,

@@ -154,8 +154,7 @@ public:
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                std::vector<std::byte> body, MessageCallback<std::uint64_t> done) override {
         rooms_->append_message(
-            room, generations_.at(room), sender, key, std::move(body),
-            std::chrono::system_clock::now(),
+            room, generations_.at(room), sender, key, body,
             [done = std::move(done)](
                 rt::StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
                 if (!r || !*r) {

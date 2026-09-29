@@ -37,10 +37,6 @@ std::vector<std::byte> bytes(std::string_view text) {
     return out;
 }
 
-core::WallTime at(std::int64_t second) {
-    return core::WallTime{std::chrono::seconds{1'790'000'000 + second}};
-}
-
 double millis(std::chrono::steady_clock::duration d) {
     return std::chrono::duration<double, std::milli>(d).count();
 }
@@ -102,8 +98,7 @@ protected:
     Seq send(const core::RoomId& room, std::uint64_t generation, std::string_view body,
              std::string_view key) {
         return ask<std::optional<std::uint64_t>>([&](auto done) {
-            rooms_->append_message(room, generation, alice_, key, bytes(body), at(0),
-                                   std::move(done));
+            rooms_->append_message(room, generation, alice_, key, bytes(body), std::move(done));
         });
     }
 
@@ -153,10 +148,12 @@ TEST_F(SequencedAppendTest, EachMessageIsStoredUnderTheSeqItTook) {
 
     const auto stored = history(room);
     ASSERT_EQ(stored.size(), 3U);
-    EXPECT_EQ(
-        stored[0],
-        (StoredMessage{
-            .seq = 1, .sender = alice_, .key = "m1", .sent_at = at(0), .body = bytes("one")}));
+    EXPECT_EQ(stored[0].seq, 1U);
+    EXPECT_EQ(stored[0].sender, alice_);
+    EXPECT_EQ(stored[0].key, "m1");
+    EXPECT_EQ(stored[0].body, bytes("one"));
+    // The database's clock at the write, not one the owner passed.
+    EXPECT_LE(stored[0].sent_at, stored[2].sent_at);
     EXPECT_EQ(stored[2].seq, 3U);
     EXPECT_EQ(stored[2].body, bytes("three"));
 }
@@ -213,7 +210,7 @@ TEST_F(SequencedAppendTest, ConcurrentRepeatsOfOneKeyStoreItOnce) {
     const std::uint64_t generation = owned_by(room, a_);
     std::vector<Seq> answers;
     for (std::size_t i = 0; i < kRepeats; ++i) {
-        rooms_->append_message(room, generation, alice_, "k1", bytes("hello"), at(0),
+        rooms_->append_message(room, generation, alice_, "k1", bytes("hello"),
                                [&answers](Seq r) noexcept { answers.push_back(r); });
     }
     ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answers.size() == kRepeats; }));

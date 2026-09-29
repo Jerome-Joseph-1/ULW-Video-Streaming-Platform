@@ -39,7 +39,7 @@ What bounds a page of history:
 
 ## Decision
 
-- **The owner's write.** `PgRoomStore::append_message(room, generation, sender, body, sent_at)`
+- **The owner's write.** `PgRoomStore::append_message(room, generation, sender, key, body)`
   runs one statement: the fenced increment of `room_state.last_seq` and, from its result, the
   message's `INSERT` into `chat_messages`. It answers the new seq, or nothing when the
   generation is no longer the room's; then no seq was taken and no row written. If the insert
@@ -57,13 +57,14 @@ What bounds a page of history:
 - **Every room, durable or lossy, writes this way**, before delivery. Storing the row costs
   nothing measurable over taking the seq alone (below), so there is no cheaper path for lossy
   rooms to keep, and E2EE rooms are always durable.
-- **How the router calls it.** The router's store port, `rt::IRoomStore::append(room,
-  generation)`, becomes `append(room, generation, sender, body, sent_at)` carrying the
-  message, with the same answer; `RoomRegistry::append` passes it through, and the owner's
-  pump in `rt/src/room_router.cpp` hands over the write it already holds (sender, body) with
-  `sent_at` from its clock. The Postgres implementation is `append_message` above. This changes
-  `room_router.cpp` once, in M19, before phase 2 is tagged; after that, encrypted bodies change
-  nothing on this path.
+- **How the router calls it.** The router's store port, as the chat service's lane reshapes
+  it, is `rt::IRoomStore::append(room, generation, const Outgoing& {sender, key, body},
+  done)`, answering the seq or nothing when fenced; a store that keeps messages writes the
+  message in that same fenced write. `append_message(room, generation, sender, key, body,
+  done)` takes exactly those fields, with the body as a view that it copies, so the Postgres
+  store's `append` is a pass-through to it. `sent_at` is the database's `now()` at the write:
+  the router passes no time and needs no clock for it. So `rt/src/room_router.cpp` changes no
+  further for storage, and encrypted bodies change nothing on this path.
 - **One writer.** `append_message` is the only statement that writes `chat_messages`. The
   message store below has no writer: a row written under a seq "taken elsewhere" could sit
   above `last_seq` and make every later append for its room fail. The seq-only
