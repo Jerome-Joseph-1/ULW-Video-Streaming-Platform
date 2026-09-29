@@ -375,7 +375,11 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     const auto refused = alice->wait_for([](const Seen& s) { return s.ref == 7U; });
     ASSERT_TRUE(refused);
     EXPECT_EQ(refused->type, "error");
-    EXPECT_EQ(refused->reason, "fenced");
+    // "fenced" when the append's own answer comes back first; "unavailable" when the resumed
+    // node's heartbeat finds the fence while the append is still out, and its fate is unknown
+    // to the node. Either way the client is told it was not sequenced for certain.
+    EXPECT_TRUE(refused->reason == "fenced" || refused->reason == "unavailable")
+        << refused->reason;
     EXPECT_EQ(last_seq(), seq_before) << "the stale write updated a row";
     const std::string& logged = stalled.process->output();
     const std::size_t at = logged.find(fenced);

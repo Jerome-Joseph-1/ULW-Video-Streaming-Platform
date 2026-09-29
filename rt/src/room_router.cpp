@@ -676,7 +676,10 @@ public:
         if (const auto it = owned_.find(room); it != owned_.end()) {
             OwnedRoomState gone = std::move(it->second);
             owned_.erase(it);
-            disown(room, gone, RouteError::Fenced);
+            // The write being appended is the fenced one only if the append said so; after a
+            // fenced heartbeat its own outcome is unknown, and it may well have committed.
+            disown(room, gone, RouteError::Fenced,
+                   write == OwnerWrite::Append ? RouteError::Fenced : RouteError::Unavailable);
         }
         const auto it = local_.find(room);
         if (it == local_.end()) {
@@ -1109,7 +1112,8 @@ private:
 
     // This node no longer owns the room: its writes are answered, and the nodes subscribed to
     // it are told to look for the new owner rather than wait for deliveries that never come.
-    void disown(const core::RoomId& room, OwnedRoomState& o, RouteError error) {
+    void disown(const core::RoomId& room, OwnedRoomState& o, RouteError error,
+                std::optional<RouteError> appending_error = std::nullopt) {
         std::vector<std::byte> frame;
         wire::encode_unsubscribe(frame, room);
         for (const net::Slab<Inbound>::Handle& h : o.subscribers) {
@@ -1117,16 +1121,19 @@ private:
                 in->send(frame);
             }
         }
-        fail_writes(o, error);
+        fail_writes(o, error, appending_error);
     }
 
-    void fail_writes(OwnedRoomState& o, RouteError error) {
+    // `appending_error`, when given, answers the write whose append is in flight.
+    void fail_writes(OwnedRoomState& o, RouteError error,
+                     std::optional<RouteError> appending_error = std::nullopt) {
         std::deque<Write> writes = std::move(o.writes);
         o.writes.clear();
         queued_bytes_ -= o.queued_bytes;
         o.queued_bytes = 0;
-        for (Write& w : writes) {
-            answer(w, std::unexpected(error));
+        for (std::size_t i = 0; i < writes.size(); ++i) {
+            const bool in_flight = i == 0 && o.appending;
+            answer(writes[i], std::unexpected(in_flight ? appending_error.value_or(error) : error));
         }
     }
 

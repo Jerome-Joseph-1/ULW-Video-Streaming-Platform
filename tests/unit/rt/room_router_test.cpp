@@ -365,6 +365,25 @@ TEST_P(RoomRouterTest, AMemberThatJoinsTwiceBeforeTheFirstIsAnsweredHearsEachMes
     EXPECT_EQ(alice.got.size(), 1U);
 }
 
+TEST_P(RoomRouterTest, AWriteInFlightWhenAHeartbeatIsFencedIsAnsweredAsUnknown) {
+    Node& a = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    a.store->hold = true;
+    std::optional<std::expected<std::uint64_t, RouteError>> result;
+    const auto body = std::as_bytes(std::span{std::string_view{"maybe"}});
+    a.router->send(room_, alice, *core::UserId::parse("alice"), {body.begin(), body.end()},
+                   [&](auto r) noexcept { result = r; });
+    // The append waits, and so does the next heartbeat.
+    ASSERT_TRUE(pump([&] { return a.store->waiting("heartbeat") == 1; }));
+    db_.take(room_, *core::NodeId::parse("chat-b"));
+    // The heartbeat's answer comes first, as it may from another session of the pool.
+    a.store->release_held("heartbeat");
+    ASSERT_TRUE(pump([&] { return result.has_value(); }));
+    EXPECT_EQ(*result, std::unexpected(RouteError::Unavailable));
+    EXPECT_EQ(a.router->rooms_owned(), 0U);
+}
+
 TEST_P(RoomRouterTest, SendingToARoomTheMemberHasNotJoinedIsRefused) {
     Node& a = start("chat-a");
     Member alice;

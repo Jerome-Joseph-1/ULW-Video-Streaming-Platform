@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -90,7 +91,7 @@ public:
 
     void resolve(const core::RoomId& room, const core::NodeId& node,
                  rt::StoreCallback<rt::Ownership> done) override {
-        answer(std::move(done), [this, room, node]() -> rt::StoreResult<rt::Ownership> {
+        answer("", std::move(done), [this, room, node]() -> rt::StoreResult<rt::Ownership> {
             const auto it = db_.rooms.find(room);
             if (it == db_.rooms.end()) {
                 db_.rooms.emplace(room, MemoryRooms::Room{.owner = node});
@@ -107,7 +108,7 @@ public:
 
     void claim_stale(std::vector<core::RoomId> rooms, const core::NodeId& node,
                      rt::StoreCallback<std::vector<rt::OwnedRoom>> done) override {
-        answer(std::move(done), [this, rooms = std::move(rooms), node] {
+        answer("", std::move(done), [this, rooms = std::move(rooms), node] {
             std::vector<rt::OwnedRoom> claimed;
             for (const core::RoomId& room : rooms) {
                 const auto it = db_.rooms.find(room);
@@ -122,7 +123,7 @@ public:
 
     void heartbeat(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
                    rt::StoreCallback<std::vector<core::RoomId>> done) override {
-        answer(std::move(done), [this, node, rooms = std::move(rooms)] {
+        answer("heartbeat", std::move(done), [this, node, rooms = std::move(rooms)] {
             std::vector<core::RoomId> renewed;
             for (const rt::OwnedRoom& held : rooms) {
                 const auto it = db_.rooms.find(held.room);
@@ -138,7 +139,7 @@ public:
 
     void append(const core::RoomId& room, std::uint64_t generation,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override {
-        answer(std::move(done), [this, room, generation] {
+        answer("", std::move(done), [this, room, generation] {
             MemoryRooms::Room& r = db_.rooms.at(room);
             if (r.generation != generation) {
                 db_.refused_appends.emplace_back(room, generation);
@@ -150,7 +151,7 @@ public:
 
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
                  rt::StoreCallback<void> done) override {
-        answer(std::move(done), [this, node, rooms = std::move(rooms)] {
+        answer("", std::move(done), [this, node, rooms = std::move(rooms)] {
             for (const rt::OwnedRoom& held : rooms) {
                 const auto it = db_.rooms.find(held.room);
                 if (it != db_.rooms.end() && it->second.owner == node &&
@@ -164,7 +165,7 @@ public:
 
     void advertise(const core::NodeId& node, std::string address,
                    rt::StoreCallback<void> done) override {
-        answer(std::move(done), [this, node, address = std::move(address)] {
+        answer("", std::move(done), [this, node, address = std::move(address)] {
             db_.addresses.insert_or_assign(std::string(node.view()), address);
             return rt::StoreResult<void>{};
         });
@@ -172,7 +173,7 @@ public:
 
     void find_address(const core::NodeId& node,
                       rt::StoreCallback<std::optional<std::string>> done) override {
-        answer(std::move(done), [this, node] {
+        answer("", std::move(done), [this, node] {
             const auto it = db_.addresses.find(std::string(node.view()));
             return rt::StoreResult<std::optional<std::string>>{
                 it == db_.addresses.end() ? std::nullopt : std::optional(it->second)};
@@ -183,12 +184,11 @@ public:
     // without dropping the connection.
     bool hold = false;
 
-    // Lets what waited go, oldest first unless asked otherwise.
-    void release_held(bool newest_first = false) {
+    // Lets what waited go, oldest first, except that answers to `first` ("heartbeat") go
+    // before all others, as they may when the pool runs them on another session.
+    void release_held(std::string_view first = {}) {
         hold = false;
-        if (newest_first) {
-            std::ranges::reverse(queue_);
-        }
+        std::ranges::stable_partition(queue_, [&](const Call& c) { return c.what == first; });
         if (!armed_) {
             armed_ = true;
             timer_ = reactor_.arm_timer(core::Millis{0}, *this);
@@ -196,32 +196,37 @@ public:
     }
 
     [[nodiscard]] std::size_t waiting() const noexcept { return queue_.size(); }
+    [[nodiscard]] std::size_t waiting(std::string_view what) const noexcept {
+        return static_cast<std::size_t>(
+            std::ranges::count_if(queue_, [&](const Call& c) { return c.what == what; }));
+    }
 
     void on_timeout() noexcept override {
         armed_ = false;
         if (hold) {
             return;
         }
-        std::vector<std::function<void()>> due;
+        std::vector<Call> due;
         due.swap(queue_);
         for (auto& call : due) {
-            call();
+            call.run();
         }
     }
 
 private:
-    template <class T, class Work> void answer(rt::StoreCallback<T> done, Work work) {
+    template <class T, class Work>
+    void answer(std::string_view what, rt::StoreCallback<T> done, Work work) {
         // The callback is move-only and std::function copies, so it waits in a shared slot.
         auto slot = std::make_shared<rt::StoreCallback<T>>(std::move(done));
         if (!reachable) {
-            later([slot] { (*slot)(std::unexpected(rt::StoreError::Unavailable)); });
+            later([slot] { (*slot)(std::unexpected(rt::StoreError::Unavailable)); }, what);
             return;
         }
-        later([slot, work = std::move(work)]() mutable { (*slot)(work()); });
+        later([slot, work = std::move(work)]() mutable { (*slot)(work()); }, what);
     }
 
-    void later(std::function<void()> call) {
-        queue_.push_back(std::move(call));
+    void later(std::function<void()> call, std::string_view what = {}) {
+        queue_.push_back({.what = what, .run = std::move(call)});
         if (!armed_) {
             armed_ = true;
             timer_ = reactor_.arm_timer(core::Millis{0}, *this);
@@ -231,7 +236,11 @@ private:
     net::IReactor& reactor_;
     MemoryRooms& db_;
     rt::IOwnershipListener* listener_ = nullptr;
-    std::vector<std::function<void()>> queue_;
+    struct Call {
+        std::string_view what;
+        std::function<void()> run;
+    };
+    std::vector<Call> queue_;
     net::TimerId timer_;
     bool armed_ = false;
 };
