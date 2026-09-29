@@ -356,3 +356,7 @@ target_link_libraries(sdp_unit_tests PRIVATE ulw::codec_sdp)
 # Chromium's offer and answer, captured by e2e/sdp_roundtrip.spec.mjs.
 target_compile_definitions(sdp_unit_tests
     PRIVATE ULW_SDP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/sdp")
+
+# Parse, validate, serialize, for e2e/sdp_roundtrip.spec.mjs to run Chromium's SDP through.
+ulw_add_executable(ulw_sdp_roundtrip media/sdp_roundtrip_main.cpp)
+target_link_libraries(ulw_sdp_roundtrip PRIVATE ulw::codec_sdp)
