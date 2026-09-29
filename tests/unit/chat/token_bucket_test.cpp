@@ -53,6 +53,17 @@ TEST(TokenBucket, TakesLessThanAMillisecondApartStillEarnTheirShare) {
     EXPECT_LT(t - kStart, Millis{501});
 }
 
+TEST(TokenBucket, ATokenGivenBackCanBeTakenAgainButNeverOverfillsIt) {
+    chat::TokenBucket bucket(1, 2, kStart);
+    ASSERT_TRUE(bucket.take(kStart));
+    bucket.give_back();
+    EXPECT_TRUE(bucket.take(kStart));
+    bucket.give_back();
+    bucket.give_back();
+    EXPECT_TRUE(bucket.take(kStart));
+    EXPECT_FALSE(bucket.take(kStart));
+}
+
 TEST(TokenBucket, ItIsFullOnlyOnceEveryTokenIsBack) {
     chat::TokenBucket bucket(2, 2, kStart);
     EXPECT_TRUE(bucket.full(kStart));

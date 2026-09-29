@@ -268,6 +268,12 @@ void ChatService::send(ClientId id, Send send) {
         answer(*c->client, reason(rt::RouteError::NotJoined), send.room, send.id);
         return;
     }
+    // Busy before the bucket: a send turned away for load costs the client no token.
+    const std::size_t bytes = send.body.size() + kMessageOverhead;
+    if (c->send_bytes_in_flight + bytes > limits_.max_send_bytes_in_flight) {
+        answer(*c->client, reason(rt::RouteError::Busy), send.room, send.id);
+        return;
+    }
     const core::MonoTime now = clock_.now();
     const auto bucket =
         sends_.try_emplace(c->user, limits_.send_burst, limits_.sends_per_second, now).first;
@@ -276,11 +282,6 @@ void ChatService::send(ClientId id, Send send) {
         std::string out;
         write_rate_limited(out, send.room, send.id, taken.error());
         c->client->push(out);
-        return;
-    }
-    const std::size_t bytes = send.body.size() + kMessageOverhead;
-    if (c->send_bytes_in_flight + bytes > limits_.max_send_bytes_in_flight) {
-        answer(*c->client, reason(rt::RouteError::Busy), send.room, send.id);
         return;
     }
     c->send_bytes_in_flight += bytes;
@@ -300,6 +301,13 @@ void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageK
     }
     c->send_bytes_in_flight -= bytes;
     if (!result) {
+        // The owner shed it for load: the client did not get to send it, and gets its token
+        // back to send it again.
+        if (result.error() == rt::RouteError::Busy) {
+            if (const auto bucket = sends_.find(c->user); bucket != sends_.end()) {
+                bucket->second.give_back();
+            }
+        }
         answer(*c->client, reason(result.error()), room, key);
         return;
     }

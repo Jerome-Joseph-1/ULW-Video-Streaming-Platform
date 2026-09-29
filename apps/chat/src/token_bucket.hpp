@@ -17,6 +17,8 @@ public:
 
     // Takes a token, or says how long until there is one.
     [[nodiscard]] std::expected<void, core::Millis> take(core::MonoTime now) noexcept;
+    // Returns a token taken for something that did not happen; never past the burst.
+    void give_back() noexcept;
     // Full at `now`: forgetting the bucket would change nothing.
     [[nodiscard]] bool full(core::MonoTime now) const noexcept;
 

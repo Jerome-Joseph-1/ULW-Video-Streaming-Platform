@@ -49,6 +49,10 @@ std::expected<void, core::Millis> TokenBucket::take(core::MonoTime now) noexcept
         core::Millis{static_cast<core::Millis::rep>((missing + per_second_ - 1) / per_second_)});
 }
 
+void TokenBucket::give_back() noexcept {
+    level_ = std::min(capacity_, level_ + kScale);
+}
+
 bool TokenBucket::full(core::MonoTime now) const noexcept {
     return level(now) == capacity_;
 }

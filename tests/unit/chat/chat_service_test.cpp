@@ -302,6 +302,31 @@ TEST_F(ChatServiceTest, SendsInFlightAreBoundedInBytesPerClient) {
     EXPECT_EQ(rooms_.sends.size(), 3U);
 }
 
+TEST_F(ChatServiceTest, ASendTurnedAwayAsBusyCostsTheClientNoToken) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    const std::string big(std::size_t{60} * 1024, 'x');
+    send(a, "big-1", big);
+    send(a, "big-2", big);
+    // Refused here, for bytes in flight, before the bucket.
+    send(a, "big-3", big);
+    EXPECT_EQ(rooms_.sends.size(), 2U);
+    // Refused by the owner, for its queue: the token comes back.
+    rooms_.sends[0].done(std::unexpected(RouteError::Busy));
+    rooms_.sends[1].done(std::unexpected(RouteError::Busy));
+    alice.take();
+    // Ten tokens were there to start with, and none is spent.
+    for (int i = 0; i < 10; ++i) {
+        send(a, "small-" + std::to_string(i));
+    }
+    EXPECT_EQ(rooms_.sends.size(), 12U);
+    EXPECT_EQ(service_->counters().rate_limited, 0U);
+    send(a, "one-too-many");
+    EXPECT_EQ(service_->counters().rate_limited, 1U);
+}
+
 TEST_F(ChatServiceTest, AFailedJoinIsReportedAndTheNextJoinAsksAgain) {
     FakeClient alice;
     const auto a = attach(alice);
