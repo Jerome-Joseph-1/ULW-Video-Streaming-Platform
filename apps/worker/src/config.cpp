@@ -2,11 +2,32 @@
 
 #include "core/util/parse.hpp"
 
+#include <algorithm>
+#include <array>
+#include <string>
 #include <utility>
 
 namespace worker {
 
 namespace {
+
+constexpr std::array kSettings{
+    ops::Setting{.env = "ULW_DATABASE_URL", .key = "database.url", .secret = true},
+    ops::Setting{.env = "ULW_STORAGE", .key = "storage.backend"},
+    ops::Setting{.env = "ULW_R2_ACCOUNT_ID", .key = "storage.r2_account_id"},
+    ops::Setting{.env = "ULW_S3_ENDPOINT", .key = "storage.s3_endpoint"},
+    ops::Setting{.env = "ULW_FS_ROOT", .key = "storage.fs_root"},
+    ops::Setting{.env = "ULW_BUCKET", .key = "storage.bucket"},
+    ops::Setting{.env = "ULW_NODE_ID", .key = "worker.node_id"},
+    ops::Setting{.env = "HOSTNAME", .key = ""},
+    ops::Setting{.env = "ULW_SCRATCH_DIR", .key = "worker.scratch_dir"},
+    ops::Setting{.env = "ULW_SANDBOX_BIN", .key = "ffmpeg.sandbox_bin"},
+    ops::Setting{.env = "ULW_FFMPEG", .key = "ffmpeg.ffmpeg"},
+    ops::Setting{.env = "ULW_FFPROBE", .key = "ffmpeg.ffprobe"},
+    ops::Setting{.env = "ULW_FFMPEG_THREADS", .key = "ffmpeg.threads"},
+    ops::Setting{.env = "PATH", .key = ""},
+    ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
+};
 
 // /var/tmp rather than /tmp: it survives reboots and is disk, where /tmp is often a tmpfs
 // sized in megabytes, and a workspace holds a whole upload.
@@ -104,7 +125,19 @@ std::expected<core::NodeId, ConfigError> load_node(const EnvLookup& env) {
 
 } // namespace
 
+std::span<const ops::Setting> settings() noexcept {
+    return kSettings;
+}
+
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
+    ops::Level level = ops::Level::Info;
+    if (const auto text = lookup(env, "ULW_LOG_LEVEL")) {
+        const auto parsed = ops::parse_level(*text);
+        if (!parsed) {
+            return error("ULW_LOG_LEVEL", "expected debug, info, warn or error");
+        }
+        level = *parsed;
+    }
     auto database = required(env, "ULW_DATABASE_URL");
     if (!database) {
         return std::unexpected(std::move(database.error()));
@@ -145,7 +178,51 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
                   .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
-                  .ffmpeg_threads = threads};
+                  .ffmpeg_threads = threads,
+                  .log_level = level};
+}
+
+void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log) {
+    const auto [storage,
+                location_variable] = [&]() -> std::pair<std::string_view, std::string_view> {
+        switch (config.storage) {
+        case StorageBackend::R2:
+            return {"r2", "ULW_R2_ACCOUNT_ID"};
+        case StorageBackend::Minio:
+            return {"minio", "ULW_S3_ENDPOINT"};
+        case StorageBackend::Filesystem:
+            return {"fs", "ULW_FS_ROOT"};
+        }
+        return {"r2", "ULW_R2_ACCOUNT_ID"};
+    }();
+    const std::array<std::pair<std::string_view, std::string>, 12> values{{
+        {"ULW_DATABASE_URL", config.database_url},
+        {"ULW_STORAGE", std::string(storage)},
+        {location_variable, config.storage_location},
+        {"ULW_BUCKET", config.bucket},
+        {"ULW_NODE_ID", std::string(config.node.view())},
+        {"ULW_SCRATCH_DIR", config.scratch.parent_path().string()},
+        {"ULW_SANDBOX_BIN", config.sandbox.string()},
+        {"ULW_FFMPEG", config.ffmpeg},
+        {"ULW_FFPROBE", config.ffprobe},
+        {"ULW_FFMPEG_THREADS", std::to_string(config.ffmpeg_threads)},
+        {"PATH", config.search_path},
+        {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
+    }};
+    for (const auto& [variable, value] : values) {
+        if (value.empty()) {
+            continue;
+        }
+        const bool secret = std::ranges::any_of(
+            kSettings, [&](const ops::Setting& s) { return s.env == variable && s.secret; });
+        // The node id may have come from HOSTNAME.
+        const ops::Origin origin = variable == "ULW_NODE_ID" && !layers.get("ULW_NODE_ID")
+                                       ? layers.origin("HOSTNAME")
+                                       : layers.origin(variable);
+        log.info("setting", {{"name", variable},
+                             {"value", secret ? std::string_view("<redacted>") : value},
+                             {"from", ops::to_string(origin)}});
+    }
 }
 
 } // namespace worker

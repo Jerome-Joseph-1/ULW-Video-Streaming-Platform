@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
 
@@ -137,6 +139,43 @@ TEST_F(WorkerConfigTest, WorkersSharingAScratchRootEachGetADirectoryOfTheirOwn) 
 TEST_F(WorkerConfigTest, TheChildrensPathComesFromOurs) {
     env["PATH"] = "/opt/ffmpeg/bin:/usr/bin";
     EXPECT_EQ(load()->search_path, "/opt/ffmpeg/bin:/usr/bin");
+}
+
+TEST_F(WorkerConfigTest, TheLogLevelIsOneOfFour) {
+    EXPECT_EQ(load()->log_level, ops::Level::Info);
+    env["ULW_LOG_LEVEL"] = "warn";
+    EXPECT_EQ(load()->log_level, ops::Level::Warn);
+    env["ULW_LOG_LEVEL"] = "loud";
+    EXPECT_EQ(refused_variable(), "ULW_LOG_LEVEL");
+}
+
+TEST_F(WorkerConfigTest, TheWorkerTakesNoAuthSettingsAndKeepsItsPasswordOffTheCommandLine) {
+    for (const ops::Setting& s : worker::settings()) {
+        EXPECT_FALSE(s.env.starts_with("JWT") || s.env.starts_with("JWKS")) << s.env;
+        EXPECT_EQ(s.secret, s.env == "ULW_DATABASE_URL") << s.env;
+    }
+    const std::vector<std::string_view> args{"--database-url=postgresql://u:pw@h/db"};
+    EXPECT_FALSE(ops::parse_command_line(worker::settings(), args));
+}
+
+TEST_F(WorkerConfigTest, AFileSetsWhatTheEnvironmentLeavesUnset) {
+    const auto entries = ops::toml::parse("[ffmpeg]\nthreads = 2\n[worker]\nnode_id = \"w-9\"\n");
+    ASSERT_TRUE(entries);
+    const ops::FileLayer file{.path = "w.toml", .entries = *entries, .private_to_owner = false};
+    const auto layers = ops::Settings::layer(
+        worker::settings(), &file,
+        [this](std::string_view name) -> std::optional<std::string> {
+            const auto it = env.find(std::string(name));
+            return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
+        },
+        ops::CommandLine{});
+    ASSERT_TRUE(layers);
+    const auto config = worker::load_config(layers->lookup());
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->ffmpeg_threads, 2U);
+    EXPECT_EQ(config->node.view(), "w-9");
+    // HOSTNAME still arrives through the layers, which is how the node id falls back to it.
+    EXPECT_EQ(layers->get("HOSTNAME"), "transcode-worker-7d9f-x2x");
 }
 
 } // namespace

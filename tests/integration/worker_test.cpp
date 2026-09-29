@@ -2,6 +2,7 @@
 // object store: the M10 acceptance runs, including the workers that die and the ones that
 // come back from the dead.
 #include "core/models/ids.hpp"
+#include "core/version.hpp"
 #include "infra/ffmpeg/transcoder.hpp"
 #include "infra/postgres/job_queue.hpp"
 #include "infra/storage/fs_transfer.hpp"
@@ -12,6 +13,7 @@
 #include "media_clips.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
+#include "support/fake_notify.hpp"
 #include "support/live_s3.hpp"
 #include "support/temp_dir.hpp"
 
@@ -274,8 +276,9 @@ protected:
         ASSERT_TRUE(store);
         const auto video = queue_video(**store);
         const auto worker = start_worker("worker-a", storage_env);
-        ASSERT_TRUE(worker->wait_for_output("outcome=", kJobPatience)) << worker->output();
-        EXPECT_NE(worker->output().find("outcome=done"), std::string::npos) << worker->output();
+        ASSERT_TRUE(worker->wait_for_output(R"("outcome":")", kJobPatience)) << worker->output();
+        EXPECT_NE(worker->output().find(R"("outcome":"done")"), std::string::npos)
+            << worker->output();
         expect_ready(video);
         expect_published_hls(**store, video);
         worker->signal(SIGTERM);
@@ -296,14 +299,14 @@ protected:
 TEST_F(WorkerTest, AnUploadedMp4BecomesHlsAndTheVideoReady) {
     const auto video = queue_video(fs_store_);
     const auto worker = start_worker("worker-a", fs_env());
-    ASSERT_TRUE(worker->wait_for_output("outcome=", kJobPatience)) << worker->output();
-    EXPECT_NE(worker->output().find("outcome=done"), std::string::npos) << worker->output();
+    ASSERT_TRUE(worker->wait_for_output(R"("outcome":")", kJobPatience)) << worker->output();
+    EXPECT_NE(worker->output().find(R"("outcome":"done")"), std::string::npos) << worker->output();
     expect_ready(video);
     EXPECT_EQ(job_row(video), "done 1 1 worker-a");
     expect_published_hls(fs_store_, video);
     // Metrics for the job, and a workspace that is gone.
-    EXPECT_NE(worker->output().find("realtime="), std::string::npos);
-    EXPECT_NE(worker->output().find("ffmpeg_peak_rss_kib="), std::string::npos);
+    EXPECT_NE(worker->output().find(R"("realtime":)"), std::string::npos);
+    EXPECT_NE(worker->output().find(R"("ffmpeg_peak_rss_kib":)"), std::string::npos);
     EXPECT_TRUE(fs::is_empty(scratch_dirs_.back()->path() / "worker-a"));
 
     worker->signal(SIGTERM);
@@ -344,7 +347,7 @@ TEST_F(WorkerTest, ASigkilledWorkersJobIsRetriedByAnotherAndItsFfmpegDiesWithIt)
     auto a = start_worker("worker-a", fs_env());
     const std::string a_scratch = scratch_dirs_.back()->path().string();
     // Killed mid-transcode, with ffmpeg running.
-    ASSERT_TRUE(a->wait_for_output("probed", kJobPatience)) << a->output();
+    ASSERT_TRUE(a->wait_for_output(R"("event":"probed")", kJobPatience)) << a->output();
     ASSERT_TRUE(within(seconds(30), [&] { return process_mentions(a_scratch); }));
     a->signal(SIGKILL);
     EXPECT_EQ(a->wait_exit(kExitPatience), 128 + SIGKILL);
@@ -354,8 +357,8 @@ TEST_F(WorkerTest, ASigkilledWorkersJobIsRetriedByAnotherAndItsFfmpegDiesWithIt)
 
     expire_and_requeue();
     const auto b = start_worker("worker-b", fs_env());
-    ASSERT_TRUE(b->wait_for_output("outcome=", kJobPatience)) << b->output();
-    EXPECT_NE(b->output().find("outcome=done"), std::string::npos) << b->output();
+    ASSERT_TRUE(b->wait_for_output(R"("outcome":")", kJobPatience)) << b->output();
+    EXPECT_NE(b->output().find(R"("outcome":"done")"), std::string::npos) << b->output();
     expect_ready(video);
     EXPECT_EQ(job_row(video), "done 2 2 worker-b worker lease expired");
     expect_published_hls(fs_store_, video);
@@ -366,7 +369,7 @@ TEST_F(WorkerTest, ASigkilledWorkersJobIsRetriedByAnotherAndItsFfmpegDiesWithIt)
 TEST_F(WorkerTest, AStoppedWorkerThatResumesIsFencedOutAndChangesNothing) {
     const auto video = queue_video(fs_store_);
     auto a = start_worker("worker-a", fs_env());
-    ASSERT_TRUE(a->wait_for_output("claimed", kJobPatience)) << a->output();
+    ASSERT_TRUE(a->wait_for_output(R"("event":"job claimed")", kJobPatience)) << a->output();
     a->signal(SIGSTOP);
     // Frozen while it held the job.
     ASSERT_EQ(column("SELECT concat_ws(' ', state, fence, locked_by) FROM jobs WHERE video_id = $1",
@@ -375,8 +378,8 @@ TEST_F(WorkerTest, AStoppedWorkerThatResumesIsFencedOutAndChangesNothing) {
 
     expire_and_requeue();
     const auto b = start_worker("worker-b", fs_env());
-    ASSERT_TRUE(b->wait_for_output("outcome=", kJobPatience)) << b->output();
-    EXPECT_NE(b->output().find("outcome=done"), std::string::npos) << b->output();
+    ASSERT_TRUE(b->wait_for_output(R"("outcome":")", kJobPatience)) << b->output();
+    EXPECT_NE(b->output().find(R"("outcome":"done")"), std::string::npos) << b->output();
     expect_ready(video);
     const std::string job_after_b = job_row(video);
     const std::string video_after_b =
@@ -387,9 +390,9 @@ TEST_F(WorkerTest, AStoppedWorkerThatResumesIsFencedOutAndChangesNothing) {
 
     // The zombie wakes, tries to write under fence 1, and every write matches no row.
     a->signal(SIGCONT);
-    ASSERT_TRUE(a->wait_for_output("matched no row", kJobPatience)) << a->output();
-    ASSERT_TRUE(a->wait_for_output("outcome=", kJobPatience)) << a->output();
-    EXPECT_EQ(a->output().find("outcome=done"), std::string::npos) << a->output();
+    ASSERT_TRUE(a->wait_for_output(R"("event":"fenced out")", kJobPatience)) << a->output();
+    ASSERT_TRUE(a->wait_for_output(R"("outcome":")", kJobPatience)) << a->output();
+    EXPECT_EQ(a->output().find(R"("outcome":"done")"), std::string::npos) << a->output();
     EXPECT_EQ(job_row(video), job_after_b);
     EXPECT_EQ(column("SELECT concat_ws(' ', state, version, duration_ms, updated_at) FROM videos "
                      "WHERE id = $1",
@@ -407,10 +410,10 @@ TEST_F(WorkerTest, AStoppedWorkerThatResumesIsFencedOutAndChangesNothing) {
 TEST_F(WorkerTest, SigtermMidTranscodeGivesTheJobBackAndExitsCleanly) {
     const auto video = queue_video(fs_store_);
     auto a = start_worker("worker-a", fs_env());
-    ASSERT_TRUE(a->wait_for_output("probed", kJobPatience)) << a->output();
+    ASSERT_TRUE(a->wait_for_output(R"("event":"probed")", kJobPatience)) << a->output();
     a->signal(SIGTERM);
     EXPECT_EQ(a->wait_exit(kExitPatience), 0) << a->output();
-    EXPECT_NE(a->output().find("outcome=requeued"), std::string::npos) << a->output();
+    EXPECT_NE(a->output().find(R"("outcome":"requeued")"), std::string::npos) << a->output();
     EXPECT_EQ(job_row(video), "queued 1 1 worker stopped");
     EXPECT_EQ(column("SELECT state FROM videos WHERE id = $1", video), "processing");
     EXPECT_TRUE(fs::is_empty(scratch_dirs_.back()->path() / "worker-a"));
@@ -424,7 +427,7 @@ TEST_F(WorkerTest, ItsEnvironmentIsUnreadableToOtherProcessesOfItsUser) {
                    "--regid=" + std::to_string(kNobody), "--clear-groups", "--"};
     }
     const auto worker = start_worker("worker-a", fs_env(), as_user);
-    ASSERT_TRUE(worker->wait_for_output("sandbox=", kExitPatience)) << worker->output();
+    ASSERT_TRUE(worker->wait_for_output(R"("sandbox":)", kExitPatience)) << worker->output();
     // An ordinary process of the same user is readable, so the refusal is the worker's doing.
     as_user.insert(as_user.end(), {"/bin/sleep", "300"});
     const auto ordinary = ChildProcess::start(as_user, {"ULW_DATABASE_URL=x"});
@@ -448,12 +451,44 @@ TEST_F(WorkerTest, AnUndecodableUploadFailsTheVideoWithAReason) {
                             "VALUES ($1, 'transcode', $2)",
                             Params{}.add_uuid(video.uuid()).add_text(source)));
     const auto worker = start_worker("worker-a", fs_env());
-    ASSERT_TRUE(worker->wait_for_output("outcome=", kJobPatience)) << worker->output();
+    ASSERT_TRUE(worker->wait_for_output(R"("outcome":")", kJobPatience)) << worker->output();
     EXPECT_EQ(column("SELECT concat_ws(' ', state, error_reason) FROM videos WHERE id = $1", video),
               "failed the file could not be decoded as video");
     EXPECT_EQ(column("SELECT state FROM jobs WHERE video_id = $1", video), "failed");
     worker->signal(SIGTERM);
     EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
+}
+
+TEST_F(WorkerTest, TellsTheServiceManagerWhenItIsReadyAliveAndStopping) {
+    const std::string socket = (files_.path() / "notify").string();
+    const ulw::test::FakeNotifySocket manager(socket);
+    ASSERT_TRUE(manager.bound());
+    auto env = fs_env();
+    env.push_back("NOTIFY_SOCKET=" + socket);
+    env.emplace_back("WATCHDOG_USEC=2000000");
+    const auto worker = start_worker("worker-a", env);
+    ASSERT_TRUE(manager.wait_for("READY=1", kExitPatience)) << worker->output();
+    EXPECT_TRUE(manager.wait_for("WATCHDOG=1", kExitPatience));
+    worker->signal(SIGTERM);
+    EXPECT_TRUE(manager.wait_for("STOPPING=1", kExitPatience));
+    EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
+}
+
+TEST(WorkerBinary, VersionNamesTheReleaseAndTheCommitAndBadConfigurationExitsTwo) {
+    const auto version = ChildProcess::start({ULW_WORKER_BIN, "--version"}, {});
+    ASSERT_NE(version, nullptr);
+    EXPECT_EQ(version->wait_exit(kExitPatience), 0);
+    const auto info = core::build_info();
+    EXPECT_EQ(version->output(), "transcode_worker " + std::string(info.version) + " (" +
+                                     std::string(info.git_sha) + ")\n");
+
+    const auto bad = ChildProcess::start(
+        {ULW_WORKER_BIN}, {"ULW_DATABASE_URL=postgresql://x@127.0.0.1:1/x", "ULW_STORAGE=fs",
+                           "ULW_FS_ROOT=/tmp", "ULW_NODE_ID=w", "ULW_FFMPEG_THREADS=0"});
+    ASSERT_NE(bad, nullptr);
+    EXPECT_EQ(bad->wait_exit(kExitPatience), 2);
+    EXPECT_NE(bad->output().find(R"("source":"ULW_FFMPEG_THREADS")"), std::string::npos)
+        << bad->output();
 }
 
 } // namespace
