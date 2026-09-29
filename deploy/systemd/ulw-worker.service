@@ -27,6 +27,11 @@ TimeoutStartSec=30
 # SIGTERM: a job still downloading or transcoding is given back to the queue at once; one
 # already publishing is finished, at most a few seconds of uploads.
 KillSignal=SIGTERM
+# SIGTERM to the worker alone. With the default, ulw_sandbox and ffmpeg got it too, the
+# transcode died first, and the job was recorded as killed instead of given back; the sandbox
+# dies with the worker anyway (PR_SET_PDEATHSIG), and SIGKILL still reaches the whole group at
+# the timeout.
+KillMode=mixed
 TimeoutStopSec=60
 Restart=on-failure
 RestartSec=5
