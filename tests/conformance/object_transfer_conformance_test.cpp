@@ -1,5 +1,6 @@
 // Laws every IObjectTransfer backend obeys, run against the filesystem always and against
 // live buckets under ULW_CONFORMANCE_LIVE.
+#include "core/ports/object_stream.hpp"
 #include "core/ports/object_transfer.hpp"
 #include "infra/storage/fs_transfer.hpp"
 
@@ -36,6 +37,8 @@ using core::ports::StorageError;
 using ulw::test::TempDir;
 
 constexpr std::size_t kMiB = std::size_t{1} << 20U;
+// What the stream tests declare they will write at most.
+constexpr std::uint64_t kBound = std::uint64_t{64} << 20U;
 
 std::vector<std::byte> pattern(std::size_t n, std::size_t seed = 0) {
     std::vector<std::byte> v(n);
@@ -79,6 +82,7 @@ public:
     virtual ~TransferHarness() = default;
 
     virtual core::ports::IObjectTransfer& transfer() = 0;
+    virtual core::ports::IObjectStreams& streams() = 0;
     // A key no other run uses; removed again when the harness goes.
     virtual core::StorageKey key(const std::string& name) = 0;
 };
@@ -87,6 +91,7 @@ class FsHarness final : public TransferHarness {
 public:
     FsHarness() : transfer_(root_.path()) {}
     core::ports::IObjectTransfer& transfer() override { return transfer_; }
+    core::ports::IObjectStreams& streams() override { return transfer_; }
     core::StorageKey key(const std::string& name) override { return key_of("videos/" + name); }
 
 private:
@@ -117,6 +122,7 @@ public:
     S3Harness& operator=(const S3Harness&) = delete;
 
     core::ports::IObjectTransfer& transfer() override { return *transfer_; }
+    core::ports::IObjectStreams& streams() override { return *transfer_; }
     core::StorageKey key(const std::string& name) override {
         keys_.push_back(key_of(prefix_ + name));
         return keys_.back();
@@ -165,6 +171,7 @@ protected:
     }
 
     core::ports::IObjectTransfer& transfer() { return harness_->transfer(); }
+    core::ports::IObjectStreams& streams() { return harness_->streams(); }
     core::StorageKey key(const std::string& name) { return harness_->key(name); }
     [[nodiscard]] fs::path local(const std::string& name) const { return files_.path() / name; }
 
@@ -275,6 +282,69 @@ TEST_P(TransferLaws, AnUploadNeverFollowsASymbolicLink) {
     EXPECT_EQ(transfer().size(k).error(), StorageError::NotFound);
 }
 
+TEST_P(TransferLaws, AStreamedObjectAppearsWholeOnlyAtItsCommit) {
+    // Past two of the largest pieces any backend sends, in writes that straddle them.
+    const auto bytes = pattern((40 * kMiB) + 17, 8);
+    const auto k = key("videos/v/raw");
+    auto stream = streams().begin(k, segment_type(), kBound);
+    ASSERT_TRUE(stream);
+    constexpr std::size_t kWrite = (3 * kMiB) + 5;
+    for (std::size_t at = 0; at < bytes.size(); at += kWrite) {
+        ASSERT_TRUE(
+            (*stream)->write(std::span(bytes).subspan(at, std::min(kWrite, bytes.size() - at))));
+    }
+    EXPECT_EQ(transfer().size(k).error(), StorageError::NotFound);
+    ASSERT_TRUE((*stream)->commit());
+
+    EXPECT_EQ(transfer().size(k), bytes.size());
+    ASSERT_TRUE(transfer().download(k, local("down")));
+    EXPECT_TRUE(std::ranges::equal(read_file(local("down")), bytes));
+}
+
+TEST_P(TransferLaws, AStreamDroppedBeforeItsCommitLeavesTheOldObject) {
+    write_file(local("old"), pattern(1000, 9));
+    const auto k = key("videos/v/raw");
+    ASSERT_TRUE(transfer().upload(local("old"), k, segment_type()));
+    {
+        auto stream = streams().begin(k, segment_type(), kBound);
+        ASSERT_TRUE(stream);
+        ASSERT_TRUE((*stream)->write(pattern(2 * kMiB, 10)));
+    }
+    EXPECT_EQ(transfer().size(k), 1000U);
+}
+
+TEST_P(TransferLaws, ACommittedStreamMayBeShortAndReplacesAnObjectLeftUnderItsKey) {
+    write_file(local("old"), pattern(3 * kMiB, 11));
+    const auto k = key("videos/v/raw");
+    ASSERT_TRUE(transfer().upload(local("old"), k, segment_type()));
+    const auto bytes = pattern(100, 12);
+    auto stream = streams().begin(k, segment_type(), kBound);
+    ASSERT_TRUE(stream);
+    ASSERT_TRUE((*stream)->write(bytes));
+    ASSERT_TRUE((*stream)->commit());
+    ASSERT_TRUE(transfer().download(k, local("down")));
+    EXPECT_TRUE(std::ranges::equal(read_file(local("down")), bytes));
+}
+
+TEST_P(TransferLaws, AStreamRefusesBytesPastItsBoundAndCommitsNothingOfThem) {
+    const auto k = key("videos/v/raw");
+    auto stream = streams().begin(k, segment_type(), 1000);
+    ASSERT_TRUE(stream);
+    ASSERT_TRUE((*stream)->write(pattern(1000, 14)));
+    EXPECT_EQ((*stream)->write(pattern(1, 15)).error(), StorageError::Permanent);
+    stream->reset();
+    EXPECT_EQ(transfer().size(k).error(), StorageError::NotFound);
+}
+
+TEST_P(TransferLaws, ARemovedObjectIsGoneAndRemovingItAgainSucceeds) {
+    write_file(local("up"), pattern(100, 16));
+    const auto k = key("videos/v/raw");
+    ASSERT_TRUE(transfer().upload(local("up"), k, segment_type()));
+    ASSERT_TRUE(streams().remove(k));
+    EXPECT_EQ(transfer().size(k).error(), StorageError::NotFound);
+    EXPECT_TRUE(streams().remove(k));
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, TransferLaws, ::testing::ValuesIn(backends()),
                          [](const auto& param_info) { return param_info.param.name; });
 
@@ -299,6 +369,17 @@ TEST(FsTransfer, KeepsCommittedObjectsWhereFsStoreDoes) {
     const fs::path dir = root.path() / "objects" / "videos" / "v" / "hls" / "360p";
     EXPECT_TRUE(std::ranges::equal(read_file(dir / "index.m3u8"), published));
     EXPECT_EQ(std::distance(fs::directory_iterator(dir), fs::directory_iterator()), 1);
+}
+
+TEST(FsTransfer, AStreamDroppedBeforeItsCommitLeavesNoTemporaryBehind) {
+    const TempDir root("ulw-fs-stream");
+    infra::storage::FsTransfer transfer(root.path());
+    {
+        auto stream = transfer.begin(key_of("videos/v/raw"), segment_type(), kBound);
+        ASSERT_TRUE(stream);
+        ASSERT_TRUE((*stream)->write(pattern(1000, 13)));
+    }
+    EXPECT_TRUE(fs::is_empty(root.path() / "objects" / "videos" / "v"));
 }
 
 } // namespace
