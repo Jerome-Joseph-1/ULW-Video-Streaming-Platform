@@ -80,6 +80,21 @@
     return response.status;
   };
 
+  window.selectedPaths = async () => {
+    const out = [];
+    for (const pc of window.peerConnections.filter((c) => c.connectionState !== 'closed')) {
+      const stats = new Map();
+      (await pc.getStats()).forEach((s) => stats.set(s.id, s));
+      for (const s of stats.values()) {
+        if (s.type !== 'transport' || !s.selectedCandidatePairId) continue;
+        const pair = stats.get(s.selectedCandidatePairId);
+        out.push({ local: stats.get(pair.localCandidateId).candidateType,
+                   remote: stats.get(pair.remoteCandidateId).candidateType });
+      }
+    }
+    return out;
+  };
+
   // Connections of rooms already left are closed and have nothing more to say.
   window.mediaStats = async () => {
     const out = [];

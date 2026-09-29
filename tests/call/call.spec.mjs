@@ -58,7 +58,11 @@ function servePage() {
     }
     res.writeHead(200, { 'content-type': file[1] }).end(readFileSync(path.join(here, file[0])));
   });
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+  // Outside mode (run.sh) forwards a fixed port from the outside peer's loopback to this host,
+  // so the page server listens there on every address; otherwise any loopback port will do.
+  const port = Number(process.env.ULW_CALL_PAGE_PORT ?? 0);
+  const address = port === 0 ? '127.0.0.1' : '0.0.0.0';
+  return new Promise((resolve) => server.listen(port, address, () => resolve(server)));
 }
 
 // Every process of one browser: the browser itself and everything it started.
@@ -83,11 +87,14 @@ function processTree(root) {
 }
 
 // A browser server rather than a plain launch: only the server exposes its process, which the
-// drop below has to freeze.
-async function launchPeer() {
+// drop below has to freeze. An outside peer runs through run.sh's wrapper, in another network
+// namespace.
+const outsideChrome = process.env.ULW_CALL_OUTSIDE_CHROME;
+
+async function launchPeer({ outside = false } = {}) {
   const server = await chromium.launchServer({
     headless: true,
-    executablePath: process.env.ULW_E2E_CHROME,
+    executablePath: outside ? outsideChrome : process.env.ULW_E2E_CHROME,
     args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
   });
   const browser = await chromium.connect(server.wsEndpoint());
@@ -98,6 +105,12 @@ async function received(page) {
   const pcs = await page.evaluate(() => window.mediaStats());
   return pcs.reduce((sum, pc) => ({ audio: sum.audio + pc.inbound.audio,
     video: sum.video + pc.inbound.video }), { audio: 0, video: 0 });
+}
+
+// The candidate types of each live connection's selected pair: "relay" on the local side means
+// the media goes through TURN.
+async function selectedPaths(page) {
+  return page.evaluate(() => window.selectedPaths());
 }
 
 async function allConnected(page) {
@@ -118,11 +131,12 @@ test('two peers exchange media and a dropped peer is detected', async () => {
     for (const user of ['alice', 'bob']) {
       const device = randomUUID();
       const ticket = await sfu.ticket(room, 1, user, device);
-      const { server, browser } = await launchPeer();
+      const outside = user === 'bob' && outsideChrome !== undefined;
+      const { server, browser } = await launchPeer({ outside });
       browsers.push(server);
       const page = await browser.newPage();
       await page.goto(pageUrl);
-      peers.push({ user, device, server, page, ticket });
+      peers.push({ user, device, server, page, ticket, outside });
     }
     const started = Date.now();
     for (const peer of peers) {
@@ -138,6 +152,14 @@ test('two peers exchange media and a dropped peer is detected', async () => {
       }, { timeout: 30_000 }).toBe(true);
     }
     metrics.connectedMs = Date.now() - started;
+    for (const peer of peers) {
+      metrics[`${peer.user}Paths`] = await selectedPaths(peer.page);
+      if (peer.outside) {
+        const local = metrics[`${peer.user}Paths`].map((p) => p.local);
+        expect(local.length, `${peer.user} has no selected pair`).toBeGreaterThan(0);
+        expect(local, `${peer.user} is not relayed`).toEqual(local.map(() => 'relay'));
+      }
+    }
 
     // Sampled once a second for the whole window: packets must keep arriving in both
     // directions, not merely have arrived once. The wait below is the sampling period, not a
