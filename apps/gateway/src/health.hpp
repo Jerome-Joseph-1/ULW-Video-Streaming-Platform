@@ -32,8 +32,11 @@ inline constexpr core::Millis kProbeStale{30'000};
 // session is replaced on the call after it breaks, so a restart or failover of the database
 // costs one failed probe even when the new server answers the next; a store answering one
 // request with a 503 costs one too. One failure turning every replica unready together would
-// turn a blip into an outage; two in a row, at least 5 s apart, is a dependency that is down,
-// and /readyz says so within 10 s.
+// turn a blip into an outage; two in a row, at least 5 s apart, is a dependency that is down.
+// A dependency that refuses at once is reported within about 10 s (two intervals). One that
+// hangs holds each probe until its timeouts, and the next probe starts an interval after that,
+// so two misses take up to 2 x (5 s + the probe): about 24 s for a database that hangs (5 s
+// connect + 2 s statement), about 36 s when the probe runs to its 13 s worst case.
 inline constexpr std::uint32_t kMissesBeforeUnready = 2;
 
 // What the probe thread last learned, for the loop to read. Every field stands alone, so

@@ -88,7 +88,10 @@ failed probes in a row. Every replica probes the same database and store, so rea
 flipped on one failure would take them all out of the load balancer together on a blip: the
 probe's session is replaced on the call after it breaks, so a database restart or failover
 costs one failed probe even when the new server answers the next. Two in a row, at least 5 s
-apart, is an outage, reported within 10 s. `dependency_up` shows the last probe's raw answer.
+apart, is an outage. It is reported within about 10 s when the dependency refuses at once;
+one that hangs holds each probe until its timeouts, and the next probe starts 5 s after that,
+so two misses take up to 2 x (5 s + the probe): about 24 s for a hanging database (5 s connect,
+2 s statement), about 36 s at the probe's 13 s worst case. `dependency_up` shows the last probe's raw answer.
 While the database does not answer, `jobs_oldest_queued_seconds` is NaN rather than its last
 value. The probe stops when the drain begins, so a probe stuck on a dead dependency (at most
 about 13 s) runs out during the drain and the exit stays inside the 45 s grace. Transitions
