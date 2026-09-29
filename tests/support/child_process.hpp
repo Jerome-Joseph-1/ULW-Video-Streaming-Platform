@@ -35,6 +35,13 @@ public:
 
     // Collects output until `text` appears in it, anywhere since the start, or `limit` passes.
     [[nodiscard]] bool wait_for_output(std::string_view text, std::chrono::milliseconds limit);
+    // Asks `ready` until it holds or `limit` passes, at most once per `period`, collecting output
+    // in between. For a state only the program can be asked about, where each check costs a
+    // connection: the wait between checks is on the output pipe, so it neither spins nor sleeps,
+    // and ends with false as soon as the program's output ends.
+    [[nodiscard]] bool poll_until(const std::function<bool()>& ready,
+                                  std::chrono::milliseconds limit,
+                                  std::chrono::milliseconds period);
     void signal(int sig) const noexcept;
     // The exit code, 128 + the signal for a signalled program, or nullopt after `limit`.
     [[nodiscard]] std::optional<int> wait_exit(std::chrono::milliseconds limit);
