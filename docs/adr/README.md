@@ -37,3 +37,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted |
 | [0032](0032-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted |
 | [0037](0037-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
+| [0038](0038-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |

@@ -283,6 +283,13 @@ target_link_libraries(room_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg
 target_include_directories(room_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
+ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/config_test.cpp
+    unit/chat/envelope_test.cpp
+    unit/chat/session_test.cpp)
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
+target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
     unit/auth/claims_test.cpp

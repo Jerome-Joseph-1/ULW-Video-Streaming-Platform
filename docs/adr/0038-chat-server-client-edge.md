@@ -1,0 +1,62 @@
+# 0038. chat_server's client edge: envelope, limits and allocation failure
+
+Status: Accepted
+Date: 2026-09-29
+
+## Context
+
+chat_server (ADR-0019) takes WebSocket connections from browsers and apps. ADR-0029 left it
+three decisions: how to keep a read full of tiny control frames from turning into thousands of
+allocations and replies, what an allocation failure inside a `noexcept` reactor callback does,
+and how to stop a foreign page from opening a socket with the user's cookie. Section 3 leaves
+the chat envelope open; M16 needs only enough of one to join a room, send, and receive
+sequenced messages, and M17 owns the rest (acks, resume, rate limits).
+
+## Options
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| Let an allocation failure terminate the process, as the Autobahn echo server does | The rest of the codebase treats it that way; no code | Rejected for chat: one connection's input would take every other connection on the node down with it, and each of those rooms then waits out a takeover |
+| Preallocate every per-connection buffer | No allocation on the data path at all | Rejected for M16: decoded messages, JSON values and outgoing frames are all sized by the peer; pooling them is the optimisation ADR-0029 already allows later without an interface change |
+| Bound what each connection can make the node hold, and catch `std::bad_alloc` where a peer's input drives allocation, closing that connection | Memory is bounded by admission, and a failure costs one connection | Accepted |
+
+## Decision
+
+- **Allocation.** Admission bounds memory: at most 2048 connections, each holding at most one
+  64 KiB message in its decoder and 256 KiB of unsent output (640 MiB at the very worst). The
+  read callbacks of client sessions and of node-channel connections, and the router's answers
+  to a session, catch `std::bad_alloc`, count it (`allocation_failures_total`) and close that
+  connection; a session inside the router's fan-out closes on the next loop iteration, so the
+  fan-out never sees its members change. The router's own timers and store answers allocate a
+  few bounded vectors per event and are left to terminate, as everywhere else.
+- **Control frames.** At most 8 control frames in one read, and a token bucket of 20 refilling
+  at 10 a second across reads; past either, Close 1008. A Ping inside the budget is answered with
+  a Pong carrying its payload. The server pings a connection quiet for 30 s and closes one quiet
+  for 75 s.
+- **Origin.** A token in `Authorization: Bearer` is accepted from anywhere: a browser cannot set
+  that header on a WebSocket, so the client chose to send it. A token in the cookie
+  (`ULW_AUTH_COOKIE`) is accepted only with an `Origin` listed exactly in `ULW_ALLOWED_ORIGINS`;
+  otherwise 403, before the token is looked at. With no list configured the cookie is refused.
+- **Envelope (M16).** JSON objects in text frames, documented in `apps/chat/src/envelope.hpp`:
+  `join` and `send` from the client; `joined`, `sent`, `message` and `error` from the server.
+  Unknown types and unknown fields are refused with `error`, not ignored. A body is a JSON
+  string carried as opaque bytes: never parsed, logged or indexed, and returned re-escaped but
+  byte for byte. A binary frame closes with 1003.
+- **Slow readers.** A connection with more than 256 KiB unsent is closed. Its client reconnects
+  and, from M17, resumes from its last seq.
+- **Probes** share the client port: `/healthz` (the loop is alive), `/readyz` (not draining, the
+  node's address is published and its owner heartbeat reaches the database) and `/metrics`.
+- **Transport.** Plain TCP: Envoy terminates TLS in front of chat as it does for the gateway
+  (ADR-0001). `TlsTransport` can be put in front of the sessions without changing them.
+
+## Consequences
+
+- A flood of pings costs the flooder its connection, not the node its memory; a client library
+  that pings more than 10 times a second is cut off, which none does.
+- Memory is bounded by the limits above, not by the kernel's buffers, which come on top; the
+  pod's limit has to leave room for them.
+- Clients must send the cookie only from listed origins; a new web front end needs its origin
+  added to the deployment before it can connect.
+- M17 replaces the envelope's error-only answers with acks and resume. The shapes here are not
+  a compatibility promise.
+- Reopen if a profile shows allocation on the chat data path in its top frames (ADR-0029).
