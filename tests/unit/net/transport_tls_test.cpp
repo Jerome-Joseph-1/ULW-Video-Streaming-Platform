@@ -6,7 +6,6 @@
 #include "support/reactor_harness.hpp"
 #include "support/tls_pki.hpp"
 
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 
@@ -85,9 +84,6 @@ public:
     [[nodiscard]] SSL* ssl() const { return ssl_.get(); }
     [[nodiscard]] int fd() const { return fd_.get(); }
     [[nodiscard]] std::size_t unsent() const { return outbox_.size(); }
-    // Ciphertext that reached the socket since the last reset.
-    [[nodiscard]] std::size_t written() const { return written_; }
-    void reset_written() { written_ = 0; }
     // At most this many bytes reach the socket per io().
     void limit_writes(std::size_t n) { max_write_ = n; }
 
@@ -110,7 +106,6 @@ public:
         const std::size_t sent = ulw::test::write_some(
             fd_.get(), std::span(outbox_).first(std::min(outbox_.size(), max_write_)));
         outbox_.erase(outbox_.begin(), outbox_.begin() + static_cast<std::ptrdiff_t>(sent));
-        written_ += sent;
     }
 
     bool handshake_step() {
@@ -154,15 +149,7 @@ private:
     SslPtr ssl_;
     std::vector<std::byte> outbox_;
     std::size_t max_write_ = SIZE_MAX;
-    std::size_t written_ = 0;
 };
-
-// Bytes waiting in a socket's receive queue: for AF_UNIX stream sockets the whole queue.
-std::size_t queued_in_kernel(int fd) {
-    int n = 0;
-    EXPECT_EQ(::ioctl(fd, FIONREAD, &n), 0);
-    return static_cast<std::size_t>(n);
-}
 
 struct Reloads final : net::IReloadHandler {
     std::vector<std::expected<void, std::string>> results;
@@ -194,14 +181,8 @@ protected:
     }
 
     // Attaches the server end of a socket pair to `upper` and returns a client on the other.
-    // `server_view`, when given, receives a second descriptor for the server's socket, so the
-    // test can see what the kernel still holds for it.
-    std::unique_ptr<TlsPeer> connect(Upper& upper, SSL_CTX* ctx = nullptr,
-                                     os::UniqueFd* server_view = nullptr) {
+    std::unique_ptr<TlsPeer> connect(Upper& upper, SSL_CTX* ctx = nullptr) {
         auto [server, client] = ulw::test::unix_pair();
-        if (server_view != nullptr) {
-            *server_view = os::UniqueFd{::dup(server.get())};
-        }
         auto t = transports->attach(std::move(server), upper);
         EXPECT_TRUE(t);
         if (!t) {
@@ -346,12 +327,9 @@ TEST_P(TlsTransportTest, ResumingFromTheLoopKeepsParkedBytesWithinOneReceive) {
     const auto tls13 = TestPki::shared().client_context(TLS1_3_VERSION);
     Upper server;
     server.hook = [](Upper& u, net::BorrowedBytes) { u.transport->stop_receiving(); };
-    os::UniqueFd view;
-    auto client = connect(server, tls13.get(), &view);
+    auto client = connect(server, tls13.get());
     ASSERT_TRUE(handshake(*client));
     ASSERT_TRUE(pump_until(*reactor, [&] { return transports->handshakes_in_flight() == 0; }));
-    ASSERT_EQ(client->unsent(), 0U);
-    client->reset_written();
 
     const auto data = pattern(16 * kMiB, 9);
     client->write(data);
@@ -365,10 +343,9 @@ TEST_P(TlsTransportTest, ResumingFromTheLoopKeepsParkedBytesWithinOneReceive) {
         client->io();
         pump_pending(*reactor);
         ASSERT_EQ(server.received.size() % kRecord, 0U);
-        const std::size_t consumed = client->written() - queued_in_kernel(view.get());
-        const std::size_t delivered = (server.received.size() / kRecord) * kRecordOnWire;
-        ASSERT_GE(consumed, delivered);
-        held_most = std::max(held_most, consumed - delivered);
+        // Asked of the transport rather than inferred from the socket: FIONREAD on a Unix
+        // socket pair counts differently from one kernel to the next.
+        held_most = std::max(held_most, server.transport->pending_receive_bytes());
         server.transport->start_receiving();
     }
     EXPECT_GT(server.data_calls, 100);

@@ -244,6 +244,11 @@ public:
         return reactor_.pending_send_bytes(conn_);
     }
 
+    [[nodiscard]] std::size_t pending_receive_bytes() const noexcept override {
+        return BIO_ctrl_pending(SSL_get_rbio(ssl_.get())) +
+               static_cast<std::size_t>(SSL_pending(ssl_.get()));
+    }
+
     void shutdown_write() noexcept override {
         if (write_shut_) {
             return;

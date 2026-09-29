@@ -16,6 +16,8 @@ public:
     [[nodiscard]] std::size_t pending_send_bytes() const noexcept override {
         return reactor_.pending_send_bytes(conn_);
     }
+    // The reactor hands every receive straight up.
+    [[nodiscard]] std::size_t pending_receive_bytes() const noexcept override { return 0; }
     void shutdown_write() noexcept override { reactor_.shutdown_write(conn_); }
     void begin_close() noexcept override { reactor_.begin_close(conn_); }
     [[nodiscard]] bool is_quiescent() const noexcept override {

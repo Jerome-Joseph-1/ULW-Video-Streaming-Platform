@@ -28,6 +28,9 @@ public:
     // Only after the handler has received data: a TLS server has no keys to send with before.
     virtual void send(std::span<const std::byte> bytes) noexcept = 0;
     [[nodiscard]] virtual std::size_t pending_send_bytes() const noexcept = 0;
+    // Bytes read from the socket and not yet handed up: for TLS, ciphertext in the read buffer
+    // and plaintext decrypted ahead of the protocol. What stop_receiving bounds.
+    [[nodiscard]] virtual std::size_t pending_receive_bytes() const noexcept = 0;
     // Ends the sending direction after everything already sent; for TLS, close_notify first.
     virtual void shutdown_write() noexcept = 0;
     virtual void begin_close() noexcept = 0;
