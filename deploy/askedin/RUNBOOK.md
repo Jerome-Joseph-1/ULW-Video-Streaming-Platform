@@ -250,9 +250,29 @@ kubectl get svc -A | grep -w 3478        # nothing may hold UDP 3478 yet
 ```
 
 STUNner's Gateway is a LoadBalancer Service on UDP 3478 with `externalTrafficPolicy: Local`, so
-TURN clients keep their own source address. On K3s, ServiceLB publishes it on the node's
-address. Open UDP 3478 to the internet on the node's firewall, and nothing else: every call's
-media arrives on that one port, and LiveKit's own UDP port (7882) stays inside the cluster.
+TURN clients should keep their own source address. On K3s, ServiceLB publishes it on the
+node's address. Open UDP 3478 to the internet on the node's firewall, and nothing else: every
+call's media arrives on that one port, and LiveKit's own UDP port (7882) stays inside the
+cluster.
+
+Whether ServiceLB really keeps the client's address is not tested anywhere before stage: the
+sandbox has no ServiceLB and publishes a NodePort instead. The probe in "Verify on stage"
+tells: `binding.mapped` must be the probing machine's public address. If it is a node or pod
+address instead, calls still work (media goes through the relay, not the reflexive address),
+but STUNner sees every client as the node, so its logs and any per-client limit lose the
+client. The fix is the path the sandbox proves, a NodePort under `externalTrafficPolicy: Local`
+with the node forwarding 3478 to it:
+
+```sh
+kubectl -n apps-stage annotate gateway stunner --overwrite \
+  stunner.l7mp.io/service-type=NodePort 'stunner.l7mp.io/nodeport={"turn-udp": 31478}'
+# on k8s-prod, persisted in its firewall configuration:
+iptables -t nat -A PREROUTING -p udp --dport 3478 -j REDIRECT --to-ports 31478
+```
+
+Put the annotations in `overlays/stage/stunner/gateway.yaml` too, or ArgoCD reverts them, then
+probe again. Running stunnerd in the host's network, the other usual fix, is ruled out: pods
+may not use `hostNetwork` (docs/adr/0013).
 
 ### Secrets
 
