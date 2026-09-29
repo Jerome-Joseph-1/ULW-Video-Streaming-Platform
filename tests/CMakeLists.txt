@@ -129,6 +129,7 @@ endif()
 ulw_add_test_suite(ws_unit_tests unit
     unit/ws/decoder_test.cpp
     unit/ws/encoder_test.cpp
+    unit/ws/handshake_test.cpp
     unit/ws/split_test.cpp
     unit/ws/utf8_test.cpp)
 target_link_libraries(ws_unit_tests PRIVATE ulw::codec_ws)
