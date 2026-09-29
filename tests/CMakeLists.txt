@@ -311,6 +311,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_job_queue_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
+    integration/postgres_upload_reaper_test.cpp
     PROPERTIES RESOURCE_LOCK postgres)
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests
@@ -318,6 +319,25 @@ target_include_directories(postgres_integration_tests
 target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
+
+ulw_add_test_suite(reaper_unit_tests unit
+    unit/reaper/config_test.cpp
+    unit/reaper/reaper_test.cpp)
+target_link_libraries(reaper_unit_tests PRIVATE ulw::reaper_lib)
+target_include_directories(reaper_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+# The reaper against the Postgres and MinIO of deploy/local/compose.yaml.
+ulw_add_test_suite(reaper_integration_tests integration
+    integration/postgres_harness.cpp
+    integration/upload_reaper_live_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(reaper_integration_tests PRIVATE
+    ulw::reaper_lib ulw::pg_store ulw::storage_s3 ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
+target_include_directories(reaper_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(reaper_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 
 # The room registry's store against a live Postgres, as the suite above.
 ulw_add_test_suite(room_store_integration_tests integration
@@ -436,19 +456,27 @@ target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/a
     ${PROJECT_SOURCE_DIR}/tests)
 
 if(ULW_BUILD_WORKER)
+    # Run under the sandbox's syscall filter, so like the helper it links nothing instrumented.
+    add_executable(ulw_syscall_probe support/syscall_probe_main.cpp)
+    target_compile_features(ulw_syscall_probe PRIVATE cxx_std_23)
+    target_link_libraries(ulw_syscall_probe PRIVATE ulw_warnings)
+
     ulw_add_test_suite(ffmpeg_unit_tests unit
         unit/ffmpeg/command_test.cpp
         unit/ffmpeg/exit_code_test.cpp
         unit/ffmpeg/hls_rewrite_test.cpp
+        unit/ffmpeg/live_command_test.cpp
         unit/ffmpeg/progress_test.cpp
-        unit/ffmpeg/sandbox_test.cpp)
+        unit/ffmpeg/sandbox_test.cpp
+        unit/ffmpeg/seccomp_filter_test.cpp)
     target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
     # White-box tests of the adapter internals, and the real sandbox helper.
     target_include_directories(ffmpeg_unit_tests
         PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${PROJECT_SOURCE_DIR}/tests)
     target_compile_definitions(ffmpeg_unit_tests
-        PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>")
-    add_dependencies(ffmpeg_unit_tests ulw_sandbox)
+        PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
+                ULW_SYSCALL_PROBE_BIN="$<TARGET_FILE:ulw_syscall_probe>")
+    add_dependencies(ffmpeg_unit_tests ulw_sandbox ulw_syscall_probe)
 
     ulw_add_test_suite(worker_unit_tests unit
         unit/worker/config_test.cpp
@@ -458,6 +486,27 @@ if(ULW_BUILD_WORKER)
         unit/worker/workspace_test.cpp)
     target_link_libraries(worker_unit_tests PRIVATE ulw::worker_lib ulw::os)
     target_include_directories(worker_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+    # Against libsrt itself as the caller, over loopback UDP.
+    ulw_add_test_suite(srt_unit_tests unit
+        unit/srt/ingest_test.cpp)
+    FetchContent_GetProperties(srt SOURCE_DIR ulw_srt_source BINARY_DIR ulw_srt_binary)
+    target_include_directories(srt_unit_tests SYSTEM PRIVATE ${ulw_srt_source}/srtcore
+        ${ulw_srt_binary})
+    target_link_libraries(srt_unit_tests PRIVATE ulw::srt_ingest srt_static)
+    target_include_directories(srt_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+    ulw_add_test_suite(live_packager_unit_tests unit
+        unit/live_packager/config_test.cpp
+        unit/live_packager/live_window_test.cpp
+        unit/live_packager/media_playlist_test.cpp
+        unit/live_packager/publisher_test.cpp
+        unit/live_packager/segment_tracker_test.cpp
+        unit/live_packager/stream_id_test.cpp
+        unit/live_packager/watch_test.cpp)
+    target_link_libraries(live_packager_unit_tests PRIVATE
+        ulw::live_packager_lib ulw::storage_fs_transfer ulw::os)
+    target_include_directories(live_packager_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
     # The adapter on real ffmpeg, and the worker binary against the Postgres and MinIO of
     # deploy/local/compose.yaml.
@@ -478,6 +527,26 @@ if(ULW_BUILD_WORKER)
         target_compile_definitions(worker_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
     endif()
     add_dependencies(worker_integration_tests transcode_worker ulw_sandbox)
+
+    # live_packager against the MinIO of deploy/local/compose.yaml, fed by the ffmpeg test
+    # publisher.
+    ulw_add_test_suite(live_packager_integration_tests integration
+        integration/live_packager_test.cpp
+        support/child_process.cpp)
+    target_link_libraries(live_packager_integration_tests PRIVATE
+        ulw::live_packager_lib ulw::storage_s3 ulw::test_live_s3 ulw::os srt_static)
+    target_include_directories(live_packager_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/tests/integration)
+    target_include_directories(live_packager_integration_tests SYSTEM PRIVATE
+        ${ulw_srt_source}/srtcore ${ulw_srt_binary})
+    target_compile_definitions(live_packager_integration_tests PRIVATE
+        ULW_LIVE_PACKAGER_BIN="$<TARGET_FILE:live_packager>"
+        ULW_LIVE_TESTSOURCE="${PROJECT_SOURCE_DIR}/apps/live-packager/testsource/ulw-live-testsource"
+        ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>")
+    if(ULW_CONFORMANCE_LIVE)
+        target_compile_definitions(live_packager_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+    endif()
+    add_dependencies(live_packager_integration_tests live_packager ulw_sandbox)
 
     # gateway_server against the Postgres and MinIO of deploy/local/compose.yaml, serving
     # what the worker's ffmpeg command writes.

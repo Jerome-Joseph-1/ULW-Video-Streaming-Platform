@@ -9,6 +9,7 @@ What ships:
 |---|---|
 | `overlays/{stage,prod}/video-gateway/` | Deployment (2 replicas, migrations in its init container), Service, HTTPRoute + BackendTrafficPolicy, NetworkPolicy |
 | `overlays/{stage,prod}/video-worker/` | Deployment (1 replica), NetworkPolicy; no Service, no route |
+| `overlays/{stage,prod}/upload-reaper/` | CronJob (every 15 minutes) and NetworkPolicy; the gateway image's `ulw_reaper` (step 3a) |
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
 | `woodpecker.yml` | Builds and pushes both images, then `rollout restart`; never applies a manifest |
 | `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
@@ -32,6 +33,36 @@ kubectl version                        # server v1.33 or later
 uname -r                               # 6.3 or later (idmapped mounts on overlayfs)
 k3s --version; runc --version          # containerd 2.x, runc 1.2 or later
 ```
+
+Two host settings stop the worker on otherwise capable machines; GitHub's Ubuntu 24.04 runners
+have both. On each node, as an ordinary user (not root, not sudo):
+
+```sh
+sysctl kernel.apparmor_restrict_unprivileged_userns   # 0, or "unknown key"
+unshare --user --map-root-user --net --mount --pid --fork --mount-proc true && echo ok
+unshare --user --map-root-user --net --mount \
+  sh -c 'mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /mnt && echo ok'
+```
+
+- `apparmor_restrict_unprivileged_userns = 1` (Ubuntu 23.10 and later) lets a process with no
+  capabilities on the host create a user namespace but not use it, and the worker is such a
+  process. The first `unshare` then fails with `write failed /proc/self/uid_map: Operation not
+  permitted`, and so would the worker's start-up check. The e2e workflow sets it to `0` on its
+  runner for this reason. The nodes need the same unless they run a kernel without the key:
+  `echo kernel.apparmor_restrict_unprivileged_userns=0 | sudo tee /etc/sysctl.d/60-ulw-userns.conf`
+  then `sudo sysctl --system`. It is host-wide; the alternative, an AppArmor profile for the
+  worker that allows `userns`, has not been written or tested.
+- If the sysfs mount fails, a file is mounted over part of the node's `/sys`
+  (`grep ' /sys/' /proc/self/mountinfo` shows it). The kernel then refuses a fresh sysfs in any
+  user namespace, and every `hostUsers: false` pod stays in `ContainerCreating` with "error
+  mounting sysfs ... operation not permitted". kind does this to its nodes on any VM with DMI
+  (the sandbox undoes it in deploy/local/e2e-up.sh); a K3s host normally has no such mount.
+
+One difference the sandbox cannot show: containerd inside a kind node never applies AppArmor,
+while K3s on a host where `cat /sys/module/apparmor/parameters/enabled` prints `Y` gives every
+pod its default AppArmor profile, which denies `mount`. On such a node watch the worker's first
+start; a `mount /proc` error in its log means the worker needs its own AppArmor profile
+(`securityContext.appArmorProfile`) before it can run.
 
 The gateway's NetworkPolicy admits only Envoy's data plane, found by labels. Confirm them, or
 edit `overlays/*/video-gateway/networkpolicy.yaml` before the first apply:
@@ -70,7 +101,7 @@ The other limits are environment variables in the same files (`ULW_MAX_CONNECTIO
 `ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND`, `ULW_REQUESTS_PER_USER_PER_MINUTE`,
 `ULW_UPLOAD_BYTES_PER_USER_PER_DAY`), listed with their ranges in
 `docs/integration/operations-contract.md`; the defaults and their derivations are in
-docs/adr/0046. Each applies per replica, so with two replicas a user may reach twice a per-user
+docs/adr/0055. Each applies per replica, so with two replicas a user may reach twice a per-user
 limit. The pods start as user 10001 and have nothing to drop; `ULW_RUN_AS_USER` is for a
 process started as root, which these manifests never do.
 
@@ -99,8 +130,8 @@ Without it the worker pod stays in `CreateContainerError`.
 
 ## 3. Secrets
 
-New keys for `.env.stage` and `.env.prod` (names only). The R2 bucket should have a lifecycle
-rule aborting incomplete multipart uploads after 7 days; the gateway expires its uploads after 6.
+New keys for `.env.stage` and `.env.prod` (names only). The R2 bucket needs the lifecycle rule
+of step 3a; the gateway expires its uploads after 6 days.
 
 ```
 VIDEO_DATABASE_URL                    postgresql://… for the ulw database; the role needs DDL (docs/adr/0031)
@@ -159,6 +190,54 @@ CREATE DATABASE ulw_stage OWNER ulw_stage;
 The role owns its database, which gives the migrations their DDL rights (docs/adr/0031).
 `VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
 password percent-encoded.
+
+### 3a. Lifecycle rule and upload reaper
+
+The bucket aborts incomplete multipart uploads under `videos/` after 7 days, a day past the
+gateway's 6-day upload lifetime. This is the backstop; the reaper below normally gets there
+within minutes of an upload expiring (docs/adr/0049). Once per bucket, with an R2 token that
+has admin read and write on the bucket (neither the gateway's nor the worker's), and the AWS
+CLI:
+
+```sh
+cat > lifecycle.json <<'JSON'
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-multipart-videos",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "videos/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
+JSON
+export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_DEFAULT_REGION=auto
+R2="https://$VIDEO_R2_ACCOUNT_ID.r2.cloudflarestorage.com"
+aws s3api get-bucket-lifecycle-configuration --endpoint-url "$R2" --bucket "$VIDEO_R2_BUCKET"
+aws s3api put-bucket-lifecycle-configuration --endpoint-url "$R2" --bucket "$VIDEO_R2_BUCKET" \
+  --lifecycle-configuration file://lifecycle.json
+aws s3api get-bucket-lifecycle-configuration --endpoint-url "$R2" --bucket "$VIDEO_R2_BUCKET"
+```
+
+The put replaces the bucket's whole lifecycle configuration: if the first get shows rules, merge
+them into `lifecycle.json`. The same rule is in the dashboard under the bucket's Settings, Object
+lifecycle rules, as "Abort incomplete multipart uploads" with prefix `videos/` and 7 days.
+
+The reaper is `overlays/{stage,prod}/upload-reaper/`: a CronJob running the gateway image's
+`ulw_reaper` every 15 minutes with the gateway's secret (the same `:development` / `:master`
+image and `imagePullPolicy: Always` as the gateway, so the reaper's SQL and lock key match the
+build the gateways run), and a NetworkPolicy that lets it reach cluster DNS, Postgres (5432) and
+the store (443) and nothing else. It aborts uploads past their `expires_at`, fails their videos
+with "upload expired", releases their storage sessions, removes any object a finished commit
+left at their key, and aborts sessions older than the uploads' lifetime that no upload owns
+(docs/adr/0049). Each pass prints `reaper_uploads_expired_last_run`,
+`reaper_uploads_release_failed_last_run` and `reaper_parts_orphaned_last_run` on stdout, as
+gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
+confirmed, and the Job's log says which.
+
+The NetworkPolicy allows ports, not addresses, because Postgres runs on the node's host and R2
+is on the internet. If the host's address is stable, add it as an `ipBlock` to the 5432 rule.
 
 ## 4. Pipeline and first deploy
 

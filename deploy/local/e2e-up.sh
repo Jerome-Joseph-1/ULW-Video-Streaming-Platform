@@ -53,6 +53,19 @@ docker exec "$node" mkdir -p /var/lib/kubelet/seccomp/profiles
 docker cp "$root/deploy/askedin/seccomp/ulw-worker.json" \
     "$node:/var/lib/kubelet/seccomp/profiles/ulw-worker.json"
 
+# On a host with DMI (any cloud VM, the CI runners among them) kind's entrypoint bind-mounts
+# fake product_name and product_uuid files over the node's sysfs, so nodes of one cluster get
+# distinct ids. The kernel mounts a fresh sysfs in a user namespace only while every sysfs
+# mount it could reveal is fully visible (fs/namespace.c, mount_too_revealing), and a file
+# mounted over one hides it: runc then fails every hostUsers: false pod sandbox with "error
+# mounting sysfs ... operation not permitted", and the worker never starts. One node needs no
+# distinct id; the entrypoint puts them back whenever the node restarts, and this runs again.
+# shellcheck disable=SC2016 # expanded by the node's shell
+docker exec "$node" sh -c '
+    for f in /sys/devices/virtual/dmi/id/product_name /sys/devices/virtual/dmi/id/product_uuid; do
+        while findmnt --mountpoint "$f" >/dev/null; do umount "$f"; done
+    done'
+
 build_args=(--build-arg "ULW_GIT_SHA=$(git -C "$root" rev-parse --short=12 HEAD)")
 for proxy in HTTPS_PROXY https_proxy NO_PROXY no_proxy; do
     [[ -n ${!proxy:-} ]] && build_args+=(--build-arg "$proxy")
@@ -98,14 +111,23 @@ start() {
 start "$pg" --tmpfs /var/lib/postgresql/data --env "POSTGRES_PASSWORD=$password" "$pg_image"
 # MinIO is also published on the host's loopback: presigned segment URLs name it as the pods
 # do (minio:9000), and the playback check reaches it there with that Host header, as a viewer
-# resolving the store's name would. CORS as in compose.yaml (ADR-0028).
+# resolving the store's name would. CORS as in compose.yaml (ADR-0028). Incomplete multipart
+# uploads are aborted after 7 days, as R2's lifecycle rule does (RUNBOOK section 3); MinIO
+# refuses AbortIncompleteMultipartUpload in a bucket lifecycle and has this server-wide setting
+# instead, whose default of 24 hours would cut short uploads the gateway allows 6 days.
 start "$minio" --tmpfs /data --env MINIO_ROOT_USER=ulw-e2e --env "MINIO_ROOT_PASSWORD=$password" \
-    --env 'MINIO_API_CORS_ALLOW_ORIGIN=*' --publish 127.0.0.1:19000:9000 "$minio_image" server /data
+    --env 'MINIO_API_CORS_ALLOW_ORIGIN=*' --env MINIO_API_STALE_UPLOADS_EXPIRY=168h \
+    --publish 127.0.0.1:19000:9000 "$minio_image" server /data
 
 until docker exec "$pg" pg_isready --quiet --username postgres; do sleep 1; done
 until docker exec "$minio" mc alias set local http://127.0.0.1:9000 ulw-e2e "$password" \
     >/dev/null 2>&1; do sleep 1; done
 docker exec "$minio" mc mb --ignore-existing "local/$bucket" >/dev/null
+# An environment override is not stored: `config get` still shows stale_uploads_expiry=24h and
+# reports the override on a comment line of its own, which is the only place the effective value
+# shows (mc has no command that prints it).
+docker exec "$minio" mc admin config get local api | grep -qxF '# MINIO_API_STALE_UPLOADS_EXPIRY=168h' \
+    || { log "MinIO did not take the 7-day stale upload expiry"; exit 1; }
 
 # The mock auth-service's certificate, from a CA that exists only here. The gateway trusts
 # this CA (gateway-patch.yaml) exactly as it trusts the public ones in production.

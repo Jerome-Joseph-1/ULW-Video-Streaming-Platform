@@ -24,6 +24,8 @@ struct Sandbox {
     // "NAME=value" entries. Nothing of the worker's own environment is passed on: it holds
     // the database password and the storage keys.
     std::vector<std::string> environment;
+    // Off only in tests that run an ordinary shell as the child.
+    bool syscall_filter = true;
 };
 
 struct Limits {
@@ -32,6 +34,8 @@ struct Limits {
     std::uint64_t address_space_bytes = 0;
     core::Seconds cpu{};
     core::Millis wall{};
+    // The most any file the child writes may grow to; 0 sets no limit.
+    std::uint64_t file_size_bytes = 0;
 };
 
 struct ChildExit {
@@ -51,13 +55,15 @@ struct ChildExit {
 // After SIGTERM, how long a child gets to exit before SIGKILL.
 inline constexpr core::Millis kTerminationGrace{5000};
 
-// Starts `args` in the sandbox with stdin on /dev/null, hands whatever it writes to stdout to
-// `on_stdout` as it arrives, and waits for it to exit. At the deadline, or once `stop` fires,
-// the child gets SIGTERM and, kTerminationGrace later, SIGKILL. Fails only when the child
-// could not be started at all.
+// Starts `args` in the sandbox, hands whatever it writes to stdout to `on_stdout` as it
+// arrives, and waits for it to exit. Its stdin is /dev/null, or the open descriptor `input`
+// when that is not -1: the only way media from the network reaches a child that has no network
+// of its own. At the deadline, or once `stop` fires, the child gets SIGTERM and,
+// kTerminationGrace later, SIGKILL. Fails only when the child could not be started at all.
 [[nodiscard]] std::expected<ChildExit, std::string>
 run_sandboxed(const Sandbox& sandbox, const Limits& limits, const Args& args,
               const core::ports::IClock& clock,
-              const std::function<void(std::string_view)>& on_stdout, const std::stop_token& stop);
+              const std::function<void(std::string_view)>& on_stdout, const std::stop_token& stop,
+              int input = -1);
 
 } // namespace infra::ffmpeg

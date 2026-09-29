@@ -1,4 +1,4 @@
-# 0046. Per-client limits, refused before the handshake, and dropping root
+# 0055. Per-client limits, refused before the handshake, and dropping root
 
 Status: Accepted
 Date: 2026-09-29

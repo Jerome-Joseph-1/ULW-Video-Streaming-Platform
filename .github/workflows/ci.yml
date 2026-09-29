@@ -242,7 +242,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ws, http, hls, toml, mls]
+        target: [ws, http, hls, toml, mls, sdp, rtp]
     env:
       CC: clang-19
       CXX: clang++-19
@@ -292,3 +292,32 @@ jobs:
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz-work/artifacts
+
+  # Every commit, not just the tip: a secret that was committed and then removed is still one.
+  # Allowlist entries are in .gitleaks.toml, each scoped to a rule and a file.
+  secrets:
+    runs-on: ubuntu-24.04
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      # From gitleaks_8.30.1_checksums.txt in the release, linux_x64 line.
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+      - run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --verbose .'
+
+  # Offline: every manifest against pinned schemas (deploy/local/tools.sh). The server-side
+  # dry run against the sandbox cluster is a step of e2e.yml, where a cluster exists.
+  manifests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get install -y -qq --no-install-recommends python3-yaml
+      - run: deploy/local/validate-manifests.sh

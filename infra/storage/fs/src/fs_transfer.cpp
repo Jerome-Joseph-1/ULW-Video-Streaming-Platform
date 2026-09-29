@@ -65,6 +65,17 @@ std::expected<std::uint64_t, StorageError> FsTransfer::download(const core::Stor
 std::expected<void, StorageError> FsTransfer::upload(const fs::path& source,
                                                      const core::StorageKey& key,
                                                      const core::ContentType& /*type*/) {
+    return place(source, key, false);
+}
+
+std::expected<void, StorageError> FsTransfer::upload_new(const fs::path& source,
+                                                         const core::StorageKey& key,
+                                                         const core::ContentType& /*type*/) {
+    return place(source, key, true);
+}
+
+std::expected<void, StorageError> FsTransfer::place(const fs::path& source,
+                                                    const core::StorageKey& key, bool create_only) {
     const fs::path target = object_path(key);
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);
@@ -99,7 +110,23 @@ std::expected<void, StorageError> FsTransfer::upload(const fs::path& source,
         return discard(std::error_code(errno, std::generic_category()));
     }
     // Readers see the old object or the new one: flushed first, then renamed over the target.
-    if (::fsync(fd.get()) != 0 || ::rename(temp.c_str(), target.c_str()) != 0) {
+    // A create-only upload links instead, which the kernel refuses when the target exists, so
+    // of two racing writers one wins; the temporary is then dropped either way.
+    if (::fsync(fd.get()) != 0) {
+        return discard(std::error_code(errno, std::generic_category()));
+    }
+    if (create_only) {
+        const int linked = ::link(temp.c_str(), target.c_str());
+        const int linked_errno = errno;
+        std::error_code ignored;
+        fs::remove(temp, ignored);
+        if (linked != 0) {
+            return std::unexpected(
+                linked_errno == EEXIST
+                    ? StorageError::AlreadyExists
+                    : from_error_code(std::error_code(linked_errno, std::generic_category())));
+        }
+    } else if (::rename(temp.c_str(), target.c_str()) != 0) {
         return discard(std::error_code(errno, std::generic_category()));
     }
     // The rename lives in the directory; until that is flushed, a crash can bring back the old
