@@ -36,7 +36,9 @@ target_link_libraries(os_unit_tests PRIVATE ulw::os)
 
 ulw_add_test_suite(ops_unit_tests unit
     unit/ops/async_log_test.cpp
-    unit/ops/log_test.cpp)
+    unit/ops/log_test.cpp
+    unit/ops/metrics_test.cpp
+    unit/ops/process_test.cpp)
 target_link_libraries(ops_unit_tests PRIVATE ulw::ops)
 target_include_directories(ops_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
