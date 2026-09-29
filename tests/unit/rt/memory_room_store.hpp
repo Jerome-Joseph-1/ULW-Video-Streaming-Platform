@@ -93,6 +93,7 @@ public:
 
     void resolve(const core::RoomId& room, const core::NodeId& node,
                  rt::StoreCallback<rt::Ownership> done) override {
+        ++resolves;
         answer("", std::move(done), [this, room, node]() -> rt::StoreResult<rt::Ownership> {
             const auto it = db_.rooms.find(room);
             if (it == db_.rooms.end()) {
@@ -182,6 +183,23 @@ public:
         });
     }
 
+    void read_owners(
+        std::vector<core::RoomId> rooms,
+        rt::StoreCallback<std::vector<std::pair<core::RoomId, rt::Ownership>>> done) override {
+        ++owner_reads;
+        answer("", std::move(done), [this, rooms = std::move(rooms)] {
+            std::vector<std::pair<core::RoomId, rt::Ownership>> owners;
+            for (const core::RoomId& room : rooms) {
+                const auto it = db_.rooms.find(room);
+                if (it != db_.rooms.end()) {
+                    owners.emplace_back(room, rt::Ownership{.node = it->second.owner,
+                                                            .generation = it->second.generation});
+                }
+            }
+            return rt::StoreResult<std::vector<std::pair<core::RoomId, rt::Ownership>>>{owners};
+        });
+    }
+
     void find_address(const core::NodeId& node,
                       rt::StoreCallback<std::optional<std::string>> done) override {
         answer("", std::move(done), [this, node] {
@@ -190,6 +208,10 @@ public:
                 it == db_.addresses.end() ? std::nullopt : std::optional(it->second)};
         });
     }
+
+    // Calls made so far, for tests of how many statements a path costs.
+    std::size_t resolves = 0;
+    std::size_t owner_reads = 0;
 
     // While set, every advertise fails as if the database were down.
     bool refuse_advertise = false;

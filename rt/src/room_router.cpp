@@ -57,10 +57,6 @@ constexpr core::Millis kHandshakeTimeout{5'000};
 // subscribed to would otherwise queue here without end; the connection is closed, and the
 // peer resubscribes when it reconnects.
 constexpr std::size_t kMaxPeerBacklog = std::size_t{16} * wire::kMaxFrame;
-// How long a room can go routed to an owner that let it go when the notification saying so was
-// lost: one store lookup per such room this often, against a room unreachable that long in the
-// rare case a notification goes missing.
-constexpr core::Millis kRevalidate{10'000};
 
 using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq) noexcept>;
 
@@ -846,7 +842,7 @@ private:
         find_orphans();
         release_idle(now);
         if (now >= next_revalidation_) {
-            next_revalidation_ = now + kRevalidate;
+            next_revalidation_ = now + config_.revalidate_every;
             revalidate();
         }
     }
@@ -882,15 +878,31 @@ private:
                       [this](const auto& entry) { return !registry_.owned(entry.first); });
     }
 
-    // Notifications are hints and a listening session can miss them; every room routed to
-    // another node is looked up again now and then, and a newer owner found this way is
-    // subscribed to like one a notification named.
+    // Notifications are hints and a listening session can miss them; the owners of every room
+    // routed to another node are read again now and then, in one read-only statement, and an
+    // owner newer than the one known is subscribed to like one a notification named.
     void revalidate() {
+        std::vector<core::RoomId> rooms;
         for (const auto& [room, lr] : local_) {
             if (remote_owner(lr) && !lr.subscribing) {
-                registry_.resolve(room, [](const StoreResult<Ownership>&) noexcept {});
+                rooms.push_back(room);
             }
         }
+        if (rooms.empty() || revalidating_) {
+            return;
+        }
+        revalidating_ = true;
+        store_.read_owners(
+            std::move(rooms),
+            [this](StoreResult<std::vector<std::pair<core::RoomId, Ownership>>> owners) noexcept {
+                revalidating_ = false;
+                if (!owners) {
+                    return;
+                }
+                for (const auto& [room, owner] : *owners) {
+                    registry_.on_owner_changed(room, owner);
+                }
+            });
     }
 
     void find_orphans() {
@@ -1374,6 +1386,7 @@ private:
     bool advertised_ = false;
     bool draining_ = false;
     bool node_taken_ = false;
+    bool revalidating_ = false;
     bool advertising_ = false;
     RouterCounters counters_;
 };

@@ -92,6 +92,9 @@ struct RouterConfig {
     // a second, and each costs a few hundred bytes here: 16384 rooms keep the beat near 1 MB and
     // the bookkeeping to a few MB. A join past it is answered Busy.
     std::size_t max_rooms = 16'384;
+    // How long a room can stay routed to an owner that let it go, if the notification saying so
+    // was lost: all such rooms' owners are read again this often, in one statement.
+    core::Millis revalidate_every{10'000};
 };
 
 struct RouterCounters {

@@ -8,6 +8,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rt {
@@ -103,6 +104,11 @@ public:
     // incarnation changes only the address.
     virtual void advertise(const core::NodeId& node, std::string address,
                            const core::Uuid& incarnation, StoreCallback<void> done) = 0;
+    // The recorded owner of each of `rooms` that exists, read only: nothing is created, claimed
+    // or announced.
+    virtual void
+    read_owners(std::vector<core::RoomId> rooms,
+                StoreCallback<std::vector<std::pair<core::RoomId, Ownership>>> done) = 0;
     // nullopt for a node that never advertised.
     virtual void find_address(const core::NodeId& node,
                               StoreCallback<std::optional<std::string>> done) = 0;

@@ -103,6 +103,10 @@ ON CONFLICT (node_id) DO UPDATE
  WHERE chat_nodes.incarnation = excluded.incarnation
     OR chat_nodes.seen_at < now() - $4 * interval '1 millisecond')sql";
 
+constexpr Sql kReadOwners = R"sql(
+SELECT room_id, owner_node, owner_generation FROM room_assignments
+ WHERE room_id = ANY ($1::text::uuid[]))sql";
+
 constexpr Sql kFindAddress = "SELECT address FROM chat_nodes WHERE node_id = $1";
 
 constexpr Sql kListen = "LISTEN room_owner";
@@ -412,6 +416,51 @@ private:
     StoreCallback<void> done_;
 };
 
+class ReadOwners final : public Operation {
+public:
+    using Owners = std::vector<std::pair<core::RoomId, Ownership>>;
+
+    ReadOwners(const std::vector<core::RoomId>& rooms, StoreCallback<Owners> done)
+        : rooms_(array_literal(rooms, [](const core::RoomId& room) { return room.to_string(); })),
+          done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = kReadOwners, .params = Params{}.add_text(rooms_)};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(StoreError::Unavailable));
+            return std::nullopt;
+        }
+        done_(decode(*outcome));
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(StoreError::Unavailable));
+    }
+
+private:
+    static StoreResult<Owners> decode(const Result& r) {
+        Owners owners;
+        owners.reserve(static_cast<std::size_t>(r.rows()));
+        for (int row = 0; row < r.rows(); ++row) {
+            const auto room = domain_at<core::RoomId>(r, row, 0);
+            const auto node = domain_at<core::NodeId>(r, row, 1);
+            const auto generation = generation_at(r, row, 2);
+            if (!room || !node || !generation) {
+                return std::unexpected(StoreError::Corrupt);
+            }
+            owners.emplace_back(*room, Ownership{.node = *node, .generation = *generation});
+        }
+        return owners;
+    }
+
+    std::string rooms_;
+    StoreCallback<Owners> done_;
+};
+
 class FindAddress final : public Operation {
 public:
     FindAddress(const core::NodeId& node, StoreCallback<std::optional<std::string>> done)
@@ -564,6 +613,11 @@ void PgRoomStore::advertise(const core::NodeId& node, std::string address,
                             const core::Uuid& incarnation, StoreCallback<void> done) {
     impl_->pool().submit(
         std::make_unique<Advertise>(node, std::move(address), incarnation, std::move(done)));
+}
+
+void PgRoomStore::read_owners(std::vector<core::RoomId> rooms,
+                              StoreCallback<std::vector<std::pair<core::RoomId, Ownership>>> done) {
+    impl_->pool().submit(std::make_unique<ReadOwners>(rooms, std::move(done)));
 }
 
 void PgRoomStore::find_address(const core::NodeId& node,

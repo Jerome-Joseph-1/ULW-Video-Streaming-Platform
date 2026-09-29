@@ -279,6 +279,35 @@ TEST_P(RoomStoreTest, ALookupByANodeWhoseOwnClaimIsInFlightKeepsThatClaimsGenera
     EXPECT_EQ(append(room, 2), Seq{1});
 }
 
+TEST_P(RoomStoreTest, ReadingOwnersCreatesAndClaimsNothing) {
+    using Owners = std::vector<std::pair<core::RoomId, Ownership>>;
+    const core::RoomId kept = new_room();
+    const core::RoomId taken = new_room();
+    const core::RoomId quiet = new_room();
+    const core::RoomId unknown = new_room();
+    ASSERT_TRUE(resolve(kept, a_));
+    ASSERT_TRUE(resolve(taken, a_));
+    go_quiet(taken);
+    ASSERT_TRUE(resolve(taken, b_));
+    ASSERT_TRUE(resolve(quiet, a_));
+    go_quiet(quiet);
+
+    auto owners = ask<Owners>(
+        [&](auto done) { store_->read_owners({kept, taken, quiet, unknown}, std::move(done)); });
+    ASSERT_TRUE(owners);
+    std::ranges::sort(*owners, {}, [](const auto& o) { return o.first.to_string(); });
+    Owners expected{{kept, {.node = a_, .generation = 1}},
+                    {taken, {.node = b_, .generation = 2}},
+                    {quiet, {.node = a_, .generation = 1}}};
+    std::ranges::sort(expected, {}, [](const auto& o) { return o.first.to_string(); });
+    EXPECT_EQ(*owners, expected);
+    // A quiet room is left for a claim, and an unknown one is not created.
+    EXPECT_EQ(fence(quiet), "1");
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM room_assignments WHERE room_id = $1",
+                     Params{}.add_uuid(unknown.uuid())),
+              "0");
+}
+
 TEST_P(RoomStoreTest, CreationsAndTakeoversAreAnnouncedButHeartbeatsAreNot) {
     Listener listener;
     store_->watch(listener);

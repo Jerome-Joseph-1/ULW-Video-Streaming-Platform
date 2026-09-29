@@ -215,6 +215,7 @@ private:
 struct Tuning {
     std::optional<core::Millis> idle_release = std::nullopt;
     std::optional<std::size_t> max_rooms = std::nullopt;
+    std::optional<core::Millis> revalidate_every = std::nullopt;
     // The store refuses to record the node, which then never becomes ready.
     bool refuse_advertise = false;
 };
@@ -249,6 +250,7 @@ protected:
                                 .secret = std::string(secret)};
         config.idle_release = tuning.idle_release.value_or(config.idle_release);
         config.max_rooms = tuning.max_rooms.value_or(config.max_rooms);
+        config.revalidate_every = tuning.revalidate_every.value_or(config.revalidate_every);
         node->router = std::make_unique<rt::RoomRouter>(*reactor_, *node->store, clock_, random_,
                                                         std::move(config), node->events);
         EXPECT_TRUE(node->router->start(std::move(*listener)));
@@ -398,6 +400,40 @@ TEST_P(RoomRouterTest, AnOwnerThatLetsARoomGoTellsItsSubscribersWhoMissedTheNoti
     ASSERT_TRUE(pump([&] { return !carol.got.empty() && !bob.got.empty(); }));
     EXPECT_EQ(carol.got.back().body, "to the new owner");
     EXPECT_EQ(bob.got.back().body, "to the new owner");
+}
+
+TEST_P(RoomRouterTest, ANodeThatMissedATakeoverFindsTheNewOwnerByReadingOwnersNotResolving) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b", kSecret, {.revalidate_every = core::Millis{300}});
+    Node& c = start("chat-c");
+    Member alice;
+    Member bob;
+    Member carol;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    // chat-b hears of no takeover, and chat-a, cut off from the database for the rest of the
+    // test, never learns it was fenced and so never tells chat-b either.
+    b.store->deaf = true;
+    a.store->reachable = false;
+    db_.make_stale(room_);
+    ASSERT_TRUE(join(c, carol));
+    ASSERT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-c"));
+    const std::size_t resolves = b.store->resolves;
+    const std::size_t reads = b.store->owner_reads;
+
+    // Only revalidation can move chat-b over; carol's messages reach bob once it has.
+    // One message per revalidation period is plenty; each send pumps until it is answered.
+    auto next_send = std::chrono::steady_clock::now();
+    ASSERT_TRUE(pump([&] {
+        if (std::chrono::steady_clock::now() >= next_send) {
+            next_send += std::chrono::milliseconds(300);
+            (void)send(c, carol, "carol", "anyone there");
+        }
+        return !bob.got.empty();
+    }));
+    EXPECT_EQ(bob.got.back().sender, "carol");
+    EXPECT_GT(b.store->owner_reads, reads);
+    EXPECT_EQ(b.store->resolves, resolves);
 }
 
 TEST_P(RoomRouterTest, AMemberThatJoinsTwiceBeforeTheFirstIsAnsweredHearsEachMessageOnce) {

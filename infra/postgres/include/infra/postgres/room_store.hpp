@@ -62,6 +62,9 @@ public:
                  rt::StoreCallback<void> done) override;
     void advertise(const core::NodeId& node, std::string address, const core::Uuid& incarnation,
                    rt::StoreCallback<void> done) override;
+    void read_owners(
+        std::vector<core::RoomId> rooms,
+        rt::StoreCallback<std::vector<std::pair<core::RoomId, rt::Ownership>>> done) override;
     void find_address(const core::NodeId& node,
                       rt::StoreCallback<std::optional<std::string>> done) override;
 

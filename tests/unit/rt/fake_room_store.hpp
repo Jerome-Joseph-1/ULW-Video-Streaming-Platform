@@ -36,6 +36,10 @@ public:
         core::NodeId node;
         rt::StoreCallback<std::optional<std::string>> done;
     };
+    struct ReadOwners {
+        std::vector<core::RoomId> rooms;
+        rt::StoreCallback<std::vector<std::pair<core::RoomId, rt::Ownership>>> done;
+    };
     struct Release {
         std::vector<rt::OwnedRoom> rooms;
         rt::StoreCallback<void> done;
@@ -68,6 +72,11 @@ public:
                    const core::Uuid& /*incarnation*/, rt::StoreCallback<void> done) override {
         advertisements.push_back(std::move(done));
     }
+    void read_owners(
+        std::vector<core::RoomId> rooms,
+        rt::StoreCallback<std::vector<std::pair<core::RoomId, rt::Ownership>>> done) override {
+        owner_reads.push_back({.rooms = std::move(rooms), .done = std::move(done)});
+    }
     void find_address(const core::NodeId& node,
                       rt::StoreCallback<std::optional<std::string>> done) override {
         lookups.push_back({.node = node, .done = std::move(done)});
@@ -88,6 +97,7 @@ public:
     std::deque<Release> releases;
     std::deque<rt::StoreCallback<void>> advertisements;
     std::deque<Lookup> lookups;
+    std::deque<ReadOwners> owner_reads;
 
 private:
     rt::IOwnershipListener* listener_ = nullptr;
