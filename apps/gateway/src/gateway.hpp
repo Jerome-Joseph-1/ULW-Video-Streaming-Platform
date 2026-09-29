@@ -130,7 +130,6 @@ struct Counters {
     std::uint64_t timeouts_header = 0;
     std::uint64_t timeouts_body = 0;
     std::uint64_t timeouts_body_rate = 0;
-    std::uint64_t timeouts_backend = 0;
     std::uint64_t timeouts_backstop = 0;
     std::uint64_t bytes_ingested = 0;
     std::uint64_t requests = 0;

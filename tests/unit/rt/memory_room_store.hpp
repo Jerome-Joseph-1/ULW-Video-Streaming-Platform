@@ -3,6 +3,8 @@
 #include "net/reactor.hpp"
 #include "rt/room_store.hpp"
 
+#include "support/reactor_harness.hpp"
+
 #include <algorithm>
 #include <functional>
 #include <memory>
@@ -36,6 +38,8 @@ public:
     std::unordered_map<std::string, std::string> addresses;
     // Which incarnation holds each name. A test erases one to model its holder going quiet.
     std::unordered_map<std::string, core::Uuid> holders;
+    // Each room's messages, as stored with their seqs from 1.
+    std::unordered_map<core::RoomId, std::vector<std::string>> bodies;
     // Every append that matched no row, as (room, generation).
     std::vector<std::pair<core::RoomId, std::uint64_t>> refused_appends;
 
@@ -141,14 +145,17 @@ public:
         });
     }
 
-    void append(const core::RoomId& room, std::uint64_t generation,
+    // Keeps the message with its seq, as a store with history does, in the same write.
+    void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& message,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override {
-        answer("", std::move(done), [this, room, generation] {
+        std::string body(ulw::test::as_text(message.body));
+        answer("", std::move(done), [this, room, generation, body = std::move(body)] {
             MemoryRooms::Room& r = db_.rooms.at(room);
             if (r.generation != generation) {
                 db_.refused_appends.emplace_back(room, generation);
                 return rt::StoreResult<std::optional<std::uint64_t>>{std::nullopt};
             }
+            db_.bodies[room].push_back(body);
             return rt::StoreResult<std::optional<std::uint64_t>>{++r.last_seq};
         });
     }

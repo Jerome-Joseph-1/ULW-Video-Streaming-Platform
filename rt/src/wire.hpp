@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "rt/message_key.hpp"
 
 #include <array>
 #include <cstddef>
@@ -16,9 +17,10 @@
 // node or sender is a length byte and its characters. A body runs to the end of its frame.
 namespace rt::wire {
 
-inline constexpr std::uint8_t kVersion = 1;
+// 2: Send and Deliver carry the client's message key.
+inline constexpr std::uint8_t kVersion = 2;
 // The largest message a client may send (codec::ws::Decoder's 64 KiB, ADR-0029), plus room for
-// the other fields, which take under 200 bytes.
+// the other fields, which take at most 239 bytes (a Send: type, request, room, sender, key).
 inline constexpr std::size_t kMaxBody = std::size_t{64} * 1024;
 inline constexpr std::size_t kMaxFrame = kMaxBody + 256;
 // Handshake nonces, and the HMAC-SHA256 tags over them.
@@ -86,6 +88,7 @@ struct Send {
     std::uint64_t request = 0;
     core::RoomId room;
     core::UserId sender;
+    MessageKey key;
     std::span<const std::byte> body;
 };
 struct Reply {
@@ -98,6 +101,7 @@ struct Deliver {
     core::RoomId room;
     std::uint64_t seq = 0;
     core::UserId sender;
+    MessageKey key;
     std::span<const std::byte> body;
 };
 
@@ -111,17 +115,19 @@ void encode_subscribe(std::vector<std::byte>& out, std::uint64_t request, const 
 void encode_unsubscribe(std::vector<std::byte>& out, const core::RoomId& room);
 // A body above kMaxBody is the caller's bug; the client decoder never produces one.
 void encode_send(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
-                 const core::UserId& sender, std::span<const std::byte> body);
+                 const core::UserId& sender, const MessageKey& key,
+                 std::span<const std::byte> body);
 void encode_reply(std::vector<std::byte>& out, std::uint64_t request, Status status,
                   std::uint64_t seq);
 void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::uint64_t seq,
-                    const core::UserId& sender, std::span<const std::byte> body);
+                    const core::UserId& sender, const MessageKey& key,
+                    std::span<const std::byte> body);
 
 enum class DecodeError : std::uint8_t {
     // A length of zero or above kMaxFrame.
     BadLength,
     UnknownType,
-    // Fields missing, left over, or invalid (a room, node or sender that does not parse).
+    // Fields missing, left over, or invalid (a room, node, sender or key that does not parse).
     Malformed,
 };
 

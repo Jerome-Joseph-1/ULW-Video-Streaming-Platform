@@ -1,6 +1,7 @@
 #pragma once
 
 #include "infra/catalog/memory_catalog.hpp"
+#include "infra/curl/multi.hpp"
 #include "infra/storage/fake_store.hpp"
 
 #include "config.hpp"
@@ -13,11 +14,13 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>
 
 namespace ulw::test {
 
-enum class Backend { Fake, Fs };
+// S3 is the store the gateway runs in production, on the MinIO of deploy/local/compose.yaml.
+enum class Backend { Fake, Fs, S3 };
 
 // Production limits but the per-client ones, lifted: every test connects from 127.0.0.1, most as
 // one user, and under a manual clock a bucket never refills. Tests of those limits set them.
@@ -35,6 +38,13 @@ struct GatewayOptions {
     std::uint64_t chunk = std::uint64_t{8} * 1024 * 1024;
     infra::storage::FaultPlan plan{};
     gateway::Limits limits = unthrottled_limits();
+    // S3 only: the store's connections, which uploads beyond wait for; the gateway's own
+    // choice, one per admitted upload, unless a test wants them to queue.
+    std::size_t store_connections = gateway::Limits{}.max_upload_slots;
+    // S3 only: how long a part may move under a byte a second before the store fails it.
+    std::chrono::seconds store_stall_limit = infra::curl::Multi::kDefaultStallLimit;
+    // S3 only: a scripted peer's base URL in place of the MinIO of deploy/local/compose.yaml.
+    std::optional<std::string> store_endpoint = std::nullopt;
     // Time moves only when the test calls advance(), so timeouts need no waiting.
     bool manual_clock = false;
     gateway::Transport transport = gateway::Transport::Plain;

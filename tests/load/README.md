@@ -58,6 +58,9 @@ tests/load/slowloris.py --url http://127.0.0.1:8080 --connections 50 --duration 
 
 `--mode headers` (the default) trickles an unfinished header block one byte at a time.
 `--mode body` completes a small PATCH's headers, then trickles the body below the 8 KiB/s floor.
+`--mode upload` streams a real upload (one 8 MiB store part by default) just above the floor, so
+the gateway never cuts it and its part holds a store connection throughout;
+`--legit-upload-token` runs an ordinary uploader beside it and reports how long its uploads took.
 
 `--legit-url` runs a concurrent health-check loop (`GET /api/v1/healthz`, optionally with
 `--legit-token`) and reports its p50/p99 latency and error rate, to show ordinary traffic isn't

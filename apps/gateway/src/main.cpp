@@ -267,7 +267,9 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, ops::Lo
         return fail(log, "offload pool", errno_text(pool.error()));
     }
     s.pool = std::move(*pool);
-    auto multi = infra::curl::Multi::create(*s.reactor);
+    // One store connection per admitted upload, so a part never queues behind slow ones
+    // (ADR-0045); ADR-0027 already budgets a backend socket for each.
+    auto multi = infra::curl::Multi::create(*s.reactor, config.limits.max_upload_slots);
     if (!multi) {
         return fail(log, "libcurl", "no threaded resolver; name lookups would block the loop");
     }

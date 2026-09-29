@@ -1197,7 +1197,7 @@ void Connection::fail_catalog(CatalogError error) noexcept {
     }
 }
 
-// A stall that ends the request (the body timeout gives up on the store, the client leaves) is
+// A stall that ends the request (the store fails the part, the backstop, the client leaves) is
 // the longest there is, and must be counted with the rest.
 void Connection::end_stall() noexcept {
     if (req_.stalled_since) {
@@ -1411,18 +1411,17 @@ void Connection::on_timeout() noexcept {
         return;
     }
     if (!req_.message_complete && req_.content_length > 0) {
-        // Progress-based: a body is only stuck if nothing moved on either side of the pump.
-        // Bytes waiting in staging mean the store stopped taking them, and a stalled store
-        // also stops us reading the socket, so a client that left would go unnoticed.
+        // Bytes waiting in staging mean the store is holding the body up, and the client is
+        // backpressured, not idle. Only the store can tell a slow store from a broken one, so
+        // the store ends a wait that goes wrong (ADR-0045).
+        if (staging_head_ < staging_.size()) {
+            arm_timer(std::min(limits.request_backstop - age, limits.body_idle_timeout));
+            return;
+        }
         const auto idle = std::chrono::duration_cast<core::Millis>(t - last_progress_);
         if (idle >= limits.body_idle_timeout) {
-            if (staging_head_ < staging_.size()) {
-                ++gw().counters().timeouts_backend;
-                fail(Status::ServiceUnavailable);
-            } else {
-                ++gw().counters().timeouts_body;
-                fail(Status::RequestTimeout);
-            }
+            ++gw().counters().timeouts_body;
+            fail(Status::RequestTimeout);
             return;
         }
         core::Millis next = limits.body_idle_timeout - idle;

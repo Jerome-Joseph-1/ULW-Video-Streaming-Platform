@@ -21,6 +21,11 @@ Two shapes, chosen with --mode:
             header block, then trickles the body at --body-rate bytes/s. Below 8 KiB/s the
             gateway answers 408 once a 30 s window has passed, which is the floor being reached;
             at or above it the connection lives.
+  upload    needs --token-file. A real upload per connection, --upload-size bytes (one 8 MiB
+            store part by default), its PATCH body streamed at --body-rate, by default just
+            above the floor: the gateway never cuts it, and its part holds a store connection
+            for the whole body. --legit-upload-token runs an ordinary uploader beside it
+            (legit_client.start_uploads) and reports how long each of its uploads took.
 
     tests/load/slowloris.py --url http://127.0.0.1:8080 --connections 50 --duration 60 \
         --legit-url http://127.0.0.1:8080 --legit-token "$TOKEN"
@@ -46,6 +51,13 @@ DEFAULT_BYTE_INTERVAL_S = 4.0
 # Comfortably under the 8 KiB/s = 8192 B/s floor (min_body_bytes_per_second): a tenth of it
 # guarantees the body-rate check trips well within its 30 s window rather than racing it.
 DEFAULT_BODY_RATE_BPS = 800
+# Upload mode stays just above that floor: 9 KiB/s is 1 KiB/s of margin for pacing jitter, and
+# holds an 8 MiB part open for 8 MiB / 9 KiB/s = 910 s.
+DEFAULT_UPLOAD_RATE_BPS = 9 * 1024
+# The gateway's part size (the chunk_size a create answers with), so each upload is one part.
+DEFAULT_UPLOAD_SIZE = 8 << 20
+# What the legitimate uploader sends each time: 1 MiB, a short clip.
+LEGIT_UPLOAD_SIZE = 1 << 20
 
 
 # Set from an https --url: every slow connection then completes a TLS handshake first, so what
@@ -227,17 +239,84 @@ def slow_body_connection(host, port, body_rate, token, deadline, stats):
             pass
 
 
+def slow_upload_connection(host, port, body_rate, size, token, deadline, stats):
+    try:
+        upload_id = create_upload(host, port, token, size)
+    except OSError:
+        upload_id = None
+    if upload_id is None:
+        with stats.lock:
+            stats.connect_errors += 1
+        return
+    started = time.monotonic()
+    try:
+        sock = dial(host, port)
+    except OSError:
+        with stats.lock:
+            stats.connect_errors += 1
+        return
+    with stats.lock:
+        stats.opened += 1
+    try:
+        sock.sendall((
+            f"PATCH /api/v1/uploads/{upload_id} HTTP/1.1\r\n"
+            "Host: load-test\r\n"
+            f"Authorization: Bearer {token}\r\n"
+            "Upload-Offset: 0\r\n"
+            "Content-Type: application/offset+octet-stream\r\n"
+            f"Content-Length: {size}\r\n\r\n"
+        ).encode())
+        # Quarter-second pieces against a deadline, as upload_load.py paces: a stall is caught up
+        # rather than added to, so the average stays at the rate.
+        step = max(1, int(body_rate) // 4)
+        piece = bytes(step)
+        sent = 0
+        while sent < size and time.monotonic() < deadline:
+            n = min(step, size - sent)
+            sock.sendall(piece[:n])
+            sent += n
+            ahead = sent / body_rate - (time.monotonic() - started)
+            if ahead > 0:
+                time.sleep(ahead)
+        if sent < size:
+            with stats.lock:
+                stats.still_open += 1
+            return
+        sock.settimeout(max(1.0, deadline - time.monotonic()))
+        data = sock.recv(4096)
+        if data.startswith(b"HTTP/1.1 204"):
+            with stats.lock:
+                stats.still_open += 1
+        else:
+            stats.record_close(time.monotonic() - started)
+    except OSError:
+        stats.record_close(time.monotonic() - started)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", required=True)
     parser.add_argument("--connections", type=int, default=200)
     parser.add_argument("--duration", type=float, default=60.0)
-    parser.add_argument("--mode", choices=["headers", "body"], default="headers")
+    parser.add_argument("--mode", choices=["headers", "body", "upload"], default="headers")
     parser.add_argument("--byte-interval", type=float, default=DEFAULT_BYTE_INTERVAL_S,
                         help="headers mode: seconds between bytes of the header block")
-    parser.add_argument("--body-rate", type=float, default=DEFAULT_BODY_RATE_BPS,
-                        help="body mode: bytes/s to trickle the PATCH body at")
+    parser.add_argument("--body-rate", type=float, default=None,
+                        help=f"body and upload modes: bytes/s to trickle the PATCH body at "
+                             f"(default {DEFAULT_BODY_RATE_BPS} for body, "
+                             f"{DEFAULT_UPLOAD_RATE_BPS} for upload)")
+    parser.add_argument("--upload-size", type=int, default=DEFAULT_UPLOAD_SIZE,
+                        help="upload mode: bytes each slow upload sends")
+    parser.add_argument("--legit-upload-token",
+                        help="upload mode: bearer token for an ordinary uploader run alongside")
+    parser.add_argument("--legit-upload-timeout", type=float, default=300.0,
+                        help="seconds the ordinary uploader waits for one upload's answer")
     parser.add_argument("--token-file", help="body mode: one bearer token per line, "
                                               "round-robined (3 uploads per user at most)")
     parser.add_argument("--legit-url", help="base URL for a concurrent legit client loop")
@@ -252,9 +331,11 @@ def main():
     if args.legit_url and not args.legit_token:
         parser.error("--legit-url needs --legit-token")
     tokens = []
-    if args.mode == "body":
+    if args.body_rate is None:
+        args.body_rate = DEFAULT_UPLOAD_RATE_BPS if args.mode == "upload" else DEFAULT_BODY_RATE_BPS
+    if args.mode in ("body", "upload"):
         if not args.token_file:
-            parser.error("--mode body needs --token-file")
+            parser.error(f"--mode {args.mode} needs --token-file")
         with open(args.token_file) as f:
             tokens = [line.strip() for line in f if line.strip()]
         if len(tokens) * 3 < args.connections:
@@ -273,15 +354,22 @@ def main():
     stop_legit = None
     if args.legit_url:
         stop_legit = legit_client.start(args.legit_url, args.legit_token, args.duration)
+    stop_legit_uploads = None
+    if args.legit_upload_token:
+        stop_legit_uploads = legit_client.start_uploads(
+            args.url, args.legit_upload_token, LEGIT_UPLOAD_SIZE, args.legit_upload_timeout)
 
     started = time.monotonic()
     threads = []
     for i in range(args.connections):
         if args.mode == "headers":
             target, extra = slow_header_connection, (args.byte_interval, deadline, stats)
-        else:
+        elif args.mode == "body":
             target = slow_body_connection
             extra = (args.body_rate, tokens[i % len(tokens)], deadline, stats)
+        else:
+            target = slow_upload_connection
+            extra = (args.body_rate, args.upload_size, tokens[i % len(tokens)], deadline, stats)
         t = threading.Thread(target=target, args=(parts.hostname, parts.port, *extra))
         t.start()
         threads.append(t)
@@ -292,6 +380,8 @@ def main():
     report = stats.to_dict(wall)
     if stop_legit:
         report["legit_client"] = stop_legit()
+    if stop_legit_uploads:
+        report["legit_uploads"] = stop_legit_uploads()
     print(json.dumps(report, indent=2))
 
 

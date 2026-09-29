@@ -1,3 +1,4 @@
+#include "infra/auth/base64url.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
@@ -166,30 +167,31 @@ TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
     ASSERT_TRUE(alice);
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"("})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+    // base64url of `hi "there"`.
     ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
-                                 R"(","ref":5,"body":"hi \"there\""})"));
+                                 R"(","id":"m5","body":"aGkgInRoZXJlIg"})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"message","room":")" + std::string(kRoom) +
-                  R"(","seq":1,"sender":"alice","body":"hi \"there\""})");
+                  R"(","seq":1,"sender":"alice","id":"m5","body":"aGkgInRoZXJlIg"})");
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"sent","room":")" + std::string(kRoom) + R"(","ref":5,"seq":1})");
+              R"({"type":"sent","room":")" + std::string(kRoom) + R"(","id":"m5","seq":1})");
 }
 
 TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);
     ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
-                                 R"(","ref":1,"body":"x"})"));
+                                 R"(","id":"m1","body":"eA"})"));
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"not_joined","room":")" +
-                                                 std::string(kRoom) + R"(","ref":1})");
+                                                 std::string(kRoom) + R"(","id":"m1"})");
     ASSERT_TRUE(alice->send_text("{"));
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"not_json"})");
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":"not-a-room"})"));
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"bad_room"})");
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"("})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
 }
 
 TEST_P(ChatSessionTest, AReadFullOfControlFramesIsClosedAsAFlood) {
@@ -249,7 +251,7 @@ TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
 
 TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryConnection) {
     node_.reset();
-    node_ = std::make_unique<Node>(GetParam(), chat::Limits{.join_burst = 2});
+    node_ = std::make_unique<Node>(GetParam(), chat::Limits{.service = {.join_burst = 2}});
     const auto join = [](WsClient& ws, std::string_view room) {
         EXPECT_TRUE(ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"("})"));
         const auto answer = ws.next_text(seconds(10));
@@ -272,18 +274,19 @@ TEST_P(ChatSessionTest, SendsInFlightAreBoundedInBytes) {
     ASSERT_TRUE(alice);
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     ASSERT_TRUE(alice->next_text(seconds(10)));
-    // Three sends of 50 KiB while the store answers nothing: two fit the connection's 128 KiB,
+    // Three sends of 45 KiB while the store answers nothing: two fit the connection's 128 KiB,
     // the third does not, however few sends that is.
     node_->hold_store = true;
     ASSERT_TRUE(ulw::test::eventually([&] { return node_->store_held.load(); }));
-    const std::string body(std::size_t{50} * 1024, 'x');
+    const std::string body =
+        infra::auth::encode_base64url(std::string(std::size_t{45} * 1024, 'x'));
     for (int ref = 1; ref <= 3; ++ref) {
         ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
-                                     R"(","ref":)" + std::to_string(ref) + R"(,"body":")" + body +
+                                     R"(","id":"m)" + std::to_string(ref) + R"(","body":")" + body +
                                      R"("})"));
     }
-    EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"error","reason":"busy","room":")" + std::string(kRoom) + R"(","ref":3})");
+    EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"busy","room":")" +
+                                                 std::string(kRoom) + R"(","id":"m3"})");
     node_->hold_store = false;
     int sent = 0;
     while (sent < 2) {
@@ -296,7 +299,8 @@ TEST_P(ChatSessionTest, SendsInFlightAreBoundedInBytes) {
 TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPingLater) {
     node_.reset();
     node_ = std::make_unique<Node>(GetParam(), chat::Limits{.ping_interval = core::Millis{1'000},
-                                                            .idle_timeout = core::Millis{1'100}});
+                                                            .idle_timeout = core::Millis{1'100},
+                                                            .service = {}});
     // Taken before the upgrade: the server counts quiet from the upgrade request, so a clock
     // started after the handshake returns would miss however long that took on a loaded box.
     const auto opened = std::chrono::steady_clock::now();
