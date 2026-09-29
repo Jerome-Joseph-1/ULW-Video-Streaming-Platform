@@ -28,6 +28,16 @@ TEST(ClassifyHost, SocketsNumericAddressesAndNames) {
     EXPECT_EQ(classify_host("256.1.1.1"), HostForm::Name);
 }
 
+TEST(ParseConninfo, AStringThatDoesNotParseIsNeverQuotedBack) {
+    // A '%' not followed by two hex digits: libpq's own message quotes the userinfo.
+    const auto target = parse_conninfo("postgresql://ulw:Sup3r%Secret@db/ulw");
+    ASSERT_FALSE(target);
+    EXPECT_EQ(target.error(), infra::postgres::kUnparsable);
+    const auto keywords = parse_conninfo("host=db password='Sup3rSecret");
+    ASSERT_FALSE(keywords);
+    EXPECT_EQ(keywords.error().find("Sup3r"), std::string::npos) << keywords.error();
+}
+
 TEST(ParseConninfo, ReadsHostPortListsAndOptionsFromAUrl) {
     const auto target =
         parse_conninfo("postgresql://ulw:secret@db-a.internal:5433,10.0.0.2:5434/ulw"

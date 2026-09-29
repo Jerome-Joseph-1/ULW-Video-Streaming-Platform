@@ -5,6 +5,7 @@
 
 #include "heartbeat.hpp"
 #include "job_runner.hpp"
+#include "ops/log.hpp"
 
 #include <stop_token>
 
@@ -17,6 +18,6 @@ inline constexpr core::Millis kPollInterval{5000};
 // it returns lapsed leases to the queue: nothing else runs the reaper. Every pass touches
 // `heartbeat`.
 void run_worker(core::ports::IJobQueue& queue, JobRunner& runner, const core::NodeId& node,
-                const Heartbeat& heartbeat, const std::stop_token& shutdown);
+                const Heartbeat& heartbeat, ops::Logger& log, const std::stop_token& shutdown);
 
 } // namespace worker

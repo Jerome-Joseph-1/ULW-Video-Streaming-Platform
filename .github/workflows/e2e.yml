@@ -1,9 +1,9 @@
 name: e2e
 
-# The sandbox cluster end to end: bring it up, run the VOD checks and the resource check under
-# load, take it down. A manual run, the nightly one and a phase tag's are the same job with the
-# same steps. Everything happens inside this runner's kind cluster; the workflow has no
-# credentials and reaches nothing of Askedin's.
+# The sandbox cluster end to end: bring it up, run the VOD checks, the STUNner checks and the
+# resource check under load, take it down. A manual run, the nightly one and a phase tag's are
+# the same job with the same steps. Everything happens inside this runner's kind cluster; the
+# workflow has no credentials and reaches nothing of Askedin's.
 #
 # The hls.js playback spec (tests/e2e) is not part of it: it starts its own gateway and worker
 # from a build tree and serves its own page, so it cannot be pointed at the sandbox route, and
@@ -53,6 +53,9 @@ jobs:
         timeout-minutes: 45
       - run: make e2e-test
         timeout-minutes: 20
+      # STUNner and LiveKit are already up (e2e-up); this checks them from the outside network.
+      - run: make e2e-stunner
+        timeout-minutes: 10
       - run: make e2e-load
         timeout-minutes: 15
       - if: always()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""vod_flow.py must never reach a cluster other than the sandbox: it refuses before running
-kubectl at all, and when it does run kubectl it names the sandbox's kubeconfig and context
-whatever the caller's KUBECONFIG says."""
+"""vod_flow.py, and stunner_check.py through it, must never reach a cluster other than the
+sandbox: they refuse before running kubectl at all, and when they do run kubectl they name the
+sandbox's kubeconfig and context whatever the caller's KUBECONFIG says."""
 import contextlib
 import io
 import os
@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import stunner_check  # noqa: E402
 import vod_flow  # noqa: E402
 
 # An address that resolves nowhere (RFC 6761): a guard that let a call through would hang or
@@ -118,6 +119,17 @@ class GuardTest(unittest.TestCase):
     def test_kubectl_refuses_when_the_target_is_not_the_sandbox(self):
         with self.assertRaises(vod_flow.Refused):
             vod_flow.kubectl("get", "pods")
+        self.assertEqual(self.calls, [])
+
+    def test_the_stunner_check_refuses_a_foreign_cluster_before_kubectl_or_docker(self):
+        fake = kubeconfig(self.dir, UNROUTABLE)
+        os.environ["KUBECONFIG"] = str(fake)
+        with mock.patch.object(vod_flow, "SANDBOX_KUBECONFIG", fake), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(SystemExit) as exit_:
+            stunner_check.main()
+        self.assertIn("refusing", str(exit_.exception.code))
+        self.assertIn("k8s-prod.askedin.invalid", str(exit_.exception.code))
         self.assertEqual(self.calls, [])
 
 

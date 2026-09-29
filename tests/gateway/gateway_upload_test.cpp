@@ -402,6 +402,11 @@ TEST_P(GatewayUpload, StalledBackendThrottlesTheClientInsteadOfBuffering) {
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 503);
     EXPECT_EQ(gw.counters().timeouts_backend, 1U);
+    // The stall that ended the request is counted, at its full length.
+    const std::string m = gw.metrics();
+    EXPECT_NE(m.find("\nbackend_write_stall_seconds_count 1\n"), std::string::npos) << m;
+    EXPECT_NE(m.find("backend_write_stall_seconds_bucket{le=\"30\"} 1\n"), std::string::npos);
+    EXPECT_NE(m.find("backend_write_stall_seconds_bucket{le=\"10\"} 0\n"), std::string::npos);
     uploader.close();
     EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0 && gw.connections() == 0; }));
 }

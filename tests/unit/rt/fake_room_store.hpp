@@ -60,7 +60,7 @@ public:
                    rt::StoreCallback<std::vector<core::RoomId>> done) override {
         heartbeats.push_back({.rooms = std::move(rooms), .done = std::move(done)});
     }
-    void append(const core::RoomId& room, std::uint64_t generation,
+    void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& /*message*/,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override {
         appends.push_back({.room = room, .generation = generation, .done = std::move(done)});
     }

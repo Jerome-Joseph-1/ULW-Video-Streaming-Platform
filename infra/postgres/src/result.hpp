@@ -2,9 +2,11 @@
 
 #include "libpq_handles.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 namespace infra::postgres {
 
@@ -27,6 +29,9 @@ private:
 [[nodiscard]] std::optional<std::uint64_t> parse_uint64(std::string_view text) noexcept;
 // The text form of boolean: "t" or "f".
 [[nodiscard]] std::optional<bool> parse_bool(std::string_view text) noexcept;
+
+// The text form of bytea: a backslash, an "x", then two hex digits per byte.
+[[nodiscard]] std::optional<std::vector<std::byte>> parse_bytea(std::string_view text);
 
 // A cell holding a domain value with a static `parse` returning std::expected (ids, keys).
 template <class T>

@@ -20,7 +20,8 @@ constexpr core::Millis kFetchTimeout{10'000};
 
 } // namespace
 
-KeySetFetcher::KeySetFetcher(infra::curl::Multi& multi) noexcept : http_(multi, kFetchTimeout) {}
+KeySetFetcher::KeySetFetcher(infra::curl::Multi& multi, ops::Logger& log) noexcept
+    : http_(multi, kFetchTimeout), log_(log) {}
 
 void KeySetFetcher::fetch(std::string_view url, infra::auth::IKeySetReceiver& receiver) noexcept {
     const std::uint64_t id = next_fetch_++;
@@ -44,7 +45,14 @@ void KeySetFetcher::finished(std::uint64_t fetch, infra::curl::Result result) no
     }
     infra::auth::IKeySetReceiver& receiver = *it->receiver;
     waiting_.erase(it);
-    if (!result || result->status != kHttpOk) {
+    // The status or the transfer error only: a response body could be anything, keys included.
+    if (!result) {
+        log_.warn("key set fetch failed", {{"error", result.error().detail}});
+        receiver.on_key_set(std::nullopt);
+        return;
+    }
+    if (result->status != kHttpOk) {
+        log_.warn("key set fetch failed", {{"status", result->status}});
         receiver.on_key_set(std::nullopt);
         return;
     }

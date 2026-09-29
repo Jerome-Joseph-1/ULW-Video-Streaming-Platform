@@ -135,9 +135,11 @@ jobs:
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
 
-  # The M16 acceptance: three chat_server processes on ports 9101-9103 over one Postgres, their
-  # room's owner stopped until a survivor takes over, then resumed to be fenced out. The test is
-  # parameterised over both reactors, so one run covers io_uring and epoll.
+  # The M16 and M17 acceptance: three chat_server processes on ports 9101-9103 over one
+  # Postgres. Their room's owner stopped until a survivor takes over, then resumed to be fenced
+  # out; clients on every node seeing one order, rate limits, retries, resume, and no body in any
+  # log or table. The tests are parameterised over both reactors, so one run covers io_uring and
+  # epoll.
   cluster:
     runs-on: ubuntu-24.04
     services:
@@ -229,7 +231,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ws, http, hls]
+        target: [ws, http, hls, toml]
     env:
       CC: clang-19
       CXX: clang++-19
@@ -247,8 +249,8 @@ jobs:
             schedule | workflow_dispatch) seconds=1800 ;;
             push) seconds=300 ;;
             *)
-              if git diff --quiet "origin/$BASE_REF...HEAD" -- http codec tests/fuzz core/src/hls.cpp \
-                  core/include/core/util/hls.hpp; then
+              if git diff --quiet "origin/$BASE_REF...HEAD" -- http codec ops tests/fuzz \
+                  core/src/hls.cpp core/include/core/util/hls.hpp; then
                 seconds=0
               else
                 seconds=300
