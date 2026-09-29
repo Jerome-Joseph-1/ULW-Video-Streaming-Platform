@@ -146,7 +146,8 @@ public:
     // takeover it can lag a seq the old owner took and never delivered; the next delivery
     // shows that gap.
     void join(const core::RoomId& room, IMember& member, JoinCallback done);
-    // Also drops a join still in progress, whose callback is then never called.
+    // Also drops the member's join still in progress and its sends not answered yet, whose
+    // callbacks are then never called; a send already on its way is still sequenced.
     void leave(const core::RoomId& room, IMember& member) noexcept;
     // Answers with the message's sequence number once its owner has sequenced it. A message
     // whose sender and key were sequenced lately, as seen here or by the owner, is not

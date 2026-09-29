@@ -112,7 +112,8 @@ struct ClientId {
 class ChatService {
 public:
     ChatService(IRooms& rooms, const core::ports::IClock& clock, ServiceLimits limits);
-    // Leaves every room; the room plane must outlive the service.
+    // Leaves every room, which also drops what the room plane owes for sends still in flight:
+    // nothing calls back into a destroyed service. The room plane must outlive it.
     ~ChatService();
     ChatService(const ChatService&) = delete;
     ChatService& operator=(const ChatService&) = delete;

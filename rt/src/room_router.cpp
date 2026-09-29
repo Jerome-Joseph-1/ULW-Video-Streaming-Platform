@@ -592,6 +592,9 @@ public:
         LocalRoom& lr = it->second;
         std::erase(lr.members, &member);
         std::erase_if(lr.joining, [&](const Joining& j) { return j.member == &member; });
+        std::erase_if(sends_, [&](const auto& entry) {
+            return entry.second.room == room && entry.second.member == &member;
+        });
         drop_if_empty(room);
     }
 
@@ -615,7 +618,7 @@ public:
             enqueue(room, Write{.sender = sender,
                                 .key = key,
                                 .body = std::move(body),
-                                .local = std::move(done),
+                                .local = pending(room, from, std::move(done)),
                                 .peer = std::nullopt,
                                 .request = 0});
             return;
@@ -634,8 +637,8 @@ public:
         ++counters_.forwarded;
         link(owner->node)
             .request(request, frame,
-                     [this, room, done = std::move(done)](wire::Status status,
-                                                          std::uint64_t seq) mutable noexcept {
+                     [this, room, done = pending(room, from, std::move(done))](
+                         wire::Status status, std::uint64_t seq) mutable noexcept {
                          if (status == wire::Status::Ok) {
                              done(seq);
                              return;
@@ -645,6 +648,23 @@ public:
                          }
                          done(std::unexpected(route_error(status)));
                      });
+    }
+
+    // Holds `done` for a send by `member`, and answers through it unless the member has left
+    // the room by then: a member that left, or went away with its connection, is owed nothing,
+    // and may no longer exist to be told.
+    SendCallback pending(const core::RoomId& room, IMember& member, SendCallback done) {
+        const std::uint64_t id = next_send_++;
+        sends_.emplace(id, PendingSend{.room = room, .member = &member, .done = std::move(done)});
+        return [this, id](std::expected<std::uint64_t, RouteError> result) noexcept {
+            const auto it = sends_.find(id);
+            if (it == sends_.end()) {
+                return;
+            }
+            SendCallback answer = std::move(it->second.done);
+            sends_.erase(it);
+            answer(result);
+        };
     }
 
     void release_rooms(StoreCallback<void> done) {
@@ -783,6 +803,12 @@ private:
     struct Joining {
         IMember* member;
         JoinCallback done;
+    };
+
+    struct PendingSend {
+        core::RoomId room;
+        IMember* member;
+        SendCallback done;
     };
 
     // A room with members on this node.
@@ -1450,6 +1476,9 @@ private:
     std::unordered_map<core::NodeId, std::unique_ptr<Outbound>> outbound_;
     std::vector<std::unique_ptr<Outbound>> closing_;
     std::uint64_t next_request_ = 1;
+    // Sends of members here not answered yet, by their own id.
+    std::unordered_map<std::uint64_t, PendingSend> sends_;
+    std::uint64_t next_send_ = 1;
     std::uint64_t next_link_ = 1;
     net::TimerId timer_;
     core::MonoTime next_beat_;

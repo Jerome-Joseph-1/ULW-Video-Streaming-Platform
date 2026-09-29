@@ -551,6 +551,33 @@ TEST_P(RoomRouterTest, ANodeThatTakesTheRoomOverKnowsTheKeysItDeliveredAsAMember
     EXPECT_EQ(send(b, alice_again, "alice", "after the takeover"), 2U);
 }
 
+TEST_P(RoomRouterTest, AMemberThatLeftIsNotAnsweredForItsSendsWhichAreStillSequenced) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    a.store->hold = true;
+    int answers = 0;
+    const auto body = std::as_bytes(std::span{std::string_view{"parting words"}});
+    // One send appended by the owner itself, one forwarded to it.
+    a.router->send(room_, alice, *core::UserId::parse("alice"), next_key(),
+                   {body.begin(), body.end()}, [&](auto) noexcept { ++answers; });
+    b.router->send(room_, bob, *core::UserId::parse("bob"), next_key(), {body.begin(), body.end()},
+                   [&](auto) noexcept { ++answers; });
+    ASSERT_TRUE(pump([&] { return a.store->waiting("") == 1; }));
+    ulw::test::pump_pending(*reactor_);
+    // The members go, as a chat service leaving its rooms before it is destroyed does; the
+    // callbacks point at it.
+    a.router->leave(room_, alice);
+    b.router->leave(room_, bob);
+    a.store->release_held();
+    ASSERT_TRUE(pump([&] { return db_.rooms.at(room_).last_seq == 2; }));
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_EQ(answers, 0);
+}
+
 TEST_P(RoomRouterTest, AMemberThatJoinsTwiceBeforeTheFirstIsAnsweredHearsEachMessageOnce) {
     Node& a = start("chat-a");
     Member alice;
