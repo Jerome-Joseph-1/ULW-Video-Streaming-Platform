@@ -20,3 +20,4 @@ __pycache__/
 /tests/call/test-results/
 /load-report/
 /diagnostics/
+/tests/call/.whipsink/
