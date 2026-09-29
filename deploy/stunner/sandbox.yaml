@@ -1,0 +1,32 @@
+# LiveKit's signalling on the node, which kind.yaml publishes as 198.18.0.1:17880: the call
+# suite's peers and its harness reach it there whether or not e2e-up.sh has put Envoy in front.
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit-nodeport
+  namespace: apps-stage
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: livekit
+  ports:
+    - name: http
+      port: 7880
+      targetPort: http
+      nodePort: 30880
+---
+# NetworkPolicies add up: this admits the NodePort's traffic, which reaches the pod from the
+# node's address, beside what the shipped policy admits.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: livekit-sandbox-signalling
+  namespace: apps-stage
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: http

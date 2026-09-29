@@ -1,4 +1,4 @@
-# 0037. Live media reaches the packager over SRT, which it terminates itself
+# 0039. Live media reaches the packager over SRT, which it terminates itself
 
 Status: Accepted
 Date: 2026-09-29
@@ -52,7 +52,7 @@ listen for an RTMP publisher nor connect to an SRT peer.
   -hls_segment_type fmp4 -hls_time <T>`, probing for 1 s rather than the default 5 s. The
   segment length T is fixed by configuration (2 to 10 s, default 2 s).
 - A copy cuts at keyframes, so the source's keyframe interval must equal T. A segment that
-  breaks the target duration ends the stream (ADR-0038).
+  breaks the target duration ends the stream (ADR-0040).
 - The sandbox limits the size of a file ffmpeg writes (`RLIMIT_FSIZE`, ADR-0025 gains a flag,
   off unless asked for): a segment at the configured maximum bitrate (`ULW_LIVE_MAX_KBPS`,
   default 20 Mbit/s, four times the worker's 1080p rung) at the longest the contract allows
@@ -76,7 +76,7 @@ listen for an RTMP publisher nor connect to an SRT peer.
   this class of latency.
 - The packager needs the same host features as the worker (user namespaces, ADR-0032), and runs
   in the same kind of pod, plus a UDP port.
-- A publisher that disconnects ends the stream (ADR-0038). A network blip between egress and
+- A publisher that disconnects ends the stream (ADR-0040). A network blip between egress and
   packager therefore ends it too, unless SRT's own retransmission and idle timeout (5 s) ride it
   out, until the egress side is started into a new stream.
 - The RTP or RTMP options of the brief are not available or not worth it, for the reasons

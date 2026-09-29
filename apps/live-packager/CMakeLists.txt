@@ -11,7 +11,7 @@ target_include_directories(live_packager_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CU
 target_link_libraries(live_packager_lib PUBLIC
     ulw::core_domain ulw::ffmpeg_adapter ulw::srt_ingest Threads::Threads PRIVATE ulw::os)
 
-# A process of its own, not linked into the gateway (ADR-0037). It reuses the worker's
+# A process of its own, not linked into the gateway (ADR-0039). It reuses the worker's
 # sandboxed ffmpeg and blocking object transfer, and none of the reactor.
 ulw_add_executable(live_packager src/main.cpp)
 target_link_libraries(live_packager PRIVATE
