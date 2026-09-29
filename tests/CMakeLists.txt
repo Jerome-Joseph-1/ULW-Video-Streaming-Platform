@@ -125,6 +125,15 @@ if(ULW_FUZZ)
     target_compile_options(hls_fuzz PRIVATE -fsanitize=fuzzer)
     target_link_options(hls_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
+
+ulw_add_test_suite(ws_unit_tests unit
+    unit/ws/decoder_test.cpp
+    unit/ws/encoder_test.cpp
+    unit/ws/split_test.cpp
+    unit/ws/utf8_test.cpp)
+target_link_libraries(ws_unit_tests PRIVATE ulw::codec_ws)
+target_include_directories(ws_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
     unit/s3/errors_test.cpp

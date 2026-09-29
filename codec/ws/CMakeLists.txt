@@ -1,0 +1,7 @@
+ulw_add_library(codec_ws
+    src/decoder.cpp
+    src/encoder.cpp
+    src/utf8.cpp)
+target_include_directories(codec_ws PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(codec_ws PUBLIC ulw::core_domain)
+
