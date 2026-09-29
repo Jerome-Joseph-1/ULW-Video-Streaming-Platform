@@ -1,0 +1,4 @@
+# What builds the bridge. The lint job adds clippy and rustfmt for itself (ADR-0044).
+[toolchain]
+channel = "1.94.1"
+profile = "minimal"

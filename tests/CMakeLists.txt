@@ -379,6 +379,40 @@ target_link_libraries(e2ee_integration_tests PRIVATE ulw::pg_store PkgConfig::LI
 target_include_directories(e2ee_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
+if(ULW_BUILD_MLS)
+    ulw_add_test_suite(mls_unit_tests unit
+        unit/e2ee/mls_ffi_test.cpp
+        unit/e2ee/mls_test.cpp)
+    # The FFI test drives the bridge's C API directly, as well as through the wrapper.
+    target_link_libraries(mls_unit_tests PRIVATE ulw::e2ee_mls mls_ffi_bridge)
+
+    # The crate's own tests, among them the check that the committed C header is what cbindgen
+    # makes of src/lib.rs. Release, like the library, so the dependencies built once serve both.
+    add_test(NAME mls_ffi_bridge_cargo_tests
+        COMMAND ${ULW_CARGO_OFFLINE} test --release --locked --offline
+            --target-dir $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CARGO_TARGET_DIR>
+        WORKING_DIRECTORY $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CRATE_DIR>)
+    set_tests_properties(mls_ffi_bridge_cargo_tests PROPERTIES LABELS unit)
+
+    ulw_add_executable(mls_fuzz_replay fuzz/mls_fuzz.cpp fuzz/replay_main.cpp)
+    target_link_libraries(mls_fuzz_replay PRIVATE mls_ffi_bridge)
+    add_test(NAME mls_fuzz_corpus
+        COMMAND mls_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/mls)
+    set_tests_properties(mls_fuzz_corpus PROPERTIES LABELS unit)
+
+    if(ULW_FUZZ)
+        ulw_add_executable(mls_fuzz fuzz/mls_fuzz.cpp)
+        target_link_libraries(mls_fuzz PRIVATE mls_ffi_bridge_fuzz)
+        target_compile_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+        target_link_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+    endif()
+
+    # Three devices through the Postgres directory: key packages fetched from it, commits
+    # ordered by its epoch claims.
+    target_sources(e2ee_integration_tests PRIVATE integration/mls_directory_test.cpp)
+    target_link_libraries(e2ee_integration_tests PRIVATE ulw::e2ee_mls)
+endif()
+
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
     unit/auth/claims_test.cpp
