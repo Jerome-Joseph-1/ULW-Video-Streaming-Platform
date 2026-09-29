@@ -801,6 +801,13 @@ private:
     void release_idle(core::MonoTime now) {
         for (const core::RoomId& room : registry_.owned_rooms()) {
             const auto o = owned_.find(room);
+            // A subscriber whose connection has closed is gone; only fan-out would otherwise
+            // notice, and a quiet room has none.
+            if (o != owned_.end()) {
+                std::erase_if(o->second.subscribers, [this](const net::Slab<Inbound>::Handle& h) {
+                    return inbound_.get(h) == nullptr;
+                });
+            }
             const bool used = local_.contains(room) ||
                               (o != owned_.end() &&
                                (!o->second.subscribers.empty() || !o->second.writes.empty()));

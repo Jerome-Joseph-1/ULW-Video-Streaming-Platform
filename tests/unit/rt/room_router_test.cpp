@@ -562,6 +562,25 @@ TEST_P(RoomRouterTest, ARoomNobodyUsesAnyMoreIsGivenUpForOthersToTake) {
     EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-b"));
 }
 
+TEST_P(RoomRouterTest, ASubscriberWhoseConnectionClosedDoesNotKeepARoomAlive) {
+    Node& a = start("chat-a", kSecret, {.idle_release = core::Millis{0}, .max_rooms = {}});
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    {
+        RawPeer peer(*reactor_, a.port);
+        ASSERT_TRUE(peer.authenticate(kSecret, *core::NodeId::parse("chat-x"),
+                                      *core::NodeId::parse("chat-a"), random_));
+        std::vector<std::byte> subscribe;
+        wire::encode_subscribe(subscribe, 1, room_);
+        peer.send(subscribe);
+        const auto reply = peer.next();
+        ASSERT_TRUE(reply && std::holds_alternative<wire::Reply>(*reply));
+    }
+    a.router->leave(room_, alice);
+    // Released after a beat or two; the closed subscriber must not hold it.
+    EXPECT_TRUE(pump([&] { return a.router->rooms_owned() == 0; }));
+}
+
 TEST_P(RoomRouterTest, AJoinPastTheNodesRoomLimitIsBusy) {
     Node& a = start("chat-a", kSecret, {.idle_release = {}, .max_rooms = 1});
     Member alice;
