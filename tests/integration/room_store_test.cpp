@@ -90,10 +90,12 @@ protected:
 
     StoreResult<std::optional<std::uint64_t>> append(const core::RoomId& room,
                                                      std::uint64_t generation) {
+        // A key of its own each time: a repeated key is the same message, and takes no seq.
+        const std::string key = "k" + std::to_string(++keys_);
         return ask<std::optional<std::uint64_t>>([&](auto done) {
             store_->append(room, generation,
                            {.sender = *core::UserId::parse("alice"),
-                            .key = *rt::MessageKey::parse("k1"),
+                            .key = *rt::MessageKey::parse(key),
                             .body = {}},
                            std::move(done));
         });
@@ -135,6 +137,7 @@ protected:
     std::optional<infra::postgres::SyncConnection> conn_;
     // This run of every node the tests play.
     const core::Uuid run_ = core::Uuid::v7(clock_, random_);
+    std::uint64_t keys_ = 0;
     const core::NodeId a_ = node("chat-a");
     const core::NodeId b_ = node("chat-b");
     const core::NodeId c_ = node("chat-c");

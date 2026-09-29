@@ -7,7 +7,10 @@
 #include <cstddef>
 #include <expected>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace infra::postgres {
 
@@ -56,6 +59,12 @@ public:
     void heartbeat(const core::NodeId& node, const core::Uuid& incarnation,
                    std::vector<rt::OwnedRoom> rooms,
                    rt::StoreCallback<std::vector<core::RoomId>> done) override;
+    // One statement: the fenced seq and the message's row in chat_messages
+    // (migrations/0005_chat_messages.sql), so a seq is taken only with its message and a fenced
+    // writer takes neither. Idempotent by the sender's key: a message whose key the sender
+    // already used in the room takes no seq, and the answer is the one it was stored under,
+    // still only to the room's owner. sent_at is the database's clock at the write. A body over
+    // core::ports::kMaxMessageBody is refused as Unavailable, and nothing is written.
     void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& message,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override;
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,

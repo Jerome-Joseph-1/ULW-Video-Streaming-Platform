@@ -18,10 +18,11 @@ namespace {
 // 1024 s at the 8 KiB/s floor below which the gateway ends it.
 constexpr std::array kPartUploadBuckets{0.25, 0.5,  1.0,   2.5,   5.0,   10.0,
                                         30.0, 60.0, 120.0, 300.0, 600.0, 1200.0};
-// A healthy store takes the next buffer within milliseconds; the body idle timeout ends a
-// stall at 30 s.
-constexpr std::array kStallBuckets{0.005, 0.01, 0.025, 0.05, 0.1,  0.25,
-                                   0.5,   1.0,  2.5,   5.0,  10.0, 30.0};
+// A healthy store takes the next buffer within milliseconds. A store that takes nothing at all
+// is failed by libcurl after 60 s under a byte a second (ADR-0045), about 65 s with its rate
+// window; a stall past 300 s is a store trickling, which only the backstop ends.
+constexpr std::array kStallBuckets{0.005, 0.01, 0.025, 0.05, 0.1,  0.25, 0.5,
+                                   1.0,   2.5,  5.0,   10.0, 30.0, 60.0, 300.0};
 
 } // namespace
 
@@ -212,15 +213,16 @@ std::string Gateway::render_metrics() {
     e.histogram("part_upload_duration_seconds",
                 "From a chunk's first byte handed to the store to all of it durable.",
                 part_upload_);
-    e.histogram("backend_write_stall_seconds",
-                "Each wait of a chunk body on a store that took nothing more.", write_stall_);
+    e.histogram(
+        "backend_write_stall_seconds",
+        "Each wait of a chunk body on a store that took nothing more, observed when it ends.",
+        write_stall_);
     e.gauge("buffer_bytes_in_use", "Bytes held in connections' staging and body buffers.",
             buffered);
     e.family("timeouts_total", "Requests or connections ended by a timer.", MetricType::Counter);
     e.sample("timeouts_total", {{.name = "kind", .value = "header"}}, c.timeouts_header);
     e.sample("timeouts_total", {{.name = "kind", .value = "body"}}, c.timeouts_body);
     e.sample("timeouts_total", {{.name = "kind", .value = "body_rate"}}, c.timeouts_body_rate);
-    e.sample("timeouts_total", {{.name = "kind", .value = "backend"}}, c.timeouts_backend);
     e.sample("timeouts_total", {{.name = "kind", .value = "backstop"}}, c.timeouts_backstop);
     e.gauge("tls_handshakes_in_flight", "TLS handshakes begun and not finished.",
             deps_.transports.handshakes_in_flight());

@@ -3,6 +3,7 @@
 #include "infra/auth/jwks_verifier.hpp"
 #include "infra/auth/local_verifier.hpp"
 #include "infra/curl/multi.hpp"
+#include "infra/postgres/message_store.hpp"
 #include "infra/postgres/room_store.hpp"
 #include "net/offload_pool.hpp"
 #include "net/signals.hpp"
@@ -23,6 +24,7 @@
 #include <exception>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <print>
 #include <string>
 #include <system_error>
@@ -82,6 +84,7 @@ struct Services {
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::OffloadPool> offload;
     std::unique_ptr<infra::postgres::PgRoomStore> store;
+    std::unique_ptr<infra::postgres::PgMessageStore> messages;
     std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<chat::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
@@ -95,10 +98,12 @@ struct Services {
     Services& operator=(const Services&) = delete;
 
     ~Services() {
-        // A lookup running on the pool points into the store; the store's answers point into
-        // the router; the server's sessions leave their rooms through the router.
+        // A lookup running on the pool points into the stores; the room store's answers point
+        // into the router, and the message store's into the chat service, which the server
+        // holds; the server's sessions leave their rooms through the router.
         offload.reset();
         signals.reset();
+        messages.reset();
         server.reset();
         store.reset();
     }
@@ -162,6 +167,12 @@ int run() {
         return fail("ULW_DATABASE_URL", "not a connection string this server can use", kBadConfig);
     }
     s.store = std::move(*store);
+    auto messages = infra::postgres::PgMessageStore::create(*s.reactor, *s.offload,
+                                                            {.conninfo = config->database_url});
+    if (!messages) {
+        return fail("ULW_DATABASE_URL", "not a connection string this server can use", kBadConfig);
+    }
+    s.messages = std::move(*messages);
     if (auto r = make_verifier(*config, s); !r) {
         return fail("auth", r.error());
     }
@@ -182,13 +193,14 @@ int run() {
     }
 
     chat::Limits chat_limits;
-    if (config->presence_grace) {
-        chat_limits.presence.grace = *config->presence_grace;
+    if (const std::optional<core::Millis> grace = config->presence_grace) {
+        chat_limits.presence.grace = *grace;
     }
     s.server = std::make_unique<chat::ChatServer>(
         chat::Deps{.node = config->node,
                    .reactor = *s.reactor,
                    .router = *s.router,
+                   .messages = *s.messages,
                    .verifier = *s.verifier,
                    .clock = s.clock},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},

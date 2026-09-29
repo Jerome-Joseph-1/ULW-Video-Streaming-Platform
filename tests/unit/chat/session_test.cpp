@@ -1,4 +1,5 @@
 #include "infra/auth/base64url.hpp"
+#include "infra/messages/memory_message_store.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
@@ -69,6 +70,7 @@ private:
         ulw::test::MemoryRooms db;
         ulw::test::FakeVerifier verifier;
         auto store = std::make_unique<ulw::test::MemoryRoomStore>(**reactor, db);
+        auto messages = std::make_unique<infra::messages::MemoryMessageStore>(**reactor);
         chat::RoomLog log(*core::NodeId::parse("chat-1"));
         os::SystemRandom random;
         rt::RoomRouter router(**reactor, *store, clock, random,
@@ -84,6 +86,7 @@ private:
             chat::Deps{.node = *core::NodeId::parse("chat-1"),
                        .reactor = **reactor,
                        .router = router,
+                       .messages = *messages,
                        .verifier = verifier,
                        .clock = clock},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
@@ -105,6 +108,7 @@ private:
             (*reactor)->run_once(core::Millis{5});
             server->reap();
         }
+        messages.reset();
         server.reset();
         store.reset();
     }

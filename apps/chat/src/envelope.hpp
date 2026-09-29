@@ -21,6 +21,10 @@
 //       "delivery":"lossy"   optional: skip messages while this connection is behind, rather
 //                            than be closed for it ("durable", the default)
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
+//   {"type":"history","room":"<uuid>"}   the room's stored messages, from the store, not this
+//       "before":<seq>       optional: those below it, newest first (the default: the newest)
+//       "after":<seq>        optional, instead of before: those above it, oldest first
+//       "limit":<n>          optional: 1 to 100, 50 when absent
 //   {"type":"watch","user":"<sub>"}     hear when the user comes online or goes offline
 //   {"type":"unwatch","user":"<sub>"}   stop; unanswered
 // Server to client:
@@ -29,6 +33,8 @@
 //   {"type":"sent","room":"<uuid>","id":"<message id>","seq":<integer>}
 //   {"type":"message","room":"<uuid>","seq":<integer>,"sender":"<sub>","id":"<message id>",
 //    "body":"<base64url>"}
+//   {"type":"history","room":"<uuid>","count":<n>}   ends a history answer, after its n
+//                                                   messages; 0 when there are no more
 //   {"type":"watching","user":"<sub>","status":"online"|"offline"}   the answer to watch: what
 //                                                                   this node knows now
 //   {"type":"presence","user":"<sub>","status":"online"|"offline"}   each change after that
@@ -58,6 +64,20 @@ struct Send {
     std::vector<std::byte> body;
 };
 
+// A history page is sent to the client as message frames, so it counts against the same output
+// the client has not read yet; 100 ordinary messages are tens of kilobytes, and the service cuts
+// a page of larger ones short to what the client can take (ServiceLimits::replay_budget).
+inline constexpr std::size_t kMaxHistoryLimit = 100;
+inline constexpr std::size_t kDefaultHistoryLimit = 50;
+
+struct History {
+    core::RoomId room;
+    // Neither: the newest messages, newest first.
+    std::optional<std::uint64_t> before;
+    std::optional<std::uint64_t> after;
+    std::size_t limit = kDefaultHistoryLimit;
+};
+
 struct Watch {
     core::UserId user;
 };
@@ -66,7 +86,7 @@ struct Unwatch {
     core::UserId user;
 };
 
-using Command = std::variant<Join, Send, Watch, Unwatch>;
+using Command = std::variant<Join, Send, History, Watch, Unwatch>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -90,6 +110,8 @@ void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head
 void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                 std::uint64_t seq);
 void write_message(std::string& out, const rt::Message& message);
+// Ends the answer to a history command, after its `count` messages.
+void write_history(std::string& out, const core::RoomId& room, std::size_t count);
 void write_error(std::string& out, std::string_view reason,
                  const std::optional<core::RoomId>& room = std::nullopt,
                  const std::optional<rt::MessageKey>& id = std::nullopt);

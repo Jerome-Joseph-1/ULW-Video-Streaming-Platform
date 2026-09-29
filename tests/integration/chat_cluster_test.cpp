@@ -4,6 +4,10 @@
 // The M17 acceptance on the same cluster: clients on every node see one order by last_seq; a
 // rate-limited send is refused and reaches nobody; a repeated send is delivered once; a client
 // that comes back resumes from its last seq; no body shows in any log or in the database.
+// The M19 acceptance: every message is stored with its seq, as the bytes that were sent and in
+// no readable form besides; history survives a restart of every node, in order; a client that
+// resumes through a node that kept nothing fills the gap from history; a room with members
+// refuses anyone else.
 // The M18 acceptance: a user who reconnects within the grace is no event to anyone watching; one
 // who does not is exactly one offline on every watching node; a user nobody watches costs no
 // presence message at all.
@@ -39,6 +43,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -97,6 +102,8 @@ struct Seen {
     std::string body;
     std::string reason;
     std::optional<std::uint64_t> retry_after_ms;
+    // Of a history answer: how many messages came before it.
+    std::uint64_t count = 0;
     std::string user;
     std::string status;
 };
@@ -117,8 +124,12 @@ std::optional<Seen> parse_seen(const std::string& text) {
            .body = infra::auth::decode_base64url(string("body")).value_or("<not base64url>"),
            .reason = string("reason"),
            .retry_after_ms = std::nullopt,
+           .count = 0,
            .user = string("user"),
            .status = string("status")};
+    if (const core::json::Value* count = json->find("count")) {
+        s.count = count->as_u64().value_or(0);
+    }
     if (const core::json::Value* seq = json->find("seq")) {
         s.seq = seq->as_u64().value_or(0);
     }
@@ -217,6 +228,7 @@ protected:
         ASSERT_TRUE(key);
         const auto jwks = files_.path() / "jwks.json";
         std::ofstream(jwks) << key->public_jwks();
+        jwks_ = jwks.string();
         for (const char* user : kUsers) {
             tokens_.push_back(*key->mint({.issuer = std::string(kIssuer),
                                           .audience = "askedin-platform",
@@ -232,8 +244,12 @@ protected:
                               .node_port = free_port(),
                               .process = nullptr});
             ASSERT_NE(nodes_.back().port, 0);
-            ASSERT_NO_FATAL_FAILURE(start(nodes_.back(), jwks.string()));
+            ASSERT_NO_FATAL_FAILURE(start(nodes_.back(), jwks_));
         }
+        ASSERT_NO_FATAL_FAILURE(wait_ready());
+    }
+
+    void wait_ready() {
         for (const Node& n : nodes_) {
             ASSERT_TRUE(ulw::test::eventually(
                 [&] { return ulw::test::http_get(n.port, "/readyz").status == 200; }, seconds(30)))
@@ -294,6 +310,30 @@ protected:
 
     static std::string ref(std::uint64_t n) { return "r" + std::to_string(n); }
 
+    // Asks for a page of the room's history with `fields` (`,"after":7`, say) and returns the
+    // messages that came before the page's end, as sent; nullopt for an error instead.
+    std::optional<std::vector<Seen>> history(Client& client, const std::string& fields) {
+        const auto is_end = [](const Seen& s) { return s.type == "history" || s.type == "error"; };
+        const std::size_t ends = client.count(is_end);
+        const std::size_t from = client.seen().size();
+        if (!client.send(R"({"type":"history","room":")" + room_ + R"(")" + fields + "}")) {
+            return std::nullopt;
+        }
+        const auto end = client.wait_for([&](const Seen&) { return client.count(is_end) > ends; });
+        if (!end || end->type != "history") {
+            ADD_FAILURE() << "history: " << (end ? end->reason : "no answer");
+            return std::nullopt;
+        }
+        std::vector<Seen> page;
+        for (std::size_t i = from; i < client.seen().size(); ++i) {
+            if (client.seen()[i].type == "message") {
+                page.push_back(client.seen()[i]);
+            }
+        }
+        EXPECT_EQ(page.size(), end->count);
+        return page;
+    }
+
     // Sends until the client gets its own message back: then its node routes to the room's
     // current owner and receives what that owner sequences. Returns the message's seq.
     std::optional<std::uint64_t> send_until_heard(Client& client, const std::string& body) {
@@ -329,14 +369,28 @@ protected:
                                  Params{}.add_text(room_));
     }
 
-    // Every row of every table, as text; bytea shows as hex.
+    // Every row of every table, as text, but for the bytes of stored bodies: those are the
+    // messages themselves, and are checked apart (stored_exactly). Their length stands in.
     [[nodiscard]] std::string database_text() const {
         auto conn = db_->session();
         return ulw::test::scalar(conn, R"sql(
 SELECT string_agg(query_to_xml(format('SELECT t::text AS row FROM %I.%I t', table_schema,
                                       table_name), false, false, '')::text, E'\n')
   FROM information_schema.tables
- WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema'))sql");
+ WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema')
+   AND table_name <> 'chat_messages')sql") +
+               ulw::test::scalar(conn, R"sql(
+SELECT string_agg(concat_ws(' ', room_id, seq, sender, msg_key, sent_at, octet_length(body)),
+                  E'\n')
+  FROM chat_messages)sql");
+    }
+
+    // How many of the room's stored messages hold exactly `body`'s bytes.
+    [[nodiscard]] std::string stored_exactly(const std::string& body) const {
+        auto conn = db_->session();
+        return ulw::test::scalar(
+            conn, "SELECT count(*) FROM chat_messages WHERE room_id = $1::text::uuid AND body = $2",
+            Params{}.add_text(room_).add_bytea(std::as_bytes(std::span{body})));
     }
 
     [[nodiscard]] static std::uint64_t metric(const Node& node, std::string_view name) {
@@ -354,11 +408,15 @@ SELECT string_agg(query_to_xml(format('SELECT t::text AS row FROM %I.%I t', tabl
     }
 
     // Section 8.15: bodies are never logged, indexed or stored as anything a grep could read.
-    // The database is searched for each body as it was sent, as the client encoded it, and as
-    // bytea would show it. Until messages are stored (M19) there are no rows a body could be
-    // in, so only the logs half can fail; from then on this must also check that the rows grew
-    // by the stored bodies, or it proves nothing about them.
-    void expect_no_plaintext(const std::vector<std::string>& bodies) const {
+    // Each body the room stored is there once, as exactly the bytes sent: that is what the
+    // search below covers. Everything else in the database, and every node's log, is searched
+    // for each body as it was sent, as the client encoded it, and as bytea would show it.
+    void expect_no_plaintext(const std::vector<std::string>& bodies,
+                             const std::vector<std::string>& never_stored = {}) const {
+        for (const std::string& body : bodies) {
+            const bool refused = std::ranges::find(never_stored, body) != never_stored.end();
+            EXPECT_EQ(stored_exactly(body), refused ? "0" : "1") << body;
+        }
         const std::string database = database_text();
         ASSERT_NE(database.find(room_), std::string::npos) << "no rows read";
         for (const std::string& body : bodies) {
@@ -375,8 +433,9 @@ SELECT string_agg(query_to_xml(format('SELECT t::text AS row FROM %I.%I t', tabl
             }
         }
         if (!HasFailure()) {
-            std::cout << "searched " << database.size() << " bytes of rows and " << nodes_.size()
-                      << " logs for " << bodies.size() << (bodies.size() == 1 ? " body" : " bodies")
+            std::cout << "each stored once as the bytes sent; searched " << database.size()
+                      << " bytes of other rows and " << nodes_.size() << " logs for "
+                      << bodies.size() << (bodies.size() == 1 ? " body" : " bodies")
                       << " in three forms: none found\n";
         }
     }
@@ -389,6 +448,7 @@ SELECT string_agg(query_to_xml(format('SELECT t::text AS row FROM %I.%I t', tabl
     std::vector<Node> nodes_;
     std::string room_;
     std::string node_secret_;
+    std::string jwks_;
     std::uint64_t next_ref_ = 100;
     std::unordered_map<std::string, std::string> last_body_;
 };
@@ -588,6 +648,7 @@ TEST_P(ChatClusterTest, ARateLimitedSendIsRefusedAndReachesNobody) {
         ASSERT_TRUE(bob->send(send_command(room_, bodies.back(), std::format("b{}", i))));
     }
     std::vector<std::string> limited;
+    std::vector<std::string> refused;
     std::uint64_t retry_after_ms = 0;
     for (std::size_t i = 0; i < kBurst; ++i) {
         const std::string id = std::format("b{}", i);
@@ -599,6 +660,7 @@ TEST_P(ChatClusterTest, ARateLimitedSendIsRefusedAndReachesNobody) {
             ASSERT_TRUE(answer->retry_after_ms) << id;
             retry_after_ms = std::max(retry_after_ms, *answer->retry_after_ms);
             limited.push_back(id);
+            refused.push_back(bodies[i]);
         }
     }
     ASSERT_GE(limited.size(), 1U);
@@ -638,7 +700,7 @@ TEST_P(ChatClusterTest, ARateLimitedSendIsRefusedAndReachesNobody) {
     std::cout << "bob sent " << kBurst << " at once: " << limited.size()
               << " refused as rate_limited (retry after " << retry_after_ms
               << " ms), delivered to nobody; the rest reached all three nodes\n";
-    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(bodies));
+    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(bodies, refused));
 }
 
 TEST_P(ChatClusterTest, ASendRepeatedWithItsIdIsDeliveredOnceWhereverItIsRepeated) {
@@ -730,7 +792,7 @@ TEST_P(ChatClusterTest, AClientThatComesBackResumesFromItsLastSeq) {
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
 }
 
-TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingLearnsWhatItMissed) {
+TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingFillsTheGapFromHistory) {
     auto alice = connect(nodes_[0], 0);
     auto bob = connect(nodes_[1], 1);
     ASSERT_TRUE(alice && bob);
@@ -754,9 +816,20 @@ TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingLearnsWhatItMi
     ASSERT_TRUE(joined);
     EXPECT_EQ(joined->seq, *last + 3) << "the client can tell it missed three messages";
     EXPECT_TRUE(elsewhere->messages().empty());
+    // It fills the gap from history, which the store has whichever node the client is on.
+    const auto filled = history(*elsewhere, std::format(R"(,"after":{})", *last));
+    ASSERT_TRUE(filled);
+    ASSERT_EQ(filled->size(), 3U);
+    for (std::size_t i = 0; i < filled->size(); ++i) {
+        EXPECT_EQ((*filled)[i].seq, *last + 1 + i);
+        EXPECT_EQ((*filled)[i].body, missed[i]);
+        EXPECT_EQ((*filled)[i].sender, "alice");
+    }
     std::cout << "bob came back through chat-3 after seq " << *last
-              << ", which kept nothing; joined named the head " << joined->seq << "\n";
-    missed.emplace_back("before bob left");
+              << ", which kept nothing; joined named the head " << joined->seq
+              << ", and history sent seqs " << filled->front().seq << ".." << filled->back().seq
+              << "\n";
+    missed.push_back(last_body_["alice"]);
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
 }
 
@@ -853,6 +926,83 @@ TEST_P(ChatClusterTest, AUserNobodyWatchesCostsNoPresenceMessage) {
               << total("presence_events_sent_total") - sent << ", received "
               << total("presence_events_received_total") - received << ", forwards "
               << total("forwards_total") - forwards << " across " << nodes_.size() << " nodes\n";
+}
+
+TEST_P(ChatClusterTest, HistorySurvivesARestartOfEveryNodeInTheOrderItWasSent) {
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    ASSERT_NO_FATAL_FAILURE(join(*alice));
+    ASSERT_NO_FATAL_FAILURE(join(*bob));
+    std::vector<std::string> sent;
+    for (int i = 0; i < 6; ++i) {
+        Client& from = i % 2 == 0 ? *alice : *bob;
+        sent.push_back(std::format("kept across restarts {}", i));
+        ASSERT_TRUE(from.send(send_command(room_, sent.back(), std::format("keep-{}", i))));
+        ASSERT_TRUE(alice->message(sent.back()));
+    }
+    const std::vector<Seen> live = alice->messages();
+    alice.reset();
+    bob.reset();
+
+    for (Node& n : nodes_) {
+        n.process->signal(SIGTERM);
+    }
+    for (Node& n : nodes_) {
+        ASSERT_EQ(n.process->wait_exit(seconds(30)), 0) << n.name << "\n" << n.process->output();
+    }
+    for (Node& n : nodes_) {
+        ASSERT_NO_FATAL_FAILURE(start(n, jwks_));
+    }
+    ASSERT_NO_FATAL_FAILURE(wait_ready());
+
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(carol);
+    ASSERT_NO_FATAL_FAILURE(join(*carol));
+    const auto newest = history(*carol, R"(,"limit":4)");
+    ASSERT_TRUE(newest);
+    const auto oldest = history(*carol, std::format(R"(,"before":{})", newest->back().seq));
+    ASSERT_TRUE(oldest);
+    std::vector<Seen> all = *newest;
+    all.insert(all.end(), oldest->begin(), oldest->end());
+    ASSERT_EQ(all.size(), live.size());
+    // Newest first from the store, as the live order reversed, byte for byte.
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        const Seen& was = live[live.size() - 1 - i];
+        EXPECT_EQ(all[i].seq, was.seq);
+        EXPECT_EQ(all[i].id, was.id);
+        EXPECT_EQ(all[i].sender, was.sender);
+        EXPECT_EQ(all[i].body, was.body);
+    }
+    const auto past_the_start = history(*carol, std::format(R"(,"before":{})", live.front().seq));
+    ASSERT_TRUE(past_the_start);
+    EXPECT_TRUE(past_the_start->empty());
+    std::cout << "after all three nodes restarted, history gave seqs " << all.front().seq << ".."
+              << all.back().seq << " newest first, as they were delivered\n";
+    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(sent));
+}
+
+TEST_P(ChatClusterTest, ARoomWithMembersRefusesEveryoneElse) {
+    auto conn = db_->session();
+    ASSERT_TRUE(conn.exec("INSERT INTO chat_members (room_id, user_id) "
+                          "VALUES ($1::text::uuid, 'alice'), ($1::text::uuid, 'bob')",
+                          Params{}.add_text(room_)));
+    auto alice = connect(nodes_[0], 0);
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(alice && carol);
+    ASSERT_NO_FATAL_FAILURE(join(*alice));
+    ASSERT_TRUE(carol->send(R"({"type":"join","room":")" + room_ + R"("})"));
+    const auto refused =
+        carol->wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->type, "error");
+    EXPECT_EQ(refused->reason, "not_member");
+    ASSERT_TRUE(carol->send(send_command(room_, "let me in", "sneak")));
+    const auto sneak = carol->wait_for([](const Seen& s) { return s.id == "sneak"; });
+    ASSERT_TRUE(sneak);
+    EXPECT_EQ(sneak->reason, "not_joined");
+    ASSERT_TRUE(send_until_heard(*alice, "members only"));
+    EXPECT_FALSE(carol->ever_saw(last_body_["alice"]));
 }
 
 // No database is reached: the connection string is refused before any connection is tried.

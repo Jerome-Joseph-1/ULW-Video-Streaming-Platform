@@ -9,7 +9,8 @@ page does not repeat it.
 
 | Dependency | Used by | Requirement |
 |---|---|---|
-| Postgres 16 | gateway, worker | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
+| Postgres 16 | gateway, worker, chat | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
+| Postgres log settings | chat | Bound parameters stay out of the server log: `log_parameter_max_length_on_error = 0` (the default), and `log_parameter_max_length = 0` whenever statement logging is on (`log_statement` `mod` or `all`, `log_min_duration_statement`, `log_min_duration_sample`, `log_transaction_sample_rate`), with `auto_explain.log_parameter_max_length = 0` if auto_explain is loaded. Otherwise chat message bodies, plaintext or ciphertext, are written to the log (ADR-0052). RUNBOOK step 3 sets them on the database. |
 | R2 bucket | gateway, worker | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
 | R2 API tokens | gateway, worker | One per component, object read and write on the bucket. The gateway's token must also allow multipart create, upload part, list parts, complete and abort, and presigned GET. |
 | Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS (`JWKS_URL` must be `https://`). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
@@ -125,12 +126,11 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `admission_rejections_total` | counter | PATCHes answered `429` or `503` by admission |
 | `bytes_ingested_total` | counter | Chunk body bytes received |
 | `part_upload_duration_seconds` | histogram | From a chunk's first byte handed to the store to all of it durable |
-| `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more |
+| `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more, observed when it ends: the store takes bytes again, fails the part (`503`), or the request ends (backstop, client gone). Buckets to 300 s; a store taking nothing is failed at about 60 s (ADR-0045) |
 | `buffer_bytes_in_use` | gauge | Bytes held in connections' staging and body buffers |
 | `timeouts_total{kind="header"}` | counter | Request head not complete within 10 s, or an idle keep-alive closed |
 | `timeouts_total{kind="body"}` | counter | Body idle 30 s (`408`) |
 | `timeouts_total{kind="body_rate"}` | counter | Body under 8 KiB/s over a 30 s window (`408`) |
-| `timeouts_total{kind="backend"}` | counter | The store took nothing for 30 s (`503`) |
 | `timeouts_total{kind="backstop"}` | counter | Request older than 6 h, closed |
 | `tls_handshakes_in_flight` | gauge | Only with `ULW_TRANSPORT=tls` |
 | `tls_handshake_failures_total` | counter | |
@@ -148,7 +148,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 Worth alerting on: `readyz` failing outside a rollout; any rise in `playlists_rejected_total`,
 `presign_failures_total`, `view_batches_failed_total` or `store_paging_errors_total` (page:
 retrying will not fix it); `admission_rejections_total` rising steadily;
-`timeouts_total{kind="backend"}` rising (the bucket is slow); `jobs_oldest_queued_seconds`
+`backend_write_stall_seconds` observations at 30 s and above rising (the bucket is slow); `jobs_oldest_queued_seconds`
 growing (the workers are behind or down); `log_messages_dropped_total` rising.
 
 ### Logs
@@ -179,6 +179,8 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `connections_accepted_total`, `connections_rejected_total{reason="capacity"}`,
 `connections_current`, `websocket_upgrades_total`, `auth_failures_total`,
 `origin_rejections_total`, `messages_received_total`, `messages_delivered_total`,
+`messages_rate_limited_total`, `messages_deduplicated_total`, `lossy_drops_total`,
+`messages_replayed_total`, `history_messages_total`, `messages_kept_bytes`,
 `protocol_errors_total`, `control_floods_total`, `slow_consumers_total`,
 `allocation_failures_total`, `rooms_active`, `rooms_joined`, `room_reassignments_total`,
 `fenced_writes_total`, `forwards_total`, `forward_timeouts_total`, `peers_lost_total`,
