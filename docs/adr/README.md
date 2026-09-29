@@ -31,3 +31,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0025](0025-ffmpeg-as-a-sandboxed-subprocess.md) | FFmpeg runs as a sandboxed subprocess | Accepted |
 | [0026](0026-ordinary-descriptors-for-accepted-sockets.md) | Accepted sockets use ordinary descriptors | Accepted |
 | [0027](0027-admission-control-from-measured-connection-memory.md) | Admission control from the measured memory of a connection | Accepted |
+| [0028](0028-segments-fetched-cross-origin-without-credentials.md) | Viewers fetch segments cross-origin, without credentials | Accepted |
