@@ -468,12 +468,13 @@ class RecordViews final : public Operation {
 public:
     RecordViews(std::span<const core::ports::ViewEvent> batch, CatalogCallback<void> done)
         : done_(std::move(done)) {
-        // UUIDs and UserIds hold nothing an array literal would need to quote: UserId allows
+        // Viewers are quoted: an unquoted NULL, in any case, is SQL NULL inside an array
+        // literal, and "null" is a valid subject. Quoting needs no escapes, since UserId allows
         // only [A-Za-z0-9._:@|+-].
         for (const core::ports::ViewEvent& e : batch) {
             separate();
             videos_ += e.video.to_string();
-            viewers_ += e.viewer.view();
+            viewers_.append(1, '"').append(e.viewer.view()).append(1, '"');
             times_ += std::to_string(micros_since_epoch(e.at));
         }
         videos_ += '}';

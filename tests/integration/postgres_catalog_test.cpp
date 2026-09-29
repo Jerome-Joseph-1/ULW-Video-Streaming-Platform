@@ -476,16 +476,21 @@ TEST_P(CatalogTest, ABatchOfViewsLandsInOneStatementFieldForField) {
         {.video = b,
          .viewer = *core::UserId::parse("user.b@example.com"),
          .at = at + std::chrono::microseconds(1)},
-        {.video = a, .viewer = *core::UserId::parse("x:y+z-1.2"), .at = at}};
+        {.video = a, .viewer = *core::UserId::parse("x:y+z-1.2"), .at = at},
+        // Array literals read an unquoted NULL, in any case, as SQL NULL.
+        {.video = a, .viewer = *core::UserId::parse("null"), .at = at},
+        {.video = a, .viewer = *core::UserId::parse("NULL"), .at = at}};
     ASSERT_TRUE(call<void>([&](auto done) { catalog->record_views(batch, std::move(done)); }));
 
     auto conn = db->session();
-    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM view_events"), "3");
-    EXPECT_EQ(scalar(conn,
-                     "SELECT string_agg(viewer_id, ' ' ORDER BY viewer_id) FROM view_events "
-                     "WHERE video_id = $1",
-                     Params{}.add_uuid(a.uuid())),
-              "auth0|tester x:y+z-1.2");
+    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM view_events"), "5");
+    EXPECT_EQ(
+        scalar(
+            conn,
+            "SELECT string_agg(viewer_id, ' ' ORDER BY viewer_id COLLATE \"C\") FROM view_events "
+            "WHERE video_id = $1",
+            Params{}.add_uuid(a.uuid())),
+        "NULL auth0|tester null x:y+z-1.2");
     EXPECT_EQ(
         scalar(conn,
                "SELECT (extract(epoch FROM viewed_at) * 1000000)::bigint FROM view_events "
