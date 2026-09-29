@@ -68,7 +68,7 @@ done
 # The keys are the ones RUNBOOK.md lists, with sandbox values.
 kubectl -n stunner-system create secret generic stunner-secrets --from-literal=type=ephemeral \
     --from-literal="secret=$turn_secret" --dry-run=client -o yaml | apply_stdin
-kubectl -n apps-stage create secret generic livekit-secrets \
+kubectl -n apps-stage create secret generic sfu-secrets --from-literal=ASKEDIN_ENV=stage \
     --from-literal="LIVEKIT_KEYS=$livekit_keys" --from-literal="TURN_HOST=$outside_gateway" \
     --from-literal="TURN_SECRET=$turn_secret" --dry-run=client -o yaml | apply_stdin
 

@@ -54,7 +54,7 @@ spec:
             - name: LIVEKIT_KEYS
               valueFrom:
                 secretKeyRef:
-                  name: livekit-secrets
+                  name: sfu-secrets
                   key: LIVEKIT_KEYS
             # STUNner's public address, and the shared secret of its ephemeral auth
             # (stunner-secrets in stunner-system holds the same value), expanded into the
@@ -62,12 +62,12 @@ spec:
             - name: TURN_HOST
               valueFrom:
                 secretKeyRef:
-                  name: livekit-secrets
+                  name: sfu-secrets
                   key: TURN_HOST
             - name: TURN_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: livekit-secrets
+                  name: sfu-secrets
                   key: TURN_SECRET
             - name: LIVEKIT_CONFIG
               value: |

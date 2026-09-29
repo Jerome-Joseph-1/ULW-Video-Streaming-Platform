@@ -271,7 +271,8 @@ kubectl -n stunner-system create secret generic stunner-secrets \
   --from-literal=type=ephemeral \
   --from-literal=secret="$TURN_SECRET" \
   --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NS" create secret generic livekit-secrets \
+kubectl -n "$NS" create secret generic sfu-secrets \
+  --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
   --from-literal=LIVEKIT_KEYS="$LIVEKIT_KEYS" \
   --from-literal=TURN_HOST="$TURN_HOST" \
   --from-literal=TURN_SECRET="$TURN_SECRET" \
