@@ -19,9 +19,12 @@ enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
 
 struct Config {
     StreamId stream;
-    // Where the publisher connects. A numeric address; loopback unless told otherwise.
+    // Where the publisher's SRT caller connects (UDP). A numeric address; loopback unless told
+    // otherwise.
     std::string ingest_host;
     std::uint16_t ingest_port = 0;
+    // What the caller must encrypt with. A secret: never logged.
+    std::string srt_passphrase;
     StorageBackend storage = StorageBackend::R2;
     // The R2 account id, the MinIO endpoint URL, or the filesystem root.
     std::string storage_location;
@@ -34,6 +37,8 @@ struct Config {
     std::uint32_t segment_seconds = 0;
     std::size_t window_segments = 0;
     core::Seconds max_duration{};
+    // The most the publisher may send, in kbit/s; it bounds the size of a segment file.
+    std::uint32_t max_kbps = 0;
 };
 
 struct ConfigError {

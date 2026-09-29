@@ -27,6 +27,7 @@ protected:
     std::map<std::string, std::string, std::less<>> env{
         {"ULW_STREAM_ID", "show-1"},
         {"ULW_LIVE_INGEST_PORT", "1936"},
+        {"ULW_LIVE_SRT_PASSPHRASE", "a passphrase of 24 chars"},
         {"ULW_R2_ACCOUNT_ID", "0123456789abcdef0123456789abcdef"},
         {"ULW_BUCKET", "ulw-media"},
     };
@@ -43,6 +44,8 @@ TEST_F(LiveConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->segment_seconds, 2U);
     EXPECT_EQ(config->window_segments, 10U);
     EXPECT_EQ(config->max_duration, core::Seconds{12 * 3600});
+    EXPECT_EQ(config->srt_passphrase, "a passphrase of 24 chars");
+    EXPECT_EQ(config->max_kbps, 20'000U);
     EXPECT_EQ(config->scratch, "/var/tmp/ulw-live/show-1");
     EXPECT_TRUE(config->sandbox.empty());
 }
@@ -59,6 +62,34 @@ TEST_F(LiveConfigTest, TheStreamAndItsPortAreRequired) {
     env["ULW_STREAM_ID"] = "show";
     env.erase("ULW_LIVE_INGEST_PORT");
     EXPECT_EQ(refused_variable(), "ULW_LIVE_INGEST_PORT");
+}
+
+TEST_F(LiveConfigTest, ThePassphraseIsRequiredAndWithinWhatSrtTakes) {
+    env.erase("ULW_LIVE_SRT_PASSPHRASE");
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_SRT_PASSPHRASE");
+    for (const std::string& bad : {std::string("too short"), std::string(80, 'x')}) {
+        env["ULW_LIVE_SRT_PASSPHRASE"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_SRT_PASSPHRASE");
+    }
+    env["ULW_LIVE_SRT_PASSPHRASE"] = std::string(79, 'x');
+    EXPECT_TRUE(load());
+}
+
+TEST_F(LiveConfigTest, ARefusedPassphraseIsNeverEchoedInTheReason) {
+    env["ULW_LIVE_SRT_PASSPHRASE"] = "short-secret";
+    env["ULW_LIVE_SRT_PASSPHRASE"] += std::string(80, 'y');
+    const auto config = load();
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().reason.find("short-secret"), std::string::npos);
+}
+
+TEST_F(LiveConfigTest, TheMaximumBitrateIsBounded) {
+    for (const char* bad : {"499", "100001", "fast"}) {
+        env["ULW_LIVE_MAX_KBPS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_MAX_KBPS") << bad;
+    }
+    env["ULW_LIVE_MAX_KBPS"] = "8000";
+    EXPECT_EQ(load()->max_kbps, 8000U);
 }
 
 TEST_F(LiveConfigTest, AStreamIdThatIsNotOneKeySegmentIsRefused) {

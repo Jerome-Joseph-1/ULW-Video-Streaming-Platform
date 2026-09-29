@@ -24,12 +24,23 @@ enum class PublishError : std::uint8_t {
     StoredPlaylistInvalid,
     // The stream was ended, and an ended stream is not continued.
     AlreadyEnded,
+    // The stored playlist was cut for another segment length. Players hold one target duration
+    // for a whole stream, so the length cannot change under them.
+    SegmentLengthChanged,
+    // The store would not take the claim on this run's epoch.
+    ClaimFailed,
+    // Another packager claimed a newer epoch of the stream: this one is the stale writer and
+    // writes nothing more.
+    Superseded,
     // An upload was refused or failed; nothing was lost, and the next pump tries again.
     UploadFailed,
     // The scan found ffmpeg's playlist unusable for good.
     PlaylistInconsistent,
     // ffmpeg's list moved past segments that were never uploaded.
     SegmentsLost,
+    // A segment ran longer than the target duration allows: the publisher's keyframes are
+    // further apart than the segment length.
+    KeyframeIntervalExceeded,
 };
 
 [[nodiscard]] std::string_view to_string(PublishError e) noexcept;
@@ -43,36 +54,44 @@ struct PublisherConfig {
     std::filesystem::path outbox;
 };
 
+struct FinishResult {
+    // The playlist in the store ends with EXT-X-ENDLIST.
+    bool ended = false;
+    // Why segments could not all be published first, or why the end could not be.
+    std::optional<PublishError> problem;
+};
+
 // Uploads what the remuxer finishes: each segment, and after it the playlist that lists it, so
 // a viewer never reads a playlist naming an object that is not there yet.
 class Publisher {
 public:
     // Reads the stream's playlist from the store when an earlier run left one, and continues
-    // from it.
+    // from it, after claiming an epoch of its own with a create-only put (see epoch()).
     [[nodiscard]] static std::expected<Publisher, PublishError>
     open(PublisherConfig config, core::ports::IObjectTransfer& store,
          const core::ports::IClock& clock);
 
-    // Where the next run of ffmpeg starts numbering, and the epoch that names its init segment.
+    // Where the next run of ffmpeg starts numbering.
     [[nodiscard]] std::uint64_t next_sequence() const noexcept { return window_.next_sequence(); }
+    // The epoch this run claimed. It names the run's init segment and segments; a packager that
+    // finds a newer epoch claimed is the stale one and stops.
     [[nodiscard]] std::uint32_t epoch() const noexcept { return epoch_; }
     // Whether the store already holds a playlist for the stream.
     [[nodiscard]] bool resumed() const noexcept { return resumed_; }
 
-    // Media starts flowing now.
-    void begin_epoch();
+    // Media starts flowing, and its first byte arrived at `first_media`.
+    void begin_epoch(core::WallTime first_media);
 
     // Uploads the segments `ffmpeg_playlist` lists as complete and are not yet uploaded, then
     // the window. Returns the number of segments that became visible.
     [[nodiscard]] std::expected<std::size_t, PublishError> pump(std::string_view ffmpeg_playlist);
 
-    // Uploads what is left, then the window with EXT-X-ENDLIST. Nothing to end when no segment
-    // was ever published.
-    [[nodiscard]] std::expected<void, PublishError> finish(std::string_view ffmpeg_playlist);
+    // Uploads what is left, then the window with EXT-X-ENDLIST, whatever went wrong with the
+    // uploading: a viewer is left with a playlist that ends, of what is visible. Nothing to end
+    // when no segment was ever published, and nothing written once superseded.
+    [[nodiscard]] FinishResult finish(std::string_view ffmpeg_playlist);
 
     [[nodiscard]] const LiveWindow& window() const noexcept { return window_; }
-    // Segments longer than the target duration seen so far.
-    [[nodiscard]] std::uint64_t overlong_segments() const noexcept { return overlong_; }
 
 private:
     Publisher(PublisherConfig config, core::ports::IObjectTransfer& store,
@@ -94,7 +113,6 @@ private:
     std::string uploaded_init_;
     // The window changed since the playlist was last uploaded.
     bool dirty_ = false;
-    std::uint64_t overlong_ = 0;
 };
 
 } // namespace live

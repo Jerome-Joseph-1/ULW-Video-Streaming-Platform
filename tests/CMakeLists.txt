@@ -353,15 +353,16 @@ if(ULW_BUILD_WORKER)
     target_include_directories(srt_unit_tests SYSTEM PRIVATE ${ulw_srt_source}/srtcore
         ${ulw_srt_binary})
     target_link_libraries(srt_unit_tests PRIVATE ulw::srt_ingest srt_static)
+    target_include_directories(srt_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
     ulw_add_test_suite(live_packager_unit_tests unit
         unit/live_packager/config_test.cpp
-        unit/live_packager/ingest_test.cpp
         unit/live_packager/live_window_test.cpp
         unit/live_packager/media_playlist_test.cpp
         unit/live_packager/publisher_test.cpp
         unit/live_packager/segment_tracker_test.cpp
-        unit/live_packager/stream_id_test.cpp)
+        unit/live_packager/stream_id_test.cpp
+        unit/live_packager/watch_test.cpp)
     target_link_libraries(live_packager_unit_tests PRIVATE
         ulw::live_packager_lib ulw::storage_fs_transfer ulw::os)
     target_include_directories(live_packager_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
@@ -392,8 +393,11 @@ if(ULW_BUILD_WORKER)
         integration/live_packager_test.cpp
         support/child_process.cpp)
     target_link_libraries(live_packager_integration_tests PRIVATE
-        ulw::live_packager_lib ulw::storage_s3 ulw::test_live_s3 ulw::os)
-    target_include_directories(live_packager_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+        ulw::live_packager_lib ulw::storage_s3 ulw::test_live_s3 ulw::os srt_static)
+    target_include_directories(live_packager_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/tests/integration)
+    target_include_directories(live_packager_integration_tests SYSTEM PRIVATE
+        ${ulw_srt_source}/srtcore ${ulw_srt_binary})
     target_compile_definitions(live_packager_integration_tests PRIVATE
         ULW_LIVE_PACKAGER_BIN="$<TARGET_FILE:live_packager>"
         ULW_LIVE_TESTSOURCE="${PROJECT_SOURCE_DIR}/apps/live-packager/testsource/ulw-live-testsource"

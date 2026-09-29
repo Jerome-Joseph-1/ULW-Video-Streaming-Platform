@@ -17,13 +17,13 @@ constexpr int kUnauthorized = SRT_REJC_PREDEFINED + 401;
 
 // libsrt is started once and stays up for the life of the process.
 struct Library {
-    Library() { started = ::srt_startup() >= 0; }
+    Library() : started(::srt_startup() >= 0) {}
     ~Library() { ::srt_cleanup(); }
     Library(const Library&) = delete;
     Library& operator=(const Library&) = delete;
     Library(Library&&) = delete;
     Library& operator=(Library&&) = delete;
-    bool started = false;
+    bool started;
 };
 
 bool ensure_library() {
@@ -82,7 +82,7 @@ std::uint16_t bound_port(SRTSOCKET socket) {
 class Poller {
 public:
     explicit Poller(SRTSOCKET socket) : id_(::srt_epoll_create()) {
-        const int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
+        const int events = static_cast<int>(SRT_EPOLL_IN) | static_cast<int>(SRT_EPOLL_ERR);
         if (id_ >= 0 && ::srt_epoll_add_usock(id_, socket, &events) == SRT_ERROR) {
             ::srt_epoll_release(id_);
             id_ = -1;
@@ -104,8 +104,8 @@ private:
     int id_;
 };
 
-bool set_option(SRTSOCKET socket, SRT_SOCKOPT option, const void* value, int length) {
-    return ::srt_setsockflag(socket, option, value, length) != SRT_ERROR;
+bool set_option(SRTSOCKET socket, SRT_SOCKOPT flag, const void* value, int size) {
+    return ::srt_setsockflag(socket, flag, value, size) != SRT_ERROR;
 }
 
 } // namespace
@@ -119,7 +119,7 @@ Session::~Session() {
 Session::Session(Session&& other) noexcept
     : socket_(std::exchange(other.socket_, SRT_INVALID_SOCK)) {}
 
-ReadResult Session::read(std::span<std::byte> out) {
+ReadResult Session::read(std::span<std::byte> out) const {
     const int n =
         ::srt_recvmsg(socket_, reinterpret_cast<char*>(out.data()), static_cast<int>(out.size()));
     if (n > 0) {

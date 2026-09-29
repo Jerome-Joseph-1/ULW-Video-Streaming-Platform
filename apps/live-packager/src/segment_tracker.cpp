@@ -20,7 +20,7 @@ SegmentTracker::scan(std::string_view playlist_text, const FileSize& size_of) co
     std::vector<CompletedSegment> ready;
     for (std::uint64_t sequence = next_; sequence < end; ++sequence) {
         const Segment& listed = playlist->segments[sequence - playlist->media_sequence];
-        if (listed.uri != infra::ffmpeg::live_segment_name(sequence)) {
+        if (listed.uri != infra::ffmpeg::live_segment_name(epoch_, sequence)) {
             return std::unexpected(ScanError::Inconsistent);
         }
         const auto size = size_of(listed.uri);
@@ -33,6 +33,14 @@ SegmentTracker::scan(std::string_view playlist_text, const FileSize& size_of) co
                          .init = listed.init});
     }
     return ready;
+}
+
+std::optional<std::uint64_t> listed_end(std::string_view playlist_text) {
+    const auto playlist = parse_media_playlist(playlist_text);
+    if (!playlist) {
+        return std::nullopt;
+    }
+    return playlist->media_sequence + playlist->segments.size();
 }
 
 } // namespace live

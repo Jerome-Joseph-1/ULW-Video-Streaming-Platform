@@ -39,7 +39,8 @@ using FileSize = std::function<std::optional<std::uint64_t>(std::string_view nam
 // after it so they are handed out in order.
 class SegmentTracker {
 public:
-    explicit SegmentTracker(std::uint64_t first_sequence) noexcept : next_(first_sequence) {}
+    SegmentTracker(std::uint32_t epoch, std::uint64_t first_sequence) noexcept
+        : epoch_(epoch), next_(first_sequence) {}
 
     // The listed segments not yet handed out, in order, that are complete. Hands out nothing
     // twice, but does not mark anything handed out: see `handled`.
@@ -51,7 +52,14 @@ public:
     [[nodiscard]] std::uint64_t next() const noexcept { return next_; }
 
 private:
+    std::uint32_t epoch_;
     std::uint64_t next_;
 };
+
+// One past the newest sequence number ffmpeg's playlist lists, or nullopt when the text is not
+// a playlist (caught half-written). It moves when ffmpeg finishes a segment, whatever became of
+// the upload, which is what tells a publisher that keeps sending from a store that keeps
+// failing.
+[[nodiscard]] std::optional<std::uint64_t> listed_end(std::string_view playlist_text);
 
 } // namespace live

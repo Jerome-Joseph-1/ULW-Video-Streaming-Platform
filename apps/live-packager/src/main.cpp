@@ -3,13 +3,13 @@
 #include "infra/ffmpeg/transcoder.hpp"
 #include "infra/s3util/credentials.hpp"
 #include "infra/s3util/profile.hpp"
+#include "infra/srt/ingest.hpp"
 #include "infra/storage/fs_transfer.hpp"
 #include "infra/storage/s3_transfer.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
 #include "config.hpp"
-#include "ingest.hpp"
 #include "log.hpp"
 #include "publisher.hpp"
 #include "stream_runner.hpp"
@@ -100,16 +100,23 @@ std::expected<Storage, std::string> make_storage(const live::Config& config,
     return storage;
 }
 
-// SIGTERM and SIGINT are blocked in every thread and taken here, synchronously, so no
-// handler runs in the middle of a libcurl call.
-void watch_signals(const std::stop_token& stop, std::stop_source& shutdown, sigset_t signals) {
+// SIGTERM, SIGINT and SIGUSR1 are blocked in every thread and taken here, synchronously, so no
+// handler runs in the middle of a libcurl call. SIGTERM and SIGINT drain: the process goes and
+// the stream is left to be continued. SIGUSR1 ends the stream.
+void watch_signals(const std::stop_token& stop, std::stop_source& drain, std::stop_source& end,
+                   sigset_t signals) {
     // Wakes this often only to notice that the packager finished on its own.
     constexpr timespec kTick{.tv_sec = 0, .tv_nsec = 100'000'000};
     while (!stop.stop_requested()) {
         const int sig = ::sigtimedwait(&signals, nullptr, &kTick);
-        if (sig > 0) {
+        if (sig == SIGUSR1) {
             live::log("signal {}: ending the stream", sig);
-            shutdown.request_stop();
+            end.request_stop();
+            return;
+        }
+        if (sig > 0) {
+            live::log("signal {}: draining, the stream is left to be continued", sig);
+            drain.request_stop();
             return;
         }
     }
@@ -121,6 +128,8 @@ int run() {
     if (!config) {
         return fail(config.error().variable, config.error().reason);
     }
+    // A write to a pipe whose reader is gone is an error to handle, not a signal.
+    static_cast<void>(std::signal(SIGPIPE, SIG_IGN));
     // Makes /proc/<pid>/environ, which holds the storage keys, unreadable to other processes
     // of our user, the sandboxed ffmpeg included.
     if (::prctl(PR_SET_DUMPABLE, 0) != 0) {
@@ -130,6 +139,7 @@ int run() {
     sigemptyset(&signals);
     sigaddset(&signals, SIGTERM);
     sigaddset(&signals, SIGINT);
+    sigaddset(&signals, SIGUSR1);
     if (const int rc = ::pthread_sigmask(SIG_BLOCK, &signals, nullptr); rc != 0) {
         return fail("block signals", std::generic_category().message(rc));
     }
@@ -159,7 +169,10 @@ int run() {
     if (!storage) {
         return fail("storage", storage.error());
     }
-    auto listener = live::IngestListener::bind(config->ingest_host, config->ingest_port);
+    auto listener = infra::srt::IngestListener::bind({.host = config->ingest_host,
+                                                      .port = config->ingest_port,
+                                                      .passphrase = config->srt_passphrase,
+                                                      .stream_id = config->stream.str()});
     if (!listener) {
         return fail("ingest", listener.error());
     }
@@ -175,24 +188,27 @@ int run() {
         return fail("stream", live::to_string(publisher.error()));
     }
 
-    std::stop_source shutdown;
-    const std::jthread signal_thread([&shutdown, signals](const std::stop_token& stop) {
-        watch_signals(stop, shutdown, signals);
+    std::stop_source drain;
+    std::stop_source end;
+    const std::jthread signal_thread([&drain, &end, signals](const std::stop_token& stop) {
+        watch_signals(stop, drain, end, signals);
     });
     live::log("{} ({}) stream={} storage={} ingest={}:{} segment={}s window={} sandbox={}",
               info.version, info.git_sha, config->stream.str(), to_string(config->storage),
               config->ingest_host, listener->port(), config->segment_seconds,
               config->window_segments, sandbox.string());
     if (publisher->resumed()) {
-        live::log("continuing at segment {}", publisher->next_sequence());
+        live::log("continuing at segment {} as epoch {}", publisher->next_sequence(),
+                  publisher->epoch());
     }
     const auto outcome =
         live::run_stream(*publisher, *listener, remuxer, clock,
                          {.media_dir = media_dir,
                           .segment_seconds = config->segment_seconds,
                           .listed_segments = live::listed_segments(config->window_segments),
+                          .max_kbps = config->max_kbps,
                           .max_duration = config->max_duration},
-                         shutdown.get_token());
+                         {.drain = drain.get_token(), .end = end.get_token()});
     live::log("stopped");
     return outcome == live::Outcome::Ended ? EXIT_SUCCESS : EXIT_FAILURE;
 }

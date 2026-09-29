@@ -1,16 +1,27 @@
 #include "stream_runner.hpp"
 
-#include "log.hpp"
+#include "os/unique_fd.hpp"
 
+#include "log.hpp"
+#include "watch.hpp"
+
+#include <array>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <fcntl.h>
 #include <fstream>
 #include <mutex>
 #include <optional>
+#include <poll.h>
+#include <span>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace live {
 
@@ -22,15 +33,9 @@ namespace fs = std::filesystem;
 // it exists at all, so 25 ms of extra delay in seeing it is noise, and reading a playlist of
 // a few hundred bytes 40 times a second is not a cost.
 constexpr std::chrono::milliseconds kTick{25};
-// A source that keyframes every target duration completes a segment each one; five target
-// durations without a segment tolerate keyframes up to four apart, and a source further out
-// than that produces segments no player will take.
-constexpr std::uint32_t kStallSegments = 5;
 // ffmpeg's own playlist is a few hundred bytes a segment.
 constexpr std::uintmax_t kMaxPlaylistBytes = std::uintmax_t{1} << 20U;
-// Progress is logged this often, so a 12 hour stream writes hundreds of lines, not tens of
-// thousands.
-constexpr std::uint64_t kLogEverySegments = 30;
+constexpr int kWriteWaitMs = 100;
 
 std::optional<std::string> read_playlist(const fs::path& file) {
     std::error_code ec;
@@ -55,85 +60,64 @@ struct RemuxRun {
     std::optional<std::expected<infra::ffmpeg::LiveRemuxResult, std::string>> result;
 };
 
-class Progress {
-public:
-    void published(std::uint64_t count, const Publisher& publisher) {
-        const std::uint64_t before = total_;
-        total_ += count;
-        if (count != 0 &&
-            (before == 0 || total_ / kLogEverySegments != before / kLogEverySegments)) {
-            log("segment {} published, {} this run", publisher.window().next_sequence() - 1,
-                total_);
-        }
-    }
-
-private:
-    std::uint64_t total_ = 0;
-};
-
-// Follows publishing and decides when it has failed for good: the store keeps refusing
-// uploads for a window's worth of segments, the playlists disagree with themselves, or no
-// segment completes.
-class Watch {
-public:
-    Watch(Publisher& publisher, const RunSettings& settings, core::MonoTime start)
-        : publisher_(publisher),
-          // Upload failures are given up on after one window of segments: ffmpeg lists twice
-          // that (config.hpp), so the list has not yet moved past a segment still waiting to
-          // go up.
-          patience_(std::chrono::seconds(
-              static_cast<std::int64_t>(settings.listed_segments / 2 * settings.segment_seconds))),
-          stall_limit_(std::chrono::seconds(kStallSegments * settings.segment_seconds)),
-          last_segment_(start) {}
-
-    // One look at ffmpeg's playlist, nullopt while there is none. True while all is well.
-    [[nodiscard]] bool look(const std::optional<std::string>& playlist, core::MonoTime now) {
-        if (playlist && !pump(*playlist, now)) {
+// Writes all of `bytes` to a pipe, waiting for room but never past `stop`: a reader that has
+// gone leaves the pipe full for good.
+bool write_all(int fd, std::span<const std::byte> bytes, const std::stop_token& stop) {
+    while (!bytes.empty()) {
+        pollfd waiting{.fd = fd, .events = POLLOUT, .revents = 0};
+        if (::poll(&waiting, 1, kWriteWaitMs) < 0 && errno != EINTR) {
             return false;
         }
-        if (now - last_segment_ >= stall_limit_) {
-            log("no segment for {} s: the publisher's keyframes are too far apart or it stalled",
-                stall_limit_.count());
+        if (stop.stop_requested()) {
             return false;
         }
-        return true;
-    }
-
-private:
-    bool pump(const std::string& playlist, core::MonoTime now) {
-        const auto pumped = publisher_.pump(playlist);
-        if (pumped) {
-            failing_since_.reset();
-            if (*pumped != 0) {
-                last_segment_ = now;
-                progress_.published(*pumped, publisher_);
+        if ((waiting.revents & POLLOUT) == 0) {
+            continue;
+        }
+        const ssize_t n = ::write(fd, bytes.data(), bytes.size());
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) {
+                continue;
             }
-            return true;
-        }
-        if (!last_failure_log_ || now - *last_failure_log_ >= std::chrono::seconds(10)) {
-            log("publish: {}", to_string(pumped.error()));
-            last_failure_log_ = now;
-        }
-        if (pumped.error() != PublishError::UploadFailed) {
             return false;
         }
-        if (!failing_since_) {
-            failing_since_ = now;
-        } else if (now - *failing_since_ >= patience_) {
-            log("publish: giving up after {} s of failed uploads", patience_.count());
-            return false;
-        }
-        return true;
+        bytes = bytes.subspan(static_cast<std::size_t>(n));
     }
+    return true;
+}
 
-    Publisher& publisher_;
-    std::chrono::seconds patience_;
-    std::chrono::seconds stall_limit_;
-    core::MonoTime last_segment_;
-    Progress progress_;
-    std::optional<core::MonoTime> failing_since_;
-    std::optional<core::MonoTime> last_failure_log_;
+// Moves the publisher's payload into the pipe ffmpeg reads, and closes the pipe when the
+// publisher is gone, which is ffmpeg's end of input.
+void relay(infra::srt::Session& session, std::vector<std::byte> first, os::UniqueFd sink,
+           const std::stop_token& stop) {
+    if (!write_all(sink.get(), first, stop)) {
+        return;
+    }
+    std::array<std::byte, infra::srt::kMaxPayload> buffer{};
+    while (!stop.stop_requested()) {
+        const auto read = session.read(buffer);
+        if (read.status == infra::srt::ReadStatus::Closed) {
+            return;
+        }
+        if (read.status == infra::srt::ReadStatus::Data &&
+            !write_all(sink.get(), std::span(buffer).first(read.bytes), stop)) {
+            return;
+        }
+    }
+}
+
+struct Pipe {
+    os::UniqueFd read;
+    os::UniqueFd write;
 };
+
+std::optional<Pipe> make_pipe() {
+    std::array<int, 2> fds{};
+    if (::pipe2(fds.data(), O_CLOEXEC) != 0) {
+        return std::nullopt;
+    }
+    return Pipe{.read = os::UniqueFd(fds[0]), .write = os::UniqueFd(fds[1])};
+}
 
 const char* describe(infra::ffmpeg::LiveEnd end) {
     switch (end) {
@@ -149,37 +133,170 @@ const char* describe(infra::ffmpeg::LiveEnd end) {
     return "unknown";
 }
 
-} // namespace
+enum class FirstMediaStatus : std::uint8_t {
+    Media,
+    // A stop was requested first.
+    Stopped,
+    // The publisher connected and sent nothing for the whole patience.
+    Silent,
+    // The publisher disconnected without sending anything.
+    Gone,
+};
 
-Outcome run_stream(Publisher& publisher, IngestListener& listener,
-                   const infra::ffmpeg::LiveRemuxer& remuxer, const core::ports::IClock& clock,
-                   const RunSettings& settings, const std::stop_token& stop) {
-    auto connection = listener.accept(stop);
-    if (!connection) {
-        log("ingest: {}", connection.error());
+struct FirstMedia {
+    FirstMediaStatus status = FirstMediaStatus::Stopped;
+    std::vector<std::byte> bytes;
+    core::WallTime at;
+};
+
+// Blocks until the publisher sends, which is when the media begins and what the playlist's
+// wall-clock times are anchored to; a connection made ahead of the media must not skew them.
+FirstMedia await_first_media(infra::srt::Session& session, const core::ports::IClock& clock,
+                             std::chrono::seconds patience, const std::stop_token& stop) {
+    const core::MonoTime start = clock.now();
+    std::array<std::byte, infra::srt::kMaxPayload> buffer{};
+    while (!stop.stop_requested()) {
+        const auto read = session.read(buffer);
+        if (read.status == infra::srt::ReadStatus::Data) {
+            return {
+                .status = FirstMediaStatus::Media,
+                .bytes = {buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(read.bytes)},
+                .at = clock.wall_now()};
+        }
+        if (read.status == infra::srt::ReadStatus::Closed) {
+            return {.status = FirstMediaStatus::Gone, .bytes = {}, .at = {}};
+        }
+        if (clock.now() - start >= patience) {
+            return {.status = FirstMediaStatus::Silent, .bytes = {}, .at = {}};
+        }
+    }
+    return {.status = FirstMediaStatus::Stopped, .bytes = {}, .at = {}};
+}
+
+// The end of a run that never had media to publish: nothing ffmpeg wrote, so only an old
+// window to end, if the process was asked to end the stream.
+Outcome end_without_media(Publisher& publisher, const StopRequests& stops, bool wait_was_stopped,
+                          bool failure) {
+    // A drain leaves the stream as it is.
+    if (wait_was_stopped && !stops.end.stop_requested()) {
+        return Outcome::Ended;
+    }
+    const auto ended = publisher.finish({});
+    return !ended.problem && !failure ? Outcome::Ended : Outcome::Failed;
+}
+
+// The end of a run that had media: reports how ffmpeg ended, then either leaves the stream
+// open (a drain, which still uploads what ffmpeg finished) or ends its playlist.
+Outcome conclude(Publisher& publisher, const StopRequests& stops, Verdict verdict,
+                 const std::expected<infra::ffmpeg::LiveRemuxResult, std::string>& result,
+                 std::string_view final_playlist) {
+    bool failed = verdict != Verdict::Healthy;
+    if (!result) {
+        log("remuxer: {}", result.error());
+        failed = true;
+    } else {
+        log("{}, ffmpeg exited {} after {} ms, peak {} KiB{}{}", describe(result->end),
+            result->signal != 0 ? 128 + result->signal : result->exit_code, result->wall.count(),
+            result->peak_rss_kib, result->detail.empty() ? "" : ": ", result->detail);
+        failed = failed || result->end == infra::ffmpeg::LiveEnd::Failed;
+    }
+    if (verdict == Verdict::Superseded) {
+        log("a newer packager of this stream took over; this one writes nothing more");
         return Outcome::Failed;
     }
-    const fs::path playlist_file = settings.media_dir / std::string(infra::ffmpeg::kLivePlaylist);
-    if (!*connection) {
-        log("stopped before a publisher connected");
-        return publisher.finish({}) ? Outcome::Ended : Outcome::Failed;
+    // A drain leaves the stream as it is. Whatever ffmpeg finished is still worth uploading;
+    // the next process for this stream continues from there.
+    const bool drained = stops.drain.stop_requested() && !stops.end.stop_requested() && result &&
+                         result->end == infra::ffmpeg::LiveEnd::Stopped && !failed;
+    if (drained) {
+        const auto flushed = publisher.pump(final_playlist);
+        if (!flushed) {
+            log("draining: {}", to_string(flushed.error()));
+        }
+        log("drained at segment {}; the stream is left to be continued",
+            publisher.next_sequence() - 1);
+        return flushed ? Outcome::Ended : Outcome::Failed;
     }
+    const FinishResult finished = publisher.finish(final_playlist);
+    if (finished.problem) {
+        log("ending the stream: {}", to_string(*finished.problem));
+        failed = true;
+    }
+    if (finished.problem == PublishError::Superseded) {
+        log("a newer packager of this stream took over; this one writes nothing more");
+    } else if (finished.ended) {
+        log("stream ended at segment {}", publisher.next_sequence() - 1);
+    }
+    return failed ? Outcome::Failed : Outcome::Ended;
+}
+
+} // namespace
+
+Outcome run_stream(Publisher& publisher, infra::srt::IngestListener& listener,
+                   const infra::ffmpeg::LiveRemuxer& remuxer, const core::ports::IClock& clock,
+                   const RunSettings& settings, const StopRequests& stops) {
+    // Either request stops the wait for a publisher and ffmpeg.
+    std::stop_source stop_all;
+    const std::stop_callback on_drain(stops.drain,
+                                      [&stop_all]() noexcept { stop_all.request_stop(); });
+    const std::stop_callback on_end(stops.end, [&stop_all]() noexcept { stop_all.request_stop(); });
+
+    auto accepted = listener.accept(stop_all.get_token());
+    if (!accepted) {
+        log("ingest: {}", accepted.error());
+        return Outcome::Failed;
+    }
+    std::optional<infra::srt::Session> session = std::move(*accepted);
+    if (!session) {
+        log("stopped before a publisher connected");
+        return end_without_media(publisher, stops, true, false);
+    }
+    const WatchLimits limits = watch_limits(settings.segment_seconds, settings.listed_segments);
     log("publisher connected, continuing at segment {} epoch {}", publisher.next_sequence(),
         publisher.epoch());
-    publisher.begin_epoch();
 
+    FirstMedia first = await_first_media(*session, clock, limits.stall, stop_all.get_token());
+    if (first.status != FirstMediaStatus::Media) {
+        switch (first.status) {
+        case FirstMediaStatus::Stopped:
+            log("stopped before the publisher sent anything");
+            break;
+        case FirstMediaStatus::Silent:
+            log("the publisher sent nothing for {} s", limits.stall.count());
+            break;
+        case FirstMediaStatus::Gone:
+            log("the publisher disconnected before sending anything");
+            break;
+        case FirstMediaStatus::Media:
+            break;
+        }
+        return end_without_media(publisher, stops, first.status == FirstMediaStatus::Stopped,
+                                 first.status == FirstMediaStatus::Silent);
+    }
+    publisher.begin_epoch(first.at);
+
+    auto pipe = make_pipe();
+    if (!pipe) {
+        log("pipe: {}", std::generic_category().message(errno));
+        return Outcome::Failed;
+    }
     std::stop_source remux_stop;
-    // Ours to end early on a failure of the store; the caller's stop is passed on.
-    const std::stop_callback pass_on(stop, [&remux_stop]() noexcept { remux_stop.request_stop(); });
+    const std::stop_callback pass_on(stop_all.get_token(),
+                                     [&remux_stop]() noexcept { remux_stop.request_stop(); });
     // Built here: the thread starts while the loop below is already using the publisher.
-    const infra::ffmpeg::LiveRemuxJob job{.input = connection->get(),
+    const infra::ffmpeg::LiveRemuxJob job{.input = pipe->read.get(),
                                           .out_dir = settings.media_dir,
                                           .segment_seconds = settings.segment_seconds,
                                           .listed_segments = settings.listed_segments,
                                           .first_sequence = publisher.next_sequence(),
                                           .epoch = publisher.epoch(),
+                                          .max_kbps = settings.max_kbps,
                                           .max_duration = settings.max_duration};
     RemuxRun run;
+    std::stop_source relay_stop;
+    std::jthread relay_thread([&session, &first, &pipe, &relay_stop] {
+        relay(*session, std::move(first.bytes), std::move(pipe->write), relay_stop.get_token());
+    });
     std::jthread remux_thread([&] {
         auto result = remuxer.run(job, remux_stop.get_token());
         const std::lock_guard lock(run.mutex);
@@ -188,8 +305,9 @@ Outcome run_stream(Publisher& publisher, IngestListener& listener,
         run.cv.notify_all();
     });
 
-    bool broken = false;
-    Watch watch(publisher, settings, clock.now());
+    Verdict verdict = Verdict::Healthy;
+    Watch watch(publisher, limits, clock.now());
+    const fs::path playlist_file = settings.media_dir / std::string(infra::ffmpeg::kLivePlaylist);
     while (true) {
         {
             std::unique_lock lock(run.mutex);
@@ -197,39 +315,22 @@ Outcome run_stream(Publisher& publisher, IngestListener& listener,
                 break;
             }
         }
-        if (!broken && !watch.look(read_playlist(playlist_file), clock.now())) {
-            broken = true;
-            remux_stop.request_stop();
+        if (verdict == Verdict::Healthy) {
+            verdict = watch.look(read_playlist(playlist_file), clock.now());
+            if (verdict != Verdict::Healthy) {
+                remux_stop.request_stop();
+            }
         }
     }
     remux_thread.join();
+    relay_stop.request_stop();
+    relay_thread.join();
+    pipe->read.reset();
 
-    const auto result = std::move(run.result).value_or(std::unexpected("remuxer did not report"));
-    bool failed = broken;
-    if (!result) {
-        log("remuxer: {}", result.error());
-        failed = true;
-    } else {
-        log("{}{}, ffmpeg exited {} after {} ms, peak {} KiB{}{}", describe(result->end),
-            result->end == infra::ffmpeg::LiveEnd::Failed ? "" : " (ends the stream)",
-            result->signal != 0 ? 128 + result->signal : result->exit_code, result->wall.count(),
-            result->peak_rss_kib, result->detail.empty() ? "" : ": ", result->detail);
-        failed = failed || result->end == infra::ffmpeg::LiveEnd::Failed;
-    }
-    connection->reset();
-    if (publisher.overlong_segments() != 0) {
-        log("{} segments longer than the target duration: the publisher's keyframes are further "
-            "apart than {} s",
-            publisher.overlong_segments(), settings.segment_seconds);
-    }
     const auto last = read_playlist(playlist_file);
-    if (const auto ended = publisher.finish(last ? std::string_view(*last) : std::string_view{});
-        !ended) {
-        log("ending the stream: {}", to_string(ended.error()));
-        return Outcome::Failed;
-    }
-    log("stream ended at segment {}", publisher.next_sequence() - 1);
-    return failed ? Outcome::Failed : Outcome::Ended;
+    return conclude(publisher, stops, verdict,
+                    std::move(run.result).value_or(std::unexpected("remuxer did not report")),
+                    last ? std::string_view(*last) : std::string_view{});
 }
 
 } // namespace live

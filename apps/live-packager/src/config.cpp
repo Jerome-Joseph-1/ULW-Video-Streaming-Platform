@@ -1,6 +1,7 @@
 #include "config.hpp"
 
 #include "core/util/parse.hpp"
+#include "infra/srt/ingest.hpp"
 
 #include <utility>
 
@@ -27,6 +28,11 @@ constexpr std::size_t kDefaultWindow = 10;
 // The longest video the platform takes is 12 hours (infra/ffmpeg command.hpp); a live stream
 // becomes one, so it is capped alike.
 constexpr std::uint64_t kMaxHours = 12;
+// The worker's ladder sends 5 Mbit/s for 1080p (brief 8.10); four times that covers a stream
+// well above it, and past 100 the pipe, not the packager, is the limit.
+constexpr std::uint32_t kMinKbps = 500;
+constexpr std::uint32_t kDefaultKbps = 20'000;
+constexpr std::uint32_t kMaxKbps = 100'000;
 
 std::unexpected<ConfigError> error(std::string_view variable, std::string_view reason) {
     return std::unexpected(
@@ -128,6 +134,14 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!port) {
         return error("ULW_LIVE_INGEST_PORT", "not a port number");
     }
+    auto passphrase = required(env, "ULW_LIVE_SRT_PASSPHRASE");
+    if (!passphrase) {
+        return std::unexpected(std::move(passphrase.error()));
+    }
+    if (passphrase->size() < infra::srt::kMinPassphrase ||
+        passphrase->size() > infra::srt::kMaxPassphrase) {
+        return error("ULW_LIVE_SRT_PASSPHRASE", "not 10 to 79 characters");
+    }
     auto storage = load_storage(env);
     if (!storage) {
         return std::unexpected(std::move(storage.error()));
@@ -155,10 +169,16 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!hours) {
         return std::unexpected(hours.error());
     }
+    const auto kbps =
+        bounded<std::uint32_t>(env, "ULW_LIVE_MAX_KBPS", kDefaultKbps, kMinKbps, kMaxKbps);
+    if (!kbps) {
+        return std::unexpected(kbps.error());
+    }
     return Config{.stream = std::move(*stream),
                   .ingest_host =
                       lookup(env, "ULW_LIVE_INGEST_HOST").value_or(std::string(kDefaultIngestHost)),
                   .ingest_port = *port,
+                  .srt_passphrase = std::move(*passphrase),
                   .storage = storage->backend,
                   .storage_location = std::move(storage->location),
                   .bucket = std::move(storage->bucket),
@@ -170,7 +190,8 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .segment_seconds = *segment,
                   .window_segments = *window,
-                  .max_duration = core::Seconds{static_cast<std::int64_t>(*hours) * 3600}};
+                  .max_duration = core::Seconds{static_cast<std::int64_t>(*hours) * 3600},
+                  .max_kbps = *kbps};
 }
 
 } // namespace live

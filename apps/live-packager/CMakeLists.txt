@@ -1,15 +1,15 @@
 ulw_add_library(live_packager_lib
     src/config.cpp
-    src/ingest.cpp
     src/live_window.cpp
     src/media_playlist.cpp
     src/publisher.cpp
     src/segment_tracker.cpp
     src/stream_id.cpp
-    src/stream_runner.cpp)
+    src/stream_runner.cpp
+    src/watch.cpp)
 target_include_directories(live_packager_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 target_link_libraries(live_packager_lib PUBLIC
-    ulw::core_domain ulw::ffmpeg_adapter Threads::Threads PRIVATE ulw::os)
+    ulw::core_domain ulw::ffmpeg_adapter ulw::srt_ingest Threads::Threads PRIVATE ulw::os)
 
 # A process of its own, not linked into the gateway (ADR-0037). It reuses the worker's
 # sandboxed ffmpeg and blocking object transfer, and none of the reactor.

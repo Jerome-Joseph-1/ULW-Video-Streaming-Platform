@@ -59,7 +59,7 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
-    [[nodiscard]] ReadResult read(std::span<std::byte> out);
+    [[nodiscard]] ReadResult read(std::span<std::byte> out) const;
 
 private:
     friend class IngestListener;
