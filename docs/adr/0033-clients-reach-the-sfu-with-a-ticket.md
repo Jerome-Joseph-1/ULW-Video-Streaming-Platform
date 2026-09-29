@@ -88,9 +88,11 @@ WHIP endpoint, built for ingest (option c).
   receives it. How the stream then reaches the packager is M31's question; if M30 prefers
   LiveKit's separate Ingress service (RTMP, stream keys), that is another role, not another
   port.
-- TURN (STUNner, ADR-0013) is not an SFU concern: the call handler sends the per-session TURN
-  credentials next to the ticket, and the client hands them to the SDK as its ICE servers with a
-  relay-only policy. That is why `IceCredentials` left `join`.
+- TURN is not the port's concern. LiveKit mints each client's STUNner credential itself (a
+  time-windowed username signed with a secret it shares with STUNner, from its `rtc.turn_servers`
+  configuration) and sends it in the join response, so neither the call handler nor our client
+  code carries TURN credentials; see "STUNner runs in front of LiveKit with time-windowed
+  credentials the SFU mints". That is why `IceCredentials` left `join`.
 - The browser loads `livekit-client`, pinned to an exact version by lockfile (2.22.3 in the call
   suite).
 
