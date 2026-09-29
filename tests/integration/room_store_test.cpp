@@ -230,9 +230,51 @@ TEST_P(RoomStoreTest, AReleasedRoomIsClaimableAtOnceButOnlyUnderItsGeneration) {
 TEST_P(RoomStoreTest, ANodeFindingARoomRecordedAsItsOwnTakesItAgainUnderANewGeneration) {
     const core::RoomId room = new_room();
     ASSERT_TRUE(resolve(room, a_));
-    // A restarted node does not know what its earlier run wrote under generation 1.
+    // A restarted node announces itself anew, and does not know what its earlier run wrote
+    // under generation 1.
+    ASSERT_TRUE(
+        ask<void>([&](auto done) { store_->advertise(a_, "127.0.0.1:9201", std::move(done)); }));
     EXPECT_EQ(resolve(room, a_), (Ownership{.node = a_, .generation = 2}));
     EXPECT_EQ(append(room, 1), Seq{std::nullopt});
+}
+
+// Two sessions of one node, as its sweep and a lookup run side by side: the sweep's claim
+// holds the row when the lookup arrives, and the lookup must find the node's own fresh claim,
+// not take the room again and fence it out.
+TEST_P(RoomStoreTest, ALookupByANodeWhoseOwnClaimIsInFlightKeepsThatClaimsGeneration) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    go_quiet(room);
+    ASSERT_TRUE(
+        ask<void>([&](auto done) { store_->advertise(b_, "127.0.0.1:9201", std::move(done)); }));
+
+    auto sweep = db_->session();
+    ASSERT_TRUE(sweep.exec("BEGIN"));
+    ASSERT_EQ(scalar(sweep,
+                     "WITH claimed AS ("
+                     "  UPDATE room_assignments SET owner_node = $1,"
+                     "         owner_generation = owner_generation + 1, heartbeat_at = now()"
+                     "   WHERE room_id = $2 AND heartbeat_at < now() - interval '5 seconds'"
+                     "  RETURNING owner_generation)"
+                     "UPDATE room_state SET owner_generation = claimed.owner_generation"
+                     "  FROM claimed WHERE room_state.room_id = $2 "
+                     "RETURNING room_state.owner_generation",
+                     Params{}.add_text(b_.view()).add_uuid(room.uuid())),
+              "2");
+
+    std::optional<StoreResult<Ownership>> looked_up;
+    store_->resolve(room, b_, [&](StoreResult<Ownership> r) noexcept { looked_up = r; });
+    // The lookup reaches the row and waits on the sweep's lock.
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] {
+        return scalar(*conn_, "SELECT count(*) FROM pg_stat_activity WHERE "
+                              "datname = current_database() AND wait_event_type = 'Lock'") == "1";
+    }));
+    ASSERT_TRUE(sweep.exec("COMMIT"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return looked_up.has_value(); }));
+
+    EXPECT_EQ(*looked_up, (Ownership{.node = b_, .generation = 2}));
+    EXPECT_EQ(fence(room), "2");
+    EXPECT_EQ(append(room, 2), Seq{1});
 }
 
 TEST_P(RoomStoreTest, CreationsAndTakeoversAreAnnouncedButHeartbeatsAreNot) {

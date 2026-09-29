@@ -635,6 +635,11 @@ public:
     void on_fenced_out(const core::RoomId& room, std::uint64_t generation,
                        OwnerWrite write) noexcept override {
         events_.on_fenced_out(room, generation, write);
+        // Taken again under a newer generation since that write went out: the room is still
+        // this node's, and so are its queue and subscribers.
+        if (registry_.owned(room)) {
+            return;
+        }
         if (const auto it = owned_.find(room); it != owned_.end()) {
             fail_writes(it->second, RouteError::Fenced);
             owned_.erase(it);
@@ -743,6 +748,10 @@ private:
             advertise();
         }
         // Rooms whose owner could not be reached are tried again, once a beat.
+        find_orphans();
+    }
+
+    void find_orphans() {
         std::vector<core::RoomId> orphans;
         for (const auto& [room, lr] : local_) {
             if (!lr.owner && !lr.subscribing) {
@@ -756,9 +765,11 @@ private:
 
     // ---- finding owners and subscribing
 
+    // Not before this node has advertised: the store tells this run's claims from an earlier
+    // run's by the time it last did, and would otherwise take this run's own rooms again.
     void find_owner(const core::RoomId& room) {
         const auto found = local_.find(room);
-        if (found == local_.end() || found->second.subscribing || draining_) {
+        if (found == local_.end() || found->second.subscribing || draining_ || !advertised_) {
             return;
         }
         LocalRoom& lr = found->second;
@@ -1018,6 +1029,10 @@ private:
             reply(peer, request, wire::Status::NotOwner, 0);
             return;
         }
+        if (!advertised_) {
+            reply(peer, request, wire::Status::Unavailable, 0);
+            return;
+        }
         // The dialer found this node in the store. If this node does not hold the room it
         // may be a restart under the same name, which the lookup takes again.
         registry_.resolve(room, [this, peer, request, room](StoreResult<Ownership>) noexcept {
@@ -1059,6 +1074,10 @@ private:
         }
         if (draining_) {
             reply(peer, request, wire::Status::NotOwner, 0);
+            return;
+        }
+        if (!advertised_) {
+            reply(peer, request, wire::Status::Unavailable, 0);
             return;
         }
         registry_.resolve(
@@ -1138,6 +1157,9 @@ private:
         store_.advertise(config_.self, config_.advertise, [this](StoreResult<void> r) noexcept {
             advertising_ = false;
             advertised_ = r.has_value();
+            if (advertised_) {
+                find_orphans();
+            }
         });
     }
 

@@ -306,6 +306,17 @@ TEST_F(RegistryTest, TheSweepClaimsRoomsOfInterestThisNodeDoesNotOwn) {
     EXPECT_EQ(observer_.changes.back().second, (Ownership{.node = self_, .generation = 6}));
 }
 
+TEST_F(RegistryTest, TheSweepLeavesOutARoomThatIsBeingLookedUp) {
+    const core::RoomId looked_up = new_room();
+    const core::RoomId quiet = new_room();
+    registry_.set_interest(looked_up, true);
+    registry_.set_interest(quiet, true);
+    registry_.resolve(looked_up, [](const rt::StoreResult<Ownership>&) noexcept {});
+    registry_.tick();
+    ASSERT_EQ(store_.claims.size(), 1U);
+    EXPECT_EQ(store_.claims.front().rooms, std::vector<core::RoomId>{quiet});
+}
+
 TEST_F(RegistryTest, NoSweepWithoutRoomsOfInterest) {
     registry_.tick();
     EXPECT_TRUE(store_.claims.empty());

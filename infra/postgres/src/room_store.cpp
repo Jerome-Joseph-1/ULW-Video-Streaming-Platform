@@ -34,12 +34,19 @@ RETURNING owner_generation)sql";
 // The fence moves with the owner: room_state takes the new generation in the same statement,
 // so from its commit on only the new owner's appends match. Under READ COMMITTED a second
 // claimant blocks on the row lock, then re-reads a fresh heartbeat and updates nothing.
+// A room recorded as the claimant's own is taken again only if its heartbeat predates the
+// claimant's latest advertise, i.e. an earlier run of the node wrote it. A claim this very run
+// made moments ago (its sweep racing this lookup) is newer, and is kept, not fenced out; a node
+// that has not advertised yet is treated as a fresh run.
 constexpr Sql kClaimRoom = R"sql(
 WITH claimed AS (
     UPDATE room_assignments
        SET owner_node = $2, owner_generation = owner_generation + 1, heartbeat_at = now()
      WHERE room_id = $1
-       AND (owner_node = $2 OR heartbeat_at < now() - $3 * interval '1 millisecond')
+       AND ((owner_node = $2
+             AND heartbeat_at < coalesce((SELECT updated_at FROM chat_nodes WHERE node_id = $2),
+                                         'infinity'))
+            OR heartbeat_at < now() - $3 * interval '1 millisecond')
     RETURNING owner_generation)
 UPDATE room_state SET owner_generation = claimed.owner_generation
   FROM claimed WHERE room_state.room_id = $1

@@ -182,8 +182,10 @@ void RoomRegistry::sweep() {
         return;
     }
     std::vector<core::RoomId> candidates;
+    // A room being looked up is left to the lookup, which may take it too: two claims of one
+    // room in flight at once would each raise the generation, the second fencing the first.
     for (const core::RoomId& room : interest_) {
-        if (!owned_.contains(room)) {
+        if (!owned_.contains(room) && !resolving_.contains(room)) {
             candidates.push_back(room);
         }
     }
