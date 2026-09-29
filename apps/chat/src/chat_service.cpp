@@ -11,18 +11,8 @@ namespace {
 // What a send holds while it waits, and a kept message while it is kept, besides its body:
 // sender, key, seq and the container's own share.
 constexpr std::size_t kMessageOverhead = 256;
-// A message on the wire besides its body: {"type":"message", the room (45), the seq (27), the
-// sender (at most 140), the id (at most 72), and "body":"" (11) come to 313 bytes, and the
-// WebSocket header of a frame under 64 KiB to 4 more.
-constexpr std::size_t kFrameOverhead = 320;
 // Rooms are looked over for lingering this often; a room lingers a second longer at most.
 constexpr core::Millis kSweepEvery{1'000};
-
-// A body as it travels to the client: base64url without padding, four characters per three
-// bytes, and a partial group's two or three.
-constexpr std::size_t encoded_size(std::size_t body) noexcept {
-    return ((body * 4) + 2) / 3;
-}
 
 } // namespace
 
@@ -228,7 +218,7 @@ void ChatService::replay(const Room& room, IClient& client, std::uint64_t after)
     auto first = room.kept.end();
     while (first != room.kept.begin()) {
         const auto previous = std::prev(first);
-        const std::size_t cost = encoded_size(previous->body.size()) + kFrameOverhead;
+        const std::size_t cost = message_wire_size(previous->body.size());
         if (previous->seq <= after || used + cost > budget) {
             break;
         }

@@ -172,6 +172,15 @@ void write_error(std::string& out, std::string_view reason, const std::optional<
     out += '}';
 }
 
+// base64url without padding is four characters per three bytes and two or three for a partial
+// group. Around it, {"type":"message", the room (45), the seq (27), the sender (at most 140),
+// the id (at most 72) and "body":"" (11) come to 313 bytes, and the WebSocket header of a frame
+// under 64 KiB to 4 more.
+std::size_t message_wire_size(std::size_t body) noexcept {
+    constexpr std::size_t kAround = 320;
+    return (((body * 4) + 2) / 3) + kAround;
+}
+
 void write_rate_limited(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                         core::Millis retry_after) {
     write_error(out, "rate_limited", room, id);

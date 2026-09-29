@@ -76,6 +76,9 @@ void write_message(std::string& out, const rt::Message& message);
 void write_error(std::string& out, std::string_view reason,
                  const std::optional<core::RoomId>& room = std::nullopt,
                  const std::optional<rt::MessageKey>& id = std::nullopt);
+// At most how many bytes a message with a body of `body` bytes takes on the client's socket.
+[[nodiscard]] std::size_t message_wire_size(std::size_t body) noexcept;
+
 void write_rate_limited(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                         core::Millis retry_after);
 

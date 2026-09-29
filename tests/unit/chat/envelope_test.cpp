@@ -114,6 +114,24 @@ TEST(Envelope, AMessageReturnsItsBodyBytesExactlyAndItsId) {
     EXPECT_EQ(out.find("line one"), std::string::npos);
 }
 
+TEST(Envelope, AMessagesWireSizeBoundsWhatWriteMessageMakes) {
+    const std::string longest_sender(core::UserId::kMaxLength, 's');
+    const std::string longest_id(rt::MessageKey::kMaxLength, 'i');
+    for (const std::size_t size :
+         {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{48} * 1024}) {
+        const std::string body(size, 'b');
+        std::string out;
+        chat::write_message(out, {.room = room(),
+                                  .seq = UINT64_MAX,
+                                  .sender = *core::UserId::parse(longest_sender),
+                                  .key = *rt::MessageKey::parse(longest_id),
+                                  .body = std::as_bytes(std::span{body})});
+        // The frame header of a text message under 64 KiB is 4 bytes.
+        EXPECT_LE(out.size() + 4, chat::message_wire_size(size)) << size;
+        EXPECT_GE(out.size() + 4 + 8, chat::message_wire_size(size)) << size;
+    }
+}
+
 TEST(Envelope, RepliesAreTheDocumentedShapes) {
     const auto id = *rt::MessageKey::parse("m-3");
     std::string out;
