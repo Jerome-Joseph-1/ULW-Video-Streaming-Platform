@@ -142,4 +142,21 @@ std::optional<int> ChildProcess::wait_exit(std::chrono::milliseconds limit) {
     return exit_code_;
 }
 
+Started start_until_listening(const std::function<std::unique_ptr<ChildProcess>()>& start,
+                              std::string_view ready_marker, std::chrono::milliseconds limit) {
+    Started last;
+    for (int attempt = 1; attempt <= kPortAttempts; ++attempt) {
+        last.process = start();
+        if (last.process == nullptr) {
+            return last;
+        }
+        last.ready = last.process->wait_for_output(ready_marker, limit);
+        if (last.ready ||
+            last.process->output().find("Address already in use") == std::string::npos) {
+            return last;
+        }
+    }
+    return last;
+}
+
 } // namespace ulw::test

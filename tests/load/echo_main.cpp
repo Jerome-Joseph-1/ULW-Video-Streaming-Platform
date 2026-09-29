@@ -13,6 +13,7 @@
 #include <exception>
 #include <memory>
 #include <print>
+#include <span>
 #include <string_view>
 
 namespace {
@@ -31,7 +32,7 @@ template <class T> bool parse_number(std::string_view text, T& out) {
     return ec == std::errc{} && ptr == last;
 }
 
-bool parse(int argc, char** argv, Args& args) {
+bool parse(std::span<char*> argv, Args& args) {
     if (const char* env = std::getenv("ULW_REACTOR")) {
         const auto kind = net::parse_reactor_kind(env);
         if (!kind) {
@@ -39,7 +40,7 @@ bool parse(int argc, char** argv, Args& args) {
         }
         args.reactor = *kind;
     }
-    for (int i = 1; i + 1 < argc; i += 2) {
+    for (std::size_t i = 1; i + 1 < argv.size(); i += 2) {
         const std::string_view flag = argv[i];
         const std::string_view value = argv[i + 1];
         bool ok = false;
@@ -60,12 +61,12 @@ bool parse(int argc, char** argv, Args& args) {
             return false;
         }
     }
-    return argc % 2 == 1;
+    return argv.size() % 2 == 1;
 }
 
 int run(int argc, char** argv) {
     Args args;
-    if (!parse(argc, argv, args)) {
+    if (!parse(std::span(argv, static_cast<std::size_t>(argc)), args)) {
         std::println(stderr, "usage: ulw_echo_server [--port N] [--reactor io_uring|epoll] "
                              "[--idle-ms N] [--max-connections N]");
         return 2;

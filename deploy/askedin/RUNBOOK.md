@@ -79,6 +79,51 @@ elsewhere, change the second `from` in the same files:
 kubectl get pods -A -l app.kubernetes.io/name=prometheus -o custom-columns=NS:.metadata.namespace
 ```
 
+The gateway limits each client address (20 connections, or 20 requests in flight before they
+are authenticated, and 10 new connections a second) and each user (300 requests a minute, 100
+GiB of uploads a day), per replica. Behind Envoy every connection comes from Envoy's pods, so
+the gateway takes the client address from `X-Forwarded-For`, from peers in `ULW_TRUSTED_PROXIES`
+only, and only the entry the `ULW_TRUSTED_PROXY_HOPS` proxies in front appended: with Envoy
+alone, the last one. The overlays set K3s's default pod network, `10.42.0.0/16`, and one hop.
+Confirm Envoy's pods are in that block, and that Envoy sees clients' own addresses rather than
+a node's: its Service must have `externalTrafficPolicy: Local`, or kube-proxy and ServiceLB
+rewrite every client to a node address before Envoy appends it.
+
+```sh
+kubectl get pods -n envoy-gateway-system -l app.kubernetes.io/component=proxy \
+  -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}'    # a /24 inside the cluster's block
+kubectl get svc -n envoy-gateway-system -l app.kubernetes.io/component=proxy \
+  -o custom-columns=NAME:.metadata.name,POLICY:.spec.externalTrafficPolicy   # Local
+```
+
+If the pods are elsewhere, set `ULW_TRUSTED_PROXIES` in both
+`overlays/*/video-gateway/deployment.yaml` to the block that holds them before the first apply.
+With the wrong block every client counts as Envoy: the gateway resets Envoy's connections past
+20 and `connections_rejected_total{reason="ip_connections"}` climbs. With a proxy more or fewer
+in front than `ULW_TRUSTED_PROXY_HOPS` says, clients are counted as the wrong address; step 5.4
+checks which one the gateway sees.
+
+The NetworkPolicy admits Envoy's pods and every pod in the `monitoring` namespace, both from
+inside the trusted block. A monitoring pod can therefore send any `X-Forwarded-For` it likes; all
+that buys it is choosing which address its own unauthenticated requests are counted against,
+and it holds no token to do more.
+
+The other limits are environment variables in the same files (`ULW_MAX_CONNECTIONS_PER_IP`,
+`ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND`, `ULW_REQUESTS_PER_USER_PER_MINUTE`,
+`ULW_UPLOAD_BYTES_PER_USER_PER_DAY`), listed with their ranges in
+`docs/integration/operations-contract.md`; the defaults and their derivations are in
+docs/adr/0052. Each applies per replica, so with two replicas a user may reach twice a per-user
+limit. The byte quota is best effort: it lives in each replica's memory, is forgotten on a
+restart, and a user unseen while 16,384 others were active starts over.
+
+The pods start as user 10001 and have nothing to drop. A process started as root (a
+hand-started binary, a supervisor that stays root) must be given `ULW_RUN_AS_USER`, which it
+becomes after binding its port and before it serves, or it refuses to start with exit 2;
+`ULW_ALLOW_ROOT=1` lets it stay root, for development only. After the drop it reads the TLS
+certificate and key (at start, and again on every SIGHUP), so with `ULW_TRANSPORT=tls` both
+files must be readable by that user.
+
 Check the node has room. Both environments run on k8s-prod's 8 vCPU / 24 GB, and the new
 requests are, per environment, 2 x 500m CPU and 2 x 600Mi for the gateways plus the worker's
 2Gi, and 1 CPU / 10Gi of scratch (stage) or 2 CPU / 30Gi (prod) for the worker: 5 CPU, 6.4Gi of
@@ -344,7 +389,30 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 
    Every run must still end `ok`: a chunk cut off by the drain is resumed from `HEAD`'s offset.
    Stop the loop with Ctrl-C.
-4. Memory under load, in the sandbox only: `make e2e-load` (with `make e2e-up` run first)
+4. The client address the gateway sees. From a machine outside the cluster, note its public
+   address (`curl -s https://ifconfig.me`), turn on debug logging, make a few requests through
+   the route (Envoy spreads them over both replicas), and read both replicas' logs. They must
+   show that address:
+
+   ```sh
+   kubectl -n apps-stage set env deploy/video-gateway ULW_LOG_LEVEL=debug
+   kubectl -n apps-stage rollout status deploy/video-gateway
+   for i in 1 2 3 4; do
+     curl -s -o /dev/null https://<stage host>/api/v1/videos/00000000-0000-7000-8000-000000000000
+   done
+   kubectl -n apps-stage logs -l app.kubernetes.io/name=video-gateway -c gateway --prefix \
+     | grep '"forwarded client"' | tail -4
+   kubectl -n apps-stage set env deploy/video-gateway ULW_LOG_LEVEL-
+   ```
+
+   `kubectl set env` changes the pod template, so each change rolls both pods (uploads in
+   flight resume, as in step 3), and ArgoCD shows the Deployment OutOfSync until the second
+   one undoes the first; with auto-sync on, ArgoCD may revert it before you have read the logs,
+   so pause auto-sync for the check or run it in a quiet window.
+
+   A `10.42.x.x` address, or a node's, means Envoy's Service is not `externalTrafficPolicy:
+   Local` or another proxy stands in front: fix that, or `ULW_TRUSTED_PROXY_HOPS`, before prod.
+5. Memory under load, in the sandbox only: `make e2e-load` (with `make e2e-up` run first)
    installs metrics-server, uploads through the route with 500 uploads in flight, samples
    `kubectl top pods --containers` every 10 s, and fails if a gateway or worker container goes
    over the limits in `overlays/*/video-gateway/deployment.yaml` and `video-worker/deployment.yaml`

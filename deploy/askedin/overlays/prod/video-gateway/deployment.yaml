@@ -86,6 +86,14 @@ spec:
               value: askedin-platform
             - name: ULW_AUTH_COOKIE
               value: auth_token
+            # Every connection comes from Envoy's data plane, so the per-client limits count the
+            # address Envoy appends to X-Forwarded-For, believed only from peers in this block:
+            # K3s's default pod network (RUNBOOK step 1 checks it). One proxy, Envoy, stands in
+            # front, so the client is the last entry; anything left of it is the client's own.
+            - name: ULW_TRUSTED_PROXIES
+              value: "10.42.0.0/16"
+            - name: ULW_TRUSTED_PROXY_HOPS
+              value: "1"
             - name: ULW_DATABASE_URL
               valueFrom:
                 secretKeyRef:

@@ -78,8 +78,9 @@ error; a real client resumes from `HEAD` and stops polling on `failed`
 
 - Ids are UUIDv7 in lowercase canonical form (`01a0ece4-69d0-781f-822e-f9f2e975cd5f`). Other
   spellings are `404`, not normalised.
-- Error responses have an empty body. The status code, `Upload-Offset`, `Retry-After` and
-  `Allow` headers carry everything.
+- Error responses have an empty body. The status code, `Upload-Offset`, `Retry-After`,
+  `Allow` and `WWW-Authenticate` headers carry everything. A `429` or `503` always carries
+  `Retry-After`; wait that long before retrying.
 - Every response has `X-Request-Id`. Quote it in bug reports.
 - Only the owner can see a video or an upload. Anything else answers `404`.
 - HTTP/1.1 with `Content-Length`; chunked request bodies are refused.

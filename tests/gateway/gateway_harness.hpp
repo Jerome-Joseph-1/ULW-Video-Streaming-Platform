@@ -22,11 +22,22 @@ namespace ulw::test {
 // S3 is the store the gateway runs in production, on the MinIO of deploy/local/compose.yaml.
 enum class Backend { Fake, Fs, S3 };
 
+// Production limits but the per-client ones, lifted: every test connects from 127.0.0.1, most as
+// one user, and under a manual clock a bucket never refills. Tests of those limits set them.
+[[nodiscard]] inline gateway::Limits unthrottled_limits() {
+    gateway::Limits limits;
+    limits.max_connections_per_ip = limits.max_connections;
+    limits.new_connections_per_ip_per_second = 1'000'000;
+    limits.requests_per_user_per_minute = 1'000'000;
+    limits.upload_bytes_per_user_per_day = std::uint64_t{1} << 50U;
+    return limits;
+}
+
 struct GatewayOptions {
     Backend backend = Backend::Fs;
     std::uint64_t chunk = std::uint64_t{8} * 1024 * 1024;
     infra::storage::FaultPlan plan{};
-    gateway::Limits limits{};
+    gateway::Limits limits = unthrottled_limits();
     // S3 only: the store's connections, which uploads beyond wait for; the gateway's own
     // choice, one per admitted upload, unless a test wants them to queue.
     std::size_t store_connections = gateway::Limits{}.max_upload_slots;

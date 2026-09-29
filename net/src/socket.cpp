@@ -220,6 +220,12 @@ std::expected<std::uint16_t, int> local_port(int fd) noexcept {
     return ntohs(reinterpret_cast<const sockaddr_in*>(&addr)->sin_port);
 }
 
+void reset_connection(os::UniqueFd fd) noexcept {
+    const linger abortive{.l_onoff = 1, .l_linger = 0};
+    // Failing leaves an ordinary close, which refuses the connection all the same.
+    static_cast<void>(::setsockopt(fd.get(), SOL_SOCKET, SO_LINGER, &abortive, sizeof abortive));
+}
+
 std::expected<void, int> tune_connection(int fd) noexcept {
     // Keepalive 60 s idle, then 3 probes 10 s apart: a vanished peer is found in 90 s.
     // TCP_USER_TIMEOUT bounds how long sent data may sit unacknowledged, which keepalive

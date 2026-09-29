@@ -1,8 +1,11 @@
 #include "infra/postgres/migrator.hpp"
 
+#include "ops/root.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -69,6 +72,22 @@ int run(std::span<char*> args) {
     if (url == nullptr || *url == '\0') {
         std::println(stderr, "ulw_migrate: ULW_DATABASE_URL is not set");
         return kBadUsage;
+    }
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+    const char* user = std::getenv("ULW_RUN_AS_USER");
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+    const char* allow = std::getenv("ULW_ALLOW_ROOT");
+    const auto allow_root = ops::parse_allow_root(
+        allow == nullptr ? std::nullopt : std::optional<std::string_view>(allow));
+    if (!allow_root) {
+        std::println(stderr, "ulw_migrate: ULW_ALLOW_ROOT: expected 0 or 1");
+        return kBadUsage;
+    }
+    // Before the database is dialled: nothing the connection reads should be read as root.
+    const auto step = ops::leave_root(user == nullptr ? "" : user, *allow_root);
+    if (!step) {
+        std::println(stderr, "ulw_migrate: {}: {}", step.error().source, step.error().reason);
+        return step.error().configuration ? kBadUsage : kFailed;
     }
     auto migrator = infra::postgres::Migrator::connect(url);
     if (!migrator) {
