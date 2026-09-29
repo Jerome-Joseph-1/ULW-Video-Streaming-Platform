@@ -1,11 +1,13 @@
 include(GoogleTest)
 
 # One executable per label keeps `ctest -L` meaningful and link times short.
+# PROPERTIES after the sources are set on every test the suite discovers.
 function(ulw_add_test_suite name label)
-    ulw_add_executable(${name} ${ARGN})
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "" "PROPERTIES")
+    ulw_add_executable(${name} ${arg_UNPARSED_ARGUMENTS})
     target_link_libraries(${name} PRIVATE GTest::gtest_main GTest::gmock)
     gtest_discover_tests(${name}
-        PROPERTIES LABELS ${label}
+        PROPERTIES LABELS ${label} ${arg_PROPERTIES}
         DISCOVERY_TIMEOUT 30)
 endfunction()
 
@@ -182,12 +184,14 @@ target_compile_definitions(postgres_unit_tests
     PRIVATE ULW_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/migrations")
 
 # Against a live Postgres: ULW_TEST_DATABASE_URL, or the one deploy/local/compose.yaml runs.
+# The pool test docker-pauses that server, so under ctest -j no other test may be using it.
 ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_catalog_test.cpp
     integration/postgres_harness.cpp
     integration/postgres_job_queue_test.cpp
     integration/postgres_migrate_test.cpp
-    integration/postgres_pool_test.cpp)
+    integration/postgres_pool_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
