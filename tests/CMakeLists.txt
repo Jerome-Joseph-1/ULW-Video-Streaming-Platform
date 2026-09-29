@@ -135,6 +135,17 @@ ulw_add_test_suite(ws_unit_tests unit
 target_link_libraries(ws_unit_tests PRIVATE ulw::codec_ws)
 target_include_directories(ws_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
+ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
+add_test(NAME ws_fuzz_corpus COMMAND ws_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/ws)
+set_tests_properties(ws_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(ws_fuzz fuzz/ws_fuzz.cpp)
+    target_link_libraries(ws_fuzz PRIVATE ulw::codec_ws)
+    target_compile_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
     unit/s3/errors_test.cpp
