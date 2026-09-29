@@ -1,9 +1,13 @@
-// Laws every IMessageStore must obey, run against each store.
+// Laws every IMessageStore must obey, run against the in-memory store and against Postgres
+// (skipped when no Postgres is reachable, as the integration suites are).
 #include "infra/messages/memory_message_store.hpp"
+#include "infra/postgres/message_store.hpp"
+#include "net/offload_pool.hpp"
 #include "net/reactor_factory.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
+#include "integration/postgres_harness.hpp"
 #include "message_store_harness.hpp"
 
 #include <algorithm>
@@ -67,6 +71,48 @@ public:
 
 private:
     std::optional<infra::messages::MemoryMessageStore> store_;
+};
+
+class PostgresBackend final : public Backend {
+public:
+    // Null when the test was skipped or failed setting up.
+    static std::unique_ptr<Backend> make() {
+        auto backend = std::make_unique<PostgresBackend>();
+        ulw::test::ScratchDatabase::open(backend->db_);
+        if (!backend->db_ || !backend->make_reactor()) {
+            return nullptr;
+        }
+        auto offload = net::OffloadPool::create(*backend->reactor_, 1);
+        if (!offload) {
+            return nullptr;
+        }
+        backend->offload_ = std::move(*offload);
+        auto store = infra::postgres::PgMessageStore::create(
+            *backend->reactor_, *backend->offload_, {.conninfo = backend->db_->conninfo()});
+        if (!store) {
+            ADD_FAILURE() << store.error();
+            return nullptr;
+        }
+        backend->store_ = std::move(*store);
+        return backend;
+    }
+
+    ~PostgresBackend() override {
+        offload_.reset();
+        store_.reset();
+    }
+    PostgresBackend() = default;
+    PostgresBackend(const PostgresBackend&) = delete;
+    PostgresBackend& operator=(const PostgresBackend&) = delete;
+    PostgresBackend(PostgresBackend&&) = delete;
+    PostgresBackend& operator=(PostgresBackend&&) = delete;
+
+    core::ports::IMessageStore& store() override { return *store_; }
+
+private:
+    std::unique_ptr<ulw::test::ScratchDatabase> db_;
+    std::unique_ptr<net::OffloadPool> offload_;
+    std::unique_ptr<infra::postgres::PgMessageStore> store_;
 };
 
 struct BackendFactory {
@@ -427,6 +473,7 @@ TEST_P(MessageStoreConformance, MembersPageInTheByteOrderOfTheirIds) {
 std::vector<BackendFactory> backends() {
     return {
         {.name = "Memory", .make = [] { return std::make_unique<MemoryBackend>(); }},
+        {.name = "Postgres", .make = &PostgresBackend::make},
     };
 }
 

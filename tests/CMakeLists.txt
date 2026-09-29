@@ -283,11 +283,24 @@ target_link_libraries(room_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg
 target_include_directories(room_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
-# The message store's laws, on every store.
+# The message store's laws, on the in-memory store and on Postgres (skipped without one).
 ulw_add_test_suite(message_store_conformance_tests conformance
-    conformance/message_store_conformance_test.cpp)
-target_link_libraries(message_store_conformance_tests PRIVATE ulw::messages_memory)
-target_include_directories(message_store_conformance_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    conformance/message_store_conformance_test.cpp
+    integration/postgres_harness.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(message_store_conformance_tests PRIVATE ulw::messages_memory ulw::pg_store
+    PkgConfig::LIBPQ)
+target_include_directories(message_store_conformance_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
+# Its schema, plans and timings on a live Postgres, as the suites above.
+ulw_add_test_suite(message_store_integration_tests integration
+    integration/message_store_test.cpp
+    integration/postgres_harness.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(message_store_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
+target_include_directories(message_store_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(chat_unit_tests unit
     unit/chat/config_test.cpp
