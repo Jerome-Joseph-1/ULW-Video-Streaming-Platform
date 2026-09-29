@@ -40,6 +40,9 @@ fi
 if [[ -f apps/gateway/CMakeLists.txt ]]; then
     hits=$(grep -nE '^[^#]*(ffmpeg|libav)' apps/gateway/CMakeLists.txt || true)
     [[ -n $hits ]] && fail "gateway links ffmpeg/libav" "$hits"
+    hits=$(grep -nE '^[^#]*live[-_]packager' apps/gateway/CMakeLists.txt || true)
+    [[ -n $hits ]] && fail "gateway links the live packager" "$hits"
+    check "gateway includes the live packager" '#include "(live_packager|media_playlist|live_window)' apps/gateway
 fi
 
 if [[ -d net ]]; then
@@ -50,6 +53,9 @@ if [[ -d http ]]; then
 fi
 if [[ -d apps/worker ]]; then
     check "worker depends on net/http" '#include "(net|http)/' apps/worker
+fi
+if [[ -d apps/live-packager ]]; then
+    check "live packager depends on net/http/rt" '#include "(net|http|rt)/' apps/live-packager
 fi
 
 exit $status

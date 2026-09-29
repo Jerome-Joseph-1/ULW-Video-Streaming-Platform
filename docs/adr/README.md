@@ -36,3 +36,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0030](0030-container-images-on-ubuntu-from-a-dated-snapshot.md) | Container images build and run on Ubuntu 24.04 from a dated snapshot | Accepted |
 | [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted |
 | [0032](0032-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted |
+| [0033](0033-live-media-reaches-the-packager-as-mpegts-on-an-inherited-socket.md) | Live media reaches the packager as MPEG-TS on a socket it hands to ffmpeg | Accepted |
+| [0034](0034-live-playlist-window-and-restart.md) | The live playlist is a window the packager owns, and it continues across a restart | Accepted |
