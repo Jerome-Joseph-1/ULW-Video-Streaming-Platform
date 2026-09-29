@@ -193,10 +193,10 @@ std::expected<Channels, std::string> open_channels() {
 }
 
 std::expected<pid_t, std::string> spawn(const Sandbox& sandbox, const Limits& limits,
-                                        const Args& args, Channels& channels) {
+                                        const Args& args, Channels& channels, int input) {
     FileActions actions;
     SpawnAttributes attributes;
-    if (!actions.dup2(channels.devnull.get(), STDIN_FILENO) ||
+    if (!actions.dup2(input >= 0 ? input : channels.devnull.get(), STDIN_FILENO) ||
         !actions.dup2(channels.out.write.get(), STDOUT_FILENO) ||
         !actions.dup2(channels.err.write.get(), STDERR_FILENO) || !attributes.isolate()) {
         return std::unexpected("spawn attributes refused");
@@ -323,13 +323,14 @@ private:
 std::expected<ChildExit, std::string>
 run_sandboxed(const Sandbox& sandbox, const Limits& limits, const Args& args,
               const core::ports::IClock& clock,
-              const std::function<void(std::string_view)>& on_stdout, const std::stop_token& stop) {
+              const std::function<void(std::string_view)>& on_stdout, const std::stop_token& stop,
+              int input) {
     auto channels = open_channels();
     if (!channels) {
         return std::unexpected(std::move(channels.error()));
     }
     const core::MonoTime started = clock.now();
-    const auto pid = spawn(sandbox, limits, args, *channels);
+    const auto pid = spawn(sandbox, limits, args, *channels, input);
     if (!pid) {
         return std::unexpected(pid.error());
     }

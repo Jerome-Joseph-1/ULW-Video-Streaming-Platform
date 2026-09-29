@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <fcntl.h>
@@ -66,7 +67,8 @@ protected:
         }
     }
 
-    ChildExit run(const Args& args, Limits limits = {}, const std::stop_token& stop = {}) {
+    ChildExit run(const Args& args, Limits limits = {}, const std::stop_token& stop = {},
+                  int input = -1) {
         if (limits.writable.empty()) {
             limits.writable = writable_.path();
         }
@@ -88,7 +90,7 @@ protected:
                     on_stdout_(stdout_);
                 }
             },
-            stop);
+            stop, input);
         EXPECT_TRUE(child) << child.error();
         return child.value_or(ChildExit{});
     }
@@ -170,6 +172,34 @@ TEST_F(SandboxTest, StdinIsEmptyAndNoOtherDescriptorLeaks) {
     EXPECT_EQ(child.exit_code, 0);
     // 0-2, and 3 for the directory ls is reading.
     EXPECT_EQ(stdout_, "0\n1\n2\n3\n");
+}
+
+TEST_F(SandboxTest, AnInputDescriptorBecomesStdinAndNothingElseLeaks) {
+    std::array<int, 2> fds{};
+    ASSERT_EQ(::pipe2(fds.data(), O_CLOEXEC), 0);
+    const os::UniqueFd read_end(fds[0]);
+    os::UniqueFd write_end(fds[1]);
+    constexpr std::string_view kBytes = "ts bytes";
+    ASSERT_EQ(::write(write_end.get(), kBytes.data(), kBytes.size()),
+              static_cast<ssize_t>(kBytes.size()));
+    write_end.reset();
+    const auto child = run({"sh", "-c", "cat; ls /proc/self/fd"}, {}, {}, read_end.get());
+    EXPECT_EQ(child.exit_code, 0);
+    EXPECT_EQ(stdout_, "ts bytes0\n1\n2\n3\n");
+}
+
+TEST_F(SandboxTest, ASocketFromOutsideStillCarriesBytesIntoTheNamespaceWithoutNetwork) {
+    std::array<int, 2> pair{};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair.data()), 0);
+    const os::UniqueFd ours(pair[0]);
+    const os::UniqueFd theirs(pair[1]);
+    constexpr std::string_view kBytes = "from the publisher";
+    ASSERT_EQ(::write(ours.get(), kBytes.data(), kBytes.size()),
+              static_cast<ssize_t>(kBytes.size()));
+    ASSERT_EQ(::shutdown(ours.get(), SHUT_WR), 0);
+    const auto child = run({"cat"}, {}, {}, theirs.get());
+    EXPECT_EQ(child.exit_code, 0);
+    EXPECT_EQ(stdout_, kBytes);
 }
 
 TEST_F(SandboxTest, TheWallClockDeadlineTerminatesAnOverrun) {
