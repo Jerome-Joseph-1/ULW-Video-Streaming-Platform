@@ -290,7 +290,7 @@ test('a join through a handle whose room went idle opens the room again', async 
   }
 });
 
-// A room's kind decides its tickets (ADR-0056): a publisher ticket for a call's generation
+// A room's kind decides its tickets (ADR-0053): a publisher ticket for a call's generation
 // could bring it back after it was closed to put someone out, since LiveKit's WHIP POST
 // re-creates the room it names; and members never join a stream's room. Publishing into a
 // stream's room is the ingest suite's (ingest.spec.mjs).

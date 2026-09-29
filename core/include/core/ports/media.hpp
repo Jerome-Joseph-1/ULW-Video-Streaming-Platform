@@ -43,7 +43,7 @@ using TicketDone = std::move_only_function<void(std::expected<MediaTicket, Media
 // can be withdrawn, but a closed generation admits no member. A publisher ticket is the
 // exception: until it expires, a WHIP POST with it brings its closed generation's room back
 // (the media server skips its own room check on that path), which is why it lives no longer
-// than a member's ticket (ADR-0056). The caller owns the number: it lives in the room's state,
+// than a member's ticket (ADR-0053). The caller owns the number: it lives in the room's state,
 // moves only forward, and moves only through the owner's fenced write (ADR-0015), so a deposed
 // owner can neither open a generation nor close the current one (ADR-0050).
 enum class MediaGeneration : std::uint64_t {};
@@ -56,7 +56,7 @@ enum class MediaRole : std::uint8_t {
     // ticket's endpoint takes a WHIP offer (RFC 9725) with the credential as bearer token, so
     // an encoder or a browser can publish with no SDK. It lives as long as a member's ticket;
     // WHIP sends a bearer token with every later request on the session too, so a client asks
-    // for a fresh ticket for each PATCH and for its DELETE (ADR-0056).
+    // for a fresh ticket for each PATCH and for its DELETE (ADR-0053).
     Publisher,
 };
 
@@ -68,7 +68,7 @@ enum class MediaRoomKind : std::uint8_t {
     Stream,
 };
 
-// A live stream's packager, as the relay reaches it (ADR-0046, ADR-0056): which stream it takes,
+// A live stream's packager, as the relay reaches it (ADR-0046, ADR-0053): which stream it takes,
 // the secret it admits the relay with, and the segment length it cuts at, which becomes the
 // relay's keyframe interval. Where the packager listens is the media adapter's configuration,
 // not the caller's to choose.
@@ -96,7 +96,7 @@ public:
     // for it for half a minute, not for as long as a ticket lasts. Idempotent: calls made while
     // one for the same participant is in flight share its answer, and a participant already
     // relayed gets the running relay's id. One case is left: a retry after the start timed out
-    // here, while the media server may still be starting it, can start a second (ADR-0056).
+    // here, while the media server may still be starting it, can start a second (ADR-0053).
     // Refused for a call's room.
     virtual void relay(const UserId& user, const DeviceId& device, const MediaRelay& target,
                        RelayDone done) = 0;

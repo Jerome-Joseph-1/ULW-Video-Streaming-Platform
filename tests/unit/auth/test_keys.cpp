@@ -12,6 +12,7 @@
 #include <openssl/encoder.h>
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -72,6 +73,8 @@ std::vector<unsigned char> bn_param(const EVP_PKEY* key, const char* name, int p
 }
 
 const unsigned char* bytes_of(std::string_view s) {
+    // OpenSSL reads its input as unsigned char; the bytes are the same.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     return reinterpret_cast<const unsigned char*>(s.data());
 }
 
@@ -81,12 +84,12 @@ std::string der_to_jose(const std::string& der) {
     const std::unique_ptr<ECDSA_SIG, EcdsaSigFree> sig{
         d2i_ECDSA_SIG(nullptr, &p, static_cast<long>(der.size()))};
     require(sig != nullptr, "ecdsa der");
-    std::string out(64, '\0');
-    auto* dst = reinterpret_cast<unsigned char*>(out.data());
-    require(BN_bn2binpad(ECDSA_SIG_get0_r(sig.get()), dst, 32) == 32 &&
-                BN_bn2binpad(ECDSA_SIG_get0_s(sig.get()), dst + 32, 32) == 32,
+    std::array<unsigned char, 64> rs{};
+    const std::span<unsigned char> s = std::span(rs).subspan(32);
+    require(BN_bn2binpad(ECDSA_SIG_get0_r(sig.get()), rs.data(), 32) == 32 &&
+                BN_bn2binpad(ECDSA_SIG_get0_s(sig.get()), s.data(), 32) == 32,
             "ecdsa scalars");
-    return out;
+    return {rs.begin(), rs.end()};
 }
 
 } // namespace
@@ -151,11 +154,11 @@ std::string TestKey::sign(std::string_view alg, std::string_view input, int pss_
     std::size_t len = 0;
     require(EVP_DigestSign(ctx.get(), nullptr, &len, bytes_of(input), input.size()) == 1,
             "sign size");
-    std::string sig(len, '\0');
-    require(EVP_DigestSign(ctx.get(), reinterpret_cast<unsigned char*>(sig.data()), &len,
-                           bytes_of(input), input.size()) == 1,
+    std::vector<unsigned char> raw(len);
+    require(EVP_DigestSign(ctx.get(), raw.data(), &len, bytes_of(input), input.size()) == 1,
             "sign");
-    sig.resize(len);
+    const auto signed_bytes = std::span(raw).first(len);
+    const std::string sig(signed_bytes.begin(), signed_bytes.end());
     return alg == "ES256" ? der_to_jose(sig) : sig;
 }
 
@@ -165,7 +168,8 @@ std::string TestKey::public_pem() const {
     unsigned char* data = nullptr;
     std::size_t len = 0;
     require(ctx != nullptr && OSSL_ENCODER_to_data(ctx.get(), &data, &len) == 1, "pem");
-    std::string pem(reinterpret_cast<const char*>(data), len);
+    const std::span<const unsigned char> encoded(data, len);
+    std::string pem(encoded.begin(), encoded.end());
     OPENSSL_free(data);
     return pem;
 }
@@ -205,7 +209,8 @@ std::string hmac_sha256(std::string_view secret, std::string_view input) {
     require(EVP_Q_mac(nullptr, "HMAC", nullptr, "SHA256", nullptr, bytes_of(secret), secret.size(),
                       bytes_of(input), input.size(), out.data(), out.size(), &len) != nullptr,
             "hmac");
-    return {reinterpret_cast<const char*>(out.data()), len};
+    const auto mac = std::span(out).first(len);
+    return {mac.begin(), mac.end()};
 }
 
 } // namespace ulw::test

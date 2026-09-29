@@ -2,11 +2,12 @@
 
 A video file is uploaded in chunks to a resumable upload, then committed. The gateway streams
 each chunk straight into the object store; it never holds a whole file. After the commit the
-worker transcodes the video, and it becomes playable ([videos-and-playback.md](videos-and-playback.md)).
+worker transcodes the video, and it becomes playable
+([videos-and-playback.md](videos-and-playback.md)).
 
 Every endpoint here needs a token ([auth.md](auth.md)). Every response carries `X-Request-Id`;
 quote it when reporting a problem. Every error body is empty: the status code and the
-`Upload-Offset` and `Retry-After` headers are the whole answer.
+`Upload-Offset`, `Retry-After` and `WWW-Authenticate` headers are the whole answer.
 
 ## Endpoints
 
@@ -131,7 +132,7 @@ to start again with a new create.
 
 ## Limits and admission
 
-<!-- apps/gateway/src/gateway.hpp (Limits), apps/gateway/src/gateway.cpp (acquire_upload_slot), apps/gateway/src/connection.cpp (on_timeout, check_body_rate, fail) -->
+<!-- apps/gateway/src/gateway.hpp (Limits), apps/gateway/src/gateway.cpp (acquire_upload_slot, on_accept, admit_peer, charge_request, charge_upload_bytes), apps/gateway/src/connection.cpp (on_head, authenticate, start_append, on_timeout, check_body_rate, fail), apps/gateway/src/rate_limit.cpp (forwarded_client) -->
 
 | Limit | Value | On breach |
 |---|---|---|
@@ -140,6 +141,10 @@ to start again with a new create.
 | Create body | 4 KiB | `413`, connection closed |
 | Concurrent `PATCH`es per user, per gateway instance | 3 | `429`, `Retry-After: 5` |
 | Concurrent `PATCH`es per gateway instance | 448 | `503`, `Retry-After: 5` |
+| Requests per user, per gateway instance | 300 a minute, up to 300 at once | `429`, `Retry-After` until the next is allowed (at most 1 s once used up) |
+| Upload bytes per user, per gateway instance | 100 GiB a day, refilled evenly (1.2 MiB/s) | `429`, `Retry-After` until this `PATCH`'s `Content-Length` fits |
+| Requests in flight per client address before authentication, through Askedin's Envoy | 20 | `429`, `Retry-After: 1` |
+| Connections per client address, direct | 20 open, 10 new a second | Reset at accept, no response |
 | Connections per gateway instance | 448 | Closed at accept, no response |
 | Request head | Complete within 10 s | Connection closed |
 | Request target | 8 KiB | `400`, connection closed |
@@ -154,8 +159,25 @@ Admission counts chunk uploads only, and happens after authentication. A user's 
 running at once is refused while other users go on; the whole instance being full refuses
 everyone. Both answers carry `Retry-After: 5`.
 
-The limits apply per gateway process; production runs two behind Envoy, so a user can have up
-to 3 chunks in flight on each.
+The request and byte limits are token buckets: a user starts with the full allowance, spends one
+token per authenticated request (any endpoint, playback included) and one per byte a `PATCH`
+declares in `Content-Length`, charged when the `PATCH` is admitted, before its body is read,
+with whatever the client then never sends given back when the request ends. A refused `PATCH`
+reads nothing and holds no slot. The byte allowance is kept in each gateway's memory: a restart,
+or a user going unseen while many others are active, starts it over full. Tokens come back
+evenly, so a client that waits `Retry-After` seconds finds the request allowed. The byte
+allowance is sized for two 50 GiB uploads a day; an ordinary uploader never meets the request
+allowance (a 100 Mbit/s uplink sends 90 chunks a minute).
+
+A client address is the connecting address, or behind Askedin's Envoy the address Envoy saw
+(the gateway reads `X-Forwarded-For` from Envoy only; a client's own `X-Forwarded-For` entries
+are ignored). An IPv6 client counts by its /64. Through Envoy the address limit covers only
+requests not yet authenticated; once a token is verified the user's own limits apply instead,
+so hundreds of users behind one carrier-grade NAT are not held to one address's 20.
+
+Every limit applies per gateway process; production runs two behind Envoy, which spreads a
+user's requests over both, so a user can have up to 3 chunks in flight on each, and up to twice
+the request and byte allowances in all.
 
 ## Errors
 
@@ -164,14 +186,14 @@ to 3 chunks in flight on each.
 | Status | Headers | When | Client action |
 |---|---|---|---|
 | `400` | | Create: missing or invalid field, empty body, not JSON. `PATCH`: missing or malformed `Upload-Offset`, or a body longer than what remains. A body on `HEAD`, commit or `DELETE`. Malformed HTTP. | Fix the request; do not retry as is |
-| `401` | | No token, or it fails verification | Refresh the token, retry once |
+| `401` | `WWW-Authenticate` | No token (`Bearer`), or it fails verification (`Bearer error="invalid_token"`) | Refresh the token, retry once |
 | `404` | | Unknown or malformed id, another user's upload, unknown path. `HEAD` on a cancelled upload. | Stop; start a new upload if needed |
 | `405` | `Allow` | Wrong method for the path | Fix the client |
 | `408` | | Body idle for 30 s, or slower than 8 KiB/s | Resume from `HEAD` |
 | `409` | `Upload-Offset` | `PATCH`: offset is not the durable offset, another `PATCH` on this upload is running, or the upload is committed or cancelled. Commit: not all bytes durable yet, or cancelled. `DELETE`: already committed. | Resume from the returned offset; commit once it equals `size_bytes`. If the upload is committed or cancelled, stop. |
 | `411` | | `Transfer-Encoding` on a create or `PATCH` | Send `Content-Length` |
 | `413` | | Create body over 4 KiB, or `PATCH` body over 16 MiB | Send smaller chunks |
-| `429` | `Retry-After: 5` | This user already has 3 chunk uploads running on this instance | Wait, then retry the same `PATCH` |
+| `429` | `Retry-After` | This user already has 3 chunk uploads running on this instance (`Retry-After: 5`); this user is over 300 requests a minute or 100 GiB a day; this client address has 20 requests in flight (`Retry-After: 1`) | Wait `Retry-After` seconds, then retry the same request |
 | `431` | | Request head too large | Fix the client |
 | `500` | | A bug or a misconfigured store | Report with `X-Request-Id`; retry later from `HEAD` |
 | `501` | | Unknown HTTP method | Fix the client |

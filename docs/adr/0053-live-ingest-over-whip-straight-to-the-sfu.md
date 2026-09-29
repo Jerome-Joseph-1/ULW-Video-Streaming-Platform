@@ -1,4 +1,4 @@
-# 0056. Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder
+# 0053. Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder
 
 Status: Accepted
 Date: 2026-09-29

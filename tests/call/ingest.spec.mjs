@@ -1,9 +1,9 @@
 // M30 acceptance: live ingest over WHIP (RFC 9725), straight to the SFU with a publisher ticket
-// (ADR-0056). A GStreamer whipsink publisher is exactly one producer; a DELETE ends the session at
+// (ADR-0053). A GStreamer whipsink publisher is exactly one producer; a DELETE ends the session at
 // once, with a fresh ticket when the first has expired, and a stale session's DELETE leaves its
 // replacement alone; a candidate trickled after the answer is what the connection is built on;
 // and a published stream reaches the M31 packager through the SFU's recorder and becomes a live
-// HLS playlist that ends with the session. One probe pins a LiveKit behaviour ADR-0056 relies on
+// HLS playlist that ends with the session. One probe pins a LiveKit behaviour ADR-0053 relies on
 // knowing: a publisher ticket brings its closed generation's room back.
 import { expect, test } from '@playwright/test';
 import { execFileSync, spawn } from 'node:child_process';
@@ -264,7 +264,7 @@ test("a replaced session's DELETE leaves the session that replaced it", async ()
 });
 
 // Not what the platform wants, what LiveKit v1.13.7 does, pinned so that an upgrade that changes
-// it is noticed (ADR-0056): its WHIP POST creates the room its token names without the
+// it is noticed (ADR-0053): its WHIP POST creates the room its token names without the
 // auto_create check, so a publisher ticket brings a closed generation's room back while it lasts.
 test('a publisher ticket brings its closed generation back (LiveKit v1.13.7)', async () => {
   const sfu = startSignalling();
@@ -394,7 +394,7 @@ function readPlaylist(file) {
 // them: the call a stream service makes once its publisher is in. The recorder joins the room,
 // takes that one participant, and calls the packager's listener (ADR-0046).
 // The harness is started here, once the packager's port is known: where relays go is the
-// adapter's configuration, not the caller's (ADR-0056).
+// adapter's configuration, not the caller's (ADR-0053).
 async function relayedStream(root, metrics) {
   const streamId = `whip-${randomBytes(6).toString('hex')}`;
   const passphrase = randomBytes(16).toString('hex');

@@ -61,7 +61,7 @@
   // answer's own candidates are dropped before they reach ICE, and with nowhere to send checks
   // the browser can only answer the server's, so a connection means the server checked towards
   // a candidate it was sent late. Each request after the POST carries a fresh ticket from
-  // `window.freshTicket`, as a client asks the stream service for one (ADR-0056).
+  // `window.freshTicket`, as a client asks the stream service for one (ADR-0053).
   window.whipTrickled = async ({ url, token }) => {
     const media = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
     const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });

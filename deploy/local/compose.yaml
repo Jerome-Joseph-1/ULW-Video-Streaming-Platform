@@ -3,6 +3,7 @@
 #
 #   docker compose -f deploy/local/compose.yaml up -d --wait
 #   ULW_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:55432/postgres build/ci/apps/migrate/ulw_migrate
+#   (started as root, the services also need ULW_ALLOW_ROOT=1, or ULW_RUN_AS_USER)
 #
 # The integration tests (label `integration`) look for Postgres at
 # postgresql://postgres:testtest123@127.0.0.1:55432/postgres unless ULW_TEST_DATABASE_URL says
@@ -64,7 +65,7 @@ services:
     profiles: ["calls"]
     # On the host's network, as are the recorder and its Redis: the recorder joins rooms as a
     # client, and a WHIP publisher's trickled candidates are host addresses the server must reach
-    # (ADR-0056); from a bridge network neither would be reachable at the loopback address the
+    # (ADR-0053); from a bridge network neither would be reachable at the loopback address the
     # server advertises.
     network_mode: host
     depends_on:
@@ -134,7 +135,7 @@ services:
 
   egress:
     # livekit/egress v1.14.1, pinned by digest (ADR-0046): the recorder that relays a live
-    # stream's publisher to the packager over SRT (ADR-0056).
+    # stream's publisher to the packager over SRT (ADR-0053).
     image: docker.io/livekit/egress@sha256:bf2b648b947349c3e9ff7aa8c718f00378d5c06af7624652a3653318e00333ce
     container_name: ulw-livekit-egress
     profiles: ["calls"]

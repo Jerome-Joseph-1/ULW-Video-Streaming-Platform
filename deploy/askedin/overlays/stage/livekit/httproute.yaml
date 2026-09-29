@@ -1,5 +1,5 @@
 # LiveKit's signalling WebSocket, the endpoint a call ticket names (the client SDK connects to
-# <ticket url>/rtc), and its WHIP endpoint, the one a publisher ticket names (docs/adr/0056):
+# <ticket url>/rtc), and its WHIP endpoint, the one a publisher ticket names (docs/adr/0053):
 # POST /whip/v1 starts a live stream's ingest session, PATCH and DELETE on the session's
 # /whip/v1/<id> trickle candidates and end it. Its server API (/twirp) stays inside the cluster:
 # only the call and stream services call it.

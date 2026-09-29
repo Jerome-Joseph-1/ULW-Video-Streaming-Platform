@@ -39,7 +39,7 @@ using detail::RoomService;
 // and room.connect() retries once: 60 s. Clock skew needs nothing extra, LiveKit allows a minute.
 // A publisher's ticket lives no longer: a WHIP POST with it re-creates its room even after the
 // generation was closed (LiveKit v1.13.7 skips the auto_create check on that path), so each
-// PATCH and the DELETE go out with a fresh ticket instead of a long one (ADR-0056).
+// PATCH and the DELETE go out with a fresh ticket instead of a long one (ADR-0053).
 constexpr core::Seconds kTicketTtl{2 * (15 + 15)};
 // How long LiveKit keeps a room with nobody in it: since its creation if nobody has joined yet
 // (empty_timeout), since the last one left if someone had (departure_timeout). The first must
@@ -328,7 +328,7 @@ public:
         const bool member = role == MediaRole::Member;
         // A call admits members and a stream its publisher, nothing else: a publisher ticket
         // for a call's generation could bring it back after it was closed to put someone out
-        // (ADR-0056), and members never join a stream's room (ADR-0014).
+        // (ADR-0053), and members never join a stream's room (ADR-0014).
         const bool fits = member == (kind_ == MediaRoomKind::Call);
         if (closed_ || !fits) {
             service_.fail(closed_ ? MediaError::Closed : MediaError::Refused,

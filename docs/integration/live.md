@@ -25,7 +25,7 @@ ticket has three fields:
 | `token` | The bearer token for one WHIP request. |
 | `expires_at` | Unix seconds, 60 s after issue. |
 
-The client then speaks WHIP to `url` (ADR-0056), and asks the stream service for a **fresh
+The client then speaks WHIP to `url` (ADR-0053), and asks the stream service for a **fresh
 ticket before every request after the POST**: each PATCH, an ICE restart, the DELETE. A ticket
 is only good for a minute, and the media server checks the token on every request of the
 session, so the POST's ticket is refused for a DELETE an hour later. Each fresh ticket names the
@@ -61,7 +61,7 @@ handed out earlier. Nothing else of the platform is between the client and the m
 - **Encoders with one fixed token.** An encoder configured with a token rather than a way to ask
   for one (OBS, `whipsink`) must POST within the ticket's minute, and its own DELETE after that
   is refused (`401`); its stream then ends through the drop above, not at once. A server-side
-  DELETE on its behalf waits for the stream service (ADR-0056).
+  DELETE on its behalf waits for the stream service (ADR-0053).
 
 | Status | Meaning |
 |---|---|
@@ -77,5 +77,5 @@ A POST is not refused for coming late: the media server allows a minute of clock
 ticket's `expires_at`, and within it re-creates a stream's room that stood empty long enough to
 be dropped, and answers `201`. After that the ticket is `401`; ask for a new one.
 
-RTMP is not offered (ADR-0056): browsers cannot send it, and OBS 30 or later, GStreamer and
+RTMP is not offered (ADR-0053): browsers cannot send it, and OBS 30 or later, GStreamer and
 FFmpeg 8.0 or later publish with WHIP.
