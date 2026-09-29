@@ -273,9 +273,9 @@ TEST_F(MessageStoreTest, ARoomCreatedWhileTheServerOpensItIsCreatedLive) {
     const core::RoomId room = new_room();
     auto opening = db_->session();
     ASSERT_TRUE(opening.exec("BEGIN"));
-    ASSERT_EQ(scalar(opening, infra::postgres::message_sql::kRecordLive,
-                     Params{}.add_uuid(room.uuid())),
-              "stream_live_chat");
+    ASSERT_EQ(
+        scalar(opening, infra::postgres::message_sql::kRecordLive, Params{}.add_uuid(room.uuid())),
+        "stream_live_chat");
 
     std::optional<rt::StoreResult<rt::Ownership>> created;
     rooms_->resolve(room, node_, [&](rt::StoreResult<rt::Ownership> r) noexcept { created = r; });

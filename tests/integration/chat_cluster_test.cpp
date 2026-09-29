@@ -912,8 +912,8 @@ TEST_P(ChatClusterTest, AReconnectWithinTheGraceIsNoEventAndALeaveIsOneOfflineOn
     ASSERT_TRUE(alice);
     // Each check is a request: paced, as readiness is.
     ASSERT_TRUE(nodes_[0].process->poll_until(
-        [&] { return metric(nodes_[0], "presence_events_sent_total") >= before + 2; },
-        seconds(30), kReadyCheckPeriod));
+        [&] { return metric(nodes_[0], "presence_events_sent_total") >= before + 2; }, seconds(30),
+        kReadyCheckPeriod));
     // Everything chat-1 sent has had a grace's time to reach every node.
     const auto quiet_until = [](std::chrono::steady_clock::time_point until) {
         return std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -974,8 +974,7 @@ TEST_P(ChatClusterTest, AUserNobodyWatchesCostsNoPresenceMessage) {
     dave.reset();
     // The grace runs out, and chat-1 leaves dave's room: nothing is left of him.
     ASSERT_TRUE(nodes_[0].process->poll_until(
-        [&] { return metric(nodes_[0], "presence_rooms") == 0; }, seconds(30),
-        kReadyCheckPeriod));
+        [&] { return metric(nodes_[0], "presence_rooms") == 0; }, seconds(30), kReadyCheckPeriod));
     EXPECT_EQ(total("presence_events_sent_total"), sent);
     EXPECT_EQ(total("presence_events_received_total"), received);
     EXPECT_EQ(total("forwards_total"), forwards);
