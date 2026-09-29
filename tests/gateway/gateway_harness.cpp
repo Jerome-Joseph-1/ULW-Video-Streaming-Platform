@@ -27,7 +27,13 @@
 namespace ulw::test {
 
 struct GatewayUnderTest::Loop final : net::IReadyHandler {
+    explicit Loop(MemoryLog& sink) : log(sink, system_clock, "gateway", ops::Level::Debug) {}
+
     os::SystemClock system_clock;
+    ops::Logger log;
+    gateway::Health health;
+    std::optional<bool> database_up;
+    std::optional<bool> store_up;
     FakeClock manual_clock;
     core::ports::IClock* clock = &system_clock;
     os::SystemRandom random;
@@ -69,7 +75,7 @@ struct GatewayUnderTest::Loop final : net::IReadyHandler {
     }
 };
 
-GatewayUnderTest::GatewayUnderTest(GatewayOptions options) : loop_(std::make_unique<Loop>()) {
+GatewayUnderTest::GatewayUnderTest(GatewayOptions options) : loop_(std::make_unique<Loop>(*log_)) {
     if (options.transport == gateway::Transport::Tls) {
         client_tls_ = TestPki::shared().client_context();
     }
@@ -94,6 +100,14 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     if (options.manual_clock) {
         l.clock = &l.manual_clock;
     }
+    l.database_up = options.database_up;
+    l.store_up = options.store_up;
+    const auto probe = [&l] {
+        if (l.database_up && l.store_up) {
+            l.health.record(*l.database_up, *l.store_up, l.clock->now());
+        }
+    };
+    probe();
     l.reactor = std::move(*net::make_reactor(reactor_kind_from_env(), *l.clock, 4096));
     if (options.transport == gateway::Transport::Tls) {
         auto tls = net::make_tls_transports(*l.reactor,
@@ -132,7 +146,9 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
                                                                  .views = *l.catalog,
                                                                  .verifier = l.verifier,
                                                                  .clock = *l.clock,
-                                                                 .random = l.random},
+                                                                 .random = l.random,
+                                                                 .log = l.log,
+                                                                 .health = l.health},
                                                    options.limits);
     auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
     port_ = *net::local_port(listener->get());
@@ -147,6 +163,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     while (!l.stop) {
         l.reactor->run_once(core::Millis{50});
         l.gateway->reap();
+        probe();
     }
     l.reactor->unwatch(l.wake.get());
     // The pool first: a job it is running points at a connection the gateway owns.
@@ -258,6 +275,18 @@ std::string GatewayUnderTest::metrics() {
     std::string out;
     on_loop([&] { out = loop_->gateway->render_metrics(); });
     return out;
+}
+
+void GatewayUnderTest::set_health(std::optional<bool> database_up, std::optional<bool> store_up) {
+    on_loop([&] {
+        loop_->database_up = database_up;
+        loop_->store_up = store_up;
+    });
+    // Two turns after this one have probed with the new answers: a dependency takes two
+    // failed probes in a row to count as down.
+    on_loop([] {});
+    on_loop([] {});
+    on_loop([] {});
 }
 
 } // namespace ulw::test

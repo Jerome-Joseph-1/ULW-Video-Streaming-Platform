@@ -330,7 +330,7 @@ void EpollReactor::unwatch(int fd) noexcept {
 }
 
 TimerId EpollReactor::arm_timer(core::Millis delay, ITimerHandler& handler) {
-    return wheel_.arm(now_, delay, handler);
+    return wheel_.arm(now(), delay, handler);
 }
 
 void EpollReactor::cancel_timer(TimerId timer) noexcept {
@@ -339,7 +339,7 @@ void EpollReactor::cancel_timer(TimerId timer) noexcept {
 
 int EpollReactor::run_once(core::Millis max_wait) {
     core::Millis wait = deferred_errors_.empty() ? max_wait : core::Millis{0};
-    if (const auto next = wheel_.next_expiry(now_)) {
+    if (const auto next = wheel_.next_expiry(now())) {
         wait = std::min(wait, *next);
     }
     std::array<epoll_event, kMaxEvents> events{};
@@ -348,11 +348,14 @@ int EpollReactor::run_once(core::Millis max_wait) {
     // EINTR is the only error a valid epoll descriptor can return here.
     const int n = std::max(0, ::epoll_wait(epfd_.get(), events.data(), kMaxEvents, timeout_ms));
     now_ = clock_.now();
+    iterating_ = true;
     for (const epoll_event& ev : std::span(events).first(static_cast<std::size_t>(n))) {
         dispatch(ev.data.u64, ev.events);
     }
     run_deferred();
-    return n + static_cast<int>(wheel_.tick_to(now_));
+    const int dispatched = n + static_cast<int>(wheel_.tick_to(now_));
+    iterating_ = false;
+    return dispatched;
 }
 
 void EpollReactor::run_deferred() noexcept {

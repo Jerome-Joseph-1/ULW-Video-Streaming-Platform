@@ -4,7 +4,7 @@
 //! releases with `ulw_mls_buffer_free`. Every entry point returns a `UlwMlsStatus` and catches
 //! panics, so nothing unwinds into C. A handle is used by one thread at a time.
 //!
-//! The server never links this: it only moves the bytes these functions produce (ADR-0039).
+//! The server never links this: it only moves the bytes these functions produce (ADR-0044).
 
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;

@@ -1,4 +1,4 @@
-# 0039. OpenMLS behind a narrow C API, pinned by Cargo.lock
+# 0044. OpenMLS behind a narrow C API, pinned by Cargo.lock
 
 Status: Accepted
 Date: 2026-09-29

@@ -1,7 +1,7 @@
 #include "lease_keeper.hpp"
 
 #include "heartbeat.hpp"
-#include "log.hpp"
+#include "job_runner.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -9,10 +9,10 @@
 
 namespace worker {
 
-LeaseKeeper::LeaseKeeper(core::ports::IJobQueue& queue, const core::NodeId& node,
+LeaseKeeper::LeaseKeeper(core::ports::IJobQueue& queue, ops::Logger& log, const core::NodeId& node,
                          const core::ports::JobLease& lease, const Intervals& intervals,
                          std::stop_source abandon, const Heartbeat* heartbeat)
-    : queue_(queue), node_(node), lease_(lease), intervals_(intervals),
+    : queue_(queue), log_(log), node_(node), lease_(lease), intervals_(intervals),
       abandon_(std::move(abandon)), heartbeat_(heartbeat),
       thread_([this](const std::stop_token& stop) { run(stop); }) {}
 
@@ -22,11 +22,11 @@ void LeaseKeeper::report(std::uint8_t percent) noexcept {
     percent_.store(percent);
 }
 
-void LeaseKeeper::lose(const char* how) {
+void LeaseKeeper::lose(std::string_view call) {
     lost_.store(true);
     abandon_.request_stop();
-    log("job={} lease lost: {} with fence {} matched no row", std::to_underlying(lease_.job), how,
-        lease_.fence);
+    log_.warn("fenced out",
+              {{"job", std::to_underlying(lease_.job)}, {"call", call}, {"fence", lease_.fence}});
 }
 
 bool LeaseKeeper::write_progress() {
@@ -39,7 +39,13 @@ bool LeaseKeeper::write_progress() {
         lose("progress");
         return false;
     }
-    if (r) {
+    // A refused value would be refused again at every tick; it is reported once and let go.
+    if (!r && r.error() != core::ports::JobQueueError::Unavailable) {
+        log_.error("job queue call failed", {{"job", std::to_underlying(lease_.job)},
+                                             {"call", "progress"},
+                                             {"error", to_string(r.error())}});
+    }
+    if (r || r.error() != core::ports::JobQueueError::Unavailable) {
         written_ = percent;
     }
     return true;
@@ -59,7 +65,12 @@ bool LeaseKeeper::beat() {
     // An unreachable database is retried at the next beat; if it stays away past the lease,
     // another worker's claim fences us out and the next beat says so.
     if (!r) {
-        log("job={} heartbeat: the job queue call failed", std::to_underlying(lease_.job));
+        log_.log(r.error() == core::ports::JobQueueError::Unavailable ? ops::Level::Warn
+                                                                      : ops::Level::Error,
+                 "job queue call failed",
+                 {{"job", std::to_underlying(lease_.job)},
+                  {"call", "heartbeat"},
+                  {"error", to_string(r.error())}});
     }
     return true;
 }

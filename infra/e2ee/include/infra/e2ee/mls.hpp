@@ -37,7 +37,7 @@ using MlsBytes = std::vector<std::byte>;
 
 class MlsGroup;
 
-// One device's MLS identity (ADR-0039). Client-side only: the server never holds one.
+// One device's MLS identity (ADR-0044). Client-side only: the server never holds one.
 class MlsClient {
 public:
     // `identity` goes into the device's credential; the device id, 1 to 64 bytes.

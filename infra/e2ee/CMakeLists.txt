@@ -13,7 +13,7 @@ set(ulw_mls_staticlib ${ulw_mls_target_dir}/release/libmls_ffi_bridge.a)
 file(GLOB_RECURSE ulw_mls_rust_sources CONFIGURE_DEPENDS ${ulw_mls_crate}/src/*.rs)
 
 # Always the release profile: debug-built RustCrypto is tens of times slower, and the Rust side
-# is not instrumented under any preset anyway (ADR-0039).
+# is not instrumented under any preset anyway (ADR-0044).
 add_custom_command(
     OUTPUT ${ulw_mls_staticlib}
     COMMAND ${ULW_CARGO_OFFLINE} build --release --locked --offline

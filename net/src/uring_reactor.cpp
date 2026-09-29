@@ -438,7 +438,7 @@ void UringReactor::unwatch(int fd) noexcept {
 }
 
 TimerId UringReactor::arm_timer(core::Millis delay, ITimerHandler& handler) {
-    return wheel_.arm(now_, delay, handler);
+    return wheel_.arm(now(), delay, handler);
 }
 
 void UringReactor::cancel_timer(TimerId timer) noexcept {
@@ -448,7 +448,7 @@ void UringReactor::cancel_timer(TimerId timer) noexcept {
 int UringReactor::run_once(core::Millis max_wait) {
     core::Millis wait =
         deliveries_.empty() && deferred_errors_.empty() ? max_wait : core::Millis{0};
-    if (const auto next = wheel_.next_expiry(now_)) {
+    if (const auto next = wheel_.next_expiry(now())) {
         wait = std::min(wait, *next);
     }
     if (wait <= core::Millis{0}) {
@@ -461,6 +461,7 @@ int UringReactor::run_once(core::Millis max_wait) {
         static_cast<void>(io_uring_submit_and_wait_timeout(&ring_, &first, 1, &ts, nullptr));
     }
     now_ = clock_.now();
+    iterating_ = true;
 
     unsigned head = 0;
     unsigned seen = 0;
@@ -471,7 +472,9 @@ int UringReactor::run_once(core::Millis max_wait) {
     }
     io_uring_cq_advance(&ring_, seen);
     run_deferred();
-    return static_cast<int>(seen) + static_cast<int>(wheel_.tick_to(now_));
+    const int dispatched = static_cast<int>(seen) + static_cast<int>(wheel_.tick_to(now_));
+    iterating_ = false;
+    return dispatched;
 }
 
 void UringReactor::dispatch(const io_uring_cqe& cqe) noexcept {

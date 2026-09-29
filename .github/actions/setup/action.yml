@@ -25,7 +25,7 @@ runs:
     - name: Relax mmap randomisation for sanitizers
       shell: bash
       run: sudo sysctl -w vm.mmap_rnd_bits=28
-    # The OpenMLS bridge (ADR-0039) builds with cargo --locked --offline, so its crates must be
+    # The OpenMLS bridge (ADR-0044) builds with cargo --locked --offline, so its crates must be
     # in the registry cache before CMake runs. Skipped on trees without the bridge.
     - name: Restore the cargo registry
       if: hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock') != ''

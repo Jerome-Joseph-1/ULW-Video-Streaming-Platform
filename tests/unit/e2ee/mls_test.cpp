@@ -176,7 +176,7 @@ std::size_t threads_in_this_process() {
 }
 
 // OpenMLS computes update paths with rayon, which on its own starts a pool of threads; the
-// bridge keeps that work on the caller's thread (ADR-0039). ctest runs every test in a process
+// bridge keeps that work on the caller's thread (ADR-0044). ctest runs every test in a process
 // of its own, so a pool started here cannot hide behind one another test started first.
 TEST(Mls, NeverStartsAThread) {
     const std::size_t before = threads_in_this_process();
@@ -207,7 +207,7 @@ TEST(Mls, KeyPackageFitsTheDirectorysSizeBound) {
 // M21's acceptance run. Under the asan preset LeakSanitizer sees every allocation on both sides
 // of the boundary, since Rust allocates through the same malloc, and ASan checks every access
 // the C++ side makes, handing buffers in and freeing what comes back. It cannot see a bad
-// access made inside the Rust code, which is not instrumented (ADR-0039): that side rests on
+// access made inside the Rust code, which is not instrumented (ADR-0044): that side rests on
 // safe Rust, the unsafe blocks at the boundary, and the fuzzer.
 TEST(Mls, SurvivesAThousandCreateAddRemoveEncryptDecryptCycles) {
     constexpr int kCycles = 1000;

@@ -10,7 +10,9 @@
 
 #include "config.hpp"
 #include "job_runner.hpp"
-#include "log.hpp"
+#include "ops/log.hpp"
+#include "ops/notify.hpp"
+#include "ops/settings.hpp"
 #include "worker.hpp"
 #include "workspace.hpp"
 
@@ -26,10 +28,13 @@
 #include <optional>
 #include <print>
 #include <pthread.h>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -42,9 +47,18 @@ std::optional<std::string> read_env(std::string_view name) {
     return value == nullptr ? std::nullopt : std::optional<std::string>(value);
 }
 
-int fail(std::string_view what, std::string_view why) {
-    std::println(stderr, "transcode_worker: {}: {}", what, why);
+// What configuration errors exit with, so a supervisor can tell a deployment that will never
+// start from one that crashed.
+constexpr int kExitConfig = 2;
+
+int fail(ops::Logger& log, std::string_view what, std::string_view why) {
+    log.error("startup failed", {{"step", what}, {"error", why}});
     return EXIT_FAILURE;
+}
+
+int refuse(ops::Logger& log, std::string_view source, std::string_view reason) {
+    log.error("configuration refused", {{"source", source}, {"reason", reason}});
+    return kExitConfig;
 }
 
 std::string_view to_string(worker::StorageBackend backend) noexcept {
@@ -101,63 +115,102 @@ std::expected<Storage, std::string> make_storage(const worker::Config& config,
 }
 
 // SIGTERM and SIGINT are blocked in every thread and taken here, synchronously, so no
-// handler runs in the middle of a libpq or libcurl call.
-void watch_signals(const std::stop_token& stop, std::stop_source& shutdown, sigset_t signals) {
-    // Wakes this often only to notice that the worker finished on its own.
+// handler runs in the middle of a libpq or libcurl call. The service manager's watchdog is fed
+// from here too: a job's own progress is guarded by its lease, and a transcode may rightly run
+// for longer than any watchdog, so what this proves is that the process still schedules.
+void watch_signals(const std::stop_token& stop, std::stop_source& shutdown, sigset_t signals,
+                   const std::optional<ops::Notifier>& notifier, ops::Logger& log) {
+    // Wakes this often to notice that the worker finished on its own; systemd's shortest
+    // sensible WatchdogSec is seconds, so half a second never lets a ping come late.
     constexpr timespec kTick{.tv_sec = 0, .tv_nsec = 500'000'000};
+    const auto watchdog = notifier ? notifier->watchdog_interval() : std::nullopt;
+    auto next_ping = std::chrono::steady_clock::now();
     while (!stop.stop_requested()) {
+        if (watchdog && std::chrono::steady_clock::now() >= next_ping) {
+            notifier->watchdog();
+            next_ping = std::chrono::steady_clock::now() + *watchdog;
+        }
         const int sig = ::sigtimedwait(&signals, nullptr, &kTick);
         if (sig > 0) {
-            worker::log("signal {}: finishing or releasing the current job, then exiting", sig);
+            log.info("stopping", {{"signal", sig}});
+            if (notifier) {
+                notifier->stopping();
+            }
             shutdown.request_stop();
             return;
         }
     }
 }
 
-int run() {
+int run(std::span<const std::string_view> args) {
     const auto info = core::build_info();
-    auto config = worker::load_config(read_env);
+    const os::SystemClock clock;
+    ops::StdoutSink sink;
+    ops::Logger log(sink, clock, "worker", ops::Level::Info);
+
+    const auto cli = ops::parse_command_line(worker::settings(), args);
+    if (!cli) {
+        return refuse(log, cli.error().source, cli.error().reason);
+    }
+    if (cli->version) {
+        std::println("transcode_worker {} ({})", info.version, info.git_sha);
+        return EXIT_SUCCESS;
+    }
+    const auto layers = ops::load_settings(worker::settings(), *cli, read_env);
+    if (!layers) {
+        return refuse(log, layers.error().source, layers.error().reason);
+    }
+    auto config = worker::load_config(layers->lookup());
     if (!config) {
-        return fail(config.error().variable, config.error().reason);
+        return refuse(log, config.error().variable, config.error().reason);
+    }
+    log.set_threshold(config->log_level);
+    log.info("starting", {{"version", info.version}, {"git_sha", info.git_sha}});
+    worker::log_effective(*config, *layers, log);
+    if (cli->check) {
+        log.info("configuration valid");
+        return EXIT_SUCCESS;
+    }
+    auto notifier = ops::Notifier::from_env(read_env, ::getpid());
+    if (!notifier) {
+        return refuse(log, "NOTIFY_SOCKET", std::generic_category().message(notifier.error()));
     }
     // Makes /proc/<pid>/environ, which holds the database password and storage keys,
     // unreadable to other processes of our user, the sandboxed children included.
     if (::prctl(PR_SET_DUMPABLE, 0) != 0) {
-        return fail("prctl", std::generic_category().message(errno));
+        return fail(log, "prctl", std::generic_category().message(errno));
     }
     sigset_t signals;
     sigemptyset(&signals);
     sigaddset(&signals, SIGTERM);
     sigaddset(&signals, SIGINT);
     if (const int rc = ::pthread_sigmask(SIG_BLOCK, &signals, nullptr); rc != 0) {
-        return fail("block signals", std::generic_category().message(rc));
+        return fail(log, "block signals", std::generic_category().message(rc));
     }
 
     std::error_code ec;
     fs::create_directories(config->scratch, ec);
     if (ec) {
-        return fail("ULW_SCRATCH_DIR", ec.message());
+        return fail(log, "ULW_SCRATCH_DIR", ec.message());
     }
     if (const std::size_t swept = worker::sweep_workspaces(config->scratch); swept > 0) {
-        worker::log("removed {} workspaces left by an earlier run", swept);
+        log.info("removed workspaces left by an earlier run", {{"count", swept}});
     }
     fs::path sandbox = config->sandbox;
     if (sandbox.empty()) {
         sandbox = fs::read_symlink("/proc/self/exe", ec).parent_path() / "ulw_sandbox";
         if (ec) {
-            return fail("ULW_SANDBOX_BIN", "not set, and /proc/self/exe is unreadable");
+            return fail(log, "ULW_SANDBOX_BIN", "not set, and /proc/self/exe is unreadable");
         }
     }
-    const os::SystemClock clock;
     os::SystemRandom random;
     // ADR-0025: without the sandbox the worker does not start, rather than run ffmpeg bare.
     if (const auto refused = infra::ffmpeg::check_sandbox(sandbox, config->scratch, clock)) {
-        return fail("sandbox", *refused);
+        return fail(log, "sandbox", *refused);
     }
     auto storage = make_storage(*config, clock, random);
     if (!storage) {
-        return fail("storage", storage.error());
+        return fail(log, "storage", storage.error());
     }
     infra::postgres::PgJobQueue queue(config->database_url);
     infra::postgres::PgJobQueue lease_queue(config->database_url);
@@ -178,27 +231,39 @@ int run() {
                               .clock = clock,
                               .random = random,
                               .free_space = worker::free_space,
+                              .log = log,
                               .heartbeat = &heartbeat},
                              {.scratch = config->scratch, .node = config->node, .lease = {}});
 
     std::stop_source shutdown;
-    const std::jthread signal_thread([&shutdown, signals](const std::stop_token& stop) {
-        watch_signals(stop, shutdown, signals);
-    });
-    worker::log("{} ({}) node={} storage={} scratch={} threads={} sandbox={}", info.version,
-                info.git_sha, config->node.view(), to_string(config->storage),
-                config->scratch.string(), config->ffmpeg_threads, sandbox.string());
-    worker::run_worker(queue, runner, config->node, heartbeat, shutdown.get_token());
-    worker::log("stopped");
+    const std::jthread signal_thread(
+        [&shutdown, signals, &notifier, &log](const std::stop_token& stop) {
+            watch_signals(stop, shutdown, signals, *notifier, log);
+        });
+    log.info("started", {{"node", config->node.view()},
+                         {"storage", to_string(config->storage)},
+                         {"scratch", config->scratch.string()},
+                         {"threads", config->ffmpeg_threads},
+                         {"sandbox", sandbox.string()}});
+    if (const std::optional<ops::Notifier>& manager = *notifier; manager) {
+        manager->ready();
+    }
+    worker::run_worker(queue, runner, config->node, heartbeat, log, shutdown.get_token());
+    log.info("stopped");
     return EXIT_SUCCESS;
 }
 
 } // namespace
 
 // Formatting and allocation are all that can still throw; report it and exit.
-int main() {
+int main(int argc, char** argv) {
     try {
-        return run();
+        const std::span<char*> raw(argv, static_cast<std::size_t>(argc));
+        std::vector<std::string_view> args;
+        for (const char* a : raw.subspan(1)) {
+            args.emplace_back(a);
+        }
+        return run(args);
     } catch (const std::exception& e) {
         static_cast<void>(std::fputs(e.what(), stderr));
         return EXIT_FAILURE;

@@ -27,7 +27,7 @@ option(ULW_CONFORMANCE_LIVE "Run storage conformance against live backends (MinI
 set(ULW_SANITIZE "" CACHE STRING "Sanitizers: address,undefined | thread | empty")
 set_property(CACHE ULW_SANITIZE PROPERTY STRINGS "" "address,undefined" "thread")
 
-# The OpenMLS bridge serves the test and client harnesses only; no server links it (ADR-0039).
+# The OpenMLS bridge serves the test and client harnesses only; no server links it (ADR-0044).
 include(CMakeDependentOption)
 cmake_dependent_option(ULW_BUILD_MLS "Build the OpenMLS bridge (needs cargo)" ON "ULW_BUILD_TESTS" OFF)
 
@@ -76,6 +76,7 @@ endfunction()
 
 add_subdirectory(core)
 add_subdirectory(os)
+add_subdirectory(ops)
 add_subdirectory(net)
 add_subdirectory(infra/curl)
 add_subdirectory(infra/storage/fake)
