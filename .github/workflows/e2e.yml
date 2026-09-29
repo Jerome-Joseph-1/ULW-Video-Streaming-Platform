@@ -1,0 +1,45 @@
+name: e2e
+
+# The sandbox cluster end to end: bring it up, run the VOD checks and the resource check under
+# load, take it down. A manual run and the nightly one are the same job with the same steps.
+# Everything happens inside this runner's kind cluster; the workflow has no credentials and
+# reaches nothing of Askedin's.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-24.04
+    # Cold image builds dominate; the rest is minutes.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: e2e
+      - run: make e2e-up
+      - run: make e2e-test
+      - run: make e2e-load
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: load-report
+          path: load-report
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-traces
+          path: tests/e2e/test-results
+          if-no-files-found: ignore
+      - if: always()
+        run: make e2e-down
