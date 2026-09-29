@@ -41,8 +41,9 @@ enum class S3ConfigError : std::uint8_t { InvalidBucket, PartSizeOutOfRange, Inv
 
 // An ingest is an S3 multipart upload: backend_ref is the upload id, chunk_size the part size,
 // and the durable offset counts the leading parts S3 lists as complete. Reads are presigned
-// GET URLs. open(), its sessions and grant_read() run on the reactor; every other call blocks
-// on the network, retrying transient failures with jittered backoff, and belongs on the
+// GET URLs. open() and its sessions run on the reactor. grant_read() is pure computation and
+// safe from any thread; the gateway signs playlists on its offload pool. Every other call
+// blocks on the network, retrying transient failures with jittered backoff, and belongs on the
 // offload pool.
 class S3Store final : public core::ports::IIngestStore,
                       public core::ports::IObjectReader,
