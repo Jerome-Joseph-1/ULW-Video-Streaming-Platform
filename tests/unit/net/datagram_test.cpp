@@ -52,6 +52,22 @@ struct Sink final : net::IDatagramHandler {
     void on_error(int err) noexcept override { error = err; }
 };
 
+// A stream whose first bytes run `hook`. Its completion lands in the same batch as datagram
+// completions submitted after it, which is how a test acts between two of them.
+struct StreamHook final : net::IStreamHandler {
+    std::function<void()> hook;
+    bool fired = false;
+    void on_data(net::BorrowedBytes /*bytes*/) noexcept override {
+        if (!fired) {
+            fired = true;
+            hook();
+        }
+    }
+    void on_writable() noexcept override {}
+    void on_peer_eof() noexcept override {}
+    void on_error(int /*err*/) noexcept override {}
+};
+
 // A peer outside the reactor, driven with plain syscalls.
 struct Peer {
     os::UniqueFd fd;
@@ -610,6 +626,50 @@ TEST_P(DatagramTest, QueuedSocketErrorStopsReceivingUntilRestarted) {
     ASSERT_TRUE(pump_until(*reactor, [&] { return !sink.got.empty(); }));
     EXPECT_EQ(decode(sink.got[0].payload).nonce, 9U);
     EXPECT_EQ(sink.got[0].from, closed);
+}
+
+// io_uring learns of the error from a receive that consumed it, so it must keep it for the
+// restart, where epoll finds it still queued on the socket.
+TEST_P(DatagramTest, ErrorThatArrivesAfterAStopIsReportedOnRestart) {
+    Sink sink;
+    auto fd = net::bind_udp(SocketAddr::loopback(AddrFamily::V4, 0));
+    ASSERT_TRUE(fd);
+    auto peer = Peer::bind(AddrFamily::V4);
+    const SocketAddr server = *net::local_addr(fd->get());
+    sockaddr_storage raw{};
+    const auto raw_len = net::detail::to_sockaddr(peer.addr, false, raw);
+    ASSERT_TRUE(raw_len);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): see Peer::send.
+    ASSERT_EQ(::connect(fd->get(), reinterpret_cast<const sockaddr*>(&raw), *raw_len), 0);
+    ASSERT_TRUE(peer.send(server, encode({.nonce = 11})));
+    peer.fd.reset();
+    // The peer is gone, so this draws an ICMP port-unreachable, queued as ECONNREFUSED.
+    ASSERT_EQ(::send(fd->get(), "x", 1, 0), 1);
+    auto id = reactor->attach_datagram(std::move(*fd), sink);
+    ASSERT_TRUE(id);
+
+    StreamHook stopper;
+    stopper.hook = [&] { reactor->stop_receiving_datagrams(*id); };
+    auto [ours, theirs] = ulw::test::unix_pair();
+    auto conn = reactor->attach(std::move(ours), stopper);
+    ASSERT_TRUE(conn);
+    ASSERT_EQ(ulw::test::write_some(theirs.get(), encode({})), sizeof(Tag));
+    reactor->start_receiving(*conn);
+    reactor->start_receiving_datagrams(*id);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return stopper.fired; }));
+    pump_pending(*reactor);
+    EXPECT_FALSE(sink.error.has_value());
+
+    reactor->start_receiving_datagrams(*id);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return sink.error.has_value(); }));
+    EXPECT_EQ(sink.error, ECONNREFUSED);
+    pump_pending(*reactor);
+    EXPECT_TRUE(sink.got.empty());
+
+    reactor->start_receiving_datagrams(*id);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return !sink.got.empty(); }));
+    EXPECT_EQ(decode(sink.got[0].payload).nonce, 11U);
+    reactor->begin_close(*conn);
 }
 
 TEST_P(DatagramTest, StaleIdCannotTouchTheSocketThatReusedItsDescriptor) {

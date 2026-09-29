@@ -15,6 +15,7 @@
 #include <cstring>
 #include <memory>
 #include <poll.h>
+#include <utility>
 
 namespace net::detail {
 
@@ -349,6 +350,7 @@ void UringReactor::finalize(Slot& s) noexcept {
     s.dgram = nullptr;
     s.stats = {};
     s.v6 = s.starved = s.zero_copy = false;
+    s.held_error = 0;
     s.sends_in_flight = 0;
     s.receiving = s.recv_armed = s.send_armed = s.poll_armed = false;
     s.closing = s.failed = s.eof = s.eof_delivered = s.delivery_queued = s.accept_paused = false;
@@ -594,7 +596,7 @@ void UringReactor::start_receiving_datagrams(DatagramId socket) noexcept {
         return;
     }
     s->receiving = true;
-    if (s->held_head >= 0) {
+    if (s->held_head >= 0 || s->held_error != 0) {
         // Delivered from the loop, never from inside this call, as for streams.
         if (!s->delivery_queued) {
             s->delivery_queued = true;
@@ -972,11 +974,16 @@ void UringReactor::on_datagram_recv(int fd, Slot& s, int res, std::optional<std:
             s.starved = true;
             starved_.push_back(DatagramId{.fd = fd, .gen = gen});
         }
-    } else if (res < 0 && res != -ECANCELED && !s.closing && s.receiving) {
-        s.receiving = false;
-        s.dgram->on_error(-res);
+    } else if (res < 0 && res != -ECANCELED && !s.closing) {
+        if (s.receiving && s.held_head < 0) {
+            s.receiving = false;
+            s.dgram->on_error(-res);
+        } else {
+            s.held_error = -res;
+        }
     }
-    if (alive(fd, gen) && s.receiving && !s.recv_armed && !s.starved && s.held_head < 0) {
+    if (alive(fd, gen) && s.receiving && !s.recv_armed && !s.starved && s.held_head < 0 &&
+        s.held_error == 0) {
         arm_datagram_recv(fd, s);
     }
 }
@@ -1101,8 +1108,13 @@ void UringReactor::deliver_held_datagrams() noexcept {
                 break;
             }
         }
-        if (alive(socket.fd, socket.gen) && s->receiving && s->held_head < 0 && !s->recv_armed &&
-            !s->starved) {
+        if (!alive(socket.fd, socket.gen) || !s->receiving || s->held_head >= 0) {
+            continue;
+        }
+        if (s->held_error != 0) {
+            s->receiving = false;
+            s->dgram->on_error(std::exchange(s->held_error, 0));
+        } else if (!s->recv_armed && !s->starved) {
             arm_datagram_recv(socket.fd, *s);
         }
     }
