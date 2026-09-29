@@ -297,9 +297,11 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     node_.reset();
     node_ = std::make_unique<Node>(GetParam(), chat::Limits{.ping_interval = core::Millis{1'000},
                                                             .idle_timeout = core::Millis{1'100}});
+    // Taken before the upgrade: the server counts quiet from the upgrade request, so a clock
+    // started after the handshake returns would miss however long that took on a loaded box.
+    const auto opened = std::chrono::steady_clock::now();
     auto quiet = open_as("alice");
     ASSERT_TRUE(quiet);
-    const auto opened = std::chrono::steady_clock::now();
     // Read, never answer: the pings go unanswered.
     int pings = 0;
     while (const auto frame = quiet->next_frame(seconds(10))) {
