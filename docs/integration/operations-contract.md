@@ -75,22 +75,36 @@ The Kubernetes secret names and the lines that create them are in the RUNBOOK, s
 <!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
 
 The live packager (one process per stream, environment only, no Askedin overlay yet) takes
-`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above and `ULW_SCRATCH_DIR`. It records an
-ended stream as a video (ADR-0054) when given both of these, and is live-only with neither;
-one without the other stops it at startup:
+`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR`, `ULW_FFMPEG` and
+`ULW_FFPROBE`. It records an ended stream as a video (ADR-0054) when given both of these, and is
+live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |
 |---|---|---|
 | `ULW_DATABASE_URL` | with recording | Secret; the same database as the gateway's |
 | `ULW_STREAM_OWNER` | with recording | The broadcaster's Askedin user id (`sub`), who owns the video |
 
-It exits `0` once the stream has ended and its video and job are queued, or once drained by
-SIGTERM, and non-zero otherwise; run it with a restart on failure, so a packager killed between
-the end and the job, or unable to reach the store or the database then, records the stream on
-its next start. Started for a stream that has already ended, it takes no publisher and only
-records. The bucket needs lifecycle rules on `live/`: expiry after days, not hours (the
-recording is read back from the segments after the stream, and the job may wait in the queue),
-and aborting incomplete multipart uploads after a day.
+The role in its database URL needs no more than `SELECT, INSERT` on `live_recordings`, `INSERT`
+and `SELECT (id)` on `videos` (the insert returns the id it wrote), `INSERT` on `jobs`, and
+`USAGE` on `jobs_id_seq`; its `NOTIFY job_available` needs no grant. Checked against the
+migrated schema with a role holding exactly these.
+
+It exits `0` once the stream has ended and its video and job are queued, when the stream was
+already recorded, when a newer packager of the stream holds it (`recording: superseded`), when
+the stream cannot be recorded at all (`recording: unrecordable: <reason>`, written to
+`live_recordings.failure`), and when drained by SIGTERM; and non-zero otherwise. Run it with a
+restart on failure: a packager killed between the end and the job, or unable to reach the store
+or the database then, records the stream on its next start. Started for a stream that has
+already ended, it takes no publisher and only records.
+
+While it records it holds one upload part in memory, 16 MiB at the default
+`ULW_LIVE_MAX_KBPS` and up to 65 MiB at its 100 Mbit/s ceiling (the part grows with
+`ULW_LIVE_MAX_KBPS` times `ULW_LIVE_MAX_HOURS`), beside two copying ffmpeg children of about
+60 MB each; its scratch holds one segment. The recording is stored as the video's source,
+`videos/<id>/raw`, so the `videos/` rules apply to it: the 7-day abort of incomplete multipart
+uploads (row above) and the upload reaper's sweep collect a copy that died midway. The `live/`
+prefix needs an expiry of days, not hours: the recording is read back from the segments after
+the stream ends.
 
 ## Probes and metrics
 

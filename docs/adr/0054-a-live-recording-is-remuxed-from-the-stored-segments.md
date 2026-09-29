@@ -17,11 +17,17 @@ as over budget.
 What exists when a stream ends (ADR-0047): the stored playlist with `EXT-X-ENDLIST`, the last
 window only; every segment the packager published, `seg_<epoch>_<n>.m4s`, and each run's
 `init_<epoch>.mp4`, all under `live/<stream>/` until the bucket's lifecycle rule expires them;
-and the epoch claims. A stream the packager restarted has several runs, and each run's fMP4
-timestamps start again at zero. The end can be seen more than once: the packager is killed
-after the ENDLIST and started again, an operator sends SIGUSR1 to a stream that already ended,
-or two packagers for one stream both finish. A stream is at most 12 hours at 20 Mbit/s
-(ADR-0046), 108 GB.
+and the epoch claims. A stream the packager restarted has several runs, each with its own init
+segment, and each run's fMP4 timestamps start again at zero. A stream is at most 12 hours
+(`ULW_LIVE_MAX_HOURS`) at up to 100 Mbit/s (`ULW_LIVE_MAX_KBPS`, default 20): 540 GB at the
+ceiling, 108 GB at the default.
+
+The end can be seen more than once: a packager killed after the ENDLIST and started again, an
+operator's SIGUSR1 to an ended stream, two packagers finishing at once. It can also be seen
+falsely: ADR-0047's fence is a check before each playlist write, not atomic with it, so a stale
+packager A can pass its check, lose the stream to a newer B's claim, and still write an
+ENDLIST that B overwrites at its next playlist write. A recording of that end would be a part
+of the stream, and would take the stream's one video.
 
 ## Options
 
@@ -29,27 +35,27 @@ or two packagers for one stream both finish. A stream is at most 12 hours at 20 
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
-| A second output of the live ffmpeg (a TS file) | No re-read of the segments | Rejected: disk on the packager proportional to the stream (108 GB), and a crash loses it; a streamed upload during the stream would have to survive restarts, which a multipart upload id kept in memory does not |
-| Concatenate the stored fMP4 (every init and segment) into the object | No ffmpeg, one pass | Rejected: tried with ffmpeg 6.1, a second run's `moov` is skipped as duplicated and its fragments are read on the first run's timeline, backwards; the probed duration is the first run's alone. Fine for one run, broken for a restarted stream |
+| A second output of the live ffmpeg (a TS file) | No re-read of the segments | Rejected: disk on the packager proportional to the stream, and a crash loses it; a streamed upload during the stream would have to survive restarts, which a multipart upload id kept in memory does not |
+| Concatenate the stored fMP4 (every init and segment) into the object | No ffmpeg, one pass | Rejected: tried with ffmpeg 6.1, a second run's `moov` is skipped as duplicated and its fragments are read on the first run's timeline, backwards; the probed duration is the first run's alone |
 | Server-side compose (UploadPartCopy) of the segments | Nothing through the packager | Rejected: every part but the last must be at least 5 MiB, and a 2 s segment is a few hundred KB |
 | Give the worker a playlist of the segments | Nothing assembled | Rejected: the worker takes one object, ffmpeg runs without a network, and changing either touches `apps/worker/src` |
-| `-output_ts_offset` per run, so the stored fMP4 is on one timeline | Fixes the concatenation at the source | Rejected: the offset is the stream's time up to the restart, which no stored state holds (the window's program date times are wall clock, and the window may not reach back to the start) |
-| After the end, read the segments back in order through two stages of copying ffmpeg (each run's fMP4 to MPEG-TS, then all of it through one more TS-to-TS copy), and stream the output into the store as the object | ffmpeg treats a timestamp jump in a transport stream as a discontinuity and carries the timeline across it; the output rises throughout and probes to the full length. Nothing is proportional to the stream but time | Accepted |
+| `-output_ts_offset` per run, so the stored fMP4 is on one timeline | Fixes the concatenation at the source | Rejected: the offset is the stream's time up to the restart, which no stored state holds |
+| After the end, read the segments back in order through two stages of copying ffmpeg (each run's fMP4 to MPEG-TS, then all of it through one more TS-to-TS copy), and stream the output into the store as one object | ffmpeg treats a timestamp jump in a transport stream as a discontinuity and carries the timeline across it; the output rises throughout and probes to the full length. Nothing held grows with the stream | Accepted |
+
+**Where the recording goes, and exactly once**
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| A fixed key per stream (`live/<stream>/recording.ts`), reused if present | A crash after the upload skips the copy next time | Rejected: two recorders overwrite one key, possibly after a job has started from it; reuse assumes ffmpeg writes the same bytes twice, which nothing promises; and the `live/` lifecycle rule could expire a video's source |
+| The jobs table's `one_live_job` index | Exists | Rejected: it holds only while the job is queued or running; a second end after the video is ready would queue a second job |
+| A new video id per attempt, generated before the copy; the recording streamed to that video's source key (`videos/<id>/raw`, where an upload's source goes); a `live_recordings` row keyed by the stream id inserted in the statement that inserts the video and the job, all hanging off it (`ON CONFLICT DO NOTHING RETURNING`) | No two recorders share a key; the row is the only gate, and the answer names the stream's video; the source lives with the video, outside `live/` | Accepted |
 
 **Which segment is the stream's at each place**
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
-| Record every run's first sequence (in its claim) | Exact | Rejected: the claim is written before the run's second read of the playlist, so it is only a lower bound; and an old claim reads "claimed" |
+| Record every run's first sequence (in its claim) | Exact | Rejected: the claim is written before the run's second read of the playlist, so it is only a lower bound |
 | Walk from the ended window down, and take for each place the newest epoch that has a segment for it | Needs nothing new stored: epochs rise with the claims, each run continues where the stored playlist ended, so a newer epoch's segment is the published one and an older one's is what a superseded run cut before it saw the newer claim. One HEAD per segment | Accepted |
-
-**Exactly once**
-
-| Option | Why it was tempting | Verdict |
-|---|---|---|
-| The jobs table's `one_live_job` index | Exists | Rejected: it holds only while the job is queued or running; a second end after the video is ready would queue a second job |
-| A deterministic video id from the stream id | No table | Rejected: breaks ADR-0023's UUIDv7, and says nothing about the job |
-| A `live_recordings` row keyed by the stream id, inserted in the statement that inserts the video and the job, all hanging off it (`ON CONFLICT DO NOTHING RETURNING`) | Once per stream whatever the order of crashes and repeats; the answer names the stream's video | Accepted |
 
 ## Decision
 
@@ -63,39 +69,73 @@ or two packagers for one stream both finish. A stream is at most 12 hours at 20 
   lifecycles) passes in, as it passes the stream id. The platform is single-tenant: `owner_id`
   is the whole ownership model (ADR-0018), so the video is visible to the broadcaster only,
   like an upload, titled `Live stream <stream id>`.
-- **The steps, each repeatable.** (1) If `live_recordings` has the stream, stop. (2) Read the
-  stored playlist; not ended, or no segment: nothing to record. (3) If
-  `live/<stream>/recording.ts` is not in the store, plan the runs and assemble it. (4) In one
-  transaction, the `live_recordings` row, the video (`processing`), its `transcode` job with
-  `source_key` the recording and `request_id` the stream id, and `NOTIFY job_available`. A
-  packager killed anywhere in between is started again (its pod restarts on a non-zero exit)
-  and resumes at the first step not done; two packagers racing both assemble, both
-  commit whole objects of the same segments, and the row lets one insert.
-- **Assembly.** For each run of the plan, a sandboxed `ffmpeg -f mp4 -i pipe:0 -map 0 -c copy
-  -f mpegts pipe:1` is fed the run's init segment and its segments, downloaded one at a time
-  into the packager's scratch; its stdout goes into the stdin of one sandboxed `ffmpeg -f mpegts
-  -i pipe:0 -map 0:v:0 -map 0:a:0? -c copy -f mpegts pipe:1` for the whole recording, whose
-  stdout is written to an object stream (`IObjectStreams`, a new port): a multipart upload of
-  16 MiB parts held in memory on S3 and R2 (10,000 parts reach 168 GB), a temporary renamed
-  over the key on the filesystem. The object appears only at the commit. Local disk: one
-  segment; memory: one part. The children have no network, as ever (ADR-0025).
-- **Holes.** A place no epoch has a segment for is counted in the log line and skipped; the
-  recording goes on around it rather than never existing.
+- **The end must be the real one.** Before copying, and again after the copy and before the
+  row: the playlist is read back and must still end, with the same last segment; and no claim
+  `epoch_<E+1>` may exist above the epoch E of its last segment, unless it is this process's
+  own (a packager that claimed and then found the stream ended publishes nothing). Either
+  failing means a newer packager is publishing, whose own end records the stream; the run
+  removes what it stored and exits 0.
+- **The steps.** (1) If `live_recordings` has the stream, stop. (2) Read the playlist; not
+  ended, or no segment: nothing to record. (3) The fence above. (4) Plan the runs; probe each
+  run's init segment for its audio. (5) Generate a UUIDv7 video id, stream the recording to
+  `videos/<id>/raw`, commit. (6) The fence again. (7) In one transaction, the row, the video
+  (`processing`), its `transcode` job (source that key, `request_id` the stream id), and
+  `NOTIFY job_available`. A run whose row does not go in (another recorder's did), or whose
+  database is down, removes its object; the next run makes its own with a new id.
+- **Failures.** One that may pass (the store, the database, a sandbox that does not start, a
+  stop) exits 1, and the pod's restart tries again from the first step. One that cannot (an
+  init segment or a segment gone, ffmpeg refusing the input, an unreadable playlist, the
+  recording past its bound) is written as the stream's row with no video and the reason, after
+  the fence is checked again, and the packager exits 0: nothing crash-loops, and nothing
+  records the stream afterwards. A place in the plan no epoch has a segment for is counted in
+  the log and skipped.
+- **Assembly.** For each run of the plan, a sandboxed `ffmpeg -f mp4 -i pipe:0 -map 0:v:0
+  -map 0:a:0? -c copy -f mpegts pipe:1` is fed the run's init segment and its segments,
+  downloaded one at a time into the packager's scratch; its stdout goes into the stdin of one
+  sandboxed `ffmpeg -f mpegts -i pipe:0 -map 0:v:0 -map 0:a:0? -c copy -f mpegts pipe:1` for the
+  whole recording, whose stdout is written to an object stream (`IObjectStreams`, a new port).
+  The children write into an empty directory of their own with a file-size limit of one byte;
+  what the parent downloads is outside it.
+- **Audio across runs.** The second stage takes its streams from what it sees first, so every
+  run must carry the same ones. Each run's init segment is probed; when the stream has audio
+  anywhere, a run without it is given silence of the first audio run's rate and layout
+  (`anullsrc`, encoded to AAC alongside the copied video), and video and audio are mapped in
+  that order in every run, so the TS PIDs match.
+- **Splices.** At a run boundary ffmpeg offsets every stream by the jump it sees in the first
+  packet after it. A run's audio and video rarely end together, so each splice can shift audio
+  against video by up to one audio frame plus one video frame (about 55 ms at 48 kHz AAC and
+  30 fps); the gap while no packager ran is not in the recording.
+- **Size and memory.** The recording is bounded by the stream's cap for its maximum duration
+  plus an eighth for the TS packets and a stand-in's audio (607.5 GB at 100 Mbit/s for 12 h).
+  S3 and R2 take it as a multipart upload whose part is that bound over 9,000 parts, rounded up
+  to a whole MiB, at least 16 MiB: 16 MiB at the default 20 Mbit/s, 65 MiB at the ceiling. One
+  part is held in memory at a time. A stream written past its bound fails (Permanent). The
+  filesystem backend writes a temporary beside the key and renames it.
 - **Budget.** The copies get the stream's maximum duration as their wall-clock budget, and a
   twentieth of it as CPU; copying runs at the store's speed, far faster than real time.
 
 ## Consequences
 
-- The segments must outlive the stream by more than the recording takes and the job waits in
-  the queue: the `live/` lifecycle rule is days, not hours. The recording lives under the same
-  prefix and expires with it, after the worker has made its renditions.
-- A bucket lifecycle rule aborting incomplete multipart uploads after a day collects the parts
-  of a recording whose packager died mid-assembly (the next packager starts a new one).
+- A run killed after its commit and before its row leaves `videos/<id>/raw` with no video row.
+  Nothing reads it; nothing yet deletes it either (the upload reaper works from upload rows).
+  It costs the bytes of one recording per such crash.
+- An incomplete multipart upload of a recorder that died mid-copy is collected by the upload
+  reaper's sweep and the bucket's rule for `videos/` (ADR-0049, both at 7 days); a recording's
+  own upload never lives that long.
+- The segments must outlive the stream by more than the copy takes: the `live/` expiry is days,
+  not hours. The recording itself is under `videos/`, so that rule never touches a video's
+  source.
+- A claim above the ended playlist whose holder died between its claim and its read of the
+  playlist blocks the recording for good: every later run sees a newer claim that is not its
+  own, and no packager publishes to an ended stream. The packager logs `superseded: epoch N
+  is claimed` and exits 0; removing that claim object lets the next start record the stream.
+- The worker downloads the whole recording into scratch that needs three times its size: 10 GiB
+  of recording on the production worker's 30 GiB (about 70 minutes at 20 Mbit/s, 4.8 hours at
+  5 Mbit/s). A larger one fails its job after its attempts, the video `failed` with `no scratch
+  space for the source`, as an upload that size would.
 - Recording costs one more read of the stream from the store after it ends, one HEAD per
   segment for the plan, and two copying ffmpeg processes, after the stream and off its path:
   the live window and its latency are untouched.
-- A restarted stream's recording splices the runs: the gap while no packager ran is not in it.
 - Nothing ends a stream that was drained and never started again (ADR-0047's stale-stream
   rule). Its recording follows whenever something starts a packager for it and sends SIGUSR1;
   the component that does that is still to be built.
-- `apps/worker/src` is unchanged; the worker sees a job like an upload's, with a `.ts` source.
