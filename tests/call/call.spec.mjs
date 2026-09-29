@@ -20,7 +20,7 @@ const kFlowMs = 10_000;
 // up to 2 s for pion to notice, as it checks on its keepalive tick (transport.go), the 100 ms
 // poll below, and the leave's hop to the other peer over its open signal connection, which takes
 // milliseconds on loopback. That is 22.1 s at worst; 25 s leaves about 3 s for a loaded machine.
-// Measured: 20.0 to 21.9 s.
+// Measured: 20.0 to 22.0 s over thirteen runs.
 const kDropBoundMs = 25_000;
 
 // The call handler's stand-in: one harness process for the whole test, holding the rooms it

@@ -124,7 +124,7 @@ returns an answer is the WHIP endpoint, built for ingest (option c).
   rights are fixed in the grant (a member publishes any source and subscribes, a publisher sends
   camera and microphone only); narrowing them is a grant change.
 - Leaving and failure are observed by LiveKit. The other peer hears of a dead one from LiveKit
-  (20.0 to 21.9 s for a frozen browser over seven runs of tests/call, against 20 s derived from
+  (20.0 to 22.0 s for a frozen browser over thirteen runs of tests/call, against 20 s derived from
   10 s ICE disconnected + 5 s ICE failed + 5 s cleanup). If the chat side needs to know, to end
   the call there, it has to subscribe to LiveKit's webhooks; that is the call handler's work.
 - Monitor RoomService latency and errors (`Unavailable` versus `Refused`), ticket issue rate, and
