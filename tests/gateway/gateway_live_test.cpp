@@ -1,6 +1,7 @@
 #include "core/util/parse.hpp"
 
 #include "gateway_harness.hpp"
+#include "support/eventually.hpp"
 #include "support/http_client.hpp"
 
 #include <gtest/gtest.h>
@@ -185,6 +186,59 @@ TEST_P(GatewayLive, APlaylistThatBreaksTheRewritingRulesIsCountedAndRefused) {
     EXPECT_EQ(c.request("GET", path("show"), kAlice)->status, 500);
     EXPECT_EQ(gw.counters().playlists_rejected, 1U);
     EXPECT_EQ(gw.counters().playlists_live, 1U);
+}
+
+// Lets held store reads go before the gateway is torn down, whatever the test did.
+struct HeldReads {
+    explicit HeldReads(GatewayUnderTest& g) : gw(g) { gw.hold_fetches(true); }
+    ~HeldReads() { gw.hold_fetches(false); }
+    HeldReads(const HeldReads&) = delete;
+    HeldReads& operator=(const HeldReads&) = delete;
+    GatewayUnderTest& gw;
+};
+
+TEST_P(GatewayLive, AViewerWhoLeavesMidReadStillLeavesTheCopyForTheNext) {
+    GatewayUnderTest gw(options());
+    gw.put_object(key("show"), kLive);
+    {
+        const HeldReads held(gw);
+        {
+            HttpClient gone(gw.endpoint());
+            ASSERT_TRUE(gone.send_request("GET", path("show"), kAlice, {}));
+            ASSERT_TRUE(ulw::test::eventually([&] { return gw.held_fetches() == 1; }));
+        }
+        // The connection outlives its client until the read it waits on comes back.
+        EXPECT_EQ(gw.connections(), 1U);
+    }
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
+
+    HttpClient next(gw.endpoint());
+    const auto r = next.request("GET", path("show"), kBob);
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 200);
+    const std::string m = gw.metrics();
+    EXPECT_EQ(metric(m, "live_playlist_fetches_total"), 1U);
+    EXPECT_EQ(metric(m, "live_playlist_cache_hits_total"), 1U);
+}
+
+TEST_P(GatewayLive, ADrainWaitsForAReadInFlightAndAnswersItsViewer) {
+    GatewayUnderTest gw(options());
+    gw.put_object(key("show"), kLive);
+    HttpClient c(gw.endpoint());
+    {
+        const HeldReads held(gw);
+        ASSERT_TRUE(c.send_request("GET", path("show"), kAlice, {}));
+        ASSERT_TRUE(ulw::test::eventually([&] { return gw.held_fetches() == 1; }));
+        gw.drain();
+        EXPECT_FALSE(gw.finished());
+        EXPECT_EQ(gw.connections(), 1U);
+    }
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 200);
+    EXPECT_EQ(r->header("connection"), "close");
+    c.close();
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.finished(); }));
 }
 
 INSTANTIATE_TEST_SUITE_P(Transports, GatewayLive,

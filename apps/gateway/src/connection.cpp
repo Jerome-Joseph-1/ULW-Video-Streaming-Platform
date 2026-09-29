@@ -923,13 +923,6 @@ void Connection::start_live() noexcept {
         fail(Status::NotFound);
         return;
     }
-    if (live_wait_) {
-        // A request that timed out while its answer was on the way; the cache still owes this
-        // connection that answer, and one waiter can wait for one thing at a time.
-        fail(Status::ServiceUnavailable);
-        return;
-    }
-    live_wait_ = request_seq_;
     ++pending_;
     gw().live().get(stream, *this);
 }
@@ -937,8 +930,9 @@ void Connection::start_live() noexcept {
 void Connection::on_live_playlist(
     const std::expected<LiveAnswer, PlaylistFailure>& answer) noexcept {
     --pending_;
-    const std::optional<std::uint64_t> request = std::exchange(live_wait_, std::nullopt);
-    if (phase_ != Phase::Request || request != request_seq_) {
+    // A waiting request ends only with its connection (the backstop and the drain deadline
+    // close it), so an answer that finds no request in progress is for one that is gone.
+    if (phase_ != Phase::Request) {
         return;
     }
     if (!answer) {

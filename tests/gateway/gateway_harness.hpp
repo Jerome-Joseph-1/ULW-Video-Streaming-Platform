@@ -71,6 +71,11 @@ public:
     // Thread-safe reads of committed objects.
     [[nodiscard]] core::ports::IObjectReader& reader() { return *reader_; }
     void set_plan(const infra::storage::FaultPlan& plan);
+    // Fake backend only: store reads wait while held (FakeStore::hold_fetches).
+    void hold_fetches(bool held);
+    [[nodiscard]] std::size_t held_fetches() const;
+    // The gateway has let every connection go after a drain.
+    [[nodiscard]] bool finished();
 
     // Runs `fn` on the loop thread and waits for it.
     void on_loop(std::function<void()> fn);

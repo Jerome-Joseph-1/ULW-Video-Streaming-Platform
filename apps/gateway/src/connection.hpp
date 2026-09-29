@@ -253,9 +253,6 @@ private:
     // Only the pool thread touches this between submit and complete().
     ControlJob job_;
     bool job_running_ = false;
-
-    // The request waiting on the live playlist cache, if one is; it answers exactly once.
-    std::optional<std::uint64_t> live_wait_;
 };
 
 } // namespace gateway
