@@ -520,6 +520,29 @@ TEST_P(RoomRouterTest, AKeyResentWithAnotherBodyIsAConflictAndIsDeliveredNowhere
     EXPECT_EQ(db_.rooms.at(room_).last_seq, 1U);
 }
 
+TEST_P(RoomRouterTest, AMemberToldTheHeadAtItsJoinIsDeliveredNothingAtOrBelowIt) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    for (const std::string_view text : {"one", "two", "three"}) {
+        ASSERT_TRUE(send(a, alice, "alice", text));
+    }
+    ASSERT_EQ(join(b, bob), 3U);
+    // A message the store holds under a key no node remembers, as an earlier run left it.
+    db_.keys.emplace(std::make_tuple(room_, std::string("alice"), std::string("earlier")), 2);
+    // chat-b, which has a member, takes the room while knowing nothing of its head.
+    a.store->reachable = false;
+    db_.make_stale(room_);
+    ASSERT_TRUE(pump([&] { return db_.rooms.at(room_).owner == *core::NodeId::parse("chat-b"); }));
+    // Its repeat is answered with the stored seq, and bob, told of seq 3, gets no seq 2.
+    EXPECT_EQ(send(b, bob, "alice", "two", *rt::MessageKey::parse("earlier")), 2U);
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_TRUE(bob.got.empty());
+    EXPECT_EQ(db_.rooms.at(room_).last_seq, 3U);
+}
+
 TEST_P(RoomRouterTest, ARetryQueuedBehindItsFirstTryIsAnsweredByTheOwnerWithTheFirstSeq) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");

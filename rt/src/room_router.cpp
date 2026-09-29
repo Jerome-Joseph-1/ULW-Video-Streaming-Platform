@@ -1115,6 +1115,9 @@ private:
             }
         }
         const std::uint64_t latest = head(room);
+        // Its members are told the head; a seq at or below it that arrives later (a repeat an
+        // owner that knows the room less well delivers again) is one they have or can fetch.
+        lr.delivered = std::max(lr.delivered, latest);
         for (Joining& j : joined) {
             j.done(latest);
         }
