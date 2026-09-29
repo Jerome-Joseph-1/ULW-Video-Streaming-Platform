@@ -25,7 +25,7 @@ against in HTML comments, for maintainers.
 | [operations-contract.md](operations-contract.md) | What the platform provides; health, readiness, metrics | Stable |
 | [versioning.md](versioning.md) | Compatibility and how changes are announced | Stable (policy is a proposal) |
 | [chat.md](chat.md) | WebSocket endpoint and envelope | Draft until M19 |
-| [calls.md](calls.md) | 1:1 and group calls | Draft until M26 |
+| [calls.md](calls.md) | 1:1 calls; group calls are planned, not available | Draft until M26 |
 | [live.md](live.md) | Live streams | Draft until M33 |
 | [e2ee.md](e2ee.md) | End-to-end encrypted chat | Draft until M22 |
 

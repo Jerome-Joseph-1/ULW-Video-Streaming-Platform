@@ -3,6 +3,9 @@
 > **Draft: changes until milestone M26 merges.** Nothing on `main` serves calls yet. This page
 > states the model only; endpoints and message shapes will be added when they exist.
 
+> **Group calls are not available.** They are planned (ADR-0058) and nothing serves them: do not
+> build against them. Only 1:1 calls are described below. This page will say when that changes.
+
 Calls go through LiveKit as the SFU (ADR-0020), with media entering the cluster through STUNner
 (ADR-0013), and are always relayed. The service does not expose LiveKit's server API: after
 authenticating the caller with their Askedin token and checking they may join the call, it mints
