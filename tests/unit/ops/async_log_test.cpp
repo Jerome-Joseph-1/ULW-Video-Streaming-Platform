@@ -2,12 +2,17 @@
 
 #include "ops/async_log.hpp"
 
+#include <sys/resource.h>
+
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -41,6 +46,12 @@ std::string read_all(int fd) {
 // Long enough never to cut a flush short where a reader is draining the pipe.
 constexpr core::Millis kFlushLimit{10'000};
 
+std::unique_ptr<ops::AsyncLogSink> make_sink(int fd, std::size_t capacity, core::Millis limit) {
+    auto sink = ops::AsyncLogSink::create(fd, capacity, limit);
+    EXPECT_TRUE(sink.has_value());
+    return sink ? std::move(*sink) : nullptr;
+}
+
 std::size_t count_lines(const std::string& text) {
     return static_cast<std::size_t>(std::ranges::count(text, '\n'));
 }
@@ -48,9 +59,9 @@ std::size_t count_lines(const std::string& text) {
 TEST(AsyncLogSink, EveryLineQueuedBeforeDestructionIsWrittenInOrder) {
     Pipe p = make_pipe();
     {
-        ops::AsyncLogSink sink(p.write.get(), 4096, kFlushLimit);
+        auto sink = make_sink(p.write.get(), 4096, kFlushLimit);
         for (int i = 0; i < 20; ++i) {
-            sink.write("line " + std::to_string(i) + "\n");
+            sink->write("line " + std::to_string(i) + "\n");
         }
     }
     p.write.reset();
@@ -71,13 +82,13 @@ TEST(AsyncLogSink, AStalledReaderCostsLinesNotTheWriter) {
     std::string drained;
     std::optional<std::jthread> reader;
     {
-        ops::AsyncLogSink sink(p.write.get(), 4096, kFlushLimit);
+        auto sink = make_sink(p.write.get(), 4096, kFlushLimit);
         // 100 KB against at most 4 KiB queued, 4 KiB being written and 4 KiB in the pipe:
         // getting through the loop at all shows the caller never waited for the reader.
         for (std::size_t i = 0; i < kLines; ++i) {
-            sink.write(line);
+            sink->write(line);
         }
-        dropped = sink.dropped();
+        dropped = sink->dropped();
         EXPECT_GE(dropped, kLines - (std::size_t{3} * 4096 / line.size()));
         reader.emplace([&] { drained = read_all(p.read.get()); });
     }
@@ -92,11 +103,11 @@ TEST(AsyncLogSink, NoLineIsSplitOrLost) {
     std::jthread reader([&] { got = read_all(p.read.get()); });
     std::uint64_t dropped = 0;
     {
-        ops::AsyncLogSink sink(p.write.get(), 512, kFlushLimit);
+        auto sink = make_sink(p.write.get(), 512, kFlushLimit);
         for (int i = 0; i < 5000; ++i) {
-            sink.write("0123456789012345678901234567890123456789\n");
+            sink->write("0123456789012345678901234567890123456789\n");
         }
-        dropped = sink.dropped();
+        dropped = sink->dropped();
     }
     p.write.reset();
     reader.join();
@@ -112,13 +123,34 @@ TEST(AsyncLogSink, DestructionGivesUpOnAReaderThatNeverComes) {
     ASSERT_EQ(::write(p.write.get(), filler.data(), filler.size()), 4096);
     const auto started = std::chrono::steady_clock::now();
     {
-        ops::AsyncLogSink sink(p.write.get(), 4096, core::Millis{50});
-        sink.write("one line\n");
+        auto sink = make_sink(p.write.get(), 4096, core::Millis{50});
+        sink->write("one line\n");
+        sink->write("another\n");
+        // Both lines were queued, and close() is the only place left to say they were lost.
+        EXPECT_EQ(sink->close(), 2U);
+        sink->write("after close\n");
+        EXPECT_EQ(sink->dropped(), 3U);
     }
     // Without the limit the destructor would wait for a reader forever.
     const auto took = std::chrono::steady_clock::now() - started;
     EXPECT_GE(took, std::chrono::milliseconds(40));
     EXPECT_LT(took, std::chrono::seconds(5));
+}
+
+TEST(AsyncLogSink, NoEventfdNoSink) {
+    // Without the eventfd, close() could not wake a thread waiting on a stalled reader, and
+    // the exit would wait for that reader forever; the sink is refused instead. A limit of no
+    // descriptors makes the eventfd fail; the child keeps it from the rest of the tests.
+    EXPECT_EXIT(
+        {
+            rlimit none{};
+            static_cast<void>(::getrlimit(RLIMIT_NOFILE, &none));
+            none.rlim_cur = 0;
+            static_cast<void>(::setrlimit(RLIMIT_NOFILE, &none));
+            const auto sink = ops::AsyncLogSink::create(STDERR_FILENO, 4096, kFlushLimit);
+            std::_Exit(!sink && sink.error() == EMFILE ? 0 : 1);
+        },
+        ::testing::ExitedWithCode(0), "");
 }
 
 } // namespace

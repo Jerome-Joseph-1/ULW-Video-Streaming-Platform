@@ -38,7 +38,11 @@ the line. Levels are `debug < info < warn < error`, from `log.level` / `ULW_LOG_
   mutex, a thread swaps it for its twin and writes that out. A full buffer drops the line and
   counts it in `log_messages_dropped_total`. 256 KiB is about 850 request lines, over a second of
   the busiest the gateway gets (448 uploads each finishing an 8 MiB chunk no faster than every
-  0.67 s, with playlist reads besides). On exit it flushes.
+  0.67 s, with playlist reads besides). On exit it flushes for at most 2 s, then writes the
+  total of dropped lines, if any, as one `log lines dropped` line to stderr: stdout's reader is
+  what fell behind, and the metric is gone with the listener. The sink needs an eventfd to wake
+  its thread from a wait on a stalled reader at exit; if it cannot have one the gateway refuses
+  to start (exit 1) rather than risk an exit that never ends.
 - The worker writes each line with one `write(2)`: its threads block by design, and a line of at
   most 1 KiB to a pipe is atomic.
 - One `request` line per response: request id, method, route name, status, milliseconds, request

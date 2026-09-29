@@ -9,12 +9,22 @@
 #include <climits>
 #include <poll.h>
 #include <unistd.h>
+#include <utility>
 
 namespace ops {
 
-AsyncLogSink::AsyncLogSink(int fd, std::size_t capacity, core::Millis flush_limit)
-    : fd_(fd), capacity_(capacity), flush_limit_(flush_limit),
-      stopping_(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {
+std::expected<std::unique_ptr<AsyncLogSink>, int> AsyncLogSink::create(int fd, std::size_t capacity,
+                                                                       core::Millis flush_limit) {
+    os::UniqueFd stopping(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
+    if (!stopping) {
+        return std::unexpected(errno);
+    }
+    return std::make_unique<AsyncLogSink>(Key{}, fd, capacity, flush_limit, std::move(stopping));
+}
+
+AsyncLogSink::AsyncLogSink(Key /*key*/, int fd, std::size_t capacity, core::Millis flush_limit,
+                           os::UniqueFd stopping)
+    : fd_(fd), capacity_(capacity), flush_limit_(flush_limit), stopping_(std::move(stopping)) {
     // Both buffers are sized once, so appending a line never allocates.
     queued_.reserve(capacity_);
     out_.reserve(capacity_);
@@ -22,18 +32,25 @@ AsyncLogSink::AsyncLogSink(int fd, std::size_t capacity, core::Millis flush_limi
 }
 
 AsyncLogSink::~AsyncLogSink() {
-    thread_.request_stop();
-    const std::uint64_t one = 1;
-    // An eventfd write only fails when its counter would overflow, which one write cannot do.
-    [[maybe_unused]] const ssize_t woken = ::write(stopping_.get(), &one, sizeof one);
-    thread_.join();
+    static_cast<void>(close());
+}
+
+std::uint64_t AsyncLogSink::close() noexcept {
+    if (!closed_.exchange(true, std::memory_order_relaxed)) {
+        thread_.request_stop();
+        const std::uint64_t one = 1;
+        // An eventfd write only fails when its counter would overflow, which one write cannot do.
+        [[maybe_unused]] const ssize_t woken = ::write(stopping_.get(), &one, sizeof one);
+        thread_.join();
+    }
+    return dropped();
 }
 
 void AsyncLogSink::write(std::string_view line) noexcept {
     bool was_empty = false;
     {
         const std::scoped_lock lock(mutex_);
-        if (queued_.size() + line.size() > capacity_) {
+        if (closed_.load(std::memory_order_relaxed) || queued_.size() + line.size() > capacity_) {
             dropped_.fetch_add(1, std::memory_order_relaxed);
             return;
         }

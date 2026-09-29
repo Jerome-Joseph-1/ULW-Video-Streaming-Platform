@@ -85,8 +85,16 @@ public:
 // the worker, whose threads block by design, and for any process before its event loop runs.
 class StdoutSink final : public ILogSink {
 public:
+    StdoutSink() noexcept = default;
+    // Another descriptor, such as stderr for what must still be said once stdout's reader has
+    // stalled.
+    explicit StdoutSink(int fd) noexcept : fd_(fd) {}
+
     void write(std::string_view line) noexcept override;
     [[nodiscard]] std::uint64_t dropped() const noexcept override { return 0; }
+
+private:
+    int fd_ = 1;
 };
 
 // JSON lines: {"ts":...,"level":...,"svc":...,"event":...,<fields>}. Event names and field

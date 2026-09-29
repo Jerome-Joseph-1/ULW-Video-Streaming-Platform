@@ -195,7 +195,7 @@ void StdoutSink::write(std::string_view line) noexcept {
     // One write per line keeps lines from threads of one process whole: a pipe write of at
     // most PIPE_BUF (4096) bytes is atomic, and a line is at most 1 KiB.
     while (!line.empty()) {
-        const ssize_t n = ::write(STDOUT_FILENO, line.data(), line.size());
+        const ssize_t n = ::write(fd_, line.data(), line.size());
         if (n < 0 && errno == EINTR) {
             continue;
         }

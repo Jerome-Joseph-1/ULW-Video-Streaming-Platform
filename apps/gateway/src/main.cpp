@@ -22,6 +22,7 @@
 #include "ops/notify.hpp"
 #include "ops/settings.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -372,9 +373,24 @@ int run(std::span<const std::string_view> args) {
         return refuse(boot, "NOTIFY_SOCKET", errno_text(notifier.error()));
     }
 
-    ops::AsyncLogSink sink(STDOUT_FILENO, kLogBuffer, kLogFlushLimit);
-    ops::Logger log(sink, clock, "gateway", config->log_level);
-    return serve(*config, *limits, log, *notifier);
+    auto sink = ops::AsyncLogSink::create(STDOUT_FILENO, kLogBuffer, kLogFlushLimit);
+    if (!sink) {
+        return fail(boot, "log sink", errno_text(sink.error()));
+    }
+    int code = EXIT_FAILURE;
+    {
+        ops::Logger log(**sink, clock, "gateway", config->log_level);
+        code = serve(*config, *limits, log, *notifier);
+    }
+    const std::uint64_t dropped = (*sink)->close();
+    if (dropped > 0) {
+        // Stdout's reader is the one that fell behind, and the metric that counted the loss is
+        // gone with the listener, so the total goes where the manager still reads.
+        ops::StdoutSink stderr_sink(STDERR_FILENO);
+        ops::Logger last(stderr_sink, clock, "gateway", ops::Level::Warn);
+        last.warn("log lines dropped", {{"count", dropped}});
+    }
+    return code;
 }
 
 } // namespace
