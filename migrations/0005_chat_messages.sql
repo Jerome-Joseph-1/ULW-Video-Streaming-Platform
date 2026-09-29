@@ -3,7 +3,7 @@
 -- index what it says. The table has no check constraint: a violated one reports the failing
 -- row, body included, in the error and the server log. A violated NOT NULL reports it too; the
 -- store binds every column from a value that cannot be null, and bounds the body's size before
--- it sends one. Bound parameters reach the log by other routes too (ADR-0039 lists the
+-- it sends one. Bound parameters reach the log by other routes too (ADR-0045 lists the
 -- settings that keep them out).
 --
 -- History pages walk the primary key in either direction; a backward scan of (room_id, seq) is

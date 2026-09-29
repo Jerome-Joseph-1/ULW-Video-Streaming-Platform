@@ -63,7 +63,7 @@ struct StoredMessage {
 // Plaintext today and MLS ciphertext later are the same thing to the store.
 //
 // Messages are written by the room's owner, in the same fenced write that takes their seq
-// (ADR-0039), so no seq is ever taken without its message; this port has no writer of its own.
+// (ADR-0045), so no seq is ever taken without its message; this port has no writer of its own.
 class IMessageStore {
 public:
     virtual ~IMessageStore() = default;
