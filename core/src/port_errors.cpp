@@ -1,5 +1,6 @@
 #include "core/ports/auth.hpp"
 #include "core/ports/catalog.hpp"
+#include "core/ports/media.hpp"
 
 namespace core::ports {
 
@@ -41,6 +42,16 @@ std::string_view to_string(AuthError e) noexcept {
         return "signing keys unavailable";
     }
     return "unknown auth error";
+}
+
+std::string_view to_string(MediaError e) noexcept {
+    switch (e) {
+    case MediaError::Unavailable:
+        return "media server unavailable";
+    case MediaError::Refused:
+        return "media server refused the request";
+    }
+    return "unknown media error";
 }
 
 } // namespace core::ports
