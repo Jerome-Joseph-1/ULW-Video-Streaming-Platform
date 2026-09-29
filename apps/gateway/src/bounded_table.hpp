@@ -21,7 +21,7 @@ public:
     using Slot = std::uint32_t;
 
     BoundedTable(std::size_t capacity, Hash hash)
-        : hash_(std::move(hash)), index_(std::bit_ceil(capacity * 2), kNone),
+        : hash_(std::move(hash)), capacity_(capacity), index_(std::bit_ceil(capacity * 2), kNone),
           mask_(index_.size() - 1) {
         nodes_.reserve(capacity);
     }
@@ -41,7 +41,9 @@ public:
             }
         }
         Slot s = kNone;
-        if (nodes_.size() < nodes_.capacity()) {
+        // Never past capacity_: the index, twice its size, then always has an empty place for
+        // a probe to stop at.
+        if (nodes_.size() < capacity_) {
             s = static_cast<Slot>(nodes_.size());
             nodes_.push_back(Node{.key = key, .value = std::forward<Make>(make)()});
         } else {
@@ -154,6 +156,7 @@ private:
     }
 
     Hash hash_;
+    std::size_t capacity_;
     std::vector<Node> nodes_;
     std::vector<Slot> index_;
     std::size_t mask_;
