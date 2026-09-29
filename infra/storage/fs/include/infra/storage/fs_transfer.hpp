@@ -3,6 +3,7 @@
 #include "core/ports/object_stream.hpp"
 #include "core/ports/object_transfer.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 
@@ -27,7 +28,10 @@ public:
     // Written to a temporary beside the object and renamed over it at the commit.
     [[nodiscard]] std::expected<std::unique_ptr<core::ports::IObjectStream>,
                                 core::ports::StorageError>
-    begin(const core::StorageKey& key, const core::ContentType& type) override;
+    begin(const core::StorageKey& key, const core::ContentType& type,
+          std::uint64_t max_bytes) override;
+    [[nodiscard]] std::expected<void, core::ports::StorageError>
+    remove(const core::StorageKey& key) override;
 
 private:
     [[nodiscard]] std::expected<void, core::ports::StorageError>

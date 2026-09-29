@@ -95,4 +95,12 @@ inline void write_file(const std::filesystem::path& file, std::string_view bytes
     std::ofstream(file, std::ios::binary) << bytes;
 }
 
+inline std::string read_file(const std::filesystem::path& file) {
+    std::error_code ec;
+    std::string text(std::filesystem::file_size(file, ec), '\0');
+    std::ifstream in(file, std::ios::binary);
+    in.read(text.data(), static_cast<std::streamsize>(text.size()));
+    return text;
+}
+
 } // namespace ulw::test

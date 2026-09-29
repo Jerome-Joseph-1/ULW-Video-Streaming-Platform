@@ -10,11 +10,14 @@
 #include "infra/storage/s3_transfer.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
+#include "os/unique_fd.hpp"
 
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
 #include "support/live_s3.hpp"
 #include "support/temp_dir.hpp"
+
+#include <sys/syscall.h>
 
 #include <algorithm>
 #include <array>
@@ -22,11 +25,14 @@
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
+#include <poll.h>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -98,20 +104,10 @@ std::uint64_t published_segments(const std::string& playlist) {
     return first + listed;
 }
 
-template <class Pred> bool within(milliseconds limit, Pred pred) {
-    const auto deadline = std::chrono::steady_clock::now() + limit;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            return false;
-        }
-        std::this_thread::yield();
-    }
-    return true;
-}
-
-// Is any process running whose command line mentions `needle`? The worker's ffmpeg children
-// all name their workspace.
-bool process_mentions(const std::string& needle) {
+// The processes whose command line mentions `needle`; the worker's ffmpeg children all name
+// their workspace.
+std::vector<pid_t> processes_mentioning(const std::string& needle) {
+    std::vector<pid_t> found;
     for (const auto& entry : fs::directory_iterator("/proc")) {
         const std::string pid = entry.path().filename().string();
         if (!std::ranges::all_of(pid, [](char c) { return c >= '0' && c <= '9'; })) {
@@ -119,12 +115,32 @@ bool process_mentions(const std::string& needle) {
         }
         std::string cmdline = read_text(entry.path() / "cmdline");
         std::ranges::replace(cmdline, '\0', ' ');
+        // A zombie still lists its command line until it is reaped.
         const bool zombie = read_text(entry.path() / "stat").find(") Z ") != std::string::npos;
         if (!zombie && cmdline.find(needle) != std::string::npos) {
-            return true;
+            found.push_back(static_cast<pid_t>(std::stol(pid)));
         }
     }
-    return false;
+    return found;
+}
+
+// Waits on each process's pidfd, woken by its exit rather than by polling; true once all have
+// exited within `limit`. A pid already gone counts as exited.
+bool all_exit(const std::vector<pid_t>& pids, milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    for (const pid_t pid : pids) {
+        const os::UniqueFd fd(static_cast<int>(::syscall(SYS_pidfd_open, pid, 0)));
+        if (!fd) {
+            continue;
+        }
+        const auto left =
+            std::chrono::duration_cast<milliseconds>(deadline - std::chrono::steady_clock::now());
+        pollfd exited{.fd = fd.get(), .events = POLLIN, .revents = 0};
+        if (left.count() <= 0 || ::poll(&exited, 1, static_cast<int>(left.count())) != 1) {
+            return false;
+        }
+    }
+    return true;
 }
 
 class LiveRecordingTest : public ::testing::Test {
@@ -223,8 +239,8 @@ protected:
 
     // 720p, so the recording is transcoded to two rungs whose keyframes must line up. A
     // duration of 0 means until killed.
-    [[nodiscard]] std::unique_ptr<ChildProcess> start_publisher(std::uint16_t port,
-                                                                unsigned duration) const {
+    [[nodiscard]] std::unique_ptr<ChildProcess>
+    start_publisher(std::uint16_t port, unsigned duration, bool audio = true) const {
         std::vector<std::string> argv{ULW_LIVE_TESTSOURCE, "127.0.0.1:" + std::to_string(port)};
         if (duration != 0) {
             argv.push_back(std::to_string(duration));
@@ -233,7 +249,8 @@ protected:
             ChildProcess::start(argv, {"PATH=" + env_or("PATH", "/usr/bin:/bin"),
                                        "ULW_TESTSOURCE_PASSPHRASE=" + std::string(kPassphrase),
                                        "ULW_TESTSOURCE_STREAMID=" + stream_,
-                                       "ULW_TESTSOURCE_SIZE=1280x720", "ULW_TESTSOURCE_KBPS=2500"});
+                                       "ULW_TESTSOURCE_SIZE=1280x720", "ULW_TESTSOURCE_KBPS=2500",
+                                       std::string("ULW_TESTSOURCE_AUDIO=") + (audio ? "1" : "0")});
         EXPECT_NE(publisher, nullptr);
         return publisher;
     }
@@ -336,8 +353,8 @@ protected:
             EXPECT_GE(files.size(), 3U) << *media;
             const std::string dir = rung.substr(0, rung.rfind('/') + 1);
             for (const std::string& f : files) {
-                EXPECT_TRUE(store().size(*core::StorageKey::parse(prefix + dir + f)))
-                    << prefix + dir + f;
+                const std::string key = std::format("{}{}{}", prefix, dir, f);
+                EXPECT_TRUE(store().size(*core::StorageKey::parse(key))) << key;
             }
         }
     }
@@ -375,7 +392,7 @@ TEST_F(LiveRecordingTest, AnEndedStreamBecomesExactlyOneVideoThatGoesFromProcess
     const std::string video = the_video();
     EXPECT_EQ(query("SELECT state FROM videos"), "processing");
     EXPECT_EQ(query("SELECT concat_ws(' ', state, source_key, request_id) FROM jobs"),
-              "queued live/" + stream_ + "/recording.ts " + stream_);
+              "queued videos/" + video + "/raw " + stream_);
     EXPECT_EQ(query("SELECT video_id FROM live_recordings"), video);
 
     run_worker_to_done();
@@ -414,7 +431,9 @@ TEST_F(LiveRecordingTest, AStreamWhosePackagerDiedMidwayIsRecordedAsOneVideoOfBo
         const auto packager = start_packager();
         const auto port = ingest_port(*packager);
         ASSERT_TRUE(port) << packager->output();
-        const auto publisher = start_publisher(*port, 0);
+        // The first run carries no audio and the second does: the recording still has one
+        // audio stream end to end, silent where the first run was.
+        const auto publisher = start_publisher(*port, 0, /*audio=*/false);
         const std::string playlist = "live/" + stream_ + "/index.m3u8";
         while (published_segments(stored_text(playlist).value_or("")) < 4) {
             ASSERT_FALSE(publisher->wait_exit(kSamplePeriod)) << publisher->output();
@@ -432,6 +451,29 @@ TEST_F(LiveRecordingTest, AStreamWhosePackagerDiedMidwayIsRecordedAsOneVideoOfBo
     // Every segment either run published, end to end: the second run's timestamps began again
     // at zero, and the recording carries the timeline on across that.
     expect_one_ready_video((static_cast<double>(first_run) * 2.0) + 8.0);
+    const auto master = stored_text("videos/" + the_video() + "/hls/master.m3u8");
+    ASSERT_TRUE(master);
+    EXPECT_NE(master->find("mp4a"), std::string::npos) << *master;
+}
+
+TEST_F(LiveRecordingTest, TwoPackagersRecordingOneEndedStreamAtOnceMakeOneVideoAndOneSource) {
+    ASSERT_EQ(stream_for(8, /*recording=*/false), 0) << last_output_;
+    auto a = start_packager();
+    auto b = start_packager();
+    ASSERT_EQ(a->wait_exit(kJobPatience), 0) << a->output();
+    ASSERT_EQ(b->wait_exit(kJobPatience), 0) << b->output();
+    const std::string outputs = a->output() + b->output();
+    EXPECT_NE(outputs.find("recording: queued as video"), std::string::npos) << outputs;
+    EXPECT_NE(outputs.find("recording: already video"), std::string::npos) << outputs;
+    EXPECT_EQ(query("SELECT count(*) FROM videos"), "1");
+    EXPECT_EQ(query("SELECT count(*) FROM jobs"), "1");
+    // The loser removed the recording it made; only the video's own source is left.
+    std::size_t sources = 0;
+    for (const auto& dir : fs::directory_iterator(store_root_.path() / "objects/videos")) {
+        sources += fs::exists(dir.path() / "raw") ? 1U : 0U;
+    }
+    EXPECT_EQ(sources, 1U);
+    EXPECT_TRUE(fs::exists(store_root_.path() / "objects/videos" / the_video() / "raw"));
 }
 
 TEST_F(LiveRecordingTest, ALiveSourcedJobSurvivesASigkilledWorkerAndItsFfmpegDiesWithIt) {
@@ -439,10 +481,16 @@ TEST_F(LiveRecordingTest, ALiveSourcedJobSurvivesASigkilledWorkerAndItsFfmpegDie
     auto a = start_worker("worker-a");
     const std::string a_scratch = scratch_dirs_.back()->path().string();
     ASSERT_TRUE(a->wait_for_output(R"("event":"probed")", kJobPatience)) << a->output();
-    ASSERT_TRUE(within(seconds(30), [&] { return process_mentions(a_scratch); }));
+    std::vector<pid_t> children = processes_mentioning(a_scratch);
+    for (auto ticks = seconds(30) / kSamplePeriod; children.empty() && ticks > 0; --ticks) {
+        // The worker's own wait is the tick: it returns at its exit, or after the period.
+        ASSERT_FALSE(a->wait_exit(kSamplePeriod)) << a->output();
+        children = processes_mentioning(a_scratch);
+    }
+    ASSERT_FALSE(children.empty()) << "the worker's ffmpeg never started";
     a->signal(SIGKILL);
     EXPECT_EQ(a->wait_exit(kExitPatience), 128 + SIGKILL);
-    EXPECT_TRUE(within(seconds(10), [&] { return !process_mentions(a_scratch); }))
+    EXPECT_TRUE(all_exit(processes_mentioning(a_scratch), seconds(10)))
         << "a child of the killed worker is still running";
     EXPECT_EQ(query("SELECT state FROM jobs"), "running");
 
@@ -471,20 +519,25 @@ TEST_F(LiveRecordingTest, AStaleWorkerOnALiveSourcedJobIsFencedOutAndPublishesNo
     const std::string job_after_b = job_row();
     const std::string video_after_b =
         query("SELECT concat_ws(' ', state, version, duration_ms, updated_at) FROM videos");
+    const std::string renditions_after_b =
+        query("SELECT string_agg(concat_ws(':', height, bitrate_bps, playlist_key), ' ' ORDER BY "
+              "height) FROM renditions");
     const std::string master_after_b =
         stored_text("videos/" + the_video() + "/hls/master.m3u8").value_or("");
     EXPECT_EQ(job_after_b, "done 2 2 worker-b worker lease expired");
 
     // The zombie wakes, finds its lease gone, and every write it attempts matches no row.
     a->signal(SIGCONT);
+    ASSERT_TRUE(a->wait_for_output(R"("event":"fenced out")", kJobPatience)) << a->output();
     ASSERT_TRUE(a->wait_for_output(R"("outcome":")", kJobPatience)) << a->output();
     EXPECT_EQ(a->output().find(R"("outcome":"done")"), std::string::npos) << a->output();
-    EXPECT_TRUE(a->output().find(R"("outcome":"fenced-out")") != std::string::npos ||
-                a->output().find(R"("outcome":"abandoned")") != std::string::npos)
-        << a->output();
     EXPECT_EQ(job_row(), job_after_b);
     EXPECT_EQ(query("SELECT concat_ws(' ', state, version, duration_ms, updated_at) FROM videos"),
               video_after_b);
+    EXPECT_EQ(query("SELECT string_agg(concat_ws(':', height, bitrate_bps, playlist_key), ' ' "
+                    "ORDER BY height) FROM renditions"),
+              renditions_after_b);
+    EXPECT_EQ(query("SELECT count(*) FROM renditions"), "2");
     EXPECT_EQ(stored_text("videos/" + the_video() + "/hls/master.m3u8"), master_after_b);
     expect_one_ready_video(10);
 

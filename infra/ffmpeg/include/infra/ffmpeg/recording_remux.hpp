@@ -2,17 +2,26 @@
 
 #include "core/ports/clock.hpp"
 #include "core/util/time.hpp"
-#include "infra/ffmpeg/live_remux.hpp"
 
 #include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
 
 namespace infra::ffmpeg {
+
+struct RecordingRemuxConfig {
+    // The ulw_sandbox helper the children are started through (ADR-0025).
+    std::filesystem::path sandbox;
+    std::string ffmpeg = "ffmpeg";
+    std::string ffprobe = "ffprobe";
+    // PATH for the children, which get no other environment.
+    std::string search_path;
+};
 
 enum class RecordingInput : std::uint8_t {
     // One run's init segment followed by its media segments, as the live packager stored them.
@@ -23,30 +32,62 @@ enum class RecordingInput : std::uint8_t {
     MpegTs,
 };
 
+// The audio a run carries, as far as a stand-in for missing audio must match it.
+struct AudioFormat {
+    std::uint32_t sample_rate = 0;
+    std::uint32_t channels = 0;
+
+    friend bool operator==(const AudioFormat&, const AudioFormat&) = default;
+};
+
 struct RecordingRemuxJob {
     RecordingInput from = RecordingInput::FragmentedMp4;
     // Becomes the child's stdin. Borrowed: the caller closes its end of the pipe to end the
     // input.
     int input = -1;
-    // The directory the child may write, which it has no reason to.
+    // The child's writable directory, which it has no reason to write: an empty one of its own.
     std::filesystem::path work_dir;
     // Wall-clock budget; a twentieth of it in CPU time.
     core::Seconds budget{};
+    // FragmentedMp4 only: the run has no audio and the recording does, so silence of this
+    // format is encoded alongside its video, and every run the second stage joins carries the
+    // same streams.
+    std::optional<AudioFormat> silence;
+};
+
+enum class RemuxFailure : std::uint8_t {
+    // The child could not be started: the sandbox or the program is missing. Worth a retry.
+    Unavailable,
+    // ffmpeg or ffprobe refused the input, or ran past its budget: the same input fails again.
+    Refused,
+    // The caller's stop token fired.
+    Stopped,
+};
+
+struct RemuxError {
+    RemuxFailure kind = RemuxFailure::Refused;
+    // For the log: the child's last words, or why it did not start.
+    std::string detail;
 };
 
 // Copies the video and the audio of a recording into MPEG-TS, without decoding them, with
 // ffmpeg as a sandboxed child whose stdout is handed to `on_output` as it arrives. Blocks until
-// the child has exited; fails with ffmpeg's last words when it did not exit 0.
+// the child has exited.
 class RecordingRemuxer {
 public:
-    RecordingRemuxer(LiveRemuxConfig config, const core::ports::IClock& clock);
+    RecordingRemuxer(RecordingRemuxConfig config, const core::ports::IClock& clock);
 
-    [[nodiscard]] std::expected<void, std::string>
+    [[nodiscard]] std::expected<void, RemuxError>
     run(const RecordingRemuxJob& job, const std::function<void(std::string_view)>& on_output,
         const std::stop_token& stop) const;
 
+    // The first audio stream of an init segment; nullopt for a run without audio.
+    [[nodiscard]] std::expected<std::optional<AudioFormat>, RemuxError>
+    probe_audio(const std::filesystem::path& init, const std::filesystem::path& work_dir,
+                const std::stop_token& stop) const;
+
 private:
-    LiveRemuxConfig config_;
+    RecordingRemuxConfig config_;
     const core::ports::IClock& clock_;
 };
 

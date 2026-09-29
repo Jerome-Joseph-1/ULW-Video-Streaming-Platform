@@ -13,127 +13,298 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <fstream>
+#include <map>
 #include <string>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace live {
 
 namespace {
 
 namespace fs = std::filesystem;
+using infra::ffmpeg::AudioFormat;
 using infra::ffmpeg::RecordingInput;
 using infra::ffmpeg::RecordingRemuxJob;
+using infra::ffmpeg::RemuxError;
+using infra::ffmpeg::RemuxFailure;
+using infra::postgres::RecordingRow;
 
 // Our playlists are a few KB; a store answering with more is not our playlist.
 constexpr std::uint64_t kMaxPlaylistBytes = std::uint64_t{1} << 20U;
 // A read per 64 KiB of segment on its way into the pipe.
 constexpr std::size_t kCopyBuffer = std::size_t{64} << 10U;
+// A line per hour of stream at the shortest segment length (2 s).
+constexpr std::uint64_t kProgressEvery = 1800;
+
+enum class Severity : std::uint8_t { Transient, Permanent, Stopped, Superseded };
+
+struct Problem {
+    Severity severity = Severity::Transient;
+    std::string detail;
+};
+
+template <class T> using Step = std::expected<T, Problem>;
+
+std::unexpected<Problem> problem(Severity severity, std::string detail) {
+    return std::unexpected(Problem{.severity = severity, .detail = std::move(detail)});
+}
+
+Problem from_remux(const RemuxError& error, std::string_view what) {
+    switch (error.kind) {
+    case RemuxFailure::Unavailable:
+        return {.severity = Severity::Transient, .detail = std::string(what) + ": " + error.detail};
+    case RemuxFailure::Refused:
+        return {.severity = Severity::Permanent, .detail = std::string(what) + ": " + error.detail};
+    case RemuxFailure::Stopped:
+        return {.severity = Severity::Stopped, .detail = "stopped"};
+    }
+    return {.severity = Severity::Transient, .detail = std::string(what)};
+}
 
 const core::ContentType& recording_type() {
     static const auto type = *core::ContentType::parse("video/mp2t");
     return type;
 }
 
-std::expected<core::StorageKey, RecordError> key_in(const StreamId& stream, std::string_view name) {
+Step<core::StorageKey> key_in(const StreamId& stream, std::string_view name) {
     auto key = core::StorageKey::parse(stream.key_prefix() + std::string(name));
     if (!key) {
-        return std::unexpected(RecordError::PlaylistInvalid);
+        return problem(Severity::Permanent, "unaddressable name " + std::string(name));
     }
     return std::move(*key);
 }
 
-// The stored playlist, if it ends with segments; nullopt when there is nothing to record.
-std::expected<std::optional<MediaPlaylist>, RecordError>
-read_ended(core::ports::IObjectTransfer& store, const StreamId& stream, const fs::path& dir) {
+// The stream's stored playlist; nullopt when it has none.
+Step<std::optional<MediaPlaylist>> read_playlist(core::ports::IObjectTransfer& store,
+                                                 const StreamId& stream, const fs::path& dir) {
     const auto key = key_in(stream, "index.m3u8");
     if (!key) {
         return std::unexpected(key.error());
     }
-    const fs::path file = dir / "ended.m3u8";
+    const fs::path file = dir / "index.m3u8";
     const auto size = store.download(*key, file);
     if (!size) {
         if (size.error() == core::ports::StorageError::NotFound) {
             return std::nullopt;
         }
-        return std::unexpected(RecordError::StoreUnreadable);
+        return problem(Severity::Transient, "playlist unreadable");
     }
     if (*size > kMaxPlaylistBytes) {
-        return std::unexpected(RecordError::PlaylistInvalid);
+        return problem(Severity::Permanent, "stored playlist too large");
     }
     std::string text(*size, '\0');
     std::ifstream in(file, std::ios::binary);
     in.read(text.data(), static_cast<std::streamsize>(text.size()));
     auto playlist = parse_media_playlist(text);
     if (!in || !playlist) {
-        return std::unexpected(RecordError::PlaylistInvalid);
-    }
-    if (!playlist->ended || playlist->segments.empty()) {
-        return std::nullopt;
+        return problem(Severity::Permanent, "stored playlist invalid");
     }
     return std::move(*playlist);
 }
 
-// Downloads one stored object and pours it into `sink`.
-std::expected<void, RecordError> pour(core::ports::IObjectTransfer& store,
-                                      const core::StorageKey& key, const fs::path& file, int sink,
-                                      const std::stop_token& stop) {
-    if (!store.download(key, file)) {
-        return std::unexpected(RecordError::StoreUnreadable);
-    }
-    const os::UniqueFd in(::open(file.c_str(), O_RDONLY | O_CLOEXEC));
-    if (!in) {
-        return std::unexpected(RecordError::StoreUnreadable);
-    }
-    std::array<std::byte, kCopyBuffer> buffer{};
-    while (true) {
-        const ssize_t n = ::read(in.get(), buffer.data(), buffer.size());
-        if (n < 0 && errno == EINTR) {
-            continue;
+class Recording {
+public:
+    Recording(const RecorderDeps& deps, const RecorderSettings& settings, std::stop_token stop)
+        : deps_(deps), settings_(settings), stop_(std::move(stop)),
+          pieces_(settings.work_dir / "pieces"), child_dir_(settings.work_dir / "child") {}
+
+    Step<void> prepare() {
+        std::error_code ec;
+        fs::remove_all(settings_.work_dir, ec);
+        fs::create_directories(pieces_, ec);
+        fs::create_directories(child_dir_, ec);
+        if (ec) {
+            return problem(Severity::Transient, "work dir: " + ec.message());
         }
-        if (n < 0) {
-            return std::unexpected(RecordError::StoreUnreadable);
+        return {};
+    }
+
+    // No run newer than the ended playlist's last one has claimed the stream, unless the claim
+    // is this process's own: a packager that claimed, then found the stream ended, publishes
+    // nothing. A newer claim otherwise belongs to a packager still publishing, which will
+    // overwrite the stale end this one saw.
+    Step<void> fence(const MediaPlaylist& ended) {
+        const auto last = infra::ffmpeg::live_init_epoch(ended.segments.back().init);
+        if (!last) {
+            return problem(Severity::Permanent, "stored playlist invalid");
         }
-        if (n == 0) {
+        const std::uint32_t next = *last + 1;
+        if (settings_.own_claim == next) {
             return {};
         }
-        if (!write_all(sink, std::span(buffer).first(static_cast<std::size_t>(n)), stop)) {
-            return std::unexpected(stop.stop_requested() ? RecordError::Stopped
-                                                         : RecordError::RemuxFailed);
+        const auto claim = key_in(settings_.stream, "epoch_" + std::to_string(next));
+        if (!claim) {
+            return std::unexpected(claim.error());
+        }
+        const auto seen = deps_.store.size(*claim);
+        if (seen) {
+            return problem(Severity::Superseded, "epoch " + std::to_string(next) + " is claimed");
+        }
+        if (seen.error() != core::ports::StorageError::NotFound) {
+            return problem(Severity::Transient, "claim unreadable");
+        }
+        return {};
+    }
+
+    // The playlist still ends where it did, and the fence still holds: the recording covers
+    // the stream to its real end.
+    Step<void> confirm(const MediaPlaylist& ended) {
+        const auto now = read_playlist(deps_.store, settings_.stream, pieces_);
+        if (!now) {
+            return std::unexpected(now.error());
+        }
+        const auto end_of = [](const MediaPlaylist& p) {
+            return p.media_sequence + p.segments.size();
+        };
+        const std::optional<MediaPlaylist>& stored = *now;
+        if (!stored || !stored->ended || stored->segments.empty() ||
+            end_of(*stored) != end_of(ended) ||
+            stored->segments.back().uri != ended.segments.back().uri) {
+            return problem(Severity::Superseded, "the playlist changed under the recording");
+        }
+        return fence(ended);
+    }
+
+    Step<RecordResult> record(const MediaPlaylist& ended) {
+        if (auto fenced = fence(ended); !fenced) {
+            return std::unexpected(fenced.error());
+        }
+        const auto plan = plan_recording(ended, settings_.stream, deps_.store);
+        if (!plan) {
+            return plan.error() == PlanError::StoreUnreadable
+                       ? problem(Severity::Transient, "store unreadable while planning")
+                       : problem(Severity::Permanent, "stored playlist invalid");
+        }
+        if (auto probed = probe(*plan); !probed) {
+            return std::unexpected(probed.error());
+        }
+        const auto video = core::VideoId::generate(deps_.clock, deps_.random);
+        // Where an upload's source goes (the gateway's), so the job is the same as for one.
+        const auto key = core::StorageKey::parse("videos/" + video.to_string() + "/raw");
+        if (!key) {
+            return problem(Severity::Permanent, "unaddressable source key");
+        }
+        if (auto made = assemble(*plan, *key); !made) {
+            return std::unexpected(made.error());
+        }
+        if (auto confirmed = confirm(ended); !confirmed) {
+            discard(*key);
+            return std::unexpected(confirmed.error());
+        }
+        const auto row = deps_.catalog.record({.stream = settings_.stream.str(),
+                                               .video = video,
+                                               .owner = settings_.owner,
+                                               .title = "Live stream " + settings_.stream.str(),
+                                               .source = *key});
+        if (!row) {
+            discard(*key);
+            return problem(Severity::Transient, "database unavailable");
+        }
+        if (row->video == video) {
+            return RecordResult{.outcome = RecordOutcome::Recorded, .video = video, .detail = {}};
+        }
+        // Another recorder's row went in first; ours is an object nothing will read.
+        discard(*key);
+        return RecordResult{
+            .outcome = RecordOutcome::AlreadyRecorded, .video = row->video, .detail = row->failure};
+    }
+
+private:
+    struct Stopper {
+        std::stop_source* source;
+        void operator()() const noexcept { source->request_stop(); }
+    };
+
+    void discard(const core::StorageKey& key) {
+        if (!deps_.streams.remove(key)) {
+            log("recording: could not remove {}", key.str());
         }
     }
-}
 
-// Two stages of ffmpeg, both copies. Each run's init segment and segments are one fragmented
-// MP4 and go through a first ffmpeg of their own, which makes MPEG-TS of them; every run's TS
-// goes through the second, one for the whole recording, which carries the timeline across the
-// jump where a restarted run's timestamps begin again, and whose output streams into the store.
-// Concatenated fMP4 of two runs would not do: ffmpeg skips the second moov and reads the second
-// run's fragments on the first run's timeline, backwards.
-class Assembly {
-public:
-    Assembly(const RecorderDeps& deps, const RecorderSettings& settings,
-             core::ports::IObjectStream& output, const std::stop_token& stop)
-        : deps_(deps), settings_(settings), output_(output),
-          on_stop_(stop, Abort{.abort = &abort_, .stopped = &caller_stopped_}) {}
+    [[nodiscard]] fs::path init_file(std::uint32_t epoch) const {
+        return pieces_ / infra::ffmpeg::live_init_name(epoch);
+    }
 
-    std::expected<std::uint64_t, RecordError> run(const RecordingPlan& plan) {
+    // Downloads `name` of the stream to `file`; a missing object is for good, since the
+    // packager never deletes one and the bucket's rule only expires them.
+    Step<void> fetch(std::string_view name, const fs::path& file) {
+        const auto key = key_in(settings_.stream, name);
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        const auto got = deps_.store.download(*key, file);
+        if (got) {
+            return {};
+        }
+        if (got.error() == core::ports::StorageError::NotFound) {
+            return problem(Severity::Permanent, std::string(name) + " is missing");
+        }
+        return problem(Severity::Transient, std::string(name) + " unreadable");
+    }
+
+    // Each run's audio, and the stream's: the first a run carries. A run without it gets
+    // silence of that format, so the joined recording keeps one audio stream throughout.
+    Step<void> probe(const RecordingPlan& plan) {
+        for (const RecordingRun& run : plan.runs) {
+            if (formats_.contains(run.epoch)) {
+                continue;
+            }
+            if (auto got = fetch(infra::ffmpeg::live_init_name(run.epoch), init_file(run.epoch));
+                !got) {
+                return got;
+            }
+            const auto format = deps_.copier.probe_audio(init_file(run.epoch), child_dir_, stop_);
+            if (!format) {
+                return std::unexpected(from_remux(format.error(), "probing the audio"));
+            }
+            formats_[run.epoch] = *format;
+            if (*format && !stream_audio_) {
+                stream_audio_ = *format;
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] RecordingRemuxJob job(RecordingInput from, int input,
+                                        std::optional<AudioFormat> silence) const {
+        return {.from = from,
+                .input = input,
+                .work_dir = child_dir_,
+                .budget = settings_.budget,
+                .silence = silence};
+    }
+
+    // Two stages of ffmpeg. Each run's init segment and segments are one fragmented MP4 and go
+    // through a first ffmpeg of their own, which makes MPEG-TS of them; every run's TS goes
+    // through the second, one for the whole recording, which carries the timeline across the
+    // jump where a restarted run's timestamps begin again, and whose output streams into the
+    // store. Concatenated fMP4 of two runs would not do: ffmpeg skips the second moov and reads
+    // the second run's fragments on the first run's timeline, backwards.
+    Step<void> assemble(const RecordingPlan& plan, const core::StorageKey& key) {
+        auto output = deps_.streams.begin(key, recording_type(), settings_.max_bytes);
+        if (!output) {
+            return problem(Severity::Transient, "the store refused the recording");
+        }
+        output_ = output->get();
+        const std::stop_callback on_stop(stop_, Stopper{&abort_});
         auto joined = make_pipe();
         if (!joined) {
-            return std::unexpected(RecordError::RemuxFailed);
+            return problem(Severity::Transient, "pipe");
         }
-        std::expected<void, std::string> joining;
+        std::expected<void, RemuxError> joining;
         std::jthread joiner([&] {
-            joining = deps_.remuxer.run(
-                job(RecordingInput::MpegTs, joined->read.get()),
+            joining = deps_.copier.run(
+                job(RecordingInput::MpegTs, joined->read.get(), {}),
                 [this](std::string_view out) { keep(out); }, abort_.get_token());
             if (!joining) {
                 abort_.request_stop();
             }
         });
-        std::expected<void, RecordError> fed;
+        Step<void> fed;
         for (const RecordingRun& run : plan.runs) {
             fed = feed(run, joined->write.get());
             if (!fed) {
@@ -142,30 +313,28 @@ public:
         }
         joined->write.reset();
         joiner.join();
+        if (stop_.stop_requested()) {
+            return problem(Severity::Stopped, "stopped");
+        }
+        if (upload_error_) {
+            return problem(*upload_error_ == core::ports::StorageError::Permanent
+                               ? Severity::Permanent
+                               : Severity::Transient,
+                           "upload: " + std::string(core::ports::to_string(*upload_error_)));
+        }
         if (!fed) {
-            return std::unexpected(fed.error());
+            return fed;
         }
         if (!joining) {
-            log("recording: joining the runs failed: {}", joining.error());
+            return std::unexpected(from_remux(joining.error(), "joining the runs"));
         }
-        return finish(joining.has_value());
-    }
-
-private:
-    struct Abort {
-        std::stop_source* abort;
-        std::stop_source* stopped;
-        void operator()() const noexcept {
-            stopped->request_stop();
-            abort->request_stop();
+        if (auto committed = (*output)->commit(); !committed) {
+            return problem(Severity::Transient,
+                           "upload: " + std::string(core::ports::to_string(committed.error())));
         }
-    };
-
-    [[nodiscard]] RecordingRemuxJob job(RecordingInput from, int input) const {
-        return {.from = from,
-                .input = input,
-                .work_dir = settings_.work_dir,
-                .budget = settings_.budget};
+        log("recording: {} segments in {} runs, {} missing, {} bytes", poured_, plan.runs.size(),
+            plan.missing, bytes_);
+        return {};
     }
 
     // On the joining stage's thread only, until it is joined.
@@ -173,7 +342,7 @@ private:
         if (upload_error_) {
             return;
         }
-        if (auto written = output_.write(std::as_bytes(std::span(out))); !written) {
+        if (auto written = output_->write(std::as_bytes(std::span(out))); !written) {
             upload_error_ = written.error();
             abort_.request_stop();
             return;
@@ -181,15 +350,18 @@ private:
         bytes_ += out.size();
     }
 
-    std::expected<void, RecordError> feed(const RecordingRun& run, int joined) {
+    Step<void> feed(const RecordingRun& run, int joined) {
         auto pipe = make_pipe();
         if (!pipe) {
-            return std::unexpected(RecordError::RemuxFailed);
+            return problem(Severity::Transient, "pipe");
         }
-        std::expected<void, std::string> copied;
+        const auto& own = formats_[run.epoch];
+        const std::optional<AudioFormat> silence =
+            !own && stream_audio_ ? stream_audio_ : std::nullopt;
+        std::expected<void, RemuxError> copied;
         std::jthread copier([&] {
-            copied = deps_.remuxer.run(
-                job(RecordingInput::FragmentedMp4, pipe->read.get()),
+            copied = deps_.copier.run(
+                job(RecordingInput::FragmentedMp4, pipe->read.get(), silence),
                 [this, joined](std::string_view out) {
                     if (!write_all(joined, std::as_bytes(std::span(out)), abort_.get_token())) {
                         abort_.request_stop();
@@ -203,178 +375,180 @@ private:
         auto poured = pour_run(run, pipe->write.get());
         pipe->write.reset();
         copier.join();
-        if (!copied) {
-            log("recording: copying epoch {} failed: {}", run.epoch, copied.error());
-        }
         if (!poured) {
             return poured;
         }
         if (!copied) {
-            return std::unexpected(stopped() ? RecordError::Stopped : RecordError::RemuxFailed);
+            return std::unexpected(
+                from_remux(copied.error(), "copying epoch " + std::to_string(run.epoch)));
         }
         return {};
     }
 
-    std::expected<void, RecordError> pour_run(const RecordingRun& run, int sink) {
-        const fs::path piece = settings_.work_dir / "piece";
-        const auto init = key_in(settings_.stream, infra::ffmpeg::live_init_name(run.epoch));
-        if (!init) {
-            return std::unexpected(init.error());
-        }
-        if (auto poured = pour(deps_.store, *init, piece, sink, abort_.get_token()); !poured) {
+    Step<void> pour_run(const RecordingRun& run, int sink) {
+        if (auto poured = pour(init_file(run.epoch), sink); !poured) {
             return poured;
         }
-        for (std::uint64_t n = run.first; n <= run.last; ++n) {
-            const auto segment =
-                key_in(settings_.stream, infra::ffmpeg::live_segment_name(run.epoch, n));
-            if (!segment) {
-                return std::unexpected(segment.error());
+        const fs::path piece = pieces_ / "segment";
+        for (std::uint64_t n = run.first; n <= run.last && !abort_.stop_requested(); ++n) {
+            if (auto got = fetch(infra::ffmpeg::live_segment_name(run.epoch, n), piece); !got) {
+                return got;
             }
-            if (auto poured = pour(deps_.store, *segment, piece, sink, abort_.get_token());
-                !poured) {
+            if (auto poured = pour(piece, sink); !poured) {
                 return poured;
+            }
+            if (++poured_ % kProgressEvery == 0) {
+                log("recording: {} segments copied", poured_);
             }
         }
         return {};
     }
 
-    [[nodiscard]] bool stopped() const noexcept { return caller_stopped_.stop_requested(); }
-
-    std::expected<std::uint64_t, RecordError> finish(bool joined) {
-        if (stopped()) {
-            return std::unexpected(RecordError::Stopped);
+    // Pours a downloaded piece into `sink`. A pipe that will take no more means the ffmpeg
+    // reading it has stopped, which the caller learns from its result.
+    Step<void> pour(const fs::path& file, int sink) {
+        const os::UniqueFd in(::open(file.c_str(), O_RDONLY | O_CLOEXEC));
+        if (!in) {
+            return problem(Severity::Transient, "piece unreadable");
         }
-        if (upload_error_) {
-            log("recording: upload failed: {}", core::ports::to_string(*upload_error_));
-            return std::unexpected(RecordError::UploadFailed);
+        std::array<std::byte, kCopyBuffer> buffer{};
+        while (true) {
+            const ssize_t n = ::read(in.get(), buffer.data(), buffer.size());
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n < 0) {
+                return problem(Severity::Transient, "piece unreadable");
+            }
+            if (n == 0) {
+                return {};
+            }
+            if (!write_all(sink, std::span(buffer).first(static_cast<std::size_t>(n)),
+                           abort_.get_token())) {
+                return {};
+            }
         }
-        if (!joined) {
-            return std::unexpected(RecordError::RemuxFailed);
-        }
-        if (auto committed = output_.commit(); !committed) {
-            log("recording: upload failed: {}", core::ports::to_string(committed.error()));
-            return std::unexpected(RecordError::UploadFailed);
-        }
-        return bytes_;
     }
 
     const RecorderDeps& deps_;
     const RecorderSettings& settings_;
-    core::ports::IObjectStream& output_;
+    std::stop_token stop_;
+    // Where the parent keeps what it downloads, out of the children's reach.
+    fs::path pieces_;
+    // The children's writable directory, empty.
+    fs::path child_dir_;
+    std::map<std::uint32_t, std::optional<AudioFormat>> formats_;
+    std::optional<AudioFormat> stream_audio_;
+    // Fires on the caller's stop and on any failure, and stops every stage.
     std::stop_source abort_;
-    // Set only by the caller's stop; abort_ also fires on failures.
-    std::stop_source caller_stopped_;
-    std::stop_callback<Abort> on_stop_;
+    core::ports::IObjectStream* output_ = nullptr;
     std::optional<core::ports::StorageError> upload_error_;
     std::uint64_t bytes_ = 0;
+    std::uint64_t poured_ = 0;
 };
 
-std::expected<void, RecordError> assemble(const RecorderDeps& deps,
-                                          const RecorderSettings& settings,
-                                          const RecordingPlan& plan, const core::StorageKey& key,
-                                          const std::stop_token& stop) {
-    auto output = deps.streams.begin(key, recording_type());
-    if (!output) {
-        return std::unexpected(RecordError::UploadFailed);
-    }
-    Assembly assembly(deps, settings, **output, stop);
-    const auto bytes = assembly.run(plan);
-    if (!bytes) {
-        return std::unexpected(bytes.error());
-    }
-    std::uint64_t segments = 0;
-    for (const RecordingRun& run : plan.runs) {
-        segments += run.last - run.first + 1;
-    }
-    log("recording: {} segments in {} runs, {} missing, {} bytes", segments, plan.runs.size(),
-        plan.missing, *bytes);
-    return {};
+RecordResult result(RecordOutcome outcome, std::string detail,
+                    std::optional<core::VideoId> video = std::nullopt) {
+    return {.outcome = outcome, .video = video, .detail = std::move(detail)};
 }
 
-RecordError from_plan(PlanError e) noexcept {
-    switch (e) {
-    case PlanError::StoreUnreadable:
-        return RecordError::StoreUnreadable;
-    case PlanError::NotEnded:
-    case PlanError::Empty:
-    case PlanError::PlaylistInvalid:
-        return RecordError::PlaylistInvalid;
+RecordResult from_row(const RecordingRow& row) {
+    return result(RecordOutcome::AlreadyRecorded, row.failure, row.video);
+}
+
+// What a problem ends the run with, unless it is one no retry fixes.
+std::optional<RecordResult> passing(const Problem& p) {
+    switch (p.severity) {
+    case Severity::Superseded:
+        return result(RecordOutcome::Superseded, p.detail);
+    case Severity::Transient:
+    case Severity::Stopped:
+        return result(RecordOutcome::Failed, p.detail);
+    case Severity::Permanent:
+        return std::nullopt;
     }
-    return RecordError::PlaylistInvalid;
+    return result(RecordOutcome::Failed, p.detail);
+}
+
+// A problem that no retry fixes is written down, so no run tries again; unless the end it was
+// found on turns out to be a stale writer's, whose stream goes on.
+RecordResult settle(const RecorderDeps& deps, const RecorderSettings& settings,
+                    Recording& recording, const MediaPlaylist& ended, const Problem& p) {
+    if (auto done = passing(p)) {
+        return std::move(*done);
+    }
+    if (auto confirmed = recording.confirm(ended); !confirmed) {
+        if (auto done = passing(confirmed.error())) {
+            return std::move(*done);
+        }
+    }
+    const auto row = deps.catalog.fail(settings.stream.str(), p.detail);
+    if (!row) {
+        return result(RecordOutcome::Failed, "database unavailable; " + p.detail);
+    }
+    if (row->video) {
+        return from_row(*row);
+    }
+    return result(RecordOutcome::Unrecordable, row->failure);
 }
 
 } // namespace
 
-std::string_view to_string(RecordError e) noexcept {
-    switch (e) {
-    case RecordError::PlaylistInvalid:
-        return "stored playlist invalid";
-    case RecordError::StoreUnreadable:
-        return "store unreadable";
-    case RecordError::RemuxFailed:
-        return "remux failed";
-    case RecordError::UploadFailed:
-        return "upload failed";
-    case RecordError::Stopped:
-        return "stopped";
-    case RecordError::DatabaseUnavailable:
-        return "database unavailable";
+std::string_view to_string(RecordOutcome outcome) noexcept {
+    switch (outcome) {
+    case RecordOutcome::Recorded:
+        return "recorded";
+    case RecordOutcome::AlreadyRecorded:
+        return "already recorded";
+    case RecordOutcome::NothingToRecord:
+        return "nothing to record";
+    case RecordOutcome::Superseded:
+        return "superseded";
+    case RecordOutcome::Unrecordable:
+        return "unrecordable";
+    case RecordOutcome::Failed:
+        return "failed";
     }
-    return "unknown";
+    return "failed";
 }
 
-std::expected<std::optional<core::VideoId>, RecordError>
-record_stream(const RecorderDeps& deps, const RecorderSettings& settings,
-              const std::stop_token& stop) {
-    const auto known = deps.recordings.find(settings.stream.str());
+std::uint64_t recording_bound(std::uint32_t max_kbps, core::Seconds max_duration) noexcept {
+    constexpr std::uint64_t kBytesPerKbit = 125;
+    const std::uint64_t media =
+        std::uint64_t{max_kbps} * kBytesPerKbit * static_cast<std::uint64_t>(max_duration.count());
+    return media + (media / 8);
+}
+
+RecordResult record_stream(const RecorderDeps& deps, const RecorderSettings& settings,
+                           const std::stop_token& stop) {
+    const auto known = deps.catalog.find(settings.stream.str());
     if (!known) {
-        return std::unexpected(RecordError::DatabaseUnavailable);
+        return result(RecordOutcome::Failed, "database unavailable");
     }
-    if (*known) {
-        log("recording: already video {}", (*known)->to_string());
-        return *known;
+    if (const std::optional<RecordingRow>& row = *known; row) {
+        return from_row(*row);
     }
-    std::error_code ec;
-    fs::create_directories(settings.work_dir, ec);
-    if (ec) {
-        return std::unexpected(RecordError::RemuxFailed);
+    Recording recording(deps, settings, stop);
+    if (auto ready = recording.prepare(); !ready) {
+        return result(RecordOutcome::Failed, ready.error().detail);
     }
-    const auto ended = read_ended(deps.store, settings.stream, settings.work_dir);
-    if (!ended) {
-        return std::unexpected(ended.error());
+    const auto stored = read_playlist(deps.store, settings.stream, settings.work_dir);
+    if (!stored) {
+        // Nothing is known of the stream's end yet, so nothing is marked either.
+        return result(stored.error().severity == Severity::Permanent ? RecordOutcome::Unrecordable
+                                                                     : RecordOutcome::Failed,
+                      stored.error().detail);
     }
-    if (!*ended) {
-        return std::nullopt;
+    const std::optional<MediaPlaylist>& playlist = *stored;
+    if (!playlist || !playlist->ended || playlist->segments.empty()) {
+        return result(RecordOutcome::NothingToRecord, {});
     }
-    const auto key = key_in(settings.stream, kRecordingName);
-    if (!key) {
-        return std::unexpected(key.error());
+    const MediaPlaylist& ended = *playlist;
+    auto done = recording.record(ended);
+    if (!done) {
+        return settle(deps, settings, recording, ended, done.error());
     }
-    // A run that died after the commit and before the database left a whole recording.
-    const auto existing = deps.store.size(*key);
-    if (!existing) {
-        if (existing.error() != core::ports::StorageError::NotFound) {
-            return std::unexpected(RecordError::StoreUnreadable);
-        }
-        const auto plan = plan_recording(**ended, settings.stream, deps.store);
-        if (!plan) {
-            return std::unexpected(from_plan(plan.error()));
-        }
-        if (auto made = assemble(deps, settings, *plan, *key, stop); !made) {
-            return std::unexpected(made.error());
-        }
-    }
-    const auto video =
-        deps.recordings.record({.stream = settings.stream.str(),
-                                .video = core::VideoId::generate(deps.clock, deps.random),
-                                .owner = settings.owner,
-                                .title = "Live stream " + settings.stream.str(),
-                                .source = *key});
-    if (!video) {
-        return std::unexpected(RecordError::DatabaseUnavailable);
-    }
-    log("recording: queued as video {}", video->to_string());
-    return *video;
+    return std::move(*done);
 }
 
 } // namespace live

@@ -28,8 +28,8 @@ enum class S3TransferConfigError : std::uint8_t { InvalidBucket, InvalidRetryPol
 // reactor. Downloads stream to disk; uploads are one PUT streamed from disk and signed over the
 // file's SHA-256, which is hashed first in a separate pass, so plain-HTTP endpoints (MinIO in
 // development) verify the body too. Transient failures are retried with jittered backoff.
-// Streams are multipart uploads of kStreamPart parts, each held in memory until it is sent;
-// a stream must not outlive the transfer that began it.
+// Streams are multipart uploads of stream_part_bytes() parts, each held in memory until it is
+// sent; a stream must not outlive the transfer that began it.
 class S3Transfer final : public core::ports::IObjectTransfer, public core::ports::IObjectStreams {
     struct Token {
         explicit Token() = default;
@@ -49,9 +49,10 @@ public:
     static constexpr s3util::RetryPolicy::Config kDefaultRetry{
         .base = core::Millis{100}, .cap = core::Millis{5000}, .max_retries = 6};
 
-    // The longest stream recorded, 12 h at the live packager's 20 Mbit/s cap, is 108 GB; in
-    // S3's 10,000 parts that is 10.8 MB a part. 16 MiB parts reach 168 GB.
-    static constexpr std::size_t kStreamPart = std::size_t{16} << 20U;
+    // A stream's parts: at least 16 MiB, and enough larger that `max_bytes` fits in 9,000 of
+    // S3's 10,000, in whole MiB. The thousand to spare absorb a stream a little past its bound
+    // on the way to being refused. One part is held in memory at a time.
+    [[nodiscard]] static std::uint64_t stream_part_bytes(std::uint64_t max_bytes) noexcept;
 
     [[nodiscard]] static std::expected<std::unique_ptr<S3Transfer>, S3TransferConfigError>
     create(Deps deps, const s3util::RetryPolicy::Config& retry = kDefaultRetry);
@@ -78,7 +79,10 @@ public:
                const core::ContentType& type) override;
     [[nodiscard]] std::expected<std::unique_ptr<core::ports::IObjectStream>,
                                 core::ports::StorageError>
-    begin(const core::StorageKey& key, const core::ContentType& type) override;
+    begin(const core::StorageKey& key, const core::ContentType& type,
+          std::uint64_t max_bytes) override;
+    [[nodiscard]] std::expected<void, core::ports::StorageError>
+    remove(const core::StorageKey& key) override;
 
     // Failures only a person can fix (a bad signature, credentials, a missing bucket).
     [[nodiscard]] std::uint64_t paging_errors() const noexcept;

@@ -211,6 +211,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .scratch = *scratch / *stream_text,
                   .sandbox = std::move(*sandbox),
                   .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
+                  .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .segment_seconds = *segment,
                   .window_segments = *window,

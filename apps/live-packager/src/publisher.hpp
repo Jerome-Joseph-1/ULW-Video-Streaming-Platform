@@ -67,9 +67,13 @@ class Publisher {
 public:
     // Reads the stream's playlist from the store when an earlier run left one, and continues
     // from it, after claiming an epoch of its own with a create-only put (see epoch()).
+    // `claimed`, when given, is set to the epoch this call claimed, also when it then refuses:
+    // a stream found ended right after the claim was ended by an older run that is now
+    // superseded by this one's claim, and whoever records the stream must know that claim is
+    // not a newer run still publishing.
     [[nodiscard]] static std::expected<Publisher, PublishError>
     open(PublisherConfig config, core::ports::IObjectTransfer& store,
-         const core::ports::IClock& clock);
+         const core::ports::IClock& clock, std::optional<std::uint32_t>* claimed = nullptr);
 
     // Where the next run of ffmpeg starts numbering.
     [[nodiscard]] std::uint64_t next_sequence() const noexcept { return window_.next_sequence(); }

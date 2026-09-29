@@ -285,7 +285,8 @@ target_include_directories(curl_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(storage_s3_unit_tests unit
     unit/s3store/part_session_test.cpp
-    unit/s3store/s3_store_test.cpp)
+    unit/s3store/s3_store_test.cpp
+    unit/s3store/stream_part_test.cpp)
 target_link_libraries(storage_s3_unit_tests PRIVATE ulw::storage_s3 ulw::test_http_server)
 # White-box tests of the adapter's internals.
 target_include_directories(storage_s3_unit_tests PRIVATE
@@ -513,6 +514,7 @@ if(ULW_BUILD_WORKER)
         unit/live_packager/live_window_test.cpp
         unit/live_packager/media_playlist_test.cpp
         unit/live_packager/publisher_test.cpp
+        unit/live_packager/recorder_test.cpp
         unit/live_packager/recording_plan_test.cpp
         unit/live_packager/segment_tracker_test.cpp
         unit/live_packager/stream_id_test.cpp

@@ -37,6 +37,8 @@ using core::ports::StorageError;
 using ulw::test::TempDir;
 
 constexpr std::size_t kMiB = std::size_t{1} << 20U;
+// What the stream tests declare they will write at most.
+constexpr std::uint64_t kBound = std::uint64_t{64} << 20U;
 
 std::vector<std::byte> pattern(std::size_t n, std::size_t seed = 0) {
     std::vector<std::byte> v(n);
@@ -283,8 +285,8 @@ TEST_P(TransferLaws, AnUploadNeverFollowsASymbolicLink) {
 TEST_P(TransferLaws, AStreamedObjectAppearsWholeOnlyAtItsCommit) {
     // Past two of the largest pieces any backend sends, in writes that straddle them.
     const auto bytes = pattern((40 * kMiB) + 17, 8);
-    const auto k = key("live/s/recording.ts");
-    auto stream = streams().begin(k, segment_type());
+    const auto k = key("videos/v/raw");
+    auto stream = streams().begin(k, segment_type(), kBound);
     ASSERT_TRUE(stream);
     constexpr std::size_t kWrite = (3 * kMiB) + 5;
     for (std::size_t at = 0; at < bytes.size(); at += kWrite) {
@@ -301,27 +303,46 @@ TEST_P(TransferLaws, AStreamedObjectAppearsWholeOnlyAtItsCommit) {
 
 TEST_P(TransferLaws, AStreamDroppedBeforeItsCommitLeavesTheOldObject) {
     write_file(local("old"), pattern(1000, 9));
-    const auto k = key("live/s/recording.ts");
+    const auto k = key("videos/v/raw");
     ASSERT_TRUE(transfer().upload(local("old"), k, segment_type()));
     {
-        auto stream = streams().begin(k, segment_type());
+        auto stream = streams().begin(k, segment_type(), kBound);
         ASSERT_TRUE(stream);
         ASSERT_TRUE((*stream)->write(pattern(2 * kMiB, 10)));
     }
     EXPECT_EQ(transfer().size(k), 1000U);
 }
 
-TEST_P(TransferLaws, ACommittedStreamReplacesTheObjectAndMayBeShort) {
+TEST_P(TransferLaws, ACommittedStreamMayBeShortAndReplacesAnObjectLeftUnderItsKey) {
     write_file(local("old"), pattern(3 * kMiB, 11));
-    const auto k = key("live/s/recording.ts");
+    const auto k = key("videos/v/raw");
     ASSERT_TRUE(transfer().upload(local("old"), k, segment_type()));
     const auto bytes = pattern(100, 12);
-    auto stream = streams().begin(k, segment_type());
+    auto stream = streams().begin(k, segment_type(), kBound);
     ASSERT_TRUE(stream);
     ASSERT_TRUE((*stream)->write(bytes));
     ASSERT_TRUE((*stream)->commit());
     ASSERT_TRUE(transfer().download(k, local("down")));
     EXPECT_TRUE(std::ranges::equal(read_file(local("down")), bytes));
+}
+
+TEST_P(TransferLaws, AStreamRefusesBytesPastItsBoundAndCommitsNothingOfThem) {
+    const auto k = key("videos/v/raw");
+    auto stream = streams().begin(k, segment_type(), 1000);
+    ASSERT_TRUE(stream);
+    ASSERT_TRUE((*stream)->write(pattern(1000, 14)));
+    EXPECT_EQ((*stream)->write(pattern(1, 15)).error(), StorageError::Permanent);
+    stream->reset();
+    EXPECT_EQ(transfer().size(k).error(), StorageError::NotFound);
+}
+
+TEST_P(TransferLaws, ARemovedObjectIsGoneAndRemovingItAgainSucceeds) {
+    write_file(local("up"), pattern(100, 16));
+    const auto k = key("videos/v/raw");
+    ASSERT_TRUE(transfer().upload(local("up"), k, segment_type()));
+    ASSERT_TRUE(streams().remove(k));
+    EXPECT_EQ(transfer().size(k).error(), StorageError::NotFound);
+    EXPECT_TRUE(streams().remove(k));
 }
 
 INSTANTIATE_TEST_SUITE_P(Backends, TransferLaws, ::testing::ValuesIn(backends()),
@@ -354,11 +375,11 @@ TEST(FsTransfer, AStreamDroppedBeforeItsCommitLeavesNoTemporaryBehind) {
     const TempDir root("ulw-fs-stream");
     infra::storage::FsTransfer transfer(root.path());
     {
-        auto stream = transfer.begin(key_of("live/s/recording.ts"), segment_type());
+        auto stream = transfer.begin(key_of("videos/v/raw"), segment_type(), kBound);
         ASSERT_TRUE(stream);
         ASSERT_TRUE((*stream)->write(pattern(1000, 13)));
     }
-    EXPECT_TRUE(fs::is_empty(root.path() / "objects" / "live" / "s"));
+    EXPECT_TRUE(fs::is_empty(root.path() / "objects" / "videos" / "v"));
 }
 
 } // namespace

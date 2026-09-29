@@ -171,7 +171,8 @@ Publisher::Publisher(PublisherConfig config, core::ports::IObjectTransfer& store
 
 std::expected<Publisher, PublishError> Publisher::open(PublisherConfig config,
                                                        core::ports::IObjectTransfer& store,
-                                                       const core::ports::IClock& clock) {
+                                                       const core::ports::IClock& clock,
+                                                       std::optional<std::uint32_t>* claimed) {
     std::error_code ec;
     fs::create_directories(config.outbox, ec);
     if (ec) {
@@ -194,9 +195,12 @@ std::expected<Publisher, PublishError> Publisher::open(PublisherConfig config,
         if (!seen) {
             return std::unexpected(seen.error());
         }
-        const auto claimed = claim_from(store, config, std::max(floor, *seen + 1));
-        if (!claimed) {
-            return std::unexpected(claimed.error());
+        const auto claim = claim_from(store, config, std::max(floor, *seen + 1));
+        if (!claim) {
+            return std::unexpected(claim.error());
+        }
+        if (claimed != nullptr) {
+            *claimed = *claim;
         }
         auto after = read_stored(store, config.stream, config.outbox);
         if (!after) {
@@ -206,7 +210,7 @@ std::expected<Publisher, PublishError> Publisher::open(PublisherConfig config,
         if (!newest) {
             return std::unexpected(newest.error());
         }
-        if (*newest >= static_cast<std::int64_t>(*claimed)) {
+        if (*newest >= static_cast<std::int64_t>(*claim)) {
             floor = *newest + 1;
             continue;
         }
@@ -216,10 +220,10 @@ std::expected<Publisher, PublishError> Publisher::open(PublisherConfig config,
         std::optional<MediaPlaylist> playlist = std::move(after->playlist);
         if (playlist && !playlist->segments.empty()) {
             LiveWindow window = LiveWindow::resume(config.window, std::move(*playlist));
-            return Publisher(std::move(config), store, clock, std::move(window), *claimed, true);
+            return Publisher(std::move(config), store, clock, std::move(window), *claim, true);
         }
         LiveWindow window = LiveWindow::fresh(config.window);
-        return Publisher(std::move(config), store, clock, std::move(window), *claimed, false);
+        return Publisher(std::move(config), store, clock, std::move(window), *claim, false);
     }
     return std::unexpected(PublishError::ClaimFailed);
 }

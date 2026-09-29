@@ -5,6 +5,7 @@
 #include "core/ports/storage.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <span>
@@ -20,16 +21,21 @@ public:
     // piece whatever the object's length.
     [[nodiscard]] virtual std::expected<void, StorageError>
     write(std::span<const std::byte> bytes) = 0;
-    // The object appears whole under its key, replacing any there. Nothing of it is visible
-    // before, and a stream destroyed without a commit leaves nothing behind.
+    // The object appears whole under its key. Nothing of it is visible before, and a stream
+    // destroyed without a commit leaves nothing behind.
     [[nodiscard]] virtual std::expected<void, StorageError> commit() = 0;
 };
 
 class IObjectStreams {
 public:
     virtual ~IObjectStreams() = default;
+    // `max_bytes` bounds what the stream will be written, and sizes the pieces it goes up in;
+    // the stream fails past it.
     [[nodiscard]] virtual std::expected<std::unique_ptr<IObjectStream>, StorageError>
-    begin(const StorageKey& key, const ContentType& type) = 0;
+    begin(const StorageKey& key, const ContentType& type, std::uint64_t max_bytes) = 0;
+    // Removes an object a committed stream left that nothing is to read. Idempotent: an
+    // object already gone counts as removed.
+    [[nodiscard]] virtual std::expected<void, StorageError> remove(const StorageKey& key) = 0;
 };
 
 } // namespace core::ports

@@ -6,6 +6,7 @@
 
 #include <cerrno>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
@@ -98,8 +99,8 @@ std::expected<void, StorageError> install(const Temporary& temp, const fs::path&
 
 class FsObjectStream final : public core::ports::IObjectStream {
 public:
-    FsObjectStream(Temporary temp, fs::path target) noexcept
-        : temp_(std::move(temp)), target_(std::move(target)) {}
+    FsObjectStream(Temporary temp, fs::path target, std::uint64_t max_bytes) noexcept
+        : temp_(std::move(temp)), target_(std::move(target)), max_bytes_(max_bytes) {}
     ~FsObjectStream() override {
         if (!committed_) {
             std::error_code ignored;
@@ -112,6 +113,10 @@ public:
     FsObjectStream& operator=(FsObjectStream&&) = delete;
 
     std::expected<void, StorageError> write(std::span<const std::byte> bytes) override {
+        if (committed_ || bytes.size() > max_bytes_ - written_) {
+            return std::unexpected(StorageError::Permanent);
+        }
+        written_ += bytes.size();
         while (!bytes.empty()) {
             const ssize_t n = ::write(temp_.fd.get(), bytes.data(), bytes.size());
             if (n < 0 && errno == EINTR) {
@@ -138,6 +143,8 @@ public:
 private:
     Temporary temp_;
     fs::path target_;
+    std::uint64_t max_bytes_;
+    std::uint64_t written_ = 0;
     bool committed_ = false;
 };
 
@@ -214,13 +221,23 @@ std::expected<void, StorageError> FsTransfer::place(const fs::path& source,
 }
 
 std::expected<std::unique_ptr<core::ports::IObjectStream>, StorageError>
-FsTransfer::begin(const core::StorageKey& key, const core::ContentType& /*type*/) {
+FsTransfer::begin(const core::StorageKey& key, const core::ContentType& /*type*/,
+                  std::uint64_t max_bytes) {
     fs::path target = object_path(key);
     auto temp = make_temporary(target);
     if (!temp) {
         return std::unexpected(temp.error());
     }
-    return std::make_unique<FsObjectStream>(std::move(*temp), std::move(target));
+    return std::make_unique<FsObjectStream>(std::move(*temp), std::move(target), max_bytes);
+}
+
+std::expected<void, StorageError> FsTransfer::remove(const core::StorageKey& key) {
+    std::error_code ec;
+    fs::remove(object_path(key), ec);
+    if (ec) {
+        return std::unexpected(from_error_code(ec));
+    }
+    return {};
 }
 
 } // namespace infra::storage

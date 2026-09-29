@@ -1,0 +1,355 @@
+#include "media_playlist.hpp"
+#include "recorder.hpp"
+#include "support.hpp"
+#include "support/fake_clock.hpp"
+#include "support/fake_random.hpp"
+#include "support/temp_dir.hpp"
+
+#include <algorithm>
+#include <array>
+#include <functional>
+#include <gtest/gtest.h>
+#include <map>
+#include <mutex>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+namespace {
+
+namespace fs = std::filesystem;
+using infra::ffmpeg::AudioFormat;
+using infra::ffmpeg::RecordingInput;
+using infra::ffmpeg::RecordingRemuxJob;
+using infra::ffmpeg::RemuxError;
+using infra::ffmpeg::RemuxFailure;
+using infra::postgres::NewRecording;
+using infra::postgres::RecordingRow;
+using infra::postgres::RecordingStoreError;
+using live::RecordOutcome;
+
+class FakeCatalog final : public live::IRecordingCatalog {
+public:
+    std::expected<std::optional<RecordingRow>, RecordingStoreError>
+    find(std::string_view stream) override {
+        const auto it = rows.find(std::string(stream));
+        return it == rows.end() ? std::nullopt : std::optional(it->second);
+    }
+    std::expected<RecordingRow, RecordingStoreError>
+    record(const NewRecording& recording) override {
+        if (before_record) {
+            before_record();
+        }
+        if (unavailable) {
+            return std::unexpected(RecordingStoreError::Unavailable);
+        }
+        recorded.push_back(recording);
+        return rows
+            .try_emplace(recording.stream, RecordingRow{.video = recording.video, .failure = {}})
+            .first->second;
+    }
+    std::expected<RecordingRow, RecordingStoreError> fail(std::string_view stream,
+                                                          std::string_view reason) override {
+        return rows
+            .try_emplace(std::string(stream),
+                         RecordingRow{.video = std::nullopt, .failure = std::string(reason)})
+            .first->second;
+    }
+
+    std::map<std::string, RecordingRow> rows;
+    std::vector<NewRecording> recorded;
+    std::function<void()> before_record;
+    bool unavailable = false;
+};
+
+// Each stage copies its input to its output unchanged, so the stored recording is exactly the
+// pieces fed in, in order.
+class PassThroughCopier final : public live::IRecordingCopier {
+public:
+    std::expected<void, RemuxError> run(const RecordingRemuxJob& job,
+                                        const std::function<void(std::string_view)>& on_output,
+                                        const std::stop_token& /*stop*/) override {
+        {
+            const std::lock_guard lock(mutex_);
+            jobs.push_back(job);
+            if (on_run) {
+                on_run(job);
+            }
+        }
+        std::array<char, 4096> buffer{};
+        while (true) {
+            const ssize_t n = ::read(job.input, buffer.data(), buffer.size());
+            if (n <= 0) {
+                break;
+            }
+            if (!refuse) {
+                on_output(std::string_view(buffer.data(), static_cast<std::size_t>(n)));
+            }
+        }
+        if (refuse) {
+            return std::unexpected(RemuxError{.kind = *refuse, .detail = "refused"});
+        }
+        return {};
+    }
+    std::expected<std::optional<AudioFormat>, RemuxError>
+    probe_audio(const fs::path& init, const fs::path& /*work_dir*/,
+                const std::stop_token& /*stop*/) override {
+        const auto it = audio.find(init.filename().string());
+        return it == audio.end() ? std::optional(AudioFormat{.sample_rate = 48'000, .channels = 2})
+                                 : it->second;
+    }
+
+    std::vector<RecordingRemuxJob> jobs;
+    std::function<void(const RecordingRemuxJob&)> on_run;
+    std::map<std::string, std::optional<AudioFormat>> audio;
+    std::optional<RemuxFailure> refuse;
+
+private:
+    std::mutex mutex_;
+};
+
+class RecorderTest : public ::testing::Test {
+protected:
+    [[nodiscard]] fs::path live_dir() const { return root.path() / "objects/live/show"; }
+    [[nodiscard]] fs::path videos_dir() const { return root.path() / "objects/videos"; }
+
+    // Segments first..last of `epoch`, and its init segment, as a run published them.
+    void run_of(std::uint32_t epoch, std::uint64_t first, std::uint64_t last) const {
+        fs::create_directories(live_dir());
+        ulw::test::write_file(live_dir() / ("init_" + std::to_string(epoch) + ".mp4"),
+                              "I" + std::to_string(epoch) + ";");
+        for (std::uint64_t n = first; n <= last; ++n) {
+            ulw::test::write_file(live_dir() / seg(epoch, n), "S" + std::to_string(n) + ";");
+        }
+    }
+    static std::string seg(std::uint32_t epoch, std::uint64_t n) {
+        return "seg_" + std::to_string(epoch) + "_" + std::to_string(n) + ".m4s";
+    }
+
+    // The stored playlist: the last `count` of segments up to `last`, each of the epoch
+    // `epoch_of` gives it.
+    void playlist(std::uint64_t last, std::uint64_t count,
+                  const std::function<std::uint32_t(std::uint64_t)>& epoch_of,
+                  bool ended = true) const {
+        live::MediaPlaylist p{.target_seconds = 2,
+                              .media_sequence = last + 1 - count,
+                              .discontinuity_sequence = 0,
+                              .ended = ended,
+                              .segments = {}};
+        for (std::uint64_t n = p.media_sequence; n <= last; ++n) {
+            p.segments.push_back({.uri = seg(epoch_of(n), n),
+                                  .duration = live::Micros{2'000'000},
+                                  .init = "init_" + std::to_string(epoch_of(n)) + ".mp4",
+                                  .discontinuity = false,
+                                  .program_date_time = std::nullopt});
+        }
+        ulw::test::write_file(live_dir() / "index.m3u8", live::render_media_playlist(p));
+    }
+
+    live::RecordResult record(std::optional<std::uint32_t> own_claim = std::nullopt) {
+        const live::RecorderSettings settings{.stream = *live::StreamId::parse("show"),
+                                              .owner = *core::UserId::parse("auth0|streamer"),
+                                              .work_dir = root.path() / "work",
+                                              .budget = core::Seconds{60},
+                                              .max_bytes = 1 << 20U,
+                                              .own_claim = own_claim};
+        return live::record_stream({.store = store,
+                                    .streams = streams,
+                                    .copier = copier,
+                                    .catalog = catalog,
+                                    .clock = clock,
+                                    .random = random},
+                                   settings, {});
+    }
+
+    [[nodiscard]] std::string raw_of(const core::VideoId& video) const {
+        return ulw::test::read_file(videos_dir() / video.to_string() / "raw");
+    }
+    [[nodiscard]] std::size_t stored_videos() const {
+        std::error_code ec;
+        if (!fs::exists(videos_dir(), ec)) {
+            return 0;
+        }
+        return static_cast<std::size_t>(
+            std::distance(fs::directory_iterator(videos_dir()), fs::directory_iterator()));
+    }
+
+    ulw::test::TempDir root{"ulw-recorder"};
+    ulw::test::RecordingStore store{root.path()};
+    infra::storage::FsTransfer streams{root.path()};
+    PassThroughCopier copier;
+    FakeCatalog catalog;
+    ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+};
+
+TEST_F(RecorderTest, AnEndedStreamGoesUnderItsVideosSourceKeyAndIsQueuedOnce) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    const auto done = record();
+    ASSERT_EQ(done.outcome, RecordOutcome::Recorded) << done.detail;
+    ASSERT_TRUE(done.video);
+    EXPECT_EQ(raw_of(*done.video), "I0;S0;S1;S2;S3;");
+    ASSERT_EQ(catalog.recorded.size(), 1U);
+    EXPECT_EQ(catalog.recorded[0].video, *done.video);
+    EXPECT_EQ(catalog.recorded[0].source.str(), "videos/" + done.video->to_string() + "/raw");
+    EXPECT_EQ(catalog.recorded[0].owner.view(), "auth0|streamer");
+    // Every child writes into an empty directory of its own, apart from the downloaded pieces.
+    ASSERT_EQ(copier.jobs.size(), 2U);
+    for (const RecordingRemuxJob& job : copier.jobs) {
+        EXPECT_EQ(job.work_dir, root.path() / "work/child");
+        EXPECT_TRUE(fs::is_empty(job.work_dir));
+    }
+
+    const auto again = record();
+    EXPECT_EQ(again.outcome, RecordOutcome::AlreadyRecorded);
+    EXPECT_EQ(again.video, done.video);
+    EXPECT_EQ(copier.jobs.size(), 2U);
+    EXPECT_EQ(stored_videos(), 1U);
+}
+
+TEST_F(RecorderTest, EveryRunOfARestartedStreamIsCopiedInOrderBehindItsOwnInitSegment) {
+    run_of(0, 0, 2);
+    run_of(1, 3, 5);
+    playlist(5, 3, [](std::uint64_t) { return 1U; });
+    const auto done = record();
+    ASSERT_EQ(done.outcome, RecordOutcome::Recorded) << done.detail;
+    EXPECT_EQ(raw_of(*done.video), "I0;S0;S1;S2;I1;S3;S4;S5;");
+    ASSERT_EQ(copier.jobs.size(), 3U);
+    EXPECT_EQ(std::ranges::count(copier.jobs, RecordingInput::MpegTs, &RecordingRemuxJob::from), 1);
+}
+
+TEST_F(RecorderTest, ARunWithoutAudioGetsSilenceOfTheFormatAnotherRunCarries) {
+    run_of(0, 0, 1);
+    run_of(1, 2, 3);
+    playlist(3, 2, [](std::uint64_t) { return 1U; });
+    copier.audio["init_0.mp4"] = std::nullopt;
+    copier.audio["init_1.mp4"] = AudioFormat{.sample_rate = 44'100, .channels = 1};
+    ASSERT_EQ(record().outcome, RecordOutcome::Recorded);
+    std::map<std::string, std::optional<AudioFormat>> silence;
+    for (const RecordingRemuxJob& job : copier.jobs) {
+        if (job.from == RecordingInput::FragmentedMp4) {
+            silence[job.silence ? "with" : "without"] = job.silence;
+        }
+    }
+    ASSERT_EQ(silence.size(), 2U);
+    EXPECT_EQ(silence["with"], (AudioFormat{.sample_rate = 44'100, .channels = 1}));
+}
+
+TEST_F(RecorderTest, AStreamThatHasNotEndedHasNothingToRecord) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; }, /*ended=*/false);
+    EXPECT_EQ(record().outcome, RecordOutcome::NothingToRecord);
+    EXPECT_TRUE(copier.jobs.empty());
+    EXPECT_TRUE(catalog.rows.empty());
+}
+
+TEST_F(RecorderTest, AnEndBehindANewerClaimIsAStaleWritersAndNothingIsRecorded) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    ulw::test::write_file(live_dir() / "epoch_1", "claimed\n");
+    const auto done = record();
+    EXPECT_EQ(done.outcome, RecordOutcome::Superseded);
+    EXPECT_TRUE(copier.jobs.empty());
+    EXPECT_TRUE(catalog.rows.empty());
+}
+
+TEST_F(RecorderTest, ThisProcesssOwnClaimDoesNotFenceItOut) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    ulw::test::write_file(live_dir() / "epoch_1", "claimed\n");
+    EXPECT_EQ(record(1).outcome, RecordOutcome::Recorded);
+}
+
+TEST_F(RecorderTest, APlaylistThatMovesOnDuringTheCopyLeavesNoVideoAndNoObject) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    // The stale end is overwritten by the newer packager, which goes on publishing.
+    copier.on_run = [this](const RecordingRemuxJob&) {
+        run_of(1, 4, 4);
+        playlist(4, 2, [](std::uint64_t n) { return n < 4 ? 0U : 1U; }, /*ended=*/false);
+    };
+    const auto done = record();
+    EXPECT_EQ(done.outcome, RecordOutcome::Superseded) << done.detail;
+    EXPECT_TRUE(catalog.rows.empty());
+    EXPECT_EQ(stored_videos(), 1U) << "the video directory remains";
+    EXPECT_TRUE(fs::is_empty(fs::directory_iterator(videos_dir())->path()));
+}
+
+TEST_F(RecorderTest, ARecorderThatLosesTheRaceForTheRowRemovesItsRecording) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    const auto winner = core::VideoId::generate(clock, random);
+    catalog.before_record = [&] {
+        catalog.rows.try_emplace("show", RecordingRow{.video = winner, .failure = {}});
+    };
+    const auto done = record();
+    EXPECT_EQ(done.outcome, RecordOutcome::AlreadyRecorded);
+    EXPECT_EQ(done.video, winner);
+    ASSERT_EQ(catalog.recorded.size(), 1U);
+    EXPECT_FALSE(fs::exists(videos_dir() / catalog.recorded[0].video.to_string() / "raw"));
+}
+
+TEST_F(RecorderTest, ADatabaseDownAtTheInsertRemovesTheRecordingForTheNextRunToRedo) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    catalog.unavailable = true;
+    EXPECT_EQ(record().outcome, RecordOutcome::Failed);
+    EXPECT_TRUE(catalog.rows.empty());
+    for (const auto& dir : fs::directory_iterator(videos_dir())) {
+        EXPECT_TRUE(fs::is_empty(dir.path()));
+    }
+    catalog.unavailable = false;
+    EXPECT_EQ(record().outcome, RecordOutcome::Recorded);
+}
+
+TEST_F(RecorderTest, WhatARunKilledAfterItsCommitLeftIsNeverReferenced) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    const auto orphan = core::VideoId::generate(clock, random);
+    fs::create_directories(videos_dir() / orphan.to_string());
+    ulw::test::write_file(videos_dir() / orphan.to_string() / "raw", "a killed run's");
+    const auto done = record();
+    ASSERT_EQ(done.outcome, RecordOutcome::Recorded);
+    EXPECT_NE(done.video, orphan);
+    EXPECT_EQ(raw_of(*done.video), "I0;S0;S1;S2;S3;");
+    EXPECT_EQ(raw_of(orphan), "a killed run's");
+}
+
+TEST_F(RecorderTest, AMissingInitSegmentMarksTheStreamUnrecordableOnce) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    fs::remove(live_dir() / "init_0.mp4");
+    const auto done = record();
+    EXPECT_EQ(done.outcome, RecordOutcome::Unrecordable);
+    ASSERT_TRUE(catalog.rows.contains("show"));
+    EXPECT_EQ(catalog.rows["show"].failure, "init_0.mp4 is missing");
+    EXPECT_EQ(record().outcome, RecordOutcome::AlreadyRecorded);
+    EXPECT_TRUE(copier.jobs.empty());
+}
+
+TEST_F(RecorderTest, InputFfmpegRefusesMarksTheStreamUnrecordableAndStoresNothing) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    copier.refuse = RemuxFailure::Refused;
+    EXPECT_EQ(record().outcome, RecordOutcome::Unrecordable);
+    EXPECT_FALSE(catalog.rows["show"].failure.empty());
+    for (const auto& dir : fs::directory_iterator(videos_dir())) {
+        EXPECT_TRUE(fs::is_empty(dir.path()));
+    }
+}
+
+TEST_F(RecorderTest, ASandboxThatCannotStartIsLeftForTheNextRun) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    copier.refuse = RemuxFailure::Unavailable;
+    EXPECT_EQ(record().outcome, RecordOutcome::Failed);
+    EXPECT_TRUE(catalog.rows.empty());
+}
+
+TEST(RecordingBound, TheLongestStreamAtTheHighestBitrateWithAnEighthForTheContainer) {
+    // 100 Mbit/s for 12 hours is 540 GB.
+    EXPECT_EQ(live::recording_bound(100'000, core::Seconds{12 * 3600}), 607'500'000'000U);
+}
+
+} // namespace

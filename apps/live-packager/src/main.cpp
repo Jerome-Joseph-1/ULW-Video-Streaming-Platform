@@ -25,6 +25,7 @@
 #include <exception>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <print>
@@ -61,6 +62,49 @@ std::string_view to_string(live::StorageBackend backend) noexcept {
     }
     return "r2";
 }
+
+class PgCatalog final : public live::IRecordingCatalog {
+public:
+    explicit PgCatalog(std::string conninfo) : db_(std::move(conninfo)) {}
+
+    std::expected<std::optional<infra::postgres::RecordingRow>,
+                  infra::postgres::RecordingStoreError>
+    find(std::string_view stream) override {
+        return db_.find(stream);
+    }
+    std::expected<infra::postgres::RecordingRow, infra::postgres::RecordingStoreError>
+    record(const infra::postgres::NewRecording& recording) override {
+        return db_.record(recording);
+    }
+    std::expected<infra::postgres::RecordingRow, infra::postgres::RecordingStoreError>
+    fail(std::string_view stream, std::string_view reason) override {
+        return db_.fail(stream, reason);
+    }
+
+private:
+    infra::postgres::PgLiveRecordings db_;
+};
+
+class SandboxedCopier final : public live::IRecordingCopier {
+public:
+    SandboxedCopier(infra::ffmpeg::RecordingRemuxConfig config, const core::ports::IClock& clock)
+        : remuxer_(std::move(config), clock) {}
+
+    std::expected<void, infra::ffmpeg::RemuxError>
+    run(const infra::ffmpeg::RecordingRemuxJob& job,
+        const std::function<void(std::string_view)>& on_output,
+        const std::stop_token& stop) override {
+        return remuxer_.run(job, on_output, stop);
+    }
+    std::expected<std::optional<infra::ffmpeg::AudioFormat>, infra::ffmpeg::RemuxError>
+    probe_audio(const fs::path& init, const fs::path& work_dir,
+                const std::stop_token& stop) override {
+        return remuxer_.probe_audio(init, work_dir, stop);
+    }
+
+private:
+    const infra::ffmpeg::RecordingRemuxer remuxer_;
+};
 
 struct Storage {
     std::unique_ptr<infra::s3util::EnvCredentialProvider> credentials;
@@ -106,6 +150,35 @@ std::expected<Storage, std::string> make_storage(const live::Config& config,
     storage.streams = transfer->get();
     storage.transfer = std::move(*transfer);
     return storage;
+}
+
+// One line for how the recording went; only what may pass exits non-zero, for a restart to
+// try again.
+int report(const live::RecordResult& done) {
+    switch (done.outcome) {
+    case live::RecordOutcome::Recorded:
+        live::log("recording: queued as video {}",
+                  done.video ? done.video->to_string() : std::string());
+        return EXIT_SUCCESS;
+    case live::RecordOutcome::AlreadyRecorded:
+        if (done.video) {
+            live::log("recording: already video {}", done.video->to_string());
+        } else {
+            live::log("recording: already marked unrecordable: {}", done.detail);
+        }
+        return EXIT_SUCCESS;
+    case live::RecordOutcome::NothingToRecord:
+        live::log("recording: nothing to record");
+        return EXIT_SUCCESS;
+    case live::RecordOutcome::Superseded:
+    case live::RecordOutcome::Unrecordable:
+        live::log("recording: {}: {}", live::to_string(done.outcome), done.detail);
+        return EXIT_SUCCESS;
+    case live::RecordOutcome::Failed:
+        live::log("recording: failed: {}", done.detail);
+        return EXIT_FAILURE;
+    }
+    return EXIT_FAILURE;
 }
 
 // SIGTERM, SIGINT and SIGUSR1 are blocked in every thread and taken here, synchronously, so no
@@ -185,49 +258,51 @@ int run() {
     });
     const infra::ffmpeg::LiveRemuxConfig ffmpeg{
         .sandbox = sandbox, .ffmpeg = config->ffmpeg, .search_path = config->search_path};
-    std::optional<infra::postgres::PgLiveRecordings> recordings;
+    std::optional<PgCatalog> catalog;
     std::optional<live::RecorderSettings> recorder;
-    if (config->recording) {
-        recordings.emplace(config->recording->database_url);
-        recorder.emplace(live::RecorderSettings{.stream = config->stream,
-                                                .owner = config->recording->owner,
-                                                .work_dir = config->scratch / "recording",
-                                                .budget = config->max_duration});
+    if (const std::optional<live::RecordingTarget>& target = config->recording; target) {
+        catalog.emplace(target->database_url);
+        recorder.emplace(live::RecorderSettings{
+            .stream = config->stream,
+            .owner = target->owner,
+            .work_dir = config->scratch / "recording",
+            .budget = config->max_duration,
+            .max_bytes = live::recording_bound(config->max_kbps, config->max_duration),
+            .own_claim = std::nullopt});
     }
-    const infra::ffmpeg::RecordingRemuxer copier(ffmpeg, clock);
+    SandboxedCopier copier({.sandbox = sandbox,
+                            .ffmpeg = config->ffmpeg,
+                            .ffprobe = config->ffprobe,
+                            .search_path = config->search_path},
+                           clock);
     // A stream that has ended is recorded, never streamed again; the recording is repeated by
     // every run that finds it not yet done, so one killed before the job was queued is made
     // good by the next.
     const auto record = [&]() -> int {
-        if (!recorder) {
+        if (!recorder || !catalog) {
             return EXIT_SUCCESS;
         }
-        const auto video = live::record_stream({.store = *storage->transfer,
-                                                .streams = *storage->streams,
-                                                .remuxer = copier,
-                                                .recordings = *recordings,
-                                                .clock = clock,
-                                                .random = random},
-                                               *recorder, drain.get_token());
-        if (!video) {
-            live::log("recording: {}", live::to_string(video.error()));
-            return EXIT_FAILURE;
-        }
-        if (!*video) {
-            live::log("recording: nothing to record");
-        }
-        return EXIT_SUCCESS;
+        const auto done = live::record_stream({.store = *storage->transfer,
+                                               .streams = *storage->streams,
+                                               .copier = copier,
+                                               .catalog = *catalog,
+                                               .clock = clock,
+                                               .random = random},
+                                              *recorder, drain.get_token());
+        return report(done);
     };
 
+    std::optional<std::uint32_t> claimed;
     auto publisher = live::Publisher::open({.stream = config->stream,
                                             .window = {.target_seconds = config->segment_seconds,
                                                        .max_segments = config->window_segments},
                                             .media_dir = media_dir,
                                             .outbox = config->scratch / "outbox"},
-                                           *storage->transfer, clock);
+                                           *storage->transfer, clock, &claimed);
     if (!publisher && publisher.error() == live::PublishError::AlreadyEnded && recorder) {
         live::log("{} ({}) stream={} has ended; recording it", info.version, info.git_sha,
                   config->stream.str());
+        recorder->own_claim = claimed;
         return record();
     }
     if (!publisher) {

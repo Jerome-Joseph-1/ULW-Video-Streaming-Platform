@@ -6,16 +6,17 @@
 #include "sync_connection.hpp"
 
 #include <chrono>
+#include <utility>
 
 namespace infra::postgres {
 
 namespace {
 
-// A packager's two statements wait at most this long; it is restarted into them after that.
+// A packager's statements wait at most this long; it is restarted into them after that.
 constexpr SessionSettings kRecordingSession{.application_name = "ulw-live-packager",
                                             .statement_timeout = core::Millis{10'000}};
 
-constexpr Sql kFind = "SELECT video_id FROM live_recordings WHERE stream_id = $1";
+constexpr Sql kFind = "SELECT video_id, failure FROM live_recordings WHERE stream_id = $1";
 
 // The stream's row goes first and everything else hangs off it, so a second call for the stream
 // inserts nothing at all. The job is what the gateway's upload commit queues.
@@ -31,14 +32,18 @@ video AS (
 INSERT INTO jobs (video_id, kind, source_key, request_id)
 SELECT id, 'transcode', $5, $6 FROM video)sql";
 
+constexpr Sql kFail = R"sql(
+INSERT INTO live_recordings (stream_id, failure) VALUES ($1, $2)
+ON CONFLICT (stream_id) DO NOTHING)sql";
+
 constexpr Sql kNotifyWorkers = "NOTIFY job_available";
 
 std::unexpected<RecordingStoreError> unavailable() {
     return std::unexpected(RecordingStoreError::Unavailable);
 }
 
-std::expected<std::optional<core::VideoId>, RecordingStoreError> find_in(SyncConnection& conn,
-                                                                         std::string_view stream) {
+std::expected<std::optional<RecordingRow>, RecordingStoreError> find_in(SyncConnection& conn,
+                                                                        std::string_view stream) {
     const auto found = conn.exec(kFind, Params{}.add_text(stream));
     if (!found) {
         return unavailable();
@@ -46,16 +51,38 @@ std::expected<std::optional<core::VideoId>, RecordingStoreError> find_in(SyncCon
     if (found->rows() == 0) {
         return std::nullopt;
     }
-    auto video = domain_at<core::VideoId>(*found, 0, 0);
-    if (!video) {
+    RecordingRow row;
+    if (found->get(0, 0)) {
+        row.video = domain_at<core::VideoId>(*found, 0, 0);
+        if (!row.video) {
+            return std::unexpected(RecordingStoreError::Corrupt);
+        }
+        return row;
+    }
+    row.failure = std::string(found->get(0, 1).value_or(""));
+    if (row.failure.empty()) {
         return std::unexpected(RecordingStoreError::Corrupt);
     }
-    return *video;
+    return row;
+}
+
+// The row a write just made, or the one that was there first.
+std::expected<RecordingRow, RecordingStoreError> row_after(SyncConnection& conn,
+                                                           std::string_view stream) {
+    auto row = find_in(conn, stream);
+    if (!row) {
+        return std::unexpected(row.error());
+    }
+    std::optional<RecordingRow>& found = *row;
+    if (!found) {
+        return std::unexpected(RecordingStoreError::Corrupt);
+    }
+    return std::move(*found);
 }
 
 } // namespace
 
-std::expected<std::optional<core::VideoId>, RecordingStoreError>
+std::expected<std::optional<RecordingRow>, RecordingStoreError>
 PgLiveRecordings::find(std::string_view stream) {
     auto conn = SyncConnection::open(conninfo_, kRecordingSession);
     if (!conn) {
@@ -64,7 +91,7 @@ PgLiveRecordings::find(std::string_view stream) {
     return find_in(*conn, stream);
 }
 
-std::expected<core::VideoId, RecordingStoreError>
+std::expected<RecordingRow, RecordingStoreError>
 PgLiveRecordings::record(const NewRecording& recording) {
     auto conn = SyncConnection::open(conninfo_, kRecordingSession);
     if (!conn) {
@@ -87,14 +114,19 @@ PgLiveRecordings::record(const NewRecording& recording) {
             return unavailable();
         }
     }
-    auto video = find_in(*conn, recording.stream);
-    if (!video) {
-        return std::unexpected(video.error());
+    return row_after(*conn, recording.stream);
+}
+
+std::expected<RecordingRow, RecordingStoreError> PgLiveRecordings::fail(std::string_view stream,
+                                                                        std::string_view reason) {
+    auto conn = SyncConnection::open(conninfo_, kRecordingSession);
+    if (!conn) {
+        return unavailable();
     }
-    if (!*video) {
-        return std::unexpected(RecordingStoreError::Corrupt);
+    if (!conn->exec(kFail, Params{}.add_text(stream).add_text(reason))) {
+        return unavailable();
     }
-    return **video;
+    return row_after(*conn, stream);
 }
 
 } // namespace infra::postgres

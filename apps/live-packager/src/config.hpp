@@ -42,6 +42,7 @@ struct Config {
     std::filesystem::path scratch;
     std::filesystem::path sandbox;
     std::string ffmpeg;
+    std::string ffprobe;
     std::string search_path;
     std::uint32_t segment_seconds = 0;
     std::size_t window_segments = 0;

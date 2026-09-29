@@ -117,10 +117,10 @@ std::expected<std::string, StorageError> file_sha256(int fd) {
 class S3ObjectStream final : public core::ports::IObjectStream {
 public:
     S3ObjectStream(const s3::Control& control, const s3util::Bucket& bucket, core::StorageKey key,
-                   std::string upload_id, std::uint32_t max_parts)
+                   std::string upload_id, std::size_t part_bytes, std::uint64_t max_bytes)
         : control_(control), bucket_(bucket), key_(std::move(key)),
-          upload_id_(std::move(upload_id)), max_parts_(max_parts) {
-        buffer_.reserve(S3Transfer::kStreamPart);
+          upload_id_(std::move(upload_id)), part_bytes_(part_bytes), max_bytes_(max_bytes) {
+        buffer_.reserve(part_bytes_);
     }
     ~S3ObjectStream() override {
         if (!done_) {
@@ -135,16 +135,16 @@ public:
     S3ObjectStream& operator=(S3ObjectStream&&) = delete;
 
     std::expected<void, StorageError> write(std::span<const std::byte> bytes) override {
-        if (done_) {
+        if (done_ || bytes.size() > max_bytes_ - written_) {
             return std::unexpected(StorageError::Permanent);
         }
+        written_ += bytes.size();
         while (!bytes.empty()) {
-            const std::size_t take =
-                std::min(bytes.size(), S3Transfer::kStreamPart - buffer_.size());
+            const std::size_t take = std::min(bytes.size(), part_bytes_ - buffer_.size());
             buffer_.insert(buffer_.end(), bytes.begin(),
                            bytes.begin() + static_cast<std::ptrdiff_t>(take));
             bytes = bytes.subspan(take);
-            if (buffer_.size() == S3Transfer::kStreamPart) {
+            if (buffer_.size() == part_bytes_) {
                 if (auto sent = send_part(); !sent) {
                     return sent;
                 }
@@ -170,9 +170,6 @@ public:
 
 private:
     std::expected<void, StorageError> send_part() {
-        if (parts_.size() == max_parts_) {
-            return std::unexpected(StorageError::Permanent);
-        }
         const auto number = static_cast<std::uint32_t>(parts_.size() + 1);
         const auto target =
             bucket_.object(key_, {{.name = "partNumber", .value = std::to_string(number)},
@@ -200,7 +197,9 @@ private:
     const s3util::Bucket& bucket_;
     core::StorageKey key_;
     std::string upload_id_;
-    std::uint32_t max_parts_;
+    std::size_t part_bytes_;
+    std::uint64_t max_bytes_;
+    std::uint64_t written_ = 0;
     std::vector<std::byte> buffer_;
     std::vector<s3util::CompletedPart> parts_;
     bool done_ = false;
@@ -305,14 +304,44 @@ std::expected<void, StorageError> S3Transfer::upload_new(const std::filesystem::
     return put_result;
 }
 
+std::uint64_t S3Transfer::stream_part_bytes(std::uint64_t max_bytes) noexcept {
+    constexpr std::uint64_t kMiB = std::uint64_t{1} << 20U;
+    constexpr std::uint64_t kMinPart = 16 * kMiB;
+    constexpr std::uint64_t kPartsUsed = 9'000;
+    const std::uint64_t per_part = (max_bytes / kPartsUsed) + (max_bytes % kPartsUsed != 0 ? 1 : 0);
+    const std::uint64_t whole_mib = ((per_part + kMiB - 1) / kMiB) * kMiB;
+    return std::max(kMinPart, whole_mib);
+}
+
 std::expected<std::unique_ptr<core::ports::IObjectStream>, StorageError>
-S3Transfer::begin(const core::StorageKey& key, const core::ContentType& type) {
+S3Transfer::begin(const core::StorageKey& key, const core::ContentType& type,
+                  std::uint64_t max_bytes) {
+    const std::uint64_t part = stream_part_bytes(max_bytes);
+    if (part > deps_.profile.max_part_bytes) {
+        return std::unexpected(StorageError::Permanent);
+    }
     auto upload_id = s3::initiate_upload(*control_, endpoint_->bucket(), key, type);
     if (!upload_id) {
         return std::unexpected(upload_id.error());
     }
     return std::make_unique<S3ObjectStream>(*control_, endpoint_->bucket(), key,
-                                            std::move(*upload_id), deps_.profile.max_parts);
+                                            std::move(*upload_id), static_cast<std::size_t>(part),
+                                            max_bytes);
+}
+
+std::expected<void, StorageError> S3Transfer::remove(const core::StorageKey& key) {
+    const auto target = endpoint_->bucket().object(key);
+    const auto removed = control_->retrying<void>([&]() -> std::expected<void, Failed> {
+        auto response = control_->send(curl::Method::Delete, target, {}, {}, 0);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+        return {};
+    });
+    if (!removed && removed.error() == StorageError::NotFound) {
+        return {};
+    }
+    return removed;
 }
 
 std::expected<void, StorageError> S3Transfer::put(const std::filesystem::path& source,
