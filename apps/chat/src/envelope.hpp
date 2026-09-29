@@ -21,20 +21,27 @@
 //       "delivery":"lossy"   optional: skip messages while this connection is behind, rather
 //                            than be closed for it ("durable", the default)
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
+//   {"type":"watch","user":"<sub>"}     hear when the user comes online or goes offline
+//   {"type":"unwatch","user":"<sub>"}   stop; unanswered
 // Server to client:
 //   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
 //                                                      whose last seq is lower missed messages
 //   {"type":"sent","room":"<uuid>","id":"<message id>","seq":<integer>}
 //   {"type":"message","room":"<uuid>","seq":<integer>,"sender":"<sub>","id":"<message id>",
 //    "body":"<base64url>"}
-//   {"type":"error","reason":"<code>"}          with "room" and "id" when known, and
-//                                               "retry_after_ms" when the reason is rate_limited
+//   {"type":"watching","user":"<sub>","status":"online"|"offline"}   the answer to watch: what
+//                                                                   this node knows now
+//   {"type":"presence","user":"<sub>","status":"online"|"offline"}   each change after that
+//   {"type":"error","reason":"<code>"}          with "room" and "id" when known, "user" for a
+//                                               watch, and "retry_after_ms" when the reason is
+//                                               rate_limited
 // A message id is 1 to 64 of [A-Za-z0-9_-], chosen by the sender and unique per room: sending
 // the same id again is answered with the seq the first send got, and delivered once. A body is
 // any bytes, in base64url without padding (RFC 4648 section 5); they are carried and returned
 // as they came, never read, never logged. Seqs of a room rise by one per message; a jump means
 // messages this connection did not get (skipped as lossy, missed while away, or sequenced
-// while the room was changing owners), which the client fetches from history.
+// while the room was changing owners), which the client fetches from history. Room ids of UUID
+// version 8 are presence rooms (presence_room.hpp), which no client joins or sends to.
 namespace chat {
 
 enum class Delivery : std::uint8_t { Durable, Lossy };
@@ -51,19 +58,29 @@ struct Send {
     std::vector<std::byte> body;
 };
 
-using Command = std::variant<Join, Send>;
+struct Watch {
+    core::UserId user;
+};
+
+struct Unwatch {
+    core::UserId user;
+};
+
+using Command = std::variant<Join, Send, Watch, Unwatch>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
     // Not an object, an unknown or missing type, a missing field, a field nobody defined, or a
     // value of the wrong kind.
     Malformed,
-    // Not a canonical lowercase UUID.
+    // Not a canonical lowercase UUID, or a presence room's.
     BadRoom,
     // Not a message id.
     BadId,
     // Not base64url.
     BadBody,
+    // Not a user id.
+    BadUser,
 };
 
 [[nodiscard]] std::expected<Command, EnvelopeError> parse_command(std::string_view text);
@@ -78,6 +95,10 @@ void write_error(std::string& out, std::string_view reason,
                  const std::optional<rt::MessageKey>& id = std::nullopt);
 // At most how many bytes a message with a body of `body` bytes takes on the client's socket.
 [[nodiscard]] std::size_t message_wire_size(std::size_t body) noexcept;
+
+// `type` is "watching" or "presence".
+void write_presence(std::string& out, std::string_view type, const core::UserId& user, bool online);
+void write_user_error(std::string& out, std::string_view reason, const core::UserId& user);
 
 void write_rate_limited(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                         core::Millis retry_after);
