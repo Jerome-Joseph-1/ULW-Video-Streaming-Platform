@@ -229,7 +229,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ws, http, hls]
+        target: [ws, http, hls, toml]
     env:
       CC: clang-19
       CXX: clang++-19
@@ -247,8 +247,8 @@ jobs:
             schedule | workflow_dispatch) seconds=1800 ;;
             push) seconds=300 ;;
             *)
-              if git diff --quiet "origin/$BASE_REF...HEAD" -- http codec tests/fuzz core/src/hls.cpp \
-                  core/include/core/util/hls.hpp; then
+              if git diff --quiet "origin/$BASE_REF...HEAD" -- http codec ops tests/fuzz \
+                  core/src/hls.cpp core/include/core/util/hls.hpp; then
                 seconds=0
               else
                 seconds=300
