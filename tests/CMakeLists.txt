@@ -293,12 +293,15 @@ target_link_libraries(message_store_conformance_tests PRIVATE ulw::messages_memo
 target_include_directories(message_store_conformance_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
-# Its schema, plans and timings on a live Postgres, as the suites above.
+# Its schema, plans and timings, and the owner's fenced write of a message, on a live Postgres
+# as the suites above.
 ulw_add_test_suite(message_store_integration_tests integration
     integration/message_store_test.cpp
     integration/postgres_harness.cpp
+    integration/sequenced_append_test.cpp
     PROPERTIES RESOURCE_LOCK postgres)
-target_link_libraries(message_store_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
+target_link_libraries(message_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg_store
+    PkgConfig::LIBPQ)
 target_include_directories(message_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 

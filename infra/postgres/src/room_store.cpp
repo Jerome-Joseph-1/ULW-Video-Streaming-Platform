@@ -1,9 +1,13 @@
 #include "infra/postgres/room_store.hpp"
 
+#include "core/ports/message_store.hpp"
+
 #include "operation.hpp"
 #include "pool.hpp"
 #include "result.hpp"
 
+#include <chrono>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -82,6 +86,18 @@ constexpr Sql kAppend = R"sql(
 UPDATE room_state SET last_seq = last_seq + 1
  WHERE room_id = $1 AND owner_generation = $2
 RETURNING last_seq)sql";
+
+// The fenced append and the message's row in one statement, so one transaction and one commit:
+// a seq is taken only with its row, and a fenced writer takes neither. A row already at the
+// new seq (written by nothing but this statement) fails the whole statement, seq included.
+constexpr Sql kAppendMessage = R"sql(
+WITH next AS (
+    UPDATE room_state SET last_seq = last_seq + 1
+     WHERE room_id = $1 AND owner_generation = $2
+    RETURNING last_seq)
+INSERT INTO chat_messages (room_id, seq, sender, body, sent_at)
+SELECT $1, last_seq, $3, $4, timestamptz 'epoch' + $5 * interval '1 microsecond' FROM next
+RETURNING seq)sql";
 
 // '-infinity' is older than any staleness bound, so the rooms are claimable at once.
 constexpr Sql kRelease = R"sql(
@@ -338,6 +354,18 @@ StoreResult<void> decode_nothing(const Result& /*r*/) {
     return {};
 }
 
+// No row: the room has moved on to another generation. Fenced out.
+StoreResult<std::optional<std::uint64_t>> decode_seq(const Result& r) noexcept {
+    if (r.rows() == 0) {
+        return std::optional<std::uint64_t>{};
+    }
+    const auto seq = r.get(0, 0).and_then(parse_uint64);
+    if (!seq) {
+        return std::unexpected(StoreError::Corrupt);
+    }
+    return seq;
+}
+
 class Append final : public Operation {
 public:
     Append(const core::RoomId& room, std::uint64_t generation,
@@ -354,17 +382,7 @@ public:
             done_(std::unexpected(StoreError::Unavailable));
             return std::nullopt;
         }
-        // No row: the room has moved on to another generation. Fenced out.
-        if (outcome->rows() == 0) {
-            done_(std::optional<std::uint64_t>{});
-            return std::nullopt;
-        }
-        const auto seq = outcome->get(0, 0).and_then(parse_uint64);
-        if (!seq) {
-            done_(std::unexpected(StoreError::Corrupt));
-            return std::nullopt;
-        }
-        done_(seq);
+        done_(decode_seq(*outcome));
         return std::nullopt;
     }
 
@@ -375,6 +393,49 @@ public:
 private:
     core::RoomId room_;
     std::uint64_t generation_;
+    StoreCallback<std::optional<std::uint64_t>> done_;
+};
+
+// Keeps the sender and body the statement binds: the pool sends it on a later iteration.
+class AppendMessage final : public Operation {
+public:
+    AppendMessage(const core::RoomId& room, std::uint64_t generation, const core::UserId& sender,
+                  std::vector<std::byte> body, core::WallTime sent_at,
+                  StoreCallback<std::optional<std::uint64_t>> done)
+        : room_(room), generation_(generation), sender_(sender), body_(std::move(body)),
+          sent_at_(
+              std::chrono::floor<std::chrono::microseconds>(sent_at.time_since_epoch()).count()),
+          done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = kAppendMessage,
+                         .params = Params{}
+                                       .add_uuid(room_.uuid())
+                                       .add_int(as_int(generation_))
+                                       .add_text(sender_.view())
+                                       .add_bytes(body_)
+                                       .add_int(sent_at_)};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(StoreError::Unavailable));
+            return std::nullopt;
+        }
+        done_(decode_seq(*outcome));
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(StoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    std::uint64_t generation_;
+    core::UserId sender_;
+    std::vector<std::byte> body_;
+    std::int64_t sent_at_;
     StoreCallback<std::optional<std::uint64_t>> done_;
 };
 
@@ -601,6 +662,18 @@ void PgRoomStore::heartbeat(const core::NodeId& node, const core::Uuid& incarnat
 void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
                          StoreCallback<std::optional<std::uint64_t>> done) {
     impl_->pool().submit(std::make_unique<Append>(room, generation, std::move(done)));
+}
+
+void PgRoomStore::append_message(const core::RoomId& room, std::uint64_t generation,
+                                 const core::UserId& sender, std::vector<std::byte> body,
+                                 core::WallTime sent_at,
+                                 StoreCallback<std::optional<std::uint64_t>> done) {
+    if (body.size() > core::ports::kMaxMessageBody) {
+        // The client edge never decodes a larger message (ADR-0029); one here is a caller's bug.
+        std::abort();
+    }
+    impl_->pool().submit(std::make_unique<AppendMessage>(room, generation, sender, std::move(body),
+                                                         sent_at, std::move(done)));
 }
 
 void PgRoomStore::release(const core::NodeId& node, std::vector<OwnedRoom> rooms,

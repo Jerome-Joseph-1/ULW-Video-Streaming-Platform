@@ -1,0 +1,230 @@
+// The owner's write path for a durable room: the fenced seq and the message's row, taken
+// together by PgRoomStore::append_message, and read back through the message store.
+#include "infra/postgres/message_store.hpp"
+#include "infra/postgres/room_store.hpp"
+#include "net/offload_pool.hpp"
+#include "net/reactor_factory.hpp"
+#include "os/system_clock.hpp"
+#include "os/system_random.hpp"
+
+#include "conformance/message_store_harness.hpp"
+#include "postgres_harness.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <format>
+#include <gtest/gtest.h>
+#include <memory>
+#include <optional>
+#include <print>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace {
+
+using core::ports::StoredMessage;
+using infra::postgres::Params;
+using rt::StoreResult;
+using ulw::test::scalar;
+using ulw::test::ScratchDatabase;
+using Seq = StoreResult<std::optional<std::uint64_t>>;
+
+std::vector<std::byte> bytes(std::string_view text) {
+    std::vector<std::byte> out(text.size());
+    std::ranges::transform(text, out.begin(), [](char c) { return static_cast<std::byte>(c); });
+    return out;
+}
+
+core::WallTime at(std::int64_t second) {
+    return core::WallTime{std::chrono::seconds{1'790'000'000 + second}};
+}
+
+double millis(std::chrono::steady_clock::duration d) {
+    return std::chrono::duration<double, std::milli>(d).count();
+}
+
+class SequencedAppendTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        ScratchDatabase::open(db_);
+        if (IsSkipped() || HasFatalFailure()) {
+            return;
+        }
+        conn_.emplace(db_->session());
+        auto reactor = net::make_reactor(net::ReactorKind::Epoll, clock_, 1024);
+        ASSERT_TRUE(reactor);
+        reactor_ = std::move(*reactor);
+        auto offload = net::OffloadPool::create(*reactor_, 1);
+        ASSERT_TRUE(offload);
+        offload_ = std::move(*offload);
+        auto rooms = infra::postgres::PgRoomStore::create(*reactor_, *offload_,
+                                                          {.conninfo = db_->conninfo()});
+        ASSERT_TRUE(rooms) << rooms.error();
+        rooms_ = std::move(*rooms);
+        auto messages = infra::postgres::PgMessageStore::create(*reactor_, *offload_,
+                                                                {.conninfo = db_->conninfo()});
+        ASSERT_TRUE(messages) << messages.error();
+        messages_ = std::move(*messages);
+    }
+
+    void TearDown() override {
+        offload_.reset();
+        messages_.reset();
+        rooms_.reset();
+        reactor_.reset();
+    }
+
+    template <class T, class Call> StoreResult<T> ask(Call call) {
+        std::optional<StoreResult<T>> answer;
+        call([&answer](StoreResult<T> r) noexcept { answer = std::move(r); });
+        if (!ulw::test::pump_until(*reactor_, [&] { return answer.has_value(); })) {
+            ADD_FAILURE() << "the room store never answered";
+            return std::unexpected(rt::StoreError::Unavailable);
+        }
+        return std::move(*answer);
+    }
+
+    std::uint64_t owned_by(const core::RoomId& room, const core::NodeId& node) {
+        const auto owner =
+            ask<rt::Ownership>([&](auto done) { rooms_->resolve(room, node, std::move(done)); });
+        EXPECT_TRUE(owner);
+        EXPECT_EQ(owner ? owner->node : a_, node);
+        return owner ? owner->generation : 0;
+    }
+
+    Seq send(const core::RoomId& room, std::uint64_t generation, std::string_view body) {
+        return ask<std::optional<std::uint64_t>>([&](auto done) {
+            rooms_->append_message(room, generation, alice_, bytes(body), at(0), std::move(done));
+        });
+    }
+
+    std::vector<StoredMessage> history(const core::RoomId& room) {
+        const auto page = ulw::test::ask<std::vector<StoredMessage>>(*reactor_, [&](auto done) {
+            messages_->history_after(room, 0, core::ports::kMaxHistoryRows, std::move(done));
+        });
+        EXPECT_TRUE(page);
+        return page.value_or(std::vector<StoredMessage>{});
+    }
+
+    std::string last_seq(const core::RoomId& room) {
+        return scalar(*conn_, "SELECT last_seq FROM room_state WHERE room_id = $1",
+                      Params{}.add_uuid(room.uuid()));
+    }
+
+    void go_quiet(const core::RoomId& room) {
+        ASSERT_TRUE(
+            conn_->exec("UPDATE room_assignments SET heartbeat_at = now() - interval '6 seconds' "
+                        "WHERE room_id = $1",
+                        Params{}.add_uuid(room.uuid())));
+    }
+
+    core::RoomId new_room() { return core::RoomId::generate(clock_, random_); }
+
+    os::SystemClock clock_;
+    os::SystemRandom random_;
+    std::unique_ptr<ScratchDatabase> db_;
+    std::optional<infra::postgres::SyncConnection> conn_;
+    std::unique_ptr<net::IReactor> reactor_;
+    std::unique_ptr<net::OffloadPool> offload_;
+    std::unique_ptr<infra::postgres::PgRoomStore> rooms_;
+    std::unique_ptr<infra::postgres::PgMessageStore> messages_;
+    const core::NodeId a_ = *core::NodeId::parse("chat-a");
+    const core::NodeId b_ = *core::NodeId::parse("chat-b");
+    const core::UserId alice_ = *core::UserId::parse("auth0|alice");
+};
+
+TEST_F(SequencedAppendTest, EachMessageIsStoredUnderTheSeqItTook) {
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = owned_by(room, a_);
+    EXPECT_EQ(send(room, generation, "one"), Seq{1});
+    EXPECT_EQ(send(room, generation, "two"), Seq{2});
+    EXPECT_EQ(send(room, generation, "three"), Seq{3});
+    EXPECT_EQ(last_seq(room), "3");
+
+    const auto stored = history(room);
+    ASSERT_EQ(stored.size(), 3U);
+    EXPECT_EQ(stored[0],
+              (StoredMessage{.seq = 1, .sender = alice_, .sent_at = at(0), .body = bytes("one")}));
+    EXPECT_EQ(stored[2].seq, 3U);
+    EXPECT_EQ(stored[2].body, bytes("three"));
+}
+
+TEST_F(SequencedAppendTest, AFencedWriterTakesNoSeqAndStoresNoRow) {
+    const core::RoomId room = new_room();
+    const std::uint64_t first = owned_by(room, a_);
+    ASSERT_EQ(send(room, first, "before the takeover"), Seq{1});
+    go_quiet(room);
+    const std::uint64_t second = owned_by(room, b_);
+    ASSERT_GT(second, first);
+
+    EXPECT_EQ(send(room, first, "from the former owner"), Seq{std::nullopt});
+    EXPECT_EQ(last_seq(room), "1");
+    EXPECT_EQ(history(room).size(), 1U);
+
+    EXPECT_EQ(send(room, second, "from the new owner"), Seq{2});
+    const auto stored = history(room);
+    ASSERT_EQ(stored.size(), 2U);
+    EXPECT_EQ(stored[1].body, bytes("from the new owner"));
+}
+
+TEST_F(SequencedAppendTest, AnInsertThatFailsGivesTheSeqBack) {
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = owned_by(room, a_);
+    // A row where the next seq would go, which nothing but a broken writer leaves.
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_messages (room_id, seq, sender, body, sent_at) "
+                            "VALUES ($1, 1, 'auth0|mallory', '\\x00', now())",
+                            Params{}.add_uuid(room.uuid())));
+    EXPECT_EQ(send(room, generation, "lost"), Seq{std::unexpected(rt::StoreError::Unavailable)});
+    // The seq was not taken without its row.
+    EXPECT_EQ(last_seq(room), "0");
+}
+
+TEST_F(SequencedAppendTest, OneStatementCostsOneCommitWhereTwoWritesCostTwo) {
+    // An owner writes a room's messages one at a time (ADR-0035), each before delivery: these
+    // are per-message latencies of a durable room, and their inverse its ceiling.
+    constexpr std::size_t kCount = 300;
+    const core::RoomId together = new_room();
+    const core::RoomId apart = new_room();
+    const std::uint64_t g_together = owned_by(together, a_);
+    const std::uint64_t g_apart = owned_by(apart, a_);
+    std::vector<double> combined;
+    std::vector<double> seq_then_row;
+    std::vector<double> seq_only;
+    for (std::size_t i = 0; i < kCount; ++i) {
+        auto started = std::chrono::steady_clock::now();
+        ASSERT_TRUE(send(together, g_together, "a line of chat, about forty bytes long"));
+        combined.push_back(millis(std::chrono::steady_clock::now() - started));
+
+        started = std::chrono::steady_clock::now();
+        const auto seq = ask<std::optional<std::uint64_t>>(
+            [&](auto done) { rooms_->append(apart, g_apart, std::move(done)); });
+        ASSERT_TRUE(seq && *seq);
+        const auto mid = std::chrono::steady_clock::now();
+        ASSERT_TRUE(ulw::test::ask<void>(*reactor_, [&](auto done) {
+            messages_->append(apart, **seq, alice_, bytes("a line of chat, about forty bytes long"),
+                              at(0), std::move(done));
+        }));
+        seq_only.push_back(millis(mid - started));
+        seq_then_row.push_back(millis(std::chrono::steady_clock::now() - started));
+    }
+    const auto quantile = [](std::vector<double>& samples, double q) {
+        std::ranges::sort(samples);
+        return samples[static_cast<std::size_t>(q * static_cast<double>(samples.size() - 1))];
+    };
+    const auto report = [&](std::string_view name, std::vector<double>& samples) {
+        const double p50 = quantile(samples, 0.5);
+        const double p99 = quantile(samples, 0.99);
+        std::println("{}: p50 {:.3f} ms, p99 {:.3f} ms", name, p50, p99);
+        RecordProperty(std::format("{}_p50_ms", name), std::format("{:.3f}", p50));
+        return p50;
+    };
+    const double one = report("seq_and_row_in_one_statement", combined);
+    const double two = report("seq_then_row_as_two_statements", seq_then_row);
+    report("seq_alone", seq_only);
+    // Loose: a single statement must not cost more than the two it replaces.
+    EXPECT_LT(one, two * 1.5);
+}
+
+} // namespace

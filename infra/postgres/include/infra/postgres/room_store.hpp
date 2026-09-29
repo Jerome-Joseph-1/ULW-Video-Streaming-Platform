@@ -8,6 +8,7 @@
 #include <expected>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace infra::postgres {
 
@@ -58,6 +59,14 @@ public:
                    rt::StoreCallback<std::vector<core::RoomId>> done) override;
     void append(const core::RoomId& room, std::uint64_t generation,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override;
+    // append(), and in the same statement the message's row in chat_messages
+    // (migrations/0005_chat_messages.sql): the seq is taken only with its row, and a fenced
+    // writer takes neither. `body` is at most core::ports::kMaxMessageBody. Not idempotent: a
+    // repeat after a lost answer is a second message under the next seq.
+    void append_message(const core::RoomId& room, std::uint64_t generation,
+                        const core::UserId& sender, std::vector<std::byte> body,
+                        core::WallTime sent_at,
+                        rt::StoreCallback<std::optional<std::uint64_t>> done);
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
                  rt::StoreCallback<void> done) override;
     void advertise(const core::NodeId& node, std::string address, const core::Uuid& incarnation,
