@@ -372,3 +372,9 @@ if(ULW_FUZZ)
     target_compile_options(sdp_fuzz PRIVATE -fsanitize=fuzzer)
     target_link_options(sdp_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
+
+ulw_add_test_suite(rtp_unit_tests unit
+    unit/rtp/demux_test.cpp
+    unit/rtp/rtcp_test.cpp
+    unit/rtp/rtp_test.cpp)
+target_link_libraries(rtp_unit_tests PRIVATE ulw::codec_rtp)
