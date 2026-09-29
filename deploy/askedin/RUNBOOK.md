@@ -133,7 +133,7 @@ CREATE DATABASE ulw_stage OWNER ulw_stage;
 The role owns its database, which gives the migrations their DDL rights (docs/adr/0031).
 
 Chat message bodies travel as bound parameters, which the server writes to its log whenever it
-logs a statement with its parameters or an error in one (docs/adr/0045). Keep them out, on the
+logs a statement with its parameters or an error in one (docs/adr/0046). Keep them out, on the
 same database, as the same superuser, whatever statement logging is on now or later:
 
 ```sql
