@@ -282,7 +282,10 @@ void GatewayUnderTest::set_health(std::optional<bool> database_up, std::optional
         loop_->database_up = database_up;
         loop_->store_up = store_up;
     });
-    // The turn after this one has probed with the new answers.
+    // Two turns after this one have probed with the new answers: a dependency takes two
+    // failed probes in a row to count as down.
+    on_loop([] {});
+    on_loop([] {});
     on_loop([] {});
 }
 

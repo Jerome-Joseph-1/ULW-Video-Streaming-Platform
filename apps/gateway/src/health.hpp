@@ -28,6 +28,13 @@ inline constexpr core::Millis kProbeInterval{5'000};
 // timeout plus its 2 s statement timeout, then the store's 6.3 s of retry backoff and the
 // requests between them; 30 s is well past both and still short of an operator's patience.
 inline constexpr core::Millis kProbeStale{30'000};
+// A dependency counts as down after this many failed probes in a row. The probe's database
+// session is replaced on the call after it breaks, so a restart or failover of the database
+// costs one failed probe even when the new server answers the next; a store answering one
+// request with a 503 costs one too. One failure turning every replica unready together would
+// turn a blip into an outage; two in a row, at least 5 s apart, is a dependency that is down,
+// and /readyz says so within 10 s.
+inline constexpr std::uint32_t kMissesBeforeUnready = 2;
 
 // What the probe thread last learned, for the loop to read. Every field stands alone, so
 // relaxed atomics suffice; none of them publishes anything else.
@@ -44,7 +51,10 @@ public:
         paging_errors_.store(n, std::memory_order_relaxed);
     }
 
+    // A dependency that has never answered is down at once; one that has, only after
+    // kMissesBeforeUnready failed probes in a row.
     [[nodiscard]] Readiness readiness(core::MonoTime now) const noexcept;
+    // What the last probe found, for the dependency_up gauge.
     [[nodiscard]] bool database_up() const noexcept {
         return database_up_.load(std::memory_order_relaxed);
     }
@@ -67,8 +77,14 @@ public:
     }
 
 private:
+    // Failed probes in a row; kNeverUp until the first success.
+    static constexpr std::uint32_t kNeverUp = 0xFFFF'FFFF;
+    static void count(std::atomic<std::uint32_t>& misses, bool up) noexcept;
+
     std::atomic<bool> database_up_{false};
     std::atomic<bool> store_up_{false};
+    std::atomic<std::uint32_t> database_misses_{kNeverUp};
+    std::atomic<std::uint32_t> store_misses_{kNeverUp};
     // Steady-clock milliseconds; zero until the first probe finishes.
     std::atomic<std::int64_t> probed_at_ms_{0};
     // -1 until the database has answered, and again whenever it does not.

@@ -16,9 +16,21 @@ std::int64_t millis(core::MonoTime t) noexcept {
 
 } // namespace
 
+void Health::count(std::atomic<std::uint32_t>& misses, bool up) noexcept {
+    const std::uint32_t before = misses.load(std::memory_order_relaxed);
+    if (up) {
+        misses.store(0, std::memory_order_relaxed);
+    } else if (before != kNeverUp) {
+        misses.store(std::min(before + 1, kNeverUp - 1), std::memory_order_relaxed);
+    }
+}
+
+// Written by the probe thread alone, so the read-modify-writes in count() race with nothing.
 void Health::record(bool database_up, bool store_up, core::MonoTime at) noexcept {
     database_up_.store(database_up, std::memory_order_relaxed);
     store_up_.store(store_up, std::memory_order_relaxed);
+    count(database_misses_, database_up);
+    count(store_misses_, store_up);
     probed_at_ms_.store(millis(at), std::memory_order_relaxed);
 }
 
@@ -45,10 +57,10 @@ Readiness Health::readiness(core::MonoTime now) const noexcept {
     if (millis(now) - at > kProbeStale.count()) {
         return Readiness::Stale;
     }
-    if (!database_up()) {
+    if (database_misses_.load(std::memory_order_relaxed) >= kMissesBeforeUnready) {
         return Readiness::DatabaseDown;
     }
-    if (!store_up()) {
+    if (store_misses_.load(std::memory_order_relaxed) >= kMissesBeforeUnready) {
         return Readiness::StoreDown;
     }
     return Readiness::Ready;

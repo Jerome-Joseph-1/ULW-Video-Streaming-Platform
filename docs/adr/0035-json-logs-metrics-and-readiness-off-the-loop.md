@@ -77,9 +77,18 @@ where it lives: the S3 store's paging errors, the log's drops, the probe's gauge
 loop turns. A probe thread asks the database for the oldest due job's age on a session of its
 own (2 s statement timeout) and the store for `health/probe`, a key nothing writes, where
 `NotFound` means it answered; it also samples `/proc/self/fd` and RSS. `/readyz` (and
-`/api/v1/readyz`) is 200 only when the last probe found both, 503 before the first probe
-(`starting`), while draining, with a dependency down (named in the body), or when no probe has
-finished for 30 s, which is past a healthy probe's worst case. Transitions are logged once.
+`/api/v1/readyz`) is 503 before the first probe (`starting`), while draining, when no probe has
+finished for 30 s (past a healthy probe's worst case), and with a dependency down, named in the
+body. A dependency that has never answered is down at once; one that has is down after two
+failed probes in a row. Every replica probes the same database and store, so readiness that
+flipped on one failure would take them all out of the load balancer together on a blip: the
+probe's session is replaced on the call after it breaks, so a database restart or failover
+costs one failed probe even when the new server answers the next. Two in a row, at least 5 s
+apart, is an outage, reported within 10 s. `dependency_up` shows the last probe's raw answer.
+While the database does not answer, `jobs_oldest_queued_seconds` is NaN rather than its last
+value. The probe stops when the drain begins, so a probe stuck on a dead dependency (at most
+about 13 s) runs out during the drain and the exit stays inside the 45 s grace. Transitions
+are logged once.
 
 **Drain and the service manager.** SIGTERM: `/readyz` 503 and `STOPPING=1`, the listener closes,
 idle connections close, requests in flight get up to 30 s, then exit 0. `READY=1` is sent once

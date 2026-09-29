@@ -42,13 +42,30 @@ protected:
 TEST_F(HealthProbeTest, ReadyOnlyAfterAProbeFoundBothDependencies) {
     EXPECT_EQ(health.readiness(clock.now()), Readiness::Starting);
     gateway::HealthProbe probe(health, checks(), clock, log);
+    database_error = "connection refused";
+    probe.probe_once();
+    // Never reached: not ready at once.
+    EXPECT_EQ(health.readiness(clock.now()), Readiness::DatabaseDown);
+    database_error.clear();
     probe.probe_once();
     EXPECT_EQ(health.readiness(clock.now()), Readiness::Ready);
-    database_error = "connection refused";
+}
+
+TEST_F(HealthProbeTest, OneFailedProbeIsABlipTwoInARowAreAnOutage) {
+    gateway::HealthProbe probe(health, checks(), clock, log);
+    probe.probe_once();
+    database_error = "server closed the connection unexpectedly";
+    probe.probe_once();
+    EXPECT_EQ(health.readiness(clock.now()), Readiness::Ready);
+    EXPECT_FALSE(health.database_up());
     probe.probe_once();
     EXPECT_EQ(health.readiness(clock.now()), Readiness::DatabaseDown);
     database_error.clear();
+    probe.probe_once();
+    EXPECT_EQ(health.readiness(clock.now()), Readiness::Ready);
     store_error = "transient";
+    probe.probe_once();
+    EXPECT_EQ(health.readiness(clock.now()), Readiness::Ready);
     probe.probe_once();
     EXPECT_EQ(health.readiness(clock.now()), Readiness::StoreDown);
 }
