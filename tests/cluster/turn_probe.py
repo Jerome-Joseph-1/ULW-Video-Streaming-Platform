@@ -4,9 +4,10 @@ tests/cluster/stunner_check.py runs it in a container on the sandbox's outside n
 can equally be run from any machine against a real TURN server.
 
     turn_probe.py HOST PORT                  a Binding request only
-    turn_probe.py HOST PORT --secret S [--user U] [--permit IP] [--forbid IP]
+    TURN_SECRET=... turn_probe.py HOST PORT [--user U] [--permit IP] [--forbid IP]
 
-With --secret (STUNner's ephemeral auth shared secret, ADR-0033) it also allocates a relay
+With TURN_SECRET in its environment (STUNner's ephemeral auth shared secret, ADR-0033; never
+on the command line, where shell history and the process list keep it) it also allocates a relay
 with a credential minted from it, asks for a permission to each --permit and --forbid peer,
 releases the allocation, and tries two allocations that must fail: a wrong password and a
 correctly signed credential that has expired.
@@ -144,7 +145,6 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("host")
     parser.add_argument("port", type=int)
-    parser.add_argument("--secret")
     parser.add_argument("--user", default="probe")
     ipv4 = lambda v: str(ipaddress.IPv4Address(v))  # noqa: E731
     parser.add_argument("--permit", action="append", default=[], type=ipv4)
@@ -152,8 +152,9 @@ def main(argv):
     args = parser.parse_args(argv)
     try:
         report = {"binding": binding(args.host, args.port)}
-        if args.secret:
-            report.update(turn(args.host, args.port, args.secret, args.user, args.permit,
+        secret = os.environ.get("TURN_SECRET")
+        if secret:
+            report.update(turn(args.host, args.port, secret, args.user, args.permit,
                                args.forbid))
     except NoAnswer as e:
         sys.exit(f"turn_probe: {e}")

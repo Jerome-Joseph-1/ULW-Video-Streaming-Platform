@@ -353,9 +353,13 @@ kubectl -n apps-stage get deploy stunner livekit              # 1/1 each
 From a machine outside the cluster (a laptop on another network), with the stage secret:
 
 ```sh
-tests/cluster/turn_probe.py <TURN_HOST> 3478 --secret "$TURN_SECRET" \
-  --permit <livekit pod IP> --forbid <any other pod IP>
+TURN_SECRET=$(set -a; . ./.env.stage; printf '%s' "$TURN_SECRET") \
+  tests/cluster/turn_probe.py <TURN_HOST> 3478 \
+  --permit <livekit pod IP> --forbid <any other pod IP> --forbid 127.0.0.1 --forbid <node IP>
 ```
+
+The secret goes in through the environment, read from the env file, so it never reaches the
+command line or the shell history.
 
 It only sends STUN and TURN requests. Expect `binding.mapped` to be the machine's public
 address (compare `curl -s https://ifconfig.me`): anything else means the node masquerades

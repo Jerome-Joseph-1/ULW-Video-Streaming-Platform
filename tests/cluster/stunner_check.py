@@ -23,6 +23,7 @@ context kind-ulw-e2e, whose API server must be on 127.0.0.1, checked before anyt
 """
 import base64
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -106,11 +107,13 @@ def shared_secret():
 def probe(livekit, forbidden, secret):
     result = subprocess.run(
         ["docker", "run", "--rm", "--network", OUTSIDE_NETWORK, "--ip", PROBE_ADDRESS,
+         "--env", "TURN_SECRET",
          "--read-only", "--volume", f"{HERE}:/probe:ro", pinned_probe_image(),
          "python3", "/probe/turn_probe.py", TURN_SERVER[0], str(TURN_SERVER[1]),
-         "--secret", secret, "--user", "stunner-check", "--permit", livekit,
+         "--user", "stunner-check", "--permit", livekit,
          "--forbid", forbidden],
-        capture_output=True, text=True)
+        # docker passes TURN_SECRET on from its own environment: never on a command line.
+        env={**os.environ, "TURN_SECRET": secret}, capture_output=True, text=True)
     if result.returncode != 0:
         raise Failure(f"probe: {result.stderr.strip()}")
     return json.loads(result.stdout)
