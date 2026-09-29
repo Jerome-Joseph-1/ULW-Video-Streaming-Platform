@@ -16,5 +16,7 @@ compile_commands.json
 /target/
 __pycache__/
 /deploy/local/.tools/
+/tests/call/node_modules/
+/tests/call/test-results/
 /load-report/
 /diagnostics/
