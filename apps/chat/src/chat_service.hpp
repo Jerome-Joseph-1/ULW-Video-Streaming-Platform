@@ -199,7 +199,7 @@ private:
     void subscribe(Room& room, ClientId id, const Join& join);
     void fell_behind(ClientId id, const core::RoomId& room) noexcept;
     void catch_up(Room& room, ClientId id, Client& c);
-    void replay(const Room& room, Client& c, std::uint64_t after);
+    std::uint64_t replay(const Room& room, Client& c, std::uint64_t after);
     void keep(Room& room, const rt::Message& message);
     void drop_oldest(Room& room) noexcept;
     void forget_oldest() noexcept;

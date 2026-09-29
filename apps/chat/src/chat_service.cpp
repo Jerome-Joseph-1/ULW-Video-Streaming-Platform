@@ -289,29 +289,30 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
     const Delivery delivery =
         core::ports::is_stream_chat(room.id) ? Delivery::Lossy : join.delivery;
     const auto it = std::ranges::find(room.subscribers, id, &Room::Subscriber::id);
+    std::optional<std::uint64_t> was_behind;
     if (it == room.subscribers.end()) {
         room.subscribers.push_back(
             {.id = id, .client = c->client, .delivery = delivery, .behind = std::nullopt});
     } else {
-        // What it was owed as a lossy client is not sent now that it has joined again; the seqs
-        // it sees show the gap.
+        // What it was owed as a lossy client is not sent now that it has joined again, beyond
+        // what this join's resume sends it; the seqs it sees show the gap.
         it->delivery = delivery;
-        counters_.lossy_drops += owed(it->behind, room.head);
+        was_behind = it->behind;
         it->behind.reset();
         std::erase(c->behind, room.id);
     }
     std::string out;
     write_joined(out, room.id, room.head);
     c->client->push(out);
-    if (join.after) {
-        replay(room, *c, *join.after);
-    }
+    const std::uint64_t resumed_from = join.after ? replay(room, *c, *join.after) : room.head + 1;
+    counters_.lossy_drops += owed(was_behind, std::min(room.head, resumed_from - 1));
 }
 
 // The newest kept messages after `after` that fit the budget, sent oldest first. Anything older
 // is a gap the client sees in the seqs, and fills from history. The budget is the client's for
-// every resume within one linger, so that joining again and again replays no more.
-void ChatService::replay(const Room& room, Client& c, std::uint64_t after) {
+// every resume within one linger, so that joining again and again replays no more. Answers the
+// first seq it sent, or the one past the room's head when it sent none.
+std::uint64_t ChatService::replay(const Room& room, Client& c, std::uint64_t after) {
     const core::MonoTime now = clock_.now();
     if (now - c.replay_window_start >= limits_.linger) {
         c.replay_window_start = now;
@@ -342,6 +343,7 @@ void ChatService::replay(const Room& room, Client& c, std::uint64_t after) {
         c.client->push(out);
         ++counters_.replayed;
     }
+    return first == room.kept.end() ? room.head + 1 : first->seq;
 }
 
 void ChatService::send(ClientId id, Send send) {

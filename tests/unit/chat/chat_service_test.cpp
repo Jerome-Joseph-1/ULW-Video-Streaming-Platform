@@ -757,6 +757,40 @@ TEST_F(ChatServiceTest, JoiningAgainForgetsWhatALossyClientWasOwedAndCountsItDro
     EXPECT_EQ(service_->counters().lossy_drops, 2U);
 }
 
+// Rejoining with a resume sends again what it names from the node's kept messages: those are
+// not dropped, only what the resume leaves out.
+TEST_F(ChatServiceTest, ARejoinThatResumesCountsDroppedOnlyWhatItsResumeLeavesOut) {
+    FakeClient viewer;
+    FakeClient other;
+    const auto v = attach(viewer);
+    const auto o = attach(other, "bob");
+    join(v, std::nullopt, chat::Delivery::Lossy);
+    join(o, std::nullopt, chat::Delivery::Lossy);
+    rt::IMember& room = rooms_.admit();
+    for (std::uint64_t seq = 1; seq <= 499; ++seq) {
+        deliver(room, seq);
+    }
+    // Behind from 500 up to the head, 563: owed 64, the most a lossy client is owed.
+    viewer.unsent = other.unsent = kBehind;
+    for (std::uint64_t seq = 500; seq <= 563; ++seq) {
+        deliver(room, seq);
+    }
+    viewer.take();
+    other.take();
+    viewer.unsent = other.unsent = 0;
+    join(v, 499, chat::Delivery::Lossy);
+    std::vector<std::uint64_t> owed;
+    for (std::uint64_t seq = 500; seq <= 563; ++seq) {
+        owed.push_back(seq);
+    }
+    EXPECT_EQ(seqs(viewer.take()), owed);
+    EXPECT_EQ(service_->counters().lossy_drops, 0U);
+    // A resume from later leaves 500..530 out, and only those are dropped.
+    join(o, 530, chat::Delivery::Lossy);
+    EXPECT_EQ(seqs(other.take()), std::vector<std::uint64_t>(owed.begin() + 31, owed.end()));
+    EXPECT_EQ(service_->counters().lossy_drops, 31U);
+}
+
 TEST_F(ChatServiceTest, AClientThatLeavesBeforeItCaughtUpHasTheRestCountedDropped) {
     FakeClient viewer;
     const auto v = attach(viewer);
