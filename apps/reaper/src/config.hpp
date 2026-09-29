@@ -21,6 +21,10 @@ struct Config {
     std::string bucket;
     // How long the gateway lets an upload live, plus a margin; see Options::orphan_after.
     core::Seconds orphan_after{};
+    // Who to become when started as root.
+    std::string run_as_user;
+    // Stay root when started as root with no run_as_user; otherwise that is refused.
+    bool allow_root = false;
 };
 
 struct ConfigError {

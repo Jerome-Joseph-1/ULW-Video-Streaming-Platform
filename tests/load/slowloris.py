@@ -38,6 +38,7 @@ import argparse
 import http.client
 import json
 import socket
+import ssl
 import threading
 import time
 import urllib.parse
@@ -57,6 +58,23 @@ DEFAULT_UPLOAD_RATE_BPS = 9 * 1024
 DEFAULT_UPLOAD_SIZE = 8 << 20
 # What the legitimate uploader sends each time: 1 MiB, a short clip.
 LEGIT_UPLOAD_SIZE = 1 << 20
+
+
+# Set from an https --url: every slow connection then completes a TLS handshake first, so what
+# it trickles is HTTP, not a stalled handshake. A load tool against a sandbox's self-signed
+# listener, so nothing is verified.
+TLS_CONTEXT = None
+
+
+def dial(host, port):
+    sock = socket.create_connection((host, port), timeout=10)
+    if TLS_CONTEXT is None:
+        return sock
+    try:
+        return TLS_CONTEXT.wrap_socket(sock, server_hostname=host)
+    except OSError:
+        sock.close()
+        raise
 
 
 class SlowlorisStats:
@@ -106,7 +124,7 @@ def slow_header_connection(host, port, byte_interval, deadline, stats):
     ]
     started = time.monotonic()
     try:
-        sock = socket.create_connection((host, port), timeout=10)
+        sock = dial(host, port)
     except OSError:
         with stats.lock:
             stats.connect_errors += 1
@@ -146,7 +164,10 @@ def slow_header_connection(host, port, byte_interval, deadline, stats):
 
 
 def create_upload(host, port, token, size):
-    conn = http.client.HTTPConnection(host, port, timeout=10)
+    if TLS_CONTEXT is None:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+    else:
+        conn = http.client.HTTPSConnection(host, port, timeout=10, context=TLS_CONTEXT)
     try:
         conn.request("POST", "/api/v1/uploads",
                      body=json.dumps({"filename": "slow.mp4", "size_bytes": size,
@@ -172,7 +193,7 @@ def slow_body_connection(host, port, body_rate, token, deadline, stats):
         return
     started = time.monotonic()
     try:
-        sock = socket.create_connection((host, port), timeout=10)
+        sock = dial(host, port)
     except OSError:
         with stats.lock:
             stats.connect_errors += 1
@@ -229,7 +250,7 @@ def slow_upload_connection(host, port, body_rate, size, token, deadline, stats):
         return
     started = time.monotonic()
     try:
-        sock = socket.create_connection((host, port), timeout=10)
+        sock = dial(host, port)
     except OSError:
         with stats.lock:
             stats.connect_errors += 1
@@ -299,9 +320,14 @@ def main():
     parser.add_argument("--token-file", help="body mode: one bearer token per line, "
                                               "round-robined (3 uploads per user at most)")
     parser.add_argument("--legit-url", help="base URL for a concurrent legit client loop")
+    parser.add_argument("--legit-source", metavar="ADDRESS",
+                        help="local address the legit client connects from, e.g. 127.0.0.2, so "
+                             "the gateway's per-address limits tell it from the abusive traffic")
     parser.add_argument("--legit-token", help="bearer token for the legit client; required "
                                               "with --legit-url")
     args = parser.parse_args()
+    if args.legit_source:
+        legit_client.SOURCE_ADDRESS = (args.legit_source, 0)
     if args.legit_url and not args.legit_token:
         parser.error("--legit-url needs --legit-token")
     tokens = []
@@ -317,6 +343,11 @@ def main():
                          f"{-(-args.connections // 3)} tokens: the gateway admits 3 uploads a user")
 
     parts = urllib.parse.urlsplit(args.url)
+    if parts.scheme == "https":
+        global TLS_CONTEXT
+        TLS_CONTEXT = ssl.create_default_context()
+        TLS_CONTEXT.check_hostname = False
+        TLS_CONTEXT.verify_mode = ssl.CERT_NONE
     stats = SlowlorisStats()
     deadline = time.monotonic() + args.duration
 
