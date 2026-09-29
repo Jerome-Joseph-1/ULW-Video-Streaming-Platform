@@ -15,10 +15,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 here=$root/deploy/local
 state=$here/.state
 tools=$("$here/tools.sh")
-cluster=ulw-e2e
-export KUBECONFIG=$state/kubeconfig
+# shellcheck source=deploy/local/sandbox.sh
+source "$here/sandbox.sh"
 kind() { "$tools/kind" "$@"; }
-kubectl() { "$tools/kubectl" "$@"; }
 
 # shellcheck source=deploy/local/images.sh
 source "$here/images.sh"
@@ -35,9 +34,12 @@ mkdir -p "$state/images" "$state/pki"
 
 if ! kind get clusters | grep -qx "$cluster"; then
     log "creating kind cluster $cluster"
-    kind create cluster --name "$cluster" --config "$here/kind.yaml" --kubeconfig "$KUBECONFIG" \
+    kind create cluster --name "$cluster" --config "$here/kind.yaml" --kubeconfig "$kubeconfig" \
         --wait 180s
 fi
+# Rewritten on every run, so the file always describes this cluster, whatever became of it.
+kind export kubeconfig --name "$cluster" --kubeconfig "$kubeconfig"
+require_sandbox
 
 # The worker's seccomp profile, where the target's runbook installs it on k8s-prod.
 node=$cluster-control-plane
@@ -89,6 +91,7 @@ pinned() {
 }
 pinned "$eg_image" "$eg_digest"
 pinned "$envoy_image" "$envoy_digest"
+pinned "$kube_router_image" "$kube_router_digest"
 
 # start NAME DOCKER_RUN_ARGS... runs a backing service on the kind network, where the node
 # reaches it as k8s-prod reaches its host's services; its data is a tmpfs and goes with it.
@@ -102,8 +105,11 @@ start() {
     fi
 }
 start "$pg" --tmpfs /var/lib/postgresql/data --env "POSTGRES_PASSWORD=$password" "$pg_image"
+# MinIO is also published on the host's loopback: presigned segment URLs name it as the pods
+# do (minio:9000), and the playback check reaches it there with that Host header, as a viewer
+# resolving the store's name would. CORS as in compose.yaml (ADR-0028).
 start "$minio" --tmpfs /data --env MINIO_ROOT_USER=ulw-e2e --env "MINIO_ROOT_PASSWORD=$password" \
-    "$minio_image" server /data
+    --env 'MINIO_API_CORS_ALLOW_ORIGIN=*' --publish 127.0.0.1:19000:9000 "$minio_image" server /data
 
 until docker exec "$pg" pg_isready --quiet --username postgres; do sleep 1; done
 until docker exec "$minio" mc alias set local http://127.0.0.1:9000 ulw-e2e "$password" \
@@ -191,4 +197,4 @@ kubectl -n envoy-gateway-system wait --for=condition=Available deployment \
 # Envoy takes a moment to program the routes after its pod is ready.
 curl -fsS -o /dev/null --retry 60 --retry-all-errors --retry-delay 1 \
     -X POST "http://127.0.0.1:18080/mock-auth/token?sub=probe"
-log "up: http://127.0.0.1:18080 (kubeconfig $KUBECONFIG)"
+log "up: http://127.0.0.1:18080 (kubeconfig $kubeconfig, context $context)"

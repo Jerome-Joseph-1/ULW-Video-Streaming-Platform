@@ -8,8 +8,11 @@ e2e-up:
 e2e-down:
 	deploy/local/e2e-down.sh
 
+# Always the sandbox: a ULW_E2E_URL left in the environment would aim the run at a real
+# deployment, which only an explicit, named invocation may do (deploy/askedin/RUNBOOK.md).
 e2e-test:
-	tests/cluster/vod_flow.py
+	python3 tests/cluster/guard_test.py
+	env -u ULW_E2E_URL -u ULW_E2E_TOKEN tests/cluster/vod_flow.py
 
 validate-manifests:
 	deploy/local/validate-manifests.sh --server

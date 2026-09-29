@@ -9,9 +9,12 @@ tools=$("$here/tools.sh")
 # shellcheck source=deploy/local/images.sh
 source "$here/images.sh"
 
-"$tools/kind" delete cluster --name ulw-e2e
+# shellcheck source=deploy/local/sandbox.sh
+source "$here/sandbox.sh"
+"$tools/kind" delete cluster --name "$cluster" --kubeconfig "$kubeconfig"
 docker rm --force ulw-e2e-pg ulw-e2e-minio >/dev/null 2>&1 || true
 # Postgres and MinIO stay: compose.yaml runs the same images.
 docker image rm "${built_images[@]}" "$eg_image" "${eg_image%:*}@$eg_digest" "$envoy_image" \
-    "${envoy_image%:*}@$envoy_digest" >/dev/null 2>&1 || true
+    "${envoy_image%:*}@$envoy_digest" "$kube_router_image" \
+    "${kube_router_image%:*}@$kube_router_digest" >/dev/null 2>&1 || true
 rm -rf "$here/.state"

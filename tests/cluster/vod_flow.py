@@ -4,23 +4,31 @@
 Every request goes through Envoy's HTTPRoute at 127.0.0.1:18080 with a token minted by the
 mock auth-service, as a browser's would through askedin-gateway:
 
-  auth        each signing algorithm, the cookie, key rotation, and refusals
+  auth        each signing algorithm, the cookie, key rotation, refusals, and the
+              askedin-gateway stand-in replacing forged x-user-* headers with the token's
   upload      a clip uploaded chunk by chunk, transcoded by the worker, reaching ready
+  playback    the master and every media playlist through the route, and every init and media
+              segment from the object store at the presigned URLs they carry, none from the
+              gateway
   pod-kill    the gateway pod serving an upload deleted mid-chunk; the chunk is cut off, the
               client asks HEAD for the durable offset, finishes against the pods left, and the
               video reaches ready
   netpol      a pod beside the gateway cannot open a connection to it (x-user-id forgery has
               nothing to reach), while it can reach the auth-service
-  playback    placeholder until playback exists (M11)
 
-    tests/cluster/vod_flow.py [SCENARIO...]     all of them when none is named
+    tests/cluster/vod_flow.py [--allow-skip] [SCENARIO...]     all of them when none is named
 
-Needs ffmpeg on PATH for the test clips and KUBECONFIG pointing at the sandbox (e2e-up.sh
-leaves it in deploy/local/.state/kubeconfig).
+A skipped scenario fails the run unless --allow-skip is given. Needs ffmpeg on PATH for the test
+clips.
+
+kubectl only ever runs against the sandbox: deploy/local/.state/kubeconfig with context
+kind-ulw-e2e, whose API server must be on 127.0.0.1, checked before anything runs. The
+caller's KUBECONFIG is ignored.
 
 Against a real deployment (deploy/askedin/RUNBOOK.md), ULW_E2E_URL names the Gateway
-(https://host) and ULW_E2E_TOKEN a token its auth-service issued; only upload and pod-kill
-apply there, since the others drive the mock auth-service and the kind node.
+(https://host) and ULW_E2E_TOKEN a token its auth-service issued. Only upload and playback may
+run there, only when named, and nothing calls kubectl: the scenarios that delete pods, start
+pods or drive the mock auth-service are refused.
 """
 import http.client
 import json
@@ -34,15 +42,26 @@ import time
 import urllib.parse
 import uuid
 
-BASE = urllib.parse.urlsplit(os.environ.get("ULW_E2E_URL", "http://127.0.0.1:18080"))
-TOKEN = os.environ.get("ULW_E2E_TOKEN")
-NAMESPACE = "apps-stage"
-NODE = "ulw-e2e-control-plane"
+import yaml
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 KUBECTL = str(ROOT / "deploy/local/.tools/kubectl")
+SANDBOX_KUBECONFIG = ROOT / "deploy/local/.state/kubeconfig"
+SANDBOX_CONTEXT = "kind-ulw-e2e"
+SANDBOX_URL = "http://127.0.0.1:18080"
+# e2e-up.sh publishes MinIO here; presigned URLs name it minio:9000, as the pods do.
+SANDBOX_STORE = {"minio:9000": ("127.0.0.1", 19000)}
+REAL_TARGET_SCENARIOS = {"upload", "playback"}
+NAMESPACE = "apps-stage"
 # A clip at 1280x720 transcodes to two rungs (720p, 360p) in well under a minute on the
 # sandbox's half-core worker; the clock allows for a slow machine.
 READY_TIMEOUT_S = 600
+
+# Set by main(): where requests go, the token to use instead of minting, and whether kubectl
+# may run at all.
+BASE = urllib.parse.urlsplit(SANDBOX_URL)
+TOKEN = None
+KUBECTL_ALLOWED = False
 
 
 class Failure(Exception):
@@ -51,6 +70,51 @@ class Failure(Exception):
 
 class Skipped(Exception):
     pass
+
+
+class Refused(Exception):
+    pass
+
+
+def require_sandbox(kubeconfig):
+    """Refuses unless `kubeconfig` exists and its SANDBOX_CONTEXT names a kind cluster on this
+    machine's loopback, where kind binds every API server it creates. Reads the file itself:
+    nothing here may run kubectl before the check has passed."""
+    if not kubeconfig.is_file():
+        raise Refused(f"{kubeconfig} is missing; run make e2e-up first")
+    config = yaml.safe_load(kubeconfig.read_text(encoding="utf-8")) or {}
+    context = next((c["context"] for c in config.get("contexts") or []
+                    if c.get("name") == SANDBOX_CONTEXT), None)
+    if context is None:
+        raise Refused(f"{kubeconfig} has no context {SANDBOX_CONTEXT}")
+    server = next((c["cluster"].get("server", "") for c in config.get("clusters") or []
+                   if c.get("name") == context.get("cluster")), "")
+    url = urllib.parse.urlsplit(server)
+    if url.scheme != "https" or url.hostname != "127.0.0.1":
+        raise Refused(f"context {SANDBOX_CONTEXT} points at {server!r}, not a kind cluster on "
+                      "this machine")
+
+
+def plan(names, env):
+    """The scenarios to run and the target, or Refused. A real target (ULW_E2E_URL) runs only
+    the scenarios in REAL_TARGET_SCENARIOS, named explicitly; the sandbox runs any."""
+    unknown = [n for n in names if n not in SCENARIOS]
+    if unknown:
+        raise Refused(f"unknown scenario {unknown}; choose from {list(SCENARIOS)}")
+    url = env.get("ULW_E2E_URL")
+    if url is None:
+        return list(names or SCENARIOS), SANDBOX_URL, None
+    if not names:
+        raise Refused("ULW_E2E_URL is set: name the scenarios to run against it "
+                      f"({', '.join(sorted(REAL_TARGET_SCENARIOS))})")
+    forbidden = [n for n in names if n not in REAL_TARGET_SCENARIOS]
+    if forbidden:
+        raise Refused(f"{forbidden} never run against ULW_E2E_URL: they delete or start pods "
+                      "or drive the mock auth-service")
+    token = env.get("ULW_E2E_TOKEN")
+    if not token:
+        raise Refused("ULW_E2E_URL needs ULW_E2E_TOKEN, a token its auth-service issued")
+    return list(names), url, token
 
 
 def check(condition, message):
@@ -92,7 +156,11 @@ def mint(subject, alg="ES256"):
 
 
 def kubectl(*args, check_rc=True):
-    result = subprocess.run([KUBECTL, *args], capture_output=True, text=True)
+    if not KUBECTL_ALLOWED:
+        raise Refused("kubectl is only run against the sandbox")
+    result = subprocess.run([KUBECTL, "--kubeconfig", str(SANDBOX_KUBECONFIG),
+                             "--context", SANDBOX_CONTEXT, *args],
+                            capture_output=True, text=True)
     if check_rc and result.returncode != 0:
         raise Failure(f"kubectl {' '.join(args)}: {result.stderr.strip()}")
     return result
@@ -173,6 +241,20 @@ def commit_and_wait_ready(token, upload):
         time.sleep(2)
 
 
+def check_askedin_gateway_stand_in(subject, token):
+    """The askedin-gateway stand-in (deploy/local/cluster/askedin-identity.yaml) drops
+    x-user-* headers a client sends and injects the token's own; /askedin-service/whoami
+    echoes what arrived behind it."""
+    forged = {"x-user-id": "someone-else", "x-user-email": "someone-else@ulw-sandbox.test"}
+    status, _, data = request("GET", "/askedin-service/whoami", token, headers=forged)
+    check(status == 200, f"whoami with a token: {status} {data!r}")
+    seen = json.loads(data)
+    check(seen == {"x-user-id": [subject], "x-user-email": [f"{subject}@ulw-sandbox.test"]},
+          f"behind the stand-in, expected only the token's identity, got {seen}")
+    status, _, data = request("GET", "/askedin-service/whoami", headers=forged)
+    check(status == 401, f"whoami with forged headers and no token: {status} {data!r}")
+
+
 def scenario_auth():
     subject = f"auth-{uuid.uuid4().hex[:8]}"
     missing = f"/api/v1/videos/{unknown_video_id()}"
@@ -190,10 +272,12 @@ def scenario_auth():
     tampered = f"{signed}.{'B' if signature[0] == 'A' else 'A'}{signature[1:]}"
     status, _, _ = request("GET", missing, tampered)
     check(status == 401, f"tampered signature: expected 401, got {status}")
+    check_askedin_gateway_stand_in(subject, token)
     # New kids are unknown to the gateway's cache: it must refetch the key set, not refuse.
     # It refetches for an unseen kid only 10 s after its last fetch (kUnseenKidFetchSpacing in
     # infra/auth/src/jwks_verifier.cpp), and this scenario's first requests just made one; a
-    # real issuer publishes a key well before it signs with it.
+    # real issuer publishes a key well before it signs with it. The gateway is a black box
+    # here, with nothing to make it fetch sooner, so the test waits the spacing out.
     status, _, data = request("POST", "/mock-auth/rotate")
     check(status == 200, f"rotate: {status} {data!r}")
     time.sleep(11)
@@ -290,16 +374,6 @@ def scenario_pod_kill(workdir):
     print(f"  video {upload['video_id']} ready after the resume, {state['duration_ms']} ms")
 
 
-def node_can_enforce_policies():
-    """kindnet enforces NetworkPolicy by queueing packets to user space (nftables `queue`);
-    some kernels, like the nested VMs sandboxes often run on, are built without it."""
-    probe = ("nft add table inet ulw_probe && nft add chain inet ulw_probe c && "
-             "nft add rule inet ulw_probe c queue num 1 bypass; rc=$?; "
-             "nft delete table inet ulw_probe; exit $rc")
-    result = subprocess.run(["docker", "exec", NODE, "sh", "-c", probe], capture_output=True)
-    return result.returncode == 0
-
-
 def scenario_netpol():
     pods = kubectl("-n", NAMESPACE, "get", "pods", "-l", "app.kubernetes.io/name=video-gateway",
                    "-o", "jsonpath={.items[0].status.podIP}").stdout.strip()
@@ -319,15 +393,76 @@ def scenario_netpol():
         # Even unfenced, the gateway must have ignored the header and asked for a token.
         check("401" in result.stdout.splitlines()[0],
               f"a forged x-user-id got past the gateway: {result.stdout!r}")
-        if not node_can_enforce_policies():
-            raise Skipped("the node's kernel has no nftables queue support, which kindnet's "
-                          "NetworkPolicy engine needs, so no policy is enforced here; the "
-                          "gateway answered the forged x-user-id with 401")
-        raise Failure("a pod outside Envoy reached the gateway despite the NetworkPolicy")
+        raise Failure("a pod outside Envoy reached the gateway despite the NetworkPolicy; "
+                      "is kube-router running in kube-system?")
 
 
-def scenario_playback():
-    raise Skipped("playback through the route waits for M11 (hls.js via Playwright)")
+def fetch_from_store(url, origin):
+    """GETs a presigned URL the way a player would, from the viewer's side; in the sandbox the
+    store's name resolves to the port e2e-up.sh publishes it on."""
+    parts = urllib.parse.urlsplit(url)
+    host, port = SANDBOX_STORE.get(parts.netloc, (parts.hostname, parts.port))
+    kind = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+    conn = kind(host, port, timeout=60)
+    path = parts.path + (f"?{parts.query}" if parts.query else "")
+    conn.request("GET", path, headers={"Host": parts.netloc, "Origin": origin})
+    response = conn.getresponse()
+    body = response.read()
+    conn.close()
+    return response.status, {k.lower(): v for k, v in response.getheaders()}, body
+
+
+def playlist_uris(text):
+    """Every URI a playlist names: its non-tag lines and the URI="..." of EXT-X-MAP."""
+    uris = re.findall(r'^#EXT-X-MAP:.*URI="([^"]+)"', text, re.M)
+    uris += [line for line in text.splitlines() if line and not line.startswith("#")]
+    return uris
+
+
+def scenario_playback(workdir):
+    data = make_clip(workdir / "play.mp4", 6, "2M")
+    subject = f"play-{uuid.uuid4().hex[:8]}"
+    token = mint(subject)
+    upload = create_upload(token, "play.mp4", len(data))
+    send_from(token, upload["upload_id"], data, 0, upload["chunk_size"])
+    commit_and_wait_ready(token, upload)
+    master_path = f"/api/v1/videos/{upload['video_id']}/master.m3u8"
+    status, _, _ = request("GET", master_path)
+    check(status == 401, f"master without a token: expected 401, got {status}")
+    if not TOKEN:
+        status, _, _ = request("GET", master_path, mint(f"other-{subject}"))
+        check(status == 404, f"master for another user: expected 404, got {status}")
+    status, headers, body = request("GET", master_path, token)
+    check(status == 200, f"master: {status} {body!r}")
+    check(headers.get("cache-control") == "private, max-age=60",
+          f"master Cache-Control: {headers.get('cache-control')!r}")
+    master_url = urllib.parse.urlunsplit(BASE._replace(path=master_path))
+    variants = [urllib.parse.urljoin(master_url, u) for u in playlist_uris(body.decode())]
+    check(variants, f"master lists no variant: {body!r}")
+    origin = "http://127.0.0.1:1"
+    segments = 0
+    for variant in variants:
+        parts = urllib.parse.urlsplit(variant)
+        check(parts.netloc == BASE.netloc,
+              f"variant {variant} is not served by the gateway at {BASE.netloc}")
+        status, _, media = request("GET", parts.path, token)
+        check(status == 200, f"media playlist {parts.path}: {status} {media!r}")
+        uris = playlist_uris(media.decode())
+        check(uris and '#EXT-X-MAP:URI="' in media.decode(), f"{parts.path} has no init segment")
+        for uri in uris:
+            url = urllib.parse.urlsplit(uri)
+            # Segment bytes never transit the gateway (ADR-0002): each URI is absolute, signed,
+            # and on the store's host.
+            check(url.scheme in ("http", "https") and url.netloc != BASE.netloc,
+                  f"{parts.path} sends a segment through the gateway: {uri}")
+            check("X-Amz-Signature=" in url.query, f"segment URL is not presigned: {uri}")
+            status, seg_headers, seg = fetch_from_store(uri, origin)
+            check(status == 200 and seg, f"segment {url.path}: {status}, {len(seg)} bytes")
+            # ADR-0028: segments are fetched cross-origin, without credentials.
+            check(seg_headers.get("access-control-allow-origin") in ("*", origin),
+                  f"segment {url.path} has no CORS grant: {seg_headers}")
+            segments += 1
+    print(f"  {len(variants)} renditions, {segments} init and media segments from the store")
 
 
 SCENARIOS = {
@@ -335,30 +470,40 @@ SCENARIOS = {
     "upload": scenario_upload,
     "pod-kill": scenario_pod_kill,
     "netpol": lambda _: scenario_netpol(),
-    "playback": lambda _: scenario_playback(),
+    "playback": scenario_playback,
 }
 
 
-def main(names):
-    unknown = [n for n in names if n not in SCENARIOS]
-    if unknown:
-        sys.exit(f"unknown scenario {unknown}; choose from {list(SCENARIOS)}")
-    os.environ.setdefault("KUBECONFIG", str(ROOT / "deploy/local/.state/kubeconfig"))
-    failed = []
+def main(argv):
+    global BASE, TOKEN, KUBECTL_ALLOWED
+    allow_skip = "--allow-skip" in argv
+    names = [a for a in argv if a != "--allow-skip"]
+    try:
+        names, url, TOKEN = plan(names, os.environ)
+        if url == SANDBOX_URL:
+            require_sandbox(SANDBOX_KUBECONFIG)
+            KUBECTL_ALLOWED = True
+    except Refused as e:
+        sys.exit(f"vod_flow: refusing: {e}")
+    BASE = urllib.parse.urlsplit(url)
+    failed, skipped = [], []
     with tempfile.TemporaryDirectory() as tmp:
-        for name in names or SCENARIOS:
+        for name in names:
             print(f"{name}:")
             started = time.monotonic()
             try:
                 SCENARIOS[name](pathlib.Path(tmp))
                 print(f"  ok ({time.monotonic() - started:.0f} s)")
             except Skipped as e:
+                skipped.append(name)
                 print(f"  skipped: {e}")
             except Failure as e:
                 failed.append(name)
                 print(f"  FAILED: {e}")
+    if skipped and not allow_skip:
+        failed += [f"{n} (skipped)" for n in skipped]
     if failed:
-        sys.exit(f"failed: {' '.join(failed)}")
+        sys.exit(f"failed: {', '.join(failed)}")
 
 
 if __name__ == "__main__":

@@ -31,11 +31,12 @@ buildx=$(grep -om1 'woodpeckerci/plugin-docker-buildx:[^ ]*' "$root/deploy/asked
     "$root/deploy/askedin/woodpecker.yml"
 
 if [[ ${1:-} == --server ]]; then
-    export KUBECONFIG=$here/.state/kubeconfig
-    for env in stage prod; do
-        # The prod overlays name namespace apps, which the sandbox has; server-side dry runs
-        # persist nothing.
-        find "$root/deploy/askedin/overlays/$env" -name '*.yaml' -print0 |
-            xargs -0 -n1 "$tools/kubectl" apply --dry-run=server -f
-    done
+    # shellcheck source=deploy/local/sandbox.sh
+    source "$here/sandbox.sh"
+    require_sandbox
+    # The prod overlays name namespace apps, which the sandbox has; server-side dry runs
+    # persist nothing.
+    while IFS= read -r -d '' manifest; do
+        kubectl apply --dry-run=server -f "$manifest"
+    done < <(find "$root/deploy/askedin/overlays" -name '*.yaml' -print0 | sort -z)
 fi
