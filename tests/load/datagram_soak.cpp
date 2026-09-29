@@ -17,10 +17,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <format>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <print>
+#include <ranges>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -100,6 +104,32 @@ std::uint64_t rss_kb() {
     return kb;
 }
 
+// Errors by errno, so a failed run says what the kernel returned. errno values are small.
+class ErrorCounts {
+public:
+    void add(int err) noexcept {
+        ++total_;
+        const auto index = static_cast<std::size_t>(err);
+        ++*std::next(by_errno_.begin(),
+                     static_cast<std::ptrdiff_t>(index < by_errno_.size() ? index : 0));
+    }
+    [[nodiscard]] std::uint64_t total() const noexcept { return total_; }
+    // "errno:count" pairs, errno 0 standing for anything out of range.
+    [[nodiscard]] std::string describe() const {
+        std::string out;
+        for (const auto [err, count] : std::views::enumerate(by_errno_)) {
+            if (count != 0) {
+                out += std::format("{}{}:{}", out.empty() ? "" : ",", err, count);
+            }
+        }
+        return out.empty() ? "none" : out;
+    }
+
+private:
+    std::uint64_t total_ = 0;
+    std::array<std::uint64_t, 256> by_errno_{};
+};
+
 struct Wire {
     std::uint64_t nonce = 0;
     std::uint64_t seq = 0;
@@ -110,16 +140,17 @@ public:
     net::IReactor* reactor = nullptr;
     DatagramId id;
     std::uint64_t refused = 0;
-    std::uint64_t errors = 0;
+    ErrorCounts send_errors;
+    ErrorCounts receive_errors;
 
     void on_datagram(SocketAddr from, net::BorrowedBytes payload) noexcept override {
         if (!reactor->send_to(id, from, payload)) {
             ++refused;
         }
     }
-    void on_send_error(SocketAddr /*to*/, int /*err*/) noexcept override { ++errors; }
-    void on_error(int /*err*/) noexcept override {
-        ++errors;
+    void on_send_error(SocketAddr /*to*/, int err) noexcept override { send_errors.add(err); }
+    void on_error(int err) noexcept override {
+        receive_errors.add(err);
         reactor->start_receiving_datagrams(id);
     }
 };
@@ -127,7 +158,8 @@ public:
 struct ServerReport {
     net::DatagramStats stats;
     std::uint64_t refused = 0;
-    std::uint64_t errors = 0;
+    ErrorCounts send_errors;
+    ErrorCounts receive_errors;
 };
 
 // Runs on its own thread: an io_uring reactor belongs to the thread that created it.
@@ -159,8 +191,10 @@ void serve(net::ReactorKind kind, std::size_t max_fds, std::promise<SocketAddr>&
     while (!stop.load(std::memory_order_relaxed)) {
         (*reactor)->run_once(core::Millis{100});
     }
-    report = {
-        .stats = (*reactor)->datagram_stats(*id), .refused = echo.refused, .errors = echo.errors};
+    report = {.stats = (*reactor)->datagram_stats(*id),
+              .refused = echo.refused,
+              .send_errors = echo.send_errors,
+              .receive_errors = echo.receive_errors};
 }
 
 class Fleet;
@@ -244,6 +278,17 @@ public:
     }
 
     [[nodiscard]] const SocketAddr& server() const noexcept { return server_; }
+    [[nodiscard]] net::DatagramStats totals() const noexcept {
+        net::DatagramStats sum;
+        for (const PeerSocket& p : peers_) {
+            const auto s = reactor_.datagram_stats(p.id);
+            sum.sent += s.sent;
+            sum.send_errors += s.send_errors;
+            sum.zero_copy_sends += s.zero_copy_sends;
+            sum.zero_copy_copied += s.zero_copy_copied;
+        }
+        return sum;
+    }
     [[nodiscard]] std::uint64_t silent_peers() const noexcept {
         return static_cast<std::uint64_t>(
             std::ranges::count_if(peers_, [](const PeerSocket& p) { return p.echoed == 0; }));
@@ -253,7 +298,8 @@ public:
     std::uint64_t refused = 0;
     std::uint64_t echoed = 0;
     std::uint64_t misattributed = 0;
-    std::uint64_t errors = 0;
+    ErrorCounts send_errors;
+    ErrorCounts receive_errors;
 
 private:
     // The timing wheel's resolution.
@@ -288,12 +334,12 @@ void PeerSocket::on_datagram(SocketAddr from, net::BorrowedBytes payload) noexce
     ++fleet->echoed;
 }
 
-void PeerSocket::on_send_error(SocketAddr /*to*/, int /*err*/) noexcept {
-    ++fleet->errors;
+void PeerSocket::on_send_error(SocketAddr /*to*/, int err) noexcept {
+    fleet->send_errors.add(err);
 }
 
-void PeerSocket::on_error(int /*err*/) noexcept {
-    ++fleet->errors;
+void PeerSocket::on_error(int err) noexcept {
+    fleet->receive_errors.add(err);
 }
 
 int run(int argc, char** argv) {
@@ -378,13 +424,19 @@ int run(int argc, char** argv) {
     // Each round trip is two datagrams: the peer's and the echo.
     const std::uint64_t measured = 2 * (fleet.echoed - echoed_at_first);
     const std::uint64_t per_datagram = measured == 0 ? 0 : growth * 1024 / measured;
+    const net::DatagramStats peers = fleet.totals();
     std::println("summary sent={} echoed={} lost={} misattributed={} silent_peers={} "
-                 "peer_refused={} peer_errors={}",
+                 "peer_refused={} peer_send_errors={} peer_receive_errors={}",
                  fleet.sent, fleet.echoed, lost, fleet.misattributed, fleet.silent_peers(),
-                 fleet.refused, fleet.errors);
-    std::println("server received={} sent={} truncated={} ring_exhausted={} refused={} errors={}",
+                 fleet.refused, fleet.send_errors.describe(), fleet.receive_errors.describe());
+    std::println("peers zero_copy_sends={} zero_copy_copied={}", peers.zero_copy_sends,
+                 peers.zero_copy_copied);
+    std::println("server received={} sent={} truncated={} ring_exhausted={} refused={} "
+                 "send_errors={} receive_errors={} zero_copy_sends={} zero_copy_copied={}",
                  report.stats.received, report.stats.sent, report.stats.truncated,
-                 report.stats.ring_exhausted, report.refused, report.errors);
+                 report.stats.ring_exhausted, report.refused, report.send_errors.describe(),
+                 report.receive_errors.describe(), report.stats.zero_copy_sends,
+                 report.stats.zero_copy_copied);
     std::println("rss_kb first_sample={} max={} last={} growth={} bytes_per_datagram={}", rss_first,
                  rss_max, rss_last, growth, per_datagram);
     const bool rss_ok = args.max_rss_bytes_per_datagram == 0 ||
@@ -393,7 +445,8 @@ int run(int argc, char** argv) {
     // it had budgeted for; either way the run did not measure what it claims to.
     const bool refused = fleet.refused != 0 || report.refused != 0;
     return fleet.misattributed == 0 && lost == 0 && fleet.silent_peers() == 0 && !refused &&
-                   fleet.errors == 0 && report.errors == 0 && rss_ok
+                   fleet.send_errors.total() == 0 && fleet.receive_errors.total() == 0 &&
+                   report.send_errors.total() == 0 && report.receive_errors.total() == 0 && rss_ok
                ? 0
                : 1;
 }

@@ -61,6 +61,10 @@ public:
     [[nodiscard]] core::MonoTime now() const noexcept override { return now_; }
     int run_once(core::Millis max_wait) override;
 
+    // For white-box tests: what the startup probe decided, and sends not yet completed.
+    [[nodiscard]] bool zero_copy_supported() const noexcept { return zero_copy_supported_; }
+    [[nodiscard]] std::size_t sends_in_flight() const noexcept { return sends_in_flight_; }
+
 private:
     enum class Kind : std::uint8_t { Free, Stream, Watch, Listener, Datagram };
     enum class Op : std::uint8_t {

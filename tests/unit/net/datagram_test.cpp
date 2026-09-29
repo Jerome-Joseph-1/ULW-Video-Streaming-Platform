@@ -5,15 +5,19 @@
 #include "sockaddr.hpp"
 #include "support/fake_random.hpp"
 #include "support/reactor_harness.hpp"
+#include "uring_reactor.hpp"
 
 #include <sys/socket.h>
+#include <sys/utsname.h>
 
 #include <array>
 #include <cstring>
+#include <format>
 #include <functional>
 #include <gtest/gtest.h>
 #include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace {
@@ -653,6 +657,31 @@ TEST_P(DatagramTest, SendToRejectsWhatItCanJudgeOnTheSpot) {
     EXPECT_TRUE(peer.drain().empty());
 }
 
+// What a failed send test needs to tell one kernel's send completions from another's.
+std::string send_diagnostics(net::IReactor& reactor, const Sink& sink, std::uint64_t taken,
+                             std::uint64_t refused) {
+    utsname host{};
+    static_cast<void>(::uname(&host));
+    const auto stats = reactor.datagram_stats(sink.id);
+    std::map<int, int> errors;
+    for (const auto& [to, err] : sink.send_errors) {
+        ++errors[err];
+    }
+    std::string out = std::format(
+        "kernel={} taken={} refused={} sent={} send_errors={} send_refused={} zero_copy_sends={} "
+        "zero_copy_copied={}",
+        host.release, taken, refused, stats.sent, stats.send_errors, stats.send_refused,
+        stats.zero_copy_sends, stats.zero_copy_copied);
+    for (const auto& [err, count] : errors) {
+        out += std::format(" errno{}x{}", err, count);
+    }
+    if (const auto* uring = dynamic_cast<const net::detail::UringReactor*>(&reactor)) {
+        out += std::format(" zero_copy_supported={} sends_in_flight={}",
+                           uring->zero_copy_supported(), uring->sends_in_flight());
+    }
+    return out;
+}
+
 // send_to never queues without bound: a datagram is either taken, in which case it is sent,
 // or refused with EAGAIN. io_uring refuses past its in-flight limit when the loop does not run;
 // epoll hands each datagram to the kernel at once, so its refusals come only from a full kernel
@@ -673,8 +702,9 @@ TEST_P(DatagramTest, SendToTakesOrRefusesWithEagainAndSendsEverythingItTook) {
             ++refused;
         }
     }
-    ASSERT_TRUE(
-        pump_until(*reactor, [&] { return reactor->datagram_stats(sink.id).sent == taken; }));
+    ASSERT_TRUE(pump_until(*reactor, [&] {
+        return reactor->datagram_stats(sink.id).sent == taken;
+    })) << send_diagnostics(*reactor, sink, taken, refused);
     const auto stats = reactor->datagram_stats(sink.id);
     EXPECT_EQ(stats.send_refused, refused);
     EXPECT_EQ(stats.send_errors, 0U);

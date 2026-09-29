@@ -674,6 +674,7 @@ std::expected<void, int> UringReactor::send_to(DatagramId socket, SocketAddr to,
     if (s->zero_copy) {
         io_uring_prep_sendmsg_zc(sqe, socket.fd, &p.msg, 0);
         sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
+        ++s->stats.zero_copy_sends;
     } else {
         io_uring_prep_sendmsg(sqe, socket.fd, &p.msg, 0);
     }
@@ -1030,6 +1031,7 @@ void UringReactor::on_send_to(std::size_t index, const io_uring_cqe& cqe) noexce
         // cannot send from user pages) costs more than a plain send (measured: 1,640 against
         // 1,440 ns per 1,200-byte datagram on loopback), so the socket stops asking.
         if ((static_cast<std::uint32_t>(cqe.res) & IORING_NOTIF_USAGE_ZC_COPIED) != 0) {
+            ++s.stats.zero_copy_copied;
             s.zero_copy = false;
         }
     } else if (!s.closing) {

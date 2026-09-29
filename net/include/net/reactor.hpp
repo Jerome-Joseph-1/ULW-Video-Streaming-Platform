@@ -86,6 +86,10 @@ struct DatagramStats {
     // receive buffers, and dropped as a full receive buffer would have dropped it.
     std::uint64_t stopped_drops = 0;
     std::uint64_t sent = 0;
+    // io_uring only: sends that went out as SENDMSG_ZC, and notifications of those that said the
+    // kernel copied the payload anyway.
+    std::uint64_t zero_copy_sends = 0;
+    std::uint64_t zero_copy_copied = 0;
     std::uint64_t send_refused = 0;
     std::uint64_t send_errors = 0;
 };
