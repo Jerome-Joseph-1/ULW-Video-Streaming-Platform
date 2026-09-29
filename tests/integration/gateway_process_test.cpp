@@ -155,6 +155,20 @@ std::optional<std::uint16_t> free_privileged_port() {
     return std::nullopt;
 }
 
+// Whether this test binary, and so the gateway beside it, is built with AddressSanitizer.
+constexpr bool kBuiltWithAsan =
+#if defined(__SANITIZE_ADDRESS__)
+    true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+    true;
+#else
+    false;
+#endif
+#else
+    false;
+#endif
+
 TEST_F(GatewayAsRoot, BindsAPrivilegedPortThenServesAsTheUserItNames) {
     const passwd* nobody = ::getpwnam("nobody");
     const auto port = free_privileged_port();
@@ -164,6 +178,20 @@ TEST_F(GatewayAsRoot, BindsAPrivilegedPortThenServesAsTheUserItNames) {
     auto env = env_without_allow_root();
     env.emplace_back("ULW_RUN_AS_USER=nobody");
     env.push_back("ULW_LISTEN_PORT=" + std::to_string(*port));
+    if (kBuiltWithAsan) {
+        // LeakSanitizer checks at exit by stopping the process's threads with ptrace from a
+        // helper it clones. Changing uid leaves the process non-dumpable, and under Yama
+        // (ptrace_scope 1, as on Ubuntu) the kernel then refuses the attach: CI's run logged
+        // "LeakSanitizer has encountered a fatal error" after "drained", and exit 1. The drop
+        // is the point of the test and stays; the same code paths are leak-checked by every
+        // test that runs the gateway without root.
+        // The child gets this environment and nothing else, so what CI set is carried over.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
+        const char* inherited = std::getenv("ASAN_OPTIONS");
+        env.push_back("ASAN_OPTIONS=" +
+                      (inherited == nullptr ? std::string() : std::string(inherited) + ":") +
+                      "detect_leaks=0");
+    }
     const auto gateway = ChildProcess::start({ULW_GATEWAY_BIN}, env);
     ASSERT_NE(gateway, nullptr);
     ASSERT_TRUE(gateway->wait_for_output(R"("event":"listening")", kPatience)) << gateway->output();
