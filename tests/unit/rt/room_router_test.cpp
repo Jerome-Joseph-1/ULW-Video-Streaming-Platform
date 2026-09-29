@@ -9,10 +9,13 @@
 #include "support/reactor_harness.hpp"
 #include "wire.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 #include <array>
 #include <cerrno>
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
@@ -82,8 +85,46 @@ struct Node {
 // A process on the node-channel port that speaks the frames but may not hold the secret.
 class RawPeer {
 public:
-    RawPeer(net::IReactor& reactor, std::uint16_t port)
-        : reactor_(reactor), fd_(ulw::test::connect_loopback(port)) {}
+    // A receive buffer as small as the kernel allows makes the node's queue fill first.
+    RawPeer(net::IReactor& reactor, std::uint16_t port, bool tiny_window = false)
+        : reactor_(reactor), fd_(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) {
+        if (tiny_window) {
+            const int bytes = 4096;
+            ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes);
+        }
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        // connect() takes every address family through the generic sockaddr header.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        EXPECT_EQ(::connect(fd_.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr), 0);
+        ::fcntl(fd_.get(), F_SETFL, ::fcntl(fd_.get(), F_GETFL) | O_NONBLOCK);
+    }
+
+    // The dialer's side of the handshake, done right; true once the node has proven itself.
+    bool authenticate(std::string_view secret, const core::NodeId& self, const core::NodeId& node,
+                      core::ports::IRandom& random) {
+        const auto key = std::as_bytes(std::span{secret});
+        wire::Nonce mine{};
+        random.fill(mine);
+        std::vector<std::byte> hello;
+        wire::encode_hello(hello, self, mine);
+        send(hello);
+        const auto challenge = next();
+        const auto* c = challenge ? std::get_if<wire::Challenge>(&*challenge) : nullptr;
+        if (c == nullptr) {
+            return false;
+        }
+        const auto expected = rt::auth::acceptor_tag(key, self, node, mine, c->nonce);
+        if (!expected || !rt::auth::same_tag(*expected, c->mac)) {
+            return false;
+        }
+        std::vector<std::byte> proof;
+        wire::encode_proof(proof, *rt::auth::dialer_tag(key, self, node, mine, c->nonce));
+        send(proof);
+        return true;
+    }
 
     void send(const std::vector<std::byte>& bytes) {
         sent_.insert(sent_.end(), bytes.begin(), bytes.end());
@@ -440,6 +481,29 @@ TEST_P(RoomRouterTest, ARecordedHandshakeReplaysToNothing) {
     ASSERT_TRUE(second && std::holds_alternative<wire::Challenge>(*second));
     EXPECT_TRUE(replay.hung_up());
     EXPECT_EQ(a.events.refused, std::vector<std::string>{"bad proof"});
+}
+
+TEST_P(RoomRouterTest, ASubscriberThatStopsReadingIsCutOffInsteadOfQueuedForWithoutEnd) {
+    Node& a = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    RawPeer stalled(*reactor_, a.port, true);
+    ASSERT_TRUE(stalled.authenticate(kSecret, *core::NodeId::parse("chat-x"),
+                                     *core::NodeId::parse("chat-a"), random_));
+    std::vector<std::byte> subscribe;
+    wire::encode_subscribe(subscribe, 1, room_);
+    stalled.send(subscribe);
+    const auto reply = stalled.next();
+    ASSERT_TRUE(reply && std::holds_alternative<wire::Reply>(*reply));
+
+    // Never read again. Each message fans out one delivery of 60 KiB to it.
+    const std::string body(std::size_t{60} * 1024, 'm');
+    for (int i = 0; i < 400 && a.router->counters().slow_peers == 0; ++i) {
+        ASSERT_TRUE(send(a, alice, "alice", body));
+    }
+    EXPECT_EQ(a.router->counters().slow_peers, 1U);
+    // Its own members are still served.
+    EXPECT_TRUE(send(a, alice, "alice", "still here"));
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, RoomRouterTest,

@@ -38,6 +38,11 @@ constexpr std::size_t kMaxPeers = 256;
 // and two MACs take milliseconds, and the dialer's address lookup is bounded by kStoreTimeout.
 // A peer that takes longer is stuck or is not a node, and gives its slot back.
 constexpr core::Millis kHandshakeTimeout{5'000};
+// Unsent bytes a node-channel connection may hold: sixteen of the largest deliveries. A peer
+// that far behind has stopped reading (paused, or wedged), and every message of every room it
+// subscribed to would otherwise queue here without end; the connection is closed, and the
+// peer resubscribes when it reconnects.
+constexpr std::size_t kMaxPeerBacklog = std::size_t{16} * wire::kMaxFrame;
 // How long a room can go routed to an owner that let it go when the notification saying so was
 // lost: one store lookup per such room this often, against a room unreachable that long in the
 // rare case a notification goes missing.
@@ -99,8 +104,13 @@ class RoomRouter::Impl final : public IRegistryObserver,
 
         // Frames for the dialer. Only an authenticated peer is ever sent any.
         void send(std::span<const std::byte> frame) noexcept {
-            if (!closed_ && state_ == State::Authenticated) {
-                router_.reactor_.send(conn_, frame);
+            if (closed_ || state_ != State::Authenticated) {
+                return;
+            }
+            router_.reactor_.send(conn_, frame);
+            if (router_.reactor_.pending_send_bytes(conn_) > kMaxPeerBacklog) {
+                ++router_.counters_.slow_peers;
+                close();
             }
         }
 
@@ -262,6 +272,10 @@ class RoomRouter::Impl final : public IRegistryObserver,
         void send(std::span<const std::byte> frame) {
             if (state_ == State::Open) {
                 router_.reactor_.send(conn_, frame);
+                if (router_.reactor_.pending_send_bytes(conn_) > kMaxPeerBacklog) {
+                    ++router_.counters_.slow_peers;
+                    router_.link_down(*this);
+                }
                 return;
             }
             if (state_ == State::Closed) {

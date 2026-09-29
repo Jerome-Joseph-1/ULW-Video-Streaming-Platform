@@ -92,6 +92,8 @@ struct RouterCounters {
     std::uint64_t allocation_failures = 0;
     // Node-channel handshakes that failed.
     std::uint64_t peers_refused = 0;
+    // Node-channel connections closed because the other end stopped reading.
+    std::uint64_t slow_peers = 0;
 };
 
 // One node's share of the room plane (ADR-0015, ADR-0037). Members join rooms here, wherever

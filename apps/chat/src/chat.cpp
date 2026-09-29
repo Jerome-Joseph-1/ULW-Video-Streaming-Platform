@@ -146,14 +146,16 @@ std::string ChatServer::render_metrics() const {
                        "forwards_total {}\n"
                        "forward_timeouts_total {}\n"
                        "peers_lost_total {}\n"
-                       "peers_refused_total {}\n",
+                       "peers_refused_total {}\n"
+                       "slow_peers_total {}\n",
                        c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
                        c.auth_failures, c.origin_rejections, c.messages_received,
                        c.messages_delivered, c.protocol_errors, c.control_floods, c.slow_consumers,
                        c.allocation_failures + router.allocation_failures,
                        deps_.router.rooms_owned(), deps_.router.rooms_joined(),
                        registry.reassignments, registry.fenced_writes, router.forwarded,
-                       router.forward_timeouts, router.peers_lost, router.peers_refused);
+                       router.forward_timeouts, router.peers_lost, router.peers_refused,
+                       router.slow_peers);
 }
 
 } // namespace chat
