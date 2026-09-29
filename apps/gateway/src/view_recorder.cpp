@@ -22,7 +22,16 @@ void ViewRecorder::record(const core::ports::ViewEvent& event) noexcept {
         return;
     }
     pending_.push_back(event);
+    if (draining_) {
+        flush();
+        return;
+    }
     arm();
+}
+
+void ViewRecorder::drain() noexcept {
+    draining_ = true;
+    flush();
 }
 
 void ViewRecorder::arm() noexcept {

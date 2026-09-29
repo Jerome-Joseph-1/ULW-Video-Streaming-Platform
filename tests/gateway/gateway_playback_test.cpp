@@ -1,5 +1,6 @@
 #include "gateway_harness.hpp"
 #include "playback.hpp"
+#include "support/eventually.hpp"
 #include "support/http_client.hpp"
 
 #include <gtest/gtest.h>
@@ -345,6 +346,24 @@ TEST_P(GatewayPlayback, ADrainWritesTheViewsItHolds) {
     gw.on_loop([] {});
     gw.on_loop([] {});
     EXPECT_EQ(gw.views().size(), 1U);
+}
+
+TEST_P(GatewayPlayback, AViewFromARequestFinishingDuringADrainIsWrittenAtOnce) {
+    GatewayOptions o = options();
+    o.manual_clock = true;
+    GatewayUnderTest gw(o);
+    publish(gw);
+    HttpClient c(gw.endpoint());
+    // Held at authentication until the keys are refreshed, so it outlasts the drain's flush.
+    ASSERT_TRUE(c.send_request("GET", path("master.m3u8"), "slow.alice", {}, {}));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.key_waiters() == 1; }));
+    gw.drain();
+    gw.refresh_keys();
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200);
+    // No time passes: the view must not wait out the batch interval.
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.views().size() == 1; }));
 }
 
 INSTANTIATE_TEST_SUITE_P(Transports, GatewayPlayback,

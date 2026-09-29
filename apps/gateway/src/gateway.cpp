@@ -92,7 +92,7 @@ void Gateway::begin_drain() noexcept {
     draining_ = true;
     deps_.reactor.stop_listening();
     connections_.for_each_live([](Connection& c) { c.drain(); });
-    views_.flush();
+    views_.drain();
     drain_timer_ = deps_.reactor.arm_timer(limits_.drain_deadline, *this);
 }
 

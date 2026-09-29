@@ -31,8 +31,9 @@ public:
     ViewRecorder& operator=(ViewRecorder&&) = delete;
 
     void record(const core::ports::ViewEvent& event) noexcept;
-    // Writes what is pending now rather than when the timer fires; for a drain.
-    void flush() noexcept;
+    // Writes what is pending now, and from here on writes each event as it arrives, so the
+    // requests a drain lets finish do not hold the exit for a whole interval.
+    void drain() noexcept;
     [[nodiscard]] bool idle() const noexcept { return !writing_ && pending_.empty(); }
     [[nodiscard]] const ViewCounters& counters() const noexcept { return counters_; }
 
@@ -40,6 +41,7 @@ public:
 
 private:
     void arm() noexcept;
+    void flush() noexcept;
 
     net::IReactor& reactor_;
     core::ports::IViewLog& log_;
@@ -50,6 +52,7 @@ private:
     bool armed_ = false;
     bool writing_ = false;
     bool hurry_ = false;
+    bool draining_ = false;
     ViewCounters counters_;
 };
 
