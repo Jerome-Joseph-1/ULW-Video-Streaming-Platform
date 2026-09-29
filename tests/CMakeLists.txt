@@ -341,6 +341,11 @@ if(ULW_BUILD_MLS)
         target_compile_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
         target_link_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
     endif()
+
+    # Three devices through the Postgres directory: key packages fetched from it, commits
+    # ordered by its epoch claims.
+    target_sources(e2ee_integration_tests PRIVATE integration/mls_directory_test.cpp)
+    target_link_libraries(e2ee_integration_tests PRIVATE ulw::e2ee_mls)
 endif()
 
 ulw_add_test_suite(auth_unit_tests unit
