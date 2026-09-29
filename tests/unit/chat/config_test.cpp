@@ -126,6 +126,16 @@ TEST_F(ChatConfigTest, OutOfRangeAndMalformedValuesAreRefused) {
     }
 }
 
+TEST_F(ChatConfigTest, ThePresenceGraceIsTheServicesUnlessSetInMilliseconds) {
+    EXPECT_FALSE(load()->presence_grace);
+    env["ULW_PRESENCE_GRACE_MS"] = "2500";
+    EXPECT_EQ(load()->presence_grace, core::Millis{2'500});
+    for (const char* bad : {"-1", "2.5", "600001", "10s"}) {
+        env["ULW_PRESENCE_GRACE_MS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_PRESENCE_GRACE_MS") << bad;
+    }
+}
+
 TEST_F(ChatConfigTest, ADevelopmentKeySetReplacesTheJwksUrlButNotBoth) {
     env["ULW_DEV_JWKS_FILE"] = "/etc/ulw/dev-jwks.json";
     EXPECT_EQ(refused_variable(), "JWKS_URL");

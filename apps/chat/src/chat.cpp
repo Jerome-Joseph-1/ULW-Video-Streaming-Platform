@@ -56,7 +56,9 @@ void RoomLog::on_node_taken() noexcept {
 
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(limits), rooms_(deps.router),
-      chat_(rooms_, deps.clock, limits_.service), sessions_(limits_.max_connections) {}
+      chat_(rooms_, deps.clock, limits_.service),
+      presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
+      sessions_(limits_.max_connections) {}
 
 ChatServer::~ChatServer() {
     deps_.reactor.cancel_timer(drain_timer_);
@@ -136,6 +138,7 @@ std::string ChatServer::render_metrics() const {
     const rt::RegistryCounters& registry = deps_.router.registry_counters();
     const rt::RouterCounters& router = deps_.router.counters();
     const ServiceCounters& chat = chat_.counters();
+    const PresenceCounters& presence = presence_.counters();
     return std::format(
         "connections_accepted_total {}\n"
         "connections_rejected_total{{reason=\"capacity\"}} {}\n"
@@ -162,15 +165,22 @@ std::string ChatServer::render_metrics() const {
         "forward_timeouts_total {}\n"
         "peers_lost_total {}\n"
         "peers_refused_total {}\n"
-        "slow_peers_total {}\n",
+        "slow_peers_total {}\n"
+        "presence_rooms {}\n"
+        "presence_events_sent_total {}\n"
+        "presence_events_received_total {}\n"
+        "presence_notifications_total {}\n"
+        "presence_expired_total {}\n",
         c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
         c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
         chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
         chat_.buffered_bytes(), c.protocol_errors, c.control_floods, c.slow_consumers,
-        c.allocation_failures + router.allocation_failures + chat.allocation_failures,
+        c.allocation_failures + router.allocation_failures + chat.allocation_failures +
+            presence.allocation_failures,
         deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,
         registry.fenced_writes, router.forwarded, router.forward_timeouts, router.peers_lost,
-        router.peers_refused, router.slow_peers);
+        router.peers_refused, router.slow_peers, presence_.rooms(), presence.sent,
+        presence.received, presence.notified, presence.expired);
 }
 
 } // namespace chat

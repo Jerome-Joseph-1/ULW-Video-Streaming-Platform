@@ -168,6 +168,17 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!allowed) {
         return std::unexpected(std::move(allowed.error()));
     }
+    std::optional<core::Millis> grace;
+    if (const auto text = lookup(env, "ULW_PRESENCE_GRACE_MS")) {
+        // Ten minutes is far past any reconnect; beyond it, a user who left would be shown
+        // online for longer than anyone would call a grace.
+        constexpr std::uint32_t kMaxGraceMs = 600'000;
+        const auto value = core::parse_integer<std::uint32_t>(*text);
+        if (!value || *value > kMaxGraceMs) {
+            return error("ULW_PRESENCE_GRACE_MS", "expected milliseconds, 0 to 600000");
+        }
+        grace = core::Millis{*value};
+    }
 
     return Config{.node = *node,
                   .port = port,
@@ -180,7 +191,8 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .jwt_issuer = std::move(*issuer),
                   .jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform"),
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
-                  .allowed_origins = std::move(*allowed)};
+                  .allowed_origins = std::move(*allowed),
+                  .presence_grace = grace};
 }
 
 } // namespace chat
