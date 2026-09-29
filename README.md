@@ -25,6 +25,7 @@ first reports in 19.
 tools/check-boundaries.sh      # layering rules
 tools/check-format.sh          # clang-format, --fix to apply
 tools/run-clang-tidy.sh build/dev [files...]
+tools/e2ee_diagnostic_check.sh [tag]  # chat service and router unchanged since phase-2
 ```
 
 ## Sandbox cluster
