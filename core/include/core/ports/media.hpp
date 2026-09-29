@@ -51,7 +51,9 @@ enum class MediaRole : std::uint8_t {
     Member,
     // A live stream's source (M30): publishes camera and microphone, receives nothing. Its
     // ticket's endpoint takes a WHIP offer (RFC 9725) with the credential as bearer token, so
-    // an encoder or a browser can publish with no SDK.
+    // an encoder or a browser can publish with no SDK. WHIP sends that same token with every
+    // later request on the session, the trickled candidates and the DELETE that ends it, so
+    // the credential stays good for as long as a stream may last (ADR-0056).
     Publisher,
 };
 

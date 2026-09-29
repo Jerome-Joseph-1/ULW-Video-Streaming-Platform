@@ -224,6 +224,25 @@ TEST_P(LiveKitSfuTest, APublisherTicketIsForWhipAndCannotSubscribe) {
     EXPECT_EQ(bool_at(token->claims, "video", "canSubscribe"), false);
 }
 
+TEST_P(LiveKitSfuTest, APublisherTicketOutlastsTheLongestStream) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto publisher = join(**room, "streamer", kDevice, MediaRole::Publisher);
+    const auto member = join(**room, "alice");
+    ASSERT_TRUE(publisher && member);
+    // WHIP's DELETE carries the ticket at the stream's end: the packager's 12 h cap, after a
+    // connect as late as a member's ticket allows.
+    EXPECT_EQ(publisher->expires_at,
+              clock.wall_now() + std::chrono::hours(12) + std::chrono::seconds(60));
+    EXPECT_EQ(member->expires_at, clock.wall_now() + std::chrono::seconds(60));
+    const auto token = read_token(publisher->credential, kSecret);
+    ASSERT_TRUE(token);
+    EXPECT_EQ(token->claims.find("exp")->as_i64(),
+              std::chrono::floor<core::Seconds>(publisher->expires_at).time_since_epoch().count());
+}
+
 TEST_P(LiveKitSfuTest, ThePlainClientUrlGivesAPlainWhipUrl) {
     auto server = answering(200);
     auto config = config_for(server.base_url());

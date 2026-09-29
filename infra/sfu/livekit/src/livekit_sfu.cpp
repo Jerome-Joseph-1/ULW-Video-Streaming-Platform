@@ -29,6 +29,11 @@ using detail::RoomService;
 // need the ticket again. One connect is the SDK's 15 s signal plus 15 s peer-connection budget,
 // and room.connect() retries once: 60 s. Clock skew needs nothing extra, LiveKit allows a minute.
 constexpr core::Seconds kTicketTtl{2 * (15 + 15)};
+// A WHIP client sends its ticket again with every request on the session (RFC 9725 section 4.5),
+// and LiveKit checks it each time (pkg/service/whipservice.go in v1.13.7), so a publisher's
+// DELETE at the end of the longest stream the packager takes, 12 h (ADR-0047), must still pass,
+// from a session that connected at the end of the ticket's connect window.
+constexpr core::Seconds kPublisherTicketTtl = std::chrono::hours{12} + kTicketTtl;
 // How long LiveKit keeps a room with nobody in it: since its creation if nobody has joined yet
 // (empty_timeout), since the last one left if someone had (departure_timeout). The first must
 // cover a ticket issued as the room opens, 60 s. The second must cover the SDK's reconnect after
@@ -102,7 +107,8 @@ public:
                       IfAbsent::Fail,
                       [&service = service_, endpoint = member ? endpoints_.client : endpoints_.whip,
                        permission = member ? Permission::JoinRoom : Permission::PublishToRoom,
-                       room = name_, identity = std::move(identity), done = std::move(done)](
+                       ttl = member ? kTicketTtl : kPublisherTicketTtl, room = name_,
+                       identity = std::move(identity), done = std::move(done)](
                           std::expected<void, MediaError> opened) mutable noexcept {
                           if (!opened) {
                               done(std::unexpected(opened.error()));
@@ -111,7 +117,7 @@ public:
                           auto token = detail::mint_token(
                               service.key(),
                               Grant{.permission = permission, .room = room, .identity = identity},
-                              service.clock().wall_now(), kTicketTtl);
+                              service.clock().wall_now(), ttl);
                           if (!token) {
                               done(std::unexpected(MediaError::Refused));
                               return;
