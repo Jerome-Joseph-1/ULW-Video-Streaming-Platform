@@ -75,8 +75,9 @@ spec:
               value: "8080"
             - name: ULW_TRANSPORT
               value: plain
-            # The container runtime's default seccomp profile refuses io_uring_setup, so the
-            # gateway would fall back to epoll anyway; saying so keeps the log honest.
+            # Docker's default seccomp profile, which RuntimeDefault profiles derive from, has
+            # no io_uring syscalls (seccomp/ulw-worker.json shows the same list), so the gateway
+            # would fall back to epoll anyway; naming it keeps the log from reporting a fallback.
             - name: ULW_REACTOR
               value: epoll
             - name: ULW_STORAGE
