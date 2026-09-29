@@ -592,11 +592,23 @@ TEST_P(ChatClusterTest, ARateLimitedSendIsRefusedAndReachesNobody) {
     ASSERT_GE(limited.size(), 1U);
     ASSERT_LE(limited.size(), kBurst - 10) << "at most those past the burst";
 
-    // Once the wait the server named is over, bob is heard again. Anything refused would have
-    // been sequenced before this, on the same connection, so its absence below is final.
-    (void)bob->wait_for([](const Seen&) { return false; },
-                        std::chrono::milliseconds(retry_after_ms + 100));
-    ASSERT_TRUE(bob->send(send_command(room_, "after the limit", "marker")));
+    // bob tries a marker until one is taken, each try once the last is answered: no clock in
+    // the test, only the server's answers. Anything refused would have been sequenced before
+    // the marker, on the same connection, so its absence below is final.
+    std::size_t marker_refusals = 0;
+    for (;;) {
+        const std::string id = std::format("marker-{}", marker_refusals);
+        ASSERT_TRUE(bob->send(send_command(room_, "after the limit", id)));
+        const auto answer = bob->wait_for(
+            [&](const Seen& s) { return (s.type == "sent" || s.type == "error") && s.id == id; });
+        ASSERT_TRUE(answer) << id;
+        if (answer->type == "sent") {
+            break;
+        }
+        ASSERT_EQ(answer->reason, "rate_limited");
+        // 2 a second: the bucket refills within half a second, far fewer tries than this.
+        ASSERT_LT(++marker_refusals, 100'000U) << "the bucket never refilled";
+    }
     for (Client* c : {alice.get(), bob.get(), carol.get()}) {
         ASSERT_TRUE(c->message("after the limit")) << c->name();
         EXPECT_EQ(c->count([](const Seen& s) {
@@ -610,7 +622,7 @@ TEST_P(ChatClusterTest, ARateLimitedSendIsRefusedAndReachesNobody) {
                 << c->name() << " was delivered " << id;
         }
     }
-    EXPECT_EQ(metric(nodes_[1], "messages_rate_limited_total"), limited.size());
+    EXPECT_EQ(metric(nodes_[1], "messages_rate_limited_total"), limited.size() + marker_refusals);
     std::cout << "bob sent " << kBurst << " at once: " << limited.size()
               << " refused as rate_limited (retry after " << retry_after_ms
               << " ms), delivered to nobody; the rest reached all three nodes\n";
