@@ -1,5 +1,6 @@
 #include "core/version.hpp"
 #include "infra/auth/local_verifier.hpp"
+#include "infra/postgres/health_check.hpp"
 #include "infra/postgres/upload_catalog.hpp"
 #include "infra/s3util/credentials.hpp"
 #include "infra/storage/fs_store.hpp"
@@ -14,7 +15,12 @@
 
 #include "config.hpp"
 #include "gateway.hpp"
+#include "health.hpp"
 #include "key_fetcher.hpp"
+#include "ops/async_log.hpp"
+#include "ops/log.hpp"
+#include "ops/notify.hpp"
+#include "ops/settings.hpp"
 
 #include <array>
 #include <cstdio>
@@ -23,16 +29,28 @@
 #include <fstream>
 #include <memory>
 #include <print>
+#include <span>
 #include <string>
 #include <system_error>
+#include <unistd.h>
+#include <vector>
 
 namespace {
 
 // 65536 descriptors: 448 client connections plus their backend sockets need a few thousand,
 // and the reactor's descriptor-indexed slot table stays at a few megabytes.
 constexpr std::size_t kMaxDescriptors = 65'536;
-// Wakes the loop at least this often; nothing depends on it but the drain check.
+// Wakes the loop at least this often, for the drain check and the watchdog, whose interval
+// is seconds.
 constexpr core::Millis kLoopTick{1'000};
+// What configuration errors exit with, so a supervisor can tell a deployment that will never
+// start from one that crashed.
+constexpr int kExitConfig = 2;
+// 256 KiB holds about 850 request lines of ~300 bytes: at the gateway's busiest, 448 uploads
+// each finishing an 8 MiB chunk no faster than every 0.67 s (100 Mbit/s), with playlist reads
+// besides, well over a second of lines. A log reader stalled longer than that costs lines,
+// counted, rather than the loop.
+constexpr std::size_t kLogBuffer = std::size_t{256} * 1024;
 
 std::optional<std::string> read_env(std::string_view name) {
     // Read once, before any thread exists, so nothing can race it with setenv.
@@ -65,16 +83,25 @@ std::string errno_text(int error) {
     return std::generic_category().message(error);
 }
 
-int fail(std::string_view what, std::string_view why) {
-    std::println(stderr, "gateway_server: {}: {}", what, why);
+int fail(ops::Logger& log, std::string_view what, std::string_view why) {
+    log.error("startup failed", {{"step", what}, {"error", why}});
     return EXIT_FAILURE;
+}
+
+int refuse(ops::Logger& log, std::string_view source, std::string_view reason) {
+    log.error("configuration refused", {{"source", source}, {"reason", reason}});
+    return kExitConfig;
 }
 
 // Owns everything the gateway borrows, in construction order, so that destruction runs in
 // reverse: the gateway goes before the store and catalog its connections point at.
 struct Services {
+    explicit Services(ops::Logger& logger) : log(logger) {}
+
+    ops::Logger& log;
     os::SystemClock clock;
     os::SystemRandom random;
+    gateway::Health health;
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::ITransportFactory> transports;
     std::unique_ptr<net::OffloadPool> pool;
@@ -86,13 +113,17 @@ struct Services {
     std::unique_ptr<core::ports::IIngestStore> store;
     // The same object as `store`, seen as a reader.
     core::ports::IObjectReader* reader = nullptr;
+    // The object store's count of failures that need an operator; none for the filesystem.
+    std::function<std::uint64_t()> paging_errors;
     std::unique_ptr<infra::postgres::PgUploadCatalog> catalog;
     std::unique_ptr<gateway::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
     std::unique_ptr<gateway::Gateway> gateway;
     std::unique_ptr<net::SignalWatcher> signals;
+    std::unique_ptr<infra::postgres::PgHealthCheck> database_check;
+    // Last, so its thread stops before anything it asks goes away.
+    std::unique_ptr<gateway::HealthProbe> probe;
 
-    Services() = default;
     Services(const Services&) = delete;
     Services& operator=(const Services&) = delete;
 
@@ -123,8 +154,6 @@ std::expected<void, std::string> make_transports(const gateway::Config& config, 
 std::expected<void, std::string> make_store(const gateway::Config& config, Services& s) {
     using gateway::StorageBackend;
     if (config.storage == StorageBackend::Filesystem) {
-        // 8 MiB chunks, matching the object-store part size so clients see one chunk size.
-        constexpr std::uint64_t kFsChunk = std::uint64_t{8} << 20U;
         // Its own writers, so a slow disk never queues the control calls behind it. Uploads
         // write one job at a time each; four threads keep four disks' worth of fsyncs apart.
         constexpr std::size_t kFsWriters = 4;
@@ -134,7 +163,7 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
         }
         auto fs = std::make_unique<infra::storage::FsStore>(
             infra::storage::FsStore::Deps{.clock = s.clock, .random = s.random},
-            std::move(*writers), config.storage_location, kFsChunk);
+            std::move(*writers), config.storage_location, config.chunk_size);
         s.reader = fs.get();
         s.store = std::move(fs);
         return {};
@@ -159,11 +188,14 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
                                                   .clock = s.clock,
                                                   .random = s.random,
                                                   .profile = std::move(*profile),
-                                                  .bucket = config.bucket});
+                                                  .bucket = config.bucket},
+                                                 {.part_size = config.chunk_size});
     if (!store) {
         return std::unexpected("object store configuration refused");
     }
-    s.reader = store->get();
+    infra::storage::S3Store* s3 = store->get();
+    s.paging_errors = [s3] { return s3->paging_errors(); };
+    s.reader = s3;
     s.store = std::move(*store);
     return {};
 }
@@ -187,57 +219,65 @@ std::expected<void, std::string> make_verifier(const gateway::Config& config, Se
         return std::unexpected("libcurl multi for key fetches failed to start");
     }
     s.key_multi = std::move(*key_multi);
-    s.key_fetcher = std::make_unique<gateway::KeySetFetcher>(*s.key_multi);
+    s.key_fetcher = std::make_unique<gateway::KeySetFetcher>(*s.key_multi, s.log);
     s.verifier = std::make_unique<infra::auth::JwksVerifier>(
         *s.reactor, *s.key_fetcher,
         infra::auth::JwksConfig{.url = config.jwks_url, .claims = std::move(rules)});
     return {};
 }
 
-int run() {
-    const auto info = core::build_info();
-    auto config = gateway::load_config(read_env);
-    if (!config) {
-        return fail(config.error().variable, config.error().reason);
-    }
-    if (auto r = net::block_shutdown_signals(); !r) {
-        return fail("block signals", errno_text(r.error()));
-    }
-    const auto limits = os::raise_nofile_limit(kMaxDescriptors);
-    if (!limits) {
-        return fail("raise RLIMIT_NOFILE", errno_text(limits.error()));
-    }
+// A key nothing ever writes: NotFound proves the store answers, and costs one GET.
+constexpr std::string_view kProbeKey = "health/probe";
 
-    Services s;
-    auto choice = net::make_reactor_with_fallback(config->reactor, s.clock, limits->soft);
+gateway::ProbeChecks probe_checks(Services& s) {
+    return {.database = [&s] { return s.database_check->oldest_queued_job(); },
+            .store = [&s]() -> std::expected<void, std::string> {
+                const auto key = core::StorageKey::parse(kProbeKey);
+                if (!key) {
+                    return std::unexpected("probe key refused");
+                }
+                const auto got = s.reader->fetch_small(*key, 1);
+                if (got || got.error() == core::ports::StorageError::NotFound) {
+                    return {};
+                }
+                return std::unexpected(std::string(core::ports::to_string(got.error())));
+            },
+            .store_paging_errors = s.paging_errors};
+}
+
+int serve(const gateway::Config& config, const os::NofileLimits& limits, ops::Logger& log,
+          const std::optional<ops::Notifier>& notifier) {
+    const auto info = core::build_info();
+    Services s(log);
+    auto choice = net::make_reactor_with_fallback(config.reactor, s.clock, limits.soft);
     if (!choice) {
-        return fail("reactor", errno_text(choice.error()));
+        return fail(log, "reactor", errno_text(choice.error()));
     }
     s.reactor = std::move(choice->reactor);
-    if (auto r = make_transports(*config, s); !r) {
-        return fail("ULW_TRANSPORT=tls", r.error());
+    if (auto r = make_transports(config, s); !r) {
+        return fail(log, "ULW_TRANSPORT=tls", r.error());
     }
-    auto pool = net::OffloadPool::create(*s.reactor, config->offload_threads);
+    auto pool = net::OffloadPool::create(*s.reactor, config.offload_threads);
     if (!pool) {
-        return fail("offload pool", errno_text(pool.error()));
+        return fail(log, "offload pool", errno_text(pool.error()));
     }
     s.pool = std::move(*pool);
     auto multi = infra::curl::Multi::create(*s.reactor);
     if (!multi) {
-        return fail("libcurl", "no threaded resolver; name lookups would block the loop");
+        return fail(log, "libcurl", "no threaded resolver; name lookups would block the loop");
     }
     s.multi = std::move(*multi);
-    if (auto r = make_store(*config, s); !r) {
-        return fail("storage", r.error());
+    if (auto r = make_store(config, s); !r) {
+        return fail(log, "storage", r.error());
     }
     auto catalog = infra::postgres::PgUploadCatalog::create(
-        *s.reactor, *s.pool, infra::postgres::CatalogConfig{.conninfo = config->database_url});
+        *s.reactor, *s.pool, infra::postgres::CatalogConfig{.conninfo = config.database_url});
     if (!catalog) {
-        return fail("ULW_DATABASE_URL", catalog.error());
+        return fail(log, "ULW_DATABASE_URL", catalog.error());
     }
     s.catalog = std::move(*catalog);
-    if (auto r = make_verifier(*config, s); !r) {
-        return fail("auth", r.error());
+    if (auto r = make_verifier(config, s); !r) {
+        return fail(log, "auth", r.error());
     }
 
     s.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *s.reactor,
@@ -249,44 +289,124 @@ int run() {
                                                                  .views = *s.catalog,
                                                                  .verifier = *s.verifier,
                                                                  .clock = s.clock,
-                                                                 .random = s.random},
-                                                   config->limits);
+                                                                 .random = s.random,
+                                                                 .log = log,
+                                                                 .health = s.health},
+                                                   config.limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.gateway);
     if (!signals) {
-        return fail("signalfd", errno_text(signals.error()));
+        return fail(log, "signalfd", errno_text(signals.error()));
     }
     s.signals = std::move(*signals);
-    auto listener = net::listen_tcp({.port = config->port});
+    auto listener = net::listen_tcp({.port = config.port});
     if (!listener) {
-        return fail("listen", errno_text(listener.error()));
+        return fail(log, "listen", errno_text(listener.error()));
     }
     if (auto r = s.reactor->listen(std::move(*listener), *s.gateway); !r) {
-        return fail("register listener", errno_text(r.error()));
+        return fail(log, "register listener", errno_text(r.error()));
     }
+    s.database_check = std::make_unique<infra::postgres::PgHealthCheck>(config.database_url);
+    s.probe = std::make_unique<gateway::HealthProbe>(s.health, probe_checks(s), s.clock, log);
+    s.probe->start(gateway::kProbeInterval);
     // Says which keys tokens are checked against, so a development key set left configured in
     // a real deployment shows on the first line of the log.
-    std::println(
-        "gateway_server {} ({}) port={} transport={} reactor={}{} keys={}", info.version,
-        info.git_sha, config->port, config->transport == gateway::Transport::Tls ? "tls" : "plain",
-        net::to_string(choice->kind),
-        choice->fell_back_from_io_uring ? " (io_uring unavailable)" : "",
-        config->dev_jwks_file.empty() ? config->jwks_url : "DEVELOPMENT " + config->dev_jwks_file);
-    static_cast<void>(std::fflush(stdout));
+    log.info("listening",
+             {{"version", info.version},
+              {"git_sha", info.git_sha},
+              {"port", config.port},
+              {"transport", config.transport == gateway::Transport::Tls ? "tls" : "plain"},
+              {"reactor", net::to_string(choice->kind)},
+              {"io_uring_unavailable", choice->fell_back_from_io_uring.has_value()},
+              {"nofile", limits.soft},
+              {"keys", config.dev_jwks_file.empty() ? config.jwks_url
+                                                    : "DEVELOPMENT " + config.dev_jwks_file}});
 
+    // Started means serving /healthz; /readyz follows the probe.
+    if (notifier) {
+        notifier->ready();
+    }
+    const auto watchdog = notifier ? notifier->watchdog_interval() : std::nullopt;
+    core::MonoTime next_ping = s.clock.now();
+    bool told_stopping = false;
     while (!s.gateway->finished()) {
         s.reactor->run_once(kLoopTick);
         s.gateway->reap();
+        // Only a loop that turns pings: a wedged loop is what the watchdog is for.
+        if (watchdog && s.clock.now() >= next_ping) {
+            notifier->watchdog();
+            next_ping = s.clock.now() + *watchdog;
+        }
+        if (notifier && s.gateway->draining() && !told_stopping) {
+            notifier->stopping();
+            told_stopping = true;
+        }
     }
-    std::println("gateway_server drained");
+    log.info("drained");
     return EXIT_SUCCESS;
+}
+
+int run(std::span<const std::string_view> args) {
+    const auto info = core::build_info();
+    const os::SystemClock clock;
+    ops::StdoutSink direct;
+    ops::Logger boot(direct, clock, "gateway", ops::Level::Info);
+
+    const auto cli = ops::parse_command_line(gateway::settings(), args);
+    if (!cli) {
+        return refuse(boot, cli.error().source, cli.error().reason);
+    }
+    if (cli->version) {
+        std::println("gateway_server {} ({})", info.version, info.git_sha);
+        return EXIT_SUCCESS;
+    }
+    const auto layers = ops::load_settings(gateway::settings(), *cli, read_env);
+    if (!layers) {
+        return refuse(boot, layers.error().source, layers.error().reason);
+    }
+    const auto config = gateway::load_config(layers->lookup());
+    if (!config) {
+        return refuse(boot, config.error().variable, config.error().reason);
+    }
+    boot.set_threshold(config->log_level);
+    boot.info("starting", {{"version", info.version}, {"git_sha", info.git_sha}});
+    gateway::log_effective(*config, *layers, boot);
+
+    // Before any thread exists, so every thread inherits the mask.
+    if (auto r = net::block_shutdown_signals(); !r) {
+        return fail(boot, "block signals", errno_text(r.error()));
+    }
+    const auto limits = os::raise_nofile_limit(kMaxDescriptors);
+    if (!limits) {
+        return fail(boot, "raise RLIMIT_NOFILE", errno_text(limits.error()));
+    }
+    if (auto r = gateway::check_descriptor_budget(config->limits, limits->soft); !r) {
+        return refuse(boot, r.error().variable, r.error().reason);
+    }
+    if (cli->check) {
+        boot.info("configuration valid");
+        return EXIT_SUCCESS;
+    }
+    auto notifier = ops::Notifier::from_env(read_env, ::getpid());
+    if (!notifier) {
+        return refuse(boot, "NOTIFY_SOCKET", errno_text(notifier.error()));
+    }
+
+    ops::AsyncLogSink sink(STDOUT_FILENO, kLogBuffer);
+    ops::Logger log(sink, clock, "gateway", config->log_level);
+    return serve(*config, *limits, log, *notifier);
 }
 
 } // namespace
 
 // Formatting and allocation are all that can still throw; report it and exit.
-int main() {
+int main(int argc, char** argv) {
     try {
-        return run();
+        const std::span<char*> raw(argv, static_cast<std::size_t>(argc));
+        std::vector<std::string_view> args;
+        for (const char* a : raw.subspan(1)) {
+            args.emplace_back(a);
+        }
+        return run(args);
     } catch (const std::exception& e) {
         static_cast<void>(std::fputs(e.what(), stderr));
         return EXIT_FAILURE;

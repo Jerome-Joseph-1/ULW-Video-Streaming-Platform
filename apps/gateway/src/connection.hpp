@@ -51,6 +51,10 @@ public:
     void abort() noexcept;
     // Nothing (the kernel, the catalog, the pool, the verifier) can still reach this object.
     [[nodiscard]] bool quiescent() const noexcept;
+    // Heap bytes held for the request: staged body and a buffered JSON body.
+    [[nodiscard]] std::size_t buffered_bytes() const noexcept {
+        return staging_.capacity() + req_.body.capacity();
+    }
 
     void on_data(net::BorrowedBytes bytes) noexcept override;
     void on_writable() noexcept override;
@@ -94,9 +98,14 @@ private:
         std::optional<core::UploadId> upload_id;
         std::uint64_t content_length = 0;
         std::array<char, core::Uuid::kTextLength> request_id{};
+        // Set when the store stopped taking the body, cleared when it took all that waited.
+        std::optional<core::MonoTime> stalled_since;
+        // When the chunk's first byte went to the store.
+        core::MonoTime append_started;
         std::optional<http::Status> body_error;
         std::optional<RouteId> route;
         http::MethodSet allow;
+        std::optional<http::Method> method;
         bool keep_alive = true;
         bool authenticated = false;
         bool message_complete = false;
@@ -154,6 +163,8 @@ private:
     void begin_append(std::uint64_t at) noexcept;
 
     void respond(http::ResponseHead head, std::string_view body) noexcept;
+    void log_request(http::Status status) noexcept;
+    [[nodiscard]] std::string_view readiness_body() const noexcept;
     void respond_json(http::Status status, std::string_view json) noexcept;
     void fail(http::Status status,
               std::optional<std::uint64_t> upload_offset = std::nullopt) noexcept;

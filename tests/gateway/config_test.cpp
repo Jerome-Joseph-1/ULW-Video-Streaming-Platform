@@ -1,4 +1,7 @@
+#include "os/system_clock.hpp"
+
 #include "config.hpp"
+#include "support/memory_log.hpp"
 
 #include <gtest/gtest.h>
 #include <map>
@@ -173,6 +176,106 @@ TEST_F(ConfigTest, TheFilesystemBackendTakesAFileServerForSegmentUrls) {
 TEST_F(ConfigTest, AFileServerBesideAnObjectStoreIsRefused) {
     env["ULW_FS_READ_URL"] = "http://127.0.0.1:8081";
     EXPECT_EQ(refused_variable(), "ULW_FS_READ_URL");
+}
+
+TEST_F(ConfigTest, AdmissionLimitsDefaultToTheDerivedBudgetAndMayBeLowered) {
+    const auto defaults = load();
+    ASSERT_TRUE(defaults);
+    EXPECT_EQ(defaults->limits.max_connections, 448U);
+    EXPECT_EQ(defaults->limits.max_upload_slots, 448U);
+    EXPECT_EQ(defaults->limits.max_uploads_per_user, 3U);
+    EXPECT_EQ(defaults->chunk_size, 8U << 20U);
+    EXPECT_EQ(defaults->log_level, ops::Level::Info);
+
+    // Lowering connections alone takes the slots down with it rather than refusing.
+    env["ULW_MAX_CONNECTIONS"] = "100";
+    const auto lowered = load();
+    ASSERT_TRUE(lowered);
+    EXPECT_EQ(lowered->limits.max_upload_slots, 100U);
+    env["ULW_MAX_UPLOAD_SLOTS"] = "2";
+    const auto few = load();
+    ASSERT_TRUE(few);
+    EXPECT_EQ(few->limits.max_uploads_per_user, 2U);
+}
+
+TEST_F(ConfigTest, LimitsThatContradictEachOtherAreRefused) {
+    env["ULW_MAX_CONNECTIONS"] = "100";
+    env["ULW_MAX_UPLOAD_SLOTS"] = "101";
+    EXPECT_EQ(refused_variable(), "ULW_MAX_UPLOAD_SLOTS");
+    env["ULW_MAX_UPLOAD_SLOTS"] = "10";
+    env["ULW_MAX_UPLOADS_PER_USER"] = "11";
+    EXPECT_EQ(refused_variable(), "ULW_MAX_UPLOADS_PER_USER");
+    env["ULW_MAX_UPLOADS_PER_USER"] = "0";
+    EXPECT_EQ(refused_variable(), "ULW_MAX_UPLOADS_PER_USER");
+}
+
+TEST_F(ConfigTest, AChunkTheObjectStoreWouldRefuseIsRefusedAtStartup) {
+    // One byte under 5 MiB, and the largest the 10,000-part cap does not reach.
+    env["ULW_CHUNK_SIZE"] = std::to_string((5U << 20U) - 1);
+    EXPECT_EQ(refused_variable(), "ULW_CHUNK_SIZE");
+    env["ULW_CHUNK_SIZE"] = std::to_string(5U << 20U);
+    EXPECT_EQ(refused_variable(), "ULW_CHUNK_SIZE");
+    env["ULW_CHUNK_SIZE"] = "5368710";
+    const auto smallest = load();
+    ASSERT_TRUE(smallest);
+    EXPECT_EQ(smallest->chunk_size, 5'368'710U);
+    env["ULW_CHUNK_SIZE"] = std::to_string((std::uint64_t{5} << 30U) + 1);
+    EXPECT_EQ(refused_variable(), "ULW_CHUNK_SIZE");
+}
+
+TEST_F(ConfigTest, TheLogLevelIsOneOfFour) {
+    env["ULW_LOG_LEVEL"] = "debug";
+    ASSERT_TRUE(load());
+    EXPECT_EQ(load()->log_level, ops::Level::Debug);
+    env["ULW_LOG_LEVEL"] = "trace";
+    EXPECT_EQ(refused_variable(), "ULW_LOG_LEVEL");
+}
+
+TEST(DescriptorBudget, TwoDescriptorsPerConnectionAfterTheReserve) {
+    gateway::Limits limits;
+    limits.max_connections = 448;
+    // (960 - 64) / 2 = 448 exactly; one descriptor fewer leaves room for 447.
+    EXPECT_TRUE(gateway::check_descriptor_budget(limits, 960));
+    const auto short_by_one = gateway::check_descriptor_budget(limits, 959);
+    ASSERT_FALSE(short_by_one);
+    EXPECT_EQ(short_by_one.error().variable, "ULW_MAX_CONNECTIONS");
+    EXPECT_FALSE(gateway::check_descriptor_budget(limits, 64));
+    EXPECT_FALSE(gateway::check_descriptor_budget(limits, 0));
+}
+
+TEST_F(ConfigTest, EverySettingHasAFileKeyAndOnlyTheConnectionStringIsSecret) {
+    for (const ops::Setting& s : gateway::settings()) {
+        EXPECT_FALSE(s.key.empty()) << s.env;
+        EXPECT_EQ(s.secret, s.env == "ULW_DATABASE_URL") << s.env;
+    }
+}
+
+TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {
+    env["ULW_DATABASE_URL"] = "postgresql://ulw:hunter2@db/ulw";
+    env["ULW_LISTEN_PORT"] = "9000";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    const auto layers = ops::Settings::layer(
+        gateway::settings(), nullptr,
+        [this](std::string_view name) -> std::optional<std::string> {
+            const auto it = env.find(std::string(name));
+            return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
+        },
+        ops::CommandLine{});
+    ASSERT_TRUE(layers);
+    const os::SystemClock clock;
+    ulw::test::MemoryLog lines;
+    ops::Logger log(lines, clock, "gateway", ops::Level::Info);
+    gateway::log_effective(*config, *layers, log);
+    const std::string all = lines.all();
+    EXPECT_EQ(all.find("hunter2"), std::string::npos);
+    EXPECT_NE(all.find(R"("name":"ULW_DATABASE_URL","value":"<redacted>","from":"env")"),
+              std::string::npos)
+        << all;
+    EXPECT_NE(all.find(R"("name":"ULW_LISTEN_PORT","value":"9000","from":"env")"),
+              std::string::npos);
+    EXPECT_NE(all.find(R"("name":"ULW_MAX_CONNECTIONS","value":"448","from":"default")"),
+              std::string::npos);
 }
 
 } // namespace

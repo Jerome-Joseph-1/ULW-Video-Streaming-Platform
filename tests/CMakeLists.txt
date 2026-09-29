@@ -215,9 +215,11 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
     gateway/gateway_harness.cpp
+    gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
+    gateway/health_test.cpp
     gateway/key_fetcher_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
@@ -326,6 +328,20 @@ target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
 add_dependencies(chat_cluster_tests chat_server)
+
+# gateway_server as its service manager runs it, against a scratch database.
+ulw_add_test_suite(gateway_process_tests integration
+    integration/gateway_process_test.cpp
+    integration/postgres_harness.cpp
+    support/child_process.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(gateway_process_tests PRIVATE
+    ulw::pg_store ulw::devtoken ulw::os ulw::test_tls PkgConfig::LIBPQ)
+target_include_directories(gateway_process_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+target_compile_definitions(gateway_process_tests PRIVATE
+    ULW_GATEWAY_BIN="$<TARGET_FILE:gateway_server>")
+add_dependencies(gateway_process_tests gateway_server)
 
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp

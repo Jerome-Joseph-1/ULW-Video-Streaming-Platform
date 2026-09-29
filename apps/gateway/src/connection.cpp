@@ -36,6 +36,28 @@ template <class T> [[nodiscard]] const T* get(const std::optional<T>& o) noexcep
     return o ? &*o : nullptr;
 }
 
+std::string_view method_name(http::Method m) noexcept {
+    switch (m) {
+    case http::Method::Get:
+        return "GET";
+    case http::Method::Head:
+        return "HEAD";
+    case http::Method::Post:
+        return "POST";
+    case http::Method::Put:
+        return "PUT";
+    case http::Method::Patch:
+        return "PATCH";
+    case http::Method::Delete:
+        return "DELETE";
+    case http::Method::Options:
+        return "OPTIONS";
+    case http::Method::Other:
+        return "OTHER";
+    }
+    return "OTHER";
+}
+
 std::string_view state_name(core::VideoState s) noexcept {
     switch (s) {
     case core::VideoState::Init:
@@ -186,6 +208,7 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
         begin_request();
     }
     ++gw().counters().requests;
+    req_.method = head.method;
     req_.content_length = head.content_length;
     req_.keep_alive =
         head.keep_alive && !draining_ && ++requests_ < gw().limits().max_requests_per_connection;
@@ -311,6 +334,9 @@ http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept
     }
     const std::size_t taken = session_->write(bytes);
     if (taken < bytes.size()) {
+        if (!req_.stalled_since) {
+            req_.stalled_since = last_activity_;
+        }
         // Appended, never assigned: whatever is already staged stays in front.
         staging_.insert(staging_.end(), bytes.begin() + static_cast<std::ptrdiff_t>(taken),
                         bytes.end());
@@ -333,10 +359,10 @@ void Connection::advance() noexcept {
         return;
     case RouteId::Readyz:
         if (req_.message_complete) {
-            const bool ready = gw().ready();
-            respond({.status = ready ? Status::Ok : Status::ServiceUnavailable,
+            const std::string_view body = readiness_body();
+            respond({.status = body == "ready\n" ? Status::Ok : Status::ServiceUnavailable,
                      .content_type = "text/plain"},
-                    ready ? "ready\n" : "draining\n");
+                    body);
         }
         return;
     case RouteId::Metrics:
@@ -372,6 +398,27 @@ void Connection::advance() noexcept {
         }
         return;
     }
+}
+
+// 503 while starting, draining, or cut off from the database or the store: a load balancer
+// should send this replica nothing it would have to refuse.
+std::string_view Connection::readiness_body() const noexcept {
+    if (gw().draining()) {
+        return "draining\n";
+    }
+    switch (gw().deps().health.readiness(now())) {
+    case Readiness::Ready:
+        return "ready\n";
+    case Readiness::Starting:
+        return "starting\n";
+    case Readiness::DatabaseDown:
+        return "database unreachable\n";
+    case Readiness::StoreDown:
+        return "object store unreachable\n";
+    case Readiness::Stale:
+        return "health probe stuck\n";
+    }
+    return "starting\n";
 }
 
 void Connection::start_create() noexcept {
@@ -523,6 +570,7 @@ void Connection::begin_append(std::uint64_t at) noexcept {
         return;
     }
     session_ = std::move(*session);
+    req_.append_started = now();
     drain_staging();
 }
 
@@ -544,6 +592,11 @@ void Connection::drain_staging() noexcept {
     }
     staging_.clear();
     staging_head_ = 0;
+    if (req_.stalled_since) {
+        gw().backend_write_stall().observe(
+            std::chrono::duration_cast<core::Millis>(now() - *req_.stalled_since));
+        req_.stalled_since.reset();
+    }
     if (parser_paused_ && !req_.message_complete) {
         parser_paused_ = false;
         // The time the store held the body up is not the client's to answer for.
@@ -577,6 +630,8 @@ void Connection::on_ingest_progress() noexcept {
 }
 
 void Connection::on_durable() noexcept {
+    gw().part_upload_duration().observe(
+        std::chrono::duration_cast<core::Millis>(now() - req_.append_started));
     const std::uint64_t offset = session_->durable_offset();
     session_.reset();
     const core::UploadId* id = get(req_.upload_id);
@@ -1111,6 +1166,7 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
     const bool keep = req_.keep_alive && req_.message_complete && !draining_;
     head.connection = keep ? http::Connection::KeepAlive : http::Connection::Close;
     head.request_id = request_id();
+    log_request(head.status);
     head.content_length = body.size();
     std::array<char, kResponseHead> buf{};
     const auto n = http::write_response_head(head, buf);
@@ -1130,6 +1186,30 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
         return;
     }
     finish_request();
+}
+
+// One line per response, without the target, headers or body: tokens travel in headers,
+// and ids are all a trace needs.
+void Connection::log_request(http::Status status) noexcept {
+    const std::uint16_t code = http::code(status);
+    const std::size_t status_class = code / 100;
+    if (status_class >= 1 && status_class <= 5) {
+        ++gw().counters().responses.at(status_class - 1);
+    }
+    ops::Level level = code >= 500 ? ops::Level::Warn : ops::Level::Info;
+    // Probes and scrapes arrive every few seconds and say nothing about traffic.
+    if (req_.route == RouteId::Healthz || req_.route == RouteId::Readyz ||
+        req_.route == RouteId::Metrics) {
+        level = ops::Level::Debug;
+    }
+    const auto ms = std::chrono::duration_cast<core::Millis>(now() - request_started_);
+    deps().log.log(level, "request",
+                   {{"request_id", request_id()},
+                    {"method", req_.method ? method_name(*req_.method) : "-"},
+                    {"route", req_.route ? to_string(*req_.route) : "-"},
+                    {"status", code},
+                    {"ms", ms.count()},
+                    {"bytes_in", req_.content_length}});
 }
 
 void Connection::finish_request() noexcept {

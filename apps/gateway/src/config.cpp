@@ -1,12 +1,50 @@
 #include "config.hpp"
 
+#include "core/models/upload.hpp"
 #include "core/util/parse.hpp"
 
+#include <algorithm>
+#include <array>
+#include <string>
 #include <utility>
 
 namespace gateway {
 
 namespace {
+
+constexpr std::array kSettings{
+    ops::Setting{.env = "ULW_LISTEN_PORT", .key = "listen.port"},
+    ops::Setting{.env = "ULW_REACTOR", .key = "listen.reactor"},
+    ops::Setting{.env = "ULW_TRANSPORT", .key = "listen.transport"},
+    ops::Setting{.env = "ULW_TLS_CERT_FILE", .key = "tls.cert_file"},
+    ops::Setting{.env = "ULW_TLS_KEY_FILE", .key = "tls.key_file"},
+    ops::Setting{.env = "ULW_OFFLOAD_THREADS", .key = "limits.offload_threads"},
+    ops::Setting{.env = "ULW_MAX_CONNECTIONS", .key = "limits.max_connections"},
+    ops::Setting{.env = "ULW_MAX_UPLOAD_SLOTS", .key = "limits.max_upload_slots"},
+    ops::Setting{.env = "ULW_MAX_UPLOADS_PER_USER", .key = "limits.max_uploads_per_user"},
+    ops::Setting{.env = "ULW_STORAGE", .key = "storage.backend"},
+    ops::Setting{.env = "ULW_R2_ACCOUNT_ID", .key = "storage.r2_account_id"},
+    ops::Setting{.env = "ULW_S3_ENDPOINT", .key = "storage.s3_endpoint"},
+    ops::Setting{.env = "ULW_FS_ROOT", .key = "storage.fs_root"},
+    ops::Setting{.env = "ULW_FS_READ_URL", .key = "storage.fs_read_url"},
+    ops::Setting{.env = "ULW_BUCKET", .key = "storage.bucket"},
+    ops::Setting{.env = "ULW_CHUNK_SIZE", .key = "storage.chunk_size"},
+    ops::Setting{.env = "ULW_DATABASE_URL", .key = "database.url", .secret = true},
+    ops::Setting{.env = "JWKS_URL", .key = "auth.jwks_url"},
+    ops::Setting{.env = "ULW_DEV_JWKS_FILE", .key = "auth.dev_jwks_file"},
+    ops::Setting{.env = "JWT_ISSUER", .key = "auth.issuer"},
+    ops::Setting{.env = "JWT_AUDIENCE", .key = "auth.audience"},
+    ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
+    ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
+};
+
+// S3 and R2 refuse a part under 5 MiB unless it is the last, and above 5 GiB.
+constexpr std::uint64_t kMinChunk = std::uint64_t{5} << 20U;
+constexpr std::uint64_t kMaxChunk = std::uint64_t{5} << 30U;
+// Neither allows more than 10,000 parts, so the largest upload bounds the chunk from below:
+// 50 GiB / 10,000 is 5.12 MiB, just above the store's own minimum.
+constexpr std::uint64_t kMaxParts = 10'000;
+constexpr std::uint64_t kDescriptorReserve = 64;
 
 std::unexpected<ConfigError> error(std::string_view variable, std::string_view reason) {
     return std::unexpected(
@@ -141,10 +179,67 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
     return {};
 }
 
+// Everything a limit is checked against is known here, so each is checked here, once.
+std::expected<void, ConfigError> load_limits(const EnvLookup& env, Config& config) {
+    Limits& limits = config.limits;
+    // Past 65,536 the reactor's descriptor-indexed tables and the budget of ADR-0027 both stop
+    // meaning anything.
+    const auto connections =
+        number<std::size_t>(env, "ULW_MAX_CONNECTIONS", limits.max_connections, 1, 65'536);
+    if (!connections) {
+        return std::unexpected(connections.error());
+    }
+    limits.max_connections = *connections;
+    const auto slots = number<std::size_t>(
+        env, "ULW_MAX_UPLOAD_SLOTS", std::min(limits.max_upload_slots, *connections), 1, 65'536);
+    if (!slots) {
+        return std::unexpected(slots.error());
+    }
+    // A slot is held by a connection; more slots than connections could never be used, and
+    // would mean the operator believes the gateway takes more uploads than it can.
+    if (*slots > limits.max_connections) {
+        return error("ULW_MAX_UPLOAD_SLOTS", "above ULW_MAX_CONNECTIONS");
+    }
+    limits.max_upload_slots = *slots;
+    const auto per_user = number<std::size_t>(
+        env, "ULW_MAX_UPLOADS_PER_USER", std::min(limits.max_uploads_per_user, *slots), 1, 65'536);
+    if (!per_user) {
+        return std::unexpected(per_user.error());
+    }
+    if (*per_user > limits.max_upload_slots) {
+        return error("ULW_MAX_UPLOADS_PER_USER", "above ULW_MAX_UPLOAD_SLOTS");
+    }
+    limits.max_uploads_per_user = *per_user;
+    const auto chunk =
+        number<std::uint64_t>(env, "ULW_CHUNK_SIZE", config.chunk_size, 1, kMaxChunk);
+    if (!chunk) {
+        return std::unexpected(chunk.error());
+    }
+    if (*chunk < kMinChunk) {
+        return error("ULW_CHUNK_SIZE", "below the object store's 5 MiB minimum part");
+    }
+    if ((core::Upload::kMaxSizeBytes + *chunk - 1) / *chunk > kMaxParts) {
+        return error("ULW_CHUNK_SIZE", "a 50 GiB upload would need more than 10,000 parts");
+    }
+    config.chunk_size = *chunk;
+    return {};
+}
+
 } // namespace
+
+std::span<const ops::Setting> settings() noexcept {
+    return kSettings;
+}
 
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     Config config;
+    if (const auto level = lookup(env, "ULW_LOG_LEVEL")) {
+        const auto parsed = ops::parse_level(*level);
+        if (!parsed) {
+            return error("ULW_LOG_LEVEL", "expected debug, info, warn or error");
+        }
+        config.log_level = *parsed;
+    }
     // Port 0 would bind an ephemeral port nobody can be told about.
     const auto port = number<std::uint16_t>(env, "ULW_LISTEN_PORT", 8080, 1, 65'535);
     if (!port) {
@@ -178,7 +273,69 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (auto r = load_auth(env, config); !r) {
         return std::unexpected(std::move(r.error()));
     }
+    if (auto r = load_limits(env, config); !r) {
+        return std::unexpected(std::move(r.error()));
+    }
     return config;
+}
+
+std::expected<void, ConfigError> check_descriptor_budget(const Limits& limits, std::size_t nofile) {
+    const std::uint64_t budget =
+        nofile > kDescriptorReserve ? (nofile - kDescriptorReserve) / 2 : 0;
+    if (limits.max_connections > budget) {
+        return error("ULW_MAX_CONNECTIONS", "above the descriptor budget (RLIMIT_NOFILE " +
+                                                std::to_string(nofile) +
+                                                " - 64) / 2 = " + std::to_string(budget));
+    }
+    return {};
+}
+
+void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log) {
+    const auto [storage,
+                location_variable] = [&]() -> std::pair<std::string_view, std::string_view> {
+        switch (config.storage) {
+        case StorageBackend::R2:
+            return {"r2", "ULW_R2_ACCOUNT_ID"};
+        case StorageBackend::Minio:
+            return {"minio", "ULW_S3_ENDPOINT"};
+        case StorageBackend::Filesystem:
+            return {"fs", "ULW_FS_ROOT"};
+        }
+        return {"r2", "ULW_R2_ACCOUNT_ID"};
+    }();
+    const std::array<std::pair<std::string_view, std::string>, 21> values{{
+        {"ULW_LISTEN_PORT", std::to_string(config.port)},
+        {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
+        {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
+        {"ULW_TLS_CERT_FILE", config.tls_certificate_chain},
+        {"ULW_TLS_KEY_FILE", config.tls_private_key},
+        {"ULW_OFFLOAD_THREADS", std::to_string(config.offload_threads)},
+        {"ULW_MAX_CONNECTIONS", std::to_string(config.limits.max_connections)},
+        {"ULW_MAX_UPLOAD_SLOTS", std::to_string(config.limits.max_upload_slots)},
+        {"ULW_MAX_UPLOADS_PER_USER", std::to_string(config.limits.max_uploads_per_user)},
+        {"ULW_STORAGE", std::string(storage)},
+        {location_variable, config.storage_location},
+        {"ULW_FS_READ_URL", config.limits.local_read_url},
+        {"ULW_BUCKET", config.bucket},
+        {"ULW_CHUNK_SIZE", std::to_string(config.chunk_size)},
+        {"ULW_DATABASE_URL", config.database_url},
+        {"JWKS_URL", config.jwks_url},
+        {"ULW_DEV_JWKS_FILE", config.dev_jwks_file},
+        {"JWT_ISSUER", config.jwt_issuer},
+        {"JWT_AUDIENCE", config.jwt_audience},
+        {"ULW_AUTH_COOKIE", config.limits.auth_cookie},
+        {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
+    }};
+    for (const auto& [variable, value] : values) {
+        if (value.empty()) {
+            continue;
+        }
+        const bool secret = std::ranges::any_of(
+            kSettings, [&](const ops::Setting& s) { return s.env == variable && s.secret; });
+        log.info("setting", {{"name", variable},
+                             {"value", secret ? std::string_view("<redacted>") : value},
+                             {"from", ops::to_string(layers.origin(variable))}});
+    }
 }
 
 } // namespace gateway
