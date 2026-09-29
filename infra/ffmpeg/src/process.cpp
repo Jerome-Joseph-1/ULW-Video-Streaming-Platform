@@ -137,8 +137,11 @@ std::vector<std::string> helper_argv(const Sandbox& sandbox, const Limits& limit
                                   "--address-space",
                                   std::to_string(limits.address_space_bytes),
                                   "--cpu-seconds",
-                                  std::to_string(limits.cpu.count()),
-                                  "--"};
+                                  std::to_string(limits.cpu.count())};
+    if (!sandbox.syscall_filter) {
+        argv.emplace_back("--no-syscall-filter");
+    }
+    argv.emplace_back("--");
     argv.insert(argv.end(), args.begin(), args.end());
     return argv;
 }

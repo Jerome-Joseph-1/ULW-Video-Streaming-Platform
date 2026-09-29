@@ -282,19 +282,26 @@ target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/a
     ${PROJECT_SOURCE_DIR}/tests)
 
 if(ULW_BUILD_WORKER)
+    # Run under the sandbox's syscall filter, so like the helper it links nothing instrumented.
+    add_executable(ulw_syscall_probe support/syscall_probe_main.cpp)
+    target_compile_features(ulw_syscall_probe PRIVATE cxx_std_23)
+    target_link_libraries(ulw_syscall_probe PRIVATE ulw_warnings)
+
     ulw_add_test_suite(ffmpeg_unit_tests unit
         unit/ffmpeg/command_test.cpp
         unit/ffmpeg/exit_code_test.cpp
         unit/ffmpeg/hls_rewrite_test.cpp
         unit/ffmpeg/progress_test.cpp
-        unit/ffmpeg/sandbox_test.cpp)
+        unit/ffmpeg/sandbox_test.cpp
+        unit/ffmpeg/seccomp_filter_test.cpp)
     target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
     # White-box tests of the adapter internals, and the real sandbox helper.
     target_include_directories(ffmpeg_unit_tests
         PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${PROJECT_SOURCE_DIR}/tests)
     target_compile_definitions(ffmpeg_unit_tests
-        PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>")
-    add_dependencies(ffmpeg_unit_tests ulw_sandbox)
+        PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
+                ULW_SYSCALL_PROBE_BIN="$<TARGET_FILE:ulw_syscall_probe>")
+    add_dependencies(ffmpeg_unit_tests ulw_sandbox ulw_syscall_probe)
 
     ulw_add_test_suite(worker_unit_tests unit
         unit/worker/config_test.cpp

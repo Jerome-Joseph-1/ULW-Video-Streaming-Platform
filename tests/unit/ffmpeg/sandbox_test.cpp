@@ -81,7 +81,10 @@ protected:
         }
         stdout_.clear();
         auto child = infra::ffmpeg::run_sandboxed(
-            Sandbox{.helper = kHelper, .environment = {"PATH=/usr/bin:/bin"}}, limits, args, clock_,
+            Sandbox{.helper = kHelper,
+                    .environment = {"PATH=/usr/bin:/bin"},
+                    .syscall_filter = syscall_filter_},
+            limits, args, clock_,
             [this](std::string_view bytes) {
                 stdout_.append(bytes);
                 if (on_stdout_) {
@@ -94,6 +97,8 @@ protected:
     }
 
     const fs::path kHelper{ULW_SANDBOX_BIN};
+    // Off here so that an ordinary shell can stand in for ffmpeg; SyscallFilterTest turns it on.
+    bool syscall_filter_ = false;
     os::SystemClock clock_;
     ulw::test::TempDir writable_{"ulw-sandbox"};
     std::string stdout_;
@@ -327,6 +332,82 @@ TEST_F(SandboxTest, TheHelpersOwnFailuresHaveTheirOwnCodes) {
                                       .wall = {}});
     EXPECT_EQ(child.exit_code, infra::ffmpeg::kSandboxSetupFailed);
     EXPECT_NE(child.stderr_tail.find("writable directory"), std::string::npos);
+}
+
+class SyscallFilterTest : public SandboxTest {
+protected:
+    SyscallFilterTest() { syscall_filter_ = true; }
+
+    const fs::path kProbe{ULW_SYSCALL_PROBE_BIN};
+};
+
+TEST_F(SyscallFilterTest, ACallTheTablesAllowRunsToTheEnd) {
+    const auto child = run({kProbe.string(), "getpid"});
+    EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
+    EXPECT_EQ(child.signal, 0);
+}
+
+TEST_F(SyscallFilterTest, EveryOtherCallKillsTheProgramWithSigsysAndRejectsTheInput) {
+    for (const std::string name : {"ptrace", "mount", "keyctl", "bpf", "io_uring_setup", "socket",
+                                   "unshare", "setns", "kill", "process_vm_readv", "chroot"}) {
+        const auto child = run({kProbe.string(), name});
+        EXPECT_EQ(child.signal, SIGSYS) << name;
+        EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
+                  core::ports::TranscodeFailure::Rejected)
+            << name;
+    }
+}
+
+TEST_F(SyscallFilterTest, WithoutTheFilterTheSameCallsReturnAnError) {
+    syscall_filter_ = false;
+    for (const std::string name : {"ptrace", "mount", "keyctl", "bpf", "io_uring_setup"}) {
+        const auto child = run({kProbe.string(), name});
+        EXPECT_EQ(child.signal, 0) << name;
+        EXPECT_EQ(child.exit_code, 0) << name;
+    }
+}
+
+TEST_F(SyscallFilterTest, ATranscodeWithThreadsStillRuns) {
+    Limits limits;
+    limits.address_space_bytes = 8 * kGiB;
+    const auto child = run({"ffmpeg",
+                            "-nostdin",
+                            "-v",
+                            "error",
+                            "-f",
+                            "lavfi",
+                            "-i",
+                            "testsrc2=size=640x360:rate=25",
+                            "-f",
+                            "lavfi",
+                            "-i",
+                            "sine=frequency=440:sample_rate=48000",
+                            "-t",
+                            "2",
+                            "-c:v",
+                            "libx264",
+                            "-threads",
+                            "4",
+                            "-c:a",
+                            "aac",
+                            "-f",
+                            "hls",
+                            "-hls_time",
+                            "1",
+                            "-hls_segment_type",
+                            "fmp4",
+                            "-hls_playlist_type",
+                            "vod",
+                            "-hls_segment_filename",
+                            "seg_%03d.m4s",
+                            "index.m3u8"},
+                           limits);
+    if (child.exit_code == infra::ffmpeg::kProgramNotFound) {
+        GTEST_SKIP() << "no ffmpeg on this host";
+    }
+    EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
+    EXPECT_TRUE(fs::exists(writable_.path() / "index.m3u8"));
+    EXPECT_TRUE(fs::exists(writable_.path() / "seg_000.m4s"));
 }
 
 TEST(SandboxCheck, NamesWhatWentWrong) {
