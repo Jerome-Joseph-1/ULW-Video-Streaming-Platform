@@ -1057,7 +1057,8 @@ TEST_F(SmallBuffers, ARoomKeepsItsNewestMessagesAndAllRoomsTogetherDropTheOldest
 class FewKept : public ChatServiceTest {
 protected:
     // A hundred messages across rooms, four ordinary ones per room.
-    FewKept() : ChatServiceTest({.room_buffer_bytes = 4 * 258, .buffer_messages = 100}) {}
+    FewKept()
+        : ChatServiceTest({.room_buffer_bytes = std::size_t{4} * 258, .buffer_messages = 100}) {}
 };
 
 // A busy live chat drops its own oldest with every message it keeps. What it dropped must not
