@@ -9,6 +9,7 @@
 #include "pipe.hpp"
 #include "recording_plan.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <fcntl.h>
@@ -123,19 +124,18 @@ public:
         return {};
     }
 
-    // No run newer than the ended playlist's last one has claimed the stream, unless the claim
-    // is this process's own: a packager that claimed, then found the stream ended, publishes
-    // nothing. A newer claim otherwise belongs to a packager still publishing, which will
-    // overwrite the stale end this one saw.
+    // No run newer than both the ended playlist's last one and this process's own claim has
+    // claimed the stream. This process's claim is above the last run's when it published
+    // nothing itself: it claimed, then found the stream ended, or ended it without media. A
+    // newer claim belongs to a packager still publishing, which will overwrite the stale end
+    // this one saw.
     Step<void> fence(const MediaPlaylist& ended) {
         const auto last = infra::ffmpeg::live_init_epoch(ended.segments.back().init);
         if (!last) {
             return problem(Severity::Permanent, "stored playlist invalid");
         }
-        const std::uint32_t next = *last + 1;
-        if (settings_.own_claim == next) {
-            return {};
-        }
+        const std::uint32_t newest = std::max(*last, settings_.own_claim.value_or(*last));
+        const std::uint32_t next = newest + 1;
         const auto claim = key_in(settings_.stream, "epoch_" + std::to_string(next));
         if (!claim) {
             return std::unexpected(claim.error());
@@ -201,8 +201,7 @@ public:
                                                .title = "Live stream " + settings_.stream.str(),
                                                .source = *key});
         if (!row) {
-            discard(*key);
-            return problem(Severity::Transient, "database unavailable");
+            return unrecorded(video, *key);
         }
         if (row->video == video) {
             return RecordResult{.outcome = RecordOutcome::Recorded, .video = video, .detail = {}};
@@ -218,6 +217,26 @@ private:
         std::stop_source* source;
         void operator()() const noexcept { source->request_stop(); }
     };
+
+    // The insert may have committed and only its answer been lost: the object is removed only
+    // when the stream's row is known not to name it.
+    Step<RecordResult> unrecorded(const core::VideoId& video, const core::StorageKey& key) {
+        const auto known = deps_.catalog.find(settings_.stream.str());
+        if (!known) {
+            return problem(Severity::Transient, "database unavailable; recording kept");
+        }
+        const std::optional<RecordingRow>& row = *known;
+        if (row && row->video == video) {
+            return RecordResult{.outcome = RecordOutcome::Recorded, .video = video, .detail = {}};
+        }
+        discard(key);
+        if (row) {
+            return RecordResult{.outcome = RecordOutcome::AlreadyRecorded,
+                                .video = row->video,
+                                .detail = row->failure};
+        }
+        return problem(Severity::Transient, "database unavailable");
+    }
 
     void discard(const core::StorageKey& key) {
         if (!deps_.streams.remove(key)) {
@@ -274,7 +293,8 @@ private:
         return {.from = from,
                 .input = input,
                 .work_dir = child_dir_,
-                .budget = settings_.budget,
+                .wall = settings_.wall,
+                .cpu = infra::ffmpeg::recording_copy_cpu(settings_.max_bytes),
                 .silence = silence};
     }
 
@@ -316,11 +336,20 @@ private:
         if (stop_.stop_requested()) {
             return problem(Severity::Stopped, "stopped");
         }
+        if (past_bound_) {
+            return problem(Severity::Permanent, "the recording is past its bound of " +
+                                                    std::to_string(settings_.max_bytes) + " bytes");
+        }
+        // Whatever the store answers, a credential, a bucket or a disk can be put right, so no
+        // store error condemns the stream.
         if (upload_error_) {
-            return problem(*upload_error_ == core::ports::StorageError::Permanent
-                               ? Severity::Permanent
-                               : Severity::Transient,
+            return problem(Severity::Transient,
                            "upload: " + std::string(core::ports::to_string(*upload_error_)));
+        }
+        // A stage that failed stops the other, which then reports being stopped: the one that
+        // did not is the cause.
+        if (!joining && joining.error().kind != RemuxFailure::Stopped) {
+            return std::unexpected(from_remux(joining.error(), "joining the runs"));
         }
         if (!fed) {
             return fed;
@@ -339,7 +368,12 @@ private:
 
     // On the joining stage's thread only, until it is joined.
     void keep(std::string_view out) {
-        if (upload_error_) {
+        if (upload_error_ || past_bound_) {
+            return;
+        }
+        if (out.size() > settings_.max_bytes - bytes_) {
+            past_bound_ = true;
+            abort_.request_stop();
             return;
         }
         if (auto written = output_->write(std::as_bytes(std::span(out))); !written) {
@@ -443,6 +477,7 @@ private:
     std::stop_source abort_;
     core::ports::IObjectStream* output_ = nullptr;
     std::optional<core::ports::StorageError> upload_error_;
+    bool past_bound_ = false;
     std::uint64_t bytes_ = 0;
     std::uint64_t poured_ = 0;
 };

@@ -63,11 +63,13 @@ struct RecorderSettings {
     core::UserId owner;
     // Holds the segment on its way to ffmpeg and the children's empty writable directory.
     std::filesystem::path work_dir;
-    // The longest the copies may run: that of the stream they copy.
-    core::Seconds budget{};
+    // The longest the copies may run in wall-clock time: that of the stream they copy. Their
+    // CPU time is derived from max_bytes (recording_copy_cpu).
+    core::Seconds wall{};
     // The most the recording can be (recording_bound); the store sizes its pieces from it.
     std::uint64_t max_bytes = 0;
-    // The epoch this process claimed, when it found the stream ended right after its claim.
+    // The epoch this process claimed, whether it went on to publish under it or found the
+    // stream ended.
     std::optional<std::uint32_t> own_claim;
 };
 

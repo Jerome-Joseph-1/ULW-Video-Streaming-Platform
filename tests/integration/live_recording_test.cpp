@@ -301,7 +301,7 @@ protected:
         auto scratch = std::make_unique<TempDir>("ulw-rec-worker-" + node);
         std::vector<std::string> env{"ULW_DATABASE_URL=" + db_->conninfo(), "ULW_NODE_ID=" + node,
                                      "ULW_SCRATCH_DIR=" + scratch->path().string(),
-                                     "PATH=" + env_or("PATH", "/usr/bin:/bin")};
+                                     "PATH=" + env_or("PATH", "/usr/bin:/bin"), "ULW_ALLOW_ROOT=1"};
         const auto storage = storage_env();
         env.insert(env.end(), storage.begin(), storage.end());
         scratch_dirs_.push_back(std::move(scratch));
@@ -454,6 +454,34 @@ TEST_F(LiveRecordingTest, AStreamWhosePackagerDiedMidwayIsRecordedAsOneVideoOfBo
     const auto master = stored_text("videos/" + the_video() + "/hls/master.m3u8");
     ASSERT_TRUE(master);
     EXPECT_NE(master->find("mp4a"), std::string::npos) << *master;
+}
+
+TEST_F(LiveRecordingTest, AStreamEndedByARestartedPackagerWithNoMediaOfItsOwnIsRecorded) {
+    std::uint64_t published = 0;
+    {
+        const auto packager = start_packager();
+        const auto port = ingest_port(*packager);
+        ASSERT_TRUE(port) << packager->output();
+        const auto publisher = start_publisher(*port, 0);
+        const std::string playlist = "live/" + stream_ + "/index.m3u8";
+        while (published_segments(stored_text(playlist).value_or("")) < 3) {
+            ASSERT_FALSE(publisher->wait_exit(kSamplePeriod)) << publisher->output();
+        }
+        packager->signal(SIGKILL);
+        EXPECT_EQ(packager->wait_exit(kExitPatience), 128 + SIGKILL);
+        publisher->signal(SIGKILL);
+        published = published_segments(stored_text(playlist).value_or(""));
+    }
+    // The restart claims epoch 1, and is told to end the stream before any publisher comes:
+    // it ends the first run's window, and must not take its own claim for a newer packager's.
+    const auto packager = start_packager();
+    ASSERT_TRUE(ingest_port(*packager)) << packager->output();
+    packager->signal(SIGUSR1);
+    ASSERT_EQ(packager->wait_exit(kJobPatience), 0) << packager->output();
+    EXPECT_NE(packager->output().find("recording: queued as video"), std::string::npos)
+        << packager->output();
+    run_worker_to_done();
+    expect_one_ready_video(static_cast<double>(published) * 2.0);
 }
 
 TEST_F(LiveRecordingTest, TwoPackagersRecordingOneEndedStreamAtOnceMakeOneVideoAndOneSource) {

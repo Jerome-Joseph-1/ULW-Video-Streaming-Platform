@@ -10,7 +10,9 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -32,6 +34,9 @@ class FakeCatalog final : public live::IRecordingCatalog {
 public:
     std::expected<std::optional<RecordingRow>, RecordingStoreError>
     find(std::string_view stream) override {
+        if (find_unavailable) {
+            return std::unexpected(RecordingStoreError::Unavailable);
+        }
         const auto it = rows.find(std::string(stream));
         return it == rows.end() ? std::nullopt : std::optional(it->second);
     }
@@ -44,6 +49,12 @@ public:
             return std::unexpected(RecordingStoreError::Unavailable);
         }
         recorded.push_back(recording);
+        if (lose_commit) {
+            rows.try_emplace(recording.stream,
+                             RecordingRow{.video = recording.video, .failure = {}});
+            find_unavailable = find_fails_after_lost_commit;
+            return std::unexpected(RecordingStoreError::Unavailable);
+        }
         return rows
             .try_emplace(recording.stream, RecordingRow{.video = recording.video, .failure = {}})
             .first->second;
@@ -60,6 +71,44 @@ public:
     std::vector<NewRecording> recorded;
     std::function<void()> before_record;
     bool unavailable = false;
+    // The row goes in, and the answer is lost on the way back.
+    bool lose_commit = false;
+    bool find_fails_after_lost_commit = false;
+    bool find_unavailable = false;
+};
+
+// The filesystem store, whose streams take nothing: every write answers `error`.
+class RefusingStreams final : public core::ports::IObjectStreams {
+public:
+    explicit RefusingStreams(core::ports::StorageError error) : error_(error) {}
+
+    std::expected<std::unique_ptr<core::ports::IObjectStream>, core::ports::StorageError>
+    begin(const core::StorageKey& /*key*/, const core::ContentType& /*type*/,
+          std::uint64_t /*max_bytes*/) override {
+        return std::make_unique<Refusing>(error_);
+    }
+    std::expected<void, core::ports::StorageError>
+    remove(const core::StorageKey& /*key*/) override {
+        return {};
+    }
+
+private:
+    class Refusing final : public core::ports::IObjectStream {
+    public:
+        explicit Refusing(core::ports::StorageError error) : error_(error) {}
+        std::expected<void, core::ports::StorageError>
+        write(std::span<const std::byte> /*bytes*/) override {
+            return std::unexpected(error_);
+        }
+        std::expected<void, core::ports::StorageError> commit() override {
+            return std::unexpected(error_);
+        }
+
+    private:
+        core::ports::StorageError error_;
+    };
+
+    core::ports::StorageError error_;
 };
 
 // Each stage copies its input to its output unchanged, so the stored recording is exactly the
@@ -82,12 +131,16 @@ public:
             if (n <= 0) {
                 break;
             }
-            if (!refuse) {
+            if (!refuse || (refuse_only && *refuse_only != job.from)) {
                 on_output(std::string_view(buffer.data(), static_cast<std::size_t>(n)));
             }
         }
-        if (refuse) {
+        if (refuse && (!refuse_only || *refuse_only == job.from)) {
             return std::unexpected(RemuxError{.kind = *refuse, .detail = "refused"});
+        }
+        if (refuse) {
+            // The other stage, stopped by the one that failed.
+            return std::unexpected(RemuxError{.kind = RemuxFailure::Stopped, .detail = "stopped"});
         }
         return {};
     }
@@ -103,6 +156,8 @@ public:
     std::function<void(const RecordingRemuxJob&)> on_run;
     std::map<std::string, std::optional<AudioFormat>> audio;
     std::optional<RemuxFailure> refuse;
+    // Only the stage reading this input fails; the other reports being stopped.
+    std::optional<RecordingInput> refuse_only;
 
 private:
     std::mutex mutex_;
@@ -146,15 +201,17 @@ protected:
         ulw::test::write_file(live_dir() / "index.m3u8", live::render_media_playlist(p));
     }
 
-    live::RecordResult record(std::optional<std::uint32_t> own_claim = std::nullopt) {
+    live::RecordResult record(std::optional<std::uint32_t> own_claim = std::nullopt,
+                              core::ports::IObjectStreams* through = nullptr,
+                              std::uint64_t max_bytes = 1U << 20U) {
         const live::RecorderSettings settings{.stream = *live::StreamId::parse("show"),
                                               .owner = *core::UserId::parse("auth0|streamer"),
                                               .work_dir = root.path() / "work",
-                                              .budget = core::Seconds{60},
-                                              .max_bytes = 1 << 20U,
+                                              .wall = core::Seconds{60},
+                                              .max_bytes = max_bytes,
                                               .own_claim = own_claim};
         return live::record_stream({.store = store,
-                                    .streams = streams,
+                                    .streams = through != nullptr ? *through : streams,
                                     .copier = copier,
                                     .catalog = catalog,
                                     .clock = clock,
@@ -345,6 +402,72 @@ TEST_F(RecorderTest, ASandboxThatCannotStartIsLeftForTheNextRun) {
     copier.refuse = RemuxFailure::Unavailable;
     EXPECT_EQ(record().outcome, RecordOutcome::Failed);
     EXPECT_TRUE(catalog.rows.empty());
+}
+
+TEST_F(RecorderTest, ARunThatEndedTheStreamWithoutASegmentOfItsOwnIsRecorded) {
+    // Epoch 1 claimed and died; epoch 2 is this run, which ended the stream without media.
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    ulw::test::write_file(live_dir() / "epoch_1", "claimed\n");
+    ulw::test::write_file(live_dir() / "epoch_2", "claimed\n");
+    EXPECT_EQ(record(2).outcome, RecordOutcome::Recorded);
+}
+
+TEST_F(RecorderTest, AClaimAboveThisRunsOwnStillFencesItOut) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    ulw::test::write_file(live_dir() / "epoch_2", "claimed\n");
+    ulw::test::write_file(live_dir() / "epoch_3", "claimed\n");
+    EXPECT_EQ(record(2).outcome, RecordOutcome::Superseded);
+    EXPECT_TRUE(catalog.rows.empty());
+}
+
+TEST_F(RecorderTest, AnInsertThatCommittedButWasReportedFailedKeepsItsRecording) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    catalog.lose_commit = true;
+    const auto done = record();
+    ASSERT_EQ(done.outcome, RecordOutcome::Recorded) << done.detail;
+    EXPECT_EQ(raw_of(*done.video), "I0;S0;S1;S2;S3;");
+}
+
+TEST_F(RecorderTest, ARecordingIsKeptWhenNothingCanSayWhetherItsRowWentIn) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    catalog.lose_commit = true;
+    catalog.find_fails_after_lost_commit = true;
+    EXPECT_EQ(record().outcome, RecordOutcome::Failed);
+    ASSERT_EQ(catalog.recorded.size(), 1U);
+    EXPECT_EQ(raw_of(catalog.recorded[0].video), "I0;S0;S1;S2;S3;");
+}
+
+TEST_F(RecorderTest, TheJoiningStageRefusingMarksTheStreamUnrecordableRatherThanStopped) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    copier.refuse = RemuxFailure::Refused;
+    copier.refuse_only = RecordingInput::MpegTs;
+    const auto done = record();
+    EXPECT_EQ(done.outcome, RecordOutcome::Unrecordable) << done.detail;
+    EXPECT_NE(catalog.rows["show"].failure.find("joining the runs"), std::string::npos);
+}
+
+TEST_F(RecorderTest, AStoreThatRefusesTheCredentialsLeavesTheStreamForTheNextRun) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    for (const auto error :
+         {core::ports::StorageError::Unauthorized, core::ports::StorageError::Permanent}) {
+        RefusingStreams refusing(error);
+        EXPECT_EQ(record(std::nullopt, &refusing).outcome, RecordOutcome::Failed);
+        EXPECT_TRUE(catalog.rows.empty());
+    }
+}
+
+TEST_F(RecorderTest, ARecordingPastItsBoundMarksTheStreamUnrecordable) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    const auto done = record(std::nullopt, nullptr, 10);
+    EXPECT_EQ(done.outcome, RecordOutcome::Unrecordable) << done.detail;
+    EXPECT_NE(catalog.rows["show"].failure.find("past its bound"), std::string::npos);
 }
 
 TEST(RecordingBound, TheLongestStreamAtTheHighestBitrateWithAnEighthForTheContainer) {

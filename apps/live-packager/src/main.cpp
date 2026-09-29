@@ -266,7 +266,7 @@ int run() {
             .stream = config->stream,
             .owner = target->owner,
             .work_dir = config->scratch / "recording",
-            .budget = config->max_duration,
+            .wall = config->max_duration,
             .max_bytes = live::recording_bound(config->max_kbps, config->max_duration),
             .own_claim = std::nullopt});
     }
@@ -307,6 +307,11 @@ int run() {
     }
     if (!publisher) {
         return fail("stream", live::to_string(publisher.error()));
+    }
+    // A run that ends the stream without publishing a segment of its own ends it above the
+    // last segment's epoch; its own claim must not fence its recording out.
+    if (recorder) {
+        recorder->own_claim = publisher->epoch();
     }
     // After everything that holds an SRT socket is declared: main's locals are destroyed in
     // reverse, and libsrt's cleanup must come last.

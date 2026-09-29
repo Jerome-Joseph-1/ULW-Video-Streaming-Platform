@@ -14,7 +14,6 @@ namespace {
 
 // As for the live remux: copying decodes nothing, and a gigabyte holds ffmpeg's arenas.
 constexpr std::uint64_t kCopyAddressSpace = std::uint64_t{1} << 30U;
-constexpr std::int64_t kWallPerCpu = 20;
 // The children write nothing but their stdout; the smallest limit the helper takes that is
 // not "none" keeps a child that tries from filling the disk.
 constexpr std::uint64_t kNoFiles = 1;
@@ -62,6 +61,30 @@ std::string last_line(std::string_view text) {
     return std::string(nl == std::string_view::npos ? text : text.substr(nl + 1));
 }
 
+// Only an ffmpeg that exited by itself with an error status has judged the input; a signal or
+// a budget says nothing about it.
+std::expected<void, RemuxError> judge(const ChildExit& child, std::string_view program) {
+    if (child.ending == Ending::Stopped) {
+        return std::unexpected(RemuxError{.kind = RemuxFailure::Stopped, .detail = "stopped"});
+    }
+    if (child.ending == Ending::Exited && child.signal == 0 && child.exit_code == 0) {
+        return {};
+    }
+    const bool refused = child.ending == Ending::Exited && child.signal == 0;
+    std::string detail = std::string(program) + " exited " + std::to_string(child.exit_code);
+    if (child.ending == Ending::TimedOut) {
+        detail += " past its wall-clock budget";
+    } else if (child.ending == Ending::CpuExhausted) {
+        detail += " past its CPU budget";
+    }
+    const std::string said = last_line(child.stderr_tail);
+    if (!said.empty()) {
+        detail += ": " + said;
+    }
+    return std::unexpected(RemuxError{
+        .kind = refused ? RemuxFailure::Refused : RemuxFailure::Unavailable, .detail = detail});
+}
+
 std::optional<std::uint32_t> field(std::string_view text, std::string_view name) {
     const std::string key = std::string(name) + "=";
     const std::size_t at = text.find(key);
@@ -75,6 +98,15 @@ std::optional<std::uint32_t> field(std::string_view text, std::string_view name)
 
 } // namespace
 
+core::Seconds recording_copy_cpu(std::uint64_t bytes) noexcept {
+    constexpr std::uint64_t kBytesPerGb = 1'000'000'000;
+    constexpr std::uint64_t kCpuSecondsPerGb = std::uint64_t{5} * 4;
+    constexpr std::int64_t kFloor = 60;
+    const auto per_bytes = static_cast<std::int64_t>(
+        ((bytes / kBytesPerGb) + (bytes % kBytesPerGb != 0 ? 1 : 0)) * kCpuSecondsPerGb);
+    return core::Seconds{kFloor + per_bytes};
+}
+
 RecordingRemuxer::RecordingRemuxer(RecordingRemuxConfig config, const core::ports::IClock& clock)
     : config_(std::move(config)), clock_(clock) {}
 
@@ -86,8 +118,8 @@ RecordingRemuxer::run(const RecordingRemuxJob& job,
                           .environment = {"PATH=" + config_.search_path}};
     const Limits limits{.writable = job.work_dir,
                         .address_space_bytes = kCopyAddressSpace,
-                        .cpu = core::Seconds{job.budget.count() / kWallPerCpu},
-                        .wall = std::chrono::duration_cast<core::Millis>(job.budget),
+                        .cpu = job.cpu,
+                        .wall = std::chrono::duration_cast<core::Millis>(job.wall),
                         .file_size_bytes = kNoFiles};
     const auto child = run_sandboxed(sandbox, limits, recording_remux_args(config_.ffmpeg, job),
                                      clock_, on_output, stop, job.input);
@@ -95,16 +127,7 @@ RecordingRemuxer::run(const RecordingRemuxJob& job,
         return std::unexpected(
             RemuxError{.kind = RemuxFailure::Unavailable, .detail = child.error()});
     }
-    if (child->ending == Ending::Stopped) {
-        return std::unexpected(RemuxError{.kind = RemuxFailure::Stopped, .detail = "stopped"});
-    }
-    if (child->ending != Ending::Exited || child->exit_code != 0) {
-        return std::unexpected(RemuxError{.kind = RemuxFailure::Refused,
-                                          .detail = "ffmpeg exited " +
-                                                    std::to_string(child->exit_code) + ": " +
-                                                    last_line(child->stderr_tail)});
-    }
-    return {};
+    return judge(*child, "ffmpeg");
 }
 
 std::expected<std::optional<AudioFormat>, RemuxError>
@@ -141,14 +164,8 @@ RecordingRemuxer::probe_audio(const std::filesystem::path& init,
         return std::unexpected(
             RemuxError{.kind = RemuxFailure::Unavailable, .detail = child.error()});
     }
-    if (child->ending == Ending::Stopped) {
-        return std::unexpected(RemuxError{.kind = RemuxFailure::Stopped, .detail = "stopped"});
-    }
-    if (child->ending != Ending::Exited || child->exit_code != 0) {
-        return std::unexpected(RemuxError{.kind = RemuxFailure::Refused,
-                                          .detail = "ffprobe exited " +
-                                                    std::to_string(child->exit_code) + ": " +
-                                                    last_line(child->stderr_tail)});
+    if (auto judged = judge(*child, "ffprobe"); !judged) {
+        return std::unexpected(judged.error());
     }
     const auto rate = field(out, "sample_rate");
     const auto channels = field(out, "channels");

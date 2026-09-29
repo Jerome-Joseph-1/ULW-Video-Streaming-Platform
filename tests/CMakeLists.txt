@@ -532,6 +532,7 @@ if(ULW_BUILD_WORKER)
     # deploy/local/compose.yaml.
     ulw_add_test_suite(worker_integration_tests integration
         integration/ffmpeg_transcoder_test.cpp
+        integration/recording_remux_test.cpp
         integration/postgres_harness.cpp
         integration/worker_test.cpp
         support/child_process.cpp)
@@ -573,7 +574,8 @@ if(ULW_BUILD_WORKER)
     ulw_add_test_suite(live_recording_integration_tests integration
         integration/live_recording_test.cpp
         integration/postgres_harness.cpp
-        support/child_process.cpp)
+        support/child_process.cpp
+        PROPERTIES RESOURCE_LOCK postgres)
     target_link_libraries(live_recording_integration_tests PRIVATE
         ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
         ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
