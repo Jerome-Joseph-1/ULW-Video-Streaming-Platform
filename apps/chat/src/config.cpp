@@ -93,6 +93,21 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!net::is_numeric_endpoint(*node_address)) {
         return error("ULW_NODE_ADDRESS", "expected a numeric ip:port or [ipv6]:port");
     }
+    // Published for other nodes to dial: an address naming no host, or only this one, would
+    // send them nowhere or to themselves. Loopback is for a test cluster on one host, and is
+    // allowed only when asked for by name.
+    switch (net::endpoint_scope(*node_address).value_or(net::EndpointScope::Unspecified)) {
+    case net::EndpointScope::Unspecified:
+        return error("ULW_NODE_ADDRESS", "names no host (0.0.0.0 or ::); give this pod's address");
+    case net::EndpointScope::Loopback:
+        if (lookup(env, "ULW_DEV_LOOPBACK_NODES") != "1") {
+            return error("ULW_NODE_ADDRESS", "is loopback, which other nodes cannot reach; set "
+                                             "ULW_DEV_LOOPBACK_NODES=1 for a cluster on one host");
+        }
+        break;
+    case net::EndpointScope::Routable:
+        break;
+    }
     // Validated just above, so the port parses.
     const std::uint16_t node_port =
         core::parse_integer<std::uint16_t>(

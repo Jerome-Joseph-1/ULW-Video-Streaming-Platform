@@ -85,6 +85,19 @@ TEST_F(ChatConfigTest, TheNodeAddressMustBeNumericAndApartFromTheClientPort) {
     EXPECT_EQ(refused_variable(), "ULW_NODE_ADDRESS");
 }
 
+TEST_F(ChatConfigTest, TheNodeAddressMustBeOneOtherNodesCanDial) {
+    for (const char* nowhere : {"0.0.0.0:9201", "[::]:9201", "127.0.0.1:9201", "[::1]:9201"}) {
+        env["ULW_NODE_ADDRESS"] = nowhere;
+        EXPECT_EQ(refused_variable(), "ULW_NODE_ADDRESS") << nowhere;
+    }
+    // A cluster on one host, as the tests run, says so.
+    env["ULW_DEV_LOOPBACK_NODES"] = "1";
+    env["ULW_NODE_ADDRESS"] = "127.0.0.1:9201";
+    EXPECT_TRUE(load());
+    env["ULW_NODE_ADDRESS"] = "0.0.0.0:9201";
+    EXPECT_EQ(refused_variable(), "ULW_NODE_ADDRESS");
+}
+
 TEST_F(ChatConfigTest, ANodeSecretShorterThan32BytesIsRefused) {
     env["ULW_NODE_SECRET"] = std::string(31, 'k');
     EXPECT_EQ(refused_variable(), "ULW_NODE_SECRET");

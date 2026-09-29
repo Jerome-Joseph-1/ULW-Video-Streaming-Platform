@@ -39,6 +39,22 @@ TEST(NumericEndpoint, TakesAddressesAndRefusesAnythingThatWouldNeedALookup) {
     EXPECT_FALSE(net::is_numeric_endpoint(""));
 }
 
+TEST(NumericEndpoint, TellsAddressesOtherHostsCanDialFromThoseTheyCannot) {
+    using net::EndpointScope;
+    EXPECT_EQ(net::endpoint_scope("10.42.0.17:9201"), EndpointScope::Routable);
+    EXPECT_EQ(net::endpoint_scope("[fd00::5]:9201"), EndpointScope::Routable);
+    EXPECT_EQ(net::endpoint_scope("[::ffff:10.1.2.3]:9201"), EndpointScope::Routable);
+    EXPECT_EQ(net::endpoint_scope("0.0.0.0:9201"), EndpointScope::Unspecified);
+    EXPECT_EQ(net::endpoint_scope("[::]:9201"), EndpointScope::Unspecified);
+    EXPECT_EQ(net::endpoint_scope("[::ffff:0.0.0.0]:9201"), EndpointScope::Unspecified);
+    EXPECT_EQ(net::endpoint_scope("127.0.0.1:9201"), EndpointScope::Loopback);
+    EXPECT_EQ(net::endpoint_scope("127.255.0.9:9201"), EndpointScope::Loopback);
+    EXPECT_EQ(net::endpoint_scope("[::1]:9201"), EndpointScope::Loopback);
+    EXPECT_EQ(net::endpoint_scope("[::ffff:127.0.0.1]:9201"), EndpointScope::Loopback);
+    EXPECT_EQ(net::endpoint_scope("128.0.0.1:9201"), EndpointScope::Routable);
+    EXPECT_EQ(net::endpoint_scope("localhost:9201"), std::nullopt);
+}
+
 TEST(NumericEndpoint, StartConnectRefusesANameWithEinval) {
     const auto fd = net::start_connect("localhost:80");
     ASSERT_FALSE(fd);

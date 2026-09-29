@@ -218,6 +218,7 @@ protected:
             "ULW_NODE_ID=" + node.name,
             "ULW_LISTEN_PORT=" + std::to_string(node.port),
             "ULW_NODE_ADDRESS=127.0.0.1:" + std::to_string(node.node_port),
+            "ULW_DEV_LOOPBACK_NODES=1",
             "ULW_NODE_SECRET=" + node_secret_,
             "ULW_DATABASE_URL=" + db_->conninfo(),
             "ULW_DEV_JWKS_FILE=" + jwks,

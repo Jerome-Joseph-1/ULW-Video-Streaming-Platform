@@ -18,7 +18,8 @@ struct Config {
     // Clients: WebSocket upgrades on /rt, and the health and metrics endpoints.
     std::uint16_t port = 9101;
     // The numeric host:port other chat nodes dial for this one's node channel, and the only
-    // address the channel listens on.
+    // address the channel listens on. Never 0.0.0.0 or ::, and loopback only with
+    // ULW_DEV_LOOPBACK_NODES=1, for a cluster on one host.
     std::string node_address;
     // ULW_NODE_SECRET: what every node proves it holds before the node channel carries anything
     // (ADR-0033). Never logged.

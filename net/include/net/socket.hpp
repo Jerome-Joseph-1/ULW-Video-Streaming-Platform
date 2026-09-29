@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string_view>
 
 namespace net {
@@ -27,6 +28,14 @@ struct ListenOptions {
 // A numeric "ipv4:port" or "[ipv6]:port": what start_connect accepts. Names are refused, since
 // resolving one would block the loop.
 [[nodiscard]] bool is_numeric_endpoint(std::string_view address) noexcept;
+
+// Who a numeric endpoint's address can be reached by. Unspecified (0.0.0.0, ::) names no host
+// at all, and loopback only the host itself; neither is an address another host can dial.
+enum class EndpointScope : std::uint8_t { Unspecified, Loopback, Routable };
+
+// nullopt for anything is_numeric_endpoint refuses. IPv4 addresses mapped into IPv6 count as
+// the IPv4 address they carry.
+[[nodiscard]] std::optional<EndpointScope> endpoint_scope(std::string_view address) noexcept;
 
 // Starts a nonblocking, close-on-exec connect to a numeric endpoint. It has finished once the
 // socket turns writable (watch it for Write), and connect_result() then says how.
