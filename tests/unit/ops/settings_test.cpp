@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -167,6 +168,25 @@ TEST_F(ConfigFileTest, OnlyAnOwnerOnlyFileMayHoldASecret) {
     for (const mode_t mode : {0400U, 0600U}) {
         const auto s = ops::load_settings(kSchema, *cli({"--config", write(text, mode)}), env());
         EXPECT_TRUE(s) << std::oct << mode;
+    }
+}
+
+TEST_F(ConfigFileTest, AFileAnotherUserCouldHaveWrittenIsNotRead) {
+    for (const mode_t mode : {0664U, 0646U, 0666U}) {
+        const auto s = ops::load_settings(
+            kSchema, *cli({"--config", write("log.level = \"debug\"\n", mode)}), env());
+        ASSERT_FALSE(s) << std::oct << mode;
+        EXPECT_TRUE(s.error().reason.starts_with("writable by others")) << s.error().reason;
+    }
+    const std::string path = write("listen.port = 1\n", 0644);
+    ASSERT_TRUE(ops::load_settings(kSchema, *cli({"--config", path}), env()));
+    // Someone else's file, readable and unwritable by others though it is.
+    constexpr uid_t kSomeoneElse = 4242;
+    if (::geteuid() == 0) {
+        ASSERT_EQ(::chown(path.c_str(), kSomeoneElse, kSomeoneElse), 0);
+        const auto s = ops::load_settings(kSchema, *cli({"--config", path}), env());
+        ASSERT_FALSE(s);
+        EXPECT_EQ(s.error().reason, "owned by neither root nor the user the service runs as");
     }
 }
 

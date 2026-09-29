@@ -178,6 +178,14 @@ std::expected<FileLayer, SettingsError> read_config_file(const std::string& path
     if (!S_ISREG(st.st_mode)) {
         return error(path, "not a regular file");
     }
+    // Any setting is enough to take the service over (a key set, a JWKS URL, a TLS key), so a
+    // file someone else could have written is not read at all.
+    if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return error(path, "writable by others than its owner; make it 0644 or stricter");
+    }
+    if (st.st_uid != 0 && st.st_uid != ::geteuid()) {
+        return error(path, "owned by neither root nor the user the service runs as");
+    }
     std::string text;
     std::array<char, 4096> buf{};
     while (true) {

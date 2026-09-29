@@ -31,6 +31,9 @@ already set the environment variable names, which must keep working.
 - Secrets (`ULW_DATABASE_URL`) are refused on the command line, and in a file that any bit of
   group or other permission lets someone else see (0400 or 0600 only). Object store keys stay
   environment-only, as their provider reads them. Unknown file keys and flags are errors.
+- The file itself must be a regular file (a FIFO is refused, not waited on), writable by no
+  one but its owner, and owned by root or by the user the service runs as: any setting, a key
+  set path or a JWKS URL, is enough to take the service over.
 - `ops::toml` accepts comments, `[tables]` and dotted bare keys, one-line basic and literal
   strings with every escape, decimal integers with `_` separators, and booleans, in UTF-8.
   Arrays, inline tables, floats, dates, multi-line strings, quoted keys and arrays of tables
