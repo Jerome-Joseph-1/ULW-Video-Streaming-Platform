@@ -513,6 +513,7 @@ if(ULW_BUILD_WORKER)
         unit/live_packager/live_window_test.cpp
         unit/live_packager/media_playlist_test.cpp
         unit/live_packager/publisher_test.cpp
+        unit/live_packager/recording_plan_test.cpp
         unit/live_packager/segment_tracker_test.cpp
         unit/live_packager/stream_id_test.cpp
         unit/live_packager/watch_test.cpp)
@@ -559,6 +560,27 @@ if(ULW_BUILD_WORKER)
         target_compile_definitions(live_packager_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
     endif()
     add_dependencies(live_packager_integration_tests live_packager ulw_sandbox)
+
+    # A live stream to a ready video (M33): live_packager fed over SRT, then transcode_worker,
+    # on a scratch Postgres database, the filesystem store and MinIO.
+    ulw_add_test_suite(live_recording_integration_tests integration
+        integration/live_recording_test.cpp
+        integration/postgres_harness.cpp
+        support/child_process.cpp)
+    target_link_libraries(live_recording_integration_tests PRIVATE
+        ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
+        ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
+    target_include_directories(live_recording_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+    target_compile_definitions(live_recording_integration_tests PRIVATE
+        ULW_LIVE_PACKAGER_BIN="$<TARGET_FILE:live_packager>"
+        ULW_LIVE_TESTSOURCE="${PROJECT_SOURCE_DIR}/apps/live-packager/testsource/ulw-live-testsource"
+        ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
+        ULW_WORKER_BIN="$<TARGET_FILE:transcode_worker>")
+    if(ULW_CONFORMANCE_LIVE)
+        target_compile_definitions(live_recording_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+    endif()
+    add_dependencies(live_recording_integration_tests live_packager transcode_worker ulw_sandbox)
 
     # gateway_server against the Postgres and MinIO of deploy/local/compose.yaml, serving
     # what the worker's ffmpeg command writes.

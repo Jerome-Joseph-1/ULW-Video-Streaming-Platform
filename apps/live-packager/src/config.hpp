@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/models/ids.hpp"
 #include "core/util/time.hpp"
 
 #include "stream_id.hpp"
@@ -16,6 +17,14 @@
 namespace live {
 
 enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
+
+// Where the stream's recording is queued as a video once the stream ends (ADR-0054).
+struct RecordingTarget {
+    // A secret: it holds the database password, and is never logged.
+    std::string database_url;
+    // The user the stream belongs to, who owns the video it becomes.
+    core::UserId owner;
+};
 
 struct Config {
     StreamId stream;
@@ -39,6 +48,8 @@ struct Config {
     core::Seconds max_duration{};
     // The most the publisher may send, in kbit/s; it bounds the size of a segment file.
     std::uint32_t max_kbps = 0;
+    // Unset: the stream is live only, and nothing is recorded.
+    std::optional<RecordingTarget> recording;
 };
 
 struct ConfigError {

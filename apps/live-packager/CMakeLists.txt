@@ -4,13 +4,16 @@ ulw_add_library(live_packager_lib
     src/media_playlist.cpp
     src/pipe.cpp
     src/publisher.cpp
+    src/recorder.cpp
+    src/recording_plan.cpp
     src/segment_tracker.cpp
     src/stream_id.cpp
     src/stream_runner.cpp
     src/watch.cpp)
 target_include_directories(live_packager_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 target_link_libraries(live_packager_lib PUBLIC
-    ulw::core_domain ulw::ffmpeg_adapter ulw::srt_ingest Threads::Threads PRIVATE ulw::os)
+    ulw::core_domain ulw::ffmpeg_adapter ulw::pg_store ulw::srt_ingest Threads::Threads
+    PRIVATE ulw::os)
 
 # A process of its own, not linked into the gateway (ADR-0046). It reuses the worker's
 # sandboxed ffmpeg and blocking object transfer, and none of the reactor.
