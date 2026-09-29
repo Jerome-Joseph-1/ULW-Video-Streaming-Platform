@@ -131,6 +131,16 @@ bool environ_readable_by_its_user(pid_t pid) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+// Every path under `root`, relative to it and sorted.
+std::vector<std::string> tree_of(const fs::path& root) {
+    std::vector<std::string> paths;
+    for (const auto& e : fs::recursive_directory_iterator(root)) {
+        paths.push_back(fs::relative(e.path(), root).string());
+    }
+    std::ranges::sort(paths);
+    return paths;
+}
+
 // What each of a process's descriptors refers to: a path, or a socket, pipe or anon inode.
 std::vector<std::string> descriptor_targets(pid_t pid) {
     std::vector<std::string> targets;
@@ -352,6 +362,8 @@ TEST_F(WorkerTest, FiftySequentialJobsLeakNoWorkspaceNorDescriptor) {
 
     ASSERT_TRUE(run_one(0)) << worker->output();
     ASSERT_TRUE(fs::is_empty(scratch / "worker-a"));
+    // The worker's own directory and its heartbeat file, which live as long as it does.
+    const std::vector<std::string> baseline_tree = tree_of(scratch);
     const std::vector<std::string> baseline = descriptor_targets(worker->pid());
     ASSERT_EQ(in_scratch(baseline), 0);
 
@@ -361,12 +373,7 @@ TEST_F(WorkerTest, FiftySequentialJobsLeakNoWorkspaceNorDescriptor) {
     }
     EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM jobs WHERE state = 'done'", Params{}),
               std::to_string(kJobs + 1));
-    std::size_t entries = 0;
-    for ([[maybe_unused]] const auto& e : fs::recursive_directory_iterator(scratch)) {
-        ++entries;
-    }
-    // Only the worker's own directory, empty.
-    EXPECT_EQ(entries, 1U);
+    EXPECT_EQ(tree_of(scratch), baseline_tree);
     const std::vector<std::string> after = descriptor_targets(worker->pid());
     EXPECT_LE(after.size(), baseline.size()) << ::testing::PrintToString(after);
     EXPECT_EQ(in_scratch(after), 0) << ::testing::PrintToString(after);
