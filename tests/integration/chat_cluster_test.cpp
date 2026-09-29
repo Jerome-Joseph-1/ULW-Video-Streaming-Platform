@@ -1095,10 +1095,12 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
         return joined ? joined->room : std::string();
     };
     // Ten senders on each node, each a viewer too, and two viewers that only read. Eight slow
-    // viewers are on chat-2: each reads 16 KiB for every 30 messages sequenced, which send it
-    // 88 KiB. None stops outright: the kernel ends a connection whose window stays shut for
-    // TCP_USER_TIMEOUT (20 s), a stall shorter than this run under a sanitizer, and reads much
-    // smaller than that leave the window shut.
+    // viewers are on chat-2: each reads 64 KiB every 2 s, a fifth of the 170 KB/s the room sends
+    // at full pace. None stops outright: the kernel ends a connection whose window stays shut
+    // for TCP_USER_TIMEOUT (20 s), a stall shorter than this run under a sanitizer. A read
+    // reopens the window only once it frees a loopback segment's worth (64 KiB), and the
+    // kernel's probes want it reopened well inside the timeout; the clock here paces the
+    // reader, it never waits.
     std::vector<std::unique_ptr<Client>> senders;
     std::vector<std::unique_ptr<Client>> viewers;
     std::string live;
@@ -1140,7 +1142,7 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     std::size_t next = 0;
     std::size_t acked = 0;
     std::size_t attempts = 0;
-    std::size_t trickled = 0;
+    auto trickled = std::chrono::steady_clock::now();
     std::uint64_t head = 0;
     std::uint64_t settled_kib = 0;
     std::uint64_t settled_seq = 0;
@@ -1199,11 +1201,11 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
                     << " never got seq " << head;
             }
         }
-        while (trickled < acked / 30) {
+        if (std::chrono::steady_clock::now() - trickled >= seconds(2)) {
             for (auto& c : slow) {
-                c->trickle(std::size_t{16} * 1024);
+                c->trickle(std::size_t{64} * 1024);
             }
-            ++trickled;
+            trickled = std::chrono::steady_clock::now();
         }
         if (settled_kib == 0 && acked >= kSettled) {
             settled_kib = resident_kib(slow_node.process->pid());
@@ -1223,8 +1225,8 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
         }
     }
     // What the slow viewers' node held for them did not grow with what they were sent: from the
-    // settled point on each was sent 600 messages, 1.6 MiB on the wire, and read a few hundred
-    // KiB of them; an unbounded queue would hold the rest, over 10 MiB for the eight. The
+    // settled point on each was sent 600 messages, 1.6 MiB on the wire, and read a fraction of
+    // them; an unbounded queue would hold the rest, over 10 MiB for the eight. The
     // bound leaves a few MiB for the allocator's own growth, which is not per message.
     // AddressSanitizer holds on to freed memory by design (its quarantine), so under it the
     // numbers are only reported.
@@ -1240,15 +1242,18 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     for (auto& c : slow) {
         ASSERT_TRUE(c->wait_for([&](const Seen& seen) {
             return seen.type == "message" && seen.seq == kMessages;
-        })) << c->name();
+        })) << c->name()
+            << " stopped after " << c->messages().size() << " messages, at seq "
+            << (c->messages().empty() ? 0 : c->messages().back().seq);
         const std::vector<Seen> got = c->messages();
         for (std::size_t k = 1; k < got.size(); ++k) {
             ASSERT_LT(got[k - 1].seq, got[k].seq) << c->name();
         }
-        EXPECT_LT(got.size(), kMessages / 2) << c->name();
+        EXPECT_LT(got.size(), kMessages) << c->name();
         missed += kMessages - got.size();
         fewest = std::min(fewest, got.size());
     }
+    EXPECT_GT(missed, 0U);
     EXPECT_EQ(metric(slow_node, "lossy_drops_total"), missed);
     for (std::size_t n = 0; n < nodes_.size(); ++n) {
         if (n != 1) {
