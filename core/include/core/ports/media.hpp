@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace core::ports {
 
@@ -20,6 +21,9 @@ enum class MediaError : std::uint8_t {
     Refused,
     // The room was closed through this handle; its generation admits nobody again.
     Closed,
+    // The media server supports the call, but this adapter does not implement it yet (group
+    // calls, ADR-0058). Permanent for the build: retrying cannot help.
+    NotImplemented,
 };
 
 [[nodiscard]] std::string_view to_string(MediaError e) noexcept;
@@ -34,6 +38,16 @@ struct MediaTicket {
     WallTime expires_at;
 };
 
+// One connected device in a room, as the media server reports it. Group calls (M27) read the
+// roster to check that a room holds everyone who was admitted and no one else.
+struct MediaParticipant {
+    UserId user;
+    DeviceId device;
+    WallTime joined_at;
+};
+
+using ParticipantsDone = std::move_only_function<void(
+    std::expected<std::vector<MediaParticipant>, MediaError>) noexcept>;
 using MediaDone = std::move_only_function<void(std::expected<void, MediaError>) noexcept>;
 using TicketDone = std::move_only_function<void(std::expected<MediaTicket, MediaError>) noexcept>;
 
@@ -64,6 +78,10 @@ public:
     // that is gone.
     virtual void join(const UserId& user, const DeviceId& device, MediaRole role,
                       TicketDone done) = 0;
+    // Who is connected to this generation right now, in no particular order; a ticket that has
+    // been issued but not used does not count. Group calls only (ADR-0058): an adapter without
+    // them reports `NotImplemented`.
+    virtual void participants(ParticipantsDone done) = 0;
     // Ends this generation for everyone in it; their tickets and refreshed credentials stop
     // admitting anyone. Closing a generation the media server has already dropped succeeds.
     virtual void close(MediaDone done) = 0;
