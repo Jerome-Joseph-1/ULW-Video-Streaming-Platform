@@ -167,12 +167,16 @@ public:
 
     void start_receiving() noexcept override {
         upper_receiving_ = true;
-        sync_receiving();
         // Records parked while the protocol was paused are handed over from the loop, not from
-        // inside this call, which the protocol makes from its own callbacks.
-        if (state_ == State::Open && buffered() && !timer_armed_) {
+        // inside this call, which the protocol makes from its own callbacks. The socket stays
+        // unread until they are gone: the reactor dispatches I/O before timers, so a receive
+        // would otherwise land on top of the backlog each time the protocol pauses and resumes,
+        // and the read BIO would grow by most of a receive per cycle.
+        draining_ = state_ == State::Open && buffered();
+        if (draining_ && !timer_armed_) {
             arm_timer(core::Millis{0});
         }
+        sync_receiving();
     }
 
     void stop_receiving() noexcept override {
@@ -310,8 +314,9 @@ private:
     // The socket is read while the handshake needs bytes, and afterwards only while the
     // protocol wants them: stopping the reactor is what leaves the backlog in the kernel.
     void sync_receiving() noexcept {
-        const bool want = state_ == State::Handshaking ||
-                          (state_ == State::Open && upper_receiving_ && !eof_delivered_);
+        const bool want =
+            state_ == State::Handshaking ||
+            (state_ == State::Open && upper_receiving_ && !draining_ && !eof_delivered_);
         if (want == reactor_receiving_ || (want && peer_eof_)) {
             return;
         }
@@ -356,7 +361,12 @@ private:
             ERR_clear_error();
             errno = 0;
             if (SSL_read_ex(ssl_.get(), plain.data(), plain.size(), &n) != 1) {
-                on_ssl_error(SSL_get_error(ssl_.get(), 0), "read failed");
+                const int code = SSL_get_error(ssl_.get(), 0);
+                // Everything parked is read; at most a partial record waits for the socket.
+                if (code == SSL_ERROR_WANT_READ) {
+                    draining_ = false;
+                }
+                on_ssl_error(code, "read failed");
                 break;
             }
             upper_.on_data({plain.data(), n});
@@ -364,6 +374,7 @@ private:
         if (state_ == State::Open && BIO_ctrl_pending(SSL_get_rbio(ssl_.get())) == 0) {
             shrink_read_bio();
         }
+        sync_receiving();
     }
 
     void on_ssl_error(int code, std::string_view what) noexcept {
@@ -479,6 +490,9 @@ private:
     bool counted_ = false;
     bool upper_receiving_ = false;
     bool reactor_receiving_ = false;
+    // Records are parked below a protocol that has resumed: they go up before the socket is
+    // read again.
+    bool draining_ = false;
     bool peer_eof_ = false;
     bool eof_delivered_ = false;
     bool write_shut_ = false;

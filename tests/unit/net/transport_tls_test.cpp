@@ -5,6 +5,7 @@
 #include "support/reactor_harness.hpp"
 #include "support/tls_pki.hpp"
 
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 
 #include <cerrno>
@@ -16,6 +17,7 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <optional>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -73,6 +75,9 @@ public:
     [[nodiscard]] SSL* ssl() const { return ssl_.get(); }
     [[nodiscard]] int fd() const { return fd_.get(); }
     [[nodiscard]] std::size_t unsent() const { return outbox_.size(); }
+    // Ciphertext that reached the socket since the last reset.
+    [[nodiscard]] std::size_t written() const { return written_; }
+    void reset_written() { written_ = 0; }
     // At most this many bytes reach the socket per io().
     void limit_writes(std::size_t n) { max_write_ = n; }
 
@@ -95,6 +100,7 @@ public:
         const std::size_t sent = ulw::test::write_some(
             fd_.get(), std::span(outbox_).first(std::min(outbox_.size(), max_write_)));
         outbox_.erase(outbox_.begin(), outbox_.begin() + static_cast<std::ptrdiff_t>(sent));
+        written_ += sent;
     }
 
     bool handshake_step() {
@@ -138,7 +144,15 @@ private:
     SslPtr ssl_;
     std::vector<std::byte> outbox_;
     std::size_t max_write_ = SIZE_MAX;
+    std::size_t written_ = 0;
 };
+
+// Bytes waiting in a socket's receive queue: for AF_UNIX stream sockets the whole queue.
+std::size_t queued_in_kernel(int fd) {
+    int n = 0;
+    EXPECT_EQ(::ioctl(fd, FIONREAD, &n), 0);
+    return static_cast<std::size_t>(n);
+}
 
 class TlsTransportTest : public ::testing::TestWithParam<ReactorKind> {
 protected:
@@ -153,8 +167,14 @@ protected:
     }
 
     // Attaches the server end of a socket pair to `upper` and returns a client on the other.
-    std::unique_ptr<TlsPeer> connect(Upper& upper, SSL_CTX* ctx = nullptr) {
+    // `server_view`, when given, receives a second descriptor for the server's socket, so the
+    // test can see what the kernel still holds for it.
+    std::unique_ptr<TlsPeer> connect(Upper& upper, SSL_CTX* ctx = nullptr,
+                                     os::UniqueFd* server_view = nullptr) {
         auto [server, client] = ulw::test::unix_pair();
+        if (server_view != nullptr) {
+            *server_view = os::UniqueFd{::dup(server.get())};
+        }
         auto t = transports->attach(std::move(server), upper);
         EXPECT_TRUE(t);
         if (!t) {
@@ -279,6 +299,77 @@ TEST_P(TlsTransportTest, StopReceivingIsExactAndTheBacklogStaysInTheKernel) {
         std::chrono::seconds(60)));
     EXPECT_TRUE(server.received == data);
     EXPECT_LE(server.largest, kRecord);
+}
+
+TEST_P(TlsTransportTest, ResumingFromTheLoopKeepsParkedBytesWithinOneReceive) {
+    // What the gateway does: pause on every record the store cannot take, resume later from a
+    // store callback, never from inside on_data.
+    const auto tls13 = TestPki::shared().client_context(TLS1_3_VERSION);
+    Upper server;
+    server.hook = [](Upper& u, net::BorrowedBytes) { u.transport->stop_receiving(); };
+    os::UniqueFd view;
+    auto client = connect(server, tls13.get(), &view);
+    ASSERT_TRUE(handshake(*client));
+    ASSERT_TRUE(pump_until(*reactor, [&] { return transports->handshakes_in_flight() == 0; }));
+    ASSERT_EQ(client->unsent(), 0U);
+    client->reset_written();
+
+    const auto data = pattern(16 * kMiB, 9);
+    client->write(data);
+    // Full records only, each 16 KiB of plaintext plus a 5-byte header, the inner content type
+    // and a 16-byte AEAD tag.
+    constexpr std::size_t kRecordOnWire = kRecord + 5 + 1 + 16;
+    // One reactor receive is at most 64 KiB, on both reactors.
+    constexpr std::size_t kOneReceive = 64 * kKiB;
+    std::size_t held_most = 0;
+    for (int cycle = 0; cycle < 200; ++cycle) {
+        client->io();
+        pump_pending(*reactor);
+        ASSERT_EQ(server.received.size() % kRecord, 0U);
+        const std::size_t consumed = client->written() - queued_in_kernel(view.get());
+        const std::size_t delivered = (server.received.size() / kRecord) * kRecordOnWire;
+        ASSERT_GE(consumed, delivered);
+        held_most = std::max(held_most, consumed - delivered);
+        server.transport->start_receiving();
+    }
+    EXPECT_GT(server.data_calls, 100);
+    EXPECT_LE(held_most, kOneReceive + kRecordOnWire);
+
+    server.hook = nullptr;
+    server.transport->start_receiving();
+    ASSERT_TRUE(pump_until(
+        *reactor,
+        [&] {
+            client->io();
+            return server.received.size() == data.size();
+        },
+        std::chrono::seconds(60)));
+    EXPECT_TRUE(server.received == data);
+}
+
+TEST_P(TlsTransportTest, AResumeAfterTheLastParkedRecordReadsTheSocketAgain) {
+    const auto tls13 = TestPki::shared().client_context(TLS1_3_VERSION);
+    Upper server;
+    server.hook = [](Upper& u, net::BorrowedBytes) { u.transport->stop_receiving(); };
+    auto client = connect(server, tls13.get());
+    ASSERT_TRUE(handshake(*client));
+    // Two whole records in one receive: the pause after the first parks the second, and
+    // reading it leaves nothing buffered, not even part of a record.
+    client->write(pattern(2 * kRecord, 1));
+    ASSERT_TRUE(pump_until(*reactor, [&] {
+        client->io();
+        return server.data_calls == 1;
+    }));
+    server.transport->start_receiving();
+    ASSERT_TRUE(pump_until(*reactor, [&] { return server.data_calls == 2; }));
+    server.transport->start_receiving();
+    pump_pending(*reactor);
+
+    client->write(pattern(kRecord, 2));
+    EXPECT_TRUE(pump_until(*reactor, [&] {
+        client->io();
+        return server.data_calls == 3;
+    }));
 }
 
 TEST_P(TlsTransportTest, RecordsParkedBehindAPauseArriveBeforeTheEndOfStream) {
