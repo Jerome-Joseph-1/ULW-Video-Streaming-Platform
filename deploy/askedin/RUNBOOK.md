@@ -48,6 +48,32 @@ elsewhere, change the second `from` in the same files:
 kubectl get pods -A -l app.kubernetes.io/name=prometheus -o custom-columns=NS:.metadata.namespace
 ```
 
+The gateway limits each client address (20 connections or requests in flight, 10 new
+connections a second) and each user (300 requests a minute, 100 GiB of uploads a day), per
+replica. Behind Envoy every connection comes from Envoy's pods, so the gateway takes the client
+address from `X-Forwarded-For`, but only from peers in `ULW_TRUSTED_PROXIES`, which the overlays
+set to K3s's default pod network, `10.42.0.0/16`. Confirm Envoy's pods are in it:
+
+```sh
+kubectl get pods -n envoy-gateway-system -l app.kubernetes.io/component=proxy \
+  -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}'    # a /24 inside the cluster's block
+```
+
+If they are not, set `ULW_TRUSTED_PROXIES` in both `overlays/*/video-gateway/deployment.yaml` to
+the block that holds them before the first apply. With the wrong block every client counts as
+Envoy: the gateway resets Envoy's connections past 20 and `connections_rejected_total{reason=
+"ip_connections"}` climbs. The NetworkPolicy is what keeps other pods in that block from
+reaching the gateway and naming a client of their choosing.
+
+The other limits are environment variables in the same files (`ULW_MAX_CONNECTIONS_PER_IP`,
+`ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND`, `ULW_REQUESTS_PER_USER_PER_MINUTE`,
+`ULW_UPLOAD_BYTES_PER_USER_PER_DAY`), listed with their ranges in
+`docs/integration/operations-contract.md`; the defaults and their derivations are in
+docs/adr/0046. Each applies per replica, so with two replicas a user may reach twice a per-user
+limit. The pods start as user 10001 and have nothing to drop; `ULW_RUN_AS_USER` is for a
+process started as root, which these manifests never do.
+
 Check the node has room. Both environments run on k8s-prod's 8 vCPU / 24 GB, and the new
 requests are, per environment, 2 x 500m CPU and 2 x 600Mi for the gateways plus the worker's
 2Gi, and 1 CPU / 10Gi of scratch (stage) or 2 CPU / 30Gi (prod) for the worker: 5 CPU, 6.4Gi of
