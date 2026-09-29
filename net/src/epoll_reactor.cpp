@@ -1,5 +1,7 @@
 #include "epoll_reactor.hpp"
 
+#include "sockaddr.hpp"
+
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -21,6 +23,9 @@ constexpr int kMaxReadsPerEvent = 4;
 // A full backlog (1024, set in listen_tcp) is taken in 16 wakeups, and established
 // connections get their turn between them.
 constexpr int kMaxAcceptsPerEvent = 64;
+// A default 208 KiB receive buffer holds 256 small datagrams (832 bytes of truesize each,
+// measured on 6.18), so a full one drains in 4 wakeups with the other sockets served between.
+constexpr int kMaxDatagramsPerEvent = 64;
 // The shortest delay the wheel expresses. Descriptors come back as soon as connections close;
 // the pause only has to keep a listener that cannot accept from spinning the loop.
 constexpr core::Millis kAcceptRetry = TimingWheel::kTick;
@@ -80,6 +85,8 @@ EpollReactor::EpollReactor(core::ports::IClock& clock, os::UniqueFd epfd, std::s
     accept_retry_.self = this;
 }
 
+static_assert(kMaxDatagramSize <= std::size_t{64} * 1024, "datagrams are read into read_buf_");
+
 EpollReactor::~EpollReactor() {
     for (Slot& s : slots_) {
         s.sendq.clear(pool_);
@@ -134,7 +141,9 @@ void EpollReactor::release(Slot& s) noexcept {
     s.stream = nullptr;
     s.ready = nullptr;
     s.acceptor = nullptr;
-    s.receiving = s.failed = s.hung_up = s.eof = s.accept_paused = s.shut_pending = false;
+    s.dgram = nullptr;
+    s.stats = {};
+    s.receiving = s.failed = s.hung_up = s.eof = s.accept_paused = s.shut_pending = s.v6 = false;
     s.kind = Kind::Free;
     ++s.gen;
 }
@@ -285,6 +294,108 @@ bool EpollReactor::is_quiescent(ConnId conn) const noexcept {
     return stream_slot(conn) == nullptr;
 }
 
+std::expected<DatagramId, int> EpollReactor::attach_datagram(os::UniqueFd socket,
+                                                             IDatagramHandler& handler) {
+    const int fd = socket.get();
+    if (fd < 0 || static_cast<std::size_t>(fd) >= slots_.size()) {
+        return std::unexpected(EMFILE);
+    }
+    Slot& s = slots_[static_cast<std::size_t>(fd)];
+    if (s.kind != Kind::Free) {
+        return std::unexpected(EEXIST);
+    }
+    const auto v6 = udp_socket_is_v6(fd);
+    if (!v6) {
+        return std::unexpected(v6.error());
+    }
+    s.kind = Kind::Datagram;
+    s.owned = std::move(socket);
+    s.dgram = &handler;
+    s.v6 = *v6;
+    return DatagramId{.fd = fd, .gen = s.gen};
+}
+
+void EpollReactor::start_receiving_datagrams(DatagramId socket) noexcept {
+    Slot* s = datagram_slot(socket);
+    if (s == nullptr || s->receiving) {
+        return;
+    }
+    // In the set only while receiving: a queued socket error is reported whatever the mask, and
+    // level triggering would report it on every wait until someone reads it.
+    epoll_event ev{.events = EPOLLIN, .data = {.u64 = make_token(socket.fd, s->gen)}};
+    if (::epoll_ctl(epfd_.get(), EPOLL_CTL_ADD, socket.fd, &ev) != 0) {
+        deferred_datagram_errors_.push_back({.socket = socket, .to = std::nullopt, .err = errno});
+        return;
+    }
+    s->in_set = true;
+    s->events = EPOLLIN;
+    s->receiving = true;
+}
+
+void EpollReactor::stop_receiving_datagrams(DatagramId socket) noexcept {
+    if (Slot* s = datagram_slot(socket)) {
+        stop_datagrams(socket.fd, *s);
+    }
+}
+
+void EpollReactor::stop_datagrams(int fd, Slot& s) noexcept {
+    s.receiving = false;
+    remove_from_set(fd, s);
+}
+
+std::expected<void, int> EpollReactor::send_to(DatagramId socket, SocketAddr to,
+                                               std::span<const std::byte> payload) noexcept {
+    Slot* s = datagram_slot(socket);
+    if (s == nullptr) {
+        return std::unexpected(EBADF);
+    }
+    if (payload.size() > kMaxDatagramSize) {
+        return std::unexpected(EMSGSIZE);
+    }
+    sockaddr_storage addr{};
+    const auto len = to_sockaddr(to, s->v6, addr);
+    if (!len) {
+        return std::unexpected(len.error());
+    }
+    ssize_t n = -1;
+    for (;;) {
+        n = ::sendto(socket.fd, payload.data(), payload.size(), MSG_DONTWAIT,
+                     reinterpret_cast<const sockaddr*>(&addr), *len);
+        if (n >= 0 || errno != EINTR) {
+            break;
+        }
+    }
+    if (n >= 0) {
+        ++s->stats.sent;
+        return {};
+    }
+    if (errno == EAGAIN) {
+        ++s->stats.send_refused;
+        return std::unexpected(EAGAIN);
+    }
+    ++s->stats.send_errors;
+    deferred_datagram_errors_.push_back({.socket = socket, .to = to, .err = errno});
+    return {};
+}
+
+void EpollReactor::begin_close(DatagramId socket) noexcept {
+    Slot* s = datagram_slot(socket);
+    if (s == nullptr) {
+        return;
+    }
+    remove_from_set(socket.fd, *s);
+    release(*s);
+}
+
+bool EpollReactor::is_quiescent(DatagramId socket) const noexcept {
+    return datagram_slot(socket) == nullptr;
+}
+
+DatagramStats EpollReactor::datagram_stats(DatagramId socket) const noexcept {
+    const Slot* s = datagram_slot(socket);
+    return s == nullptr ? DatagramStats{} : s->stats;
+}
+
 std::expected<void, int> EpollReactor::watch(int fd, Interest interest, IReadyHandler& handler) {
     if (fd < 0 || static_cast<std::size_t>(fd) >= slots_.size()) {
         return std::unexpected(EMFILE);
@@ -338,7 +449,8 @@ void EpollReactor::cancel_timer(TimerId timer) noexcept {
 }
 
 int EpollReactor::run_once(core::Millis max_wait) {
-    core::Millis wait = deferred_errors_.empty() ? max_wait : core::Millis{0};
+    core::Millis wait =
+        deferred_errors_.empty() && deferred_datagram_errors_.empty() ? max_wait : core::Millis{0};
     if (const auto next = wheel_.next_expiry(now_)) {
         wait = std::min(wait, *next);
     }
@@ -364,6 +476,19 @@ void EpollReactor::run_deferred() noexcept {
             s->stream->on_error(e.err);
         }
     }
+    reporting_datagram_errors_.swap(deferred_datagram_errors_);
+    for (const DeferredDatagramError& e : reporting_datagram_errors_) {
+        Slot* s = datagram_slot(e.socket);
+        if (s == nullptr) {
+            continue;
+        }
+        if (e.to) {
+            s->dgram->on_send_error(*e.to, e.err);
+        } else {
+            s->dgram->on_error(e.err);
+        }
+    }
+    reporting_datagram_errors_.clear();
 }
 
 void EpollReactor::dispatch(std::uint64_t token, std::uint32_t events) noexcept {
@@ -392,6 +517,9 @@ void EpollReactor::dispatch(std::uint64_t token, std::uint32_t events) noexcept 
     }
     case Kind::Listener:
         on_listener_event(fd, s);
+        return;
+    case Kind::Datagram:
+        on_datagram_event(fd, s, events);
         return;
     case Kind::Free:
         return;
@@ -525,6 +653,49 @@ void EpollReactor::on_listener_event(int fd, Slot& s) noexcept {
             pause_accepting(fd, s);
         }
         return;
+    }
+}
+
+void EpollReactor::on_datagram_event(int fd, Slot& s, std::uint32_t events) noexcept {
+    const std::uint32_t gen = s.gen;
+    if (!s.receiving) {
+        return;
+    }
+    if ((events & EPOLLERR) != 0) {
+        const int err = socket_error(fd);
+        stop_datagrams(fd, s);
+        s.dgram->on_error(err);
+        return;
+    }
+    auto& buf = *read_buf_;
+    for (int i = 0; i < kMaxDatagramsPerEvent && s.receiving; ++i) {
+        sockaddr_storage from{};
+        socklen_t from_len = sizeof from;
+        // MSG_TRUNC makes recvfrom return the datagram's real length, not what fitted.
+        const ssize_t n = ::recvfrom(fd, buf.data(), kMaxDatagramSize, MSG_TRUNC | MSG_DONTWAIT,
+                                     reinterpret_cast<sockaddr*>(&from), &from_len);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN) {
+                const int err = errno;
+                stop_datagrams(fd, s);
+                s.dgram->on_error(err);
+            }
+            return;
+        }
+        const auto size = static_cast<std::size_t>(n);
+        if (size > kMaxDatagramSize) {
+            ++s.stats.truncated;
+            continue;
+        }
+        ++s.stats.received;
+        s.dgram->on_datagram(from_sockaddr(std::as_bytes(std::span(&from, 1)).first(from_len)),
+                             std::span<const std::byte>(buf.data(), size));
+        if (!alive(fd, gen)) {
+            return;
+        }
     }
 }
 

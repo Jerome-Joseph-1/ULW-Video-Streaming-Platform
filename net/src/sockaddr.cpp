@@ -41,6 +41,26 @@ SocketAddr from_sockaddr(std::span<const std::byte> name) noexcept {
     return addr;
 }
 
+std::expected<bool, int> udp_socket_is_v6(int fd) noexcept {
+    int type = 0;
+    socklen_t len = sizeof type;
+    if (::getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &len) != 0) {
+        return std::unexpected(errno);
+    }
+    if (type != SOCK_DGRAM) {
+        return std::unexpected(EPROTOTYPE);
+    }
+    int domain = 0;
+    len = sizeof domain;
+    if (::getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &domain, &len) != 0) {
+        return std::unexpected(errno);
+    }
+    if (domain != AF_INET && domain != AF_INET6) {
+        return std::unexpected(EAFNOSUPPORT);
+    }
+    return domain == AF_INET6;
+}
+
 std::expected<socklen_t, int> to_sockaddr(const SocketAddr& addr, bool v6_socket,
                                           sockaddr_storage& out) noexcept {
     out = {};

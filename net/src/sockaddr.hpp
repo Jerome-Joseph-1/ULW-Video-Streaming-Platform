@@ -19,4 +19,8 @@ namespace net::detail {
 [[nodiscard]] std::expected<socklen_t, int> to_sockaddr(const SocketAddr& addr, bool v6_socket,
                                                         sockaddr_storage& out) noexcept;
 
+// Whether `fd` is an IPv6 UDP socket (true) or an IPv4 one (false); EPROTOTYPE or EAFNOSUPPORT
+// for anything else.
+[[nodiscard]] std::expected<bool, int> udp_socket_is_v6(int fd) noexcept;
+
 } // namespace net::detail
