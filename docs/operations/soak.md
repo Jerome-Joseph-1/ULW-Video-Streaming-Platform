@@ -141,4 +141,25 @@ its own database there and drops it at the end. Client ports are 19101 to 19103 
 
 ### Runs
 
-None yet on a `main` with M18 and M19; the 6 h run is recorded here when it ends.
+No 6 h run yet; it belongs on a `main` with M18 and M19, and is recorded here when it ends.
+
+#### 45 min, 2026-09-29 21:20 to 22:05 UTC, with the prefill
+
+Main at 76a8a17 (without M18 and M19), io_uring, 64 clients; conntrack stayed under 7,500
+entries. Every path of the mix ran, and every node exited 0 on SIGTERM. 30 samples judged, over
+0.48 h after the warm-up. RSS in MiB:
+
+| minute | 0 | 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 44 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chat-1 | 17.7 | 46.3 | 49.2 | 51.3 | 52.0 | 52.4 | 52.3 | 52.4 | 52.7 | 53.0 |
+| chat-2 | 18.7 | 45.6 | 47.7 | 48.6 | 48.1 | 48.8 | 49.0 | 49.6 | 50.0 | 50.1 |
+| chat-3 | 19.0 | 46.0 | 48.0 | 48.6 | 49.1 | 49.2 | 49.5 | 49.5 | 49.5 | 49.5 |
+
+- The receive pool held 17.9 MB from minute 5 on, and each node's kept-message order was at
+  131,072 entries by minute 30 (read from the processes).
+- The slopes' upper ends were +3.2, +5.5 and +2.2 MB an hour, against 13 to 23 before the
+  prefill: 33, 66 and 23 bytes a command against 0.10. **Not shown flat.** Half an hour cannot
+  resolve a bound of about 9 KB an hour, and the heap still rose by 0.5 to 1.4 MB between
+  minutes 15 and 40, most on chat-2; the 6 h run decides whether that settles.
+- An epoll run beside it (30 min, 15 samples judged) was alike: upper ends of +2.1 to +6.7 MB
+  an hour, heap +0.4 to +1.1 MB after the warm-up and slowing.
