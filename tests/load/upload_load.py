@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""Drives many concurrent resumable uploads against the gateway (apps/gateway/src/routes.hpp)
+and reports throughput, latency and error counts as JSON.
+
+    tests/load/upload_load.py --url http://127.0.0.1:8080 --token-file tokens.txt \
+        --uploads 500 --size 16777216
+
+Tokens round-robin over --token-file (one bearer token per line) because the gateway admits at
+most 3 uploads per user at once (Limits::max_uploads_per_user, apps/gateway/src/gateway.hpp);
+with fewer tokens than concurrent uploads, some connections are expected to see 429 until an
+earlier upload of the same user finishes. Rather than a token file, --devtoken-key together with
+--issuer and --users mints that many fresh subjects on the fly with the repo's ulw_devtoken
+binary (tools/devtoken/src/main.cpp), one token per subject, and round-robins the same way.
+
+Each upload PATCHes the gateway's chunk_size (from the 201 response) at a time, optionally
+throttled to --rate bytes/s per connection so a connection stays open long enough to be worth
+measuring, then POSTs a commit. Chunk bytes come from a small repeating buffer so memory stays
+flat regardless of --size.
+"""
+import argparse
+import http.client
+import json
+import statistics
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+
+# A 4 KiB pattern is far smaller than any chunk but large enough that repeating it never lines
+# up with a chunk boundary in a way that would let an over-eager compressor collapse it; nothing
+# here compresses, but a non-trivial fill also makes a byte-for-byte truncation obvious in a
+# hex dump if a test ever needs one.
+FILL = bytes((i * 2654435761) & 0xFF for i in range(4096))
+
+
+def chunk_bytes(n):
+    """n bytes built by repeating FILL, without ever materializing more than one copy plus the
+    remainder — the memory-flat requirement for uploads far larger than FILL."""
+    whole, rest = divmod(n, len(FILL))
+    return FILL * whole + FILL[:rest]
+
+
+def mint_tokens(devtoken_bin, key_file, issuer, users):
+    tokens = []
+    for i in range(users):
+        out = subprocess.run(
+            [devtoken_bin, "mint", key_file, "--iss", issuer, "--sub", f"load-{i:06d}",
+             "--ttl", "3600"],
+            check=True, capture_output=True, text=True)
+        tokens.append(out.stdout.strip())
+    return tokens
+
+
+class Percentiles:
+    """A fixed-size reservoir would drop precision; for the sizes this tool runs at (a few
+    thousand PATCHes per run, not millions) keeping every sample and sorting once at the end is
+    simpler and cheap enough."""
+
+    def __init__(self):
+        self.samples = []
+        self.lock = threading.Lock()
+
+    def add(self, value):
+        with self.lock:
+            self.samples.append(value)
+
+    def summary(self):
+        with self.lock:
+            data = sorted(self.samples)
+        if not data:
+            return {"count": 0}
+        return {
+            "count": len(data),
+            "p50_ms": round(statistics.quantiles(data, n=100)[49] * 1000, 2) if len(data) > 1 else round(data[0] * 1000, 2),
+            "p95_ms": round(statistics.quantiles(data, n=100)[94] * 1000, 2) if len(data) > 1 else round(data[0] * 1000, 2),
+            "p99_ms": round(statistics.quantiles(data, n=100)[98] * 1000, 2) if len(data) > 1 else round(data[0] * 1000, 2),
+        }
+
+
+class Results:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.attempted = 0
+        self.completed = 0
+        self.status_counts = {}
+        self.errors = {}
+        self.bytes_sent = 0
+        self.patch_latency = Percentiles()
+
+    def record_status(self, status):
+        with self.lock:
+            self.status_counts[status] = self.status_counts.get(status, 0) + 1
+
+    def record_error(self, kind):
+        with self.lock:
+            self.errors[kind] = self.errors.get(kind, 0) + 1
+
+    def add_bytes(self, n):
+        with self.lock:
+            self.bytes_sent += n
+
+    def to_dict(self):
+        with self.lock:
+            return {
+                "attempted": self.attempted,
+                "completed": self.completed,
+                "status_counts": dict(self.status_counts),
+                "errors_by_kind": dict(self.errors),
+                "total_bytes_sent": self.bytes_sent,
+            }
+
+
+def connect(base, timeout):
+    kind = http.client.HTTPSConnection if base.scheme == "https" else http.client.HTTPConnection
+    return kind(base.hostname, base.port, timeout=timeout)
+
+
+def request(base, method, path, token=None, body=None, headers=None, timeout=60):
+    conn = connect(base, timeout)
+    try:
+        all_headers = dict(headers or {})
+        if token:
+            all_headers["Authorization"] = f"Bearer {token}"
+        if isinstance(body, dict):
+            body = json.dumps(body).encode()
+            all_headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=body, headers=all_headers)
+        response = conn.getresponse()
+        data = response.read()
+        return response.status, {k.lower(): v for k, v in response.getheaders()}, data
+    finally:
+        conn.close()
+
+
+def run_one_upload(base, token, size, chunk_cap, rate, results):
+    with results.lock:
+        results.attempted += 1
+    try:
+        status, _, data = request(base, "POST", "/api/v1/uploads", token,
+                                  {"filename": "load.mp4", "size_bytes": size,
+                                   "content_type": "video/mp4"})
+    except OSError as e:
+        results.record_error(f"create:{type(e).__name__}")
+        return
+    if status == 429:
+        results.record_status(429)
+        return
+    if status == 503:
+        results.record_status(503)
+        return
+    if status != 201:
+        results.record_status(status)
+        results.record_error(f"create:http_{status}")
+        return
+    results.record_status(status)
+    created = json.loads(data)
+    upload_id = created["upload_id"]
+    chunk_size = min(created["chunk_size"], chunk_cap) if chunk_cap else created["chunk_size"]
+    offset = created["durable_offset"]
+    body = chunk_bytes(size)
+    started_upload = time.monotonic()
+    while offset < size:
+        piece = body[offset:offset + chunk_size]
+        piece_started = time.monotonic()
+        try:
+            status, headers, data = request(
+                base, "PATCH", f"/api/v1/uploads/{upload_id}", token, piece,
+                {"Upload-Offset": str(offset),
+                 "Content-Type": "application/offset+octet-stream"})
+        except OSError as e:
+            results.record_error(f"patch:{type(e).__name__}")
+            return
+        results.patch_latency.add(time.monotonic() - piece_started)
+        results.record_status(status)
+        if status == 429 or status == 503:
+            return
+        if status != 204:
+            results.record_error(f"patch:http_{status}")
+            return
+        offset = int(headers["upload-offset"])
+        results.add_bytes(len(piece))
+        if rate:
+            # Deliberate pacing, not a wait-for-condition sleep: holds the connection open at a
+            # bounded rate so short runs still exercise sustained-upload behavior.
+            elapsed = time.monotonic() - started_upload
+            target = offset / rate
+            behind = target - elapsed
+            if behind > 0:
+                time.sleep(behind)
+    try:
+        status, _, data = request(base, "POST", f"/api/v1/uploads/{upload_id}/commit", token,
+                                  timeout=60)
+    except OSError as e:
+        results.record_error(f"commit:{type(e).__name__}")
+        return
+    results.record_status(status)
+    if status != 200:
+        results.record_error(f"commit:http_{status}")
+        return
+    with results.lock:
+        results.completed += 1
+
+
+def scrape_metrics_loop(base, stop_event, series):
+    """Samples /metrics every 5 s (the interval the task asked for) until stop_event fires, and
+    records the two gauges apps/gateway/src/gateway.cpp's render_metrics exposes that describe
+    load in flight: uploads_in_flight and connections_current. The gateway build in this repo
+    exposes no process_resident_memory_bytes metric, so it is omitted rather than invented."""
+    parts = urllib.parse.urlsplit(base)
+    while not stop_event.is_set():
+        try:
+            status, _, data = request(parts, "GET", "/metrics", timeout=10)
+            if status == 200:
+                text = data.decode()
+                sample = {"t": time.time()}
+                for name in ("uploads_in_flight", "connections_current"):
+                    for line in text.splitlines():
+                        if line.startswith(name + " "):
+                            sample[name] = int(line.split()[-1])
+                series.append(sample)
+        except OSError:
+            pass
+        stop_event.wait(5)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--url", required=True, help="gateway base URL, e.g. http://127.0.0.1:8080")
+    parser.add_argument("--uploads", type=int, default=500)
+    parser.add_argument("--size", type=int, default=16 * (1 << 20))
+    parser.add_argument("--rate", type=int, default=0,
+                        help="bytes/s per connection; 0 means as fast as possible")
+    parser.add_argument("--token-file", help="one bearer token per line, round-robined")
+    parser.add_argument("--devtoken-key", help="ulw_devtoken private key file")
+    parser.add_argument("--devtoken", default="build/ci/tools/devtoken/ulw_devtoken",
+                        help="path to the ulw_devtoken binary")
+    parser.add_argument("--issuer", help="JWT_ISSUER to mint with --devtoken-key")
+    parser.add_argument("--users", type=int, default=0,
+                        help="distinct subjects to mint with --devtoken-key")
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="threads running uploads at once; defaults to --uploads")
+    parser.add_argument("--scrape-metrics", help="gateway base URL to sample /metrics from")
+    args = parser.parse_args()
+
+    if bool(args.token_file) == bool(args.devtoken_key):
+        sys.exit("upload_load: give exactly one of --token-file or --devtoken-key")
+
+    if args.token_file:
+        with open(args.token_file) as f:
+            tokens = [line.strip() for line in f if line.strip()]
+        if not tokens:
+            sys.exit("upload_load: --token-file has no tokens")
+    else:
+        if not args.issuer or not args.users:
+            sys.exit("upload_load: --devtoken-key needs --issuer and --users")
+        tokens = mint_tokens(args.devtoken, args.devtoken_key, args.issuer, args.users)
+
+    base = urllib.parse.urlsplit(args.url)
+    results = Results()
+    metrics_series = []
+    stop_scrape = threading.Event()
+    scrape_thread = None
+    if args.scrape_metrics:
+        scrape_thread = threading.Thread(
+            target=scrape_metrics_loop, args=(args.scrape_metrics, stop_scrape, metrics_series),
+            daemon=True)
+        scrape_thread.start()
+
+    concurrency = args.concurrency or args.uploads
+    wall_started = time.monotonic()
+    threads = []
+    # A simple semaphore-bounded pool: one thread per upload, capped at --concurrency in flight,
+    # which is enough for the sizes this tool targets (hundreds, not thousands) and keeps the
+    # implementation to plain threads rather than a selector-driven event loop.
+    sem = threading.Semaphore(concurrency)
+
+    def worker(i):
+        with sem:
+            token = tokens[i % len(tokens)]
+            run_one_upload(base, token, args.size, None, args.rate, results)
+
+    for i in range(args.uploads):
+        t = threading.Thread(target=worker, args=(i,))
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+    wall_time = time.monotonic() - wall_started
+    stop_scrape.set()
+    if scrape_thread:
+        scrape_thread.join(timeout=10)
+
+    report = results.to_dict()
+    report["wall_time_s"] = round(wall_time, 3)
+    report["patch_latency"] = results.patch_latency.summary()
+    report["rejections_429"] = report["status_counts"].get(429, 0)
+    report["rejections_503"] = report["status_counts"].get(503, 0)
+    if metrics_series:
+        report["metrics_samples"] = metrics_series
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == "__main__":
+    main()
