@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <memory>
 #include <openssl/evp.h>
 #include <span>
 #include <string>
@@ -46,6 +47,43 @@ Sha256Digest hmac_sha256(std::span<const unsigned char> key, std::string_view da
     if (EVP_Q_mac(nullptr, "HMAC", nullptr, "SHA256", nullptr, key.data(), key.size(), bytes,
                   data.size(), out.data(), out.size(), &written) == nullptr ||
         written != out.size()) {
+        crypto_failure();
+    }
+    return out;
+}
+
+class Sha256Stream::Context {
+public:
+    Context() : ctx_(EVP_MD_CTX_new()) {
+        if (!ctx_ || EVP_DigestInit_ex(ctx_.get(), EVP_sha256(), nullptr) != 1) {
+            crypto_failure();
+        }
+    }
+
+    [[nodiscard]] EVP_MD_CTX* get() const noexcept { return ctx_.get(); }
+
+private:
+    struct Free {
+        void operator()(EVP_MD_CTX* ctx) const noexcept { EVP_MD_CTX_free(ctx); }
+    };
+    std::unique_ptr<EVP_MD_CTX, Free> ctx_;
+};
+
+Sha256Stream::Sha256Stream() : context_(std::make_unique<Context>()) {}
+Sha256Stream::~Sha256Stream() = default;
+Sha256Stream::Sha256Stream(Sha256Stream&&) noexcept = default;
+Sha256Stream& Sha256Stream::operator=(Sha256Stream&&) noexcept = default;
+
+void Sha256Stream::update(std::span<const std::byte> data) noexcept {
+    if (EVP_DigestUpdate(context_->get(), data.data(), data.size()) != 1) {
+        crypto_failure();
+    }
+}
+
+Sha256Digest Sha256Stream::finish() noexcept {
+    Sha256Digest out{};
+    unsigned int written = 0;
+    if (EVP_DigestFinal_ex(context_->get(), out.data(), &written) != 1 || written != out.size()) {
         crypto_failure();
     }
     return out;

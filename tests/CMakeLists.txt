@@ -17,6 +17,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/error_messages_test.cpp
     unit/core/ids_test.cpp
     unit/core/json_test.cpp
+    unit/core/ladder_test.cpp
     unit/core/parse_test.cpp
     unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
@@ -78,6 +79,15 @@ ulw_add_test_suite(storage_conformance_tests conformance
     conformance/fs_store_test.cpp
     conformance/storage_conformance_test.cpp)
 target_link_libraries(storage_conformance_tests PRIVATE ulw::test_storage_harness)
+
+ulw_add_test_suite(transfer_conformance_tests conformance
+    conformance/object_transfer_conformance_test.cpp)
+target_link_libraries(transfer_conformance_tests PRIVATE ulw::storage_fs_transfer)
+target_include_directories(transfer_conformance_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+if(ULW_CONFORMANCE_LIVE)
+    target_link_libraries(transfer_conformance_tests PRIVATE ulw::storage_s3 ulw::test_live_s3)
+    target_compile_definitions(transfer_conformance_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 ulw_add_test_suite(http_unit_tests unit
     unit/http/backpressure_test.cpp
     unit/http/parser_limits_test.cpp
@@ -216,3 +226,46 @@ target_link_libraries(auth_unit_tests PRIVATE ulw::auth ulw::devtoken OpenSSL::C
 # Most suites test the module's internals: parsers, signature and claim checks, verdict cache.
 target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/auth/src
     ${PROJECT_SOURCE_DIR}/tests)
+
+if(ULW_BUILD_WORKER)
+    ulw_add_test_suite(ffmpeg_unit_tests unit
+        unit/ffmpeg/command_test.cpp
+        unit/ffmpeg/exit_code_test.cpp
+        unit/ffmpeg/progress_test.cpp
+        unit/ffmpeg/sandbox_test.cpp)
+    target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
+    # White-box tests of the adapter internals, and the real sandbox helper.
+    target_include_directories(ffmpeg_unit_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${PROJECT_SOURCE_DIR}/tests)
+    target_compile_definitions(ffmpeg_unit_tests
+        PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>")
+    add_dependencies(ffmpeg_unit_tests ulw_sandbox)
+
+    ulw_add_test_suite(worker_unit_tests unit
+        unit/worker/config_test.cpp
+        unit/worker/job_runner_test.cpp
+        unit/worker/lease_keeper_test.cpp
+        unit/worker/workspace_test.cpp)
+    target_link_libraries(worker_unit_tests PRIVATE ulw::worker_lib ulw::os)
+    target_include_directories(worker_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+    # The adapter on real ffmpeg, and the worker binary against the Postgres and MinIO of
+    # deploy/local/compose.yaml.
+    ulw_add_test_suite(worker_integration_tests integration
+        integration/ffmpeg_transcoder_test.cpp
+        integration/postgres_harness.cpp
+        integration/worker_test.cpp
+        support/child_process.cpp)
+    target_link_libraries(worker_integration_tests PRIVATE
+        ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
+        ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
+    target_include_directories(worker_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/infra/postgres/src ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src)
+    target_compile_definitions(worker_integration_tests PRIVATE
+        ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
+        ULW_WORKER_BIN="$<TARGET_FILE:transcode_worker>")
+    if(ULW_CONFORMANCE_LIVE)
+        target_compile_definitions(worker_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+    endif()
+    add_dependencies(worker_integration_tests transcode_worker ulw_sandbox)
+endif()

@@ -46,6 +46,28 @@ private:
     std::span<const std::byte> rest_;
 };
 
+class UploadSource final : public IBodySource {
+public:
+    explicit UploadSource(IUploadSource& source) noexcept : source_(source) {}
+
+    std::size_t read_body(std::span<std::byte> out) noexcept override {
+        return source_.read_upload(out);
+    }
+
+private:
+    IUploadSource& source_;
+};
+
+Result run_blocking(const Request& request, std::uint64_t upload_length, IBodySource* source,
+                    IDownloadSink* sink) {
+    auto exchange = detail::Exchange::create(request, upload_length, source,
+                                             detail::Exchange::Mode::Blocking, sink);
+    if (!exchange) {
+        return std::unexpected(std::move(exchange.error()));
+    }
+    return (*exchange)->finish(curl_easy_perform((*exchange)->easy()));
+}
+
 } // namespace
 
 std::string_view to_string(Method method) noexcept {
@@ -80,13 +102,16 @@ std::optional<std::string_view> Response::header(std::string_view name) const no
 
 Result perform(const Request& request, std::span<const std::byte> body) {
     SpanSource source(body);
-    auto exchange = detail::Exchange::create(request, body.size(), &source);
-    if (!exchange) {
-        return std::unexpected(std::move(exchange.error()));
-    }
-    // A span never runs dry before the length it declared, so the read callback never
-    // pauses, which curl_easy_perform could not recover from.
-    return (*exchange)->finish(curl_easy_perform((*exchange)->easy()));
+    return run_blocking(request, body.size(), &source, nullptr);
+}
+
+Result perform_download(const Request& request, IDownloadSink& sink) {
+    return run_blocking(request, 0, nullptr, &sink);
+}
+
+Result perform_upload(const Request& request, std::uint64_t length, IUploadSource& source) {
+    UploadSource adapter(source);
+    return run_blocking(request, length, &adapter, nullptr);
 }
 
 } // namespace infra::curl

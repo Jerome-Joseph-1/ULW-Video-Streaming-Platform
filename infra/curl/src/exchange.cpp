@@ -71,15 +71,19 @@ bool global_init() noexcept {
 }
 
 Exchange::Exchange(Token /*token*/, std::size_t max_body, std::uint64_t upload_length,
-                   IBodySource* source) noexcept
-    : max_body_(max_body), upload_left_(source == nullptr ? 0 : upload_length), source_(source) {}
+                   IBodySource* source, Mode mode, IDownloadSink* sink) noexcept
+    : max_body_(max_body), upload_left_(source == nullptr ? 0 : upload_length), source_(source),
+      mode_(mode), sink_(sink) {}
 
-std::expected<std::unique_ptr<Exchange>, Failure>
-Exchange::create(const Request& request, std::uint64_t upload_length, IBodySource* source) {
+std::expected<std::unique_ptr<Exchange>, Failure> Exchange::create(const Request& request,
+                                                                   std::uint64_t upload_length,
+                                                                   IBodySource* source, Mode mode,
+                                                                   IDownloadSink* sink) {
     if (!global_init()) {
         return std::unexpected(Failure{.kind = FailureKind::Local, .detail = "curl init failed"});
     }
-    auto exchange = std::make_unique<Exchange>(Token{}, request.max_body, upload_length, source);
+    auto exchange =
+        std::make_unique<Exchange>(Token{}, request.max_body, upload_length, source, mode, sink);
     if (auto configured = exchange->configure(request); !configured) {
         return std::unexpected(std::move(configured.error()));
     }
@@ -222,6 +226,10 @@ std::size_t Exchange::on_body(char* data, std::size_t size, std::size_t count,
     const std::size_t n = size * count;
     long status = 0;
     static_cast<void>(curl_easy_getinfo(ex.easy_.get(), CURLINFO_RESPONSE_CODE, &status));
+    if (ex.sink_ != nullptr && is_success(status)) {
+        const auto bytes = std::as_bytes(std::span(data, n));
+        return ex.sink_->write_download(bytes) ? n : CURL_WRITEFUNC_ERROR;
+    }
     const std::size_t limit = is_success(status) ? ex.max_body_ : kMaxErrorBody;
     if (ex.response_.body.size() + n > limit) {
         ex.oversize_ = true;
@@ -242,6 +250,9 @@ std::size_t Exchange::on_read(char* data, std::size_t size, std::size_t count,
     const std::size_t n =
         std::min(room, ex.source_->read_body(std::span(reinterpret_cast<std::byte*>(data), room)));
     if (n == 0) {
+        if (ex.mode_ == Mode::Blocking) {
+            return CURL_READFUNC_ABORT;
+        }
         // Returning 0 here would end the body short of its Content-Length and truncate it.
         ex.paused_ = true;
         return CURL_READFUNC_PAUSE;

@@ -5,6 +5,7 @@
 #include "infra/s3util/sigv4.hpp"
 #include "infra/s3util/url.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -116,6 +117,25 @@ TEST(Sha256, MatchesKnownDigests) {
     const std::string_view body = "Welcome to Amazon S3.";
     EXPECT_EQ(payload_sha256(std::as_bytes(std::span(body))),
               "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072");
+}
+
+TEST(Sha256, AStreamFedInPiecesMatchesTheOneShotDigest) {
+    std::vector<std::byte> body(100'003);
+    for (std::size_t i = 0; i < body.size(); ++i) {
+        body[i] = static_cast<std::byte>((i * 31) % 251);
+    }
+    infra::s3util::Sha256Stream stream;
+    // Uneven pieces, so a stream that dropped or repeated a piece boundary shows.
+    for (std::size_t at = 0, piece = 1; at < body.size(); at += piece, piece = (piece * 3) + 1) {
+        stream.update(std::span(body).subspan(at, std::min(piece, body.size() - at)));
+    }
+    EXPECT_EQ(infra::s3util::to_hex(stream.finish()),
+              infra::s3util::to_hex(infra::s3util::sha256(std::span<const std::byte>(body))));
+}
+
+TEST(Sha256, AStreamFedNothingHashesTheEmptyPayload) {
+    infra::s3util::Sha256Stream stream;
+    EXPECT_EQ(infra::s3util::to_hex(stream.finish()), kEmptyPayloadSha256);
 }
 
 TEST(SigV4, CanonicalRequestMatchesTheAwsGetObjectExample) {
