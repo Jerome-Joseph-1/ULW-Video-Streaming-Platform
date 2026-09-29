@@ -26,6 +26,11 @@ struct ListenOptions {
 // alone: setting SO_RCVBUF or SO_SNDBUF switches off the kernel's autotuning.
 [[nodiscard]] std::expected<void, int> tune_connection(int fd) noexcept;
 
+// Closes with a reset instead of a FIN, for a connection refused before anything was read from
+// it: our side keeps no TIME_WAIT entry for it, which a flood of refusals would otherwise fill
+// the port range with, and the peer learns at once rather than after its request.
+void reset_connection(os::UniqueFd fd) noexcept;
+
 // A numeric "ipv4:port" or "[ipv6]:port": what start_connect accepts. Names are refused, since
 // resolving one would block the loop.
 [[nodiscard]] bool is_numeric_endpoint(std::string_view address) noexcept;

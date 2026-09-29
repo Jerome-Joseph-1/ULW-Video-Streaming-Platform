@@ -4,6 +4,8 @@
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
+#include "ops/root.hpp"
+
 #include <algorithm>
 #include <utility>
 
@@ -168,6 +170,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!allowed) {
         return std::unexpected(std::move(allowed.error()));
     }
+    const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
+    if (!allow_root) {
+        return error("ULW_ALLOW_ROOT", "expected 0 or 1");
+    }
 
     return Config{.node = *node,
                   .port = port,
@@ -180,7 +186,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .jwt_issuer = std::move(*issuer),
                   .jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform"),
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
-                  .allowed_origins = std::move(*allowed)};
+                  .allowed_origins = std::move(*allowed),
+                  .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
+                  .allow_root = *allow_root};
 }
 
 } // namespace chat

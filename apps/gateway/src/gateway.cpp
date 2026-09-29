@@ -1,12 +1,15 @@
 #include "gateway.hpp"
 
 #include "core/version.hpp"
+#include "net/ip_address.hpp"
 #include "net/socket.hpp"
 
 #include "connection.hpp"
 #include "ops/metrics.hpp"
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <limits>
 #include <string_view>
 
@@ -23,6 +26,25 @@ constexpr std::array kPartUploadBuckets{0.25, 0.5,  1.0,   2.5,   5.0,   10.0,
 // window; a stall past 300 s is a store trickling, which only the backstop ends.
 constexpr std::array kStallBuckets{0.005, 0.01, 0.025, 0.05, 0.1,  0.25, 0.5,
                                    1.0,   2.5,  5.0,   10.0, 30.0, 60.0, 300.0};
+
+// A client's bucket is full again one second after its last new connection (10 saved at 10 a
+// second), and a full bucket is worth nothing, so the table need only remember the addresses of
+// the last second or so: 16,384 is more new clients a second than one loop can take TLS
+// handshakes from. At about 64 bytes an entry and 8 of index, 1.2 MiB. An entry with a
+// connection or request open is never dropped, and there are at most max_connections of those.
+constexpr std::size_t kClientEntries = 16'384;
+// About 200 bytes an entry (the 129-byte user id, two buckets, links), 3.3 MiB. A request bucket
+// is full again a minute after the user's last request, a byte bucket a day after their last
+// upload; the least recently seen user makes way once 16,384 others have been seen since, and
+// starts over with full buckets, which rate_limit_evictions_total shows.
+constexpr std::size_t kUserEntries = 16'384;
+constexpr double kSecondsPerDay = 86'400;
+
+std::uint64_t seed(core::ports::IRandom& random) {
+    std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+    random.fill(bytes);
+    return std::bit_cast<std::uint64_t>(bytes);
+}
 
 } // namespace
 
@@ -43,7 +65,21 @@ private:
 };
 
 Gateway::Gateway(Deps deps, Limits limits)
-    : deps_(deps), limits_(std::move(limits)), connections_(limits_.max_connections),
+    : deps_(deps), limits_(std::move(limits)),
+      new_connection_rule_{.burst = static_cast<double>(limits_.new_connections_per_ip_per_second),
+                           .per_second =
+                               static_cast<double>(limits_.new_connections_per_ip_per_second)},
+      request_rule_{.burst = static_cast<double>(limits_.requests_per_user_per_minute),
+                    .per_second = static_cast<double>(limits_.requests_per_user_per_minute) / 60},
+      upload_byte_rule_{.burst = static_cast<double>(limits_.upload_bytes_per_user_per_day),
+                        .per_second = static_cast<double>(limits_.upload_bytes_per_user_per_day) /
+                                      kSecondsPerDay},
+      // One more than the connections that can pin an entry, so a new client always finds one
+      // to take the place of.
+      clients_(std::max(kClientEntries, limits_.max_connections + 1),
+               AddressHash{SeededHash(seed(deps_.random))}),
+      users_(kUserEntries, UserHash{SeededHash(seed(deps_.random))}),
+      connections_(limits_.max_connections),
       views_(deps_.reactor, deps_.views, limits_.view_batch, limits_.view_interval),
       part_upload_(kPartUploadBuckets), write_stall_(kStallBuckets) {}
 
@@ -56,25 +92,120 @@ void Gateway::on_accept(os::UniqueFd conn) noexcept {
         ++counters_.rejected_draining;
         return;
     }
+    // Gone already, or not an IP socket: nothing to serve either way.
+    const auto peer = net::peer_address(conn.get());
+    if (!peer) {
+        ++counters_.rejected_socket;
+        return;
+    }
+    // A trusted proxy carries many clients on its connections; they are told apart, and held
+    // to the same limits, request by request.
+    std::optional<ClientHold> hold;
+    if (!trusted_proxy(*peer)) {
+        hold = admit_peer(*peer);
+        if (!hold) {
+            net::reset_connection(std::move(conn));
+            return;
+        }
+    }
+    const auto refuse = [&](std::uint64_t& counter) {
+        ++counter;
+        if (hold) {
+            release_client(*hold);
+        }
+    };
     // A socket that refuses its options is already broken.
     if (!net::tune_connection(conn.get())) {
-        ++counters_.rejected_socket;
+        refuse(counters_.rejected_socket);
         return;
     }
     const auto handle = connections_.emplace(*this);
     if (!handle) {
-        ++counters_.rejected_capacity;
+        refuse(counters_.rejected_capacity);
         return;
     }
     Connection* c = connections_.get(*handle);
     auto transport = deps_.transports.attach(std::move(conn), *c);
     if (!transport) {
-        ++counters_.rejected_socket;
+        refuse(counters_.rejected_socket);
         connections_.retire(*handle);
         return;
     }
     ++counters_.connections_accepted;
-    c->start(std::move(*transport));
+    c->start(std::move(*transport), *peer, hold);
+}
+
+void Gateway::refund_upload_bytes(const core::UserId& user, std::uint64_t bytes) noexcept {
+    // A user forgotten since the charge starts over full anyway.
+    if (UserEntry* entry = user_entry(user); entry != nullptr) {
+        entry->upload_bytes.refund(upload_byte_rule_, static_cast<double>(bytes));
+    }
+}
+
+bool Gateway::trusted_proxy(const net::IpAddress& peer) const noexcept {
+    return std::ranges::any_of(limits_.trusted_proxies,
+                               [&](const net::IpNetwork& n) { return n.contains(peer); });
+}
+
+std::optional<ClientHold> Gateway::admit_peer(const net::IpAddress& peer) noexcept {
+    const core::MonoTime now = deps_.reactor.now();
+    const auto slot = clients_.acquire(client_key(peer), [&] {
+        return ClientEntry{.new_connections = TokenBucket(new_connection_rule_, now)};
+    });
+    if (!slot || clients_.pins(*slot) >= limits_.max_connections_per_ip) {
+        ++counters_.rejected_ip_connections;
+        return std::nullopt;
+    }
+    if (!clients_.at(*slot).new_connections.take(new_connection_rule_, now)) {
+        ++counters_.rejected_ip_rate;
+        return std::nullopt;
+    }
+    clients_.pin(*slot);
+    return slot;
+}
+
+std::optional<ClientHold> Gateway::hold_client(const net::IpAddress& client) noexcept {
+    const core::MonoTime now = deps_.reactor.now();
+    const auto slot = clients_.acquire(client_key(client), [&] {
+        return ClientEntry{.new_connections = TokenBucket(new_connection_rule_, now)};
+    });
+    if (!slot || clients_.pins(*slot) >= limits_.max_connections_per_ip) {
+        return std::nullopt;
+    }
+    clients_.pin(*slot);
+    return slot;
+}
+
+void Gateway::release_client(ClientHold hold) noexcept {
+    clients_.unpin(hold);
+}
+
+Gateway::UserEntry* Gateway::user_entry(const core::UserId& user) noexcept {
+    const core::MonoTime now = deps_.reactor.now();
+    const auto slot = users_.acquire(user, [&] {
+        return UserEntry{.requests = TokenBucket(request_rule_, now),
+                         .upload_bytes = TokenBucket(upload_byte_rule_, now)};
+    });
+    // Nothing pins a user's entry, so a full table always has one to give up.
+    return slot ? &users_.at(*slot) : nullptr;
+}
+
+std::expected<void, core::Millis> Gateway::charge_request(const core::UserId& user) noexcept {
+    UserEntry* entry = user_entry(user);
+    if (entry == nullptr) {
+        return {};
+    }
+    return entry->requests.take(request_rule_, deps_.reactor.now());
+}
+
+std::expected<void, core::Millis> Gateway::charge_upload_bytes(const core::UserId& user,
+                                                               std::uint64_t bytes) noexcept {
+    UserEntry* entry = user_entry(user);
+    if (entry == nullptr) {
+        return {};
+    }
+    return entry->upload_bytes.take(upload_byte_rule_, deps_.reactor.now(),
+                                    static_cast<double>(bytes));
 }
 
 void Gateway::on_signal(net::Signal signal) noexcept {
@@ -204,11 +335,34 @@ std::string Gateway::render_metrics() {
              c.rejected_socket);
     e.sample("connections_rejected_total", {{.name = "reason", .value = "draining"}},
              c.rejected_draining);
+    e.sample("connections_rejected_total", {{.name = "reason", .value = "ip_connections"}},
+             c.rejected_ip_connections);
+    e.sample("connections_rejected_total", {{.name = "reason", .value = "ip_rate"}},
+             c.rejected_ip_rate);
     e.gauge("connections_current", "Connections open now.", connections_.size());
     e.gauge("uploads_in_flight", "Chunk uploads holding an admission slot.", upload_slots_);
     e.counter("admission_rejections_total",
               "Chunk uploads refused a slot, for the user's limit or the process's.",
               c.admission_rejections);
+    e.family("rate_limited_total", "Requests answered 429 by a per-client limit.",
+             MetricType::Counter);
+    e.sample("rate_limited_total", {{.name = "limit", .value = "ip_requests"}},
+             c.limited_ip_requests);
+    e.sample("rate_limited_total", {{.name = "limit", .value = "user_requests"}},
+             c.limited_user_requests);
+    e.sample("rate_limited_total", {{.name = "limit", .value = "user_bytes"}},
+             c.limited_user_bytes);
+    e.family("rate_limit_entries", "Clients and users the rate limits remember.",
+             MetricType::Gauge);
+    e.sample("rate_limit_entries", {{.name = "table", .value = "client"}}, clients_.size());
+    e.sample("rate_limit_entries", {{.name = "table", .value = "user"}}, users_.size());
+    e.family("rate_limit_evictions_total",
+             "Entries forgotten to make room; a forgotten client or user starts over.",
+             MetricType::Counter);
+    e.sample("rate_limit_evictions_total", {{.name = "table", .value = "client"}},
+             clients_.evictions());
+    e.sample("rate_limit_evictions_total", {{.name = "table", .value = "user"}},
+             users_.evictions());
     e.counter("bytes_ingested_total", "Upload body bytes read from clients.", c.bytes_ingested);
     e.histogram("part_upload_duration_seconds",
                 "From a chunk's first byte handed to the store to all of it durable.",
