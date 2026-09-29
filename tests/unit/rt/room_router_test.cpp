@@ -685,6 +685,19 @@ TEST_P(RoomRouterTest, APeerThatSkipsTheHandshakeIsCutOffBeforeAnythingHappens) 
     EXPECT_EQ(a.events.refused, std::vector<std::string>{"no hello"});
 }
 
+TEST_P(RoomRouterTest, AHelloOfAnotherVersionIsRefusedAsSuch) {
+    const Node& a = start("chat-a");
+    RawPeer peer(*reactor_, a.port);
+    std::vector<std::byte> hello;
+    wire::encode_hello(hello, *core::NodeId::parse("chat-x"), wire::Nonce{});
+    // After the length (4 bytes) and the type (1), the version: M16's was 1.
+    hello.at(5) = std::byte{1};
+    peer.send(hello);
+    EXPECT_TRUE(peer.hung_up());
+    EXPECT_EQ(a.events.refused,
+              std::vector<std::string>{"version mismatch: peer speaks 1, this node 2"});
+}
+
 TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {
     const Node& a = start("chat-a");
     RawPeer peer(*reactor_, a.port);

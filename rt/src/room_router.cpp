@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <format>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -194,8 +195,15 @@ class RoomRouter::Impl final : public IRegistryObserver,
         }
 
         bool greet(const wire::Hello* hello) {
-            if (hello == nullptr || hello->version != wire::kVersion) {
+            if (hello == nullptr) {
                 router_.refused("no hello");
+                return false;
+            }
+            // Nodes on two versions of the channel refuse each other: say so, or a rollout
+            // across a version reads like a stranger knocking.
+            if (hello->version != wire::kVersion) {
+                router_.refused(std::format("version mismatch: peer speaks {}, this node {}",
+                                            hello->version, wire::kVersion));
                 return false;
             }
             dialer_.emplace(hello->node);

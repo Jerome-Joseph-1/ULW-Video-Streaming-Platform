@@ -104,8 +104,11 @@ need no change for it: whatever end-to-end encryption needs from them has to be 
   sequence it, is sequenced again; M19 closes that with a unique key per stored message.
 - A reused id loses the second message: it is answered with the first one's seq. Clients must
   make ids unique, a UUID or ULID per message.
-- Nodes of node-channel version 1 and 2 refuse each other; a rolling deploy from M16 has rooms
-  unreachable across the two versions until the old pods have drained.
+- Nodes of node-channel version 1 and 2 refuse each other, and log it as `version mismatch`; a
+  rolling deploy from M16 has rooms unreachable across the two versions until the old pods have
+  drained. When chat's deployment overlay lands, its RUNBOOK says so: a change of node-channel
+  version is rolled out by recreating the pods, or by surging the new ones and draining the old
+  with that outage accepted.
 - The message ids are visible to everyone in the room, and so are part of what a client must
   not put anything secret into.
 - Presence (M18) builds on the same per-node room membership; persistence (M19) adds history by

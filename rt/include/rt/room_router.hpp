@@ -70,8 +70,9 @@ public:
     virtual void on_took_room(const core::RoomId& room, std::uint64_t generation) noexcept = 0;
     // The connection to another node failed; the rooms routed through it are looked up again.
     virtual void on_peer_lost(const core::NodeId& peer) noexcept = 0;
-    // A node-channel peer failed the handshake: it does not hold the secret, or is not the
-    // node it was dialled as. Nothing it sent was acted on.
+    // A node-channel peer failed the handshake: it speaks another version of the channel,
+    // does not hold the secret, or is not the node it was dialled as. Nothing it sent was
+    // acted on.
     virtual void on_peer_refused(std::string_view why) noexcept = 0;
     // Another live process runs under this node's name. This one takes no room and stays
     // unready, trying again each beat, until the other stops.

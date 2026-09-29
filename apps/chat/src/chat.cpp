@@ -43,7 +43,8 @@ void RoomLog::on_peer_lost(const core::NodeId& peer) noexcept {
               peer.view());
 }
 
-// `why` is one of the router's fixed reasons; nothing a peer sent is echoed.
+// `why` is one of the router's fixed reasons, at most with the version number a peer's hello
+// named; nothing else a peer sent is echoed.
 void RoomLog::on_peer_refused(std::string_view why) noexcept {
     log_event(R"("level":"warn","msg":"node refused","node":"{}","why":"{}")", self_.view(), why);
 }
