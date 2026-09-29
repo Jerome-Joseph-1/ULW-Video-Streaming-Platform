@@ -38,9 +38,24 @@ ulw_add_test_suite(ops_unit_tests unit
     unit/ops/async_log_test.cpp
     unit/ops/log_test.cpp
     unit/ops/metrics_test.cpp
-    unit/ops/process_test.cpp)
+    unit/ops/process_test.cpp
+    unit/ops/settings_test.cpp
+    unit/ops/toml_test.cpp)
 target_link_libraries(ops_unit_tests PRIVATE ulw::ops)
 target_include_directories(ops_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+ulw_add_executable(toml_fuzz_replay fuzz/toml_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(toml_fuzz_replay PRIVATE ulw::ops)
+add_test(NAME toml_fuzz_corpus
+    COMMAND toml_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/toml)
+set_tests_properties(toml_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(toml_fuzz fuzz/toml_fuzz.cpp)
+    target_link_libraries(toml_fuzz PRIVATE ulw::ops)
+    target_compile_options(toml_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(toml_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
 
 ulw_add_library(test_echo support/echo_server.cpp)
 target_include_directories(test_echo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
