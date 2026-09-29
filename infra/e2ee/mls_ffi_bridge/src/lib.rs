@@ -52,6 +52,8 @@ pub enum UlwMlsReceived {
     Commit = 1,
     /// A proposal, queued for the next commit.
     Proposal = 2,
+    /// Written when the call fails: nothing was received.
+    Nothing = 3,
 }
 
 /// Borrowed input bytes. `data` may be null when `len` is 0.
@@ -155,6 +157,18 @@ fn state_error(error: &MlsGroupStateError) -> UlwMlsStatus {
         MlsGroupStateError::LibraryError(_) => UlwMlsStatus::Internal,
         _ => UlwMlsStatus::Rejected,
     }
+}
+
+// A commit the caller never receives must not stay pending, or the group would refuse every
+// later change until someone cleared it.
+fn unstage_on_failure<T>(
+    group: &mut MlsGroup,
+    client: &Client,
+    output: impl FnOnce() -> Result<T, UlwMlsStatus>,
+) -> Result<T, UlwMlsStatus> {
+    output().inspect_err(|_| {
+        let _ = group.clear_pending_commit(client.provider.storage());
+    })
 }
 
 /// # Safety
@@ -414,8 +428,9 @@ pub unsafe extern "C" fn ulw_mls_group_add(
                 }
                 _ => UlwMlsStatus::Rejected,
             })?;
-        let commit = serialize(&commit)?;
-        let welcome = serialize(&welcome)?;
+        let (commit, welcome) = unstage_on_failure(&mut handle.group, &client, || {
+            Ok((serialize(&commit)?, serialize(&welcome)?))
+        })?;
         fill(commit_out, commit);
         fill(welcome_out, welcome);
         Ok(())
@@ -460,7 +475,8 @@ pub unsafe extern "C" fn ulw_mls_group_remove(
                 }
                 _ => UlwMlsStatus::Rejected,
             })?;
-        fill(commit_out, serialize(&commit)?);
+        let commit = unstage_on_failure(&mut handle.group, &client, || serialize(&commit))?;
+        fill(commit_out, commit);
         Ok(())
     })
 }
@@ -559,6 +575,7 @@ pub unsafe extern "C" fn ulw_mls_group_process(
         let plaintext_out = unsafe { clear(plaintext_out) }?;
         // SAFETY: the caller vouches for `received` when it is not null.
         let received = unsafe { received.as_mut() }.ok_or(UlwMlsStatus::InvalidArgument)?;
+        *received = UlwMlsReceived::Nothing;
         // SAFETY: as documented on this function.
         let handle = unsafe { group_mut(group) }?;
         // SAFETY: as documented on this function.

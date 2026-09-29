@@ -33,6 +33,8 @@ typedef enum UlwMlsReceived {
   ULW_MLS_RECEIVED_COMMIT = 1,
   // A proposal, queued for the next commit.
   ULW_MLS_RECEIVED_PROPOSAL = 2,
+  // Written when the call fails: nothing was received.
+  ULW_MLS_RECEIVED_NOTHING = 3,
 } UlwMlsReceived;
 
 // A device's MLS identity: its signature key, credential, and the private halves of the key

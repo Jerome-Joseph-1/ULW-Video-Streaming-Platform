@@ -83,7 +83,8 @@ protected:
         return take(out);
     }
 
-    // Bob processes `message`; the plaintext buffer must be left empty on any failure.
+    // Bob processes `message`; on any failure the plaintext buffer is left empty and the kind
+    // reads nothing.
     static UlwMlsStatus process(const Group& g, const Bytes& message, Bytes* plaintext = nullptr) {
         UlwMlsReceived kind = ULW_MLS_RECEIVED_PROPOSAL;
         UlwMlsBuffer out{.data = nullptr, .len = 0};
@@ -92,6 +93,7 @@ protected:
         if (s != ULW_MLS_STATUS_OK) {
             EXPECT_EQ(out.data, nullptr);
             EXPECT_EQ(out.len, 0U);
+            EXPECT_EQ(kind, ULW_MLS_RECEIVED_NOTHING) << "a failed call left a stale kind";
         }
         Bytes got = take(out);
         if (plaintext != nullptr) {
