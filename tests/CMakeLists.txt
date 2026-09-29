@@ -306,6 +306,14 @@ if(ULW_BUILD_WORKER)
     target_link_libraries(worker_unit_tests PRIVATE ulw::worker_lib ulw::os)
     target_include_directories(worker_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
+    # Against libsrt itself as the caller, over loopback UDP.
+    ulw_add_test_suite(srt_unit_tests unit
+        unit/srt/ingest_test.cpp)
+    FetchContent_GetProperties(srt SOURCE_DIR ulw_srt_source BINARY_DIR ulw_srt_binary)
+    target_include_directories(srt_unit_tests SYSTEM PRIVATE ${ulw_srt_source}/srtcore
+        ${ulw_srt_binary})
+    target_link_libraries(srt_unit_tests PRIVATE ulw::srt_ingest srt_static)
+
     ulw_add_test_suite(live_packager_unit_tests unit
         unit/live_packager/config_test.cpp
         unit/live_packager/ingest_test.cpp

@@ -35,3 +35,27 @@ if(ULW_BUILD_TESTS)
         SYSTEM)
     FetchContent_MakeAvailable(googletest)
 endif()
+
+# The live packager terminates SRT itself, so ffmpeg can stay in its empty network namespace
+# (ADR-0033). Built static, without its command-line apps, against OpenSSL for the passphrase.
+if(ULW_BUILD_WORKER)
+    FetchContent_Declare(srt
+        URL ${ULW_THIRD_PARTY_DIR}/srt-1.5.4.tar.gz
+        URL_HASH SHA256=d0a8b600fe1b4eaaf6277530e3cfc8f15b8ce4035f16af4a5eb5d4b123640cdd
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SYSTEM)
+    # Scoped like llhttp's: nothing leaks into the cache or another target. srt asks for CMake
+    # 2.8, which CMake 4 refuses without the policy floor.
+    block()
+        set(ENABLE_APPS OFF)
+        set(ENABLE_SHARED OFF)
+        set(ENABLE_STATIC ON)
+        set(ENABLE_TESTING OFF)
+        set(ENABLE_UNITTESTS OFF)
+        set(ENABLE_ENCRYPTION ON)
+        set(USE_ENCLIB openssl)
+        set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+        set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+        FetchContent_MakeAvailable(srt)
+    endblock()
+endif()
