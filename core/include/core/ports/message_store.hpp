@@ -142,7 +142,9 @@ public:
                         MessageCallback<Admission> done) = 0;
     // Records the room as a stream's live chat, which admits anyone: a server-side step (the
     // stream's owner opening its chat), never a client's. Conflict, and nothing recorded, when the
-    // room lists members or is recorded as another kind; recording it again does nothing.
+    // room lists members, is recorded as another kind, or was created on the room plane as
+    // another kind (whose kind and delivery are fixed when it is created); recording it again
+    // does nothing. The in-memory store keeps no room plane, so only the first two apply to it.
     virtual void record_live(const RoomId& room, MessageCallback<void> done) = 0;
 };
 

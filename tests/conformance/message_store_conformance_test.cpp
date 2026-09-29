@@ -277,6 +277,11 @@ protected:
         return room;
     }
 
+    // A room nothing has created yet: on Postgres it has no room_state row, as a stream's room
+    // has before the server opens its chat. new_room() creates one, as a group chat, and a room
+    // created closed cannot be opened afterwards.
+    core::RoomId unopened_room() { return core::RoomId::generate(clock_, random_); }
+
     os::SystemClock clock_;
     os::SystemRandom random_;
     std::unique_ptr<Backend> backend_;
@@ -545,7 +550,7 @@ TEST_P(MessageStoreConformance, AGroupRoomAdmitsOnlyItsMembersEvenWhileItHasNone
 }
 
 TEST_P(MessageStoreConformance, AJoinThatAsksForLiveInARoomWithNoKindIsRefusedAndRecordsNothing) {
-    const core::RoomId room = new_room();
+    const core::RoomId room = unopened_room();
     const auto admits = [&](const core::UserId& user, core::ports::RoomKind asked) {
         return ask<Admission>(
             [&](auto done) { store().admits(room, user, asked, std::move(done)); });
@@ -558,7 +563,7 @@ TEST_P(MessageStoreConformance, AJoinThatAsksForLiveInARoomWithNoKindIsRefusedAn
 }
 
 TEST_P(MessageStoreConformance, ARoomRecordedLiveAdmitsAnyoneWhateverKindTheJoinNames) {
-    const core::RoomId room = new_room();
+    const core::RoomId room = unopened_room();
     ASSERT_TRUE(ask<void>([&](auto done) { store().record_live(room, std::move(done)); }));
     // Recording it again changes nothing.
     ASSERT_TRUE(ask<void>([&](auto done) { store().record_live(room, std::move(done)); }));
@@ -592,13 +597,13 @@ TEST_P(MessageStoreConformance, RecordLiveRefusesARoomThatIsClosedOrListsMembers
         return ask<void>([&](auto done) { store().record_live(room, std::move(done)); });
     };
     const MessageResult<void> conflict{std::unexpected(MessageStoreError::Conflict)};
-    const core::RoomId joined = new_room();
+    const core::RoomId joined = unopened_room();
     ASSERT_EQ(ask<Admission>([&](auto done) {
                   store().admits(joined, bob_, core::ports::RoomKind::GroupChat, std::move(done));
               }),
               Admission::NotMember);
     EXPECT_EQ(record_live(joined), conflict);
-    const core::RoomId listed = new_room();
+    const core::RoomId listed = unopened_room();
     ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(listed, alice_, std::move(done)); }));
     EXPECT_EQ(record_live(listed), conflict);
     // A room whose members all left is still closed.

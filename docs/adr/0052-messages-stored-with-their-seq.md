@@ -126,15 +126,18 @@ What bounds a page of history:
   `"live"` in a room not recorded as live is answered `Admission::NotLive`, which reaches the
   client as `not_live`, and records nothing. Recording a room as live is a server-side step
   only: `IMessageStore::record_live(room)`, or the SQL in the runbook (section 3), which refuse
-  a room that lists members or is recorded as another kind. Adding a member records an
-  unrecorded room as a group chat in the same statement, before its member row, so a member
-  insert in flight holds the `chat_rooms` key that `record_live` waits on: the closed record
-  wins, and a room is never both listed and open. (A `record_live` that commits first and a
-  member added after it leave a live room with a member list, which changes nothing: a live
-  room admits anyone.) A join reads the recorded kind first and writes only for an unrecorded
+  a room that lists members, is recorded as another kind, or was already created on the room
+  plane as another kind (`room_state`'s kind and delivery are fixed at creation, so opening such
+  a room would leave it durable and `group_chat` there while `chat_rooms` said live). Adding a
+  member records an unrecorded room as a group chat in the same statement, before its member
+  row, so a member insert in flight holds the `chat_rooms` key that `record_live` waits on: the
+  closed record wins, and a room listed before it is opened is never opened. The other order is
+  allowed: a member added after a `record_live` committed is listed in a room that stays live.
+  That is harmless, because a live room admits anyone and its list admits nobody extra. A join reads the recorded kind first and writes only for an unrecorded
   room, so the joins of a recorded room take no row lock and cause no WAL flush; a first join
   racing another waits for it and reads the kind it recorded. Rooms that existed before this
-  ADR are recorded as group chats by migration 0006. The chat service asks before a client
+  ADR are recorded as group chats by migration 0006, and so become closed: until then no join
+  was checked. A stream's room among them needs a new room id to be opened. The chat service asks before a client
   joins a room new to its connection, which is before the room plane resolves, and so creates,
   the room. `room_state`'s `kind` (0003), written as `group_chat` for every room until now, is
   copied from the recorded kind when the room is created, and its `delivery` is lossy for a
