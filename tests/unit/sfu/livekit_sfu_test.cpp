@@ -269,7 +269,7 @@ TEST_P(LiveKitSfuTest, TwoDevicesOfOneUserAreTwoParticipants) {
 
 TEST_P(LiveKitSfuTest, NoTicketIssuesForARoomThatCannotBeReopened) {
     std::atomic<int> served{0};
-    HttpTestServer server([&](const ServedRequest&) {
+    const HttpTestServer server([&](const ServedRequest&) {
         return ++served == 1
                    ? Reply{.status = 200, .headers = {}, .body = "{}"}
                    : Reply{.status = 503, .headers = {}, .body = R"({"code":"unavailable"})"};
@@ -310,7 +310,7 @@ TEST_P(LiveKitSfuTest, ClosingAGenerationDeletesItsRoom) {
 TEST_P(LiveKitSfuTest, ClosingWhatIsAlreadyGoneSucceeds) {
     std::atomic<int> served{0};
     // The room opens and has gone by the time it is closed.
-    HttpTestServer server([&](const ServedRequest&) {
+    const HttpTestServer server([&](const ServedRequest&) {
         return ++served == 1
                    ? Reply{.status = 200, .headers = {}, .body = "{}"}
                    : Reply{.status = 404, .headers = {}, .body = R"({"code":"not_found"})"};
@@ -393,12 +393,17 @@ TEST_P(LiveKitSfuTest, DestroyingTheSfuDropsPendingCallbacks) {
     });
     // Destroyed before the server, so a failed assertion cannot leave its thread waiting.
     const struct Releaser {
-        std::latch& latch;
+        explicit Releaser(std::latch& l) noexcept : latch(l) {}
+        Releaser(const Releaser&) = delete;
+        Releaser& operator=(const Releaser&) = delete;
+        Releaser(Releaser&&) = delete;
+        Releaser& operator=(Releaser&&) = delete;
         ~Releaser() {
             if (!latch.try_wait()) {
                 latch.count_down();
             }
         }
+        std::latch& latch;
     } releaser{release};
     start(server.base_url());
     int calls = 0;
