@@ -17,6 +17,12 @@ constexpr std::size_t kMessageOverhead = 256;
 // Rooms are looked over for lingering this often; a room lingers a second longer at most.
 constexpr core::Millis kSweepEvery{1'000};
 
+// What a lossy client behind from `behind` is still owed of a room whose latest seq is `head`:
+// dropped for it when it leaves or joins again before it is sent them.
+[[nodiscard]] std::uint64_t owed(std::optional<std::uint64_t> behind, std::uint64_t head) noexcept {
+    return behind && head >= *behind ? head - *behind + 1 : 0;
+}
+
 // The error a join is refused with, for an answer other than Admitted.
 [[nodiscard]] std::string_view
 refusal(const core::ports::MessageResult<core::ports::Admission>& result) noexcept {
@@ -110,7 +116,11 @@ void ChatService::detach(ClientId id) noexcept {
         if (r == nullptr) {
             continue;
         }
-        std::erase_if(r->subscribers, [id](const Room::Subscriber& s) { return s.id == id; });
+        if (const auto s = std::ranges::find(r->subscribers, id, &Room::Subscriber::id);
+            s != r->subscribers.end()) {
+            counters_.lossy_drops += owed(s->behind, r->head);
+            r->subscribers.erase(s);
+        }
         std::erase_if(r->waiting, [id](const Room::Waiting& w) { return w.id == id; });
         if (r->subscribers.empty() && r->waiting.empty()) {
             r->unused_since = now;
@@ -286,6 +296,7 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
         // What it was owed as a lossy client is not sent now that it has joined again; the seqs
         // it sees show the gap.
         it->delivery = delivery;
+        counters_.lossy_drops += owed(it->behind, room.head);
         it->behind.reset();
         std::erase(c->behind, room.id);
     }
@@ -591,14 +602,19 @@ void ChatService::catch_up(Room& room, ClientId id, Client& c) {
     if (!from) {
         return;
     }
+    std::uint64_t next = *from;
     std::string out;
-    for (auto it = std::ranges::lower_bound(room.kept, *from, {}, &Room::Kept::seq);
+    for (auto it = std::ranges::lower_bound(room.kept, next, {}, &Room::Kept::seq);
          it != room.kept.end(); ++it) {
         if (c.client->unsent_bytes() > limits_.lossy_backlog) {
-            s->behind = it->seq;
+            s->behind = next;
             c.behind.push_back(room.id);
             return;
         }
+        // Seqs from the cursor that the room does not keep: a message that could not be kept,
+        // or a gap of the room itself. Either way the client is moved past them.
+        counters_.lossy_drops += it->seq - next;
+        next = it->seq;
         out.clear();
         write_message(out, rt::Message{.room = room.id,
                                        .seq = it->seq,
@@ -606,10 +622,14 @@ void ChatService::catch_up(Room& room, ClientId id, Client& c) {
                                        .key = it->key,
                                        .body = it->body});
         if (!c.client->push(out)) {
+            // Closing: what is left is counted when it detaches.
+            s->behind = next;
             return;
         }
         ++counters_.delivered;
+        next = it->seq + 1;
     }
+    counters_.lossy_drops += owed(next, room.head);
     s->behind.reset();
 }
 

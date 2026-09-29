@@ -738,7 +738,7 @@ TEST_F(SmallLossyBuffer, WhatTheRoomNoLongerKeepsIsDroppedForAClientBehindAsItGo
     EXPECT_EQ(seqs(viewer.take()), (std::vector<std::uint64_t>{7, 8, 9, 10}));
 }
 
-TEST_F(ChatServiceTest, JoiningAgainForgetsWhatALossyClientWasOwed) {
+TEST_F(ChatServiceTest, JoiningAgainForgetsWhatALossyClientWasOwedAndCountsItDropped) {
     FakeClient viewer;
     const auto v = attach(viewer);
     join(v, std::nullopt, chat::Delivery::Lossy);
@@ -750,9 +750,49 @@ TEST_F(ChatServiceTest, JoiningAgainForgetsWhatALossyClientWasOwed) {
     viewer.unsent = 0;
     join(v);
     EXPECT_EQ(seen(viewer.take().at(0)).type, "joined");
+    EXPECT_EQ(service_->counters().lossy_drops, 2U);
     deliver(room, 3);
     service_->drained(v);
     EXPECT_EQ(seqs(viewer.take()), std::vector<std::uint64_t>{3});
+    EXPECT_EQ(service_->counters().lossy_drops, 2U);
+}
+
+TEST_F(ChatServiceTest, AClientThatLeavesBeforeItCaughtUpHasTheRestCountedDropped) {
+    FakeClient viewer;
+    const auto v = attach(viewer);
+    join(v, std::nullopt, chat::Delivery::Lossy);
+    rt::IMember& room = rooms_.admit();
+    viewer.take();
+    viewer.unsent = kBehind;
+    for (std::uint64_t seq = 1; seq <= 5; ++seq) {
+        deliver(room, seq);
+    }
+    // Two of the five fit before its socket is behind again; the other three never reach it.
+    viewer.growth = std::size_t{40} * 1024;
+    viewer.unsent = 0;
+    service_->drained(v);
+    EXPECT_EQ(seqs(viewer.take()), (std::vector<std::uint64_t>{1, 2}));
+    EXPECT_EQ(service_->counters().lossy_drops, 0U);
+    service_->detach(v);
+    EXPECT_EQ(service_->counters().lossy_drops, 3U);
+}
+
+TEST_F(ChatServiceTest, SeqsTheRoomDoesNotKeepAreCountedDroppedWhenAClientCatchesUpPastThem) {
+    FakeClient viewer;
+    const auto v = attach(viewer);
+    join(v, std::nullopt, chat::Delivery::Lossy);
+    rt::IMember& room = rooms_.admit();
+    viewer.take();
+    viewer.unsent = kBehind;
+    deliver(room, 1);
+    // 2 and 3 never reached this node (the room changed owners, or the message could not be
+    // kept): catching up moves past them, and counts them, as it does past the room's newest
+    // when that one was not kept.
+    deliver(room, 4);
+    viewer.unsent = 0;
+    service_->drained(v);
+    EXPECT_EQ(seqs(viewer.take()), (std::vector<std::uint64_t>{1, 4}));
+    EXPECT_EQ(service_->counters().lossy_drops, 2U);
 }
 
 TEST_F(ChatServiceTest, EveryViewerOfALiveChatIsLossyWhateverItsJoinAsked) {
