@@ -42,9 +42,15 @@ already set the environment variable names, which must keep working.
   TLS and then both; a filesystem read URL only for the filesystem store; `JWKS_URL` https and
   exclusive with a development key set; chunk size between S3's 5 MiB and 5 GiB part limits and
   such that a 50 GiB upload needs at most 10,000 parts (so at least 5.12 MiB);
-  `max_upload_slots <= max_connections`; `max_uploads_per_user <= max_upload_slots`; and, once
-  the descriptor limit is raised, `max_connections <= (RLIMIT_NOFILE - 64) / 2`. Worker: node id
-  an RFC 1123 label, absolute paths, 1..64 ffmpeg threads, storage choice and location.
+  `max_upload_slots <= max_connections`; `max_uploads_per_user <= max_upload_slots`; the
+  connection string parses (the reason is never quoted, since libpq's quotes the password); the
+  R2 account id or MinIO endpoint makes a store profile and both store keys are set; the
+  development key set reads and holds a usable key; the TLS certificate and key load and
+  match; and, once the descriptor limit is raised, `max_connections <= (RLIMIT_NOFILE - 64) /
+  2`. Worker: node id an RFC 1123 label, absolute paths, 1..64 ffmpeg threads, storage choice,
+  location and keys, and the connection string. Whatever can be checked without starting
+  anything is checked here, so `--check-config` refuses it and a unit that could never start
+  exits 2 once instead of restarting every two seconds.
 - The new gateway settings are `ULW_CHUNK_SIZE`, `ULW_MAX_CONNECTIONS`, `ULW_MAX_UPLOAD_SLOTS`,
   `ULW_MAX_UPLOADS_PER_USER` and, for both binaries, `ULW_LOG_LEVEL`; defaults are ADR-0009's
   and ADR-0027's.

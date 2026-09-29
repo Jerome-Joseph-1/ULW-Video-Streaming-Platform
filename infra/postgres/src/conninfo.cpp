@@ -1,5 +1,7 @@
 #include "conninfo.hpp"
 
+#include "infra/postgres/connection_string.hpp"
+
 #include "libpq_handles.hpp"
 
 #include <arpa/inet.h>
@@ -92,6 +94,10 @@ HostForm classify_host(std::string_view host) noexcept {
         return HostForm::Numeric;
     }
     return HostForm::Name;
+}
+
+bool connection_string_parses(const std::string& conninfo) {
+    return parse_conninfo(conninfo).has_value();
 }
 
 std::expected<ConnTarget, std::string> parse_conninfo(const std::string& conninfo) {

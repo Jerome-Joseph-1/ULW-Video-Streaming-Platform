@@ -609,6 +609,14 @@ private:
 
 } // namespace
 
+std::expected<void, std::string> check_tls_files(const TlsFiles& files) {
+    auto ctx = make_context(files);
+    if (!ctx) {
+        return std::unexpected(std::move(ctx.error()));
+    }
+    return {};
+}
+
 std::expected<std::unique_ptr<ITransportFactory>, std::string>
 make_tls_transports(IReactor& reactor, TlsFiles files) {
     auto ctx = make_context(files);

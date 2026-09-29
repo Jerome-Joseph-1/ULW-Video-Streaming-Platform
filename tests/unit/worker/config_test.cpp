@@ -31,6 +31,8 @@ protected:
         {"ULW_R2_ACCOUNT_ID", "0123456789abcdef0123456789abcdef"},
         {"ULW_BUCKET", "ulw-media"},
         {"HOSTNAME", "transcode-worker-7d9f-x2x"},
+        {"ULW_S3_ACCESS_KEY_ID", "AKIAEXAMPLE"},
+        {"ULW_S3_SECRET_ACCESS_KEY", "example-secret"},
     };
 };
 
@@ -141,6 +143,20 @@ TEST_F(WorkerConfigTest, TheChildrensPathComesFromOurs) {
     EXPECT_EQ(load()->search_path, "/opt/ffmpeg/bin:/usr/bin");
 }
 
+TEST_F(WorkerConfigTest, WhatCannotWorkIsRefusedBeforeAnythingStarts) {
+    env["ULW_DATABASE_URL"] = "postgresql://ulw:Sup3r%Secret@db/ulw";
+    const auto config = load();
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().variable, "ULW_DATABASE_URL");
+    EXPECT_EQ(config.error().reason.find("Sup3r"), std::string::npos);
+    env["ULW_DATABASE_URL"] = "postgresql://ulw@db/ulw";
+    env["ULW_R2_ACCOUNT_ID"] = "not an account";
+    EXPECT_EQ(refused_variable(), "ULW_R2_ACCOUNT_ID");
+    env["ULW_R2_ACCOUNT_ID"] = "0123456789abcdef0123456789abcdef";
+    env.erase("ULW_S3_ACCESS_KEY_ID");
+    EXPECT_EQ(refused_variable(), "ULW_S3_ACCESS_KEY_ID");
+}
+
 TEST_F(WorkerConfigTest, TheLogLevelIsOneOfFour) {
     EXPECT_EQ(load()->log_level, ops::Level::Info);
     env["ULW_LOG_LEVEL"] = "warn";
@@ -152,7 +168,9 @@ TEST_F(WorkerConfigTest, TheLogLevelIsOneOfFour) {
 TEST_F(WorkerConfigTest, TheWorkerTakesNoAuthSettingsAndKeepsItsPasswordOffTheCommandLine) {
     for (const ops::Setting& s : worker::settings()) {
         EXPECT_FALSE(s.env.starts_with("JWT") || s.env.starts_with("JWKS")) << s.env;
-        EXPECT_EQ(s.secret, s.env == "ULW_DATABASE_URL") << s.env;
+        EXPECT_EQ(s.secret, s.env == "ULW_DATABASE_URL" || s.env == "ULW_S3_ACCESS_KEY_ID" ||
+                                s.env == "ULW_S3_SECRET_ACCESS_KEY")
+            << s.env;
     }
     const std::vector<std::string_view> args{"--database-url=postgresql://u:pw@h/db"};
     EXPECT_FALSE(ops::parse_command_line(worker::settings(), args));

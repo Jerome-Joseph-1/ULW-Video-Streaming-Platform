@@ -125,6 +125,30 @@ TEST_F(GatewayConfigTest, NoPasswordReachesTheLogWhenTheDatabaseUrlIsBadOrUnreac
     EXPECT_EQ(gateway->output().find("Sup3r"), std::string::npos) << gateway->output();
 }
 
+// Each of these used to pass the check and fail the start with exit 1, which systemd restarts
+// every two seconds; refused as configuration, they exit 2 and stay down.
+TEST_F(GatewayConfigTest, TheCheckRefusesWhatWouldOtherwiseFailTheStart) {
+    const std::vector<std::pair<std::string, std::string>> cases{
+        {"ULW_DATABASE_URL", "postgresql://ulw:bad%zz@db/ulw"},
+        {"ULW_DEV_JWKS_FILE", "/nonexistent/jwks.json"},
+        {"ULW_STORAGE", "minio"},
+    };
+    for (const auto& [name, value] : cases) {
+        auto env = base_env();
+        std::erase_if(env, [&](const std::string& e) { return e.starts_with(name + "="); });
+        env.push_back(name + "=" + value);
+        if (name == "ULW_STORAGE") {
+            std::erase_if(env, [](const std::string& e) { return e.starts_with("ULW_STORAGE="); });
+            env.emplace_back("ULW_STORAGE=minio");
+            env.emplace_back("ULW_S3_ENDPOINT=127.0.0.1:9000");
+            env.emplace_back("ULW_BUCKET=b");
+        }
+        const auto [code, output] = run({"--check-config"}, env);
+        EXPECT_EQ(code, 2) << name << ": " << output;
+        EXPECT_NE(output.find(R"("event":"configuration refused")"), std::string::npos) << output;
+    }
+}
+
 TEST_F(GatewayConfigTest, TheConnectionStringIsRefusedOnTheCommandLine) {
     const auto [code, output] = run({"--database-url=postgresql://u:pw@h/db"}, base_env());
     EXPECT_EQ(code, 2);

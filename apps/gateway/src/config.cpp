@@ -2,9 +2,14 @@
 
 #include "core/models/upload.hpp"
 #include "core/util/parse.hpp"
+#include "infra/auth/local_verifier.hpp"
+#include "infra/postgres/connection_string.hpp"
+#include "infra/s3util/profile.hpp"
+#include "net/transport.hpp"
 
 #include <algorithm>
 #include <array>
+#include <fstream>
 #include <string>
 #include <utility>
 
@@ -36,6 +41,9 @@ constexpr std::array kSettings{
     ops::Setting{.env = "JWT_AUDIENCE", .key = "auth.audience"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
     ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
+    // Read by the store's credential provider; here only to be checked for.
+    ops::Setting{.env = "ULW_S3_ACCESS_KEY_ID", .key = "", .secret = true},
+    ops::Setting{.env = "ULW_S3_SECRET_ACCESS_KEY", .key = "", .secret = true},
 };
 
 // S3 and R2 refuse a part under 5 MiB unless it is the last, and above 5 GiB.
@@ -117,6 +125,19 @@ std::expected<void, ConfigError> load_storage(const EnvLookup& env, Config& conf
     if (read_url) {
         return error("ULW_FS_READ_URL", "set, but ULW_STORAGE is not fs");
     }
+    const auto profile = config.storage == StorageBackend::R2
+                             ? infra::s3util::S3Profile::r2(config.storage_location)
+                             : infra::s3util::S3Profile::minio(config.storage_location);
+    if (!profile) {
+        return error(location_variable, config.storage == StorageBackend::R2
+                                            ? "not an R2 account id"
+                                            : "not an http or https endpoint URL");
+    }
+    for (const std::string_view key : {"ULW_S3_ACCESS_KEY_ID", "ULW_S3_SECRET_ACCESS_KEY"}) {
+        if (!lookup(env, key)) {
+            return error(key, "not set");
+        }
+    }
     auto bucket = required(env, "ULW_BUCKET");
     if (!bucket) {
         return std::unexpected(std::move(bucket.error()));
@@ -148,10 +169,35 @@ std::expected<void, ConfigError> load_transport(const EnvLookup& env, Config& co
     if (!key) {
         return error("ULW_TLS_KEY_FILE", "not set; ULW_TRANSPORT=tls needs it");
     }
+    // Read now, as the listener would: a certificate that does not load, or does not match
+    // its key, would otherwise fail the process after the checks said it could start.
+    if (auto r = net::check_tls_files({.certificate_chain = *cert, .private_key = *key}); !r) {
+        return error("ULW_TLS_CERT_FILE", r.error());
+    }
     config.transport = Transport::Tls;
     config.tls_certificate_chain = std::move(*cert);
     config.tls_private_key = std::move(*key);
     return {};
+}
+
+std::optional<std::string> read_key_set(const std::string& path) {
+    // A development key set holds one or two Ed25519 keys, a few hundred bytes.
+    constexpr std::size_t kMaxKeySet = std::size_t{64} * 1024;
+    std::ifstream in(path, std::ios::binary);
+    std::string out;
+    // One page per read; the whole file is at most sixteen of them.
+    std::array<char, 4096> buf{};
+    while (in) {
+        in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+        out.append(buf.data(), static_cast<std::size_t>(in.gcount()));
+        if (out.size() > kMaxKeySet) {
+            return std::nullopt;
+        }
+    }
+    if (!in.eof()) {
+        return std::nullopt;
+    }
+    return out;
 }
 
 std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config) {
@@ -176,6 +222,19 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
     config.jwt_issuer = std::move(*issuer);
     config.jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform");
     config.limits.auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token");
+    if (config.dev_jwks_file.empty()) {
+        return {};
+    }
+    auto jwks = read_key_set(config.dev_jwks_file);
+    if (!jwks) {
+        return error("ULW_DEV_JWKS_FILE", "unreadable, or larger than 64 KiB");
+    }
+    const auto keys = infra::auth::Ed25519LocalVerifier::create(
+        *jwks, {.issuer = config.jwt_issuer, .audience = config.jwt_audience});
+    if (!keys) {
+        return error("ULW_DEV_JWKS_FILE", infra::auth::to_string(keys.error()));
+    }
+    config.dev_jwks = std::move(*jwks);
     return {};
 }
 
@@ -268,6 +327,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     auto database = required(env, "ULW_DATABASE_URL");
     if (!database) {
         return std::unexpected(std::move(database.error()));
+    }
+    // The reason libpq would give quotes the string, password and all.
+    if (!infra::postgres::connection_string_parses(*database)) {
+        return error("ULW_DATABASE_URL", "not a connection string libpq can read");
     }
     config.database_url = std::move(*database);
     if (auto r = load_auth(env, config); !r) {

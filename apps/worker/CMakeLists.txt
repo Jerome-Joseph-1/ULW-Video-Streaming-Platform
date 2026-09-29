@@ -6,7 +6,8 @@ ulw_add_library(worker_lib
     src/worker.cpp
     src/workspace.cpp)
 target_include_directories(worker_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
-target_link_libraries(worker_lib PUBLIC ulw::core_domain ulw::ops Threads::Threads PRIVATE ulw::os)
+target_link_libraries(worker_lib PUBLIC ulw::core_domain ulw::ops Threads::Threads
+    PRIVATE ulw::os ulw::pg_store ulw::s3util)
 
 ulw_add_executable(transcode_worker src/main.cpp)
 target_link_libraries(transcode_worker PRIVATE

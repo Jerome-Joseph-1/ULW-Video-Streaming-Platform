@@ -2,7 +2,10 @@
 
 #include "config.hpp"
 #include "support/memory_log.hpp"
+#include "support/temp_dir.hpp"
+#include "support/tls_pki.hpp"
 
+#include <fstream>
 #include <gtest/gtest.h>
 #include <map>
 #include <string>
@@ -35,7 +38,24 @@ protected:
         {"ULW_DATABASE_URL", "postgresql://ulw@db/ulw"},
         {"JWKS_URL", "https://auth.example.test/.well-known/jwks.json"},
         {"JWT_ISSUER", "https://auth.example.test"},
+        {"ULW_S3_ACCESS_KEY_ID", "AKIAEXAMPLE"},
+        {"ULW_S3_SECRET_ACCESS_KEY", "example-secret"},
     };
+};
+
+// RFC 8037's example Ed25519 public key.
+constexpr std::string_view kKeySet = R"({"keys":[{"kty":"OKP","crv":"Ed25519","kid":"dev",)"
+                                     R"("x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}]})";
+
+// A key set file on disk, as ulw_devtoken jwks writes it.
+class KeySetFile {
+public:
+    explicit KeySetFile(std::string_view text) { std::ofstream(path_) << text; }
+    [[nodiscard]] std::string path() const { return path_.string(); }
+
+private:
+    ulw::test::TempDir dir_{"ulw-jwks"};
+    std::filesystem::path path_ = dir_.path() / "jwks.json";
 };
 
 TEST_F(ConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
@@ -73,16 +93,52 @@ TEST_F(ConfigTest, KeysFetchedOverPlainHttpAreRefused) {
 }
 
 TEST_F(ConfigTest, ALocalKeySetReplacesTheJwksUrl) {
+    const KeySetFile file(kKeySet);
     env.erase("JWKS_URL");
-    env["ULW_DEV_JWKS_FILE"] = "/run/ulw/dev-jwks.json";
+    env["ULW_DEV_JWKS_FILE"] = file.path();
     const auto config = load();
-    ASSERT_TRUE(config);
-    EXPECT_EQ(config->dev_jwks_file, "/run/ulw/dev-jwks.json");
+    ASSERT_TRUE(config) << config.error().reason;
+    EXPECT_EQ(config->dev_jwks_file, file.path());
+    EXPECT_EQ(config->dev_jwks, kKeySet);
     EXPECT_TRUE(config->jwks_url.empty());
 }
 
+TEST_F(ConfigTest, ALocalKeySetThatCannotBeReadOrUsedIsRefused) {
+    env.erase("JWKS_URL");
+    env["ULW_DEV_JWKS_FILE"] = "/nonexistent/jwks.json";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    const KeySetFile garbage(R"({"keys":[{"kty":"RSA"}]})");
+    env["ULW_DEV_JWKS_FILE"] = garbage.path();
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+}
+
+TEST_F(ConfigTest, AConnectionStringLibpqCannotReadIsRefusedWithoutQuotingIt) {
+    env["ULW_DATABASE_URL"] = "postgresql://ulw:Sup3r%Secret@db/ulw";
+    const auto config = load();
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().variable, "ULW_DATABASE_URL");
+    EXPECT_EQ(config.error().reason.find("Sup3r"), std::string::npos);
+}
+
+TEST_F(ConfigTest, AnObjectStoreLocationOrKeysThatCannotWorkAreRefused) {
+    env["ULW_R2_ACCOUNT_ID"] = "not an account";
+    EXPECT_EQ(refused_variable(), "ULW_R2_ACCOUNT_ID");
+    env["ULW_STORAGE"] = "minio";
+    env["ULW_S3_ENDPOINT"] = "ftp://127.0.0.1:9000";
+    EXPECT_EQ(refused_variable(), "ULW_S3_ENDPOINT");
+    env["ULW_S3_ENDPOINT"] = "http://127.0.0.1:9000";
+    env.erase("ULW_S3_SECRET_ACCESS_KEY");
+    EXPECT_EQ(refused_variable(), "ULW_S3_SECRET_ACCESS_KEY");
+    // The filesystem needs neither.
+    env["ULW_STORAGE"] = "fs";
+    env["ULW_FS_ROOT"] = "/var/lib/ulw";
+    env.erase("ULW_BUCKET");
+    EXPECT_TRUE(load());
+}
+
 TEST_F(ConfigTest, BothKeySourcesAtOnceAreRefused) {
-    env["ULW_DEV_JWKS_FILE"] = "/run/ulw/dev-jwks.json";
+    const KeySetFile file(kKeySet);
+    env["ULW_DEV_JWKS_FILE"] = file.path();
     EXPECT_EQ(refused_variable(), "JWKS_URL");
 }
 
@@ -110,14 +166,26 @@ TEST_F(ConfigTest, MinioIsReachedThroughItsEndpoint) {
 TEST_F(ConfigTest, TlsNeedsBothTheCertificateAndTheKey) {
     env["ULW_TRANSPORT"] = "tls";
     EXPECT_EQ(refused_variable(), "ULW_TLS_CERT_FILE");
-    env["ULW_TLS_CERT_FILE"] = "/run/tls/chain.pem";
+    const net::TlsFiles& files = ulw::test::TestPki::shared().server();
+    env["ULW_TLS_CERT_FILE"] = files.certificate_chain;
     EXPECT_EQ(refused_variable(), "ULW_TLS_KEY_FILE");
-    env["ULW_TLS_KEY_FILE"] = "/run/tls/key.pem";
+    env["ULW_TLS_KEY_FILE"] = files.private_key;
     const auto config = load();
     ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
     EXPECT_EQ(config->transport, gateway::Transport::Tls);
-    EXPECT_EQ(config->tls_certificate_chain, "/run/tls/chain.pem");
-    EXPECT_EQ(config->tls_private_key, "/run/tls/key.pem");
+    EXPECT_EQ(config->tls_certificate_chain, files.certificate_chain);
+    EXPECT_EQ(config->tls_private_key, files.private_key);
+}
+
+TEST_F(ConfigTest, TlsFilesThatDoNotLoadAreRefusedAtTheCheckNotAtTheFirstClient) {
+    const net::TlsFiles& files = ulw::test::TestPki::shared().server();
+    env["ULW_TRANSPORT"] = "tls";
+    env["ULW_TLS_CERT_FILE"] = files.certificate_chain;
+    env["ULW_TLS_KEY_FILE"] = "/nonexistent/key.pem";
+    EXPECT_EQ(refused_variable(), "ULW_TLS_CERT_FILE");
+    // A certificate where the key belongs.
+    env["ULW_TLS_KEY_FILE"] = files.certificate_chain;
+    EXPECT_EQ(refused_variable(), "ULW_TLS_CERT_FILE");
 }
 
 TEST_F(ConfigTest, CertificateFilesWithoutTlsAreRefusedRatherThanIgnored) {
@@ -243,10 +311,12 @@ TEST(DescriptorBudget, TwoDescriptorsPerConnectionAfterTheReserve) {
     EXPECT_FALSE(gateway::check_descriptor_budget(limits, 0));
 }
 
-TEST_F(ConfigTest, EverySettingHasAFileKeyAndOnlyTheConnectionStringIsSecret) {
+TEST_F(ConfigTest, OnlyTheConnectionStringAndTheStoreKeysAreSecretAndTheKeysEnvOnly) {
     for (const ops::Setting& s : gateway::settings()) {
-        EXPECT_FALSE(s.key.empty()) << s.env;
-        EXPECT_EQ(s.secret, s.env == "ULW_DATABASE_URL") << s.env;
+        const bool store_key =
+            s.env == "ULW_S3_ACCESS_KEY_ID" || s.env == "ULW_S3_SECRET_ACCESS_KEY";
+        EXPECT_EQ(s.key.empty(), store_key) << s.env;
+        EXPECT_EQ(s.secret, store_key || s.env == "ULW_DATABASE_URL") << s.env;
     }
 }
 

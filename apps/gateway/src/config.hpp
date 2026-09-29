@@ -40,6 +40,8 @@ struct Config {
     // Exactly one of the two: Askedin's JWKS, or a local key set for offline development.
     std::string jwks_url;
     std::string dev_jwks_file;
+    // Its contents, read and checked by load_config.
+    std::string dev_jwks;
     std::string jwt_issuer;
     std::string jwt_audience;
     // The size every chunk but an upload's last has, and the object store's part size.

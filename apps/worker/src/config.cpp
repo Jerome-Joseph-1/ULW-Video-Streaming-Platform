@@ -1,6 +1,8 @@
 #include "config.hpp"
 
 #include "core/util/parse.hpp"
+#include "infra/postgres/connection_string.hpp"
+#include "infra/s3util/profile.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +29,9 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_FFMPEG_THREADS", .key = "ffmpeg.threads"},
     ops::Setting{.env = "PATH", .key = ""},
     ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
+    // Read by the store's credential provider; here only to be checked for.
+    ops::Setting{.env = "ULW_S3_ACCESS_KEY_ID", .key = "", .secret = true},
+    ops::Setting{.env = "ULW_S3_SECRET_ACCESS_KEY", .key = "", .secret = true},
 };
 
 // /var/tmp rather than /tmp: it survives reboots and is disk, where /tmp is often a tmpfs
@@ -100,6 +105,19 @@ std::expected<Storage, ConfigError> load_storage(const EnvLookup& env) {
     if (storage.backend == StorageBackend::Filesystem) {
         return storage;
     }
+    const auto profile = storage.backend == StorageBackend::R2
+                             ? infra::s3util::S3Profile::r2(storage.location)
+                             : infra::s3util::S3Profile::minio(storage.location);
+    if (!profile) {
+        return error(location_variable, storage.backend == StorageBackend::R2
+                                            ? "not an R2 account id"
+                                            : "not an http or https endpoint URL");
+    }
+    for (const std::string_view key : {"ULW_S3_ACCESS_KEY_ID", "ULW_S3_SECRET_ACCESS_KEY"}) {
+        if (!lookup(env, key)) {
+            return error(key, "not set");
+        }
+    }
     auto bucket = required(env, "ULW_BUCKET");
     if (!bucket) {
         return std::unexpected(std::move(bucket.error()));
@@ -141,6 +159,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     auto database = required(env, "ULW_DATABASE_URL");
     if (!database) {
         return std::unexpected(std::move(database.error()));
+    }
+    // The reason libpq would give quotes the string, password and all.
+    if (!infra::postgres::connection_string_parses(*database)) {
+        return error("ULW_DATABASE_URL", "not a connection string libpq can read");
     }
     auto storage = load_storage(env);
     if (!storage) {

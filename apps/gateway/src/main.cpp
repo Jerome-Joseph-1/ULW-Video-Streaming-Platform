@@ -22,11 +22,9 @@
 #include "ops/notify.hpp"
 #include "ops/settings.hpp"
 
-#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
-#include <fstream>
 #include <memory>
 #include <print>
 #include <span>
@@ -57,26 +55,6 @@ std::optional<std::string> read_env(std::string_view name) {
     // NOLINTNEXTLINE(concurrency-mt-unsafe)
     const char* value = std::getenv(std::string(name).c_str());
     return value == nullptr ? std::nullopt : std::optional<std::string>(value);
-}
-
-std::optional<std::string> read_key_set(const std::string& path) {
-    // A development key set holds one or two Ed25519 keys, a few hundred bytes.
-    constexpr std::size_t kMaxKeySet = std::size_t{64} * 1024;
-    std::ifstream in(path, std::ios::binary);
-    std::string out;
-    // One page per read; the whole file is at most sixteen of them.
-    std::array<char, 4096> buf{};
-    while (in) {
-        in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
-        out.append(buf.data(), static_cast<std::size_t>(in.gcount()));
-        if (out.size() > kMaxKeySet) {
-            return std::nullopt;
-        }
-    }
-    if (!in.eof()) {
-        return std::nullopt;
-    }
-    return out;
 }
 
 std::string errno_text(int error) {
@@ -203,11 +181,7 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
 std::expected<void, std::string> make_verifier(const gateway::Config& config, Services& s) {
     infra::auth::ClaimRules rules{.issuer = config.jwt_issuer, .audience = config.jwt_audience};
     if (!config.dev_jwks_file.empty()) {
-        const auto jwks = read_key_set(config.dev_jwks_file);
-        if (!jwks) {
-            return std::unexpected("cannot read " + config.dev_jwks_file);
-        }
-        auto local = infra::auth::Ed25519LocalVerifier::create(*jwks, std::move(rules));
+        auto local = infra::auth::Ed25519LocalVerifier::create(config.dev_jwks, std::move(rules));
         if (!local) {
             return std::unexpected(std::string(infra::auth::to_string(local.error())));
         }
