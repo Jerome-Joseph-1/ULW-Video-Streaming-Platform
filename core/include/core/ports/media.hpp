@@ -18,6 +18,8 @@ enum class MediaError : std::uint8_t {
     // The media server refused the request as made: bad credentials, a bad argument. A retry
     // cannot succeed until the configuration changes.
     Refused,
+    // The room was closed through this handle; its generation admits nobody again.
+    Closed,
 };
 
 [[nodiscard]] std::string_view to_string(MediaError e) noexcept;
@@ -33,6 +35,7 @@ struct MediaTicket {
 };
 
 using MediaDone = std::move_only_function<void(std::expected<void, MediaError>) noexcept>;
+using TicketDone = std::move_only_function<void(std::expected<MediaTicket, MediaError>) noexcept>;
 
 // A call's media runs in one media-server room per generation, and a generation, once closed,
 // never opens again. That is how a participant is put out: the media server keeps a connected
@@ -45,9 +48,11 @@ enum class MediaGeneration : std::uint64_t {};
 class IMediaRoom {
 public:
     virtual ~IMediaRoom() = default;
-    // The device keeps two devices of one user apart: each is its own participant.
-    [[nodiscard]] virtual std::expected<MediaTicket, MediaError> join(const UserId& user,
-                                                                      const DeviceId& device) = 0;
+    // The device keeps two devices of one user apart: each is its own participant. The media
+    // server drops a room that has stood empty for a while, and a handle can outlive that, so
+    // join opens the generation again first (idempotent) and never issues a ticket for a room
+    // that is gone.
+    virtual void join(const UserId& user, const DeviceId& device, TicketDone done) = 0;
     // Ends this generation for everyone in it; their tickets and refreshed credentials stop
     // admitting anyone. Closing a generation the media server has already dropped succeeds.
     virtual void close(MediaDone done) = 0;

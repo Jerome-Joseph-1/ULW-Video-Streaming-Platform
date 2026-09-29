@@ -43,6 +43,9 @@ public:
     void call(std::string_view method, std::string body, const Grant& grant, IfAbsent absent,
               core::ports::MediaDone done);
 
+    // `done` runs later with `error`, and nothing is sent.
+    void fail(core::ports::MediaError error, core::ports::MediaDone done);
+
     [[nodiscard]] const ApiKey& key() const noexcept { return key_; }
     [[nodiscard]] const core::ports::IClock& clock() const noexcept { return clock_; }
 

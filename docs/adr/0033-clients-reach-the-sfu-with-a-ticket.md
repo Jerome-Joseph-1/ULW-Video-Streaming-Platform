@@ -30,7 +30,7 @@ WHIP endpoint, built for ingest (option c).
 ## Decision
 
 - The port is `ISfu::open_room(RoomId, MediaGeneration, max_participants) -> IMediaRoom`,
-  `IMediaRoom::join(UserId, DeviceId) -> MediaTicket` and `IMediaRoom::close()`
+  `IMediaRoom::join(UserId, DeviceId) -> MediaTicket` (asynchronous) and `IMediaRoom::close()`
   (`core/include/core/ports/media.hpp`). A `MediaTicket` is an endpoint, an opaque credential
   and its expiry; core never sees a LiveKit word. `apply_offer`, `add_ice_candidate` and the SDP
   they carry are gone from the port.
@@ -50,6 +50,16 @@ WHIP endpoint, built for ingest (option c).
   `pkg/service/roommanager.go:765` and `1152-1166` in v1.13.7), and reconnects use that. Each
   RoomService call carries its own 10 s token with only the permission it needs. RoomService
   (Twirp JSON over HTTP) runs on the reactor through `infra/curl`.
+- LiveKit deletes a room that stands empty: 60 s after creation if nobody joined
+  (`empty_timeout`), 60 s after the last participant left (`departure_timeout`). The first covers
+  a ticket issued as the room opens; the second the SDK's reconnect after everyone's link drops
+  at once, whose retry delays add up to 44.1 s. A room handle outlives that easily (a callee's
+  phone ringing), so `join` re-creates the generation (CreateRoom is idempotent and carries the
+  same settings) before it mints the ticket, one round trip per join, and a ticket never names a
+  room that is gone. Only a room that was about to be swept can still vanish between the ticket
+  and the connect; the client is refused ("room does not exist") and asks again, and the next
+  join re-creates it. A handle that `close()` was called on refuses to join (`Closed`) instead,
+  so a closed generation is never re-created by its own handle.
 - **Putting a participant out is closing a generation.** No credential LiveKit has issued can be
   withdrawn: a client removed with `RemoveParticipant` reconnects with the token LiveKit
   refreshed for it and is issued another (the review reproduced this, and tests/call keeps the

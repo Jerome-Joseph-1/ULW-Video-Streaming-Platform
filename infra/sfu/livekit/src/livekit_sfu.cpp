@@ -28,50 +28,93 @@ using detail::RoomService;
 // need the ticket again. One connect is the SDK's 15 s signal plus 15 s peer-connection budget,
 // and room.connect() retries once: 60 s. Clock skew needs nothing extra, LiveKit allows a minute.
 constexpr core::Seconds kTicketTtl{2 * (15 + 15)};
-// A room nobody has joined yet is kept while the tickets issued when it opened are still good.
-constexpr core::Seconds kEmptyRoomTimeout = kTicketTtl;
+// How long LiveKit keeps a room with nobody in it: since its creation if nobody has joined yet
+// (empty_timeout), since the last one left if someone had (departure_timeout). The first must
+// cover a ticket issued as the room opens, 60 s. The second must cover the SDK's reconnect after
+// everyone's link drops at once: its retry delays add up to 44.1 s (0, 0.3, 1.2, 2.7, 4.8 and
+// five of 7 s), which the ticket's 60 s also covers. join re-creates a room dropped anyway.
+constexpr core::Seconds kIdleRoomTimeout = kTicketTtl;
 
 // RFC 7518 section 3.2: an HS256 key of at least 256 bits.
 constexpr std::size_t kMinSecretBytes = 256 / 8;
 // Generated secrets are 43 to 64 characters; 256 bytes is far past any real one.
 constexpr std::size_t kMaxSecretBytes = 256;
 
+std::string create_room_body(std::string_view name, std::uint16_t max_participants) {
+    std::string body = R"({"name":)";
+    core::json::append_string(body, name);
+    body += R"(,"empty_timeout":)";
+    body += std::to_string(kIdleRoomTimeout.count());
+    body += R"(,"departure_timeout":)";
+    body += std::to_string(kIdleRoomTimeout.count());
+    body += R"(,"max_participants":)";
+    body += std::to_string(max_participants);
+    body += '}';
+    return body;
+}
+
+constexpr Grant kCreateRooms{.permission = Permission::CreateRooms, .room = {}, .identity = {}};
+
 class LiveKitRoom final : public IMediaRoom {
 public:
-    LiveKitRoom(RoomService& service, std::string client_url, std::string name) noexcept
-        : service_(service), client_url_(std::move(client_url)), name_(std::move(name)) {}
+    LiveKitRoom(RoomService& service, std::string client_url, std::string name,
+                std::uint16_t max_participants) noexcept
+        : service_(service), client_url_(std::move(client_url)), name_(std::move(name)),
+          max_participants_(max_participants) {}
 
-    [[nodiscard]] std::expected<MediaTicket, MediaError>
-    join(const core::UserId& user, const core::DeviceId& device) override {
+    void join(const core::UserId& user, const core::DeviceId& device,
+              core::ports::TicketDone done) override {
+        if (closed_) {
+            service_.fail(
+                MediaError::Closed,
+                [done = std::move(done)](std::expected<void, MediaError> r) mutable noexcept {
+                    done(std::unexpected(r.error()));
+                });
+            return;
+        }
         // A user id never holds '/', so the identity splits back apart unambiguously.
         std::string identity(user.view());
         identity += '/';
         identity += device.to_string();
-        auto token = detail::mint_token(
-            service_.key(),
-            Grant{.permission = Permission::JoinRoom, .room = name_, .identity = identity},
-            service_.clock().wall_now(), kTicketTtl);
-        if (!token) {
-            return std::unexpected(MediaError::Refused);
-        }
-        return MediaTicket{.endpoint = client_url_,
-                           .credential = std::move(token->jwt),
-                           .expires_at = token->expires_at};
+        // Copies, not this: the room handle may be gone by the time the room is back.
+        service_.call(
+            "CreateRoom", create_room_body(name_, max_participants_), kCreateRooms, IfAbsent::Fail,
+            [&service = service_, endpoint = client_url_, room = name_,
+             identity = std::move(identity),
+             done = std::move(done)](std::expected<void, MediaError> opened) mutable noexcept {
+                if (!opened) {
+                    done(std::unexpected(opened.error()));
+                    return;
+                }
+                auto token = detail::mint_token(
+                    service.key(),
+                    Grant{.permission = Permission::JoinRoom, .room = room, .identity = identity},
+                    service.clock().wall_now(), kTicketTtl);
+                if (!token) {
+                    done(std::unexpected(MediaError::Refused));
+                    return;
+                }
+                done(MediaTicket{.endpoint = std::move(endpoint),
+                                 .credential = std::move(token->jwt),
+                                 .expires_at = token->expires_at});
+            });
     }
 
     void close(MediaDone done) override {
+        closed_ = true;
         std::string body = R"({"room":)";
         core::json::append_string(body, name_);
         body += '}';
-        service_.call("DeleteRoom", std::move(body),
-                      Grant{.permission = Permission::CreateRooms, .room = {}, .identity = {}},
-                      IfAbsent::Succeed, std::move(done));
+        service_.call("DeleteRoom", std::move(body), kCreateRooms, IfAbsent::Succeed,
+                      std::move(done));
     }
 
 private:
     RoomService& service_;
     std::string client_url_;
     std::string name_;
+    std::uint16_t max_participants_;
+    bool closed_ = false;
 };
 
 class LiveKitSfu final : public core::ports::ISfu {
@@ -89,25 +132,17 @@ public:
         std::string name = room.to_string();
         name += ':';
         name += std::to_string(std::to_underlying(generation));
-        std::string body = R"({"name":)";
-        core::json::append_string(body, name);
-        body += R"(,"empty_timeout":)";
-        body += std::to_string(kEmptyRoomTimeout.count());
-        body += R"(,"max_participants":)";
-        body += std::to_string(max_participants);
-        body += '}';
-        service_.call(
-            "CreateRoom", std::move(body),
-            Grant{.permission = Permission::CreateRooms, .room = {}, .identity = {}},
-            IfAbsent::Fail,
-            [this, name = std::move(name),
-             done = std::move(done)](std::expected<void, MediaError> created) mutable noexcept {
-                if (!created) {
-                    done(std::unexpected(created.error()));
-                    return;
-                }
-                done(std::make_unique<LiveKitRoom>(service_, client_url_, std::move(name)));
-            });
+        std::string body = create_room_body(name, max_participants);
+        service_.call("CreateRoom", std::move(body), kCreateRooms, IfAbsent::Fail,
+                      [this, name = std::move(name), max_participants, done = std::move(done)](
+                          std::expected<void, MediaError> created) mutable noexcept {
+                          if (!created) {
+                              done(std::unexpected(created.error()));
+                              return;
+                          }
+                          done(std::make_unique<LiveKitRoom>(service_, client_url_, std::move(name),
+                                                             max_participants));
+                      });
     }
 
 private:

@@ -50,6 +50,8 @@ std::string_view to_string(MediaError e) noexcept {
         return "media server unavailable";
     case MediaError::Refused:
         return "media server refused the request";
+    case MediaError::Closed:
+        return "media room closed";
     }
     return "unknown media error";
 }

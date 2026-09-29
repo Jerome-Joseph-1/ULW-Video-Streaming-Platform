@@ -4,7 +4,7 @@
 // participant put out of a call stays out, whatever credential it kept.
 import { chromium, expect, test } from '@playwright/test';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import path from 'node:path';
@@ -257,6 +257,57 @@ test('an expelled participant cannot return, even with its refreshed token', asy
     // Alice carried on in the new generation.
     expect(await alice.page.evaluate(() => window.room.state)).toBe('connected');
     await sfu.close(room, 2);
+  } finally {
+    sfu.stop();
+    for (const browser of browsers) await browser.close().catch(() => {});
+    pageServer.close();
+    console.log(JSON.stringify(metrics));
+  }
+});
+
+// Whether LiveKit still has a room, asked directly: the test's own view, not the adapter's.
+async function liveKitHasRoom(name) {
+  const b64 = (x) => Buffer.from(JSON.stringify(x)).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({
+    iss: process.env.LIVEKIT_API_KEY, nbf: now, exp: now + 10, video: { roomList: true } })}`;
+  const signature = createHmac('sha256', process.env.LIVEKIT_API_SECRET).update(unsigned)
+    .digest('base64url');
+  const response = await fetch(`${process.env.LIVEKIT_API_URL}/twirp/livekit.RoomService/ListRooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${unsigned}.${signature}` },
+    body: JSON.stringify({ names: [name] }),
+  });
+  expect(response.status).toBe(200);
+  return ((await response.json()).rooms ?? []).length > 0;
+}
+
+// A handle held past LiveKit's idle timeout, as the call handler holds one while a callee's
+// phone rings: the room behind it is gone, and the next join must bring it back rather than
+// hand out a ticket to nowhere. The harness opens the room once and never again.
+test('a join through a handle whose room went idle opens the room again', async () => {
+  const room = randomUUID();
+  const metrics = { room };
+  const pageServer = await servePage();
+  const browsers = [];
+  const sfu = startSignalling();
+  try {
+    await sfu.open(room, 1);
+    const openedAt = Date.now();
+    // The adapter's 60 s empty timeout, and LiveKit's own sweep on top.
+    await expect.poll(() => liveKitHasRoom(`${room}:1`),
+      { timeout: 90_000, intervals: [1000] }).toBe(false);
+    metrics.droppedAfterMs = Date.now() - openedAt;
+
+    const ticket = await sfu.ticket(room, 1, 'alice', randomUUID());
+    expect(await liveKitHasRoom(`${room}:1`)).toBe(true);
+    const { server, browser } = await launchPeer();
+    browsers.push(server);
+    const page = await browser.newPage();
+    await page.goto(`http://127.0.0.1:${pageServer.address().port}/`);
+    await page.evaluate((t) => window.join(t), ticket);
+    expect(await page.evaluate(() => window.room.state)).toBe('connected');
+    await sfu.close(room, 1);
   } finally {
     sfu.stop();
     for (const browser of browsers) await browser.close().catch(() => {});

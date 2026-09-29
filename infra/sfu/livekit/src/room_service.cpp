@@ -154,6 +154,12 @@ void RoomService::call(std::string_view method, std::string body, const Grant& g
     call.start(std::move(*transfer));
 }
 
+void RoomService::fail(core::ports::MediaError error, core::ports::MediaDone done) {
+    calls_
+        .emplace_back(std::make_unique<Call>(*this, std::string{}, IfAbsent::Fail, std::move(done)))
+        ->fail_later(error);
+}
+
 void RoomService::finished(Call& call,
                            std::expected<void, core::ports::MediaError> outcome) noexcept {
     core::ports::MediaDone done = call.take_callback();

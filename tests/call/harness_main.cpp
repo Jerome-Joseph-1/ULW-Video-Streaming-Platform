@@ -173,8 +173,10 @@ private:
         if (room == rooms_.end()) {
             return "error not open";
         }
-        const auto ticket = room->second->join(user, device);
-        return ticket ? ticket_json(*ticket) : "error " + std::string(to_string(ticket.error()));
+        std::optional<std::expected<core::ports::MediaTicket, MediaError>> ticket;
+        room->second->join(user, device, [&](auto result) noexcept { ticket = std::move(result); });
+        run_until([&] { return ticket.has_value(); });
+        return *ticket ? ticket_json(**ticket) : "error " + std::string(to_string(ticket->error()));
     }
 
     std::string close(const std::string& key) {

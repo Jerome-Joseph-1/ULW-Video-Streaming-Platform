@@ -42,6 +42,7 @@ constexpr std::string_view kDevice = "0192f3a4-0000-7000-8000-00000000000d";
 
 using OpenResult = std::expected<std::unique_ptr<IMediaRoom>, MediaError>;
 using DoneResult = std::expected<void, MediaError>;
+using TicketResult = std::expected<core::ports::MediaTicket, MediaError>;
 
 Config config_for(std::string api_url) {
     return Config{.api_url = std::move(api_url),
@@ -77,6 +78,15 @@ protected:
         sfu->open_room(*core::RoomId::parse(kRoom), generation, 2,
                        [&](OpenResult r) noexcept { got = std::move(r); });
         EXPECT_FALSE(got.has_value()) << "callback ran inside open_room()";
+        EXPECT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
+        return std::move(*got);
+    }
+
+    TicketResult join(IMediaRoom& room, std::string_view user, std::string_view device = kDevice) {
+        std::optional<TicketResult> got;
+        room.join(*core::UserId::parse(user), *core::DeviceId::parse(device),
+                  [&](TicketResult r) noexcept { got = std::move(r); });
+        EXPECT_FALSE(got.has_value()) << "callback ran inside join()";
         EXPECT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
         return std::move(*got);
     }
@@ -134,6 +144,11 @@ TEST_P(LiveKitSfuTest, OpeningARoomCreatesItsGenerationWithTheCallsLimits) {
     EXPECT_EQ(string_at(body, "name"), std::string(kRoom) + ":7");
     ASSERT_NE(body.find("max_participants"), nullptr);
     EXPECT_EQ(body.find("max_participants")->as_u64(), 2U);
+    // Both cover a ticket's 60 s, and departure the SDK's 44 s of reconnect attempts.
+    ASSERT_NE(body.find("empty_timeout"), nullptr);
+    EXPECT_EQ(body.find("empty_timeout")->as_u64(), 60U);
+    ASSERT_NE(body.find("departure_timeout"), nullptr);
+    EXPECT_EQ(body.find("departure_timeout")->as_u64(), 60U);
 
     const auto claims = claims_of(create);
     EXPECT_EQ(string_at(claims, "iss"), "fake-key");
@@ -141,14 +156,30 @@ TEST_P(LiveKitSfuTest, OpeningARoomCreatesItsGenerationWithTheCallsLimits) {
     EXPECT_EQ(bool_at(claims, "video", "roomJoin"), std::nullopt);
 }
 
-TEST_P(LiveKitSfuTest, JoiningIssuesATicketForThatUsersDeviceWithoutARoundTrip) {
+TEST_P(LiveKitSfuTest, JoiningReopensTheGenerationBeforeIssuingItsTicket) {
     auto server = answering(200);
     start(server.base_url());
     auto room = open();
     ASSERT_TRUE(room);
-    auto ticket = (*room)->join(*core::UserId::parse("alice"), *core::DeviceId::parse(kDevice));
+    // Opened once; every join re-creates the room, as LiveKit may have dropped it since.
+    for (int i = 0; i < 2; ++i) {
+        ASSERT_TRUE(join(**room, "alice"));
+    }
+    const auto requests = server.requests();
+    ASSERT_EQ(requests.size(), 3U);
+    for (const ServedRequest& request : requests) {
+        EXPECT_EQ(request.path(), "/twirp/livekit.RoomService/CreateRoom");
+        EXPECT_EQ(request.body, requests[0].body) << "a re-created room has other settings";
+    }
+}
+
+TEST_P(LiveKitSfuTest, JoiningIssuesATicketForThatUsersDevice) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto ticket = join(**room, "alice");
     ASSERT_TRUE(ticket);
-    EXPECT_EQ(server.request_count(), 1U);
 
     EXPECT_EQ(ticket->endpoint, "wss://media.example.test");
     const auto token = read_token(ticket->credential, kSecret);
@@ -168,10 +199,8 @@ TEST_P(LiveKitSfuTest, ATicketAdmitsToItsOwnGenerationOnly) {
     auto first = open(MediaGeneration{1});
     auto second = open(MediaGeneration{2});
     ASSERT_TRUE(first && second);
-    const auto user = *core::UserId::parse("alice");
-    const auto device = *core::DeviceId::parse(kDevice);
-    auto old_ticket = (*first)->join(user, device);
-    auto new_ticket = (*second)->join(user, device);
+    const auto old_ticket = join(**first, "alice");
+    const auto new_ticket = join(**second, "alice");
     ASSERT_TRUE(old_ticket && new_ticket);
     EXPECT_EQ(string_at(read_token(old_ticket->credential, kSecret)->claims, "video", "room"),
               std::string(kRoom) + ":1");
@@ -184,12 +213,38 @@ TEST_P(LiveKitSfuTest, TwoDevicesOfOneUserAreTwoParticipants) {
     start(server.base_url());
     auto room = open();
     ASSERT_TRUE(room);
-    const auto user = *core::UserId::parse("alice");
-    auto a = (*room)->join(user, *core::DeviceId::parse(kDevice));
-    auto b = (*room)->join(user, *core::DeviceId::parse("0192f3a4-0000-7000-8000-00000000000e"));
+    const auto a = join(**room, "alice");
+    const auto b = join(**room, "alice", "0192f3a4-0000-7000-8000-00000000000e");
     ASSERT_TRUE(a && b);
     EXPECT_NE(string_at(read_token(a->credential, kSecret)->claims, "sub"),
               string_at(read_token(b->credential, kSecret)->claims, "sub"));
+}
+
+TEST_P(LiveKitSfuTest, NoTicketIssuesForARoomThatCannotBeReopened) {
+    std::atomic<int> served{0};
+    HttpTestServer server([&](const ServedRequest&) {
+        return ++served == 1
+                   ? Reply{.status = 200, .headers = {}, .body = "{}"}
+                   : Reply{.status = 503, .headers = {}, .body = R"({"code":"unavailable"})"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto ticket = join(**room, "alice");
+    ASSERT_FALSE(ticket);
+    EXPECT_EQ(ticket.error(), MediaError::Unavailable);
+}
+
+TEST_P(LiveKitSfuTest, AClosedRoomIssuesNoTicketAndIsNotRecreated) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    ASSERT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
+    const auto ticket = join(**room, "alice");
+    ASSERT_FALSE(ticket);
+    EXPECT_EQ(ticket.error(), MediaError::Closed);
+    EXPECT_EQ(server.request_count(), 2U) << "the closed generation was created again";
 }
 
 TEST_P(LiveKitSfuTest, ClosingAGenerationDeletesItsRoom) {
