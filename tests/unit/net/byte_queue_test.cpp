@@ -1,6 +1,7 @@
 #include "send_queue.hpp"
 
 #include <gtest/gtest.h>
+#include <span>
 #include <vector>
 
 namespace {
@@ -49,8 +50,8 @@ TEST(ByteQueue, GatherReturnsEveryChunkInOrder) {
     const std::size_t n = q.gather(spans);
     ASSERT_EQ(n, 3U);
     std::vector<std::byte> joined;
-    for (std::size_t i = 0; i < n; ++i) {
-        joined.insert(joined.end(), spans[i].begin(), spans[i].end());
+    for (const auto& s : std::span(spans).first(n)) {
+        joined.insert(joined.end(), s.begin(), s.end());
     }
     EXPECT_EQ(joined, std::vector<std::byte>(data.begin() + 5, data.end()));
     q.clear(pool);
