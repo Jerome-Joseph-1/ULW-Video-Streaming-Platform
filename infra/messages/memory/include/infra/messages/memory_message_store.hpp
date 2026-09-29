@@ -26,12 +26,14 @@ public:
     MemoryMessageStore(MemoryMessageStore&&) = delete;
     MemoryMessageStore& operator=(MemoryMessageStore&&) = delete;
 
-    // Stores a message under `seq` (from 1). Idempotent: the same seq with the same sender, key
-    // and body succeeds and keeps the first sent_at. Any other under a stored seq, or a key the
-    // sender already used under another seq, is Conflict. Over kMaxMessageBody is TooLarge.
+    // Stores a message under `seq` (from 1) and answers the seq it is stored under. As the
+    // durable store does, a key the sender already used in the room is answered with that
+    // message's seq when the body is the same, and is Conflict when it is not; nothing is
+    // written either way. A seq already taken by another message is Conflict. Over
+    // kMaxMessageBody is TooLarge.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
                 std::string key, std::vector<std::byte> body, core::WallTime sent_at,
-                core::ports::MessageCallback<void> done);
+                core::ports::MessageCallback<std::uint64_t> done);
     void history_before(
         const core::RoomId& room, std::optional<std::uint64_t> before, std::size_t limit,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;
@@ -59,8 +61,8 @@ private:
     };
     struct Room {
         std::map<std::uint64_t, core::ports::StoredMessage> messages;
-        // (sender, key) of every stored message.
-        std::set<std::pair<std::string, std::string>> keys;
+        // (sender, key) of every stored message, and its seq.
+        std::map<std::pair<std::string, std::string>, std::uint64_t> keys;
     };
 
     void defer(std::move_only_function<void() noexcept> fn);

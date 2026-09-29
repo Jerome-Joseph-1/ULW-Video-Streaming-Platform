@@ -84,14 +84,16 @@ public:
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                std::vector<std::byte> body, MessageCallback<std::uint64_t> done) override {
         const std::uint64_t seq = next_[room] + 1;
-        store_->append(
-            room, seq, sender, std::move(key), std::move(body), std::chrono::system_clock::now(),
-            [this, room, seq, done = std::move(done)](MessageResult<void> r) mutable noexcept {
-                if (r) {
-                    next_[room] = seq;
-                }
-                done(r.transform([seq] { return seq; }));
-            });
+        store_->append(room, seq, sender, std::move(key), std::move(body),
+                       std::chrono::system_clock::now(),
+                       [this, room, seq,
+                        done = std::move(done)](MessageResult<std::uint64_t> r) mutable noexcept {
+                           // A repeat is answered with the seq it already has, and takes none.
+                           if (r && *r == seq) {
+                               next_[room] = seq;
+                           }
+                           done(r);
+                       });
     }
 
 private:
@@ -157,7 +159,9 @@ public:
                        [done = std::move(done)](
                            rt::StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
                            if (!r) {
-                               done(std::unexpected(MessageStoreError::Unavailable));
+                               done(std::unexpected(r.error() == rt::StoreError::Conflict
+                                                        ? MessageStoreError::Conflict
+                                                        : MessageStoreError::Unavailable));
                            } else if (!*r) {
                                // This test is the room's only owner; fenced would be a broken
                                // store.
@@ -502,6 +506,26 @@ TEST_P(MessageStoreConformance, MembersPageInTheByteOrderOfTheirIds) {
     EXPECT_EQ(listed, ordered);
 }
 
+TEST_P(MessageStoreConformance, AKeyUsedAgainGetsItsSeqWithTheSameBodyAndIsAConflictWithAnother) {
+    const core::RoomId room = new_room();
+    const auto write_as = [&](const core::UserId& sender, std::string key, std::string_view body) {
+        return ask<std::uint64_t>([&](auto done) {
+            backend_->write(room, sender, std::move(key), bytes(body), std::move(done));
+        });
+    };
+    ASSERT_EQ(write_as(alice_, "k1", "hello"), 1U);
+    ASSERT_EQ(write_as(alice_, "k2", "later"), 2U);
+    EXPECT_EQ(write_as(alice_, "k1", "hello"), 1U);
+    EXPECT_EQ(write_as(alice_, "k1", "hello, edited"),
+              MessageResult<std::uint64_t>{std::unexpected(MessageStoreError::Conflict)});
+    EXPECT_EQ(write_as(bob_, "k1", "bob's own"), 3U);
+    EXPECT_EQ(last_seq(room), 3U);
+    const auto page = after(room, 0, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 3U);
+    EXPECT_EQ(page->front().body, bytes("hello"));
+}
+
 TEST_P(MessageStoreConformance, ARoomWithoutMembersAdmitsAnyoneAndOneWithMembersOnlyThem) {
     const core::RoomId room = new_room();
     const auto admits = [&](const core::UserId& user) {
@@ -528,9 +552,10 @@ protected:
         store_.emplace(*reactor_);
     }
 
-    MessageResult<void> append(std::uint64_t seq, const core::UserId& sender, std::string key,
-                               std::vector<std::byte> body, core::WallTime sent_at) {
-        return ulw::test::ask<void>(*reactor_, [&](auto done) {
+    MessageResult<std::uint64_t> append(std::uint64_t seq, const core::UserId& sender,
+                                        std::string key, std::vector<std::byte> body,
+                                        core::WallTime sent_at) {
+        return ulw::test::ask<std::uint64_t>(*reactor_, [&](auto done) {
             store_->append(room_, seq, sender, std::move(key), std::move(body), sent_at,
                            std::move(done));
         });
@@ -563,7 +588,8 @@ TEST_F(MemoryMessageStoreAppend, RepeatingAnAppendSucceedsAndKeepsTheFirstSentAt
 }
 
 TEST_F(MemoryMessageStoreAppend, OtherBytesAnotherSenderOrKeyUnderAStoredSeqConflict) {
-    const auto conflict = MessageResult<void>{std::unexpected(MessageStoreError::Conflict)};
+    const auto conflict =
+        MessageResult<std::uint64_t>{std::unexpected(MessageStoreError::Conflict)};
     ASSERT_TRUE(append(1, alice_, "k1", bytes("hello"), at(1)));
     EXPECT_EQ(append(1, alice_, "k1", bytes("hellp"), at(1)), conflict);
     EXPECT_EQ(append(1, alice_, "k1", bytes("hello!"), at(1)), conflict);
@@ -574,12 +600,11 @@ TEST_F(MemoryMessageStoreAppend, OtherBytesAnotherSenderOrKeyUnderAStoredSeqConf
     EXPECT_EQ(page.front().body, bytes("hello"));
 }
 
-TEST_F(MemoryMessageStoreAppend, AKeyTheSenderUsedUnderAnotherSeqConflicts) {
-    ASSERT_TRUE(append(1, alice_, "k1", bytes("hello"), at(1)));
-    EXPECT_EQ(append(2, alice_, "k1", bytes("hello"), at(1)),
-              MessageResult<void>{std::unexpected(MessageStoreError::Conflict)});
+TEST_F(MemoryMessageStoreAppend, AKeyUsedAgainIsAnsweredWithItsSeqAndTakesNoOther) {
+    ASSERT_EQ(append(1, alice_, "k1", bytes("hello"), at(1)), 1U);
+    EXPECT_EQ(append(2, alice_, "k1", bytes("hello"), at(1)), 1U);
     // Keys are per sender.
-    EXPECT_TRUE(append(2, bob_, "k1", bytes("hello"), at(1)));
+    EXPECT_EQ(append(2, bob_, "k1", bytes("hello"), at(1)), 2U);
     EXPECT_EQ(all().size(), 2U);
 }
 
@@ -593,7 +618,7 @@ TEST_F(MemoryMessageStoreAppend, AGapInSeqIsSkippedNotFilled) {
 
 TEST_F(MemoryMessageStoreAppend, ABodyOverTheBoundIsRefusedAndNothingIsStored) {
     EXPECT_EQ(append(1, alice_, "k1", std::vector<std::byte>(kMaxMessageBody + 1), at(0)),
-              MessageResult<void>{std::unexpected(MessageStoreError::TooLarge)});
+              MessageResult<std::uint64_t>{std::unexpected(MessageStoreError::TooLarge)});
     EXPECT_TRUE(all().empty());
 }
 

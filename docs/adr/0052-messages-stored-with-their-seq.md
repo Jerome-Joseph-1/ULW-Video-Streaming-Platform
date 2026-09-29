@@ -59,8 +59,15 @@ What bounds a page of history:
   the message was stored under; the `room_state` row is still updated by nothing, so a fenced
   former owner gets no answer for it either. Two repeats in flight at once both miss the
   lookup; the second fails on the key's unique index, whole, and is run once more, when it
-  finds the first. The index holds the room, sender and key, never the body. A key reused with
-  a different body is the same message to the store: the first body stays.
+  finds the first. The index holds the room, sender and key, never the body.
+- **A key reused for another body is a conflict.** The lookup compares the stored body with
+  the new one: the same bytes are a repeat, answered with its seq; other bytes take no seq,
+  write nothing, and are answered `StoreError::Conflict`, which reaches the client as
+  `conflict` and is delivered to nobody. Answering the old seq instead would have the owner fan
+  out the new body under a seq whose stored body is the old one, so that history and what
+  members saw disagree. The router's cache of recent keys keeps a digest of each body for the
+  same reason, and gives the same answer without asking the store. Reply status `Conflict` is
+  new on the node channel, whose version is therefore 3 (ADR-0043's nodes speak 2).
 - **Every room, durable or lossy, writes this way**, before delivery. Storing the row costs
   nothing measurable over taking the seq alone (below), so there is no cheaper path for lossy
   rooms to keep, and E2EE rooms are always durable.

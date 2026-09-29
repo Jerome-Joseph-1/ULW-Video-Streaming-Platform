@@ -211,6 +211,23 @@ TEST_F(SequencedAppendTest, ARepeatThroughTheNextOwnerGetsTheOriginalSeq) {
     EXPECT_EQ(history(room).size(), 1U);
 }
 
+TEST_F(SequencedAppendTest, AKeyResentWithAnotherBodyIsAConflictAndTakesNoSeq) {
+    const core::RoomId room = new_room();
+    const std::uint64_t first = owned_by(room, a_);
+    const Seq conflict{std::unexpected(rt::StoreError::Conflict)};
+    ASSERT_EQ(send(room, first, "hello", "k1"), Seq{1});
+    EXPECT_EQ(send(room, first, "hello, edited", "k1"), conflict);
+    // The next owner finds the same stored row.
+    go_quiet(room);
+    const std::uint64_t second = owned_by(room, b_);
+    EXPECT_EQ(send(room, second, "hello, edited", "k1"), conflict);
+    EXPECT_EQ(send(room, second, "hello", "k1"), Seq{1});
+    EXPECT_EQ(last_seq(room), "1");
+    const auto stored = history(room);
+    ASSERT_EQ(stored.size(), 1U);
+    EXPECT_EQ(stored[0].body, bytes("hello"));
+}
+
 TEST_F(SequencedAppendTest, ConcurrentWritesToOneRoomTakeEverySeqOnce) {
     // More in flight than the pool has sessions, so that writes queue on the room's row.
     constexpr std::size_t kWrites = 200;

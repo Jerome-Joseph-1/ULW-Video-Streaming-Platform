@@ -253,6 +253,8 @@ std::string_view reason(rt::RouteError e) noexcept {
         return "unavailable";
     case rt::RouteError::Busy:
         return "busy";
+    case rt::RouteError::Conflict:
+        return "conflict";
     }
     return "unavailable";
 }

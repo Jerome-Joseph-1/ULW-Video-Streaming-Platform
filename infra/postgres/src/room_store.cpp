@@ -83,13 +83,15 @@ RETURNING room_assignments.room_id)sql";
 
 // The fenced append and the message's row in one statement, so one transaction and one commit:
 // a seq is taken only with its row, and a fenced writer takes neither. A message whose key the
-// sender already used in the room answers the seq it was stored under and takes none; the
-// room_state row is still updated (by nothing), so that the answer, too, is fenced. A
-// concurrent repeat of the same key that commits first makes this one fail on the key's
+// sender already used in the room takes no seq: with the same body it is a repeat, answered
+// with the seq it was stored under; with another body it is a conflict, answered with none.
+// The room_state row is updated (by nothing) either way, so that those answers are fenced too.
+// A concurrent repeat of the same key that commits first makes this one fail on the key's
 // unique index, whole, seq included; run again, it finds the stored row.
 constexpr Sql kAppendMessage = R"sql(
 WITH prior AS (
-    SELECT seq FROM chat_messages WHERE room_id = $1 AND sender = $3 AND msg_key = $4),
+    SELECT seq, body = $5 AS same
+      FROM chat_messages WHERE room_id = $1 AND sender = $3 AND msg_key = $4),
 next AS (
     UPDATE room_state
        SET last_seq = last_seq + CASE WHEN EXISTS (SELECT 1 FROM prior) THEN 0 ELSE 1 END
@@ -101,9 +103,9 @@ stored AS (
       FROM next
      WHERE NOT EXISTS (SELECT 1 FROM prior)
     RETURNING seq)
-SELECT seq FROM prior WHERE EXISTS (SELECT 1 FROM next)
+SELECT seq, same FROM prior WHERE EXISTS (SELECT 1 FROM next)
 UNION ALL
-SELECT seq FROM stored)sql";
+SELECT seq, true FROM stored)sql";
 
 // '-infinity' is older than any staleness bound, so the rooms are claimable at once.
 constexpr Sql kRelease = R"sql(
@@ -360,14 +362,19 @@ StoreResult<void> decode_nothing(const Result& /*r*/) {
     return {};
 }
 
-// No row: the room has moved on to another generation. Fenced out.
-StoreResult<std::optional<std::uint64_t>> decode_seq(const Result& r) noexcept {
+// The seq, a repeat's stored seq, or no row when fenced; a stored key with another body is a
+// conflict.
+StoreResult<std::optional<std::uint64_t>> decode_append(const Result& r) noexcept {
     if (r.rows() == 0) {
         return std::optional<std::uint64_t>{};
     }
     const auto seq = r.get(0, 0).and_then(parse_uint64);
-    if (!seq) {
+    const auto same = r.get(0, 1).and_then(parse_bool);
+    if (!seq || !same) {
         return std::unexpected(StoreError::Corrupt);
+    }
+    if (!*same) {
+        return std::unexpected(StoreError::Conflict);
     }
     return seq;
 }
@@ -402,7 +409,7 @@ public:
             done_(std::unexpected(StoreError::Unavailable));
             return std::nullopt;
         }
-        done_(decode_seq(*outcome));
+        done_(decode_append(*outcome));
         return std::nullopt;
     }
 

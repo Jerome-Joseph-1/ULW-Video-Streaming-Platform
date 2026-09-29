@@ -267,7 +267,7 @@ TEST_F(WireTest, ASendOrDeliverWithABodyPastTheLargestIsMalformed) {
 
 TEST_F(WireTest, AReplyWithAStatusNobodyDefinedIsMalformed) {
     std::string reply(8, '\0');
-    reply += '\x05';
+    reply += '\x06';
     reply += std::string(8, '\0');
     EXPECT_EQ(error_of(raw(5, reply)), wire::DecodeError::Malformed);
 }

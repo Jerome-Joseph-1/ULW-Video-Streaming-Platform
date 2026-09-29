@@ -419,6 +419,12 @@ TEST_F(ChatServiceTest, ASendIsAnsweredWithItsIdAndTheSeqTheOwnerGaveIt) {
     const Seen e = seen(alice.take().at(0));
     EXPECT_EQ(e.reason, "unavailable");
     EXPECT_EQ(e.id, "second");
+    // The id was already used for another body: the client learns it, and the id is spent.
+    send(a, "first", "something else");
+    rooms_.sends[2].done(std::unexpected(RouteError::Conflict));
+    const Seen c = seen(alice.take().at(0));
+    EXPECT_EQ(c.reason, "conflict");
+    EXPECT_EQ(c.id, "first");
 }
 
 TEST_F(ChatServiceTest, ARateLimitedSendIsRefusedWithWhenToRetryAndNeverReachesTheRoom) {

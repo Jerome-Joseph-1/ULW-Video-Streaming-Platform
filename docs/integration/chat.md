@@ -74,8 +74,8 @@ is sent it, so history has every seq that was ever delivered.
 
 **Resends.** After `unavailable`, send the same message again with the same `id`, on this or any
 connection, to any node: it is sequenced once, answered with the first seq, and delivered once.
-Reusing an `id` for a different message loses the second one: it is answered with the first
-one's seq.
+Reusing an `id` for a different message is refused with `conflict`: nothing is sequenced or
+delivered, and the `id` stays with the first message. Send the new message under a new `id`.
 
 ### Resume and history
 
@@ -121,6 +121,7 @@ later by the product, in the database.
 | `busy` | Join or history allowance exceeded, too many sends awaiting answers, the room's owner queue is full, or too much unread output for a history page | Back off and retry |
 | `unavailable` | The room's owner or the store could not be reached | Retry; resend a `send` with the same `id` |
 | `fenced` | The room changed owners while the write was in flight | Retry with the same `id` |
+| `conflict` | This `id` was already used for a different message in the room | Send it under a new `id` |
 
 ## Limits
 
