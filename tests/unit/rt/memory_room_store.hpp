@@ -179,8 +179,29 @@ public:
         });
     }
 
+    // While set, answers and notices wait, as behind a database that has stopped answering
+    // without dropping the connection.
+    bool hold = false;
+
+    // Lets what waited go, oldest first unless asked otherwise.
+    void release_held(bool newest_first = false) {
+        hold = false;
+        if (newest_first) {
+            std::ranges::reverse(queue_);
+        }
+        if (!armed_) {
+            armed_ = true;
+            timer_ = reactor_.arm_timer(core::Millis{0}, *this);
+        }
+    }
+
+    [[nodiscard]] std::size_t waiting() const noexcept { return queue_.size(); }
+
     void on_timeout() noexcept override {
         armed_ = false;
+        if (hold) {
+            return;
+        }
         std::vector<std::function<void()>> due;
         due.swap(queue_);
         for (auto& call : due) {

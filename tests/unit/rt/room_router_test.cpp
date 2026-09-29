@@ -543,6 +543,28 @@ TEST_P(RoomRouterTest, AJoinPastTheNodesRoomLimitIsBusy) {
     EXPECT_TRUE(join(a, bob));
 }
 
+TEST_P(RoomRouterTest, ARoomsQueueIsBoundedInBytesNotInWrites) {
+    Node& a = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    a.store->hold = true;
+    // Sixteen writes of 60 KiB fit the room's 1 MiB; the seventeenth does not, though a count
+    // of writes would have taken hundreds.
+    const std::string big(std::size_t{60} * 1024, 'q');
+    std::vector<std::optional<std::expected<std::uint64_t, RouteError>>> results(17);
+    for (auto& result : results) {
+        const auto body = std::as_bytes(std::span{big});
+        a.router->send(room_, alice, *core::UserId::parse("alice"), {body.begin(), body.end()},
+                       [&result](auto r) noexcept { result = r; });
+    }
+    EXPECT_EQ(results.back(), std::unexpected(RouteError::Busy));
+    a.store->release_held();
+    ASSERT_TRUE(pump([&] { return results[15].has_value(); }));
+    for (std::size_t i = 0; i < 16; ++i) {
+        EXPECT_EQ(results[i], i + 1) << i;
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(Reactors, RoomRouterTest,
                          ::testing::Values(ReactorKind::IoUring, ReactorKind::Epoll),
                          ulw::test::reactor_name);

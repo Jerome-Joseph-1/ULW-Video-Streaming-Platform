@@ -24,16 +24,23 @@ constexpr core::Millis kTick{250};
 // An owner answers a forward after one append, which the store gives up on after
 // kStoreTimeout; the extra second covers the hop and the writes queued ahead in the room.
 constexpr core::Millis kForwardTimeout = kStoreTimeout + core::Millis{1'000};
-// One room sequences about one message per store round trip, a millisecond or so; 256 queued
-// writes are a quarter second of backlog. Past that the room is flooded, and the owner sheds
-// load with Busy instead of holding it.
-constexpr std::size_t kMaxQueuedWrites = 256;
+// Writes waiting for their sequence number are counted in bytes: the body, plus this for the
+// rest of a Write (sender, callback, queue slot), so that empty bodies are not free.
+constexpr std::size_t kWriteOverhead = 256;
+// One room sequences about one message per store round trip, a millisecond or so. 1 MiB is a
+// few hundred ordinary messages, a quarter second or more of backlog, or sixteen of the
+// largest; past that the room is flooded, and the owner sheds load with Busy.
+constexpr std::size_t kMaxRoomQueueBytes = std::size_t{1} << 20U;
+// All rooms' queues together: 64 of them full. The owner's share of the node's memory budget
+// (ADR-0038), whatever mix of rooms is busy.
+constexpr std::size_t kMaxQueueBytes = std::size_t{64} << 20U;
 // Frames waiting for a connection to another node to open: a handful of subscriptions and
 // forwards. A peer that takes longer to answer than this fills is treated as down.
 constexpr std::size_t kMaxUnsentBytes = std::size_t{1} << 20U;
-// Connections from other nodes at once. A deployment runs a handful of replicas, each dialling
-// this node once; the rest is room for the dead ones a rolling restart leaves until they close.
-constexpr std::size_t kMaxPeers = 256;
+// Connections from other nodes at once. A deployment runs three replicas, each dialling this
+// node once; the rest is room for the dead ones a rolling restart leaves until they close, and
+// for scaling out. Each may hold a frame in its decoder and kMaxPeerBacklog unsent.
+constexpr std::size_t kMaxPeers = 32;
 // From a connection's start to the end of its handshake: a round trip on the private network
 // and two MACs take milliseconds, and the dialer's address lookup is bounded by kStoreTimeout.
 // A peer that takes longer is stuck or is not a node, and gives its slot back.
@@ -736,8 +743,13 @@ private:
     struct OwnedRoomState {
         std::vector<net::Slab<Inbound>::Handle> subscribers;
         std::deque<Write> writes;
+        std::size_t queued_bytes = 0;
         bool appending = false;
     };
+
+    static std::size_t cost(const Write& write) noexcept {
+        return write.body.size() + kWriteOverhead;
+    }
 
     void tick() {
         const core::MonoTime now = clock_.now();
@@ -991,10 +1003,13 @@ private:
 
     void enqueue(const core::RoomId& room, Write write) {
         OwnedRoomState& o = owned_[room];
-        if (o.writes.size() >= kMaxQueuedWrites) {
+        const std::size_t bytes = cost(write);
+        if (o.queued_bytes + bytes > kMaxRoomQueueBytes || queued_bytes_ + bytes > kMaxQueueBytes) {
             answer(write, std::unexpected(RouteError::Busy));
             return;
         }
+        o.queued_bytes += bytes;
+        queued_bytes_ += bytes;
         o.writes.push_back(std::move(write));
         pump(room);
     }
@@ -1026,6 +1041,8 @@ private:
         OwnedRoomState& o = it->second;
         Write write = std::move(o.writes.front());
         o.writes.pop_front();
+        o.queued_bytes -= cost(write);
+        queued_bytes_ -= cost(write);
         o.appending = false;
         if (!seq) {
             answer(write,
@@ -1103,6 +1120,8 @@ private:
     void fail_writes(OwnedRoomState& o, RouteError error) {
         std::deque<Write> writes = std::move(o.writes);
         o.writes.clear();
+        queued_bytes_ -= o.queued_bytes;
+        o.queued_bytes = 0;
         for (Write& w : writes) {
             answer(w, std::unexpected(error));
         }
@@ -1264,6 +1283,7 @@ private:
     RoomRegistry registry_;
     std::unordered_map<core::RoomId, LocalRoom> local_;
     std::unordered_map<core::RoomId, OwnedRoomState> owned_;
+    std::size_t queued_bytes_ = 0;
     // Owned rooms nobody here uses, and since when.
     std::unordered_map<core::RoomId, core::MonoTime> idle_since_;
     net::Slab<Inbound> inbound_;

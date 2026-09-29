@@ -18,10 +18,12 @@ namespace chat {
 class Session;
 
 struct Limits {
-    // Each connection may hold a 64 KiB message in its decoder and max_backlog of unsent
-    // output: 2048 x (64 + 256) KiB = 640 MiB at the very worst, inside a 1 GiB pod with room
-    // for the kernel's socket buffers. A connection that is only listening costs a few KiB.
-    std::size_t max_connections = 2048;
+    // Each connection may hold a 64 KiB message in its decoder, max_backlog of unsent output
+    // and max_send_bytes_in_flight of sends: 64 + 256 + 128 = 448 KiB, and 1280 of them 560 MiB
+    // at the very worst. The router adds its owner queues (64 MiB) and node-channel
+    // connections (32 x ~2.1 MiB), about 690 MiB in all, inside a 1 GiB pod with room for the
+    // kernel's socket buffers (ADR-0038). A connection that is only listening costs a few KiB.
+    std::size_t max_connections = 1280;
     // A client shows a handful of conversations at once; 64 bounds what one socket makes this
     // node track and subscribe to.
     std::size_t max_rooms_per_connection = 64;
@@ -31,9 +33,10 @@ struct Limits {
     // than a script filling the table would like.
     std::uint32_t join_burst = 64;
     std::uint32_t joins_per_second = 1;
-    // Sends answered only once their owner has sequenced them; a client that has 32 of those
-    // outstanding is not waiting on the answers.
-    std::size_t max_sends_in_flight = 32;
+    // Bytes of a connection's sends not yet answered, each counted as its body plus 256 for
+    // the rest of it. They sit in an owner's queue or on the node channel meanwhile, so they are
+    // part of the connection's memory: two of the largest messages, or dozens of ordinary ones.
+    std::size_t max_send_bytes_in_flight = std::size_t{128} * 1024;
     // Output a client has not read yet. A delivery is at most 64 KiB, so this is four of the
     // largest, or thousands of ordinary ones: a reader that far behind is closed, and resumes
     // from its last seq when it reconnects (M17).

@@ -47,6 +47,10 @@ public:
     Node& operator=(Node&&) = delete;
 
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+    // While set, the room store answers nothing: every send stays in flight. `store_held`
+    // follows once the node's thread has seen it.
+    std::atomic<bool> hold_store = false;
+    std::atomic<bool> store_held = false;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -86,6 +90,14 @@ private:
         }
         port.set_value(client_port);
         while (!stop_) {
+            if (hold_store != store->hold) {
+                if (hold_store) {
+                    store->hold = true;
+                } else {
+                    store->release_held();
+                }
+                store_held = store->hold;
+            }
             (*reactor)->run_once(core::Millis{5});
             server->reap();
         }
@@ -253,6 +265,32 @@ TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryCo
     // A second connection does not reset the user's allowance; another user has their own.
     EXPECT_FALSE(join(*second, "01a0eb86-6cca-7dce-84cc-3bb47615f904"));
     EXPECT_TRUE(join(*other, "01a0eb86-6cca-7dce-84cc-3bb47615f905"));
+}
+
+TEST_P(ChatSessionTest, SendsInFlightAreBoundedInBytes) {
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->next_text(seconds(10)));
+    // Three sends of 50 KiB while the store answers nothing: two fit the connection's 128 KiB,
+    // the third does not, however few sends that is.
+    node_->hold_store = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->store_held.load(); }));
+    const std::string body(std::size_t{50} * 1024, 'x');
+    for (int ref = 1; ref <= 3; ++ref) {
+        ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
+                                     R"(","ref":)" + std::to_string(ref) + R"(,"body":")" + body +
+                                     R"("})"));
+    }
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"error","reason":"busy","room":")" + std::string(kRoom) + R"(","ref":3})");
+    node_->hold_store = false;
+    int sent = 0;
+    while (sent < 2) {
+        const auto text = alice->next_text(seconds(10));
+        ASSERT_TRUE(text);
+        sent += text->starts_with(R"({"type":"sent")") ? 1 : 0;
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

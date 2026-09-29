@@ -109,7 +109,7 @@ private:
     codec::ws::Decoder decoder_;
     // Rooms joined or being joined, to leave when the connection goes.
     std::vector<core::RoomId> rooms_;
-    std::size_t sends_in_flight_ = 0;
+    std::size_t send_bytes_in_flight_ = 0;
     std::uint32_t control_tokens_;
     core::MonoTime control_refilled_;
     bool closed_ = false;

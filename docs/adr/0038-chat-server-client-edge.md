@@ -22,9 +22,19 @@ sequenced messages, and M17 owns the rest (acks, resume, rate limits).
 
 ## Decision
 
-- **Allocation.** Admission bounds memory: at most 2048 connections, each holding at most one
-  64 KiB message in its decoder and 256 KiB of unsent output (640 MiB at the very worst). The
-  read callbacks of client sessions and of node-channel connections, and the router's answers
+- **Memory.** Every queue is bounded in bytes, not in entries, and admission bounds the rest:
+  - a client connection holds at most one 64 KiB message in its decoder, 256 KiB of unsent
+    output and 128 KiB of sends not yet answered (each counted as its body plus 256 bytes,
+    wherever it waits: an owner's queue or the node channel), 448 KiB in all; 1280
+    connections are 560 MiB;
+  - an owner's queues of writes awaiting their sequence numbers hold at most 1 MiB per room and
+    64 MiB across rooms, again body plus 256 bytes a write; past either, the write is `busy`;
+  - at most 32 node-channel connections, each holding one frame (64 KiB) being decoded, 1 MiB
+    queued before it opens and about 1 MiB unsent once open, beyond which it is closed:
+    about 67 MiB;
+  about 690 MiB at the very worst, inside a 1 GiB pod, with the rest for the kernel's socket
+  buffers, which the pod's memory is also charged for.
+- **Allocation.** The read callbacks of client sessions and of node-channel connections, and the router's answers
   to a session, catch `std::bad_alloc`, count it (`allocation_failures_total`) and close that
   connection; a session inside the router's fan-out closes on the next loop iteration, so the
   fan-out never sees its members change. The router's own timers and store answers allocate a

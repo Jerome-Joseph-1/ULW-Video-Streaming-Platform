@@ -397,34 +397,37 @@ void Session::send(Send send) {
         close_with(kInternalError);
         return;
     }
-    if (sends_in_flight_ >= server_.limits().max_sends_in_flight) {
+    // What a send holds while it waits: its body, and the rest of it on its way to the owner.
+    constexpr std::size_t kSendOverhead = 256;
+    const std::size_t bytes = send.body.size() + kSendOverhead;
+    if (send_bytes_in_flight_ + bytes > server_.limits().max_send_bytes_in_flight) {
         std::string out;
         write_error(out, "busy", send.room, send.ref);
         send_text(out);
         return;
     }
-    ++sends_in_flight_;
+    send_bytes_in_flight_ += bytes;
     const auto body = bytes_of(send.body);
     ChatServer& server = server_;
     const Handle handle = handle_;
     const core::RoomId room = send.room;
     const std::optional<std::uint64_t> ref = send.ref;
-    server_.deps().router.send(
-        room, *this, *user_, {body.begin(), body.end()},
-        [&server, handle, room, ref](std::expected<std::uint64_t, rt::RouteError> r) noexcept {
-            if (Session* s = server.session(handle)) {
-                try {
-                    s->sent(room, ref, r);
-                } catch (const std::bad_alloc&) {
-                    s->allocation_failed();
-                }
-            }
-        });
+    server_.deps().router.send(room, *this, *user_, {body.begin(), body.end()},
+                               [&server, handle, room, ref,
+                                bytes](std::expected<std::uint64_t, rt::RouteError> r) noexcept {
+                                   if (Session* s = server.session(handle)) {
+                                       s->send_bytes_in_flight_ -= bytes;
+                                       try {
+                                           s->sent(room, ref, r);
+                                       } catch (const std::bad_alloc&) {
+                                           s->allocation_failed();
+                                       }
+                                   }
+                               });
 }
 
 void Session::sent(const core::RoomId& room, std::optional<std::uint64_t> ref,
                    std::expected<std::uint64_t, rt::RouteError> result) {
-    --sends_in_flight_;
     std::string out;
     if (!result) {
         write_error(out, reason(result.error()), room, ref);
