@@ -15,11 +15,12 @@ spec:
       app.kubernetes.io/name: livekit
   policyTypes: ["Ingress"]
   ingress:
-    # The stunnerd pods of stunner/gateway.yaml's Gateway; the operator labels them app=stunner.
+    # The stunnerd pods of stunner/gateway.yaml's Gateway, by the label the operator gives only
+    # them: app=stunner alone would admit any workload that happens to use that label.
     - from:
         - podSelector:
             matchLabels:
-              app: stunner
+              stunner.l7mp.io/related-gateway-name: stunner
       ports:
         - port: rtc-udp
           protocol: UDP

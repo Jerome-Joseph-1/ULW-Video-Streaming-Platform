@@ -164,7 +164,7 @@ def main():
     try:
         print("ready:")
         wait_ready()
-        stunnerd = pod_ip(NAMESPACE, "app=stunner")
+        stunnerd = pod_ip(NAMESPACE, "stunner.l7mp.io/related-gateway-name=stunner")
         livekit = pod_ip(NAMESPACE, "app.kubernetes.io/name=livekit")
         forbidden = pod_ip("stunner-system",
                            "control-plane=stunner-gateway-operator-controller-manager")
