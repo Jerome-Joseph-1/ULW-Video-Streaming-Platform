@@ -25,6 +25,13 @@ what happened.
 
 - `finish` refused as `Invalid`: log an error and call `fail(reason = "the transcoded result
   could not be recorded", retryable = false)`. If that is written the outcome is `Failed`.
+- The Postgres adapter reports `Invalid` only for a constraint (class 23): that is the refusal
+  certain to repeat. Its classifier's catch-all also holds a server out of a resource (53xxx),
+  a system error (58xxx, XX000) and a read-only transaction after a failover (25006); those
+  report `Unavailable`, so a transient refusal never fails a good transcode. A statement that
+  is itself wrong reports `Unavailable` too, and is bounded by the lease and the attempts.
+- A refused `finish` that is really a lost lease stays safe: the `fail` that follows is fenced
+  like every write, matches no row, and the outcome is `FencedOut`.
 - `fail` refused, whatever the reason: nothing is left to try; outcome `Unrecorded`, and the
   lease and the reaper settle the job.
 - A refused progress write is logged once and that value is not resent; a refused heartbeat or

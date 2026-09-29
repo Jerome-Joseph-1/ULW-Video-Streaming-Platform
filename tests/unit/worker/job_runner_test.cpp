@@ -368,6 +368,15 @@ TEST_F(JobRunnerTest, AResultTheDatabaseRefusesFailsTheJobRatherThanRerunningIt)
     EXPECT_NE(errors[0].find(R"("call":"finish","error":"invalid")"), std::string::npos);
 }
 
+// A refused finish may be a lost lease's: the fail that follows is fenced like every write,
+// so a job another worker holds is never failed by this one.
+TEST_F(JobRunnerTest, ARefusedFinishFollowedByAFencedFailIsFencedOut) {
+    queue.refuse("finish", core::ports::JobQueueError::Invalid);
+    queue.answer_writes(false);
+    EXPECT_EQ(run(), JobOutcome::FencedOut);
+    EXPECT_TRUE(writes().back().starts_with("queue fail permanent")) << writes().back();
+}
+
 TEST_F(JobRunnerTest, AnUnreachableDatabaseAtFinishWritesNothingMore) {
     queue.refuse("finish", core::ports::JobQueueError::Unavailable);
     EXPECT_EQ(run(), JobOutcome::Unrecorded);

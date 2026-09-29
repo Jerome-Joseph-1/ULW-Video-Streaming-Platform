@@ -2,6 +2,7 @@
 
 #include "job_session.hpp"
 #include "params.hpp"
+#include "queue_error.hpp"
 #include "result.hpp"
 #include "sql.hpp"
 #include "sync_connection.hpp"
@@ -98,21 +99,6 @@ video AS (
            version = version + 1, updated_at = now()
      WHERE id IN (SELECT video_id FROM exhausted) AND state = 'processing')
 SELECT (SELECT count(*) FROM requeued) + (SELECT count(*) FROM exhausted))sql";
-
-JobQueueError to_queue_error(DbError e) noexcept {
-    switch (e) {
-    case DbError::Retry:
-    case DbError::ConnectionLost:
-    case DbError::Timeout:
-    case DbError::LockTimeout:
-        return JobQueueError::Unavailable;
-    case DbError::Duplicate:
-    case DbError::Constraint:
-    case DbError::Rejected:
-        return JobQueueError::Invalid;
-    }
-    return JobQueueError::Unavailable;
-}
 
 template <class T> JobQueueResult<T> failure(const DbFailure& f) {
     return std::unexpected(to_queue_error(f.error));
