@@ -99,7 +99,9 @@ RETURNING room_assignments.room_id)sql";
 // with the seq it was stored under; with another body it is a conflict, answered with none.
 // The room_state row is updated (by nothing) either way, so that those answers are fenced too.
 // A concurrent repeat of the same key that commits first makes this one fail on the key's
-// unique index, whole, seq included; run again, it finds the stored row.
+// unique index, whole, seq included; run again, it finds the stored row. A lossy room (a
+// stream's live chat) keeps its newest 1000: storing seq N deletes seq N - 1000, one more
+// primary key write, so a live room's rows stay about 2 MiB however long the stream (ADR-0057).
 constexpr Sql kAppendMessage = R"sql(
 WITH prior AS (
     SELECT seq, body = $5 AS same
@@ -108,13 +110,18 @@ next AS (
     UPDATE room_state
        SET last_seq = last_seq + CASE WHEN EXISTS (SELECT 1 FROM prior) THEN 0 ELSE 1 END
      WHERE room_id = $1 AND owner_generation = $2
-    RETURNING last_seq),
+    RETURNING last_seq, delivery),
 stored AS (
     INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at)
     SELECT $1, last_seq, $3, $4, $5, now()
       FROM next
      WHERE NOT EXISTS (SELECT 1 FROM prior)
-    RETURNING seq)
+    RETURNING seq),
+pruned AS (
+    DELETE FROM chat_messages
+     WHERE room_id = $1
+       AND seq = (SELECT last_seq - 1000 FROM next WHERE delivery = 'lossy')
+       AND EXISTS (SELECT 1 FROM stored))
 SELECT seq, same FROM prior WHERE EXISTS (SELECT 1 FROM next)
 UNION ALL
 SELECT seq, true FROM stored)sql";
