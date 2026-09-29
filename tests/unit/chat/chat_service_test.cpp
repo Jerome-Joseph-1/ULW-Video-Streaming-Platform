@@ -1054,6 +1054,35 @@ TEST_F(SmallBuffers, ARoomKeepsItsNewestMessagesAndAllRoomsTogetherDropTheOldest
     EXPECT_EQ(seqs(alice.take()), (std::vector<std::uint64_t>{1, 2}));
 }
 
+class FewKept : public ChatServiceTest {
+protected:
+    // A hundred messages across rooms, four ordinary ones per room.
+    FewKept() : ChatServiceTest({.room_buffer_bytes = 4 * 258, .buffer_messages = 100}) {}
+};
+
+// A busy live chat drops its own oldest with every message it keeps. What it dropped must not
+// count against the rooms that keep theirs: a quiet group chat still resumes.
+TEST_F(FewKept, AQuietRoomKeepsWhatItResumesFromWhileALiveChatRunsOnTheSameNode) {
+    FakeClient member;
+    FakeClient viewer;
+    const auto m = attach(member);
+    const auto v = attach(viewer, "bob");
+    join(m);
+    join(v, std::nullopt, chat::Delivery::Lossy, kLiveRoom);
+    rt::IMember& quiet = rooms_.admit();
+    rt::IMember& live = rooms_.admit();
+    for (std::uint64_t seq = 1; seq <= 3; ++seq) {
+        deliver(quiet, seq);
+    }
+    for (std::uint64_t seq = 1; seq <= 1'000; ++seq) {
+        deliver(live, seq, "hi", "carol", kLiveRoom);
+    }
+    member.take();
+    join(m, 0);
+    EXPECT_EQ(seqs(member.take()), (std::vector<std::uint64_t>{1, 2, 3}));
+    EXPECT_EQ(service_->buffered_bytes(), 7 * (2 + 256U));
+}
+
 TEST_F(ChatServiceTest, ADetachedClientIsToldNothingMoreEvenOfItsOwnSends) {
     FakeClient alice;
     FakeClient bob;

@@ -644,12 +644,22 @@ void ChatService::keep(Room& room, const rt::Message& message) {
                          .body = {message.body.begin(), message.body.end()}});
     room.kept_bytes += cost;
     buffered_bytes_ += cost;
+    ++kept_messages_;
     while (room.kept_bytes > limits_.room_buffer_bytes) {
         drop_oldest(room);
     }
-    while (!kept_order_.empty() && (buffered_bytes_ > limits_.buffer_bytes ||
-                                    kept_order_.size() > limits_.buffer_messages)) {
+    while (!kept_order_.empty() &&
+           (buffered_bytes_ > limits_.buffer_bytes || kept_messages_ > limits_.buffer_messages)) {
         forget_oldest();
+    }
+    // A room dropping its own oldest (a busy live chat does, every message) leaves its entry
+    // here behind. Past twice the bound at least half are such, so clearing them out costs
+    // nothing per message, and the entries never count against rooms that keep theirs.
+    if (kept_order_.size() > 2 * limits_.buffer_messages) {
+        std::erase_if(kept_order_, [this](const std::pair<core::RoomId, std::uint64_t>& e) {
+            const Room* r = find(e.first);
+            return r == nullptr || r->kept.empty() || e.second < r->kept.front().seq;
+        });
     }
 }
 
@@ -664,6 +674,7 @@ void ChatService::drop_oldest(Room& room) noexcept {
     const std::size_t cost = room.kept.front().body.size() + kMessageOverhead;
     room.kept_bytes -= cost;
     buffered_bytes_ -= cost;
+    --kept_messages_;
     room.kept.pop_front();
 }
 
@@ -714,6 +725,7 @@ void ChatService::erase(const core::RoomId& room) noexcept {
         rooms_plane_.leave(room, r);
     }
     buffered_bytes_ -= r.kept_bytes;
+    kept_messages_ -= r.kept.size();
     rooms_.erase(it);
 }
 

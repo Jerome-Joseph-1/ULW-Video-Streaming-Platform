@@ -85,7 +85,8 @@ struct ServiceLimits {
     // Each room this node is in keeps its latest messages for clients that come back, each
     // counted as its body plus 256. 256 KiB is a few hundred ordinary messages: what a phone
     // that dropped off for a minute missed in a busy conversation. All rooms together keep at
-    // most 32 MiB, and 131072 messages (the order they are dropped in costs 24 bytes each).
+    // most 32 MiB, and 131072 messages (the order they are dropped in costs 24 bytes each, with
+    // room for as many again of messages their own room dropped first: 6 MiB at most).
     std::size_t room_buffer_bytes = std::size_t{256} * 1024;
     std::size_t buffer_bytes = std::size_t{32} << 20U;
     std::size_t buffer_messages = std::size_t{128} * 1024;
@@ -219,6 +220,8 @@ private:
     // Every kept message, in the order kept, to drop the oldest of all rooms first.
     std::deque<std::pair<core::RoomId, std::uint64_t>> kept_order_;
     std::size_t buffered_bytes_ = 0;
+    // Messages kept across rooms; kept_order_ may also hold entries of messages already gone.
+    std::size_t kept_messages_ = 0;
     core::MonoTime next_sweep_;
 };
 
