@@ -56,7 +56,7 @@ listen for an RTMP publisher nor connect to an SRT peer.
 - Nothing authenticates the publisher. On loopback that is the whole trust model; a packager
   listening on a pod address is protected by a NetworkPolicy that admits the egress pod only,
   which the deployment manifests must carry.
-- A publisher that disconnects ends the stream (ADR-0034). A network blip between egress and
+- A publisher that disconnects ends the stream (ADR-0038). A network blip between egress and
   packager therefore ends it too, until the egress side reconnects into a new stream.
 - Reopen if ffmpeg must terminate the transport itself (SRT with retransmission across a
   lossy link): that needs a network for the child, or a receiver we write.
