@@ -46,11 +46,12 @@ bool is_rid_id(std::string_view s) noexcept {
     });
 }
 
-bool is_upper_hex(char c) noexcept {
-    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
+bool is_hex(char c) noexcept {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
 }
 
-// RFC 8122 section 5: 2UHEX *(":" 2UHEX), upper case only.
+// RFC 8122 section 5: 2UHEX *(":" 2UHEX), upper case. Chromium accepts lower case too, and the
+// value is kept as written, so accepting it costs the round trip nothing.
 bool is_fingerprint_value(std::string_view s) noexcept {
     constexpr std::size_t kPair = 3;
     if (s.size() % kPair != 2) {
@@ -62,7 +63,7 @@ bool is_fingerprint_value(std::string_view s) noexcept {
             if (c != ':') {
                 return false;
             }
-        } else if (!is_upper_hex(c)) {
+        } else if (!is_hex(c)) {
             return false;
         }
     }

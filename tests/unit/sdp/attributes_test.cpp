@@ -8,6 +8,9 @@
 
 #include "text.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cstddef>
 #include <gtest/gtest.h>
 #include <initializer_list>
 #include <optional>
@@ -49,6 +52,7 @@ using ulw::test::inserted;
 using ulw::test::Lines;
 using ulw::test::minimal;
 using ulw::test::Parsed;
+using ulw::test::replaced;
 using ulw::test::with;
 
 Lines in_media(std::initializer_list<std::string_view> lines) {
@@ -261,10 +265,32 @@ TEST(SdpAttributes, Fingerprint) {
     const auto& fp = std::get<Fingerprint>(p.session().media[0].attributes[2].value);
     EXPECT_EQ(fp.algorithm, "sha-256");
     EXPECT_TRUE(fp.value.starts_with("05:B8:"));
-    // RFC 8122 section 5: upper-case hex pairs separated by colons.
-    expect_refused_in_media({"a=fingerprint:sha-256 ab:CD", "a=fingerprint:sha-256 ABCD",
+    // RFC 8122 section 5: hex pairs separated by colons.
+    expect_refused_in_media({"a=fingerprint:sha-256 AB:CG", "a=fingerprint:sha-256 ABCD",
                              "a=fingerprint:sha-256 AB:", "a=fingerprint:sha-256 A:BC",
                              "a=fingerprint:sha-256", "a=fingerprint:sha-256 AB CD"});
+}
+
+TEST(SdpAttributes, FingerprintHexInEitherCaseIsKeptAsWritten) {
+    const auto lowered = [](char c) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    };
+    std::string lower{ulw::test::kFingerprint};
+    std::ranges::transform(lower, lower.begin(), lowered);
+    std::string mixed{ulw::test::kFingerprint};
+    // After "sha-256 ": every second pair in lower case.
+    for (std::size_t i = 8; i < mixed.size(); i += 6) {
+        mixed[i] = lowered(mixed[i]);
+        mixed[i + 1] = lowered(mixed[i + 1]);
+    }
+    ASSERT_NE(lower, mixed);
+    for (const std::string& value : {lower, mixed}) {
+        const Parsed p{replaced(minimal(), "a=fingerprint:", "a=fingerprint:" + value)};
+        ASSERT_TRUE(p.ok()) << ::testing::PrintToString(p.error());
+        const auto& fp = std::get<Fingerprint>(p.session().media[0].attributes[2].value);
+        EXPECT_EQ(fp.value, value.substr(8));
+        EXPECT_EQ(serialize(p.session()), p.source());
+    }
 }
 
 TEST(SdpAttributes, Setup) {
