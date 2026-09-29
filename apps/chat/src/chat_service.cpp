@@ -107,8 +107,6 @@ ChatService::Room* ChatService::find(const core::RoomId& room) noexcept {
     return it == rooms_.end() ? nullptr : it->second.get();
 }
 
-// ---- joining
-
 bool ChatService::admit_join(const core::UserId& user) {
     const core::MonoTime now = clock_.now();
     const auto it =
@@ -255,8 +253,6 @@ void ChatService::replay(const Room& room, Client& c, std::uint64_t after) {
     }
 }
 
-// ---- sending
-
 void ChatService::send(ClientId id, Send send) {
     Client* c = find(id);
     if (c == nullptr) {
@@ -320,8 +316,6 @@ void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageK
         c->client->allocation_failed();
     }
 }
-
-// ---- delivering
 
 // One text for every client in the room. A client that cannot be given it (the text could not
 // be made) is closed if it asked never to miss a message; it resumes when it reconnects.
@@ -393,8 +387,6 @@ void ChatService::forget_oldest() noexcept {
         drop_oldest(*r);
     }
 }
-
-// ---- lifetime
 
 void ChatService::sweep() noexcept {
     const core::MonoTime now = clock_.now();
