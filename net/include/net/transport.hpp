@@ -4,6 +4,7 @@
 #include "os/unique_fd.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <span>
@@ -57,6 +58,8 @@ public:
     // pool must be destroyed before the factory and `done`.
     virtual void reload(OffloadPool& pool, IReloadHandler& done) = 0;
     [[nodiscard]] virtual std::size_t handshakes_in_flight() const noexcept = 0;
+    // Handshakes that ended in an error, a timeout or the peer leaving, since the start.
+    [[nodiscard]] virtual std::uint64_t handshake_failures() const noexcept = 0;
 };
 
 [[nodiscard]] std::unique_ptr<ITransportFactory> make_plain_transports(IReactor& reactor);

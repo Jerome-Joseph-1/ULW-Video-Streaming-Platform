@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <cstdio>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
@@ -64,8 +65,27 @@ private:
     std::size_t used_ = 0;
 };
 
+// What every connection of one factory shares.
+struct Shared {
+    std::size_t handshakes_in_flight = 0;
+    std::uint64_t handshake_failures = 0;
+    // Failures are logged at most once a second. Anyone can open connections and fail their
+    // handshakes, and a line per failure would let a scanner fill the log and spend the loop
+    // on write(2); the counter above still sees every one.
+    core::MonoTime next_log;
+    std::uint64_t unlogged = 0;
+};
+
+constexpr core::Millis kLogInterval{1'000};
+
 // Everything OpenSSL queued, on one line, so one failure reads as one event.
-void log_ssl_errors(std::string_view what) noexcept {
+void log_ssl_errors(Shared& shared, core::MonoTime now, std::string_view what) noexcept {
+    if (now < shared.next_log) {
+        ++shared.unlogged;
+        ERR_clear_error();
+        return;
+    }
+    shared.next_log = now + kLogInterval;
     LogLine line;
     line.append("tls: ");
     line.append(what);
@@ -74,6 +94,13 @@ void log_ssl_errors(std::string_view what) noexcept {
         ERR_error_string_n(e, reason.data(), reason.size());
         line.append(": ");
         line.append(reason.data());
+    }
+    if (const std::uint64_t n = std::exchange(shared.unlogged, 0); n != 0) {
+        std::array<char, 24> count{};
+        auto* const end = std::to_chars(count.begin(), count.end(), n).ptr;
+        line.append(" (");
+        line.append({count.begin(), end});
+        line.append(" more not logged)");
     }
     line.write();
 }
@@ -155,9 +182,8 @@ void carry_ticket_keys(SSL_CTX* from, SSL_CTX* to) noexcept {
 // OpenSSL never touches the descriptor.
 class TlsTransport final : public ITransport, public IStreamHandler, public ITimerHandler {
 public:
-    TlsTransport(std::size_t& handshakes, IReactor& reactor, IStreamHandler& upper,
-                 SslPtr ssl) noexcept
-        : handshakes_(handshakes), reactor_(reactor), upper_(upper), ssl_(std::move(ssl)) {}
+    TlsTransport(Shared& shared, IReactor& reactor, IStreamHandler& upper, SslPtr ssl) noexcept
+        : shared_(shared), reactor_(reactor), upper_(upper), ssl_(std::move(ssl)) {}
 
     ~TlsTransport() override {
         cancel_timer();
@@ -171,7 +197,7 @@ public:
     void start(ConnId conn) {
         conn_ = conn;
         counted_ = true;
-        ++handshakes_;
+        ++shared_.handshakes_in_flight;
         arm_timer(kHandshakeTimeout);
         SSL_set_accept_state(ssl_.get());
         sync_receiving();
@@ -206,7 +232,7 @@ public:
             if (SSL_write_ex(ssl_.get(), bytes.data(), bytes.size(), &n) != 1) {
                 // A memory BIO never blocks, so a failed write is a broken session. Reported
                 // from the loop: the caller is in the middle of its own work.
-                log_ssl_errors("write failed");
+                log_ssl_errors(shared_, reactor_.now(), "write failed");
                 defer_error(EPROTO);
                 return;
             }
@@ -256,7 +282,7 @@ public:
             ERR_clear_error();
             if (BIO_write(SSL_get_rbio(ssl_.get()), cipher.data(), static_cast<int>(n)) !=
                 static_cast<int>(n)) {
-                log_ssl_errors("read buffer");
+                log_ssl_errors(shared_, reactor_.now(), "read buffer");
                 fail(ENOMEM);
                 return;
             }
@@ -407,7 +433,7 @@ private:
         default:
             break;
         }
-        log_ssl_errors(what);
+        log_ssl_errors(shared_, reactor_.now(), what);
         // The alert OpenSSL queued tells the peer why, if it can still hear it.
         flush();
         fail(EPROTO);
@@ -419,6 +445,7 @@ private:
         }
         eof_delivered_ = true;
         if (state_ == State::Handshaking) {
+            ++shared_.handshake_failures;
             state_ = State::Failed;
             cancel_timer();
             end_handshake();
@@ -456,6 +483,9 @@ private:
 
     // Only on a reactor callback: the protocol hears of it before this returns.
     void fail(int err) noexcept {
+        if (state_ == State::Handshaking) {
+            ++shared_.handshake_failures;
+        }
         state_ = State::Failed;
         cancel_timer();
         end_handshake();
@@ -486,11 +516,11 @@ private:
     void end_handshake() noexcept {
         if (counted_) {
             counted_ = false;
-            --handshakes_;
+            --shared_.handshakes_in_flight;
         }
     }
 
-    std::size_t& handshakes_;
+    Shared& shared_;
     IReactor& reactor_;
     IStreamHandler& upper_;
     SslPtr ssl_;
@@ -531,8 +561,7 @@ public:
         BIO_set_mem_eof_return(in, -1);
         BIO_set_mem_eof_return(out, -1);
         SSL_set_bio(ssl.get(), in, out);
-        auto transport =
-            std::make_unique<TlsTransport>(handshakes_, reactor_, handler, std::move(ssl));
+        auto transport = std::make_unique<TlsTransport>(shared_, reactor_, handler, std::move(ssl));
         const auto id = reactor_.attach(std::move(conn), *transport);
         if (!id) {
             return std::unexpected(id.error());
@@ -574,13 +603,18 @@ public:
         }
     }
 
-    [[nodiscard]] std::size_t handshakes_in_flight() const noexcept override { return handshakes_; }
+    [[nodiscard]] std::size_t handshakes_in_flight() const noexcept override {
+        return shared_.handshakes_in_flight;
+    }
+    [[nodiscard]] std::uint64_t handshake_failures() const noexcept override {
+        return shared_.handshake_failures;
+    }
 
 private:
     IReactor& reactor_;
     const TlsFiles files_;
     SslCtxPtr ctx_;
-    std::size_t handshakes_ = 0;
+    Shared shared_;
     OffloadPool* pool_ = nullptr;
     IReloadHandler* done_ = nullptr;
     std::expected<SslCtxPtr, std::string> loaded_ = std::unexpected(std::string{});

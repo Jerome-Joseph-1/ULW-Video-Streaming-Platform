@@ -74,6 +74,7 @@ TEST(GatewayTls, PlaintextSentToTheTlsPortIsNeverAnswered) {
     EXPECT_TRUE(plain.closed_by_peer());
     EXPECT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
     EXPECT_TRUE(metric_is(gw, "tls_handshakes_in_flight 0"));
+    EXPECT_TRUE(metric_is(gw, "tls_handshake_failures_total 1"));
 }
 
 TEST(GatewayTls, ASilentConnectionIsNotMistakenForAClosedOne) {

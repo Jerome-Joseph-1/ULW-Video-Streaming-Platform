@@ -157,13 +157,15 @@ std::string Gateway::render_metrics() const {
                        "timeouts_total{{kind=\"backend\"}} {}\n"
                        "timeouts_total{{kind=\"backstop\"}} {}\n"
                        "tls_handshakes_in_flight {}\n"
+                       "tls_handshake_failures_total {}\n"
                        "certificate_reloads_total {}\n"
                        "certificate_reload_failures_total {}\n",
                        c.requests, c.connections_accepted, c.connections_rejected,
                        connections_.size(), upload_slots_, c.admission_rejections, c.bytes_ingested,
                        c.timeouts_header, c.timeouts_body, c.timeouts_body_rate, c.timeouts_backend,
                        c.timeouts_backstop, deps_.transports.handshakes_in_flight(),
-                       c.certificate_reloads, c.certificate_reload_failures);
+                       deps_.transports.handshake_failures(), c.certificate_reloads,
+                       c.certificate_reload_failures);
 }
 
 } // namespace gateway

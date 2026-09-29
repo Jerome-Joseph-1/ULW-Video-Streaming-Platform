@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -499,6 +500,48 @@ TEST_P(TlsTransportTest, APeerSendingGarbageFailsTheHandshake) {
     EXPECT_EQ(transports->handshakes_in_flight(), 0U);
     server.transport->begin_close();
     pump_pending(*reactor);
+}
+
+TEST_P(TlsTransportTest, FailedHandshakesAreCountedAndLoggedAtMostOnceASecond) {
+    const auto fail_one = [&] {
+        Upper server;
+        auto [server_fd, client_fd] = ulw::test::unix_pair();
+        auto t = transports->attach(std::move(server_fd), server);
+        ASSERT_TRUE(t);
+        server.transport = t->get();
+        server.transport->start_receiving();
+        const std::string_view http = "GET / HTTP/1.1\r\n\r\n";
+        ASSERT_EQ(ulw::test::write_some(client_fd.get(), std::as_bytes(std::span(http))),
+                  http.size());
+        ASSERT_TRUE(pump_until(*reactor, [&] { return server.error.has_value(); }));
+        server.transport->begin_close();
+        pump_pending(*reactor);
+    };
+    const auto lines = [](const std::string& text) { return std::ranges::count(text, '\n'); };
+
+    ::testing::internal::CaptureStderr();
+    for (int i = 0; i < 20; ++i) {
+        fail_one();
+    }
+    // A peer that leaves half way is a failed handshake too, and is not logged.
+    {
+        Upper server;
+        auto client = connect(server);
+        client->handshake_step();
+        client->fin();
+        ASSERT_TRUE(pump_until(*reactor, [&] { return server.eof; }));
+    }
+    const std::string burst = ::testing::internal::GetCapturedStderr();
+    EXPECT_EQ(transports->handshake_failures(), 21U);
+    EXPECT_EQ(lines(burst), 1) << burst;
+
+    clock.advance(Millis{1'000});
+    ::testing::internal::CaptureStderr();
+    fail_one();
+    const std::string next = ::testing::internal::GetCapturedStderr();
+    EXPECT_EQ(transports->handshake_failures(), 22U);
+    EXPECT_EQ(lines(next), 1) << next;
+    EXPECT_NE(next.find("(19 more not logged)"), std::string::npos) << next;
 }
 
 TEST_P(TlsTransportTest, GarbageAfterTheHandshakeFailsTheConnection) {

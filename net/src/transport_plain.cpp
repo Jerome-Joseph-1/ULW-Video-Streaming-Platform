@@ -41,6 +41,7 @@ public:
     }
     void reload(OffloadPool& /*pool*/, IReloadHandler& done) override { done.on_reloaded({}); }
     [[nodiscard]] std::size_t handshakes_in_flight() const noexcept override { return 0; }
+    [[nodiscard]] std::uint64_t handshake_failures() const noexcept override { return 0; }
 
 private:
     IReactor& reactor_;
