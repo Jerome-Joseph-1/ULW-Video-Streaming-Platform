@@ -1,4 +1,4 @@
-# 0033. STUNner runs in front of LiveKit with time-windowed credentials the SFU mints
+# 0037. STUNner runs in front of LiveKit with time-windowed credentials the SFU mints
 
 Status: Accepted
 Date: 2026-09-29

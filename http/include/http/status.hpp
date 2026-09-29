@@ -11,6 +11,7 @@ enum class Status : std::uint16_t {
     NoContent = 204,
     BadRequest = 400,
     Unauthorized = 401,
+    Forbidden = 403,
     NotFound = 404,
     MethodNotAllowed = 405,
     RequestTimeout = 408,
@@ -42,6 +43,8 @@ enum class Status : std::uint16_t {
         return "Bad Request";
     case Status::Unauthorized:
         return "Unauthorized";
+    case Status::Forbidden:
+        return "Forbidden";
     case Status::NotFound:
         return "Not Found";
     case Status::MethodNotAllowed:

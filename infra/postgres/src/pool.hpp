@@ -12,10 +12,23 @@
 #include <deque>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace infra::postgres {
+
+// Called on the reactor thread.
+class INotificationSink {
+public:
+    virtual ~INotificationSink() = default;
+    // A session has just started listening. Anything sent while no session was listening is
+    // lost, so whatever the notifications keep current must be reloaded.
+    virtual void on_listening() noexcept = 0;
+    // The payload is valid only during the call.
+    virtual void on_notification(std::string_view payload) noexcept = 0;
+};
 
 struct PoolConfig {
     std::string conninfo;
@@ -26,6 +39,11 @@ struct PoolConfig {
     // From submission to the last result. The server's statement_timeout is set just below it,
     // so a statement the client stops waiting for does not keep its backend busy.
     core::Millis request_timeout{};
+    // When set, every session runs this LISTEN as soon as it connects, before it takes any work,
+    // and hands what arrives to `notifications`. One session is enough: each would deliver
+    // every notification.
+    std::optional<Sql> listen = std::nullopt;
+    INotificationSink* notifications = nullptr;
 };
 
 // libpq sessions driven by the reactor, never blocking it: libpq runs nonblocking, and host

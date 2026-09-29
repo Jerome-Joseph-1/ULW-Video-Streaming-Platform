@@ -18,7 +18,7 @@ source "$here/sandbox.sh"
 source "$here/images.sh"
 
 # The sandbox's fake credentials. The TURN secret signs the time-windowed credentials the
-# checks mint (ADR-0033); the LiveKit pair is the one the local call suite signs tickets with.
+# checks mint (ADR-0037); the LiveKit pair is the one the local call suite signs tickets with.
 turn_secret=ulw-sandbox-turn-testtest123
 livekit_keys='ulw-dev-key: ulw-dev-secret-testtest123-not-a-real-secret'
 

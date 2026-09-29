@@ -29,7 +29,7 @@ spec:
       # seconds; the default 30 s covers it.
       terminationGracePeriodSeconds: 30
       # ulw_sandbox gives every ffmpeg fresh user, network, mount and pid namespaces with a
-      # /proc of its own (docs/adr/0025, 0034). A pod in the host's user namespace may not mount
+      # /proc of its own (docs/adr/0025, 0032). A pod in the host's user namespace may not mount
       # a proc over the runtime's masked /proc, and the runtime's default seccomp profile
       # refuses unshare and mount without CAP_SYS_ADMIN. So the pod gets a user namespace of
       # its own (its uid 10001 is an unprivileged id on the node), an unmasked /proc, and

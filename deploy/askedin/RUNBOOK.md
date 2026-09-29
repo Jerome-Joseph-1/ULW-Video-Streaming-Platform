@@ -239,7 +239,7 @@ scale both deployments to 0. Uploads in progress resume once it is back.
 
 Media from browsers enters through STUNner, a TURN server run as a Gateway API implementation
 beside Envoy Gateway (docs/adr/0013); LiveKit is the SFU behind it (docs/adr/0020). LiveKit hands
-each client a TURN credential minted from a secret it shares with STUNner (docs/adr/0033).
+each client a TURN credential minted from a secret it shares with STUNner (docs/adr/0037).
 
 ### Check the cluster first
 
@@ -278,7 +278,7 @@ may not use `hostNetwork` (docs/adr/0013).
 ### Secrets
 
 STUNner holds one shared secret for the whole cluster, and LiveKit in each environment signs
-its clients' TURN credentials with that same secret (docs/adr/0033). So `TURN_SECRET` is not a
+its clients' TURN credentials with that same secret (docs/adr/0037). So `TURN_SECRET` is not a
 per-environment value, even though it lives in both env files: a copy that differs breaks
 every call of the environment whose LiveKit holds it.
 

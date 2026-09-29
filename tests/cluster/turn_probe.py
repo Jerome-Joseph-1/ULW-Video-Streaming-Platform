@@ -6,7 +6,7 @@ can equally be run from any machine against a real TURN server.
     turn_probe.py HOST PORT                  a Binding request only
     TURN_SECRET=... turn_probe.py HOST PORT [--user U] [--permit IP] [--forbid IP]
 
-With TURN_SECRET in its environment (STUNner's ephemeral auth shared secret, ADR-0033; never
+With TURN_SECRET in its environment (STUNner's ephemeral auth shared secret, ADR-0037; never
 on the command line, where shell history and the process list keep it) it also allocates a relay
 with a credential minted from it, asks for a permission to each --permit and --forbid peer,
 releases the allocation, and tries two allocations that must fail: a wrong password and a

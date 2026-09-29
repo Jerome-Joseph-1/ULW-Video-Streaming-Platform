@@ -79,7 +79,7 @@ spec:
                   udp_port: 7882
                   tcp_port: 0
                   use_external_ip: false
-                  # The ICE servers every client is told to use when it joins (ADR-0033): STUNner,
+                  # The ICE servers every client is told to use when it joins (ADR-0037): STUNner,
                   # with a credential minted per participant from the shared secret, valid for
                   # ttl seconds. A client whose credential expires mid-call loses its relay at
                   # the next allocation refresh and reconnects with a fresh one; 4 h keeps that

@@ -1,5 +1,5 @@
 # The class every STUNner Gateway names, and the configuration they share (ADR-0013, and
-# ADR-0033 for the credentials). Media clients authenticate with time-windowed TURN credentials:
+# ADR-0037 for the credentials). Media clients authenticate with time-windowed TURN credentials:
 # the call service mints each one from the shared secret in Secret stunner-secrets (RUNBOOK.md
 # step 7) for one session, and it stops working when its window closes. STUNner's "ephemeral"
 # is the same type as the "longterm" that older STUNner documentation names.

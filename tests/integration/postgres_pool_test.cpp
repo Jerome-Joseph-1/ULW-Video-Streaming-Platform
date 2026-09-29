@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -353,6 +354,51 @@ TEST_P(PoolTest, ReconnectsAfterTheServerEndsItsSessions) {
     }));
     EXPECT_EQ(answer, Answer{"1"});
     EXPECT_GT(pool->sessions_lost(), 0U);
+}
+
+class Notifications final : public infra::postgres::INotificationSink {
+public:
+    void on_listening() noexcept override { ++listening; }
+    void on_notification(std::string_view payload) noexcept override {
+        payloads.emplace_back(payload);
+    }
+
+    int listening = 0;
+    std::vector<std::string> payloads;
+};
+
+TEST_P(PoolTest, AListeningSessionHandsOverNotificationsAndReportsEveryRestart) {
+    ScratchDatabase::open(db);
+    if (IsSkipped() || HasFatalFailure()) {
+        return;
+    }
+    Notifications sink;
+    auto made = Pool::create(*reactor, *offload,
+                             PoolConfig{.conninfo = db->conninfo(),
+                                        .application_name = "ulw-test",
+                                        .connections = 1,
+                                        .connect_timeout = kTimeout,
+                                        .request_timeout = kTimeout,
+                                        .listen = Sql{"LISTEN probe"},
+                                        .notifications = &sink});
+    ASSERT_TRUE(made) << made.error();
+    pool = std::move(*made);
+    ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return sink.listening == 1; }));
+
+    auto conn = db->session();
+    ASSERT_TRUE(conn.exec("SELECT pg_notify('probe', 'one')"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return sink.payloads.size() == 1; }));
+
+    // What is sent while no session listens is lost, which is why the restart is reported.
+    ASSERT_EQ(scalar(conn, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+                           "WHERE datname = current_database() AND application_name = 'ulw-test'"),
+              "1");
+    ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return sink.listening == 2; }));
+    ASSERT_TRUE(conn.exec("SELECT pg_notify('probe', 'two')"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return sink.payloads.size() == 2; }));
+    EXPECT_EQ(sink.payloads, (std::vector<std::string>{"one", "two"}));
+    // The listening session still takes ordinary work.
+    EXPECT_EQ(ask("SELECT 1"), Answer{"1"});
 }
 
 TEST_P(PoolTest, PausedDatabaseNeverStallsTheLoop) {
