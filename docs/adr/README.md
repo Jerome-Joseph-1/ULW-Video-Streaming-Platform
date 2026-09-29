@@ -49,3 +49,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0043](0043-chat-service-policy-between-edge-and-rooms.md) | The chat service: policy between the client edge and the room plane | Accepted |
 | [0044](0044-openmls-behind-a-narrow-c-api.md) | OpenMLS behind a narrow C API, pinned by Cargo.lock | Accepted |
 | [0045](0045-one-store-connection-per-admitted-upload.md) | One store connection per admitted upload, and a held body is the store's to end | Accepted |
+| [0046](0046-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted |

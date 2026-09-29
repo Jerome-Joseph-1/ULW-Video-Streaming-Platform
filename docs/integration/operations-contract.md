@@ -40,8 +40,10 @@ check what would otherwise fail only at start: the connection string parses; the
 id or MinIO endpoint forms a store profile; the store keys are set and the key id is 1 to 128
 of `A-Z a-z 0-9 - . _ ~`; the development key set reads and holds a usable key; TLS certificate
 and key load and match; `ULW_MAX_UPLOAD_SLOTS <= ULW_MAX_CONNECTIONS`,
-`ULW_MAX_UPLOADS_PER_USER <= ULW_MAX_UPLOAD_SLOTS`; and the descriptor limit covers two per
-connection plus 64. `--version` prints the version and commit. At start each logs its
+`ULW_MAX_UPLOADS_PER_USER <= ULW_MAX_UPLOAD_SLOTS`, `ULW_MAX_CONNECTIONS_PER_IP <=
+ULW_MAX_CONNECTIONS`; `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` at least 16 MiB, the largest `PATCH`;
+`ULW_TRUSTED_PROXIES` exact CIDR blocks, at most 16; `ULW_RUN_AS_USER` names a user, when the
+process is root; and the descriptor limit covers two per connection plus 64. `--version` prints the version and commit. At start each logs its
 effective configuration, secrets as `<redacted>`.
 
 | Variable | Gateway | Worker | Chat | Notes |
@@ -63,6 +65,12 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_MAX_CONNECTIONS` | 1 to 65536, default 448 | | | Past this, a new connection is closed at accept |
 | `ULW_MAX_UPLOAD_SLOTS` | default 448, at most `ULW_MAX_CONNECTIONS` | | | Chunk uploads in flight at once |
 | `ULW_MAX_UPLOADS_PER_USER` | default 3, at most `ULW_MAX_UPLOAD_SLOTS` | | | |
+| `ULW_MAX_CONNECTIONS_PER_IP` | default 20, at most `ULW_MAX_CONNECTIONS` | | | Per client address (IPv6: per /64): open connections, or requests in flight behind a trusted proxy |
+| `ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND` | default 10 | | | Direct peers only; burst of the same size |
+| `ULW_REQUESTS_PER_USER_PER_MINUTE` | default 300 | | | Authenticated requests, burst of the same size |
+| `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` | bytes, default 107374182400 (100 GiB), at least 16777216 | | | Charged by each `PATCH`'s `Content-Length` |
+| `ULW_TRUSTED_PROXIES` | comma-separated CIDR blocks, default none | | | Peers whose `X-Forwarded-For` is believed. Set to the pod network Envoy's data plane runs in (K3s default `10.42.0.0/16`); RUNBOOK step 1 |
+| `ULW_RUN_AS_USER` | user name, default none | same | | Used only when started as root: the process becomes this user before it listens or takes a job. Root with none set logs a warning and stays root. |
 | `ULW_CHUNK_SIZE` | bytes, default 8388608 (8 MiB) | | | 5 MiB to 5 GiB, and a 50 GiB upload in at most 10,000 chunks |
 | `ULW_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` | same | | |
 | `ULW_CONFIG` | optional TOML file | same | | See above |
@@ -119,9 +127,16 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `connections_rejected_total{reason="capacity"}` | counter | Refused at accept: `ULW_MAX_CONNECTIONS` (448) were open |
 | `connections_rejected_total{reason="socket"}` | counter | Refused at accept: the socket could not be set up |
 | `connections_rejected_total{reason="draining"}` | counter | Accepted after SIGTERM and closed |
+| `connections_rejected_total{reason="ip_connections"}` | counter | Reset at accept: the address had `ULW_MAX_CONNECTIONS_PER_IP` open |
+| `connections_rejected_total{reason="ip_rate"}` | counter | Reset at accept: the address opened more than `ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND` |
 | `connections_current` | gauge | |
 | `uploads_in_flight` | gauge | Chunk uploads holding an admission slot |
 | `admission_rejections_total` | counter | PATCHes answered `429` or `503` by admission |
+| `rate_limited_total{limit="ip_requests"}` | counter | `429`: a client behind the proxy had `ULW_MAX_CONNECTIONS_PER_IP` requests in flight |
+| `rate_limited_total{limit="user_requests"}` | counter | `429`: a user over `ULW_REQUESTS_PER_USER_PER_MINUTE` |
+| `rate_limited_total{limit="user_bytes"}` | counter | `429`: a `PATCH` over the user's `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` |
+| `rate_limit_entries{table="client"}`, `{table="user"}` | gauge | Client addresses and users the limits remember; at most 16384 each (more clients when `ULW_MAX_CONNECTIONS` is higher) |
+| `rate_limit_evictions_total{table="client"}`, `{table="user"}` | counter | Entries forgotten to make room: the least recently seen, never one with a connection or request open. A forgotten user starts over with full allowances. |
 | `bytes_ingested_total` | counter | Chunk body bytes received |
 | `part_upload_duration_seconds` | histogram | From a chunk's first byte handed to the store to all of it durable |
 | `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more, observed when it ends: the store takes bytes again, fails the part (`503`), or the request ends (backstop, client gone). Buckets to 300 s; a store taking nothing is failed at about 60 s (ADR-0045) |
@@ -147,7 +162,11 @@ Worth alerting on: `readyz` failing outside a rollout; any rise in `playlists_re
 `presign_failures_total`, `view_batches_failed_total` or `store_paging_errors_total` (page:
 retrying will not fix it); `admission_rejections_total` rising steadily;
 `backend_write_stall_seconds` observations at 30 s and above rising (the bucket is slow); `jobs_oldest_queued_seconds`
-growing (the workers are behind or down); `log_messages_dropped_total` rising.
+growing (the workers are behind or down); `log_messages_dropped_total` rising;
+`connections_rejected_total{reason="ip_connections"}` or `{reason="ip_rate"}` rising steadily
+behind Envoy (`ULW_TRUSTED_PROXIES` does not cover Envoy's pods, so every client is being counted
+as Envoy); `rate_limit_evictions_total{table="user"}` rising (more active users than the table
+remembers, so allowances are being reset).
 
 ### Logs
 
