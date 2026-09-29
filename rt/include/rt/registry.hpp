@@ -59,8 +59,9 @@ using AppendCallback =
 // answering. The store must be destroyed before the registry: its callbacks point here.
 class RoomRegistry final : public IOwnershipListener {
 public:
+    // `incarnation` names this run of the node; its heartbeats keep the name held.
     RoomRegistry(IRoomStore& store, const core::ports::IClock& clock, core::NodeId self,
-                 IRegistryObserver& observer);
+                 const core::Uuid& incarnation, IRegistryObserver& observer);
     RoomRegistry(const RoomRegistry&) = delete;
     RoomRegistry& operator=(const RoomRegistry&) = delete;
     RoomRegistry(RoomRegistry&&) = delete;
@@ -118,6 +119,7 @@ private:
     IRoomStore& store_;
     const core::ports::IClock& clock_;
     core::NodeId self_;
+    core::Uuid incarnation_;
     IRegistryObserver& observer_;
     std::unordered_map<core::RoomId, std::uint64_t> owned_;
     std::unordered_map<core::RoomId, Ownership> cache_;

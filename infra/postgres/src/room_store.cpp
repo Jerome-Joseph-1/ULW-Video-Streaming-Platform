@@ -44,7 +44,7 @@ WITH claimed AS (
        SET owner_node = $2, owner_generation = owner_generation + 1, heartbeat_at = now()
      WHERE room_id = $1
        AND ((owner_node = $2
-             AND heartbeat_at < coalesce((SELECT updated_at FROM chat_nodes WHERE node_id = $2),
+             AND heartbeat_at < coalesce((SELECT started_at FROM chat_nodes WHERE node_id = $2),
                                          'infinity'))
             OR heartbeat_at < now() - $3 * interval '1 millisecond')
     RETURNING owner_generation)
@@ -69,6 +69,8 @@ RETURNING room_state.room_id, room_state.owner_generation)sql";
 
 // Owner writes: each matches a room only under the generation its writer holds.
 constexpr Sql kHeartbeat = R"sql(
+WITH seen AS (
+    UPDATE chat_nodes SET seen_at = now() WHERE node_id = $1 AND incarnation = $4)
 UPDATE room_assignments SET heartbeat_at = now()
   FROM unnest($2::text::uuid[], $3::text::bigint[]) AS held (room_id, generation)
  WHERE room_assignments.room_id = held.room_id
@@ -89,9 +91,17 @@ UPDATE room_assignments SET heartbeat_at = '-infinity'
    AND room_assignments.owner_generation = held.generation
    AND room_assignments.owner_node = $1)sql";
 
+// Another incarnation's hold ends kOwnerStaleAfter after its last heartbeat, the same bound
+// its rooms go stale by. Re-advertising the same incarnation keeps its start.
 constexpr Sql kAdvertise = R"sql(
-INSERT INTO chat_nodes (node_id, address) VALUES ($1, $2)
-ON CONFLICT (node_id) DO UPDATE SET address = excluded.address, updated_at = now())sql";
+INSERT INTO chat_nodes (node_id, address, incarnation) VALUES ($1, $2, $3)
+ON CONFLICT (node_id) DO UPDATE
+   SET address = excluded.address, incarnation = excluded.incarnation,
+       started_at = CASE WHEN chat_nodes.incarnation = excluded.incarnation
+                         THEN chat_nodes.started_at ELSE now() END,
+       seen_at = now()
+ WHERE chat_nodes.incarnation = excluded.incarnation
+    OR chat_nodes.seen_at < now() - $4 * interval '1 millisecond')sql";
 
 constexpr Sql kFindAddress = "SELECT address FROM chat_nodes WHERE node_id = $1";
 
@@ -263,21 +273,25 @@ private:
     StoreCallback<std::vector<OwnedRoom>> done_;
 };
 
-// The heartbeat and the release: the same fenced match on (room, generation, node).
+// The heartbeat and the release: the same fenced match on (room, generation, node). The
+// heartbeat also binds the incarnation, as $4.
 template <class T> class HeldRooms final : public Operation {
 public:
     using Decode = StoreResult<T> (*)(const Result&);
 
-    HeldRooms(Sql sql, const core::NodeId& node, const std::vector<OwnedRoom>& rooms, Decode decode,
-              StoreCallback<T> done)
-        : sql_(sql), node_(node), rooms_(array_literal(rooms, room_of)),
+    HeldRooms(Sql sql, const core::NodeId& node, std::optional<core::Uuid> incarnation,
+              const std::vector<OwnedRoom>& rooms, Decode decode, StoreCallback<T> done)
+        : sql_(sql), node_(node), incarnation_(incarnation), rooms_(array_literal(rooms, room_of)),
           generations_(array_literal(rooms, generation_of)), decode_(decode),
           done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
-        return Statement{
-            .sql = sql_,
-            .params = Params{}.add_text(node_.view()).add_text(rooms_).add_text(generations_)};
+        Params params;
+        params.add_text(node_.view()).add_text(rooms_).add_text(generations_);
+        if (incarnation_) {
+            params.add_uuid(*incarnation_);
+        }
+        return Statement{.sql = sql_, .params = params};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -296,6 +310,7 @@ public:
 private:
     Sql sql_;
     core::NodeId node_;
+    std::optional<core::Uuid> incarnation_;
     std::string rooms_;
     std::string generations_;
     Decode decode_;
@@ -361,16 +376,28 @@ private:
 
 class Advertise final : public Operation {
 public:
-    Advertise(const core::NodeId& node, std::string address, StoreCallback<void> done)
-        : node_(node), address_(std::move(address)), done_(std::move(done)) {}
+    Advertise(const core::NodeId& node, std::string address, const core::Uuid& incarnation,
+              StoreCallback<void> done)
+        : node_(node), address_(std::move(address)), incarnation_(incarnation),
+          done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
         return Statement{.sql = kAdvertise,
-                         .params = Params{}.add_text(node_.view()).add_text(address_)};
+                         .params = Params{}
+                                       .add_text(node_.view())
+                                       .add_text(address_)
+                                       .add_uuid(incarnation_)
+                                       .add_int(stale_after_ms())};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
-        done_(outcome ? StoreResult<void>{} : std::unexpected(StoreError::Unavailable));
+        if (!outcome) {
+            done_(std::unexpected(StoreError::Unavailable));
+        } else if (outcome->affected() == 0) {
+            done_(std::unexpected(StoreError::NodeTaken));
+        } else {
+            done_({});
+        }
         return std::nullopt;
     }
 
@@ -381,6 +408,7 @@ public:
 private:
     core::NodeId node_;
     std::string address_;
+    core::Uuid incarnation_;
     StoreCallback<void> done_;
 };
 
@@ -514,10 +542,11 @@ void PgRoomStore::claim_stale(std::vector<core::RoomId> rooms, const core::NodeI
     impl_->pool().submit(std::make_unique<ClaimStale>(rooms, node, std::move(done)));
 }
 
-void PgRoomStore::heartbeat(const core::NodeId& node, std::vector<OwnedRoom> rooms,
+void PgRoomStore::heartbeat(const core::NodeId& node, const core::Uuid& incarnation,
+                            std::vector<OwnedRoom> rooms,
                             StoreCallback<std::vector<core::RoomId>> done) {
     impl_->pool().submit(std::make_unique<HeldRooms<std::vector<core::RoomId>>>(
-        kHeartbeat, node, rooms, &decode_renewed, std::move(done)));
+        kHeartbeat, node, incarnation, rooms, &decode_renewed, std::move(done)));
 }
 
 void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
@@ -527,13 +556,14 @@ void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
 
 void PgRoomStore::release(const core::NodeId& node, std::vector<OwnedRoom> rooms,
                           StoreCallback<void> done) {
-    impl_->pool().submit(
-        std::make_unique<HeldRooms<void>>(kRelease, node, rooms, &decode_nothing, std::move(done)));
+    impl_->pool().submit(std::make_unique<HeldRooms<void>>(kRelease, node, std::nullopt, rooms,
+                                                           &decode_nothing, std::move(done)));
 }
 
 void PgRoomStore::advertise(const core::NodeId& node, std::string address,
-                            StoreCallback<void> done) {
-    impl_->pool().submit(std::make_unique<Advertise>(node, std::move(address), std::move(done)));
+                            const core::Uuid& incarnation, StoreCallback<void> done) {
+    impl_->pool().submit(
+        std::make_unique<Advertise>(node, std::move(address), incarnation, std::move(done)));
 }
 
 void PgRoomStore::find_address(const core::NodeId& node,

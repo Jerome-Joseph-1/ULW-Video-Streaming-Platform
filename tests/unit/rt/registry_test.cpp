@@ -64,7 +64,7 @@ protected:
     Observer observer_;
     const core::NodeId self_ = node("chat-a");
     const core::NodeId other_ = node("chat-b");
-    rt::RoomRegistry registry_{store_, clock_, self_, observer_};
+    rt::RoomRegistry registry_{store_, clock_, self_, core::Uuid::v7(clock_, random_), observer_};
 };
 
 TEST_F(RegistryTest, ConcurrentLookupsOfOneRoomShareOneStoreCall) {

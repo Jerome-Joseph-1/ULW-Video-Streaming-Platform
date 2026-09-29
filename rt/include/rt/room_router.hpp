@@ -68,6 +68,9 @@ public:
     // A node-channel peer failed the handshake: it does not hold the secret, or is not the
     // node it was dialled as. Nothing it sent was acted on.
     virtual void on_peer_refused(std::string_view why) noexcept = 0;
+    // Another live process runs under this node's name. This one takes no room and stays
+    // unready, trying again each beat, until the other stops.
+    virtual void on_node_taken() noexcept = 0;
 };
 
 // A node secret shorter than this is refused at startup: HMAC-SHA256 is as strong as its key,

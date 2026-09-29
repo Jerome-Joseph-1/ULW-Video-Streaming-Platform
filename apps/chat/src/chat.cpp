@@ -49,6 +49,11 @@ void RoomLog::on_peer_refused(std::string_view why) noexcept {
     log_event(R"("level":"warn","msg":"node refused","node":"{}","why":"{}")", self_.view(), why);
 }
 
+void RoomLog::on_node_taken() noexcept {
+    log_event(R"("level":"error","msg":"node name in use by another live process","node":"{}")",
+              self_.view());
+}
+
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(limits), sessions_(limits_.max_connections) {
 }

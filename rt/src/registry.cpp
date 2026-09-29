@@ -6,8 +6,8 @@
 namespace rt {
 
 RoomRegistry::RoomRegistry(IRoomStore& store, const core::ports::IClock& clock, core::NodeId self,
-                           IRegistryObserver& observer)
-    : store_(store), clock_(clock), self_(self), observer_(observer) {
+                           const core::Uuid& incarnation, IRegistryObserver& observer)
+    : store_(store), clock_(clock), self_(self), incarnation_(incarnation), observer_(observer) {
     store_.watch(*this);
 }
 
@@ -160,7 +160,7 @@ void RoomRegistry::beat() {
     // judged by it.
     std::vector<OwnedRoom> sent = rooms;
     store_.heartbeat(
-        self_, std::move(rooms),
+        self_, incarnation_, std::move(rooms),
         [this, sent = std::move(sent)](StoreResult<std::vector<core::RoomId>> renewed) noexcept {
             beating_ = false;
             if (!renewed) {

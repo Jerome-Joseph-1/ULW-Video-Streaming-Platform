@@ -60,6 +60,7 @@ public:
         lost.emplace_back(peer.view());
     }
     void on_peer_refused(std::string_view why) noexcept override { refused.emplace_back(why); }
+    void on_node_taken() noexcept override { ++taken; }
 
     struct Fence {
         core::RoomId room;
@@ -70,6 +71,7 @@ public:
     std::vector<std::uint64_t> took;
     std::vector<std::string> lost;
     std::vector<std::string> refused;
+    int taken = 0;
 };
 
 // A test value, made up for these tests; real deployments take theirs from the environment.
@@ -209,6 +211,14 @@ private:
     std::uint16_t port_ = 0;
 };
 
+// Limits other than the router's own defaults.
+struct Tuning {
+    std::optional<core::Millis> idle_release = std::nullopt;
+    std::optional<std::size_t> max_rooms = std::nullopt;
+    // The store refuses to record the node, which then never becomes ready.
+    bool refuse_advertise = false;
+};
+
 class RoomRouterTest : public ::testing::TestWithParam<ReactorKind> {
 protected:
     void SetUp() override {
@@ -227,15 +237,10 @@ protected:
         }
     }
 
-    // Limits other than the router's own defaults.
-    struct Tuning {
-        std::optional<core::Millis> idle_release;
-        std::optional<std::size_t> max_rooms;
-    };
-
     Node& start(std::string_view name, std::string_view secret = kSecret, Tuning tuning = {}) {
         auto node = std::make_unique<Node>();
         node->store = std::make_unique<ulw::test::MemoryRoomStore>(*reactor_, db_);
+        node->store->refuse_advertise = tuning.refuse_advertise;
         auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
         EXPECT_TRUE(listener);
         node->port = *net::local_port(listener->get());
@@ -249,7 +254,9 @@ protected:
         EXPECT_TRUE(node->router->start(std::move(*listener)));
         Node& out = *node;
         nodes_.push_back(std::move(node));
-        EXPECT_TRUE(pump([&] { return out.router->healthy(); }));
+        if (!tuning.refuse_advertise) {
+            EXPECT_TRUE(pump([&] { return out.router->healthy() || out.events.taken > 0; }));
+        }
         return out;
     }
 
@@ -722,6 +729,45 @@ TEST_P(RoomRouterTest, ALinkBrokenInsideASendIsTakenDownAfterwardsNotInsideIt) {
     ASSERT_TRUE(pump([&] { return !b.events.lost.empty(); }));
     EXPECT_EQ(b.events.lost, std::vector<std::string>{"chat-a"});
     EXPECT_TRUE(pump([&] { return answered > 0; }));
+}
+
+TEST_P(RoomRouterTest, ASecondLiveProcessUnderANodesNameTakesNothing) {
+    Node& first = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(first, alice));
+    Node& second = start("chat-a");
+    EXPECT_EQ(second.events.taken, 1);
+    EXPECT_FALSE(second.router->healthy());
+    // It routes nothing and claims nothing; the first run's room is untouched.
+    Member mallory;
+    std::optional<std::expected<void, RouteError>> joined;
+    second.router->join(room_, mallory, [&](auto r) noexcept { joined = r; });
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_FALSE(joined);
+    EXPECT_EQ(db_.rooms.at(room_).generation, 1U);
+    EXPECT_TRUE(first.router->healthy());
+    EXPECT_EQ(send(first, alice, "alice", "still mine"), 1U);
+}
+
+TEST_P(RoomRouterTest, NoRoomIsClaimedBeforeTheNodeHasAdvertised) {
+    Node& a = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    a.store->reachable = false;
+    db_.make_stale(room_);
+    Node& b = start("chat-b", kSecret, {.refuse_advertise = true});
+    Member bob;
+    std::optional<std::expected<void, RouteError>> joined;
+    b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
+    // A beat and a half: chat-b's first sweep would have run by now.
+    ulw::test::pump_for(*reactor_, std::chrono::milliseconds(1'500));
+    EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-a"));
+    EXPECT_FALSE(joined);
+
+    b.store->refuse_advertise = false;
+    ASSERT_TRUE(pump([&] { return joined.has_value(); }));
+    EXPECT_TRUE(*joined);
+    EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-b"));
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, RoomRouterTest,

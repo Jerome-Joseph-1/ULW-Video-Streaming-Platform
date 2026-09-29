@@ -34,6 +34,8 @@ public:
 
     std::unordered_map<core::RoomId, Room> rooms;
     std::unordered_map<std::string, std::string> addresses;
+    // Which incarnation holds each name. A test erases one to model its holder going quiet.
+    std::unordered_map<std::string, core::Uuid> holders;
     // Every append that matched no row, as (room, generation).
     std::vector<std::pair<core::RoomId, std::uint64_t>> refused_appends;
 
@@ -121,7 +123,8 @@ public:
         });
     }
 
-    void heartbeat(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
+    void heartbeat(const core::NodeId& node, const core::Uuid& /*incarnation*/,
+                   std::vector<rt::OwnedRoom> rooms,
                    rt::StoreCallback<std::vector<core::RoomId>> done) override {
         answer("heartbeat", std::move(done), [this, node, rooms = std::move(rooms)] {
             std::vector<core::RoomId> renewed;
@@ -163,10 +166,18 @@ public:
         });
     }
 
-    void advertise(const core::NodeId& node, std::string address,
+    void advertise(const core::NodeId& node, std::string address, const core::Uuid& incarnation,
                    rt::StoreCallback<void> done) override {
-        answer("", std::move(done), [this, node, address = std::move(address)] {
-            db_.addresses.insert_or_assign(std::string(node.view()), address);
+        answer("", std::move(done), [this, node, address = std::move(address), incarnation] {
+            if (refuse_advertise) {
+                return rt::StoreResult<void>{std::unexpected(rt::StoreError::Unavailable)};
+            }
+            const std::string name(node.view());
+            const auto [holder, fresh] = db_.holders.try_emplace(name, incarnation);
+            if (!fresh && holder->second != incarnation) {
+                return rt::StoreResult<void>{std::unexpected(rt::StoreError::NodeTaken)};
+            }
+            db_.addresses.insert_or_assign(name, address);
             return rt::StoreResult<void>{};
         });
     }
@@ -179,6 +190,9 @@ public:
                 it == db_.addresses.end() ? std::nullopt : std::optional(it->second)};
         });
     }
+
+    // While set, every advertise fails as if the database were down.
+    bool refuse_advertise = false;
 
     // While set, answers and notices wait, as behind a database that has stopped answering
     // without dropping the connection.

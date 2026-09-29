@@ -53,13 +53,14 @@ public:
                  rt::StoreCallback<rt::Ownership> done) override;
     void claim_stale(std::vector<core::RoomId> rooms, const core::NodeId& node,
                      rt::StoreCallback<std::vector<rt::OwnedRoom>> done) override;
-    void heartbeat(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
+    void heartbeat(const core::NodeId& node, const core::Uuid& incarnation,
+                   std::vector<rt::OwnedRoom> rooms,
                    rt::StoreCallback<std::vector<core::RoomId>> done) override;
     void append(const core::RoomId& room, std::uint64_t generation,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override;
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
                  rt::StoreCallback<void> done) override;
-    void advertise(const core::NodeId& node, std::string address,
+    void advertise(const core::NodeId& node, std::string address, const core::Uuid& incarnation,
                    rt::StoreCallback<void> done) override;
     void find_address(const core::NodeId& node,
                       rt::StoreCallback<std::optional<std::string>> done) override;

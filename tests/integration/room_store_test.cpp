@@ -97,7 +97,7 @@ protected:
     StoreResult<std::vector<core::RoomId>> heartbeat(const core::NodeId& by,
                                                      std::vector<OwnedRoom> rooms) {
         return ask<std::vector<core::RoomId>>(
-            [&](auto done) { store_->heartbeat(by, std::move(rooms), std::move(done)); });
+            [&](auto done) { store_->heartbeat(by, run_, std::move(rooms), std::move(done)); });
     }
 
     // What an owner that stopped beating looks like, without waiting for it.
@@ -128,6 +128,8 @@ protected:
     std::unique_ptr<net::OffloadPool> offload_;
     std::unique_ptr<PgRoomStore> store_;
     std::optional<infra::postgres::SyncConnection> conn_;
+    // This run of every node the tests play.
+    const core::Uuid run_ = core::Uuid::v7(clock_, random_);
     const core::NodeId a_ = node("chat-a");
     const core::NodeId b_ = node("chat-b");
     const core::NodeId c_ = node("chat-c");
@@ -232,8 +234,8 @@ TEST_P(RoomStoreTest, ANodeFindingARoomRecordedAsItsOwnTakesItAgainUnderANewGene
     ASSERT_TRUE(resolve(room, a_));
     // A restarted node announces itself anew, and does not know what its earlier run wrote
     // under generation 1.
-    ASSERT_TRUE(
-        ask<void>([&](auto done) { store_->advertise(a_, "127.0.0.1:9201", std::move(done)); }));
+    ASSERT_TRUE(ask<void>(
+        [&](auto done) { store_->advertise(a_, "127.0.0.1:9201", run_, std::move(done)); }));
     EXPECT_EQ(resolve(room, a_), (Ownership{.node = a_, .generation = 2}));
     EXPECT_EQ(append(room, 1), Seq{std::nullopt});
 }
@@ -245,8 +247,8 @@ TEST_P(RoomStoreTest, ALookupByANodeWhoseOwnClaimIsInFlightKeepsThatClaimsGenera
     const core::RoomId room = new_room();
     ASSERT_TRUE(resolve(room, a_));
     go_quiet(room);
-    ASSERT_TRUE(
-        ask<void>([&](auto done) { store_->advertise(b_, "127.0.0.1:9201", std::move(done)); }));
+    ASSERT_TRUE(ask<void>(
+        [&](auto done) { store_->advertise(b_, "127.0.0.1:9201", run_, std::move(done)); }));
 
     auto sweep = db_->session();
     ASSERT_TRUE(sweep.exec("BEGIN"));
@@ -319,7 +321,7 @@ TEST_P(RoomStoreTest, AForeignPayloadOnTheChannelIsTreatedAsAResync) {
 TEST_P(RoomStoreTest, NodesFindEachOthersLatestAddress) {
     const auto advertise = [&](const core::NodeId& n, std::string address) {
         return ask<void>(
-            [&](auto done) { store_->advertise(n, std::move(address), std::move(done)); });
+            [&](auto done) { store_->advertise(n, std::move(address), run_, std::move(done)); });
     };
     const auto find = [&](const core::NodeId& n) {
         return ask<std::optional<std::string>>(
@@ -330,6 +332,32 @@ TEST_P(RoomStoreTest, NodesFindEachOthersLatestAddress) {
     ASSERT_TRUE(advertise(a_, "10.0.0.7:9201"));
     EXPECT_EQ(find(a_), Address{"10.0.0.7:9201"});
     EXPECT_EQ(find(b_), Address{std::nullopt});
+}
+
+TEST_P(RoomStoreTest, ANameIsHeldByOneLiveRunAtATime) {
+    const core::Uuid other = core::Uuid::v7(clock_, random_);
+    const auto advertise = [&](const core::Uuid& run) {
+        return ask<void>(
+            [&](auto done) { store_->advertise(a_, "10.0.0.1:9201", run, std::move(done)); });
+    };
+    ASSERT_TRUE(advertise(run_));
+    const std::string started = scalar(*conn_, "SELECT started_at FROM chat_nodes");
+    // The same run again: still its name, from its own start.
+    ASSERT_TRUE(advertise(run_));
+    EXPECT_EQ(scalar(*conn_, "SELECT started_at FROM chat_nodes"), started);
+    // Another process under the same name, while this run beats: refused.
+    EXPECT_EQ(advertise(other), std::unexpected(rt::StoreError::NodeTaken));
+
+    // Quiet past the stale bound, then a heartbeat: held again.
+    ASSERT_TRUE(conn_->exec("UPDATE chat_nodes SET seen_at = now() - interval '6 seconds'"));
+    ASSERT_TRUE(heartbeat(a_, {}));
+    EXPECT_EQ(advertise(other), std::unexpected(rt::StoreError::NodeTaken));
+
+    // Quiet past the stale bound for good: the other run takes the name, from a new start.
+    ASSERT_TRUE(conn_->exec("UPDATE chat_nodes SET seen_at = now() - interval '6 seconds'"));
+    EXPECT_TRUE(advertise(other));
+    EXPECT_EQ(scalar(*conn_, "SELECT incarnation FROM chat_nodes"), other.to_string());
+    EXPECT_NE(scalar(*conn_, "SELECT started_at FROM chat_nodes"), started);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, RoomStoreTest,

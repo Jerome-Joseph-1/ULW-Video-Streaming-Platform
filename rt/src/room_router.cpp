@@ -505,8 +505,8 @@ public:
     Impl(net::IReactor& reactor, IRoomStore& store, const core::ports::IClock& clock,
          core::ports::IRandom& random, RouterConfig config, IRouterEvents& events)
         : reactor_(reactor), store_(store), clock_(clock), random_(random),
-          config_(std::move(config)), events_(events), registry_(store, clock, config_.self, *this),
-          inbound_(kMaxPeers) {}
+          config_(std::move(config)), events_(events), incarnation_(core::Uuid::v7(clock, random)),
+          registry_(store, clock, config_.self, incarnation_, *this), inbound_(kMaxPeers) {}
 
     ~Impl() override {
         reactor_.cancel_timer(timer_);
@@ -790,7 +790,11 @@ private:
         if (draining_) {
             return;
         }
-        registry_.tick();
+        // Nothing is claimed before this run has advertised: until then the store cannot tell
+        // this run's claims from an earlier run's, nor this process from another under its name.
+        if (advertised_) {
+            registry_.tick();
+        }
         if (!advertised_ && !advertising_) {
             advertise();
         }
@@ -1287,13 +1291,19 @@ private:
 
     void advertise() {
         advertising_ = true;
-        store_.advertise(config_.self, config_.advertise, [this](StoreResult<void> r) noexcept {
-            advertising_ = false;
-            advertised_ = r.has_value();
-            if (advertised_) {
-                find_orphans();
-            }
-        });
+        store_.advertise(config_.self, config_.advertise, incarnation_,
+                         [this](StoreResult<void> r) noexcept {
+                             advertising_ = false;
+                             advertised_ = r.has_value();
+                             const bool taken = !r && r.error() == StoreError::NodeTaken;
+                             if (taken && !node_taken_) {
+                                 events_.on_node_taken();
+                             }
+                             node_taken_ = taken;
+                             if (advertised_) {
+                                 find_orphans();
+                             }
+                         });
     }
 
     net::IReactor& reactor_;
@@ -1302,6 +1312,7 @@ private:
     core::ports::IRandom& random_;
     RouterConfig config_;
     IRouterEvents& events_;
+    core::Uuid incarnation_;
     RoomRegistry registry_;
     std::unordered_map<core::RoomId, LocalRoom> local_;
     std::unordered_map<core::RoomId, OwnedRoomState> owned_;
@@ -1318,6 +1329,7 @@ private:
     core::MonoTime next_revalidation_;
     bool advertised_ = false;
     bool draining_ = false;
+    bool node_taken_ = false;
     bool advertising_ = false;
     RouterCounters counters_;
 };

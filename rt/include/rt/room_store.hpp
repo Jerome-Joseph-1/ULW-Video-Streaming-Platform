@@ -44,6 +44,8 @@ enum class StoreError : std::uint8_t {
     Unavailable,
     // A stored value that no writer here produces.
     Corrupt,
+    // Another run of the same node, still alive, holds the node's name.
+    NodeTaken,
 };
 
 template <class T> using StoreResult = std::expected<T, StoreError>;
@@ -72,16 +74,18 @@ public:
 
     // The room's owner. `node` takes the room, under a new generation, when the room does not
     // exist yet, when its owner's heartbeat is older than kOwnerStaleAfter, or when it is
-    // already recorded as `node`'s: an earlier run of that node may have written under the
-    // recorded generation, and must be fenced out.
+    // recorded as `node`'s from before `node`'s current run advertised: that earlier run may
+    // have written under the recorded generation, and must be fenced out.
     virtual void resolve(const core::RoomId& room, const core::NodeId& node,
                          StoreCallback<Ownership> done) = 0;
     // Takes each of `rooms` whose owner's heartbeat is stale; answers with those it took.
     virtual void claim_stale(std::vector<core::RoomId> rooms, const core::NodeId& node,
                              StoreCallback<std::vector<OwnedRoom>> done) = 0;
     // An owner write: renews each room `node` still holds at the given generation, and answers
-    // with those. A room missing from the answer was fenced out.
-    virtual void heartbeat(const core::NodeId& node, std::vector<OwnedRoom> rooms,
+    // with those. A room missing from the answer was fenced out. Also keeps `incarnation`'s
+    // hold on the node's name.
+    virtual void heartbeat(const core::NodeId& node, const core::Uuid& incarnation,
+                           std::vector<OwnedRoom> rooms,
                            StoreCallback<std::vector<core::RoomId>> done) = 0;
     // An owner write: the room's next sequence number, or nullopt when `generation` is no
     // longer the room's. Then nothing was written.
@@ -92,9 +96,13 @@ public:
     virtual void release(const core::NodeId& node, std::vector<OwnedRoom> rooms,
                          StoreCallback<void> done) = 0;
 
-    // Records the numeric host:port where `node` takes node-channel connections.
+    // Records the numeric host:port where `node` takes node-channel connections, and starts
+    // `incarnation`, one run of the node. NodeTaken while another incarnation of the same name
+    // has heartbeated within kOwnerStaleAfter: two live processes under one name would each
+    // take the other's rooms as their own, unfenced. Advertising again under the same
+    // incarnation changes only the address.
     virtual void advertise(const core::NodeId& node, std::string address,
-                           StoreCallback<void> done) = 0;
+                           const core::Uuid& incarnation, StoreCallback<void> done) = 0;
     // nullopt for a node that never advertised.
     virtual void find_address(const core::NodeId& node,
                               StoreCallback<std::optional<std::string>> done) = 0;

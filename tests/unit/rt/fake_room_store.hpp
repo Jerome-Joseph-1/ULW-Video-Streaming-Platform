@@ -51,7 +51,8 @@ public:
                      rt::StoreCallback<std::vector<rt::OwnedRoom>> done) override {
         claims.push_back({.rooms = std::move(rooms), .done = std::move(done)});
     }
-    void heartbeat(const core::NodeId& /*node*/, std::vector<rt::OwnedRoom> rooms,
+    void heartbeat(const core::NodeId& /*node*/, const core::Uuid& /*incarnation*/,
+                   std::vector<rt::OwnedRoom> rooms,
                    rt::StoreCallback<std::vector<core::RoomId>> done) override {
         heartbeats.push_back({.rooms = std::move(rooms), .done = std::move(done)});
     }
@@ -64,7 +65,7 @@ public:
         releases.push_back({.rooms = std::move(rooms), .done = std::move(done)});
     }
     void advertise(const core::NodeId& /*node*/, std::string /*address*/,
-                   rt::StoreCallback<void> done) override {
+                   const core::Uuid& /*incarnation*/, rt::StoreCallback<void> done) override {
         advertisements.push_back(std::move(done));
     }
     void find_address(const core::NodeId& node,

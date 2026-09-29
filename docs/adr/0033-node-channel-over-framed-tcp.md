@@ -50,6 +50,13 @@ runs as a Deployment, so replicas have neither stable names nor a fixed list of 
   the member node subscribes to the new one.
 - Each node publishes its node-channel address, a numeric `host:port`, in `chat_nodes`, and finds
   others there by node id. Numeric only: resolving a name would block the loop.
+- A node's name is held by one run at a time. Each run of `chat_server` picks a random
+  incarnation and records it in `chat_nodes` when it advertises; its heartbeats keep it there.
+  A second live process under the same name (a misconfigured `ULW_NODE_ID`) is refused until
+  the first has been quiet for `kOwnerStaleAfter`, and meanwhile claims nothing and stays
+  unready: two processes under one name would each take the other's rooms as their own,
+  unfenced. A new run takes back, under a new generation, only rooms whose heartbeat predates
+  its own start; a run claims nothing before it has advertised.
 - Writes to one room are appended one at a time: the owner sends the next append only after the
   previous one returned, so fan-out leaves in `last_seq` order and a connection delivers in that
   order. Member nodes drop any delivery whose seq is not above the last one they delivered.
