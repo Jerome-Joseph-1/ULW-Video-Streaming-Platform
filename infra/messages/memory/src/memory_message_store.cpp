@@ -22,7 +22,8 @@ template <class View> std::vector<StoredMessage> page(View messages, std::size_t
     std::size_t bytes = 0;
     for (const StoredMessage& m : messages) {
         bytes += m.body.size();
-        if (out.size() == rows || bytes > kMaxHistoryBytes) {
+        // The first message goes in whatever its size, as it does from the durable store.
+        if (out.size() == rows || (bytes > kMaxHistoryBytes && !out.empty())) {
             break;
         }
         out.push_back(m);

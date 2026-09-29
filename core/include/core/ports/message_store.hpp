@@ -71,7 +71,8 @@ public:
     // Messages below `before` (the newest when nullopt), newest first: scrolling back.
     // Messages above `after`, oldest first: resuming from the last seq a client saw.
     // Each page holds at most min(limit, kMaxHistoryRows) messages whose bodies add up to at
-    // most kMaxHistoryBytes. Pages are contiguous: a gap in seq is a seq never stored.
+    // most kMaxHistoryBytes, and at least one message whenever one is left, however large.
+    // Pages are contiguous: a gap in seq is a seq never stored.
     virtual void history_before(const RoomId& room, std::optional<std::uint64_t> before,
                                 std::size_t limit,
                                 MessageCallback<std::vector<StoredMessage>> done) = 0;

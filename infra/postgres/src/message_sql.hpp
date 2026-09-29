@@ -10,7 +10,9 @@
 namespace infra::postgres::message_sql {
 
 // Both pages walk the primary key from the cursor and stop at the row limit; the running sum
-// then cuts the page where its bodies pass the byte bound. The window reads rows in index
+// then cuts the page where its bodies pass the byte bound. The first row is kept whatever its
+// size (its running sum is its own length): no writer here stores a body over the bound, but a
+// page that came back empty would read as the end of the room. The window reads rows in index
 // order and one row ahead of what it emits, so the limit stops the scan early.
 // $1 room, $2 cursor (exclusive), $3 row limit, $4 byte bound.
 inline constexpr std::string_view kHistoryBeforeText = R"sql(
@@ -21,7 +23,7 @@ SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, bo
          WHERE room_id = $1 AND seq < $2
          ORDER BY seq DESC
          LIMIT $3) AS page
- WHERE running <= $4
+ WHERE running <= $4 OR running = octet_length(body)
  ORDER BY seq DESC)sql";
 // A view of a literal: data() is NUL-terminated.
 // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
@@ -35,7 +37,7 @@ SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, bo
          WHERE room_id = $1 AND seq > $2
          ORDER BY seq
          LIMIT $3) AS page
- WHERE running <= $4
+ WHERE running <= $4 OR running = octet_length(body)
  ORDER BY seq)sql";
 // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
 inline constexpr Sql kHistoryAfter = kHistoryAfterText.data();

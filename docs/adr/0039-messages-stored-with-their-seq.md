@@ -94,7 +94,9 @@ What bounds a page of history:
   commits are bodies like any other.
 - **Pages.** At most `min(limit, 256)` rows whose bodies add up to at most 256 KiB. The query
   walks the primary key from the cursor, forwards or backwards, under a `LIMIT`; a running
-  `sum(octet_length(body))` window cuts the page at the byte bound. A backward scan of
+  `sum(octet_length(body))` window cuts the page at the byte bound. The first row is kept
+  whatever its size: nothing here writes a body over the bound, but a row that came to be
+  there anyway must not make an empty page, which reads as the start of the room. A backward scan of
   `(room_id, seq)` is the `(room_id, seq DESC)` order, so no second index exists.
 - **Membership** is `chat_members(room_id, user_id)`, `user_id` in the `"C"` collation, so ids
   page in byte order whatever the database's default collation; the in-memory store orders them

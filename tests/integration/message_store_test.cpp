@@ -216,6 +216,36 @@ TEST_F(MessageStoreTest, HistorySurvivesARestartInTheSameOrder) {
     EXPECT_EQ(ask<std::uint64_t>([&](auto done) { store_->last_seq(room, std::move(done)); }), 5U);
 }
 
+TEST_F(MessageStoreTest, ABodyOverThePagesByteBoundStillMakesAPageOfItsOwn) {
+    const core::RoomId room = new_room();
+    // No writer here stores such a body; a row put there by hand must not end paging early.
+    ASSERT_TRUE(conn_->exec(
+        "INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at) VALUES "
+        "($1, 1, 'auth0|alice', 'k1', '\\x01', now()), "
+        "($1, 2, 'auth0|alice', 'k2', decode(repeat('ab', $2::integer), 'hex'), now()), "
+        "($1, 3, 'auth0|alice', 'k3', '\\x03', now())",
+        Params{}.add_uuid(room.uuid()).add_int(core::ports::kMaxHistoryBytes + 1)));
+    const auto seqs_of = [](const MessageResult<Page>& page) {
+        std::vector<std::uint64_t> out;
+        for (const StoredMessage& m : page.value_or(Page{})) {
+            out.push_back(m.seq);
+        }
+        return out;
+    };
+    const auto after = [&](std::uint64_t cursor) {
+        return ask<Page>(
+            [&](auto done) { store_->history_after(room, cursor, 10, std::move(done)); });
+    };
+    EXPECT_EQ(seqs_of(after(0)), std::vector<std::uint64_t>{1});
+    const auto large = after(1);
+    EXPECT_EQ(seqs_of(large), std::vector<std::uint64_t>{2});
+    EXPECT_EQ(large->front().body.size(), core::ports::kMaxHistoryBytes + 1);
+    EXPECT_EQ(seqs_of(after(2)), std::vector<std::uint64_t>{3});
+    EXPECT_EQ(seqs_of(before(room, std::nullopt, 10)), std::vector<std::uint64_t>{3});
+    EXPECT_EQ(seqs_of(before(room, 3, 10)), std::vector<std::uint64_t>{2});
+    EXPECT_EQ(seqs_of(before(room, 2, 10)), std::vector<std::uint64_t>{1});
+}
+
 TEST_F(MessageStoreTest, HistoryOfATenThousandMessageRoomWalksThePrimaryKey) {
     const core::RoomId room = new_room();
     ASSERT_NO_FATAL_FAILURE(seed(room, 10'000));
