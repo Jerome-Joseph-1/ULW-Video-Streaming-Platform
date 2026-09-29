@@ -38,6 +38,7 @@ public:
         : limits_(limits), manual_clock_(manual_clock) {
         std::promise<std::uint16_t> port;
         auto ready = port.get_future();
+        healthy_ = healthy_promise_.get_future();
         thread_ = std::jthread([this, kind, port = std::move(port)]() mutable { run(kind, port); });
         port_ = ready.get();
     }
@@ -51,6 +52,12 @@ public:
     Node& operator=(Node&&) = delete;
 
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+    // Whether the room plane is reachable, the condition /readyz reports, without a request to
+    // poll it with: the node's loop says so once, and the wait ends then or at the limit.
+    [[nodiscard]] bool wait_healthy(std::chrono::milliseconds limit) const {
+        return healthy_.wait_for(limit) == std::future_status::ready;
+    }
 
     // Returns once the node's loop has run the timers that came due: it applies the step before
     // polling, and the extra turns let whatever those timers did reach its sockets.
@@ -110,7 +117,12 @@ private:
             return;
         }
         port.set_value(client_port);
+        bool healthy_told = false;
         while (!stop_) {
+            if (!healthy_told && router.healthy()) {
+                healthy_told = true;
+                healthy_promise_.set_value();
+            }
             if (hold_store != store->hold) {
                 if (hold_store) {
                     store->hold = true;
@@ -135,6 +147,8 @@ private:
 
     chat::Limits limits_;
     bool manual_clock_;
+    std::promise<void> healthy_promise_;
+    std::future<void> healthy_;
     std::atomic<std::int64_t> requested_ = 0;
     std::atomic<std::int64_t> applied_ = 0;
     std::atomic<std::uint64_t> turns_ = 0;
@@ -170,8 +184,10 @@ protected:
 
 TEST_P(ChatSessionTest, ProbesAnswerAndUnknownPathsAreNotFound) {
     EXPECT_EQ(ulw::test::http_get(node_->port(), "/healthz").status, 200);
-    EXPECT_TRUE(ulw::test::eventually(
-        [&] { return ulw::test::http_get(node_->port(), "/readyz").status == 200; }));
+    // Ready follows the node's first heartbeat, about a second on. Waiting on that instead of
+    // requesting /readyz in a loop keeps the test to a handful of connections.
+    ASSERT_TRUE(node_->wait_healthy(seconds(10)));
+    EXPECT_EQ(ulw::test::http_get(node_->port(), "/readyz").status, 200);
     const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
     EXPECT_EQ(metrics.status, 200);
     EXPECT_NE(metrics.body.find("fenced_writes_total 0\n"), std::string::npos);
