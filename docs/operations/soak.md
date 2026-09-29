@@ -92,3 +92,49 @@ Binaries from ee075b6, the current soak load (eight clients on TLS, about 30 req
 with slow clients, saturation, store faults and SIGHUPs) and criterion.
 
 Run 3 (full load) in progress; recorded when it ends at about 16:41 UTC.
+
+## Chat
+
+`tests/soak/chat_soak.py` runs three `chat_server` nodes on one Postgres, the M16 cluster, for
+hours under a mixed WebSocket load through all three, samples each node's RSS, open descriptors
+and `/metrics` every minute into `samples.csv`, and judges every node by ADR-0042's method on
+chat's units of work: per command, per delivery and per connection, against ceilings of 3840,
+25,600 and 42.7 a second per node and the pod's 1 GiB. The units, ceilings and why are
+ADR-0053; the load is listed in the script's docstring. It needs Postgres only, and sets
+`ULW_ALLOW_ROOT=1` for what it starts, as the gateway soak does.
+
+```
+docker compose -f deploy/local/compose.yaml up -d --wait postgres
+cmake --preset ci && cmake --build --preset ci --target chat_server ulw_migrate ulw_devtoken
+tests/soak/chat_soak.py --self-test --out /tmp/chat-soak-selftest            # 12 minutes
+tests/soak/chat_soak.py --build build/ci --hours 6 --out /tmp/chat-soak-6h    # the run
+tests/soak/chat_soak.py --rejudge /tmp/chat-soak-6h/samples.csv --clients 64
+```
+
+`ULW_TEST_DATABASE_URL` names the Postgres server (the compose one by default); the run creates
+its own database there and drops it at the end. Client ports are 19101 to 19103 and node ports
+100 above (`--port`). `ULW_REACTOR=epoll` runs the nodes on the fallback reactor.
+
+- **The mix follows the server.** At the start the soak tries `kind` on join, `history` and
+  `watch`; a `malformed` answer means that server predates them (M19, M18), and the summary
+  names what it left out. Run the 6 h soak on a `main` that has both, so that history pages,
+  stored messages and presence are part of what is judged.
+- **Verdict.** A run passes when every node is flat, every path of the mix ran (the summary's
+  "paths exercised" list: owner takeovers and fenced writes, rate limits, deduplication,
+  resumes, lossy skips, slow consumers, refused upgrades, bad commands, SIGHUP, and history and
+  presence where present), nothing in the soak itself raised, and every node exited 0 on
+  SIGTERM.
+- **Self-test.** 12 minutes, 15 s samples, a 3 minute warm-up, owner changes every 150 s and
+  shorter client sessions. It proves the harness: it passes on coverage and clean exits, and
+  prints its flatness without judging by it, since nine minutes cannot resolve bounds set for
+  six hours. `tests/soak/chat_soak_test.py` (ctest `chat_soak_judge`) checks the verdict on
+  synthetic samples.
+- **Storage.** On a server that stores messages (M19) 6 h leave about 1.5 million of them, some
+  0.8 GB of rows with the slow consumers' firehose, until the database is dropped at the end.
+- **Owner changes stall clients.** Each stop holds one node for 8 s: its clients' sends go
+  unanswered, some connects to it time out, and those count as `transport_errors` in the
+  totals, not as failures.
+
+### Runs
+
+None yet on a `main` with M18 and M19; the 6 h run is recorded here when it ends.
