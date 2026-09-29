@@ -124,6 +124,11 @@ TEST_F(LiveRecordingsTest, ARecordedStreamIsNotMarkedFailedAfterwards) {
     EXPECT_EQ(recordings.fail("s1", "too late")->video, first.video);
 }
 
+TEST_F(LiveRecordingsTest, AnEmptyReasonIsRefusedByTheSchema) {
+    EXPECT_FALSE(PgLiveRecordings(db_->conninfo()).fail("s1", ""));
+    EXPECT_EQ(count("SELECT count(*) FROM live_recordings"), "0");
+}
+
 TEST(LiveRecordingsUnreachable, AnUnreachableDatabaseIsUnavailableNotAnAnswer) {
     PgLiveRecordings recordings("postgresql://ulw@127.0.0.1:1/ulw?connect_timeout=2");
     EXPECT_EQ(recordings.find("s1").error(), infra::postgres::RecordingStoreError::Unavailable);

@@ -8,5 +8,7 @@ CREATE TABLE live_recordings (
     video_id    uuid,
     failure     text,
     recorded_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT video_or_failure CHECK ((video_id IS NULL) <> (failure IS NULL))
+    CONSTRAINT video_or_failure CHECK ((video_id IS NULL) <> (failure IS NULL)),
+    -- A reason says something; an empty one would read back as neither a video nor a reason.
+    CONSTRAINT failure_says_why CHECK (failure <> '')
 );
