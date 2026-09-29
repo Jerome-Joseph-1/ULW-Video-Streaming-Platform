@@ -78,7 +78,11 @@ of the stream, and would take the stream's one video.
   publisher that never came or went silent, before a segment of its own), which leaves the
   previous run's window ended under that run's epoch; a restart after its recording failed
   holds no claim, and without `ended_by` would take the ender's claim for a newer packager's
-  and never record the stream. A claim above the ender belongs to a packager still publishing,
+  and never record the stream. `ended_by` is written only after the same check the playlist
+  write makes (no `epoch_<E+1>` claimed), so a superseded run cannot put its older epoch over a
+  newer ender's; the check is not atomic with the write, as for the playlist, and the recorder
+  takes the highest of the three sources. An `ended_by` that is empty or does not parse is
+  ignored rather than fatal: the other two still bound the ender from below. A claim above the ender belongs to a packager still publishing,
   whose own end records the stream; the run removes what it stored and exits 0.
 - **The steps.** (1) If `live_recordings` has the stream, stop. (2) Read the playlist; not
   ended, or no segment: nothing to record. (3) The fence above. (4) Plan the runs; probe each
@@ -89,7 +93,8 @@ of the stream, and would take the stream's one video.
   database is down, removes its object; the next run makes its own with a new id.
 - **Failures.** One that may pass exits 1, and the pod's restart tries again from the first
   step: every error of the store (a credential, a bucket, a disk can be put right), the
-  database, the sandbox helper's own exits (125 to 127: setup failed, cannot execute, program
+  database (a packager opens a session per call, a few in its life; one the server refuses,
+  for want of a free connection say, is such a failure, and the next start retries), the sandbox helper's own exits (125 to 127: setup failed, cannot execute, program
   not found, as for a misnamed `ULW_FFPROBE`), a copy killed by a signal (the OOM killer, the
   syscall filter), interrupted (ffmpeg's 255) or past its wall-clock or CPU budget, and a stop.
   One that cannot is written as the stream's row with no video and the reason, after the fence
