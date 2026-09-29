@@ -42,7 +42,6 @@ public:
                                                                   std::string title);
     [[nodiscard]] static std::expected<Video, DomainError> rehydrate(const VideoRecord& record);
 
-    [[nodiscard]] std::expected<void, DomainError> start_upload() noexcept;
     [[nodiscard]] std::expected<void, DomainError> start_processing() noexcept;
     [[nodiscard]] std::expected<void, DomainError> mark_ready(Millis duration) noexcept;
     [[nodiscard]] std::expected<void, DomainError> mark_failed(std::string reason) noexcept;
