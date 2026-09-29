@@ -90,11 +90,13 @@ public:
         const core::RoomId& /*room*/, std::optional<std::uint64_t> /*before*/,
         std::size_t /*limit*/,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
+        directions.emplace_back("before");
         pages.push_back(std::move(done));
     }
     void history_after(
         const core::RoomId& /*room*/, std::uint64_t /*after*/, std::size_t /*limit*/,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
+        directions.emplace_back("after");
         pages.push_back(std::move(done));
     }
     void last_seq(const core::RoomId& /*room*/,
@@ -136,6 +138,7 @@ public:
     bool hold = false;
     std::vector<std::pair<core::ports::MessageCallback<bool>, bool>> held;
     std::vector<core::ports::MessageCallback<std::vector<core::ports::StoredMessage>>> pages;
+    std::vector<std::string> directions;
 };
 
 class FakeClient final : public chat::IClient {
@@ -364,6 +367,28 @@ TEST_F(ChatServiceTest, AHistoryPageArrivesAsItsMessagesInTheStoresOrderThenItsC
     EXPECT_EQ(got[2], std::string(R"({"type":"history","room":")") + std::string(kRoom) +
                           R"(","count":2})");
     EXPECT_EQ(service_->counters().history_messages, 2U);
+}
+
+TEST_F(ChatServiceTest, AfterReadsForwardFromTheCursorAndBeforeOrNoCursorBackward) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit(9);
+    service_->history(a, {.room = room_id(), .before = std::nullopt, .after = 3});
+    history(a, 9);
+    history(a);
+    EXPECT_EQ(messages_.directions, (std::vector<std::string>{"after", "before", "before"}));
+}
+
+TEST_F(ChatServiceTest, HistoryIsRefusedWhileTheMemberCheckIsStillOut) {
+    messages_.hold = true;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    alice.take();
+    history(a);
+    EXPECT_TRUE(messages_.pages.empty());
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
 }
 
 TEST_F(ChatServiceTest, HistoryOfARoomNotJoinedIsRefusedWithoutReadingTheStore) {
@@ -720,6 +745,21 @@ TEST_F(TwoJoins, AResumeInARoomAlreadyJoinedCostsAJoinAndAPlainRejoinDoesNot) {
     ASSERT_EQ(got.size(), 5U);
     EXPECT_EQ(seen(got[3]).type, "joined");
     EXPECT_EQ(seen(got[4]).reason, "busy");
+}
+
+TEST_F(TwoJoins, APageOfHistoryCostsAJoin) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    history(a);
+    history(a);
+    EXPECT_EQ(messages_.pages.size(), 1U);
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "busy");
+    clock_.advance(Millis{1'000});
+    history(a);
+    EXPECT_EQ(messages_.pages.size(), 2U);
 }
 
 class SmallBuffers : public ChatServiceTest {
