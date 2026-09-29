@@ -1,0 +1,42 @@
+title = "ulw"
+
+[extend]
+useDefault = true
+
+# Every entry is scoped to one rule and to the files named. A new file, or a hit from another
+# rule, still fails the scan.
+
+# Fake credentials the S3 adapter's tests feed to the signer, the credential providers and the
+# XML parser; made-up key ids and session tokens. None grants access.
+[[allowlists]]
+description = "S3 adapter test credentials"
+targetRules = ["generic-api-key"]
+paths = [
+    '''^tests/unit/s3/credentials_test\.cpp$''',
+    '''^tests/unit/s3/sigv4_test\.cpp$''',
+    '''^tests/unit/s3/xml_test\.cpp$''',
+]
+
+# Sec-WebSocket-Key values in handshake fixtures: 16 random bytes sent in the clear by every
+# client, and RFC 6455's own sample nonce.
+[[allowlists]]
+description = "WebSocket handshake nonces"
+targetRules = ["generic-api-key"]
+paths = [
+    '''^tests/support/ws_client\.hpp$''',
+    '''^tests/unit/ws/handshake_test\.cpp$''',
+    '''^tests/unit/ws/ws_echo_server_test\.cpp$''',
+]
+
+# --from-literal="secret=$turn_secret": the value is a shell variable generated per run, not a
+# literal.
+[[allowlists]]
+description = "sandbox secret created from a generated shell variable"
+targetRules = ["generic-api-key"]
+paths = ['''^deploy/stunner/up\.sh$''']
+
+# The rule fires on the crate name "libcrux-secrets" followed by a checksum line.
+[[allowlists]]
+description = "crate name in a lockfile"
+targetRules = ["generic-api-key"]
+paths = ['''^infra/e2ee/mls_ffi_bridge/Cargo\.lock$''']

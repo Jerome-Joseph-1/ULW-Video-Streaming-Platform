@@ -24,6 +24,8 @@ struct Sandbox {
     // "NAME=value" entries. Nothing of the worker's own environment is passed on: it holds
     // the database password and the storage keys.
     std::vector<std::string> environment;
+    // Off only in tests that run an ordinary shell as the child.
+    bool syscall_filter = true;
 };
 
 struct Limits {

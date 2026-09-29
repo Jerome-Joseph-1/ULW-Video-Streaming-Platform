@@ -51,4 +51,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0045](0045-one-store-connection-per-admitted-upload.md) | One store connection per admitted upload, and a held body is the store's to end | Accepted |
 | [0046](0046-live-media-reaches-the-packager-over-srt.md) | Live media reaches the packager over SRT, which it terminates itself | Accepted |
 | [0047](0047-live-playlist-window-and-restart.md) | The live playlist is a window the packager owns, and it continues across a restart | Accepted |
+| [0048](0048-seccomp-allowlist-for-the-ffmpeg-child.md) | The ffmpeg child runs under a syscall allowlist | Accepted |
+| [0049](0049-upload-reaper-as-a-cron-job.md) | Abandoned uploads are reaped by a CronJob | Accepted |
+| [0050](0050-clients-reach-the-sfu-with-a-ticket.md) | Clients reach the SFU with a ticket, not through our signalling | Accepted |
 | [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
