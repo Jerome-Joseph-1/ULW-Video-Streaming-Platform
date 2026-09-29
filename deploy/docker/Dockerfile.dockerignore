@@ -1,0 +1,9 @@
+# The build needs the sources, the vendored archives and CMake; nothing built or fetched here.
+.git
+build
+out
+.cache
+deploy/local/.tools
+deploy/local/.state
+tests/e2e/node_modules
+**/__pycache__

@@ -33,3 +33,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0027](0027-admission-control-from-measured-connection-memory.md) | Admission control from the measured memory of a connection | Accepted |
 | [0028](0028-segments-fetched-cross-origin-without-credentials.md) | Viewers fetch segments cross-origin, without credentials | Accepted |
 | [0029](0029-websocket-messages-own-their-payload.md) | WebSocket messages own their payload | Accepted |
+| [0032](0032-container-images-on-ubuntu-from-a-dated-snapshot.md) | Container images build and run on Ubuntu 24.04 from a dated snapshot | Accepted |
