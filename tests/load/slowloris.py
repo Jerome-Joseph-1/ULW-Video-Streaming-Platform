@@ -1,44 +1,46 @@
 #!/usr/bin/env python3
-"""Opens many sockets to the gateway and trickles bytes into them just under the timeouts the
+"""Opens many sockets to the gateway and trickles bytes into them against the timeouts the
 gateway documents for a connection (apps/gateway/src/gateway.hpp's Limits, enforced in
 apps/gateway/src/connection.cpp):
 
-  header_timeout     10 s from the first byte of a request to a complete header block
-                      (arm_timer(header_timeout) in Connection::on_head / the header-wait path)
+  header_timeout     10 s, measured from the request's first byte, not its latest: a client that
+                      drips the header block one byte at a time is cut off at 10 s all the same
+                      (Connection's timer, "Measured from the request's first byte")
   body_idle_timeout   30 s of no forward progress on a request body
   min_body_bytes_per_second / body_rate_window
                       a body must average at least 8 KiB/s (8 * 1024 B/s) over each 30 s window
                       it is read in, or the gateway answers 408 (Connection::check_body_rate)
 
-Two attack shapes, chosen with --mode:
-  headers   opens a connection, sends one header line, then a further byte every
-            --byte-interval seconds (comfortably under 10 s) forever — this never crosses the
-            per-byte header timeout but never finishes the header block either, so it measures
-            how many connections the gateway will hold open on unfinished headers, not whether
-            the timeout itself is enforced correctly.
-  body      completes a small PATCH's header block, then trickles the body at a rate the caller
-            sets with --body-rate (bytes/s); set it below 8 KiB/s to also exercise the 30 s
-            floor rather than only the idle timeout.
+Two shapes, chosen with --mode:
+  headers   opens a connection, sends the header block one byte every --byte-interval seconds
+            and never finishes it. The gateway should close each connection about 10 s in, so
+            the report's closed_after_buckets show whether the timeout is enforced, and how many
+            sockets it held meanwhile.
+  body      needs --token-file. Creates a real upload per connection (a 64 KiB one, with a token
+            round-robined from the file: the gateway admits 3 uploads per user), sends the PATCH
+            header block, then trickles the body at --body-rate bytes/s. Below 8 KiB/s the
+            gateway answers 408 once a 30 s window has passed, which is the floor being reached;
+            at or above it the connection lives.
 
     tests/load/slowloris.py --url http://127.0.0.1:8080 --connections 50 --duration 60 \
-        --legit-url http://127.0.0.1:8080
+        --legit-url http://127.0.0.1:8080 --legit-token "$TOKEN"
 
 Reports, as JSON: connections opened, how many the gateway closed (and after how long, in
-buckets), and — with --legit-url — the concurrent legitimate client's latency and error rate, to
-show its p99 holds up while the slow connections are open.
+buckets), and - with --legit-url - the concurrent legitimate client's latency and error rate
+(legit_client.py), to show its p99 holds up while the slow connections are open.
 """
 import argparse
 import http.client
 import json
 import socket
-import statistics
 import threading
 import time
 import urllib.parse
 
-# Comfortably under the 10 s header_timeout (apps/gateway/src/gateway.hpp): a byte every 4 s
-# means at most 3 bytes could still be in flight when the timer would fire, so this mode's
-# connections are never at risk of being closed as a header-timeout false positive.
+import legit_client
+
+# A byte every 4 s keeps a connection alive on the idle path only if the timeout were per byte;
+# the gateway measures header_timeout (10 s) from the first byte, so these are closed at 10 s.
 DEFAULT_BYTE_INTERVAL_S = 4.0
 # Comfortably under the 8 KiB/s = 8192 B/s floor (min_body_bytes_per_second): a tenth of it
 # guarantees the body-rate check trips well within its 30 s window rather than racing it.
@@ -131,8 +133,31 @@ def slow_header_connection(host, port, byte_interval, deadline, stats):
             pass
 
 
-def slow_body_connection(host, port, body_rate, deadline, stats):
-    body_len = 64 * 1024  # one small PATCH body, never actually completed at this rate
+def create_upload(host, port, token, size):
+    conn = http.client.HTTPConnection(host, port, timeout=10)
+    try:
+        conn.request("POST", "/api/v1/uploads",
+                     body=json.dumps({"filename": "slow.mp4", "size_bytes": size,
+                                      "content_type": "video/mp4"}),
+                     headers={"Authorization": f"Bearer {token}",
+                              "Content-Type": "application/json"})
+        response = conn.getresponse()
+        data = response.read()
+    finally:
+        conn.close()
+    return json.loads(data)["upload_id"] if response.status == 201 else None
+
+
+def slow_body_connection(host, port, body_rate, token, deadline, stats):
+    body_len = 64 * 1024
+    try:
+        upload_id = create_upload(host, port, token, body_len)
+    except OSError:
+        upload_id = None
+    if upload_id is None:
+        with stats.lock:
+            stats.connect_errors += 1
+        return
     started = time.monotonic()
     try:
         sock = socket.create_connection((host, port), timeout=10)
@@ -144,31 +169,30 @@ def slow_body_connection(host, port, body_rate, deadline, stats):
         stats.opened += 1
     try:
         header = (
-            "PATCH /api/v1/uploads/00000000-0000-7000-8000-000000000000 HTTP/1.1\r\n"
+            f"PATCH /api/v1/uploads/{upload_id} HTTP/1.1\r\n"
             "Host: load-test\r\n"
+            f"Authorization: Bearer {token}\r\n"
             "Upload-Offset: 0\r\n"
             "Content-Type: application/offset+octet-stream\r\n"
             f"Content-Length: {body_len}\r\n\r\n"
         ).encode()
         sock.sendall(header)
         sent = 0
-        piece = b"x"
         while sent < body_len and time.monotonic() < deadline:
-            sock.sendall(piece)
+            sock.sendall(b"x")
             sent += 1
-            # Deliberate pacing to the target rate — the point of this tool, not a
+            # Deliberate pacing to the target rate - the point of this tool, not a
             # wait-for-condition sleep.
             behind = sent / body_rate - (time.monotonic() - started)
             if behind > 0:
                 time.sleep(behind)
-        # Whatever the server answers (401 for the bogus upload id, or a timeout closing the
-        # socket first) ends this connection's measurement the same way.
+        # A 408 or a closed socket ends the measurement; so does the deadline.
         sock.settimeout(max(1.0, deadline - time.monotonic()))
         try:
             data = sock.recv(4096)
         except OSError:
             data = b""
-        if data == b"":
+        if data == b"" or data.startswith(b"HTTP/1.1 408"):
             stats.record_close(time.monotonic() - started)
         else:
             with stats.lock:
@@ -182,57 +206,6 @@ def slow_body_connection(host, port, body_rate, deadline, stats):
             pass
 
 
-def run_legit_client(url, token, duration):
-    stop_event = threading.Event()
-    latencies = []
-    errors = []
-    lock = threading.Lock()
-
-    def guarded_loop():
-        parts = urllib.parse.urlsplit(url)
-        kind = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
-        while not stop_event.is_set():
-            started = time.monotonic()
-            try:
-                conn = kind(parts.hostname, parts.port, timeout=10)
-                headers = {"Authorization": f"Bearer {token}"} if token else {}
-                conn.request("GET", "/api/v1/healthz", headers=headers)
-                resp = conn.getresponse()
-                resp.read()
-                conn.close()
-                elapsed = time.monotonic() - started
-                with lock:
-                    latencies.append(elapsed)
-                    if resp.status not in (200, 204):
-                        errors.append(f"http_{resp.status}")
-            except OSError as e:
-                with lock:
-                    errors.append(type(e).__name__)
-            stop_event.wait(0.2)
-
-    thread = threading.Thread(target=guarded_loop, daemon=True)
-    thread.start()
-
-    def stop():
-        stop_event.set()
-        thread.join(timeout=10)
-        with lock:
-            data = sorted(latencies)
-            err = list(errors)
-        summary = {
-            "requests": len(data) + len(err),
-            "errors": len(err),
-            "error_rate": round(len(err) / (len(data) + len(err)), 4) if (data or err) else None,
-        }
-        if data:
-            qs = statistics.quantiles(data, n=100) if len(data) > 1 else [data[0]] * 99
-            summary["p50_ms"] = round((qs[49] if len(data) > 1 else data[0]) * 1000, 2)
-            summary["p99_ms"] = round((qs[98] if len(data) > 1 else data[0]) * 1000, 2)
-        return summary
-
-    return stop
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -244,9 +217,23 @@ def main():
                         help="headers mode: seconds between bytes of the header block")
     parser.add_argument("--body-rate", type=float, default=DEFAULT_BODY_RATE_BPS,
                         help="body mode: bytes/s to trickle the PATCH body at")
+    parser.add_argument("--token-file", help="body mode: one bearer token per line, "
+                                              "round-robined (3 uploads per user at most)")
     parser.add_argument("--legit-url", help="base URL for a concurrent legit client loop")
-    parser.add_argument("--legit-token", help="bearer token for the legit client, if it needs one")
+    parser.add_argument("--legit-token", help="bearer token for the legit client; required "
+                                              "with --legit-url")
     args = parser.parse_args()
+    if args.legit_url and not args.legit_token:
+        parser.error("--legit-url needs --legit-token")
+    tokens = []
+    if args.mode == "body":
+        if not args.token_file:
+            parser.error("--mode body needs --token-file")
+        with open(args.token_file) as f:
+            tokens = [line.strip() for line in f if line.strip()]
+        if len(tokens) * 3 < args.connections:
+            parser.error(f"{args.connections} connections need at least "
+                         f"{-(-args.connections // 3)} tokens: the gateway admits 3 uploads a user")
 
     parts = urllib.parse.urlsplit(args.url)
     stats = SlowlorisStats()
@@ -254,15 +241,17 @@ def main():
 
     stop_legit = None
     if args.legit_url:
-        stop_legit = run_legit_client(args.legit_url, args.legit_token, args.duration)
-
-    target = slow_header_connection if args.mode == "headers" else slow_body_connection
-    extra = (args.byte_interval,) if args.mode == "headers" else (args.body_rate,)
+        stop_legit = legit_client.start(args.legit_url, args.legit_token, args.duration)
 
     started = time.monotonic()
     threads = []
-    for _ in range(args.connections):
-        t = threading.Thread(target=target, args=(parts.hostname, parts.port, *extra, deadline, stats))
+    for i in range(args.connections):
+        if args.mode == "headers":
+            target, extra = slow_header_connection, (args.byte_interval, deadline, stats)
+        else:
+            target = slow_body_connection
+            extra = (args.body_rate, tokens[i % len(tokens)], deadline, stats)
+        t = threading.Thread(target=target, args=(parts.hostname, parts.port, *extra))
         t.start()
         threads.append(t)
     for t in threads:

@@ -37,9 +37,10 @@ in flight) into the JSON report.
 
 ## slowloris.py
 
-Opens many sockets and trickles bytes into them just under the gateway's documented timeouts
-(`apps/gateway/src/gateway.hpp`'s `Limits`, enforced in `connection.cpp`): a 10 s header timeout,
-a 30 s body idle timeout, and a floor of 8 KiB/s averaged over each 30 s window a body is read.
+Opens many sockets and trickles bytes into them against the gateway's documented timeouts
+(`apps/gateway/src/gateway.hpp`'s `Limits`, enforced in `connection.cpp`): a 10 s header timeout
+measured from the request's first byte, a 30 s body idle timeout, and a floor of 8 KiB/s averaged
+over each 30 s window a body is read.
 
 ```
 tests/load/slowloris.py --url http://127.0.0.1:8080 --connections 50 --duration 60 \
@@ -56,8 +57,8 @@ degraded while the slow connections are open.
 ## flood.py
 
 Opens many short-lived connections as fast as it can: unauthenticated requests, a deliberately
-oversized header the parser should reject outright, and — with `--token` — small valid requests,
-all mixed together per worker.
+oversized header the parser should reject outright, and — with `--token` — authenticated
+catalog lookups, all mixed together per worker. It follows `https://` URLs.
 
 ```
 tests/load/flood.py --url http://127.0.0.1:8080 --duration 30 --rate 500 \

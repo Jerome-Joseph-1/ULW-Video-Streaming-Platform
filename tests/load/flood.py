@@ -9,11 +9,15 @@ legitimate client's latency and error rate so a run can show it held up under th
   bad      a request the HTTP layer itself should refuse before routing: a header line over the
            parser's limit, run once per connection and then the socket is dropped — this checks
            that malformed input is turned away cheaply rather than accepted onto a route.
-  valid    (only if --token is given) GET /api/v1/healthz with a valid bearer token, the
-           cheapest authenticated route, so a flood run can also show real traffic keeps working.
+  valid    (only if --token is given) GET /api/v1/videos/{random-uuid} with a valid bearer token:
+           an authenticated catalog lookup that answers 404, so the flood also reaches the
+           authenticated path.
 
     tests/load/flood.py --url http://127.0.0.1:8080 --duration 30 --rate 500 \
         --legit-url http://127.0.0.1:8080 --token "$TOKEN"
+
+--legit-url with --legit-token runs the client in legit_client.py beside the flood: it creates
+one small upload and keeps reading that video, and its p99 and error rate are reported.
 
 --rate bounds requests/s across all worker threads combined (0 means unbounded, limited only by
 --workers). Each connection is opened, one request sent, response drained, then closed — no
@@ -23,11 +27,13 @@ import argparse
 import http.client
 import json
 import socket
-import statistics
+import ssl
 import threading
 import time
 import urllib.parse
 import uuid
+
+import legit_client
 
 
 class Flood:
@@ -54,11 +60,15 @@ class Flood:
             }
 
 
-def send_unauth(host, port):
-    parts_path = f"/api/v1/videos/{uuid.uuid4()}"
-    conn = http.client.HTTPConnection(host, port, timeout=5)
+def connect(scheme, host, port):
+    kind = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+    return kind(host, port, timeout=5)
+
+
+def send_unauth(scheme, host, port):
+    conn = connect(scheme, host, port)
     try:
-        conn.request("GET", parts_path)
+        conn.request("GET", f"/api/v1/videos/{uuid.uuid4()}")
         resp = conn.getresponse()
         resp.read()
         return resp.status
@@ -66,10 +76,16 @@ def send_unauth(host, port):
         conn.close()
 
 
-def send_bad(host, port):
+def send_bad(scheme, host, port):
     """A request line the parser should refuse outright: a header name/value pair far past any
     reasonable size, sent raw so nothing in http.client normalizes it away first."""
     sock = socket.create_connection((host, port), timeout=5)
+    if scheme == "https":
+        # A load tool against a sandbox's self-signed listener, so no verification.
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        sock = context.wrap_socket(sock, server_hostname=host)
     try:
         oversized = "X-Flood: " + ("a" * 200_000) + "\r\n"
         request = f"GET /api/v1/healthz HTTP/1.1\r\nHost: load-test\r\n{oversized}\r\n"
@@ -86,10 +102,11 @@ def send_bad(host, port):
         sock.close()
 
 
-def send_valid(host, port, token):
-    conn = http.client.HTTPConnection(host, port, timeout=5)
+def send_valid(scheme, host, port, token):
+    conn = connect(scheme, host, port)
     try:
-        conn.request("GET", "/api/v1/healthz", headers={"Authorization": f"Bearer {token}"})
+        conn.request("GET", f"/api/v1/videos/{uuid.uuid4()}",
+                     headers={"Authorization": f"Bearer {token}"})
         resp = conn.getresponse()
         resp.read()
         return resp.status
@@ -97,13 +114,13 @@ def send_valid(host, port, token):
         conn.close()
 
 
-def worker(host, port, token, deadline, rate_gate, flood):
+def worker(scheme, host, port, token, deadline, rate_gate, flood):
     # Cycle through the shapes so each worker contributes all three kinds rather than one
     # worker per kind, which would skew status counts toward whichever kind has fewer workers
     # when --workers doesn't divide evenly by the number of kinds.
-    shapes = [("unauth", lambda: send_unauth(host, port)), ("bad", lambda: send_bad(host, port))]
+    shapes = [("unauth", lambda: send_unauth(scheme, host, port)), ("bad", lambda: send_bad(scheme, host, port))]
     if token:
-        shapes.append(("valid", lambda: send_valid(host, port, token)))
+        shapes.append(("valid", lambda: send_valid(scheme, host, port, token)))
     while time.monotonic() < deadline:
         for kind, fn in shapes:
             if time.monotonic() >= deadline:
@@ -138,57 +155,6 @@ class RateGate:
             time.sleep(wait)
 
 
-def run_legit_client(url, token, duration):
-    stop_event = threading.Event()
-    latencies = []
-    errors = []
-    lock = threading.Lock()
-
-    def loop():
-        parts = urllib.parse.urlsplit(url)
-        kind = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
-        while not stop_event.is_set():
-            started = time.monotonic()
-            try:
-                conn = kind(parts.hostname, parts.port, timeout=10)
-                headers = {"Authorization": f"Bearer {token}"} if token else {}
-                conn.request("GET", "/api/v1/healthz", headers=headers)
-                resp = conn.getresponse()
-                resp.read()
-                conn.close()
-                elapsed = time.monotonic() - started
-                with lock:
-                    latencies.append(elapsed)
-                    if resp.status not in (200, 204):
-                        errors.append(f"http_{resp.status}")
-            except OSError as e:
-                with lock:
-                    errors.append(type(e).__name__)
-            stop_event.wait(0.2)
-
-    thread = threading.Thread(target=loop, daemon=True)
-    thread.start()
-
-    def stop():
-        stop_event.set()
-        thread.join(timeout=10)
-        with lock:
-            data = sorted(latencies)
-            err = list(errors)
-        summary = {
-            "requests": len(data) + len(err),
-            "errors": len(err),
-            "error_rate": round(len(err) / (len(data) + len(err)), 4) if (data or err) else None,
-        }
-        if data:
-            qs = statistics.quantiles(data, n=100) if len(data) > 1 else [data[0]] * 99
-            summary["p50_ms"] = round((qs[49] if len(data) > 1 else data[0]) * 1000, 2)
-            summary["p99_ms"] = round((qs[98] if len(data) > 1 else data[0]) * 1000, 2)
-        return summary
-
-    return stop
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -199,8 +165,10 @@ def main():
                         help="combined requests/s across all workers; 0 means unbounded")
     parser.add_argument("--token", help="bearer token; adds the 'valid' request shape when given")
     parser.add_argument("--legit-url", help="base URL for a concurrent legit client loop")
-    parser.add_argument("--legit-token", help="bearer token for the legit client, if it needs one")
+    parser.add_argument("--legit-token", help="bearer token for the legit client; required with --legit-url")
     args = parser.parse_args()
+    if args.legit_url and not args.legit_token:
+        parser.error("--legit-url needs --legit-token")
 
     parts = urllib.parse.urlsplit(args.url)
     flood = Flood()
@@ -209,11 +177,12 @@ def main():
 
     stop_legit = None
     if args.legit_url:
-        stop_legit = run_legit_client(args.legit_url, args.legit_token, args.duration)
+        stop_legit = legit_client.start(args.legit_url, args.legit_token, args.duration)
 
     started = time.monotonic()
     threads = [threading.Thread(target=worker,
-                                args=(parts.hostname, parts.port, args.token, deadline, rate_gate,
+                                args=(parts.scheme, parts.hostname, parts.port, args.token, deadline,
+                                      rate_gate,
                                       flood))
               for _ in range(args.workers)]
     for t in threads:
