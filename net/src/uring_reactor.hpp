@@ -90,6 +90,7 @@ private:
         // a list threaded through held_next_, oldest first.
         std::int32_t held_head = -1;
         std::int32_t held_tail = -1;
+        std::uint16_t held_count = 0;
         // A receive error that arrived after a stop. The failed receive consumed the socket's
         // error, so it is reported here, after the held datagrams, once receiving resumes.
         int held_error = 0;

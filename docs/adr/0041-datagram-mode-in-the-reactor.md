@@ -51,8 +51,12 @@ Measured on kernel 6.18 over loopback:
   buffer of small datagrams in one batch.
 - A stop cancels the multishot. Datagrams already posted are held in their ring buffers, in
   order, and delivered from the loop when receiving resumes; close gives them back. This keeps
-  the stop exact without copying, and the excess is bounded by the ring, not by the socket
-  backlog.
+  the stop exact without copying. A stopped socket keeps at most 64, an eighth of the ring, so
+  eight must stop mid-burst at once before a socket still receiving finds the ring empty;
+  beyond 64 the buffer goes back and the datagram is counted in `stopped_drops`, as the kernel
+  drops one that finds a stopped socket's receive buffer full. A receive error that lands after
+  the stop is kept behind the held datagrams and reported when receiving resumes, since the
+  failed receive has taken it off the socket.
 - A receive that finds the ring empty ends with `ENOBUFS`; it is counted as `ring_exhausted` and
   re-armed at the end of the iteration, once every buffer that iteration used is back. If held
   datagrams keep every buffer, it is not re-armed until one is delivered or released, so the loop
@@ -102,9 +106,10 @@ Measured on kernel 6.18 over loopback:
 
   io_uring's syscalls follow the number of loop iterations, not datagrams; epoll pays one
   `recvfrom` or `sendto` per datagram plus the `EAGAIN` that ends each read loop.
-- A socket stopped for long holds up to the datagrams that were posted before its cancel took
-  effect (98 in the measurement), out of 512 buffers shared by every datagram socket. A handler
-  that stops receiving for long should close the socket instead.
+- A socket stopped for long keeps up to 64 of the 512 buffers every datagram socket shares, and
+  datagrams its last batch posted beyond those are lost where epoll would have kept them in the
+  socket. Stopping is exact but, on io_uring, not lossless past 64. A handler that stops
+  receiving for long should close the socket instead.
 - The zero-copy path runs only on routes where the kernel really avoids the copy, and nothing
   in CI has such a route. Its benefit for datagrams of 2 KiB or less is unmeasured: the kernel's
   own guidance puts the break-even around 10 KB.

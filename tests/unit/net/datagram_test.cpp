@@ -287,7 +287,8 @@ TEST_P(DatagramTest, DropsAndCountsDatagramsLongerThanTheLimit) {
 }
 
 TEST_P(DatagramTest, StopIsExactAndResumeDeliversWhatWaitedInOrder) {
-    constexpr std::uint64_t kBurst = 200;
+    // Fewer than a stopped io_uring socket may keep, so nothing is dropped while it waits.
+    constexpr std::uint64_t kBurst = 60;
     constexpr std::uint64_t kStopAfter = 3;
     Sink sink;
     sink.after_datagram = [&](Sink& s) {
@@ -455,52 +456,113 @@ TEST_P(DatagramTest, ManySocketsDrainingAtOnceLoseNothing) {
     }
 }
 
-// Datagrams that arrive for a stopped socket wait in receive buffers, and enough of them can
-// hold every buffer the ring has. A socket still receiving must then wait for one to come back,
-// not retry a receive that fails at once on every iteration.
-TEST_P(DatagramTest, HeldDatagramsNeverMakeTheLoopSpin) {
-    constexpr std::size_t kStopped = 8;
+// What a socket delivered after its stop, less what io_uring dropped beyond the datagrams one
+// stopped socket may keep: always in order, and nothing lost otherwise.
+void expect_in_order(net::IReactor& reactor, const Sink& s, std::uint64_t nonce,
+                     std::uint64_t sent) {
+    const auto dropped = reactor.datagram_stats(s.id).stopped_drops;
+    EXPECT_EQ(s.got.size() + dropped, sent);
+    std::optional<std::uint64_t> last;
+    for (const Received& r : s.got) {
+        const Tag tag = decode(r.payload);
+        ASSERT_EQ(tag.nonce, nonce);
+        ASSERT_TRUE(!last || tag.seq > *last) << "reordered at seq " << tag.seq;
+        last = tag.seq;
+    }
+}
+
+// Stopped from a stream's callback, whose buffer belongs to another pool, so every datagram
+// buffer the kernel fills for `target` in that batch arrives after the stop. Submitted in this
+// order, the stream's completion comes first.
+void stop_within_one_batch(net::IReactor& reactor, net::ConnId conn, int writer, Sink& target,
+                           StreamHook& hook) {
+    hook.fired = false;
+    hook.hook = [&] { reactor.stop_receiving_datagrams(target.id); };
+    ASSERT_EQ(ulw::test::write_some(writer, encode({})), sizeof(Tag));
+    reactor.start_receiving(conn);
+    reactor.start_receiving_datagrams(target.id);
+    ASSERT_TRUE(pump_until(reactor, [&] { return hook.fired; }));
+    pump_pending(reactor);
+    reactor.stop_receiving(conn);
+    pump_pending(reactor);
+}
+
+// A stopped socket keeps a bounded share of the receive buffers every datagram socket shares,
+// so a few of them stopped mid-burst leave the others room. Unbounded, six stopped sockets
+// each keep what their batch posted (98 each, measured on 6.18) and pin the whole ring.
+TEST_P(DatagramTest, StoppedSocketsCannotStarveAnother) {
+    constexpr std::size_t kStopped = 6;
     constexpr std::uint64_t kEach = 200;
     const Peer peer = Peer::bind(AddrFamily::V4);
+    StreamHook hook;
+    auto [ours, theirs] = ulw::test::unix_pair();
+    auto conn = reactor->attach(std::move(ours), hook);
+    ASSERT_TRUE(conn);
     std::vector<Sink> stopped(kStopped);
-    std::vector<SocketAddr> addrs;
-    addrs.reserve(kStopped);
     for (std::size_t i = 0; i < kStopped; ++i) {
-        addrs.push_back(attach(stopped[i]));
+        const SocketAddr addr = attach(stopped[i]);
         for (std::uint64_t seq = 0; seq < kEach; ++seq) {
-            ASSERT_TRUE(peer.send(addrs[i], encode({.nonce = i, .seq = seq})));
+            ASSERT_TRUE(peer.send(addr, encode({.nonce = i, .seq = seq})));
+        }
+        stop_within_one_batch(*reactor, *conn, theirs.get(), stopped[i], hook);
+    }
+
+    Sink live;
+    const SocketAddr live_addr = attach(live);
+    reactor->start_receiving_datagrams(live.id);
+    constexpr std::uint64_t kLive = 448;
+    for (std::uint64_t seq = 0; seq < kLive; ++seq) {
+        ASSERT_TRUE(peer.send(live_addr, encode({.nonce = kStopped, .seq = seq})));
+        if ((seq + 1) % 64 == 0) {
+            ASSERT_TRUE(pump_until(*reactor, [&] { return live.got.size() == seq + 1; }));
         }
     }
-    // The stop comes from a stream's callback, whose buffer belongs to another pool, so that
-    // every datagram buffer the kernel fills in that batch stays held.
-    struct Stopper final : net::IStreamHandler {
-        net::IReactor* reactor = nullptr;
-        std::vector<Sink>* sinks = nullptr;
-        bool fired = false;
-        void on_data(net::BorrowedBytes /*bytes*/) noexcept override {
-            if (!fired) {
-                fired = true;
-                for (const Sink& s : *sinks) {
-                    reactor->stop_receiving_datagrams(s.id);
-                }
-            }
+    EXPECT_EQ(reactor->datagram_stats(live.id).ring_exhausted, 0U);
+    if (GetParam() == ReactorKind::IoUring) {
+        // Some batch went past what a stopped socket may keep; else nothing was tested.
+        std::uint64_t dropped = 0;
+        for (const Sink& s : stopped) {
+            dropped += reactor->datagram_stats(s.id).stopped_drops;
         }
-        void on_writable() noexcept override {}
-        void on_peer_eof() noexcept override {}
-        void on_error(int /*err*/) noexcept override {}
-    } stopper;
-    stopper.reactor = reactor.get();
-    stopper.sinks = &stopped;
-    auto [ours, theirs] = ulw::test::unix_pair();
-    auto conn = reactor->attach(std::move(ours), stopper);
-    ASSERT_TRUE(conn);
-    ASSERT_EQ(ulw::test::write_some(theirs.get(), encode({})), sizeof(Tag));
-    reactor->start_receiving(*conn);
+        EXPECT_GT(dropped, 0U);
+    }
+
     for (const Sink& s : stopped) {
         reactor->start_receiving_datagrams(s.id);
     }
-    ASSERT_TRUE(pump_until(*reactor, [&] { return stopper.fired; }));
-    pump_pending(*reactor);
+    ASSERT_TRUE(pump_until(*reactor, [&] {
+        return std::ranges::all_of(stopped, [&](const Sink& s) {
+            return s.got.size() + reactor->datagram_stats(s.id).stopped_drops == kEach;
+        });
+    }));
+    for (std::size_t i = 0; i < kStopped; ++i) {
+        expect_in_order(*reactor, stopped[i], i, kEach);
+    }
+    expect_in_order(*reactor, live, kStopped, kLive);
+    reactor->begin_close(*conn);
+}
+
+// Enough stopped sockets can still hold every receive buffer between them. A socket still
+// receiving must then wait for one to come back, not retry a receive that fails at once on
+// every iteration.
+TEST_P(DatagramTest, HeldDatagramsNeverMakeTheLoopSpin) {
+    // Eight stopped sockets each keeping their share fill the 512-buffer ring; four more make
+    // up for any round the kernel posts less than a full share in.
+    constexpr std::size_t kStopped = 12;
+    constexpr std::uint64_t kEach = 200;
+    const Peer peer = Peer::bind(AddrFamily::V4);
+    StreamHook hook;
+    auto [ours, theirs] = ulw::test::unix_pair();
+    auto conn = reactor->attach(std::move(ours), hook);
+    ASSERT_TRUE(conn);
+    std::vector<Sink> stopped(kStopped);
+    for (std::size_t i = 0; i < kStopped; ++i) {
+        const SocketAddr addr = attach(stopped[i]);
+        for (std::uint64_t seq = 0; seq < kEach; ++seq) {
+            ASSERT_TRUE(peer.send(addr, encode({.nonce = i, .seq = seq})));
+        }
+        stop_within_one_batch(*reactor, *conn, theirs.get(), stopped[i], hook);
+    }
 
     Sink live;
     const SocketAddr addr = attach(live);
@@ -524,17 +586,14 @@ TEST_P(DatagramTest, HeldDatagramsNeverMakeTheLoopSpin) {
         reactor->start_receiving_datagrams(s.id);
     }
     ASSERT_TRUE(pump_until(*reactor, [&] {
-        return live.got.size() == kEach &&
-               std::ranges::all_of(stopped, [&](const Sink& s) { return s.got.size() == kEach; });
+        return live.got.size() == kEach && std::ranges::all_of(stopped, [&](const Sink& s) {
+                   return s.got.size() + reactor->datagram_stats(s.id).stopped_drops == kEach;
+               });
     }));
-    for (std::size_t i = 0; i <= kStopped; ++i) {
-        const Sink& s = i < kStopped ? stopped[i] : live;
-        for (std::uint64_t seq = 0; seq < kEach; ++seq) {
-            const Tag tag = decode(s.got[seq].payload);
-            ASSERT_EQ(tag.nonce, i);
-            ASSERT_EQ(tag.seq, seq);
-        }
+    for (std::size_t i = 0; i < kStopped; ++i) {
+        expect_in_order(*reactor, stopped[i], i, kEach);
     }
+    expect_in_order(*reactor, live, kStopped, kEach);
     reactor->begin_close(*conn);
 }
 

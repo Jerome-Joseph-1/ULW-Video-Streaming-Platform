@@ -82,6 +82,9 @@ struct DatagramStats {
     // io_uring only: a datagram arrived while every receive buffer was in use and waited in the
     // socket until one came back.
     std::uint64_t ring_exhausted = 0;
+    // io_uring only: arrived after a stop, beyond what one stopped socket may keep in the shared
+    // receive buffers, and dropped as a full receive buffer would have dropped it.
+    std::uint64_t stopped_drops = 0;
     std::uint64_t sent = 0;
     // send_to returned EAGAIN.
     std::uint64_t send_refused = 0;

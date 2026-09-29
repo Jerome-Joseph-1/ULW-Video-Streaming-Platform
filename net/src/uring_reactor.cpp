@@ -34,6 +34,9 @@ constexpr std::uint16_t kDatagramGroup = 2;
 // measured on 6.18). 512 buffers let two sockets drain a full receive buffer in the same batch
 // before the ring runs dry.
 constexpr unsigned kDatagramBufCount = 512;
+// A stopped socket holds at most an eighth of the ring, so eight have to stop mid-burst at once
+// before a socket still receiving finds it empty. 64 is also what one epoll wakeup reads.
+constexpr std::uint16_t kMaxHeldPerSocket = 64;
 // RECVMSG writes a header, then the source address in the room msg_namelen reserves, then the
 // payload: 16 + 28 + 2048 = 2092 bytes, 1 MiB for the ring.
 constexpr std::size_t kDatagramBufSize =
@@ -400,6 +403,14 @@ void UringReactor::return_datagram_buffer(std::uint16_t bid) noexcept {
 }
 
 void UringReactor::hold(Slot& s, std::uint16_t bid, int res) noexcept {
+    if (!s.receiving && s.held_count >= kMaxHeldPerSocket) {
+        // Dropped as it would have been had the socket's receive buffer been full, rather than
+        // let one stopped socket pin the ring every other socket shares.
+        ++s.stats.stopped_drops;
+        return_datagram_buffer(bid);
+        return;
+    }
+    ++s.held_count;
     held_next_[bid] = -1;
     held_len_[bid] = res;
     if (s.held_tail < 0) {
@@ -417,6 +428,7 @@ std::uint16_t UringReactor::pop_held(Slot& s) noexcept {
     if (s.held_head < 0) {
         s.held_tail = -1;
     }
+    --s.held_count;
     --held_count_;
     return bid;
 }
