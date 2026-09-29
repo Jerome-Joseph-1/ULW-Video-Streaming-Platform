@@ -382,3 +382,15 @@ target_link_libraries(rtp_unit_tests PRIVATE ulw::codec_rtp)
 # The capture and tshark's reading of it, from media/capture_rtp.sh.
 target_compile_definitions(rtp_unit_tests
     PRIVATE ULW_RTP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/rtp")
+
+ulw_add_executable(rtp_fuzz_replay fuzz/rtp_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(rtp_fuzz_replay PRIVATE ulw::codec_rtp)
+add_test(NAME rtp_fuzz_corpus COMMAND rtp_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/rtp)
+set_tests_properties(rtp_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(rtp_fuzz fuzz/rtp_fuzz.cpp)
+    target_link_libraries(rtp_fuzz PRIVATE ulw::codec_rtp)
+    target_compile_options(rtp_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(rtp_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
