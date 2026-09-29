@@ -122,7 +122,7 @@ public:
     [[nodiscard]] const std::vector<Seen>& seen() const noexcept { return seen_; }
 
     bool send(const std::string& json) { return ws_.send_text(json); }
-    void trickle(std::size_t bytes) { ws_.read_at_most(bytes); }
+    std::size_t trickle(std::size_t bytes) { return ws_.read_at_most(bytes); }
 
     // Reads until a message matching `pred` arrives, keeping everything read.
     template <class Pred>
@@ -281,10 +281,12 @@ protected:
             .value_or("");
     }
 
-    std::unique_ptr<Client> connect_as(const Node& node, const std::string& user) {
+    std::unique_ptr<Client> connect_as(const Node& node, const std::string& user,
+                                       int receive_buffer = 0) {
         std::string refusal;
-        auto ws = WsClient::connect(node.port, "/rt",
-                                    "Authorization: Bearer " + mint(user) + "\r\n", &refusal);
+        auto ws =
+            WsClient::connect(node.port, "/rt", "Authorization: Bearer " + mint(user) + "\r\n",
+                              &refusal, receive_buffer);
         if (!ws) {
             ADD_FAILURE() << "upgrade refused: " << refusal;
             return nullptr;
@@ -1110,12 +1112,12 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
         return joined ? joined->room : std::string();
     };
     // Ten senders on each node, each a viewer too, and two viewers that only read. Eight slow
-    // viewers are on chat-2: each reads 64 KiB every 2 s, a fifth of the 170 KB/s the room sends
-    // at full pace. None stops outright: the kernel ends a connection whose window stays shut
-    // for TCP_USER_TIMEOUT (20 s), a stall shorter than this run under a sanitizer. A read
-    // reopens the window only once it frees a loopback segment's worth (64 KiB), and the
-    // kernel's probes want it reopened well inside the timeout; the clock here paces the
-    // reader, it never waits.
+    // viewers are on chat-2, each with its receive buffer fixed at 64 KiB (128 KiB in the
+    // kernel). Every 90 messages sequenced, once chat-2's lossy_drops_total shows they are
+    // behind, each reads 64 KiB, a quarter of what those messages send it. None stops outright:
+    // the kernel ends a connection whose window stays shut for TCP_USER_TIMEOUT (20 s), longer
+    // than 90 messages take even under a sanitizer, and a 64 KiB read frees half the buffer,
+    // which reopens the window.
     std::vector<std::unique_ptr<Client>> senders;
     std::vector<std::unique_ptr<Client>> viewers;
     std::string live;
@@ -1131,10 +1133,13 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
             join_live(*viewers.back());
         }
     }
+    constexpr int kSlowReceiveBuffer = 64 * 1024;
+    constexpr std::size_t kReadEvery = 90;
+    constexpr std::size_t kSlowRead = std::size_t{64} * 1024;
     Node& slow_node = nodes_[1];
     std::vector<std::unique_ptr<Client>> slow;
     for (int k = 0; k < 8; ++k) {
-        slow.push_back(connect_as(slow_node, std::format("slow-viewer-{}", k)));
+        slow.push_back(connect_as(slow_node, std::format("slow-viewer-{}", k), kSlowReceiveBuffer));
         ASSERT_TRUE(slow.back());
         ASSERT_EQ(join_live(*slow.back()), live);
     }
@@ -1146,7 +1151,8 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     // again in the next round, with a new id since it was never sequenced; the room's allowance
     // (40, then 20 a second on each node) sets the pace.
     constexpr std::size_t kMessages = 900;
-    constexpr std::size_t kSettled = 300;
+    // Past the first half, the room keeps its most and the slow viewers are long behind.
+    constexpr std::size_t kSettled = 450;
     const auto body = [](std::size_t k) {
         std::string b = std::format("live {} ", k);
         b.resize(2'000, '.');
@@ -1157,7 +1163,9 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     std::size_t next = 0;
     std::size_t acked = 0;
     std::size_t attempts = 0;
-    auto trickled = std::chrono::steady_clock::now();
+    std::size_t reads = 0;
+    std::uint64_t drops_at_read = 0;
+    std::vector<std::size_t> read_bytes(slow.size());
     std::uint64_t head = 0;
     std::uint64_t settled_kib = 0;
     std::uint64_t settled_seq = 0;
@@ -1216,11 +1224,15 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
                     << " never got seq " << head;
             }
         }
-        if (std::chrono::steady_clock::now() - trickled >= seconds(2)) {
-            for (auto& c : slow) {
-                c->trickle(std::size_t{64} * 1024);
+        if (acked / kReadEvery > reads) {
+            reads = acked / kReadEvery;
+            if (const std::uint64_t drops = metric(slow_node, "lossy_drops_total");
+                drops > drops_at_read) {
+                drops_at_read = drops;
+                for (std::size_t k = 0; k < slow.size(); ++k) {
+                    read_bytes[k] += slow[k]->trickle(kSlowRead);
+                }
             }
-            trickled = std::chrono::steady_clock::now();
         }
         if (settled_kib == 0 && acked >= kSettled) {
             settled_kib = resident_kib(slow_node.process->pid());
@@ -1239,16 +1251,20 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
             }
         }
     }
-    // What the slow viewers' node held for them did not grow with what they were sent: from the
-    // settled point on each was sent 600 messages, 1.6 MiB on the wire, and read a fraction of
-    // them; an unbounded queue would hold the rest, over 10 MiB for the eight. The
-    // bound leaves a few MiB for the allocator's own growth, which is not per message.
-    // AddressSanitizer holds on to freed memory by design (its quarantine), so under it the
-    // numbers are only reported.
+    // What the slow viewers' node held for them did not grow with what they were sent. Past
+    // the settled point each can be queued at most lossy_backlog and one message (67 KiB); the
+    // room's kept messages (256 KiB) were full long before; each message sequenced adds one
+    // remembered key (ADR-0043), about 300 bytes; and the allocator gets 1 MiB for arenas and
+    // fragments of its own. Nothing there grows with how far behind a viewer is, where an
+    // unbounded queue would hold each one's 1.3 MiB more. AddressSanitizer keeps freed memory in
+    // its quarantine instead of returning it, so its resident memory grows with every free,
+    // bounded or not: under it the numbers are only reported.
+    const std::uint64_t allowed_kib =
+        (slow.size() * 67) + ((kMessages - settled_seq) * 300 / 1024) + 1024;
     const std::uint64_t owed_kib = slow.size() * (kMessages - settled_seq) * 2'700 / 1024;
-    EXPECT_TRUE(kAddressSanitizer || final_kib - std::min(final_kib, settled_kib) < owed_kib / 3)
+    EXPECT_TRUE(kAddressSanitizer || final_kib - std::min(final_kib, settled_kib) < allowed_kib)
         << "resident " << settled_kib << " KiB at seq " << settled_seq << ", " << final_kib
-        << " KiB at seq " << kMessages;
+        << " KiB at seq " << kMessages << ", allowed " << allowed_kib << " KiB more";
 
     // Reading in full, each slow viewer gets the rest of what it was owed, in order, up to the
     // last message, after gaps where it dropped the rest, which its node counted exactly.
@@ -1264,7 +1280,14 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
         for (std::size_t k = 1; k < got.size(); ++k) {
             ASSERT_LT(got[k - 1].seq, got[k].seq) << c->name();
         }
-        EXPECT_LT(got.size(), kMessages) << c->name();
+        // A message is at least its body in base64url (2667 bytes) on the wire. A slow viewer was
+        // sent only what it read, what its node's send buffer (64 KiB), its own receive buffer
+        // (128 KiB) and its queue before it counts as behind (lossy_backlog, 64 KiB, and one
+        // message of at most 2987 bytes) held at the end, and the newest 64 it was owed then.
+        const auto k = static_cast<std::size_t>(&c - slow.data());
+        const std::size_t bound =
+            ((read_bytes[k] + (std::size_t{256} * 1024) + 2'987) / 2'667) + 64;
+        EXPECT_LE(got.size(), bound) << c->name() << " read " << read_bytes[k] << " bytes";
         missed += kMessages - got.size();
         fewest = std::min(fewest, got.size());
     }
@@ -1279,8 +1302,8 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
               << " nodes got all " << kMessages << " messages in order; " << slow.size()
               << " slow ones got as few as " << fewest << ", and their node dropped " << missed
               << " for them; it was resident at " << settled_kib << " KiB at seq " << settled_seq
-              << " and " << final_kib << " KiB at the end, having sent them " << owed_kib
-              << " KiB more; " << attempts - kMessages
+              << " and " << final_kib << " KiB at the end (allowed " << allowed_kib
+              << " more), having sent them " << owed_kib << " KiB more; " << attempts - kMessages
               << " sends were turned away or unanswered and tried again\n";
 }
 
