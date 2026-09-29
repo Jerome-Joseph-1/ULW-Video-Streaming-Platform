@@ -43,4 +43,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0035](0035-json-logs-metrics-and-readiness-off-the-loop.md) | JSON logs, metrics and readiness, none of them waiting on the loop | Accepted |
 | [0036](0036-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
 | [0037](0037-a-job-result-the-queue-refuses-fails-the-job.md) | A job result the queue refuses fails the job | Accepted |
-| [0038](0038-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged against the memory limit and requests in flight | Accepted |
+| [0038](0038-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged per unit of work against the memory limit | Accepted |
