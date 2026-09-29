@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -28,6 +29,7 @@ public:
     [[nodiscard]] bool empty() const noexcept { return size() == 0; }
 
     [[nodiscard]] T operator[](std::size_t i) const noexcept {
+        assert(i < size());
         return WireFormat<T>::read(bytes_.subspan(i * kSize).template first<kSize>());
     }
 

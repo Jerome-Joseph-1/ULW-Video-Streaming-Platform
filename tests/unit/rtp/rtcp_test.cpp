@@ -356,4 +356,13 @@ TEST(Rtcp, EveryPrefixYieldsTheWholePacketsItHoldsThenAnError) {
     }
 }
 
+#ifndef NDEBUG
+TEST(RtcpDeathTest, ReadingPastTheLastEntryAborts) {
+    const auto wire = Wire{}.u32(5).u32(6).take();
+    const codec::rtp::Entries<std::uint32_t> ssrcs{wire};
+    ASSERT_EQ(ssrcs.size(), 2U);
+    EXPECT_DEATH((void)ssrcs[2], "i < size");
+}
+#endif
+
 } // namespace
