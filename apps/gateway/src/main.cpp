@@ -49,6 +49,10 @@ constexpr int kExitConfig = 2;
 // besides, well over a second of lines. A log reader stalled longer than that costs lines,
 // counted, rather than the loop.
 constexpr std::size_t kLogBuffer = std::size_t{256} * 1024;
+// At exit, a log reader gets this long to take what is queued. The manager kills the process
+// 45 s after SIGTERM (TimeoutStopSec, and the pod's grace period); the preStop hook's 5 s and
+// the 30 s drain leave 10 s, of which the exit needs this at most.
+constexpr core::Millis kLogFlushLimit{2'000};
 
 std::optional<std::string> read_env(std::string_view name) {
     // Read once, before any thread exists, so nothing can race it with setenv.
@@ -365,7 +369,7 @@ int run(std::span<const std::string_view> args) {
         return refuse(boot, "NOTIFY_SOCKET", errno_text(notifier.error()));
     }
 
-    ops::AsyncLogSink sink(STDOUT_FILENO, kLogBuffer);
+    ops::AsyncLogSink sink(STDOUT_FILENO, kLogBuffer, kLogFlushLimit);
     ops::Logger log(sink, clock, "gateway", config->log_level);
     return serve(*config, *limits, log, *notifier);
 }

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -37,6 +38,9 @@ std::string read_all(int fd) {
     }
 }
 
+// Long enough never to cut a flush short where a reader is draining the pipe.
+constexpr core::Millis kFlushLimit{10'000};
+
 std::size_t count_lines(const std::string& text) {
     return static_cast<std::size_t>(std::ranges::count(text, '\n'));
 }
@@ -44,7 +48,7 @@ std::size_t count_lines(const std::string& text) {
 TEST(AsyncLogSink, EveryLineQueuedBeforeDestructionIsWrittenInOrder) {
     Pipe p = make_pipe();
     {
-        ops::AsyncLogSink sink(p.write.get(), 4096);
+        ops::AsyncLogSink sink(p.write.get(), 4096, kFlushLimit);
         for (int i = 0; i < 20; ++i) {
             sink.write("line " + std::to_string(i) + "\n");
         }
@@ -67,7 +71,7 @@ TEST(AsyncLogSink, AStalledReaderCostsLinesNotTheWriter) {
     std::string drained;
     std::optional<std::jthread> reader;
     {
-        ops::AsyncLogSink sink(p.write.get(), 4096);
+        ops::AsyncLogSink sink(p.write.get(), 4096, kFlushLimit);
         // 100 KB against at most 4 KiB queued, 4 KiB being written and 4 KiB in the pipe:
         // getting through the loop at all shows the caller never waited for the reader.
         for (std::size_t i = 0; i < kLines; ++i) {
@@ -88,7 +92,7 @@ TEST(AsyncLogSink, NoLineIsSplitOrLost) {
     std::jthread reader([&] { got = read_all(p.read.get()); });
     std::uint64_t dropped = 0;
     {
-        ops::AsyncLogSink sink(p.write.get(), 512);
+        ops::AsyncLogSink sink(p.write.get(), 512, kFlushLimit);
         for (int i = 0; i < 5000; ++i) {
             sink.write("0123456789012345678901234567890123456789\n");
         }
@@ -98,6 +102,23 @@ TEST(AsyncLogSink, NoLineIsSplitOrLost) {
     reader.join();
     EXPECT_EQ(count_lines(got) + dropped, 5000U);
     EXPECT_EQ(got.size(), count_lines(got) * 41);
+}
+
+TEST(AsyncLogSink, DestructionGivesUpOnAReaderThatNeverComes) {
+    Pipe p = make_pipe();
+    ASSERT_GE(::fcntl(p.write.get(), F_SETPIPE_SZ, 4096), 4096);
+    // A full pipe that nobody reads.
+    const std::string filler(4096, 'f');
+    ASSERT_EQ(::write(p.write.get(), filler.data(), filler.size()), 4096);
+    const auto started = std::chrono::steady_clock::now();
+    {
+        ops::AsyncLogSink sink(p.write.get(), 4096, core::Millis{50});
+        sink.write("one line\n");
+    }
+    // Without the limit the destructor would wait for a reader forever.
+    const auto took = std::chrono::steady_clock::now() - started;
+    EXPECT_GE(took, std::chrono::milliseconds(40));
+    EXPECT_LT(took, std::chrono::seconds(5));
 }
 
 } // namespace
