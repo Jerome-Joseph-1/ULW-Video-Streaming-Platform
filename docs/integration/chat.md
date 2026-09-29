@@ -44,8 +44,8 @@ Client to server:
 | `type` | Fields | Meaning |
 |---|---|---|
 | `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`) | Subscribe this connection to the room. Joining an unknown room creates it, as the `kind` it names (see [Member lists](#member-lists)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
-| `send` | `room`, `id`, `body` | Post a message. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
-| `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. The connection must have joined the room. |
+| `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
+| `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 
 Server to client:
 
@@ -81,6 +81,9 @@ delivered, and the `id` stays with the first message. Send the new message under
 
 <!-- apps/chat/src/chat_service.cpp (replay, history, page_read) -->
 
+- **A page** is the `count` `message` frames that come immediately before its `history` frame:
+  the service sends them together, with nothing between them. Other messages of the room may
+  arrive before or after the page, never inside it.
 - **Resume.** Rejoin with `"after"` set to the last seq you have. The node sends what it still
   keeps above it (up to 128 KiB of the newest), then live messages. It keeps a room's latest
   messages only while it is in the room and for 30 s after its last client left.

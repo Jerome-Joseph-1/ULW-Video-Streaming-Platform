@@ -151,7 +151,7 @@ What bounds a page of history:
   | Write | p50 | p99 |
   |---|---|---|
   | seq and row in one statement (`append`) | 1.3-4.0 ms | 5-10 ms |
-  | seq alone (`append`, today's path) | 1.3-4.0 ms | 8-10 ms |
+  | seq alone (the seq-only append, since removed) | 1.3-4.0 ms | 8-10 ms |
   | seq, then the row as a second statement | 2.7-8.0 ms | 11-19 ms |
 
   The last row was measured before the store lost its second writer. With the message key's
@@ -181,6 +181,10 @@ What bounds a page of history:
   readiness probe could. A test runs the store's writes, an erroring one included, under those
   settings with every statement logged, and under the same with parameters logged, and
   searches the server's log for the body as text, hex and base64: found only in the second.
+- Two repeats of one key in flight at once make the second fail on the key's unique index,
+  and the server logs that `ERROR` at its default settings, with a `DETAIL` naming the room,
+  the sender and the key; the index holds nothing else, so the body is never in it. The
+  statement's parameters stay out of the line under the settings above.
 - A violated `NOT NULL` also writes the failing row, body and all, like a check constraint.
   None can be violated: every column is bound from a typed value that has no null (the room's
   uuid, the seq from `room_state`, the sender's id, the key, the body, which binds as an empty

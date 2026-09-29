@@ -161,6 +161,8 @@ CREATE DATABASE ulw_stage OWNER ulw_stage;
 ```
 
 The role owns its database, which gives the migrations their DDL rights (docs/adr/0031).
+`VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
+password percent-encoded.
 
 Chat message bodies travel as bound parameters, which the server writes to its log whenever it
 logs a statement with its parameters or an error in one (docs/adr/0052). Keep them out, on the
@@ -187,8 +189,6 @@ DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user sub>
 A member removed this way keeps receiving the room's messages, and can read its history, until
 their connection closes; their next join is refused. To cut them off at once, also restart the
 chat pods.
-`VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
-password percent-encoded.
 
 ## 4. Pipeline and first deploy
 
