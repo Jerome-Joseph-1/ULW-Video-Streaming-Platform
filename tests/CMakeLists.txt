@@ -66,6 +66,19 @@ target_link_libraries(test_echo PUBLIC ulw::net_lib)
 ulw_add_executable(ulw_echo_server load/echo_main.cpp)
 target_link_libraries(ulw_echo_server PRIVATE ulw::test_echo)
 ulw_add_executable(ulw_loadgen load/loadgen.cpp)
+ulw_add_executable(ulw_datagram_soak load/datagram_soak.cpp)
+target_link_libraries(ulw_datagram_soak PRIVATE ulw::net_lib Threads::Threads)
+# The short form of the M23 soak: 5000 peers for 20 s on each reactor. 150,000 datagrams follow
+# the first sample, so a leak of one byte per datagram shows as 150 KB.
+foreach(reactor io_uring epoll)
+    add_test(NAME datagram_soak_${reactor}
+        COMMAND ulw_datagram_soak --reactor ${reactor} --peers 5000 --duration-s 20 --sample-s 5
+                --max-rss-bytes-per-datagram 1)
+    # Its RSS bound is calibrated on an uninstrumented build, and sanitizer runtimes grow their
+    # own memory with run time, so it has a label of its own that the sanitizer jobs, which
+    # select by label, leave out; the ci job runs every label.
+    set_tests_properties(datagram_soak_${reactor} PROPERTIES LABELS soak)
+endforeach()
 
 # A CA and server certificates generated at run time, and the OpenSSL client side of tests.
 ulw_add_library(test_tls support/tls_pki.cpp)
@@ -75,12 +88,14 @@ target_link_libraries(test_tls PUBLIC ulw::net_lib OpenSSL::SSL)
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
     unit/net/connect_test.cpp
+    unit/net/datagram_test.cpp
     unit/net/echo_server_test.cpp
     unit/net/offload_pool_test.cpp
     unit/net/reactor_factory_test.cpp
     unit/net/reactor_test.cpp
     unit/net/signals_test.cpp
     unit/net/slab_test.cpp
+    unit/net/sockaddr_test.cpp
     unit/net/timing_wheel_test.cpp
     unit/net/transport_tls_test.cpp)
 target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo ulw::test_tls)
