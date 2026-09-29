@@ -1,6 +1,8 @@
 ulw_add_library(ffmpeg_adapter
     src/command.cpp
     src/exit_code.cpp
+    src/live_command.cpp
+    src/live_remux.cpp
     src/process.cpp
     src/progress.cpp
     src/transcoder.cpp)

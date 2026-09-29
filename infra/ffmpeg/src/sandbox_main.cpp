@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 // ulw_sandbox --writable DIR --address-space BYTES --cpu-seconds N [--no-syscall-filter]
 //             -- PROGRAM [ARGS...]
 //
@@ -9,6 +10,18 @@
 // need an ordinary shell as the program. posix_spawn cannot do any of this in the child, hence a
 // separate program. Without a PROGRAM it sets everything up and exits 0, which is how the worker
 // checks at startup that the host allows it.
+=======
+// ulw_sandbox --writable DIR --address-space BYTES --cpu-seconds N [--file-size BYTES]
+//             -- PROGRAM [ARGS...]
+//
+// Runs PROGRAM confined: an empty network namespace (unshare -n), a pid namespace with a
+// /proc of its own, every mount read-only except DIR, the given RLIMIT_AS and RLIMIT_CPU, and
+// when asked for RLIMIT_FSIZE, the size a file may grow to (SIGXFSZ ends a program at it), no
+// core dumps, no descriptors beyond the standard three, and no capabilities, so the program
+// cannot undo any of it. posix_spawn cannot do any of this in the child, hence a separate
+// program. Without a PROGRAM it sets everything up and exits 0, which is how the worker checks
+// at startup that the host allows it.
+>>>>>>> origin/main
 //
 // Three processes: this helper, which the worker started; its child, pid 1 of the new pid
 // namespace; and PROGRAM, pid 1's child. When pid 1 exits the kernel kills everything left in
@@ -64,7 +77,12 @@ struct Options {
     std::filesystem::path writable;
     rlim_t address_space = 0;
     rlim_t cpu_seconds = 0;
+<<<<<<< HEAD
     bool syscall_filter = true;
+=======
+    // 0: no limit on the size of a file the program writes.
+    rlim_t file_size = 0;
+>>>>>>> origin/main
     std::vector<char*> program;
 };
 
@@ -102,6 +120,8 @@ Options parse(std::span<char*> args) {
             options.address_space = core::parse_integer<rlim_t>(value).value_or(0);
         } else if (flag == "--cpu-seconds") {
             options.cpu_seconds = core::parse_integer<rlim_t>(value).value_or(0);
+        } else if (flag == "--file-size") {
+            options.file_size = core::parse_integer<rlim_t>(value).value_or(0);
         } else {
             usage();
         }
@@ -263,6 +283,9 @@ int wait_passing_signals(pid_t child, const sigset_t& signals) {
     // SIGXCPU at the soft limit; the hard limit one second later is SIGKILL for a child that
     // catches SIGXCPU.
     set_limit(RLIMIT_CPU, options.cpu_seconds, options.cpu_seconds + 1, "RLIMIT_CPU");
+    if (options.file_size != 0) {
+        set_limit(RLIMIT_FSIZE, options.file_size, options.file_size, "RLIMIT_FSIZE");
+    }
     // A crash dump of a hostile input is hostile data in the scratch directory we upload from.
     set_limit(RLIMIT_CORE, 0, 0, "RLIMIT_CORE");
     // All but `status_out`, which is close-on-exec, so PROGRAM never holds it.

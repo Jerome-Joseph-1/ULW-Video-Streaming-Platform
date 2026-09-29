@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# A live publisher for the packager: ffmpeg's test pattern and a sine tone, encoded in real
+# time and sent as MPEG-TS over SRT, as an SRT caller the way LiveKit egress is, with the
+# moment each frame was made drawn into it.
+#
+#   ulw-live-testsource HOST:PORT [seconds]
+#
+# Environment: ULW_TESTSOURCE_PASSPHRASE and ULW_TESTSOURCE_STREAMID (required: what the
+# packager's listener checks), ULW_TESTSOURCE_SEGMENT (keyframe interval in seconds, default 2,
+# which must be the packager's segment length), ULW_TESTSOURCE_FPS (default 30),
+# ULW_TESTSOURCE_SIZE (default 640x360), ULW_TESTSOURCE_KBPS (video bitrate, default 1500),
+# ULW_FFMPEG.
+#
+# Two overlays. The top-left strip is 24 cells of 16 px, most significant bit last, black for
+# 0 and white for 1: the low 24 bits of the frame's creation time in milliseconds since the
+# epoch (4.66 hours before it wraps), which a player-side script reads back from the picture to
+# measure glass-to-glass latency. Below it the same moment in clear, for a person.
+set -euo pipefail
+
+target=${1:?usage: ulw-live-testsource HOST:PORT [seconds]}
+seconds=${2:-}
+segment=${ULW_TESTSOURCE_SEGMENT:-2}
+fps=${ULW_TESTSOURCE_FPS:-30}
+size=${ULW_TESTSOURCE_SIZE:-640x360}
+kbps=${ULW_TESTSOURCE_KBPS:-1500}
+ffmpeg=${ULW_FFMPEG:-ffmpeg}
+passphrase=${ULW_TESTSOURCE_PASSPHRASE:?ULW_TESTSOURCE_PASSPHRASE is required}
+streamid=${ULW_TESTSOURCE_STREAMID:?ULW_TESTSOURCE_STREAMID is required}
+gop=$((fps * segment))
+cell=16
+bits=24
+
+# setpts=RTCTIME makes each frame's timestamp the wall clock in microseconds, so `t` in the
+# drawbox expressions is the creation time in seconds since the epoch; the second setpts puts
+# the timeline back at zero for the muxer.
+filter="setpts=RTCTIME/(TB*1000000),drawbox=x=0:y=0:w=$((cell * bits)):h=${cell}:color=black:t=fill"
+for ((i = 0; i < bits; i++)); do
+    filter+=",drawbox=x=$((i * cell)):y=0:w=${cell}:h=${cell}:color=white:t=fill:enable='bitand(floor(t*1000),$((1 << i)))'"
+done
+filter+=",drawtext=text='%{localtime\:%T} frame %{frame_num}':x=8:y=24:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.6"
+filter+=",setpts=PTS-STARTPTS"
+
+args=(-nostdin -hide_banner -loglevel warning -nostats
+    -re -f lavfi -i "testsrc2=size=${size}:rate=${fps}"
+    -re -f lavfi -i "sine=frequency=440:sample_rate=48000"
+    -filter_complex "[0:v]${filter}[v]"
+    -map "[v]" -map 1:a
+    -fps_mode cfr -r "${fps}"
+    -c:v libx264 -preset ultrafast -tune zerolatency -profile:v main -pix_fmt yuv420p
+    -b:v "${kbps}k" -maxrate "${kbps}k" -bufsize "${kbps}k"
+    -g "${gop}" -keyint_min "${gop}" -sc_threshold 0
+    -c:a aac -b:a 64k -ac 2
+    -muxdelay 0 -muxpreload 0 -flush_packets 1)
+if [[ -n $seconds ]]; then
+    args+=(-t "$seconds")
+fi
+# 1316 bytes is seven TS packets, the payload SRT is meant to carry in a 1500-byte MTU.
+exec "$ffmpeg" "${args[@]}" -f mpegts \
+    "srt://${target}?mode=caller&pkt_size=1316&passphrase=${passphrase}&streamid=${streamid}"

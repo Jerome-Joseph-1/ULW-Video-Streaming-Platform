@@ -63,11 +63,20 @@ public:
     [[nodiscard]] std::expected<void, core::ports::StorageError>
     upload(const std::filesystem::path& source, const core::StorageKey& key,
            const core::ContentType& type) override;
+    // One PUT with If-None-Match: *, which S3, R2 and MinIO honour (Permanent on a profile that
+    // does not).
+    [[nodiscard]] std::expected<void, core::ports::StorageError>
+    upload_new(const std::filesystem::path& source, const core::StorageKey& key,
+               const core::ContentType& type) override;
 
     // Failures only a person can fix (a bad signature, credentials, a missing bucket).
     [[nodiscard]] std::uint64_t paging_errors() const noexcept;
 
 private:
+    [[nodiscard]] std::expected<void, core::ports::StorageError>
+    put(const std::filesystem::path& source, const core::StorageKey& key,
+        const core::ContentType& type, bool create_only);
+
     Deps deps_;
     // Before control_, which counts into it.
     std::unique_ptr<s3::PageCount> pages_;

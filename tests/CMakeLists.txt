@@ -461,6 +461,7 @@ if(ULW_BUILD_WORKER)
         unit/ffmpeg/command_test.cpp
         unit/ffmpeg/exit_code_test.cpp
         unit/ffmpeg/hls_rewrite_test.cpp
+        unit/ffmpeg/live_command_test.cpp
         unit/ffmpeg/progress_test.cpp
         unit/ffmpeg/sandbox_test.cpp
         unit/ffmpeg/seccomp_filter_test.cpp)
@@ -482,6 +483,27 @@ if(ULW_BUILD_WORKER)
     target_link_libraries(worker_unit_tests PRIVATE ulw::worker_lib ulw::os)
     target_include_directories(worker_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
+    # Against libsrt itself as the caller, over loopback UDP.
+    ulw_add_test_suite(srt_unit_tests unit
+        unit/srt/ingest_test.cpp)
+    FetchContent_GetProperties(srt SOURCE_DIR ulw_srt_source BINARY_DIR ulw_srt_binary)
+    target_include_directories(srt_unit_tests SYSTEM PRIVATE ${ulw_srt_source}/srtcore
+        ${ulw_srt_binary})
+    target_link_libraries(srt_unit_tests PRIVATE ulw::srt_ingest srt_static)
+    target_include_directories(srt_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+    ulw_add_test_suite(live_packager_unit_tests unit
+        unit/live_packager/config_test.cpp
+        unit/live_packager/live_window_test.cpp
+        unit/live_packager/media_playlist_test.cpp
+        unit/live_packager/publisher_test.cpp
+        unit/live_packager/segment_tracker_test.cpp
+        unit/live_packager/stream_id_test.cpp
+        unit/live_packager/watch_test.cpp)
+    target_link_libraries(live_packager_unit_tests PRIVATE
+        ulw::live_packager_lib ulw::storage_fs_transfer ulw::os)
+    target_include_directories(live_packager_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
     # The adapter on real ffmpeg, and the worker binary against the Postgres and MinIO of
     # deploy/local/compose.yaml.
     ulw_add_test_suite(worker_integration_tests integration
@@ -501,6 +523,26 @@ if(ULW_BUILD_WORKER)
         target_compile_definitions(worker_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
     endif()
     add_dependencies(worker_integration_tests transcode_worker ulw_sandbox)
+
+    # live_packager against the MinIO of deploy/local/compose.yaml, fed by the ffmpeg test
+    # publisher.
+    ulw_add_test_suite(live_packager_integration_tests integration
+        integration/live_packager_test.cpp
+        support/child_process.cpp)
+    target_link_libraries(live_packager_integration_tests PRIVATE
+        ulw::live_packager_lib ulw::storage_s3 ulw::test_live_s3 ulw::os srt_static)
+    target_include_directories(live_packager_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/tests/integration)
+    target_include_directories(live_packager_integration_tests SYSTEM PRIVATE
+        ${ulw_srt_source}/srtcore ${ulw_srt_binary})
+    target_compile_definitions(live_packager_integration_tests PRIVATE
+        ULW_LIVE_PACKAGER_BIN="$<TARGET_FILE:live_packager>"
+        ULW_LIVE_TESTSOURCE="${PROJECT_SOURCE_DIR}/apps/live-packager/testsource/ulw-live-testsource"
+        ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>")
+    if(ULW_CONFORMANCE_LIVE)
+        target_compile_definitions(live_packager_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+    endif()
+    add_dependencies(live_packager_integration_tests live_packager ulw_sandbox)
 
     # gateway_server against the Postgres and MinIO of deploy/local/compose.yaml, serving
     # what the worker's ffmpeg command writes.

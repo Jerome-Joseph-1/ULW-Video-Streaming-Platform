@@ -34,6 +34,36 @@ uname -r                               # 6.3 or later (idmapped mounts on overla
 k3s --version; runc --version          # containerd 2.x, runc 1.2 or later
 ```
 
+Two host settings stop the worker on otherwise capable machines; GitHub's Ubuntu 24.04 runners
+have both. On each node, as an ordinary user (not root, not sudo):
+
+```sh
+sysctl kernel.apparmor_restrict_unprivileged_userns   # 0, or "unknown key"
+unshare --user --map-root-user --net --mount --pid --fork --mount-proc true && echo ok
+unshare --user --map-root-user --net --mount \
+  sh -c 'mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /mnt && echo ok'
+```
+
+- `apparmor_restrict_unprivileged_userns = 1` (Ubuntu 23.10 and later) lets a process with no
+  capabilities on the host create a user namespace but not use it, and the worker is such a
+  process. The first `unshare` then fails with `write failed /proc/self/uid_map: Operation not
+  permitted`, and so would the worker's start-up check. The e2e workflow sets it to `0` on its
+  runner for this reason. The nodes need the same unless they run a kernel without the key:
+  `echo kernel.apparmor_restrict_unprivileged_userns=0 | sudo tee /etc/sysctl.d/60-ulw-userns.conf`
+  then `sudo sysctl --system`. It is host-wide; the alternative, an AppArmor profile for the
+  worker that allows `userns`, has not been written or tested.
+- If the sysfs mount fails, a file is mounted over part of the node's `/sys`
+  (`grep ' /sys/' /proc/self/mountinfo` shows it). The kernel then refuses a fresh sysfs in any
+  user namespace, and every `hostUsers: false` pod stays in `ContainerCreating` with "error
+  mounting sysfs ... operation not permitted". kind does this to its nodes on any VM with DMI
+  (the sandbox undoes it in deploy/local/e2e-up.sh); a K3s host normally has no such mount.
+
+One difference the sandbox cannot show: containerd inside a kind node never applies AppArmor,
+while K3s on a host where `cat /sys/module/apparmor/parameters/enabled` prints `Y` gives every
+pod its default AppArmor profile, which denies `mount`. On such a node watch the worker's first
+start; a `mount /proc` error in its log means the worker needs its own AppArmor profile
+(`securityContext.appArmorProfile`) before it can run.
+
 The gateway's NetworkPolicy admits only Envoy's data plane, found by labels. Confirm them, or
 edit `overlays/*/video-gateway/networkpolicy.yaml` before the first apply:
 
