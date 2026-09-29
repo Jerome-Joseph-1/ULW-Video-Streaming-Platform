@@ -517,6 +517,27 @@ TEST_P(RoomRouterTest, ASendRepeatedWithItsKeyGetsItsFirstSeqAndIsDeliveredOnce)
     EXPECT_EQ(db_.rooms.at(room_).last_seq, 2U);
 }
 
+TEST_P(RoomRouterTest, AKeyResentWithAnotherBodyIsAConflictAndIsDeliveredNowhere) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    const rt::MessageKey key = next_key();
+    ASSERT_EQ(send(b, bob, "bob", "hello", key), 1U);
+    ASSERT_TRUE(pump([&] { return alice.got.size() == 1 && bob.got.size() == 1; }));
+    // Refused where it was delivered, and by the owner, which sequenced it.
+    EXPECT_EQ(send(b, bob, "bob", "goodbye", key), std::unexpected(RouteError::Conflict));
+    Member bob_on_a;
+    ASSERT_TRUE(join(a, bob_on_a));
+    EXPECT_EQ(send(a, bob_on_a, "bob", "goodbye", key), std::unexpected(RouteError::Conflict));
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_EQ(alice.got.size(), 1U);
+    EXPECT_EQ(bob.got.size(), 1U);
+    EXPECT_EQ(db_.rooms.at(room_).last_seq, 1U);
+}
+
 TEST_P(RoomRouterTest, ARetryQueuedBehindItsFirstTryIsAnsweredByTheOwnerWithTheFirstSeq) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");
@@ -713,7 +734,7 @@ TEST_P(RoomRouterTest, AHelloOfAnotherVersionIsRefusedAsSuch) {
     peer.send(hello);
     EXPECT_TRUE(peer.hung_up());
     EXPECT_EQ(a.events.refused,
-              std::vector<std::string>{"version mismatch: peer speaks 1, this node 2"});
+              std::vector<std::string>{"version mismatch: peer speaks 1, this node 3"});
 }
 
 TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {

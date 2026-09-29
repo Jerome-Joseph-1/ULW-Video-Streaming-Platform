@@ -65,6 +65,9 @@ enum class StoreError : std::uint8_t {
     Corrupt,
     // Another run of the same node, still alive, holds the node's name.
     NodeTaken,
+    // The sender's key is already stored in the room with a different body. Nothing was
+    // written, and no seq taken.
+    Conflict,
 };
 
 // A message on its way to its sequence number. The body is a view, valid only during the call

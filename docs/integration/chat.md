@@ -43,9 +43,9 @@ Client to server:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`) | Subscribe this connection to the room. Joining an unknown room creates it. With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
-| `send` | `room`, `id`, `body` | Post a message. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
-| `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. The connection must have joined the room. |
+| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`) | Subscribe this connection to the room. Joining an unknown room creates it, as the `kind` it names (see [Member lists](#member-lists)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
+| `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
+| `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 
 Server to client:
 
@@ -74,13 +74,16 @@ is sent it, so history has every seq that was ever delivered.
 
 **Resends.** After `unavailable`, send the same message again with the same `id`, on this or any
 connection, to any node: it is sequenced once, answered with the first seq, and delivered once.
-Reusing an `id` for a different message loses the second one: it is answered with the first
-one's seq.
+Reusing an `id` for a different message is refused with `conflict`: nothing is sequenced or
+delivered, and the `id` stays with the first message. Send the new message under a new `id`.
 
 ### Resume and history
 
 <!-- apps/chat/src/chat_service.cpp (replay, history, page_read) -->
 
+- **A page** is the `count` `message` frames that come immediately before its `history` frame:
+  the service sends them together, with nothing between them. Other messages of the room may
+  arrive before or after the page, never inside it.
 - **Resume.** Rejoin with `"after"` set to the last seq you have. The node sends what it still
   keeps above it (up to 128 KiB of the newest), then live messages. It keeps a room's latest
   messages only while it is in the room and for 30 s after its last client left.
@@ -99,11 +102,19 @@ one's seq.
 
 <!-- apps/chat/src/chat_service.cpp (join, admitted), migrations/0005_chat_messages.sql (chat_members) -->
 
-A room with a member list admits only its members: anyone else's `join` is refused with
-`not_member`, and so they can neither send to it nor read its history. A room with no member
-list is open to anyone, which is every room until one is listed, and what a stream's live chat
-stays. No client command changes a member list; they are set by the service's operators, and
-later by the product, in the database.
+Who may join a room depends on its kind, which the room's first join sets and nothing changes
+afterwards:
+
+- **Direct and group chats** (`"kind":"direct"` or `"group"`, the default) admit only their
+  members. Anyone else's `join` is refused with `not_member`, so they can neither send to the
+  room nor read its history. A direct or group chat with no members admits nobody.
+- **A stream's live chat** (`"kind":"live"`) admits anyone. Later joins need not name the kind.
+  A room whose members were listed before its first join is a group chat, whatever that join
+  asks for.
+
+No client command changes a member list; they are set by the service's operators, and later by
+the product, in the database. A member removed from the list keeps receiving the room's
+messages, and can read its history, until that connection closes; the next `join` is refused.
 
 ### Errors
 
@@ -121,6 +132,7 @@ later by the product, in the database.
 | `busy` | Join or history allowance exceeded, too many sends awaiting answers, the room's owner queue is full, or too much unread output for a history page | Back off and retry |
 | `unavailable` | The room's owner or the store could not be reached | Retry; resend a `send` with the same `id` |
 | `fenced` | The room changed owners while the write was in flight | Retry with the same `id` |
+| `conflict` | This `id` was already used for a different message in the room | Send it under a new `id` |
 
 ## Limits
 

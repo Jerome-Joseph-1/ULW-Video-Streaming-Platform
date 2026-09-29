@@ -44,8 +44,11 @@ a word.
   plane's ephemeral kind (`rt::is_ephemeral_room`): the store creates such a room with kind
   `presence` and takes its seqs with the fenced `UPDATE room_state SET last_seq = last_seq + 1`
   alone, storing no `chat_messages` row, in Postgres and in the in-memory stores alike (a
-  conformance law). The envelope refuses version 8 room ids in `join`, `send` and `history`
-  (`bad_room`), so no client can read or write a presence room, and only nodes speak in one.
+  conformance law). The ephemeral rule wins over any kind a chat join recorded; a presence
+  room is not a chat `RoomKind`, since its joins come from nodes through `IRooms` and never
+  pass the message store's `admits()` or record a kind in `chat_rooms`. The envelope refuses
+  version 8 room ids in `join`, `send` and `history` (`bad_room`), so no client can read or
+  write a presence room, and only nodes speak in one.
   Events are 9 bytes: a kind and the sender's tag, 64 bits of SHA-256 over the node's name and
   its start time, so a restarted node is a new sender and its last run's announcements run out
   on their own.

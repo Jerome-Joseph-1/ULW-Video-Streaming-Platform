@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/ports/message_store.hpp"
 #include "core/util/time.hpp"
 #include "rt/message_key.hpp"
 #include "rt/room_router.hpp"
@@ -20,6 +21,9 @@
 //       "after":<seq>        optional: also send what this node still holds after that seq
 //       "delivery":"lossy"   optional: skip messages while this connection is behind, rather
 //                            than be closed for it ("durable", the default)
+//       "kind":"live"        optional: what the room is, recorded by the room's first join:
+//                            "direct" or "group" (the default) admit only members, "live"
+//                            admits anyone
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
 //   {"type":"history","room":"<uuid>"}   the room's stored messages, from the store, not this
 //       "before":<seq>       optional: those below it, newest first (the default: the newest)
@@ -56,6 +60,7 @@ struct Join {
     core::RoomId room;
     std::optional<std::uint64_t> after;
     Delivery delivery = Delivery::Durable;
+    core::ports::RoomKind kind = core::ports::RoomKind::GroupChat;
 };
 
 struct Send {

@@ -163,8 +163,11 @@ TEST_P(RoomStoreTest, ANodeTakingARoomOverLearnsWhereItsCountStands) {
     ASSERT_TRUE(taken);
     EXPECT_EQ(taken->node, b_);
     EXPECT_EQ(taken->last_seq, 2U);
-    // Another node's answer names the owner only.
-    EXPECT_EQ(resolve(room, c_)->last_seq, 0U);
+    // Another node's answer names the owner, and reads where the count stands as well.
+    const auto seen = resolve(room, c_);
+    ASSERT_TRUE(seen);
+    EXPECT_EQ(seen->node, b_);
+    EXPECT_EQ(seen->last_seq, 2U);
     ASSERT_EQ(append(room, 2), Seq{3});
     go_quiet(room);
     const auto claimed = claim_stale({room}, c_);
@@ -177,6 +180,10 @@ TEST_P(RoomStoreTest, AnEphemeralRoomTakesFencedSeqsAndStoresNoMessage) {
     // Version 8, as presence rooms are.
     const core::RoomId room = *core::RoomId::parse("01a0eb86-6cca-8dce-84cc-3bb47615f9fd");
     ASSERT_TRUE(rt::is_ephemeral_room(room));
+    // No chat join can name it; were a kind recorded for it anyway, the ephemeral rule wins.
+    ASSERT_TRUE(
+        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                    Params{}.add_uuid(room.uuid())));
     ASSERT_TRUE(resolve(room, a_));
     EXPECT_EQ(scalar(*conn_, "SELECT kind FROM room_state WHERE room_id = $1",
                      Params{}.add_uuid(room.uuid())),
@@ -191,6 +198,18 @@ TEST_P(RoomStoreTest, AnEphemeralRoomTakesFencedSeqsAndStoresNoMessage) {
     EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_messages WHERE room_id = $1",
                      Params{}.add_uuid(room.uuid())),
               "0");
+}
+
+TEST_P(RoomStoreTest, ARoomTakesTheKindItsFirstChatJoinRecorded) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(
+        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                    Params{}.add_uuid(room.uuid())));
+    ASSERT_TRUE(resolve(room, a_));
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', kind, delivery) FROM room_state WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "stream_live_chat lossy");
 }
 
 TEST_P(RoomStoreTest, AnOwnerWhoseHeartbeatIsFreshKeepsItsRoom) {

@@ -27,13 +27,15 @@ public:
     MemoryMessageStore(MemoryMessageStore&&) = delete;
     MemoryMessageStore& operator=(MemoryMessageStore&&) = delete;
 
-    // Stores a message under `seq` (from 1). Idempotent: the same seq with the same sender, key
-    // and body succeeds and keeps the first sent_at. Any other under a stored seq, or a key the
-    // sender already used under another seq, is Conflict. Over kMaxMessageBody is TooLarge. An
-    // ephemeral room's (rt::is_ephemeral_room) is not kept: only its seq counts, for last_seq.
+    // Stores a message under `seq` (from 1) and answers the seq it is stored under. As the
+    // durable store does, a key the sender already used in the room is answered with that
+    // message's seq when the body is the same, and is Conflict when it is not; nothing is
+    // written either way. A seq already taken by another message is Conflict. Over
+    // kMaxMessageBody is TooLarge. An ephemeral room's
+    // (rt::is_ephemeral_room) message is not kept: only its seq counts, for last_seq.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
                 std::string key, std::vector<std::byte> body, core::WallTime sent_at,
-                core::ports::MessageCallback<void> done);
+                core::ports::MessageCallback<std::uint64_t> done);
     void history_before(
         const core::RoomId& room, std::optional<std::uint64_t> before, std::size_t limit,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;
@@ -48,7 +50,7 @@ public:
                        core::ports::MessageCallback<void> done) override;
     void members(const core::RoomId& room, std::optional<core::UserId> after, std::size_t limit,
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override;
-    void admits(const core::RoomId& room, const core::UserId& user,
+    void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
                 core::ports::MessageCallback<bool> done) override;
 
     void on_timeout() noexcept override;
@@ -61,8 +63,8 @@ private:
     };
     struct Room {
         std::map<std::uint64_t, core::ports::StoredMessage> messages;
-        // (sender, key) of every stored message.
-        std::set<std::pair<std::string, std::string>> keys;
+        // (sender, key) of every stored message, and its seq.
+        std::map<std::pair<std::string, std::string>, std::uint64_t> keys;
         // The highest seq appended to an ephemeral room, which keeps no messages.
         std::uint64_t last = 0;
     };
@@ -75,6 +77,8 @@ private:
     std::unordered_map<core::RoomId, Room> rooms_;
     // Ordered bytewise, as the durable store lists them.
     std::unordered_map<core::RoomId, std::set<core::UserId, ByteOrder>> members_;
+    // As recorded by each room's first join.
+    std::unordered_map<core::RoomId, core::ports::RoomKind> kinds_;
 };
 
 } // namespace infra::messages

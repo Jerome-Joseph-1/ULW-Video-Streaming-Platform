@@ -59,7 +59,7 @@ private:
     MessageCallback<T> done_;
 };
 
-MessageResult<std::vector<StoredMessage>> decode_page(const Result& r) {
+[[nodiscard]] MessageResult<std::vector<StoredMessage>> decode_page(const Result& r) {
     std::vector<StoredMessage> page;
     page.reserve(static_cast<std::size_t>(r.rows()));
     for (int row = 0; row < r.rows(); ++row) {
@@ -82,7 +82,7 @@ MessageResult<std::vector<StoredMessage>> decode_page(const Result& r) {
     return page;
 }
 
-MessageResult<std::uint64_t> decode_last_seq(const Result& r) {
+[[nodiscard]] MessageResult<std::uint64_t> decode_last_seq(const Result& r) {
     const auto seq = r.get(0, 0).and_then(parse_uint64);
     if (!seq) {
         return std::unexpected(MessageStoreError::Corrupt);
@@ -90,7 +90,7 @@ MessageResult<std::uint64_t> decode_last_seq(const Result& r) {
     return *seq;
 }
 
-MessageResult<std::vector<core::UserId>> decode_members(const Result& r) {
+[[nodiscard]] MessageResult<std::vector<core::UserId>> decode_members(const Result& r) {
     std::vector<core::UserId> members;
     members.reserve(static_cast<std::size_t>(r.rows()));
     for (int row = 0; row < r.rows(); ++row) {
@@ -171,15 +171,41 @@ private:
     MessageCallback<void> done_;
 };
 
+// The names section 8.15 gives the kinds, as chat_rooms.kind holds them.
+[[nodiscard]] std::string_view kind_text(core::ports::RoomKind kind) noexcept {
+    switch (kind) {
+    case core::ports::RoomKind::DirectChat:
+        return "direct_chat";
+    case core::ports::RoomKind::GroupChat:
+        return "group_chat";
+    case core::ports::RoomKind::StreamLiveChat:
+        return "stream_live_chat";
+    }
+    return "group_chat";
+}
+
+[[nodiscard]] std::optional<core::ports::RoomKind> kind_of(std::string_view text) noexcept {
+    for (const auto kind : {core::ports::RoomKind::DirectChat, core::ports::RoomKind::GroupChat,
+                            core::ports::RoomKind::StreamLiveChat}) {
+        if (kind_text(kind) == text) {
+            return kind;
+        }
+    }
+    return std::nullopt;
+}
+
 // Binds the user id, which must outlive the statement.
 class Admits final : public Operation {
 public:
-    Admits(const core::RoomId& room, const core::UserId& user, MessageCallback<bool> done)
-        : room_(room), user_(user), done_(std::move(done)) {}
+    Admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
+           MessageCallback<bool> done)
+        : room_(room), user_(user), asked_(asked), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
-        return Statement{.sql = message_sql::kAdmits,
-                         .params = Params{}.add_uuid(room_.uuid()).add_text(user_.view())};
+        return Statement{
+            .sql = message_sql::kAdmits,
+            .params =
+                Params{}.add_uuid(room_.uuid()).add_text(user_.view()).add_text(kind_text(asked_))};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -187,12 +213,13 @@ public:
             done_(std::unexpected(MessageStoreError::Unavailable));
             return std::nullopt;
         }
-        const auto admitted = outcome->get(0, 0).and_then(parse_bool);
-        if (!admitted) {
+        const auto kind = outcome->get(0, 0).and_then(kind_of);
+        const auto member = outcome->get(0, 1).and_then(parse_bool);
+        if (!kind || !member) {
             done_(std::unexpected(MessageStoreError::Corrupt));
             return std::nullopt;
         }
-        done_(*admitted);
+        done_(core::ports::admits_anyone(*kind) || *member);
         return std::nullopt;
     }
 
@@ -203,6 +230,7 @@ public:
 private:
     core::RoomId room_;
     core::UserId user_;
+    core::ports::RoomKind asked_;
     MessageCallback<bool> done_;
 };
 
@@ -288,8 +316,8 @@ void PgMessageStore::members(const core::RoomId& room, std::optional<core::UserI
 }
 
 void PgMessageStore::admits(const core::RoomId& room, const core::UserId& user,
-                            MessageCallback<bool> done) {
-    impl_->pool().submit(std::make_unique<Admits>(room, user, std::move(done)));
+                            core::ports::RoomKind asked, MessageCallback<bool> done) {
+    impl_->pool().submit(std::make_unique<Admits>(room, user, asked, std::move(done)));
 }
 
 } // namespace infra::postgres
