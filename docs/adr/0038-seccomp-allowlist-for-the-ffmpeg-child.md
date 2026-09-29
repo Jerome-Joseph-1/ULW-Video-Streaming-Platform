@@ -32,11 +32,13 @@ and ffmpeg alike and cannot be tighter than the worker needs.
 - The allowlist is what ffmpeg 6.1.1 and ffprobe called under `strace -f`: the probe and the
   three-rung HLS transcode the worker issues, on h264/aac mp4, vp9/opus webm, mpeg4/mp3 avi,
   hevc/aac and av1 mkv, mpegts, flv, ogg, wmv and prores mov inputs, and on truncated, random
-  and empty files. Every run gave the same 40 names. Of them `ioctl`, `prctl`, `fcntl` and
+  and empty files. Every run as root gave the same 40 names, and 41 as an ordinary user (below). Of them `ioctl`, `prctl`, `fcntl` and
   `prlimit64` are admitted only with the arguments below, and `clone3` is answered `ENOSYS`, so
   that glibc's threads use `clone`, which is checked too. Seven more are added for what a run
   cannot show without the occasion: `rt_sigreturn` (a handler for SIGTERM, which is how the
-  worker stops it), the clocks and sleeps a fallback or a wait reaches, and `gettid`. `tgkill`
+  worker stops it), the clocks and sleeps a fallback or a wait reaches, and `gettid`. One is
+  from the ordinary-user trace: `geteuid`, which libgcrypt's secure-memory set-up calls after
+  `getuid` and `mlock`, but only when not root. It is a read of the caller's own id. `tgkill`
   and `tkill` are added for `SIGABRT` alone (next item).
 - Arguments are checked where a call is both needed and dangerous: `ioctl` only for the
   terminal queries `TCGETS` and `TIOCGWINSZ`; `prctl` only `PR_SET_NAME` and
@@ -71,9 +73,21 @@ and ffmpeg alike and cannot be tighter than the worker needs.
 
 ## Consequences
 
+- The first version was traced as root only and killed ffprobe on CI, whose runner is an
+  ordinary user, on `geteuid`. Nothing had varied the user. Two guards now: the tests run as
+  the user CI runs them as (and `AnOrdinaryUsersFfprobeRunsToo` covers it from a root shell),
+  and the program's instruction count and hash are pinned by a test, so a compiler or a library
+  that built a different filter fails there instead of on a job's transcode.
+- The allowlist is judged against the images' ffmpeg and glibc, not the machine it was traced
+  on: the worker image pins ffmpeg 7:6.1.1-3ubuntu5 on Ubuntu 24.04 (glibc 2.39), which CI's
+  runners install too. The kernel does not enter into it, since the filter sees only what user
+  space asks for; a different CPU can, through libraries' feature probes, which is what the
+  re-trace on a bump and the tests under both users are for.
+
 - A new ffmpeg or libc that calls something not on the list kills the transcode. The failure
   is `SyscallBlocked`, and the job's video fails after one rerun until the list is extended:
-  re-trace on every ffmpeg bump (`strace -f -c`, both the probe and the transcode) and add
+  re-trace on every ffmpeg or base image bump with `tools/trace-ffmpeg-syscalls.sh`, run once as
+  root and once as an ordinary user, and add
   what is new. The worker image pins ffmpeg's version for this reason as well.
 - The filter costs one comparison per call for the ones early in the table and the kernel's
   cache bitmap for the ones whose verdict never depends on an argument.

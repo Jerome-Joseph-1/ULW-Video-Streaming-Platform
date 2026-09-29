@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 
 #include <algorithm>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <grp.h>
 #include <gtest/gtest.h>
 #include <pthread.h>
 #include <stop_token>
@@ -415,6 +417,40 @@ TEST_F(SyscallFilterTest, ATranscodeWithThreadsStillRuns) {
     EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
     EXPECT_TRUE(fs::exists(writable_.path() / "index.m3u8"));
     EXPECT_TRUE(fs::exists(writable_.path() / "seg_000.m4s"));
+}
+
+// The traces this filter came from were taken as root, and some libraries ask more of a caller
+// that is not (libgcrypt calls geteuid only then). CI runs these tests as an ordinary user;
+// as root this stands in for it.
+TEST_F(SyscallFilterTest, AnOrdinaryUsersFfprobeRunsToo) {
+    if (::geteuid() != 0) {
+        GTEST_SKIP() << "already an ordinary user, as every test here then is";
+    }
+    constexpr uid_t kNobody = 65534;
+    fs::permissions(writable_.path(), fs::perms::all);
+    const pid_t child = ::fork();
+    if (child == 0) {
+        const bool dropped =
+            ::setgroups(0, nullptr) == 0 && ::setgid(kNobody) == 0 && ::setuid(kNobody) == 0;
+        const auto ran =
+            dropped ? run({"ffprobe", "-v", "error", "-f", "lavfi", "-i",
+                           "testsrc=duration=1:size=64x64", "-show_entries", "format=duration"})
+                    : ChildExit{.exit_code = 99,
+                                .signal = 0,
+                                .ending = Ending::Exited,
+                                .wall = {},
+                                .peak_rss_kib = 0,
+                                .stderr_tail = {},
+                                .stderr_bytes = 0};
+        std::_Exit(ran.exit_code);
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    if (WEXITSTATUS(status) == infra::ffmpeg::kProgramNotFound) {
+        GTEST_SKIP() << "no ffprobe on this host";
+    }
+    EXPECT_EQ(WEXITSTATUS(status), 0) << "159 is the filter killing it";
 }
 
 TEST(SandboxCheck, NamesWhatWentWrong) {

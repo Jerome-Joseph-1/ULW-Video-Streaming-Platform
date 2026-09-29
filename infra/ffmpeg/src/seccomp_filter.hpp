@@ -6,13 +6,14 @@
 // The allowlist is what ffmpeg 6.1.1 and ffprobe called in strace -f runs: the probe and the
 // three-rung HLS transcode the worker issues, over h264/aac mp4, vp9/opus webm, mpeg4/mp3 avi,
 // hevc/aac and av1 mkv, mpegts, flv, ogg, wmv and prores mov inputs, and over truncated,
-// random and empty files. Every input gave the same 40 names, the runtime's start-up and thread
-// creation among them; ioctl, prctl, fcntl and prlimit64 are admitted only with the arguments
-// below, and clone3, which glibc used for threads, is answered ENOSYS so that it uses clone, also
-// checked. The additions marked below are calls the traces could not reach because they need a
-// signal or a clock the runs never met, and tgkill and tkill for SIGABRT alone. Anything else kills
-// the whole process: ptrace, mount, keyctl, bpf, io_uring_setup, socket, unshare, setns, fork, kill
-// and the rest of the kernel's surface a decoder exploit would reach for.
+// random and empty files. Every input gave the same 40 names as root (41 as an ordinary user), the
+// runtime's start-up and thread creation among them; ioctl, prctl, fcntl and prlimit64 are admitted
+// only with the arguments below, and clone3, which glibc used for threads, is answered ENOSYS so
+// that it uses clone, also checked. The additions marked below are calls the traces could not reach
+// because they need a signal or a clock the runs never met, and tgkill and tkill for SIGABRT alone.
+// Anything else kills the whole process: ptrace, mount, keyctl, bpf, io_uring_setup, socket,
+// unshare, setns, fork, kill and the rest of the kernel's surface a decoder exploit would reach
+// for.
 #pragma once
 
 #include <linux/audit.h>
@@ -95,6 +96,10 @@ inline constexpr std::array kAllowed = {
 #if defined(SYS_arch_prctl)
     SYS_arch_prctl,
 #endif
+    // Found by running as an ordinary user, which the root traces could not show: libgcrypt's
+    // secure-memory set-up calls geteuid after getuid and mlock, but only when not root. The
+    // first run as CI's runner (a pod's uid 10001 does the same) died of it.
+    SYS_geteuid,
     // Not in any trace, for want of the occasion. A signal handler, as ffmpeg installs for
     // SIGTERM and SIGINT, returns through rt_sigreturn, and the worker's stop request is a
     // SIGTERM. The clocks and sleeps are the vDSO's fallbacks and the waits in libav* and

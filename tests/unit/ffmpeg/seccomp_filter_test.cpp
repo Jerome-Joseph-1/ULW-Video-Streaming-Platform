@@ -80,6 +80,31 @@ TEST_F(SeccompFilter, FitsWhatTheKernelWillLoad) {
     EXPECT_LE(program_.size(), std::size_t{BPF_MAXINSNS});
 }
 
+// Every compiler and library must build the program instruction for instruction the same. A
+// change to the allowlist changes this too, deliberately: the new value is the reviewer's cue to
+// look at what was added. FNV-1a over each instruction's four fields.
+TEST_F(SeccompFilter, ProgramIsTheSameInstructionsOnEveryCompiler) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto mix = [&hash](std::uint64_t value, int bytes) {
+        for (int i = 0; i < bytes; ++i) {
+            hash ^= (value >> (8 * i)) & 0xFFU;
+            hash *= 1099511628211ULL;
+        }
+    };
+    for (const sock_filter& insn : program_) {
+        mix(insn.code, 2);
+        mix(insn.jt, 1);
+        mix(insn.jf, 1);
+        mix(insn.k, 4);
+    }
+#if defined(__x86_64__)
+    EXPECT_EQ(program_.size(), 168U);
+    EXPECT_EQ(hash, 4688286380803353990ULL) << "program of " << program_.size() << " instructions";
+#else
+    GTEST_SKIP() << "the golden program is x86-64's";
+#endif
+}
+
 TEST_F(SeccompFilter, AllowsEveryCallTheTracesShowed) {
     for (const int nr : seccomp::kAllowed) {
         EXPECT_EQ(verdict(call(nr)), seccomp::kAllow) << "syscall " << nr;
