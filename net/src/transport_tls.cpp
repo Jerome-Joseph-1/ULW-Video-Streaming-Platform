@@ -7,7 +7,6 @@
 #include <charconv>
 #include <cstdio>
 #include <openssl/bio.h>
-#include <openssl/buffer.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <string_view>
@@ -23,13 +22,12 @@ constexpr core::Millis kHandshakeTimeout{5'000};
 constexpr std::size_t kRecordPlaintext = std::size_t{16} * 1024;
 // Ciphertext goes into the read BIO a piece at a time and is read out before the next piece. A
 // memory BIO keeps the largest size it ever held, so feeding a whole 64 KiB receive at once
-// would leave every connection holding 64 KiB of BIO for good.
+// would leave every connection holding 64 KiB of BIO for good. A paused protocol still grows it
+// to what it parks, at most a receive and a partial record, and it keeps that size: replacing
+// the BIO once the backlog was read cost more than it saved, because 500 uploads pausing and
+// resuming behind a slow store freed and regrew those buffers until the heap held about 50 KB
+// more per connection in holes than the buffers themselves.
 constexpr std::size_t kCipherPiece = kRecordPlaintext;
-// A piece plus the partial record left from the one before: 16 KiB + at most 16 KiB of
-// plaintext, 2 KiB of TLS 1.2 expansion and a 5-byte header, under 48 KiB. Only a paused
-// protocol, which parks the rest of a receive in the BIO, grows it past that, and the BIO is
-// replaced once that backlog has been read.
-constexpr std::size_t kReadBioKeep = std::size_t{48} * 1024;
 // A session id context is required for resumption to be offered at all; the value only has to
 // be the same for every connection this server resumes.
 constexpr std::string_view kSessionContext = "ulw-gateway";
@@ -409,9 +407,6 @@ private:
             }
             upper_.on_data({plain.data(), n});
         }
-        if (state_ == State::Open && BIO_ctrl_pending(SSL_get_rbio(ssl_.get())) == 0) {
-            shrink_read_bio();
-        }
         sync_receiving();
     }
 
@@ -464,21 +459,6 @@ private:
             }
             reactor_.send(conn_, std::span(buf).first(static_cast<std::size_t>(n)));
         }
-    }
-
-    // Called only with the read BIO empty, so nothing it held is lost.
-    void shrink_read_bio() noexcept {
-        BUF_MEM* mem = nullptr;
-        BIO_get_mem_ptr(SSL_get_rbio(ssl_.get()), &mem);
-        if (mem == nullptr || mem->max <= kReadBioKeep) {
-            return;
-        }
-        BIO* fresh = BIO_new(BIO_s_mem());
-        if (fresh == nullptr) {
-            return;
-        }
-        BIO_set_mem_eof_return(fresh, peer_eof_ ? 0 : -1);
-        SSL_set0_rbio(ssl_.get(), fresh);
     }
 
     // Only on a reactor callback: the protocol hears of it before this returns.
