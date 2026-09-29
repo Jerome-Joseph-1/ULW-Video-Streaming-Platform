@@ -166,9 +166,13 @@ if(ULW_FUZZ)
     target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
 ulw_add_test_suite(rt_unit_tests unit
-    unit/rt/registry_test.cpp)
+    unit/rt/registry_test.cpp
+    unit/rt/room_router_test.cpp
+    unit/rt/wire_test.cpp)
 target_link_libraries(rt_unit_tests PRIVATE ulw::rt_lib)
-target_include_directories(rt_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+# The node channel's frame codec is internal to the module.
+target_include_directories(rt_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/rt/src)
 
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
