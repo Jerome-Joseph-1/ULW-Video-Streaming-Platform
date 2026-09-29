@@ -188,6 +188,9 @@ MlsResult<MlsIncoming> MlsGroup::process(std::span<const std::byte> message) {
     case ULW_MLS_RECEIVED_PROPOSAL:
         incoming.kind = MlsReceived::Proposal;
         break;
+    // The bridge writes this only on failure.
+    case ULW_MLS_RECEIVED_NOTHING:
+        return std::unexpected(MlsError::Internal);
     }
     return incoming;
 }
