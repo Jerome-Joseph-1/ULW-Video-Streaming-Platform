@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ULW call peer</title>
+<script>
+  // The SDK keeps its peer connections private. Recording them as they are made lets the test
+  // read ICE state and RTP statistics through the standard API instead of SDK internals.
+  window.peerConnections = [];
+  const Native = window.RTCPeerConnection;
+  window.RTCPeerConnection = class extends Native {
+    constructor(...args) {
+      super(...args);
+      window.peerConnections.push(this);
+    }
+  };
+</script>
+<script src="/livekit-client.umd.js"></script>
+</head>
+<body>
+<script>
+  const { Room, RoomEvent } = LivekitClient;
+  window.events = [];
+  const note = (type, detail = {}) => window.events.push({ type, at: Date.now(), ...detail });
+
+  window.join = async ({ url, token }) => {
+    const room = new Room({ adaptiveStream: false, dynacast: false });
+    window.room = room;
+    room.on(RoomEvent.ParticipantConnected, (p) => note('participant-connected', { who: p.identity }));
+    room.on(RoomEvent.ParticipantDisconnected, (p) => note('participant-disconnected', { who: p.identity }));
+    room.on(RoomEvent.TrackSubscribed, (track, _pub, p) =>
+      note('track-subscribed', { who: p.identity, kind: track.kind }));
+    room.on(RoomEvent.TrackUnsubscribed, (track, _pub, p) =>
+      note('track-unsubscribed', { who: p.identity, kind: track.kind, state: track.mediaStreamTrack.readyState }));
+    room.on(RoomEvent.Disconnected, (reason) => note('disconnected', { reason }));
+    await room.connect(url, token);
+    await room.localParticipant.enableCameraAndMicrophone();
+    return room.localParticipant.identity;
+  };
+
+  window.mediaStats = async () => {
+    const out = [];
+    for (const pc of window.peerConnections) {
+      const inbound = { audio: 0, video: 0 };
+      (await pc.getStats()).forEach((s) => {
+        if (s.type === 'inbound-rtp') inbound[s.kind] += s.packetsReceived;
+      });
+      out.push({ ice: pc.iceConnectionState, inbound });
+    }
+    return out;
+  };
+</script>
+</body>
+</html>

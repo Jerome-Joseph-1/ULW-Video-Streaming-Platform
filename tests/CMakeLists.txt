@@ -354,3 +354,7 @@ target_link_libraries(sfu_unit_tests PRIVATE ulw::sfu_livekit ulw::auth ulw::tes
 # White-box tests of token minting and of how RoomService answers are read.
 target_include_directories(sfu_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src
     ${PROJECT_SOURCE_DIR}/tests)
+
+# The signalling side of the call suite, tests/call/run.sh.
+ulw_add_executable(ulw_call_harness call/harness_main.cpp)
+target_link_libraries(ulw_call_harness PRIVATE ulw::sfu_livekit ulw::os)

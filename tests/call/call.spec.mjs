@@ -1,0 +1,188 @@
+// M25 acceptance: two headless Chrome peers join one call with tickets the SFU adapter issues,
+// reach ICE connected, and receive each other's RTP for 10 s; then one peer's network vanishes
+// and the other sees it leave, within a measured bound, with its own call intact.
+import { chromium, expect, test } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import path from 'node:path';
+
+const here = path.dirname(new URL(import.meta.url).pathname);
+const harness = process.env.ULW_CALL_HARNESS;
+
+// The acceptance window for media flow.
+const kFlowMs = 10_000;
+// LiveKit v1.13.7 gives up on a silent peer after 10 s without ICE traffic (disconnected), 5 s
+// more (failed) and a 5 s cleanup wait: 20 s (pkg/rtc/transport.go and participant.go). Pion
+// checks ICE on its 2 s keepalive tick, and the departure then travels to the other peer over
+// its signal connection; 25 s leaves 3 s above both.
+const kDropBoundMs = 25_000;
+
+function sfu(...args) {
+  return execFileSync(harness, args, { encoding: 'utf8' }).trim();
+}
+
+function servePage() {
+  const files = {
+    '/': ['call.html', 'text/html'],
+    '/livekit-client.umd.js': ['node_modules/livekit-client/dist/livekit-client.umd.js',
+      'text/javascript'],
+  };
+  const server = createServer((req, res) => {
+    const file = files[req.url];
+    if (!file) {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, { 'content-type': file[1] }).end(readFileSync(path.join(here, file[0])));
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+}
+
+// Every process of one browser: the browser itself and everything it started.
+function processTree(root) {
+  const parents = new Map();
+  for (const entry of readdirSync('/proc')) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
+      // The command name is parenthesised and may hold spaces; the ppid follows its close.
+      const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+      parents.set(Number(entry), ppid);
+    } catch {
+      // Exited while being listed.
+    }
+  }
+  const tree = [root];
+  for (let i = 0; i < tree.length; ++i) {
+    for (const [pid, ppid] of parents) if (ppid === tree[i]) tree.push(pid);
+  }
+  return tree;
+}
+
+// A browser server rather than a plain launch: only the server exposes its process, which the
+// drop below has to freeze.
+async function launchPeer() {
+  const server = await chromium.launchServer({
+    headless: true,
+    executablePath: process.env.ULW_E2E_CHROME,
+    args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
+  });
+  const browser = await chromium.connect(server.wsEndpoint());
+  return { server, browser };
+}
+
+async function received(page) {
+  const pcs = await page.evaluate(() => window.mediaStats());
+  return pcs.reduce((sum, pc) => ({ audio: sum.audio + pc.inbound.audio,
+    video: sum.video + pc.inbound.video }), { audio: 0, video: 0 });
+}
+
+async function allConnected(page) {
+  const pcs = await page.evaluate(() => window.mediaStats());
+  return pcs.length > 0 && pcs.every((pc) => pc.ice === 'connected' || pc.ice === 'completed');
+}
+
+test('two peers exchange media and a dropped peer is detected', async () => {
+  const room = randomUUID();
+  const metrics = { room };
+  const pageServer = await servePage();
+  const pageUrl = `http://127.0.0.1:${pageServer.address().port}/`;
+  const browsers = [];
+  try {
+    sfu('open', room);
+    const peers = [];
+    for (const user of ['alice', 'bob']) {
+      const device = randomUUID();
+      const ticket = JSON.parse(sfu('join', room, user, device));
+      const { server, browser } = await launchPeer();
+      browsers.push(server);
+      const page = await browser.newPage();
+      await page.goto(pageUrl);
+      peers.push({ user, device, server, page, ticket });
+    }
+    const started = Date.now();
+    for (const peer of peers) {
+      peer.identity = await peer.page.evaluate((t) => window.join(t), peer.ticket);
+    }
+    const [alice, bob] = peers;
+
+    for (const peer of peers) {
+      await expect.poll(() => allConnected(peer.page), { timeout: 30_000 }).toBe(true);
+      await expect.poll(async () => {
+        const r = await received(peer.page);
+        return r.audio > 0 && r.video > 0;
+      }, { timeout: 30_000 }).toBe(true);
+    }
+    metrics.connectedMs = Date.now() - started;
+
+    // Sampled once a second for the whole window: packets must keep arriving in both
+    // directions, not merely have arrived once.
+    const samples = { alice: [await received(alice.page)], bob: [await received(bob.page)] };
+    const flowEnd = Date.now() + kFlowMs;
+    while (Date.now() < flowEnd) {
+      await alice.page.waitForTimeout(1000);
+      samples.alice.push(await received(alice.page));
+      samples.bob.push(await received(bob.page));
+    }
+    for (const [who, series] of Object.entries(samples)) {
+      for (let i = 1; i < series.length; ++i) {
+        expect(series[i].audio, `${who} audio stalled`).toBeGreaterThan(series[i - 1].audio);
+        expect(series[i].video, `${who} video stalled`).toBeGreaterThan(series[i - 1].video);
+      }
+    }
+    metrics.packetsIn10s = Object.fromEntries(Object.entries(samples).map(([who, s]) =>
+      [who, { audio: s.at(-1).audio - s[0].audio, video: s.at(-1).video - s[0].video }]));
+    expect(await allConnected(alice.page)).toBe(true);
+    expect(await allConnected(bob.page)).toBe(true);
+
+    // Bob's network vanishes: every process of his browser stops, so nothing he would send
+    // leaves and nothing sent to him is answered, which is what the SFU sees of a peer whose
+    // link died. Closing his page instead would send a polite leave.
+    const frozen = processTree(bob.server.process().pid);
+    const droppedAt = Date.now();
+    for (const pid of frozen) process.kill(pid, 'SIGSTOP');
+    try {
+      await expect.poll(() => alice.page.evaluate((who) =>
+        window.events.find((e) => e.type === 'participant-disconnected' && e.who === who),
+      bob.identity), { timeout: kDropBoundMs, intervals: [100] }).toBeTruthy();
+      const events = await alice.page.evaluate(() => window.events);
+      const gone = events.find((e) => e.type === 'participant-disconnected');
+      metrics.dropDetectedMs = gone.at - droppedAt;
+      const unsubscribed = events.filter((e) => e.type === 'track-unsubscribed' && e.who === bob.identity);
+      expect(unsubscribed.map((e) => e.kind).sort()).toEqual(['audio', 'video']);
+      metrics.aliceEventsAfterDrop = events.filter((e) => e.at >= droppedAt)
+        .map((e) => ({ ...e, at: e.at - droppedAt }));
+      expect(events.some((e) => e.type === 'disconnected'), 'alice lost the call').toBe(false);
+      expect(await allConnected(alice.page)).toBe(true);
+      // LiveKit has already dropped bob, so removing him is a no-op that must still succeed.
+      sfu('remove', room, bob.user, bob.device);
+    } finally {
+      for (const pid of frozen) {
+        try {
+          process.kill(pid, 'SIGCONT');
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+
+    // The room is closed through the adapter; the remaining peer is told why.
+    const closedAt = Date.now();
+    sfu('close', room);
+    await expect.poll(() => alice.page.evaluate(() =>
+      window.events.find((e) => e.type === 'disconnected')), { timeout: 10_000 }).toBeTruthy();
+    const ended = await alice.page.evaluate(() => window.events.find((e) => e.type === 'disconnected'));
+    metrics.closeToDisconnectMs = ended.at - closedAt;
+    metrics.closeReason = ended.reason;
+    expect(ended.reason).toBe(await alice.page.evaluate(() =>
+      LivekitClient.DisconnectReason.ROOM_DELETED));
+  } finally {
+    for (const browser of browsers) await browser.close().catch(() => {});
+    pageServer.close();
+    console.log(JSON.stringify(metrics));
+    mkdirSync(path.join(here, 'test-results'), { recursive: true });
+    writeFileSync(path.join(here, 'test-results', `metrics-${room}.json`), JSON.stringify(metrics, null, 2));
+  }
+});
