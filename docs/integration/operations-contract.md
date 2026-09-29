@@ -27,7 +27,8 @@ file (`--config <path>` or `ULW_CONFIG`), the environment, and a command-line fl
 Askedin deployment uses the environment only, which is what the table lists. An empty value
 counts as unset. A file must be a regular file owned by root or the process's user and not
 writable by group or others. Secrets (marked below) are never taken from a flag, and from a file
-only if no one but its owner can read it (`0400` or `0600`). Chat reads the environment only.
+only if no one but its owner can read it (`0400` or `0600`); the store keys only from the
+environment. Chat reads the environment only.
 
 A bad value stops the process at startup with exit code `2` and a `configuration refused` log
 line naming the variable; a secret's value is never quoted, not even in the reason a database
