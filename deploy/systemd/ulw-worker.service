@@ -1,0 +1,73 @@
+# The transcode worker (brief 8.1, 8.14). Size the host at 2 GB or more.
+#
+#   install -m 0755 transcode_worker ulw_sandbox /usr/local/bin/
+#   install -m 0640 -o root -g ulw worker.toml /etc/ulw/          # no secrets in it
+#   install -m 0400 -o root -g root worker.env /etc/ulw/          # ULW_DATABASE_URL, ULW_S3_*
+#   systemctl enable --now ulw-worker
+#
+# The worker finds ulw_sandbox beside itself, and refuses to start without it (ADR-0025).
+
+[Unit]
+Description=ULW transcode worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/bin/transcode_worker --config /etc/ulw/worker.toml
+EnvironmentFile=/etc/ulw/worker.env
+User=ulw
+Group=ulw
+
+# WATCHDOG=1 comes from the thread that takes signals, every 15 s. A transcode may rightly run
+# longer than any watchdog; a job that hangs is the lease's to catch, not systemd's.
+WatchdogSec=30
+TimeoutStartSec=30
+# SIGTERM: a job still downloading or transcoding is given back to the queue at once; one
+# already publishing is finished, at most a few seconds of uploads.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2
+
+LimitNOFILE=65536
+# The worker is sized at 2 GB: ffmpeg's full ladder of a 1080p source peaked at 556 MB
+# resident with four threads, about 200 MB per rendition (brief 8.1), and the sandbox's own
+# RLIMIT_AS bounds each child. Throttled at 1800M, killed at 2G, never swapped.
+MemoryHigh=1800M
+MemoryMax=2G
+MemorySwapMax=0
+
+# The scratch workspace, /var/tmp/ulw-worker, lives in the private /var/tmp, which is on disk
+# and removed with the service; the worker sweeps what a crash left behind anyway.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+# ulw_sandbox confines ffmpeg in new user, network, mount and pid namespaces, mounts a /proc
+# of its own and remounts everything read-only. So, unlike the gateway, the worker may create
+# those namespaces and mount (@mount), and it leaves /proc unmasked: the kernel refuses a
+# fresh procfs inside a user namespace while the parent's /proc has anything mounted over it,
+# which ProtectKernelTunables, ProtectKernelLogs and ProtectProc all do.
+RestrictNamespaces=user net mnt pid
+SystemCallFilter=@system-service @mount
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

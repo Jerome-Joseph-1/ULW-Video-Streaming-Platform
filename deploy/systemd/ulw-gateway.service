@@ -1,0 +1,75 @@
+# The upload and playback gateway on a 1 GB host (brief 8.1, 8.14).
+#
+#   install -m 0755 gateway_server /usr/local/bin/
+#   install -d -m 0750 -o root -g ulw /etc/ulw
+#   install -m 0640 -o root -g ulw gateway.toml /etc/ulw/        # no secrets in it
+#   install -m 0400 -o root -g root gateway.env /etc/ulw/        # ULW_DATABASE_URL, ULW_S3_*
+#   systemctl enable --now ulw-gateway
+#
+# The environment file is read by systemd, as root, before the service drops to ulw; the
+# gateway never opens it. /readyz, not the unit's state, says whether it takes traffic.
+
+[Unit]
+Description=ULW upload and playback gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/bin/gateway_server --config /etc/ulw/gateway.toml
+EnvironmentFile=/etc/ulw/gateway.env
+User=ulw
+Group=ulw
+
+# READY=1 once it listens; WATCHDOG=1 from the event loop at half this, so a wedged loop is
+# restarted within 30 s.
+WatchdogSec=30
+TimeoutStartSec=30
+# SIGTERM: /readyz answers 503, the listener closes, requests in flight get up to 30 s, then
+# the process exits 0. 15 s more covers the exit itself before systemd sends SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=2
+# 2 is a configuration the gateway refused; restarting would only refuse it again.
+RestartPreventExitStatus=2
+
+# 448 connections at two descriptors each fit many times over; the gateway caps its own soft
+# limit at 65,536 and checks its admission limit against it at startup.
+LimitNOFILE=65536
+# Brief section 3, decision 11: throttled at 600M, killed at 700M. The connection budget is
+# 600 MB, so reclaim pressure starts where the derivation says it never should be.
+MemoryHigh=600M
+MemoryMax=700M
+MemorySwapMax=0
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+# io_uring_setup is in @system-service (through @aio). Where a host policy refuses it anyway,
+# the gateway falls back to epoll and says so in its first log line.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
