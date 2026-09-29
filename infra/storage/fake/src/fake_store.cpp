@@ -320,6 +320,9 @@ FakeStore::grant_read(const core::StorageKey& key, core::Seconds ttl) {
 std::expected<std::vector<std::byte>, StorageError>
 FakeStore::fetch_small(const core::StorageKey& key, std::size_t max) {
     const std::scoped_lock lock(mutex_);
+    if (plan_.fail_fetch) {
+        return std::unexpected(*plan_.fail_fetch);
+    }
     const auto it = objects_.find(key.str());
     if (it == objects_.end()) {
         return std::unexpected(StorageError::NotFound);

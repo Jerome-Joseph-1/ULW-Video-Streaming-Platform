@@ -28,6 +28,8 @@ struct FaultPlan {
     std::size_t accept_per_call = std::numeric_limits<std::size_t>::max();
     // A backend that has stalled outright: write() takes nothing, ever.
     bool accept_zero = false;
+    // Every fetch_small fails with this.
+    std::optional<core::ports::StorageError> fail_fetch = std::nullopt;
 };
 
 // In-memory ingest store with S3-family semantics: bytes become durable a whole chunk at a

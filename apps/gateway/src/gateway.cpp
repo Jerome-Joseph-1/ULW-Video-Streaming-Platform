@@ -26,7 +26,8 @@ private:
 };
 
 Gateway::Gateway(Deps deps, Limits limits)
-    : deps_(deps), limits_(std::move(limits)), connections_(limits_.max_connections) {}
+    : deps_(deps), limits_(std::move(limits)), connections_(limits_.max_connections),
+      views_(deps_.reactor, deps_.views, limits_.view_batch, limits_.view_interval) {}
 
 Gateway::~Gateway() {
     deps_.reactor.cancel_timer(drain_timer_);
@@ -91,6 +92,7 @@ void Gateway::begin_drain() noexcept {
     draining_ = true;
     deps_.reactor.stop_listening();
     connections_.for_each_live([](Connection& c) { c.drain(); });
+    views_.flush();
     drain_timer_ = deps_.reactor.arm_timer(limits_.drain_deadline, *this);
 }
 
@@ -144,28 +146,37 @@ void Gateway::retire(net::Slab<Connection>::Handle handle) noexcept {
 
 std::string Gateway::render_metrics() const {
     const Counters& c = counters_;
-    return std::format("requests_total {}\n"
-                       "connections_accepted_total {}\n"
-                       "connections_rejected_total{{reason=\"capacity\"}} {}\n"
-                       "connections_current {}\n"
-                       "uploads_in_flight {}\n"
-                       "admission_rejections_total {}\n"
-                       "bytes_ingested_total {}\n"
-                       "timeouts_total{{kind=\"header\"}} {}\n"
-                       "timeouts_total{{kind=\"body\"}} {}\n"
-                       "timeouts_total{{kind=\"body_rate\"}} {}\n"
-                       "timeouts_total{{kind=\"backend\"}} {}\n"
-                       "timeouts_total{{kind=\"backstop\"}} {}\n"
-                       "tls_handshakes_in_flight {}\n"
-                       "tls_handshake_failures_total {}\n"
-                       "certificate_reloads_total {}\n"
-                       "certificate_reload_failures_total {}\n",
-                       c.requests, c.connections_accepted, c.connections_rejected,
-                       connections_.size(), upload_slots_, c.admission_rejections, c.bytes_ingested,
-                       c.timeouts_header, c.timeouts_body, c.timeouts_body_rate, c.timeouts_backend,
-                       c.timeouts_backstop, deps_.transports.handshakes_in_flight(),
-                       deps_.transports.handshake_failures(), c.certificate_reloads,
-                       c.certificate_reload_failures);
+    const ViewCounters& v = views_.counters();
+    return std::format(
+        "requests_total {}\n"
+        "connections_accepted_total {}\n"
+        "connections_rejected_total{{reason=\"capacity\"}} {}\n"
+        "connections_current {}\n"
+        "uploads_in_flight {}\n"
+        "admission_rejections_total {}\n"
+        "bytes_ingested_total {}\n"
+        "timeouts_total{{kind=\"header\"}} {}\n"
+        "timeouts_total{{kind=\"body\"}} {}\n"
+        "timeouts_total{{kind=\"body_rate\"}} {}\n"
+        "timeouts_total{{kind=\"backend\"}} {}\n"
+        "timeouts_total{{kind=\"backstop\"}} {}\n"
+        "tls_handshakes_in_flight {}\n"
+        "tls_handshake_failures_total {}\n"
+        "certificate_reloads_total {}\n"
+        "certificate_reload_failures_total {}\n"
+        "playlist_requests_total{{kind=\"master\"}} {}\n"
+        "playlist_requests_total{{kind=\"media\"}} {}\n"
+        "playlists_rejected_total {}\n"
+        "presign_failures_total {}\n"
+        "view_events_recorded_total {}\n"
+        "view_events_dropped_total {}\n"
+        "view_batches_failed_total {}\n",
+        c.requests, c.connections_accepted, c.connections_rejected, connections_.size(),
+        upload_slots_, c.admission_rejections, c.bytes_ingested, c.timeouts_header, c.timeouts_body,
+        c.timeouts_body_rate, c.timeouts_backend, c.timeouts_backstop,
+        deps_.transports.handshakes_in_flight(), deps_.transports.handshake_failures(),
+        c.certificate_reloads, c.certificate_reload_failures, c.playlists_master, c.playlists_media,
+        c.playlists_rejected, c.presign_failures, v.recorded, v.dropped, v.failed_batches);
 }
 
 } // namespace gateway

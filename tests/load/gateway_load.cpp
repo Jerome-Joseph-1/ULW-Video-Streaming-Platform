@@ -216,6 +216,9 @@ public:
     void discard(const core::ports::IngestId& id) noexcept override { control_.discard(id); }
     [[nodiscard]] std::uint64_t preferred_chunk_size() const noexcept override { return kChunk; }
 
+    // Playback is not measured here; nothing is ever read.
+    [[nodiscard]] core::ports::IObjectReader& reader() noexcept { return control_; }
+
     void throttle() { timer_ = reactor_.arm_timer(kTick, *this); }
     [[nodiscard]] std::uint64_t taken() const noexcept { return taken_; }
     // The fewest times any live session was woken after being refused.
@@ -363,7 +366,9 @@ int run(const Args& args) {
                                                                  .transports = *s.transports,
                                                                  .pool = *s.pool,
                                                                  .store = *s.store,
+                                                                 .reader = s.store->reader(),
                                                                  .catalog = *s.catalog,
+                                                                 .views = *s.catalog,
                                                                  .verifier = s.verifier,
                                                                  .clock = s.clock,
                                                                  .random = s.random},

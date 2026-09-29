@@ -127,7 +127,9 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
                                                                  .transports = *l.transports,
                                                                  .pool = *l.pool,
                                                                  .store = store,
+                                                                 .reader = *reader_,
                                                                  .catalog = *l.catalog,
+                                                                 .views = *l.catalog,
                                                                  .verifier = l.verifier,
                                                                  .clock = *l.clock,
                                                                  .random = l.random},
@@ -228,6 +230,28 @@ void GatewayUnderTest::reload_certificate() {
     if (!eventually([&] { return finished(counters()) > before; })) {
         ADD_FAILURE() << "certificate reload never finished";
     }
+}
+
+void GatewayUnderTest::put_video(const core::VideoRecord& video) {
+    on_loop([&] { loop_->catalog->put_video(video); });
+}
+
+void GatewayUnderTest::put_object(std::string_view key, std::string_view bytes) {
+    core::ports::IObjectAdmin& admin =
+        loop_->fake ? static_cast<core::ports::IObjectAdmin&>(*loop_->fake) : *loop_->fs;
+    const auto parsed = core::StorageKey::parse(key);
+    ASSERT_TRUE(parsed) << key;
+    ASSERT_TRUE(admin.put(*parsed, std::as_bytes(std::span(bytes))));
+}
+
+std::vector<core::ports::ViewEvent> GatewayUnderTest::views() {
+    std::vector<core::ports::ViewEvent> out;
+    on_loop([&] { out = loop_->catalog->views(); });
+    return out;
+}
+
+void GatewayUnderTest::fail_views(std::optional<core::ports::CatalogError> error) {
+    on_loop([&] { loop_->catalog->fail_views(error); });
 }
 
 std::string GatewayUnderTest::metrics() {
