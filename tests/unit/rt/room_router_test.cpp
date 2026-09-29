@@ -202,7 +202,10 @@ public:
                 os::UniqueFd{::accept4(fd_.get(), nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK)};
             return static_cast<bool>(conn);
         }));
-        return conn ? std::make_unique<RawPeer>(reactor_, std::move(conn)) : nullptr;
+        if (!conn) {
+            return nullptr;
+        }
+        return std::make_unique<RawPeer>(reactor_, std::move(conn));
     }
 
 private:
@@ -424,14 +427,16 @@ TEST_P(RoomRouterTest, ANodeThatMissedATakeoverFindsTheNewOwnerByReadingOwnersNo
     // Only revalidation can move chat-b over; carol's messages reach bob once it has.
     // One message per revalidation period is plenty; each send pumps until it is answered.
     auto next_send = std::chrono::steady_clock::now();
+    int sent = 0;
     ASSERT_TRUE(pump([&] {
         if (std::chrono::steady_clock::now() >= next_send) {
             next_send += std::chrono::milliseconds(300);
-            (void)send(c, carol, "carol", "anyone there");
+            sent += send(c, carol, "carol", "anyone there") ? 1 : 0;
         }
         return !bob.got.empty();
     }));
     EXPECT_EQ(bob.got.back().sender, "carol");
+    EXPECT_GT(sent, 0);
     EXPECT_GT(b.store->owner_reads, reads);
     EXPECT_EQ(b.store->resolves, resolves);
 }
@@ -735,11 +740,11 @@ TEST_P(RoomRouterTest, ALinkBrokenInsideASendIsTakenDownAfterwardsNotInsideIt) {
     auto conn =
         play_owner(owner, *core::NodeId::parse("chat-b"), *core::NodeId::parse("chat-a"), random_);
     ASSERT_TRUE(conn);
-    std::optional<wire::Frame> subscribe;
-    do {
+    std::optional<wire::Frame> subscribe = conn->next();
+    while (subscribe && !std::holds_alternative<wire::Subscribe>(*subscribe)) {
         subscribe = conn->next();
-        ASSERT_TRUE(subscribe);
-    } while (!std::holds_alternative<wire::Subscribe>(*subscribe));
+    }
+    ASSERT_TRUE(subscribe);
     std::vector<std::byte> ok;
     wire::encode_reply(ok, std::get<wire::Subscribe>(*subscribe).request, wire::Status::Ok, 0);
     conn->send(ok);
