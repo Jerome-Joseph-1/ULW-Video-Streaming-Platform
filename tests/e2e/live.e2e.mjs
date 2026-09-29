@@ -104,13 +104,15 @@ test('a live stream plays, keeps a monotonic manifest, and ends cleanly after EN
       }
 
       // A viewer sits three target durations behind the newest segment (RFC 8216 6.3.3), which
-      // is itself up to one segment old when it is listed; the gateway's copy of the playlist
-      // is up to half a segment older than the store's (ADR-0059); and SRT's latency, the
-      // upload and the fetches take a moment, 2 s allowed: 3T + T + T/2 + 2 s. At T = 2 that
-      // is 11 s, against about 7 to 8 s measured, so a regression of a segment or more is
-      // caught.
+      // is itself up to one segment old when it is listed, and SRT, the upload and the fetches
+      // take a moment: 3T + T + 2 s, 10 s at T = 2. The gateway's copy adds up to T/2 of age
+      // within that. Measured medians were 7.4 s on a hosted runner and 7.5 to 7.7 s locally,
+      // so the bound fails a change that adds more than about 2.3 s, such as a player starting
+      // two further segments back (4 s) or live playlists held as long as ended ones (up to
+      // 60 s). One extra segment alone (2 s, to about 9.7 s) passes. The lower bound, 3T,
+      // fails a player that starts nearer the live edge than RFC 8216 allows.
       expect(summary.glassToGlassMs.median).toBeGreaterThan(3 * kSegmentSeconds * 1000);
-      expect(summary.glassToGlassMs.median).toBeLessThan((4.5 * kSegmentSeconds + 2) * 1000);
+      expect(summary.glassToGlassMs.median).toBeLessThan((4 * kSegmentSeconds + 2) * 1000);
 
       // hls.js saw the window slide: it never reloaded a playlist that went backwards.
       const starts = state.playlists.map((p) => p.startSN);
