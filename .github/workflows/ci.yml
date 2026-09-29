@@ -163,3 +163,90 @@ jobs:
       - name: clang-tidy (full tree)
         if: github.event_name != 'pull_request'
         run: tools/run-clang-tidy.sh build/ci
+
+  # The WebSocket codec against the Autobahn fuzzingclient, through the echo server on each
+  # reactor. run.sh pins the image by digest and fails on any verdict outside its allowlist.
+  autobahn:
+    name: autobahn (${{ matrix.reactor }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        reactor: [io_uring, epoll]
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      ULW_REACTOR: ${{ matrix.reactor }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-ci
+      - run: cmake --preset ci
+      - run: cmake --build --preset ci --target ulw_ws_echo_server
+      - run: tests/autobahn/run.sh build/ci
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: autobahn-reports-${{ matrix.reactor }}
+          path: build/ci/autobahn
+
+  # Five minutes per target on pull requests that touch a parser or codec, and on pushes to
+  # main; thirty on the nightly and manual runs. Other pull requests skip the build: the unit
+  # label already replays the committed corpora on every build.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ws, http, hls]
+    env:
+      CC: clang-19
+      CXX: clang++-19
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Choose the run length
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          case $EVENT in
+            schedule | workflow_dispatch) seconds=1800 ;;
+            push) seconds=300 ;;
+            *)
+              if git diff --quiet "origin/$BASE_REF...HEAD" -- http codec tests/fuzz core/src/hls.cpp \
+                  core/include/core/util/hls.hpp; then
+                seconds=0
+              else
+                seconds=300
+              fi
+              ;;
+          esac
+          echo "seconds=$seconds" >>"$GITHUB_OUTPUT"
+      - if: steps.scope.outputs.seconds != '0'
+        uses: ./.github/actions/setup
+        with:
+          cache-key: clang-fuzz
+      - if: steps.scope.outputs.seconds != '0'
+        run: cmake --preset fuzz
+      - if: steps.scope.outputs.seconds != '0'
+        run: cmake --build --preset fuzz --target ${{ matrix.target }}_fuzz
+      # A scratch corpus, so what the run discovers never lands in the checkout.
+      - if: steps.scope.outputs.seconds != '0'
+        env:
+          TARGET: ${{ matrix.target }}
+          SECONDS_TO_RUN: ${{ steps.scope.outputs.seconds }}
+        run: |
+          mkdir -p fuzz-work/corpus fuzz-work/artifacts
+          cp "tests/fuzz/corpus/$TARGET"/* fuzz-work/corpus/
+          "build/fuzz/tests/${TARGET}_fuzz" -max_total_time="$SECONDS_TO_RUN" \
+            -print_final_stats=1 -artifact_prefix=fuzz-work/artifacts/ fuzz-work/corpus
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz-work/artifacts
