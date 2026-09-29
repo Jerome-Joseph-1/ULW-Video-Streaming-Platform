@@ -326,6 +326,38 @@ TEST_P(DatagramTest, StopAndStartWithinOneCallbackLosesNothing) {
     }
 }
 
+// The restart lands in the batch that also carries the stop: datagrams the kernel posted after
+// the restart must still wait behind those held since the stop.
+TEST_P(DatagramTest, RestartInTheStoppingBatchKeepsHeldDatagramsFirst) {
+    constexpr std::uint64_t kBurst = 200;
+    Sink sink;
+    sink.after_datagram = [](Sink& s) {
+        if (s.got.size() == 1) {
+            s.reactor->stop_receiving_datagrams(s.id);
+        }
+    };
+    const SocketAddr server = attach(sink);
+    const Peer peer = Peer::bind(AddrFamily::V4);
+    for (std::uint64_t seq = 0; seq < kBurst; ++seq) {
+        ASSERT_TRUE(peer.send(server, encode({.nonce = 1, .seq = seq})));
+    }
+    StreamHook starter;
+    starter.hook = [&] { reactor->start_receiving_datagrams(sink.id); };
+    auto [ours, theirs] = ulw::test::unix_pair();
+    auto conn = reactor->attach(std::move(ours), starter);
+    ASSERT_TRUE(conn);
+    ASSERT_EQ(ulw::test::write_some(theirs.get(), encode({})), sizeof(Tag));
+    // Submitted in this order, the stream's completion follows the first of the datagram
+    // completions and precedes the rest.
+    reactor->start_receiving_datagrams(sink.id);
+    reactor->start_receiving(*conn);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return sink.got.size() == kBurst; }));
+    for (std::uint64_t i = 0; i < kBurst; ++i) {
+        ASSERT_EQ(decode(sink.got[i].payload).seq, i);
+    }
+    reactor->begin_close(*conn);
+}
+
 TEST_P(DatagramTest, NoCallbackFollowsCloseFromInsideOnDatagram) {
     constexpr std::uint64_t kBurst = 100;
     Sink sink;
