@@ -237,40 +237,48 @@ bool UringReactor::probe_zero_copy_send() noexcept {
         return false;
     }
     const auto self = local_addr(fd->get());
-    sockaddr_storage addr{};
-    if (!self || !to_sockaddr(*self, false, addr)) {
+    if (!self || !to_sockaddr(*self, false, probe_.addr)) {
         return false;
     }
-    std::byte payload{};
-    iovec iov{.iov_base = &payload, .iov_len = 1};
-    msghdr msg{};
-    msg.msg_name = &addr;
-    msg.msg_namelen = sizeof(sockaddr_in);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    io_uring_sqe* sqe = next_sqe();
-    io_uring_prep_sendmsg_zc(sqe, fd->get(), &msg, 0);
-    sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
-    io_uring_sqe_set_data64(sqe, static_cast<std::uint8_t>(Op::Probe));
-    // The send completes inline on a local socket and the notification follows at once. Waiting
-    // is bounded by count, not by the clock, which a test may hold still; if it runs out, the
-    // late completions are recognised by their operation and ignored.
-    std::optional<int> result;
-    bool more = true;
-    const auto waits = kCancelGrace / kCancelSlice;
-    for (auto i = decltype(waits){0}; more && i < waits; ++i) {
-        __kernel_timespec ts{.tv_sec = 0, .tv_nsec = kCancelSlice.count()};
-        io_uring_cqe* cqe = nullptr;
-        if (io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, &ts, nullptr) < 0 || cqe == nullptr) {
-            continue;
-        }
-        if ((cqe->flags & IORING_CQE_F_NOTIF) == 0) {
-            result = cqe->res;
-        }
-        more = (cqe->flags & IORING_CQE_F_MORE) != 0;
-        io_uring_cqe_seen(&ring_, cqe);
+    probe_.iov = {.iov_base = &probe_.payload, .iov_len = 1};
+    probe_.msg.msg_name = &probe_.addr;
+    probe_.msg.msg_namelen = sizeof(sockaddr_in);
+    probe_.msg.msg_iov = &probe_.iov;
+    probe_.msg.msg_iovlen = 1;
+    // As many sends at once as the reactor ever holds: on the 6.8 kernel of CI's runners a single
+    // zero-copy send succeeds while a burst of them to one socket fails some, so only a burst
+    // confirms zero copy is safe to use.
+    for (std::size_t i = 0; i < kMaxSendsInFlight; ++i) {
+        io_uring_sqe* sqe = next_sqe();
+        io_uring_prep_sendmsg_zc(sqe, fd->get(), &probe_.msg, 0);
+        sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
+        io_uring_sqe_set_data64(sqe, static_cast<std::uint8_t>(Op::Probe));
     }
-    return !more && result == 1;
+    // Every send completes inline on a local socket and its notification follows at once.
+    // Waiting is bounded by count, not by the clock, which a test may hold still; if it runs
+    // out, the late completions are recognised by their operation and ignored.
+    std::size_t succeeded = 0;
+    std::size_t finished = 0;
+    const auto waits = kCancelGrace / kCancelSlice;
+    for (auto i = decltype(waits){0}; finished < kMaxSendsInFlight && i < waits; ++i) {
+        __kernel_timespec ts{.tv_sec = 0, .tv_nsec = kCancelSlice.count()};
+        io_uring_cqe* first = nullptr;
+        static_cast<void>(io_uring_submit_and_wait_timeout(&ring_, &first, 1, &ts, nullptr));
+        unsigned head = 0;
+        unsigned seen = 0;
+        io_uring_cqe* cqe = nullptr;
+        io_uring_for_each_cqe(&ring_, head, cqe) {
+            ++seen;
+            if ((cqe->flags & IORING_CQE_F_NOTIF) == 0 && cqe->res == 1) {
+                ++succeeded;
+            }
+            if ((cqe->flags & IORING_CQE_F_MORE) == 0) {
+                ++finished;
+            }
+        }
+        io_uring_cq_advance(&ring_, seen);
+    }
+    return finished == kMaxSendsInFlight && succeeded == kMaxSendsInFlight;
 }
 
 void UringReactor::prepare(io_uring_sqe* sqe, int fd, Slot& s, Op op) noexcept {
@@ -670,19 +678,27 @@ std::expected<void, int> UringReactor::send_to(DatagramId socket, SocketAddr to,
     p.msg.msg_namelen = *addr_len;
     p.msg.msg_iov = &p.iov;
     p.msg.msg_iovlen = 1;
+    p.pending = 0;
+    submit_send(index, *s, s->zero_copy);
+    ++sends_in_flight_;
+    return {};
+}
+
+void UringReactor::submit_send(std::uint32_t index, Slot& s, bool zero_copy) noexcept {
+    PendingSend& p = *send_pool_[index];
     io_uring_sqe* sqe = next_sqe();
-    if (s->zero_copy) {
-        io_uring_prep_sendmsg_zc(sqe, socket.fd, &p.msg, 0);
+    if (zero_copy) {
+        io_uring_prep_sendmsg_zc(sqe, p.fd, &p.msg, 0);
         sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
-        ++s->stats.zero_copy_sends;
+        ++s.stats.zero_copy_sends;
     } else {
-        io_uring_prep_sendmsg(sqe, socket.fd, &p.msg, 0);
+        io_uring_prep_sendmsg(sqe, p.fd, &p.msg, 0);
     }
     io_uring_sqe_set_data64(sqe, (std::uint64_t{index} << kSendIndexShift) |
                                      static_cast<std::uint8_t>(Op::SendTo));
-    ++s->in_flight;
-    ++sends_in_flight_;
-    return {};
+    p.zero_copy = zero_copy;
+    ++p.pending;
+    ++s.in_flight;
 }
 
 void UringReactor::begin_close(DatagramId socket) noexcept {
@@ -1024,7 +1040,7 @@ void UringReactor::take_datagram(Slot& s, std::uint16_t bid, int res) noexcept {
 }
 
 void UringReactor::on_send_to(std::size_t index, const io_uring_cqe& cqe) noexcept {
-    const PendingSend& p = *send_pool_[index];
+    PendingSend& p = *send_pool_[index];
     Slot& s = slots_[static_cast<std::size_t>(p.fd)];
     if ((cqe.flags & IORING_CQE_F_NOTIF) != 0) {
         // The kernel is done with the payload. A copy anyway (loopback, or a device that
@@ -1034,22 +1050,28 @@ void UringReactor::on_send_to(std::size_t index, const io_uring_cqe& cqe) noexce
             ++s.stats.zero_copy_copied;
             s.zero_copy = false;
         }
-    } else if (!s.closing) {
-        if (cqe.res >= 0) {
-            ++s.stats.sent;
-        } else if (cqe.res != -ECANCELED) {
-            ++s.stats.send_errors;
-            s.dgram->on_send_error(p.to, -cqe.res);
-        }
+    } else if (!s.closing && cqe.res >= 0) {
+        ++s.stats.sent;
+    } else if (!s.closing && cqe.res != -ECANCELED && p.zero_copy) {
+        // A zero-copy send can fail where a plain one of the same datagram succeeds, as a burst
+        // of them did on the runners' 6.8 kernel. The datagram goes again as a plain send, and
+        // the socket sends plainly from now on; only a plain failure is the caller's to hear of.
+        s.zero_copy = false;
+        submit_send(static_cast<std::uint32_t>(index), s, false);
+    } else if (!s.closing && cqe.res != -ECANCELED) {
+        ++s.stats.send_errors;
+        s.dgram->on_send_error(p.to, -cqe.res);
     }
     // A zero-copy send reports twice: its result, then the notification that frees the payload.
     if ((cqe.flags & IORING_CQE_F_MORE) != 0) {
         return;
     }
-    free_sends_.push_back(static_cast<std::uint32_t>(index));
-    --sends_in_flight_;
-    assert(s.in_flight > 0);
+    assert(s.in_flight > 0 && p.pending > 0);
     --s.in_flight;
+    if (--p.pending == 0) {
+        free_sends_.push_back(static_cast<std::uint32_t>(index));
+        --sends_in_flight_;
+    }
     if (s.closing && s.in_flight == 0) {
         finalize(s);
     }

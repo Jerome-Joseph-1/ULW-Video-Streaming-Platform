@@ -23,7 +23,11 @@ Measured on kernel 6.18 over loopback:
 - one multishot `RECVMSG`, armed on a socket with 250 datagrams queued and stopped on its first
   completion, had posted 98 datagrams before the cancel took effect;
 - `SENDMSG_ZC` of 1,200-byte datagrams cost 1,640 ns of CPU each against 1,440 ns for
-  `SENDMSG` (300,000 sends each way); loopback reports every zero-copy send as copied.
+  `SENDMSG` (300,000 sends each way); loopback reports every zero-copy send as copied;
+- on CI's runners (Ubuntu 24.04, kernel 6.8), a single zero-copy send to ourselves succeeded,
+  but of a burst of zero-copy sends some completed with an error that a plain send of the same
+  datagram does not return: 400 of 5,000 in the soak, and enough of 1,024 from one socket to
+  fail the send test. 6.18 never returned it.
 
 ## Options
 
@@ -76,10 +80,15 @@ Measured on kernel 6.18 over loopback:
   `on_send_error` from the loop on both reactors, never from inside `send_to`.
 - A receive error (an ICMP error queued on a connected socket) stops receiving and is reported
   through `on_error`; `start_receiving_datagrams` resumes.
-- Sends use `SENDMSG_ZC` when a send to ourselves at startup shows the kernel accepts it with
-  `IORING_SEND_ZC_REPORT_USAGE` (6.2; 6.1 has the opcode but rejects the flag). A socket
-  switches to `SENDMSG` for good at the first notification that says the kernel copied anyway,
-  as it always does on loopback, where the copy costs 14% more CPU than a plain send.
+- Sends use `SENDMSG_ZC` only when, at startup, a burst of 1,024 zero-copy sends to ourselves
+  (as many as the reactor ever holds in flight) all succeed with
+  `IORING_SEND_ZC_REPORT_USAGE` (6.2; 6.1 has the opcode but rejects the flag). A single send is
+  no confirmation: on the runners' 6.8 one passed where a burst failed.
+- A socket switches to `SENDMSG` for good at the first notification that says the kernel copied
+  anyway, as it always does on loopback, where the copy costs 14% more CPU than a plain send,
+  and at the first zero-copy send that fails. That datagram is sent again as a plain send before
+  anything is reported, so a kernel's zero-copy quirk never loses a datagram `send_to` took;
+  only a plain send's failure reaches `on_send_error`.
 
 ## Consequences
 
@@ -113,6 +122,8 @@ Measured on kernel 6.18 over loopback:
 - The zero-copy path runs only on routes where the kernel really avoids the copy, and nothing
   in CI has such a route. Its benefit for datagrams of 2 KiB or less is unmeasured: the kernel's
   own guidance puts the break-even around 10 KB.
+- `zero_copy_sends` and `zero_copy_copied` show whether zero copy is in use at all; on loopback
+  they stay equal and stop growing after a socket's first notification.
 - Monitor `ring_exhausted`, `truncated` and `send_refused` per socket. A steady rate of any of
   them means the ring, the size limit or the in-flight limit is wrong for the load.
 - Reopen if media datagrams exceed 2 KiB, if the epoll fallback has to carry media at rate, or if
