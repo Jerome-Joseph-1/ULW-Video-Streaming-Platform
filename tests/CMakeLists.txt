@@ -15,6 +15,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/build_info_test.cpp
     unit/core/content_type_test.cpp
     unit/core/error_messages_test.cpp
+    unit/core/hls_test.cpp
     unit/core/ids_test.cpp
     unit/core/json_test.cpp
     unit/core/ladder_test.cpp
@@ -110,6 +111,19 @@ if(ULW_FUZZ)
     target_link_libraries(http_fuzz PRIVATE ulw::http_lib)
     target_compile_options(http_fuzz PRIVATE -fsanitize=fuzzer)
     target_link_options(http_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
+
+ulw_add_executable(hls_fuzz_replay fuzz/hls_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(hls_fuzz_replay PRIVATE ulw::core_domain)
+add_test(NAME hls_fuzz_corpus
+    COMMAND hls_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/hls)
+set_tests_properties(hls_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(hls_fuzz fuzz/hls_fuzz.cpp)
+    target_link_libraries(hls_fuzz PRIVATE ulw::core_domain)
+    target_compile_options(hls_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(hls_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
@@ -231,6 +245,7 @@ if(ULW_BUILD_WORKER)
     ulw_add_test_suite(ffmpeg_unit_tests unit
         unit/ffmpeg/command_test.cpp
         unit/ffmpeg/exit_code_test.cpp
+        unit/ffmpeg/hls_rewrite_test.cpp
         unit/ffmpeg/progress_test.cpp
         unit/ffmpeg/sandbox_test.cpp)
     target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
