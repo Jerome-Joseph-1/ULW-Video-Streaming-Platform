@@ -16,9 +16,11 @@ const harness = process.env.ULW_CALL_HARNESS;
 // The acceptance window for media flow.
 const kFlowMs = 10_000;
 // LiveKit v1.13.7 gives up on a silent peer after 10 s without ICE traffic (disconnected), 5 s
-// more (failed) and a 5 s cleanup wait: 20 s (pkg/rtc/transport.go and participant.go). Pion
-// checks ICE on its 2 s keepalive tick, and the departure then travels to the other peer over
-// its signal connection; 25 s leaves 3 s above both.
+// more (failed) and a 5 s cleanup wait: 20 s (pkg/rtc/transport.go and participant.go). On top:
+// up to 2 s for pion to notice, as it checks on its keepalive tick (transport.go), the 100 ms
+// poll below, and the leave's hop to the other peer over its open signal connection, which takes
+// milliseconds on loopback. That is 22.1 s at worst; 25 s leaves about 3 s for a loaded machine.
+// Measured: 20.0 to 21.9 s.
 const kDropBoundMs = 25_000;
 
 // The call handler's stand-in: one harness process for the whole test, holding the rooms it
@@ -138,7 +140,8 @@ test('two peers exchange media and a dropped peer is detected', async () => {
     metrics.connectedMs = Date.now() - started;
 
     // Sampled once a second for the whole window: packets must keep arriving in both
-    // directions, not merely have arrived once.
+    // directions, not merely have arrived once. The wait below is the sampling period, not a
+    // wait for something to happen; there is nothing to wait on but time.
     const samples = { alice: [await received(alice.page)], bob: [await received(bob.page)] };
     const flowEnd = Date.now() + kFlowMs;
     while (Date.now() < flowEnd) {
