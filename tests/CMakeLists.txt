@@ -38,6 +38,7 @@ ulw_add_test_suite(ops_unit_tests unit
     unit/ops/async_log_test.cpp
     unit/ops/log_test.cpp
     unit/ops/metrics_test.cpp
+    unit/ops/notify_test.cpp
     unit/ops/process_test.cpp
     unit/ops/settings_test.cpp
     unit/ops/toml_test.cpp)
