@@ -33,7 +33,8 @@
     room.on(RoomEvent.TrackSubscribed, (track, _pub, p) =>
       note('track-subscribed', { who: p.identity, kind: track.kind }));
     room.on(RoomEvent.TrackUnsubscribed, (track, _pub, p) =>
-      note('track-unsubscribed', { who: p.identity, kind: track.kind, state: track.mediaStreamTrack.readyState }));
+      note('track-unsubscribed', { who: p.identity, kind: track.kind }));
+    room.on(RoomEvent.Reconnecting, () => note('reconnecting'));
     room.on(RoomEvent.Disconnected, (reason) => note('disconnected', { reason }));
     await room.connect(url, token);
     await room.localParticipant.enableCameraAndMicrophone();

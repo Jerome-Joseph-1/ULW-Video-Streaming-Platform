@@ -175,6 +175,14 @@ test('two peers exchange media and a dropped peer is detected', async () => {
       metrics.aliceEventsAfterDrop = events.filter((e) => e.at >= droppedAt)
         .map((e) => ({ ...e, at: e.at - droppedAt }));
       expect(events.some((e) => e.type === 'disconnected'), 'alice lost the call').toBe(false);
+      expect(events.some((e) => e.type === 'reconnecting'), 'alice had to reconnect').toBe(false);
+      // Ending cleanly, concretely: LiveKit renegotiates bob's tracks off alice's connection,
+      // so their inbound RTP streams leave her statistics altogether (bob was the only one
+      // sending to her), with her connections up throughout. The MediaStreamTracks themselves
+      // stay "live": the SDK detaches them, but only the page could stop them.
+      await expect.poll(() => received(alice.page), { timeout: 5_000 })
+        .toEqual({ audio: 0, video: 0 });
+      metrics.streamsRemovedMs = Date.now() - droppedAt - metrics.dropDetectedMs;
       expect(await allConnected(alice.page)).toBe(true);
     } finally {
       for (const pid of frozen) {
