@@ -37,3 +37,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted |
 | [0032](0032-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted |
 | [0033](0033-seccomp-allowlist-for-the-ffmpeg-child.md) | The ffmpeg child runs under a syscall allowlist | Accepted |
+| [0034](0034-upload-reaper-as-a-cron-job.md) | Abandoned uploads are reaped by a CronJob | Accepted |

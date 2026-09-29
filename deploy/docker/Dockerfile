@@ -3,9 +3,10 @@
 #   docker build -f deploy/docker/Dockerfile --target gateway --build-arg ULW_GIT_SHA=$(git rev-parse --short=12 HEAD) -t video-gateway .
 #   docker build -f deploy/docker/Dockerfile --target worker  --build-arg ULW_GIT_SHA=... -t video-worker .
 #
-# gateway carries gateway_server and ulw_migrate (the video-gateway pod's init container runs
-# the gateway image with ulw_migrate as its command, so schema and server always come from one
-# build; docs/adr/0031). worker carries
+# gateway carries gateway_server, ulw_migrate and ulw_reaper (the video-gateway pod's init
+# container runs the gateway image with ulw_migrate as its command, so schema and server always
+# come from one build; docs/adr/0031; the upload reaper's CronJob runs it with ulw_reaper as its
+# command, docs/adr/0034). worker carries
 # transcode_worker, ulw_sandbox beside it, and ffmpeg.
 #
 # Builder and runtime are the same Ubuntu release, which is also what CI and the dev machines
@@ -38,9 +39,10 @@ ARG ULW_GIT_SHA=unknown
 RUN CC=gcc-14 CXX=g++-14 cmake --preset release -DULW_BUILD_TESTS=OFF \
         -DULW_GIT_SHA=${ULW_GIT_SHA} \
  && cmake --build --preset release \
-        --target gateway_server ulw_migrate transcode_worker ulw_sandbox \
+        --target gateway_server ulw_migrate ulw_reaper transcode_worker ulw_sandbox \
  && install -D -m 0755 -t /out/gateway \
         build/release/apps/gateway/gateway_server build/release/apps/migrate/ulw_migrate \
+        build/release/apps/reaper/ulw_reaper \
  && install -D -m 0755 -t /out/worker \
         build/release/apps/worker/transcode_worker build/release/apps/worker/ulw_sandbox
 

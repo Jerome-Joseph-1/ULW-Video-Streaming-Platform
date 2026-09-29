@@ -255,6 +255,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_job_queue_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
+    integration/postgres_upload_reaper_test.cpp
     PROPERTIES RESOURCE_LOCK postgres)
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests
@@ -262,6 +263,25 @@ target_include_directories(postgres_integration_tests
 target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
+
+ulw_add_test_suite(reaper_unit_tests unit
+    unit/reaper/config_test.cpp
+    unit/reaper/reaper_test.cpp)
+target_link_libraries(reaper_unit_tests PRIVATE ulw::reaper_lib)
+target_include_directories(reaper_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+# The reaper against the Postgres and MinIO of deploy/local/compose.yaml.
+ulw_add_test_suite(reaper_integration_tests integration
+    integration/postgres_harness.cpp
+    integration/upload_reaper_live_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(reaper_integration_tests PRIVATE
+    ulw::reaper_lib ulw::pg_store ulw::storage_s3 ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
+target_include_directories(reaper_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(reaper_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
