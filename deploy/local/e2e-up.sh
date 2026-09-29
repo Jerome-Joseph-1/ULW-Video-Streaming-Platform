@@ -188,7 +188,7 @@ kubectl -n apps-stage rollout status deployment/video-gateway --timeout=300s
 kubectl -n apps-stage rollout status deployment/video-worker --timeout=300s
 kubectl -n envoy-gateway-system wait --for=condition=Available deployment \
     --selector=gateway.envoyproxy.io/owning-gateway-name=askedin-gateway --timeout=180s
-until curl -fsS -o /dev/null -X POST "http://127.0.0.1:18080/mock-auth/token?sub=probe"; do
-    sleep 1
-done
+# Envoy takes a moment to program the routes after its pod is ready.
+curl -fsS -o /dev/null --retry 60 --retry-all-errors --retry-delay 1 \
+    -X POST "http://127.0.0.1:18080/mock-auth/token?sub=probe"
 log "up: http://127.0.0.1:18080 (kubeconfig $KUBECONFIG)"
