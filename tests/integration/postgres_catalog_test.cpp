@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -464,6 +465,41 @@ TEST_P(CatalogTest, ClaimThatLoadsACorruptRowLetsGoOfItsLock) {
     });
     ASSERT_TRUE(settled);
     EXPECT_EQ(seen.error(), CatalogError::Corrupt);
+}
+
+TEST_P(CatalogTest, ABatchOfViewsLandsInOneStatementFieldForField) {
+    const auto a = core::VideoId::generate(clock, random);
+    const auto b = core::VideoId::generate(clock, random);
+    const auto at = std::chrono::floor<std::chrono::microseconds>(clock.wall_now());
+    std::vector<core::ports::ViewEvent> batch{
+        {.video = a, .viewer = tester(), .at = at},
+        {.video = b,
+         .viewer = *core::UserId::parse("user.b@example.com"),
+         .at = at + std::chrono::microseconds(1)},
+        {.video = a, .viewer = *core::UserId::parse("x:y+z-1.2"), .at = at}};
+    ASSERT_TRUE(call<void>([&](auto done) { catalog->record_views(batch, std::move(done)); }));
+
+    auto conn = db->session();
+    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM view_events"), "3");
+    EXPECT_EQ(scalar(conn,
+                     "SELECT string_agg(viewer_id, ' ' ORDER BY viewer_id) FROM view_events "
+                     "WHERE video_id = $1",
+                     Params{}.add_uuid(a.uuid())),
+              "auth0|tester x:y+z-1.2");
+    EXPECT_EQ(
+        scalar(conn,
+               "SELECT (extract(epoch FROM viewed_at) * 1000000)::bigint FROM view_events "
+               "WHERE video_id = $1",
+               Params{}.add_uuid(b.uuid())),
+        std::to_string(
+            std::chrono::duration_cast<std::chrono::microseconds>(at.time_since_epoch()).count() +
+            1));
+}
+
+TEST_P(CatalogTest, AnEmptyBatchOfViewsSucceedsWithoutAStatement) {
+    EXPECT_TRUE(call<void>([&](auto done) { catalog->record_views({}, std::move(done)); }));
+    auto conn = db->session();
+    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM view_events"), "0");
 }
 
 TEST_P(CatalogTest, RefusesConnectionStringsLibpqWouldResolveOnTheLoop) {

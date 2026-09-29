@@ -34,6 +34,11 @@ protected:
         return scalar(conn, "SELECT count(*) FROM schema_migrations");
     }
 
+    static std::string count_bundled() { return std::to_string(bundled_migrations().size()); }
+
+    // The first version after every bundled one.
+    static int next_version() { return bundled_migrations().back().version + 1; }
+
     std::unique_ptr<ScratchDatabase> db;
 };
 
@@ -41,7 +46,11 @@ TEST_F(MigrateTest, AppliesTheSchemaAndRecordsEachVersion) {
     Migrator migrator = connect();
     const auto applied = migrator.apply(bundled_migrations());
     ASSERT_TRUE(applied) << applied.error().message;
-    EXPECT_EQ(*applied, std::vector<int>{1});
+    std::vector<int> every;
+    for (const Migration& m : bundled_migrations()) {
+        every.push_back(m.version);
+    }
+    EXPECT_EQ(*applied, every);
     auto conn = db->session();
     EXPECT_EQ(scalar(conn, "SELECT count(*) FROM information_schema.tables "
                            "WHERE table_name IN ('videos', 'uploads', 'jobs', 'renditions')"),
@@ -55,7 +64,7 @@ TEST_F(MigrateTest, SecondRunFindsNothingToDo) {
     const auto again = connect().apply(bundled_migrations());
     ASSERT_TRUE(again) << again.error().message;
     EXPECT_TRUE(again->empty());
-    EXPECT_EQ(count_applied(), "1");
+    EXPECT_EQ(count_applied(), count_bundled());
 }
 
 TEST_F(MigrateTest, StatusListsPendingThenApplied) {
@@ -107,7 +116,7 @@ TEST_F(MigrateTest, ConcurrentMigratorsApplyEachVersionOnce) {
     }
     // Whoever lost the race either saw the lock taken or found the work done.
     EXPECT_EQ(applied_initial, 1);
-    EXPECT_EQ(count_applied(), "1");
+    EXPECT_EQ(count_applied(), count_bundled());
 }
 
 TEST_F(MigrateTest, FailingMigrationLeavesNoTrace) {
@@ -142,10 +151,10 @@ TEST_F(MigrateTest, DdlWaitingOnALockGivesUpInsteadOfStallingTraffic) {
     auto reader = db->session();
     ASSERT_TRUE(reader.exec("BEGIN"));
     ASSERT_TRUE(reader.exec("SELECT count(*) FROM videos"));
-    const std::array known{
-        bundled_migrations().front(),
-        Migration{.version = 2, .name = "add_column", .sql = "ALTER TABLE videos ADD c integer"},
-    };
+    std::vector<Migration> known(bundled_migrations().begin(), bundled_migrations().end());
+    known.push_back(Migration{.version = next_version(),
+                              .name = "add_column",
+                              .sql = "ALTER TABLE videos ADD c integer"});
     const auto result = connect().apply(known);
     ASSERT_FALSE(result);
     EXPECT_NE(result.error().message.find("lock timeout"), std::string::npos)

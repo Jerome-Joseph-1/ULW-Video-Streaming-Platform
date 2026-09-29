@@ -1,9 +1,11 @@
 #pragma once
 
 #include "core/ports/catalog.hpp"
+#include "core/ports/views.hpp"
 #include "net/reactor.hpp"
 
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -13,7 +15,9 @@ namespace infra::catalog {
 // The catalog without a database, for tests and single-process development. Same contract as
 // the durable catalog: results arrive on a later loop iteration, commit is one atomic step
 // and queues at most one live job per video.
-class MemoryCatalog final : public core::ports::IUploadCatalog, public net::ITimerHandler {
+class MemoryCatalog final : public core::ports::IUploadCatalog,
+                            public core::ports::IViewLog,
+                            public net::ITimerHandler {
 public:
     struct Job {
         core::VideoId video;
@@ -42,11 +46,23 @@ public:
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
     void find_video(const core::VideoId& id,
                     core::ports::CatalogCallback<core::VideoRecord> done) override;
+    void record_views(std::vector<core::ports::ViewEvent> batch,
+                      core::ports::CatalogCallback<void> done) override;
 
     void on_timeout() noexcept override;
 
+    // A video as the worker leaves it, for tests that begin after the upload.
+    void put_video(core::VideoRecord video);
+    // Fails every record_views from now on with `error`, or none with nullopt.
+    void fail_views(std::optional<core::ports::CatalogError> error) noexcept {
+        views_error_ = error;
+    }
+
     [[nodiscard]] const std::vector<Job>& jobs() const noexcept { return jobs_; }
     [[nodiscard]] std::size_t claims() const noexcept { return claimed_.size(); }
+    [[nodiscard]] const std::vector<core::ports::ViewEvent>& views() const noexcept {
+        return views_;
+    }
 
 private:
     void defer(std::move_only_function<void() noexcept> fn);
@@ -58,6 +74,8 @@ private:
     std::unordered_map<core::VideoId, core::VideoRecord> videos_;
     std::unordered_set<core::UploadId> claimed_;
     std::vector<Job> jobs_;
+    std::vector<core::ports::ViewEvent> views_;
+    std::optional<core::ports::CatalogError> views_error_;
 };
 
 } // namespace infra::catalog

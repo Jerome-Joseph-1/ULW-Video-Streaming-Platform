@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ports/catalog.hpp"
+#include "core/ports/views.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor.hpp"
 
@@ -8,6 +9,7 @@
 #include <expected>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace infra::postgres {
 
@@ -33,9 +35,11 @@ struct CatalogConfig {
 // flight then fail with Unavailable, and record_progress under a lost claim fails with
 // Conflict; the holder has to claim again, and may find another gateway holds the upload.
 //
+// View events go out on the same pool as catalog calls, one INSERT per batch.
+//
 // The offload pool resolves host names and must be stopped before this is destroyed. Calls
 // still outstanding at destruction are dropped without their callbacks.
-class PgUploadCatalog final : public core::ports::IUploadCatalog {
+class PgUploadCatalog final : public core::ports::IUploadCatalog, public core::ports::IViewLog {
     class Impl;
     struct Token {
         explicit Token() = default;
@@ -71,6 +75,8 @@ public:
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
     void find_video(const core::VideoId& id,
                     core::ports::CatalogCallback<core::VideoRecord> done) override;
+    void record_views(std::vector<core::ports::ViewEvent> batch,
+                      core::ports::CatalogCallback<void> done) override;
 
 private:
     std::unique_ptr<Impl> impl_;

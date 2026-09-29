@@ -144,4 +144,20 @@ void MemoryCatalog::find_video(const core::VideoId& id, CatalogCallback<core::Vi
     });
 }
 
+void MemoryCatalog::record_views(std::vector<core::ports::ViewEvent> batch,
+                                 CatalogCallback<void> done) {
+    core::ports::CatalogResult<void> result{};
+    if (views_error_) {
+        result = std::unexpected(*views_error_);
+    } else {
+        views_.insert(views_.end(), batch.begin(), batch.end());
+    }
+    defer([done = std::move(done), result]() mutable noexcept { done(result); });
+}
+
+void MemoryCatalog::put_video(core::VideoRecord video) {
+    const core::VideoId id = video.id;
+    videos_.insert_or_assign(id, std::move(video));
+}
+
 } // namespace infra::catalog
