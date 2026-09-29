@@ -8,6 +8,7 @@
 #include <sys/resource.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -61,6 +62,8 @@ std::string_view public_reason(TranscodeFailure failure) noexcept {
         return "the file could not be decoded as video";
     case TranscodeFailure::Crashed:
         return "the decoder crashed on this file";
+    case TranscodeFailure::SyscallBlocked:
+        return "the decoder was stopped by the sandbox";
     case TranscodeFailure::Killed:
         return "the transcoder was killed";
     case TranscodeFailure::OverBudget:
@@ -121,6 +124,7 @@ private:
 Disposition disposition(TranscodeFailure failure, bool reran) noexcept {
     switch (failure) {
     case TranscodeFailure::Crashed:
+    case TranscodeFailure::SyscallBlocked:
         return reran ? Disposition::FailPermanently : Disposition::RerunOnce;
     case TranscodeFailure::Killed:
     case TranscodeFailure::Sandbox:
@@ -282,6 +286,16 @@ public:
     [[nodiscard]] const Metrics& metrics() const noexcept { return metrics_; }
 
 private:
+    // The worker has no metrics endpoint; its counters are log lines, one per event, that carry
+    // the running total for whatever tails them.
+    void count_blocked(TranscodeFailure kind) {
+        static std::atomic<std::uint64_t> total{0};
+        if (kind == TranscodeFailure::SyscallBlocked) {
+            log().warn("ffmpeg syscall blocked",
+                       {{"job", id()}, {"ffmpeg_syscall_blocked_total", ++total}});
+        }
+    }
+
     [[nodiscard]] std::int64_t id() const noexcept { return std::to_underlying(job_.lease.job); }
     [[nodiscard]] ops::Logger& log() const noexcept { return deps_.log; }
 
@@ -296,10 +310,16 @@ private:
     // Runs `step` again once when its first failure calls for it.
     template <class Step> std::invoke_result_t<Step&> with_rerun(Step step) {
         auto result = step();
+        if (!result) {
+            count_blocked(result.error().kind);
+        }
         if (!result && disposition(result.error().kind, false) == Disposition::RerunOnce) {
             log().warn("step rerun", {{"job", id()}, {"error", result.error().detail}});
             result = step();
             rerun_ = true;
+            if (!result) {
+                count_blocked(result.error().kind);
+            }
         }
         return result;
     }

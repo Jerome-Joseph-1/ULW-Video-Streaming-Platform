@@ -41,6 +41,12 @@ services:
       # or the E2E suite's page server is on (ADR-0028). The server's default, spelled out so
       # it is not lost to a change of image.
       MINIO_API_CORS_ALLOW_ORIGIN: "*"
+      # Incomplete multipart uploads are aborted after 7 days, as R2's lifecycle rule does.
+      # MinIO takes no AbortIncompleteMultipartUpload rule; this server-wide setting is its
+      # equivalent, and its 24 hour default would cut short uploads the gateway allows 6 days.
+      MINIO_API_STALE_UPLOADS_EXPIRY: 168h
+      # `mc admin config get local api` keeps showing the stored stale_uploads_expiry=24h and
+      # lists this override as a comment line: '# MINIO_API_STALE_UPLOADS_EXPIRY=168h'.
     ports:
       - "127.0.0.1:9000:9000"
     tmpfs:

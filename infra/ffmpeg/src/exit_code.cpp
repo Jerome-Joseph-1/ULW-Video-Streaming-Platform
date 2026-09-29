@@ -20,6 +20,12 @@ std::optional<TranscodeFailure> classify(int exit_code, int signal, Ending endin
     if (signal == SIGSEGV) {
         return TranscodeFailure::Crashed;
     }
+    // The syscall filter killed it. Either the input drove the decoder somewhere it has no
+    // business, or the allowlist has a gap; the exit code cannot say which, so this is neither
+    // a verdict on the file nor a plain kill.
+    if (signal == SIGSYS) {
+        return TranscodeFailure::SyscallBlocked;
+    }
     if (signal != 0) {
         return TranscodeFailure::Killed;
     }

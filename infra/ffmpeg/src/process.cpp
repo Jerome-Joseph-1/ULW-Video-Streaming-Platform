@@ -137,12 +137,14 @@ std::vector<std::string> helper_argv(const Sandbox& sandbox, const Limits& limit
                                   "--address-space",
                                   std::to_string(limits.address_space_bytes),
                                   "--cpu-seconds",
-                                  std::to_string(limits.cpu.count()),
-                                  "--"};
+                                  std::to_string(limits.cpu.count())};
     if (limits.file_size_bytes != 0) {
-        // Before the "--" that ends the helper's own options.
-        argv.insert(argv.end() - 1, {"--file-size", std::to_string(limits.file_size_bytes)});
+        argv.insert(argv.end(), {"--file-size", std::to_string(limits.file_size_bytes)});
     }
+    if (!sandbox.syscall_filter) {
+        argv.emplace_back("--no-syscall-filter");
+    }
+    argv.emplace_back("--");
     argv.insert(argv.end(), args.begin(), args.end());
     return argv;
 }
