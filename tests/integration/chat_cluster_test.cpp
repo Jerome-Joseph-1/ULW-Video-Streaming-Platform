@@ -904,6 +904,58 @@ TEST_P(ChatClusterTest, HistorySurvivesARestartOfEveryNodeInTheOrderItWasSent) {
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(sent));
 }
 
+TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    ASSERT_NO_FATAL_FAILURE(join(*alice));
+    const std::string body = "sent before the restart";
+    ASSERT_TRUE(alice->send(send_command(room_, body, "kept-key")));
+    const auto ack =
+        alice->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
+    ASSERT_TRUE(ack);
+    alice.reset();
+    // Every node's memory of recent keys goes with it, and the room gets a new owner.
+    for (Node& n : nodes_) {
+        n.process->signal(SIGTERM);
+    }
+    for (Node& n : nodes_) {
+        ASSERT_EQ(n.process->wait_exit(seconds(30)), 0) << n.name << "\n" << n.process->output();
+    }
+    for (Node& n : nodes_) {
+        ASSERT_NO_FATAL_FAILURE(start(n, jwks_));
+    }
+    ASSERT_NO_FATAL_FAILURE(wait_ready());
+
+    auto again = connect(nodes_[1], 0);
+    ASSERT_TRUE(again);
+    ASSERT_NO_FATAL_FAILURE(join(*again));
+    ASSERT_TRUE(again->send(send_command(room_, body, "kept-key")));
+    const auto repeat =
+        again->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
+    ASSERT_TRUE(repeat);
+    EXPECT_EQ(repeat->seq, ack->seq);
+    ASSERT_TRUE(again->send(send_command(room_, "another body", "kept-key")));
+    const auto conflict =
+        again->wait_for([](const Seen& s) { return s.type == "error" && s.id == "kept-key"; });
+    ASSERT_TRUE(conflict);
+    EXPECT_EQ(conflict->reason, "conflict");
+    ASSERT_TRUE(again->send(send_command(room_, "after the resends", "marker")));
+    ASSERT_TRUE(again->message("after the resends"));
+    // Never sequenced again: the marker is the next seq, and nothing arrived under the key
+    // but the first message, under its own seq.
+    EXPECT_EQ(last_seq(), std::to_string(ack->seq + 1));
+    for (const Seen& s : again->messages()) {
+        EXPECT_TRUE(s.id != "kept-key" || (s.seq == ack->seq && s.body == body));
+    }
+    EXPECT_FALSE(again->ever_saw("another body"));
+    for (const Node& n : nodes_) {
+        EXPECT_EQ(metric(n, "messages_deduplicated_total"), 0U) << n.name << " answered it";
+    }
+    std::cout << "after every node restarted, the resend got seq " << repeat->seq
+              << " from the store, and another body under its id was a conflict\n";
+    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext({body, "another body"}, {"another body"}));
+}
+
 TEST_P(ChatClusterTest, ARoomWithMembersRefusesEveryoneElse) {
     const std::string members_only = core::RoomId::generate(clock_, random_).to_string();
     ASSERT_NO_FATAL_FAILURE(list_members(members_only, {"alice", "bob"}));

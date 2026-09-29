@@ -68,6 +68,11 @@ What bounds a page of history:
   members saw disagree. The router's cache of recent keys keeps a digest of each body for the
   same reason, and gives the same answer without asking the store. Reply status `Conflict` is
   new on the node channel, whose version is therefore 3 (ADR-0043's nodes speak 2).
+- **A repeat the store recognised is not delivered again.** The answer is a seq the owner has
+  already passed, and the owner, seeing it at or below its head, answers the sender and
+  delivers nothing. An owner that took the room since, and has not yet learnt the room's head,
+  cannot tell, and delivers the stored message once more under its original seq; a client that
+  has that seq already drops it.
 - **Every room, durable or lossy, writes this way**, before delivery. Storing the row costs
   nothing measurable over taking the seq alone (below), so there is no cheaper path for lossy
   rooms to keep, and E2EE rooms are always durable.

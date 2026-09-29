@@ -1243,8 +1243,14 @@ private:
         o.appending = false;
         if (!seq) {
             answer(write, std::unexpected(route_error(seq.error())));
+        } else if (*seq <= o.head) {
+            // A repeat the store recognised by its key: sequenced before, under this seq, and
+            // delivered then. It is remembered for the next repeat, and not delivered again.
+            recent_.remember(room, write.sender, write.key,
+                             {.seq = *seq, .digest = RecentKeys::digest(write.body)}, clock_.now());
+            answer(write, *seq);
         } else {
-            o.head = std::max(o.head, *seq);
+            o.head = *seq;
             fan_out(room, o, *seq, write);
             answer(write, *seq);
         }
