@@ -79,4 +79,12 @@ private:
     std::map<std::string, Value, std::less<>> values_;
 };
 
+// Reads, parses and checks the file at `path`: owner-only means no permission bits for group
+// or others.
+[[nodiscard]] std::expected<FileLayer, SettingsError> read_config_file(const std::string& path);
+
+// All the layers: the file --config names, or else ULW_CONFIG, if either does.
+[[nodiscard]] std::expected<Settings, SettingsError>
+load_settings(std::span<const Setting> schema, const CommandLine& cli, const Lookup& env);
+
 } // namespace ops

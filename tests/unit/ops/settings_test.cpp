@@ -1,6 +1,11 @@
 #include "ops/settings.hpp"
+#include "support/temp_dir.hpp"
+
+#include <sys/stat.h>
 
 #include <array>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <map>
 #include <string>
@@ -121,6 +126,60 @@ TEST_F(SettingsTest, AnUnknownFileKeyIsAnErrorNotIgnored) {
     ASSERT_FALSE(s);
     EXPECT_EQ(s.error().source, "/etc/ulw/gateway.toml:2: listen.prot");
     EXPECT_EQ(s.error().reason, "unknown setting");
+}
+
+class ConfigFileTest : public SettingsTest {
+protected:
+    std::string write(const std::string& text, mode_t mode) {
+        const std::string path = (dir.path() / "gateway.toml").string();
+        std::ofstream(path) << text;
+        EXPECT_EQ(::chmod(path.c_str(), mode), 0);
+        return path;
+    }
+
+    ulw::test::TempDir dir{"ulw-settings"};
+};
+
+TEST_F(ConfigFileTest, TheFileNamedOnTheCommandLineIsLayeredUnderTheEnvironment) {
+    const std::string path = write("listen.port = 1000\nlog.level = \"warn\"\n", 0644);
+    vars["ULW_LOG_LEVEL"] = "error";
+    const auto c = cli({"--config", path});
+    ASSERT_TRUE(c);
+    const auto s = ops::load_settings(kSchema, *c, env());
+    ASSERT_TRUE(s) << s.error().source << ": " << s.error().reason;
+    EXPECT_EQ(s->get("ULW_LISTEN_PORT"), "1000");
+    EXPECT_EQ(s->get("ULW_LOG_LEVEL"), "error");
+}
+
+TEST_F(ConfigFileTest, UlwConfigNamesTheFileWhenTheCommandLineDoesNot) {
+    vars["ULW_CONFIG"] = write("listen.port = 1000\n", 0600);
+    const auto s = ops::load_settings(kSchema, ops::CommandLine{}, env());
+    ASSERT_TRUE(s);
+    EXPECT_EQ(s->origin("ULW_LISTEN_PORT"), Origin::File);
+}
+
+TEST_F(ConfigFileTest, OnlyAnOwnerOnlyFileMayHoldASecret) {
+    const std::string text = "database.url = \"postgresql://u:pw@h/db\"\n";
+    for (const mode_t mode : {0644U, 0640U, 0604U}) {
+        const auto s = ops::load_settings(kSchema, *cli({"--config", write(text, mode)}), env());
+        EXPECT_FALSE(s) << std::oct << mode;
+    }
+    for (const mode_t mode : {0400U, 0600U}) {
+        const auto s = ops::load_settings(kSchema, *cli({"--config", write(text, mode)}), env());
+        EXPECT_TRUE(s) << std::oct << mode;
+    }
+}
+
+TEST_F(ConfigFileTest, AMalformedOrMissingFileIsNamedWithTheLine) {
+    const auto bad =
+        ops::load_settings(kSchema, *cli({"--config", write("a = [1]\n", 0600)}), env());
+    ASSERT_FALSE(bad);
+    EXPECT_EQ(bad.error().source, (dir.path() / "gateway.toml").string() + ":1");
+    EXPECT_EQ(bad.error().reason, "arrays are not supported");
+    const auto missing =
+        ops::load_settings(kSchema, *cli({"--config", "/nonexistent/g.toml"}), env());
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().source, "/nonexistent/g.toml");
 }
 
 } // namespace

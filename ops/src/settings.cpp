@@ -1,6 +1,15 @@
 #include "ops/settings.hpp"
 
+#include "os/unique_fd.hpp"
+
+#include <sys/stat.h>
+
 #include <algorithm>
+#include <array>
+#include <cerrno>
+#include <fcntl.h>
+#include <system_error>
+#include <unistd.h>
 #include <utility>
 
 namespace ops {
@@ -23,6 +32,18 @@ const Setting* by_flag(std::span<const Setting> schema, std::string_view flag) {
     const auto it = std::ranges::find_if(
         schema, [&](const Setting& s) { return !s.key.empty() && flag_of(s.key) == flag; });
     return it == schema.end() ? nullptr : &*it;
+}
+
+// A flag's value, attached with '=' or as the next argument, which `i` then moves past.
+std::optional<std::string> flag_value(std::span<const std::string_view> args, std::size_t& i) {
+    const std::string_view arg = args[i];
+    if (const std::size_t eq = arg.find('='); eq != std::string_view::npos) {
+        return std::string(arg.substr(eq + 1));
+    }
+    if (i + 1 < args.size() && !args[i + 1].starts_with("--")) {
+        return std::string(args[++i]);
+    }
+    return std::nullopt;
 }
 
 } // namespace
@@ -57,15 +78,9 @@ parse_command_line(std::span<const Setting> schema, std::span<const std::string_
             cli.check = true;
             continue;
         }
-        const std::size_t eq = arg.find('=');
-        const std::string_view flag =
-            arg.substr(2, eq == std::string_view::npos ? arg.npos : eq - 2);
-        std::optional<std::string> value;
-        if (eq != std::string_view::npos) {
-            value = std::string(arg.substr(eq + 1));
-        } else if (i + 1 < args.size() && !args[i + 1].starts_with("--")) {
-            value = std::string(args[++i]);
-        }
+        const std::string_view name = arg.substr(2);
+        const std::string_view flag = name.substr(0, name.find('='));
+        auto value = flag_value(args, i);
         if (!value) {
             return error(std::string(arg), "needs a value");
         }
@@ -145,6 +160,63 @@ Lookup Settings::lookup() const {
         }
         return it->second.text;
     };
+}
+
+std::expected<FileLayer, SettingsError> read_config_file(const std::string& path) {
+    // A file of scalars is a few KiB; anything past 64 KiB is not a configuration file.
+    constexpr std::size_t kMaxFile = std::size_t{64} * 1024;
+    const os::UniqueFd fd{::open(path.c_str(), O_RDONLY | O_CLOEXEC)};
+    if (!fd) {
+        return error(path, std::generic_category().message(errno));
+    }
+    struct stat st {};
+    if (::fstat(fd.get(), &st) != 0) {
+        return error(path, std::generic_category().message(errno));
+    }
+    if (!S_ISREG(st.st_mode)) {
+        return error(path, "not a regular file");
+    }
+    std::string text;
+    std::array<char, 4096> buf{};
+    while (true) {
+        const ssize_t n = ::read(fd.get(), buf.data(), buf.size());
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0) {
+            return error(path, std::generic_category().message(errno));
+        }
+        if (n == 0) {
+            break;
+        }
+        text.append(buf.data(), static_cast<std::size_t>(n));
+        if (text.size() > kMaxFile) {
+            return error(path, "larger than 64 KiB");
+        }
+    }
+    auto entries = toml::parse(text);
+    if (!entries) {
+        return error(path + ":" + std::to_string(entries.error().line), entries.error().reason);
+    }
+    return FileLayer{.path = path,
+                     .entries = std::move(*entries),
+                     .private_to_owner = (st.st_mode & (S_IRWXG | S_IRWXO)) == 0};
+}
+
+std::expected<Settings, SettingsError> load_settings(std::span<const Setting> schema,
+                                                     const CommandLine& cli, const Lookup& env) {
+    std::optional<std::string> path = cli.config_file;
+    if (!path) {
+        path = env("ULW_CONFIG");
+    }
+    if (!path || path->empty()) {
+        return Settings::layer(schema, nullptr, env, cli);
+    }
+    auto file = read_config_file(*path);
+    if (!file) {
+        return std::unexpected(std::move(file.error()));
+    }
+    return Settings::layer(schema, &*file, env, cli);
 }
 
 } // namespace ops
