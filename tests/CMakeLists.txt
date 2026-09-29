@@ -290,6 +290,19 @@ ulw_add_test_suite(chat_unit_tests unit
 target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
+# The M16 acceptance: three chat_server processes on the Postgres the suites above use.
+ulw_add_test_suite(chat_cluster_tests integration
+    integration/chat_cluster_test.cpp
+    integration/postgres_harness.cpp
+    support/child_process.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::codec_ws
+    ulw::net_lib ulw::os PkgConfig::LIBPQ)
+target_include_directories(chat_cluster_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
+add_dependencies(chat_cluster_tests chat_server)
+
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
     unit/auth/claims_test.cpp
