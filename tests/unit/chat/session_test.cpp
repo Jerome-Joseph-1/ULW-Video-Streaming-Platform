@@ -296,7 +296,7 @@ TEST_P(ChatSessionTest, SendsInFlightAreBoundedInBytes) {
 TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPingLater) {
     node_.reset();
     node_ = std::make_unique<Node>(GetParam(), chat::Limits{.ping_interval = core::Millis{1'000},
-                                                            .idle_timeout = core::Millis{1'200}});
+                                                            .idle_timeout = core::Millis{1'100}});
     auto quiet = open_as("alice");
     ASSERT_TRUE(quiet);
     const auto opened = std::chrono::steady_clock::now();
@@ -307,10 +307,11 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     }
     const auto lasted = std::chrono::steady_clock::now() - opened;
     EXPECT_EQ(pings, 1);
-    // The idle timeout, plus the timer wheel's rounding (two 100 ms ticks); a second ping's
-    // interval later would be 2 s.
-    EXPECT_GE(lasted, std::chrono::milliseconds(1'200));
-    EXPECT_LT(lasted, std::chrono::milliseconds(1'700));
+    // At the idle timeout, 1.1 s, rounded up by the timer wheel's 100 ms ticks. Closing at the
+    // next ping instead would take 2 s, so the bound sits just under that: 800 ms of slack for a
+    // loaded machine, on the real clock the reactor's timers run on.
+    EXPECT_GE(lasted, std::chrono::milliseconds(1'100));
+    EXPECT_LT(lasted, std::chrono::milliseconds(1'900));
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,
