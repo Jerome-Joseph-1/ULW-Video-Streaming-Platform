@@ -1,5 +1,5 @@
 # Aborts uploads past their expires_at, fails their videos, and releases what the store holds
-# for them (docs/adr/0039). One pass per run; the gateway image carries ulw_reaper, so the
+# for them (docs/adr/0049). One pass per run; the gateway image carries ulw_reaper, so the
 # reaper's SQL and advisory-lock key always come from the build the gateways run.
 apiVersion: batch/v1
 kind: CronJob

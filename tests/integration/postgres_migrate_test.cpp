@@ -180,4 +180,13 @@ TEST_F(MigrateTest, CommandLineReportsOutcomeInItsExitCode) {
     EXPECT_EQ(unreachable.exit_code, 1) << unreachable.output;
 }
 
+TEST_F(MigrateTest, APasswordNeverReachesTheOutput) {
+    for (const std::string url : {"postgresql://ulw:Sup3r%Secret@127.0.0.1:1/ulw",
+                                  "postgresql://ulw:Sup3rSecret@127.0.0.1:1/ulw"}) {
+        const auto r = ulw::test::run_process({ULW_MIGRATE_BIN}, {"ULW_DATABASE_URL=" + url});
+        EXPECT_EQ(r.exit_code, 1) << r.output;
+        EXPECT_EQ(r.output.find("Sup3r"), std::string::npos) << r.output;
+    }
+}
+
 } // namespace

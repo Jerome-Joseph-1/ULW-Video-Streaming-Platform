@@ -21,8 +21,10 @@ enum class DbError : std::uint8_t {
     LockTimeout,
     // Class 23 other than 23505: a constraint refused a write the code should never issue.
     Constraint,
-    // Anything else: the statement is wrong (syntax, types, privileges) or the server is out of
-    // a resource. Sending it again unchanged will not help.
+    // Anything else: the statement is wrong (syntax, types, privileges), the server is out of a
+    // resource (53xxx), a system error (58xxx, XX000) or a read-only transaction after a
+    // failover (25006). Only the first stays wrong on a retry, and nothing here tells it from the
+    // rest, so callers must not treat this as final (queue_error.hpp passes it as Unavailable).
     Rejected,
 };
 

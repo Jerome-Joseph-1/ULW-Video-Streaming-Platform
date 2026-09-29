@@ -139,7 +139,7 @@ password percent-encoded.
 
 The bucket aborts incomplete multipart uploads under `videos/` after 7 days, a day past the
 gateway's 6-day upload lifetime. This is the backstop; the reaper below normally gets there
-within minutes of an upload expiring (docs/adr/0039). Once per bucket, with an R2 token that
+within minutes of an upload expiring (docs/adr/0049). Once per bucket, with an R2 token that
 has admin read and write on the bucket (neither the gateway's nor the worker's), and the AWS
 CLI:
 
@@ -175,7 +175,7 @@ build the gateways run), and a NetworkPolicy that lets it reach cluster DNS, Pos
 the store (443) and nothing else. It aborts uploads past their `expires_at`, fails their videos
 with "upload expired", releases their storage sessions, removes any object a finished commit
 left at their key, and aborts sessions older than the uploads' lifetime that no upload owns
-(docs/adr/0039). Each pass prints `reaper_uploads_expired_last_run`,
+(docs/adr/0049). Each pass prints `reaper_uploads_expired_last_run`,
 `reaper_uploads_release_failed_last_run` and `reaper_parts_orphaned_last_run` on stdout, as
 gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
 confirmed, and the Job's log says which.

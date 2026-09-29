@@ -6,7 +6,7 @@
 # gateway carries gateway_server, ulw_migrate and ulw_reaper (the video-gateway pod's init
 # container runs the gateway image with ulw_migrate as its command, so schema and server always
 # come from one build; docs/adr/0031; the upload reaper's CronJob runs it with ulw_reaper as its
-# command, docs/adr/0039). worker carries
+# command, docs/adr/0049). worker carries
 # transcode_worker, ulw_sandbox beside it, and ffmpeg.
 #
 # Builder and runtime are the same Ubuntu release, which is also what CI and the dev machines

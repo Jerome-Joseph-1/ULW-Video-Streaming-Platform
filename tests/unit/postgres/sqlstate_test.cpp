@@ -1,4 +1,5 @@
 #include "libpq_handles.hpp"
+#include "queue_error.hpp"
 #include "sqlstate.hpp"
 
 #include <array>
@@ -59,6 +60,18 @@ TEST(ErrorOf, ErrorWithoutSqlstateOnADeadConnectionIsConnectionLost) {
     ASSERT_TRUE(result);
     EXPECT_EQ(error_of(result.get(), nullptr), ConnectionLost);
     EXPECT_EQ(error_of(nullptr, nullptr), ConnectionLost);
+}
+
+// The worker fails a job for good on Invalid, so only a constraint may produce it: a server
+// out of memory or disk, or one just demoted by a failover, must leave the job retryable.
+TEST(QueueError, OnlyAConstraintIsInvalidEverythingElsePasses) {
+    using core::ports::JobQueueError;
+    using infra::postgres::to_queue_error;
+    EXPECT_EQ(to_queue_error(classify("23505")), JobQueueError::Invalid);
+    EXPECT_EQ(to_queue_error(classify("23514")), JobQueueError::Invalid);
+    for (const char* passing : {"53200", "53100", "58030", "XX000", "25006", "40001", "57014"}) {
+        EXPECT_EQ(to_queue_error(classify(passing)), JobQueueError::Unavailable) << passing;
+    }
 }
 
 } // namespace

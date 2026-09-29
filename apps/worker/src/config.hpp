@@ -2,11 +2,15 @@
 
 #include "core/models/ids.hpp"
 
+#include "ops/log.hpp"
+#include "ops/settings.hpp"
+
 #include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -32,6 +36,7 @@ struct Config {
     // PATH for the sandboxed children, which inherit nothing else.
     std::string search_path;
     unsigned ffmpeg_threads = 1;
+    ops::Level log_level = ops::Level::Info;
 };
 
 struct ConfigError {
@@ -42,8 +47,14 @@ struct ConfigError {
 // The variable's value, or nullopt when unset. An empty value counts as unset.
 using EnvLookup = std::function<std::optional<std::string>(std::string_view name)>;
 
-// Everything comes from the environment, as for the gateway: arguments are visible to every
-// user through /proc, and the database URL carries a password.
+// Every value the worker reads, by the environment variable deployments set it with. The
+// database URL carries a password, so it never comes from the command line.
+[[nodiscard]] std::span<const ops::Setting> settings() noexcept;
+
+// `env` looks values up by variable name, from the layered settings or the environment alone.
 [[nodiscard]] std::expected<Config, ConfigError> load_config(const EnvLookup& env);
+
+// One line per value, secrets redacted, saying where each came from.
+void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log);
 
 } // namespace worker

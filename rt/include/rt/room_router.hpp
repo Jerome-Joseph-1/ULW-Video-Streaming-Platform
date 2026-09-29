@@ -5,6 +5,7 @@
 #include "core/ports/random.hpp"
 #include "net/reactor.hpp"
 #include "os/unique_fd.hpp"
+#include "rt/message_key.hpp"
 #include "rt/registry.hpp"
 #include "rt/room_store.hpp"
 
@@ -26,6 +27,7 @@ struct Message {
     core::RoomId room;
     std::uint64_t seq = 0;
     core::UserId sender;
+    MessageKey key;
     std::span<const std::byte> body;
 };
 
@@ -50,7 +52,10 @@ enum class RouteError : std::uint8_t {
     Busy,
 };
 
-using JoinCallback = std::move_only_function<void(std::expected<void, RouteError>) noexcept>;
+// A join's answer: the room's latest seq known here, the head a member that missed messages
+// compares its last seq against.
+using JoinCallback =
+    std::move_only_function<void(std::expected<std::uint64_t, RouteError>) noexcept>;
 using SendCallback =
     std::move_only_function<void(std::expected<std::uint64_t, RouteError>) noexcept>;
 
@@ -65,8 +70,9 @@ public:
     virtual void on_took_room(const core::RoomId& room, std::uint64_t generation) noexcept = 0;
     // The connection to another node failed; the rooms routed through it are looked up again.
     virtual void on_peer_lost(const core::NodeId& peer) noexcept = 0;
-    // A node-channel peer failed the handshake: it does not hold the secret, or is not the
-    // node it was dialled as. Nothing it sent was acted on.
+    // A node-channel peer failed the handshake: it speaks another version of the channel,
+    // does not hold the secret, or is not the node it was dialled as. Nothing it sent was
+    // acted on.
     virtual void on_peer_refused(std::string_view why) noexcept = 0;
     // Another live process runs under this node's name. This one takes no room and stays
     // unready, trying again each beat, until the other stops.
@@ -110,6 +116,8 @@ struct RouterCounters {
     std::uint64_t handshakes_evicted = 0;
     // Node-channel connections closed because the other end stopped reading.
     std::uint64_t slow_peers = 0;
+    // Sends answered with the seq their key already had, instead of being sequenced again.
+    std::uint64_t duplicates = 0;
 };
 
 // One node's share of the room plane (ADR-0015, ADR-0035). Members join rooms here, wherever
@@ -135,13 +143,18 @@ public:
 
     // Answers once the room's owner is known and, if it is another node, has taken this
     // node's subscription: from then on the member receives every message the owner
-    // sequences.
+    // sequences. The answer is the latest seq the owner took or this node delivered. After a
+    // takeover it can lag a seq the old owner took and never delivered; the next delivery
+    // shows that gap.
     void join(const core::RoomId& room, IMember& member, JoinCallback done);
-    // Also drops a join still in progress, whose callback is then never called.
+    // Also drops the member's join still in progress and its sends not answered yet, whose
+    // callbacks are then never called; a send already on its way is still sequenced.
     void leave(const core::RoomId& room, IMember& member) noexcept;
-    // Answers with the message's sequence number once its owner has sequenced it.
+    // Answers with the message's sequence number once its owner has sequenced it. A message
+    // whose sender and key were sequenced lately, as seen here or by the owner, is not
+    // sequenced again: the answer is the seq it got the first time.
     void send(const core::RoomId& room, IMember& from, const core::UserId& sender,
-              std::vector<std::byte> body, SendCallback done);
+              const MessageKey& key, std::vector<std::byte> body, SendCallback done);
 
     // For a drain: stops owning rooms and makes them claimable at once.
     void release_rooms(StoreCallback<void> done);

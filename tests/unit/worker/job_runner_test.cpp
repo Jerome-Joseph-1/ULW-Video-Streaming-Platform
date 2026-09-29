@@ -1,10 +1,12 @@
 #include "core/models/ids.hpp"
 #include "core/models/ladder.hpp"
+#include "core/util/json.hpp"
 #include "os/system_clock.hpp"
 
 #include "fakes.hpp"
 #include "job_runner.hpp"
 #include "support/fake_random.hpp"
+#include "support/memory_log.hpp"
 #include "support/temp_dir.hpp"
 
 #include <algorithm>
@@ -60,7 +62,8 @@ protected:
                                   .transcoder = transcoder,
                                   .clock = clock,
                                   .random = random,
-                                  .free_space = free_space()},
+                                  .free_space = free_space(),
+                                  .log = log},
                                  {.scratch = scratch.path(),
                                   .node = *core::NodeId::parse("worker-a"),
                                   .lease = intervals});
@@ -87,6 +90,8 @@ protected:
     FakeTransfer transfer{journal};
     FakeTranscoder transcoder;
     os::SystemClock clock;
+    ulw::test::MemoryLog lines;
+    ops::Logger log{lines, clock, "worker", ops::Level::Debug};
     ulw::test::FakeRandom random;
     ulw::test::TempDir scratch{"ulw-worker-test"};
     // What the scratch filesystem reports free, whenever the runner asks.
@@ -297,7 +302,8 @@ TEST_F(JobRunnerTest, AMissingSourceFailsTheJob) {
          .transcoder = transcoder,
          .clock = clock,
          .random = random,
-         .free_space = free_space()},
+         .free_space = free_space(),
+         .log = log},
         {.scratch = scratch.path(), .node = *core::NodeId::parse("worker-a"), .lease = intervals});
     EXPECT_EQ(runner.run(job, {}), JobOutcome::Failed);
     EXPECT_EQ(writes(),
@@ -363,6 +369,61 @@ TEST_F(JobRunnerTest, AFinishThatMatchesNoRowIsReportedAsFencedOut) {
 TEST_F(JobRunnerTest, AnUnrecordableFinishLeavesTheJobToItsLease) {
     queue.answer_writes(std::nullopt);
     EXPECT_EQ(run(), JobOutcome::Unrecorded);
+}
+
+TEST_F(JobRunnerTest, AResultTheDatabaseRefusesFailsTheJobRatherThanRerunningIt) {
+    queue.refuse("finish", core::ports::JobQueueError::Invalid);
+    EXPECT_EQ(run(), JobOutcome::Failed);
+    const auto w = writes();
+    ASSERT_FALSE(w.empty());
+    EXPECT_EQ(w.back(), "queue fail permanent the transcoded result could not be recorded");
+    const auto errors = lines.events("job queue call failed");
+    ASSERT_EQ(errors.size(), 1U);
+    EXPECT_NE(errors[0].find(R"("level":"error")"), std::string::npos) << errors[0];
+    EXPECT_NE(errors[0].find(R"("call":"finish","error":"invalid")"), std::string::npos);
+}
+
+// A refused finish may be a lost lease's: the fail that follows is fenced like every write,
+// so a job another worker holds is never failed by this one.
+TEST_F(JobRunnerTest, ARefusedFinishFollowedByAFencedFailIsFencedOut) {
+    queue.refuse("finish", core::ports::JobQueueError::Invalid);
+    queue.answer_writes(false);
+    EXPECT_EQ(run(), JobOutcome::FencedOut);
+    EXPECT_TRUE(writes().back().starts_with("queue fail permanent")) << writes().back();
+}
+
+TEST_F(JobRunnerTest, AnUnreachableDatabaseAtFinishWritesNothingMore) {
+    queue.refuse("finish", core::ports::JobQueueError::Unavailable);
+    EXPECT_EQ(run(), JobOutcome::Unrecorded);
+    EXPECT_FALSE(writes().back().starts_with("queue fail"));
+    const auto errors = lines.events("job queue call failed");
+    ASSERT_EQ(errors.size(), 1U);
+    EXPECT_NE(errors[0].find(R"("level":"warn")"), std::string::npos) << errors[0];
+}
+
+TEST_F(JobRunnerTest, ARefusedFailureIsLeftToTheLeaseAndReportedAsAnError) {
+    transcoder.run_failures.push_back(failure(TranscodeFailure::Rejected));
+    queue.refuse("fail", core::ports::JobQueueError::Invalid);
+    EXPECT_EQ(run(), JobOutcome::Unrecorded);
+    const auto errors = lines.events("job queue call failed");
+    ASSERT_EQ(errors.size(), 1U);
+    EXPECT_NE(errors[0].find(R"("call":"fail","error":"invalid")"), std::string::npos);
+}
+
+TEST_F(JobRunnerTest, EveryJobEndsWithOneLineOfItsNumbersAndItsRequestId) {
+    EXPECT_EQ(run(), JobOutcome::Done);
+    const auto finished = lines.events("job finished");
+    ASSERT_EQ(finished.size(), 1U);
+    const auto doc = core::json::parse(finished[0]);
+    ASSERT_TRUE(doc) << finished[0];
+    EXPECT_EQ(doc->find("job")->as_u64(), 7U);
+    EXPECT_EQ(doc->find("request_id")->as_string(), "req-1");
+    EXPECT_EQ(doc->find("outcome")->as_string(), "done");
+    EXPECT_EQ(doc->find("svc")->as_string(), "worker");
+    for (const char* key : {"wall_ms", "media_ms", "transcode_ms", "realtime", "ffmpeg_exit",
+                            "ffmpeg_peak_rss_kib", "worker_peak_rss_kib"}) {
+        EXPECT_NE(doc->find(key), nullptr) << key;
+    }
 }
 
 TEST_F(JobRunnerTest, ProgressReachesTheQueueFromTheKeepersSession) {

@@ -3,7 +3,6 @@
 #include "core/models/content_type.hpp"
 #include "core/models/storage_key.hpp"
 
-#include "log.hpp"
 #include "workspace.hpp"
 
 #include <sys/resource.h>
@@ -140,6 +139,18 @@ Disposition disposition(TranscodeFailure failure, bool reran) noexcept {
     return Disposition::FailPermanently;
 }
 
+std::string_view to_string(core::ports::JobQueueError error) noexcept {
+    switch (error) {
+    case core::ports::JobQueueError::Unavailable:
+        return "unavailable";
+    case core::ports::JobQueueError::Corrupt:
+        return "corrupt";
+    case core::ports::JobQueueError::Invalid:
+        return "invalid";
+    }
+    return "unavailable";
+}
+
 std::string_view to_string(JobOutcome outcome) noexcept {
     switch (outcome) {
     case JobOutcome::Done:
@@ -163,7 +174,7 @@ public:
     Attempt(const JobDeps& deps, const JobSettings& settings, const core::ports::ClaimedJob& job,
             const std::stop_token& shutdown)
         : deps_(deps), settings_(settings), job_(job),
-          keeper_(deps.lease_queue, settings.node, job.lease, settings.lease, abandon_,
+          keeper_(deps.lease_queue, deps.log, settings.node, job.lease, settings.lease, abandon_,
                   deps.heartbeat),
           on_shutdown_(shutdown, RequestStop{&abandon_}) {}
 
@@ -175,7 +186,9 @@ public:
         auto workspace = Workspace::create(settings_.scratch, *size, deps_.random);
         if (!workspace) {
             const bool full = workspace.error() == WorkspaceError::InsufficientSpace;
-            log("job={} workspace: {}", id(), full ? "not enough free space" : "scratch unusable");
+            log().warn(
+                "workspace refused",
+                {{"job", id()}, {"reason", full ? "not enough free space" : "scratch unusable"}});
             return fail("no scratch space for the source", /*retryable=*/true);
         }
         if (auto got = deps_.store.download(job_.source, workspace->source()); !got) {
@@ -192,9 +205,14 @@ public:
         }
         metrics_.media = media->duration;
         const auto ladder = core::choose_ladder(media->height);
-        log("job={} probed {}x{} {}/{} fps {} ms audio={} rungs={}", id(), media->width,
-            media->height, media->frame_rate.num, media->frame_rate.den, media->duration.count(),
-            media->has_audio, ladder.size());
+        log().info("probed", {{"job", id()},
+                              {"width", media->width},
+                              {"height", media->height},
+                              {"fps_num", media->frame_rate.num},
+                              {"fps_den", media->frame_rate.den},
+                              {"duration_ms", media->duration.count()},
+                              {"audio", media->has_audio},
+                              {"rungs", ladder.size()}});
         if (ladder.empty()) {
             return fail("the video is too small to encode", /*retryable=*/false);
         }
@@ -202,8 +220,8 @@ public:
         const std::uint64_t needed = output_bytes(media->duration, ladder, media->has_audio);
         if (const auto available = deps_.free_space(workspace->dir());
             !available || *available < needed) {
-            log("job={} workspace: {} bytes free, the output needs {}", id(), available.value_or(0),
-                needed);
+            log().warn("workspace too small for the output",
+                       {{"job", id()}, {"free_bytes", available.value_or(0)}, {"needed", needed}});
             return fail("no scratch space for the output", /*retryable=*/true);
         }
 
@@ -235,25 +253,31 @@ public:
         }
         // The last cheap chance to find out we are a zombie before writing any object.
         if (const auto held = deps_.queue.heartbeat(job_.lease, settings_.node); held && !*held) {
-            log("job={} lease lost before publishing: heartbeat matched no row", id());
+            log().warn("fenced out", {{"job", id()}, {"call", "heartbeat before publishing"}});
             return JobOutcome::FencedOut;
         }
         auto renditions = publish(workspace->output(), ladder, media->has_audio);
         if (!renditions && keeper_.lost()) {
-            log("job={} publish stopped: {}", id(), renditions.error());
+            log().warn("publish stopped", {{"job", id()}, {"error", renditions.error()}});
             return JobOutcome::Abandoned;
         }
         if (!renditions) {
-            log("job={} publish: {}", id(), renditions.error());
+            log().warn("publish failed", {{"job", id()}, {"error", renditions.error()}});
             return fail("publishing the output failed", /*retryable=*/true);
         }
         const auto finished = deps_.queue.finish(job_.lease, media->duration, *renditions);
         if (!finished) {
-            log("job={} finish: the job queue call failed", id());
+            queue_failed("finish", finished.error());
+            // The database refused the result itself, and would refuse it again after every
+            // rerun the lease lapsing would bring; the job fails now instead of three
+            // transcodes later.
+            if (finished.error() == core::ports::JobQueueError::Invalid) {
+                return fail("the transcoded result could not be recorded", /*retryable=*/false);
+            }
             return JobOutcome::Unrecorded;
         }
         if (!*finished) {
-            log("job={} finish matched no row: fenced out", id());
+            log().warn("fenced out", {{"job", id()}, {"call", "finish"}});
             return JobOutcome::FencedOut;
         }
         return JobOutcome::Done;
@@ -272,6 +296,14 @@ private:
     }
 
     [[nodiscard]] std::int64_t id() const noexcept { return std::to_underlying(job_.lease.job); }
+    [[nodiscard]] ops::Logger& log() const noexcept { return deps_.log; }
+
+    // An outage is a warning, retried by the lease; a refusal is a bug, and an error.
+    void queue_failed(std::string_view call, core::ports::JobQueueError error) {
+        log().log(
+            error == core::ports::JobQueueError::Unavailable ? ops::Level::Warn : ops::Level::Error,
+            "job queue call failed", {{"job", id()}, {"call", call}, {"error", to_string(error)}});
+    }
     [[nodiscard]] bool abandoned() const noexcept { return abandon_.stop_requested(); }
 
     // Runs `step` again once when its first failure calls for it.
@@ -281,7 +313,7 @@ private:
             count_blocked(result.error().kind);
         }
         if (!result && disposition(result.error().kind, false) == Disposition::RerunOnce) {
-            log("job={} {}; running it once more", id(), result.error().detail);
+            log().warn("step rerun", {{"job", id()}, {"error", result.error().detail}});
             result = step();
             rerun_ = true;
             if (!result) {
@@ -293,10 +325,10 @@ private:
 
     JobOutcome transcode_failure(std::string_view step, const TranscodeError& error,
                                  const Workspace& workspace) {
-        log("job={} {} failed: {}", id(), step, error.detail);
+        log().warn("step failed", {{"job", id()}, {"step", step}, {"error", error.detail}});
         if (error.kind != TranscodeFailure::Stopped) {
             if (const auto left = deps_.free_space(workspace.dir()); left && *left < kNearlyFull) {
-                log("job={} workspace: {} bytes left, the disk filled up", id(), *left);
+                log().warn("scratch disk filled up", {{"job", id()}, {"free_bytes", *left}});
                 return fail("scratch space ran out", /*retryable=*/true);
             }
         }
@@ -313,7 +345,8 @@ private:
     }
 
     JobOutcome storage_failure(std::string_view step, StorageError error) {
-        log("job={} {}: {}", id(), step, core::ports::to_string(error));
+        log().warn("storage failed",
+                   {{"job", id()}, {"step", step}, {"error", core::ports::to_string(error)}});
         if (error == StorageError::NotFound) {
             return fail("the uploaded file is missing", /*retryable=*/false);
         }
@@ -332,11 +365,13 @@ private:
     JobOutcome fail(std::string_view reason, bool retryable) {
         const auto written = deps_.queue.fail(job_.lease, reason, retryable);
         if (!written) {
-            log("job={} fail: the job queue call failed", id());
+            // Nothing is left to try: whatever the cause, the lease lapses and the reaper
+            // requeues the job or fails it.
+            queue_failed("fail", written.error());
             return JobOutcome::Unrecorded;
         }
         if (!*written) {
-            log("job={} fail matched no row: fenced out", id());
+            log().warn("fenced out", {{"job", id()}, {"call", "fail"}});
             return JobOutcome::FencedOut;
         }
         return retryable ? JobOutcome::Requeued : JobOutcome::Failed;
@@ -445,8 +480,10 @@ JobRunner::JobRunner(JobDeps deps, JobSettings settings)
 
 JobOutcome JobRunner::run(const core::ports::ClaimedJob& job, const std::stop_token& shutdown) {
     const auto started = deps_.clock.now();
-    log("job={} claimed video={} fence={}", std::to_underlying(job.lease.job),
-        job.video.to_string(), job.lease.fence);
+    deps_.log.info("job claimed", {{"job", std::to_underlying(job.lease.job)},
+                                   {"video", job.video.to_string()},
+                                   {"fence", job.lease.fence},
+                                   {"request_id", job.request_id}});
     JobOutcome outcome{};
     Metrics metrics;
     {
@@ -459,11 +496,17 @@ JobOutcome JobRunner::run(const core::ports::ClaimedJob& job, const std::stop_to
                                 ? static_cast<double>(metrics.media.count()) /
                                       static_cast<double>(metrics.transcode.count())
                                 : 0.0;
-    log("job={} outcome={} wall_ms={} media_ms={} transcode_ms={} realtime={:.2f}x ffmpeg_exit={} "
-        "ffmpeg_peak_rss_kib={} worker_peak_rss_kib={}",
-        std::to_underlying(job.lease.job), to_string(outcome), wall.count(), metrics.media.count(),
-        metrics.transcode.count(), realtime, metrics.ffmpeg_exit, metrics.ffmpeg_peak_rss_kib,
-        own_peak_rss_kib());
+    // One line per job with its numbers, carrying the id of the request that queued it.
+    deps_.log.info("job finished", {{"job", std::to_underlying(job.lease.job)},
+                                    {"request_id", job.request_id},
+                                    {"outcome", to_string(outcome)},
+                                    {"wall_ms", wall.count()},
+                                    {"media_ms", metrics.media.count()},
+                                    {"transcode_ms", metrics.transcode.count()},
+                                    {"realtime", realtime},
+                                    {"ffmpeg_exit", metrics.ffmpeg_exit},
+                                    {"ffmpeg_peak_rss_kib", metrics.ffmpeg_peak_rss_kib},
+                                    {"worker_peak_rss_kib", own_peak_rss_kib()}});
     return outcome;
 }
 

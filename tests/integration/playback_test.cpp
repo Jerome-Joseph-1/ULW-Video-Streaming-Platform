@@ -13,11 +13,9 @@
 #include "media_clips.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
+#include "support/free_port.hpp"
 #include "support/live_s3.hpp"
 #include "support/temp_dir.hpp"
-
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -62,24 +60,6 @@ std::vector<std::string> lines(std::string_view text) {
         text = nl == std::string_view::npos ? std::string_view{} : text.substr(nl + 1);
     }
     return out;
-}
-
-// A port nothing listens on right now. The gateway takes it a moment later; nothing else on
-// a test host binds loopback ports in between.
-std::uint16_t free_port() {
-    const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    socklen_t len = sizeof addr;
-    // bind() and getsockname() take every address family through the generic header.
-    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
-    if (::bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 ||
-        ::getsockname(fd.get(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-        return 0;
-    }
-    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
-    return ntohs(addr.sin_port);
 }
 
 infra::curl::Result get(const std::string& url, const std::string& token = {}) {
@@ -200,7 +180,7 @@ protected:
         alice_ = mint("alice");
         bob_ = mint("bob");
 
-        port_ = free_port();
+        port_ = ulw::test::free_port();
         ASSERT_NE(port_, 0);
         std::vector<std::string> env{
             "ULW_LISTEN_PORT=" + std::to_string(port_),
@@ -217,7 +197,7 @@ protected:
         }
         gateway_ = ChildProcess::start({ULW_GATEWAY_BIN}, env);
         ASSERT_NE(gateway_, nullptr);
-        ASSERT_TRUE(gateway_->wait_for_output("port=" + std::to_string(port_), seconds(30)))
+        ASSERT_TRUE(gateway_->wait_for_output(R"("port":)" + std::to_string(port_), seconds(30)))
             << gateway_->output();
     }
 

@@ -41,3 +41,5 @@ real cluster, and how to apply it, is in [`deploy/askedin/RUNBOOK.md`](deploy/as
 - `apps/` one directory per binary; `main.cpp` is the only place concrete adapters are named
 
 Design decisions are recorded in [`docs/adr/`](docs/adr/).
+
+Integrating an app or backend with the service: [`docs/integration/`](docs/integration/README.md).

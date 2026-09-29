@@ -61,6 +61,8 @@ protected:
     ulw::test::FakeClock clock_;
     ulw::test::FakeRandom random_;
     FakeRoomStore store_;
+    const rt::Outgoing message_{
+        .sender = *core::UserId::parse("alice"), .key = *rt::MessageKey::parse("k1"), .body = {}};
     Observer observer_;
     const core::NodeId self_ = node("chat-a");
     const core::NodeId other_ = node("chat-b");
@@ -122,7 +124,7 @@ TEST_F(RegistryTest, AnAppendIsFencedOnTheGenerationThisNodeOwnsTheRoomUnder) {
     const core::RoomId room = new_room();
     own(room, 2);
     std::optional<std::expected<std::uint64_t, AppendError>> result;
-    ASSERT_TRUE(registry_.append(room, [&](auto r) noexcept { result = r; }));
+    ASSERT_TRUE(registry_.append(room, message_, [&](auto r) noexcept { result = r; }));
     ASSERT_EQ(store_.appends.size(), 1U);
     EXPECT_EQ(store_.appends.front().room, room);
     EXPECT_EQ(store_.appends.front().generation, 2U);
@@ -136,7 +138,7 @@ TEST_F(RegistryTest, AFencedAppendEndsOwnershipAtOnceAndIsReported) {
     const core::RoomId room = new_room();
     own(room, 2);
     std::optional<std::expected<std::uint64_t, AppendError>> result;
-    ASSERT_TRUE(registry_.append(room, [&](auto r) noexcept { result = r; }));
+    ASSERT_TRUE(registry_.append(room, message_, [&](auto r) noexcept { result = r; }));
     FakeRoomStore::take(store_.appends).done(std::optional<std::uint64_t>{});
 
     EXPECT_EQ(result, std::unexpected(AppendError::Fenced));
@@ -148,7 +150,7 @@ TEST_F(RegistryTest, AFencedAppendEndsOwnershipAtOnceAndIsReported) {
     EXPECT_EQ(observer_.fences[0].generation, 2U);
     EXPECT_EQ(observer_.fences[0].write, OwnerWrite::Append);
     // No second write under the old generation, and none retried.
-    EXPECT_FALSE(registry_.append(room, [](auto) noexcept {}));
+    EXPECT_FALSE(registry_.append(room, message_, [](auto) noexcept {}));
     EXPECT_TRUE(store_.appends.empty());
 }
 
@@ -157,7 +159,7 @@ TEST_F(RegistryTest, EveryFencedWriteInFlightIsReportedNotJustTheFirst) {
     own(room, 2);
     int fenced = 0;
     for (int i = 0; i < 2; ++i) {
-        ASSERT_TRUE(registry_.append(room, [&](auto r) noexcept {
+        ASSERT_TRUE(registry_.append(room, message_, [&](auto r) noexcept {
             fenced += r == std::unexpected(AppendError::Fenced) ? 1 : 0;
         }));
     }
@@ -172,7 +174,7 @@ TEST_F(RegistryTest, AnUnansweredAppendKeepsOwnership) {
     const core::RoomId room = new_room();
     own(room, 2);
     std::optional<std::expected<std::uint64_t, AppendError>> result;
-    ASSERT_TRUE(registry_.append(room, [&](auto r) noexcept { result = r; }));
+    ASSERT_TRUE(registry_.append(room, message_, [&](auto r) noexcept { result = r; }));
     FakeRoomStore::take(store_.appends).done(std::unexpected(rt::StoreError::Unavailable));
     EXPECT_EQ(result, std::unexpected(AppendError::Unavailable));
     EXPECT_EQ(registry_.owned(room), 2U);
@@ -187,7 +189,7 @@ TEST_F(RegistryTest, ATakeoverNoticeUpdatesRoutingButOwnershipEndsOnlyAtTheFence
 
     // Still the owner as far as writes go: the next one finds out.
     EXPECT_EQ(registry_.owned(room), 1U);
-    ASSERT_TRUE(registry_.append(room, [](auto) noexcept {}));
+    ASSERT_TRUE(registry_.append(room, message_, [](auto) noexcept {}));
     EXPECT_EQ(store_.appends.front().generation, 1U);
     FakeRoomStore::take(store_.appends).done(std::optional<std::uint64_t>{});
 
@@ -383,7 +385,7 @@ TEST_F(RegistryTest, ReleasingForADrainGivesUpEveryRoomUnderItsGeneration) {
     bool released = false;
     registry_.release_all([&](rt::StoreResult<void> r) noexcept { released = r.has_value(); });
     EXPECT_EQ(registry_.rooms_owned(), 0U);
-    EXPECT_FALSE(registry_.append(a, [](auto) noexcept {}));
+    EXPECT_FALSE(registry_.append(a, message_, [](auto) noexcept {}));
     ASSERT_EQ(store_.releases.size(), 1U);
     auto rooms = store_.releases.front().rooms;
     ASSERT_EQ(rooms.size(), 2U);
