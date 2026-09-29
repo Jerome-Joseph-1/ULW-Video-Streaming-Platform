@@ -2,10 +2,14 @@
 
 #include "codec/sdp/error.hpp"
 #include "codec/sdp/session.hpp"
+#include "core/util/lifetime.hpp"
 
+#include <concepts>
 #include <cstddef>
 #include <expected>
+#include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace codec::sdp {
 
@@ -30,6 +34,13 @@ struct Limits {
 // Parses and validates an offer or an answer: the grammar of RFC 8866 and of each typed
 // attribute, then what the signalling boundary enforces (see validate.cpp). Anything accepted
 // serializes back to the same text, with CRLF line endings.
-[[nodiscard]] std::expected<Session, Error> parse(std::string_view text, const Limits& limits = {});
+[[nodiscard]] std::expected<Session, Error> parse(std::string_view text ULW_LIFETIMEBOUND,
+                                                  const Limits& limits = {});
+
+// The session points into the text, which a temporary string would take with it. A template, so
+// that string literals still convert to the string_view overload instead of being ambiguous.
+template <typename S>
+    requires(!std::is_lvalue_reference_v<S> && std::same_as<std::remove_cvref_t<S>, std::string>)
+std::expected<Session, Error> parse(S&&, const Limits& = {}) = delete;
 
 } // namespace codec::sdp

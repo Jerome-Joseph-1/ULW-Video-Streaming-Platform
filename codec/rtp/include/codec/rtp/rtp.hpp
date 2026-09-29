@@ -2,12 +2,14 @@
 
 #include "codec/rtp/entries.hpp"
 #include "codec/rtp/error.hpp"
+#include "core/util/lifetime.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <optional>
 #include <span>
+#include <vector>
 
 // RTP (RFC 3550 section 5) and its header extensions (RFC 8285), read in place: every span
 // points into the datagram given to parse_rtp(), which must outlive the packet.
@@ -64,6 +66,8 @@ struct RtpPacket {
 };
 
 [[nodiscard]] std::expected<RtpPacket, Error>
-parse_rtp(std::span<const std::byte> datagram) noexcept;
+parse_rtp(std::span<const std::byte> datagram ULW_LIFETIMEBOUND) noexcept;
+// The packet points into the datagram, which a temporary buffer would take with it.
+std::expected<RtpPacket, Error> parse_rtp(std::vector<std::byte>&&) noexcept = delete;
 
 } // namespace codec::rtp

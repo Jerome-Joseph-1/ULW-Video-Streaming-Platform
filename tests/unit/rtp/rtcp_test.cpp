@@ -3,6 +3,7 @@
 
 #include "wire.hpp"
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
@@ -84,6 +85,10 @@ Wire sender_report_and_cname() {
     w.rtcp_header(1, 202, 12).u32(0x11111111).raw({1, 4}).text("abcd").raw({0, 0});
     return w;
 }
+
+// The reader points into the datagram: a temporary buffer must not be accepted.
+static_assert(std::constructible_from<CompoundReader, const std::vector<std::byte>&>);
+static_assert(!std::constructible_from<CompoundReader, std::vector<std::byte>>);
 
 TEST(Rtcp, ReadsASenderReportAndItsReportBlock) {
     const auto wire = sender_report_and_cname().take();

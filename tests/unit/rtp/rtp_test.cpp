@@ -29,6 +29,12 @@ Wire header(unsigned flags, unsigned marker_pt, std::uint16_t seq = 0x1234,
     return w;
 }
 
+// What parse_rtp() makes of a packet that is not needed after the call.
+Error error_of(Wire w) {
+    const auto datagram = w.take();
+    return parse_rtp(datagram).error();
+}
+
 std::vector<ExtensionElement> elements(const HeaderExtension& ext) {
     std::vector<ExtensionElement> out;
     ExtensionElements it{ext};
@@ -41,6 +47,14 @@ std::vector<ExtensionElement> elements(const HeaderExtension& ext) {
 std::vector<std::byte> copy(std::span<const std::byte> s) {
     return {s.begin(), s.end()};
 }
+
+// The packet points into the datagram: a temporary buffer must not be accepted.
+template <typename T>
+concept CanParse = requires(T&& datagram) { parse_rtp(std::forward<T>(datagram)); };
+static_assert(CanParse<std::vector<std::byte>&>);
+static_assert(CanParse<const std::vector<std::byte>&>);
+static_assert(CanParse<std::span<const std::byte>>);
+static_assert(!CanParse<std::vector<std::byte>>);
 
 TEST(Rtp, ReadsTheFixedHeader) {
     const auto wire = header(0, 0x80U | 96).text("abc").take();
@@ -101,12 +115,12 @@ TEST(Rtp, PaddingMayTakeTheWholePayload) {
 }
 
 TEST(Rtp, RefusesPaddingOfZeroOrLongerThanWhatFollowsTheHeader) {
-    EXPECT_EQ(parse_rtp(header(0x20, 96).raw({1, 2, 0}).take()).error(), Error::BadPadding);
-    EXPECT_EQ(parse_rtp(header(0x20, 96).raw({1, 2, 4}).take()).error(), Error::BadPadding);
+    EXPECT_EQ(error_of(header(0x20, 96).raw({1, 2, 0})), Error::BadPadding);
+    EXPECT_EQ(error_of(header(0x20, 96).raw({1, 2, 4})), Error::BadPadding);
     // The padding count may not reach back into the CSRC list.
-    EXPECT_EQ(parse_rtp(header(0x21, 96).u32(7).raw({5}).take()).error(), Error::BadPadding);
+    EXPECT_EQ(error_of(header(0x21, 96).u32(7).raw({5})), Error::BadPadding);
     // The P bit on a packet that ends with its header: the count byte is the SSRC's last.
-    EXPECT_EQ(parse_rtp(header(0x20, 96, 1, 1, 0x10).take()).error(), Error::BadPadding);
+    EXPECT_EQ(error_of(header(0x20, 96, 1, 1, 0x10)), Error::BadPadding);
 }
 
 TEST(Rtp, EveryTruncatedHeaderIsRefused) {
@@ -189,13 +203,13 @@ TEST(Rtp, ReadsTwoByteExtensionElementsIncludingEmptyOnes) {
 
 TEST(Rtp, RefusesAnElementThatOverrunsTheExtension) {
     // One-byte form: ID 1 with 4 bytes of data, 3 left in the word.
-    EXPECT_EQ(parse_rtp(header(0x10, 96).u16(0xBEDE).u16(1).raw({0x13, 1, 2, 3}).take()).error(),
+    EXPECT_EQ(error_of(header(0x10, 96).u16(0xBEDE).u16(1).raw({0x13, 1, 2, 3})),
               Error::BadExtension);
     // Two-byte form: a length byte that claims 3 with 2 left.
-    EXPECT_EQ(parse_rtp(header(0x10, 96).u16(0x1000).u16(1).raw({0x01, 0x03, 1, 2}).take()).error(),
+    EXPECT_EQ(error_of(header(0x10, 96).u16(0x1000).u16(1).raw({0x01, 0x03, 1, 2})),
               Error::BadExtension);
     // Two-byte form: an ID with no room for its length byte.
-    EXPECT_EQ(parse_rtp(header(0x10, 96).u16(0x1000).u16(1).raw({0, 0, 0, 0x01}).take()).error(),
+    EXPECT_EQ(error_of(header(0x10, 96).u16(0x1000).u16(1).raw({0, 0, 0, 0x01})),
               Error::BadExtension);
 }
 
@@ -209,8 +223,7 @@ TEST(Rtp, OtherProfilesKeepTheirExtensionOpaque) {
 }
 
 TEST(Rtp, ExtensionLengthBeyondThePacketIsTruncation) {
-    EXPECT_EQ(parse_rtp(header(0x10, 96).u16(0xBEDE).u16(2).raw({0x10, 1, 0, 0}).take()).error(),
-              Error::Truncated);
+    EXPECT_EQ(error_of(header(0x10, 96).u16(0xBEDE).u16(2).raw({0x10, 1, 0, 0})), Error::Truncated);
 }
 
 TEST(Rtp, ElementsOfAHandBuiltOverrunningExtensionStopAtTheOverrun) {

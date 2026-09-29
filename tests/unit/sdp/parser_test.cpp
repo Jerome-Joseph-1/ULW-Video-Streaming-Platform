@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 
 namespace {
@@ -30,6 +31,16 @@ using ulw::test::Parsed;
 using ulw::test::replaced;
 using ulw::test::text;
 using ulw::test::with;
+
+// The session points into the text: a temporary string must not be accepted.
+template <typename T>
+concept CanParse = requires(T&& text) { codec::sdp::parse(std::forward<T>(text)); };
+static_assert(CanParse<std::string&>);
+static_assert(CanParse<const std::string&>);
+static_assert(CanParse<std::string_view>);
+static_assert(CanParse<const char*>);
+static_assert(!CanParse<std::string>);
+static_assert(!CanParse<const std::string>);
 
 TEST(SdpParser, ReadsTheMinimalDescription) {
     const Parsed p{minimal()};

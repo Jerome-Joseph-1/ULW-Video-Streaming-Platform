@@ -2,6 +2,7 @@
 
 #include "codec/rtp/entries.hpp"
 #include "codec/rtp/error.hpp"
+#include "core/util/lifetime.hpp"
 
 #include <array>
 #include <cstddef>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <variant>
+#include <vector>
 
 // RTCP (RFC 3550 section 6) and the RTP/AVPF feedback messages WebRTC sends (RFC 4585,
 // RFC 5104, draft-alvestrand-rmcat-remb, draft-holmer-rmcat-transport-wide-cc-extensions), read
@@ -202,7 +204,9 @@ using RtcpPacket = std::variant<SenderReport, ReceiverReport, SourceDescription,
 // reduced-size RTCP, which browsers negotiate with a=rtcp-rsize, sends feedback on its own.
 class CompoundReader {
 public:
-    explicit CompoundReader(std::span<const std::byte> datagram) noexcept : rest_(datagram) {}
+    explicit CompoundReader(std::span<const std::byte> datagram ULW_LIFETIMEBOUND) noexcept
+        : rest_(datagram) {}
+    explicit CompoundReader(std::vector<std::byte>&&) = delete;
 
     // The next packet; nothing past the last one. After an error the reader returns that error
     // again and reads no further.
