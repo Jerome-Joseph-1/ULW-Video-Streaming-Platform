@@ -172,6 +172,9 @@ export async function startStack() {
     ULW_LISTEN_PORT: String(gatewayPort),
     ULW_DEV_JWKS_FILE: jwks,
     JWT_ISSUER: config.issuer,
+    // The browser and the test both reach it from 127.0.0.1, many connections at once.
+    ULW_MAX_CONNECTIONS_PER_IP: '448',
+    ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND: '1000',
   });
   const worker = new Service('transcode_worker', bin('apps/worker/transcode_worker'), {
     PATH: process.env.PATH,
