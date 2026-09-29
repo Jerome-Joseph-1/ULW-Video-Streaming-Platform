@@ -35,7 +35,7 @@ public:
     class Impl;
 
     // A ceiling on descriptors and on the sockets the store holds open for us. Transfers beyond
-    // it wait in libcurl's queue for a connection to come free rather than failing.
+    // it wait in libcurl's queue, first come first served, for a connection to come free.
     static constexpr std::size_t kDefaultMaxConnections = 64;
 
     [[nodiscard]] static std::expected<std::unique_ptr<Multi>, MultiError>

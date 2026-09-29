@@ -1,6 +1,7 @@
 #pragma once
 
 #include "infra/catalog/memory_catalog.hpp"
+#include "infra/curl/multi.hpp"
 #include "infra/storage/fake_store.hpp"
 
 #include "config.hpp"
@@ -15,13 +16,16 @@
 
 namespace ulw::test {
 
-enum class Backend { Fake, Fs };
+// S3 is the store the gateway runs in production, on the MinIO of deploy/local/compose.yaml.
+enum class Backend { Fake, Fs, S3 };
 
 struct GatewayOptions {
     Backend backend = Backend::Fs;
     std::uint64_t chunk = std::uint64_t{8} * 1024 * 1024;
     infra::storage::FaultPlan plan{};
     gateway::Limits limits{};
+    // S3 only: the store's connections, which uploads beyond wait for.
+    std::size_t store_connections = infra::curl::Multi::kDefaultMaxConnections;
     // Time moves only when the test calls advance(), so timeouts need no waiting.
     bool manual_clock = false;
     gateway::Transport transport = gateway::Transport::Plain;

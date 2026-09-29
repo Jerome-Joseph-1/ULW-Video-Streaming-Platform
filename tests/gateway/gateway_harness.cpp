@@ -1,6 +1,7 @@
 #include "gateway_harness.hpp"
 
 #include "infra/storage/fs_store.hpp"
+#include "infra/storage/s3_store.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
@@ -11,6 +12,7 @@
 #include "support/eventually.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_verifier.hpp"
+#include "support/live_s3.hpp"
 #include "support/tls_pki.hpp"
 
 #include <sys/eventfd.h>
@@ -36,6 +38,11 @@ struct GatewayUnderTest::Loop final : net::IReadyHandler {
     std::unique_ptr<net::OffloadPool> pool;
     std::unique_ptr<infra::storage::FakeStore> fake;
     std::unique_ptr<infra::storage::FsStore> fs;
+    ulw::test::LiveS3 s3_target = minio_from_env();
+    std::unique_ptr<infra::curl::Multi> multi;
+    std::unique_ptr<infra::storage::S3Store> s3;
+    core::ports::IIngestStore* store = nullptr;
+    core::ports::IObjectAdmin* admin = nullptr;
     std::unique_ptr<infra::catalog::MemoryCatalog> catalog;
     FakeVerifier verifier;
     std::unique_ptr<gateway::Gateway> gateway;
@@ -107,26 +114,60 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
         l.transports = net::make_plain_transports(*l.reactor);
     }
     l.pool = std::move(*net::OffloadPool::create(*l.reactor, 4));
-    if (options.backend == Backend::Fake) {
+    switch (options.backend) {
+    case Backend::Fake:
         l.fake = std::make_unique<infra::storage::FakeStore>(*l.reactor, *l.clock, options.chunk,
                                                              options.plan);
         fake_ = l.fake.get();
         reader_ = l.fake.get();
-    } else {
+        l.store = l.fake.get();
+        l.admin = l.fake.get();
+        break;
+    case Backend::Fs: {
         std::string tmpl = (std::filesystem::temp_directory_path() / "ulw-gw-XXXXXX").string();
         l.root = ::mkdtemp(tmpl.data());
         l.fs = std::make_unique<infra::storage::FsStore>(
             infra::storage::FsStore::Deps{.clock = *l.clock, .random = l.random},
             std::move(*net::OffloadPool::create(*l.reactor, 2)), l.root, options.chunk);
         reader_ = l.fs.get();
+        l.store = l.fs.get();
+        l.admin = l.fs.get();
+        break;
+    }
+    case Backend::S3: {
+        auto multi = infra::curl::Multi::create(*l.reactor, options.store_connections);
+        if (!multi) {
+            static_cast<void>(std::fputs("gateway harness: curl multi refused\n", stderr));
+            std::abort();
+        }
+        l.multi = std::move(*multi);
+        // Signed with the real time whatever the loop's clock says: MinIO refuses a request
+        // dated more than 15 minutes from its own.
+        auto s3 = infra::storage::S3Store::create(
+            infra::storage::S3Store::Deps{.reactor = *l.reactor,
+                                          .multi = *l.multi,
+                                          .credentials = l.s3_target.credentials,
+                                          .clock = l.system_clock,
+                                          .random = l.random,
+                                          .profile = l.s3_target.profile,
+                                          .bucket = l.s3_target.bucket},
+            {.part_size = options.chunk});
+        if (!s3) {
+            static_cast<void>(std::fputs("gateway harness: s3 store refused\n", stderr));
+            std::abort();
+        }
+        l.s3 = std::move(*s3);
+        reader_ = l.s3.get();
+        l.store = l.s3.get();
+        l.admin = l.s3.get();
+        break;
+    }
     }
     l.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*l.reactor);
-    core::ports::IIngestStore& store =
-        l.fake ? static_cast<core::ports::IIngestStore&>(*l.fake) : *l.fs;
     l.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *l.reactor,
                                                                  .transports = *l.transports,
                                                                  .pool = *l.pool,
-                                                                 .store = store,
+                                                                 .store = *l.store,
                                                                  .reader = *reader_,
                                                                  .catalog = *l.catalog,
                                                                  .views = *l.catalog,
@@ -154,6 +195,9 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     l.gateway.reset();
     l.fs.reset();
     l.fake.reset();
+    // Its sessions went with the gateway's connections; its transfers with them.
+    l.s3.reset();
+    l.multi.reset();
     l.catalog.reset();
     l.transports.reset();
     l.reactor.reset();
@@ -237,8 +281,7 @@ void GatewayUnderTest::put_video(const core::VideoRecord& video) {
 }
 
 void GatewayUnderTest::put_object(std::string_view key, std::string_view bytes) {
-    core::ports::IObjectAdmin& admin =
-        loop_->fake ? static_cast<core::ports::IObjectAdmin&>(*loop_->fake) : *loop_->fs;
+    core::ports::IObjectAdmin& admin = *loop_->admin;
     const auto parsed = core::StorageKey::parse(key);
     ASSERT_TRUE(parsed) << key;
     ASSERT_TRUE(admin.put(*parsed, std::as_bytes(std::span(bytes))));

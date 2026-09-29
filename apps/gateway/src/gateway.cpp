@@ -158,7 +158,6 @@ std::string Gateway::render_metrics() const {
         "timeouts_total{{kind=\"header\"}} {}\n"
         "timeouts_total{{kind=\"body\"}} {}\n"
         "timeouts_total{{kind=\"body_rate\"}} {}\n"
-        "timeouts_total{{kind=\"backend\"}} {}\n"
         "timeouts_total{{kind=\"backstop\"}} {}\n"
         "tls_handshakes_in_flight {}\n"
         "tls_handshake_failures_total {}\n"
@@ -173,10 +172,10 @@ std::string Gateway::render_metrics() const {
         "view_batches_failed_total {}\n",
         c.requests, c.connections_accepted, c.connections_rejected, connections_.size(),
         upload_slots_, c.admission_rejections, c.bytes_ingested, c.timeouts_header, c.timeouts_body,
-        c.timeouts_body_rate, c.timeouts_backend, c.timeouts_backstop,
-        deps_.transports.handshakes_in_flight(), deps_.transports.handshake_failures(),
-        c.certificate_reloads, c.certificate_reload_failures, c.playlists_master, c.playlists_media,
-        c.playlists_rejected, c.presign_failures, v.recorded, v.dropped, v.failed_batches);
+        c.timeouts_body_rate, c.timeouts_backstop, deps_.transports.handshakes_in_flight(),
+        deps_.transports.handshake_failures(), c.certificate_reloads, c.certificate_reload_failures,
+        c.playlists_master, c.playlists_media, c.playlists_rejected, c.presign_failures, v.recorded,
+        v.dropped, v.failed_batches);
 }
 
 } // namespace gateway

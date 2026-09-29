@@ -187,8 +187,21 @@ ulw_add_test_suite(gateway_tests unit
     gateway/key_fetcher_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
-    ulw::test_tls OpenSSL::Crypto)
+    ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# The gateway over the S3 store and the MinIO of deploy/local/compose.yaml.
+ulw_add_test_suite(gateway_store_integration_tests integration
+    gateway/gateway_harness.cpp
+    integration/gateway_store_queue_test.cpp)
+target_link_libraries(gateway_store_integration_tests PRIVATE
+    ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_tls
+    ulw::storage_s3 ulw::test_live_s3)
+target_include_directories(gateway_store_integration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/gateway)
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(gateway_store_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 
 # Not a test: the M9 memory measurement, run by hand (see the file's header).
 ulw_add_executable(ulw_gateway_load load/gateway_load.cpp)

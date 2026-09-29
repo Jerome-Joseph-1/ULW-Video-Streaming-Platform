@@ -360,7 +360,7 @@ TEST_P(GatewayUpload, AdmissionCapsConcurrentUploadsPerUser) {
     EXPECT_EQ(patch(bob, theirs->upload_id, 0, data, kBob)->status, 204);
 }
 
-TEST_P(GatewayUpload, StalledBackendThrottlesTheClientInsteadOfBuffering) {
+TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut) {
     GatewayUnderTest gw(
         over_transport({.backend = Backend::Fake, .chunk = 8 * kMiB, .manual_clock = true}));
     const auto data = ulw::test::pattern(8 * kMiB);
@@ -395,14 +395,20 @@ TEST_P(GatewayUpload, StalledBackendThrottlesTheClientInsteadOfBuffering) {
     const auto ingested = gw.counters().bytes_ingested;
     EXPECT_LE(ingested, (std::uint64_t{256} * 1024) + (std::uint64_t{64} * 1024));
 
-    // With no progress for the body timeout the gateway gives up on the store, answers 503
-    // and releases everything the upload held, whether or not the client is still there.
-    gw.advance(gateway::Limits{}.body_idle_timeout);
-    const auto r = uploader.read_response();
-    ASSERT_TRUE(r);
-    EXPECT_EQ(r->status, 503);
-    EXPECT_EQ(gw.counters().timeouts_backend, 1U);
-    uploader.close();
+    // A store that holds the body up is busy as far as the gateway can tell: a part queued for
+    // a connection looks exactly like this. Only the store, or the request backstop, ends it.
+    const gateway::Limits limits;
+    for (int i = 0; i < 10; ++i) {
+        gw.advance(limits.body_idle_timeout);
+    }
+    const gateway::Counters held = gw.counters();
+    EXPECT_EQ(held.timeouts_body + held.timeouts_body_rate + held.timeouts_backstop, 0U);
+    EXPECT_EQ(gw.claims(), 1U);
+    EXPECT_EQ(gw.connections(), 1U);
+
+    gw.advance(limits.request_backstop);
+    EXPECT_TRUE(uploader.closed_by_peer());
+    EXPECT_EQ(gw.counters().timeouts_backstop, 1U);
     EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0 && gw.connections() == 0; }));
 }
 

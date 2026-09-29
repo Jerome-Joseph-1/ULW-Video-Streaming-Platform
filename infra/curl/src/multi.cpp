@@ -92,8 +92,9 @@ bool Multi::Impl::configure(std::size_t max_connections) noexcept {
     // Nothing in libcurl limits the wait of a transfer queued behind the connection cap: it
     // has no connection, and 8.5 checks neither the connect timeout nor CURLOPT_TIMEOUT
     // without one. So whatever shares a multi with uploads must be able to wait behind them;
-    // the gateway gives its key fetches a multi of their own, and a part stuck in the queue
-    // takes no bytes, which the gateway's body timeout ends.
+    // the gateway gives its key fetches a multi of their own. A queued part waits as long as
+    // the parts ahead of it take, which the gateway's minimum body rate and LOW_SPEED bound,
+    // and no timer runs against it meanwhile (ADR-0033).
     const auto cap = static_cast<long>(max_connections);
     return curl_multi_setopt(m, CURLMOPT_SOCKETFUNCTION, &Impl::on_socket) == CURLM_OK &&
            curl_multi_setopt(m, CURLMOPT_SOCKETDATA, this) == CURLM_OK &&
