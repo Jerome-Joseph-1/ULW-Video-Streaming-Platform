@@ -144,6 +144,38 @@ def restarts():
     return counts
 
 
+def restart_problems(before, after):
+    """Containers whose samples stop where a kill happened. A pod replaced during the run has
+    a new name and no restarts, so it is caught by its predecessor's absence. A last state of
+    OOMKilled counts only when restartCount rose during the run: one left over from before it
+    says nothing about this load."""
+    problems = []
+    for key in before:
+        if key not in after:
+            problems.append(f"{key[0]}/{key[1]} is gone: the pod was replaced during the run")
+    for key, (count, reason) in after.items():
+        was = before.get(key, (0, None))[0]
+        if count != was:
+            problems.append(f"{key[0]}/{key[1]} restarted ({was} -> {count}, last exit "
+                            f"{reason}): its samples stop where the kill happened")
+    return problems
+
+
+def peak_problems(peak_in_flight, admitted):
+    if peak_in_flight is None:
+        return ["could not read uploads_in_flight from any gateway pod; the check is void"]
+    if peak_in_flight < MIN_PEAK_FRACTION * admitted:
+        return [f"peak uploads in flight {peak_in_flight}, expected at least "
+                f"{MIN_PEAK_FRACTION * admitted:.0f} of the {admitted} the gateway admits"]
+    return []
+
+
+def coverage_problems(samples):
+    counts = {w: sum(1 for s in samples for r in s["containers"] if workload_of(r["pod"]) == w)
+              for w in WORKLOADS}
+    return [f"no sample of a {w} pod" for w, n in counts.items() if n == 0]
+
+
 def top_rows():
     result = vod_flow.kubectl("-n", NAMESPACE, "top", "pods", "--containers", "--no-headers",
                               check_rc=False)
@@ -170,17 +202,21 @@ class Sampler(threading.Thread):
         self.stop_event = threading.Event()
         self.samples = []
         self.gauges = []
+        self.error = None
         self.started = time.monotonic()
 
     def run(self):
         ticks = SAMPLE_INTERVAL_S // GAUGE_INTERVAL_S
         tick = 0
-        while not self.stop_event.is_set():
-            self.read_gauges()
-            if tick % ticks == 0:
-                self.take()
-            tick += 1
-            self.stop_event.wait(GAUGE_INTERVAL_S)
+        try:
+            while not self.stop_event.is_set():
+                self.read_gauges()
+                if tick % ticks == 0:
+                    self.take()
+                tick += 1
+                self.stop_event.wait(GAUGE_INTERVAL_S)
+        except Exception as e:  # noqa: BLE001 - handed to finish(), which the run calls
+            self.error = e
 
     def take(self):
         rows = top_rows()
@@ -207,6 +243,8 @@ class Sampler(threading.Thread):
     def finish(self):
         self.stop_event.set()
         self.join()
+        if self.error is not None:
+            raise Failure(f"sampler stopped early: {type(self.error).__name__}: {self.error}")
 
 
 def mint_tokens(users, path):
@@ -262,6 +300,23 @@ def count_ready(committed, tokens, wait_s):
     return counts
 
 
+def build_report(args, users, size, rate, admitted, limits, sampler, load, videos, problems):
+    gauges = sampler.gauges
+    return {
+        "uploads": args.uploads, "users": users, "size_bytes": size, "rate_bytes_per_s": rate,
+        "sample_interval_s": SAMPLE_INTERVAL_S, "samples": len(sampler.samples),
+        "peak_uploads_in_flight": max((g["uploads_in_flight"] for g in gauges), default=None),
+        "peak_connections": max((g["connections_current"] for g in gauges), default=None),
+        "admitted_expected": admitted, "videos": videos,
+        "limits": {f"{w}/{c}": v for (w, c), v in limits.items()},
+        "peaks": peaks(sampler.samples),
+        "upload_load": None if load is None else {
+            k: load[k] for k in ("attempted", "completed", "status_counts", "errors_by_kind",
+                                 "wall_time_s", "patch_latency")},
+        "violations": problems, "passed": not problems,
+    }
+
+
 def run(args):
     vod_flow.require_sandbox(vod_flow.SANDBOX_KUBECONFIG)
     vod_flow.KUBECTL_ALLOWED = True
@@ -274,16 +329,18 @@ def run(args):
     rate = upload_load.SAFE_RATE
     users = math.ceil(args.uploads / UPLOADS_PER_USER)
     admitted = min(args.uploads, GATEWAY_UPLOAD_SLOTS * len(vod_flow.gateway_pods()))
-    with tempfile.TemporaryDirectory() as tmp:
-        clip = pathlib.Path(tmp, "load.mp4")
-        size = len(vod_flow.make_clip(clip, CLIP_SECONDS, CLIP_BITRATE))
-        token_file = pathlib.Path(tmp, "tokens")
-        mint_tokens(users, token_file)
-        tokens = token_file.read_text(encoding="utf-8").split()
-        sampler = Sampler()
-        sampler.start()
-        print(f"  {args.uploads} uploads, {users} users, {size} bytes each at {rate} B/s")
-        try:
+    sampler, load, videos, size, problems = Sampler(), None, {}, 0, []
+    # Whatever went wrong, the samples taken so far are the evidence: the report is written
+    # from them before the failure is raised.
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            clip = pathlib.Path(tmp, "load.mp4")
+            size = len(vod_flow.make_clip(clip, CLIP_SECONDS, CLIP_BITRATE))
+            token_file = pathlib.Path(tmp, "tokens")
+            mint_tokens(users, token_file)
+            tokens = token_file.read_text(encoding="utf-8").split()
+            sampler.start()
+            print(f"  {args.uploads} uploads, {users} users, {size} bytes each at {rate} B/s")
             driver = subprocess.run(
                 [sys.executable, str(ROOT / "tests/load/upload_load.py"), "--url",
                  vod_flow.SANDBOX_URL, "--token-file", str(token_file), "--uploads",
@@ -293,47 +350,31 @@ def run(args):
                 raise Failure(f"upload_load.py exited {driver.returncode}: {driver.stderr.strip()}")
             load = json.loads(driver.stdout)
             videos = count_ready(load["committed_videos"], tokens, args.ready_wait)
-        finally:
+            print(f"  videos after {args.ready_wait} s at most: {videos}")
+    except Exception as e:  # noqa: BLE001 - recorded in the report, then raised below
+        problems.append(f"{type(e).__name__}: {e}")
+    if sampler.ident is not None:
+        try:
             sampler.finish()
-    sampler.take()
-    print(f"  videos after {args.ready_wait} s at most: {videos}")
+        except Failure as e:
+            problems.append(str(e))
+        sampler.take()
 
-    problems = violations(sampler.samples, limits)
-    restarts_after = restarts()
-    for key, (count, reason) in restarts_after.items():
-        before = restarts_before.get(key, (0, None))[0]
-        if count != before or reason == "OOMKilled":
-            problems.append(f"{key[0]}/{key[1]} restarted ({before} -> {count}, last exit "
-                            f"{reason}): its samples stop where the kill happened")
-    peak_in_flight = max((g["uploads_in_flight"] for g in sampler.gauges), default=None)
-    peak_connections = max((g["connections_current"] for g in sampler.gauges), default=None)
-    if peak_in_flight is not None and peak_in_flight < MIN_PEAK_FRACTION * admitted:
-        problems.append(f"peak uploads in flight {peak_in_flight}, expected at least "
-                        f"{MIN_PEAK_FRACTION * admitted:.0f} of the {admitted} the gateway admits")
-    if load["completed"] == 0:
+    problems += violations(sampler.samples, limits)
+    problems += restart_problems(restarts_before, restarts())
+    problems += peak_problems(
+        max((g["uploads_in_flight"] for g in sampler.gauges), default=None), admitted)
+    problems += coverage_problems(sampler.samples)
+    if load is not None and load["completed"] == 0:
         problems.append("no upload completed")
-    workload_samples = {w: sum(1 for s in sampler.samples for r in s["containers"]
-                               if workload_of(r["pod"]) == w) for w in WORKLOADS}
-    for workload, count in workload_samples.items():
-        if count == 0:
-            problems.append(f"no sample of a {workload} pod")
 
-    report = {
-        "uploads": args.uploads, "users": users, "size_bytes": size, "rate_bytes_per_s": rate,
-        "sample_interval_s": SAMPLE_INTERVAL_S, "samples": len(sampler.samples),
-        "peak_uploads_in_flight": peak_in_flight, "peak_connections": peak_connections,
-        "admitted_expected": admitted, "videos": videos,
-        "limits": {f"{w}/{c}": v for (w, c), v in limits.items()},
-        "peaks": peaks(sampler.samples), "upload_load": {
-            k: load[k] for k in ("attempted", "completed", "status_counts", "errors_by_kind",
-                                 "wall_time_s", "patch_latency")},
-        "violations": problems, "passed": not problems,
-    }
+    report = build_report(args, users, size, rate, admitted, limits, sampler, load, videos,
+                          problems)
     write_reports(args.out, report, sampler.samples)
     for name, peak in report["peaks"].items():
         print(f"  {name}: peak {peak['cpu_m']}m, {peak['memory'] >> 20} MiB")
-    print(f"  peak uploads in flight {peak_in_flight}, connections {peak_connections}; "
-          f"reports in {args.out}")
+    print(f"  peak uploads in flight {report['peak_uploads_in_flight']}, connections "
+          f"{report['peak_connections']}; reports in {args.out}")
     if problems:
         raise Failure("; ".join(problems))
 
