@@ -64,6 +64,15 @@ TEST(TokenBucket, ATokenGivenBackCanBeTakenAgainButNeverOverfillsIt) {
     EXPECT_FALSE(bucket.take(kStart));
 }
 
+TEST(TokenBucket, ATakeAtAnEarlierInstantEarnsNothingAndLosesNothing) {
+    chat::TokenBucket bucket(1, 2, kStart);
+    ASSERT_TRUE(bucket.take(kStart));
+    // An instant before the last refill: no time has passed as far as the bucket goes.
+    EXPECT_FALSE(bucket.take(kStart - std::chrono::seconds(1)));
+    // What was earned since the last refill is still earned.
+    EXPECT_TRUE(bucket.take(kStart + Millis{500}));
+}
+
 TEST(TokenBucket, ItIsFullOnlyOnceEveryTokenIsBack) {
     chat::TokenBucket bucket(2, 2, kStart);
     EXPECT_TRUE(bucket.full(kStart));
