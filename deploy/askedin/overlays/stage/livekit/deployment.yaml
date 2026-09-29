@@ -96,8 +96,14 @@ spec:
                   auto_create: false
                 logging:
                   level: info
-          # Not yet measured: half a core and 256 MiB reserved, with room above for a burst of
-          # joins, until the call capacity script gives a participant's cost.
+          # A participant publishes and receives ~250 packets/s each way (2.5 Mbit/s of audio
+          # and 720p video), and the SFU decrypts, inspects and re-encrypts each: at an assumed
+          # 20 us per packet (SRTP both ways plus RTP handling, unmeasured) that is 1% of a
+          # core, so 500m carries ~50 participants and the 2-core limit ~200. Memory is ~100 MB
+          # of server plus each track's retransmission cache, ~500 packets x 1.5 KB = 750 KB,
+          # for ~4 tracks per participant in a 1:1 call (audio and video, sent and received):
+          # ~3 MB each. 256 MiB then holds ~50 participants and 1 GiB ~300. The call capacity
+          # script replaces the 20 us and the 3 MB with measurements.
           resources:
             requests:
               cpu: 500m
