@@ -18,6 +18,9 @@ ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND=65536 ULW_REQUESTS_PER_USER_PER_MINUTE=100
 legitimate client gets an address of its own with `--legit-source 127.0.0.2` (all of
 127.0.0.0/8 is loopback on Linux), as a real client has.
 
+The gateway these run against refuses to start as root unless told which user to become
+(`ULW_RUN_AS_USER`) or, for a local run only, `ULW_ALLOW_ROOT=1`.
+
 ## upload_load.py
 
 Drives many concurrent resumable uploads and reports throughput, latency and error counts.

@@ -35,7 +35,7 @@ serving TLS (method below), one host was enough to hurt everyone else:
 | | IPv4 address, IPv6 /64 | Accepted |
 | Per-address limits behind the proxy | The connection limits, per connection | Rejected: Envoy's pooled connections carry any client's requests, and all come from Envoy |
 | | Requests in flight per forwarded address (20), `429`, for as long as they last | Rejected: a carrier-grade NAT puts hundreds of users on one address, and its busiest few would lock out the rest |
-| | The same, only until the request is authenticated | Accepted: a verified user is held to the per-user limits instead; what the address limit guards is the work done for nobody in particular. The new-connection rate is left to direct peers, since behind Envoy the handshake it protects is Envoy's |
+| | The same, only until the request is authenticated | Accepted (a request waiting on a key set refetch has not been authenticated yet, so it still holds its address until the keys arrive): a verified user is held to the per-user limits instead; what the address limit guards is the work done for nobody in particular. The new-connection rate is left to direct peers, since behind Envoy the handshake it protects is Envoy's |
 | Byte quota over | Declared `size_bytes` at create | Rejected: create-and-cancel would spend it without a byte sent, and the store's cost is the bytes |
 | | Each `PATCH`'s `Content-Length`, charged at admission, with what never arrives given back when the request ends | Accepted: refused before a byte is read, and what is kept is what was sent |
 | Quota refusal | `413` | Rejected: the request is not too large, the user is over a rate |
@@ -100,8 +100,10 @@ no supplementary group or capability remains, no_new_privs reads back set, and `
 `setuid` discards; no_new_privs because the runtime image ships setuid-root `su` and `mount`,
 whose exec would otherwise hand root back without our ids showing it. The gateway and the
 worker call it from `main` after the configuration is read and before any thread, socket or job
-exists, when root, with `ULW_RUN_AS_USER`; the gateway binds its listening socket and raises
-its descriptor limit first and hands the socket to the server, so a port under 1024 works. Root
+exists, when root, with `ULW_RUN_AS_USER`; so do `chat_server`, which faces the network as the
+gateway does, and the `ulw_reaper` and `ulw_migrate` jobs, all through one helper,
+`ops::leave_root`. The gateway and `chat_server` bind their listening sockets and raise
+their descriptor limit first and hand the sockets to the server, so a port under 1024 works. Root
 with no user named exits 2 unless `ULW_ALLOW_ROOT=1`. The TLS certificate and key are read
 after the drop, at start and on SIGHUP, so they must be readable by that user. The tests need
 root; CI runs them with `sudo`.

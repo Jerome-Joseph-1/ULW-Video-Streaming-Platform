@@ -328,15 +328,25 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
    Every run must still end `ok`: a chunk cut off by the drain is resumed from `HEAD`'s offset.
    Stop the loop with Ctrl-C.
 4. The client address the gateway sees. From a machine outside the cluster, note its public
-   address (`curl -s https://ifconfig.me`), set `ULW_LOG_LEVEL=debug` on one stage gateway
-   for a minute, and make any request through the route. Its log must show that address:
+   address (`curl -s https://ifconfig.me`), turn on debug logging, make a few requests through
+   the route (Envoy spreads them over both replicas), and read both replicas' logs. They must
+   show that address:
 
    ```sh
    kubectl -n apps-stage set env deploy/video-gateway ULW_LOG_LEVEL=debug
-   curl -s -o /dev/null https://<stage host>/api/v1/videos/00000000-0000-7000-8000-000000000000
-   kubectl -n apps-stage logs deploy/video-gateway | grep '"forwarded client"' | tail -3
+   kubectl -n apps-stage rollout status deploy/video-gateway
+   for i in 1 2 3 4; do
+     curl -s -o /dev/null https://<stage host>/api/v1/videos/00000000-0000-7000-8000-000000000000
+   done
+   kubectl -n apps-stage logs -l app.kubernetes.io/name=video-gateway -c gateway --prefix \
+     | grep '"forwarded client"' | tail -4
    kubectl -n apps-stage set env deploy/video-gateway ULW_LOG_LEVEL-
    ```
+
+   `kubectl set env` changes the pod template, so each change rolls both pods (uploads in
+   flight resume, as in step 3), and ArgoCD shows the Deployment OutOfSync until the second
+   one undoes the first; with auto-sync on, ArgoCD may revert it before you have read the logs,
+   so pause auto-sync for the check or run it in a quiet window.
 
    A `10.42.x.x` address, or a node's, means Envoy's Service is not `externalTrafficPolicy:
    Local` or another proxy stands in front: fix that, or `ULW_TRUSTED_PROXY_HOPS`, before prod.

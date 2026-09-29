@@ -159,7 +159,8 @@ class Stack:
         subprocess.run(["psql", self.admin_url, "-qc", f"CREATE DATABASE {self.name}"],
                        check=True)
         subprocess.run([self.bin / "ulw_migrate"], check=True,
-                       env={**os.environ, "ULW_DATABASE_URL": self.database_url},
+                       env={**os.environ, "ULW_DATABASE_URL": self.database_url,
+                            "ULW_ALLOW_ROOT": "1"},
                        stdout=subprocess.DEVNULL)
         code = self.s3("PUT", self.bucket)
         if code != "200":

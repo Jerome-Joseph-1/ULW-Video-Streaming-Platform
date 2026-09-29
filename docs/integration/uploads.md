@@ -2,7 +2,8 @@
 
 A video file is uploaded in chunks to a resumable upload, then committed. The gateway streams
 each chunk straight into the object store; it never holds a whole file. After the commit the
-worker transcodes the video, and it becomes playable ([videos-and-playback.md](videos-and-playback.md)).
+worker transcodes the video, and it becomes playable
+([videos-and-playback.md](videos-and-playback.md)).
 
 Every endpoint here needs a token ([auth.md](auth.md)). Every response carries `X-Request-Id`;
 quote it when reporting a problem. Every error body is empty: the status code and the
@@ -158,15 +159,15 @@ Admission counts chunk uploads only, and happens after authentication. A user's 
 running at once is refused while other users go on; the whole instance being full refuses
 everyone. Both answers carry `Retry-After: 5`.
 
-The request and byte limits are token buckets: a user starts with the full allowance, spends
-one token per authenticated request (any endpoint, playback included) and one per byte a
-`PATCH` declares in `Content-Length`, charged when the `PATCH` is admitted, before its body is
-read, with whatever the client then never sends given back when the request ends. A refused
-`PATCH` reads nothing and holds no slot. The byte allowance is kept in each gateway's memory:
-a restart, or a user going unseen while many others are active, starts it over full. Tokens come back evenly, so a client
-that waits `Retry-After` seconds finds the request allowed. The byte allowance is sized for two
-50 GiB uploads a day; an ordinary uploader never meets the request allowance (a 100 Mbit/s
-uplink sends 90 chunks a minute).
+The request and byte limits are token buckets: a user starts with the full allowance, spends one
+token per authenticated request (any endpoint, playback included) and one per byte a `PATCH`
+declares in `Content-Length`, charged when the `PATCH` is admitted, before its body is read,
+with whatever the client then never sends given back when the request ends. A refused `PATCH`
+reads nothing and holds no slot. The byte allowance is kept in each gateway's memory: a restart,
+or a user going unseen while many others are active, starts it over full. Tokens come back
+evenly, so a client that waits `Retry-After` seconds finds the request allowed. The byte
+allowance is sized for two 50 GiB uploads a day; an ordinary uploader never meets the request
+allowance (a 100 Mbit/s uplink sends 90 chunks a minute).
 
 A client address is the connecting address, or behind Askedin's Envoy the address Envoy saw
 (the gateway reads `X-Forwarded-For` from Envoy only; a client's own `X-Forwarded-For` entries

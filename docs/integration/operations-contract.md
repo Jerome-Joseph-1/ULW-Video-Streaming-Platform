@@ -32,20 +32,20 @@ environment. Chat reads the environment only.
 
 A bad value stops the process at startup with exit code `2` and a `configuration refused` log
 line naming the variable; a secret's value is never quoted, not even in the reason a database
-URL does not parse.
-Exit `2` means "fix the configuration, do not just restart": the shipped systemd units do not
-restart on it. `gateway_server --check-config` and `transcode_worker --check-config` run the
-same checks and exit `0` or `2` without starting anything. Beyond each value's own range, they
-check what would otherwise fail only at start: the connection string parses; the R2 account
-id or MinIO endpoint forms a store profile; the store keys are set and the key id is 1 to 128
-of `A-Z a-z 0-9 - . _ ~`; the development key set reads and holds a usable key; TLS certificate
-and key load and match; `ULW_MAX_UPLOAD_SLOTS <= ULW_MAX_CONNECTIONS`,
-`ULW_MAX_UPLOADS_PER_USER <= ULW_MAX_UPLOAD_SLOTS`, `ULW_MAX_CONNECTIONS_PER_IP <=
-ULW_MAX_CONNECTIONS`; `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` at least 16 MiB, the largest `PATCH`;
-`ULW_TRUSTED_PROXIES` exact CIDR blocks, none of them /0, at most 16, and
-`ULW_TRUSTED_PROXY_HOPS` only with them; when the process is root, `ULW_RUN_AS_USER` names a
-user or `ULW_ALLOW_ROOT=1` is set; and the descriptor limit covers two per connection plus 64.
-`--version` prints the version and commit. At start each logs its
+URL does not parse. Exit `2` means "fix the configuration, do not just restart": the shipped
+systemd units do not restart on it. `gateway_server --check-config` and
+`transcode_worker --check-config` run the same checks and exit `0` or `2` without starting
+anything. Beyond each value's own range, they check what would otherwise fail only at start: the
+connection string parses; the R2 account id or MinIO endpoint forms a store profile; the store
+keys are set and the key id is 1 to 128 of `A-Z a-z 0-9 - . _ ~`; the development key set reads
+and holds a usable key; TLS certificate and key load and match;
+`ULW_MAX_UPLOAD_SLOTS <= ULW_MAX_CONNECTIONS`,
+`ULW_MAX_UPLOADS_PER_USER <= ULW_MAX_UPLOAD_SLOTS`,
+`ULW_MAX_CONNECTIONS_PER_IP <= ULW_MAX_CONNECTIONS`; `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` at
+least 16 MiB, the largest `PATCH`; `ULW_TRUSTED_PROXIES` exact CIDR blocks, none of them /0, at
+most 16, and `ULW_TRUSTED_PROXY_HOPS` only with them; when the process is root,
+`ULW_RUN_AS_USER` names a user or `ULW_ALLOW_ROOT=1` is set; and the descriptor limit covers two
+per connection plus 64. `--version` prints the version and commit. At start each logs its
 effective configuration, secrets as `<redacted>`.
 
 | Variable | Gateway | Worker | Chat | Notes |
@@ -73,8 +73,8 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` | bytes, default 107374182400 (100 GiB), at least 16777216 | | | Charged by each `PATCH`'s `Content-Length`, the part never sent given back; best effort: per replica, in memory, forgotten on restart |
 | `ULW_TRUSTED_PROXIES` | comma-separated CIDR blocks, default none | | | Peers whose `X-Forwarded-For` is believed. Set to the pod network Envoy's data plane runs in (K3s default `10.42.0.0/16`); RUNBOOK step 1. A block shorter than /8 (IPv4) or /32 (IPv6) is logged as a warning. |
 | `ULW_TRUSTED_PROXY_HOPS` | 1 to 16, default 1, only with `ULW_TRUSTED_PROXIES` | | | Proxies in front, each appending one entry: the client is that many entries from the right. Fewer entries, or a malformed one, count the request against the proxy itself. |
-| `ULW_RUN_AS_USER` | user name, default none | same | | Used only when started as root: the process binds its port and raises its descriptor limit, then becomes this user before it serves or takes a job. With `ULW_TRANSPORT=tls` the certificate and key are read after that, at start and on every SIGHUP, so this user must be able to read them. |
-| `ULW_ALLOW_ROOT` | `0` (default) or `1` | same | | Root with no `ULW_RUN_AS_USER` exits `2` unless this is `1`: for development and test harnesses only. |
+| `ULW_RUN_AS_USER` | user name, default none | same | same | Also read by `ulw_reaper` and `ulw_migrate`. Used only when started as root: the process binds its ports and raises its descriptor limit, then becomes this user before it serves, takes a job or dials the database. With `ULW_TRANSPORT=tls` the certificate and key are read after that, at start and on every SIGHUP, so this user must be able to read them. |
+| `ULW_ALLOW_ROOT` | `0` (default) or `1` | same | same | Also read by `ulw_reaper` and `ulw_migrate`. Root with no `ULW_RUN_AS_USER` exits `2` unless this is `1`: for development and test harnesses only. |
 | `ULW_CHUNK_SIZE` | bytes, default 8388608 (8 MiB) | | | 5 MiB to 5 GiB, and a 50 GiB upload in at most 10,000 chunks |
 | `ULW_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` | same | | |
 | `ULW_CONFIG` | optional TOML file | same | | See above |
@@ -165,12 +165,12 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 Worth alerting on: `readyz` failing outside a rollout; any rise in `playlists_rejected_total`,
 `presign_failures_total`, `view_batches_failed_total` or `store_paging_errors_total` (page:
 retrying will not fix it); `admission_rejections_total` rising steadily;
-`backend_write_stall_seconds` observations at 30 s and above rising (the bucket is slow); `jobs_oldest_queued_seconds`
-growing (the workers are behind or down); `log_messages_dropped_total` rising;
-`connections_rejected_total{reason="ip_connections"}` or `{reason="ip_rate"}` rising steadily
-behind Envoy (`ULW_TRUSTED_PROXIES` does not cover Envoy's pods, so every client is being counted
-as Envoy); `rate_limit_evictions_total{table="user"}` rising (more active users than the table
-remembers, so allowances are being reset).
+`backend_write_stall_seconds` observations at 30 s and above rising (the bucket is slow);
+`jobs_oldest_queued_seconds` growing (the workers are behind or down);
+`log_messages_dropped_total` rising; `connections_rejected_total{reason="ip_connections"}` or
+`{reason="ip_rate"}` rising steadily behind Envoy (`ULW_TRUSTED_PROXIES` does not cover Envoy's
+pods, so every client is being counted as Envoy); `rate_limit_evictions_total{table="user"}`
+rising (more active users than the table remembers, so allowances are being reset).
 
 ### Logs
 
@@ -209,4 +209,6 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 
 On SIGTERM the gateway stops accepting, answers `readyz` with `503`, lets requests in flight
 finish for up to 30 s, then cuts off what remains. A client whose chunk was cut off resumes from
-`HEAD` ([uploads.md](uploads.md#resuming)). Give the pod a termination grace period above 30 s (the shipped Deployment uses 45 s): the drain's 30 s, the health probe finishing (it stops when the drain begins) and the 2 s log flush fit inside it.
+`HEAD` ([uploads.md](uploads.md#resuming)). Give the pod a termination grace period above 30 s
+(the shipped Deployment uses 45 s): the drain's 30 s, the health probe finishing (it stops when
+the drain begins) and the 2 s log flush fit inside it.
