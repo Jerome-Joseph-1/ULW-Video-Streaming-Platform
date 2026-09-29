@@ -215,8 +215,9 @@ Errors for `watch` and `unwatch`:
 | `too_many_watches` | This connection already watches 128 users | Unwatch some first |
 | `busy` | This node watches as many users as it takes, or this user started watching users no connection on this node was watching (unwatching and watching again counts each time) faster than 128 at once and then 1 a second | Back off and retry |
 
-Room ids of UUID version 8 (the third group starts with `8`) are reserved for presence: `join`,
-`send` or `history` naming one is refused with `bad_room`. Presence events are never stored.
+Room ids of UUID version 8 (the third group starts with `8`) whose first byte is `02` (the id
+starts with `02`) are reserved for presence: `join`, `send` or `history` naming one is refused
+with `bad_room`. Presence events are never stored.
 
 Anyone signed in may watch anyone: there is no check of who may see whose presence yet. That is
 an open item before production ([ADR-0055](../adr/0055-presence-over-the-room-plane.md)).

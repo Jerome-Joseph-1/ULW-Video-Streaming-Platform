@@ -177,9 +177,12 @@ TEST_P(RoomStoreTest, ANodeTakingARoomOverLearnsWhereItsCountStands) {
 }
 
 TEST_P(RoomStoreTest, AnEphemeralRoomTakesFencedSeqsAndStoresNoMessage) {
-    // Version 8, as presence rooms are.
-    const core::RoomId room = *core::RoomId::parse("01a0eb86-6cca-8dce-84cc-3bb47615f9fd");
+    // Version 8 and tagged 0x02, as presence rooms are.
+    const core::RoomId room = *core::RoomId::parse("02a0eb86-6cca-8dce-84cc-3bb47615f9fd");
     ASSERT_TRUE(rt::is_ephemeral_room(room));
+    // A stream chat's derived id (tag 0x01) is not ephemeral: its messages are kept.
+    ASSERT_FALSE(
+        rt::is_ephemeral_room(*core::RoomId::parse("01a0eb86-6cca-8dce-84cc-3bb47615f9fd")));
     // No chat join can name it; were a kind recorded for it anyway, the ephemeral rule wins.
     ASSERT_TRUE(
         conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",

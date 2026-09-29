@@ -29,11 +29,26 @@ inline constexpr core::Millis kStoreTimeout{2'000};
 // comparison both use the database's clock, so skew between nodes does not enter.
 inline constexpr core::Millis kOwnerStaleAfter{5'000};
 
-// Rooms whose writes are sequenced and fanned out like any other's but never kept: RFC 9562
-// version 8 ids, which chat_server derives for presence (ADR-0055) and no client can name. A
-// store takes their seqs, fenced as ever, and stores no message for them.
+// Room ids derived from a name are RFC 9562 version 8 UUIDs whose first byte says what names
+// them; every other room id is version 7 (ADR-0023). 0x01 is a stream's live chat (M32), 0x02 a
+// user's presence room (ADR-0055), so a derived id of one kind is never taken for the other's.
+// M32 moves these tags to its shared header (core::ports::NamedRoom); until then they live here.
+inline constexpr std::uint8_t kStreamChatRoomTag = 0x01;
+inline constexpr std::uint8_t kPresenceRoomTag = 0x02;
+
+// Whether the room's id is version 8 and tagged `tag` in its first byte.
+[[nodiscard]] inline bool is_named_room(const core::RoomId& room, std::uint8_t tag) noexcept {
+    // RFC 9562 section 4: the version is the high nibble of byte 6.
+    const auto bytes = room.uuid().bytes();
+    return (std::to_integer<unsigned>(bytes[6]) & 0xF0U) == 0x80U &&
+           std::to_integer<std::uint8_t>(bytes[0]) == tag;
+}
+
+// Rooms whose writes are sequenced and fanned out like any other's but never kept: presence
+// rooms, which chat_server derives (ADR-0055) and no client can name. A store takes their seqs,
+// fenced as ever, and stores no message for them.
 [[nodiscard]] inline bool is_ephemeral_room(const core::RoomId& room) noexcept {
-    return (room.uuid().bytes()[6] & std::byte{0xF0}) == std::byte{0x80};
+    return is_named_room(room, kPresenceRoomTag);
 }
 
 struct Ownership {

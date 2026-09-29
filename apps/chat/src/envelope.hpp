@@ -53,7 +53,8 @@
 // as they came, never read, never logged. Seqs of a room rise by one per message; a jump means
 // messages this connection did not get (skipped as lossy, missed while away, or sequenced
 // while the room was changing owners), which the client fetches from history. Room ids of UUID
-// version 8 are presence rooms (presence_room.hpp), which no client joins or sends to.
+// version 8 whose first byte is 0x02 are presence rooms (presence_room.hpp), which no client
+// joins or sends to.
 namespace chat {
 
 enum class Delivery : std::uint8_t { Durable, Lossy };

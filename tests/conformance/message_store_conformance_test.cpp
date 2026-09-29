@@ -413,6 +413,7 @@ TEST_P(MessageStoreConformance, LastSeqIsZeroForAnEmptyRoomAndTheNewestOtherwise
 
 TEST_P(MessageStoreConformance, AnEphemeralRoomCountsItsSeqsAndKeepsNoMessage) {
     std::string text = core::RoomId::generate(clock_, random_).to_string();
+    text.replace(0, 2, "02");
     text[14] = '8';
     const core::RoomId room = *core::RoomId::parse(text);
     ASSERT_TRUE(rt::is_ephemeral_room(room));

@@ -1,5 +1,7 @@
 #include "presence_room.hpp"
 
+#include "rt/room_store.hpp"
+
 #include "sha256.hpp"
 
 #include <cstddef>
@@ -22,7 +24,9 @@ core::RoomId presence_room(const core::UserId& user) {
     std::string name(kNamespace);
     name += user.view();
     auto digest = sha256(name);
-    // The first 16 bytes, with the version and variant bits set (RFC 9562 section 5.8).
+    // The first 16 bytes, with the version and variant bits set (RFC 9562 section 5.8), and the
+    // first byte the presence tag, which no other kind of derived room carries.
+    digest[0] = rt::kPresenceRoomTag;
     digest[6] = static_cast<unsigned char>((digest[6] & 0x0FU) | 0x80U);
     digest[8] = static_cast<unsigned char>((digest[8] & 0x3FU) | 0x80U);
     std::string text;

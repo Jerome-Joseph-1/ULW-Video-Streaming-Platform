@@ -40,18 +40,27 @@ a word.
 
 - **Rooms.** A user's presence room is the RFC 9562 version 8 UUID of SHA-256 over a fixed
   namespace and the user id (`presence_room.hpp`): every node derives it, nothing is looked up.
-  The registry, ownership, fencing and forwarding are the chat rooms' own. Version 8 is the room
-  plane's ephemeral kind (`rt::is_ephemeral_room`): the store creates such a room with kind
-  `presence` and takes its seqs with the fenced `UPDATE room_state SET last_seq = last_seq + 1`
-  alone, storing no `chat_messages` row, in Postgres and in the in-memory stores alike (a
-  conformance law). The ephemeral rule wins over any kind a chat join recorded; a presence
-  room is not a chat `RoomKind`, since its joins come from nodes through `IRooms` and never
-  pass the message store's `admits()`. The envelope refuses version 8 room ids in `join`,
-  `send` and `history` (`bad_room`), so no client can read or write a presence room, and only
-  nodes speak in one.
+  The registry, ownership, fencing and forwarding are the chat rooms' own.
   Events are 9 bytes: a kind and the sender's tag, 64 bits of SHA-256 over the node's name and
   its start time, so a restarted node is a new sender and its last run's announcements run out
   on their own.
+- **Kind tag.** Rooms derived from a name share version 8, so the first byte of the id says
+  what names the room: `0x01` is a stream's live chat (M32, `core::ports::is_stream_chat`),
+  `0x02` a user's presence room. `presence_room()` overwrites the digest's first byte with
+  `0x02` and keeps the RFC's version and variant bits, which leaves 114 bits of the digest, so
+  a presence room and a stream's chat can never share an id however their names collide. The
+  tags live in `rt/room_store.hpp` (`rt::kPresenceRoomTag`, `rt::kStreamChatRoomTag`) until
+  M32 moves them to its shared header. A unit test pins alice's room id and its tag.
+- **Ephemeral.** A version 8 id tagged `0x02` is the room plane's ephemeral kind
+  (`rt::is_ephemeral_room`); other version 8 ids, a stream's chat among them, are ordinary
+  rooms whose messages are kept. The store creates an ephemeral room with kind `presence` in
+  `room_state` and takes its seqs with the fenced `UPDATE room_state SET last_seq = last_seq +
+  1` alone, storing no `chat_messages` row, in Postgres and in the in-memory stores alike (a
+  conformance law). The ephemeral rule wins over any kind recorded in `chat_rooms`; a presence
+  room is not a chat `RoomKind`, since its joins come from nodes through `IRooms` and never
+  pass the message store's `admits()`. The envelope refuses presence room ids in `join`, `send`
+  and `history` (`bad_room`), so no client can read or write a presence room, and only nodes
+  speak in one.
 - **Created without a join.** A presence room is the one room the room plane creates with no
   chat join before it, so nothing has recorded it in `chat_rooms`. Its creation records it
   there itself, as a closed room (`group_chat`), in the statement that creates it, as M19's

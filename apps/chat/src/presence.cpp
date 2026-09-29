@@ -241,7 +241,7 @@ void Presence::delivered(Room& room, const rt::Message& message) noexcept {
     }
     room.head = std::max(room.head, message.seq);
     // Only nodes speak in a presence room, each under the user's name; clients cannot reach
-    // it (the envelope refuses version 8 room ids).
+    // it (the envelope refuses presence room ids).
     if (message.sender != room.user || message.body.size() != kEventSize) {
         return;
     }

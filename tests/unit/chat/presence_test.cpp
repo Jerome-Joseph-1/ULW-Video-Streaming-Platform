@@ -6,6 +6,8 @@
 #include "support/fake_clock.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
@@ -265,6 +267,29 @@ TEST(PresenceRoom, EveryNodeDerivesTheSameVersion8RoomForAUserAndAnotherForAnoth
     EXPECT_EQ(alice.to_string()[14], '8');
     EXPECT_FALSE(
         chat::is_presence_room(*core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fd")));
+}
+
+// Pinned: every node of every version must derive the same room for a user, and its first byte
+// is the presence tag, never a stream chat's (ADR-0055), so the two kinds of derived room never
+// share an id.
+TEST(PresenceRoom, AUsersRoomIsPinnedAndTaggedAsAPresenceRoom) {
+    const core::RoomId alice = chat::presence_room(user("alice"));
+    EXPECT_EQ(alice.to_string(), "0245c53c-9c67-87a9-b59f-58fd4886aa2e");
+    EXPECT_EQ(rt::kPresenceRoomTag, 0x02U);
+    EXPECT_NE(rt::kPresenceRoomTag, rt::kStreamChatRoomTag);
+    EXPECT_EQ(std::to_integer<std::uint8_t>(alice.uuid().bytes()[0]), rt::kPresenceRoomTag);
+    EXPECT_TRUE(rt::is_named_room(alice, rt::kPresenceRoomTag));
+    EXPECT_FALSE(rt::is_named_room(alice, rt::kStreamChatRoomTag));
+    for (const char* name : {"bob", "carol", "auth0|dave", ""}) {
+        if (const auto u = core::UserId::parse(name)) {
+            EXPECT_EQ(std::to_integer<std::uint8_t>(chat::presence_room(*u).uuid().bytes()[0]),
+                      rt::kPresenceRoomTag)
+                << name;
+        }
+    }
+    // A stream chat's derived id, version 8 and tagged 0x01, is not a presence room.
+    EXPECT_FALSE(
+        chat::is_presence_room(*core::RoomId::parse("01a0eb86-6cca-8dce-84cc-3bb47615f9fd")));
 }
 
 TEST_F(PresenceTest, AUserNobodyWatchesCostsNoEventAndNoRoomOnceTheGraceIsOver) {
