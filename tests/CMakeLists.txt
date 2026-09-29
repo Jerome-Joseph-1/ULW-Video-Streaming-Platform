@@ -322,6 +322,14 @@ target_link_libraries(e2ee_integration_tests PRIVATE ulw::pg_store PkgConfig::LI
 target_include_directories(e2ee_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
+if(ULW_BUILD_MLS)
+    ulw_add_test_suite(mls_unit_tests unit
+        unit/e2ee/mls_ffi_test.cpp
+        unit/e2ee/mls_test.cpp)
+    # The FFI test drives the bridge's C API directly, as well as through the wrapper.
+    target_link_libraries(mls_unit_tests PRIVATE ulw::e2ee_mls mls_ffi_bridge)
+endif()
+
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
     unit/auth/claims_test.cpp
