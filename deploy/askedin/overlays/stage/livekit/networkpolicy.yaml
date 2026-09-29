@@ -1,0 +1,37 @@
+# Media reaches LiveKit only from STUNner's relay; signalling only through Envoy's data plane
+# and, for the server API, from ULW's own pods beside it. A client that learnt the pod's
+# address from an ICE candidate still cannot send to it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: livekit
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/name: livekit
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit
+  policyTypes: ["Ingress"]
+  ingress:
+    # The stunnerd pods of stunner/gateway.yaml's Gateway; the operator labels them app=stunner.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: stunner
+      ports:
+        - port: rtc-udp
+          protocol: UDP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: proxy
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: ulw
+      ports:
+        - port: http

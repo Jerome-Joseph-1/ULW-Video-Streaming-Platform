@@ -11,9 +11,12 @@ What ships:
 | `overlays/{stage,prod}/video-worker/` | Deployment (1 replica), NetworkPolicy; no Service, no route |
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
 | `woodpecker.yml` | Builds and pushes both images, then `rollout restart`; never applies a manifest |
+| `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
+| `overlays/stage/stunner/` | The TURN Gateway on UDP 3478 and the UDPRoute to LiveKit |
+| `overlays/stage/livekit/` | LiveKit (1 replica), Service, HTTPRoute for its signalling (`/rtc`), NetworkPolicy |
 
-`chat` and `live-packager` have no overlays yet: their binaries do not exist. STUNner comes with
-the realtime plane.
+`chat` and `live-packager` have no overlays yet: their binaries do not exist. The realtime plane
+(STUNner and LiveKit) is stage only until its phase is tagged there; step 7.
 
 Open decisions, yours: whether this builds inside the Askedin monorepo or pushes from this
 repository (the image names `git.askedin.com/askedin/askedin-monorepo/<svc>` assume the
@@ -231,3 +234,104 @@ too, or the next push redeploys it.
 
 To take the plane out entirely: delete the HTTPRoute first (uploads stop at the edge), then
 scale both deployments to 0. Uploads in progress resume once it is back.
+
+## 7. The realtime plane: STUNner and LiveKit (stage)
+
+Media from browsers enters through STUNner, a TURN server run as a Gateway API implementation
+beside Envoy Gateway (docs/adr/0013); LiveKit is the SFU behind it (docs/adr/0020). LiveKit hands
+each client a TURN credential minted from a secret it shares with STUNner (docs/adr/0033).
+
+### Check the cluster first
+
+```sh
+kubectl get crd gateways.gateway.networking.k8s.io \
+  -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}'   # v1.x from Envoy Gateway
+kubectl get svc -A | grep -w 3478        # nothing may hold UDP 3478 yet
+```
+
+STUNner's Gateway is a LoadBalancer Service on UDP 3478 with `externalTrafficPolicy: Local`, so
+TURN clients keep their own source address. On K3s, ServiceLB publishes it on the node's
+address. Open UDP 3478 to the internet on the node's firewall, and nothing else: every call's
+media arrives on that one port, and LiveKit's own UDP port (7882) stays inside the cluster.
+
+### Secrets
+
+New keys for `.env.stage` (names only):
+
+```
+TURN_SECRET              32+ random bytes, base64; STUNner's shared secret, also given to LiveKit
+TURN_HOST                the address browsers reach STUNner at: the node's public IP or a DNS name for it
+LIVEKIT_KEYS             "<api key>: <api secret>", the secret at least 32 characters
+```
+
+Lines for `scripts/create-k8s-secrets.sh`, stage only for now (`$NS` is `apps-stage`):
+
+```sh
+kubectl -n stunner-system create secret generic stunner-secrets \
+  --from-literal=type=ephemeral \
+  --from-literal=secret="$TURN_SECRET" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n "$NS" create secret generic livekit-secrets \
+  --from-literal=LIVEKIT_KEYS="$LIVEKIT_KEYS" \
+  --from-literal=TURN_HOST="$TURN_HOST" \
+  --from-literal=TURN_SECRET="$TURN_SECRET" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+`stunner-system` must exist first (the operator step below creates it). The call service gets
+the same `LIVEKIT_KEYS` pair once it ships. Add LiveKit to the rollout-restart list; STUNner
+rereads its secret by itself:
+
+```sh
+kubectl -n "$NS" rollout restart deployment/livekit
+```
+
+### Install, once per cluster
+
+STUNner's CRDs come from its chart at v1.2.1, checked against the hash `deploy/local/tools.sh`
+pins:
+
+```sh
+curl -fsSLo stunner-crds.yaml https://raw.githubusercontent.com/l7mp/stunner-helm/08555494a2fdb53c0f8a0146cfa1c951dbb83f1b/helm/stunner/crds/stunner-crds.yaml
+echo "720ab0c18e0e51b8cee18259685061e03cc0d3d01e90a0c0fc20c5144351b279  stunner-crds.yaml" | sha256sum -c
+kubectl apply --server-side -f stunner-crds.yaml
+kubectl apply -f stunner/operator.yaml
+kubectl -n stunner-system rollout status deployment/stunner-gateway-operator-controller-manager
+# now the secrets above
+kubectl apply -f stunner/dataplane.yaml -f stunner/gatewayclass.yaml
+```
+
+Do not install the chart's own Gateway API CRDs: Envoy Gateway owns them, and a second copy at
+another version would fight it. Then copy `overlays/stage/stunner/` and `overlays/stage/livekit/`
+into the monorepo's stage overlay tree like the others; ArgoCD applies them. The LiveKit
+Deployment pulls `livekit/livekit-server` by digest, so Woodpecker has nothing to build for it.
+
+### Verify on stage
+
+```sh
+kubectl get gatewayclass stunner-gatewayclass                 # ACCEPTED True
+kubectl -n apps-stage get gateway stunner                     # PROGRAMMED True, ADDRESS the node's
+kubectl -n apps-stage get udproutes.stunner.l7mp.io livekit \
+  -o jsonpath='{.status.parents[0].conditions[*].type}={.status.parents[0].conditions[*].status}'
+kubectl -n apps-stage get deploy stunner livekit              # 1/1 each
+```
+
+From a machine outside the cluster (a laptop on another network), with the stage secret:
+
+```sh
+tests/cluster/turn_probe.py <TURN_HOST> 3478 --secret "$TURN_SECRET" \
+  --permit <livekit pod IP> --forbid <any other pod IP>
+```
+
+It only sends STUN and TURN requests. Expect `binding.mapped` to be the machine's public
+address (compare `curl -s https://ifconfig.me`): anything else means the node masquerades
+the traffic and `externalTrafficPolicy` is not taking effect. Expect `allocate` a success
+with `integrity: true` and a relayed address inside the cluster, the `permit` peer a success,
+the `forbid` peer an error, and `wrong_password` and `expired` errors (400 or 401).
+
+### Rollback
+
+Delete the UDPRoute (`kubectl -n apps-stage delete udproutes.stunner.l7mp.io livekit`): STUNner
+then relays to nothing and calls stop at once. To remove the plane, delete the Gateway (the
+operator removes its Deployment and Service), scale LiveKit to 0, and, if nothing else uses
+STUNner, delete `stunner/*.yaml` and the CRDs.

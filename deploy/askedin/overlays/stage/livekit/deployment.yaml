@@ -1,0 +1,123 @@
+# The SFU (ADR-0020). Browsers reach it two ways: signalling over WebSocket through
+# askedin-gateway (httproute.yaml), and media only as TURN relayed by STUNner (ADR-0013): the
+# ICE candidates it offers are its pod address, which only STUNner can reach, and the ICE
+# servers it hands each client name STUNner.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livekit
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/name: livekit
+    app.kubernetes.io/part-of: ulw
+spec:
+  # One server: LiveKit spreads rooms over several only through Redis, which this cluster does
+  # not run. Recreate, because a second server beside the first would split rooms between two
+  # processes that cannot see each other's.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: livekit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: livekit
+        app.kubernetes.io/part-of: ulw
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: livekit
+          image: docker.io/livekit/livekit-server:v1.13.7@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3
+          imagePullPolicy: IfNotPresent
+          args: ["--node-ip=$(POD_IP)"]
+          ports:
+            - name: http
+              containerPort: 7880
+            - name: rtc-udp
+              containerPort: 7882
+              protocol: UDP
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # "<api key>: <api secret>", the pair the call service signs tickets with.
+            - name: LIVEKIT_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: livekit-secrets
+                  key: LIVEKIT_KEYS
+            # STUNner's public address, and the shared secret of its ephemeral auth
+            # (stunner-secrets in stunner-system holds the same value), expanded into the
+            # configuration below.
+            - name: TURN_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: livekit-secrets
+                  key: TURN_HOST
+            - name: TURN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: livekit-secrets
+                  key: TURN_SECRET
+            - name: LIVEKIT_CONFIG
+              value: |
+                port: 7880
+                rtc:
+                  # Every participant's media on one UDP port, the port STUNner's UDPRoute
+                  # admits. No ICE over TCP and no public address discovery: nothing but
+                  # STUNner reaches the pod, and it only relays UDP.
+                  udp_port: 7882
+                  tcp_port: 0
+                  use_external_ip: false
+                  # The ICE servers every client is told to use when it joins (ADR-0033): STUNner,
+                  # with a credential minted per participant from the shared secret, valid for
+                  # ttl seconds. A client whose credential expires mid-call loses its relay at
+                  # the next allocation refresh and reconnects with a fresh one; 4 h keeps that
+                  # to calls longer than almost any, while a leaked credential still dies the
+                  # same day.
+                  turn_servers:
+                    - host: $(TURN_HOST)
+                      port: 3478
+                      protocol: udp
+                      secret: $(TURN_SECRET)
+                      ttl: 14400
+                room:
+                  # Rooms exist only because the call service opened them.
+                  auto_create: false
+                logging:
+                  level: info
+          # Not yet measured: half a core and 256 MiB reserved, with room above for a burst of
+          # joins, until the call capacity script gives a participant's cost.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
