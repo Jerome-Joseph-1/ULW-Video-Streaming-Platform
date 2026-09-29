@@ -81,6 +81,8 @@ private:
         bool delivery_queued = false;
         bool accept_paused = false;
         bool v6 = false;
+        // Sends go out as SENDMSG_ZC until the kernel reports it copied one anyway.
+        bool zero_copy = false;
         // A datagram receive ended with every buffer in use; it is re-armed once one is back.
         bool starved = false;
         Interest interest = Interest::None;
@@ -149,6 +151,7 @@ private:
     [[nodiscard]] bool alive(int fd, std::uint32_t gen) const noexcept;
 
     [[nodiscard]] io_uring_sqe* next_sqe() noexcept;
+    [[nodiscard]] bool probe_zero_copy_send() noexcept;
     static void prepare(io_uring_sqe* sqe, int fd, Slot& s, Op op) noexcept;
     void arm_recv(int fd, Slot& s) noexcept;
     void arm_send(int fd, Slot& s) noexcept;
@@ -200,6 +203,7 @@ private:
     std::vector<std::unique_ptr<PendingSend>> send_pool_;
     std::vector<std::uint32_t> free_sends_;
     std::size_t sends_in_flight_ = 0;
+    bool zero_copy_supported_ = false;
     std::vector<DatagramId> datagram_deliveries_;
     std::vector<DatagramId> delivering_datagrams_;
     std::vector<DatagramId> starved_;
