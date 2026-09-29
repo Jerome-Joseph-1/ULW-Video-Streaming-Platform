@@ -72,6 +72,7 @@ endfunction()
 
 add_subdirectory(core)
 add_subdirectory(os)
+add_subdirectory(ops)
 add_subdirectory(net)
 add_subdirectory(infra/curl)
 add_subdirectory(infra/storage/fake)

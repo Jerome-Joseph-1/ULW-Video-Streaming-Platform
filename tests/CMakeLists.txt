@@ -34,6 +34,12 @@ ulw_add_test_suite(os_unit_tests unit
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
 
+ulw_add_test_suite(ops_unit_tests unit
+    unit/ops/async_log_test.cpp
+    unit/ops/log_test.cpp)
+target_link_libraries(ops_unit_tests PRIVATE ulw::ops)
+target_include_directories(ops_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
 ulw_add_library(test_echo support/echo_server.cpp)
 target_include_directories(test_echo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(test_echo PUBLIC ulw::net_lib)
