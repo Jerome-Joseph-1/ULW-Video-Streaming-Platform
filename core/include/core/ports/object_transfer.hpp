@@ -25,6 +25,12 @@ public:
     // Creates or replaces the object. Readers see the old object or the new one, never a mix.
     [[nodiscard]] virtual std::expected<void, StorageError>
     upload(const std::filesystem::path& source, const StorageKey& key, const ContentType& type) = 0;
+    // upload(), but only if the key holds no object: AlreadyExists when it does, and the
+    // existing object is left as it was. The store decides, so of several writers racing for a
+    // key exactly one wins. For claims that fence one writer off from another, not for data.
+    [[nodiscard]] virtual std::expected<void, StorageError>
+    upload_new(const std::filesystem::path& source, const StorageKey& key,
+               const ContentType& type) = 0;
 };
 
 } // namespace core::ports
