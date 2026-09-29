@@ -197,6 +197,11 @@ add_test(NAME cluster_guard
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/cluster/guard_test.py)
 set_tests_properties(cluster_guard PROPERTIES LABELS unit)
 
+# The chat soak's verdict on synthetic samples: tests/soak.
+add_test(NAME chat_soak_judge
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/soak/chat_soak_test.py)
+set_tests_properties(chat_soak_judge PROPERTIES LABELS unit)
+
 ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
 target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
 add_test(NAME ws_fuzz_corpus COMMAND ws_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/ws)
