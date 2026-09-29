@@ -313,6 +313,15 @@ target_link_libraries(e2ee_unit_tests PRIVATE ulw::e2ee_directory_memory)
 target_include_directories(e2ee_unit_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/tests/conformance)
 
+ulw_add_test_suite(e2ee_integration_tests integration
+    conformance/e2ee_directory_contract.cpp
+    integration/postgres_e2ee_test.cpp
+    integration/postgres_harness.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(e2ee_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
+target_include_directories(e2ee_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
     unit/auth/claims_test.cpp
