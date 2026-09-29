@@ -40,7 +40,8 @@ hls.on(Hls.Events.ERROR, (_, data) => {
   if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
     state.stalls.push(video.currentTime);
   } else {
-    state.errors.push(`${data.type}/${data.details}${data.fatal ? ' (fatal)' : ''}`);
+    const frag = data.frag ? ` level ${data.frag.level} sn ${data.frag.sn}` : '';
+    state.errors.push({ fatal: data.fatal, what: `${data.type}/${data.details}${frag}` });
   }
 });
 video.addEventListener('playing', () => { state.started = true; });
