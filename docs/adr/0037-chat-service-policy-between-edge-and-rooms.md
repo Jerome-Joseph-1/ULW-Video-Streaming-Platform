@@ -1,4 +1,4 @@
-# 0049. The chat service: policy between the client edge and the room plane
+# 0037. The chat service: policy between the client edge and the room plane
 
 Status: Accepted
 Date: 2026-09-29

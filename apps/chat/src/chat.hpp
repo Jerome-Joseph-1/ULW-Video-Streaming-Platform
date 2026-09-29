@@ -25,7 +25,7 @@ struct Limits {
     // 560 MiB at the very worst. The router adds its owner queues (64 MiB), node-channel
     // connections (32 x ~2.1 MiB) and recent message keys (10 MiB), and the chat service the
     // messages it keeps for resuming clients (32 MiB): about 730 MiB in all, inside a 1 GiB pod
-    // with room for the kernel's socket buffers (ADR-0036, ADR-0049). A connection that is only
+    // with room for the kernel's socket buffers (ADR-0036, ADR-0037). A connection that is only
     // listening costs a few KiB.
     std::size_t max_connections = 1280;
     // Output a client has not read yet. A delivery is at most 64 KiB, so this is four of the
