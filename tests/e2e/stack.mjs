@@ -164,6 +164,8 @@ export async function startStack() {
     ULW_S3_SECRET_ACCESS_KEY: config.secretKey,
     ULW_DATABASE_URL: databaseUrl,
   };
+  // A developer's container may run the suite as root, which the services refuse unless told.
+  const rootAllowed = { ULW_ALLOW_ROOT: '1' };
   const gatewayPort = await freePort();
   const gateway = new Service('gateway_server', bin('apps/gateway/gateway_server'), {
     PATH: process.env.PATH,
@@ -172,9 +174,9 @@ export async function startStack() {
     ULW_LISTEN_PORT: String(gatewayPort),
     ULW_DEV_JWKS_FILE: jwks,
     JWT_ISSUER: config.issuer,
-    // The browser and the test both reach it from 127.0.0.1, many connections at once.
-    ULW_MAX_CONNECTIONS_PER_IP: '448',
-    ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND: '1000',
+    // The per-client limits stay at their defaults: a real browser playing through them is
+    // part of what this suite shows.
+    ...rootAllowed,
   });
   const worker = new Service('transcode_worker', bin('apps/worker/transcode_worker'), {
     PATH: process.env.PATH,
@@ -182,6 +184,7 @@ export async function startStack() {
     ULW_NODE_ID: 'e2e-worker',
     ULW_SCRATCH_DIR: work,
     ULW_SANDBOX_BIN: bin('apps/worker/ulw_sandbox'),
+    ...rootAllowed,
   });
   await gateway.waitFor(`"port":${gatewayPort}`, 30_000);
 

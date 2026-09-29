@@ -3,8 +3,9 @@
 # - MinIO stands in for R2, so ULW_S3_ENDPOINT replaces ULW_R2_ACCOUNT_ID;
 # - the mock auth-service's certificate is signed by the sandbox CA, which replaces the system
 #   bundle libcurl reads, so the JWKS fetch is verified exactly as against Askedin's.
-# - kind's pod network is 10.244.0.0/16, not K3s's 10.42.0.0/16, and the load check's one host
-#   stands in for 500 clients, so one client address may have every connection in flight.
+# - kind's pod network is 10.244.0.0/16, not K3s's 10.42.0.0/16. The per-client limits stay at
+#   their defaults: the load check's 500 uploads from one host are authenticated, so its users'
+#   limits govern them, not their shared address's.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,8 +32,6 @@ spec:
                   key: ULW_S3_ENDPOINT
             - name: ULW_TRUSTED_PROXIES
               value: "10.244.0.0/16"
-            - name: ULW_MAX_CONNECTIONS_PER_IP
-              value: "448"
           volumeMounts:
             - name: sandbox-ca
               mountPath: /etc/ssl/certs/ca-certificates.crt

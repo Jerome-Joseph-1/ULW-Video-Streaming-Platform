@@ -190,6 +190,8 @@ class Stack:
             "ULW_BUCKET": self.bucket,
             "ULW_S3_ACCESS_KEY_ID": self.access,
             "ULW_S3_SECRET_ACCESS_KEY": self.secret,
+            # The soak may run as root on a development host.
+            "ULW_ALLOW_ROOT": "1",
         }
 
     def connection(self, timeout=60):

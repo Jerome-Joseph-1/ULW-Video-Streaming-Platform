@@ -29,13 +29,15 @@ serving TLS (method below), one host was enough to hurt everyone else:
 | | Reset it (`SO_LINGER` 0) before reading a byte | Accepted: no handshake, no TIME_WAIT, and the peer knows at once |
 | Where the client address comes from | The socket's peer | Accepted where the peer is the client |
 | | `X-Forwarded-For`, from any peer | Rejected: any client could name any address and walk past every limit |
-| | The rightmost `X-Forwarded-For` entry not itself a trusted proxy, from peers in `ULW_TRUSTED_PROXIES` only | Accepted: each proxy appends the address it was reached from, so that entry is the first one no client could have written |
+| | Walk from the right past every entry inside the trusted blocks, from peers in `ULW_TRUSTED_PROXIES` only | Rejected in review: on K3s, ServiceLB's masquerade or the cni0 bridge (10.42.0.1) can make Envoy see its downstream inside the trusted block, and the walk then steps over Envoy's own entry onto one the client wrote, letting it dodge its limits or spend a victim's |
+| | The entry `ULW_TRUSTED_PROXY_HOPS` from the right, from peers in `ULW_TRUSTED_PROXIES` only | Accepted: each proxy appends one entry, so the Nth from the right is the one the outermost proxy wrote; a wrong count, too few entries or a malformed one count the request against the proxy itself, which fails closed |
 | What an address counts as | The whole address | Rejected for IPv6: a client holds a /64 at least and could take 2^64 fresh buckets |
 | | IPv4 address, IPv6 /64 | Accepted |
 | Per-address limits behind the proxy | The connection limits, per connection | Rejected: Envoy's pooled connections carry any client's requests, and all come from Envoy |
-| | Requests in flight per forwarded address (20), `429` | Accepted; the new-connection rate is left to direct peers, since behind Envoy the handshake it protects is Envoy's |
+| | Requests in flight per forwarded address (20), `429`, for as long as they last | Rejected: a carrier-grade NAT puts hundreds of users on one address, and its busiest few would lock out the rest |
+| | The same, only until the request is authenticated | Accepted: a verified user is held to the per-user limits instead; what the address limit guards is the work done for nobody in particular. The new-connection rate is left to direct peers, since behind Envoy the handshake it protects is Envoy's |
 | Byte quota over | Declared `size_bytes` at create | Rejected: create-and-cancel would spend it without a byte sent, and the store's cost is the bytes |
-| | Each `PATCH`'s `Content-Length`, charged at admission | Accepted: refused before a byte is read, and exact for what a client sends |
+| | Each `PATCH`'s `Content-Length`, charged at admission, with what never arrives given back when the request ends | Accepted: refused before a byte is read, and what is kept is what was sent |
 | Quota refusal | `413` | Rejected: the request is not too large, the user is over a rate |
 | | `429` with `Retry-After` from the bucket | Accepted: the same answer, and the same client action, as every other rate |
 | Concurrent uploads per user across replicas | Count the user's claimed uploads in the claim's query | Rejected here: the catalog port's claim can only answer "held by someone else", which the gateway already turns into `409` and a resume; refusing a user's fourth upload needs an answer the port does not have, and the port is not this change's to alter |
@@ -44,8 +46,10 @@ serving TLS (method below), one host was enough to hurt everyone else:
 | | A fixed table that forgets the least recently seen unpinned entry | Accepted |
 | Error bodies | A small JSON code | Rejected: every status here already maps to one client action, and `Retry-After` carries the one number a client needs; a body is a second contract to keep stable |
 | | Empty, with `WWW-Authenticate` on `401` | Accepted |
-| Root with no `ULW_RUN_AS_USER` | Refuse to start | Rejected: every deployment starts unprivileged (the images' `USER 10001`, the units' `User=ulw`), so root is a developer or a test harness, which refusing would only break |
-| | Warn and stay root | Accepted |
+| Root with no `ULW_RUN_AS_USER` | Warn and stay root | Rejected in review: the process would serve as root on a warning nobody reads |
+| | Refuse with exit 2 unless `ULW_ALLOW_ROOT=1` | Accepted, as ADR-0035 had it: the test harnesses that run as root say so |
+| When to bind the port | After the drop, with everything else | Rejected: a port under 1024 could then not be bound at all |
+| | Before the drop, handed to the server | Accepted; the descriptor limit is raised before it too |
 
 ## Decision
 
@@ -53,7 +57,7 @@ serving TLS (method below), one host was enough to hurt everyone else:
 
 | Limit | Default | Derivation | Refusal |
 |---|---|---|---|
-| Connections per address (direct) or requests in flight per forwarded address | 20 | Brief; a household behind one NAT, each browser opening up to 6 per origin and each uploader 3 `PATCH`es and a control request | Reset at accept; `429`, `Retry-After: 1` behind the proxy |
+| Connections per address (direct), or unauthenticated requests in flight per forwarded address | 20 | Brief; a household behind one NAT, each browser opening up to 6 per origin and each uploader 3 `PATCH`es and a control request | Reset at accept; `429`, `Retry-After: 1` behind the proxy |
 | New connections per address (direct only) | 10 a second, 10 saved | Brief; clients reuse connections, and each new one is a handshake | Reset at accept |
 | Requests per user | 300 a minute, 300 saved | Brief; an uploader at 100 Mbit/s sends 8 MiB every 0.67 s, 90 `PATCH`es a minute however many run at once, which leaves 210 for playlists, polls and retries; caps one account at 300 x 8 MiB a minute, 40 MiB/s | `429`, `Retry-After` until one token |
 | Upload bytes per user | 100 GiB a day, 100 GiB saved | Two 50 GiB uploads (the largest allowed) a day, one and a full retry; 1.7% of the 600 Mbit/s port's 6.5 TB a day; refilled at 1.2 MiB/s, so a refused 16 MiB `PATCH` waits 13 s | `429`, `Retry-After` until the `PATCH` fits |
@@ -73,10 +77,18 @@ linear probing and backward-shift deletion, over a hash seeded per process so th
 cannot choose keys that collide. `rate_limit_entries` and `rate_limit_evictions_total` show both.
 
 **Trusted proxies.** `ULW_TRUSTED_PROXIES` takes CIDR blocks, none by default, so a forged
-header changes nothing unless an operator names Envoy. The Askedin overlays set K3s's default
-pod network, `10.42.0.0/16`, and the NetworkPolicy keeps every other pod in it from reaching
-the gateway; RUNBOOK step 1 checks the block. The sandbox sets kind's `10.244.0.0/16` and, since
-one host plays all 500 clients of the load check, 448 requests in flight per address.
+header changes nothing unless an operator names Envoy; /0 is refused and a block shorter than /8
+(IPv4) or /32 (IPv6) logs a warning. `ULW_TRUSTED_PROXY_HOPS` (default 1) says how many proxies
+stand in front, and the client is that many entries from the right. The Askedin overlays set
+K3s's default pod network, `10.42.0.0/16`, and one hop. The NetworkPolicy admits Envoy and the
+`monitoring` namespace, both inside that block; a monitoring pod could name any address, which
+only chooses the bucket its own unauthenticated requests go to. RUNBOOK step 1 checks the block
+and that Envoy's Service keeps clients' addresses (`externalTrafficPolicy: Local`); step 5.4
+checks, at debug level, that the gateway logs the tester's real public address. The sandbox
+sets kind's `10.244.0.0/16` and keeps every limit at its default.
+
+**Byte quota, best effort.** Each replica keeps it in the user table: it is counted per
+replica, forgotten on a restart, and reset for a user evicted from the table.
 
 **Errors.** Bodies stay empty. `401` carries `WWW-Authenticate: Bearer` when no token was sent,
 and `Bearer error="invalid_token"` when one was refused (RFC 6750 section 3).
@@ -88,7 +100,11 @@ no supplementary group or capability remains, no_new_privs reads back set, and `
 `setuid` discards; no_new_privs because the runtime image ships setuid-root `su` and `mount`,
 whose exec would otherwise hand root back without our ids showing it. The gateway and the
 worker call it from `main` after the configuration is read and before any thread, socket or job
-exists, when root, with `ULW_RUN_AS_USER`. The tests need root; CI runs them with `sudo`.
+exists, when root, with `ULW_RUN_AS_USER`; the gateway binds its listening socket and raises
+its descriptor limit first and hands the socket to the server, so a port under 1024 works. Root
+with no user named exits 2 unless `ULW_ALLOW_ROOT=1`. The TLS certificate and key are read
+after the drop, at start and on SIGHUP, so they must be readable by that user. The tests need
+root; CI runs them with `sudo`.
 
 ## Measurements
 
@@ -134,12 +150,14 @@ with larger numbers: flood p99 327 ms before and 13 to 70 ms after.
 - One address or one account can no longer take the gateway from everyone else; many
   addresses still can, up to the process-wide limits. A distributed flood is for Envoy and what
   is in front of it; a distributed slowloris is still cut off at 10 s by the header timer.
-- Clients behind one NAT share its 20. A large office on one address can meet it, and sees
-  resets directly or `429` through Envoy.
+- Clients behind one NAT share its 20 connections when they reach the gateway directly. Through
+  Envoy only their unauthenticated requests share it; signed-in users are held to their own.
 - Every limit is per replica: two replicas double what one user or address can reach.
 - A wrong `ULW_TRUSTED_PROXIES` makes every client look like Envoy and refuses it past 20;
-  `connections_rejected_total{reason="ip_connections"}` shows it at once.
-- Load tools on one host need the per-address limits raised (tests/load/README.md), and the
-  soak and the sandbox set them.
+  `connections_rejected_total{reason="ip_connections"}` shows it at once. A wrong hop count
+  counts clients as the wrong address, which RUNBOOK step 5.4 catches before prod.
+- Load tools on one host that open connections directly need the per-address limits raised
+  (tests/load/README.md), and the soak sets them. Test harnesses that run as root set
+  `ULW_ALLOW_ROOT=1`.
 - Reopen if the catalog port gains a way to refuse a claim for the user's limit: the concurrent
   upload limit could then hold across replicas at no extra round trip.
