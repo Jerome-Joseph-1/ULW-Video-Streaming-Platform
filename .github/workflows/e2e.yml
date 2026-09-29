@@ -49,6 +49,26 @@ jobs:
           probe && echo "restricted: namespaces usable" || echo "restricted: namespaces refused"
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           probe
+      # stunner_check.py's client on the outside network (198.18.0.0/24, sandbox.sh) must reach
+      # 198.18.0.1:3478 through Docker's DNAT and keep its source address. Docker before 29,
+      # which this image ships, does neither by default: while the userland proxy is on, its nat
+      # rules skip DNAT for packets arriving from any Docker bridge, so docker-proxy takes them
+      # and forwards them from the kind network's gateway address; with the proxy off, its bridge
+      # isolation drops the DNATed packet on the way into the kind network. The proxy off and
+      # DNATed packets from the outside network accepted in DOCKER-USER, the chain Docker leaves
+      # to the host, give the path Docker 29 has out of the box; replies pass Docker's own
+      # conntrack rule.
+      - name: Let the outside network reach the published ports through DNAT
+        run: |
+          version=$(docker version --format '{{.Server.Version}}')
+          echo "docker $version"
+          if (( ${version%%.*} >= 29 )); then exit 0; fi
+          config=/etc/docker/daemon.json
+          { sudo cat "$config" 2>/dev/null || echo '{}'; } \
+            | jq '. + {"userland-proxy": false}' | sudo tee "$config.new"
+          sudo mv "$config.new" "$config"
+          sudo systemctl restart docker
+          sudo iptables -I DOCKER-USER -s 198.18.0.0/24 -m conntrack --ctstate DNAT -j ACCEPT
       - run: make e2e-up
         timeout-minutes: 45
       - run: make e2e-test
