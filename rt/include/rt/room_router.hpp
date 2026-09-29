@@ -50,6 +50,9 @@ enum class RouteError : std::uint8_t {
     Unavailable,
     // The room's owner has more writes queued than it takes.
     Busy,
+    // The sender already sent a message under this key with another body. Nothing was
+    // sequenced or delivered; the key is spent.
+    Conflict,
 };
 
 // A join's answer: the room's latest seq known here, the head a member that missed messages

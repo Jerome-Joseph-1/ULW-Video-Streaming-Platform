@@ -365,13 +365,35 @@ target_link_libraries(room_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg
 target_include_directories(room_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
+# The message store's laws, on the in-memory store and on Postgres (skipped without one).
+ulw_add_test_suite(message_store_conformance_tests conformance
+    conformance/message_store_conformance_test.cpp
+    integration/postgres_harness.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(message_store_conformance_tests PRIVATE ulw::messages_memory ulw::pg_rooms
+    ulw::pg_store PkgConfig::LIBPQ)
+target_include_directories(message_store_conformance_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
+# Its schema, plans and timings, and the owner's fenced write of a message, on a live Postgres
+# as the suites above.
+ulw_add_test_suite(message_store_integration_tests integration
+    integration/message_store_test.cpp
+    integration/postgres_harness.cpp
+    integration/sequenced_append_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(message_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg_store
+    PkgConfig::LIBPQ)
+target_include_directories(message_store_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
 ulw_add_test_suite(chat_unit_tests unit
     unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
     unit/chat/envelope_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
-target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 # The M16 acceptance: three chat_server processes on the Postgres the suites above use.

@@ -1,9 +1,8 @@
 # Chat
 
-> **Draft: changes until milestone M19 merges.** What follows is the protocol on `main` today
-> (M16). M17 replaces the message envelope (see [Coming in M17](#coming-in-m17)), M18 adds
-> presence and M19 adds history and membership checks. Nothing here is a compatibility promise
-> yet.
+> **Draft until phase 2 is tagged.** Messages, acks, resume, history and member lists below are
+> what `main` does. M18 adds presence messages; nothing else here is expected to change before
+> the tag, but it is not a compatibility promise until then.
 
 Chat is its own service, `chat_server`, separate from the video gateway (ADR-0019). Clients hold
 one WebSocket to it and send JSON messages in text frames.
@@ -33,9 +32,9 @@ Upgrade refusals (the connection is closed after the response, and the body is e
 A browser cannot set `Authorization` on a WebSocket, so a browser client uses the cookie from a
 listed origin. Native apps send the bearer header.
 
-## Messages as of main (M16)
+## Messages
 
-<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/session.cpp -->
+<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0054-messages-stored-with-their-seq.md -->
 
 Every message is one JSON object in one text frame. Unknown `type`s and unknown fields are
 refused with an `error`, not ignored. Room ids are canonical lowercase UUIDs.
@@ -44,41 +43,99 @@ Client to server:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `join` | `room` | Subscribe this connection to the room. Joining an unknown room creates it. |
-| `send` | `room`, `body` (string), optional `ref` (non-negative integer) | Post a message. `ref` is echoed in the answer so the client can match it. |
+| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names; `"live"` joins only a room the server opened (see [Member lists](#member-lists)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
+| `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
+| `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 
 Server to client:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `joined` | `room` | The join succeeded; messages for the room follow. |
-| `sent` | `room`, `seq`, and `ref` if the send had one | The message was sequenced as `seq` in that room. |
-| `message` | `room`, `seq`, `sender`, `body` | A message in the room, including your own. `sender` is the poster's user id ([auth.md](auth.md)). |
-| `error` | `reason`, plus `room` and `ref` when known | A command failed. |
+| `joined` | `room`, `seq` | The join succeeded. `seq` is the room's latest seq: a client whose last seq is lower missed messages. |
+| `sent` | `room`, `id`, `seq` | The message was sequenced as `seq`. A resend with the same `id` gets the same answer. |
+| `message` | `room`, `seq`, `sender`, `id`, `body` | A message in the room, your own included, live, resumed or from history. `sender` is the poster's user id ([auth.md](auth.md)). |
+| `history` | `room`, `count` | Ends the answer to a `history` command, after its `count` messages. `0`: nothing more in that direction. |
+| `error` | `reason`, plus `room` and `id` when known, `retry_after_ms` for `rate_limited` | A command failed. |
 
 ```json
-{"type":"join","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d"}
-{"type":"joined","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d"}
-{"type":"send","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","ref":1,"body":"hello"}
-{"type":"sent","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","ref":1,"seq":7}
-{"type":"message","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","seq":7,"sender":"user-42","body":"hello"}
+{"type":"join","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","after":41}
+{"type":"joined","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","seq":44}
+{"type":"send","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W","body":"aGVsbG8"}
+{"type":"sent","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W","seq":45}
+{"type":"message","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","seq":45,"sender":"user-42","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W","body":"aGVsbG8"}
+{"type":"history","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","before":42,"limit":20}
+{"type":"history","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","count":20}
 ```
 
-`body` is opaque to the service: it is carried and returned byte for byte (re-escaped as JSON),
-never parsed, logged or indexed. Within a room, `seq` gives every client the same total order.
+`body` is opaque to the service: any bytes, plaintext or ciphertext, carried, stored and returned
+exactly as sent, never parsed, logged or indexed. Within a room, `seq` rises by one per message
+and gives every client the same total order. Every seq is stored with its message before anyone
+is sent it, so history has every seq that was ever delivered.
 
-`error` reasons:
+**Resends.** After `unavailable`, send the same message again with the same `id`, on this or any
+connection, to any node: it is sequenced once, answered with the first seq, and delivered once.
+Reusing an `id` for a different message is refused with `conflict`: nothing is sequenced or
+delivered, and the `id` stays with the first message. Send the new message under a new `id`.
+
+### Resume and history
+
+<!-- apps/chat/src/chat_service.cpp (replay, history, page_read) -->
+
+- **A page** is the `count` `message` frames that come immediately before its `history` frame:
+  the service sends them together, with nothing between them. Other messages of the room may
+  arrive before or after the page, never inside it.
+- **Resume.** Rejoin with `"after"` set to the last seq you have. The node sends what it still
+  keeps above it (up to 128 KiB of the newest), then live messages. It keeps a room's latest
+  messages only while it is in the room and for 30 s after its last client left.
+- **Gaps.** If `joined`'s `seq`, or the next message's, is more than one above the last seq you
+  have, fill the gap with `history` and `"after"`, page after page, until a page's `count` is
+  `0` or you reach what you already hold. A client applying MLS commits applies none past a gap
+  until it is filled.
+- **Scrolling back.** `history` without a cursor gives the newest messages; each next page is
+  `"before"` the lowest seq you got. A page ends early, with fewer than `limit` messages, when
+  the connection already has much unread output (a page queues at most 128 KiB behind it);
+  ask again from where it stopped. When it cannot send even one message it answers `busy`.
+- **Cost.** A `history` command, and a rejoin with `after`, count against the same allowance as
+  joins: a burst of 64, then one a second.
+
+### Member lists
+
+<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms) -->
+
+Who may join a room depends on its kind, which is recorded once and never changes:
+
+- **Direct and group chats** (`"kind":"direct"` or `"group"`, the default) admit only their
+  members. Anyone else's `join` is refused with `not_member`, so they can neither send to the
+  room nor read its history. A direct or group chat with no members admits nobody. The first
+  join of a room with no kind recorded records the kind it names; so does listing its first
+  member (as a group chat).
+- **A stream's live chat** admits anyone. Only the server opens one, before anyone joins it; a
+  client cannot. A join that says `"kind":"live"` is admitted in a room the server opened, and
+  refused with `not_live` in any other, which it leaves as it was. Joins of a live room need
+  not name the kind.
+
+No client command changes a member list; they are set by the service's operators, and later by
+the product, in the database. A member removed from the list keeps receiving the room's
+messages, and can read its history, until that connection closes; the next `join` is refused.
+
+### Errors
 
 | `reason` | Meaning | Client action |
 |---|---|---|
 | `not_json` | The frame is not JSON | Fix the client |
-| `malformed` | Not an object, unknown or missing `type`, missing field, unknown field, wrong value type | Fix the client |
+| `malformed` | Not an object, unknown or missing `type`, missing or unknown field, a value of the wrong kind, both `before` and `after`, a `limit` out of range | Fix the client |
 | `bad_room` | `room` is not a canonical lowercase UUID | Fix the client |
-| `not_joined` | `send` to a room this connection has not joined | Join first |
+| `bad_id` | `id` is not a message id | Fix the client |
+| `bad_body` | `body` is not base64url | Fix the client |
+| `not_member` | The room has a member list without you | Do not retry |
+| `not_live` | `"kind":"live"` for a room the server has not opened as a stream's live chat | Do not retry; join without `kind` if it is a group chat you are a member of |
+| `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
 | `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |
-| `busy` | Join rate exceeded, or too many sends awaiting answers, or the room's owner queue is full | Back off and retry |
-| `unavailable` | The room's owner could not be reached | Retry; the send may or may not have been sequenced (M16 has no dedupe) |
-| `fenced` | The room changed owners while the write was in flight | Retry |
+| `rate_limited` | Past the send allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered |
+| `busy` | Join or history allowance exceeded, too many sends awaiting answers, the room's owner queue is full, or too much unread output for a history page | Back off and retry |
+| `unavailable` | The room's owner or the store could not be reached | Retry; resend a `send` with the same `id` |
+| `fenced` | The room changed owners while the write was in flight | Retry with the same `id` |
+| `conflict` | This `id` was already used for a different message in the room | Send it under a new `id` |
 
 ## Limits
 
@@ -91,51 +148,13 @@ never parsed, logged or indexed. Within a room, `seq` gives every client the sam
 | Control frames | 8 per read; token bucket of 20, refilling 10/s | Close `1008` |
 | Rooms per connection | 64 | `error` `too_many_rooms` |
 | New-room joins per user | Burst 64, then 1/s, across all the user's connections on a node | `error` `busy` |
+| Sends | Burst 10, then 2/s, per user across the user's connections on a node | `error` `rate_limited` with `retry_after_ms` |
 | Sends awaiting an answer | 128 KiB per connection, each counted as body + 256 bytes | `error` `busy` |
+| Resends recognised | For about a minute on the node that sequenced or delivered them; always, by the store, once sequenced | |
+| Resume and history output | 128 KiB queued behind a connection's unread output | Shorter page, or `busy` |
+| History pages and resumes | Counted with joins: burst 64, then 1/s per user | `error` `busy` |
+| Lossy delivery | Skipped while more than 64 KiB behind | Gap in seqs; fill from history |
 | Unread output | 256 KiB per connection | Connection closed; reconnect and rejoin |
 | Handshake | 10 s from accept to a complete upgrade request | Connection closed |
 | Idle | The server pings after 30 s of silence and closes after 75 s with nothing received | Answer pings (browsers do this themselves) |
 | Server drain | Close `1001`, then 5 s | Reconnect |
-
-M16 has no resume: after a reconnect a client rejoins its rooms and receives only new messages.
-
-## Coming in M17
-
-<!-- lane/m17-chat: apps/chat/src/envelope.hpp, docs/adr/0049-chat-service-policy-between-edge-and-rooms.md -->
-
-M17 replaces the envelope. It is not on `main` yet; build against it only once it merges. The
-shapes as they stand on the M17 branch:
-
-Client to server:
-
-```json
-{"type":"join","room":"<uuid>","after":41,"delivery":"durable"}
-{"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
-```
-
-Server to client:
-
-```json
-{"type":"joined","room":"<uuid>"}
-{"type":"sent","room":"<uuid>","id":"<message id>","seq":42}
-{"type":"message","room":"<uuid>","seq":42,"sender":"<sub>","id":"<message id>","body":"<base64url>"}
-{"type":"error","reason":"rate_limited","room":"<uuid>","id":"<message id>","retry_after_ms":500}
-```
-
-What changes:
-
-- **Bodies are bytes**, sent as base64url without padding (RFC 4648 section 5), so ciphertext can
-  be carried. A body that is not base64url is refused with `bad_body`.
-- **Message ids replace `ref`.** Every `send` carries an `id` of 1 to 64 characters from
-  `A-Z a-z 0-9 _ -`, unique per sender and room (use a UUID). A resend with the same id is
-  answered with the first send's `seq` and delivered once, for about a minute. A bad id is refused
-  with `bad_id`. Reusing an id for a different message loses the second one.
-- **Acks.** `sent` carries the id and the seq.
-- **Resume.** `join` with `"after":N` delivers, after `joined`, the messages this node still
-  holds above `N` (up to 128 KiB of the newest), then live ones. Seqs rise by one per message; a
-  jump is a gap, to be filled from history once M19 provides it.
-- **Delivery mode.** `"delivery":"lossy"` on `join` skips messages while the connection is more
-  than 64 KiB behind instead of closing it. `"durable"` is the default.
-- **Rate limit.** 10 sends, refilling 2 per second, per user per node. Past it the send is
-  answered `error` with `reason` `rate_limited` and `retry_after_ms`, and is neither sequenced nor
-  delivered.

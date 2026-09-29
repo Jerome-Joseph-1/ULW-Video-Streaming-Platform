@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/ports/message_store.hpp"
 #include "core/util/time.hpp"
 #include "rt/message_key.hpp"
 #include "rt/room_router.hpp"
@@ -20,13 +21,24 @@
 //       "after":<seq>        optional: also send what this node still holds after that seq
 //       "delivery":"lossy"   optional: skip messages while this connection is behind, rather
 //                            than be closed for it ("durable", the default)
+//       "kind":"live"        optional: what the room is. "direct" or "group" (the default)
+//                            admit only members, and the first join of a room with no kind
+//                            recorded records it; "live" admits anyone, but only in a room
+//                            the server recorded as live, and is refused with not_live
+//                            elsewhere
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
+//   {"type":"history","room":"<uuid>"}   the room's stored messages, from the store, not this
+//       "before":<seq>       optional: those below it, newest first (the default: the newest)
+//       "after":<seq>        optional, instead of before: those above it, oldest first
+//       "limit":<n>          optional: 1 to 100, 50 when absent
 // Server to client:
 //   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
 //                                                      whose last seq is lower missed messages
 //   {"type":"sent","room":"<uuid>","id":"<message id>","seq":<integer>}
 //   {"type":"message","room":"<uuid>","seq":<integer>,"sender":"<sub>","id":"<message id>",
 //    "body":"<base64url>"}
+//   {"type":"history","room":"<uuid>","count":<n>}   ends a history answer, after its n
+//                                                   messages; 0 when there are no more
 //   {"type":"error","reason":"<code>"}          with "room" and "id" when known, and
 //                                               "retry_after_ms" when the reason is rate_limited
 // A message id is 1 to 64 of [A-Za-z0-9_-], chosen by the sender and unique per room: sending
@@ -43,6 +55,7 @@ struct Join {
     core::RoomId room;
     std::optional<std::uint64_t> after;
     Delivery delivery = Delivery::Durable;
+    core::ports::RoomKind kind = core::ports::RoomKind::GroupChat;
 };
 
 struct Send {
@@ -51,7 +64,21 @@ struct Send {
     std::vector<std::byte> body;
 };
 
-using Command = std::variant<Join, Send>;
+// A history page is sent to the client as message frames, so it counts against the same output
+// the client has not read yet; 100 ordinary messages are tens of kilobytes, and the service cuts
+// a page of larger ones short to what the client can take (ServiceLimits::replay_budget).
+inline constexpr std::size_t kMaxHistoryLimit = 100;
+inline constexpr std::size_t kDefaultHistoryLimit = 50;
+
+struct History {
+    core::RoomId room;
+    // Neither: the newest messages, newest first.
+    std::optional<std::uint64_t> before;
+    std::optional<std::uint64_t> after;
+    std::size_t limit = kDefaultHistoryLimit;
+};
+
+using Command = std::variant<Join, Send, History>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -73,6 +100,8 @@ void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head
 void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                 std::uint64_t seq);
 void write_message(std::string& out, const rt::Message& message);
+// Ends the answer to a history command, after its `count` messages.
+void write_history(std::string& out, const core::RoomId& room, std::size_t count);
 void write_error(std::string& out, std::string_view reason,
                  const std::optional<core::RoomId>& room = std::nullopt,
                  const std::optional<rt::MessageKey>& id = std::nullopt);

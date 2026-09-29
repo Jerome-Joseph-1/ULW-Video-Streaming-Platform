@@ -11,9 +11,8 @@
 - **Response JSON (gateway).** Objects are written by the server with a fixed field set. Field
   order is not significant.
 - **Chat envelope.** No version field. The server refuses unknown `type`s and unknown fields
-  with `error` `malformed`, so a client cannot send fields the server does not know. The M16
-  envelope is explicitly not a compatibility promise (ADR-0036); M17 replaces it
-  ([chat.md](chat.md#coming-in-m17)).
+  with `error` `malformed`, so a client cannot send fields the server does not know. The envelope
+  ([chat.md](chat.md#messages)) is a draft until phase 2 is tagged (ADR-0036, ADR-0043).
 - **Playlists.** HLS as the worker writes it: fMP4 segments, an `EXT-X-MAP` init segment, a
   master with one variant per rendition. Rendition names are `<height>p`.
 
