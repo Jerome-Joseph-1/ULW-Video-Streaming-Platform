@@ -58,8 +58,13 @@ UPDATE room_state SET owner_generation = claimed.owner_generation
   FROM claimed WHERE room_state.room_id = $1
 RETURNING room_state.owner_generation, room_state.last_seq)sql";
 
-constexpr Sql kReadOwner =
-    "SELECT owner_node, owner_generation FROM room_assignments WHERE room_id = $1";
+// The owner, and where the room's count stands: the lookup may find the asking node itself
+// holding the room (its own claim, racing this one, committed first), and it starts its head
+// there as after any claim.
+constexpr Sql kReadOwner = R"sql(
+SELECT a.owner_node, a.owner_generation, s.last_seq
+  FROM room_assignments a JOIN room_state s USING (room_id)
+ WHERE a.room_id = $1)sql";
 
 // Any number of rooms is one statement.
 constexpr Sql kClaimStale = R"sql(
@@ -254,10 +259,11 @@ private:
         }
         const auto node = r.get(0, 0).transform(core::NodeId::parse);
         const auto generation = generation_at(r, 0, 1);
-        if (!node || !*node || !generation) {
+        const auto last_seq = seq_at(r, 0, 2);
+        if (!node || !*node || !generation || !last_seq) {
             return std::unexpected(StoreError::Corrupt);
         }
-        return Ownership{.node = **node, .generation = *generation, .last_seq = 0};
+        return Ownership{.node = **node, .generation = *generation, .last_seq = *last_seq};
     }
 
     std::optional<Statement> finish(StoreResult<Ownership> result) noexcept {

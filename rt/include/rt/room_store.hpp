@@ -39,8 +39,8 @@ inline constexpr core::Millis kOwnerStaleAfter{5'000};
 struct Ownership {
     core::NodeId node;
     std::uint64_t generation = 0;
-    // The room's last_seq as the answer that made or gave the room to the asking node found it;
-    // 0 in any other answer. A new owner starts counting its head from it, not from 0.
+    // The room's last_seq as resolve's answer found it; 0 in a notification or read_owners. When
+    // the answer names the asking node, it starts counting its head there, not from 0.
     std::uint64_t last_seq = 0;
 
     // Who holds the room, under which generation: last_seq describes an answer, not the owner.

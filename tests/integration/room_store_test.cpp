@@ -294,6 +294,8 @@ TEST_P(RoomStoreTest, ANodeFindingARoomRecordedAsItsOwnTakesItAgainUnderANewGene
 TEST_P(RoomStoreTest, ALookupByANodeWhoseOwnClaimIsInFlightKeepsThatClaimsGeneration) {
     const core::RoomId room = new_room();
     ASSERT_TRUE(resolve(room, a_));
+    ASSERT_EQ(append(room, 1), Seq{1});
+    ASSERT_EQ(append(room, 1), Seq{2});
     go_quiet(room);
     ASSERT_TRUE(ask<void>(
         [&](auto done) { store_->advertise(b_, "127.0.0.1:9201", run_, std::move(done)); }));
@@ -323,8 +325,10 @@ TEST_P(RoomStoreTest, ALookupByANodeWhoseOwnClaimIsInFlightKeepsThatClaimsGenera
     ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return looked_up.has_value(); }));
 
     EXPECT_EQ(*looked_up, (Ownership{.node = b_, .generation = 2}));
+    // Found by reading, not by its own claim: the count still comes with it.
+    EXPECT_EQ((*looked_up)->last_seq, 2U);
     EXPECT_EQ(fence(room), "2");
-    EXPECT_EQ(append(room, 2), Seq{1});
+    EXPECT_EQ(append(room, 2), Seq{3});
 }
 
 TEST_P(RoomStoreTest, ReadingOwnersCreatesAndClaimsNothing) {
