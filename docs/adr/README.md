@@ -59,4 +59,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted |
 | [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted |
 | [0055](0055-a-live-recording-is-remuxed-from-the-stored-segments.md) | A live recording is remuxed from its stored segments into one object, and queued once per stream | Accepted |
+| [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
 | [0057](0057-live-chat-lossy-and-bounded.md) | A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere | Accepted |

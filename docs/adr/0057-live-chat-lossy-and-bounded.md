@@ -115,7 +115,7 @@ How senders are limited in a room of thousands:
 - **Memory per viewer.** A lossy client costs its node at most 64 KiB of unsent output plus
   one message, 64 KiB of kernel buffer, and one seq; the messages it is owed are the room's,
   kept once, inside ADR-0043's 32 MiB. The node's budget (ADR-0036, ADR-0043) grows only by
-  the kernel's 80 MiB, to 810 MiB in a 1 GiB pod, and does not grow with the audience or with
+  the kernel's 80 MiB, to 820 MiB in a 1 GiB pod, and does not grow with the audience or with
   how long a viewer stalls.
 - **Senders.** A live chat message is at most 2000 bytes (500 characters of up to four UTF-8
   bytes; `too_large` beyond). Besides each user's bucket (10, then 2 a second), each node lets

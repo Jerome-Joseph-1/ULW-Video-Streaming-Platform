@@ -5,6 +5,9 @@ ulw_add_library(chat_lib
     src/envelope.cpp
     src/key_fetcher.cpp
     src/live_chat.cpp
+    src/presence.cpp
+    src/presence_room.cpp
+    src/sha256.cpp
     src/session.cpp
     src/token_bucket.cpp)
 target_include_directories(chat_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)

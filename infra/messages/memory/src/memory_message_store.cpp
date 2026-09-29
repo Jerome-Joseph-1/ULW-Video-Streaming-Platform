@@ -1,5 +1,7 @@
 #include "infra/messages/memory_message_store.hpp"
 
+#include "rt/room_store.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <ranges>
@@ -65,6 +67,9 @@ void MemoryMessageStore::append(const core::RoomId& room, std::uint64_t seq,
     std::pair<std::string, std::string> sender_key{sender.view(), key};
     if (body.size() > core::ports::kMaxMessageBody) {
         result = std::unexpected(MessageStoreError::TooLarge);
+    } else if (rt::is_ephemeral_room(room)) {
+        // Its seq is taken; its message is not kept.
+        r.last = std::max(r.last, seq);
     } else if (const auto stored = r.keys.find(sender_key); stored != r.keys.end()) {
         // The same message again is answered with its seq; another under its key is refused.
         const bool same = r.messages.at(stored->second).body == body;
@@ -117,8 +122,11 @@ void MemoryMessageStore::history_after(const core::RoomId& room, std::uint64_t a
 
 void MemoryMessageStore::last_seq(const core::RoomId& room, MessageCallback<std::uint64_t> done) {
     std::uint64_t seq = 0;
-    if (const auto it = rooms_.find(room); it != rooms_.end() && !it->second.messages.empty()) {
-        seq = it->second.messages.rbegin()->first;
+    if (const auto it = rooms_.find(room); it != rooms_.end()) {
+        seq = it->second.last;
+        if (!it->second.messages.empty()) {
+            seq = std::max(seq, it->second.messages.rbegin()->first);
+        }
     }
     defer([done = std::move(done), seq]() mutable noexcept { done(seq); });
 }

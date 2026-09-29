@@ -25,6 +25,7 @@
 #include <exception>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <print>
 #include <string>
 #include <system_error>
@@ -208,14 +209,19 @@ int run() {
         return fail("register the node listener", errno_text(r.error()));
     }
 
+    chat::Limits chat_limits;
+    if (const std::optional<core::Millis> grace = config->presence_grace) {
+        chat_limits.presence.grace = *grace;
+    }
     s.server = std::make_unique<chat::ChatServer>(
-        chat::Deps{.reactor = *s.reactor,
+        chat::Deps{.node = config->node,
+                   .reactor = *s.reactor,
                    .router = *s.router,
                    .messages = *s.messages,
                    .verifier = *s.verifier,
                    .clock = s.clock},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},
-        chat::Limits{});
+        chat_limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.server);
     if (!signals) {
         return fail("signalfd", errno_text(signals.error()));

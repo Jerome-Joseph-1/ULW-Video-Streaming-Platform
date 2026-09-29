@@ -12,6 +12,7 @@
 
 #include "chat.hpp"
 #include "chat_service.hpp"
+#include "presence.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -104,6 +105,7 @@ private:
     std::optional<core::UserId> user_;
     // Set by the upgrade.
     std::optional<ClientId> client_;
+    std::optional<PresenceClientId> presence_;
 
     codec::ws::Decoder decoder_;
     std::uint32_t control_tokens_;

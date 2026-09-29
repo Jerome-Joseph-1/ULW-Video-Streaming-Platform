@@ -82,6 +82,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` | same | | |
 | `ULW_CONFIG` | optional TOML file | same | | See above |
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
+| `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
 | `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET`, `ULW_ALLOWED_ORIGINS` | | | required, required (32+ bytes), optional | Chat has no Askedin overlay yet |
 
@@ -244,11 +245,15 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `protocol_errors_total`, `control_floods_total`, `slow_consumers_total`,
 `allocation_failures_total`, `rooms_active`, `rooms_joined`, `room_reassignments_total`,
 `fenced_writes_total`, `forwards_total`, `forward_timeouts_total`, `peers_lost_total`,
-`peers_refused_total`, `slow_peers_total`. Chat is a draft ([chat.md](chat.md)).
+`peers_refused_total`, `slow_peers_total`, `presence_rooms`, `presence_events_sent_total`,
+`presence_events_received_total`, `presence_notifications_total`, `presence_expired_total`
+(announcements and watching nodes dropped because they stopped being renewed, normally a node
+that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
+node repeated what it had said there). Chat is a draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0057): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at
-64 KiB, so chat's pod memory is bounded at about 810 MiB of its 1 GiB, kernel buffers included.
+64 KiB, so chat's pod memory is bounded at about 820 MiB of its 1 GiB, kernel buffers included.
 
 ## Shutdown
 

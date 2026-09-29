@@ -3,6 +3,7 @@
 
 #include "envelope.hpp"
 #include "live_chat.hpp"
+#include "presence_room.hpp"
 
 #include <algorithm>
 #include <gtest/gtest.h>
@@ -175,6 +176,37 @@ TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
               std::unexpected(EnvelopeError::NotJson));
 }
 
+TEST(Envelope, WatchAndUnwatchNameAUser) {
+    const auto w = chat::parse_command(R"({"type":"watch","user":"auth0|bob"})");
+    ASSERT_TRUE(w);
+    EXPECT_EQ(std::get<chat::Watch>(*w).user.view(), "auth0|bob");
+    const auto u = chat::parse_command(R"({"user":"auth0|bob","type":"unwatch"})");
+    ASSERT_TRUE(u);
+    EXPECT_EQ(std::get<chat::Unwatch>(*u).user.view(), "auth0|bob");
+
+    EXPECT_EQ(chat::parse_command(R"({"type":"watch"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"watch","user":7})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"watch","user":"bob","room":"x"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"watch","user":"bob smith"})"),
+              std::unexpected(EnvelopeError::BadUser));
+    EXPECT_EQ(chat::parse_command(R"({"type":"unwatch","user":""})"),
+              std::unexpected(EnvelopeError::BadUser));
+}
+
+TEST(Envelope, APresenceRoomCannotBeJoinedSentToOrReadAsAChatRoom) {
+    const std::string presence = chat::presence_room(*core::UserId::parse("bob")).to_string();
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","room":")" + presence + R"("})"),
+              std::unexpected(EnvelopeError::BadRoom));
+    EXPECT_EQ(
+        chat::parse_command(R"({"type":"send","room":")" + presence + R"(","id":"a","body":""})"),
+        std::unexpected(EnvelopeError::BadRoom));
+    EXPECT_EQ(chat::parse_command(R"({"type":"history","room":")" + presence + R"("})"),
+              std::unexpected(EnvelopeError::BadRoom));
+}
+
 TEST(Envelope, AMessageReturnsItsBodyBytesExactlyAndItsId) {
     const std::string body("line one\n\"two\"\\ \x7f \x00\xfe", 20);
     const auto sender = *core::UserId::parse("auth0|alice");
@@ -242,6 +274,16 @@ TEST(Envelope, RepliesAreTheDocumentedShapes) {
     out.clear();
     chat::write_error(out, chat::reason(EnvelopeError::NotJson));
     EXPECT_EQ(out, R"({"type":"error","reason":"not_json"})");
+    const auto bob = *core::UserId::parse("auth0|bob");
+    out.clear();
+    chat::write_presence(out, "watching", bob, false);
+    EXPECT_EQ(out, R"({"type":"watching","user":"auth0|bob","status":"offline"})");
+    out.clear();
+    chat::write_presence(out, "presence", bob, true);
+    EXPECT_EQ(out, R"({"type":"presence","user":"auth0|bob","status":"online"})");
+    out.clear();
+    chat::write_user_error(out, "too_many_watches", bob);
+    EXPECT_EQ(out, R"({"type":"error","reason":"too_many_watches","user":"auth0|bob"})");
 }
 
 } // namespace
