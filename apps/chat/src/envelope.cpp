@@ -1,11 +1,13 @@
 #include "envelope.hpp"
 
 #include "core/util/json.hpp"
+#include "infra/auth/base64url.hpp"
 
 #include <algorithm>
 #include <array>
 #include <format>
 #include <iterator>
+#include <span>
 
 namespace chat {
 
@@ -33,27 +35,60 @@ bool only(const core::json::Value& message, std::initializer_list<std::string_vi
     });
 }
 
-std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "ref", "body"})) {
+std::optional<std::string_view> string_of(const core::json::Value& message, std::string_view key) {
+    const core::json::Value* v = message.find(key);
+    return v == nullptr ? std::nullopt : v->as_string();
+}
+
+std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "after", "delivery"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     auto room = room_of(message);
     if (!room) {
         return std::unexpected(room.error());
     }
-    const core::json::Value* body = message.find("body");
-    const auto text = body == nullptr ? std::nullopt : body->as_string();
-    if (!text) {
-        return std::unexpected(EnvelopeError::Malformed);
-    }
-    std::optional<std::uint64_t> ref;
-    if (const core::json::Value* r = message.find("ref")) {
-        ref = r->as_u64();
-        if (!ref) {
+    Join join{.room = *room, .after = std::nullopt, .delivery = Delivery::Durable};
+    if (const core::json::Value* after = message.find("after")) {
+        join.after = after->as_u64();
+        if (!join.after) {
             return std::unexpected(EnvelopeError::Malformed);
         }
     }
-    return Send{.room = *room, .ref = ref, .body = std::string(*text)};
+    if (message.find("delivery") != nullptr) {
+        const auto delivery = string_of(message, "delivery");
+        if (delivery == "lossy") {
+            join.delivery = Delivery::Lossy;
+        } else if (delivery != "durable") {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+    }
+    return join;
+}
+
+std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "id", "body"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    const auto id_text = string_of(message, "id");
+    const auto body_text = string_of(message, "body");
+    if (!id_text || !body_text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto id = rt::MessageKey::parse(*id_text);
+    if (!id) {
+        return std::unexpected(EnvelopeError::BadId);
+    }
+    // Transfer encoding only: what the bytes are is the clients' business.
+    auto body = infra::auth::decode_base64url_bytes(*body_text);
+    if (!body) {
+        return std::unexpected(EnvelopeError::BadBody);
+    }
+    return Send{.room = *room, .id = *id, .body = std::move(*body)};
 }
 
 void append_room(std::string& out, const core::RoomId& room) {
@@ -61,6 +96,13 @@ void append_room(std::string& out, const core::RoomId& room) {
     room.format_to(text);
     out += R"("room":")";
     out.append(text.data(), text.size());
+    out += '"';
+}
+
+// Message ids hold only characters that need no escaping.
+void append_id(std::string& out, const rt::MessageKey& id) {
+    out += R"(,"id":")";
+    out += id.view();
     out += '"';
 }
 
@@ -74,17 +116,9 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     if (message->as_object() == nullptr) {
         return std::unexpected(EnvelopeError::Malformed);
     }
-    const core::json::Value* type = message->find("type");
-    const auto name = type == nullptr ? std::nullopt : type->as_string();
+    const auto name = string_of(*message, "type");
     if (name == "join") {
-        if (!only(*message, {"type", "room"})) {
-            return std::unexpected(EnvelopeError::Malformed);
-        }
-        auto room = room_of(*message);
-        if (!room) {
-            return std::unexpected(room.error());
-        }
-        return Join{.room = *room};
+        return join_of(*message);
     }
     if (name == "send") {
         return send_of(*message);
@@ -92,19 +126,17 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     return std::unexpected(EnvelopeError::Malformed);
 }
 
-void write_joined(std::string& out, const core::RoomId& room) {
+void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head) {
     out += R"({"type":"joined",)";
     append_room(out, room);
-    out += '}';
+    std::format_to(std::back_inserter(out), R"(,"seq":{}}})", head);
 }
 
-void write_sent(std::string& out, const core::RoomId& room, std::optional<std::uint64_t> ref,
+void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                 std::uint64_t seq) {
     out += R"({"type":"sent",)";
     append_room(out, room);
-    if (ref) {
-        std::format_to(std::back_inserter(out), R"(,"ref":{})", *ref);
-    }
+    append_id(out, id);
     std::format_to(std::back_inserter(out), R"(,"seq":{}}})", seq);
 }
 
@@ -114,28 +146,45 @@ void write_message(std::string& out, const rt::Message& message) {
     std::format_to(std::back_inserter(out), R"(,"seq":{},"sender":)", message.seq);
     // UserId allows only characters that need no escaping.
     core::json::append_string(out, message.sender.view());
-    out += R"(,"body":)";
-    // Valid UTF-8: it came from a JSON string, whose parser refuses anything else. The bytes
-    // are characters, which is what reading them as such means.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    const std::string_view body{reinterpret_cast<const char*>(message.body.data()),
-                                message.body.size()};
-    core::json::append_string(out, body);
-    out += '}';
+    append_id(out, message.key);
+    out += R"(,"body":")";
+    // The body's bytes, whatever they are; the encoding reads them as octets.
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+    const std::span<const unsigned char> octets{
+        reinterpret_cast<const unsigned char*>(message.body.data()), message.body.size()};
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+    out += infra::auth::encode_base64url(octets);
+    out += R"("})";
 }
 
 void write_error(std::string& out, std::string_view reason, const std::optional<core::RoomId>& room,
-                 std::optional<std::uint64_t> ref) {
+                 const std::optional<rt::MessageKey>& id) {
     out += R"({"type":"error","reason":)";
     core::json::append_string(out, reason);
     if (room) {
         out += ',';
         append_room(out, *room);
     }
-    if (ref) {
-        std::format_to(std::back_inserter(out), R"(,"ref":{})", *ref);
+    if (id) {
+        append_id(out, *id);
     }
     out += '}';
+}
+
+// base64url without padding is four characters per three bytes and two or three for a partial
+// group. Around it, {"type":"message", the room (45), the seq (27), the sender (at most 140),
+// the id (at most 72) and "body":"" (11) come to 313 bytes, and the WebSocket header of a frame
+// under 64 KiB to 4 more.
+std::size_t message_wire_size(std::size_t body) noexcept {
+    constexpr std::size_t kAround = 320;
+    return (((body * 4) + 2) / 3) + kAround;
+}
+
+void write_rate_limited(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
+                        core::Millis retry_after) {
+    write_error(out, "rate_limited", room, id);
+    out.pop_back();
+    std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{}}})", retry_after.count());
 }
 
 std::string_view reason(EnvelopeError e) noexcept {
@@ -146,6 +195,10 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "malformed";
     case EnvelopeError::BadRoom:
         return "bad_room";
+    case EnvelopeError::BadId:
+        return "bad_id";
+    case EnvelopeError::BadBody:
+        return "bad_body";
     }
     return "malformed";
 }

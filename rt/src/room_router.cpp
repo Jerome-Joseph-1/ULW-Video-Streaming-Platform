@@ -4,10 +4,12 @@
 #include "net/socket.hpp"
 
 #include "node_auth.hpp"
+#include "recent_keys.hpp"
 #include "wire.hpp"
 
 #include <algorithm>
 #include <deque>
+#include <format>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -57,6 +59,15 @@ constexpr core::Millis kHandshakeTimeout{5'000};
 // subscribed to would otherwise queue here without end; the connection is closed, and the
 // peer resubscribes when it reconnects.
 constexpr std::size_t kMaxPeerBacklog = std::size_t{16} * wire::kMaxFrame;
+// A client sends again after `unavailable`, which comes within kForwardTimeout, plus its own
+// backoff, or after reconnecting: seconds. A minute of keys covers both with room to spare.
+constexpr core::Millis kRecentKeysWindow{60'000};
+// Each key remembered costs about 300 bytes (room, sender, key and seq, and the map's and the
+// queue's own), so 32768 are about 10 MiB of the node's budget. That is a minute of 546
+// messages a second sequenced or delivered here, all rooms and senders together; past that the
+// window shrinks for everyone, to half a minute at the thousand a second one room can reach
+// (ADR-0035): still ten forward timeouts.
+constexpr std::size_t kRecentKeys = 32'768;
 
 using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq) noexcept>;
 
@@ -185,8 +196,15 @@ class RoomRouter::Impl final : public IRegistryObserver,
         }
 
         bool greet(const wire::Hello* hello) {
-            if (hello == nullptr || hello->version != wire::kVersion) {
+            if (hello == nullptr) {
                 router_.refused("no hello");
+                return false;
+            }
+            // Nodes on two versions of the channel refuse each other: say so, or a rollout
+            // across a version reads like a stranger knocking.
+            if (hello->version != wire::kVersion) {
+                router_.refused(std::format("version mismatch: peer speaks {}, this node {}",
+                                            hello->version, wire::kVersion));
                 return false;
             }
             dialer_.emplace(hello->node);
@@ -233,7 +251,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 return true;
             }
             if (const auto* f = std::get_if<wire::Send>(&frame)) {
-                router_.on_forwarded(handle_, f->request, f->room, f->sender, f->body);
+                router_.on_forwarded(handle_, f->request, f->room, f->sender, f->key, f->body);
                 return true;
             }
             return false;
@@ -458,8 +476,11 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 return true;
             }
             if (const auto* f = std::get_if<wire::Deliver>(&frame)) {
-                router_.on_deliver(
-                    Message{.room = f->room, .seq = f->seq, .sender = f->sender, .body = f->body});
+                router_.on_deliver(Message{.room = f->room,
+                                           .seq = f->seq,
+                                           .sender = f->sender,
+                                           .key = f->key,
+                                           .body = f->body});
                 return true;
             }
             if (const auto* f = std::get_if<wire::Unsubscribe>(&frame)) {
@@ -516,7 +537,8 @@ public:
          core::ports::IRandom& random, RouterConfig config, IRouterEvents& events)
         : reactor_(reactor), store_(store), clock_(clock), random_(random),
           config_(std::move(config)), events_(events), incarnation_(core::Uuid::v7(clock, random)),
-          registry_(store, clock, config_.self, incarnation_, *this), inbound_(kInboundSlots) {}
+          registry_(store, clock, config_.self, incarnation_, *this),
+          recent_(kRecentKeys, kRecentKeysWindow), inbound_(kInboundSlots) {}
 
     ~Impl() override {
         reactor_.cancel_timer(timer_);
@@ -559,12 +581,12 @@ public:
             registry_.set_interest(room, true);
         }
         if (std::ranges::find(lr.members, &member) != lr.members.end()) {
-            done({});
+            done(head(room));
             return;
         }
         if (lr.owner) {
             lr.members.push_back(&member);
-            done({});
+            done(head(room));
             return;
         }
         lr.joining.push_back({.member = &member, .done = std::move(done)});
@@ -579,23 +601,33 @@ public:
         LocalRoom& lr = it->second;
         std::erase(lr.members, &member);
         std::erase_if(lr.joining, [&](const Joining& j) { return j.member == &member; });
+        std::erase_if(sends_, [&](const auto& entry) {
+            return entry.second.room == room && entry.second.member == &member;
+        });
         drop_if_empty(room);
     }
 
     void send(const core::RoomId& room, IMember& from, const core::UserId& sender,
-              std::vector<std::byte> body, SendCallback done) {
+              const MessageKey& key, std::vector<std::byte> body, SendCallback done) {
         const auto it = local_.find(room);
         if (it == local_.end() ||
             std::ranges::find(it->second.members, &from) == it->second.members.end()) {
             done(std::unexpected(RouteError::NotJoined));
             return;
         }
+        // Delivered here already: whoever owns the room now, it was sequenced.
+        if (const auto seq = recent_.find(room, sender, key)) {
+            ++counters_.duplicates;
+            done(*seq);
+            return;
+        }
         // Owning comes first, whatever the cache says: a write under a generation that has
         // moved on is exactly what the fence must see and refuse.
         if (registry_.owned(room)) {
             enqueue(room, Write{.sender = sender,
+                                .key = key,
                                 .body = std::move(body),
-                                .local = std::move(done),
+                                .local = pending(room, from, std::move(done)),
                                 .peer = std::nullopt,
                                 .request = 0});
             return;
@@ -610,12 +642,12 @@ public:
         }
         std::vector<std::byte> frame;
         const std::uint64_t request = next_request_++;
-        wire::encode_send(frame, request, room, sender, body);
+        wire::encode_send(frame, request, room, sender, key, body);
         ++counters_.forwarded;
         link(owner->node)
             .request(request, frame,
-                     [this, room, done = std::move(done)](wire::Status status,
-                                                          std::uint64_t seq) mutable noexcept {
+                     [this, room, done = pending(room, from, std::move(done))](
+                         wire::Status status, std::uint64_t seq) mutable noexcept {
                          if (status == wire::Status::Ok) {
                              done(seq);
                              return;
@@ -625,6 +657,23 @@ public:
                          }
                          done(std::unexpected(route_error(status)));
                      });
+    }
+
+    // Holds `done` for a send by `member`, and answers through it unless the member has left
+    // the room by then: a member that left, or went away with its connection, is owed nothing,
+    // and may no longer exist to be told.
+    SendCallback pending(const core::RoomId& room, IMember& member, SendCallback done) {
+        const std::uint64_t id = next_send_++;
+        sends_.emplace(id, PendingSend{.room = room, .member = &member, .done = std::move(done)});
+        return [this, id](std::expected<std::uint64_t, RouteError> result) noexcept {
+            const auto it = sends_.find(id);
+            if (it == sends_.end()) {
+                return;
+            }
+            SendCallback answer = std::move(it->second.done);
+            sends_.erase(it);
+            answer(result);
+        };
     }
 
     void release_rooms(StoreCallback<void> done) {
@@ -765,6 +814,12 @@ private:
         JoinCallback done;
     };
 
+    struct PendingSend {
+        core::RoomId room;
+        IMember* member;
+        SendCallback done;
+    };
+
     // A room with members on this node.
     struct LocalRoom {
         std::vector<IMember*> members;
@@ -775,11 +830,14 @@ private:
         bool subscribing = false;
         // Deliveries can repeat after a resubscription; each seq reaches the members once.
         std::uint64_t delivered = 0;
+        // The owner's head when it took this node's subscription.
+        std::uint64_t head = 0;
     };
 
     // A write waiting for its sequence number, from a member here or from another node.
     struct Write {
         core::UserId sender;
+        MessageKey key;
         std::vector<std::byte> body;
         SendCallback local;
         std::optional<net::Slab<Inbound>::Handle> peer;
@@ -793,7 +851,21 @@ private:
         std::deque<Write> writes;
         std::size_t queued_bytes = 0;
         bool appending = false;
+        // The last seq this node took for the room.
+        std::uint64_t head = 0;
     };
+
+    // The latest seq known here: taken as the owner, delivered, or named by the owner.
+    [[nodiscard]] std::uint64_t head(const core::RoomId& room) const noexcept {
+        std::uint64_t latest = 0;
+        if (const auto o = owned_.find(room); o != owned_.end()) {
+            latest = o->second.head;
+        }
+        if (const auto l = local_.find(room); l != local_.end()) {
+            latest = std::max({latest, l->second.delivered, l->second.head});
+        }
+        return latest;
+    }
 
     static std::size_t cost(const Write& write) noexcept {
         return write.body.size() + kWriteOverhead;
@@ -966,12 +1038,14 @@ private:
         wire::encode_subscribe(frame, request, room);
         link(owner.node)
             .request(request, frame,
-                     [this, room, owner](wire::Status status, std::uint64_t) noexcept {
-                         subscribed(room, owner, status);
+                     [this, room, owner](wire::Status status, std::uint64_t seq) noexcept {
+                         subscribed(room, owner, status, seq);
                      });
     }
 
-    void subscribed(const core::RoomId& room, const Ownership& owner, wire::Status status) {
+    // `seq`, when the owner took the subscription, is its head.
+    void subscribed(const core::RoomId& room, const Ownership& owner, wire::Status status,
+                    std::uint64_t seq) {
         const auto it = local_.find(room);
         if (it == local_.end()) {
             if (status == wire::Status::Ok) {
@@ -988,6 +1062,7 @@ private:
             fail_joins(room, RouteError::Unavailable);
             return;
         }
+        lr.head = std::max(lr.head, seq);
         settle(room, lr, owner);
         // The owner changed hands while the subscription was on its way.
         const auto known = registry_.known_owner(room);
@@ -1018,8 +1093,9 @@ private:
                 lr.members.push_back(j.member);
             }
         }
+        const std::uint64_t latest = head(room);
         for (Joining& j : joined) {
-            j.done({});
+            j.done(latest);
         }
     }
 
@@ -1093,13 +1169,31 @@ private:
     }
 
     void pump(const core::RoomId& room) {
-        const auto it = owned_.find(room);
+        // A retry queued behind its first try is answered as soon as that one is sequenced,
+        // from the same queue: the queue is in order, so the first try always comes first.
+        auto it = owned_.find(room);
+        while (it != owned_.end() && !it->second.appending && !it->second.writes.empty()) {
+            OwnedRoomState& o = it->second;
+            const auto seq = recent_.find(room, o.writes.front().sender, o.writes.front().key);
+            if (!seq) {
+                break;
+            }
+            Write retry = std::move(o.writes.front());
+            o.writes.pop_front();
+            o.queued_bytes -= cost(retry);
+            queued_bytes_ -= cost(retry);
+            ++counters_.duplicates;
+            answer(retry, *seq);
+            it = owned_.find(room);
+        }
         if (it == owned_.end() || it->second.appending || it->second.writes.empty()) {
             return;
         }
         it->second.appending = true;
+        const Write& next = it->second.writes.front();
         const bool started = registry_.append(
-            room, [this, room](std::expected<std::uint64_t, AppendError> seq) noexcept {
+            room, Outgoing{.sender = next.sender, .key = next.key, .body = next.body},
+            [this, room](std::expected<std::uint64_t, AppendError> seq) noexcept {
                 appended(room, seq);
             });
         // Not owned any more, and not through a fence either: the rooms were released.
@@ -1127,6 +1221,7 @@ private:
                    std::unexpected(seq.error() == AppendError::Fenced ? RouteError::Fenced
                                                                       : RouteError::Unavailable));
         } else {
+            o.head = std::max(o.head, *seq);
             fan_out(room, o, *seq, write);
             answer(write, *seq);
         }
@@ -1135,12 +1230,17 @@ private:
 
     void fan_out(const core::RoomId& room, OwnedRoomState& o, std::uint64_t seq,
                  const Write& write) {
-        deliver_here(Message{.room = room, .seq = seq, .sender = write.sender, .body = write.body});
+        recent_.remember(room, write.sender, write.key, seq, clock_.now());
+        deliver_here(Message{.room = room,
+                             .seq = seq,
+                             .sender = write.sender,
+                             .key = write.key,
+                             .body = write.body});
         if (o.subscribers.empty()) {
             return;
         }
         std::vector<std::byte> frame;
-        wire::encode_deliver(frame, room, seq, write.sender, write.body);
+        wire::encode_deliver(frame, room, seq, write.sender, write.key, write.body);
         std::erase_if(o.subscribers, [&](const net::Slab<Inbound>::Handle& h) {
             Inbound* in = inbound_.get(h);
             if (in == nullptr) {
@@ -1242,7 +1342,7 @@ private:
         if (std::ranges::find(subscribers, peer) == subscribers.end()) {
             subscribers.push_back(peer);
         }
-        reply(peer, request, wire::Status::Ok, 0);
+        reply(peer, request, wire::Status::Ok, head(room));
     }
 
     void on_unsubscribe(net::Slab<Inbound>::Handle peer, const core::RoomId& room) noexcept {
@@ -1253,9 +1353,10 @@ private:
     }
 
     void on_forwarded(net::Slab<Inbound>::Handle peer, std::uint64_t request,
-                      const core::RoomId& room, const core::UserId& sender,
+                      const core::RoomId& room, const core::UserId& sender, const MessageKey& key,
                       std::span<const std::byte> body) {
         Write write{.sender = sender,
+                    .key = key,
                     .body = {body.begin(), body.end()},
                     .local = {},
                     .peer = peer,
@@ -1297,8 +1398,12 @@ private:
     // ---- deliveries from owners, as a member node
 
     // Whichever node sends it, a delivery was sequenced under a fence, so it is genuine; the
-    // seq check drops what a resubscription repeats.
-    void on_deliver(const Message& message) { deliver_here(message); }
+    // seq check drops what a resubscription repeats. Its key is remembered for whichever node
+    // owns the room when the sender tries again through this one.
+    void on_deliver(const Message& message) {
+        recent_.remember(message.room, message.sender, message.key, message.seq, clock_.now());
+        deliver_here(message);
+    }
 
     // ---- links to other nodes
 
@@ -1370,6 +1475,7 @@ private:
     IRouterEvents& events_;
     core::Uuid incarnation_;
     RoomRegistry registry_;
+    RecentKeys recent_;
     std::unordered_map<core::RoomId, LocalRoom> local_;
     std::unordered_map<core::RoomId, OwnedRoomState> owned_;
     std::size_t queued_bytes_ = 0;
@@ -1379,6 +1485,9 @@ private:
     std::unordered_map<core::NodeId, std::unique_ptr<Outbound>> outbound_;
     std::vector<std::unique_ptr<Outbound>> closing_;
     std::uint64_t next_request_ = 1;
+    // Sends of members here not answered yet, by their own id.
+    std::unordered_map<std::uint64_t, PendingSend> sends_;
+    std::uint64_t next_send_ = 1;
     std::uint64_t next_link_ = 1;
     net::TimerId timer_;
     core::MonoTime next_beat_;
@@ -1410,8 +1519,8 @@ void RoomRouter::leave(const core::RoomId& room, IMember& member) noexcept {
 }
 
 void RoomRouter::send(const core::RoomId& room, IMember& from, const core::UserId& sender,
-                      std::vector<std::byte> body, SendCallback done) {
-    impl_->send(room, from, sender, std::move(body), std::move(done));
+                      const MessageKey& key, std::vector<std::byte> body, SendCallback done) {
+    impl_->send(room, from, sender, key, std::move(body), std::move(done));
 }
 
 void RoomRouter::release_rooms(StoreCallback<void> done) {

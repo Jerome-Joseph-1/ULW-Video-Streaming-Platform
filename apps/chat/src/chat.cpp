@@ -5,9 +5,8 @@
 #include "log.hpp"
 #include "session.hpp"
 
-#include <algorithm>
-#include <chrono>
 #include <format>
+#include <utility>
 
 namespace chat {
 
@@ -44,7 +43,8 @@ void RoomLog::on_peer_lost(const core::NodeId& peer) noexcept {
               peer.view());
 }
 
-// `why` is one of the router's fixed reasons; nothing a peer sent is echoed.
+// `why` is one of the router's fixed reasons, at most with the version number a peer's hello
+// named; nothing else a peer sent is echoed.
 void RoomLog::on_peer_refused(std::string_view why) noexcept {
     log_event(R"("level":"warn","msg":"node refused","node":"{}","why":"{}")", self_.view(), why);
 }
@@ -55,8 +55,8 @@ void RoomLog::on_node_taken() noexcept {
 }
 
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
-    : deps_(deps), access_(std::move(access)), limits_(limits), sessions_(limits_.max_connections) {
-}
+    : deps_(deps), access_(std::move(access)), limits_(limits), rooms_(deps.router),
+      chat_(rooms_, deps.clock, limits_.service), sessions_(limits_.max_connections) {}
 
 ChatServer::~ChatServer() {
     deps_.reactor.cancel_timer(drain_timer_);
@@ -120,6 +120,7 @@ void ChatServer::on_timeout() noexcept {
 void ChatServer::reap() noexcept {
     sessions_.reap([this](Session& s) { return deps_.reactor.is_quiescent(s.conn()); });
     deps_.router.reap();
+    chat_.sweep();
 }
 
 Session* ChatServer::session(net::Slab<Session>::Handle handle) noexcept {
@@ -130,70 +131,46 @@ void ChatServer::retire(net::Slab<Session>::Handle handle) noexcept {
     sessions_.retire(handle);
 }
 
-bool ChatServer::admit_join(const core::UserId& user) {
-    const core::MonoTime now = deps_.reactor.now();
-    const auto refill = [&](JoinBucket& b) {
-        const auto elapsed = std::chrono::duration_cast<core::Seconds>(now - b.refilled).count();
-        if (elapsed <= 0) {
-            return;
-        }
-        b.tokens = static_cast<std::uint32_t>(std::min<std::uint64_t>(
-            limits_.join_burst,
-            b.tokens + (static_cast<std::uint64_t>(elapsed) * limits_.joins_per_second)));
-        b.refilled += core::Seconds{elapsed};
-    };
-    // A full bucket is the same as none, so users idle long enough to refill are forgotten
-    // whenever the table outgrows the connections that could be using it.
-    if (joins_.size() > limits_.max_connections) {
-        std::erase_if(joins_, [&](auto& entry) {
-            refill(entry.second);
-            return entry.second.tokens >= limits_.join_burst;
-        });
-    }
-    auto [it, fresh] =
-        joins_.try_emplace(user, JoinBucket{.tokens = limits_.join_burst, .refilled = now});
-    JoinBucket& bucket = it->second;
-    refill(bucket);
-    if (bucket.tokens == 0) {
-        return false;
-    }
-    --bucket.tokens;
-    return true;
-}
-
 std::string ChatServer::render_metrics() const {
     const Counters& c = counters_;
     const rt::RegistryCounters& registry = deps_.router.registry_counters();
     const rt::RouterCounters& router = deps_.router.counters();
-    return std::format("connections_accepted_total {}\n"
-                       "connections_rejected_total{{reason=\"capacity\"}} {}\n"
-                       "connections_current {}\n"
-                       "websocket_upgrades_total {}\n"
-                       "auth_failures_total {}\n"
-                       "origin_rejections_total {}\n"
-                       "messages_received_total {}\n"
-                       "messages_delivered_total {}\n"
-                       "protocol_errors_total {}\n"
-                       "control_floods_total {}\n"
-                       "slow_consumers_total {}\n"
-                       "allocation_failures_total {}\n"
-                       "rooms_active {}\n"
-                       "rooms_joined {}\n"
-                       "room_reassignments_total {}\n"
-                       "fenced_writes_total {}\n"
-                       "forwards_total {}\n"
-                       "forward_timeouts_total {}\n"
-                       "peers_lost_total {}\n"
-                       "peers_refused_total {}\n"
-                       "slow_peers_total {}\n",
-                       c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
-                       c.auth_failures, c.origin_rejections, c.messages_received,
-                       c.messages_delivered, c.protocol_errors, c.control_floods, c.slow_consumers,
-                       c.allocation_failures + router.allocation_failures,
-                       deps_.router.rooms_owned(), deps_.router.rooms_joined(),
-                       registry.reassignments, registry.fenced_writes, router.forwarded,
-                       router.forward_timeouts, router.peers_lost, router.peers_refused,
-                       router.slow_peers);
+    const ServiceCounters& chat = chat_.counters();
+    return std::format(
+        "connections_accepted_total {}\n"
+        "connections_rejected_total{{reason=\"capacity\"}} {}\n"
+        "connections_current {}\n"
+        "websocket_upgrades_total {}\n"
+        "auth_failures_total {}\n"
+        "origin_rejections_total {}\n"
+        "messages_received_total {}\n"
+        "messages_delivered_total {}\n"
+        "messages_rate_limited_total {}\n"
+        "messages_deduplicated_total {}\n"
+        "lossy_drops_total {}\n"
+        "messages_replayed_total {}\n"
+        "messages_kept_bytes {}\n"
+        "protocol_errors_total {}\n"
+        "control_floods_total {}\n"
+        "slow_consumers_total {}\n"
+        "allocation_failures_total {}\n"
+        "rooms_active {}\n"
+        "rooms_joined {}\n"
+        "room_reassignments_total {}\n"
+        "fenced_writes_total {}\n"
+        "forwards_total {}\n"
+        "forward_timeouts_total {}\n"
+        "peers_lost_total {}\n"
+        "peers_refused_total {}\n"
+        "slow_peers_total {}\n",
+        c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
+        c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
+        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
+        chat_.buffered_bytes(), c.protocol_errors, c.control_floods, c.slow_consumers,
+        c.allocation_failures + router.allocation_failures + chat.allocation_failures,
+        deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,
+        registry.fenced_writes, router.forwarded, router.forward_timeouts, router.peers_lost,
+        router.peers_refused, router.slow_peers);
 }
 
 } // namespace chat
