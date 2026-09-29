@@ -58,33 +58,8 @@ std::expected<std::vector<std::string>, ConfigError> origins(const EnvLookup& en
     return out;
 }
 
-} // namespace
-
-std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
-    const char* node_variable = "ULW_NODE_ID";
-    auto node_name = lookup(env, node_variable);
-    if (!node_name) {
-        node_variable = "HOSTNAME";
-        node_name = lookup(env, node_variable);
-    }
-    if (!node_name) {
-        return error("ULW_NODE_ID", "not set, and neither is HOSTNAME");
-    }
-    const auto node = core::NodeId::parse(*node_name);
-    if (!node) {
-        return error(node_variable, "not a node name: [a-z0-9-], at most 63 characters");
-    }
-
-    std::uint16_t port = 9101;
-    if (const auto text = lookup(env, "ULW_LISTEN_PORT")) {
-        // Port 0 would bind an ephemeral port nobody can be told about.
-        const auto value = core::parse_integer<std::uint16_t>(*text);
-        if (!value || *value == 0) {
-            return error("ULW_LISTEN_PORT", "not an integer in range");
-        }
-        port = *value;
-    }
-
+std::expected<std::string, ConfigError> checked_node_address(const EnvLookup& env,
+                                                             std::uint16_t client_port) {
     auto node_address = lookup(env, "ULW_NODE_ADDRESS");
     if (!node_address) {
         return error("ULW_NODE_ADDRESS", "not set");
@@ -113,8 +88,42 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
         core::parse_integer<std::uint16_t>(
             std::string_view{*node_address}.substr(node_address->rfind(':') + 1))
             .value_or(0);
-    if (node_port == port) {
+    if (node_port == client_port) {
         return error("ULW_NODE_ADDRESS", "uses ULW_LISTEN_PORT, which clients already take");
+    }
+    return std::move(*node_address);
+}
+
+} // namespace
+
+std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
+    const char* node_variable = "ULW_NODE_ID";
+    auto node_name = lookup(env, node_variable);
+    if (!node_name) {
+        node_variable = "HOSTNAME";
+        node_name = lookup(env, node_variable);
+    }
+    if (!node_name) {
+        return error("ULW_NODE_ID", "not set, and neither is HOSTNAME");
+    }
+    const auto node = core::NodeId::parse(*node_name);
+    if (!node) {
+        return error(node_variable, "not a node name: [a-z0-9-], at most 63 characters");
+    }
+
+    std::uint16_t port = 9101;
+    if (const auto text = lookup(env, "ULW_LISTEN_PORT")) {
+        // Port 0 would bind an ephemeral port nobody can be told about.
+        const auto value = core::parse_integer<std::uint16_t>(*text);
+        if (!value || *value == 0) {
+            return error("ULW_LISTEN_PORT", "not an integer in range");
+        }
+        port = *value;
+    }
+
+    auto node_address = checked_node_address(env, port);
+    if (!node_address) {
+        return std::unexpected(node_address.error());
     }
 
     auto node_secret = lookup(env, "ULW_NODE_SECRET");
