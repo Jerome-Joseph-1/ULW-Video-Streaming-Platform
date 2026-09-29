@@ -96,7 +96,10 @@ struct StoredCommit {
 
 struct FetchedKeyPackage {
     KeyPackageBytes package;
-    // The device is at or below kKeyPackageLowWater and should be told to publish more.
+    // The device is at or below kKeyPackageLowWater and should be told to publish more. An
+    // early warning only: fetches running side by side each count the packages the others are
+    // taking, so a burst can cross the mark without any of them raising it. Exhausted, which
+    // no burst can hide, remains the signal that must be acted on.
     bool replenish = false;
 };
 

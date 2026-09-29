@@ -34,7 +34,8 @@ never parses a package.
   concurrent fetchers of the last package exactly one gets it; the rest get `Exhausted`.
 - `Exhausted` is the replenish signal. A successful fetch also carries `replenish` once the
   device is at or below the low-water mark, a fifth of the cap, so the signal can reach the
-  device before it runs dry.
+  device before it runs dry. The flag counts on the fetch's snapshot, so a burst of concurrent
+  fetches can cross the mark without raising it; `Exhausted` cannot be missed.
 - Bounds: at most 100 packages per device, 1 to 8192 bytes each. A batch is stored whole or not
   at all; publishes of one device serialise on its row lock and count on a snapshot taken after
   the lock, so concurrent publishes never pass the cap.
