@@ -65,15 +65,17 @@ int refuse(ops::Logger& log, std::string_view source, std::string_view reason) {
 // Started as root, the worker becomes the configured user before its first job, and before the
 // scratch directory it will own is made; not root, there is nothing to give up. nullopt means
 // carry on, anything else is the exit code.
-std::optional<int> leave_root(const std::string& user, ops::Logger& log) {
+std::optional<int> leave_root(const std::string& user, bool allow_root, ops::Logger& log) {
     if (!os::is_root()) {
         return std::nullopt;
     }
     if (user.empty()) {
-        // Every deployment starts unprivileged (the images' USER, the units' User=), so root
-        // here is a developer's shell or a test harness, which refusing would only break.
-        log.warn("running as root; set ULW_RUN_AS_USER to drop to an unprivileged user");
-        return std::nullopt;
+        if (allow_root) {
+            log.warn("running as root, as ULW_ALLOW_ROOT=1 allows");
+            return std::nullopt;
+        }
+        return refuse(log, "ULW_RUN_AS_USER",
+                      "not set, and the process runs as root; set it, or ULW_ALLOW_ROOT=1");
     }
     const auto identity = os::resolve_user(user);
     if (!identity) {
@@ -193,7 +195,7 @@ int run(std::span<const std::string_view> args) {
     log.info("starting", {{"version", info.version}, {"git_sha", info.git_sha}});
     worker::log_effective(*config, *layers, log);
     // Before any thread exists: glibc then has no other thread to carry the change to.
-    if (const auto code = leave_root(config->run_as_user, log)) {
+    if (const auto code = leave_root(config->run_as_user, config->allow_root, log)) {
         return *code;
     }
     if (cli->check) {

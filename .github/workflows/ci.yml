@@ -44,7 +44,7 @@ jobs:
       - run: ctest --preset ${{ matrix.test }}
       # The runner is not root, so the step above skips these; only root can change to another
       # user's ids, and the drop's order and checks are only proven by doing it.
-      - run: sudo -E ctest --test-dir build/${{ matrix.preset }} -R '^DropPrivilegesTest\.' --no-tests=error --output-on-failure
+      - run: sudo -E ctest --test-dir build/${{ matrix.preset }} -R '^(DropPrivilegesTest|GatewayAsRoot)\.' --no-tests=error --output-on-failure
       - run: ccache --show-stats
 
   tsan:

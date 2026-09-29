@@ -79,6 +79,9 @@ struct Limits {
     // Peers whose X-Forwarded-For names the client (the Envoy data plane in front). None by
     // default: then every peer is the client itself, and a forged header changes nothing.
     std::vector<net::IpNetwork> trusted_proxies;
+    // How many of them stand in front, each appending one X-Forwarded-For entry: the client is
+    // that many entries from the right.
+    std::size_t trusted_proxy_hops = 1;
     core::Millis header_timeout{10'000};
     core::Millis body_idle_timeout{30'000};
     // A chunk body must average at least this rate over each window the gateway spends reading
@@ -199,6 +202,8 @@ public:
     charge_request(const core::UserId& user) noexcept;
     [[nodiscard]] std::expected<void, core::Millis>
     charge_upload_bytes(const core::UserId& user, std::uint64_t bytes) noexcept;
+    // Bytes charged for a PATCH body that never arrived.
+    void refund_upload_bytes(const core::UserId& user, std::uint64_t bytes) noexcept;
 
     [[nodiscard]] Admission acquire_upload_slot(const core::UserId& user) noexcept;
     void release_upload_slot(const core::UserId& user) noexcept;

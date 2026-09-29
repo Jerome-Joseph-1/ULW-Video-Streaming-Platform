@@ -3,6 +3,7 @@
 // follows the database, the notify protocol, and the SIGTERM drain.
 #include "core/version.hpp"
 #include "os/system_clock.hpp"
+#include "os/unique_fd.hpp"
 
 #include "devtoken/dev_key.hpp"
 #include "postgres_harness.hpp"
@@ -12,6 +13,8 @@
 #include "support/http_client.hpp"
 #include "support/temp_dir.hpp"
 
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 
 #include <chrono>
@@ -21,6 +24,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
+#include <pwd.h>
 #include <string>
 #include <vector>
 
@@ -60,7 +64,9 @@ protected:
     [[nodiscard]] std::vector<std::string> base_env() const {
         return {"ULW_STORAGE=fs", "ULW_FS_ROOT=" + (files_.path() / "store").string(),
                 "ULW_DATABASE_URL=postgresql://ulw:hunter2@127.0.0.1:1/ulw",
-                "ULW_DEV_JWKS_FILE=" + jwks_.string(), "JWT_ISSUER=ulw-test"};
+                "ULW_DEV_JWKS_FILE=" + jwks_.string(), "JWT_ISSUER=ulw-test",
+                // Developers and some runners start tests as root; the refusal has tests below.
+                "ULW_ALLOW_ROOT=1"};
     }
 
     // Runs the gateway to its exit; `args` follow the program name.
@@ -99,6 +105,72 @@ TEST_F(GatewayConfigTest, BadConfigurationExitsTwoAndNamesTheCulprit) {
     const auto [flag_code, flag_output] = run({"--no-such-flag=1"}, base_env());
     EXPECT_EQ(flag_code, 2);
     EXPECT_NE(flag_output.find("--no-such-flag"), std::string::npos) << flag_output;
+}
+
+// Started as root, the gateway either becomes the user it is told to or refuses to start. Only
+// root can show either; CI runs these under sudo.
+class GatewayAsRoot : public GatewayConfigTest {
+protected:
+    void SetUp() override {
+        if (::geteuid() != 0) {
+            GTEST_SKIP() << "needs root";
+        }
+    }
+
+    [[nodiscard]] std::vector<std::string> env_without_allow_root() const {
+        auto env = base_env();
+        std::erase(env, std::string("ULW_ALLOW_ROOT=1"));
+        return env;
+    }
+};
+
+TEST_F(GatewayAsRoot, RootWithNoUserToBecomeIsRefusedAsConfiguration) {
+    const auto [code, output] = run({"--check-config"}, env_without_allow_root());
+    EXPECT_EQ(code, 2);
+    EXPECT_NE(output.find(R"("source":"ULW_RUN_AS_USER")"), std::string::npos) << output;
+}
+
+// A port under 1024 needs root to bind, which the gateway no longer has once it serves.
+std::optional<std::uint16_t> free_privileged_port() {
+    for (std::uint16_t port = 1023; port >= 900; --port) {
+        const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        // bind() takes every address family through the generic sockaddr header.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        if (::bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0) {
+            return port;
+        }
+    }
+    return std::nullopt;
+}
+
+TEST_F(GatewayAsRoot, BindsAPrivilegedPortThenServesAsTheUserItNames) {
+    const passwd* nobody = ::getpwnam("nobody");
+    const auto port = free_privileged_port();
+    if (nobody == nullptr || !port) {
+        GTEST_SKIP() << "no nobody user, or no free port under 1024";
+    }
+    auto env = env_without_allow_root();
+    env.emplace_back("ULW_RUN_AS_USER=nobody");
+    env.push_back("ULW_LISTEN_PORT=" + std::to_string(*port));
+    const auto gateway = ChildProcess::start({ULW_GATEWAY_BIN}, env);
+    ASSERT_NE(gateway, nullptr);
+    ASSERT_TRUE(gateway->wait_for_output(R"("event":"listening")", kPatience)) << gateway->output();
+    EXPECT_NE(gateway->output().find(R"("event":"dropped root")"), std::string::npos);
+    std::ifstream status("/proc/" + std::to_string(gateway->pid()) + "/status");
+    std::string line;
+    while (std::getline(status, line) && !line.starts_with("Uid:")) {
+    }
+    const std::string uid = std::to_string(nobody->pw_uid);
+    EXPECT_EQ(line, "Uid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid);
+    HttpClient c({.port = *port, .tls = nullptr});
+    const auto r = c.request("GET", "/healthz", "");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 200);
+    gateway->signal(SIGTERM);
+    EXPECT_EQ(gateway->wait_exit(kPatience), 0);
 }
 
 // libpq quotes the token it cannot parse, which here is the password, and a failed connection

@@ -29,6 +29,9 @@ public:
     [[nodiscard]] std::expected<void, core::Millis> take(const BucketRule& rule, core::MonoTime now,
                                                          double n = 1) noexcept;
 
+    // Gives back what was taken for something that did not happen, never past the burst.
+    void refund(const BucketRule& rule, double n) noexcept;
+
 private:
     double tokens_;
     core::MonoTime last_refill_;
@@ -72,13 +75,15 @@ struct UserHash {
     return address.is_v4() ? address : address.prefix(kIpv6Site);
 }
 
-// The client behind a request a trusted proxy relayed: the rightmost X-Forwarded-For entry that
-// is not a trusted proxy itself. Each proxy appends the address it was reached from, so the
-// entries to the right of that one are ours and it is the first no client could have written;
-// anything left of it is whatever the client chose to send. A malformed entry ends the walk at
-// the last good one, and a request with no header at all came from the proxy itself.
+// The client behind a request a trusted proxy relayed: the `hops`-th X-Forwarded-For entry from
+// the right, `hops` being the proxies in front of us, each of which appends the address it was
+// reached from. Entries further left are whatever the client sent. Skipping every entry that
+// looks like a proxy instead would trust addresses by where they fall: a proxy that sees its
+// clients through a masquerade inside the trusted block would pass a client-written entry
+// through. Too few entries, or a malformed one where the client should be, count the request
+// against the peer itself, so a proxy set up otherwise than configured fails closed.
 [[nodiscard]] net::IpAddress forwarded_client(const net::IpAddress& peer,
                                               std::span<const http::HeaderField> headers,
-                                              std::span<const net::IpNetwork> trusted) noexcept;
+                                              std::size_t hops) noexcept;
 
 } // namespace gateway

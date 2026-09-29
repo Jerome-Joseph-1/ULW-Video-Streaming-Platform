@@ -59,6 +59,11 @@ TEST_F(WorkerConfigTest, TheUserToDropToIsOptionalAndTakenAsGiven) {
     const auto set = load();
     ASSERT_TRUE(set);
     EXPECT_EQ(set->run_as_user, "ulw");
+    EXPECT_FALSE(set->allow_root);
+    env["ULW_ALLOW_ROOT"] = "1";
+    EXPECT_TRUE(load()->allow_root);
+    env["ULW_ALLOW_ROOT"] = "true";
+    EXPECT_EQ(refused_variable(), "ULW_ALLOW_ROOT");
 }
 
 TEST_F(WorkerConfigTest, EachRequiredVariableIsNamedWhenMissing) {

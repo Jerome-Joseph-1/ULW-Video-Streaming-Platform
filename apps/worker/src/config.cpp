@@ -31,6 +31,7 @@ constexpr std::array kSettings{
     ops::Setting{.env = "PATH", .key = ""},
     ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
     ops::Setting{.env = "ULW_RUN_AS_USER", .key = "process.user"},
+    ops::Setting{.env = "ULW_ALLOW_ROOT", .key = "process.allow_root"},
     // Read by the store's credential provider; here only to be checked for.
     ops::Setting{.env = "ULW_S3_ACCESS_KEY_ID", .key = "", .secret = true},
     ops::Setting{.env = "ULW_S3_SECRET_ACCESS_KEY", .key = "", .secret = true},
@@ -190,6 +191,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!sandbox) {
         return std::unexpected(std::move(sandbox.error()));
     }
+    const std::string allow_root = lookup(env, "ULW_ALLOW_ROOT").value_or("0");
+    if (allow_root != "0" && allow_root != "1") {
+        return error("ULW_ALLOW_ROOT", "expected 0 or 1");
+    }
     unsigned threads = kDefaultThreads;
     if (const auto text = lookup(env, "ULW_FFMPEG_THREADS")) {
         const auto value = core::parse_integer<unsigned>(*text);
@@ -212,7 +217,8 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .ffmpeg_threads = threads,
                   .log_level = level,
-                  .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or("")};
+                  .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
+                  .allow_root = allow_root == "1"};
 }
 
 void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log) {
@@ -228,7 +234,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         }
         return {"r2", "ULW_R2_ACCOUNT_ID"};
     }();
-    const std::array<std::pair<std::string_view, std::string>, 13> values{{
+    const std::array<std::pair<std::string_view, std::string>, 14> values{{
         {"ULW_DATABASE_URL", config.database_url},
         {"ULW_STORAGE", std::string(storage)},
         {location_variable, config.storage_location},
@@ -242,6 +248,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"PATH", config.search_path},
         {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
         {"ULW_RUN_AS_USER", config.run_as_user},
+        {"ULW_ALLOW_ROOT", config.allow_root ? "1" : ""},
     }};
     for (const auto& [variable, value] : values) {
         if (value.empty()) {

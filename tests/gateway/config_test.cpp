@@ -298,12 +298,14 @@ TEST_F(ConfigTest, PerClientLimitsDefaultToTheBriefsAndTrustNoProxy) {
     EXPECT_EQ(defaults->limits.upload_bytes_per_user_per_day, std::uint64_t{100} << 30U);
     EXPECT_TRUE(defaults->limits.trusted_proxies.empty());
     EXPECT_TRUE(defaults->run_as_user.empty());
+    EXPECT_FALSE(defaults->allow_root);
+    EXPECT_EQ(defaults->limits.trusted_proxy_hops, 1U);
 
     env["ULW_MAX_CONNECTIONS_PER_IP"] = "64";
     env["ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND"] = "50";
     env["ULW_REQUESTS_PER_USER_PER_MINUTE"] = "600";
     env["ULW_UPLOAD_BYTES_PER_USER_PER_DAY"] = std::to_string(std::uint64_t{16} << 20U);
-    env["ULW_TRUSTED_PROXIES"] = "10.42.0.0/16, fd00:42::/56";
+    env["ULW_TRUSTED_PROXIES"] = "10.42.0.0/16,\tfd00:42::/56";
     env["ULW_RUN_AS_USER"] = "ulw";
     const auto set = load();
     ASSERT_TRUE(set);
@@ -312,6 +314,7 @@ TEST_F(ConfigTest, PerClientLimitsDefaultToTheBriefsAndTrustNoProxy) {
     EXPECT_EQ(set->limits.requests_per_user_per_minute, 600U);
     EXPECT_EQ(set->limits.upload_bytes_per_user_per_day, std::uint64_t{16} << 20U);
     EXPECT_EQ(set->run_as_user, "ulw");
+    EXPECT_EQ(set->limits.trusted_proxy_hops, 1U);
     ASSERT_EQ(set->limits.trusted_proxies.size(), 2U);
     const auto pod = net::IpAddress::parse("10.42.7.1");
     const auto outside = net::IpAddress::parse("10.43.0.1");
@@ -338,7 +341,8 @@ TEST_F(ConfigTest, PerClientLimitsThatCouldNeverBeMetAreRefused) {
 
 TEST_F(ConfigTest, TrustedProxiesMustBeExactBlocks) {
     for (const std::string_view bad :
-         {"10.42.0.0/33", "10.42.1.0/16", "envoy", "10.42.0.0/16;10.43.0.0/16", "10.42.0.0/16,,"}) {
+         {"10.42.0.0/33", "10.42.1.0/16", "envoy", "10.42.0.0/16;10.43.0.0/16", "10.42.0.0/16,,",
+          "0.0.0.0/0", "10.42.0.0/16, ::/0"}) {
         env["ULW_TRUSTED_PROXIES"] = std::string(bad);
         EXPECT_EQ(refused_variable(), "ULW_TRUSTED_PROXIES") << bad;
     }
@@ -348,6 +352,28 @@ TEST_F(ConfigTest, TrustedProxiesMustBeExactBlocks) {
     }
     env["ULW_TRUSTED_PROXIES"] = many;
     EXPECT_EQ(refused_variable(), "ULW_TRUSTED_PROXIES");
+}
+
+TEST_F(ConfigTest, ProxyHopsCountOnlyWithTrustedProxies) {
+    env["ULW_TRUSTED_PROXY_HOPS"] = "2";
+    EXPECT_EQ(refused_variable(), "ULW_TRUSTED_PROXY_HOPS");
+    env["ULW_TRUSTED_PROXIES"] = "10.42.0.0/16";
+    const auto two = load();
+    ASSERT_TRUE(two);
+    EXPECT_EQ(two->limits.trusted_proxy_hops, 2U);
+    for (const std::string_view bad : {"0", "17", "one"}) {
+        env["ULW_TRUSTED_PROXY_HOPS"] = std::string(bad);
+        EXPECT_EQ(refused_variable(), "ULW_TRUSTED_PROXY_HOPS") << bad;
+    }
+}
+
+TEST_F(ConfigTest, StayingRootIsAnExplicitChoice) {
+    env["ULW_ALLOW_ROOT"] = "1";
+    const auto allowed = load();
+    ASSERT_TRUE(allowed);
+    EXPECT_TRUE(allowed->allow_root);
+    env["ULW_ALLOW_ROOT"] = "yes";
+    EXPECT_EQ(refused_variable(), "ULW_ALLOW_ROOT");
 }
 
 TEST_F(ConfigTest, AChunkTheObjectStoreWouldRefuseIsRefusedAtStartup) {

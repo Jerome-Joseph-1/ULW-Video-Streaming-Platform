@@ -204,11 +204,10 @@ TEST(BoundedTable, KeysWrappingPastTheEndOfTheIndexSurviveRemovals) {
     }
 }
 
-TEST(ForwardedClient, IsTheRightmostEntryNoTrustedProxyWrote) {
-    const auto proxies = std::vector{*net::IpNetwork::parse("10.42.0.0/16")};
+TEST(ForwardedClient, IsTheEntryTheNthProxyFromUsAppended) {
     const auto peer = *net::IpAddress::parse("10.42.3.4");
-    const auto client = [&](std::vector<http::HeaderField> headers) {
-        return gateway::forwarded_client(peer, headers, proxies);
+    const auto client = [&](std::vector<http::HeaderField> headers, std::size_t hops = 1) {
+        return gateway::forwarded_client(peer, headers, hops);
     };
     const auto ip = [](std::string_view text) { return *net::IpAddress::parse(text); };
 
@@ -216,21 +215,52 @@ TEST(ForwardedClient, IsTheRightmostEntryNoTrustedProxyWrote) {
     EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7"}}), ip("198.51.100.7"));
     // Whatever the client put in front of that is its own invention.
     EXPECT_EQ(client({{"x-forwarded-for", "203.0.113.1, 198.51.100.7"}}), ip("198.51.100.7"));
-    // A chain of trusted hops is walked through.
-    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7,10.42.9.9 , 10.42.0.5"}}),
+    // Two proxies in front: a CDN appended the client, Envoy the CDN.
+    EXPECT_EQ(client({{"X-Forwarded-For", "203.0.113.1,\t198.51.100.7 , 192.0.2.50"}}, 2),
               ip("198.51.100.7"));
     // Two fields are one list, the later field last.
-    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7"}, {"X-Forwarded-For", "10.42.0.5"}}),
+    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7"}, {"X-Forwarded-For", "192.0.2.50"}}, 2),
               ip("198.51.100.7"));
-    // No header: the proxy itself, a health check or a scrape.
-    EXPECT_EQ(client({{"Host", "gw"}}), peer);
-    // A malformed entry ends the walk at the last good one.
-    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7, garbage, 10.42.0.5"}}), ip("10.42.0.5"));
-    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7:443"}}), peer);
-    EXPECT_EQ(client({{"X-Forwarded-For", ""}}), peer);
     // IPv6, and IPv4 in either form, are all addresses.
     EXPECT_EQ(client({{"X-Forwarded-For", "2001:db8::5"}}), ip("2001:db8::5"));
     EXPECT_EQ(client({{"X-Forwarded-For", "::ffff:198.51.100.7"}}), ip("198.51.100.7"));
+}
+
+TEST(ForwardedClient, AnAddressInsideTheProxyBlockIsNotSkippedPast) {
+    // Envoy behind a masquerade sees its downstream as 10.42.0.1, inside the trusted pod block.
+    // The client wrote the entry to its left; taking it would let the client choose its own
+    // address, to dodge its limits or spend a victim's.
+    const auto peer = *net::IpAddress::parse("10.42.3.4");
+    const std::vector<http::HeaderField> headers{{"X-Forwarded-For", "192.0.2.66, 10.42.0.1"}};
+    EXPECT_EQ(gateway::forwarded_client(peer, headers, 1), *net::IpAddress::parse("10.42.0.1"));
+}
+
+TEST(ForwardedClient, AChainShorterOrOtherThanConfiguredCountsAgainstThePeer) {
+    const auto peer = *net::IpAddress::parse("10.42.3.4");
+    const auto client = [&](std::vector<http::HeaderField> headers, std::size_t hops = 1) {
+        return gateway::forwarded_client(peer, headers, hops);
+    };
+    // No header: the proxy itself, a health check or a scrape.
+    EXPECT_EQ(client({{"Host", "gw"}}), peer);
+    EXPECT_EQ(client({{"X-Forwarded-For", ""}}), peer);
+    // Fewer entries than proxies configured.
+    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7"}}, 2), peer);
+    // Garbage where the client should be, and nothing reaches past it.
+    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7, garbage"}}), peer);
+    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7:443"}}), peer);
+    EXPECT_EQ(client({{"X-Forwarded-For", "198.51.100.7,,"}}), peer);
+}
+
+TEST(TokenBucket, ARefundGivesBackNoMoreThanTheBurst) {
+    const BucketRule rule{.burst = 10, .per_second = 1};
+    TokenBucket b(rule, kStart);
+    ASSERT_TRUE(b.take(rule, kStart, 10));
+    b.refund(rule, 4);
+    EXPECT_TRUE(b.take(rule, kStart, 4));
+    EXPECT_FALSE(b.take(rule, kStart, 1));
+    b.refund(rule, 100);
+    EXPECT_TRUE(b.take(rule, kStart, 10));
+    EXPECT_FALSE(b.take(rule, kStart, 1));
 }
 
 TEST(ClientKey, CountsAnIpv6SiteAsOneClient) {

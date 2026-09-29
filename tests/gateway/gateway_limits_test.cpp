@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <gtest/gtest.h>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -123,13 +124,45 @@ TEST_F(GatewayBehindProxy, ClientsAreCountedByTheAddressTheProxyNames) {
     EXPECT_EQ(healthz(gw, "198.51.100.2")->status, 200);
     // A client naming someone else in front of the proxy's own entry is still itself.
     EXPECT_EQ(healthz(gw, "198.51.100.2, 198.51.100.1")->status, 429);
-    EXPECT_EQ(gw.counters().limited_ip_requests, 2U);
+    // Nor does naming a proxy-looking address, or many of them, get past it.
+    EXPECT_EQ(healthz(gw, "127.0.0.1, 198.51.100.1")->status, 429);
+    EXPECT_EQ(healthz(gw, "10.0.0.1, 127.0.0.1, 198.51.100.1")->status, 429);
+    EXPECT_EQ(gw.counters().limited_ip_requests, 4U);
 
     gw.refresh_keys();
     const auto finished = pending.read_response();
     ASSERT_TRUE(finished);
     EXPECT_EQ(finished->status, 404);
     EXPECT_EQ(healthz(gw, "198.51.100.1")->status, 200);
+}
+
+TEST_F(GatewayBehindProxy, AnAuthenticatedRequestIsLeftToItsUsersLimits) {
+    GatewayOptions o = options();
+    o.backend = Backend::Fake;
+    o.chunk = kMiB;
+    GatewayUnderTest gw(o);
+    const std::map<std::string, std::string> via{{"X-Forwarded-For", "198.51.100.1"}};
+    HttpClient setup(gw.endpoint());
+    const std::string body = R"({"filename":"trip.mp4","size_bytes":1048576,)"
+                             R"("content_type":"video/mp4"})";
+    const auto created =
+        setup.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)), via);
+    ASSERT_TRUE(created && created->status == 201);
+    const auto doc = core::json::parse(created->body);
+    const std::string upload(*doc->find("upload_id")->as_string());
+    // A PATCH from that address in flight, its body not yet sent: past authentication, so it
+    // holds a slot and a claim but nothing of the address's.
+    HttpClient uploading(gw.endpoint());
+    ASSERT_TRUE(uploading.send_raw("PATCH /api/v1/uploads/" + upload +
+                                   " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
+                                   "X-Forwarded-For: 198.51.100.1\r\nUpload-Offset: 0\r\n"
+                                   "Content-Length: 1048576\r\n\r\n"));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 1; }));
+    // Behind one carrier-grade NAT address, everyone else still gets in.
+    EXPECT_EQ(healthz(gw, "198.51.100.1")->status, 200);
+    HttpClient bob(gw.endpoint());
+    EXPECT_EQ(bob.request("GET", kNoVideo, kBob, {}, via)->status, 404);
+    EXPECT_EQ(gw.counters().limited_ip_requests, 0U);
 }
 
 TEST(GatewayUserLimits, AUserPastTheRequestRateGets429WithTheWaitInRetryAfter) {
@@ -185,6 +218,28 @@ TEST(GatewayUserLimits, APatchPastTheDailyByteQuotaGets429AndTakesNoSlot) {
     const auto metrics = probe.request("GET", "/metrics", "");
     ASSERT_TRUE(metrics);
     EXPECT_NE(metrics->body.find("\nuploads_in_flight 0\n"), std::string::npos);
+}
+
+TEST(GatewayUserLimits, BytesChargedForABodyThatNeverCameAreGivenBack) {
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true};
+    options.limits.upload_bytes_per_user_per_day = 2 * kMiB;
+    GatewayUnderTest gw(options);
+    HttpClient alice(gw.endpoint());
+    const auto up = create_upload(alice, 2 * kMiB, kAlice);
+    ASSERT_TRUE(up);
+    {
+        // A PATCH that declares 1 MiB, is charged for it, and goes away with none of it sent.
+        HttpClient quitter(gw.endpoint());
+        ASSERT_TRUE(quitter.send_raw("PATCH /api/v1/uploads/" + *up +
+                                     " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice"
+                                     "\r\nUpload-Offset: 0\r\nContent-Length: 1048576\r\n\r\n"));
+        ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 1; }));
+    }
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0; }));
+    // Without the refund the second of these would be over the 2 MiB.
+    EXPECT_EQ(patch(alice, *up, 0, kMiB, kAlice)->status, 204);
+    EXPECT_EQ(patch(alice, *up, kMiB, kMiB, kAlice)->status, 204);
+    EXPECT_EQ(gw.counters().limited_user_bytes, 0U);
 }
 
 } // namespace

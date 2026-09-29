@@ -39,7 +39,9 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_UPLOAD_BYTES_PER_USER_PER_DAY",
                  .key = "limits.upload_bytes_per_user_per_day"},
     ops::Setting{.env = "ULW_TRUSTED_PROXIES", .key = "limits.trusted_proxies"},
+    ops::Setting{.env = "ULW_TRUSTED_PROXY_HOPS", .key = "limits.trusted_proxy_hops"},
     ops::Setting{.env = "ULW_RUN_AS_USER", .key = "process.user"},
+    ops::Setting{.env = "ULW_ALLOW_ROOT", .key = "process.allow_root"},
     ops::Setting{.env = "ULW_STORAGE", .key = "storage.backend"},
     ops::Setting{.env = "ULW_R2_ACCOUNT_ID", .key = "storage.r2_account_id"},
     ops::Setting{.env = "ULW_S3_ENDPOINT", .key = "storage.s3_endpoint"},
@@ -68,6 +70,12 @@ constexpr std::uint64_t kMaxParts = 10'000;
 constexpr std::uint64_t kDescriptorReserve = 64;
 // Every trusted block is tried against every accepted peer; a deployment names one or two.
 constexpr std::size_t kMaxTrustedProxies = 16;
+// Past a CDN, a load balancer and Envoy there is no chain worth trusting.
+constexpr std::size_t kMaxProxyHops = 16;
+// Blocks wider than these are rarely one's own proxies: a /8 of IPv4 is 16 million addresses,
+// and a /32 of IPv6 a whole provider's allocation.
+constexpr unsigned kWideV4Prefix = 8;
+constexpr unsigned kWideV6Prefix = 32;
 // A bucket's count is a double, exact to 2^53: 8 PiB a day is past any quota worth setting.
 constexpr std::uint64_t kMaxDailyBytes = std::uint64_t{1} << 53U;
 
@@ -269,10 +277,10 @@ std::expected<std::vector<net::IpNetwork>, ConfigError> parse_proxies(std::strin
         const std::size_t comma = text.find(',');
         std::string_view item = text.substr(0, comma);
         text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
-        while (!item.empty() && item.front() == ' ') {
+        while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) {
             item.remove_prefix(1);
         }
-        while (!item.empty() && item.back() == ' ') {
+        while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) {
             item.remove_suffix(1);
         }
         const auto network = net::IpNetwork::parse(item);
@@ -280,6 +288,10 @@ std::expected<std::vector<net::IpNetwork>, ConfigError> parse_proxies(std::strin
             return error("ULW_TRUSTED_PROXIES",
                          "expected comma-separated CIDR blocks, such as 10.42.0.0/16, with no "
                          "bits set past the prefix");
+        }
+        // Every address on the internet could then name any client it liked.
+        if (network->prefix_length() == 0) {
+            return error("ULW_TRUSTED_PROXIES", "a /0 block trusts every peer");
         }
         out.push_back(*network);
     }
@@ -325,6 +337,15 @@ std::expected<void, ConfigError> load_client_limits(const EnvLookup& env, Limits
         }
         limits.trusted_proxies = std::move(*proxies);
     }
+    // Envoy alone in front appends one entry; each further proxy, one more.
+    const auto hops = number<std::size_t>(env, "ULW_TRUSTED_PROXY_HOPS", 1, 1, kMaxProxyHops);
+    if (!hops) {
+        return std::unexpected(hops.error());
+    }
+    if (lookup(env, "ULW_TRUSTED_PROXY_HOPS") && limits.trusted_proxies.empty()) {
+        return error("ULW_TRUSTED_PROXY_HOPS", "set, but ULW_TRUSTED_PROXIES is not");
+    }
+    limits.trusted_proxy_hops = *hops;
     return {};
 }
 
@@ -433,6 +454,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
         return std::unexpected(std::move(r.error()));
     }
     config.run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or("");
+    const std::string allow_root = lookup(env, "ULW_ALLOW_ROOT").value_or("0");
+    if (allow_root != "0" && allow_root != "1") {
+        return error("ULW_ALLOW_ROOT", "expected 0 or 1");
+    }
+    config.allow_root = allow_root == "1";
     return config;
 }
 
@@ -463,7 +489,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     // Checked as given; the blocks themselves hold no text to print back.
     const std::string proxies =
         config.limits.trusted_proxies.empty() ? "" : layers.get("ULW_TRUSTED_PROXIES").value_or("");
-    const std::array<std::pair<std::string_view, std::string>, 28> values{{
+    const std::array<std::pair<std::string_view, std::string>, 30> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -481,7 +507,10 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_UPLOAD_BYTES_PER_USER_PER_DAY",
          std::to_string(config.limits.upload_bytes_per_user_per_day)},
         {"ULW_TRUSTED_PROXIES", proxies},
+        {"ULW_TRUSTED_PROXY_HOPS",
+         proxies.empty() ? "" : std::to_string(config.limits.trusted_proxy_hops)},
         {"ULW_RUN_AS_USER", config.run_as_user},
+        {"ULW_ALLOW_ROOT", config.allow_root ? "1" : ""},
         {"ULW_STORAGE", std::string(storage)},
         {location_variable, config.storage_location},
         {"ULW_FS_READ_URL", config.limits.local_read_url},
@@ -504,6 +533,12 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         log.info("setting", {{"name", variable},
                              {"value", secret ? std::string_view("<redacted>") : value},
                              {"from", ops::to_string(layers.origin(variable))}});
+    }
+    for (const net::IpNetwork& block : config.limits.trusted_proxies) {
+        if (block.prefix_length() < (block.is_v4() ? kWideV4Prefix : kWideV6Prefix)) {
+            log.warn("a trusted proxy block this wide lets many peers name any client",
+                     {{"prefix_length", block.prefix_length()}});
+        }
     }
 }
 

@@ -135,6 +135,13 @@ void Gateway::on_accept(os::UniqueFd conn) noexcept {
     c->start(std::move(*transport), *peer, hold);
 }
 
+void Gateway::refund_upload_bytes(const core::UserId& user, std::uint64_t bytes) noexcept {
+    // A user forgotten since the charge starts over full anyway.
+    if (UserEntry* entry = user_entry(user); entry != nullptr) {
+        entry->upload_bytes.refund(upload_byte_rule_, static_cast<double>(bytes));
+    }
+}
+
 bool Gateway::trusted_proxy(const net::IpAddress& peer) const noexcept {
     return std::ranges::any_of(limits_.trusted_proxies,
                                [&](const net::IpNetwork& n) { return n.contains(peer); });

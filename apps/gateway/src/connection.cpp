@@ -315,6 +315,10 @@ void Connection::authenticate() noexcept {
         return;
     }
     req_.authenticated = true;
+    // From here the user's own limits govern the request. One address can carry hundreds of
+    // users (a carrier-grade NAT), and holding them all to 20 in flight would let the busiest
+    // few lock the rest out; the address count is for the requests nobody vouches for.
+    release_request_hold();
 }
 
 bool Connection::admit_forwarded(const http::RequestHead& head) noexcept {
@@ -322,7 +326,11 @@ bool Connection::admit_forwarded(const http::RequestHead& head) noexcept {
         return true;
     }
     const net::IpAddress client =
-        forwarded_client(peer_, head.headers, gw().limits().trusted_proxies);
+        forwarded_client(peer_, head.headers, gw().limits().trusted_proxy_hops);
+    if (deps().log.enabled(ops::Level::Debug)) {
+        deps().log.debug("forwarded client",
+                         {{"request_id", request_id()}, {"client", client.to_string()}});
+    }
     request_hold_ = gw().hold_client(client);
     if (request_hold_) {
         return true;
@@ -356,6 +364,7 @@ http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept
         return http::BodyVerdict::Continue;
     }
     gw().counters().bytes_ingested += bytes.size();
+    req_.bytes_received += bytes.size();
     rate_window_bytes_ += bytes.size();
     if (!session_ || staging_head_ < staging_.size()) {
         if (staging_.size() - staging_head_ + bytes.size() > kMaxStaging) {
@@ -538,6 +547,7 @@ void Connection::start_append() noexcept {
         fail(Status::TooManyRequests);
         return;
     }
+    req_.bytes_charged = req_.content_length;
     ++pending_;
     deps().catalog.claim_upload(*id, claims->subject, [this](auto result) noexcept {
         --pending_;
@@ -1218,10 +1228,8 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
         session_.reset();
     }
     release_slot();
-    if (request_hold_) {
-        gw().release_client(*request_hold_);
-        request_hold_.reset();
-    }
+    release_request_hold();
+    settle_upload_bytes();
     const bool keep = req_.keep_alive && req_.message_complete && !draining_;
     head.connection = keep ? http::Connection::KeepAlive : http::Connection::Close;
     head.request_id = request_id();
@@ -1295,6 +1303,21 @@ void Connection::release_slot() noexcept {
     }
 }
 
+void Connection::release_request_hold() noexcept {
+    if (request_hold_) {
+        gateway_.release_client(*request_hold_);
+        request_hold_.reset();
+    }
+}
+
+void Connection::settle_upload_bytes() noexcept {
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims != nullptr && req_.bytes_charged > req_.bytes_received) {
+        gateway_.refund_upload_bytes(claims->subject, req_.bytes_charged - req_.bytes_received);
+    }
+    req_.bytes_charged = 0;
+}
+
 void Connection::release_client_holds() noexcept {
     for (std::optional<ClientHold>* hold : {&connection_hold_, &request_hold_}) {
         if (*hold) {
@@ -1338,6 +1361,7 @@ void Connection::close() noexcept {
     release_claim();
     release_slot();
     release_client_holds();
+    settle_upload_bytes();
     if (key_wait_) {
         deps().verifier.cancel_wait(*this);
         key_wait_ = false;

@@ -101,6 +101,10 @@ private:
         std::optional<std::uint64_t> upload_offset;
         std::optional<core::UploadId> upload_id;
         std::uint64_t content_length = 0;
+        // Charged against the user's byte quota at admission, and the body bytes read since;
+        // what was charged and never sent is given back when the request ends.
+        std::uint64_t bytes_charged = 0;
+        std::uint64_t bytes_received = 0;
         std::array<char, core::Uuid::kTextLength> request_id{};
         // Set when the store stopped taking the body, cleared when it took all that waited.
         std::optional<core::MonoTime> stalled_since;
@@ -182,6 +186,8 @@ private:
     void release_claim() noexcept;
     void release_slot() noexcept;
     void release_client_holds() noexcept;
+    void release_request_hold() noexcept;
+    void settle_upload_bytes() noexcept;
     // Behind a trusted proxy, counts the request against the client the proxy names; false
     // once that client has max_connections_per_ip in flight. A direct peer was counted at
     // accept.
