@@ -51,10 +51,14 @@ short or too quiet to tell fails rather than passes.
                           are few beside them
           upload sessions 5.3/s: a 100 MiB upload over 10 Mbit/s holds its slot 84 s, and 448
                           slots / 84 s is 5.3 sessions a second
-          jobs            1/s: the soak's two-second clip takes the worker 0.6 s end to end, so
-                          no worker finishes more than about one job a second
+          jobs            1.67/s: the soak's two-second clip takes the worker 0.6 s end to
+                          end, the least any job takes, and 1 / 0.6 s is 1.67 jobs a second
         With a gateway peak of ~40 MB that is 0.32 bytes per request and 41 bytes per upload
-        session: one leaked allocation (32 bytes at least) on every hundredth request fails.
+        session: one leaked allocation (32 bytes at least) on every hundredth request fails. A
+        worker peak of ~16 MB gives 413 bytes per job.
+        Chunk requests are also judged on their own, against the same 670/s: they are what that
+        ceiling counts, and in the soak they are a small share of all requests, so a leak on
+        each chunk would be diluted per request by the playlists and control calls around them.
   fds   Descriptors do not settle; any sustained rise is a leak. What a sample may legitimately
         differ by is what is in flight: each client and the uploads thread hold a connection,
         and each connection at most one backend socket; the slow clients (SLOW_MAX at once)
@@ -91,7 +95,7 @@ MONTH_SECONDS = 30 * 24 * 3600
 MEMORY_HIGH = {"gateway": 600 * 1000 * 1000, "worker": 1800 * 1000 * 1000}
 PRODUCTION_REQUESTS_PER_S = 670.0
 PRODUCTION_UPLOADS_PER_S = 5.3
-PRODUCTION_JOBS_PER_S = 1.0
+PRODUCTION_JOBS_PER_S = 1 / 0.6
 # Two-sided 95%: the slope's upper end is the slope plus 1.96 standard errors.
 Z95 = 1.96
 # The worker holds one job's descriptors at a time: its two database sessions, the workspace
@@ -349,10 +353,13 @@ class Worker(threading.Thread):
         return json.loads(data) if status == 201 else None
 
     def patch(self, upload, offset, data, user):
+        self.counts.add("chunks")
         return self.http("PATCH", f"/api/v1/uploads/{upload}", data,
                          {"Upload-Offset": str(offset)}, user=user)
 
     def patch_head(self, upload, total, user):
+        # Every chunk request sent by hand starts here.
+        self.counts.add("chunks")
         return (f"PATCH /api/v1/uploads/{upload} HTTP/1.1\r\nHost: soak\r\n"
                 f"Authorization: Bearer {self.stack.tokens[user]}\r\n"
                 f"Upload-Offset: 0\r\nContent-Length: {total}\r\n\r\n").encode()
@@ -701,12 +708,14 @@ def judge(rows, clients):
     passed = True
     hours = (window[-1]["elapsed_min"] - window[0]["elapsed_min"]) / 60
     rates = {"request": per_hour(window, "requests"),
+             "chunk request": per_hour(window, "chunks") if "chunks" in window[0] else None,
              "upload session": per_hour(window, "upload_sessions"),
              "job": per_hour(window, "uploads_committed")}
     report.append(f"window: {len(window)} samples over {hours:.2f} h after a "
                   f"{WARMUP_MINUTES} min warm-up; per hour: " +
-                  ", ".join(f"{v:.0f} {k}s" for k, v in rates.items()))
+                  ", ".join(f"{v:.0f} {k}s" for k, v in rates.items() if v is not None))
     units = {"gateway": [("request", PRODUCTION_REQUESTS_PER_S),
+                         ("chunk request", PRODUCTION_REQUESTS_PER_S),
                          ("upload session", PRODUCTION_UPLOADS_PER_S)],
              "worker": [("job", PRODUCTION_JOBS_PER_S)]}
     for proc in ["gateway", "worker"]:
@@ -719,6 +728,10 @@ def judge(rows, clients):
                       f"upper end {upper / 1e3:+.1f} KB/h")
         for unit, production in units[proc]:
             bound = (MEMORY_HIGH[proc] - peak) / (production * MONTH_SECONDS)
+            if rates[unit] is None:
+                # Runs from before the column; the per-session bound is what covers chunks there.
+                report.append(f"  per {unit}: not recorded by this run: not judged")
+                continue
             if rates[unit] <= 0:
                 report.append(f"  per {unit}: none in the window: NOT JUDGED")
                 passed = False
@@ -847,7 +860,8 @@ def main():
     rows = []
     fields = ["time", "elapsed_min", "gateway_rss_kb", "gateway_fds", "worker_rss_kb",
               "worker_fds", "requests", "status_2xx", "status_4xx", "status_5xx",
-              "transport_errors", "upload_sessions", "uploads_committed", "videos_ready",
+              "transport_errors", "chunks", "upload_sessions", "uploads_committed",
+              "videos_ready",
               "resumes_completed", "cancels", "playlists", "sighups"]
     started = time.time()
     end = started + args.hours * 3600
@@ -878,6 +892,7 @@ def main():
                        "worker_rss_kb": w[0], "worker_fds": w[1],
                        "requests": sum(statuses.values()), **statuses,
                        "transport_errors": c.get("transport_errors", 0),
+                       "chunks": c.get("chunks", 0),
                        "upload_sessions": c.get("upload_sessions", 0),
                        "uploads_committed": c.get("uploads_committed", 0),
                        # Capped at the working set of 200.

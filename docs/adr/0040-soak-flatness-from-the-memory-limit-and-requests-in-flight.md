@@ -43,11 +43,14 @@ minute, excludes the first 15 minutes and fits a least-squares line to the rest.
   for the worker. The production rates are ceilings:
   - requests, 670 a second: 448 upload slots (ADR-0027) each sending an 8 MiB chunk every
     0.67 s, which 100 Mbit/s takes; everything else is small beside that. About 0.32 bytes per
-    request: one 32-byte allocation in every hundred requests.
+    request: one 32-byte allocation in every hundred requests. The same bound is applied per
+    chunk request on its own: the ceiling counts chunks, and in the soak's mix they are a
+    small share of all requests, so per request a leak on each chunk would be diluted by the
+    playlists and control calls around it.
   - upload sessions, 5.3 a second: a 100 MiB upload over 10 Mbit/s holds its slot 84 s, and
     448 / 84 is 5.3. About 41 bytes per session.
-  - jobs, one a second per worker: the soak's clip takes the worker 0.6 s end to end, the least
-    any job takes. About 690 bytes per job.
+  - jobs, 1.67 a second per worker: the soak's clip takes the worker 0.6 s end to end, the
+    least any job takes, and 1 / 0.6 s is 1.67. About 413 bytes per job.
   Judging the upper end rather than the slope means noise cannot pass for flatness: a run too
   short or too quiet to resolve the bound fails, and says so.
 - Descriptors are flat when the upper end of the fitted rise over the window is below what may

@@ -12,8 +12,16 @@ tests/soak/soak.py --rejudge /tmp/soak-6h/samples.csv --clients 8        # judge
 ```
 
 `--rejudge` prints two verdicts: the per-unit criterion in force (the RSS slope's 95% upper end
-per request, per upload session and per job, against production ceilings), and the per-hour
-criterion it replaced. Pass `--clients` as the run used it; it sets the descriptor bound.
+per request, per chunk request, per upload session and per job, against production ceilings),
+and the per-hour criterion it replaced. Pass `--clients` as the run used it; it sets the
+descriptor bound.
+
+The job ceiling is 1.67 a second (the clip's 0.6 s end to end, the least a job takes), which
+bounds the worker at about 413 bytes a job; the runs below were judged again with it and their
+verdicts did not change. Chunk requests are counted from the soak that follows these runs; the
+three runs here predate the column, so for them `--rejudge` reports the per-chunk line as not
+judged, and a leak on each chunk shows only through the per-session line, since every chunk
+belongs to a session.
 
 ## Runs
 
@@ -42,7 +50,7 @@ A two-hour run, recorded as one. 126 samples; judged window 111 samples over 1.8
 - Per-unit criterion (current): **fail, not resolved**. At 18,507 requests an hour the gateway's
   upper end is 2.83 bytes a request against a bound of 0.32: two hours at five requests a
   second cannot resolve it. Per upload session 37.1 bytes against 40.9, flat; worker 0 bytes a
-  job against 688, flat; descriptors flat.
+  job against 413, flat; descriptors flat.
 
 ### 6 h, 2026-09-29 04:40 to 10:40 UTC
 
@@ -69,7 +77,7 @@ finished. `uploads_committed` (1,723) counts the commits.
 - Per-hour criterion (replaced): **pass**.
 - Per-unit criterion (current): **pass**. The upper ends are negative: RSS fell slightly over the
   window. Gateway at most -3.7 bytes a request (bound 0.32) and -48 a session (bound 40.9);
-  worker at most -536 bytes a job (bound 688); descriptors flat against bounds of 27 and 16.
+  worker at most -536 bytes a job (bound 413); descriptors flat against bounds of 27 and 16.
 
 This run lacked the paths the current load adds: TLS, the header, body idle and body rate
 timers, full admission limits, store faults and certificate reloads.
@@ -77,6 +85,6 @@ timers, full admission limits, store faults and certificate reloads.
 ### 6 h on the current load, started 2026-09-29 10:41 UTC
 
 Binaries from ee075b6, the current soak load (eight clients on TLS, about 30 requests a second,
-with slow clients, saturation, store faults and SIGHUPs) and criterion. Output in the lane's
-scratchpad under `soak/run-6h-final/` (soak PID 25110, gateway 25285, worker 25286); it ends
-about 16:41 UTC. Its result is to be added here.
+with slow clients, saturation, store faults and SIGHUPs) and criterion.
+
+Run 3 (full load) in progress; recorded when it ends at about 16:41 UTC.
