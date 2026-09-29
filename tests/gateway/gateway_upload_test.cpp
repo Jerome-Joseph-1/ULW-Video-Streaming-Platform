@@ -98,16 +98,22 @@ TEST_P(GatewayUpload, HealthAndReadinessNeedNoToken) {
     EXPECT_EQ(c.request("GET", "/api/v1/uploads", "")->status, 405);
 }
 
-TEST_P(GatewayUpload, UploadRoutesRefuseMissingAndBadTokens) {
+TEST_P(GatewayUpload, UploadRoutesRefuseMissingAndBadTokensWithABearerChallenge) {
     const GatewayUnderTest gw(over_transport());
     HttpClient c(gw.endpoint());
     const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
-    EXPECT_EQ(c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)))->status,
-              401);
+    const auto missing = c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)));
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 401);
+    // No credentials, so no error code (RFC 6750 section 3.1).
+    EXPECT_EQ(missing->header("www-authenticate"), "Bearer");
     HttpClient d(gw.endpoint());
-    EXPECT_EQ(
-        d.request("POST", "/api/v1/uploads", "forged", std::as_bytes(std::span(body)))->status,
-        401);
+    const auto forged =
+        d.request("POST", "/api/v1/uploads", "forged", std::as_bytes(std::span(body)));
+    ASSERT_TRUE(forged);
+    EXPECT_EQ(forged->status, 401);
+    EXPECT_EQ(forged->header("www-authenticate"), R"(Bearer error="invalid_token")");
+    EXPECT_EQ(forged->body, "");
 }
 
 TEST_P(GatewayUpload, InboundUserHeadersAreIgnored) {
@@ -210,6 +216,38 @@ TEST_P(GatewayUpload, CommitBeforeEveryByteArrivedIs409) {
     const auto r = c.request("POST", "/api/v1/uploads/" + up->upload_id + "/commit", kAlice);
     EXPECT_EQ(r->status, 409);
     EXPECT_TRUE(gw.jobs().empty());
+}
+
+TEST_P(GatewayUpload, OnlyTheFirstAcceptedPatchMovesTheVideoFromInitToUploading) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(3 * kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    struct Seen {
+        std::string state;
+        std::uint64_t version = 0;
+        bool operator==(const Seen&) const = default;
+    };
+    const auto video = [&]() -> std::optional<Seen> {
+        const auto r = c.request("GET", "/api/v1/videos/" + up->video_id, kAlice);
+        if (!r || r->status != 200) {
+            return std::nullopt;
+        }
+        const auto doc = core::json::parse(r->body);
+        if (!doc) {
+            return std::nullopt;
+        }
+        return Seen{.state = std::string(*doc->find("state")->as_string()),
+                    .version = *doc->find("version")->as_u64()};
+    };
+    EXPECT_EQ(video(), (Seen{"init", 0}));
+
+    ASSERT_EQ(patch(c, up->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+    EXPECT_EQ(video(), (Seen{"uploading", 1}));
+
+    ASSERT_EQ(patch(c, up->upload_id, kMiB, std::span(data).subspan(kMiB, kMiB))->status, 204);
+    EXPECT_EQ(video(), (Seen{"uploading", 1}));
 }
 
 TEST_P(GatewayUpload, ClientKilledMidChunkResumesFromHead) {

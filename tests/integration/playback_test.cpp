@@ -189,6 +189,10 @@ protected:
             "ULW_DATABASE_URL=" + db_->conninfo(),
             "ULW_DEV_JWKS_FILE=" + jwks.string(),
             "JWT_ISSUER=" + std::string(kIssuer)};
+        // Every request here is a connection of its own from 127.0.0.1, several a second.
+        env.emplace_back("ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND=1000");
+        // Some runs start tests as root; this suite is not about that.
+        env.emplace_back("ULW_ALLOW_ROOT=1");
         if (const char* reactor = std::getenv("ULW_REACTOR")) {
             env.push_back("ULW_REACTOR=" + std::string(reactor));
         }

@@ -12,6 +12,7 @@
 #include "job_runner.hpp"
 #include "ops/log.hpp"
 #include "ops/notify.hpp"
+#include "ops/root.hpp"
 #include "ops/settings.hpp"
 #include "worker.hpp"
 #include "workspace.hpp"
@@ -59,6 +60,23 @@ int fail(ops::Logger& log, std::string_view what, std::string_view why) {
 int refuse(ops::Logger& log, std::string_view source, std::string_view reason) {
     log.error("configuration refused", {{"source", source}, {"reason", reason}});
     return kExitConfig;
+}
+
+// Started as root, the worker becomes the configured user before its first job, and before the
+// scratch directory it will own is made; not root, there is nothing to give up. nullopt means
+// carry on, anything else is the exit code.
+std::optional<int> leave_root(const std::string& user, bool allow_root, ops::Logger& log) {
+    const auto step = ops::leave_root(user, allow_root);
+    if (!step) {
+        return step.error().configuration ? refuse(log, step.error().source, step.error().reason)
+                                          : fail(log, step.error().source, step.error().reason);
+    }
+    if (*step == ops::RootStep::StayedRoot) {
+        log.warn("running as root, as ULW_ALLOW_ROOT=1 allows");
+    } else if (*step == ops::RootStep::Dropped) {
+        log.info("dropped root", {{"user", user}});
+    }
+    return std::nullopt;
 }
 
 std::string_view to_string(worker::StorageBackend backend) noexcept {
@@ -167,6 +185,10 @@ int run(std::span<const std::string_view> args) {
     log.set_threshold(config->log_level);
     log.info("starting", {{"version", info.version}, {"git_sha", info.git_sha}});
     worker::log_effective(*config, *layers, log);
+    // Before any thread exists: glibc then has no other thread to carry the change to.
+    if (const auto code = leave_root(config->run_as_user, config->allow_root, log)) {
+        return *code;
+    }
     if (cli->check) {
         log.info("configuration valid");
         return EXIT_SUCCESS;

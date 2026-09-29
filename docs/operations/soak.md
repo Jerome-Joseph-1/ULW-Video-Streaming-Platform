@@ -11,6 +11,10 @@ tests/soak/soak.py --build build/ci --hours 6 --out /tmp/soak-6h          # a ru
 tests/soak/soak.py --rejudge /tmp/soak-6h/samples.csv --clients 8        # judge it again
 ```
 
+The soak sets `ULW_ALLOW_ROOT=1` for the processes it starts, since a development host may run it
+as root, and both services refuse root otherwise (ADR-0052). Started by hand as root, either
+service needs `ULW_ALLOW_ROOT=1`, or `ULW_RUN_AS_USER` naming the user to become.
+
 `--rejudge` prints two verdicts: the per-unit criterion in force (the RSS slope's 95% upper end
 per request, per chunk request, per upload session and per job, against production ceilings),
 and the per-hour criterion it replaced. Pass `--clients` as the run used it; it sets the

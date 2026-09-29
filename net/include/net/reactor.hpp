@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/util/time.hpp"
+#include "net/socket_addr.hpp"
 #include "os/unique_fd.hpp"
 
 #include <cstddef>
@@ -62,6 +63,49 @@ public:
     virtual void on_timeout() noexcept = 0;
 };
 
+// A UDP socket owned by the reactor. The generation plays the same part as in ConnId.
+struct DatagramId {
+    std::int32_t fd = -1;
+    std::uint32_t gen = 0;
+    friend bool operator==(DatagramId, DatagramId) = default;
+};
+
+// The largest payload either direction carries. Media on the internet is sized to the 1500-byte
+// Ethernet MTU, which leaves at most 1500 - 20 (IPv4) - 8 (UDP) = 1472 bytes; 2 KiB is the next
+// power of two. A longer datagram is dropped and counted as truncated rather than delivered cut.
+inline constexpr std::size_t kMaxDatagramSize = 2048;
+
+struct DatagramStats {
+    std::uint64_t received = 0;
+    // Longer than kMaxDatagramSize.
+    std::uint64_t truncated = 0;
+    // io_uring only: a datagram arrived while every receive buffer was in use and waited in the
+    // socket until one came back.
+    std::uint64_t ring_exhausted = 0;
+    // io_uring only: arrived after a stop, beyond what one stopped socket may keep in the shared
+    // receive buffers, and dropped as a full receive buffer would have dropped it.
+    std::uint64_t stopped_drops = 0;
+    std::uint64_t sent = 0;
+    // io_uring only: sends that went out as SENDMSG_ZC, and notifications of those that said the
+    // kernel copied the payload anyway.
+    std::uint64_t zero_copy_sends = 0;
+    std::uint64_t zero_copy_copied = 0;
+    std::uint64_t send_refused = 0;
+    std::uint64_t send_errors = 0;
+};
+
+// Mode C: the reactor owns a UDP socket and hands over each datagram it has already read.
+class IDatagramHandler {
+public:
+    virtual ~IDatagramHandler() = default;
+    virtual void on_datagram(SocketAddr from, BorrowedBytes payload) noexcept = 0;
+    // The kernel refused a datagram send_to had accepted (ENETUNREACH, EACCES, ...).
+    virtual void on_send_error(SocketAddr to, int err) noexcept = 0;
+    // Receiving failed, typically with an ICMP error queued on a connected socket. Receiving
+    // stops; start_receiving_datagrams resumes it.
+    virtual void on_error(int err) noexcept = 0;
+};
+
 class IAcceptHandler {
 public:
     virtual ~IAcceptHandler() = default;
@@ -97,6 +141,28 @@ public:
     // no reference to it. No callback for this connection follows.
     virtual void begin_close(ConnId conn) noexcept = 0;
     [[nodiscard]] virtual bool is_quiescent(ConnId conn) const noexcept = 0;
+
+    // `socket` must be an IPv4 or IPv6 UDP socket. It starts out not receiving.
+    [[nodiscard]] virtual std::expected<DatagramId, int>
+    attach_datagram(os::UniqueFd socket, IDatagramHandler& handler) = 0;
+    virtual void start_receiving_datagrams(DatagramId socket) noexcept = 0;
+    // Exact, as stop_receiving is. Datagrams wait in the socket's receive buffer, and once that
+    // is full the kernel drops new ones, which is the backpressure UDP has.
+    virtual void stop_receiving_datagrams(DatagramId socket) noexcept = 0;
+    // Copies `payload` and never blocks or queues without bound. EAGAIN means the datagram was
+    // not taken and is the caller's to drop or retry: a late media packet is worth less than a
+    // fresh one. The reactors refuse on different grounds: io_uring once it holds 1,024 sends
+    // not yet completed, across all its sockets, which only happens when a single iteration
+    // sends that many; epoll when the socket's kernel send buffer is full. Also
+    // EMSGSIZE past kMaxDatagramSize, EAFNOSUPPORT for an IPv6 destination on an IPv4 socket,
+    // and EBADF for a closed socket. Whatever the kernel refuses later arrives through
+    // on_send_error, never from inside this call.
+    [[nodiscard]] virtual std::expected<void, int>
+    send_to(DatagramId socket, SocketAddr to, std::span<const std::byte> payload) noexcept = 0;
+    // Drops sends in flight; no callback for this socket follows.
+    virtual void begin_close(DatagramId socket) noexcept = 0;
+    [[nodiscard]] virtual bool is_quiescent(DatagramId socket) const noexcept = 0;
+    [[nodiscard]] virtual DatagramStats datagram_stats(DatagramId socket) const noexcept = 0;
 
     // The caller keeps ownership of `fd` and must unwatch() before closing it.
     [[nodiscard]] virtual std::expected<void, int> watch(int fd, Interest interest,

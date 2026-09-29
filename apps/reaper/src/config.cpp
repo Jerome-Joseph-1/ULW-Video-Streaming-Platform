@@ -2,6 +2,8 @@
 
 #include "core/util/parse.hpp"
 
+#include "ops/root.hpp"
+
 #include <chrono>
 #include <utility>
 
@@ -48,7 +50,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .storage = StorageBackend::R2,
                   .storage_location = {},
                   .bucket = {},
-                  .orphan_after = {}};
+                  .orphan_after = {},
+                  .run_as_user = {},
+                  .allow_root = false};
     const std::string kind = lookup(env, "ULW_STORAGE").value_or("r2");
     std::string_view location_variable;
     if (kind == "r2") {
@@ -84,6 +88,12 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     }
     config.orphan_after = std::chrono::duration_cast<core::Seconds>(
         std::chrono::hours{static_cast<std::int64_t>(ttl_hours)} + kMargin);
+    const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
+    if (!allow_root) {
+        return error("ULW_ALLOW_ROOT", "expected 0 or 1");
+    }
+    config.allow_root = *allow_root;
+    config.run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or("");
     return config;
 }
 

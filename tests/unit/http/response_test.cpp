@@ -126,6 +126,16 @@ TEST(ResponseWriter, WritesRetryAfterInSeconds) {
               "\r\n");
 }
 
+TEST(ResponseWriter, ChallengesAnUnauthorizedClient) {
+    EXPECT_EQ(write({.status = Status::Unauthorized,
+                     .www_authenticate = R"(Bearer error="invalid_token")"}),
+              "HTTP/1.1 401 Unauthorized\r\n"
+              "Content-Length: 0\r\n"
+              "Connection: keep-alive\r\n"
+              "WWW-Authenticate: Bearer error=\"invalid_token\"\r\n"
+              "\r\n");
+}
+
 TEST(ResponseWriter, ReportsEveryBufferShorterThanTheHead) {
     const ResponseHead head{.status = Status::Created,
                             .location = "/api/v1/uploads/u",
@@ -145,8 +155,9 @@ TEST(ResponseWriter, ReportsEveryBufferShorterThanTheHead) {
 }
 
 TEST(ResponseWriter, RefusesValuesThatCouldEndTheFieldEarly) {
-    const std::array<ResponseHead, 5> heads{{
+    const std::array<ResponseHead, 6> heads{{
         {.status = Status::Created, .location = "/a\r\nSet-Cookie: s=1"},
+        {.status = Status::Unauthorized, .www_authenticate = "Bearer\r\nSet-Cookie: s=1"},
         {.status = Status::Ok, .request_id = "r\n"},
         {.status = Status::Ok, .content_type = std::string_view{"text/plain\0x", 12}},
         {.status = Status::Ok, .cache_control = "no-store\x7F"},
