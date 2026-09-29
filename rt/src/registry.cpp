@@ -94,12 +94,12 @@ void RoomRegistry::forget(const core::RoomId& room) noexcept {
     }
 }
 
-bool RoomRegistry::append(const core::RoomId& room, AppendCallback done) {
+bool RoomRegistry::append(const core::RoomId& room, const Outgoing& message, AppendCallback done) {
     const auto generation = owned(room);
     if (!generation) {
         return false;
     }
-    store_.append(room, *generation,
+    store_.append(room, *generation, message,
                   [this, room, generation = *generation, done = std::move(done)](
                       StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
                       if (!r) {

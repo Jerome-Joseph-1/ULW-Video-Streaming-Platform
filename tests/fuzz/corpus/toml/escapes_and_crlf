@@ -1,0 +1,4 @@
+a.b = "x\u00e9\U0001F600\t"
+[c]
+d = -12 # note
+e = true

@@ -60,7 +60,7 @@ public:
     void heartbeat(const core::NodeId& node, const core::Uuid& incarnation,
                    std::vector<rt::OwnedRoom> rooms,
                    rt::StoreCallback<std::vector<core::RoomId>> done) override;
-    void append(const core::RoomId& room, std::uint64_t generation,
+    void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& message,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override;
     // append(), and in the same statement the message's row in chat_messages
     // (migrations/0005_chat_messages.sql): the seq is taken only with its row, and a fenced

@@ -1,9 +1,11 @@
 ulw_add_library(chat_lib
     src/chat.cpp
+    src/chat_service.cpp
     src/config.cpp
     src/envelope.cpp
     src/key_fetcher.cpp
-    src/session.cpp)
+    src/session.cpp
+    src/token_bucket.cpp)
 target_include_directories(chat_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 target_link_libraries(chat_lib PUBLIC
     ulw::core_domain ulw::net_lib ulw::http_lib ulw::codec_ws ulw::rt_lib ulw::auth

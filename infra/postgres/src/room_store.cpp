@@ -700,7 +700,10 @@ void PgRoomStore::heartbeat(const core::NodeId& node, const core::Uuid& incarnat
         kHeartbeat, node, incarnation, rooms, &decode_renewed, std::move(done)));
 }
 
+// No message table exists yet: only the seq is taken. The message goes into the same statement
+// once history is stored.
 void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
+                         const rt::Outgoing& /*message*/,
                          StoreCallback<std::optional<std::uint64_t>> done) {
     impl_->pool().submit(std::make_unique<Append>(room, generation, std::move(done)));
 }

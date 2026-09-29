@@ -77,4 +77,8 @@ struct TlsFiles {
 [[nodiscard]] std::expected<std::unique_ptr<ITransportFactory>, std::string>
 make_tls_transports(IReactor& reactor, TlsFiles files);
 
+// What make_tls_transports would say of `files`, without a reactor: for checking configuration
+// before anything starts.
+[[nodiscard]] std::expected<void, std::string> check_tls_files(const TlsFiles& files);
+
 } // namespace net

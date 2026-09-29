@@ -302,8 +302,12 @@ TEST_F(SequencedAppendTest, StoringTheMessageCostsWhatTakingTheSeqAloneDoes) {
         combined.push_back(millis(std::chrono::steady_clock::now() - started));
 
         started = std::chrono::steady_clock::now();
-        ASSERT_TRUE(ask<std::optional<std::uint64_t>>(
-            [&](auto done) { rooms_->append(seq_only, g_seq_only, std::move(done)); }));
+        ASSERT_TRUE(ask<std::optional<std::uint64_t>>([&](auto done) {
+            rooms_->append(
+                seq_only, g_seq_only,
+                rt::Outgoing{.sender = alice_, .key = *rt::MessageKey::parse("k"), .body = {}},
+                std::move(done));
+        }));
         alone.push_back(millis(std::chrono::steady_clock::now() - started));
     }
     const auto report = [&](std::string_view name, std::vector<double>& samples) {
