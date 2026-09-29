@@ -5,6 +5,8 @@
 #include "log.hpp"
 #include "session.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <format>
 
 namespace chat {
@@ -121,6 +123,37 @@ Session* ChatServer::session(net::Slab<Session>::Handle handle) noexcept {
 
 void ChatServer::retire(net::Slab<Session>::Handle handle) noexcept {
     sessions_.retire(handle);
+}
+
+bool ChatServer::admit_join(const core::UserId& user) {
+    const core::MonoTime now = deps_.reactor.now();
+    const auto refill = [&](JoinBucket& b) {
+        const auto elapsed = std::chrono::duration_cast<core::Seconds>(now - b.refilled).count();
+        if (elapsed <= 0) {
+            return;
+        }
+        b.tokens = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            limits_.join_burst,
+            b.tokens + (static_cast<std::uint64_t>(elapsed) * limits_.joins_per_second)));
+        b.refilled += core::Seconds{elapsed};
+    };
+    // A full bucket is the same as none, so users idle long enough to refill are forgotten
+    // whenever the table outgrows the connections that could be using it.
+    if (joins_.size() > limits_.max_connections) {
+        std::erase_if(joins_, [&](auto& entry) {
+            refill(entry.second);
+            return entry.second.tokens >= limits_.join_burst;
+        });
+    }
+    auto [it, fresh] =
+        joins_.try_emplace(user, JoinBucket{.tokens = limits_.join_burst, .refilled = now});
+    JoinBucket& bucket = it->second;
+    refill(bucket);
+    if (bucket.tokens == 0) {
+        return false;
+    }
+    --bucket.tokens;
+    return true;
 }
 
 std::string ChatServer::render_metrics() const {

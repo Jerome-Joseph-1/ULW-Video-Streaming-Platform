@@ -357,6 +357,12 @@ void Session::join(const Join& join) {
             send_text(out);
             return;
         }
+        if (!user_ || !server_.admit_join(*user_)) {
+            std::string out;
+            write_error(out, "busy", join.room);
+            send_text(out);
+            return;
+        }
         rooms_.push_back(join.room);
     }
     ChatServer& server = server_;

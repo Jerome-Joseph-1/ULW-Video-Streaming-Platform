@@ -527,6 +527,10 @@ public:
             done(std::unexpected(RouteError::Unavailable));
             return;
         }
+        if (!local_.contains(room) && local_.size() >= config_.max_rooms) {
+            done(std::unexpected(RouteError::Busy));
+            return;
+        }
         auto [it, created] = local_.try_emplace(room);
         LocalRoom& lr = it->second;
         if (created) {
@@ -772,10 +776,35 @@ private:
         }
         // Rooms whose owner could not be reached are tried again, once a beat.
         find_orphans();
+        release_idle(now);
         if (now >= next_revalidation_) {
             next_revalidation_ = now + kRevalidate;
             revalidate();
         }
+    }
+
+    void release_idle(core::MonoTime now) {
+        for (const core::RoomId& room : registry_.owned_rooms()) {
+            const auto o = owned_.find(room);
+            const bool used = local_.contains(room) ||
+                              (o != owned_.end() &&
+                               (!o->second.subscribers.empty() || !o->second.writes.empty()));
+            if (used) {
+                idle_since_.erase(room);
+                continue;
+            }
+            const auto [since, first] = idle_since_.try_emplace(room, now);
+            if (first || now - since->second < config_.idle_release) {
+                continue;
+            }
+            idle_since_.erase(since);
+            if (o != owned_.end()) {
+                owned_.erase(o);
+            }
+            registry_.release(room);
+        }
+        std::erase_if(idle_since_,
+                      [this](const auto& entry) { return !registry_.owned(entry.first); });
     }
 
     // Notifications are hints and a listening session can miss them; every room routed to
@@ -1235,6 +1264,8 @@ private:
     RoomRegistry registry_;
     std::unordered_map<core::RoomId, LocalRoom> local_;
     std::unordered_map<core::RoomId, OwnedRoomState> owned_;
+    // Owned rooms nobody here uses, and since when.
+    std::unordered_map<core::RoomId, core::MonoTime> idle_since_;
     net::Slab<Inbound> inbound_;
     std::unordered_map<core::NodeId, std::unique_ptr<Outbound>> outbound_;
     std::vector<std::unique_ptr<Outbound>> closing_;

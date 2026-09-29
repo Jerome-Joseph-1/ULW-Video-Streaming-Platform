@@ -42,6 +42,9 @@ sequenced messages, and M17 owns the rest (acks, resume, rate limits).
   Unknown types and unknown fields are refused with `error`, not ignored. A body is a JSON
   string carried as opaque bytes: never parsed, logged or indexed, and returned re-escaped but
   byte for byte. A binary frame closes with 1003.
+- **Joins.** A user may join new rooms at a burst of 64 and then one a second, counted across
+  all their connections: a join of an unknown room creates it, and its rows outlive the room's
+  use. Past that, the join is answered `busy`.
 - **Slow readers.** A connection with more than 256 KiB unsent is closed. Its client reconnects
   and, from M17, resumes from its last seq.
 - **Probes** share the client port: `/healthz` (the loop is alive), `/readyz` (not draining, the

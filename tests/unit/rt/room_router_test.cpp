@@ -186,18 +186,25 @@ protected:
         }
     }
 
-    Node& start(std::string_view name, std::string_view secret = kSecret) {
+    // Limits other than the router's own defaults.
+    struct Tuning {
+        std::optional<core::Millis> idle_release;
+        std::optional<std::size_t> max_rooms;
+    };
+
+    Node& start(std::string_view name, std::string_view secret = kSecret, Tuning tuning = {}) {
         auto node = std::make_unique<Node>();
         node->store = std::make_unique<ulw::test::MemoryRoomStore>(*reactor_, db_);
         auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
         EXPECT_TRUE(listener);
         node->port = *net::local_port(listener->get());
-        node->router = std::make_unique<rt::RoomRouter>(
-            *reactor_, *node->store, clock_, random_,
-            rt::RouterConfig{.self = *core::NodeId::parse(name),
-                             .advertise = "127.0.0.1:" + std::to_string(node->port),
-                             .secret = std::string(secret)},
-            node->events);
+        rt::RouterConfig config{.self = *core::NodeId::parse(name),
+                                .advertise = "127.0.0.1:" + std::to_string(node->port),
+                                .secret = std::string(secret)};
+        config.idle_release = tuning.idle_release.value_or(config.idle_release);
+        config.max_rooms = tuning.max_rooms.value_or(config.max_rooms);
+        node->router = std::make_unique<rt::RoomRouter>(*reactor_, *node->store, clock_, random_,
+                                                        std::move(config), node->events);
         EXPECT_TRUE(node->router->start(std::move(*listener)));
         Node& out = *node;
         nodes_.push_back(std::move(node));
@@ -504,6 +511,36 @@ TEST_P(RoomRouterTest, ASubscriberThatStopsReadingIsCutOffInsteadOfQueuedForWith
     EXPECT_EQ(a.router->counters().slow_peers, 1U);
     // Its own members are still served.
     EXPECT_TRUE(send(a, alice, "alice", "still here"));
+}
+
+TEST_P(RoomRouterTest, ARoomNobodyUsesAnyMoreIsGivenUpForOthersToTake) {
+    Node& a = start("chat-a", kSecret, {.idle_release = core::Millis{0}, .max_rooms = {}});
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_EQ(a.router->rooms_owned(), 1U);
+    a.router->leave(room_, alice);
+    ASSERT_TRUE(pump([&] { return a.router->rooms_owned() == 0; }));
+    // Claimable at once, not after the owner's heartbeat goes stale.
+    EXPECT_TRUE(pump([&] { return db_.rooms.at(room_).stale; }));
+
+    // Used again, it is simply taken again.
+    Node& b = start("chat-b");
+    Member bob;
+    ASSERT_TRUE(join(b, bob));
+    EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-b"));
+}
+
+TEST_P(RoomRouterTest, AJoinPastTheNodesRoomLimitIsBusy) {
+    Node& a = start("chat-a", kSecret, {.idle_release = {}, .max_rooms = 1});
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    std::optional<std::expected<void, RouteError>> second;
+    a.router->join(core::RoomId::generate(clock_, random_), alice,
+                   [&](auto r) noexcept { second = r; });
+    EXPECT_EQ(second, std::unexpected(RouteError::Busy));
+    // The room already joined is not a new one.
+    Member bob;
+    EXPECT_TRUE(join(a, bob));
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, RoomRouterTest,

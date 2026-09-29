@@ -359,6 +359,22 @@ TEST_F(RegistryTest, LosingInterestDropsTheCachedOwner) {
     EXPECT_FALSE(registry_.known_owner(room));
 }
 
+TEST_F(RegistryTest, ReleasingOneRoomGivesUpThatRoomAlone) {
+    const core::RoomId idle = new_room();
+    const core::RoomId busy = new_room();
+    own(idle, 3);
+    own(busy, 1);
+    registry_.release(idle);
+    EXPECT_FALSE(registry_.owned(idle));
+    EXPECT_FALSE(registry_.known_owner(idle));
+    EXPECT_EQ(registry_.owned_rooms(), std::vector<core::RoomId>{busy});
+    ASSERT_EQ(store_.releases.size(), 1U);
+    EXPECT_EQ(store_.releases.front().rooms,
+              (std::vector<OwnedRoom>{{.room = idle, .generation = 3}}));
+    registry_.release(idle);
+    EXPECT_EQ(store_.releases.size(), 1U);
+}
+
 TEST_F(RegistryTest, ReleasingForADrainGivesUpEveryRoomUnderItsGeneration) {
     const core::RoomId a = new_room();
     const core::RoomId b = new_room();

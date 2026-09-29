@@ -216,6 +216,27 @@ void RoomRegistry::release_all(StoreCallback<void> done) {
     store_.release(self_, std::move(rooms), std::move(done));
 }
 
+void RoomRegistry::release(const core::RoomId& room) {
+    const auto it = owned_.find(room);
+    if (it == owned_.end()) {
+        return;
+    }
+    std::vector<OwnedRoom> rooms{{.room = room, .generation = it->second}};
+    owned_.erase(it);
+    cache_.erase(room);
+    // Failing leaves the room to go stale instead, which costs a claimant kOwnerStaleAfter.
+    store_.release(self_, std::move(rooms), [](const StoreResult<void>&) noexcept {});
+}
+
+std::vector<core::RoomId> RoomRegistry::owned_rooms() const {
+    std::vector<core::RoomId> rooms;
+    rooms.reserve(owned_.size());
+    for (const auto& [room, generation] : owned_) {
+        rooms.push_back(room);
+    }
+    return rooms;
+}
+
 bool RoomRegistry::healthy() const noexcept {
     return last_beat_ && clock_.now() - *last_beat_ < kOwnerStaleAfter;
 }

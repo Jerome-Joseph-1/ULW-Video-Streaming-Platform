@@ -81,6 +81,14 @@ struct RouterConfig {
     // Shared by every node of the deployment; each end of a node-channel connection proves it
     // holds it before anything else is exchanged (ADR-0037). kMinNodeSecretBytes at least.
     std::string secret;
+    // A room this node owns that has had no members here, no subscribed node and no write for
+    // this long is given up, so that rooms nobody uses do not pile up on their owner. A minute
+    // outlasts a reconnect; a room used again is simply taken again.
+    core::Millis idle_release{60'000};
+    // Rooms with members on this node at once. The owner heartbeat names every owned room once
+    // a second, and each costs a few hundred bytes here: 16384 rooms keep the beat near 1 MB and
+    // the bookkeeping to a few MB. A join past it is answered Busy.
+    std::size_t max_rooms = 16'384;
 };
 
 struct RouterCounters {

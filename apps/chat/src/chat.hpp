@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace chat {
@@ -24,6 +25,12 @@ struct Limits {
     // A client shows a handful of conversations at once; 64 bounds what one socket makes this
     // node track and subscribe to.
     std::size_t max_rooms_per_connection = 64;
+    // Joins of new rooms per user, across all their connections: a join may create the room,
+    // a row that outlives everyone in it. A fresh user may fill one connection's rooms at once;
+    // after that one a second, far faster than a person opens conversations and far slower
+    // than a script filling the table would like.
+    std::uint32_t join_burst = 64;
+    std::uint32_t joins_per_second = 1;
     // Sends answered only once their owner has sequenced them; a client that has 32 of those
     // outstanding is not waiting on the answers.
     std::size_t max_sends_in_flight = 32;
@@ -128,6 +135,8 @@ public:
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
+    // Takes one of the user's joins; false when they have none left.
+    [[nodiscard]] bool admit_join(const core::UserId& user);
     void retire(net::Slab<Session>::Handle handle) noexcept;
 
 private:
@@ -136,6 +145,11 @@ private:
     Limits limits_;
     Counters counters_;
     net::Slab<Session> sessions_;
+    struct JoinBucket {
+        std::uint32_t tokens = 0;
+        core::MonoTime refilled;
+    };
+    std::unordered_map<core::UserId, JoinBucket> joins_;
     bool draining_ = false;
     bool released_ = false;
     net::TimerId drain_timer_;

@@ -31,7 +31,7 @@ constexpr std::string_view kAllowed = "https://app.askedin.test";
 // The test talks to it through sockets only.
 class Node {
 public:
-    explicit Node(net::ReactorKind kind) {
+    explicit Node(net::ReactorKind kind, chat::Limits limits = {}) : limits_(limits) {
         std::promise<std::uint16_t> port;
         auto ready = port.get_future();
         thread_ = std::jthread([this, kind, port = std::move(port)]() mutable { run(kind, port); });
@@ -79,7 +79,7 @@ private:
             chat::Deps{
                 .reactor = **reactor, .router = router, .verifier = verifier, .clock = clock},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
-            chat::Limits{});
+            limits_);
         if (!(*reactor)->listen(std::move(*clients), *server)) {
             port.set_value(0);
             return;
@@ -93,6 +93,7 @@ private:
         store.reset();
     }
 
+    chat::Limits limits_;
     std::atomic<bool> stop_ = false;
     std::uint16_t port_ = 0;
     std::jthread thread_;
@@ -232,6 +233,26 @@ TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
     ASSERT_TRUE(alice->append(binary, codec::ws::Opcode::Binary, "\x01\x02"));
     ASSERT_TRUE(alice->send_raw(binary));
     EXPECT_EQ(alice->close_status(seconds(10)), 1003);
+}
+
+TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryConnection) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(), chat::Limits{.join_burst = 2});
+    const auto join = [](WsClient& ws, std::string_view room) {
+        EXPECT_TRUE(ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"("})"));
+        const auto answer = ws.next_text(seconds(10));
+        return answer.value_or("").find(R"("type":"joined")") != std::string::npos;
+    };
+    auto first = open_as("alice");
+    auto second = open_as("alice");
+    auto other = open_as("bob");
+    ASSERT_TRUE(first && second && other);
+    EXPECT_TRUE(join(*first, "01a0eb86-6cca-7dce-84cc-3bb47615f901"));
+    EXPECT_TRUE(join(*first, "01a0eb86-6cca-7dce-84cc-3bb47615f902"));
+    EXPECT_FALSE(join(*first, "01a0eb86-6cca-7dce-84cc-3bb47615f903"));
+    // A second connection does not reset the user's allowance; another user has their own.
+    EXPECT_FALSE(join(*second, "01a0eb86-6cca-7dce-84cc-3bb47615f904"));
+    EXPECT_TRUE(join(*other, "01a0eb86-6cca-7dce-84cc-3bb47615f905"));
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

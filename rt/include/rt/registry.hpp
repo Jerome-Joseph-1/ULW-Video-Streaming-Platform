@@ -94,6 +94,10 @@ public:
     void tick();
     // For a drain: stops owning every room and makes them claimable at once.
     void release_all(StoreCallback<void> done);
+    // Stops owning one room nobody here uses, and makes it claimable at once. A no-op for a
+    // room this node does not own.
+    void release(const core::RoomId& room);
+    [[nodiscard]] std::vector<core::RoomId> owned_rooms() const;
 
     // The last heartbeat reached the store within kOwnerStaleAfter.
     [[nodiscard]] bool healthy() const noexcept;

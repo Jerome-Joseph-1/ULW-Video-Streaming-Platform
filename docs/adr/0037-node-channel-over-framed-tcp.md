@@ -82,6 +82,11 @@ Failure modes, and what each costs:
   as owner, answers the write's sender `fenced`, and delivers nothing. Notifications of the
   takeover only update where it routes; ownership ends at the fence, never before, so what a
   stale owner does is decided by the database and not by which event its loop saw first.
+- An owner gives up a room that has had no members on it, no subscribed node and no write for a
+  minute, so the rooms a node owns (and names in every heartbeat) follow what is in use; a node
+  also takes at most 16384 rooms with members on it at once. The room's rows stay: creating
+  rooms is limited per user at the client edge (ADR-0038), and deciding who may create one at
+  all is membership's, in M17.
 - Rows of departed nodes stay in `chat_nodes`; a restarted pod comes back under a new name.
   Reopen with a cleanup when the table is large enough to notice.
 - One append per message per room caps a single room at about a thousand messages a second.
