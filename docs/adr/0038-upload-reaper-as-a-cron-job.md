@@ -1,4 +1,4 @@
-# 0034. Abandoned uploads are reaped by a CronJob
+# 0038. Abandoned uploads are reaped by a CronJob
 
 Status: Accepted
 Date: 2026-09-29

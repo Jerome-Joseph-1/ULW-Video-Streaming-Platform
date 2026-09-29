@@ -136,7 +136,7 @@ password percent-encoded.
 
 The bucket aborts incomplete multipart uploads under `videos/` after 7 days, a day past the
 gateway's 6-day upload lifetime. This is the backstop; the reaper below normally gets there
-within minutes of an upload expiring (docs/adr/0034). Once per bucket, with an R2 token that
+within minutes of an upload expiring (docs/adr/0038). Once per bucket, with an R2 token that
 has admin read and write on the bucket (neither the gateway's nor the worker's), and the AWS
 CLI:
 
