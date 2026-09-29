@@ -13,18 +13,6 @@
 
 namespace infra::curl {
 
-namespace {
-
-// A ceiling on descriptors and on the sockets the store holds open for us. Transfers beyond
-// it wait in libcurl's queue for a connection to come free rather than failing. Nothing in
-// libcurl limits that wait: a queued transfer has no connection, and 8.5 checks neither the
-// connect timeout nor CURLOPT_TIMEOUT without one. So whatever shares a multi with uploads
-// must be able to wait behind them; the gateway gives its key fetches a multi of their own,
-// and a part stuck in the queue takes no bytes, which the gateway's body timeout ends.
-constexpr long kMaxConnections = 64;
-
-} // namespace
-
 class Multi::Impl final : public net::ITimerHandler {
 public:
     Impl(net::IReactor& reactor, CURLM* handle) noexcept : reactor_(reactor), handle_(handle) {}
@@ -32,7 +20,7 @@ public:
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 
-    [[nodiscard]] bool configure() noexcept;
+    [[nodiscard]] bool configure(std::size_t max_connections) noexcept;
     [[nodiscard]] std::expected<void, Failure> attach(Transfer& transfer);
     // Removes the transfer from libcurl. False if it was not attached (already completed).
     bool release(Transfer& transfer) noexcept;
@@ -99,13 +87,19 @@ Multi::Impl::~Impl() {
                                         static_cast<curl_multi_timer_callback>(nullptr)));
 }
 
-bool Multi::Impl::configure() noexcept {
+bool Multi::Impl::configure(std::size_t max_connections) noexcept {
     CURLM* const m = handle_.get();
+    // Nothing in libcurl limits the wait of a transfer queued behind the connection cap: it
+    // has no connection, and 8.5 checks neither the connect timeout nor CURLOPT_TIMEOUT
+    // without one. So whatever shares a multi with uploads must be able to wait behind them;
+    // the gateway gives its key fetches a multi of their own, and a part stuck in the queue
+    // takes no bytes, which the gateway's body timeout ends.
+    const auto cap = static_cast<long>(max_connections);
     return curl_multi_setopt(m, CURLMOPT_SOCKETFUNCTION, &Impl::on_socket) == CURLM_OK &&
            curl_multi_setopt(m, CURLMOPT_SOCKETDATA, this) == CURLM_OK &&
            curl_multi_setopt(m, CURLMOPT_TIMERFUNCTION, &Impl::on_timer) == CURLM_OK &&
            curl_multi_setopt(m, CURLMOPT_TIMERDATA, this) == CURLM_OK &&
-           curl_multi_setopt(m, CURLMOPT_MAX_TOTAL_CONNECTIONS, kMaxConnections) == CURLM_OK;
+           curl_multi_setopt(m, CURLMOPT_MAX_TOTAL_CONNECTIONS, cap) == CURLM_OK;
 }
 
 std::expected<void, Failure> Multi::Impl::attach(Transfer& transfer) {
@@ -309,7 +303,8 @@ void Multi::Impl::doom(CURL* easy) noexcept {
     arm(core::Millis{0});
 }
 
-std::expected<std::unique_ptr<Multi>, MultiError> Multi::create(net::IReactor& reactor) {
+std::expected<std::unique_ptr<Multi>, MultiError> Multi::create(net::IReactor& reactor,
+                                                                std::size_t max_connections) {
     if (!detail::global_init()) {
         return std::unexpected(MultiError::InitFailed);
     }
@@ -325,7 +320,7 @@ std::expected<std::unique_ptr<Multi>, MultiError> Multi::create(net::IReactor& r
         return std::unexpected(MultiError::InitFailed);
     }
     auto impl = std::make_unique<Impl>(reactor, handle);
-    if (!impl->configure()) {
+    if (!impl->configure(max_connections)) {
         return std::unexpected(MultiError::InitFailed);
     }
     return std::make_unique<Multi>(Token{}, std::move(impl));

@@ -34,8 +34,12 @@ class Multi {
 public:
     class Impl;
 
+    // A ceiling on descriptors and on the sockets the store holds open for us. Transfers beyond
+    // it wait in libcurl's queue for a connection to come free rather than failing.
+    static constexpr std::size_t kDefaultMaxConnections = 64;
+
     [[nodiscard]] static std::expected<std::unique_ptr<Multi>, MultiError>
-    create(net::IReactor& reactor);
+    create(net::IReactor& reactor, std::size_t max_connections = kDefaultMaxConnections);
 
     Multi(Token token, std::unique_ptr<Impl> impl) noexcept;
     // Every transfer must be destroyed first.
