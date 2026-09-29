@@ -94,6 +94,21 @@ std::expected<std::string, ConfigError> checked_node_address(const EnvLookup& en
     return std::move(*node_address);
 }
 
+std::expected<std::optional<core::Millis>, ConfigError> presence_grace(const EnvLookup& env) {
+    const auto text = lookup(env, "ULW_PRESENCE_GRACE_MS");
+    if (!text) {
+        return std::nullopt;
+    }
+    // Ten minutes is far past any reconnect; beyond it, a user who left would be shown online
+    // for longer than anyone would call a grace.
+    constexpr std::uint32_t kMaxGraceMs = 600'000;
+    const auto value = core::parse_integer<std::uint32_t>(*text);
+    if (!value || *value > kMaxGraceMs) {
+        return error("ULW_PRESENCE_GRACE_MS", "expected milliseconds, 0 to 600000");
+    }
+    return core::Millis{*value};
+}
+
 } // namespace
 
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
@@ -168,16 +183,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!allowed) {
         return std::unexpected(std::move(allowed.error()));
     }
-    std::optional<core::Millis> grace;
-    if (const auto text = lookup(env, "ULW_PRESENCE_GRACE_MS")) {
-        // Ten minutes is far past any reconnect; beyond it, a user who left would be shown
-        // online for longer than anyone would call a grace.
-        constexpr std::uint32_t kMaxGraceMs = 600'000;
-        const auto value = core::parse_integer<std::uint32_t>(*text);
-        if (!value || *value > kMaxGraceMs) {
-            return error("ULW_PRESENCE_GRACE_MS", "expected milliseconds, 0 to 600000");
-        }
-        grace = core::Millis{*value};
+    auto grace = presence_grace(env);
+    if (!grace) {
+        return std::unexpected(std::move(grace.error()));
     }
 
     return Config{.node = *node,
@@ -192,7 +200,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform"),
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
                   .allowed_origins = std::move(*allowed),
-                  .presence_grace = grace};
+                  .presence_grace = *grace};
 }
 
 } // namespace chat

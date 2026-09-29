@@ -9,6 +9,7 @@
 #include <format>
 #include <iterator>
 #include <openssl/evp.h>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -39,8 +40,8 @@ std::uint64_t incarnation_tag(const core::NodeId& self, core::WallTime started) 
         throw std::runtime_error("SHA-256 unavailable");
     }
     std::uint64_t tag = 0;
-    for (std::size_t i = 0; i < sizeof tag; ++i) {
-        tag = (tag << 8U) | digest[i];
+    for (const unsigned char b : std::span(digest).first<sizeof tag>()) {
+        tag = (tag << 8U) | b;
     }
     return tag;
 }
@@ -323,11 +324,11 @@ void Presence::pump(Room& room, core::MonoTime now) {
         std::ranges::any_of(room.watchers, [this](std::uint64_t n) { return n != tag_; });
     if (wanted && !room.announced && (room.head > 0 || room.answer)) {
         post(room, Kind::Probe, now);
-    } else if (wanted && room.answer) {
-        post(room, Kind::Online, now);
     } else if (!wanted && room.announced) {
         post(room, Kind::Offline, now);
-    } else if (wanted && room.announced && now >= room.refresh_at && watched_elsewhere) {
+    } else if (wanted &&
+               (room.answer || (room.announced && now >= room.refresh_at && watched_elsewhere))) {
+        // An answer to a hello, or a renewal.
         post(room, Kind::Online, now);
     } else if (room.local.empty() == room.watching) {
         post(room, room.watching ? Kind::Unwatch : Kind::Hello, now);
@@ -337,6 +338,12 @@ void Presence::pump(Room& room, core::MonoTime now) {
 }
 
 void Presence::post(Room& room, Kind kind, core::MonoTime now) {
+    // Unique per run of this node, which is all the room plane's retry detection needs; the
+    // events themselves are idempotent.
+    const auto key = rt::MessageKey::parse(std::format("{:016x}-{:x}", tag_, next_key_++));
+    if (!key) {
+        return;
+    }
     switch (kind) {
     case Kind::Probe:
     case Kind::Online:
@@ -362,9 +369,6 @@ void Presence::post(Room& room, Kind kind, core::MonoTime now) {
     for (std::size_t i = 1; i < kEventSize; ++i) {
         body[i] = static_cast<std::byte>(tag_ >> (8U * (kEventSize - 1 - i)));
     }
-    // Unique per run of this node, which is all the room plane's retry detection needs; the
-    // events themselves are idempotent.
-    const auto key = rt::MessageKey::parse(std::format("{:016x}-{:x}", tag_, next_key_++));
     room.sending = true;
     ++counters_.sent;
     rooms_plane_.send(room.id, room, room.user, *key, std::move(body),
@@ -447,7 +451,7 @@ void Presence::tell(IClient& client, std::string_view type, const Room& room) no
     }
 }
 
-bool Presence::idle(const Room& room) const noexcept {
+bool Presence::idle(const Room& room) noexcept {
     return !room.wanted() && room.local.empty() && !room.announced && !room.watching &&
            !room.sending;
 }

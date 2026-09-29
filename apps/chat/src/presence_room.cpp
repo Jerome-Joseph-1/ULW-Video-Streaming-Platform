@@ -5,6 +5,7 @@
 #include <format>
 #include <iterator>
 #include <openssl/evp.h>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -34,11 +35,13 @@ core::RoomId presence_room(const core::UserId& user) {
     digest[6] = static_cast<unsigned char>((digest[6] & 0x0FU) | 0x80U);
     digest[8] = static_cast<unsigned char>((digest[8] & 0x3FU) | 0x80U);
     std::string text;
-    for (std::size_t i = 0; i < core::Uuid::kByteLength; ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) {
+    std::size_t at = 0;
+    for (const unsigned char b : std::span(digest).first<core::Uuid::kByteLength>()) {
+        if (at == 4 || at == 6 || at == 8 || at == 10) {
             text += '-';
         }
-        std::format_to(std::back_inserter(text), "{:02x}", digest[i]);
+        std::format_to(std::back_inserter(text), "{:02x}", b);
+        ++at;
     }
     return *core::RoomId::parse(text);
 }

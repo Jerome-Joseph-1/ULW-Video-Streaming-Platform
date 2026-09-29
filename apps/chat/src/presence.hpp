@@ -131,7 +131,7 @@ private:
     void expire(Room& room, core::MonoTime now) noexcept;
     void show(Room& room) noexcept;
     void tell(IClient& client, std::string_view type, const Room& room) noexcept;
-    [[nodiscard]] bool idle(const Room& room) const noexcept;
+    [[nodiscard]] static bool idle(const Room& room) noexcept;
     void drop_watch(Room& room, PresenceClientId id) noexcept;
     void wake(Room& room) noexcept;
     void arm(core::MonoTime at) noexcept;
