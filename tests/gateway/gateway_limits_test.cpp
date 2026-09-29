@@ -158,7 +158,8 @@ TEST(GatewayUserLimits, AUserPastTheRequestRateGets429WithTheWaitInRetryAfter) {
 }
 
 TEST(GatewayUserLimits, APatchPastTheDailyByteQuotaGets429AndTakesNoSlot) {
-    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB};
+    // Time stands still, so the wait below is exact: at 2 MiB a day, a byte comes back every 41 ms.
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true};
     options.limits.upload_bytes_per_user_per_day = 2 * kMiB;
     options.limits.max_uploads_per_user = 1;
     GatewayUnderTest gw(options);
