@@ -53,7 +53,7 @@ UPLOADS_PER_USER = 2
 # Most of the admitted uploads must be in flight together at the peak: the check is void if the
 # driver ramped too slowly or the route dropped them. The gateway streams only as many chunk
 # bodies as the store has connections (64); the rest wait for one, held back rather than
-# failed (docs/adr/0033), so the peak lasts until the first uploads finish.
+# failed (docs/adr/0037), so the peak lasts until the first uploads finish.
 MIN_PEAK_FRACTION = 0.9
 WORKLOADS = ("video-gateway", "video-worker")
 

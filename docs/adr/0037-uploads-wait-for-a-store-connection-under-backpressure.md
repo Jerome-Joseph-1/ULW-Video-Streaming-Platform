@@ -1,4 +1,4 @@
-# 0033. An upload waiting for a store connection is backpressured, not timed out
+# 0037. An upload waiting for a store connection is backpressured, not timed out
 
 Status: Accepted
 Date: 2026-09-29

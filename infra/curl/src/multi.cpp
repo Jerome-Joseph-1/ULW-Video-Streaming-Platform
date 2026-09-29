@@ -94,7 +94,7 @@ bool Multi::Impl::configure(std::size_t max_connections) noexcept {
     // without one. So whatever shares a multi with uploads must be able to wait behind them;
     // the gateway gives its key fetches a multi of their own. A queued part waits as long as
     // the parts ahead of it take, which the gateway's minimum body rate and LOW_SPEED bound,
-    // and no timer runs against it meanwhile (ADR-0033).
+    // and no timer runs against it meanwhile (ADR-0037).
     const auto cap = static_cast<long>(max_connections);
     return curl_multi_setopt(m, CURLMOPT_SOCKETFUNCTION, &Impl::on_socket) == CURLM_OK &&
            curl_multi_setopt(m, CURLMOPT_SOCKETDATA, this) == CURLM_OK &&
