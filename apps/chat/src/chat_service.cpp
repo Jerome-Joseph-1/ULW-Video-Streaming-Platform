@@ -55,8 +55,10 @@ struct ChatService::Room final : rt::IMember {
     core::MonoTime unused_since;
 };
 
-ChatService::ChatService(IRooms& rooms, const core::ports::IClock& clock, ServiceLimits limits)
-    : rooms_plane_(rooms), clock_(clock), limits_(limits), next_sweep_(clock.now()) {}
+ChatService::ChatService(IRooms& rooms, core::ports::IMessageStore& messages,
+                         const core::ports::IClock& clock, ServiceLimits limits)
+    : rooms_plane_(rooms), messages_(messages), clock_(clock), limits_(limits),
+      next_sweep_(clock.now()) {}
 
 ChatService::~ChatService() {
     for (auto& [id, room] : rooms_) {
@@ -71,6 +73,7 @@ ClientId ChatService::attach(IClient& client, const core::UserId& user) {
     clients_.emplace(id.value, Client{.client = &client,
                                       .user = user,
                                       .rooms = {},
+                                      .admitting = {},
                                       .send_bytes_in_flight = 0,
                                       .replayed_bytes = 0,
                                       .replay_window_start = clock_.now()});
@@ -122,6 +125,11 @@ void ChatService::join(ClientId id, const Join& join) {
     // Joining a room the client is in again is how it asks for what it missed. That costs a
     // join when it asks for a resume, which is work for this node; otherwise it is free.
     const bool known = std::ranges::find(c->rooms, join.room) != c->rooms.end();
+    // Asked again before the member list answered: the first ask answers both.
+    if (std::ranges::find(c->admitting, join.room) != c->admitting.end()) {
+        answer(*c->client, "busy", join.room);
+        return;
+    }
     if (known && join.after && !admit_join(c->user)) {
         answer(*c->client, "busy", join.room);
         return;
@@ -136,7 +144,41 @@ void ChatService::join(ClientId id, const Join& join) {
             return;
         }
         c->rooms.push_back(join.room);
+        // Whether the user may be in the room at all. Asked only for rooms new to the
+        // connection, whose joins are rate limited; the answer may come from inside the call.
+        c->admitting.push_back(join.room);
+        messages_.admits(join.room, c->user,
+                         [this, id, join](core::ports::MessageResult<bool> result) noexcept {
+                             admitted(id, join, result);
+                         });
+        return;
     }
+    enter(id, join);
+}
+
+void ChatService::admitted(ClientId id, const Join& join,
+                           core::ports::MessageResult<bool> result) noexcept {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    std::erase(c->admitting, join.room);
+    if (!result || !*result) {
+        std::erase(c->rooms, join.room);
+        answer(*c->client, result ? "not_member" : "unavailable", join.room);
+        return;
+    }
+    try {
+        enter(id, join);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        std::erase(c->rooms, join.room);
+        c->client->allocation_failed();
+    }
+}
+
+// Into a room the client may be in: joined on the room plane once for the node, and subscribed.
+void ChatService::enter(ClientId id, const Join& join) {
     auto it = rooms_.find(join.room);
     if (it == rooms_.end()) {
         auto made = std::make_unique<Room>(*this, join.room);

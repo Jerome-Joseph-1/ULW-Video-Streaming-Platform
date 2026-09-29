@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 #include "core/ports/clock.hpp"
+#include "core/ports/message_store.hpp"
 #include "rt/message_key.hpp"
 #include "rt/room_router.hpp"
 
@@ -112,7 +113,10 @@ struct ClientId {
 // thread.
 class ChatService {
 public:
-    ChatService(IRooms& rooms, const core::ports::IClock& clock, ServiceLimits limits);
+    // `messages` answers whether a room admits a user. Its answers must never reach a destroyed
+    // service: destroy the store first, which drops what it still owes.
+    ChatService(IRooms& rooms, core::ports::IMessageStore& messages,
+                const core::ports::IClock& clock, ServiceLimits limits);
     // Leaves every room, which also drops what the room plane owes for sends still in flight:
     // nothing calls back into a destroyed service. The room plane must outlive it.
     ~ChatService();
@@ -140,6 +144,8 @@ private:
         IClient* client;
         core::UserId user;
         std::vector<core::RoomId> rooms;
+        // Of `rooms`, those whose member list has not answered yet.
+        std::vector<core::RoomId> admitting;
         std::size_t send_bytes_in_flight = 0;
         // What resumes queued since the window started.
         std::size_t replayed_bytes = 0;
@@ -149,6 +155,8 @@ private:
     [[nodiscard]] Client* find(ClientId id) noexcept;
     [[nodiscard]] Room* find(const core::RoomId& room) noexcept;
     [[nodiscard]] bool admit_join(const core::UserId& user);
+    void admitted(ClientId id, const Join& join, core::ports::MessageResult<bool> result) noexcept;
+    void enter(ClientId id, const Join& join);
     void joined(const core::RoomId& room,
                 std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void delivered(Room& room, const rt::Message& message) noexcept;
@@ -164,6 +172,7 @@ private:
                 const std::optional<rt::MessageKey>& id = std::nullopt) noexcept;
 
     IRooms& rooms_plane_;
+    core::ports::IMessageStore& messages_;
     const core::ports::IClock& clock_;
     ServiceLimits limits_;
     ServiceCounters counters_;

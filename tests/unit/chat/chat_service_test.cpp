@@ -4,6 +4,7 @@
 #include "chat_service.hpp"
 #include "support/fake_clock.hpp"
 
+#include <algorithm>
 #include <format>
 #include <gtest/gtest.h>
 #include <memory>
@@ -80,6 +81,61 @@ public:
     std::vector<core::RoomId> left;
 };
 
+// Member lists, answered at once by default. The port never answers from inside a call; the
+// service copes with either, and tests that do not care about membership read simpler this way.
+// With `hold` set, answers wait for answer_admits().
+class FakeMessages final : public core::ports::IMessageStore {
+public:
+    void history_before(
+        const core::RoomId& /*room*/, std::optional<std::uint64_t> /*before*/,
+        std::size_t /*limit*/,
+        core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
+        pages.push_back(std::move(done));
+    }
+    void history_after(
+        const core::RoomId& /*room*/, std::uint64_t /*after*/, std::size_t /*limit*/,
+        core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
+        pages.push_back(std::move(done));
+    }
+    void last_seq(const core::RoomId& /*room*/,
+                  core::ports::MessageCallback<std::uint64_t> done) override {
+        done(std::uint64_t{0});
+    }
+    void add_member(const core::RoomId& /*room*/, const core::UserId& /*user*/,
+                    core::ports::MessageCallback<void> done) override {
+        done({});
+    }
+    void remove_member(const core::RoomId& /*room*/, const core::UserId& /*user*/,
+                       core::ports::MessageCallback<void> done) override {
+        done({});
+    }
+    void members(const core::RoomId& /*room*/, std::optional<core::UserId> /*after*/,
+                 std::size_t /*limit*/,
+                 core::ports::MessageCallback<std::vector<core::UserId>> done) override {
+        done(std::vector<core::UserId>{});
+    }
+    void admits(const core::RoomId& /*room*/, const core::UserId& user,
+                core::ports::MessageCallback<bool> done) override {
+        const bool admitted = std::ranges::find(refused, user.view()) == refused.end();
+        if (hold) {
+            held.emplace_back(std::move(done), admitted);
+            return;
+        }
+        done(admitted);
+    }
+
+    void answer_admits(core::ports::MessageResult<bool> result) {
+        auto [done, admitted] = std::move(held.front());
+        held.erase(held.begin());
+        done(result ? core::ports::MessageResult<bool>{admitted} : result);
+    }
+
+    std::vector<std::string> refused;
+    bool hold = false;
+    std::vector<std::pair<core::ports::MessageCallback<bool>, bool>> held;
+    std::vector<core::ports::MessageCallback<std::vector<core::ports::StoredMessage>>> pages;
+};
+
 class FakeClient final : public chat::IClient {
 public:
     bool push(std::string_view text) noexcept override {
@@ -146,7 +202,7 @@ std::vector<std::uint64_t> seqs(const std::vector<std::string>& texts) {
 class ChatServiceTest : public ::testing::Test {
 protected:
     explicit ChatServiceTest(chat::ServiceLimits limits = {})
-        : service_(std::make_unique<chat::ChatService>(rooms_, clock_, limits)) {}
+        : service_(std::make_unique<chat::ChatService>(rooms_, messages_, clock_, limits)) {}
 
     chat::ClientId attach(FakeClient& client, std::string_view user = "alice") {
         return service_->attach(client, *core::UserId::parse(user));
@@ -174,6 +230,7 @@ protected:
     }
 
     FakeRooms rooms_;
+    FakeMessages messages_;
     ulw::test::FakeClock clock_;
     std::unique_ptr<chat::ChatService> service_;
 };
@@ -205,6 +262,61 @@ TEST_F(ChatServiceTest, ARoomIsJoinedOnceForAllItsClientsHereAndEachHearsEveryMe
     bob.closing = true;
     deliver(member, 2);
     EXPECT_EQ(service_->counters().delivered, 3U);
+}
+
+TEST_F(ChatServiceTest, AJoinOfARoomThatDoesNotAdmitTheUserIsRefusedAndNeverReachesTheRoom) {
+    messages_.refused = {"mallory"};
+    FakeClient mallory;
+    const auto m = attach(mallory, "mallory");
+    join(m);
+    EXPECT_TRUE(rooms_.joins.empty());
+    const Seen refused = seen(mallory.take().at(0));
+    EXPECT_EQ(refused.type, "error");
+    EXPECT_EQ(refused.reason, "not_member");
+    // Not joined, so nothing can be sent there either.
+    send(m, "try");
+    EXPECT_TRUE(rooms_.sends.empty());
+    EXPECT_EQ(seen(mallory.take().at(0)).reason, "not_joined");
+}
+
+TEST_F(ChatServiceTest, AJoinWaitsForTheMemberListAndAskingAgainMeanwhileIsBusy) {
+    messages_.hold = true;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    join(a);
+    EXPECT_TRUE(rooms_.joins.empty());
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "busy");
+    messages_.answer_admits(true);
+    ASSERT_EQ(rooms_.joins.size(), 1U);
+    rooms_.admit(7);
+    const Seen joined = seen(alice.take().at(0));
+    EXPECT_EQ(joined.type, "joined");
+    EXPECT_EQ(joined.seq, 7U);
+}
+
+TEST_F(ChatServiceTest, AMemberListThatCannotBeReadRefusesTheJoinAsUnavailable) {
+    messages_.hold = true;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    messages_.answer_admits(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    EXPECT_TRUE(rooms_.joins.empty());
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
+    // The client is not left half in the room: asking again asks the member list again.
+    join(a);
+    ASSERT_EQ(messages_.held.size(), 1U);
+}
+
+TEST_F(ChatServiceTest, AnAnswerForAClientThatLeftMeanwhileIsDropped) {
+    messages_.hold = true;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    service_->detach(a);
+    messages_.answer_admits(true);
+    EXPECT_TRUE(rooms_.joins.empty());
+    EXPECT_TRUE(alice.take().empty());
 }
 
 TEST_F(ChatServiceTest, ASendIsAnsweredWithItsIdAndTheSeqTheOwnerGaveIt) {

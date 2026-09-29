@@ -339,7 +339,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/envelope_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
-target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 # The M16 acceptance: three chat_server processes on the Postgres the suites above use.

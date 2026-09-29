@@ -56,7 +56,8 @@ void RoomLog::on_node_taken() noexcept {
 
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(limits), rooms_(deps.router),
-      chat_(rooms_, deps.clock, limits_.service), sessions_(limits_.max_connections) {}
+      chat_(rooms_, deps.messages, deps.clock, limits_.service),
+      sessions_(limits_.max_connections) {}
 
 ChatServer::~ChatServer() {
     deps_.reactor.cancel_timer(drain_timer_);
