@@ -55,25 +55,32 @@ std::expected<void, int> Notifier::send(std::string_view message) const noexcept
     const auto len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + address_.size() +
                                             (address_.front() == '\0' ? 0 : 1));
     // sendto() takes every address family through the generic header.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     const ssize_t n = ::sendto(fd_.get(), message.data(), message.size(), MSG_NOSIGNAL,
                                reinterpret_cast<const sockaddr*>(&addr), len);
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     if (n < 0) {
         return std::unexpected(errno);
     }
     return {};
 }
 
+// Nobody here could act on a lost message, and the manager notices one by itself: a missing
+// READY=1 fails the start, a missing WATCHDOG=1 restarts the service.
+void Notifier::post(std::string_view message) const noexcept {
+    static_cast<void>(send(message).has_value());
+}
+
 void Notifier::ready() const noexcept {
-    static_cast<void>(send("READY=1"));
+    post("READY=1");
 }
 
 void Notifier::stopping() const noexcept {
-    static_cast<void>(send("STOPPING=1"));
+    post("STOPPING=1");
 }
 
 void Notifier::watchdog() const noexcept {
-    static_cast<void>(send("WATCHDOG=1"));
+    post("WATCHDOG=1");
 }
 
 } // namespace ops

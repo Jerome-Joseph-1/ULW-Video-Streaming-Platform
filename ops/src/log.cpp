@@ -154,23 +154,21 @@ void LineBuilder::add(const Field& field) noexcept {
     }
     std::array<char, 32> num{};
     std::string_view text;
-    bool is_string = false;
-    std::visit(
-        [&](const auto& v) {
-            using V = std::decay_t<decltype(v)>;
-            if constexpr (std::is_same_v<V, std::string_view>) {
-                text = v;
-                is_string = true;
-            } else if constexpr (std::is_same_v<V, bool>) {
-                text = v ? "true" : "false";
-            } else {
-                text = digits(num, v);
-            }
-        },
-        field.value());
+    const auto* string = std::get_if<std::string_view>(&field.value());
+    if (string != nullptr) {
+        text = *string;
+    } else if (const auto* b = std::get_if<bool>(&field.value())) {
+        text = *b ? "true" : "false";
+    } else if (const auto* i = std::get_if<std::int64_t>(&field.value())) {
+        text = digits(num, *i);
+    } else if (const auto* u = std::get_if<std::uint64_t>(&field.value())) {
+        text = digits(num, *u);
+    } else if (const auto* d = std::get_if<double>(&field.value())) {
+        text = digits(num, *d);
+    }
     // ,"key": plus the value, escaped at worst.
     const std::size_t worst =
-        4 + (6 * field.key().size()) + (is_string ? 2 + 6 * text.size() : text.size());
+        4 + (6 * field.key().size()) + (string != nullptr ? 2 + (6 * text.size()) : text.size());
     if (!fits(worst)) {
         truncated_ = true;
         return;
@@ -178,7 +176,7 @@ void LineBuilder::add(const Field& field) noexcept {
     raw(",");
     quoted(field.key());
     raw(":");
-    if (is_string) {
+    if (string != nullptr) {
         quoted(text);
     } else {
         raw(text);

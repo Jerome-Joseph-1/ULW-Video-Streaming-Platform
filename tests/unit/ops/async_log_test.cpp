@@ -74,7 +74,7 @@ TEST(AsyncLogSink, AStalledReaderCostsLinesNotTheWriter) {
             sink.write(line);
         }
         dropped = sink.dropped();
-        EXPECT_GE(dropped, kLines - (3 * 4096 / line.size()));
+        EXPECT_GE(dropped, kLines - (std::size_t{3} * 4096 / line.size()));
         reader.emplace([&] { drained = read_all(p.read.get()); });
     }
     p.write.reset();

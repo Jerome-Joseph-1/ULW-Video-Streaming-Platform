@@ -26,6 +26,8 @@ std::optional<std::uint64_t> open_descriptors() noexcept {
         return std::nullopt;
     }
     std::uint64_t n = 0;
+    // readdir() is only unsafe on a stream two threads share; this one is the call's own.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     while (const dirent* entry = ::readdir(dir.get())) {
         if (entry->d_name[0] != '.') {
             ++n;

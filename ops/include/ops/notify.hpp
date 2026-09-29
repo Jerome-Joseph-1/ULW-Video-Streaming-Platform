@@ -36,6 +36,8 @@ public:
     }
 
 private:
+    void post(std::string_view message) const noexcept;
+
     Notifier(os::UniqueFd fd, std::string address, std::optional<core::Millis> watchdog) noexcept
         : fd_(std::move(fd)), address_(std::move(address)), watchdog_interval_(watchdog) {}
 

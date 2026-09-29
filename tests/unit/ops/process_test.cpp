@@ -12,6 +12,7 @@ TEST(ProcessStats, OpeningDescriptorsRaisesTheCountByExactlyThatMany) {
     const auto before = ops::open_descriptors();
     ASSERT_TRUE(before);
     std::vector<os::UniqueFd> held;
+    held.reserve(5);
     for (int i = 0; i < 5; ++i) {
         held.emplace_back(::open("/dev/null", O_RDONLY | O_CLOEXEC));
     }

@@ -1,46 +1,14 @@
-#include "os/unique_fd.hpp"
 
 #include "ops/notify.hpp"
+#include "support/fake_notify.hpp"
 #include "support/temp_dir.hpp"
 
-#include <sys/socket.h>
-#include <sys/un.h>
-
-#include <array>
-#include <cstring>
 #include <gtest/gtest.h>
 #include <map>
 #include <string>
+#include <unistd.h>
 
 namespace {
-
-// Stands in for the service manager: a datagram socket at the path NOTIFY_SOCKET names.
-class FakeManager {
-public:
-    explicit FakeManager(const std::string& address) {
-        fd_.reset(::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
-        sockaddr_un addr{};
-        addr.sun_family = AF_UNIX;
-        std::memcpy(static_cast<void*>(addr.sun_path), address.data(), address.size());
-        const auto len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + address.size());
-        // bind() takes every address family through the generic header.
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-        bound_ = ::bind(fd_.get(), reinterpret_cast<const sockaddr*>(&addr), len) == 0;
-    }
-
-    [[nodiscard]] bool bound() const noexcept { return bound_; }
-
-    // The next datagram, or empty when none is waiting.
-    [[nodiscard]] std::string receive() const {
-        std::array<char, 512> buf{};
-        const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), 0);
-        return n <= 0 ? std::string{} : std::string(buf.data(), static_cast<std::size_t>(n));
-    }
-
-private:
-    os::UniqueFd fd_;
-    bool bound_ = false;
-};
 
 ops::Lookup env_of(std::map<std::string, std::string> vars) {
     return [vars = std::move(vars)](std::string_view name) -> std::optional<std::string> {
@@ -58,7 +26,7 @@ TEST(Notifier, NothingToDoOutsideANotifyUnit) {
 TEST(Notifier, ReadyStoppingAndWatchdogReachAPathSocket) {
     const ulw::test::TempDir dir("ulw-notify");
     const std::string path = (dir.path() / "notify").string();
-    const FakeManager manager(path);
+    const ulw::test::FakeNotifySocket manager(path);
     ASSERT_TRUE(manager.bound());
     auto n = ops::Notifier::from_env(env_of({{"NOTIFY_SOCKET", path}}), 42);
     ASSERT_TRUE(n && n->has_value());
@@ -75,7 +43,7 @@ TEST(Notifier, ReadyStoppingAndWatchdogReachAPathSocket) {
 
 TEST(Notifier, AnAbstractSocketIsNamedWithALeadingAt) {
     const std::string name = "ulw-notify-test-" + std::to_string(::getpid());
-    const FakeManager manager(std::string(1, '\0') + name);
+    const ulw::test::FakeNotifySocket manager(std::string(1, '\0') + name);
     ASSERT_TRUE(manager.bound());
     auto n = ops::Notifier::from_env(env_of({{"NOTIFY_SOCKET", "@" + name}}), 42);
     ASSERT_TRUE(n && n->has_value());
