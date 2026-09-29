@@ -4,6 +4,9 @@
 // The M17 acceptance on the same cluster: clients on every node see one order by last_seq; a
 // rate-limited send is refused and reaches nobody; a repeated send is delivered once; a client
 // that comes back resumes from its last seq; no body shows in any log or in the database.
+// The M32 acceptance: a stream's live chat on the same cluster. A viewer that stops reading
+// holds its node to no more memory and is counted as dropping; every other viewer, on every
+// node, gets every message in order.
 // ULW_CHAT_CLUSTER_PORTS=9101,9102,9103 pins the client ports (the CI job does); otherwise
 // free ones are taken.
 
@@ -85,6 +88,7 @@ std::vector<std::uint16_t> client_ports() {
 // A server message, the fields the test looks at. The body is decoded: what the sender sent.
 struct Seen {
     std::string type;
+    std::string room;
     std::uint64_t seq = 0;
     std::string sender;
     std::string id;
@@ -103,6 +107,7 @@ std::optional<Seen> parse_seen(const std::string& text) {
         return std::string(v == nullptr ? "" : v->as_string().value_or(""));
     };
     Seen s{.type = string("type"),
+           .room = string("room"),
            .seq = 0,
            .sender = string("sender"),
            .id = string("id"),
@@ -205,15 +210,11 @@ protected:
         }
         auto key = devtoken::DevKey::generate();
         ASSERT_TRUE(key);
+        key_.emplace(std::move(*key));
         const auto jwks = files_.path() / "jwks.json";
-        std::ofstream(jwks) << key->public_jwks();
+        std::ofstream(jwks) << key_->public_jwks();
         for (const char* user : {"alice", "bob", "carol"}) {
-            tokens_.push_back(*key->mint({.issuer = std::string(kIssuer),
-                                          .audience = "askedin-platform",
-                                          .subject = user,
-                                          .email = {},
-                                          .ttl = seconds(600)},
-                                         clock_.wall_now()));
+            tokens_.push_back(mint(user));
         }
         const auto ports = client_ports();
         for (std::size_t i = 0; i < 3; ++i) {
@@ -253,6 +254,30 @@ protected:
         ASSERT_NE(node.process, nullptr);
         ASSERT_TRUE(node.process->wait_for_output(R"("msg":"listening")", seconds(30)))
             << node.process->output();
+    }
+
+    [[nodiscard]] std::string mint(const std::string& user) const {
+        return key_
+            ->mint({.issuer = std::string(kIssuer),
+                    .audience = "askedin-platform",
+                    .subject = user,
+                    .email = {},
+                    .ttl = seconds(600)},
+                   clock_.wall_now())
+            .value_or("");
+    }
+
+    std::unique_ptr<Client> connect_as(const Node& node, const std::string& user,
+                                       int receive_buffer = 0) {
+        std::string refusal;
+        auto ws =
+            WsClient::connect(node.port, "/rt", "Authorization: Bearer " + mint(user) + "\r\n",
+                              &refusal, receive_buffer);
+        if (!ws) {
+            ADD_FAILURE() << "upgrade refused: " << refusal;
+            return nullptr;
+        }
+        return std::make_unique<Client>(std::move(*ws), user);
     }
 
     std::unique_ptr<Client> connect(const Node& node, std::size_t user) {
@@ -373,6 +398,7 @@ SELECT string_agg(query_to_xml(format('SELECT t::text AS row FROM %I.%I t', tabl
 
     os::SystemClock clock_;
     os::SystemRandom random_;
+    std::optional<devtoken::DevKey> key_;
     std::unique_ptr<ScratchDatabase> db_;
     ulw::test::TempDir files_{"ulw-chat-cluster"};
     std::vector<std::string> tokens_;
@@ -748,6 +774,191 @@ TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingLearnsWhatItMi
               << ", which kept nothing; joined named the head " << joined->seq << "\n";
     missed.emplace_back("before bob left");
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
+}
+
+#if defined(__SANITIZE_ADDRESS__)
+constexpr bool kAddressSanitizer = true;
+#elif defined(__has_feature)
+constexpr bool kAddressSanitizer = __has_feature(address_sanitizer);
+#else
+constexpr bool kAddressSanitizer = false;
+#endif
+
+// Resident memory, from /proc: what the node holds, the kernel's socket buffers aside.
+std::uint64_t resident_kib(pid_t pid) {
+    std::ifstream status("/proc/" + std::to_string(pid) + "/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        if (line.starts_with("VmRSS:")) {
+            const std::string_view rest = std::string_view(line).substr(6);
+            const std::size_t digits = rest.find_first_of("0123456789");
+            const std::size_t end = rest.find(' ', digits);
+            return core::parse_integer<std::uint64_t>(rest.substr(digits, end - digits))
+                .value_or(0);
+        }
+    }
+    return 0;
+}
+
+TEST_P(ChatClusterTest, AViewerThatStopsReadingCostsItsNodeNoMemoryAndOthersMissNothing) {
+    const std::string stream = "m32-" + room_.substr(0, 8);
+    const auto join_live = [&](Client& c) {
+        EXPECT_TRUE(c.send(R"({"type":"join","stream":")" + stream + R"("})"));
+        const auto joined =
+            c.wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
+        EXPECT_TRUE(joined && joined->type == "joined") << c.name();
+        return joined ? joined->room : std::string();
+    };
+    // Ten senders on each node, each a viewer too, and two viewers that only read. The one that
+    // stops reading is on chat-2, and leaves little in its own kernel.
+    std::vector<std::unique_ptr<Client>> senders;
+    std::vector<std::unique_ptr<Client>> viewers;
+    std::string live;
+    for (std::size_t n = 0; n < nodes_.size(); ++n) {
+        for (int k = 0; k < 10; ++k) {
+            senders.push_back(connect_as(nodes_[n], std::format("sender-{}-{}", n, k)));
+            ASSERT_TRUE(senders.back());
+            live = join_live(*senders.back());
+        }
+        for (int k = 0; k < 2; ++k) {
+            viewers.push_back(connect_as(nodes_[n], std::format("viewer-{}-{}", n, k)));
+            ASSERT_TRUE(viewers.back());
+            join_live(*viewers.back());
+        }
+    }
+    Node& stalled_node = nodes_[1];
+    auto stalled = connect_as(stalled_node, "stalled", 4096);
+    ASSERT_TRUE(stalled);
+    ASSERT_EQ(join_live(*stalled), live);
+    ASSERT_FALSE(HasFailure());
+
+    // 900 messages of 2000 bytes, about 2.6 MiB for each viewer: rounds of one message per
+    // sender, each round read by everyone but the stalled viewer before the next, so that no
+    // one else is ever behind. A send the room or the user turns away as rate_limited is tried
+    // again in the next round, with a new id since it was never sequenced; the room's allowance
+    // (40, then 20 a second on each node) sets the pace.
+    constexpr std::size_t kMessages = 900;
+    constexpr std::size_t kSettled = 300;
+    const auto body = [](std::size_t k) {
+        std::string b = std::format("live {} ", k);
+        b.resize(2'000, '.');
+        return b;
+    };
+    std::vector<std::optional<std::size_t>> holding(senders.size());
+    std::vector<std::string> ids(senders.size());
+    std::size_t next = 0;
+    std::size_t acked = 0;
+    std::size_t attempts = 0;
+    std::uint64_t head = 0;
+    std::uint64_t settled_kib = 0;
+    std::uint64_t settled_seq = 0;
+    while (acked < kMessages) {
+        // A node that turned one send away turns away the rest of the round's too: they are
+        // not tried, which keeps the retrying down to a few sends a round.
+        std::array<bool, 3> refused{};
+        for (std::size_t s = 0; s < senders.size(); ++s) {
+            const std::size_t node = s / 10;
+            if (refused.at(node)) {
+                continue;
+            }
+            if (!holding[s] && next < kMessages) {
+                holding[s] = next++;
+            }
+            if (!holding[s]) {
+                continue;
+            }
+            // unavailable leaves the send's fate unknown: it goes again under the same id, and
+            // is sequenced once (ADR-0043). A send turned away was never sequenced.
+            if (ids[s].empty()) {
+                ids[s] = std::format("m{}-{}", *holding[s], attempts);
+            }
+            ++attempts;
+            ASSERT_TRUE(senders[s]->send(send_command(live, body(*holding[s]), ids[s])));
+            const std::size_t answers = senders[s]->count([&](const Seen& seen) {
+                return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
+            });
+            ASSERT_TRUE(senders[s]->wait_for([&](const Seen&) {
+                return senders[s]->count([&](const Seen& seen) {
+                    return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
+                }) > answers;
+            })) << ids[s];
+            const Seen answer =
+                *std::ranges::find_last_if(senders[s]->seen(), [&](const Seen& seen) {
+                     return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
+                 }).begin();
+            if (answer.type == "sent") {
+                head = std::max(head, answer.seq);
+                holding[s].reset();
+                ids[s].clear();
+                ++acked;
+            } else if (answer.reason == "rate_limited") {
+                refused.at(node) = true;
+                ids[s].clear();
+            } else {
+                ASSERT_EQ(answer.reason, "unavailable") << ids[s];
+            }
+        }
+        ASSERT_LT(attempts, 200'000U) << "the rate limit never lifted";
+        for (auto* group : {&senders, &viewers}) {
+            for (auto& c : *group) {
+                ASSERT_TRUE(c->wait_for([&](const Seen& seen) {
+                    return seen.type == "message" && seen.seq >= head;
+                })) << c->name()
+                    << " never got seq " << head;
+            }
+        }
+        if (settled_kib == 0 && acked >= kSettled) {
+            settled_kib = resident_kib(stalled_node.process->pid());
+            settled_seq = head;
+        }
+    }
+    const std::uint64_t final_kib = resident_kib(stalled_node.process->pid());
+
+    // Everyone who kept reading got every message, once, in the room's order.
+    for (auto* group : {&senders, &viewers}) {
+        for (auto& c : *group) {
+            const std::vector<Seen> heard = c->messages();
+            ASSERT_EQ(heard.size(), kMessages) << c->name();
+            for (std::size_t k = 0; k < heard.size(); ++k) {
+                ASSERT_EQ(heard[k].seq, k + 1) << c->name();
+            }
+        }
+    }
+    // What the stalled viewer's node held for it did not grow with what it was sent: from the
+    // settled point on it was owed 600 messages, 1.7 MiB on the wire, and an unbounded queue
+    // would hold all of them.
+    // AddressSanitizer holds on to freed memory by design (its quarantine), so under it the
+    // numbers are only reported.
+    const std::uint64_t owed_kib = (kMessages - settled_seq) * 2'700 / 1024;
+    EXPECT_TRUE(kAddressSanitizer || final_kib - std::min(final_kib, settled_kib) < owed_kib / 4)
+        << "resident " << settled_kib << " KiB at seq " << settled_seq << ", " << final_kib
+        << " KiB at seq " << kMessages;
+
+    // Reading again, the stalled viewer gets the newest it was owed, in order, and sees the
+    // gap where it dropped the rest; its node counted exactly those.
+    ASSERT_TRUE(stalled->wait_for(
+        [&](const Seen& seen) { return seen.type == "message" && seen.seq == kMessages; }));
+    const std::vector<Seen> got = stalled->messages();
+    for (std::size_t k = 1; k < got.size(); ++k) {
+        ASSERT_LT(got[k - 1].seq, got[k].seq);
+    }
+    ASSERT_GT(got.size(), 64U);
+    EXPECT_LT(got.size(), kMessages / 2);
+    EXPECT_EQ(got[got.size() - 64].seq, kMessages - 63) << "the newest 64, without a hole";
+    EXPECT_EQ(metric(stalled_node, "lossy_drops_total"), kMessages - got.size());
+    for (std::size_t n = 0; n < nodes_.size(); ++n) {
+        if (n != 1) {
+            EXPECT_EQ(metric(nodes_[n], "lossy_drops_total"), 0U) << nodes_[n].name;
+        }
+    }
+    std::cout << senders.size() + viewers.size() << " viewers on " << nodes_.size()
+              << " nodes got all " << kMessages << " messages in order; the stalled one got "
+              << got.size() << " (seqs up to " << got[got.size() - 65].seq << ", then "
+              << got[got.size() - 64].seq << ".." << got.back().seq << "), its node dropped "
+              << metric(stalled_node, "lossy_drops_total") << " and was resident at " << settled_kib
+              << " KiB at seq " << settled_seq << " and " << final_kib
+              << " KiB at the end, while owing it " << owed_kib << " KiB more; "
+              << attempts - kMessages << " sends were turned away or unanswered and tried again\n";
 }
 
 // No database is reached: the connection string is refused before any connection is tried.
