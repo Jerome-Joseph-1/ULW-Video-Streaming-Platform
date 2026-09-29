@@ -1,9 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace infra::auth {
 
@@ -14,5 +16,7 @@ namespace infra::auth {
 // Strict: the URL-safe alphabet only, no padding, and zero bits after the last whole byte.
 // Accepting either of the latter would give one token several spellings.
 [[nodiscard]] std::optional<std::string> decode_base64url(std::string_view text);
+// The same, into bytes, for callers that hold no text.
+[[nodiscard]] std::optional<std::vector<std::byte>> decode_base64url_bytes(std::string_view text);
 
 } // namespace infra::auth

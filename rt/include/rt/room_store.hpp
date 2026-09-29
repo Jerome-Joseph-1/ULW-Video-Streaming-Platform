@@ -2,11 +2,13 @@
 
 #include "core/models/ids.hpp"
 #include "core/util/time.hpp"
+#include "rt/message_key.hpp"
 
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,6 +51,14 @@ enum class StoreError : std::uint8_t {
     NodeTaken,
 };
 
+// A message on its way to its sequence number. The body is a view, valid only during the call
+// that carries it.
+struct Outgoing {
+    core::UserId sender;
+    MessageKey key;
+    std::span<const std::byte> body;
+};
+
 template <class T> using StoreResult = std::expected<T, StoreError>;
 template <class T> using StoreCallback = std::move_only_function<void(StoreResult<T>) noexcept>;
 
@@ -88,9 +98,11 @@ public:
     virtual void heartbeat(const core::NodeId& node, const core::Uuid& incarnation,
                            std::vector<OwnedRoom> rooms,
                            StoreCallback<std::vector<core::RoomId>> done) = 0;
-    // An owner write: the room's next sequence number, or nullopt when `generation` is no
-    // longer the room's. Then nothing was written.
-    virtual void append(const core::RoomId& room, std::uint64_t generation,
+    // An owner write: the room's next sequence number for `message`, or nullopt when
+    // `generation` is no longer the room's. Then nothing was written. A store that keeps
+    // messages keeps this one in the same fenced write, so that no seq is ever taken without
+    // its message (ADR-0043).
+    virtual void append(const core::RoomId& room, std::uint64_t generation, const Outgoing& message,
                         StoreCallback<std::optional<std::uint64_t>> done) = 0;
     // An owner write, for a node about to stop: the rooms it still holds at these generations
     // become claimable at once instead of after kOwnerStaleAfter.

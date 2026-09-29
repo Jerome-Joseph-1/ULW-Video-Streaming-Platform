@@ -70,6 +70,7 @@ protected:
     ulw::test::FakeRandom random_;
     const core::RoomId room_ = core::RoomId::generate(clock_, random_);
     const core::UserId alice_ = *core::UserId::parse("auth0|alice");
+    const rt::MessageKey key_ = *rt::MessageKey::parse("01J9ZQ4V7B8K3M2N5P6R7S8T9W");
     const core::NodeId node_ = *core::NodeId::parse("chat-7f9c-x2");
     wire::Decoder decoder_;
 };
@@ -86,9 +87,9 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     wire::encode_proof(out, mac);
     wire::encode_subscribe(out, 7, room_);
     wire::encode_unsubscribe(out, room_);
-    wire::encode_send(out, 1ULL << 40U, room_, alice_, body);
+    wire::encode_send(out, 1ULL << 40U, room_, alice_, key_, body);
     wire::encode_reply(out, 9, wire::Status::Fenced, 12);
-    wire::encode_deliver(out, room_, 13, alice_, body);
+    wire::encode_deliver(out, room_, 13, alice_, key_, body);
 
     auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 8U);
@@ -111,6 +112,7 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     EXPECT_EQ(send.request, 1ULL << 40U);
     EXPECT_EQ(send.room, room_);
     EXPECT_EQ(send.sender, alice_);
+    EXPECT_EQ(send.key, key_);
     EXPECT_EQ(text(send.body), text(body));
     const auto& reply = std::get<wire::Reply>(frames[4]);
     EXPECT_EQ(reply.request, 9U);
@@ -120,14 +122,15 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     EXPECT_EQ(deliver.room, room_);
     EXPECT_EQ(deliver.seq, 13U);
     EXPECT_EQ(deliver.sender, alice_);
+    EXPECT_EQ(deliver.key, key_);
     EXPECT_EQ(text(deliver.body), text(body));
 }
 
 TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
     std::vector<std::byte> out;
-    wire::encode_send(out, 1, room_, alice_, {});
+    wire::encode_send(out, 1, room_, alice_, key_, {});
     const std::vector<std::byte> largest(wire::kMaxBody, std::byte{0x5A});
-    wire::encode_deliver(out, room_, 2, alice_, largest);
+    wire::encode_deliver(out, room_, 2, alice_, key_, largest);
     const auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 2U);
     EXPECT_TRUE(std::get<wire::Send>(frames[0]).body.empty());
@@ -137,7 +140,7 @@ TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
 TEST_F(WireTest, BytesFedOneAtATimeDecodeToTheSameFrames) {
     std::vector<std::byte> out;
     wire::encode_subscribe(out, 3, room_);
-    wire::encode_deliver(out, room_, 4, alice_, bytes("hi"));
+    wire::encode_deliver(out, room_, 4, alice_, key_, bytes("hi"));
     std::vector<wire::Frame> frames;
     for (const std::byte b : out) {
         const auto got = decode_all(std::span{&b, 1});
@@ -204,6 +207,30 @@ TEST_F(WireTest, ARoomOrSenderThatDoesNotParseIsMalformed) {
     send += "a b";
     fresh.feed(raw(4, send));
     EXPECT_EQ(fresh.next(), std::unexpected(wire::DecodeError::Malformed));
+}
+
+TEST_F(WireTest, ASendWhoseKeyDoesNotParseIsMalformed) {
+    const auto send_with = [&](std::string_view key) {
+        std::string send(8, '\0');
+        send += room_.to_string();
+        send += '\x05';
+        send += "alice";
+        send += static_cast<char>(key.size());
+        send += key;
+        send += "body";
+        wire::Decoder fresh;
+        fresh.feed(raw(4, send));
+        return fresh.next();
+    };
+    const auto good = send_with("k-1_Z");
+    ASSERT_TRUE(good && *good);
+    EXPECT_EQ(std::get<wire::Send>(**good).key.view(), "k-1_Z");
+    const std::string too_long(rt::MessageKey::kMaxLength + 1, 'k');
+    for (const std::string_view key :
+         {std::string_view{}, std::string_view{"a b"}, std::string_view{"caf\xc3\xa9"},
+          std::string_view{too_long}}) {
+        EXPECT_EQ(send_with(key), std::unexpected(wire::DecodeError::Malformed)) << key;
+    }
 }
 
 TEST_F(WireTest, AReplyWithAStatusNobodyDefinedIsMalformed) {
