@@ -45,6 +45,8 @@ pins=(
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/namespace-v1.json"
     "schemas/networkpolicy-networking-v1.json a6f9a32 f6324cc464f62228b0418f438d167208e4f86c7e3677ba30f608e79a8b26ba79
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/networkpolicy-networking-v1.json"
+    "schemas/cronjob-batch-v1.json a6f9a32 84c4990d07d34fb8f7b62f1fda442e8ba25da93dc77bb737c4a901e4d6ae8780
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/cronjob-batch-v1.json"
 )
 
 verified() {

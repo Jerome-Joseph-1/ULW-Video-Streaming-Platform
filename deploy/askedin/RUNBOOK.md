@@ -9,6 +9,7 @@ What ships:
 |---|---|
 | `overlays/{stage,prod}/video-gateway/` | Deployment (2 replicas, migrations in its init container), Service, HTTPRoute + BackendTrafficPolicy, NetworkPolicy |
 | `overlays/{stage,prod}/video-worker/` | Deployment (1 replica), NetworkPolicy; no Service, no route |
+| `overlays/{stage,prod}/upload-reaper/` | CronJob (every 15 minutes) and NetworkPolicy; the gateway image's `ulw_reaper` (step 3a) |
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
 | `woodpecker.yml` | Builds and pushes both images, then `rollout restart`; never applies a manifest |
 
@@ -164,44 +165,20 @@ The put replaces the bucket's whole lifecycle configuration: if the first get sh
 them into `lifecycle.json`. The same rule is in the dashboard under the bucket's Settings, Object
 lifecycle rules, as "Abort incomplete multipart uploads" with prefix `videos/` and 7 days.
 
-The reaper is a CronJob running the gateway image's `ulw_reaper` with the gateway's secret. It
-aborts uploads past their `expires_at`, fails their videos with "upload expired", releases their
-multipart sessions, and aborts sessions older than the uploads' lifetime that no upload owns. It
-prints `reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run` and
-`reaper_parts_orphaned_last_run` for its pass on stdout, as gauges; a non-zero
-exit means a phase failed, and the Job's log says which.
+The reaper is `overlays/{stage,prod}/upload-reaper/`: a CronJob running the gateway image's
+`ulw_reaper` every 15 minutes with the gateway's secret (the same `:development` / `:master`
+image and `imagePullPolicy: Always` as the gateway, so the reaper's SQL and lock key match the
+build the gateways run), and a NetworkPolicy that lets it reach cluster DNS, Postgres (5432) and
+the store (443) and nothing else. It aborts uploads past their `expires_at`, fails their videos
+with "upload expired", releases their storage sessions, removes any object a finished commit
+left at their key, and aborts sessions older than the uploads' lifetime that no upload owns
+(docs/adr/0038). Each pass prints `reaper_uploads_expired_last_run`,
+`reaper_uploads_release_failed_last_run` and `reaper_parts_orphaned_last_run` on stdout, as
+gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
+confirmed, and the Job's log says which.
 
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: video-reaper
-spec:
-  schedule: "*/15 * * * *"
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 1
-  failedJobsHistoryLimit: 3
-  jobTemplate:
-    spec:
-      backoffLimit: 0
-      activeDeadlineSeconds: 600
-      template:
-        spec:
-          restartPolicy: Never
-          securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
-          containers:
-            - name: reaper
-              image: git.askedin.com/askedin/askedin-monorepo/video-gateway:<tag of the running gateway>
-              command: ["/usr/local/bin/ulw_reaper"]
-              envFrom: [{ secretRef: { name: video-gateway-secrets } }]
-              resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 128Mi } }
-              securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
-```
-
-Its NetworkPolicy needs egress to Postgres and to R2, as the gateway's has. The gateway's secret
-carries `JWKS_URL` and `JWT_ISSUER` as well, which the reaper ignores. The reaper's environment
-takes `ULW_UPLOAD_TTL_HOURS` if the gateway's upload lifetime is ever changed from 6 days
-(default 144).
+The NetworkPolicy allows ports, not addresses, because Postgres runs on the node's host and R2
+is on the internet. If the host's address is stable, add it as an `ipBlock` to the 5432 rule.
 
 ## 4. Pipeline and first deploy
 
