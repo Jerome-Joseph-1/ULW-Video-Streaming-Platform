@@ -43,11 +43,12 @@ target_link_libraries(ulw_echo_server PRIVATE ulw::test_echo)
 ulw_add_executable(ulw_loadgen load/loadgen.cpp)
 ulw_add_executable(ulw_datagram_soak load/datagram_soak.cpp)
 target_link_libraries(ulw_datagram_soak PRIVATE ulw::net_lib Threads::Threads)
-# The short form of the M23 soak: 5000 peers for 20 s on each reactor.
+# The short form of the M23 soak: 5000 peers for 20 s on each reactor. 150,000 datagrams follow
+# the first sample, so a leak of one byte per datagram shows as 150 KB.
 foreach(reactor io_uring epoll)
     add_test(NAME datagram_soak_${reactor}
         COMMAND ulw_datagram_soak --reactor ${reactor} --peers 5000 --duration-s 20 --sample-s 5
-                --max-rss-growth-kb 1024)
+                --max-rss-bytes-per-datagram 1)
     set_tests_properties(datagram_soak_${reactor} PROPERTIES LABELS unit)
 endforeach()
 

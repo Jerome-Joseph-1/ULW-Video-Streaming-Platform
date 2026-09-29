@@ -38,7 +38,7 @@ struct Args {
     std::uint64_t sample_s = 10;
     std::uint64_t burst = 1;
     // Zero leaves RSS unchecked; the tool then only reports it.
-    std::uint64_t max_rss_growth_kb = 0;
+    std::uint64_t max_rss_bytes_per_datagram = 0;
 };
 
 template <class T> bool parse_number(std::string_view text, T& out) {
@@ -69,8 +69,8 @@ bool parse(std::span<char*> argv, Args& args) {
             ok = parse_number(value, args.sample_s) && args.sample_s > 0;
         } else if (flag == "--burst") {
             ok = parse_number(value, args.burst) && args.burst > 0;
-        } else if (flag == "--max-rss-growth-kb") {
-            ok = parse_number(value, args.max_rss_growth_kb);
+        } else if (flag == "--max-rss-bytes-per-datagram") {
+            ok = parse_number(value, args.max_rss_bytes_per_datagram);
         }
         if (!ok) {
             return false;
@@ -182,6 +182,8 @@ class Fleet final : public net::ITimerHandler {
 public:
     Fleet(net::IReactor& reactor, SocketAddr server, const Args& args)
         : reactor_(reactor), server_(server), args_(args), slices_(args.interval_ms / kTickMs),
+          slices_per_fire_(std::max<std::uint64_t>(
+              1, kSendBudget / std::max<std::uint64_t>(1, args.peers / slices_ * args.burst))),
           peers_(args.peers) {}
 
     [[nodiscard]] bool open() {
@@ -205,17 +207,21 @@ public:
         return true;
     }
 
+    // The first fire sends as many slices as any fire ever will, so the reactors' send pools
+    // reach their working set before the first RSS sample and later growth is a leak.
     void start() {
-        next_slice_at_ = reactor_.now() + core::Millis{kTickMs};
+        next_slice_at_ = reactor_.now() + core::Millis{kTickMs} -
+                         (core::Millis{kTickMs} * (slices_per_fire_ - 1));
         timer_ = reactor_.arm_timer(core::Millis{kTickMs}, *this);
     }
     void stop() { reactor_.cancel_timer(timer_); }
 
     // Every 100 ms one slice of the peers sends, so every peer sends once per interval and the
     // load is spread evenly across it. The wheel may fire a tick late; slices that fell due in
-    // the meantime go out together rather than being skipped.
+    // the meantime go out together rather than being skipped, but no more per fire than the
+    // reactor takes in one iteration, and the rest on the next.
     void on_timeout() noexcept override {
-        while (next_slice_at_ <= reactor_.now()) {
+        for (std::uint64_t n = 0; n < slices_per_fire_ && next_slice_at_ <= reactor_.now(); ++n) {
             send_slice(tick_++ % slices_);
             next_slice_at_ += core::Millis{kTickMs};
         }
@@ -256,7 +262,11 @@ private:
     net::IReactor& reactor_;
     SocketAddr server_;
     const Args& args_;
+    // Just under the 1,024 sends an io_uring reactor holds in flight: one fire's sends are all
+    // taken, and complete long before the next.
+    static constexpr std::uint64_t kSendBudget = 1000;
     std::uint64_t slices_;
+    std::uint64_t slices_per_fire_;
     std::uint64_t tick_ = 0;
     core::MonoTime next_slice_at_;
     net::TimerId timer_;
@@ -291,7 +301,7 @@ int run(int argc, char** argv) {
     if (!parse(std::span(argv, static_cast<std::size_t>(argc)), args)) {
         std::println(stderr, "usage: ulw_datagram_soak [--reactor io_uring|epoll] [--peers N] "
                              "[--interval-ms N>=100] [--duration-s N] [--sample-s N] [--burst N] "
-                             "[--max-rss-growth-kb N]");
+                             "[--max-rss-bytes-per-datagram N]");
         return 2;
     }
     // One descriptor per peer plus the server's, the rings and the standard streams.
@@ -333,6 +343,7 @@ int run(int argc, char** argv) {
     auto next_sample = started + sample_every;
     const auto end = started + core::Seconds{args.duration_s};
     std::uint64_t rss_first = 0;
+    std::uint64_t echoed_at_first = 0;
     std::uint64_t rss_max = 0;
     std::uint64_t rss_last = 0;
     while ((*reactor)->now() < end) {
@@ -340,7 +351,10 @@ int run(int argc, char** argv) {
         if ((*reactor)->now() >= next_sample) {
             next_sample += sample_every;
             rss_last = rss_kb();
-            rss_first = rss_first == 0 ? rss_last : rss_first;
+            if (rss_first == 0) {
+                rss_first = rss_last;
+                echoed_at_first = fleet.echoed;
+            }
             rss_max = std::max(rss_max, rss_last);
             const auto elapsed =
                 std::chrono::duration_cast<core::Seconds>((*reactor)->now() - started);
@@ -360,7 +374,10 @@ int run(int argc, char** argv) {
     server_thread.join();
 
     const std::uint64_t lost = fleet.sent - fleet.echoed;
-    const std::uint64_t growth = rss_last > rss_first ? rss_last - rss_first : 0;
+    const std::uint64_t growth = rss_max - rss_first;
+    // Each round trip is two datagrams: the peer's and the echo.
+    const std::uint64_t measured = 2 * (fleet.echoed - echoed_at_first);
+    const std::uint64_t per_datagram = measured == 0 ? 0 : growth * 1024 / measured;
     std::println("summary sent={} echoed={} lost={} misattributed={} silent_peers={} "
                  "peer_refused={} peer_errors={}",
                  fleet.sent, fleet.echoed, lost, fleet.misattributed, fleet.silent_peers(),
@@ -368,10 +385,17 @@ int run(int argc, char** argv) {
     std::println("server received={} sent={} truncated={} ring_exhausted={} refused={} errors={}",
                  report.stats.received, report.stats.sent, report.stats.truncated,
                  report.stats.ring_exhausted, report.refused, report.errors);
-    std::println("rss_kb first_sample={} max={} last={} growth={}", rss_first, rss_max, rss_last,
-                 growth);
-    const bool rss_ok = args.max_rss_growth_kb == 0 || growth <= args.max_rss_growth_kb;
-    return fleet.misattributed == 0 && lost == 0 && fleet.silent_peers() == 0 && rss_ok ? 0 : 1;
+    std::println("rss_kb first_sample={} max={} last={} growth={} bytes_per_datagram={}", rss_first,
+                 rss_max, rss_last, growth, per_datagram);
+    const bool rss_ok = args.max_rss_bytes_per_datagram == 0 ||
+                        (measured > 0 && per_datagram <= args.max_rss_bytes_per_datagram);
+    // A refusal on either side means a send slot was not given back, or the fleet outran what
+    // it had budgeted for; either way the run did not measure what it claims to.
+    const bool refused = fleet.refused != 0 || report.refused != 0;
+    return fleet.misattributed == 0 && lost == 0 && fleet.silent_peers() == 0 && !refused &&
+                   fleet.errors == 0 && report.errors == 0 && rss_ok
+               ? 0
+               : 1;
 }
 
 } // namespace
