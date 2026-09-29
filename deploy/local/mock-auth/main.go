@@ -9,6 +9,9 @@
 //	                              {"token":...} plus the cookie; alg is RS256, ES256 or EdDSA
 //	POST /rotate                  new keys; tokens signed before stay valid for one rotation
 //	GET  /healthz
+//	GET  /whoami                  the x-user-* headers it was sent, as JSON; the sandbox routes
+//	                              it behind the header-stripping policies that mimic
+//	                              askedin-gateway (deploy/local/cluster/askedin-identity.yaml)
 //
 // Test infrastructure only: the keys live in memory and die with the pod.
 package main
@@ -219,6 +222,12 @@ func (i *issuer) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /whoami", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string][]string{
+			"x-user-id":    r.Header.Values("X-User-Id"),
+			"x-user-email": r.Header.Values("X-User-Email"),
+		})
 	})
 	mux.HandleFunc("GET /.well-known/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, i.jwks())

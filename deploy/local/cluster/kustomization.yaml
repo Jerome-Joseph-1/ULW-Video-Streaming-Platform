@@ -1,13 +1,16 @@
-# Everything the sandbox runs once Envoy Gateway's CRDs are in: the Gateway, the mock
-# auth-service, and the stage overlays exactly as they ship, with only what the sandbox must
-# change patched below. Rendered with
+# Everything the sandbox runs once Envoy Gateway's CRDs are in: a NetworkPolicy enforcer, the
+# Gateway, the mock auth-service, the policies that mimic askedin-gateway, and the stage
+# overlays exactly as they ship, with only what the sandbox must change patched below.
+# Rendered with
 #   kubectl kustomize --load-restrictor LoadRestrictionsNone deploy/local/cluster
 # because the overlays live outside this directory.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
+  - kube-router.yaml
   - envoy.yaml
   - mock-auth.yaml
+  - askedin-identity.yaml
   - backing.yaml
   - ../../askedin/overlays/stage/video-gateway/deployment.yaml
   - ../../askedin/overlays/stage/video-gateway/service.yaml

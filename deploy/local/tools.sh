@@ -26,6 +26,14 @@ pins=(
     # kubeconform's schemas for the built-in kinds the manifests use, Kubernetes v1.37.0, from
     # yannh/kubernetes-json-schema at a fixed commit. The CRD kinds' schemas are generated
     # from the CRDs in envoy-gateway.yaml (crd-schemas.py).
+    "schemas/serviceaccount-v1.json a6f9a32 8193d6c3561475c6d3d5c44e1faedb1df53905373d904bc17015694326d659cf
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/serviceaccount-v1.json"
+    "schemas/clusterrole-rbac-v1.json a6f9a32 3fd79fbc322d89090be016a046630b6a399941547e7fbf7501645ee379e4fccb
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/clusterrole-rbac-v1.json"
+    "schemas/clusterrolebinding-rbac-v1.json a6f9a32 3f83a2198fe9c178bf742849df9a3fb719fe2f3bb8ef425fee855931dad554cf
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/clusterrolebinding-rbac-v1.json"
+    "schemas/daemonset-apps-v1.json a6f9a32 410871aa51ca678b861fddf530925f1fc6c9f38766975cbae3bb113c339fcecc
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/daemonset-apps-v1.json"
     "schemas/deployment-apps-v1.json a6f9a32 0b64451c0b8c36ea06dfebf952718810ae24a07779fb0ed2a6b03f1cc8735a54
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/deployment-apps-v1.json"
     "schemas/service-v1.json a6f9a32 8bf019854daed511e7c174896a898173fa65d88ec5937c687a37303d4cc9351b
