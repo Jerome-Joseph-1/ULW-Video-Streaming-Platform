@@ -110,11 +110,19 @@ PgLiveRecordings::record(const NewRecording& recording) {
                                                       .add_text(recording.title)
                                                       .add_text(recording.source.str())
                                                       .add_text(recording.stream));
-        if (!inserted || !conn->exec(kNotifyWorkers) || !tx->commit()) {
+        // Before the commit a failure rolls the transaction back: nothing was written.
+        if (!inserted || !conn->exec(kNotifyWorkers)) {
             return unavailable();
         }
+        if (!tx->commit()) {
+            return std::unexpected(RecordingStoreError::Unknown);
+        }
     }
-    return row_after(*conn, recording.stream);
+    auto row = row_after(*conn, recording.stream);
+    if (!row && row.error() == RecordingStoreError::Unavailable) {
+        return std::unexpected(RecordingStoreError::Unknown);
+    }
+    return row;
 }
 
 std::expected<RecordingRow, RecordingStoreError> PgLiveRecordings::fail(std::string_view stream,

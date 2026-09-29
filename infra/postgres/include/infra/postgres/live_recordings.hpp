@@ -16,6 +16,9 @@ enum class RecordingStoreError : std::uint8_t {
     Unavailable,
     // A stored row is not one this code writes.
     Corrupt,
+    // The commit was sent and its answer lost, or the row could not be read after it: the write
+    // may have landed, or may still land.
+    Unknown,
 };
 
 // What a stream became: exactly one of a video, or the reason it could not be recorded.
