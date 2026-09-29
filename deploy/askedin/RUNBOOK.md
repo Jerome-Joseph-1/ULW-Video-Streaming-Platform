@@ -175,6 +175,18 @@ ALTER DATABASE ulw_stage SET auto_explain.log_parameter_max_length = 0;
 
 `SHOW log_parameter_max_length;` and `SHOW log_parameter_max_length_on_error;` in a new session
 as `ulw_stage` then print `0`.
+
+Chat rooms other than a stream's live chat admit only their listed members (docs/adr/0052).
+Until the product manages the lists, they are rows in `chat_members`, set as the service's role:
+
+```sql
+INSERT INTO chat_members (room_id, user_id) VALUES ('<room uuid>', '<user sub>');
+DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user sub>';
+```
+
+A member removed this way keeps receiving the room's messages, and can read its history, until
+their connection closes; their next join is refused. To cut them off at once, also restart the
+chat pods.
 `VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
 password percent-encoded.
 

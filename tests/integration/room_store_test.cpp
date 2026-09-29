@@ -153,6 +153,18 @@ TEST_P(RoomStoreTest, TheFirstNodeToResolveARoomCreatesItUnderGenerationOne) {
               "1 0 group_chat durable");
 }
 
+TEST_P(RoomStoreTest, ARoomTakesTheKindItsFirstChatJoinRecorded) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(
+        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                    Params{}.add_uuid(room.uuid())));
+    ASSERT_TRUE(resolve(room, a_));
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', kind, delivery) FROM room_state WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "stream_live_chat lossy");
+}
+
 TEST_P(RoomStoreTest, AnOwnerWhoseHeartbeatIsFreshKeepsItsRoom) {
     const core::RoomId room = new_room();
     ASSERT_TRUE(resolve(room, a_));

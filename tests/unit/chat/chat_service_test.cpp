@@ -114,8 +114,9 @@ public:
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override {
         done(std::vector<core::UserId>{});
     }
-    void admits(const core::RoomId& /*room*/, const core::UserId& user,
+    void admits(const core::RoomId& /*room*/, const core::UserId& user, core::ports::RoomKind asked,
                 core::ports::MessageCallback<bool> done) override {
+        kinds.push_back(asked);
         const bool admitted = std::ranges::find(refused, user.view()) == refused.end();
         if (hold) {
             held.emplace_back(std::move(done), admitted);
@@ -131,6 +132,7 @@ public:
     }
 
     std::vector<std::string> refused;
+    std::vector<core::ports::RoomKind> kinds;
     bool hold = false;
     std::vector<std::pair<core::ports::MessageCallback<bool>, bool>> held;
     std::vector<core::ports::MessageCallback<std::vector<core::ports::StoredMessage>>> pages;
@@ -290,6 +292,18 @@ TEST_F(ChatServiceTest, AJoinOfARoomThatDoesNotAdmitTheUserIsRefusedAndNeverReac
     send(m, "try");
     EXPECT_TRUE(rooms_.sends.empty());
     EXPECT_EQ(seen(mallory.take().at(0)).reason, "not_joined");
+}
+
+TEST_F(ChatServiceTest, TheKindAJoinNamesIsWhatTheMemberCheckIsAskedFor) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    service_->join(a, {.room = room_id(kOtherRoom),
+                       .after = std::nullopt,
+                       .delivery = chat::Delivery::Lossy,
+                       .kind = core::ports::RoomKind::StreamLiveChat});
+    EXPECT_EQ(messages_.kinds, (std::vector{core::ports::RoomKind::GroupChat,
+                                            core::ports::RoomKind::StreamLiveChat}));
 }
 
 TEST_F(ChatServiceTest, AJoinWaitsForTheMemberListAndAskingAgainMeanwhileIsBusy) {

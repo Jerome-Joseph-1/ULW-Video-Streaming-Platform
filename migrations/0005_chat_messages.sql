@@ -33,3 +33,12 @@ CREATE TABLE chat_members (
     user_id text COLLATE "C" NOT NULL,
     PRIMARY KEY (room_id, user_id)
 );
+
+-- Who may be in a room follows from its kind (section 8.15): a direct or group chat admits only
+-- its members, even while it has none; a stream's live chat admits anyone. The kind is recorded
+-- once, by the room's first join, and a room that already lists members is never recorded as
+-- live (ADR-0052). room_state's kind (0003) is copied from here when the room is created.
+CREATE TABLE chat_rooms (
+    room_id uuid PRIMARY KEY,
+    kind    text NOT NULL CHECK (kind IN ('direct_chat', 'group_chat', 'stream_live_chat'))
+);

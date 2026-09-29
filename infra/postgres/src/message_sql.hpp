@@ -52,10 +52,20 @@ ON CONFLICT (room_id, user_id) DO NOTHING)sql";
 
 inline constexpr Sql kRemoveMember = "DELETE FROM chat_members WHERE room_id = $1 AND user_id = $2";
 
-// Both probes are one primary-key lookup.
+// Records the kind a room's first join asks for ($3), unless it lists members already and $3
+// is the open kind, and answers with the recorded kind and whether $2 is a member. The update that
+// does nothing on a conflict waits for a concurrent first join and returns the kind it recorded,
+// rather than missing it in this statement's snapshot. Each probe is one primary-key lookup.
 inline constexpr Sql kAdmits = R"sql(
-SELECT NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1)
-    OR EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
+WITH kind AS (
+    INSERT INTO chat_rooms (room_id, kind)
+    VALUES ($1, CASE WHEN $3 = 'stream_live_chat'
+                      AND EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1)
+                     THEN 'group_chat' ELSE $3 END)
+    ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind
+    RETURNING kind)
+SELECT (SELECT kind FROM kind),
+       EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
 
 // '' sorts before every id, none of which is empty.
 inline constexpr Sql kMembers = R"sql(

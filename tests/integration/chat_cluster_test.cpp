@@ -208,6 +208,8 @@ protected:
             return;
         }
         room_ = core::RoomId::generate(clock_, random_).to_string();
+        // The room the tests share is a group chat of the three users.
+        ASSERT_NO_FATAL_FAILURE(list_members(room_, {"alice", "bob", "carol"}));
         // Made up per run: no real secret lives in the repository.
         std::array<std::byte, 32> secret{};
         random_.fill(secret);
@@ -299,6 +301,31 @@ protected:
     }
 
     static std::string ref(std::uint64_t n) { return "r" + std::to_string(n); }
+
+    // Lists members for a room, as the service's operators do.
+    void list_members(const std::string& room, const std::vector<std::string>& users) const {
+        auto conn = db_->session();
+        for (const std::string& user : users) {
+            ASSERT_TRUE(
+                conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::text::uuid, $2)",
+                          Params{}.add_text(room).add_text(user)));
+        }
+    }
+
+    // A join of `room` with `fields` added; "joined", or the error's reason.
+    static std::string join_answer(Client& client, const std::string& room,
+                                   const std::string& fields = "") {
+        if (!client.send(R"({"type":"join","room":")" + room + R"(")" + fields + "}")) {
+            return "not sent";
+        }
+        const auto answer = client.wait_for([](const Seen& s) {
+            return s.type == "joined" || (s.type == "error" && s.reason != "not_joined");
+        });
+        if (!answer) {
+            return "no answer";
+        }
+        return answer->type == "joined" ? "joined" : answer->reason;
+    }
 
     // Asks for a page of the room's history with `fields` (`,"after":7`, say) and returns the
     // messages that came before the page's end, as sent; nullopt for an error instead.
@@ -878,26 +905,42 @@ TEST_P(ChatClusterTest, HistorySurvivesARestartOfEveryNodeInTheOrderItWasSent) {
 }
 
 TEST_P(ChatClusterTest, ARoomWithMembersRefusesEveryoneElse) {
-    auto conn = db_->session();
-    ASSERT_TRUE(conn.exec("INSERT INTO chat_members (room_id, user_id) "
-                          "VALUES ($1::text::uuid, 'alice'), ($1::text::uuid, 'bob')",
-                          Params{}.add_text(room_)));
+    const std::string members_only = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(members_only, {"alice", "bob"}));
     auto alice = connect(nodes_[0], 0);
     auto carol = connect(nodes_[2], 2);
     ASSERT_TRUE(alice && carol);
-    ASSERT_NO_FATAL_FAILURE(join(*alice));
-    ASSERT_TRUE(carol->send(R"({"type":"join","room":")" + room_ + R"("})"));
-    const auto refused =
-        carol->wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
-    ASSERT_TRUE(refused);
-    EXPECT_EQ(refused->type, "error");
-    EXPECT_EQ(refused->reason, "not_member");
-    ASSERT_TRUE(carol->send(send_command(room_, "let me in", "sneak")));
+    EXPECT_EQ(join_answer(*alice, members_only), "joined");
+    EXPECT_EQ(join_answer(*carol, members_only), "not_member");
+    ASSERT_TRUE(carol->send(send_command(members_only, "let me in", "sneak")));
     const auto sneak = carol->wait_for([](const Seen& s) { return s.id == "sneak"; });
     ASSERT_TRUE(sneak);
     EXPECT_EQ(sneak->reason, "not_joined");
-    ASSERT_TRUE(send_until_heard(*alice, "members only"));
-    EXPECT_FALSE(carol->ever_saw(last_body_["alice"]));
+    ASSERT_TRUE(alice->send(send_command(members_only, "members only", "inside")));
+    ASSERT_TRUE(alice->message("members only"));
+    EXPECT_FALSE(carol->ever_saw("members only"));
+}
+
+TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedLater) {
+    const std::string nobody = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    EXPECT_EQ(join_answer(*alice, nobody), "not_member");
+    // Its first join recorded it as a group chat; asking for live afterwards opens nothing.
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_member");
+}
+
+TEST_P(ChatClusterTest, ALiveRoomAdmitsAnyone) {
+    const std::string live = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(alice && carol);
+    EXPECT_EQ(join_answer(*alice, live, R"(,"kind":"live")"), "joined");
+    // Joins after the first need not know what the room is.
+    EXPECT_EQ(join_answer(*carol, live), "joined");
+    ASSERT_TRUE(carol->send(send_command(live, "hello, stream", "live-1")));
+    ASSERT_TRUE(alice->message("hello, stream"));
 }
 
 // No database is reached: the connection string is refused before any connection is tried.

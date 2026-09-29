@@ -31,6 +31,25 @@ inline constexpr std::size_t kMaxMessageKey = 64;
 // share of that same client budget.
 inline constexpr std::size_t kMaxMembersPage = 1024;
 
+// Section 8.15's room kinds, as far as who may be in the room goes.
+enum class RoomKind : std::uint8_t {
+    DirectChat,
+    GroupChat,
+    StreamLiveChat,
+};
+
+// Whether a room of `kind` admits a user who is not among its members.
+[[nodiscard]] constexpr bool admits_anyone(RoomKind kind) noexcept {
+    switch (kind) {
+    case RoomKind::DirectChat:
+    case RoomKind::GroupChat:
+        return false;
+    case RoomKind::StreamLiveChat:
+        return true;
+    }
+    return false;
+}
+
 enum class MessageStoreError : std::uint8_t {
     // Unreachable, timed out, or lost a race with a concurrent write; the call may be repeated.
     Unavailable,
@@ -90,9 +109,12 @@ public:
     // Members above `after` in byte order of their ids, at most min(limit, kMaxMembersPage).
     virtual void members(const RoomId& room, std::optional<UserId> after, std::size_t limit,
                          MessageCallback<std::vector<UserId>> done) = 0;
-    // Whether `user` may be in the room: a room with members admits only them; a room with none
-    // is open to anyone, as a stream's live chat is.
-    virtual void admits(const RoomId& room, const UserId& user, MessageCallback<bool> done) = 0;
+    // Whether `user` may be in the room, by the room's kind: a direct or group chat admits only
+    // its members, even while it has none; a stream's live chat admits anyone. A room's kind is
+    // recorded once, by the first join, as `asked`, except that a room that already lists
+    // members is never recorded as open.
+    virtual void admits(const RoomId& room, const UserId& user, RoomKind asked,
+                        MessageCallback<bool> done) = 0;
 };
 
 } // namespace core::ports

@@ -24,15 +24,27 @@ using rt::StoreError;
 using rt::StoreResult;
 
 // A room nobody has asked for before is created by the first node that resolves it. Both rows
-// in one statement: a room never exists without its sequence counter.
+// in one statement: a room never exists without its sequence counter. Its kind is the one its
+// first chat join recorded in chat_rooms, which runs before the room is resolved; a room no
+// chat join recorded takes $3 (kind_of_unrecorded). A live chat is delivered lossy.
 constexpr Sql kCreateRoom = R"sql(
 WITH created AS (
     INSERT INTO room_assignments (room_id, owner_node) VALUES ($1, $2)
     ON CONFLICT (room_id) DO NOTHING
-    RETURNING owner_generation)
+    RETURNING owner_generation),
+kind AS (
+    SELECT coalesce((SELECT kind FROM chat_rooms WHERE room_id = $1), $3) AS kind)
 INSERT INTO room_state (room_id, owner_generation, kind, delivery)
-SELECT $1, owner_generation, 'group_chat', 'durable' FROM created
+SELECT $1, created.owner_generation, kind.kind,
+       CASE WHEN kind.kind = 'stream_live_chat' THEN 'lossy' ELSE 'durable' END
+  FROM created, kind
 RETURNING owner_generation)sql";
+
+// The kind of a room created without a chat join recording one first: closed, so that no room
+// is open by default. The one place a room's kind is chosen from the room alone.
+std::string_view kind_of_unrecorded(const core::RoomId& /*room*/) noexcept {
+    return "group_chat";
+}
 
 // The fence moves with the owner: room_state takes the new generation in the same statement,
 // so from its commit on only the new owner's appends match. Under READ COMMITTED a second
@@ -184,7 +196,10 @@ public:
     [[nodiscard]] Statement start() noexcept override {
         step_ = Step::Create;
         return Statement{.sql = kCreateRoom,
-                         .params = Params{}.add_uuid(room_.uuid()).add_text(node_.view())};
+                         .params = Params{}
+                                       .add_uuid(room_.uuid())
+                                       .add_text(node_.view())
+                                       .add_text(kind_of_unrecorded(room_))};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {

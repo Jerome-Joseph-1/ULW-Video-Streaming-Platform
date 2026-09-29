@@ -526,19 +526,52 @@ TEST_P(MessageStoreConformance, AKeyUsedAgainGetsItsSeqWithTheSameBodyAndIsAConf
     EXPECT_EQ(page->front().body, bytes("hello"));
 }
 
-TEST_P(MessageStoreConformance, ARoomWithoutMembersAdmitsAnyoneAndOneWithMembersOnlyThem) {
+TEST_P(MessageStoreConformance, AGroupRoomAdmitsOnlyItsMembersEvenWhileItHasNone) {
     const core::RoomId room = new_room();
     const auto admits = [&](const core::UserId& user) {
-        return ask<bool>([&](auto done) { store().admits(room, user, std::move(done)); });
+        return ask<bool>([&](auto done) {
+            store().admits(room, user, core::ports::RoomKind::GroupChat, std::move(done));
+        });
     };
-    EXPECT_EQ(admits(alice_), true);
-    EXPECT_EQ(admits(bob_), true);
+    EXPECT_EQ(admits(alice_), false);
+    EXPECT_EQ(admits(bob_), false);
     ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(room, alice_, std::move(done)); }));
     EXPECT_EQ(admits(alice_), true);
     EXPECT_EQ(admits(bob_), false);
     ASSERT_TRUE(
         ask<void>([&](auto done) { store().remove_member(room, alice_, std::move(done)); }));
-    EXPECT_EQ(admits(bob_), true);
+    EXPECT_EQ(admits(alice_), false);
+}
+
+TEST_P(MessageStoreConformance, ALiveRoomAdmitsAnyone) {
+    const core::RoomId room = new_room();
+    EXPECT_EQ(ask<bool>([&](auto done) {
+                  store().admits(room, alice_, core::ports::RoomKind::StreamLiveChat,
+                                 std::move(done));
+              }),
+              true);
+    EXPECT_EQ(ask<bool>([&](auto done) {
+                  store().admits(room, bob_, core::ports::RoomKind::StreamLiveChat,
+                                 std::move(done));
+              }),
+              true);
+}
+
+TEST_P(MessageStoreConformance, TheFirstJoinRecordsTheKindAndALaterOneCannotOpenTheRoom) {
+    const core::RoomId group = new_room();
+    const auto admits = [&](const core::RoomId& room, core::ports::RoomKind asked) {
+        return ask<bool>([&](auto done) { store().admits(room, bob_, asked, std::move(done)); });
+    };
+    EXPECT_EQ(admits(group, core::ports::RoomKind::DirectChat), false);
+    EXPECT_EQ(admits(group, core::ports::RoomKind::StreamLiveChat), false);
+    // A room someone listed members for is private, whatever its first join says.
+    const core::RoomId listed = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(listed, alice_, std::move(done)); }));
+    EXPECT_EQ(admits(listed, core::ports::RoomKind::StreamLiveChat), false);
+    // A live room stays open to a join that names another kind.
+    const core::RoomId live = new_room();
+    EXPECT_EQ(admits(live, core::ports::RoomKind::StreamLiveChat), true);
+    EXPECT_EQ(admits(live, core::ports::RoomKind::GroupChat), true);
 }
 
 // The in-memory store's own writer, which the Postgres store does

@@ -147,7 +147,7 @@ void ChatService::join(ClientId id, const Join& join) {
         // Whether the user may be in the room at all. Asked only for rooms new to the
         // connection, whose joins are rate limited; the answer may come from inside the call.
         c->admitting.push_back(join.room);
-        messages_.admits(join.room, c->user,
+        messages_.admits(join.room, c->user, join.kind,
                          [this, id, join](core::ports::MessageResult<bool> result) noexcept {
                              admitted(id, join, result);
                          });

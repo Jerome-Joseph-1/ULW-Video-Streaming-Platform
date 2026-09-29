@@ -33,6 +33,21 @@ TEST(Envelope, AJoinNamesItsRoomAndMayAskToResumeAndToBeLossy) {
     ASSERT_TRUE(resume);
     EXPECT_EQ(std::get<chat::Join>(*resume).after, 41U);
     EXPECT_EQ(std::get<chat::Join>(*resume).delivery, chat::Delivery::Lossy);
+    EXPECT_EQ(join.kind, core::ports::RoomKind::GroupChat);
+
+    for (const auto& [text, kind] : {std::pair{"direct", core::ports::RoomKind::DirectChat},
+                                     std::pair{"group", core::ports::RoomKind::GroupChat},
+                                     std::pair{"live", core::ports::RoomKind::StreamLiveChat}}) {
+        const auto named = chat::parse_command(
+            std::string{
+                R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":")"} +
+            text + R"("})");
+        ASSERT_TRUE(named) << text;
+        EXPECT_EQ(std::get<chat::Join>(*named).kind, kind) << text;
+    }
+    EXPECT_EQ(chat::parse_command(
+                  R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":"open"})"),
+              std::unexpected(EnvelopeError::Malformed));
 }
 
 TEST(Envelope, AHistoryPageRunsBackFromTheNewestUnlessGivenACursor) {

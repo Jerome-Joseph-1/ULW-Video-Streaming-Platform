@@ -43,7 +43,7 @@ Client to server:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`) | Subscribe this connection to the room. Joining an unknown room creates it. With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
+| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`) | Subscribe this connection to the room. Joining an unknown room creates it, as the `kind` it names (see [Member lists](#member-lists)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
 | `send` | `room`, `id`, `body` | Post a message. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. The connection must have joined the room. |
 
@@ -99,11 +99,19 @@ delivered, and the `id` stays with the first message. Send the new message under
 
 <!-- apps/chat/src/chat_service.cpp (join, admitted), migrations/0005_chat_messages.sql (chat_members) -->
 
-A room with a member list admits only its members: anyone else's `join` is refused with
-`not_member`, and so they can neither send to it nor read its history. A room with no member
-list is open to anyone, which is every room until one is listed, and what a stream's live chat
-stays. No client command changes a member list; they are set by the service's operators, and
-later by the product, in the database.
+Who may join a room depends on its kind, which the room's first join sets and nothing changes
+afterwards:
+
+- **Direct and group chats** (`"kind":"direct"` or `"group"`, the default) admit only their
+  members. Anyone else's `join` is refused with `not_member`, so they can neither send to the
+  room nor read its history. A direct or group chat with no members admits nobody.
+- **A stream's live chat** (`"kind":"live"`) admits anyone. Later joins need not name the kind.
+  A room whose members were listed before its first join is a group chat, whatever that join
+  asks for.
+
+No client command changes a member list; they are set by the service's operators, and later by
+the product, in the database. A member removed from the list keeps receiving the room's
+messages, and can read its history, until that connection closes; the next `join` is refused.
 
 ### Errors
 

@@ -155,9 +155,15 @@ void MemoryMessageStore::members(const core::RoomId& room, std::optional<core::U
 }
 
 void MemoryMessageStore::admits(const core::RoomId& room, const core::UserId& user,
-                                MessageCallback<bool> done) {
-    const auto it = members_.find(room);
-    const bool admitted = it == members_.end() || it->second.empty() || it->second.contains(user);
+                                core::ports::RoomKind asked, MessageCallback<bool> done) {
+    const auto listed = members_.find(room);
+    const bool has_members = listed != members_.end() && !listed->second.empty();
+    if (asked == core::ports::RoomKind::StreamLiveChat && has_members) {
+        asked = core::ports::RoomKind::GroupChat;
+    }
+    const core::ports::RoomKind kind = kinds_.try_emplace(room, asked).first->second;
+    const bool admitted =
+        core::ports::admits_anyone(kind) || (has_members && listed->second.contains(user));
     defer([done = std::move(done), admitted]() mutable noexcept { done(admitted); });
 }
 

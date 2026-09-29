@@ -106,10 +106,27 @@ What bounds a page of history:
   `(room_id, seq)` is the `(room_id, seq DESC)` order, so no second index exists.
 - **Membership** is `chat_members(room_id, user_id)`, `user_id` in the `"C"` collation, so ids
   page in byte order whatever the database's default collation; the in-memory store orders them
-  the same way. A room with members is closed: `admits(room, user)` is true only for them. A
-  room with none is open to anyone, which is every room until something lists members, and what
-  a stream's live chat stays. The chat service asks before a client joins a room new to it; no
-  client command changes the list, which is the operators' (and later the product's) to set.
+  the same way. No client command changes it; it is the operators' (and later the product's) to
+  set.
+- **Who may be in a room follows from its kind, never from an empty list.** Direct and group
+  chats are closed: `admits(room, user, asked)` is true only for their members, and a closed
+  room with no members admits nobody. A stream's live chat is open to anyone. The kind is
+  recorded in `chat_rooms` by the room's first join, as the join names it (`"kind"` in the
+  envelope; a join that names none asks for a group chat), so a room is closed unless it was
+  created as live. A room that already lists members is recorded as a group chat whatever its
+  first join asks, and a recorded kind never changes: a later join cannot open a closed room.
+  A first join racing another waits for it and reads the kind it recorded. The chat service
+  asks before a client joins a room new to its connection, which is before the room plane
+  resolves, and so creates, the room. `room_state`'s `kind` (0003), written as `group_chat` for
+  every room until now, is copied from the recorded kind when the room is created, and its
+  `delivery` is lossy for a live chat and durable otherwise. A room created without a chat join
+  recording its kind first takes the kind one function in the room store chooses from the room
+  alone: a group chat, closed. Which kinds admit anyone is one function too
+  (`core::ports::admits_anyone`), so a new kind is a case in each, not a new rule.
+- **A member removed from the list keeps what they have until they reconnect.** The check runs
+  at a join, not per message: a connection already in the room goes on receiving its messages,
+  and may read its history, until it closes. Cutting it off at once needs the service to watch
+  the list (a notification on removal), which is not built.
 - **Sessions.** The message store drives its own pool of four sessions on the reactor, as the
   room store does, with a 2 s request timeout.
 - An in-memory store implements the same port, and one conformance suite
