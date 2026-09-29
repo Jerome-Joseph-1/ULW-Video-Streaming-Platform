@@ -181,8 +181,11 @@ TEST(Mls, KeyPackageFitsTheDirectorysSizeBound) {
     EXPECT_LT(package->size(), 8192U);
 }
 
-// M21's acceptance run: under the asan preset, ASan and LeakSanitizer watch every allocation on
-// both sides of the boundary, since Rust allocates through the same malloc.
+// M21's acceptance run. Under the asan preset LeakSanitizer sees every allocation on both sides
+// of the boundary, since Rust allocates through the same malloc, and ASan checks every access
+// the C++ side makes, handing buffers in and freeing what comes back. It cannot see a bad
+// access made inside the Rust code, which is not instrumented (ADR-0039): that side rests on
+// safe Rust, the unsafe blocks at the boundary, and the fuzzer.
 TEST(Mls, SurvivesAThousandCreateAddRemoveEncryptDecryptCycles) {
     constexpr int kCycles = 1000;
     for (int i = 0; i < kCycles; ++i) {
