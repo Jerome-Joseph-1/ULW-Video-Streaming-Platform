@@ -90,6 +90,9 @@ public:
     // Members above `after` in byte order of their ids, at most min(limit, kMaxMembersPage).
     virtual void members(const RoomId& room, std::optional<UserId> after, std::size_t limit,
                          MessageCallback<std::vector<UserId>> done) = 0;
+    // Whether `user` may be in the room: a room with members admits only them; a room with none
+    // is open to anyone, as a stream's live chat is.
+    virtual void admits(const RoomId& room, const UserId& user, MessageCallback<bool> done) = 0;
 };
 
 } // namespace core::ports

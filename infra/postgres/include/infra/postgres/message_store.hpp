@@ -64,6 +64,8 @@ public:
                        core::ports::MessageCallback<void> done) override;
     void members(const core::RoomId& room, std::optional<core::UserId> after, std::size_t limit,
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override;
+    void admits(const core::RoomId& room, const core::UserId& user,
+                core::ports::MessageCallback<bool> done) override;
 
 private:
     std::unique_ptr<Impl> impl_;

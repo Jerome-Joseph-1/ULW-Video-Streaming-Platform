@@ -171,6 +171,41 @@ private:
     MessageCallback<void> done_;
 };
 
+// Binds the user id, which must outlive the statement.
+class Admits final : public Operation {
+public:
+    Admits(const core::RoomId& room, const core::UserId& user, MessageCallback<bool> done)
+        : room_(room), user_(user), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = message_sql::kAdmits,
+                         .params = Params{}.add_uuid(room_.uuid()).add_text(user_.view())};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+            return std::nullopt;
+        }
+        const auto admitted = outcome->get(0, 0).and_then(parse_bool);
+        if (!admitted) {
+            done_(std::unexpected(MessageStoreError::Corrupt));
+            return std::nullopt;
+        }
+        done_(*admitted);
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    core::UserId user_;
+    MessageCallback<bool> done_;
+};
+
 } // namespace
 
 class PgMessageStore::Impl {
@@ -250,6 +285,11 @@ void PgMessageStore::remove_member(const core::RoomId& room, const core::UserId&
 void PgMessageStore::members(const core::RoomId& room, std::optional<core::UserId> after,
                              std::size_t limit, MessageCallback<std::vector<core::UserId>> done) {
     impl_->pool().submit(std::make_unique<Members>(room, after, limit, std::move(done)));
+}
+
+void PgMessageStore::admits(const core::RoomId& room, const core::UserId& user,
+                            MessageCallback<bool> done) {
+    impl_->pool().submit(std::make_unique<Admits>(room, user, std::move(done)));
 }
 
 } // namespace infra::postgres

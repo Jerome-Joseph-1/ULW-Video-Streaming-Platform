@@ -52,6 +52,11 @@ ON CONFLICT (room_id, user_id) DO NOTHING)sql";
 
 inline constexpr Sql kRemoveMember = "DELETE FROM chat_members WHERE room_id = $1 AND user_id = $2";
 
+// Both probes are one primary-key lookup.
+inline constexpr Sql kAdmits = R"sql(
+SELECT NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1)
+    OR EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
+
 // '' sorts before every id, none of which is empty.
 inline constexpr Sql kMembers = R"sql(
 SELECT user_id FROM chat_members

@@ -502,6 +502,21 @@ TEST_P(MessageStoreConformance, MembersPageInTheByteOrderOfTheirIds) {
     EXPECT_EQ(listed, ordered);
 }
 
+TEST_P(MessageStoreConformance, ARoomWithoutMembersAdmitsAnyoneAndOneWithMembersOnlyThem) {
+    const core::RoomId room = new_room();
+    const auto admits = [&](const core::UserId& user) {
+        return ask<bool>([&](auto done) { store().admits(room, user, std::move(done)); });
+    };
+    EXPECT_EQ(admits(alice_), true);
+    EXPECT_EQ(admits(bob_), true);
+    ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(room, alice_, std::move(done)); }));
+    EXPECT_EQ(admits(alice_), true);
+    EXPECT_EQ(admits(bob_), false);
+    ASSERT_TRUE(
+        ask<void>([&](auto done) { store().remove_member(room, alice_, std::move(done)); }));
+    EXPECT_EQ(admits(bob_), true);
+}
+
 // The in-memory store's own writer, which the Postgres store does
 // not have.
 class MemoryMessageStoreAppend : public ::testing::Test {

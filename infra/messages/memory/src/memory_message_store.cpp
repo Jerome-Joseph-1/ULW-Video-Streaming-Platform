@@ -154,4 +154,11 @@ void MemoryMessageStore::members(const core::RoomId& room, std::optional<core::U
     });
 }
 
+void MemoryMessageStore::admits(const core::RoomId& room, const core::UserId& user,
+                                MessageCallback<bool> done) {
+    const auto it = members_.find(room);
+    const bool admitted = it == members_.end() || it->second.empty() || it->second.contains(user);
+    defer([done = std::move(done), admitted]() mutable noexcept { done(admitted); });
+}
+
 } // namespace infra::messages

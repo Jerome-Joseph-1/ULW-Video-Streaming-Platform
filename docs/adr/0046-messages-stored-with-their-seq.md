@@ -99,7 +99,10 @@ What bounds a page of history:
   `(room_id, seq)` is the `(room_id, seq DESC)` order, so no second index exists.
 - **Membership** is `chat_members(room_id, user_id)`, `user_id` in the `"C"` collation, so ids
   page in byte order whatever the database's default collation; the in-memory store orders them
-  the same way.
+  the same way. A room with members is closed: `admits(room, user)` is true only for them. A
+  room with none is open to anyone, which is every room until something lists members, and what
+  a stream's live chat stays. The chat service asks before a client joins a room new to it; no
+  client command changes the list, which is the operators' (and later the product's) to set.
 - **Sessions.** The message store drives its own pool of four sessions on the reactor, as the
   room store does, with a 2 s request timeout.
 - An in-memory store implements the same port, and one conformance suite
