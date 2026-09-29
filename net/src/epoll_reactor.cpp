@@ -82,10 +82,10 @@ std::expected<std::unique_ptr<EpollReactor>, int> EpollReactor::create(core::por
 EpollReactor::EpollReactor(core::ports::IClock& clock, os::UniqueFd epfd, std::size_t max_fds)
     : clock_(clock), epfd_(std::move(epfd)), slots_(max_fds), wheel_(clock.now()),
       now_(clock.now()), read_buf_(std::make_unique<ReadBuffer>()) {
+    static_assert(kMaxDatagramSize <= std::tuple_size_v<ReadBuffer>,
+                  "datagrams are read into read_buf_");
     accept_retry_.self = this;
 }
-
-static_assert(kMaxDatagramSize <= std::size_t{64} * 1024, "datagrams are read into read_buf_");
 
 EpollReactor::~EpollReactor() {
     for (Slot& s : slots_) {
