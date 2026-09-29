@@ -22,6 +22,14 @@ void append_video_grant(std::string& out, const Grant& grant) {
         core::json::append_string(out, grant.room);
         out += R"(,"roomJoin":true,"canPublish":true,"canSubscribe":true)";
         break;
+    case Permission::PublishToRoom:
+        out += R"("room":)";
+        core::json::append_string(out, grant.room);
+        // A WHIP session's audio is the microphone source and its video the camera
+        // (synthesizeAddTrackRequests, pkg/rtc/participant.go in LiveKit v1.13.7).
+        out += R"(,"roomJoin":true,"canPublish":true,"canSubscribe":false,"canPublishData":false)";
+        out += R"(,"canPublishSources":["camera","microphone"])";
+        break;
     case Permission::CreateRooms:
         out += R"("roomCreate":true)";
         break;

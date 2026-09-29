@@ -3,7 +3,7 @@
 // command per line on stdin, runs it through the SFU port, and answers with one line on stdout.
 //
 //   open <room-id> <generation> <max-participants>   -> ok
-//   join <room-id> <generation> <user> <device-id>    -> the ticket, as JSON
+//   join <room-id> <generation> <user> <device-id> <member|publisher>  -> the ticket, as JSON
 //   close <room-id> <generation>                      -> ok
 //
 // A command that fails answers "error <reason>". LIVEKIT_API_KEY and LIVEKIT_API_SECRET are
@@ -142,10 +142,15 @@ public:
             return max ? open(*room, MediaGeneration{*generation}, *max, std::move(key))
                        : "error bad max-participants";
         }
-        if (words[0] == "join" && words.size() == 5) {
+        if (words[0] == "join" && words.size() == 6) {
             const auto user = core::UserId::parse(words[3]);
             const auto device = core::DeviceId::parse(words[4]);
-            return user && device ? join(key, *user, *device) : "error bad user or device id";
+            if (!user || !device || (words[5] != "member" && words[5] != "publisher")) {
+                return "error bad user, device id or role";
+            }
+            return join(key, *user, *device,
+                        words[5] == "member" ? core::ports::MediaRole::Member
+                                             : core::ports::MediaRole::Publisher);
         }
         if (words[0] == "close" && words.size() == 3) {
             return close(key);
@@ -167,14 +172,15 @@ private:
         return "ok";
     }
 
-    std::string join(const std::string& key, const core::UserId& user,
-                     const core::DeviceId& device) {
+    std::string join(const std::string& key, const core::UserId& user, const core::DeviceId& device,
+                     core::ports::MediaRole role) {
         const auto room = rooms_.find(key);
         if (room == rooms_.end()) {
             return "error not open";
         }
         std::optional<std::expected<core::ports::MediaTicket, MediaError>> ticket;
-        room->second->join(user, device, [&](auto result) noexcept { ticket = std::move(result); });
+        room->second->join(user, device, role,
+                           [&](auto result) noexcept { ticket = std::move(result); });
         run_until([&] { return ticket.has_value(); });
         return *ticket ? ticket_json(**ticket) : "error " + std::string(to_string(ticket->error()));
     }

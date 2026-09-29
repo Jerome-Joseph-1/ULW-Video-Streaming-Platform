@@ -30,7 +30,8 @@ WHIP endpoint, built for ingest (option c).
 ## Decision
 
 - The port is `ISfu::open_room(RoomId, MediaGeneration, max_participants) -> IMediaRoom`,
-  `IMediaRoom::join(UserId, DeviceId) -> MediaTicket` (asynchronous) and `IMediaRoom::close()`
+  `IMediaRoom::join(UserId, DeviceId, MediaRole) -> MediaTicket` (asynchronous) and
+  `IMediaRoom::close()`
   (`core/include/core/ports/media.hpp`). A `MediaTicket` is an endpoint, an opaque credential
   and its expiry; core never sees a LiveKit word. `apply_offer`, `add_ice_candidate` and the SDP
   they carry are gone from the port.
@@ -75,6 +76,18 @@ WHIP endpoint, built for ingest (option c).
   call's state, and a deposed owner's update matches no row, so it never touches the SFU. Tickets
   are issued for the generation the owner last wrote. Closing a generation that LiveKit has
   already dropped succeeds.
+- Live ingest (M30) is WHIP's intended use, and option (c)'s objections do not apply to it: a
+  source only sends, so there is nothing to subscribe to and nothing to renegotiate. The port
+  carries it as a role: `join(..., MediaRole::Publisher)` issues a ticket whose endpoint is
+  LiveKit's WHIP URL (`http(s)://<client host>/whip/v1`, the client URL with its scheme swapped)
+  and whose grant publishes camera and microphone (the sources LiveKit assigns a WHIP session's
+  audio and video) and nothing else: `canSubscribe` and `canPublishData` are spelled out as
+  false, since LiveKit reads their absence as allowed. The ingest handler hands that ticket to
+  an encoder or a browser, which POSTs its offer to the endpoint with the credential as bearer
+  token; tests/call publishes that way from a plain `RTCPeerConnection` and a call member
+  receives it. How the stream then reaches the packager is M31's question; if M30 prefers
+  LiveKit's separate Ingress service (RTMP, stream keys), that is another role, not another
+  port.
 - TURN (STUNner, ADR-0013) is not an SFU concern: the call handler sends the per-session TURN
   credentials next to the ticket, and the client hands them to the SDK as its ICE servers with a
   relay-only policy. That is why `IceCredentials` left `join`.

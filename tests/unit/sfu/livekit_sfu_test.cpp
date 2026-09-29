@@ -25,6 +25,7 @@ using core::ports::IMediaRoom;
 using core::ports::ISfu;
 using core::ports::MediaError;
 using core::ports::MediaGeneration;
+using core::ports::MediaRole;
 using infra::sfu::livekit::Config;
 using infra::sfu::livekit::ConfigError;
 using infra::sfu::livekit::make_sfu;
@@ -82,9 +83,10 @@ protected:
         return std::move(*got);
     }
 
-    TicketResult join(IMediaRoom& room, std::string_view user, std::string_view device = kDevice) {
+    TicketResult join(IMediaRoom& room, std::string_view user, std::string_view device = kDevice,
+                      MediaRole role = MediaRole::Member) {
         std::optional<TicketResult> got;
-        room.join(*core::UserId::parse(user), *core::DeviceId::parse(device),
+        room.join(*core::UserId::parse(user), *core::DeviceId::parse(device), role,
                   [&](TicketResult r) noexcept { got = std::move(r); });
         EXPECT_FALSE(got.has_value()) << "callback ran inside join()";
         EXPECT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
@@ -191,6 +193,38 @@ TEST_P(LiveKitSfuTest, JoiningIssuesATicketForThatUsersDevice) {
     EXPECT_EQ(ticket->expires_at, clock.wall_now() + std::chrono::seconds(60));
     EXPECT_EQ(token->claims.find("exp")->as_i64(),
               std::chrono::floor<core::Seconds>(ticket->expires_at).time_since_epoch().count());
+}
+
+TEST_P(LiveKitSfuTest, APublisherTicketIsForWhipAndCannotSubscribe) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto ticket = join(**room, "streamer", kDevice, MediaRole::Publisher);
+    ASSERT_TRUE(ticket);
+    EXPECT_EQ(ticket->endpoint, "https://media.example.test/whip/v1");
+    const auto token = read_token(ticket->credential, kSecret);
+    ASSERT_TRUE(token);
+    EXPECT_EQ(string_at(token->claims, "sub"), "streamer/" + std::string(kDevice));
+    EXPECT_EQ(string_at(token->claims, "video", "room"), std::string(kRoom) + ":1");
+    EXPECT_EQ(bool_at(token->claims, "video", "canPublish"), true);
+    EXPECT_EQ(bool_at(token->claims, "video", "canSubscribe"), false);
+}
+
+TEST_P(LiveKitSfuTest, ThePlainClientUrlGivesAPlainWhipUrl) {
+    auto server = answering(200);
+    auto config = config_for(server.base_url());
+    config.client_url = "ws://127.0.0.1:7880/";
+    auto made = make_sfu(*reactor, *multi, clock, std::move(config));
+    ASSERT_TRUE(made);
+    sfu = std::move(*made);
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto publisher = join(**room, "streamer", kDevice, MediaRole::Publisher);
+    const auto member = join(**room, "alice");
+    ASSERT_TRUE(publisher && member);
+    EXPECT_EQ(publisher->endpoint, "http://127.0.0.1:7880/whip/v1");
+    EXPECT_EQ(member->endpoint, "ws://127.0.0.1:7880/");
 }
 
 TEST_P(LiveKitSfuTest, ATicketAdmitsToItsOwnGenerationOnly) {

@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
 
@@ -96,6 +98,27 @@ TEST(AccessToken, JoinGrantAdmitsTheIdentityToOneRoomOnly) {
     EXPECT_EQ(bool_at(read.claims, "video", "canPublish"), true);
     EXPECT_EQ(bool_at(read.claims, "video", "canSubscribe"), true);
     EXPECT_EQ(bool_at(read.claims, "video", "roomAdmin"), std::nullopt);
+    EXPECT_EQ(bool_at(read.claims, "video", "roomCreate"), std::nullopt);
+}
+
+TEST(AccessToken, PublishGrantPublishesCameraAndMicrophoneAndNothingElse) {
+    const ReadToken read = mint_and_read(
+        {.permission = Permission::PublishToRoom, .room = kRoom, .identity = kIdentity});
+    EXPECT_EQ(string_at(read.claims, "sub"), kIdentity);
+    EXPECT_EQ(string_at(read.claims, "video", "room"), kRoom);
+    EXPECT_EQ(bool_at(read.claims, "video", "roomJoin"), true);
+    EXPECT_EQ(bool_at(read.claims, "video", "canPublish"), true);
+    // LiveKit reads an absent canSubscribe or canPublishData as allowed, so both are spelled out.
+    EXPECT_EQ(bool_at(read.claims, "video", "canSubscribe"), false);
+    EXPECT_EQ(bool_at(read.claims, "video", "canPublishData"), false);
+    const core::json::Value* sources = read.claims.find("video")->find("canPublishSources");
+    ASSERT_NE(sources, nullptr);
+    ASSERT_NE(sources->as_array(), nullptr);
+    std::vector<std::string_view> names;
+    for (const auto& source : *sources->as_array()) {
+        names.push_back(source.as_string().value_or(""));
+    }
+    EXPECT_EQ(names, (std::vector<std::string_view>{"camera", "microphone"}));
     EXPECT_EQ(bool_at(read.claims, "video", "roomCreate"), std::nullopt);
 }
 

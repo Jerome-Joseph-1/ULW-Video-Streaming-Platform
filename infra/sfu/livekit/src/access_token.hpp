@@ -18,6 +18,9 @@ struct ApiKey {
 enum class Permission : std::uint8_t {
     // Join `room` as `identity`, publishing and subscribing.
     JoinRoom,
+    // Join `room` as `identity` to publish camera and microphone only: no subscribing and no
+    // data, which is all a WHIP ingest does.
+    PublishToRoom,
     // RoomService.CreateRoom and DeleteRoom, which LiveKit guards with one permission.
     CreateRooms,
 };

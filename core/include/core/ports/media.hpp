@@ -45,6 +45,16 @@ using TicketDone = std::move_only_function<void(std::expected<MediaTicket, Media
 // deposed owner can neither open a generation nor close the current one (ADR-0033).
 enum class MediaGeneration : std::uint64_t {};
 
+enum class MediaRole : std::uint8_t {
+    // A call member: publishes camera and microphone and receives everyone else. Its ticket's
+    // endpoint is where the client's SDK connects.
+    Member,
+    // A live stream's source (M30): publishes camera and microphone, receives nothing. Its
+    // ticket's endpoint takes a WHIP offer (RFC 9725) with the credential as bearer token, so
+    // an encoder or a browser can publish with no SDK.
+    Publisher,
+};
+
 class IMediaRoom {
 public:
     virtual ~IMediaRoom() = default;
@@ -52,7 +62,8 @@ public:
     // server drops a room that has stood empty for a while, and a handle can outlive that, so
     // join opens the generation again first (idempotent) and never issues a ticket for a room
     // that is gone.
-    virtual void join(const UserId& user, const DeviceId& device, TicketDone done) = 0;
+    virtual void join(const UserId& user, const DeviceId& device, MediaRole role,
+                      TicketDone done) = 0;
     // Ends this generation for everyone in it; their tickets and refreshed credentials stop
     // admitting anyone. Closing a generation the media server has already dropped succeeds.
     virtual void close(MediaDone done) = 0;

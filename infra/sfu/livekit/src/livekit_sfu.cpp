@@ -17,6 +17,7 @@ namespace {
 using core::ports::IMediaRoom;
 using core::ports::MediaDone;
 using core::ports::MediaError;
+using core::ports::MediaRole;
 using core::ports::MediaTicket;
 using detail::Grant;
 using detail::IfAbsent;
@@ -40,6 +41,25 @@ constexpr std::size_t kMinSecretBytes = 256 / 8;
 // Generated secrets are 43 to 64 characters; 256 bytes is far past any real one.
 constexpr std::size_t kMaxSecretBytes = 256;
 
+// Where a client goes for each role: the signalling WebSocket, and the WHIP endpoint LiveKit
+// serves on the same port over HTTP.
+struct Endpoints {
+    std::string client;
+    std::string whip;
+};
+
+std::string whip_url(std::string_view client_url) {
+    const bool secure = client_url.starts_with("wss://");
+    std::string url = secure ? "https://" : "http://";
+    url += client_url.substr(secure ? std::string_view("wss://").size()
+                                    : std::string_view("ws://").size());
+    while (url.ends_with('/')) {
+        url.pop_back();
+    }
+    url += "/whip/v1";
+    return url;
+}
+
 std::string create_room_body(std::string_view name, std::uint16_t max_participants) {
     std::string body = R"({"name":)";
     core::json::append_string(body, name);
@@ -57,12 +77,12 @@ constexpr Grant kCreateRooms{.permission = Permission::CreateRooms, .room = {}, 
 
 class LiveKitRoom final : public IMediaRoom {
 public:
-    LiveKitRoom(RoomService& service, std::string client_url, std::string name,
+    LiveKitRoom(RoomService& service, const Endpoints& endpoints, std::string name,
                 std::uint16_t max_participants) noexcept
-        : service_(service), client_url_(std::move(client_url)), name_(std::move(name)),
+        : service_(service), endpoints_(endpoints), name_(std::move(name)),
           max_participants_(max_participants) {}
 
-    void join(const core::UserId& user, const core::DeviceId& device,
+    void join(const core::UserId& user, const core::DeviceId& device, MediaRole role,
               core::ports::TicketDone done) override {
         if (closed_) {
             service_.fail(
@@ -76,28 +96,30 @@ public:
         std::string identity(user.view());
         identity += '/';
         identity += device.to_string();
+        const bool member = role == MediaRole::Member;
         // Copies, not this: the room handle may be gone by the time the room is back.
-        service_.call(
-            "CreateRoom", create_room_body(name_, max_participants_), kCreateRooms, IfAbsent::Fail,
-            [&service = service_, endpoint = client_url_, room = name_,
-             identity = std::move(identity),
-             done = std::move(done)](std::expected<void, MediaError> opened) mutable noexcept {
-                if (!opened) {
-                    done(std::unexpected(opened.error()));
-                    return;
-                }
-                auto token = detail::mint_token(
-                    service.key(),
-                    Grant{.permission = Permission::JoinRoom, .room = room, .identity = identity},
-                    service.clock().wall_now(), kTicketTtl);
-                if (!token) {
-                    done(std::unexpected(MediaError::Refused));
-                    return;
-                }
-                done(MediaTicket{.endpoint = std::move(endpoint),
-                                 .credential = std::move(token->jwt),
-                                 .expires_at = token->expires_at});
-            });
+        service_.call("CreateRoom", create_room_body(name_, max_participants_), kCreateRooms,
+                      IfAbsent::Fail,
+                      [&service = service_, endpoint = member ? endpoints_.client : endpoints_.whip,
+                       permission = member ? Permission::JoinRoom : Permission::PublishToRoom,
+                       room = name_, identity = std::move(identity), done = std::move(done)](
+                          std::expected<void, MediaError> opened) mutable noexcept {
+                          if (!opened) {
+                              done(std::unexpected(opened.error()));
+                              return;
+                          }
+                          auto token = detail::mint_token(
+                              service.key(),
+                              Grant{.permission = permission, .room = room, .identity = identity},
+                              service.clock().wall_now(), kTicketTtl);
+                          if (!token) {
+                              done(std::unexpected(MediaError::Refused));
+                              return;
+                          }
+                          done(MediaTicket{.endpoint = std::move(endpoint),
+                                           .credential = std::move(token->jwt),
+                                           .expires_at = token->expires_at});
+                      });
     }
 
     void close(MediaDone done) override {
@@ -111,7 +133,7 @@ public:
 
 private:
     RoomService& service_;
-    std::string client_url_;
+    const Endpoints& endpoints_;
     std::string name_;
     std::uint16_t max_participants_;
     bool closed_ = false;
@@ -121,7 +143,7 @@ class LiveKitSfu final : public core::ports::ISfu {
 public:
     LiveKitSfu(net::IReactor& reactor, curl::Multi& multi, const core::ports::IClock& clock,
                Config config)
-        : client_url_(std::move(config.client_url)),
+        : endpoints_{.client = config.client_url, .whip = whip_url(config.client_url)},
           service_(reactor, multi, clock, std::move(config.api_url),
                    detail::ApiKey{.id = std::move(config.api_key),
                                   .secret = std::move(config.api_secret)}) {}
@@ -140,13 +162,13 @@ public:
                               done(std::unexpected(created.error()));
                               return;
                           }
-                          done(std::make_unique<LiveKitRoom>(service_, client_url_, std::move(name),
+                          done(std::make_unique<LiveKitRoom>(service_, endpoints_, std::move(name),
                                                              max_participants));
                       });
     }
 
 private:
-    std::string client_url_;
+    Endpoints endpoints_;
     RoomService service_;
 };
 

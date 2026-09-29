@@ -35,8 +35,8 @@ function startSignalling() {
   };
   return {
     open: (room, generation) => send('open', room, generation, 2),
-    ticket: async (room, generation, user, device) =>
-      JSON.parse(await send('join', room, generation, user, device)),
+    ticket: async (room, generation, user, device, role = 'member') =>
+      JSON.parse(await send('join', room, generation, user, device, role)),
     close: (room, generation) => send('close', room, generation),
     stop: () => child.stdin.end(),
   };
@@ -307,6 +307,49 @@ test('a join through a handle whose room went idle opens the room again', async 
     await page.goto(`http://127.0.0.1:${pageServer.address().port}/`);
     await page.evaluate((t) => window.join(t), ticket);
     expect(await page.evaluate(() => window.room.state)).toBe('connected');
+    await sfu.close(room, 1);
+  } finally {
+    sfu.stop();
+    for (const browser of browsers) await browser.close().catch(() => {});
+    pageServer.close();
+    console.log(JSON.stringify(metrics));
+  }
+});
+
+// M30's way in: a publish-only ticket, used for WHIP with no SDK at all, reaches a call member.
+test('a publisher ticket ingests over WHIP and members receive it', async () => {
+  const room = randomUUID();
+  const metrics = { room };
+  const pageServer = await servePage();
+  const pageUrl = `http://127.0.0.1:${pageServer.address().port}/`;
+  const browsers = [];
+  const sfu = startSignalling();
+  try {
+    await sfu.open(room, 1);
+    const pages = [];
+    for (let i = 0; i < 2; ++i) {
+      const { server, browser } = await launchPeer();
+      browsers.push(server);
+      const page = await browser.newPage();
+      await page.goto(pageUrl);
+      pages.push(page);
+    }
+    const [viewer, source] = pages;
+    await viewer.evaluate((t) => window.join(t),
+      await sfu.ticket(room, 1, 'alice', randomUUID()));
+    const publisher = await sfu.ticket(room, 1, 'streamer', randomUUID(), 'publisher');
+    expect(publisher.url).toBe(`${process.env.LIVEKIT_API_URL}/whip/v1`);
+    metrics.whipStatus = await source.evaluate((t) => window.whipPublish(t), publisher);
+    expect(metrics.whipStatus).toBe(201);
+
+    await expect.poll(() => viewer.evaluate(() => window.events
+      .filter((e) => e.type === 'track-subscribed' && e.who.startsWith('streamer/'))
+      .map((e) => e.kind).sort()), { timeout: 20_000 }).toEqual(['audio', 'video']);
+    const before = await received(viewer);
+    await expect.poll(async () => {
+      const now = await received(viewer);
+      return now.audio > before.audio && now.video > before.video;
+    }, { timeout: 10_000 }).toBe(true);
     await sfu.close(room, 1);
   } finally {
     sfu.stop();
