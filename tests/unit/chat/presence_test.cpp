@@ -70,6 +70,12 @@ public:
                     std::erase(to, lost->second);
                     losing_.erase(lost);
                 }
+                for (Dropping& d : dropping_) {
+                    if (d.room == s.room && d.from == s.from && d.count > 0) {
+                        std::erase(to, d.to);
+                        --d.count;
+                    }
+                }
                 for (rt::IMember* m : to) {
                     m->deliver({.room = s.room,
                                 .seq = seq,
@@ -88,6 +94,15 @@ public:
     // when an owner dies between its deliveries.
     void lose_next(const core::RoomId& room, std::size_t nth) {
         losing_.insert_or_assign(room, members_[room].at(nth));
+    }
+
+    // The next `count` events the member that joined `from`-th sends reach every member but
+    // the `to`-th, as on a path that keeps failing between the two.
+    void drop_between(const core::RoomId& room, std::size_t from, std::size_t to, int count) {
+        dropping_.push_back({.room = room,
+                             .from = members_[room].at(from),
+                             .to = members_[room].at(to),
+                             .count = count});
     }
 
     // Another node takes the room over. Sends still waiting for their seq are lost with the old
@@ -131,6 +146,13 @@ private:
     std::map<core::RoomId, std::vector<rt::IMember*>> members_;
     std::map<core::RoomId, std::uint64_t> heads_;
     std::map<core::RoomId, rt::IMember*> losing_;
+    struct Dropping {
+        core::RoomId room;
+        rt::IMember* from;
+        rt::IMember* to;
+        int count;
+    };
+    std::vector<Dropping> dropping_;
 };
 
 struct Event {
@@ -536,6 +558,22 @@ TEST_F(PresenceTest, RenewalsStopOnceTheOnlyNodeWatchingHasDied) {
     EXPECT_LE(stopped - renewing, 3U);
     advance(Millis{600'000});
     EXPECT_EQ(node(0).counters().sent, stopped);
+}
+
+TEST_F(PresenceTest, AWatcherWhoseAcksAreLostIsProbedAgainAndNeverSeesAFalseOffline) {
+    const core::RoomId room = chat::presence_room(user("alice"));
+    Watcher bob;
+    node(1).watch(connect(1, bob, "bob"), user("alice"));
+    Watcher alice;
+    connect(0, alice, "alice");
+    ASSERT_EQ(bob.take(), (std::vector{watching("alice", "offline"), presence("alice", "online")}));
+    // chat-2 joined first, chat-1 second. chat-2's next two acks never reach chat-1: had it
+    // taken the jumps they leave for renewals it need not ack, it would forget chat-2 at the
+    // expiry and stop renewing, and chat-2 would then drop alice while she is still here.
+    plane_.drop_between(room, 0, 1, 2);
+    advance(Millis{900'000});
+    EXPECT_TRUE(bob.got.empty());
+    EXPECT_GE(node(0).counters().gaps, 1U);
 }
 
 } // namespace

@@ -197,8 +197,15 @@ void Presence::watch(PresenceClientId id, const core::UserId& user) {
         return;
     }
     Room& r = room_of(user);
-    client.watching.push_back(&r);
+    // The room first: a room with a local watcher is never erased, so the pointer the client
+    // keeps is never left dangling.
     r.local.push_back(id);
+    try {
+        client.watching.push_back(&r);
+    } catch (...) {
+        r.local.pop_back();
+        throw;
+    }
     tell(*client.client, "watching", r);
     wake(r);
 }
@@ -225,10 +232,12 @@ void Presence::delivered(Room& room, const rt::Message& message) noexcept {
     // Seqs rise by one; a jump is events this node never got, among them perhaps a hello it
     // owed an answer or an announcement it should know of. Nobody can tell whom a gap cost, so
     // this node says again what it stands for, and whoever it cost does likewise.
+    // An announcement is repeated as a probe, not an online: the gap may have held acks, and a
+    // watcher this node stops hearing from is one it stops renewing for.
     if (message.seq > room.head + 1) {
         ++counters_.gaps;
         room.watching = room.watching && room.local.empty();
-        room.answer = room.answer || room.wanted();
+        room.announced = room.announced && !room.wanted();
     }
     room.head = std::max(room.head, message.seq);
     // Only nodes speak in a presence room, each under the user's name; clients cannot reach
@@ -461,7 +470,13 @@ void Presence::expire(Room& room, core::MonoTime now) noexcept {
     const auto stale = [&](const Room::Heard& h) {
         return h.node != tag_ && now - h.at >= limits_.expiry;
     };
-    counters_.expired += std::erase_if(room.sources, stale) + std::erase_if(room.watchers, stale);
+    const auto lost_sources = std::erase_if(room.sources, stale);
+    counters_.expired += lost_sources + std::erase_if(room.watchers, stale);
+    // An announcement that ran out may only have lost its renewals: saying hello again is
+    // answered by every node that still has the user.
+    if (lost_sources > 0 && !room.local.empty()) {
+        room.watching = false;
+    }
     show(room);
 }
 
