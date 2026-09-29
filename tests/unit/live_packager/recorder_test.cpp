@@ -506,6 +506,20 @@ TEST_F(RecorderTest, AClaimAboveTheEnderStillFencesARestartOut) {
     EXPECT_EQ(record().outcome, RecordOutcome::Superseded);
 }
 
+TEST_F(RecorderTest, AnEmptyOrMalformedEndedByIsIgnoredNotFatal) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    ulw::test::write_file(live_dir() / "epoch_1", "claimed\n");
+    for (const std::string& bad : {std::string(), std::string("one\n"), std::string(64, '9')}) {
+        ulw::test::write_file(live_dir() / "ended_by", bad);
+        // The fence falls back to the last segment's run: epoch 1 is then a newer claim.
+        EXPECT_EQ(record().outcome, RecordOutcome::Superseded) << bad;
+        EXPECT_TRUE(catalog.rows.empty());
+    }
+    // And with this process's own claim it records.
+    EXPECT_EQ(record(1).outcome, RecordOutcome::Recorded);
+}
+
 TEST_F(RecorderTest, AnInsertOfUnknownOutcomeWithNoRowYetKeepsItsRecordingAndFails) {
     run_of(0, 0, 3);
     playlist(3, 2, [](std::uint64_t) { return 0U; });

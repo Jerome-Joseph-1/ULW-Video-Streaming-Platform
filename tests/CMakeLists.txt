@@ -536,7 +536,8 @@ if(ULW_BUILD_WORKER)
         integration/recording_remux_test.cpp
         integration/postgres_harness.cpp
         integration/worker_test.cpp
-        support/child_process.cpp)
+        support/child_process.cpp
+        PROPERTIES RESOURCE_LOCK postgres)
     target_link_libraries(worker_integration_tests PRIVATE
         ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
         ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)

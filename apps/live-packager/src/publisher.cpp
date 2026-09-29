@@ -244,23 +244,7 @@ std::expected<void, PublishError> Publisher::put(const fs::path& file, std::stri
     return {};
 }
 
-std::expected<void, PublishError> Publisher::mark_ending() {
-    const fs::path file = config_.outbox / kEndedByName;
-    {
-        std::ofstream out(file, std::ios::binary | std::ios::trunc);
-        out << epoch_ << '\n';
-        if (!out) {
-            return std::unexpected(PublishError::UploadFailed);
-        }
-    }
-    return put(file, kEndedByName, claim_type());
-}
-
-std::expected<void, PublishError> Publisher::publish_playlist(const MediaPlaylist& playlist) {
-    // A packager that started after this one claimed the next epoch. The check comes right
-    // before the write and cannot be atomic with it, so a stale writer can still land one
-    // playlist that a newer one overwrites at its first; what it cannot do is write objects the
-    // newer playlist lists, which carry their epoch in their names.
+std::expected<void, PublishError> Publisher::check_not_superseded() {
     const auto newer =
         core::StorageKey::parse(config_.stream.key_prefix() + epoch_claim_name(epoch_ + 1));
     if (!newer) {
@@ -273,6 +257,37 @@ std::expected<void, PublishError> Publisher::publish_playlist(const MediaPlaylis
     // Cannot tell whether the stream has moved on: not writing is the safe answer.
     if (seen.error() != core::ports::StorageError::NotFound) {
         return std::unexpected(PublishError::UploadFailed);
+    }
+    return {};
+}
+
+std::expected<void, PublishError> Publisher::mark_ending() {
+    // A stale run's epoch over a newer ender's would have every recorder take the newer run's
+    // claim for a packager still publishing. The check is not atomic with the write, as for the
+    // playlist; the recorder takes the highest of this and the stream's other evidence.
+    if (auto current = check_not_superseded(); !current) {
+        return current;
+    }
+    const fs::path file = config_.outbox / kEndedByName;
+    {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << epoch_ << '\n';
+        // A write the disk refuses shows only when the buffer goes out.
+        out.close();
+        if (out.fail()) {
+            return std::unexpected(PublishError::UploadFailed);
+        }
+    }
+    return put(file, kEndedByName, claim_type());
+}
+
+std::expected<void, PublishError> Publisher::publish_playlist(const MediaPlaylist& playlist) {
+    // A packager that started after this one claimed the next epoch. The check comes right
+    // before the write and cannot be atomic with it, so a stale writer can still land one
+    // playlist that a newer one overwrites at its first; what it cannot do is write objects the
+    // newer playlist lists, which carry their epoch in their names.
+    if (auto current = check_not_superseded(); !current) {
+        return current;
     }
     const fs::path file = config_.outbox / kPlaylistName;
     {

@@ -174,10 +174,12 @@ public:
             }
             return problem(Severity::Transient, "ended_by unreadable");
         }
-        // A decimal epoch and a newline.
+        // A decimal epoch and a newline. Anything else is as good as none: the playlist's last
+        // run and this process's claim still bound the ender from below.
         constexpr std::uint64_t kMaxBytes = 16;
         if (*got > kMaxBytes) {
-            return problem(Severity::Permanent, "ended_by invalid");
+            log("recording: ended_by unreadable, ignored");
+            return std::nullopt;
         }
         std::string text(*got, '\0');
         std::ifstream in(file, std::ios::binary);
@@ -187,7 +189,8 @@ public:
         }
         const auto epoch = core::parse_integer<std::uint32_t>(text);
         if (!in || !epoch) {
-            return problem(Severity::Permanent, "ended_by invalid");
+            log("recording: ended_by unreadable, ignored");
+            return std::nullopt;
         }
         return *epoch;
     }

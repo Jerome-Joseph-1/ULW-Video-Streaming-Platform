@@ -112,6 +112,8 @@ private:
     put(const std::filesystem::path& file, std::string_view name, const core::ContentType& type);
     [[nodiscard]] std::expected<void, PublishError> publish_playlist(const MediaPlaylist& playlist);
     [[nodiscard]] std::expected<void, PublishError> mark_ending();
+    // Superseded when a newer packager has claimed the stream (ADR-0047).
+    [[nodiscard]] std::expected<void, PublishError> check_not_superseded();
 
     PublisherConfig config_;
     core::ports::IObjectTransfer& store_;
