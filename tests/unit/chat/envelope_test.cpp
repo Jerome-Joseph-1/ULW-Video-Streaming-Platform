@@ -117,8 +117,8 @@ TEST(Envelope, AMessageReturnsItsBodyBytesExactlyAndItsId) {
 TEST(Envelope, RepliesAreTheDocumentedShapes) {
     const auto id = *rt::MessageKey::parse("m-3");
     std::string out;
-    chat::write_joined(out, room());
-    EXPECT_EQ(out, R"({"type":"joined","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
+    chat::write_joined(out, room(), 12);
+    EXPECT_EQ(out, R"({"type":"joined","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","seq":12})");
     out.clear();
     chat::write_sent(out, room(), id, 17);
     EXPECT_EQ(

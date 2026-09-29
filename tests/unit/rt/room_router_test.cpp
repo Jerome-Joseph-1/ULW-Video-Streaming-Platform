@@ -274,8 +274,8 @@ protected:
         });
     }
 
-    std::expected<void, RouteError> join(Node& node, Member& member) {
-        std::optional<std::expected<void, RouteError>> result;
+    std::expected<std::uint64_t, RouteError> join(Node& node, Member& member) {
+        std::optional<std::expected<std::uint64_t, RouteError>> result;
         node.router->join(room_, member, [&](auto r) noexcept { result = r; });
         if (!pump([&] { return result.has_value(); })) {
             ADD_FAILURE() << "join never answered";
@@ -347,6 +347,25 @@ TEST_P(RoomRouterTest, MembersOnDifferentNodesSeeEachOthersMessagesInOneOrder) {
     EXPECT_EQ(b.router->counters().forwarded, 1U);
     // Each message reached the store in the very write that took its seq.
     EXPECT_EQ(db_.bodies.at(room_), (std::vector<std::string>{"one", "two"}));
+}
+
+TEST_P(RoomRouterTest, AJoinIsAnsweredWithTheRoomsHeadWhereverTheOwnerIs) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Node& c = start("chat-c");
+    Member alice;
+    Member bob;
+    Member carol;
+    EXPECT_EQ(join(a, alice), 0U);
+    ASSERT_TRUE(join(b, bob));
+    ASSERT_EQ(send(a, alice, "alice", "one"), 1U);
+    ASSERT_EQ(send(b, bob, "bob", "two"), 2U);
+    ASSERT_TRUE(pump([&] { return bob.got.size() == 2; }));
+    // chat-c has delivered nothing: it learns the head from the owner's answer.
+    EXPECT_EQ(join(c, carol), 2U);
+    EXPECT_TRUE(carol.got.empty());
+    Member again;
+    EXPECT_EQ(join(a, again), 2U);
 }
 
 TEST_P(RoomRouterTest, AWriteUnderAGenerationThatMovedOnIsFencedAndDeliveredNowhere) {
@@ -766,7 +785,7 @@ TEST_P(RoomRouterTest, AJoinPastTheNodesRoomLimitIsBusy) {
     Node& a = start("chat-a", kSecret, {.idle_release = {}, .max_rooms = 1});
     Member alice;
     ASSERT_TRUE(join(a, alice));
-    std::optional<std::expected<void, RouteError>> second;
+    std::optional<std::expected<std::uint64_t, RouteError>> second;
     a.router->join(core::RoomId::generate(clock_, random_), alice,
                    [&](auto r) noexcept { second = r; });
     EXPECT_EQ(second, std::unexpected(RouteError::Busy));
@@ -827,7 +846,7 @@ TEST_P(RoomRouterTest, ALinkBrokenInsideASendIsTakenDownAfterwardsNotInsideIt) {
     db_.rooms.emplace(room_, ulw::test::MemoryRooms::Room{.owner = *core::NodeId::parse("chat-a")});
     Node& b = start("chat-b");
     Member bob;
-    std::optional<std::expected<void, RouteError>> joined;
+    std::optional<std::expected<std::uint64_t, RouteError>> joined;
     b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
     auto conn =
         play_owner(owner, *core::NodeId::parse("chat-b"), *core::NodeId::parse("chat-a"), random_);
@@ -873,7 +892,7 @@ TEST_P(RoomRouterTest, AHandshakeNobodyFinishesIsDroppedAfterFiveSecondsOnEither
 
     // Dialled by chat-b, "chat-a" reads the Hello and never answers it.
     Member bob;
-    std::optional<std::expected<void, RouteError>> joined;
+    std::optional<std::expected<std::uint64_t, RouteError>> joined;
     b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
     auto dialled = owner.accept();
     ASSERT_TRUE(dialled);
@@ -917,7 +936,7 @@ TEST_P(RoomRouterTest, ADialerAnsweredByANodeOtherThanTheOneItDialledGoesNoFurth
     db_.rooms.emplace(room_, ulw::test::MemoryRooms::Room{.owner = *core::NodeId::parse("chat-a")});
     Node& b = start("chat-b");
     Member bob;
-    std::optional<std::expected<void, RouteError>> joined;
+    std::optional<std::expected<std::uint64_t, RouteError>> joined;
     b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
     // A genuine node, with the secret, but not the one chat-b means to reach: its tag is valid
     // for the node it names.
@@ -939,7 +958,7 @@ TEST_P(RoomRouterTest, ASecondLiveProcessUnderANodesNameTakesNothing) {
     EXPECT_FALSE(second.router->healthy());
     // It routes nothing and claims nothing; the first run's room is untouched.
     Member mallory;
-    std::optional<std::expected<void, RouteError>> joined;
+    std::optional<std::expected<std::uint64_t, RouteError>> joined;
     second.router->join(room_, mallory, [&](auto r) noexcept { joined = r; });
     ulw::test::pump_pending(*reactor_);
     EXPECT_FALSE(joined);
@@ -956,7 +975,7 @@ TEST_P(RoomRouterTest, NoRoomIsClaimedBeforeTheNodeHasAdvertised) {
     db_.make_stale(room_);
     Node& b = start("chat-b", kSecret, {.refuse_advertise = true});
     Member bob;
-    std::optional<std::expected<void, RouteError>> joined;
+    std::optional<std::expected<std::uint64_t, RouteError>> joined;
     b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
     // A beat and a half: chat-b's first sweep would have run by now.
     ulw::test::pump_for(*reactor_, std::chrono::milliseconds(1'500));

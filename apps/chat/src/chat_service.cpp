@@ -59,6 +59,8 @@ struct ChatService::Room final : rt::IMember {
     std::vector<Waiting> waiting;
     std::deque<Kept> kept;
     std::size_t kept_bytes = 0;
+    // The latest seq known: the room plane's answer to the join, or a later delivery.
+    std::uint64_t head = 0;
     // Since when no client here has been in the room.
     core::MonoTime unused_since;
 };
@@ -155,13 +157,13 @@ void ChatService::join(ClientId id, const Join& join) {
     r.joining = true;
     rooms_plane_.join(
         join.room, r,
-        [this, room = join.room](std::expected<void, rt::RouteError> result) noexcept {
+        [this, room = join.room](std::expected<std::uint64_t, rt::RouteError> result) noexcept {
             joined(room, result);
         });
 }
 
 void ChatService::joined(const core::RoomId& room,
-                         std::expected<void, rt::RouteError> result) noexcept {
+                         std::expected<std::uint64_t, rt::RouteError> result) noexcept {
     Room* r = find(room);
     if (r == nullptr) {
         return;
@@ -182,6 +184,7 @@ void ChatService::joined(const core::RoomId& room,
         return;
     }
     r->joined = true;
+    r->head = std::max(r->head, *result);
     r->unused_since = clock_.now();
     for (const Room::Waiting& w : waiting) {
         Client* c = find(w.id);
@@ -209,7 +212,7 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
         it->delivery = join.delivery;
     }
     std::string out;
-    write_joined(out, room.id);
+    write_joined(out, room.id, room.head);
     c->client->push(out);
     if (join.after) {
         replay(room, *c->client, *join.after);
@@ -320,6 +323,7 @@ void ChatService::delivered(Room& room, const rt::Message& message) noexcept {
         }
         return;
     }
+    room.head = std::max(room.head, message.seq);
     try {
         keep(room, message);
     } catch (const std::bad_alloc&) {

@@ -144,7 +144,8 @@ private:
     [[nodiscard]] Client* find(ClientId id) noexcept;
     [[nodiscard]] Room* find(const core::RoomId& room) noexcept;
     [[nodiscard]] bool admit_join(const core::UserId& user);
-    void joined(const core::RoomId& room, std::expected<void, rt::RouteError> result) noexcept;
+    void joined(const core::RoomId& room,
+                std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void delivered(Room& room, const rt::Message& message) noexcept;
     void sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key, std::size_t bytes,
               std::expected<std::uint64_t, rt::RouteError> result) noexcept;

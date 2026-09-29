@@ -127,10 +127,10 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     return std::unexpected(EnvelopeError::Malformed);
 }
 
-void write_joined(std::string& out, const core::RoomId& room) {
+void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head) {
     out += R"({"type":"joined",)";
     append_room(out, room);
-    out += '}';
+    std::format_to(std::back_inserter(out), R"(,"seq":{}}})", head);
 }
 
 void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey& id,

@@ -63,8 +63,10 @@ need no change for it: whatever end-to-end encryption needs from them has to be 
   the kept messages above N, as many of the newest as fit 128 KiB (half the backlog that closes
   a connection, so resuming cannot get a client closed), then live messages. Kept messages live
   on the node that delivered them: a client that reconnects through another node, or later than
-  the room lingered, gets what that node has, and sees the rest as a gap. Filling a gap is a
-  read of history by seq, which M19 provides.
+  the room lingered, gets what that node has, and sees the rest as a gap. `joined` names the
+  room's head (the latest seq the owner took, from its answer to the subscription, or this
+  node delivered), so the gap shows even when nothing follows it. Filling a gap is a read of
+  history by seq, which M19 provides.
 - **Delivery.** A durable client gets every message; one too far behind is closed at 256 KiB
   unsent (ADR-0036) and resumes. A client joining with `"delivery":"lossy"` is skipped (and the
   skip counted) while it has more than 64 KiB unsent, and stays connected. The choice is the

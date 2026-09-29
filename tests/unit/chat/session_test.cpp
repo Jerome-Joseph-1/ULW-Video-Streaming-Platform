@@ -167,7 +167,7 @@ TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
     ASSERT_TRUE(alice);
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"("})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
     // base64url of `hi "there"`.
     ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
                                  R"(","id":"m5","body":"aGkgInRoZXJlIg"})"));
@@ -191,7 +191,7 @@ TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"bad_room"})");
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"("})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
 }
 
 TEST_P(ChatSessionTest, AReadFullOfControlFramesIsClosedAsAFlood) {

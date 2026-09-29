@@ -706,6 +706,36 @@ TEST_P(ChatClusterTest, AClientThatComesBackResumesFromItsLastSeq) {
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
 }
 
+TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingLearnsWhatItMissed) {
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    ASSERT_NO_FATAL_FAILURE(join(*alice));
+    ASSERT_NO_FATAL_FAILURE(join(*bob));
+    const auto last = send_until_heard(*alice, "before bob left");
+    ASSERT_TRUE(last);
+    ASSERT_TRUE(bob->message(last_body_["alice"]));
+    bob.reset();
+    std::vector<std::string> missed;
+    for (int i = 0; i < 3; ++i) {
+        missed.push_back(std::format("sent while bob was elsewhere {}", i));
+        ASSERT_TRUE(alice->send(send_command(room_, missed.back(), std::format("gone-{}", i))));
+        ASSERT_TRUE(alice->message(missed.back()));
+    }
+    // chat-3 was never in the room: it has nothing to send again, only the head to name.
+    auto elsewhere = connect(nodes_[2], 1);
+    ASSERT_TRUE(elsewhere);
+    ASSERT_NO_FATAL_FAILURE(join(*elsewhere, last));
+    const auto joined = elsewhere->wait_for([](const Seen& s) { return s.type == "joined"; });
+    ASSERT_TRUE(joined);
+    EXPECT_EQ(joined->seq, *last + 3) << "the client can tell it missed three messages";
+    EXPECT_TRUE(elsewhere->messages().empty());
+    std::cout << "bob came back through chat-3 after seq " << *last
+              << ", which kept nothing; joined named the head " << joined->seq << "\n";
+    missed.emplace_back("before bob left");
+    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
+}
+
 // No database is reached: the connection string is refused before any connection is tried.
 TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePassword) {
     for (const std::string url :

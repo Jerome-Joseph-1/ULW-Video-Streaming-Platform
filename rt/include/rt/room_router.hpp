@@ -52,7 +52,10 @@ enum class RouteError : std::uint8_t {
     Busy,
 };
 
-using JoinCallback = std::move_only_function<void(std::expected<void, RouteError>) noexcept>;
+// A join's answer: the room's latest seq known here, the head a member that missed messages
+// compares its last seq against.
+using JoinCallback =
+    std::move_only_function<void(std::expected<std::uint64_t, RouteError>) noexcept>;
 using SendCallback =
     std::move_only_function<void(std::expected<std::uint64_t, RouteError>) noexcept>;
 
@@ -139,7 +142,9 @@ public:
 
     // Answers once the room's owner is known and, if it is another node, has taken this
     // node's subscription: from then on the member receives every message the owner
-    // sequences.
+    // sequences. The answer is the latest seq the owner took or this node delivered. After a
+    // takeover it can lag a seq the old owner took and never delivered; the next delivery
+    // shows that gap.
     void join(const core::RoomId& room, IMember& member, JoinCallback done);
     // Also drops a join still in progress, whose callback is then never called.
     void leave(const core::RoomId& room, IMember& member) noexcept;

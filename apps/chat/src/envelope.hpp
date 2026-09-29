@@ -22,7 +22,8 @@
 //                            than be closed for it ("durable", the default)
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
 // Server to client:
-//   {"type":"joined","room":"<uuid>"}
+//   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
+//                                                      whose last seq is lower missed messages
 //   {"type":"sent","room":"<uuid>","id":"<message id>","seq":<integer>}
 //   {"type":"message","room":"<uuid>","seq":<integer>,"sender":"<sub>","id":"<message id>",
 //    "body":"<base64url>"}
@@ -68,7 +69,7 @@ enum class EnvelopeError : std::uint8_t {
 [[nodiscard]] std::expected<Command, EnvelopeError> parse_command(std::string_view text);
 
 // Each appends one message to `out`.
-void write_joined(std::string& out, const core::RoomId& room);
+void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head);
 void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                 std::uint64_t seq);
 void write_message(std::string& out, const rt::Message& message);

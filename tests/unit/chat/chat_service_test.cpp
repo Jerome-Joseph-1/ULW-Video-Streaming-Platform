@@ -68,7 +68,7 @@ public:
     }
 
     // Answers the oldest join, and returns the member it made.
-    rt::IMember& admit(std::expected<void, RouteError> result = {}) {
+    rt::IMember& admit(std::expected<std::uint64_t, RouteError> result = 0) {
         Joining j = std::move(joins.front());
         joins.erase(joins.begin());
         j.done(result);
@@ -353,6 +353,23 @@ TEST_F(ChatServiceTest, AClientResumingAfterASeqGetsWhatThisNodeKeptSinceInOrder
     deliver(room, 6);
     EXPECT_EQ(seqs(bob.take()), std::vector<std::uint64_t>{6});
     EXPECT_EQ(service_->counters().replayed, 3U);
+}
+
+TEST_F(ChatServiceTest, JoinedNamesTheRoomsHeadEvenWhenNothingWasKeptToResumeFrom) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a, 3);
+    // The owner has taken seq 7; this node has delivered nothing and kept nothing.
+    rt::IMember& room = rooms_.admit(7);
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 1U);
+    EXPECT_EQ(seen(got[0]).type, "joined");
+    EXPECT_EQ(seen(got[0]).seq, 7U) << "a client at seq 3 must learn it missed 4..7";
+
+    deliver(room, 8);
+    FakeClient bob;
+    join(attach(bob, "bob"));
+    EXPECT_EQ(seen(bob.take().at(0)).seq, 8U);
 }
 
 TEST_F(ChatServiceTest, AClientThatLeftComesBackWithinTheLingerAndMissesNothing) {

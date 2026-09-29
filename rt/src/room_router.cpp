@@ -572,12 +572,12 @@ public:
             registry_.set_interest(room, true);
         }
         if (std::ranges::find(lr.members, &member) != lr.members.end()) {
-            done({});
+            done(head(room));
             return;
         }
         if (lr.owner) {
             lr.members.push_back(&member);
-            done({});
+            done(head(room));
             return;
         }
         lr.joining.push_back({.member = &member, .done = std::move(done)});
@@ -795,6 +795,8 @@ private:
         bool subscribing = false;
         // Deliveries can repeat after a resubscription; each seq reaches the members once.
         std::uint64_t delivered = 0;
+        // The owner's head when it took this node's subscription.
+        std::uint64_t head = 0;
     };
 
     // A write waiting for its sequence number, from a member here or from another node.
@@ -814,7 +816,21 @@ private:
         std::deque<Write> writes;
         std::size_t queued_bytes = 0;
         bool appending = false;
+        // The last seq this node took for the room.
+        std::uint64_t head = 0;
     };
+
+    // The latest seq known here: taken as the owner, delivered, or named by the owner.
+    [[nodiscard]] std::uint64_t head(const core::RoomId& room) const noexcept {
+        std::uint64_t latest = 0;
+        if (const auto o = owned_.find(room); o != owned_.end()) {
+            latest = o->second.head;
+        }
+        if (const auto l = local_.find(room); l != local_.end()) {
+            latest = std::max({latest, l->second.delivered, l->second.head});
+        }
+        return latest;
+    }
 
     static std::size_t cost(const Write& write) noexcept {
         return write.body.size() + kWriteOverhead;
@@ -987,12 +1003,14 @@ private:
         wire::encode_subscribe(frame, request, room);
         link(owner.node)
             .request(request, frame,
-                     [this, room, owner](wire::Status status, std::uint64_t) noexcept {
-                         subscribed(room, owner, status);
+                     [this, room, owner](wire::Status status, std::uint64_t seq) noexcept {
+                         subscribed(room, owner, status, seq);
                      });
     }
 
-    void subscribed(const core::RoomId& room, const Ownership& owner, wire::Status status) {
+    // `seq`, when the owner took the subscription, is its head.
+    void subscribed(const core::RoomId& room, const Ownership& owner, wire::Status status,
+                    std::uint64_t seq) {
         const auto it = local_.find(room);
         if (it == local_.end()) {
             if (status == wire::Status::Ok) {
@@ -1009,6 +1027,7 @@ private:
             fail_joins(room, RouteError::Unavailable);
             return;
         }
+        lr.head = std::max(lr.head, seq);
         settle(room, lr, owner);
         // The owner changed hands while the subscription was on its way.
         const auto known = registry_.known_owner(room);
@@ -1039,8 +1058,9 @@ private:
                 lr.members.push_back(j.member);
             }
         }
+        const std::uint64_t latest = head(room);
         for (Joining& j : joined) {
-            j.done({});
+            j.done(latest);
         }
     }
 
@@ -1166,6 +1186,7 @@ private:
                    std::unexpected(seq.error() == AppendError::Fenced ? RouteError::Fenced
                                                                       : RouteError::Unavailable));
         } else {
+            o.head = std::max(o.head, *seq);
             fan_out(room, o, *seq, write);
             answer(write, *seq);
         }
@@ -1286,7 +1307,7 @@ private:
         if (std::ranges::find(subscribers, peer) == subscribers.end()) {
             subscribers.push_back(peer);
         }
-        reply(peer, request, wire::Status::Ok, 0);
+        reply(peer, request, wire::Status::Ok, head(room));
     }
 
     void on_unsubscribe(net::Slab<Inbound>::Handle peer, const core::RoomId& room) noexcept {
