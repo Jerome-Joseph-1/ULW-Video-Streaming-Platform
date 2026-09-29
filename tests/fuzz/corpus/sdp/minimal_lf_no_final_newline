@@ -1,0 +1,13 @@
+v=0
+o=- 1 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0
+m=audio 9 UDP/TLS/RTP/SAVPF 111 0 96 97
+c=IN IP4 0.0.0.0
+a=ice-ufrag:abcd
+a=ice-pwd:aaaaaaaaaaaaaaaaaaaaaa
+a=fingerprint:sha-256 05:B8:BE:BA:8C:BF:94:93:B2:2B:40:B7:B5:12:F3:18:02:5D:A5:C4:69:AF:F8:52:13:E1:60:0E:47:CB:7B:78
+a=setup:actpass
+a=mid:0
+a=rtpmap:111 opus/48000/2
