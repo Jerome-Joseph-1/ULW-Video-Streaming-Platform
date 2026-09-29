@@ -49,7 +49,10 @@ foreach(reactor io_uring epoll)
     add_test(NAME datagram_soak_${reactor}
         COMMAND ulw_datagram_soak --reactor ${reactor} --peers 5000 --duration-s 20 --sample-s 5
                 --max-rss-bytes-per-datagram 1)
-    set_tests_properties(datagram_soak_${reactor} PROPERTIES LABELS unit)
+    # Its RSS bound is calibrated on an uninstrumented build, and sanitizer runtimes grow their
+    # own memory with run time, so it has a label of its own that the sanitizer jobs, which
+    # select by label, leave out; the ci job runs every label.
+    set_tests_properties(datagram_soak_${reactor} PROPERTIES LABELS soak)
 endforeach()
 
 # A CA and server certificates generated at run time, and the OpenSSL client side of tests.
