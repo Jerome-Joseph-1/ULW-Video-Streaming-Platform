@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace net {
@@ -26,6 +27,8 @@ public:
 
     [[nodiscard]] const std::array<std::uint8_t, kBytes>& bytes() const noexcept { return bytes_; }
     [[nodiscard]] bool is_v4() const noexcept;
+    // Dotted for IPv4, RFC 5952 text for IPv6; for logs.
+    [[nodiscard]] std::string to_string() const;
     // The same address with every bit past the first `bits` cleared.
     [[nodiscard]] IpAddress prefix(unsigned bits) const noexcept;
 
@@ -47,10 +50,17 @@ public:
     [[nodiscard]] static std::optional<IpNetwork> parse(std::string_view text) noexcept;
 
     [[nodiscard]] bool contains(const IpAddress& address) const noexcept;
+    [[nodiscard]] bool is_v4() const noexcept { return base_.is_v4(); }
+    // The prefix length as written: an IPv4 /16 is 16.
+    [[nodiscard]] unsigned prefix_length() const noexcept {
+        return base_.is_v4() ? bits_ - kV4MappedBits : bits_;
+    }
 
     friend bool operator==(const IpNetwork&, const IpNetwork&) noexcept = default;
 
 private:
+    static constexpr unsigned kV4MappedBits = 96;
+
     IpNetwork(IpAddress base, unsigned bits) noexcept : base_(base), bits_(bits) {}
 
     IpAddress base_;

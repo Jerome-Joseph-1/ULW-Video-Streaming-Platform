@@ -15,7 +15,6 @@ namespace {
 
 // ::ffff:0:0/96, the prefix an IPv4-mapped address carries.
 constexpr std::array<std::uint8_t, 12> kMappedPrefix{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
-constexpr unsigned kV4Offset = 96;
 
 } // namespace
 
@@ -41,6 +40,17 @@ std::optional<IpAddress> IpAddress::parse(std::string_view text) noexcept {
 
 bool IpAddress::is_v4() const noexcept {
     return std::equal(kMappedPrefix.begin(), kMappedPrefix.end(), bytes_.begin());
+}
+
+std::string IpAddress::to_string() const {
+    std::array<char, INET6_ADDRSTRLEN> text{};
+    const bool v4 = is_v4();
+    const void* source = v4 ? static_cast<const void*>(&bytes_[kMappedPrefix.size()])
+                            : static_cast<const void*>(bytes_.data());
+    if (::inet_ntop(v4 ? AF_INET : AF_INET6, source, text.data(), text.size()) == nullptr) {
+        return {};
+    }
+    return std::string(text.data());
 }
 
 IpAddress IpAddress::prefix(unsigned bits) const noexcept {
@@ -72,7 +82,7 @@ std::optional<IpNetwork> IpNetwork::parse(std::string_view text) noexcept {
         }
         bits = *parsed;
     }
-    const unsigned stored = base->is_v4() ? bits + kV4Offset : bits;
+    const unsigned stored = base->is_v4() ? bits + kV4MappedBits : bits;
     if (base->prefix(stored) != *base) {
         return std::nullopt;
     }

@@ -39,6 +39,12 @@ TEST(IpAddress, AnIpv4AddressEqualsItsMappedIpv6Form) {
     EXPECT_NE(ip("198.51.100.20"), ip("198.51.100.21"));
 }
 
+TEST(IpAddress, PrintsInTheFormItsFamilyIsWrittenIn) {
+    EXPECT_EQ(ip("198.51.100.20").to_string(), "198.51.100.20");
+    EXPECT_EQ(ip("::ffff:198.51.100.20").to_string(), "198.51.100.20");
+    EXPECT_EQ(ip("2001:DB8:0:0::1").to_string(), "2001:db8::1");
+}
+
 TEST(IpAddress, PrefixClearsEveryBitPastIt) {
     EXPECT_EQ(ip("2001:db8:1:2:3:4:5:6").prefix(64), ip("2001:db8:1:2::"));
     EXPECT_EQ(ip("2001:db8:1:2:3:4:5:6").prefix(60), ip("2001:db8:1::"));
@@ -61,6 +67,12 @@ TEST(IpNetwork, ContainsExactlyTheAddressesUnderItsPrefix) {
     EXPECT_TRUE(v6->contains(ip("fd12:3456::1")));
     EXPECT_FALSE(v6->contains(ip("fe80::1")));
     EXPECT_FALSE(v6->contains(ip("10.42.0.1")));
+}
+
+TEST(IpNetwork, ReportsItsPrefixAsWritten) {
+    EXPECT_EQ(net::IpNetwork::parse("10.42.0.0/16")->prefix_length(), 16U);
+    EXPECT_EQ(net::IpNetwork::parse("192.0.2.9")->prefix_length(), 32U);
+    EXPECT_EQ(net::IpNetwork::parse("fd00::/8")->prefix_length(), 8U);
 }
 
 TEST(IpNetwork, ABareAddressIsABlockOfOne) {
