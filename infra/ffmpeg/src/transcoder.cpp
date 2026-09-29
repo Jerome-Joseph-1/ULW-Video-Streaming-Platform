@@ -73,7 +73,9 @@ TranscodeError error_of(TranscodeFailure kind, const ChildExit& child, std::stri
     const std::string why = last_line(child.stderr_tail);
     return {.kind = kind,
             .exit_code = child.exit_code,
-            .detail = std::string(what) + " exited " + std::to_string(child.exit_code) +
+            .detail = std::string(what) +
+                      (child.signal != 0 ? " killed by signal " + std::to_string(child.signal)
+                                         : " exited " + std::to_string(child.exit_code)) +
                       (why.empty() ? "" : ": " + why)};
 }
 
@@ -131,7 +133,7 @@ TranscodeResult<MediaInfo> FfmpegTranscoder::probe(const fs::path& input, std::s
     if (!child) {
         return std::unexpected(spawn_error(std::move(child.error())));
     }
-    if (const auto failure = classify(child->exit_code, child->ending)) {
+    if (const auto failure = classify(child->exit_code, child->signal, child->ending)) {
         return std::unexpected(error_of(*failure, *child, "ffprobe"));
     }
     auto media = parse_probe(output, source_bytes);
@@ -167,7 +169,7 @@ FfmpegTranscoder::run(const fs::path& input, const fs::path& out_dir, const Medi
     if (!child) {
         return std::unexpected(spawn_error(std::move(child.error())));
     }
-    if (const auto failure = classify(child->exit_code, child->ending)) {
+    if (const auto failure = classify(child->exit_code, child->signal, child->ending)) {
         return std::unexpected(error_of(*failure, *child, "ffmpeg"));
     }
     return core::ports::TranscodeStats{.wall = child->wall, .peak_rss_kib = child->peak_rss_kib};
@@ -199,7 +201,8 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
     // What a checking child's failure means: its input is our output, so anything it refuses
     // is our output failing verification.
     const auto failed_check = [](const ChildExit& child, std::string_view what) {
-        auto kind = classify(child.exit_code, child.ending).value_or(TranscodeFailure::Unverified);
+        auto kind = classify(child.exit_code, child.signal, child.ending)
+                        .value_or(TranscodeFailure::Unverified);
         if (kind == TranscodeFailure::Rejected) {
             kind = TranscodeFailure::Unverified;
         }

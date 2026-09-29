@@ -37,6 +37,9 @@ struct Limits {
 struct ChildExit {
     // As a shell reports it: 128 + the signal number for a signalled child.
     int exit_code = 0;
+    // The signal that killed the child, or 0 when it exited. Only this tells a signal from an
+    // exit code above 128, which ffmpeg uses for its own failures.
+    int signal = 0;
     Ending ending = Ending::Exited;
     core::Millis wall{};
     std::uint64_t peak_rss_kib = 0;

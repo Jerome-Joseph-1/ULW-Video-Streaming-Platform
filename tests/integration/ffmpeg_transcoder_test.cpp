@@ -254,8 +254,27 @@ TEST_F(TranscoderTest, FfmpegOutOfCpuTimeIsOverBudgetNotKilled) {
     ASSERT_TRUE(child) << child.error();
     EXPECT_NE(child->exit_code, 0);
     EXPECT_EQ(child->ending, infra::ffmpeg::Ending::CpuExhausted) << child->exit_code;
-    EXPECT_EQ(infra::ffmpeg::classify(child->exit_code, child->ending),
+    EXPECT_EQ(infra::ffmpeg::classify(child->exit_code, child->signal, child->ending),
               TranscodeFailure::OverBudget);
+}
+
+TEST_F(TranscoderTest, FfmpegsOwnFailuresAbove128RejectTheInput) {
+    // ffmpeg exits with 256 minus its error code, here 256 - ENOENT; read as 128 + a signal
+    // it would count as a kill and requeue a bad file until its attempts ran out.
+    const auto child = infra::ffmpeg::run_sandboxed(
+        {.helper = ULW_SANDBOX_BIN, .environment = {"PATH=" + search_path()}},
+        {.writable = work_.path(),
+         .address_space_bytes = std::uint64_t{4} << 30U,
+         .cpu = core::Seconds{60},
+         .wall = core::Millis{60'000}},
+        {"ffmpeg", "-nostdin", "-v", "error", "-i", (work_.path() / "absent.mp4").string(), "-f",
+         "null", "-"},
+        clock_, [](std::string_view) {}, {});
+    ASSERT_TRUE(child) << child.error();
+    EXPECT_GT(child->exit_code, 128);
+    EXPECT_EQ(child->signal, 0);
+    EXPECT_EQ(infra::ffmpeg::classify(child->exit_code, child->signal, child->ending),
+              TranscodeFailure::Rejected);
 }
 
 TEST_F(TranscoderTest, AManifestThatNamesAFileOutsideTheWorkspaceIsRefused) {

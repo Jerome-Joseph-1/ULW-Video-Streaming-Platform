@@ -12,7 +12,9 @@
 // the namespace, so nothing PROGRAM started, not even a descendant that left its session,
 // outlives it or keeps its pipes open. pid 1 dies with the helper, and the helper with the
 // worker. SIGTERM and SIGINT sent to the helper are passed down to PROGRAM, and the helper
-// exits with PROGRAM's status: its exit code, or 128 + the signal that killed it.
+// ends as PROGRAM did: with its exit code, or killed by the same signal. The signal is raised
+// again rather than folded into 128 + its number, because ffmpeg's own failures exit with
+// 256 minus an error code (183 for invalid data) and would read as signals.
 //
 // Exit codes of its own: 125 when a confinement step fails, 126 when PROGRAM cannot be
 // executed, 127 when it is not found.
@@ -207,14 +209,14 @@ void set_limit(int resource, rlim_t soft, rlim_t hard, std::string_view name) {
 }
 
 // 128 + the signal for a signalled process, as a shell reports it.
-int exit_code_of(int status) {
+int exit_code_of(int status) noexcept {
     constexpr int kSignalled = 128;
     return WIFEXITED(status) ? WEXITSTATUS(status) : kSignalled + WTERMSIG(status);
 }
 
 // Waits for `child` to exit, passing SIGTERM and SIGINT on to it, and reaps every other
 // process that ends up as ours on the way: pid 1 inherits the program's orphans.
-// `signals` must be blocked, so that they queue until taken here.
+// `signals` must be blocked, so that they queue until taken here. Returns the wait status.
 int wait_passing_signals(pid_t child, const sigset_t& signals) {
     while (true) {
         const int sig = ::sigwaitinfo(&signals, nullptr);
@@ -226,14 +228,16 @@ int wait_passing_signals(pid_t child, const sigset_t& signals) {
         pid_t reaped = 0;
         while ((reaped = ::waitpid(-1, &status, WNOHANG)) > 0) {
             if (reaped == child) {
-                return exit_code_of(status);
+                return status;
             }
         }
     }
 }
 
 // pid 1 of the new pid namespace: confines itself, then starts the program as its child.
-[[noreturn]] void run_init(const Options& options, int lifeline, const sigset_t& signals) {
+// `status_out` carries PROGRAM's wait status to the helper, which cannot wait for it itself.
+[[noreturn]] void run_init(const Options& options, int lifeline, int status_out,
+                           const sigset_t& signals) {
     // The helper may die without killing us, and then the namespace must go too. getppid()
     // is 0 here, the helper being outside the namespace, so the lifeline tells instead: its
     // other end closes when the helper exits.
@@ -251,7 +255,9 @@ int wait_passing_signals(pid_t child, const sigset_t& signals) {
     set_limit(RLIMIT_CPU, options.cpu_seconds, options.cpu_seconds + 1, "RLIMIT_CPU");
     // A crash dump of a hostile input is hostile data in the scratch directory we upload from.
     set_limit(RLIMIT_CORE, 0, 0, "RLIMIT_CORE");
-    if (::close_range(3, ~0U, 0) != 0) {
+    // All but `status_out`, which is close-on-exec, so PROGRAM never holds it.
+    const auto keep = static_cast<unsigned>(status_out);
+    if ((keep > 3 && ::close_range(3, keep - 1, 0) != 0) || ::close_range(keep + 1, ~0U, 0) != 0) {
         die("close descriptors", errno);
     }
     drop_capabilities();
@@ -274,7 +280,31 @@ int wait_passing_signals(pid_t child, const sigset_t& signals) {
                      std::generic_category().message(error));
         std::_Exit(error == ENOENT ? kNotFound : kCannotExecute);
     }
-    std::_Exit(wait_passing_signals(program, signals));
+    const int status = wait_passing_signals(program, signals);
+    // A pipe write this small is atomic; the helper reads it once we have exited.
+    [[maybe_unused]] const ssize_t n = ::write(status_out, &status, sizeof status);
+    std::_Exit(exit_code_of(status));
+}
+
+// Ends this process the way `status` says its child ended. pid 1 of a namespace cannot do
+// this, the kernel dropping the signals it sends itself, which is why the helper does.
+int end_like(int status) {
+    if (!WIFSIGNALED(status)) {
+        return WEXITSTATUS(status);
+    }
+    const int sig = WTERMSIG(status);
+    // A dump of this helper would be as useless as the program's is dangerous.
+    const rlimit no_core{.rlim_cur = 0, .rlim_max = 0};
+    static_cast<void>(::setrlimit(RLIMIT_CORE, &no_core));
+    static_cast<void>(::signal(sig, SIG_DFL));
+    sigset_t only;
+    sigemptyset(&only);
+    sigaddset(&only, sig);
+    static_cast<void>(::pthread_sigmask(SIG_UNBLOCK, &only, nullptr));
+    static_cast<void>(::raise(sig));
+    // Only a signal whose default is not to terminate gets here, and none of those ended
+    // the program.
+    return exit_code_of(status);
 }
 
 int run(std::span<char*> args) {
@@ -300,6 +330,10 @@ int run(std::span<char*> args) {
     if (::pipe2(lifeline.data(), O_CLOEXEC) != 0) {
         die("lifeline", errno);
     }
+    std::array<int, 2> program_status{};
+    if (::pipe2(program_status.data(), O_CLOEXEC) != 0) {
+        die("status pipe", errno);
+    }
     // NOLINTNEXTLINE(concurrency-mt-unsafe): no threads here, as above.
     const pid_t init = ::fork();
     if (init < 0) {
@@ -307,11 +341,20 @@ int run(std::span<char*> args) {
     }
     if (init == 0) {
         ::close(lifeline[1]);
-        run_init(options, lifeline[0], signals);
+        ::close(program_status[0]);
+        run_init(options, lifeline[0], program_status[1], signals);
     }
     // Our end of the lifeline stays open until we exit.
     ::close(lifeline[0]);
-    return wait_passing_signals(init, signals);
+    ::close(program_status[1]);
+    const int init_status = wait_passing_signals(init, signals);
+    int status = 0;
+    // pid 1 wrote before it exited, or never will: a pid 1 that failed to start the program
+    // or was killed leaves the pipe empty, and its own status stands.
+    if (::read(program_status[0], &status, sizeof status) == sizeof status) {
+        return end_like(status);
+    }
+    return end_like(init_status);
 }
 
 } // namespace

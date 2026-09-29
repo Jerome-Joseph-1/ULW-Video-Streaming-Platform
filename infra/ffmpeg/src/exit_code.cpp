@@ -6,7 +6,7 @@ namespace infra::ffmpeg {
 
 using core::ports::TranscodeFailure;
 
-std::optional<TranscodeFailure> classify(int exit_code, Ending ending) noexcept {
+std::optional<TranscodeFailure> classify(int exit_code, int signal, Ending ending) noexcept {
     // A child that we signalled reports that signal, which says nothing about the input.
     switch (ending) {
     case Ending::Stopped:
@@ -17,17 +17,21 @@ std::optional<TranscodeFailure> classify(int exit_code, Ending ending) noexcept 
     case Ending::Exited:
         break;
     }
-    constexpr int kSignalled = 128;
+    if (signal == SIGSEGV) {
+        return TranscodeFailure::Crashed;
+    }
+    if (signal != 0) {
+        return TranscodeFailure::Killed;
+    }
+    // ffmpeg's exit after it caught SIGTERM or SIGINT from someone else.
+    constexpr int kFfmpegInterrupted = 255;
     if (exit_code == 0) {
         return std::nullopt;
     }
     if (exit_code >= kSandboxSetupFailed && exit_code <= kProgramNotFound) {
         return TranscodeFailure::Sandbox;
     }
-    if (exit_code == kSignalled + SIGSEGV) {
-        return TranscodeFailure::Crashed;
-    }
-    if (exit_code > kSignalled) {
+    if (exit_code == kFfmpegInterrupted) {
         return TranscodeFailure::Killed;
     }
     return TranscodeFailure::Rejected;

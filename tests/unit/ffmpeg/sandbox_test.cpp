@@ -265,6 +265,27 @@ TEST_F(SandboxTest, AFailureWithCpuTimeToSpareIsNotTheLimits) {
             {.writable = {}, .address_space_bytes = 0, .cpu = core::Seconds{1}, .wall = {}});
     EXPECT_EQ(child.ending, Ending::Exited);
     EXPECT_EQ(child.exit_code, 128 + SIGKILL);
+    EXPECT_EQ(child.signal, SIGKILL);
+}
+
+TEST_F(SandboxTest, AnExitCodeAbove128ArrivesAsAnExitNotASignal) {
+    // What ffmpeg exits with for a corrupt input; read as 128 + 55 it would requeue the file
+    // until its attempts ran out instead of rejecting it.
+    const auto child = run({"sh", "-c", "exit 183"});
+    EXPECT_EQ(child.ending, Ending::Exited);
+    EXPECT_EQ(child.exit_code, 183);
+    EXPECT_EQ(child.signal, 0);
+    EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
+              core::ports::TranscodeFailure::Rejected);
+}
+
+TEST_F(SandboxTest, AProgramThatCrashesArrivesAsTheSignalThatKilledIt) {
+    const auto child = run({"sh", "-c", "kill -SEGV $$"});
+    EXPECT_EQ(child.ending, Ending::Exited);
+    EXPECT_EQ(child.signal, SIGSEGV);
+    EXPECT_EQ(child.exit_code, 128 + SIGSEGV);
+    EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
+              core::ports::TranscodeFailure::Crashed);
 }
 
 TEST_F(SandboxTest, TheAddressSpaceLimitRefusesALargeAllocation) {

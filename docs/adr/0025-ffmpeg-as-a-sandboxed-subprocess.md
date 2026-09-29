@@ -32,9 +32,11 @@ must not reach the network or the rest of the filesystem.
 ## Consequences
 
 - Progress is parsed from `-progress pipe:1`, the key=value lines ffmpeg writes to stdout.
-- An exit code above 128 means the child was killed by a signal (128 + signal number): a crash, the
-  CPU limit or our deadline. It is classified apart from ffmpeg's own non-zero exits, which mean
-  it rejected the input. The CPU limit is recognised by the child's CPU time reaching it, not by
+- A child killed by a signal (a crash, the CPU limit or our deadline) is classified apart from
+  ffmpeg's own non-zero exits, which mean it rejected the input. The signal is taken from the
+  wait status, never inferred from an exit code above 128: ffmpeg exits with 256 minus its error
+  code (183 for invalid data), so the sandbox helper ends by the program's own signal rather than
+  exiting 128 + its number. The CPU limit is recognised by the child's CPU time reaching it, not by
   the signal: ffmpeg catches SIGXCPU and dies of the SIGKILL at the hard limit. Hitting `RLIMIT_AS` shows up as an allocation failure inside ffmpeg and
   may be an ordinary error exit rather than a signal.
 - The worker depends on the ffmpeg CLI's arguments and progress format, so the worker image pins

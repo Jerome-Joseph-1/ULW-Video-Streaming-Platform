@@ -358,7 +358,8 @@ run_sandboxed(const Sandbox& sandbox, const Limits& limits, const Args& args,
     rusage usage{};
     while (::wait4(*pid, &status, 0, &usage) < 0 && errno == EINTR) {
     }
-    result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    result.signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+    result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + result.signal;
     const auto cpu = std::chrono::seconds(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) +
                      std::chrono::microseconds(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
     // Only RLIMIT_CPU sends SIGXCPU, so that alone says the limit ended the child. ffmpeg

@@ -26,8 +26,10 @@ inline constexpr int kSandboxSetupFailed = 125;
 inline constexpr int kCannotExecute = 126;
 inline constexpr int kProgramNotFound = 127;
 
-// nullopt for success. `exit_code` is the shell's: 128 + the signal for a signalled child.
-[[nodiscard]] std::optional<core::ports::TranscodeFailure> classify(int exit_code,
+// nullopt for success. `signal` is the signal that killed the child, 0 when it exited with
+// `exit_code`. An exit code above 128 without a signal is ffmpeg's own failure (it exits with
+// 256 minus an error code: 183 for invalid data, 234 for EINVAL), so it rejects the input.
+[[nodiscard]] std::optional<core::ports::TranscodeFailure> classify(int exit_code, int signal,
                                                                     Ending ending) noexcept;
 
 } // namespace infra::ffmpeg
