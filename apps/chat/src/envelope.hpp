@@ -11,7 +11,7 @@
 #include <variant>
 
 // The JSON a client and chat_server exchange in WebSocket text frames, as far as M16 needs it
-// (ADR-0034). Client to server:
+// (ADR-0036). Client to server:
 //   {"type":"join","room":"<uuid>"}
 //   {"type":"send","room":"<uuid>","body":"<text>"}          "ref":<integer> is optional
 // Server to client:

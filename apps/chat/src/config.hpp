@@ -22,7 +22,7 @@ struct Config {
     // ULW_DEV_LOOPBACK_NODES=1, for a cluster on one host.
     std::string node_address;
     // ULW_NODE_SECRET: what every node proves it holds before the node channel carries anything
-    // (ADR-0033). Never logged.
+    // (ADR-0035). Never logged.
     std::string node_secret;
     net::ReactorKind reactor = net::ReactorKind::IoUring;
     std::string database_url;

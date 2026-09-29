@@ -7,7 +7,7 @@
 #include <optional>
 #include <span>
 
-// The node channel's handshake (ADR-0033). Both ends hold the same secret. The dialer sends a
+// The node channel's handshake (ADR-0035). Both ends hold the same secret. The dialer sends a
 // fresh nonce, the owner answers with its own and a tag over both, the dialer answers with its
 // tag over both: each proves it holds the secret over a nonce the other just chose, so a
 // recorded exchange replays to nothing. The tags differ by role, so one end's tag is never

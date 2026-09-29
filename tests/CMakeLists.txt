@@ -384,3 +384,58 @@ if(ULW_BUILD_WORKER)
     endif()
     add_dependencies(playback_integration_tests gateway_server)
 endif()
+
+ulw_add_test_suite(sdp_unit_tests unit
+    unit/sdp/attributes_test.cpp
+    unit/sdp/chromium_test.cpp
+    unit/sdp/parser_test.cpp
+    unit/sdp/property_test.cpp
+    unit/sdp/serializer_test.cpp
+    unit/sdp/validate_test.cpp)
+target_link_libraries(sdp_unit_tests PRIVATE ulw::codec_sdp)
+# Chromium's offer and answer, captured by e2e/sdp_roundtrip.spec.mjs.
+target_compile_definitions(sdp_unit_tests
+    PRIVATE ULW_SDP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/sdp")
+
+# Parse, validate, serialize, for e2e/sdp_roundtrip.spec.mjs to run Chromium's SDP through.
+ulw_add_executable(ulw_sdp_roundtrip media/sdp_roundtrip_main.cpp)
+target_link_libraries(ulw_sdp_roundtrip PRIVATE ulw::codec_sdp)
+
+ulw_add_executable(sdp_fuzz_replay fuzz/sdp_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(sdp_fuzz_replay PRIVATE ulw::codec_sdp)
+add_test(NAME sdp_fuzz_corpus COMMAND sdp_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/sdp)
+set_tests_properties(sdp_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(sdp_fuzz fuzz/sdp_fuzz.cpp)
+    target_link_libraries(sdp_fuzz PRIVATE ulw::codec_sdp)
+    target_compile_options(sdp_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(sdp_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
+
+ulw_add_test_suite(rtp_unit_tests unit
+    unit/rtp/demux_test.cpp
+    unit/rtp/pcap_test.cpp
+    unit/rtp/rtcp_test.cpp
+    unit/rtp/rtp_test.cpp)
+target_link_libraries(rtp_unit_tests PRIVATE ulw::codec_rtp)
+# The capture and tshark's reading of it, from media/capture_rtp.sh.
+target_compile_definitions(rtp_unit_tests
+    PRIVATE ULW_RTP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/rtp")
+
+ulw_add_executable(rtp_fuzz_replay fuzz/rtp_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(rtp_fuzz_replay PRIVATE ulw::codec_rtp)
+add_test(NAME rtp_fuzz_corpus COMMAND rtp_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/rtp)
+set_tests_properties(rtp_fuzz_corpus PROPERTIES LABELS unit)
+# The committed tables against tshark's reading of the committed pcap; skipped without tshark.
+add_test(NAME rtp_pcap_tshark
+    COMMAND bash -c "command -v tshark >/dev/null || exit 77; exec \"$0\" --check"
+        ${CMAKE_CURRENT_SOURCE_DIR}/media/capture_rtp.sh)
+set_tests_properties(rtp_pcap_tshark PROPERTIES LABELS unit SKIP_RETURN_CODE 77)
+
+if(ULW_FUZZ)
+    ulw_add_executable(rtp_fuzz fuzz/rtp_fuzz.cpp)
+    target_link_libraries(rtp_fuzz PRIVATE ulw::codec_rtp)
+    target_compile_options(rtp_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(rtp_fuzz PRIVATE -fsanitize=fuzzer)
+endif()

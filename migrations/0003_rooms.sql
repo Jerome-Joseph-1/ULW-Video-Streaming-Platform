@@ -7,7 +7,7 @@ CREATE TABLE room_state (room_id uuid PRIMARY KEY REFERENCES room_assignments(ro
   delivery text NOT NULL);   -- durable | lossy
 
 -- Where each chat node takes connections from the others, and which run of it holds the name
--- (ADR-0033): a name is held by one incarnation at a time, from started_at, for as long as its
+-- (ADR-0035): a name is held by one incarnation at a time, from started_at, for as long as its
 -- heartbeats keep seen_at fresh. A restarted pod comes back under a new name, so rows of
 -- departed nodes stay behind; nothing reads them once no room names their node.
 CREATE TABLE chat_nodes (
