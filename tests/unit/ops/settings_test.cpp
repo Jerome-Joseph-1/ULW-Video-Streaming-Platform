@@ -31,12 +31,12 @@ protected:
         };
     }
 
-    std::expected<ops::CommandLine, ops::SettingsError>
-    cli(std::vector<std::string_view> args) const {
+    [[nodiscard]] static std::expected<ops::CommandLine, ops::SettingsError>
+    cli(std::vector<std::string_view> args) {
         return ops::parse_command_line(kSchema, args);
     }
 
-    std::expected<ops::Settings, ops::SettingsError>
+    [[nodiscard]] std::expected<ops::Settings, ops::SettingsError>
     layer(const ops::CommandLine& c, const std::string& toml = "", bool private_file = true) const {
         if (toml.empty()) {
             return ops::Settings::layer(kSchema, nullptr, env(), c);
