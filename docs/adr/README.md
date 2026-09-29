@@ -41,7 +41,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0035](0035-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
 | [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted |
-| [0037](0037-json-logs-metrics-and-readiness-off-the-loop.md) | JSON logs, metrics and readiness, none of them waiting on the loop | Accepted |
-| [0038](0038-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
-| [0039](0039-a-job-result-the-queue-refuses-fails-the-job.md) | A job result the queue refuses fails the job | Accepted |
-| [0040](0040-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged per unit of work against the memory limit | Accepted |
+| [0038](0038-json-logs-metrics-and-readiness-off-the-loop.md) | JSON logs, metrics and readiness, none of them waiting on the loop | Accepted |
+| [0039](0039-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
+| [0040](0040-a-job-result-the-queue-refuses-fails-the-job.md) | A job result the queue refuses fails the job | Accepted |
+| [0041](0041-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged per unit of work against the memory limit | Accepted |
