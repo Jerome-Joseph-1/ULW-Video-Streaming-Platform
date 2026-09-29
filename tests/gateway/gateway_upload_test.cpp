@@ -212,6 +212,38 @@ TEST_P(GatewayUpload, CommitBeforeEveryByteArrivedIs409) {
     EXPECT_TRUE(gw.jobs().empty());
 }
 
+TEST_P(GatewayUpload, OnlyTheFirstAcceptedPatchMovesTheVideoFromInitToUploading) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(3 * kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    struct Seen {
+        std::string state;
+        std::uint64_t version = 0;
+        bool operator==(const Seen&) const = default;
+    };
+    const auto video = [&]() -> std::optional<Seen> {
+        const auto r = c.request("GET", "/api/v1/videos/" + up->video_id, kAlice);
+        if (!r || r->status != 200) {
+            return std::nullopt;
+        }
+        const auto doc = core::json::parse(r->body);
+        if (!doc) {
+            return std::nullopt;
+        }
+        return Seen{.state = std::string(*doc->find("state")->as_string()),
+                    .version = *doc->find("version")->as_u64()};
+    };
+    EXPECT_EQ(video(), (Seen{"init", 0}));
+
+    ASSERT_EQ(patch(c, up->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+    EXPECT_EQ(video(), (Seen{"uploading", 1}));
+
+    ASSERT_EQ(patch(c, up->upload_id, kMiB, std::span(data).subspan(kMiB, kMiB))->status, 204);
+    EXPECT_EQ(video(), (Seen{"uploading", 1}));
+}
+
 TEST_P(GatewayUpload, ClientKilledMidChunkResumesFromHead) {
     GatewayUnderTest gw(over_transport({.backend = Backend::Fs, .chunk = kMiB}));
     const auto data = ulw::test::pattern((5 * kMiB) + 1234, 5);
