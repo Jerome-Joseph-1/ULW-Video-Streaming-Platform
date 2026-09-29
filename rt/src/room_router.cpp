@@ -63,9 +63,10 @@ constexpr std::size_t kMaxPeerBacklog = std::size_t{16} * wire::kMaxFrame;
 // backoff, or after reconnecting: seconds. A minute of keys covers both with room to spare.
 constexpr core::Millis kRecentKeysWindow{60'000};
 // Each key remembered costs about 300 bytes (room, sender, key and seq, and the map's and the
-// queue's own), so 32768 are about 10 MiB of the node's budget. That is a minute of 500
-// messages a second sequenced or delivered here, and half a minute at the thousand a second
-// one room can reach (ADR-0035): still ten forward timeouts.
+// queue's own), so 32768 are about 10 MiB of the node's budget. That is a minute of 546
+// messages a second sequenced or delivered here, all rooms and senders together; past that the
+// window shrinks for everyone, to half a minute at the thousand a second one room can reach
+// (ADR-0035): still ten forward timeouts.
 constexpr std::size_t kRecentKeys = 32'768;
 
 using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq) noexcept>;

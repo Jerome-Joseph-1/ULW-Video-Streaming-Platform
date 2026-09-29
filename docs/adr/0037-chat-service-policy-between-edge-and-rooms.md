@@ -99,9 +99,14 @@ need no change for it: whatever end-to-end encryption needs from them has to be 
 - A user with connections on several nodes gets a bucket on each; three nodes, three times the
   rate. Accepted: the limit is against floods from one connection or script, and a global one
   would cost a round trip per message.
-- A retry is recognised for a minute, or less when the node sequences more than 500 messages a
-  second. A retry through a node that never delivered the first try, to an owner that did not
-  sequence it, is sequenced again; M19 closes that with a unique key per stored message.
+- A retry is recognised for a minute, or less when the node sequences or delivers more than
+  about 546 messages a second (32768 keys over 60 s). The keys are one window for the whole
+  node, oldest out first, so other users' traffic shortens everyone's window: many accounts,
+  each within its own rate, can bring it down toward the forward timeout. No one can reach
+  another's entries (a key is the sender's own, and senders are authenticated), only shorten
+  how long they last. A retry through a node that never delivered the first try, to an owner
+  that did not sequence it, is sequenced again; M19 closes both with a unique key per stored
+  message.
 - A reused id loses the second message: it is answered with the first one's seq. Clients must
   make ids unique, a UUID or ULID per message.
 - Nodes of node-channel version 1 and 2 refuse each other, and log it as `version mismatch`; a
