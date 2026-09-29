@@ -187,11 +187,16 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-nice libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev
+      # A build is only good for the GStreamer it linked against and the compiler that made it;
+      # fetch-whipsink.sh rebuilds whatever the key lets through that does not match either.
+      - name: GStreamer version
+        id: gstreamer
+        run: echo "version=$(pkg-config --modversion gstreamer-webrtc-1.0)" >>"$GITHUB_OUTPUT"
       - name: Restore the whipsink build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: tests/call/.whipsink
-          key: whipsink-${{ hashFiles('tests/call/whipsink/Cargo.lock', 'tests/call/fetch-whipsink.sh') }}
+          key: whipsink-gst${{ steps.gstreamer.outputs.version }}-${{ hashFiles('tests/call/whipsink/*', 'tests/call/fetch-whipsink.sh') }}
       - run: tests/call/fetch-whipsink.sh
       - name: Start LiveKit, Redis and egress
         run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit egress
