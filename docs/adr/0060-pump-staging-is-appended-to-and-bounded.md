@@ -35,17 +35,24 @@ what to do with them.
 - `drain_staging` writes from the head in order when the store is ready again, and the
   connection resumes reading only once it has emptied. ADR-0045 covers how long a request may
   wait while it is held.
-- The comment beside the constant gives the derivation; the ceiling is reached only by a peer the
-  reactor could not stop in time.
+- The comment beside the constant gives the derivation. The check is defensive: it cannot be
+  reached from the wire today. Bytes that arrive while the connection is paused stay in the
+  parser's retained tail (`retain()` in `http/src/request_parser.cpp`, capped at 4 x 64 KiB, past
+  which the parser itself answers 413) and reach `on_body` only after `drain_staging` has emptied
+  staging and resumed, so staging never holds more than one callback's worth.
 
 ## Consequences
 
 - No byte is lost or reordered when completions keep arriving after receiving is stopped.
-- A peer that keeps sending into a stalled store costs its own connection: 413, not memory.
+- A peer that keeps sending into a stalled store is held by the kernel window and the parser's
+  bound, and costs its own connection (413), not memory.
 - Code and brief agree: the append-or-413 rule is implemented as brief 8.4 describes it, with
   the bound spelt `4 * 64 * 1024`. One difference in wording only: the brief's step 1 checks
   the bound against the staged size plus the new data, and the code counts only the unsent part
   (`staging_.size() - staging_head_`), because a partly drained buffer keeps its consumed head
   until it empties.
-- No test drives staging past the bound, so the 413 is held by this reading and not by a
-  failing test; a stalled-backend test that fills staging is the missing check.
+- The observable bounds are pinned by tests: `Backpressure.BytesArrivingWhilePausedAreBounded`
+  (the parser's retained tail) and `StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut`
+  (at most 320 KiB ingested while the store is stalled). The connection's own 413 branch has no
+  test because no input reaches it; exercising it would need the staging append moved into a
+  type testable on its own.
