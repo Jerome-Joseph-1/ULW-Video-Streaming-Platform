@@ -291,7 +291,8 @@ private:
     void count_blocked(TranscodeFailure kind) {
         static std::atomic<std::uint64_t> total{0};
         if (kind == TranscodeFailure::SyscallBlocked) {
-            log("job={} ffmpeg_syscall_blocked_total={}", id(), ++total);
+            log().warn("ffmpeg syscall blocked",
+                       {{"job", id()}, {"ffmpeg_syscall_blocked_total", ++total}});
         }
     }
 

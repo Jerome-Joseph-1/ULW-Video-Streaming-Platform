@@ -63,8 +63,9 @@ and ffmpeg alike and cannot be tighter than the worker needs.
   apart from a gap in this allowlist, which is our bug, not the owner's, so it is neither a
   rejection of the file nor a plain kill: the worker runs it once more, as for a crash, and
   then fails the video with "the decoder was stopped by the sandbox", never "could not be
-  decoded". Each occurrence logs `ffmpeg_syscall_blocked_total=N` (the worker's counters are
-  log lines) with the job's exit code 159 (128 + `SIGSYS`) above it.
+  decoded". Each occurrence logs a warning carrying the running count
+  `ffmpeg_syscall_blocked_total` (the worker's counters are log lines), with the job's exit
+  code 159 (128 + `SIGSYS`) above it.
 - The filter is per architecture (x86-64 and AArch64 tables; the legacy names `access` and
   `mkdir` are replaced by `faccessat` and `mkdirat` where the architecture has no legacy
   calls). AArch64 is untested here.
