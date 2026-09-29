@@ -293,6 +293,7 @@ if(ULW_BUILD_WORKER)
 
     ulw_add_test_suite(worker_unit_tests unit
         unit/worker/config_test.cpp
+        unit/worker/heartbeat_test.cpp
         unit/worker/job_runner_test.cpp
         unit/worker/lease_keeper_test.cpp
         unit/worker/workspace_test.cpp)
