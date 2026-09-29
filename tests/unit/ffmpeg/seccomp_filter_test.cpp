@@ -98,8 +98,8 @@ TEST_F(SeccompFilter, ProgramIsTheSameInstructionsOnEveryCompiler) {
         mix(insn.k, 4);
     }
 #if defined(__x86_64__)
-    EXPECT_EQ(program_.size(), 168U);
-    EXPECT_EQ(hash, 4688286380803353990ULL) << "program of " << program_.size() << " instructions";
+    EXPECT_EQ(program_.size(), 170U);
+    EXPECT_EQ(hash, 10600060975178529872ULL) << "program of " << program_.size() << " instructions";
 #else
     GTEST_SKIP() << "the golden program is x86-64's";
 #endif

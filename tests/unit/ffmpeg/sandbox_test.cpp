@@ -4,6 +4,7 @@
 #include "os/system_clock.hpp"
 #include "os/unique_fd.hpp"
 
+#include "live_command.hpp"
 #include "process.hpp"
 #include "support/temp_dir.hpp"
 
@@ -25,6 +26,8 @@
 #include <pthread.h>
 #include <stop_token>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -474,6 +477,65 @@ TEST_F(SyscallFilterTest, ATranscodeWithThreadsStillRuns) {
     EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
     EXPECT_TRUE(fs::exists(writable_.path() / "index.m3u8"));
     EXPECT_TRUE(fs::exists(writable_.path() / "seg_000.m4s"));
+}
+
+// The live packager's command line, fed MPEG-TS over a pipe as the packager feeds it. It renames
+// each segment into place, which the worker's transcode never does.
+TEST_F(SyscallFilterTest, ALiveRemuxFromAPipeStillRuns) {
+    const auto source =
+        run({"ffmpeg", "-nostdin", "-v",       "error",
+             "-f",     "lavfi",    "-i",       "testsrc2=size=320x180:rate=25",
+             "-f",     "lavfi",    "-i",       "sine=frequency=440:sample_rate=48000",
+             "-t",     "3",        "-c:v",     "libx264",
+             "-g",     "25",       "-c:a",     "aac",
+             "-f",     "mpegts",   "source.ts"});
+    if (source.exit_code == infra::ffmpeg::kProgramNotFound) {
+        GTEST_SKIP() << "no ffmpeg on this host";
+    }
+    ASSERT_EQ(source.exit_code, 0) << source.stderr_tail;
+    std::string bytes(fs::file_size(writable_.path() / "source.ts"), '\0');
+    ASSERT_FALSE(bytes.empty());
+    std::ifstream(writable_.path() / "source.ts", std::ios::binary)
+        .read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+
+    std::array<int, 2> fds{};
+    ASSERT_EQ(::pipe2(fds.data(), O_CLOEXEC), 0);
+    os::UniqueFd read_end(fds[0]);
+    // More than a pipe holds, so a writer of its own; closing its end is the end of the stream.
+    std::jthread publisher([write_end = os::UniqueFd(fds[1]), &bytes] {
+        // A write with no reader left is EPIPE here rather than SIGPIPE for the whole test.
+        sigset_t pipe_signal;
+        sigemptyset(&pipe_signal);
+        sigaddset(&pipe_signal, SIGPIPE);
+        pthread_sigmask(SIG_BLOCK, &pipe_signal, nullptr);
+        std::string_view rest = bytes;
+        while (!rest.empty()) {
+            const ssize_t n = ::write(write_end.get(), rest.data(), rest.size());
+            if (n <= 0) {
+                return;
+            }
+            rest.remove_prefix(static_cast<std::size_t>(n));
+        }
+    });
+    const infra::ffmpeg::LiveRemuxJob job{.input = read_end.get(),
+                                          .out_dir = writable_.path(),
+                                          .segment_seconds = 1,
+                                          .listed_segments = 2,
+                                          .first_sequence = 5,
+                                          .epoch = 7,
+                                          .max_kbps = 8000,
+                                          .max_duration = core::Seconds{30}};
+    const auto child = run(infra::ffmpeg::live_remux_args("ffmpeg", job), {}, {}, read_end.get());
+    // An ffmpeg that died early leaves the writer blocked on a full pipe until no reader is left.
+    read_end.reset();
+    publisher.join();
+    EXPECT_EQ(child.signal, 0) << "SIGSYS is the filter killing it";
+    EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
+    const std::string segment = infra::ffmpeg::live_segment_name(7, 5);
+    EXPECT_TRUE(fs::exists(writable_.path() / infra::ffmpeg::live_init_name(7)));
+    EXPECT_TRUE(fs::exists(writable_.path() / segment));
+    EXPECT_FALSE(fs::exists(writable_.path() / (segment + ".tmp")));
+    EXPECT_TRUE(fs::exists(writable_.path() / std::string(infra::ffmpeg::kLivePlaylist)));
 }
 
 // The traces this filter came from were taken as root, and some libraries ask more of a caller

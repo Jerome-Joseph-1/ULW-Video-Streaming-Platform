@@ -54,6 +54,13 @@ and ffmpeg alike and cannot be tighter than the worker needs.
   namespace is dropped unless pid 1 has a handler for it.
 - `clone3` answers `ENOSYS`. Its flags are in memory, where a filter cannot read them, and
   glibc falls back to `clone` on that answer. The one other benign errno.
+- The live packager (ADR-0046: a remux of an SRT ingest, its input on a pipe) runs ffmpeg
+  through the same helper and filter. Its command line adds one call, `rename` (`renameat` on
+  AArch64): with `hls_flags temp_file` the HLS muxer writes each segment and the playlist under
+  a `.tmp` name and renames it once closed. The worker's VOD output is written in place, so its
+  traces never showed it, and the first live segment died of `SIGSYS`. Both names stay inside
+  the writable directory, since every other mount is read-only and a rename does not cross
+  mounts. The trace script runs this command line too, with its input on a pipe.
 - Everything else, and every call of another ABI (32-bit, x32), is `SECCOMP_RET_KILL_PROCESS`,
   with `SECCOMP_FILTER_FLAG_LOG` so the kill reaches the audit log.
 - `execve` is allowed: the helper's child needs it once, and the filter cannot tell that one
@@ -70,7 +77,8 @@ and ffmpeg alike and cannot be tighter than the worker needs.
   `mkdir` are replaced by `faccessat` and `mkdirat` where the architecture has no legacy
   calls). AArch64 is untested here.
 - `--no-syscall-filter` leaves it out, for the sandbox's own tests, which run `sh` and `python3`
-  as stand-ins. Only the worker builds the helper's arguments, and it never passes it.
+  as stand-ins. Only the worker and the live packager build the helper's arguments, and neither
+  passes it.
 
 ## Consequences
 

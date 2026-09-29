@@ -7,13 +7,13 @@
 // three-rung HLS transcode the worker issues, over h264/aac mp4, vp9/opus webm, mpeg4/mp3 avi,
 // hevc/aac and av1 mkv, mpegts, flv, ogg, wmv and prores mov inputs, and over truncated,
 // random and empty files. Every input gave the same 40 names as root (41 as an ordinary user), the
-// runtime's start-up and thread creation among them; ioctl, prctl, fcntl and prlimit64 are admitted
-// only with the arguments below, and clone3, which glibc used for threads, is answered ENOSYS so
-// that it uses clone, also checked. The additions marked below are calls the traces could not reach
-// because they need a signal or a clock the runs never met, and tgkill and tkill for SIGABRT alone.
-// Anything else kills the whole process: ptrace, mount, keyctl, bpf, io_uring_setup, socket,
-// unshare, setns, fork, kill and the rest of the kernel's surface a decoder exploit would reach
-// for.
+// runtime's start-up and thread creation among them, and the live packager's remux one more; ioctl,
+// prctl, fcntl and prlimit64 are admitted only with the arguments below, and clone3, which glibc
+// used for threads, is answered ENOSYS so that it uses clone, also checked. The additions marked
+// below are calls the traces could not reach because they need a signal or a clock the runs never
+// met, and tgkill and tkill for SIGABRT alone. Anything else kills the whole process: ptrace,
+// mount, keyctl, bpf, io_uring_setup, socket, unshare, setns, fork, kill and the rest of the
+// kernel's surface a decoder exploit would reach for.
 #pragma once
 
 #include <linux/audit.h>
@@ -111,6 +111,17 @@ inline constexpr std::array kAllowed = {
     SYS_nanosleep,
     SYS_sched_yield,
     SYS_gettid,
+#if defined(SYS_rename)
+    // The live packager's remux sets hls_flags temp_file (live_command.cpp): the HLS muxer's
+    // thread writes every segment and the playlist under a .tmp name and renames it once closed,
+    // so the first finished segment died of this. The worker's VOD output is written in place.
+    // glibc's rename() is this call where the architecture has it and renameat where it does
+    // not. Both names stay in the writable directory: every other mount is read-only, and a
+    // rename does not cross mounts.
+    SYS_rename,
+#else
+    SYS_renameat,
+#endif
 };
 
 // Terminal requests ffmpeg makes of stdin, stdout and stderr to see whether they are terminals.
