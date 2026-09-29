@@ -3,6 +3,7 @@
 #include "infra/curl/http.hpp"
 #include "net/reactor.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -34,12 +35,19 @@ class Multi {
 public:
     class Impl;
 
-    // A ceiling on descriptors and on the sockets the store holds open for us. Transfers beyond
-    // it wait in libcurl's queue, first come first served, for a connection to come free.
-    static constexpr std::size_t kDefaultMaxConnections = 64;
+    // A ceiling on descriptors and on the sockets the peer holds open for us; a transfer beyond
+    // it waits in libcurl's queue, with no timer running, for a connection to come free. An
+    // upload store passes the uploads its process admits, so none of them ever waits
+    // (ADR-0037). Every other multi fetches key sets, one at a time per verifier: 8 leaves room
+    // for overlapping refreshes while still bounding what a fault can open.
+    static constexpr std::size_t kDefaultMaxConnections = 8;
+    // Less than a byte a second for this long ends a transfer, whether the peer stopped reading
+    // or the body source ran dry: the limit a blocking exchange has too.
+    static constexpr std::chrono::seconds kDefaultStallLimit{60};
 
     [[nodiscard]] static std::expected<std::unique_ptr<Multi>, MultiError>
-    create(net::IReactor& reactor, std::size_t max_connections = kDefaultMaxConnections);
+    create(net::IReactor& reactor, std::size_t max_connections = kDefaultMaxConnections,
+           std::chrono::seconds stall_limit = kDefaultStallLimit);
 
     Multi(Token token, std::unique_ptr<Impl> impl) noexcept;
     // Every transfer must be destroyed first.

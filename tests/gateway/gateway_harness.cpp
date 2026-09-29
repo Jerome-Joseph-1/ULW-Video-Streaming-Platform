@@ -38,7 +38,7 @@ struct GatewayUnderTest::Loop final : net::IReadyHandler {
     std::unique_ptr<net::OffloadPool> pool;
     std::unique_ptr<infra::storage::FakeStore> fake;
     std::unique_ptr<infra::storage::FsStore> fs;
-    ulw::test::LiveS3 s3_target = minio_from_env();
+    ulw::test::LiveS3 store_target = minio_from_env();
     std::unique_ptr<infra::curl::Multi> multi;
     std::unique_ptr<infra::storage::S3Store> s3;
     core::ports::IIngestStore* store = nullptr;
@@ -135,22 +135,26 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
         break;
     }
     case Backend::S3: {
-        auto multi = infra::curl::Multi::create(*l.reactor, options.store_connections);
+        auto multi = infra::curl::Multi::create(*l.reactor, options.store_connections,
+                                                options.store_stall_limit);
         if (!multi) {
             static_cast<void>(std::fputs("gateway harness: curl multi refused\n", stderr));
             std::abort();
         }
         l.multi = std::move(*multi);
+        if (options.store_endpoint) {
+            l.store_target.profile = *infra::s3util::S3Profile::minio(*options.store_endpoint);
+        }
         // Signed with the real time whatever the loop's clock says: MinIO refuses a request
         // dated more than 15 minutes from its own.
         auto s3 = infra::storage::S3Store::create(
             infra::storage::S3Store::Deps{.reactor = *l.reactor,
                                           .multi = *l.multi,
-                                          .credentials = l.s3_target.credentials,
+                                          .credentials = l.store_target.credentials,
                                           .clock = l.system_clock,
                                           .random = l.random,
-                                          .profile = l.s3_target.profile,
-                                          .bucket = l.s3_target.bucket},
+                                          .profile = l.store_target.profile,
+                                          .bucket = l.store_target.bucket},
             {.part_size = options.chunk});
         if (!s3) {
             static_cast<void>(std::fputs("gateway harness: s3 store refused\n", stderr));

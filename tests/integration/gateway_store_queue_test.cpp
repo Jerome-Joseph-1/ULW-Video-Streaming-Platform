@@ -66,7 +66,7 @@ protected:
         }
     }
 
-    // The upload's id; its video is remembered so the multipart upload can be aborted after.
+    // The upload's id; its video is remembered so the store's upload can be aborted after.
     [[nodiscard]] std::string create(HttpClient& c) {
         const std::string body = R"({"filename":"trip.mp4","size_bytes":)" +
                                  std::to_string(kUploadBytes) + R"(,"content_type":"video/mp4"})";

@@ -398,7 +398,9 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     // A store that holds the body up is busy as far as the gateway can tell: a part queued for
     // a connection looks exactly like this. Only the store, or the request backstop, ends it.
     const gateway::Limits limits;
-    for (int i = 0; i < 10; ++i) {
+    // Ten body timeouts, far past the 30 s the gateway once allowed a store holding a body.
+    constexpr int kBodyTimeouts = 10;
+    for (int i = 0; i < kBodyTimeouts; ++i) {
         gw.advance(limits.body_idle_timeout);
     }
     const gateway::Counters held = gw.counters();

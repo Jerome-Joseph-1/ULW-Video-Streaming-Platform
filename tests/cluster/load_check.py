@@ -38,8 +38,8 @@ import vod_flow  # noqa: E402
 ROOT = vod_flow.ROOT
 NAMESPACE = vod_flow.NAMESPACE
 SAMPLE_INTERVAL_S = 10
-# The gauges are cheap to read and move fast: once the first uploads finish, the ones waiting
-# for a store connection drain within seconds, and a 10 s poll could miss the peak.
+# The gauges are cheap to read and move fast: every upload streams at the same rate, so they
+# all finish within seconds of each other, and a 10 s poll could miss the peak.
 GAUGE_INTERVAL_S = 2
 # The clip every upload sends: 4 s of 1280x720 at 2 Mbit/s is 1.06 MiB, which SAFE_RATE holds
 # open for 68 s, and a real transcode for the worker, as vod_flow's upload scenario has.
@@ -51,9 +51,8 @@ GATEWAY_UPLOAD_SLOTS = 448
 # room for an upload whose commit lags, so no create is refused with 429.
 UPLOADS_PER_USER = 2
 # Most of the admitted uploads must be in flight together at the peak: the check is void if the
-# driver ramped too slowly or the route dropped them. The gateway streams only as many chunk
-# bodies as the store has connections (64); the rest wait for one, held back rather than
-# failed (docs/adr/0037), so the peak lasts until the first uploads finish.
+# driver ramped too slowly or the route dropped them. Every admitted upload has a store
+# connection of its own (docs/adr/0037), so the peak lasts until the uploads finish.
 MIN_PEAK_FRACTION = 0.9
 WORKLOADS = ("video-gateway", "video-worker")
 
