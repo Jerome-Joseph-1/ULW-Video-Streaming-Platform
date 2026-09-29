@@ -178,4 +178,26 @@ TEST_F(LiveConfigTest, EmptyValuesCountAsUnset) {
     EXPECT_EQ(config->ffmpeg, "ffmpeg");
 }
 
+TEST_F(LiveConfigTest, RecordingIsOffUnlessADatabaseAndAnOwnerAreBothGiven) {
+    EXPECT_FALSE(load()->recording.has_value());
+    env["ULW_DATABASE_URL"] = "postgresql://ulw:secret@db/ulw";
+    EXPECT_EQ(refused_variable(), "ULW_STREAM_OWNER");
+    env["ULW_STREAM_OWNER"] = "auth0|streamer";
+    const auto config = load();
+    ASSERT_TRUE(config && config->recording);
+    EXPECT_EQ(config->recording->database_url, "postgresql://ulw:secret@db/ulw");
+    EXPECT_EQ(config->recording->owner.view(), "auth0|streamer");
+    env.erase("ULW_DATABASE_URL");
+    EXPECT_EQ(refused_variable(), "ULW_DATABASE_URL");
+}
+
+TEST_F(LiveConfigTest, AnOwnerThatIsNotAUserIdIsRefusedWithoutEchoingTheDatabaseUrl) {
+    env["ULW_DATABASE_URL"] = "postgresql://ulw:Sup3rSecret@db/ulw";
+    env["ULW_STREAM_OWNER"] = "no spaces allowed";
+    const auto config = load();
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().variable, "ULW_STREAM_OWNER");
+    EXPECT_EQ(config.error().reason.find("Sup3r"), std::string::npos);
+}
+
 } // namespace
