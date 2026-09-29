@@ -196,8 +196,12 @@ Errors for `watch` and `unwatch`:
 |---|---|---|
 | `malformed` | Missing `user`, or another field | Fix the client |
 | `bad_user` | `user` is not a user id | Fix the client |
+| `watching_self` | `user` is the connection's own user | Nothing to watch: the connection is online |
 | `too_many_watches` | This connection already watches 128 users | Unwatch some first |
-| `busy` | This node watches as many users as it takes, or this user started watching users nobody on this node watched faster than 128 at once and then 1 a second | Back off and retry |
+| `busy` | This node watches as many users as it takes, or this user started watching users no connection on this node was watching (unwatching and watching again counts each time) faster than 128 at once and then 1 a second | Back off and retry |
 
-Room ids of UUID version 8 (the third group starts with `8`) are reserved for presence: `join`
-or `send` naming one is refused with `bad_room`.
+Room ids of UUID version 8 (the third group starts with `8`) are reserved for presence: `join`,
+`send` or `history` naming one is refused with `bad_room`. Presence events are never stored.
+
+Anyone signed in may watch anyone: there is no check of who may see whose presence yet. That is
+an open item before production ([ADR-0053](../adr/0053-presence-over-the-room-plane.md)).

@@ -40,9 +40,12 @@ a word.
 
 - **Rooms.** A user's presence room is the RFC 9562 version 8 UUID of SHA-256 over a fixed
   namespace and the user id (`presence_room.hpp`): every node derives it, nothing is looked up.
-  The registry, ownership, fencing and forwarding are the chat rooms' own. The envelope refuses
-  version 8 room ids in `join` and `send` (`bad_room`), so no client can read or write a
-  presence room, and only nodes speak in one. Events are 9 bytes: a kind and the sender's tag,
+  The registry, ownership, fencing and forwarding are the chat rooms' own. Version 8 is the
+  room plane's ephemeral kind (`rt::is_ephemeral_room`): the store creates such a room with kind
+  `presence` and takes its seqs with the fenced `UPDATE room_state SET last_seq = last_seq + 1`
+  alone, storing no `chat_messages` row, in Postgres and in the in-memory stores alike (a
+  conformance law). The envelope refuses version 8 room ids in `join`, `send` and `history`
+  (`bad_room`), so no client can read or write a presence room, and only nodes speak in one. Events are 9 bytes: a kind and the sender's tag,
   64 bits of SHA-256 over the node's name and its start time, so a restarted node is a new
   sender and its last run's announcements run out on their own.
 - **Membership.** A node joins the room while the user has a connection there or is in their
@@ -50,7 +53,8 @@ a word.
   `ChatService` is for a chat room. It leaves when none of that holds and nothing it said is
   outstanding.
 - **Events.** `hello` (a node started watching), `unwatch`, `probe` (online, and asks watching
-  nodes to `ack`), `ack`, `online` (an answer to a hello, or a renewal), `offline`. Each is
+  nodes to `ack`: a first announcement in a room something was said in, and every renewal),
+  `ack`, `online` (an answer to a hello), `offline`. Each is
   idempotent, so a send that failed (its fate unknown after `unavailable`) is sent again, a
   second later, if the state that called for it still holds. A node has one event in flight per
   room, so its events keep the order it decided them in.
@@ -65,7 +69,10 @@ a word.
   nothing if it had not. A reconnect through another node within the grace is that node's
   `probe` followed by the first node's `offline`: the watchers' verdict stays online throughout.
 - **Zero subscribers.** A user nobody watches has a room joined on their node, whose head is 0,
-  and no event is ever sent. The join is membership, not a message: it costs a registry lookup
+  and no event is ever sent. The head a join answers is the room's `last_seq`, also after the
+  room changed owners: a node taking a room over reads `last_seq` in the statement that claims
+  it (`Ownership::last_seq`, `RoomRegistry::taken_at`) and counts on from there, so a hello said
+  under an earlier owner still shows. The join is membership, not a message: it costs a registry lookup
   (a claim, the first time) and a place in the owner's heartbeat, both already bounded by
   `Limits::max_connections`. `presence_events_sent_total` counts every event, and the cluster
   test checks it, with `forwards_total`, does not move for such a user.
@@ -74,16 +81,28 @@ a word.
   are each at most a second late. Time is the injected clock's.
 - **Node failure.** Who is owed an event is the owner's view of the room's members at the moment
   it sequences it: a node subscribed then gets it once, a node that joins later asks with
-  `hello`. A watching node that dies loses nothing anyone else needs, and its clients watch again
-  when they reconnect. The user's node dying, or draining before a grace runs out, leaves its
-  announcement standing: nodes watching drop it once it has not been renewed for 150 s (renewals
-  every 60 s while another node watches; the derivation is beside `PresenceLimits`), and report
-  offline then, once. The owner dying mid fan-out can lose an event for some nodes: a lost
-  `offline` ends the same way, a lost `online` is repaired by the next renewal.
-- **Limits.** 128 watches per connection, `too_many_watches` past it; 8192 presence rooms per
-  node (half the router's 16384), and a watch that would join a new room past it, or past the
-  user's bucket of 128 refilling at 1 a second, is answered `busy`. At most 64 nodes are
-  remembered per room. About 1 KiB per room: 8 MiB of the node's budget.
+  `hello`.
+  - The user's node dying, or draining before a grace runs out, leaves its announcement
+    standing. Nodes watching drop it once it has not been renewed for 150 s (a `probe` every
+    60 s while another node watches; the derivation is beside `PresenceLimits`) and report
+    offline then, once.
+  - A watching node that dies leaves its tag in the announcing node's list of watchers. The
+    renewal probes it no longer acks let that entry expire after the same 150 s, and renewals
+    stop once no other node is left.
+  - The owner dying mid fan-out can cost some nodes an event. A node sees that as a jump in the
+    room's seqs at its next delivery and says again what it stands for: a `hello` if it watches,
+    an announcement if the user is connected there. A lost `offline` needs no repeat, since
+    the lease drops the announcement anyway. The router's join answer can itself lag a seq the
+    old owner took and never delivered; the same jump shows it.
+- **Limits.** 128 watches per connection, `too_many_watches` past it; watching oneself is
+  `watching_self`. 8192 presence rooms per node (half the router's 16384): a watch that would
+  make a new room past it is `busy`. Every watch that makes this node start watching a user
+  (the room's local watchers go from none to one, which costs a `hello` and later an `unwatch`)
+  takes a token from the watching user's bucket of 128 refilling at 1 a second, `busy` past it,
+  so watching and unwatching in a loop is held to a second per round. At most 64 nodes are
+  remembered per room. About 1 KiB per room (8 MiB) and 16 bytes per watch (a room pointer in
+  the connection's list, an id in the room's; 2.6 MiB for 1280 connections of 128): 11 MiB of
+  the node's budget.
 - **Layering.** `chat_service.cpp` and `room_router.cpp` are untouched: the session dispatches
   `watch` and `unwatch` to `Presence`, which uses `IRooms` as `ChatService` does. Presence
   events are the nodes' own bytes in rooms no client can reach; end-to-end encryption, which is
@@ -94,16 +113,20 @@ a word.
 - Every connected user costs their node one joined room, whether or not anyone watches. That is
   the price of hearing a hello without a directory; rooms are bounded by connections (1280),
   well inside the router's cap.
-- A user watched once and no longer still costs a `probe` and an `offline` per session while the
-  owner of their room that heard it keeps it: the head is above 0 until the room is given up
-  (60 s after its last member left).
+- A user who was ever watched costs a `probe` and an `offline` per session from then on, watched
+  or not: the room's `last_seq` is above 0 for good, and the user's node cannot tell a room
+  whose watchers left from one with watchers who spoke before it joined.
 - A node that dies or drains holds its users online for up to 150 s after it stops renewing, and
-  a watching node that lost an `online` in an owner's failure shows the user offline for up to a
-  minute. Both are bounded by the lease; neither shows a flap.
+  a watching node that lost an `online` in an owner's failure shows the user offline until the
+  room's next event shows the gap, a minute at most (the next renewal). Both are bounded by the
+  lease; neither shows a flap.
 - A watch answered `watching` with `offline` for a user connected elsewhere is followed within a
   round trip by `presence` `online`: the answer is what the node knew, before the hello's
   answers arrived.
-- Once messages are stored (M19), every presence event is a row: the store keeps what it is
-  asked to sequence. They are 9 bytes each and only watched users make them.
-- Anyone may watch anyone, as anyone may join any chat room until M19's membership checks;
-  whether presence follows those checks is M19's to decide.
+- Presence events are sequenced and fanned out but never stored: a room's history is not a
+  record of who was online when. A client that missed events cannot fetch them; it watches
+  again and is answered with the state.
+- **Open before production: authorization.** Anyone signed in may watch anyone, and learn when
+  they are online. Nothing in the brief asks for a rule, and the envelope has no place for one
+  yet; whether watching needs a shared room, a contact, or a check with Askedin's platform must
+  be decided before presence is offered to real users.

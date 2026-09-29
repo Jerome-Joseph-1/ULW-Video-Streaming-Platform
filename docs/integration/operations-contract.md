@@ -186,8 +186,9 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `fenced_writes_total`, `forwards_total`, `forward_timeouts_total`, `peers_lost_total`,
 `peers_refused_total`, `slow_peers_total`, `presence_rooms`, `presence_events_sent_total`,
 `presence_events_received_total`, `presence_notifications_total`, `presence_expired_total`
-(announcements dropped because the node that made them stopped renewing them, normally a node
-that died). Chat is a draft ([chat.md](chat.md)).
+(announcements and watching nodes dropped because they stopped being renewed, normally a node
+that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
+node repeated what it had said there). Chat is a draft ([chat.md](chat.md)).
 
 ## Shutdown
 
