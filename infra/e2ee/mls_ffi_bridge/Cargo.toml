@@ -1,0 +1,23 @@
+[package]
+name = "mls_ffi_bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+description = "A narrow C API over OpenMLS for the test harnesses and the client harness"
+
+[lib]
+crate-type = ["staticlib"]
+
+# Exact versions: Cargo.lock pins the rest of the graph, and each crate's SHA-256 with it.
+[dependencies]
+openmls = "=0.9.0"
+openmls_basic_credential = "=0.6.0"
+openmls_rust_crypto = "=0.6.0"
+openmls_traits = "=0.6.0"
+
+[dev-dependencies]
+cbindgen = { version = "=0.29.4", default-features = false }
+
+[profile.release]
+debug = "line-tables-only"
