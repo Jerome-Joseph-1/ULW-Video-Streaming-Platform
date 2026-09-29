@@ -37,6 +37,10 @@ set_target_properties(mls_ffi_bridge PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES ${ulw_mls_crate}/include
     INTERFACE_LINK_LIBRARIES "gcc_s;util;rt;Threads::Threads;m;${CMAKE_DL_LIBS}")
 add_dependencies(mls_ffi_bridge mls_ffi_bridge_build)
+# For tests that run cargo against the same build: tests/CMakeLists.txt reads these.
+set_target_properties(mls_ffi_bridge PROPERTIES
+    ULW_CRATE_DIR ${ulw_mls_crate}
+    ULW_CARGO_TARGET_DIR ${ulw_mls_target_dir})
 
 ulw_add_library(e2ee_mls src/mls.cpp)
 target_include_directories(e2ee_mls PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
