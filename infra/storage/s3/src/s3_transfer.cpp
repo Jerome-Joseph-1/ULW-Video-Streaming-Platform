@@ -163,12 +163,48 @@ public:
                 return sent;
             }
         }
-        auto completed = s3::complete_upload(control_, bucket_, key_, upload_id_, parts_);
-        done_ = completed.has_value();
-        return completed;
+        const auto completed = s3::complete_upload(control_, bucket_, key_, upload_id_, parts_);
+        if (completed) {
+            done_ = true;
+            return {};
+        }
+        if (completed.error() != StorageError::NotFound) {
+            return completed;
+        }
+        // A retry of a completion whose answer was lost finds the upload gone. The key is this
+        // stream's alone, so an object of its length there is its own.
+        const auto present = whole_object_present();
+        done_ = present.has_value();
+        return present;
     }
 
 private:
+    std::expected<void, StorageError> whole_object_present() {
+        const auto target = bucket_.object(key_);
+        auto length =
+            control_.retrying<std::uint64_t>([&]() -> std::expected<std::uint64_t, Failed> {
+                auto response = control_.send(curl::Method::Head, target, {}, {}, 0);
+                if (!response) {
+                    return std::unexpected(response.error());
+                }
+                const auto header = response->header("content-length");
+                const auto size =
+                    header ? core::parse_integer<std::uint64_t>(*header) : std::nullopt;
+                if (!size) {
+                    return std::unexpected(
+                        Failed{.error = StorageError::Corrupt, .retry_after = {}});
+                }
+                return *size;
+            });
+        if (!length) {
+            return std::unexpected(length.error());
+        }
+        if (*length != written_) {
+            return std::unexpected(StorageError::NotFound);
+        }
+        return {};
+    }
+
     std::expected<void, StorageError> send_part() {
         const auto number = static_cast<std::uint32_t>(parts_.size() + 1);
         const auto target =

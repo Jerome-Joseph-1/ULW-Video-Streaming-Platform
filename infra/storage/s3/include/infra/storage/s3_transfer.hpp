@@ -29,7 +29,8 @@ enum class S3TransferConfigError : std::uint8_t { InvalidBucket, InvalidRetryPol
 // file's SHA-256, which is hashed first in a separate pass, so plain-HTTP endpoints (MinIO in
 // development) verify the body too. Transient failures are retried with jittered backoff.
 // Streams are multipart uploads of stream_part_bytes() parts, each held in memory until it is
-// sent; a stream must not outlive the transfer that began it.
+// sent; a stream must not outlive the transfer that began it, and nothing else may write its
+// key: a completion whose answer was lost is confirmed by the object found under the key.
 class S3Transfer final : public core::ports::IObjectTransfer, public core::ports::IObjectStreams {
     struct Token {
         explicit Token() = default;
