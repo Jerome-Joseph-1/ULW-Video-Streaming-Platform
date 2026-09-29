@@ -345,7 +345,9 @@ SELECT string_agg(query_to_xml(format('SELECT t::text AS row FROM %I.%I t', tabl
 
     // Section 8.15: bodies are never logged, indexed or stored as anything a grep could read.
     // The database is searched for each body as it was sent, as the client encoded it, and as
-    // bytea would show it.
+    // bytea would show it. Until messages are stored (M19) there are no rows a body could be
+    // in, so only the logs half can fail; from then on this must also check that the rows grew
+    // by the stored bodies, or it proves nothing about them.
     void expect_no_plaintext(const std::vector<std::string>& bodies) const {
         const std::string database = database_text();
         ASSERT_NE(database.find(room_), std::string::npos) << "no rows read";

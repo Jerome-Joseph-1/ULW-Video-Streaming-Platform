@@ -111,6 +111,9 @@ need no change for it: whatever end-to-end encryption needs from them has to be 
   with that outage accepted.
 - The message ids are visible to everyone in the room, and so are part of what a client must
   not put anything secret into.
+- No message is stored in M17, so the acceptance test's search of the database for bodies
+  cannot fail yet; only its search of the logs can. At M19 it must also check that the rows
+  grew by the bodies stored.
 - Presence (M18) builds on the same per-node room membership; persistence (M19) adds history by
   seq for gaps, stored keys for retries across owners, membership checks on join, and the
   room's delivery kind from `room_state`.
