@@ -24,7 +24,7 @@ void Health::record(bool database_up, bool store_up, core::MonoTime at) noexcept
 
 void Health::set_oldest_queued(std::optional<core::Seconds> age) noexcept {
     const auto seconds = age ? std::max<core::Seconds::rep>(age->count(), 0) : 0;
-    oldest_queued_.store(static_cast<std::uint64_t>(seconds), std::memory_order_relaxed);
+    oldest_queued_.store(seconds, std::memory_order_relaxed);
 }
 
 void Health::set_process(std::optional<std::uint64_t> fds,
@@ -63,6 +63,8 @@ void HealthProbe::probe_once() {
     const auto store = checks_.store();
     if (database) {
         health_.set_oldest_queued(*database);
+    } else {
+        health_.forget_oldest_queued();
     }
     health_.set_process(ops::open_descriptors(), ops::resident_bytes());
     if (checks_.store_paging_errors) {

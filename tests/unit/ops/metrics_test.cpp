@@ -2,6 +2,7 @@
 
 #include <array>
 #include <gtest/gtest.h>
+#include <limits>
 
 namespace {
 
@@ -29,6 +30,14 @@ TEST(Exposition, LabelValuesAndHelpAreEscaped) {
     e.family("x", "a\\b\nc", ops::MetricType::Gauge);
     e.sample("x", {{.name = "v", .value = "q\"\\\n"}}, std::uint64_t{1});
     EXPECT_EQ(e.text(), "# HELP x a\\\\b\\nc\n# TYPE x gauge\nx{v=\"q\\\"\\\\\\n\"} 1\n");
+}
+
+TEST(Exposition, UnknownAndInfiniteValuesAreSpelledAsPrometheusReadsThem) {
+    ops::Exposition e;
+    e.gauge("a", "h", std::numeric_limits<double>::quiet_NaN());
+    e.gauge("b", "h", std::numeric_limits<double>::infinity());
+    EXPECT_NE(e.text().find("\na NaN\n"), std::string::npos) << e.text();
+    EXPECT_NE(e.text().find("\nb +Inf\n"), std::string::npos) << e.text();
 }
 
 TEST(Histogram, BucketsAreCumulativeAndEndInInf) {

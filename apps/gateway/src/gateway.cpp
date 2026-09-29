@@ -7,6 +7,7 @@
 #include "ops/metrics.hpp"
 
 #include <array>
+#include <limits>
 #include <string_view>
 
 namespace gateway {
@@ -241,9 +242,13 @@ std::string Gateway::render_metrics() {
     e.counter("view_events_dropped_total", "View events refused or lost with a failed batch.",
               v.dropped);
     e.counter("view_batches_failed_total", "View batches the database refused.", v.failed_batches);
+    // NaN while the database is out of reach: a frozen last value would read as a queue that
+    // stopped aging, and 0 as an empty one.
+    const auto oldest = h.oldest_queued_seconds();
     e.gauge("jobs_oldest_queued_seconds",
-            "How long the oldest transcode job due to run has waited; 0 when none waits.",
-            h.oldest_queued_seconds());
+            "How long the oldest transcode job due to run has waited; 0 when none waits, NaN "
+            "when the database did not answer.",
+            oldest ? static_cast<double>(*oldest) : std::numeric_limits<double>::quiet_NaN());
     e.counter("store_paging_errors_total",
               "Store failures only a fix on our side cures: signature, credentials, bucket.",
               h.store_paging_errors());

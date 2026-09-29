@@ -284,7 +284,8 @@ TEST_F(GatewayProcessTest, TheOldestDueJobsAgeIsExported) {
         }
         const std::string value =
             r->body.substr(at + name.size(), r->body.find('\n', at + 1) - at - name.size());
-        return std::stoi(value) >= 90;
+        // NaN until the first probe has asked.
+        return value != "NaN" && std::stoi(value) >= 90;
     })) << gateway_->output();
     gateway_->signal(SIGTERM);
     EXPECT_EQ(gateway_->wait_exit(kPatience), 0);

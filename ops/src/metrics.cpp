@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <format>
 #include <iterator>
 
@@ -90,7 +91,14 @@ void Exposition::sample(std::string_view name, std::initializer_list<Label> labe
 
 void Exposition::sample(std::string_view name, std::initializer_list<Label> labels, double value) {
     series(name, {}, labels);
-    std::format_to(std::back_inserter(out_), "{}\n", value);
+    // The format spells these as Go does; std::format would write nan and inf.
+    if (std::isnan(value)) {
+        out_ += "NaN\n";
+    } else if (std::isinf(value)) {
+        out_ += value > 0 ? "+Inf\n" : "-Inf\n";
+    } else {
+        std::format_to(std::back_inserter(out_), "{}\n", value);
+    }
 }
 
 void Exposition::counter(std::string_view name, std::string_view help, std::uint64_t value) {

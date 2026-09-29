@@ -92,12 +92,12 @@ TEST_F(HealthProbeTest, TheQueueAgeAndStoreCountsAreCarriedOver) {
     oldest.reset();
     probe.probe_once();
     EXPECT_EQ(health.oldest_queued_seconds(), 0U);
-    // An unreachable database says nothing about the queue; the last age stands.
+    // An unreachable database says nothing about the queue; the last age does not stand in.
     oldest = core::Seconds{7};
     probe.probe_once();
     database_error = "gone";
     probe.probe_once();
-    EXPECT_EQ(health.oldest_queued_seconds(), 7U);
+    EXPECT_EQ(health.oldest_queued_seconds(), std::nullopt);
 }
 
 TEST_F(HealthProbeTest, StoppingLetsTheProbeInProgressFinishAndStartsNoOther) {

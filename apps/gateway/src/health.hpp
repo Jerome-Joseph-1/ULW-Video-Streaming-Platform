@@ -34,7 +34,10 @@ inline constexpr core::Millis kProbeStale{30'000};
 class Health {
 public:
     void record(bool database_up, bool store_up, core::MonoTime at) noexcept;
+    // `age` of nullopt: nothing waits. Called only with an answer from the database.
     void set_oldest_queued(std::optional<core::Seconds> age) noexcept;
+    // The database did not answer, so nobody knows how old the queue is.
+    void forget_oldest_queued() noexcept { oldest_queued_.store(-1, std::memory_order_relaxed); }
     void set_process(std::optional<std::uint64_t> fds,
                      std::optional<std::uint64_t> resident) noexcept;
     void set_store_paging_errors(std::uint64_t n) noexcept {
@@ -48,9 +51,10 @@ public:
     [[nodiscard]] bool store_up() const noexcept {
         return store_up_.load(std::memory_order_relaxed);
     }
-    // Zero when nothing is waiting.
-    [[nodiscard]] std::uint64_t oldest_queued_seconds() const noexcept {
-        return oldest_queued_.load(std::memory_order_relaxed);
+    // Zero when nothing is waiting; nullopt while the last probe could not ask.
+    [[nodiscard]] std::optional<std::uint64_t> oldest_queued_seconds() const noexcept {
+        const std::int64_t age = oldest_queued_.load(std::memory_order_relaxed);
+        return age < 0 ? std::nullopt : std::optional(static_cast<std::uint64_t>(age));
     }
     [[nodiscard]] std::uint64_t open_fds() const noexcept {
         return fds_.load(std::memory_order_relaxed);
@@ -67,7 +71,8 @@ private:
     std::atomic<bool> store_up_{false};
     // Steady-clock milliseconds; zero until the first probe finishes.
     std::atomic<std::int64_t> probed_at_ms_{0};
-    std::atomic<std::uint64_t> oldest_queued_{0};
+    // -1 until the database has answered, and again whenever it does not.
+    std::atomic<std::int64_t> oldest_queued_{-1};
     std::atomic<std::uint64_t> fds_{0};
     std::atomic<std::uint64_t> resident_{0};
     std::atomic<std::uint64_t> paging_errors_{0};

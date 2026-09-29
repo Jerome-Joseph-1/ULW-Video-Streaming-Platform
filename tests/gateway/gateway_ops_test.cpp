@@ -176,6 +176,13 @@ TEST(GatewayMetrics, CountersFollowTheTrafficTheyCount) {
     EXPECT_NE(build.find(R"(git_sha=")"), std::string::npos) << build;
 }
 
+TEST(GatewayMetrics, TheQueueAgeIsUnknownRatherThanStaleOrZeroWithoutADatabase) {
+    // The harness's probe has not asked a database, so there is no age to report.
+    const GatewayUnderTest gw(GatewayOptions{});
+    const std::string m = scrape(gw);
+    EXPECT_NE(m.find("\njobs_oldest_queued_seconds NaN\n"), std::string::npos) << m;
+}
+
 TEST(GatewayMetrics, ChunkUploadsAreTimedIntoTheHistogram) {
     const GatewayUnderTest gw(GatewayOptions{.backend = Backend::Fake, .chunk = kMiB});
     HttpClient c(gw.endpoint());
