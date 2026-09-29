@@ -326,6 +326,8 @@ protected:
             "INSERT INTO chat_rooms (room_id, kind) "
             "SELECT $1::text::uuid, 'stream_live_chat' WHERE NOT EXISTS "
             "(SELECT 1 FROM chat_members WHERE room_id = $1::text::uuid) "
+            "AND NOT EXISTS (SELECT 1 FROM room_state WHERE room_id = $1::text::uuid "
+            "AND kind <> 'stream_live_chat') "
             "ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind RETURNING kind",
             Params{}.add_text(room));
     }

@@ -208,13 +208,16 @@ room live, before anyone joins it, as the service's role:
 INSERT INTO chat_rooms (room_id, kind)
 SELECT '<room uuid>', 'stream_live_chat'
  WHERE NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = '<room uuid>')
+   AND NOT EXISTS (SELECT 1 FROM room_state
+                    WHERE room_id = '<room uuid>' AND kind <> 'stream_live_chat')
 ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind
 RETURNING kind;
 ```
 
 It must print `stream_live_chat`. Anything else (`group_chat`, `direct_chat`, or no row, when the
-room lists members) means the room is closed, and stays so: a recorded kind never changes, so a
-room that was joined or listed before it was opened needs a new room id.
+room lists members or was already created closed) means the room is closed, and stays so: a
+recorded kind never changes, so a room that was joined, listed or created before it was opened,
+including every room from before M19 (migration 0006), needs a new room id.
 
 The chat nodes speak a versioned channel to each other (docs/adr/0043), and a node refuses a
 peer of another version. A release that changes the version (M19 moves it from 2 to 3) splits a

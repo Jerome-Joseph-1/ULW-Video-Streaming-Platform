@@ -259,7 +259,7 @@ public:
             done_(std::unexpected(MessageStoreError::Unavailable));
             return std::nullopt;
         }
-        // No row: the room lists members and has no kind recorded.
+        // No row: no kind recorded, and the room lists members or was created as another kind.
         if (outcome->rows() == 0) {
             done_(std::unexpected(MessageStoreError::Conflict));
             return std::nullopt;

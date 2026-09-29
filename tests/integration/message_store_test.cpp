@@ -235,6 +235,34 @@ TEST_F(MessageStoreTest, AMemberInsertInFlightAndAFirstJoinNeverLeaveTheRoomOpen
               "group_chat");
 }
 
+// A room the room plane created closed keeps its kind and delivery in room_state, so it cannot be
+// opened afterwards: chat_rooms and room_state would disagree. One opened before it was created
+// is created live, and opening it again still answers ok.
+TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
+    const core::RoomId closed = new_room();
+    ASSERT_NE(own(closed), 0U);
+    EXPECT_EQ(ask<void>([&](auto done) { store_->record_live(closed, std::move(done)); }),
+              MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_rooms WHERE room_id = $1",
+                     Params{}.add_uuid(closed.uuid())),
+              "0");
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', kind, delivery) FROM room_state "
+                     "WHERE room_id = $1",
+                     Params{}.add_uuid(closed.uuid())),
+              "group_chat durable");
+
+    const core::RoomId live = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
+    ASSERT_NE(own(live), 0U);
+    EXPECT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', kind, delivery) FROM room_state "
+                     "WHERE room_id = $1",
+                     Params{}.add_uuid(live.uuid())),
+              "stream_live_chat lossy");
+}
+
 // A join reads a recorded room's kind and writes nothing.
 TEST_F(MessageStoreTest, AJoinOfARecordedRoomWritesNothing) {
     const core::RoomId room = new_room();
