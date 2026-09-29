@@ -1,13 +1,18 @@
 #include "result.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <format>
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace {
 
 using infra::postgres::parse_bool;
+using infra::postgres::parse_hex;
 using infra::postgres::parse_int64;
 using infra::postgres::parse_uint64;
 
@@ -43,6 +48,24 @@ TEST(ParseBool, AcceptsOnlyTheServersTextForm) {
     EXPECT_EQ(parse_bool("f"), false);
     EXPECT_EQ(parse_bool("true"), std::nullopt);
     EXPECT_EQ(parse_bool(""), std::nullopt);
+}
+
+TEST(ParseHex, ReadsEveryByteValue) {
+    std::string hex;
+    std::vector<std::byte> all;
+    for (unsigned v = 0; v < 256; ++v) {
+        hex += std::format("{:02x}", v);
+        all.push_back(static_cast<std::byte>(v));
+    }
+    EXPECT_EQ(parse_hex(hex), all);
+    EXPECT_EQ(parse_hex(""), std::vector<std::byte>{});
+}
+
+TEST(ParseHex, RejectsAnOddLengthUppercaseAndPrefixes) {
+    EXPECT_EQ(parse_hex("abc"), std::nullopt);
+    EXPECT_EQ(parse_hex("AB"), std::nullopt);
+    EXPECT_EQ(parse_hex("\\x00"), std::nullopt);
+    EXPECT_EQ(parse_hex("0g"), std::nullopt);
 }
 
 } // namespace

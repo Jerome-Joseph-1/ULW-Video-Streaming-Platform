@@ -45,7 +45,16 @@ Params& Params::add_uuid(const core::Uuid& value) noexcept {
 
 Params& Params::add_text(std::string_view value) noexcept {
     Slot& slot = push(kTextOid);
-    slot.text = value;
+    slot.borrowed = value;
+    slot.length = value.size();
+    return *this;
+}
+
+Params& Params::add_bytes(std::span<const std::byte> value) noexcept {
+    Slot& slot = push(kByteaOid);
+    // libpq takes every value as char; std::byte and char may alias each other.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    slot.borrowed = {reinterpret_cast<const char*>(value.data()), value.size()};
     slot.length = value.size();
     return *this;
 }
@@ -54,13 +63,14 @@ Params::Wire Params::wire() const noexcept {
     Wire wire;
     for (std::size_t i = 0; i < count_; ++i) {
         const Slot& slot = slots_[i];
-        if (slot.type == kTextOid) {
+        if (slot.type == kTextOid || slot.type == kByteaOid) {
             // A null pointer means SQL NULL, and an empty view may well have one.
-            wire.values[i] = slot.text.empty() ? "" : slot.text.data();
+            wire.values[i] = slot.borrowed.empty() ? "" : slot.borrowed.data();
         } else {
             wire.values[i] = slot.bytes.data();
         }
-        // Every value we bind is far below 2 GiB: titles, keys, reasons, fixed-width numbers.
+        // Every value we bind is far below 2 GiB: titles, keys, reasons, fixed-width numbers,
+        // message bodies of at most 64 KiB.
         wire.lengths[i] = static_cast<int>(slot.length);
         wire.formats[i] = 1;
         wire.types[i] = slot.type;

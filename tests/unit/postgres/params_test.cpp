@@ -12,6 +12,7 @@
 namespace {
 
 using infra::postgres::kBoolOid;
+using infra::postgres::kByteaOid;
 using infra::postgres::kInt8Oid;
 using infra::postgres::kTextOid;
 using infra::postgres::kUuidOid;
@@ -65,6 +66,17 @@ TEST(Params, EmptyTextIsAnEmptyValueNotNull) {
     const Params::Wire wire = params.wire();
     EXPECT_NE(wire.values[0], nullptr);
     EXPECT_EQ(wire.lengths[0], 0);
+}
+
+TEST(Params, BytesBindAsBinaryByteaWithoutACopy) {
+    const std::array body{std::byte{0x00}, std::byte{0xff}, std::byte{0x5c}, std::byte{0x27}};
+    Params params;
+    params.add_bytes(body);
+    const Params::Wire wire = params.wire();
+    EXPECT_EQ(wire.types[0], kByteaOid);
+    EXPECT_EQ(wire.formats[0], 1);
+    EXPECT_EQ(static_cast<const void*>(wire.values[0]), static_cast<const void*>(body.data()));
+    EXPECT_EQ(bytes_of(wire, 0), std::string("\x00\xff\\'", 4));
 }
 
 TEST(Params, BoolIsOneByte) {

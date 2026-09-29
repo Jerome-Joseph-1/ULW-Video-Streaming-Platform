@@ -21,6 +21,16 @@ template <class T> std::optional<T> parse_whole(std::string_view text) noexcept 
     return value;
 }
 
+std::optional<std::uint8_t> hex_digit(char c) noexcept {
+    if (c >= '0' && c <= '9') {
+        return static_cast<std::uint8_t>(c - '0');
+    }
+    if (c >= 'a' && c <= 'f') {
+        return static_cast<std::uint8_t>(c - 'a' + 10);
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 std::optional<std::string_view> Result::get(int row, int column) const noexcept {
@@ -52,6 +62,22 @@ std::optional<bool> parse_bool(std::string_view text) noexcept {
         return false;
     }
     return std::nullopt;
+}
+
+std::optional<std::vector<std::byte>> parse_hex(std::string_view text) {
+    if (text.size() % 2 != 0) {
+        return std::nullopt;
+    }
+    std::vector<std::byte> out(text.size() / 2);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const auto high = hex_digit(text[2 * i]);
+        const auto low = hex_digit(text[(2 * i) + 1]);
+        if (!high || !low) {
+            return std::nullopt;
+        }
+        out[i] = static_cast<std::byte>((*high << 4U) | *low);
+    }
+    return out;
 }
 
 } // namespace infra::postgres

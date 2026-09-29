@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <libpq-fe.h>
+#include <span>
 #include <string_view>
 
 namespace infra::postgres {
@@ -13,6 +14,7 @@ namespace infra::postgres {
 // Built-in type OIDs are fixed by the system catalog and never renumbered; libpq ships no header
 // that names them.
 inline constexpr Oid kBoolOid = 16;
+inline constexpr Oid kByteaOid = 17;
 inline constexpr Oid kInt8Oid = 20;
 inline constexpr Oid kTextOid = 25;
 inline constexpr Oid kUuidOid = 2950;
@@ -30,6 +32,8 @@ public:
     Params& add_uuid(const core::Uuid& value) noexcept;
     // Borrowed: the viewed bytes must stay put until the statement has been sent.
     Params& add_text(std::string_view value) noexcept;
+    // Borrowed, as text is. Bytes bind as they are: no escaping, no hex.
+    Params& add_bytes(std::span<const std::byte> value) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return count_; }
 
@@ -50,7 +54,8 @@ private:
         // Fixed-width values, already in network byte order.
         std::array<char, core::Uuid::kByteLength> bytes{};
         std::size_t length = 0;
-        std::string_view text;
+        // Text and bytea values, borrowed.
+        std::string_view borrowed;
     };
 
     Slot& push(Oid type) noexcept;
