@@ -219,14 +219,28 @@ ulw_add_test_suite(gateway_tests unit
     gateway/gateway_harness.cpp
     gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
+    gateway/gateway_store_stall_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
     gateway/health_test.cpp
     gateway/key_fetcher_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
-    ulw::test_tls OpenSSL::Crypto)
+    ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# The gateway over the S3 store and the MinIO of deploy/local/compose.yaml.
+ulw_add_test_suite(gateway_store_integration_tests integration
+    gateway/gateway_harness.cpp
+    integration/gateway_store_queue_test.cpp)
+target_link_libraries(gateway_store_integration_tests PRIVATE
+    ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_tls
+    ulw::storage_s3 ulw::test_live_s3)
+target_include_directories(gateway_store_integration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/gateway)
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(gateway_store_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 
 # Not a test: the M9 memory measurement, run by hand (see the file's header).
 ulw_add_executable(ulw_gateway_load load/gateway_load.cpp)
@@ -386,6 +400,40 @@ ulw_add_test_suite(e2ee_integration_tests integration
 target_link_libraries(e2ee_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(e2ee_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
+if(ULW_BUILD_MLS)
+    ulw_add_test_suite(mls_unit_tests unit
+        unit/e2ee/mls_ffi_test.cpp
+        unit/e2ee/mls_test.cpp)
+    # The FFI test drives the bridge's C API directly, as well as through the wrapper.
+    target_link_libraries(mls_unit_tests PRIVATE ulw::e2ee_mls mls_ffi_bridge)
+
+    # The crate's own tests, among them the check that the committed C header is what cbindgen
+    # makes of src/lib.rs. Release, like the library, so the dependencies built once serve both.
+    add_test(NAME mls_ffi_bridge_cargo_tests
+        COMMAND ${ULW_CARGO_OFFLINE} test --release --locked --offline
+            --target-dir $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CARGO_TARGET_DIR>
+        WORKING_DIRECTORY $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CRATE_DIR>)
+    set_tests_properties(mls_ffi_bridge_cargo_tests PROPERTIES LABELS unit)
+
+    ulw_add_executable(mls_fuzz_replay fuzz/mls_fuzz.cpp fuzz/replay_main.cpp)
+    target_link_libraries(mls_fuzz_replay PRIVATE mls_ffi_bridge)
+    add_test(NAME mls_fuzz_corpus
+        COMMAND mls_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/mls)
+    set_tests_properties(mls_fuzz_corpus PROPERTIES LABELS unit)
+
+    if(ULW_FUZZ)
+        ulw_add_executable(mls_fuzz fuzz/mls_fuzz.cpp)
+        target_link_libraries(mls_fuzz PRIVATE mls_ffi_bridge_fuzz)
+        target_compile_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+        target_link_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+    endif()
+
+    # Three devices through the Postgres directory: key packages fetched from it, commits
+    # ordered by its epoch claims.
+    target_sources(e2ee_integration_tests PRIVATE integration/mls_directory_test.cpp)
+    target_link_libraries(e2ee_integration_tests PRIVATE ulw::e2ee_mls)
+endif()
 
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp

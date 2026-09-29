@@ -125,12 +125,11 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `admission_rejections_total` | counter | PATCHes answered `429` or `503` by admission |
 | `bytes_ingested_total` | counter | Chunk body bytes received |
 | `part_upload_duration_seconds` | histogram | From a chunk's first byte handed to the store to all of it durable |
-| `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more |
+| `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more, observed when it ends: the store takes bytes again, fails the part (`503`), or the request ends (backstop, client gone). Buckets to 300 s; a store taking nothing is failed at about 60 s (ADR-0045) |
 | `buffer_bytes_in_use` | gauge | Bytes held in connections' staging and body buffers |
 | `timeouts_total{kind="header"}` | counter | Request head not complete within 10 s, or an idle keep-alive closed |
 | `timeouts_total{kind="body"}` | counter | Body idle 30 s (`408`) |
 | `timeouts_total{kind="body_rate"}` | counter | Body under 8 KiB/s over a 30 s window (`408`) |
-| `timeouts_total{kind="backend"}` | counter | The store took nothing for 30 s (`503`) |
 | `timeouts_total{kind="backstop"}` | counter | Request older than 6 h, closed |
 | `tls_handshakes_in_flight` | gauge | Only with `ULW_TRANSPORT=tls` |
 | `tls_handshake_failures_total` | counter | |
@@ -148,7 +147,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 Worth alerting on: `readyz` failing outside a rollout; any rise in `playlists_rejected_total`,
 `presign_failures_total`, `view_batches_failed_total` or `store_paging_errors_total` (page:
 retrying will not fix it); `admission_rejections_total` rising steadily;
-`timeouts_total{kind="backend"}` rising (the bucket is slow); `jobs_oldest_queued_seconds`
+`backend_write_stall_seconds` observations at 30 s and above rising (the bucket is slow); `jobs_oldest_queued_seconds`
 growing (the workers are behind or down); `log_messages_dropped_total` rising.
 
 ### Logs
