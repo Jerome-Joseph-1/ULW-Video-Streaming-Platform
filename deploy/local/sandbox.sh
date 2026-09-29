@@ -1,5 +1,6 @@
-# The sandbox cluster's name, kubeconfig and context, sourced by the scripts beside it after they
-# set $here and $tools. Every kubectl call they make goes through kubectl() below, which names
+# The sandbox cluster's name, kubeconfig and context, and the helpers that create it and load
+# images into it; sourced by the scripts beside it and deploy/stunner/up.sh after they set
+# $here (deploy/local) and $tools. Every kubectl call they make goes through kubectl() below, which names
 # the kubeconfig and context outright: neither a KUBECONFIG in the caller's environment nor a
 # missing file can point one at another cluster.
 cluster=ulw-e2e
@@ -53,4 +54,22 @@ require_sandbox() {
             "this machine; refusing" >&2
         return 1
     fi
+}
+
+# load_image IMAGE puts an image from the local store into the node. Only the node's platform
+# is saved: the local store may hold just that one of a multi-platform image.
+load_image() {
+    local archive=$here/.state/images/${1//[\/:]/_}.tar
+    mkdir -p "$here/.state/images"
+    docker save --platform linux/amd64 --output "$archive" "$1"
+    "$tools/kind" load image-archive --name "$cluster" "$archive"
+    rm -f "$archive"
+}
+
+# pinned IMAGE DIGEST pulls IMAGE's content by digest and loads it into the node under IMAGE's
+# tag, the name the manifests use there (images.sh).
+pinned() {
+    docker pull --quiet "${1%:*}@$2" >/dev/null
+    docker tag "${1%:*}@$2" "$1"
+    load_image "$1"
 }

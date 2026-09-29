@@ -59,15 +59,6 @@ for proxy in HTTPS_PROXY https_proxy NO_PROXY no_proxy; do
 done
 [[ -n ${ULW_CA_BUNDLE:-} ]] && build_args+=(--secret "id=ca-bundle,src=$ULW_CA_BUNDLE")
 
-# load IMAGE puts an image from the local store into the node. Only the node's platform is
-# saved: the local store may hold just that one of a multi-platform image.
-load() {
-    local archive=$state/images/${1//[\/:]/_}.tar
-    docker save --platform linux/amd64 --output "$archive" "$1"
-    kind load image-archive --name "$cluster" "$archive"
-    rm -f "$archive"
-}
-
 # build IMAGE CONTEXT DOCKERFILE [TARGET]
 build() {
     local image=$1 context=$2 dockerfile=$3 target=${4:-}
@@ -81,7 +72,7 @@ build() {
         rm -f "$archive"
     else
         docker buildx build "${args[@]}" --load --tag "$image" "$context"
-        load "$image"
+        load_image "$image"
     fi
 }
 
@@ -89,12 +80,6 @@ build "${built_images[0]}" "$root" "$root/deploy/docker/Dockerfile" gateway
 build "${built_images[1]}" "$root" "$root/deploy/docker/Dockerfile" worker
 build "${built_images[2]}" "$here/mock-auth" "$here/mock-auth/Dockerfile"
 
-# pinned IMAGE DIGEST pulls IMAGE's content by digest and loads it under IMAGE's tag.
-pinned() {
-    docker pull --quiet "${1%:*}@$2" >/dev/null
-    docker tag "${1%:*}@$2" "$1"
-    load "$1"
-}
 pinned "$eg_image" "$eg_digest"
 pinned "$envoy_image" "$envoy_digest"
 pinned "$kube_router_image" "$kube_router_digest"

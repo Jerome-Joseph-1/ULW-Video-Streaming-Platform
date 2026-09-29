@@ -24,20 +24,11 @@ livekit_keys='ulw-dev-key: ulw-dev-secret-testtest123-not-a-real-secret'
 
 log() { echo "stunner: $*" >&2; }
 
-mkdir -p "$here/.state/images"
+# The guard reads the kubeconfig kind writes, so the cluster comes first; creating it touches
+# only this machine, and nothing reaches kubectl before the guard has passed.
 create_cluster
 require_sandbox
 
-# pinned IMAGE DIGEST pulls IMAGE's content by digest and loads it into the node under IMAGE's
-# tag, the name the manifests use there (images.sh). Only the node's platform is saved.
-pinned() {
-    local archive=$here/.state/images/${1//[\/:]/_}.tar
-    docker pull --quiet "${1%:*}@$2" >/dev/null
-    docker tag "${1%:*}@$2" "$1"
-    docker save --platform linux/amd64 --output "$archive" "$1"
-    "$tools/kind" load image-archive --name "$cluster" "$archive"
-    rm -f "$archive"
-}
 pinned "$stunner_operator_image" "$stunner_operator_digest"
 pinned "$stunnerd_image" "$stunnerd_digest"
 pinned "$livekit_image" "$livekit_digest"
