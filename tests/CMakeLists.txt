@@ -332,7 +332,7 @@ if(ULW_BUILD_MLS)
     # The crate's own tests, among them the check that the committed C header is what cbindgen
     # makes of src/lib.rs. Release, like the library, so the dependencies built once serve both.
     add_test(NAME mls_ffi_bridge_cargo_tests
-        COMMAND ${ULW_CARGO} test --release --locked --offline
+        COMMAND ${ULW_CARGO_OFFLINE} test --release --locked --offline
             --target-dir $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CARGO_TARGET_DIR>
         WORKING_DIRECTORY $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CRATE_DIR>)
     set_tests_properties(mls_ffi_bridge_cargo_tests PROPERTIES LABELS unit)
