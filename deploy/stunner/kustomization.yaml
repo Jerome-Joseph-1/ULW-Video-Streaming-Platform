@@ -16,7 +16,8 @@ resources:
   - ../askedin/overlays/stage/livekit/networkpolicy.yaml
   - sandbox.yaml
 # up.sh loads each image into the node from a pull pinned by digest, filed under its tag only
-# (images.sh), so the pods name the tag.
+# (images.sh), so the pods name the tag, and never pull: a tag missing from the node would
+# otherwise fetch whatever the registry serves under it now.
 images:
   - name: docker.io/l7mp/stunner-gateway-operator
     newTag: "1.2.1"
@@ -30,6 +31,16 @@ patches:
       - op: replace
         path: /spec/image
         value: docker.io/l7mp/stunnerd:1.2.1
+      - op: replace
+        path: /spec/imagePullPolicy
+        value: Never
+  - target:
+      kind: Deployment
+      name: stunner-gateway-operator-controller-manager|livekit
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
   # The kind node has no load balancer: the TURN listener is a NodePort, which kind.yaml
   # publishes on the outside network as 198.18.0.1:3478. That is the address clients use, so
   # the Gateway names it; STUNner reports a Gateway Programmed only once it knows one.
