@@ -202,6 +202,20 @@ TEST_P(GatewayPlayback, OnlyRenditionsTheMasterListsAreServed) {
     }
 }
 
+TEST_P(GatewayPlayback, ARenditionTheMasterRoutesFromATagIsServed) {
+    GatewayUnderTest gw(options());
+    publish(gw);
+    gw.put_object(key("master.m3u8"), std::string(kMaster) +
+                                          "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"en\","
+                                          "URI=\"audio/index.m3u8\"\n");
+    gw.put_object(key("audio/index.m3u8"), kMedia);
+    HttpClient c(gw.endpoint());
+    const auto master = c.request("GET", path("master.m3u8"), kAlice);
+    ASSERT_EQ(master->status, 200);
+    ASSERT_NE(master->body.find("URI=\"" + path("audio/index.m3u8") + "\""), std::string::npos);
+    EXPECT_EQ(c.request("GET", path("audio/index.m3u8"), kAlice)->status, 200);
+}
+
 TEST_P(GatewayPlayback, AStoredPlaylistPointingOutsideItsVideoIsRefusedAndCounted) {
     GatewayUnderTest gw(options());
     publish(gw);

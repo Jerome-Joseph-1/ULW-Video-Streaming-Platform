@@ -85,6 +85,15 @@ TEST(HlsMaster, RoutesUriAttributesOfAlternateRenditionsToo) {
                     "URI=\"/api/v1/videos/v1/audio/index.m3u8\"\n");
 }
 
+TEST(HlsMaster, ListsTheRenditionsOfTagUrisItRoutesToo) {
+    const auto names = core::hls::list_renditions(
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"en\",URI=\"audio/index.m3u8\"\n"
+        "#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=1,URI=\"iframes/index.m3u8\"\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\n720p/index.m3u8\n");
+    ASSERT_TRUE(names);
+    EXPECT_EQ(*names, (std::vector<std::string_view>{"audio", "iframes", "720p"}));
+}
+
 TEST(HlsMaster, RefusesVariantsNoRouteServes) {
     for (const std::string_view uri :
          {"720p/other.m3u8", "a/b/index.m3u8", "index.m3u8", "720p/index.m3u8.bak"}) {

@@ -44,7 +44,9 @@ inline constexpr std::size_t kMaxPlaylistUris = 16'384;
 // Returns the presigned URL for an object, or nullopt when it cannot grant one.
 using Signer = std::function<std::optional<std::string>(const StorageKey& key)>;
 
-// The renditions a master playlist lists, in its order. Names are single key segments.
+// The renditions a master playlist lists, in its order: those of its variant URIs and of the
+// URI attributes of its tags (EXT-X-MEDIA, EXT-X-I-FRAME-STREAM-INF), exactly what
+// rewrite_master routes. Names are single key segments.
 [[nodiscard]] std::expected<std::vector<std::string_view>, PlaylistError>
 list_renditions(std::string_view master);
 

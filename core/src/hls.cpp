@@ -276,25 +276,21 @@ std::string_view to_string(PlaylistError e) noexcept {
     return "playlist error";
 }
 
+// The same walk as rewrite_master, so every URI it would route, tag attributes included, is
+// a rendition the gateway will serve.
 std::expected<std::vector<std::string_view>, PlaylistError>
 list_renditions(std::string_view master) {
-    if (auto r = check_header(master); !r) {
-        return std::unexpected(r.error());
-    }
     std::vector<std::string_view> names;
     auto r =
-        for_each_line(master, [&](std::string_view line) -> std::expected<void, PlaylistError> {
-            if (line.empty() || line.starts_with('#')) {
-                return {};
-            }
-            auto name = rendition_of(line);
+        rewrite(master, [&](std::string_view uri) -> std::expected<std::string, PlaylistError> {
+            auto name = rendition_of(uri);
             if (!name) {
                 return std::unexpected(name.error());
             }
             if (std::ranges::find(names, *name) == names.end()) {
                 names.push_back(*name);
             }
-            return {};
+            return std::string{};
         });
     if (!r) {
         return std::unexpected(r.error());
