@@ -360,3 +360,15 @@ target_compile_definitions(sdp_unit_tests
 # Parse, validate, serialize, for e2e/sdp_roundtrip.spec.mjs to run Chromium's SDP through.
 ulw_add_executable(ulw_sdp_roundtrip media/sdp_roundtrip_main.cpp)
 target_link_libraries(ulw_sdp_roundtrip PRIVATE ulw::codec_sdp)
+
+ulw_add_executable(sdp_fuzz_replay fuzz/sdp_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(sdp_fuzz_replay PRIVATE ulw::codec_sdp)
+add_test(NAME sdp_fuzz_corpus COMMAND sdp_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/sdp)
+set_tests_properties(sdp_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(sdp_fuzz fuzz/sdp_fuzz.cpp)
+    target_link_libraries(sdp_fuzz PRIVATE ulw::codec_sdp)
+    target_compile_options(sdp_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(sdp_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
