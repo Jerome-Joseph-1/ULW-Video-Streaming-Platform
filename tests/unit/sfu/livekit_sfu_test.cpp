@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <gtest/gtest.h>
+#include <latch>
 #include <memory>
 #include <optional>
 #include <string>
@@ -370,13 +371,33 @@ TEST_P(LiveKitSfuTest, ARequestThatCannotBeSentIsDroppedWithTheSfu) {
 }
 
 TEST_P(LiveKitSfuTest, DestroyingTheSfuDropsPendingCallbacks) {
-    auto server = answering(200);
+    // The server holds its answer until the sfu is gone, then answers anyway.
+    std::atomic<bool> arrived{false};
+    std::latch release{1};
+    HttpTestServer server([&](const ServedRequest&) {
+        arrived = true;
+        release.wait();
+        return Reply{.status = 200, .headers = {}, .body = "{}"};
+    });
+    // Destroyed before the server, so a failed assertion cannot leave its thread waiting.
+    const struct Releaser {
+        std::latch& latch;
+        ~Releaser() {
+            if (!latch.try_wait()) {
+                latch.count_down();
+            }
+        }
+    } releaser{release};
     start(server.base_url());
     int calls = 0;
     sfu->open_room(*core::RoomId::parse(kRoom), MediaGeneration{1}, 2,
                    [&](OpenResult) noexcept { ++calls; });
+    ASSERT_TRUE(pump_until(*reactor, [&] { return arrived.load(); }));
     sfu.reset();
-    ulw::test::pump_for(*reactor, std::chrono::milliseconds(100));
+    release.count_down();
+    // Recorded once the handler has answered; one more turn delivers anything the answer set off.
+    ASSERT_TRUE(pump_until(*reactor, [&] { return server.request_count() == 1; }));
+    ulw::test::pump_pending(*reactor);
     EXPECT_EQ(calls, 0);
 }
 
