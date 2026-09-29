@@ -13,8 +13,9 @@ client outside the cluster's network gets from it what a browser on the internet
      shows up as another address.
   3. A TURN Allocate with a credential minted from the sandbox's shared secret succeeds, signed
      with the same key, and relays from the stunnerd pod; a permission to the LiveKit pod is
-     granted and one to a pod that is no backend (the operator) refused, so it is no open
-     relay into the cluster; a wrong password and an expired credential are both refused.
+     granted, and ones to a pod that is no backend (the operator), to the relay's own loopback
+     and to the node are refused, so it is no open relay into the cluster; a wrong password
+     and an expired credential are both refused.
 
     tests/cluster/stunner_check.py
 
@@ -98,6 +99,11 @@ def pod_ip(namespace, selector):
     return ips[0]
 
 
+def node_ip():
+    return kubectl("get", "nodes", "-o", "jsonpath={.items[0].status.addresses"
+                   "[?(@.type==\"InternalIP\")].address}").stdout.strip()
+
+
 def shared_secret():
     encoded = kubectl("-n", "stunner-system", "get", "secret", "stunner-secrets", "-o",
                       "jsonpath={.data.secret}").stdout
@@ -105,13 +111,15 @@ def shared_secret():
 
 
 def probe(livekit, forbidden, secret):
+    """Runs turn_probe.py on the outside network; `forbidden` maps each peer that must be
+    refused to what it is."""
     result = subprocess.run(
         ["docker", "run", "--rm", "--network", OUTSIDE_NETWORK, "--ip", PROBE_ADDRESS,
          "--env", "TURN_SECRET",
          "--read-only", "--volume", f"{HERE}:/probe:ro", pinned_probe_image(),
          "python3", "/probe/turn_probe.py", TURN_SERVER[0], str(TURN_SERVER[1]),
          "--user", "stunner-check", "--permit", livekit,
-         "--forbid", forbidden],
+         *(arg for peer in forbidden for arg in ("--forbid", peer))],
         # docker passes TURN_SECRET on from its own environment: never on a command line.
         env={**os.environ, "TURN_SECRET": secret}, capture_output=True, text=True)
     if result.returncode != 0:
@@ -138,15 +146,18 @@ def verify(report, stunnerd, livekit, forbidden):
     check(allocation["relayed"][0] == stunnerd,
           f"relayed address {allocation['relayed']} is not the stunnerd pod's {stunnerd}")
 
-    permitted, refused = report["permit"][livekit], report["forbid"][forbidden]
-    print(f"  permission to LiveKit {livekit}: {permitted['class']}; to the operator "
-          f"{forbidden}: {refused.get('error', refused['class'])}")
+    permitted = report["permit"][livekit]
+    print(f"  permission to LiveKit {livekit}: {permitted['class']}")
     check(permitted["class"] == "success", f"permission to the LiveKit pod: {permitted}")
     # RFC 8656 section 9.2 asks for 403, but STUNner v1.2.1 (pion/turn) answers a refused
     # permission with an error response that carries no ERROR-CODE at all; the error class is
     # what a client acts on either way, and anything but a success means no relay to that peer.
-    check(refused["class"] == "error" and refused["error"][0] in (0, 403),
-          f"permission to a pod outside the UDPRoute: {refused}, want a refusal")
+    for peer, what in forbidden.items():
+        refused = report["forbid"].get(peer)
+        check(refused is not None, f"the probe did not try {what} {peer}")
+        print(f"  permission to {what} {peer}: {refused.get('error', refused['class'])}")
+        check(refused["class"] == "error" and refused["error"][0] in (0, 403),
+              f"permission to {what} {peer}, outside the UDPRoute: {refused}, want a refusal")
     check(report["release"]["class"] == "success", f"releasing the allocation: {report['release']}")
 
     # RFC 8656 has both answered 401. pion/turn, under STUNner v1.2.1, answers a request whose
@@ -169,8 +180,14 @@ def main():
         wait_ready()
         stunnerd = pod_ip(NAMESPACE, "stunner.l7mp.io/related-gateway-name=stunner")
         livekit = pod_ip(NAMESPACE, "app.kubernetes.io/name=livekit")
-        forbidden = pod_ip("stunner-system",
-                           "control-plane=stunner-gateway-operator-controller-manager")
+        # Beside a pod that is no backend: stunnerd's own loopback, where its health and
+        # metrics listen, and the node, which runs the kubelet and the API server.
+        forbidden = {
+            pod_ip("stunner-system", "control-plane=stunner-gateway-operator-controller-manager"):
+                "the operator",
+            "127.0.0.1": "the relay's loopback",
+            node_ip(): "the node",
+        }
         print(f"outside ({PROBE_ADDRESS} on {OUTSIDE_NETWORK} -> "
               f"{TURN_SERVER[0]}:{TURN_SERVER[1]}):")
         verify(probe(livekit, forbidden, shared_secret()), stunnerd, livekit, forbidden)
