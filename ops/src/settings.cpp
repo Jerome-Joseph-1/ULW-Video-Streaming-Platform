@@ -165,7 +165,9 @@ Lookup Settings::lookup() const {
 std::expected<FileLayer, SettingsError> read_config_file(const std::string& path) {
     // A file of scalars is a few KiB; anything past 64 KiB is not a configuration file.
     constexpr std::size_t kMaxFile = std::size_t{64} * 1024;
-    const os::UniqueFd fd{::open(path.c_str(), O_RDONLY | O_CLOEXEC)};
+    // O_NONBLOCK: opening a FIFO for reading would otherwise wait for a writer that may never
+    // come. It changes nothing for the regular file this must be, which is checked next.
+    const os::UniqueFd fd{::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK)};
     if (!fd) {
         return error(path, std::generic_category().message(errno));
     }

@@ -170,6 +170,14 @@ TEST_F(ConfigFileTest, OnlyAnOwnerOnlyFileMayHoldASecret) {
     }
 }
 
+TEST_F(ConfigFileTest, AFifoIsRefusedRatherThanWaitedOn) {
+    const std::string path = (dir.path() / "gateway.toml").string();
+    ASSERT_EQ(::mkfifo(path.c_str(), 0600), 0);
+    const auto s = ops::load_settings(kSchema, *cli({"--config", path}), env());
+    ASSERT_FALSE(s);
+    EXPECT_EQ(s.error().reason, "not a regular file");
+}
+
 TEST_F(ConfigFileTest, AMalformedOrMissingFileIsNamedWithTheLine) {
     const auto bad =
         ops::load_settings(kSchema, *cli({"--config", write("a = [1]\n", 0600)}), env());
