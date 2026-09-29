@@ -518,18 +518,21 @@ void Session::on_timeout() noexcept {
             close();
             return;
         }
-        if (quiet >= limits.ping_interval) {
-            try {
-                send_frame({.opcode = codec::ws::Opcode::Ping,
-                            .fin = true,
-                            .payload = {},
-                            .close_code = codec::ws::CloseCode::NoStatus});
-            } catch (const std::bad_alloc&) {
-                allocation_failed();
-                return;
-            }
+        if (quiet < limits.ping_interval) {
+            arm(limits.ping_interval - quiet);
+            return;
         }
-        arm(limits.ping_interval);
+        try {
+            send_frame({.opcode = codec::ws::Opcode::Ping,
+                        .fin = true,
+                        .payload = {},
+                        .close_code = codec::ws::CloseCode::NoStatus});
+        } catch (const std::bad_alloc&) {
+            allocation_failed();
+            return;
+        }
+        // The next check is the idle deadline itself if it comes before another ping would.
+        arm(std::min(limits.ping_interval, limits.idle_timeout - quiet));
         return;
     }
 }
