@@ -937,8 +937,11 @@ private:
         lr.owner = owner;
         std::vector<Joining> joined = std::move(lr.joining);
         lr.joining.clear();
+        // A member may have asked twice before the first was answered; it joins once.
         for (const Joining& j : joined) {
-            lr.members.push_back(j.member);
+            if (std::ranges::find(lr.members, j.member) == lr.members.end()) {
+                lr.members.push_back(j.member);
+            }
         }
         for (Joining& j : joined) {
             j.done({});

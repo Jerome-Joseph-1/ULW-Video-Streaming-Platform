@@ -352,6 +352,19 @@ TEST_P(RoomRouterTest, AnOwnerThatLetsARoomGoTellsItsSubscribersWhoMissedTheNoti
     EXPECT_EQ(bob.got.back().body, "to the new owner");
 }
 
+TEST_P(RoomRouterTest, AMemberThatJoinsTwiceBeforeTheFirstIsAnsweredHearsEachMessageOnce) {
+    Node& a = start("chat-a");
+    Member alice;
+    int answers = 0;
+    a.router->join(room_, alice, [&](auto r) noexcept { answers += r ? 1 : 0; });
+    a.router->join(room_, alice, [&](auto r) noexcept { answers += r ? 1 : 0; });
+    ASSERT_TRUE(pump([&] { return answers == 2; }));
+    ASSERT_EQ(send(a, alice, "alice", "once"), 1U);
+    ASSERT_TRUE(pump([&] { return !alice.got.empty(); }));
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_EQ(alice.got.size(), 1U);
+}
+
 TEST_P(RoomRouterTest, SendingToARoomTheMemberHasNotJoinedIsRefused) {
     Node& a = start("chat-a");
     Member alice;
