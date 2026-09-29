@@ -79,10 +79,12 @@ test('a live stream plays, keeps a monotonic manifest, and ends cleanly after EN
       await testInfo.attach('live-latency.json',
         { body: JSON.stringify(summary, null, 2), contentType: 'application/json' });
 
-      // Not before one segment has been cut and uploaded, not after a stream this small ought
-      // to be showing something several minutes old.
-      expect(summary.glassToGlassMs.median).toBeGreaterThan(kSegmentSeconds * 1000);
-      expect(summary.glassToGlassMs.median).toBeLessThan(20_000);
+      // A viewer sits three target durations behind the newest segment (RFC 8216 6.3.3), which
+      // is itself up to one segment old when it is listed, and fetching and uploading it take a
+      // moment: 3T + T, plus 2 s for SRT's latency, the upload and the fetch. At T = 2 that is
+      // 10 s, against about 7 s measured, so a regression of a segment or more is caught.
+      expect(summary.glassToGlassMs.median).toBeGreaterThan(3 * kSegmentSeconds * 1000);
+      expect(summary.glassToGlassMs.median).toBeLessThan((4 * kSegmentSeconds + 2) * 1000);
 
       // hls.js saw the window slide: it never reloaded a playlist that went backwards.
       const starts = state.playlists.map((p) => p.startSN);

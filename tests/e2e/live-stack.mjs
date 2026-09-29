@@ -16,6 +16,9 @@ const root = path.resolve(here, '../..');
 const bin = (rel) => path.join(config.build, rel);
 
 export const bucket = 'ulw-live-e2e';
+// What the packager's SRT listener requires of its caller, as LiveKit egress would be given it
+// in the stream URL.
+const passphrase = 'e2e passphrase of 24 chars';
 
 const encode = (text) => encodeURIComponent(text).replace(/[!'()*]/g, (c) =>
   `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -135,6 +138,7 @@ export async function startLiveStack({ seconds, segment = 2, window = 10 }) {
     PATH: process.env.PATH,
     ULW_STREAM_ID: id,
     ULW_LIVE_INGEST_PORT: '0',
+    ULW_LIVE_SRT_PASSPHRASE: passphrase,
     ULW_LIVE_SEGMENT_SECONDS: String(segment),
     ULW_LIVE_WINDOW_SEGMENTS: String(window),
     ULW_STORAGE: 'minio',
@@ -161,7 +165,8 @@ export async function startLiveStack({ seconds, segment = 2, window = 10 }) {
       const publisher = new Process('ulw-live-testsource',
         path.join(root, 'apps/live-packager/testsource/ulw-live-testsource'),
         [`127.0.0.1:${port}`, String(seconds)],
-        { PATH: process.env.PATH, ULW_TESTSOURCE_SEGMENT: String(segment) });
+        { PATH: process.env.PATH, ULW_TESTSOURCE_SEGMENT: String(segment),
+          ULW_TESTSOURCE_PASSPHRASE: passphrase, ULW_TESTSOURCE_STREAMID: id });
       this.publisher = publisher;
       return publisher;
     },
