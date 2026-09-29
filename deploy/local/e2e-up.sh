@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Brings up the sandbox replica of Askedin's cluster on this machine, from scratch: a kind
 # cluster, Postgres and MinIO beside it (as they run beside K3s on k8s-prod), Envoy Gateway,
-# the mock auth-service, and the stage overlays of video-gateway and video-worker built from
-# this checkout. Rerunning rebuilds the images and reapplies everything; e2e-down.sh removes it.
+# the mock auth-service, the stage overlays of video-gateway and video-worker built from this
+# checkout, and STUNner with LiveKit behind it (deploy/stunner/up.sh). Rerunning rebuilds the
+# images and reapplies everything; e2e-down.sh removes it.
 # Nothing here knows how to reach Askedin's infrastructure.
 #
 #   ULW_BUILDER    build with this docker buildx builder instead of the default one; the images
@@ -202,4 +203,6 @@ kubectl -n envoy-gateway-system wait --for=condition=Available deployment \
 # Envoy takes a moment to program the routes after its pod is ready.
 curl -fsS -o /dev/null --retry 60 --retry-all-errors --retry-delay 1 \
     -X POST "http://127.0.0.1:18080/mock-auth/token?sub=probe"
+# The realtime plane's way in: STUNner and the LiveKit server behind it.
+"$root/deploy/stunner/up.sh"
 log "up: http://127.0.0.1:18080 (kubeconfig $kubeconfig, context $context)"

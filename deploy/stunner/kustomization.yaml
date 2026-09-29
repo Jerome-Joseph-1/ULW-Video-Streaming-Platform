@@ -1,0 +1,48 @@
+# STUNner and LiveKit in the sandbox cluster, from the Askedin manifests exactly as they ship,
+# with only what the sandbox must change patched below. up.sh applies it once STUNner's CRDs
+# are in; rendered with
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone deploy/stunner
+# because the manifests live outside this directory.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../askedin/stunner/operator.yaml
+  - ../askedin/stunner/dataplane.yaml
+  - ../askedin/stunner/gatewayclass.yaml
+  - ../askedin/overlays/stage/stunner/gateway.yaml
+  - ../askedin/overlays/stage/livekit/deployment.yaml
+  - ../askedin/overlays/stage/livekit/service.yaml
+  - ../askedin/overlays/stage/livekit/httproute.yaml
+  - ../askedin/overlays/stage/livekit/networkpolicy.yaml
+  - sandbox.yaml
+# up.sh loads each image into the node from a pull pinned by digest, filed under its tag only
+# (images.sh), so the pods name the tag.
+images:
+  - name: docker.io/l7mp/stunner-gateway-operator
+    newTag: "1.2.1"
+  - name: docker.io/livekit/livekit-server
+    newTag: v1.13.7
+patches:
+  - target:
+      kind: Dataplane
+      name: default
+    patch: |-
+      - op: replace
+        path: /spec/image
+        value: docker.io/l7mp/stunnerd:1.2.1
+  # The kind node has no load balancer: the TURN listener is a NodePort, which kind.yaml
+  # publishes on the outside network as 198.18.0.1:3478. That is the address clients use, so
+  # the Gateway names it; STUNner reports a Gateway Programmed only once it knows one.
+  - target:
+      kind: Gateway
+      name: stunner
+    patch: |-
+      - op: add
+        path: /spec/addresses
+        value: [{type: IPAddress, value: 198.18.0.1}]
+      - op: add
+        path: /metadata/annotations/stunner.l7mp.io~1service-type
+        value: NodePort
+      - op: add
+        path: /metadata/annotations/stunner.l7mp.io~1nodeport
+        value: '{"turn-udp": 31478}'
