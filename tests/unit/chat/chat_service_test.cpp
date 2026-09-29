@@ -432,6 +432,48 @@ TEST_F(ChatServiceTest, AResumeQueuesNoMoreThanItsBudgetAndKeepsTheNewest) {
     EXPECT_EQ(seqs(carol.take()), std::vector<std::uint64_t>{5});
 }
 
+TEST_F(ChatServiceTest, ResumingAgainAndAgainReplaysNoMoreThanOneBudgetPerLinger) {
+    FakeClient alice;
+    FakeClient bob;
+    const auto a = attach(alice);
+    join(a);
+    rt::IMember& room = rooms_.admit();
+    // Each 30 KiB body is about 40 KiB on the wire: three fit the 128 KiB budget.
+    const std::string body(std::size_t{30} * 1024, 'r');
+    for (std::uint64_t seq = 1; seq <= 5; ++seq) {
+        deliver(room, seq, body);
+    }
+    const auto b = attach(bob, "bob");
+    join(b, 0);
+    EXPECT_EQ(seqs(bob.take()), (std::vector<std::uint64_t>{3, 4, 5}));
+    // bob has read everything, and asks again: this linger's budget is spent.
+    join(b, 0);
+    EXPECT_TRUE(seqs(bob.take()).empty());
+    clock_.advance(Millis{30'000});
+    join(b, 0);
+    EXPECT_EQ(seqs(bob.take()), (std::vector<std::uint64_t>{3, 4, 5}));
+}
+
+class TwoJoins : public ChatServiceTest {
+protected:
+    TwoJoins() : ChatServiceTest({.join_burst = 2}) {}
+};
+
+TEST_F(TwoJoins, AResumeInARoomAlreadyJoinedCostsAJoinAndAPlainRejoinDoesNot) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    join(a);
+    join(a);
+    join(a, 0);
+    join(a, 0);
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 5U);
+    EXPECT_EQ(seen(got[3]).type, "joined");
+    EXPECT_EQ(seen(got[4]).reason, "busy");
+}
+
 class SmallBuffers : public ChatServiceTest {
 protected:
     // Two ordinary messages per room, and three across rooms.

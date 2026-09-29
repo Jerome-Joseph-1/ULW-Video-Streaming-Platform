@@ -61,7 +61,9 @@ need no change for it: whatever end-to-end encryption needs from them has to be 
 - **Resume.** Each room this node is in keeps its latest messages: 256 KiB per room and 32 MiB
   across rooms (131072 messages), oldest first. `join` with `"after":N` sends, after `joined`,
   the kept messages above N, as many of the newest as fit 128 KiB (half the backlog that closes
-  a connection, so resuming cannot get a client closed), then live messages. Kept messages live
+  a connection, so resuming cannot get a client closed), then live messages. The 128 KiB is the
+  client's for all its resumes within one linger, and a resume in a room it is already in costs
+  a join from the join bucket, so asking again and again makes the node encode no more. Kept messages live
   on the node that delivered them: a client that reconnects through another node, or later than
   the room lingered, gets what that node has, and sees the rest as a gap. `joined` names the
   room's head (the latest seq the owner took, from its answer to the subscription, or this

@@ -68,7 +68,12 @@ ChatService::~ChatService() {
 
 ClientId ChatService::attach(IClient& client, const core::UserId& user) {
     const ClientId id{next_client_++};
-    clients_.emplace(id.value, Client{.client = &client, .user = user, .rooms = {}});
+    clients_.emplace(id.value, Client{.client = &client,
+                                      .user = user,
+                                      .rooms = {},
+                                      .send_bytes_in_flight = 0,
+                                      .replayed_bytes = 0,
+                                      .replay_window_start = clock_.now()});
     return id;
 }
 
@@ -116,9 +121,14 @@ void ChatService::join(ClientId id, const Join& join) {
     if (c == nullptr) {
         return;
     }
-    // Joining a room the client is in again costs nothing: it is how a client asks for what
-    // it missed.
-    if (std::ranges::find(c->rooms, join.room) == c->rooms.end()) {
+    // Joining a room the client is in again is how it asks for what it missed. That costs a
+    // join when it asks for a resume, which is work for this node; otherwise it is free.
+    const bool known = std::ranges::find(c->rooms, join.room) != c->rooms.end();
+    if (known && join.after && !admit_join(c->user)) {
+        answer(*c->client, "busy", join.room);
+        return;
+    }
+    if (!known) {
         if (c->rooms.size() >= limits_.max_rooms_per_client) {
             answer(*c->client, "too_many_rooms", join.room);
             return;
@@ -205,15 +215,21 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
     write_joined(out, room.id, room.head);
     c->client->push(out);
     if (join.after) {
-        replay(room, *c->client, *join.after);
+        replay(room, *c, *join.after);
     }
 }
 
 // The newest kept messages after `after` that fit the budget, sent oldest first. Anything older
-// is a gap the client sees in the seqs, and fills from history.
-void ChatService::replay(const Room& room, IClient& client, std::uint64_t after) {
-    const std::size_t budget =
-        limits_.replay_budget - std::min(client.unsent_bytes(), limits_.replay_budget);
+// is a gap the client sees in the seqs, and fills from history. The budget is the client's for
+// every resume within one linger, so that joining again and again replays no more.
+void ChatService::replay(const Room& room, Client& c, std::uint64_t after) {
+    const core::MonoTime now = clock_.now();
+    if (now - c.replay_window_start >= limits_.linger) {
+        c.replay_window_start = now;
+        c.replayed_bytes = 0;
+    }
+    const std::size_t taken = std::max(c.client->unsent_bytes(), c.replayed_bytes);
+    const std::size_t budget = limits_.replay_budget - std::min(taken, limits_.replay_budget);
     std::size_t used = 0;
     auto first = room.kept.end();
     while (first != room.kept.begin()) {
@@ -225,6 +241,7 @@ void ChatService::replay(const Room& room, IClient& client, std::uint64_t after)
         used += cost;
         first = previous;
     }
+    c.replayed_bytes += used;
     std::string out;
     for (auto it = first; it != room.kept.end(); ++it) {
         out.clear();
@@ -233,7 +250,7 @@ void ChatService::replay(const Room& room, IClient& client, std::uint64_t after)
                                        .sender = it->sender,
                                        .key = it->key,
                                        .body = it->body});
-        client.push(out);
+        c.client->push(out);
         ++counters_.replayed;
     }
 }

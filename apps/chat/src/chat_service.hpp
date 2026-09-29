@@ -70,9 +70,9 @@ struct ServiceLimits {
     // that closes a connection (Limits::max_backlog), so one largest delivery on top still
     // leaves a lossy client open.
     std::size_t lossy_backlog = std::size_t{64} * 1024;
-    // What a join's resume may queue on a connection: half the backlog that closes it, so that
-    // resuming cannot itself get the client closed. Messages past it are left out, oldest
-    // first; the client sees the gap.
+    // What a client's resumes may queue on its connection within one linger: half the backlog
+    // that closes it, so that resuming cannot itself get the client closed. Messages past it
+    // are left out, oldest first; the client sees the gap.
     std::size_t replay_budget = std::size_t{128} * 1024;
     // Each room this node is in keeps its latest messages for clients that come back, each
     // counted as its body plus 256. 256 KiB is a few hundred ordinary messages: what a phone
@@ -140,6 +140,9 @@ private:
         core::UserId user;
         std::vector<core::RoomId> rooms;
         std::size_t send_bytes_in_flight = 0;
+        // What resumes queued since the window started.
+        std::size_t replayed_bytes = 0;
+        core::MonoTime replay_window_start;
     };
 
     [[nodiscard]] Client* find(ClientId id) noexcept;
@@ -151,7 +154,7 @@ private:
     void sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key, std::size_t bytes,
               std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
-    void replay(const Room& room, IClient& client, std::uint64_t after);
+    void replay(const Room& room, Client& c, std::uint64_t after);
     void keep(Room& room, const rt::Message& message);
     void drop_oldest(Room& room) noexcept;
     void forget_oldest() noexcept;
