@@ -1,5 +1,5 @@
 // The owner's write path for a durable room: the fenced seq and the message's row, taken
-// together by PgRoomStore::append_message, and read back through the message store.
+// together by PgRoomStore::append, and read back through the message store.
 #include "infra/postgres/message_store.hpp"
 #include "infra/postgres/room_store.hpp"
 #include "net/offload_pool.hpp"
@@ -30,7 +30,7 @@ using infra::postgres::Params;
 using rt::StoreResult;
 using ulw::test::scalar;
 using ulw::test::ScratchDatabase;
-using Seq = core::ports::MessageResult<std::optional<std::uint64_t>>;
+using Seq = StoreResult<std::optional<std::uint64_t>>;
 
 std::vector<std::byte> bytes(std::string_view text) {
     std::vector<std::byte> out(text.size());
@@ -103,8 +103,9 @@ protected:
 
     Seq write(const core::RoomId& room, std::uint64_t generation, std::span<const std::byte> body,
               std::string_view key) {
-        return ulw::test::ask<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
-            rooms_->append_message(room, generation, alice_, key, body, std::move(done));
+        return ask<std::optional<std::uint64_t>>([&](auto done) {
+            rooms_->append(room, generation, ulw::test::outgoing(alice_, key, body),
+                           std::move(done));
         });
     }
 
@@ -217,9 +218,9 @@ TEST_F(SequencedAppendTest, ConcurrentWritesToOneRoomTakeEverySeqOnce) {
     const std::uint64_t generation = owned_by(room, a_);
     std::vector<Seq> answers;
     for (std::size_t i = 0; i < kWrites; ++i) {
-        rooms_->append_message(room, generation, alice_, std::format("k{}", i),
-                               bytes(std::format("body {}", i)),
-                               [&answers](Seq r) noexcept { answers.push_back(r); });
+        const std::vector<std::byte> body = bytes(std::format("body {}", i));
+        rooms_->append(room, generation, ulw::test::outgoing(alice_, std::format("k{}", i), body),
+                       [&answers](Seq r) noexcept { answers.push_back(r); });
     }
     ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answers.size() == kWrites; }));
     std::vector<std::uint64_t> seqs;
@@ -246,8 +247,9 @@ TEST_F(SequencedAppendTest, ConcurrentRepeatsOfOneKeyStoreItOnce) {
     const std::uint64_t generation = owned_by(room, a_);
     std::vector<Seq> answers;
     for (std::size_t i = 0; i < kRepeats; ++i) {
-        rooms_->append_message(room, generation, alice_, "k1", bytes("hello"),
-                               [&answers](Seq r) noexcept { answers.push_back(r); });
+        const std::vector<std::byte> body = bytes("hello");
+        rooms_->append(room, generation, ulw::test::outgoing(alice_, "k1", body),
+                       [&answers](Seq r) noexcept { answers.push_back(r); });
     }
     ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answers.size() == kRepeats; }));
     for (const Seq& answer : answers) {
@@ -257,17 +259,15 @@ TEST_F(SequencedAppendTest, ConcurrentRepeatsOfOneKeyStoreItOnce) {
     EXPECT_EQ(history(room).size(), 1U);
 }
 
-TEST_F(SequencedAppendTest, AnOversizedBodyOrKeyIsTooLargeAndTakesNoSeq) {
+TEST_F(SequencedAppendTest, AnOversizedBodyIsRefusedAndTakesNoSeq) {
     const core::RoomId room = new_room();
     const std::uint64_t generation = owned_by(room, a_);
-    const Seq too_large{std::unexpected(core::ports::MessageStoreError::TooLarge)};
-    // What a peer node's frame can carry past the client edge's bound.
+    // Past what any frame may carry; refused before it reaches the database, not trusted.
     const std::vector<std::byte> body(core::ports::kMaxMessageBody + 1);
-    EXPECT_EQ(write(room, generation, body, "k1"), too_large);
-    EXPECT_EQ(
-        write(room, generation, bytes("hello"), std::string(core::ports::kMaxMessageKey + 1, 'k')),
-        too_large);
+    EXPECT_EQ(write(room, generation, body, "k1"),
+              Seq{std::unexpected(rt::StoreError::Unavailable)});
     EXPECT_EQ(last_seq(room), "0");
+    EXPECT_TRUE(history(room).empty());
     EXPECT_EQ(send(room, generation, "hello"), Seq{1});
 }
 
@@ -279,48 +279,31 @@ TEST_F(SequencedAppendTest, AnInsertThatFailsGivesTheSeqBack) {
         conn_->exec("INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at) "
                     "VALUES ($1, 1, 'auth0|mallory', 'k', '\\x00', now())",
                     Params{}.add_uuid(room.uuid())));
-    EXPECT_EQ(send(room, generation, "lost"),
-              Seq{std::unexpected(core::ports::MessageStoreError::Unavailable)});
+    EXPECT_EQ(send(room, generation, "lost"), Seq{std::unexpected(rt::StoreError::Unavailable)});
     // The seq was not taken without its row.
     EXPECT_EQ(last_seq(room), "0");
 }
 
-TEST_F(SequencedAppendTest, StoringTheMessageCostsWhatTakingTheSeqAloneDoes) {
-    // An owner writes a room's messages one at a time (ADR-0035), each before delivery: these
-    // are per-message latencies of a durable room. Reported, not asserted: they measure the
-    // host as much as the statement.
+TEST_F(SequencedAppendTest, AnAppendIsOneRoundTripAndOneCommit) {
+    // An owner writes a room's messages one at a time (ADR-0035), each before delivery: this is
+    // what every message waits for. Reported, not asserted: it measures the host as much as the
+    // statement.
     constexpr std::size_t kCount = 300;
-    const core::RoomId with_row = new_room();
-    const core::RoomId seq_only = new_room();
-    const std::uint64_t g_with_row = owned_by(with_row, a_);
-    const std::uint64_t g_seq_only = owned_by(seq_only, a_);
-    std::vector<double> combined;
-    std::vector<double> alone;
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = owned_by(room, a_);
+    std::vector<double> samples;
     for (std::size_t i = 0; i < kCount; ++i) {
-        auto started = std::chrono::steady_clock::now();
-        ASSERT_TRUE(send(with_row, g_with_row, "a line of chat, about forty bytes long"));
-        combined.push_back(millis(std::chrono::steady_clock::now() - started));
-
-        started = std::chrono::steady_clock::now();
-        ASSERT_TRUE(ask<std::optional<std::uint64_t>>([&](auto done) {
-            rooms_->append(
-                seq_only, g_seq_only,
-                rt::Outgoing{.sender = alice_, .key = *rt::MessageKey::parse("k"), .body = {}},
-                std::move(done));
-        }));
-        alone.push_back(millis(std::chrono::steady_clock::now() - started));
+        const auto started = std::chrono::steady_clock::now();
+        ASSERT_TRUE(send(room, generation, "a line of chat, about forty bytes long"));
+        samples.push_back(millis(std::chrono::steady_clock::now() - started));
     }
-    const auto report = [&](std::string_view name, std::vector<double>& samples) {
-        std::ranges::sort(samples);
-        const auto at_quantile = [&](double q) {
-            return samples[static_cast<std::size_t>(q * static_cast<double>(samples.size() - 1))];
-        };
-        std::println("{}: p50 {:.3f} ms, p99 {:.3f} ms", name, at_quantile(0.5), at_quantile(0.99));
-        RecordProperty(std::format("{}_p50_ms", name), std::format("{:.3f}", at_quantile(0.5)));
-        RecordProperty(std::format("{}_p99_ms", name), std::format("{:.3f}", at_quantile(0.99)));
+    std::ranges::sort(samples);
+    const auto at_quantile = [&](double q) {
+        return samples[static_cast<std::size_t>(q * static_cast<double>(samples.size() - 1))];
     };
-    report("seq_and_row_in_one_statement", combined);
-    report("seq_alone", alone);
+    std::println("append: p50 {:.3f} ms, p99 {:.3f} ms", at_quantile(0.5), at_quantile(0.99));
+    RecordProperty("append_p50_ms", std::format("{:.3f}", at_quantile(0.5)));
+    RecordProperty("append_p99_ms", std::format("{:.3f}", at_quantile(0.99)));
 }
 
 } // namespace

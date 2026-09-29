@@ -113,11 +113,12 @@ protected:
     }
 
     // The owner's write: the room's next seq and the message's row.
-    MessageResult<std::optional<std::uint64_t>>
+    rt::StoreResult<std::optional<std::uint64_t>>
     write(const core::RoomId& room, std::uint64_t generation, std::vector<std::byte> body) {
-        return ask<std::optional<std::uint64_t>>([&](auto done) {
-            rooms_->append_message(room, generation, alice_, std::format("m{}", ++keys_), body,
-                                   std::move(done));
+        return ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+            const std::string key = std::format("m{}", ++keys_);
+            rooms_->append(room, generation, ulw::test::outgoing(alice_, key, body),
+                           std::move(done));
         });
     }
 
@@ -196,7 +197,7 @@ TEST_F(MessageStoreTest, HistorySurvivesARestartInTheSameOrder) {
     const std::uint64_t generation = own(room);
     for (std::uint64_t seq = 1; seq <= 5; ++seq) {
         ASSERT_EQ(write(room, generation, bytes(std::format("body {}", seq))),
-                  (MessageResult<std::optional<std::uint64_t>>{seq}));
+                  (rt::StoreResult<std::optional<std::uint64_t>>{seq}));
     }
     const auto first = before(room, std::nullopt, 10);
     ASSERT_TRUE(first);
@@ -355,12 +356,13 @@ protected:
             *reactor_, [&](auto done) { rooms->resolve(room, node_, std::move(done)); });
         ASSERT_TRUE(owner);
         const auto write = [&](std::string_view key) {
-            return ask<std::optional<std::uint64_t>>([&](auto done) {
-                rooms->append_message(room, owner->generation, alice_, key, bytes(marker),
-                                      std::move(done));
+            return ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+                const std::vector<std::byte> body = bytes(marker);
+                rooms->append(room, owner->generation, ulw::test::outgoing(alice_, key, body),
+                              std::move(done));
             });
         };
-        ASSERT_EQ(write("k1"), (MessageResult<std::optional<std::uint64_t>>{1}));
+        ASSERT_EQ(write("k1"), (rt::StoreResult<std::optional<std::uint64_t>>{1}));
         ASSERT_TRUE(conn_->exec("INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, "
                                 "sent_at) VALUES ($1, 2, 'auth0|mallory', 'k', '\\x00', now())",
                                 Params{}.add_uuid(room.uuid())));

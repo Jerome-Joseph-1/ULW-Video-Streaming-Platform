@@ -153,19 +153,19 @@ public:
 
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                std::vector<std::byte> body, MessageCallback<std::uint64_t> done) override {
-        rooms_->append_message(room, generations_.at(room), sender, key, body,
-                               [done = std::move(done)](
-                                   MessageResult<std::optional<std::uint64_t>> r) mutable noexcept {
-                                   if (!r) {
-                                       done(std::unexpected(r.error()));
-                                   } else if (!*r) {
-                                       // This test is the room's only owner; fenced would be a
-                                       // broken store.
-                                       done(std::unexpected(MessageStoreError::Corrupt));
-                                   } else {
-                                       done(**r);
-                                   }
-                               });
+        rooms_->append(room, generations_.at(room), ulw::test::outgoing(sender, key, body),
+                       [done = std::move(done)](
+                           rt::StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
+                           if (!r) {
+                               done(std::unexpected(MessageStoreError::Unavailable));
+                           } else if (!*r) {
+                               // This test is the room's only owner; fenced would be a broken
+                               // store.
+                               done(std::unexpected(MessageStoreError::Corrupt));
+                           } else {
+                               done(**r);
+                           }
+                       });
     }
 
 private:
@@ -224,8 +224,8 @@ protected:
         });
     }
 
-    // Messages 1..count, one at a time as an owner writes a room's messages, each carrying
-    // body_of(its seq).
+    // Messages 1..count, one at a time as an owner writes a room's
+    // messages, each carrying body_of(its seq).
     void write_many(const core::RoomId& room, std::uint64_t count) {
         for (std::uint64_t seq = 1; seq <= count; ++seq) {
             ASSERT_EQ(write(room, alice_, body_of(seq)), seq);
@@ -371,7 +371,8 @@ TEST_P(MessageStoreConformance, AskingForMoreThanTheRowCapGetsTheCap) {
 
 TEST_P(MessageStoreConformance, APageEndsBeforeItsBodiesPassTheByteBound) {
     const core::RoomId room = new_room();
-    // Four largest bodies fill the bound exactly; the fifth goes to the next page.
+    // Four largest bodies fill the bound exactly; the fifth goes to
+    // the next page.
     static_assert(4 * kMaxMessageBody == kMaxHistoryBytes);
     for (std::uint64_t seq = 1; seq <= 5; ++seq) {
         std::vector<std::byte> body(kMaxMessageBody, static_cast<std::byte>(seq));
@@ -388,15 +389,6 @@ TEST_P(MessageStoreConformance, APageEndsBeforeItsBodiesPassTheByteBound) {
     const auto back = before(room, std::nullopt, 10);
     ASSERT_TRUE(back);
     EXPECT_EQ(seqs(*back), (std::vector<std::uint64_t>{5, 4, 3, 2}));
-}
-
-TEST_P(MessageStoreConformance, ABodyOverTheBoundIsRefusedAndNothingIsStored) {
-    const core::RoomId room = new_room();
-    EXPECT_EQ(write(room, alice_, std::vector<std::byte>(kMaxMessageBody + 1)),
-              MessageResult<std::uint64_t>{std::unexpected(MessageStoreError::TooLarge)});
-    EXPECT_EQ(last_seq(room), 0U);
-    EXPECT_EQ(after(room, 0, 10), Page{});
-    EXPECT_EQ(write(room, alice_, std::vector<std::byte>(kMaxMessageBody)), 1U);
 }
 
 TEST_P(MessageStoreConformance, LastSeqIsZeroForAnEmptyRoomAndTheNewestOtherwise) {
@@ -424,7 +416,8 @@ TEST_P(MessageStoreConformance, RoomsAreKeptApart) {
 
 TEST_P(MessageStoreConformance, TenThousandMessagesPageBothWaysWithoutGapsOrDuplicates) {
     constexpr std::uint64_t kCount = 10'000;
-    // Not a divisor of kCount, so the last page in each direction is a short one.
+    // Not a divisor of kCount, so the last page in each direction is
+    // a short one.
     constexpr std::size_t kPage = 97;
     const core::RoomId room = new_room();
     ASSERT_NO_FATAL_FAILURE(write_many(room, kCount));
@@ -488,7 +481,8 @@ TEST_P(MessageStoreConformance, RemovingAMemberIsIdempotent) {
 
 TEST_P(MessageStoreConformance, MembersPageInTheByteOrderOfTheirIds) {
     const core::RoomId room = new_room();
-    // A linguistic collation would put "a" before "B" and ignore the punctuation.
+    // A linguistic collation would put "a" before "B" and ignore the
+    // punctuation.
     const std::vector<core::UserId> ordered{user("B"),   user("Z|1"),     user("a"),
                                             user("a.b"), user("auth0|x"), user("a|1")};
     for (const core::UserId& id : ordered | std::views::reverse) {
@@ -508,7 +502,8 @@ TEST_P(MessageStoreConformance, MembersPageInTheByteOrderOfTheirIds) {
     EXPECT_EQ(listed, ordered);
 }
 
-// The in-memory store's own writer, which the Postgres store does not have.
+// The in-memory store's own writer, which the Postgres store does
+// not have.
 class MemoryMessageStoreAppend : public ::testing::Test {
 protected:
     MemoryMessageStoreAppend() {

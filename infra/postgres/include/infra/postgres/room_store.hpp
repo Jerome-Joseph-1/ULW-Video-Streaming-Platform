@@ -1,6 +1,5 @@
 #pragma once
 
-#include "core/ports/message_store.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor.hpp"
 #include "rt/room_store.hpp"
@@ -60,21 +59,14 @@ public:
     void heartbeat(const core::NodeId& node, const core::Uuid& incarnation,
                    std::vector<rt::OwnedRoom> rooms,
                    rt::StoreCallback<std::vector<core::RoomId>> done) override;
+    // One statement: the fenced seq and the message's row in chat_messages
+    // (migrations/0005_chat_messages.sql), so a seq is taken only with its message and a fenced
+    // writer takes neither. Idempotent by the sender's key: a message whose key the sender
+    // already used in the room takes no seq, and the answer is the one it was stored under,
+    // still only to the room's owner. sent_at is the database's clock at the write. A body over
+    // core::ports::kMaxMessageBody is refused as Unavailable, and nothing is written.
     void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& message,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override;
-    // append(), and in the same statement the message's row in chat_messages
-    // (migrations/0005_chat_messages.sql): the seq is taken only with its row, and a fenced
-    // writer takes neither. Takes what the router's outgoing message carries (sender, key and
-    // a body it holds only for the call), so that it is the router's append passed through;
-    // sent_at is the database's clock at the write. A body over core::ports::kMaxMessageBody
-    // or a key over kMaxMessageKey is TooLarge, and nothing is written.
-    // Idempotent by the sender's `key`: a message whose key the sender already used in the room is
-    // not stored again, and the answer is the seq it was stored under (still only to the room's
-    // owner).
-    void append_message(const core::RoomId& room, std::uint64_t generation,
-                        const core::UserId& sender, std::string_view key,
-                        std::span<const std::byte> body,
-                        core::ports::MessageCallback<std::optional<std::uint64_t>> done);
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
                  rt::StoreCallback<void> done) override;
     void advertise(const core::NodeId& node, std::string address, const core::Uuid& incarnation,

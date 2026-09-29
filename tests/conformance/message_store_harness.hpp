@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 #include <optional>
+#include <span>
+#include <string_view>
 #include <utility>
 
 namespace ulw::test {
@@ -22,6 +24,13 @@ core::ports::MessageResult<T> ask(net::IReactor& reactor, Call call) {
         return std::unexpected(core::ports::MessageStoreError::Unavailable);
     }
     return std::move(*answer);
+}
+
+// What the router hands the room store to append. `key` must be a valid message key; the view
+// of `body` must outlive the call it is passed to.
+inline rt::Outgoing outgoing(const core::UserId& sender, std::string_view key,
+                             std::span<const std::byte> body) {
+    return rt::Outgoing{.sender = sender, .key = *rt::MessageKey::parse(key), .body = body};
 }
 
 // The same, for the room store.

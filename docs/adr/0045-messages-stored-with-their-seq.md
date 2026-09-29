@@ -39,19 +39,23 @@ What bounds a page of history:
 
 ## Decision
 
-- **The owner's write.** `PgRoomStore::append_message(room, generation, sender, key, body)`
-  runs one statement: the fenced increment of `room_state.last_seq` and, from its result, the
-  message's `INSERT` into `chat_messages`. It answers the new seq, or nothing when the
-  generation is no longer the room's; then no seq was taken and no row written. If the insert
-  fails, the statement fails whole and the seq is not taken. A body over 64 KiB or a key over
-  64 characters is answered `TooLarge` and nothing is sent: the client edge decodes nothing
-  larger, but a peer node's forward is bounded only by its frame, and input a peer controls
-  must not stop the owner.
+- **The owner's write.** `PgRoomStore::append(room, generation, const rt::Outgoing&
+  {sender, key, body})`, the router's store port, runs one statement: the fenced increment of
+  `room_state.last_seq` and, from its result, the message's `INSERT` into `chat_messages`. It
+  answers the new seq, or nothing when the generation is no longer the room's; then no seq was
+  taken and no row written. If the insert fails, the statement fails whole and the seq is not
+  taken. `sent_at` is the database's `now()` at the write, so the router passes no time.
+- **An oversized body is refused, as `Unavailable`.** A body over 64 KiB is answered without
+  a statement: the client edge decodes nothing larger, the node channel refuses any frame whose
+  body is larger (`rt/src/wire.cpp`), and input a peer controls must never stop the owner.
+  `rt::StoreError` gains no `TooLarge` for it: no client can send such a body, so the router
+  has nothing to tell one, and the store port stays as the router uses it. To the router it is
+  a write that did not happen.
 - **Repeats are recognised by the sender's message key.** A client that got `unavailable`
   sends the same message again under the same key, to the same owner or, after a takeover, to
   the next one; either may have no memory of it, since a lost answer means it was never fanned
   out. So the key is stored with the message (`msg_key`, unique per room and sender), and
-  `append_message` first looks for it: found, the statement takes no seq and answers the one
+  the append first looks for it: found, the statement takes no seq and answers the one
   the message was stored under; the `room_state` row is still updated by nothing, so a fenced
   former owner gets no answer for it either. Two repeats in flight at once both miss the
   lookup; the second fails on the key's unique index, whole, and is run once more, when it
@@ -60,23 +64,17 @@ What bounds a page of history:
 - **Every room, durable or lossy, writes this way**, before delivery. Storing the row costs
   nothing measurable over taking the seq alone (below), so there is no cheaper path for lossy
   rooms to keep, and E2EE rooms are always durable.
-- **How the router calls it.** The router's store port, as the chat service's lane reshapes
-  it, is `rt::IRoomStore::append(room, generation, const Outgoing& {sender, key, body},
-  done)`, answering the seq or nothing when fenced; a store that keeps messages writes the
-  message in that same fenced write. `append_message(room, generation, sender, key, body,
-  done)` takes exactly those fields, with the body as a view that it copies, so the Postgres
-  store's `append` is a pass-through to it. `sent_at` is the database's `now()` at the write:
-  the router passes no time and needs no clock for it. So `rt/src/room_router.cpp` changes no
-  further for storage, and encrypted bodies change nothing on this path.
-- **One writer.** `append_message` is the only statement that writes `chat_messages`. The
+- **How the router calls it.** Unchanged: the owner's pump calls `IRoomStore::append` with
+  the message it sequences, as it did before messages were stored, and `RoomRegistry` passes
+  it through. Storage changed only the store, so `rt/src/room_router.cpp` does not change for
+  it, and encrypted bodies change nothing on this path.
+- **One writer.** `PgRoomStore::append` is the only statement that writes `chat_messages`, and
+  there is no path that takes a seq without its message: the seq-only append is gone. The
   message store below has no writer: a row written under a seq "taken elsewhere" could sit
-  above `last_seq` and make every later append for its room fail. The seq-only
-  `IRoomStore::append` still exists, because the router calls it today; it takes a seq with no
-  row, so rooms written through it have holes in their history. The wiring step removes it,
-  with the router change above, so that no path takes a seq without its message.
+  above `last_seq` and make every later append for its room fail.
 - **One counter.** `room_state.last_seq` is the only source of a room's last seq. The message
-  store's `last_seq(room)` reads it, not `max(seq)` of the messages; with `append_message` as
-  the only writer the two agree.
+  store's `last_seq(room)` reads it, not `max(seq)` of the messages; with the append as the only
+  writer the two agree.
 - **Reads.** `core::ports::IMessageStore` (`core/include/core/ports/message_store.hpp`) serves
   history: `history_before(room, before, limit)` newest first, `history_after(room, after,
   limit)` oldest first, `last_seq(room)`, and membership (`add_member`/`remove_member`/
@@ -115,7 +113,7 @@ What bounds a page of history:
 
   | Write | p50 | p99 |
   |---|---|---|
-  | seq and row in one statement (`append_message`) | 1.3-4.0 ms | 5-10 ms |
+  | seq and row in one statement (`append`) | 1.3-4.0 ms | 5-10 ms |
   | seq alone (`append`, today's path) | 1.3-4.0 ms | 8-10 ms |
   | seq, then the row as a second statement | 2.7-8.0 ms | 11-19 ms |
 

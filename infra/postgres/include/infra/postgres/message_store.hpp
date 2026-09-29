@@ -24,7 +24,7 @@ struct MessageStoreConfig {
 };
 
 // IMessageStore on Postgres (migrations/0005_chat_messages.sql), driven by the reactor: no call
-// blocks the loop. It only reads messages; PgRoomStore::append_message writes them. Bodies come
+// blocks the loop. It only reads messages; PgRoomStore::append writes them. Bodies come
 // back in bytea's hex text form, and neither they nor anything derived from them reaches a log
 // or an error.
 //
