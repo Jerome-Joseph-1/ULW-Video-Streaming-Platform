@@ -2,8 +2,8 @@
 
 > **Draft: changes until milestone M19 merges.** What follows is the protocol on `main` today
 > (M16). M17 replaces the message envelope (see [Coming in M17](#coming-in-m17)), M18 adds
-> presence and M19 adds history and membership checks. Nothing here is a compatibility promise
-> yet.
+> [presence](#presence) and M19 adds history and membership checks. Nothing here is a
+> compatibility promise yet.
 
 Chat is its own service, `chat_server`, separate from the video gateway (ADR-0019). Clients hold
 one WebSocket to it and send JSON messages in text frames.
@@ -139,3 +139,61 @@ What changes:
 - **Rate limit.** 10 sends, refilling 2 per second, per user per node. Past it the send is
   answered `error` with `reason` `rate_limited` and `retry_after_ms`, and is neither sequenced nor
   delivered.
+
+## Presence
+
+<!-- apps/chat/src/presence.hpp (PresenceLimits), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), docs/adr/0044-presence-over-the-room-plane.md -->
+
+A client can watch other users and hear when they come online and go offline. A user is online
+while they have at least one open socket to any chat node, and for a grace of 10 s after their
+last one closes: a page reload or a reconnect, even through another node, within the grace is
+never reported. Nothing needs to be joined first.
+
+Client to server:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `watch` | `user` | Hear this user's presence on this connection. Watching the same user again is answered again. |
+| `unwatch` | `user` | Stop. Not answered; unwatching a user not watched does nothing. |
+
+Server to client:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `watching` | `user`, `status` (`online` or `offline`) | The answer to `watch`: what the node knows now. |
+| `presence` | `user`, `status` (`online` or `offline`) | The user's status changed. Sent once per change, to every connection watching them. |
+| `error` | `reason`, `user` | The watch was refused (below). |
+
+```json
+{"type":"watch","user":"user-42"}
+{"type":"watching","user":"user-42","status":"offline"}
+{"type":"presence","user":"user-42","status":"online"}
+{"type":"presence","user":"user-42","status":"offline"}
+```
+
+`user` is the watched user's id as it appears in `sender` ([auth.md](auth.md)). A `watching`
+that says `offline` may be followed within a round trip by `presence` `online`: the node had not
+yet heard from the node the user is connected through. Treat `watching` as the starting state
+and apply each `presence` in order.
+
+When a user goes offline:
+
+- after closing their last socket normally: 10 s later (the grace);
+- when their connection dies without a close: once the server notices, at most 75 s later (the
+  idle timeout in [Limits](#limits)), plus the grace;
+- when the node they were on stops (a crash, or a deploy draining it) and they do not reconnect:
+  up to 150 s later.
+
+Watches last as long as the connection. After a reconnect, watch again.
+
+Errors for `watch` and `unwatch`:
+
+| `reason` | Meaning | Client action |
+|---|---|---|
+| `malformed` | Missing `user`, or another field | Fix the client |
+| `bad_user` | `user` is not a user id | Fix the client |
+| `too_many_watches` | This connection already watches 128 users | Unwatch some first |
+| `busy` | This node watches as many users as it takes, or this user started watching users nobody on this node watched faster than 128 at once and then 1 a second | Back off and retry |
+
+Room ids of UUID version 8 (the third group starts with `8`) are reserved for presence: `join`
+or `send` naming one is refused with `bad_room`.
