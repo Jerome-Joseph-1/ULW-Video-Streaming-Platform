@@ -147,7 +147,7 @@ void RoomService::call(std::string_view method, std::string body, const Grant& g
         return;
     }
     std::string url = api_url_;
-    url += "/twirp/livekit.RoomService/";
+    url += "/twirp/livekit.";
     url += method;
     auto transfer = curl::Transfer::start_upload(
         multi_,

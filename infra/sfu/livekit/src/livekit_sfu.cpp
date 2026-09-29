@@ -78,7 +78,45 @@ std::string create_room_body(std::string_view name, std::uint16_t max_participan
     return body;
 }
 
+// The live stream's single rendition, re-encoded by LiveKit's recorder: the worker's 720p rung
+// (core::choose_ladder), at the frame rate browsers capture at.
+constexpr int kRelayWidth = 1280;
+constexpr int kRelayHeight = 720;
+constexpr int kRelayFramerate = 30;
+constexpr int kRelayVideoKbps = 2800;
+
+std::string relay_body(std::string_view room, std::string_view identity,
+                       const core::ports::MediaRelay& target) {
+    std::string body = R"({"room_name":)";
+    core::json::append_string(body, room);
+    body += R"(,"identity":)";
+    core::json::append_string(body, identity);
+    body += R"(,"advanced":{"width":)";
+    body += std::to_string(kRelayWidth);
+    body += R"(,"height":)";
+    body += std::to_string(kRelayHeight);
+    body += R"(,"framerate":)";
+    body += std::to_string(kRelayFramerate);
+    body += R"(,"video_bitrate":)";
+    body += std::to_string(kRelayVideoKbps);
+    body += R"(,"key_frame_interval":)";
+    body += std::to_string(target.keyframe_interval.count());
+    body += R"(},"stream_outputs":[{"protocol":"SRT","urls":[)";
+    core::json::append_string(body, target.url);
+    body += "]}]}";
+    return body;
+}
+
+std::string identity_of(const core::UserId& user, const core::DeviceId& device) {
+    // A user id never holds '/', so the identity splits back apart unambiguously.
+    std::string identity(user.view());
+    identity += '/';
+    identity += device.to_string();
+    return identity;
+}
+
 constexpr Grant kCreateRooms{.permission = Permission::CreateRooms, .room = {}, .identity = {}};
+constexpr Grant kRecordRooms{.permission = Permission::RecordRoom, .room = {}, .identity = {}};
 
 class LiveKitRoom final : public IMediaRoom {
 public:
@@ -97,14 +135,11 @@ public:
                 });
             return;
         }
-        // A user id never holds '/', so the identity splits back apart unambiguously.
-        std::string identity(user.view());
-        identity += '/';
-        identity += device.to_string();
+        std::string identity = identity_of(user, device);
         const bool member = role == MediaRole::Member;
         // Copies, not this: the room handle may be gone by the time the room is back.
-        service_.call("CreateRoom", create_room_body(name_, max_participants_), kCreateRooms,
-                      IfAbsent::Fail,
+        service_.call("RoomService/CreateRoom", create_room_body(name_, max_participants_),
+                      kCreateRooms, IfAbsent::Fail,
                       [&service = service_, endpoint = member ? endpoints_.client : endpoints_.whip,
                        permission = member ? Permission::JoinRoom : Permission::PublishToRoom,
                        ttl = member ? kTicketTtl : kPublisherTicketTtl, room = name_,
@@ -128,12 +163,28 @@ public:
                       });
     }
 
+    void relay(const core::UserId& user, const core::DeviceId& device,
+               const core::ports::MediaRelay& target, MediaDone done) override {
+        if (closed_) {
+            service_.fail(MediaError::Closed, std::move(done));
+            return;
+        }
+        // The packager listens only with SRT (ADR-0046); anything else is a caller's mistake.
+        if (!target.url.starts_with("srt://")) {
+            service_.fail(MediaError::Refused, std::move(done));
+            return;
+        }
+        service_.call("Egress/StartParticipantEgress",
+                      relay_body(name_, identity_of(user, device), target), kRecordRooms,
+                      IfAbsent::Fail, std::move(done));
+    }
+
     void close(MediaDone done) override {
         closed_ = true;
         std::string body = R"({"room":)";
         core::json::append_string(body, name_);
         body += '}';
-        service_.call("DeleteRoom", std::move(body), kCreateRooms, IfAbsent::Succeed,
+        service_.call("RoomService/DeleteRoom", std::move(body), kCreateRooms, IfAbsent::Succeed,
                       std::move(done));
     }
 
@@ -161,7 +212,7 @@ public:
         name += ':';
         name += std::to_string(std::to_underlying(generation));
         std::string body = create_room_body(name, max_participants);
-        service_.call("CreateRoom", std::move(body), kCreateRooms, IfAbsent::Fail,
+        service_.call("RoomService/CreateRoom", std::move(body), kCreateRooms, IfAbsent::Fail,
                       [this, name = std::move(name), max_participants, done = std::move(done)](
                           std::expected<void, MediaError> created) mutable noexcept {
                           if (!created) {

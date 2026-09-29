@@ -33,8 +33,9 @@ enum class ConfigError : std::uint8_t {
 [[nodiscard]] std::string_view to_string(ConfigError e) noexcept;
 
 // Each generation of a room is the LiveKit room "<room id>:<generation>"; a participant is the
-// LiveKit identity "<user>/<device>". Room control goes over RoomService (Twirp, JSON over HTTP) on
-// `reactor` through `multi`; all three arguments must outlive the returned ISfu.
+// LiveKit identity "<user>/<device>". Room control goes over RoomService, and relaying a live
+// stream's publisher over Egress (Twirp, JSON over HTTP), on `reactor` through `multi`; all
+// three arguments must outlive the returned ISfu.
 [[nodiscard]] std::expected<std::unique_ptr<core::ports::ISfu>, ConfigError>
 make_sfu(net::IReactor& reactor, curl::Multi& multi, const core::ports::IClock& clock,
          Config config);

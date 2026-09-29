@@ -4,6 +4,7 @@
 //
 //   open <room-id> <generation> <max-participants>   -> ok
 //   join <room-id> <generation> <user> <device-id> <member|publisher>  -> the ticket, as JSON
+//   relay <room-id> <generation> <user> <device-id> <keyframe-seconds> <srt-url>  -> ok
 //   close <room-id> <generation>                      -> ok
 //
 // A command that fails answers "error <reason>". LIVEKIT_API_KEY and LIVEKIT_API_SECRET are
@@ -152,6 +153,17 @@ public:
                         words[5] == "member" ? core::ports::MediaRole::Member
                                              : core::ports::MediaRole::Publisher);
         }
+        if (words[0] == "relay" && words.size() == 7) {
+            const auto user = core::UserId::parse(words[3]);
+            const auto device = core::DeviceId::parse(words[4]);
+            const auto keyframes = parse_number<std::uint32_t>(words[5]);
+            if (!user || !device || !keyframes) {
+                return "error bad user, device id or keyframe interval";
+            }
+            return relay(key, *user, *device,
+                         core::ports::MediaRelay{.url = std::string(words[6]),
+                                                 .keyframe_interval = core::Seconds{*keyframes}});
+        }
         if (words[0] == "close" && words.size() == 3) {
             return close(key);
         }
@@ -183,6 +195,19 @@ private:
                            [&](auto result) noexcept { ticket = std::move(result); });
         run_until([&] { return ticket.has_value(); });
         return *ticket ? ticket_json(**ticket) : "error " + std::string(to_string(ticket->error()));
+    }
+
+    std::string relay(const std::string& key, const core::UserId& user,
+                      const core::DeviceId& device, const core::ports::MediaRelay& target) {
+        const auto room = rooms_.find(key);
+        if (room == rooms_.end()) {
+            return "error not open";
+        }
+        std::optional<std::expected<void, MediaError>> relayed;
+        room->second->relay(user, device, target,
+                            [&](std::expected<void, MediaError> r) noexcept { relayed = r; });
+        run_until([&] { return relayed.has_value(); });
+        return *relayed ? "ok" : "error " + std::string(to_string(relayed->error()));
     }
 
     std::string close(const std::string& key) {

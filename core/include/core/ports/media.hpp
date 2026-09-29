@@ -57,6 +57,14 @@ enum class MediaRole : std::uint8_t {
     Publisher,
 };
 
+// Where a live stream's media goes once its publisher is in (ADR-0056): the packager's ingest
+// address, as a URL whose scheme names the protocol, and the keyframe interval the packager
+// cuts its segments at (ADR-0046).
+struct MediaRelay {
+    std::string url;
+    Seconds keyframe_interval;
+};
+
 class IMediaRoom {
 public:
     virtual ~IMediaRoom() = default;
@@ -66,6 +74,12 @@ public:
     // that is gone.
     virtual void join(const UserId& user, const DeviceId& device, MediaRole role,
                       TicketDone done) = 0;
+    // Sends what that participant publishes to `target`, re-encoded for it, until the
+    // participant leaves or the generation closes; its leaving is how the far end learns the
+    // stream is over. The participant must be in the room already: the media server looks for
+    // it for half a minute, not for as long as a ticket lasts.
+    virtual void relay(const UserId& user, const DeviceId& device, const MediaRelay& target,
+                       MediaDone done) = 0;
     // Ends this generation for everyone in it; their tickets and refreshed credentials stop
     // admitting anyone. Closing a generation the media server has already dropped succeeds.
     virtual void close(MediaDone done) = 0;

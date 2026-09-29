@@ -243,6 +243,105 @@ TEST_P(LiveKitSfuTest, APublisherTicketOutlastsTheLongestStream) {
               std::chrono::floor<core::Seconds>(publisher->expires_at).time_since_epoch().count());
 }
 
+TEST_P(LiveKitSfuTest, RelayingSendsThatParticipantToThePackagerOverSrt) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open(MediaGeneration{4});
+    ASSERT_TRUE(room);
+    const std::string url = "srt://packager:9000?streamid=s1&passphrase=0123456789";
+    ASSERT_TRUE(wait([&](auto done) {
+        (*room)->relay(*core::UserId::parse("streamer"), *core::DeviceId::parse(kDevice),
+                       core::ports::MediaRelay{.url = url, .keyframe_interval = core::Seconds{2}},
+                       std::move(done));
+    }));
+
+    const auto requests = server.requests();
+    ASSERT_EQ(requests.size(), 2U);
+    const ServedRequest& start = requests[1];
+    EXPECT_EQ(start.path(), "/twirp/livekit.Egress/StartParticipantEgress");
+    const auto body = body_of(start);
+    EXPECT_EQ(string_at(body, "room_name"), std::string(kRoom) + ":4");
+    EXPECT_EQ(string_at(body, "identity"), "streamer/" + std::string(kDevice));
+    const core::json::Value* advanced = body.find("advanced");
+    ASSERT_NE(advanced, nullptr);
+    // The packager copies, so segments can only be cut where the recorder put keyframes.
+    EXPECT_EQ(advanced->find("key_frame_interval")->as_u64(), 2U);
+    EXPECT_EQ(advanced->find("height")->as_u64(), 720U);
+    const auto* outputs = body.find("stream_outputs")->as_array();
+    ASSERT_NE(outputs, nullptr);
+    ASSERT_EQ(outputs->size(), 1U);
+    EXPECT_EQ(string_at(outputs->front(), "protocol"), "SRT");
+    const auto* urls = outputs->front().find("urls")->as_array();
+    ASSERT_NE(urls, nullptr);
+    ASSERT_EQ(urls->size(), 1U);
+    EXPECT_EQ(urls->front().as_string(), url);
+
+    const auto claims = claims_of(start);
+    EXPECT_EQ(bool_at(claims, "video", "roomRecord"), true);
+    EXPECT_EQ(bool_at(claims, "video", "roomCreate"), std::nullopt);
+    EXPECT_EQ(claims.find("sub"), nullptr);
+}
+
+TEST_P(LiveKitSfuTest, RelayingFailsByWhetherARetryCanHelp) {
+    std::atomic<int> status{200};
+    const HttpTestServer server([&](const ServedRequest&) {
+        return Reply{.status = status.load(), .headers = {}, .body = R"({"code":"x"})"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto relay = [&] {
+        return wait([&](auto done) {
+            (*room)->relay(*core::UserId::parse("streamer"), *core::DeviceId::parse(kDevice),
+                           core::ports::MediaRelay{.url = "srt://packager:9000",
+                                                   .keyframe_interval = core::Seconds{2}},
+                           std::move(done));
+        });
+    };
+    // No recorder is connected to LiveKit, or none has the CPU to spare.
+    status = 503;
+    const auto busy = relay();
+    ASSERT_FALSE(busy);
+    EXPECT_EQ(busy.error(), MediaError::Unavailable);
+    status = 400;
+    const auto rejected = relay();
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error(), MediaError::Refused);
+}
+
+TEST_P(LiveKitSfuTest, ATargetThePackagerCannotListenOnIsRefusedUnsent) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto relayed = wait([&](auto done) {
+        (*room)->relay(*core::UserId::parse("streamer"), *core::DeviceId::parse(kDevice),
+                       core::ports::MediaRelay{.url = "rtmp://packager/live/s1",
+                                               .keyframe_interval = core::Seconds{2}},
+                       std::move(done));
+    });
+    ASSERT_FALSE(relayed);
+    EXPECT_EQ(relayed.error(), MediaError::Refused);
+    EXPECT_EQ(server.request_count(), 1U);
+}
+
+TEST_P(LiveKitSfuTest, AClosedRoomRelaysNothing) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    ASSERT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
+    const auto relayed = wait([&](auto done) {
+        (*room)->relay(*core::UserId::parse("streamer"), *core::DeviceId::parse(kDevice),
+                       core::ports::MediaRelay{.url = "srt://packager:9000",
+                                               .keyframe_interval = core::Seconds{2}},
+                       std::move(done));
+    });
+    ASSERT_FALSE(relayed);
+    EXPECT_EQ(relayed.error(), MediaError::Closed);
+    EXPECT_EQ(server.request_count(), 2U);
+}
+
 TEST_P(LiveKitSfuTest, ThePlainClientUrlGivesAPlainWhipUrl) {
     auto server = answering(200);
     auto config = config_for(server.base_url());

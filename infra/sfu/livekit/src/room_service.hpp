@@ -27,8 +27,8 @@ enum class IfAbsent : std::uint8_t {
 [[nodiscard]] std::expected<void, core::ports::MediaError> classify(const curl::Result& result,
                                                                     IfAbsent absent) noexcept;
 
-// Calls to livekit.RoomService, each authorised by a token minted for that call alone.
-// Reactor thread only.
+// Calls to LiveKit's server API (RoomService, and Egress for live streams), each authorised by
+// a token minted for that call alone. Reactor thread only.
 class RoomService {
 public:
     RoomService(net::IReactor& reactor, curl::Multi& multi, const core::ports::IClock& clock,
@@ -38,8 +38,9 @@ public:
     RoomService(const RoomService&) = delete;
     RoomService& operator=(const RoomService&) = delete;
 
-    // POSTs the JSON `body` to RoomService/`method`. `done` runs later on the reactor thread,
-    // failures that happen before anything is sent included.
+    // POSTs the JSON `body` to `method`, "<service>/<method>" of LiveKit's Twirp services.
+    // `done` runs later on the reactor thread, failures that happen before anything is sent
+    // included.
     void call(std::string_view method, std::string body, const Grant& grant, IfAbsent absent,
               core::ports::MediaDone done);
 
