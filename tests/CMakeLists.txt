@@ -18,6 +18,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/hls_test.cpp
     unit/core/ids_test.cpp
     unit/core/json_test.cpp
+    unit/core/key_package_test.cpp
     unit/core/ladder_test.cpp
     unit/core/parse_test.cpp
     unit/core/storage_key_test.cpp
@@ -33,6 +34,30 @@ ulw_add_test_suite(os_unit_tests unit
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
+
+ulw_add_test_suite(ops_unit_tests unit
+    unit/ops/async_log_test.cpp
+    unit/ops/log_test.cpp
+    unit/ops/metrics_test.cpp
+    unit/ops/notify_test.cpp
+    unit/ops/process_test.cpp
+    unit/ops/settings_test.cpp
+    unit/ops/toml_test.cpp)
+target_link_libraries(ops_unit_tests PRIVATE ulw::ops)
+target_include_directories(ops_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+ulw_add_executable(toml_fuzz_replay fuzz/toml_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(toml_fuzz_replay PRIVATE ulw::ops)
+add_test(NAME toml_fuzz_corpus
+    COMMAND toml_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/toml)
+set_tests_properties(toml_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(toml_fuzz fuzz/toml_fuzz.cpp)
+    target_link_libraries(toml_fuzz PRIVATE ulw::ops)
+    target_compile_options(toml_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(toml_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
 
 ulw_add_library(test_echo support/echo_server.cpp)
 target_include_directories(test_echo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
@@ -166,6 +191,7 @@ if(ULW_FUZZ)
     target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
 ulw_add_test_suite(rt_unit_tests unit
+    unit/rt/recent_keys_test.cpp
     unit/rt/registry_test.cpp
     unit/rt/room_router_test.cpp
     unit/rt/wire_test.cpp)
@@ -191,14 +217,30 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
     gateway/gateway_harness.cpp
+    gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
+    gateway/gateway_store_stall_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
+    gateway/health_test.cpp
     gateway/key_fetcher_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
-    ulw::test_tls OpenSSL::Crypto)
+    ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# The gateway over the S3 store and the MinIO of deploy/local/compose.yaml.
+ulw_add_test_suite(gateway_store_integration_tests integration
+    gateway/gateway_harness.cpp
+    integration/gateway_store_queue_test.cpp)
+target_link_libraries(gateway_store_integration_tests PRIVATE
+    ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_tls
+    ulw::storage_s3 ulw::test_live_s3)
+target_include_directories(gateway_store_integration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/gateway)
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(gateway_store_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 
 # Not a test: the M9 memory measurement, run by hand (see the file's header).
 ulw_add_executable(ulw_gateway_load load/gateway_load.cpp)
@@ -284,9 +326,11 @@ target_include_directories(room_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
     unit/chat/envelope_test.cpp
-    unit/chat/session_test.cpp)
+    unit/chat/session_test.cpp
+    unit/chat/token_bucket_test.cpp)
 target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
@@ -296,12 +340,78 @@ ulw_add_test_suite(chat_cluster_tests integration
     integration/postgres_harness.cpp
     support/child_process.cpp
     PROPERTIES RESOURCE_LOCK postgres)
-target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::codec_ws
+target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::auth ulw::codec_ws
     ulw::net_lib ulw::os PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
 add_dependencies(chat_cluster_tests chat_server)
+
+# gateway_server as its service manager runs it, against a scratch database.
+ulw_add_test_suite(gateway_process_tests integration
+    integration/gateway_process_test.cpp
+    integration/postgres_harness.cpp
+    support/child_process.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(gateway_process_tests PRIVATE
+    ulw::pg_store ulw::devtoken ulw::os ulw::test_tls PkgConfig::LIBPQ)
+target_include_directories(gateway_process_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+target_compile_definitions(gateway_process_tests PRIVATE
+    ULW_GATEWAY_BIN="$<TARGET_FILE:gateway_server>")
+add_dependencies(gateway_process_tests gateway_server)
+
+# The directory contract runs against the in-memory directory here and against Postgres in
+# e2ee_integration_tests.
+ulw_add_test_suite(e2ee_unit_tests unit
+    conformance/e2ee_directory_contract.cpp
+    unit/e2ee/memory_directory_test.cpp)
+target_link_libraries(e2ee_unit_tests PRIVATE ulw::e2ee_directory_memory)
+target_include_directories(e2ee_unit_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/tests/conformance)
+
+ulw_add_test_suite(e2ee_integration_tests integration
+    conformance/e2ee_directory_contract.cpp
+    integration/postgres_e2ee_test.cpp
+    integration/postgres_harness.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(e2ee_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
+target_include_directories(e2ee_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
+if(ULW_BUILD_MLS)
+    ulw_add_test_suite(mls_unit_tests unit
+        unit/e2ee/mls_ffi_test.cpp
+        unit/e2ee/mls_test.cpp)
+    # The FFI test drives the bridge's C API directly, as well as through the wrapper.
+    target_link_libraries(mls_unit_tests PRIVATE ulw::e2ee_mls mls_ffi_bridge)
+
+    # The crate's own tests, among them the check that the committed C header is what cbindgen
+    # makes of src/lib.rs. Release, like the library, so the dependencies built once serve both.
+    add_test(NAME mls_ffi_bridge_cargo_tests
+        COMMAND ${ULW_CARGO_OFFLINE} test --release --locked --offline
+            --target-dir $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CARGO_TARGET_DIR>
+        WORKING_DIRECTORY $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CRATE_DIR>)
+    set_tests_properties(mls_ffi_bridge_cargo_tests PROPERTIES LABELS unit)
+
+    ulw_add_executable(mls_fuzz_replay fuzz/mls_fuzz.cpp fuzz/replay_main.cpp)
+    target_link_libraries(mls_fuzz_replay PRIVATE mls_ffi_bridge)
+    add_test(NAME mls_fuzz_corpus
+        COMMAND mls_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/mls)
+    set_tests_properties(mls_fuzz_corpus PROPERTIES LABELS unit)
+
+    if(ULW_FUZZ)
+        ulw_add_executable(mls_fuzz fuzz/mls_fuzz.cpp)
+        target_link_libraries(mls_fuzz PRIVATE mls_ffi_bridge_fuzz)
+        target_compile_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+        target_link_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+    endif()
+
+    # Three devices through the Postgres directory: key packages fetched from it, commits
+    # ordered by its epoch claims.
+    target_sources(e2ee_integration_tests PRIVATE integration/mls_directory_test.cpp)
+    target_link_libraries(e2ee_integration_tests PRIVATE ulw::e2ee_mls)
+endif()
 
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp

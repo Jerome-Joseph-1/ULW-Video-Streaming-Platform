@@ -1,4 +1,4 @@
-# 0038. Clients reach the SFU with a ticket, not through our signalling
+# 0050. Clients reach the SFU with a ticket, not through our signalling
 
 Status: Accepted
 Date: 2026-09-29

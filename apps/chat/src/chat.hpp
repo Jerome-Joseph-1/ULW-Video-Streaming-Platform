@@ -7,10 +7,12 @@
 #include "net/slab.hpp"
 #include "rt/room_router.hpp"
 
+#include "chat_service.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace chat {
@@ -19,27 +21,16 @@ class Session;
 
 struct Limits {
     // Each connection may hold a 64 KiB message in its decoder, max_backlog of unsent output
-    // and max_send_bytes_in_flight of sends: 64 + 256 + 128 = 448 KiB, and 1280 of them 560 MiB
-    // at the very worst. The router adds its owner queues (64 MiB) and node-channel
-    // connections (32 x ~2.1 MiB), about 690 MiB in all, inside a 1 GiB pod with room for the
-    // kernel's socket buffers (ADR-0036). A connection that is only listening costs a few KiB.
+    // and service.max_send_bytes_in_flight of sends: 64 + 256 + 128 = 448 KiB, and 1280 of them
+    // 560 MiB at the very worst. The router adds its owner queues (64 MiB), node-channel
+    // connections (32 x ~2.1 MiB) and recent message keys (10 MiB), and the chat service the
+    // messages it keeps for resuming clients (32 MiB): about 730 MiB in all, inside a 1 GiB pod
+    // with room for the kernel's socket buffers (ADR-0036, ADR-0043). A connection that is only
+    // listening costs a few KiB.
     std::size_t max_connections = 1280;
-    // A client shows a handful of conversations at once; 64 bounds what one socket makes this
-    // node track and subscribe to.
-    std::size_t max_rooms_per_connection = 64;
-    // Joins of new rooms per user, across all their connections: a join may create the room,
-    // a row that outlives everyone in it. A fresh user may fill one connection's rooms at once;
-    // after that one a second, far faster than a person opens conversations and far slower
-    // than a script filling the table would like.
-    std::uint32_t join_burst = 64;
-    std::uint32_t joins_per_second = 1;
-    // Bytes of a connection's sends not yet answered, each counted as its body plus 256 for
-    // the rest of it. They sit in an owner's queue or on the node channel meanwhile, so they are
-    // part of the connection's memory: two of the largest messages, or dozens of ordinary ones.
-    std::size_t max_send_bytes_in_flight = std::size_t{128} * 1024;
     // Output a client has not read yet. A delivery is at most 64 KiB, so this is four of the
     // largest, or thousands of ordinary ones: a reader that far behind is closed, and resumes
-    // from its last seq when it reconnects (M17).
+    // from its last seq when it reconnects.
     std::size_t max_backlog = std::size_t{256} * 1024;
     // ADR-0029: a read of tiny control frames decodes into thousands of Frames. A client sends
     // a Pong per Ping and perhaps a Ping of its own now and then; 8 in one read, or more than
@@ -56,6 +47,7 @@ struct Limits {
     core::Millis idle_timeout{75'000};
     // Clients get a Close 1001 and this long to answer it before a drain cuts them off.
     core::Millis drain_deadline{5'000};
+    ServiceLimits service;
 };
 
 // Who may open a socket: the cookie that carries the token, and the pages allowed to use it.
@@ -78,7 +70,6 @@ struct Counters {
     std::uint64_t auth_failures = 0;
     std::uint64_t origin_rejections = 0;
     std::uint64_t messages_received = 0;
-    std::uint64_t messages_delivered = 0;
     std::uint64_t protocol_errors = 0;
     std::uint64_t control_floods = 0;
     std::uint64_t slow_consumers = 0;
@@ -100,6 +91,27 @@ public:
 
 private:
     core::NodeId self_;
+};
+
+// The chat service's view of this node's RoomRouter.
+class RouterRooms final : public IRooms {
+public:
+    explicit RouterRooms(rt::RoomRouter& router) noexcept : router_(router) {}
+
+    void join(const core::RoomId& room, rt::IMember& member, rt::JoinCallback done) override {
+        router_.join(room, member, std::move(done));
+    }
+    void leave(const core::RoomId& room, rt::IMember& member) noexcept override {
+        router_.leave(room, member);
+    }
+    void send(const core::RoomId& room, rt::IMember& from, const core::UserId& sender,
+              const rt::MessageKey& key, std::vector<std::byte> body,
+              rt::SendCallback done) override {
+        router_.send(room, from, sender, key, std::move(body), std::move(done));
+    }
+
+private:
+    rt::RoomRouter& router_;
 };
 
 // chat_server's client side: WebSocket upgrades on /rt, authenticated with the gateway's
@@ -138,9 +150,8 @@ public:
     [[nodiscard]] const Access& access() const noexcept { return access_; }
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
+    [[nodiscard]] ChatService& chat() noexcept { return chat_; }
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
-    // Takes one of the user's joins; false when they have none left.
-    [[nodiscard]] bool admit_join(const core::UserId& user);
     void retire(net::Slab<Session>::Handle handle) noexcept;
 
 private:
@@ -148,12 +159,10 @@ private:
     Access access_;
     Limits limits_;
     Counters counters_;
+    RouterRooms rooms_;
+    // Sessions detach from it as they close, so it outlives them.
+    ChatService chat_;
     net::Slab<Session> sessions_;
-    struct JoinBucket {
-        std::uint32_t tokens = 0;
-        core::MonoTime refilled;
-    };
-    std::unordered_map<core::UserId, JoinBucket> joins_;
     bool draining_ = false;
     bool released_ = false;
     net::TimerId drain_timer_;

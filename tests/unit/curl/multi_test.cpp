@@ -230,6 +230,41 @@ TEST_P(MultiTest, StreamedUploadPausesWhileTheSourceIsDryAndSendsExactlyItsLengt
     EXPECT_TRUE(served.body == text(source.data));
 }
 
+TEST_P(MultiTest, AnUploadThePeerStopsReadingFailsAsATimeoutAfterTheStallLimit) {
+    // Listening but never accepting: the kernel completes the connection and takes bytes until
+    // the buffers on both sides are full, then nothing moves, as with a store that hung.
+    const auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
+    ASSERT_TRUE(listener);
+    const std::uint16_t port = *net::local_port(listener->get());
+    // libcurl's stall timer runs on its own clock, not the reactor's, so the limit is made
+    // small instead of the clock injected.
+    constexpr std::chrono::seconds kStallLimit{1};
+    auto stalling = infra::curl::Multi::create(*reactor, 1, kStallLimit);
+    ASSERT_TRUE(stalling);
+    struct Endless final : infra::curl::IBodySource {
+        std::size_t read_body(std::span<std::byte> out) noexcept override { return out.size(); }
+    } source;
+    Outcome outcome;
+    const auto started_at = std::chrono::steady_clock::now();
+    auto transfer =
+        Transfer::start_upload(**stalling,
+                               Request{.method = Method::Put,
+                                       .url = "http://127.0.0.1:" + std::to_string(port) + "/part",
+                                       .headers = {},
+                                       .max_body = 0},
+                               std::uint64_t{1} << 40U, source, outcome);
+    ASSERT_TRUE(transfer);
+    // libcurl judges the rate over its last five seconds of samples, so a stall shows only once
+    // they have aged out of that window: the limit, plus five seconds, plus scheduling slack.
+    constexpr std::chrono::seconds kBound = kStallLimit + std::chrono::seconds(5 + 4);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return outcome.calls > 0; }, kBound));
+    ASSERT_FALSE(outcome.result->has_value());
+    EXPECT_EQ(outcome.result->error().kind, FailureKind::Timeout) << outcome.result->error().detail;
+    EXPECT_GE(std::chrono::steady_clock::now() - started_at, kStallLimit);
+    transfer->reset();
+    stalling->reset();
+}
+
 TEST_P(MultiTest, DestroyingARunningUploadCancelsItWithoutCallingTheHandler) {
     const HttpTestServer server([](const ServedRequest&) { return Reply{}; });
     Trickle source;

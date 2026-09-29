@@ -1,6 +1,7 @@
 #include "gateway_harness.hpp"
 
 #include "infra/storage/fs_store.hpp"
+#include "infra/storage/s3_store.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
@@ -11,6 +12,7 @@
 #include "support/eventually.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_verifier.hpp"
+#include "support/live_s3.hpp"
 #include "support/tls_pki.hpp"
 
 #include <sys/eventfd.h>
@@ -27,7 +29,13 @@
 namespace ulw::test {
 
 struct GatewayUnderTest::Loop final : net::IReadyHandler {
+    explicit Loop(MemoryLog& sink) : log(sink, system_clock, "gateway", ops::Level::Debug) {}
+
     os::SystemClock system_clock;
+    ops::Logger log;
+    gateway::Health health;
+    std::optional<bool> database_up;
+    std::optional<bool> store_up;
     FakeClock manual_clock;
     core::ports::IClock* clock = &system_clock;
     os::SystemRandom random;
@@ -36,6 +44,11 @@ struct GatewayUnderTest::Loop final : net::IReadyHandler {
     std::unique_ptr<net::OffloadPool> pool;
     std::unique_ptr<infra::storage::FakeStore> fake;
     std::unique_ptr<infra::storage::FsStore> fs;
+    ulw::test::LiveS3 store_target = minio_from_env();
+    std::unique_ptr<infra::curl::Multi> multi;
+    std::unique_ptr<infra::storage::S3Store> s3;
+    core::ports::IIngestStore* store = nullptr;
+    core::ports::IObjectAdmin* admin = nullptr;
     std::unique_ptr<infra::catalog::MemoryCatalog> catalog;
     FakeVerifier verifier;
     std::unique_ptr<gateway::Gateway> gateway;
@@ -69,7 +82,7 @@ struct GatewayUnderTest::Loop final : net::IReadyHandler {
     }
 };
 
-GatewayUnderTest::GatewayUnderTest(GatewayOptions options) : loop_(std::make_unique<Loop>()) {
+GatewayUnderTest::GatewayUnderTest(GatewayOptions options) : loop_(std::make_unique<Loop>(*log_)) {
     if (options.transport == gateway::Transport::Tls) {
         client_tls_ = TestPki::shared().client_context();
     }
@@ -94,6 +107,14 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     if (options.manual_clock) {
         l.clock = &l.manual_clock;
     }
+    l.database_up = options.database_up;
+    l.store_up = options.store_up;
+    const auto probe = [&l] {
+        if (l.database_up && l.store_up) {
+            l.health.record(*l.database_up, *l.store_up, l.clock->now());
+        }
+    };
+    probe();
     l.reactor = std::move(*net::make_reactor(reactor_kind_from_env(), *l.clock, 4096));
     if (options.transport == gateway::Transport::Tls) {
         auto tls = net::make_tls_transports(*l.reactor,
@@ -107,32 +128,72 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
         l.transports = net::make_plain_transports(*l.reactor);
     }
     l.pool = std::move(*net::OffloadPool::create(*l.reactor, 4));
-    if (options.backend == Backend::Fake) {
+    switch (options.backend) {
+    case Backend::Fake:
         l.fake = std::make_unique<infra::storage::FakeStore>(*l.reactor, *l.clock, options.chunk,
                                                              options.plan);
         fake_ = l.fake.get();
         reader_ = l.fake.get();
-    } else {
+        l.store = l.fake.get();
+        l.admin = l.fake.get();
+        break;
+    case Backend::Fs: {
         std::string tmpl = (std::filesystem::temp_directory_path() / "ulw-gw-XXXXXX").string();
         l.root = ::mkdtemp(tmpl.data());
         l.fs = std::make_unique<infra::storage::FsStore>(
             infra::storage::FsStore::Deps{.clock = *l.clock, .random = l.random},
             std::move(*net::OffloadPool::create(*l.reactor, 2)), l.root, options.chunk);
         reader_ = l.fs.get();
+        l.store = l.fs.get();
+        l.admin = l.fs.get();
+        break;
+    }
+    case Backend::S3: {
+        auto multi = infra::curl::Multi::create(*l.reactor, options.store_connections,
+                                                options.store_stall_limit);
+        if (!multi) {
+            static_cast<void>(std::fputs("gateway harness: curl multi refused\n", stderr));
+            std::abort();
+        }
+        l.multi = std::move(*multi);
+        if (options.store_endpoint) {
+            l.store_target.profile = *infra::s3util::S3Profile::minio(*options.store_endpoint);
+        }
+        // Signed with the real time whatever the loop's clock says: MinIO refuses a request
+        // dated more than 15 minutes from its own.
+        auto s3 = infra::storage::S3Store::create(
+            infra::storage::S3Store::Deps{.reactor = *l.reactor,
+                                          .multi = *l.multi,
+                                          .credentials = l.store_target.credentials,
+                                          .clock = l.system_clock,
+                                          .random = l.random,
+                                          .profile = l.store_target.profile,
+                                          .bucket = l.store_target.bucket},
+            {.part_size = options.chunk});
+        if (!s3) {
+            static_cast<void>(std::fputs("gateway harness: s3 store refused\n", stderr));
+            std::abort();
+        }
+        l.s3 = std::move(*s3);
+        reader_ = l.s3.get();
+        l.store = l.s3.get();
+        l.admin = l.s3.get();
+        break;
+    }
     }
     l.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*l.reactor);
-    core::ports::IIngestStore& store =
-        l.fake ? static_cast<core::ports::IIngestStore&>(*l.fake) : *l.fs;
     l.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *l.reactor,
                                                                  .transports = *l.transports,
                                                                  .pool = *l.pool,
-                                                                 .store = store,
+                                                                 .store = *l.store,
                                                                  .reader = *reader_,
                                                                  .catalog = *l.catalog,
                                                                  .views = *l.catalog,
                                                                  .verifier = l.verifier,
                                                                  .clock = *l.clock,
-                                                                 .random = l.random},
+                                                                 .random = l.random,
+                                                                 .log = l.log,
+                                                                 .health = l.health},
                                                    options.limits);
     auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
     port_ = *net::local_port(listener->get());
@@ -147,6 +208,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     while (!l.stop) {
         l.reactor->run_once(core::Millis{50});
         l.gateway->reap();
+        probe();
     }
     l.reactor->unwatch(l.wake.get());
     // The pool first: a job it is running points at a connection the gateway owns.
@@ -154,6 +216,9 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     l.gateway.reset();
     l.fs.reset();
     l.fake.reset();
+    // Its sessions went with the gateway's connections; its transfers with them.
+    l.s3.reset();
+    l.multi.reset();
     l.catalog.reset();
     l.transports.reset();
     l.reactor.reset();
@@ -237,8 +302,7 @@ void GatewayUnderTest::put_video(const core::VideoRecord& video) {
 }
 
 void GatewayUnderTest::put_object(std::string_view key, std::string_view bytes) {
-    core::ports::IObjectAdmin& admin =
-        loop_->fake ? static_cast<core::ports::IObjectAdmin&>(*loop_->fake) : *loop_->fs;
+    core::ports::IObjectAdmin& admin = *loop_->admin;
     const auto parsed = core::StorageKey::parse(key);
     ASSERT_TRUE(parsed) << key;
     ASSERT_TRUE(admin.put(*parsed, std::as_bytes(std::span(bytes))));
@@ -258,6 +322,18 @@ std::string GatewayUnderTest::metrics() {
     std::string out;
     on_loop([&] { out = loop_->gateway->render_metrics(); });
     return out;
+}
+
+void GatewayUnderTest::set_health(std::optional<bool> database_up, std::optional<bool> store_up) {
+    on_loop([&] {
+        loop_->database_up = database_up;
+        loop_->store_up = store_up;
+    });
+    // Two turns after this one have probed with the new answers: a dependency takes two
+    // failed probes in a row to count as down.
+    on_loop([] {});
+    on_loop([] {});
+    on_loop([] {});
 }
 
 } // namespace ulw::test

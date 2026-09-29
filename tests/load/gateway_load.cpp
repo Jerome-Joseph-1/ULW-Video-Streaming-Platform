@@ -69,7 +69,7 @@ constexpr std::uint64_t kEpollBuffer = std::uint64_t{64} * 1024;
 constexpr std::uint64_t kChunk = std::uint64_t{8} * 1024 * 1024;
 // No more bytes taken for this long means every client is blocked on a full socket.
 constexpr auto kSettle = std::chrono::seconds(2);
-// Short of the gateway's 30 s body timeout, which would start answering the stalled uploads.
+// Each phase settles within seconds; one still moving after this never will.
 constexpr auto kPhaseLimit = std::chrono::seconds(25);
 // 16 KiB per upload every 100 ms: less than a plain connection stages from one receive, so
 // it takes several ticks to drain, and exactly one TLS record, so a TLS connection resumes
@@ -298,6 +298,10 @@ private:
 struct Server {
     os::SystemClock clock;
     os::SystemRandom random;
+    // Warnings only: a line per request would be measured along with the connections.
+    ops::StdoutSink log_sink;
+    ops::Logger log{log_sink, clock, "gateway", ops::Level::Warn};
+    gateway::Health health;
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::ITransportFactory> transports;
     std::unique_ptr<net::OffloadPool> pool;
@@ -371,7 +375,9 @@ int run(const Args& args) {
                                                                  .views = *s.catalog,
                                                                  .verifier = s.verifier,
                                                                  .clock = s.clock,
-                                                                 .random = s.random},
+                                                                 .random = s.random,
+                                                                 .log = s.log,
+                                                                 .health = s.health},
                                                    limits);
     if (!s.reactor->listen(std::move(*listener), *s.gateway)) {
         return EXIT_FAILURE;

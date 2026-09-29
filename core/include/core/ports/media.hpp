@@ -24,7 +24,7 @@ enum class MediaError : std::uint8_t {
 
 [[nodiscard]] std::string_view to_string(MediaError e) noexcept;
 
-// What one participant's client needs to reach the media server itself (ADR-0038): the
+// What one participant's client needs to reach the media server itself (ADR-0050): the
 // endpoint to connect to and a credential that admits exactly that participant to exactly
 // that room until `expires_at`. The client runs WebRTC, offer and answer included, against the
 // media server; the credential is the only thing the signalling path hands it.
@@ -42,7 +42,7 @@ using TicketDone = std::move_only_function<void(std::expected<MediaTicket, Media
 // client's credential fresh for as long as it stays connected, so no ticket can be withdrawn,
 // but a closed generation admits nobody. The caller owns the number: it lives in the room's
 // state, moves only forward, and moves only through the owner's fenced write (ADR-0015), so a
-// deposed owner can neither open a generation nor close the current one (ADR-0038).
+// deposed owner can neither open a generation nor close the current one (ADR-0050).
 enum class MediaGeneration : std::uint64_t {};
 
 enum class MediaRole : std::uint8_t {

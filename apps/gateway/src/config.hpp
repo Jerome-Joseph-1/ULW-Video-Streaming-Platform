@@ -3,11 +3,14 @@
 #include "net/reactor_factory.hpp"
 
 #include "gateway.hpp"
+#include "ops/log.hpp"
+#include "ops/settings.hpp"
 
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -37,8 +40,13 @@ struct Config {
     // Exactly one of the two: Askedin's JWKS, or a local key set for offline development.
     std::string jwks_url;
     std::string dev_jwks_file;
+    // Its contents, read and checked by load_config.
+    std::string dev_jwks;
     std::string jwt_issuer;
     std::string jwt_audience;
+    // The size every chunk but an upload's last has, and the object store's part size.
+    std::uint64_t chunk_size = std::uint64_t{8} << 20U;
+    ops::Level log_level = ops::Level::Info;
     Limits limits;
 };
 
@@ -51,8 +59,22 @@ struct ConfigError {
 // because that is how most deployment tools clear one.
 using EnvLookup = std::function<std::optional<std::string>(std::string_view name)>;
 
-// Everything comes from the environment: arguments are visible to every user through /proc,
-// and the connection string carries a password.
+// Every value the gateway reads, by the environment variable deployments set it with. The
+// connection string carries a password, so it never comes from the command line.
+[[nodiscard]] std::span<const ops::Setting> settings() noexcept;
+
+// Reads and checks everything but what depends on the running process; `env` looks values up
+// by variable name, from the layered settings or the environment alone.
 [[nodiscard]] std::expected<Config, ConfigError> load_config(const EnvLookup& env);
+
+// Two descriptors per connection (the client's, and the backend socket its upload holds), and
+// 64 for the process's own: stdio, the listener, the reactor's, the pools' wakeups, the
+// database sessions. An admission limit the descriptor limit cannot back would fail with
+// EMFILE at the worst moment instead of answering 503.
+[[nodiscard]] std::expected<void, ConfigError> check_descriptor_budget(const Limits& limits,
+                                                                       std::size_t nofile);
+
+// One line per value, secrets redacted, saying where each came from.
+void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log);
 
 } // namespace gateway
