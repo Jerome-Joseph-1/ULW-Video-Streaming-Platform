@@ -82,7 +82,13 @@ public:
 
 class FakeClient final : public chat::IClient {
 public:
-    void push(std::string_view text) noexcept override { got.emplace_back(text); }
+    bool push(std::string_view text) noexcept override {
+        if (closing) {
+            return false;
+        }
+        got.emplace_back(text);
+        return true;
+    }
     [[nodiscard]] std::size_t unsent_bytes() const noexcept override { return unsent; }
     void allocation_failed() noexcept override { ++failures; }
 
@@ -91,6 +97,7 @@ public:
 
     std::vector<std::string> got;
     std::size_t unsent = 0;
+    bool closing = false;
     int failures = 0;
 };
 
@@ -194,6 +201,10 @@ TEST_F(ChatServiceTest, ARoomIsJoinedOnceForAllItsClientsHereAndEachHearsEveryMe
     EXPECT_EQ(m.id, "m1");
     EXPECT_EQ(m.body, body);
     EXPECT_EQ(service_->counters().delivered, 2U);
+    // A connection on its way out takes nothing, and is not counted as delivered to.
+    bob.closing = true;
+    deliver(member, 2);
+    EXPECT_EQ(service_->counters().delivered, 3U);
 }
 
 TEST_F(ChatServiceTest, ASendIsAnsweredWithItsIdAndTheSeqTheOwnerGaveIt) {

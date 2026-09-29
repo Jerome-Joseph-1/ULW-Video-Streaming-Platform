@@ -350,8 +350,9 @@ void ChatService::delivered(Room& room, const rt::Message& message) noexcept {
             ++counters_.lossy_drops;
             continue;
         }
-        s.client->push(text);
-        ++counters_.delivered;
+        if (s.client->push(text)) {
+            ++counters_.delivered;
+        }
     }
 }
 

@@ -55,7 +55,7 @@ public:
 
     void on_keys_refreshed() noexcept override;
 
-    void push(std::string_view text) noexcept override;
+    bool push(std::string_view text) noexcept override;
     [[nodiscard]] std::size_t unsent_bytes() const noexcept override;
     void allocation_failed() noexcept override;
 

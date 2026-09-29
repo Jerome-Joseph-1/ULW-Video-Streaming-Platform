@@ -24,9 +24,10 @@ namespace chat {
 class IClient {
 public:
     virtual ~IClient() = default;
-    // One envelope message. Never closes the connection from inside the call, which may be
-    // running inside the router's fan-out; a connection that cannot take it closes later.
-    virtual void push(std::string_view text) noexcept = 0;
+    // One envelope message; false when the connection is closing and it went nowhere. Never
+    // closes the connection from inside the call, which may be running inside the router's
+    // fan-out; a connection that cannot take it closes later.
+    virtual bool push(std::string_view text) noexcept = 0;
     // What the connection has queued that its peer has not read yet.
     [[nodiscard]] virtual std::size_t unsent_bytes() const noexcept = 0;
     // Something this client asked for could not be allocated; it pays with its connection

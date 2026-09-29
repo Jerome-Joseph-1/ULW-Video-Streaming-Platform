@@ -359,9 +359,9 @@ void Session::command(const codec::ws::Frame& frame) {
     chat.send(*client_, std::move(std::get<Send>(*parsed)));
 }
 
-void Session::push(std::string_view text) noexcept {
+bool Session::push(std::string_view text) noexcept {
     if (phase_ != Phase::Open) {
-        return;
+        return false;
     }
     try {
         const auto bytes = bytes_of(text);
@@ -372,6 +372,8 @@ void Session::push(std::string_view text) noexcept {
     } catch (const std::bad_alloc&) {
         allocation_failed();
     }
+    // A reader too far behind was abandoned by this very frame, which it will never read.
+    return phase_ == Phase::Open;
 }
 
 std::size_t Session::unsent_bytes() const noexcept {
