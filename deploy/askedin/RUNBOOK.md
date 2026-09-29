@@ -70,8 +70,8 @@ Without it the worker pod stays in `CreateContainerError`.
 
 ## 3. Secrets
 
-New keys for `.env.stage` and `.env.prod` (names only). The R2 bucket should have a lifecycle
-rule aborting incomplete multipart uploads after 7 days; the gateway expires its uploads after 6.
+New keys for `.env.stage` and `.env.prod` (names only). The R2 bucket needs the lifecycle rule
+of step 3a; the gateway expires its uploads after 6 days.
 
 ```
 VIDEO_DATABASE_URL                    postgresql://… for the ulw database; the role needs DDL (docs/adr/0031)
@@ -130,6 +130,77 @@ CREATE DATABASE ulw_stage OWNER ulw_stage;
 The role owns its database, which gives the migrations their DDL rights (docs/adr/0031).
 `VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
 password percent-encoded.
+
+### 3a. Lifecycle rule and upload reaper
+
+The bucket aborts incomplete multipart uploads under `videos/` after 7 days, a day past the
+gateway's 6-day upload lifetime. This is the backstop; the reaper below normally gets there
+within minutes of an upload expiring (docs/adr/0034). Once per bucket, with an R2 token that
+has admin read and write on the bucket (neither the gateway's nor the worker's), and the AWS
+CLI:
+
+```sh
+cat > lifecycle.json <<'JSON'
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-multipart-videos",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "videos/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
+JSON
+export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… AWS_DEFAULT_REGION=auto
+R2="https://$VIDEO_R2_ACCOUNT_ID.r2.cloudflarestorage.com"
+aws s3api get-bucket-lifecycle-configuration --endpoint-url "$R2" --bucket "$VIDEO_R2_BUCKET"
+aws s3api put-bucket-lifecycle-configuration --endpoint-url "$R2" --bucket "$VIDEO_R2_BUCKET" \
+  --lifecycle-configuration file://lifecycle.json
+aws s3api get-bucket-lifecycle-configuration --endpoint-url "$R2" --bucket "$VIDEO_R2_BUCKET"
+```
+
+The put replaces the bucket's whole lifecycle configuration: if the first get shows rules, merge
+them into `lifecycle.json`. The same rule is in the dashboard under the bucket's Settings, Object
+lifecycle rules, as "Abort incomplete multipart uploads" with prefix `videos/` and 7 days.
+
+The reaper is a CronJob running the gateway image's `ulw_reaper` with the gateway's secret. It
+aborts uploads past their `expires_at`, fails their videos with "upload expired", releases their
+multipart sessions, and aborts sessions older than the uploads' lifetime that no upload owns. It
+prints `uploads_expired_total` and `parts_orphaned_total` for its pass on stdout; a non-zero
+exit means a phase failed, and the Job's log says which.
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: video-reaper
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+          containers:
+            - name: reaper
+              image: git.askedin.com/askedin/askedin-monorepo/video-gateway:<tag of the running gateway>
+              command: ["/usr/local/bin/ulw_reaper"]
+              envFrom: [{ secretRef: { name: video-gateway-secrets } }]
+              resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 128Mi } }
+              securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+```
+
+Its NetworkPolicy needs egress to Postgres and to R2, as the gateway's has. The gateway's secret
+carries `JWKS_URL` and `JWT_ISSUER` as well, which the reaper ignores. The reaper's environment
+takes `ULW_UPLOAD_TTL_HOURS` if the gateway's upload lifetime is ever changed from 6 days
+(default 144).
 
 ## 4. Pipeline and first deploy
 

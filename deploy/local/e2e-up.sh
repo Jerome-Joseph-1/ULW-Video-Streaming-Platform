@@ -118,14 +118,19 @@ start() {
 start "$pg" --tmpfs /var/lib/postgresql/data --env "POSTGRES_PASSWORD=$password" "$pg_image"
 # MinIO is also published on the host's loopback: presigned segment URLs name it as the pods
 # do (minio:9000), and the playback check reaches it there with that Host header, as a viewer
-# resolving the store's name would. CORS as in compose.yaml (ADR-0028).
+# resolving the store's name would. CORS as in compose.yaml (ADR-0028). Incomplete multipart
+# uploads are aborted after 7 days, as R2's lifecycle rule does (RUNBOOK section 3); MinIO
+# refuses AbortIncompleteMultipartUpload in a bucket lifecycle and has this server-wide setting
+# instead, whose default of 24 hours would cut short uploads the gateway allows 6 days.
 start "$minio" --tmpfs /data --env MINIO_ROOT_USER=ulw-e2e --env "MINIO_ROOT_PASSWORD=$password" \
-    --env 'MINIO_API_CORS_ALLOW_ORIGIN=*' --publish 127.0.0.1:19000:9000 "$minio_image" server /data
+    --env 'MINIO_API_CORS_ALLOW_ORIGIN=*' --env MINIO_API_STALE_UPLOADS_EXPIRY=168h --publish 127.0.0.1:19000:9000 "$minio_image" server /data
 
 until docker exec "$pg" pg_isready --quiet --username postgres; do sleep 1; done
 until docker exec "$minio" mc alias set local http://127.0.0.1:9000 ulw-e2e "$password" \
     >/dev/null 2>&1; do sleep 1; done
 docker exec "$minio" mc mb --ignore-existing "local/$bucket" >/dev/null
+docker exec "$minio" mc admin config get local api | grep -q 'stale_uploads_expiry=168h' \
+    || { log "MinIO did not take the 7-day stale upload expiry"; exit 1; }
 
 # The mock auth-service's certificate, from a CA that exists only here. The gateway trusts
 # this CA (gateway-patch.yaml) exactly as it trusts the public ones in production.
