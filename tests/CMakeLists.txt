@@ -49,6 +49,7 @@ target_link_libraries(test_tls PUBLIC ulw::net_lib OpenSSL::SSL)
 
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
+    unit/net/connect_test.cpp
     unit/net/echo_server_test.cpp
     unit/net/offload_pool_test.cpp
     unit/net/reactor_factory_test.cpp
@@ -164,6 +165,15 @@ if(ULW_FUZZ)
     target_compile_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
     target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
+ulw_add_test_suite(rt_unit_tests unit
+    unit/rt/registry_test.cpp
+    unit/rt/room_router_test.cpp
+    unit/rt/wire_test.cpp)
+target_link_libraries(rt_unit_tests PRIVATE ulw::rt_lib)
+# The node channel's frame codec is internal to the module.
+target_include_directories(rt_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/rt/src)
+
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
     unit/s3/errors_test.cpp
@@ -263,6 +273,36 @@ target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
 
+# The room registry's store against a live Postgres, as the suite above.
+ulw_add_test_suite(room_store_integration_tests integration
+    integration/postgres_harness.cpp
+    integration/room_store_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(room_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg_store
+    PkgConfig::LIBPQ)
+target_include_directories(room_store_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
+ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/config_test.cpp
+    unit/chat/envelope_test.cpp
+    unit/chat/session_test.cpp)
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
+target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+# The M16 acceptance: three chat_server processes on the Postgres the suites above use.
+ulw_add_test_suite(chat_cluster_tests integration
+    integration/chat_cluster_test.cpp
+    integration/postgres_harness.cpp
+    support/child_process.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::codec_ws
+    ulw::net_lib ulw::os PkgConfig::LIBPQ)
+target_include_directories(chat_cluster_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
+add_dependencies(chat_cluster_tests chat_server)
+
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
     unit/auth/claims_test.cpp
@@ -358,3 +398,58 @@ target_include_directories(sfu_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/sf
 # The signalling side of the call suite, tests/call/run.sh.
 ulw_add_executable(ulw_call_harness call/harness_main.cpp)
 target_link_libraries(ulw_call_harness PRIVATE ulw::sfu_livekit ulw::os)
+
+ulw_add_test_suite(sdp_unit_tests unit
+    unit/sdp/attributes_test.cpp
+    unit/sdp/chromium_test.cpp
+    unit/sdp/parser_test.cpp
+    unit/sdp/property_test.cpp
+    unit/sdp/serializer_test.cpp
+    unit/sdp/validate_test.cpp)
+target_link_libraries(sdp_unit_tests PRIVATE ulw::codec_sdp)
+# Chromium's offer and answer, captured by e2e/sdp_roundtrip.spec.mjs.
+target_compile_definitions(sdp_unit_tests
+    PRIVATE ULW_SDP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/sdp")
+
+# Parse, validate, serialize, for e2e/sdp_roundtrip.spec.mjs to run Chromium's SDP through.
+ulw_add_executable(ulw_sdp_roundtrip media/sdp_roundtrip_main.cpp)
+target_link_libraries(ulw_sdp_roundtrip PRIVATE ulw::codec_sdp)
+
+ulw_add_executable(sdp_fuzz_replay fuzz/sdp_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(sdp_fuzz_replay PRIVATE ulw::codec_sdp)
+add_test(NAME sdp_fuzz_corpus COMMAND sdp_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/sdp)
+set_tests_properties(sdp_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(sdp_fuzz fuzz/sdp_fuzz.cpp)
+    target_link_libraries(sdp_fuzz PRIVATE ulw::codec_sdp)
+    target_compile_options(sdp_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(sdp_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
+
+ulw_add_test_suite(rtp_unit_tests unit
+    unit/rtp/demux_test.cpp
+    unit/rtp/pcap_test.cpp
+    unit/rtp/rtcp_test.cpp
+    unit/rtp/rtp_test.cpp)
+target_link_libraries(rtp_unit_tests PRIVATE ulw::codec_rtp)
+# The capture and tshark's reading of it, from media/capture_rtp.sh.
+target_compile_definitions(rtp_unit_tests
+    PRIVATE ULW_RTP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/rtp")
+
+ulw_add_executable(rtp_fuzz_replay fuzz/rtp_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(rtp_fuzz_replay PRIVATE ulw::codec_rtp)
+add_test(NAME rtp_fuzz_corpus COMMAND rtp_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/rtp)
+set_tests_properties(rtp_fuzz_corpus PROPERTIES LABELS unit)
+# The committed tables against tshark's reading of the committed pcap; skipped without tshark.
+add_test(NAME rtp_pcap_tshark
+    COMMAND bash -c "command -v tshark >/dev/null || exit 77; exec \"$0\" --check"
+        ${CMAKE_CURRENT_SOURCE_DIR}/media/capture_rtp.sh)
+set_tests_properties(rtp_pcap_tshark PROPERTIES LABELS unit SKIP_RETURN_CODE 77)
+
+if(ULW_FUZZ)
+    ulw_add_executable(rtp_fuzz fuzz/rtp_fuzz.cpp)
+    target_link_libraries(rtp_fuzz PRIVATE ulw::codec_rtp)
+    target_compile_options(rtp_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(rtp_fuzz PRIVATE -fsanitize=fuzzer)
+endif()

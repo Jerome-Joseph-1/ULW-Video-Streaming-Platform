@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # Brings up the sandbox replica of Askedin's cluster on this machine, from scratch: a kind
 # cluster, Postgres and MinIO beside it (as they run beside K3s on k8s-prod), Envoy Gateway,
-# the mock auth-service, and the stage overlays of video-gateway and video-worker built from
-# this checkout. Rerunning rebuilds the images and reapplies everything; e2e-down.sh removes it.
+# the mock auth-service, the stage overlays of video-gateway and video-worker built from this
+# checkout, and STUNner with LiveKit behind it (deploy/stunner/up.sh). Rerunning rebuilds the
+# images and reapplies everything; e2e-down.sh removes it.
 # Nothing here knows how to reach Askedin's infrastructure.
 #
 #   ULW_BUILDER    build with this docker buildx builder instead of the default one; the images
 #                  then reach the node as OCI archives and never enter the local image store
+#                  Behind a proxy on the host's loopback the builder needs host networking:
+#                    docker buildx create --name B --driver docker-container \
+#                      --driver-opt image=moby/buildkit@sha256:<pinned digest> \
+#                      --driver-opt network=host --driver-opt env.HTTPS_PROXY=$HTTPS_PROXY \
+#                      --driver-opt env.SSL_CERT_FILE=/proxy-ca.crt --buildkitd-config F
+#                  where F holds [worker.oci] networkMode = "host" (so the RUN steps reach the
+#                  proxy too). buildkitd reads the proxy's CA from that path, so once the
+#                  builder exists (docker buildx inspect B --bootstrap), copy the file in and
+#                  restart it: docker cp <ca bundle> buildx_buildkit_B0:/proxy-ca.crt, then
+#                  docker restart buildx_buildkit_B0. Its build cache is several GB:
+#                  `docker buildx prune -a --builder B` once the images are loaded.
 #   ULW_CA_BUNDLE  CA bundle handed to image builds (build secret ca-bundle) on machines whose
 #                  outbound HTTPS goes through a TLS-inspecting proxy
 set -euo pipefail
@@ -32,13 +44,7 @@ log() { echo "e2e-up: $*" >&2; }
 
 mkdir -p "$state/images" "$state/pki"
 
-if ! kind get clusters | grep -qx "$cluster"; then
-    log "creating kind cluster $cluster"
-    kind create cluster --name "$cluster" --config "$here/kind.yaml" --kubeconfig "$kubeconfig" \
-        --wait 180s
-fi
-# Rewritten on every run, so the file always describes this cluster, whatever became of it.
-kind export kubeconfig --name "$cluster" --kubeconfig "$kubeconfig"
+create_cluster
 require_sandbox
 
 # The worker's seccomp profile, where the target's runbook installs it on k8s-prod.
@@ -53,15 +59,6 @@ for proxy in HTTPS_PROXY https_proxy NO_PROXY no_proxy; do
 done
 [[ -n ${ULW_CA_BUNDLE:-} ]] && build_args+=(--secret "id=ca-bundle,src=$ULW_CA_BUNDLE")
 
-# load IMAGE puts an image from the local store into the node. Only the node's platform is
-# saved: the local store may hold just that one of a multi-platform image.
-load() {
-    local archive=$state/images/${1//[\/:]/_}.tar
-    docker save --platform linux/amd64 --output "$archive" "$1"
-    kind load image-archive --name "$cluster" "$archive"
-    rm -f "$archive"
-}
-
 # build IMAGE CONTEXT DOCKERFILE [TARGET]
 build() {
     local image=$1 context=$2 dockerfile=$3 target=${4:-}
@@ -75,7 +72,7 @@ build() {
         rm -f "$archive"
     else
         docker buildx build "${args[@]}" --load --tag "$image" "$context"
-        load "$image"
+        load_image "$image"
     fi
 }
 
@@ -83,12 +80,6 @@ build "${built_images[0]}" "$root" "$root/deploy/docker/Dockerfile" gateway
 build "${built_images[1]}" "$root" "$root/deploy/docker/Dockerfile" worker
 build "${built_images[2]}" "$here/mock-auth" "$here/mock-auth/Dockerfile"
 
-# pinned IMAGE DIGEST pulls IMAGE's content by digest and loads it under IMAGE's tag.
-pinned() {
-    docker pull --quiet "${1%:*}@$2" >/dev/null
-    docker tag "${1%:*}@$2" "$1"
-    load "$1"
-}
 pinned "$eg_image" "$eg_digest"
 pinned "$envoy_image" "$envoy_digest"
 pinned "$kube_router_image" "$kube_router_digest"
@@ -197,4 +188,6 @@ kubectl -n envoy-gateway-system wait --for=condition=Available deployment \
 # Envoy takes a moment to program the routes after its pod is ready.
 curl -fsS -o /dev/null --retry 60 --retry-all-errors --retry-delay 1 \
     -X POST "http://127.0.0.1:18080/mock-auth/token?sub=probe"
+# The realtime plane's way in: STUNner and the LiveKit server behind it.
+"$root/deploy/stunner/up.sh"
 log "up: http://127.0.0.1:18080 (kubeconfig $kubeconfig, context $context)"

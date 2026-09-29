@@ -25,7 +25,7 @@
 
   window.join = async ({ url, token }) => {
     // Off so that every packet sent is counted as received. Layer selection is left to these two
-    // in the product (ADR-0033, M28); they are not the default to copy.
+    // in the product (ADR-0038, M28); they are not the default to copy.
     const room = new Room({ adaptiveStream: false, dynacast: false });
     window.room = room;
     room.on(RoomEvent.ParticipantConnected, (p) => note('participant-connected', { who: p.identity }));
