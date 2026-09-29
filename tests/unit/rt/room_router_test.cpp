@@ -160,12 +160,53 @@ public:
     // Reads until the node hangs up; false if it answers anything first.
     bool hung_up() { return !next() && closed_; }
 
+    // A connection the test accepted, as the node's peer at the other end.
+    RawPeer(net::IReactor& reactor, os::UniqueFd accepted)
+        : reactor_(reactor), fd_(std::move(accepted)) {}
+
 private:
     net::IReactor& reactor_;
     os::UniqueFd fd_;
     wire::Decoder decoder_;
     std::vector<std::byte> sent_;
     bool closed_ = false;
+};
+
+// Listens where a node is advertised, to play that node: the router under test dials it.
+class RawOwner {
+public:
+    explicit RawOwner(net::IReactor& reactor) : reactor_(reactor) {
+        fd_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)};
+        // Inherited by the accepted socket, so a peer that stops reading fills up quickly.
+        const int bytes = 4096;
+        ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        // bind() takes every address family through the generic sockaddr header.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        EXPECT_EQ(::bind(fd_.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr), 0);
+        EXPECT_EQ(::listen(fd_.get(), 8), 0);
+        port_ = *net::local_port(fd_.get());
+    }
+
+    [[nodiscard]] std::string address() const { return "127.0.0.1:" + std::to_string(port_); }
+
+    // The router's connection, once it has dialled.
+    std::unique_ptr<RawPeer> accept() {
+        os::UniqueFd conn;
+        EXPECT_TRUE(ulw::test::pump_until(reactor_, [&] {
+            conn =
+                os::UniqueFd{::accept4(fd_.get(), nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK)};
+            return static_cast<bool>(conn);
+        }));
+        return conn ? std::make_unique<RawPeer>(reactor_, std::move(conn)) : nullptr;
+    }
+
+private:
+    net::IReactor& reactor_;
+    os::UniqueFd fd_;
+    std::uint16_t port_ = 0;
 };
 
 class RoomRouterTest : public ::testing::TestWithParam<ReactorKind> {
@@ -614,6 +655,73 @@ TEST_P(RoomRouterTest, ARoomsQueueIsBoundedInBytesNotInWrites) {
     for (std::size_t i = 0; i < 16; ++i) {
         EXPECT_EQ(results[i], i + 1) << i;
     }
+}
+
+// Plays chat-a, the room's recorded owner, for `dialler`: answers the handshake as `as` and
+// takes the first Subscribe. Returns the connection, with the Subscribe answered.
+std::unique_ptr<RawPeer> play_owner(RawOwner& owner, const core::NodeId& dialler,
+                                    const core::NodeId& as, core::ports::IRandom& random) {
+    auto conn = owner.accept();
+    if (!conn) {
+        return nullptr;
+    }
+    const auto hello = conn->next();
+    const auto* h = hello ? std::get_if<wire::Hello>(&*hello) : nullptr;
+    EXPECT_NE(h, nullptr);
+    if (h == nullptr) {
+        return nullptr;
+    }
+    wire::Nonce mine{};
+    random.fill(mine);
+    const auto key = std::as_bytes(std::span{kSecret});
+    std::vector<std::byte> challenge;
+    wire::encode_challenge(challenge, as, mine,
+                           *rt::auth::acceptor_tag(key, dialler, as, h->nonce, mine));
+    conn->send(challenge);
+    return conn;
+}
+
+TEST_P(RoomRouterTest, ALinkBrokenInsideASendIsTakenDownAfterwardsNotInsideIt) {
+    RawOwner owner(*reactor_);
+    db_.addresses["chat-a"] = owner.address();
+    db_.rooms.emplace(room_, ulw::test::MemoryRooms::Room{.owner = *core::NodeId::parse("chat-a")});
+    Node& b = start("chat-b");
+    Member bob;
+    std::optional<std::expected<void, RouteError>> joined;
+    b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
+    auto conn =
+        play_owner(owner, *core::NodeId::parse("chat-b"), *core::NodeId::parse("chat-a"), random_);
+    ASSERT_TRUE(conn);
+    std::optional<wire::Frame> subscribe;
+    do {
+        subscribe = conn->next();
+        ASSERT_TRUE(subscribe);
+    } while (!std::holds_alternative<wire::Subscribe>(*subscribe));
+    std::vector<std::byte> ok;
+    wire::encode_reply(ok, std::get<wire::Subscribe>(*subscribe).request, wire::Status::Ok, 0);
+    conn->send(ok);
+    ASSERT_TRUE(pump([&] { return joined.has_value(); }));
+    ASSERT_TRUE(*joined);
+
+    // chat-a stops reading; bob's forwards pile up on the link until it is found broken.
+    const std::string big(std::size_t{60} * 1024, 'f');
+    int answered = 0;
+    for (int i = 0; i < 400; ++i) {
+        const auto body = std::as_bytes(std::span{big});
+        b.router->send(room_, bob, *core::UserId::parse("bob"), {body.begin(), body.end()},
+                       [&](auto) noexcept { ++answered; });
+        if (b.router->counters().slow_peers > 0) {
+            break;
+        }
+        ulw::test::pump_pending(*reactor_);
+    }
+    ASSERT_EQ(b.router->counters().slow_peers, 1U);
+    // The send that found it did not take the link down, or fail anything, from inside itself.
+    EXPECT_TRUE(b.events.lost.empty());
+    EXPECT_EQ(answered, 0);
+    ASSERT_TRUE(pump([&] { return !b.events.lost.empty(); }));
+    EXPECT_EQ(b.events.lost, std::vector<std::string>{"chat-a"});
+    EXPECT_TRUE(pump([&] { return answered > 0; }));
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, RoomRouterTest,

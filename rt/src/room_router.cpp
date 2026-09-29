@@ -276,20 +276,23 @@ class RoomRouter::Impl final : public IRegistryObserver,
         }
 
         // Until the owner has proven itself, frames wait here; they reach nobody else.
+        // A send that finds the link broken only marks it: send() runs inside the router's
+        // own walks over its rooms, which taking the link down (failing its requests, whose
+        // callbacks change those rooms) must not run under. The next tick takes it down.
         void send(std::span<const std::byte> frame) {
+            if (broken_ || state_ == State::Closed) {
+                return;
+            }
             if (state_ == State::Open) {
                 router_.reactor_.send(conn_, frame);
                 if (router_.reactor_.pending_send_bytes(conn_) > kMaxPeerBacklog) {
                     ++router_.counters_.slow_peers;
-                    router_.link_down(*this);
+                    broken_ = true;
                 }
                 return;
             }
-            if (state_ == State::Closed) {
-                return;
-            }
             if (unsent_.size() + frame.size() > kMaxUnsentBytes) {
-                router_.link_down(*this);
+                broken_ = true;
                 return;
             }
             unsent_.insert(unsent_.end(), frame.begin(), frame.end());
@@ -326,8 +329,9 @@ class RoomRouter::Impl final : public IRegistryObserver,
             state_ = State::Closed;
         }
 
-        [[nodiscard]] bool handshake_overdue(core::MonoTime now) const noexcept {
-            return state_ != State::Open && now - created_ > kHandshakeTimeout;
+        // Broken by a send, or still not open past the handshake timeout.
+        [[nodiscard]] bool due_down(core::MonoTime now) const noexcept {
+            return broken_ || (state_ != State::Open && now - created_ > kHandshakeTimeout);
         }
 
         [[nodiscard]] bool quiescent(const net::IReactor& reactor) const noexcept {
@@ -486,6 +490,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
         core::NodeId node_;
         std::uint64_t id_;
         core::MonoTime created_;
+        bool broken_ = false;
         wire::Nonce own_nonce_{};
         State state_ = State::Locating;
         os::UniqueFd connecting_;
@@ -763,7 +768,7 @@ private:
         });
         std::vector<Outbound*> stuck;
         for (auto& [node, link] : outbound_) {
-            if (link->handshake_overdue(now)) {
+            if (link->due_down(now)) {
                 stuck.push_back(link.get());
             }
         }
