@@ -28,7 +28,7 @@
 
 namespace {
 
-// 65536 descriptors: 512 client connections plus their backend sockets need a few thousand,
+// 65536 descriptors: 448 client connections plus their backend sockets need a few thousand,
 // and the reactor's descriptor-indexed slot table stays at a few megabytes.
 constexpr std::size_t kMaxDescriptors = 65'536;
 // Wakes the loop at least this often; nothing depends on it but the drain check.

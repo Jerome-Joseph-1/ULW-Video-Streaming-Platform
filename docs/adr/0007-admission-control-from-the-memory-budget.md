@@ -1,6 +1,6 @@
 # 0007. Admission control per route, derived from the memory budget
 
-Status: Accepted
+Status: Superseded by 0027
 Date: 2026-09-28
 
 ## Context

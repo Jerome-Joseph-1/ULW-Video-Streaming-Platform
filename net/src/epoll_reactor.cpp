@@ -13,7 +13,7 @@ namespace net::detail {
 
 namespace {
 
-// Half the 512 connections admission control allows a process (ADR-0007): with every one of
+// Over half the 448 connections admission control allows a process (ADR-0027): with every one of
 // them ready, two waits take them all, and level triggering keeps the rest pending meanwhile.
 constexpr int kMaxEvents = 256;
 // 4 x 64 KiB per wakeup bounds how long one busy connection can hold the loop.

@@ -10,7 +10,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0004](0004-storage-port-at-the-multipart-part-level.md) | Storage port at the multipart part level | Superseded by 0009 |
 | [0005](0005-unsigned-payload-for-upload-part.md) | UNSIGNED-PAYLOAD for UploadPart, over TLS only | Accepted |
 | [0006](0006-postgres-job-queue.md) | The job queue is a Postgres table | Accepted |
-| [0007](0007-admission-control-from-the-memory-budget.md) | Admission control per route, derived from the memory budget | Accepted |
+| [0007](0007-admission-control-from-the-memory-budget.md) | Admission control per route, derived from the memory budget | Superseded by 0027 |
 | [0008](0008-expected-for-recoverable-errors.md) | std::expected for recoverable errors, exceptions for bugs | Accepted |
 | [0009](0009-storage-port-at-the-durable-offset.md) | Storage is abstracted at the durable offset, not the part | Accepted |
 | [0010](0010-io-uring-primary-reactor.md) | io_uring is the primary reactor, epoll the fallback | Accepted |
@@ -30,3 +30,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0024](0024-playlists-served-inline-with-presigned-uris.md) | Playlists are rewritten and served inline | Accepted |
 | [0025](0025-ffmpeg-as-a-sandboxed-subprocess.md) | FFmpeg runs as a sandboxed subprocess | Accepted |
 | [0026](0026-ordinary-descriptors-for-accepted-sockets.md) | Accepted sockets use ordinary descriptors | Accepted |
+| [0027](0027-admission-control-from-measured-connection-memory.md) | Admission control from the measured memory of a connection | Accepted |

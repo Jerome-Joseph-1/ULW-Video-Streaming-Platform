@@ -11,7 +11,7 @@
 //              staging, the transport's parked ciphertext and the TLS session;
 //   slow:      the store takes a slice of every upload each tick and wakes it, so each
 //              connection pauses and resumes over and over, as it does behind a slow backend.
-// That RSS holds only the in-process terms of the per-connection budget (docs/adr/0007): the
+// That RSS holds only the in-process terms of the per-connection budget (docs/adr/0027): the
 // kernel's socket buffers and the backend socket are not in it, so they are not in the limit
 // either. The shared receive buffers a reactor owns are one fixed cost for the process. Prints
 // one key=value line and exits non-zero if the stalled, slow or peak RSS goes past n
@@ -57,11 +57,11 @@ using Clock = std::chrono::steady_clock;
 using core::ports::IngestState;
 using core::ports::StorageError;
 
-// The in-process terms of the per-connection budget (docs/adr/0007): the session, the pump
-// buffer and, over TLS, the TLS state.
-constexpr std::uint64_t kSessionBytes = 200;
-constexpr std::uint64_t kPumpBytes = std::uint64_t{64} * 1024;
-constexpr std::uint64_t kTlsBytes = std::uint64_t{35} * 1000;
+// The in-process terms of the per-connection budget (docs/adr/0027): the session and its
+// request parser, the pump and, over TLS, the TLS state with its parked ciphertext.
+constexpr std::uint64_t kSessionBytes = 36'000;
+constexpr std::uint64_t kPumpBytes = 92'000;
+constexpr std::uint64_t kTlsBytes = 52'000;
 // Receive buffers every connection shares: io_uring's provided-buffer ring of 256 x 64 KiB
 // (docs/adr/0021), epoll's single 64 KiB buffer.
 constexpr std::uint64_t kUringBuffers = std::uint64_t{256} * 64 * 1024;
