@@ -12,10 +12,10 @@ earlier upload of the same user finishes. Rather than a token file, --devtoken-k
 --issuer and --users mints that many fresh subjects on the fly with the repo's ulw_devtoken
 binary (tools/devtoken/src/main.cpp), one token per subject, and round-robins the same way.
 
-Each upload PATCHes the gateway's chunk_size (from the 201 response) at a time, optionally
-throttled to --rate bytes/s per connection so a connection stays open long enough to be worth
-measuring, then POSTs a commit. Chunk bytes come from a small repeating buffer so memory stays
-flat regardless of --size.
+Each upload holds one keep-alive connection for its create, PATCHes and commit. It PATCHes the
+gateway's chunk_size (from the 201 response) at a time, optionally streamed at --rate bytes/s so
+the socket stays open for as long as a slow client's would, then POSTs a commit. Chunk bytes come from a small repeating buffer, or from --payload, a
+file every upload sends.
 """
 import argparse
 import http.client
@@ -32,6 +32,13 @@ import urllib.parse
 # here compresses, but a non-trivial fill also makes a byte-for-byte truncation obvious in a
 # hex dump if a test ever needs one.
 FILL = bytes((i * 2654435761) & 0xFF for i in range(4096))
+
+
+# The gateway answers 408 to a body averaging under 8 KiB/s over a 30 s window
+# (Limits::min_body_bytes_per_second and body_rate_window, apps/gateway/src/gateway.hpp). Twice
+# that floor leaves room for the pacing granularity and a busy load generator without ever
+# tripping it, and holds a 1 MiB upload open for 64 s.
+SAFE_RATE = 16 * 1024
 
 
 def chunk_bytes(n):
@@ -86,6 +93,7 @@ class Results:
         self.status_counts = {}
         self.errors = {}
         self.bytes_sent = 0
+        self.committed = []
         self.patch_latency = Percentiles()
 
     def record_status(self, status):
@@ -108,6 +116,7 @@ class Results:
                 "status_counts": dict(self.status_counts),
                 "errors_by_kind": dict(self.errors),
                 "total_bytes_sent": self.bytes_sent,
+                "committed_videos": list(self.committed),
             }
 
 
@@ -116,8 +125,12 @@ def connect(base, timeout):
     return kind(base.hostname, base.port, timeout=timeout)
 
 
-def request(base, method, path, token=None, body=None, headers=None, timeout=60):
-    conn = connect(base, timeout)
+def request(base, method, path, token=None, body=None, headers=None, timeout=60, conn=None):
+    """One request. With conn it goes over that keep-alive connection and leaves it open;
+    without, over a connection of its own."""
+    own = conn is None
+    if own:
+        conn = connect(base, timeout)
     try:
         all_headers = dict(headers or {})
         if token:
@@ -130,17 +143,49 @@ def request(base, method, path, token=None, body=None, headers=None, timeout=60)
         data = response.read()
         return response.status, {k.lower(): v for k, v in response.getheaders()}, data
     finally:
+        if own:
+            conn.close()
+
+
+def patch_streamed(conn, path, token, offset, piece, rate):
+    """A PATCH whose body leaves at `rate` bytes/s over the open connection, so the gateway holds
+    the upload's socket and buffers for as long as the chunk takes, as it does for a slow client.
+    Sent in quarter-second pieces against a deadline, so a stall is caught up rather than added
+    to."""
+    conn.putrequest("PATCH", path)
+    conn.putheader("Authorization", f"Bearer {token}")
+    conn.putheader("Upload-Offset", str(offset))
+    conn.putheader("Content-Type", "application/offset+octet-stream")
+    conn.putheader("Content-Length", str(len(piece)))
+    conn.endheaders()
+    step = max(1, rate // 4)
+    started = time.monotonic()
+    for sent in range(0, len(piece), step):
+        conn.send(piece[sent:sent + step])
+        ahead = min(sent + step, len(piece)) / rate - (time.monotonic() - started)
+        if ahead > 0:
+            time.sleep(ahead)
+    response = conn.getresponse()
+    data = response.read()
+    return response.status, {k.lower(): v for k, v in response.getheaders()}, data
+
+
+def run_one_upload(base, token, size, chunk_cap, rate, results, payload=None, index=0):
+    with results.lock:
+        results.attempted += 1
+    conn = connect(base, 120)
+    try:
+        upload(conn, base, token, size, chunk_cap, rate, results, payload, index)
+    finally:
         conn.close()
 
 
-def run_one_upload(base, token, size, chunk_cap, rate, results):
-    with results.lock:
-        results.attempted += 1
+def upload(conn, base, token, size, chunk_cap, rate, results, payload, index):
     try:
         status, _, data = request(base, "POST", "/api/v1/uploads", token,
                                   {"filename": "load.mp4", "size_bytes": size,
-                                   "content_type": "video/mp4"})
-    except OSError as e:
+                                   "content_type": "video/mp4"}, conn=conn)
+    except (OSError, http.client.HTTPException) as e:
         results.record_error(f"create:{type(e).__name__}")
         return
     if status == 429:
@@ -158,17 +203,20 @@ def run_one_upload(base, token, size, chunk_cap, rate, results):
     upload_id = created["upload_id"]
     chunk_size = min(created["chunk_size"], chunk_cap) if chunk_cap else created["chunk_size"]
     offset = created["durable_offset"]
-    body = chunk_bytes(size)
-    started_upload = time.monotonic()
+    body = payload if payload is not None else chunk_bytes(size)
     while offset < size:
         piece = body[offset:offset + chunk_size]
         piece_started = time.monotonic()
         try:
-            status, headers, data = request(
-                base, "PATCH", f"/api/v1/uploads/{upload_id}", token, piece,
-                {"Upload-Offset": str(offset),
-                 "Content-Type": "application/offset+octet-stream"})
-        except OSError as e:
+            if rate:
+                status, headers, data = patch_streamed(
+                    conn, f"/api/v1/uploads/{upload_id}", token, offset, piece, rate)
+            else:
+                status, headers, data = request(
+                    base, "PATCH", f"/api/v1/uploads/{upload_id}", token, piece,
+                    {"Upload-Offset": str(offset),
+                     "Content-Type": "application/offset+octet-stream"}, conn=conn)
+        except (OSError, http.client.HTTPException) as e:
             results.record_error(f"patch:{type(e).__name__}")
             return
         results.patch_latency.add(time.monotonic() - piece_started)
@@ -180,18 +228,10 @@ def run_one_upload(base, token, size, chunk_cap, rate, results):
             return
         offset = int(headers["upload-offset"])
         results.add_bytes(len(piece))
-        if rate:
-            # Deliberate pacing, not a wait-for-condition sleep: holds the connection open at a
-            # bounded rate so short runs still exercise sustained-upload behavior.
-            elapsed = time.monotonic() - started_upload
-            target = offset / rate
-            behind = target - elapsed
-            if behind > 0:
-                time.sleep(behind)
     try:
         status, _, data = request(base, "POST", f"/api/v1/uploads/{upload_id}/commit", token,
-                                  timeout=60)
-    except OSError as e:
+                                  conn=conn)
+    except (OSError, http.client.HTTPException) as e:
         results.record_error(f"commit:{type(e).__name__}")
         return
     results.record_status(status)
@@ -200,6 +240,7 @@ def run_one_upload(base, token, size, chunk_cap, rate, results):
         return
     with results.lock:
         results.completed += 1
+        results.committed.append({"video_id": created["video_id"], "token_index": index})
 
 
 def scrape_metrics_loop(base, stop_event, series):
@@ -231,7 +272,11 @@ def main():
     parser.add_argument("--uploads", type=int, default=500)
     parser.add_argument("--size", type=int, default=16 * (1 << 20))
     parser.add_argument("--rate", type=int, default=0,
-                        help="bytes/s per connection; 0 means as fast as possible")
+                        help=f"bytes/s per connection, streamed over the open socket; 0 means as fast as "
+                             f"possible; {SAFE_RATE} is the slowest rate that keeps clear of the "
+                             "gateway's minimum")
+    parser.add_argument("--payload", help="upload this file's bytes (and its size) instead of "
+                                          "generated filler")
     parser.add_argument("--token-file", help="one bearer token per line, round-robined")
     parser.add_argument("--devtoken-key", help="ulw_devtoken private key file")
     parser.add_argument("--devtoken", default="build/ci/tools/devtoken/ulw_devtoken",
@@ -257,6 +302,12 @@ def main():
             sys.exit("upload_load: --devtoken-key needs --issuer and --users")
         tokens = mint_tokens(args.devtoken, args.devtoken_key, args.issuer, args.users)
 
+    payload = None
+    if args.payload:
+        with open(args.payload, "rb") as f:
+            payload = f.read()
+        args.size = len(payload)
+
     base = urllib.parse.urlsplit(args.url)
     results = Results()
     metrics_series = []
@@ -279,7 +330,8 @@ def main():
     def worker(i):
         with sem:
             token = tokens[i % len(tokens)]
-            run_one_upload(base, token, args.size, None, args.rate, results)
+            run_one_upload(base, token, args.size, None, args.rate, results, payload,
+                           i % len(tokens))
 
     for i in range(args.uploads):
         t = threading.Thread(target=worker, args=(i,))

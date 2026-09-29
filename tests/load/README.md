@@ -25,8 +25,11 @@ concurrent uploads because the gateway admits at most 3 uploads per user) or are
 fly with `--devtoken-key <key> --issuer <iss> --users <n>`, which runs the repo's `ulw_devtoken`
 binary (`--devtoken <path-to-it>`, default `build/ci/tools/devtoken/ulw_devtoken`).
 
-`--rate <bytes/s>` throttles each connection's PATCHes so they stay open long enough to measure
-sustained behavior; omitted, each upload sends as fast as the gateway accepts it.
+Each upload holds one keep-alive connection from create to commit, so N concurrent uploads are N
+open sockets. `--rate <bytes/s>` streams each PATCH body at that rate over it (16384, twice the
+gateway's 8 KiB/s minimum body rate, is the slowest that stays clear of a 408), so the socket stays
+open as long as a slow client's would. `--payload <file>` uploads that file's bytes, for uploads
+the worker can transcode.
 
 `--scrape-metrics <url>` samples `/metrics` every 5 s during the run and folds `uploads_in_flight`
 and `connections_current` (the gauges `apps/gateway/src/gateway.cpp` exposes that describe load
