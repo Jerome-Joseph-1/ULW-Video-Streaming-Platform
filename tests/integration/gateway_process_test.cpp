@@ -140,6 +140,9 @@ TEST_F(GatewayAsRoot, RootWithNoUserToBecomeIsRefusedAsConfiguration) {
 std::optional<std::uint16_t> free_privileged_port() {
     for (std::uint16_t port = 1023; port >= 900; --port) {
         const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+        if (!fd) {
+            return std::nullopt;
+        }
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);

@@ -231,7 +231,8 @@ TEST(ForwardedClient, AnAddressInsideTheProxyBlockIsNotSkippedPast) {
     // The client wrote the entry to its left; taking it would let the client choose its own
     // address, to dodge its limits or spend a victim's.
     const auto peer = *net::IpAddress::parse("10.42.3.4");
-    const std::vector<http::HeaderField> headers{{"X-Forwarded-For", "192.0.2.66, 10.42.0.1"}};
+    const std::vector<http::HeaderField> headers{
+        {.name = "X-Forwarded-For", .value = "192.0.2.66, 10.42.0.1"}};
     EXPECT_EQ(gateway::forwarded_client(peer, headers, 1), *net::IpAddress::parse("10.42.0.1"));
 }
 
