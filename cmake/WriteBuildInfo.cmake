@@ -1,6 +1,8 @@
 find_package(Git QUIET)
 set(sha "unknown")
-if(GIT_FOUND)
+if(GIT_SHA)
+    set(sha ${GIT_SHA})
+elseif(GIT_FOUND)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} -C ${SOURCE_DIR} rev-parse --short=12 HEAD
         OUTPUT_VARIABLE git_out OUTPUT_STRIP_TRAILING_WHITESPACE
