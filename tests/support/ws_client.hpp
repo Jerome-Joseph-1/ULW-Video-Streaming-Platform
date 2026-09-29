@@ -175,8 +175,12 @@ private:
         const int one = 1;
         ::setsockopt(fd_.get(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         // Before connect(): the window scale is agreed in the handshake.
-        if (receive_buffer > 0) {
-            ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof receive_buffer);
+        // A buffer that could not be fixed leaves no socket: the caller's connect fails, rather
+        // than a test running on a buffer it did not ask for.
+        if (receive_buffer > 0 && ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &receive_buffer,
+                                               sizeof receive_buffer) != 0) {
+            fd_.reset();
+            return;
         }
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
