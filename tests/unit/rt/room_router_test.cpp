@@ -767,6 +767,72 @@ TEST_P(RoomRouterTest, ALinkBrokenInsideASendIsTakenDownAfterwardsNotInsideIt) {
     EXPECT_TRUE(pump([&] { return answered > 0; }));
 }
 
+// Both sides at once, since each waits out the same five seconds.
+TEST_P(RoomRouterTest, AHandshakeNobodyFinishesIsDroppedAfterFiveSecondsOnEitherSide) {
+    RawOwner owner(*reactor_);
+    db_.addresses["chat-a"] = owner.address();
+    db_.rooms.emplace(room_, ulw::test::MemoryRooms::Room{.owner = *core::NodeId::parse("chat-a")});
+    Node& b = start("chat-b");
+
+    // Dialled by chat-b, "chat-a" reads the Hello and never answers it.
+    Member bob;
+    std::optional<std::expected<void, RouteError>> joined;
+    b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
+    auto dialled = owner.accept();
+    ASSERT_TRUE(dialled);
+    const auto hello = dialled->next();
+    ASSERT_TRUE(hello && std::holds_alternative<wire::Hello>(*hello));
+    // Dialling chat-b, a peer connects and says nothing.
+    RawPeer silent(*reactor_, b.port);
+    const auto began = std::chrono::steady_clock::now();
+
+    EXPECT_TRUE(silent.hung_up());
+    ASSERT_TRUE(pump([&] { return !b.events.lost.empty() && joined.has_value(); }));
+    EXPECT_GE(std::chrono::steady_clock::now() - began, std::chrono::seconds(5));
+    EXPECT_EQ(b.events.lost, std::vector<std::string>{"chat-a"});
+    EXPECT_EQ(*joined, std::unexpected(RouteError::Unavailable));
+    EXPECT_TRUE(dialled->hung_up());
+}
+
+TEST_P(RoomRouterTest, AChallengeTagReflectedBackAsTheProofIsRefused) {
+    const Node& a = start("chat-a");
+    RawPeer peer(*reactor_, a.port);
+    wire::Nonce mine{};
+    random_.fill(mine);
+    std::vector<std::byte> hello;
+    wire::encode_hello(hello, *core::NodeId::parse("chat-x"), mine);
+    peer.send(hello);
+    const auto challenge = peer.next();
+    ASSERT_TRUE(challenge && std::holds_alternative<wire::Challenge>(*challenge));
+    // Without the secret, the only tag to hand is the node's own.
+    std::vector<std::byte> rest;
+    wire::encode_proof(rest, std::get<wire::Challenge>(*challenge).mac);
+    wire::encode_subscribe(rest, 1, room_);
+    peer.send(rest);
+    EXPECT_TRUE(peer.hung_up());
+    EXPECT_TRUE(db_.rooms.empty());
+    EXPECT_EQ(a.events.refused, std::vector<std::string>{"bad proof"});
+}
+
+TEST_P(RoomRouterTest, ADialerAnsweredByANodeOtherThanTheOneItDialledGoesNoFurther) {
+    RawOwner owner(*reactor_);
+    db_.addresses["chat-a"] = owner.address();
+    db_.rooms.emplace(room_, ulw::test::MemoryRooms::Room{.owner = *core::NodeId::parse("chat-a")});
+    Node& b = start("chat-b");
+    Member bob;
+    std::optional<std::expected<void, RouteError>> joined;
+    b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
+    // A genuine node, with the secret, but not the one chat-b means to reach: its tag is valid
+    // for the node it names.
+    auto conn =
+        play_owner(owner, *core::NodeId::parse("chat-b"), *core::NodeId::parse("chat-z"), random_);
+    ASSERT_TRUE(conn);
+    EXPECT_TRUE(conn->hung_up());
+    ASSERT_TRUE(pump([&] { return joined.has_value(); }));
+    EXPECT_EQ(*joined, std::unexpected(RouteError::Unavailable));
+    EXPECT_EQ(b.events.refused, std::vector<std::string>{"no challenge"});
+}
+
 TEST_P(RoomRouterTest, ASecondLiveProcessUnderANodesNameTakesNothing) {
     Node& first = start("chat-a");
     Member alice;
