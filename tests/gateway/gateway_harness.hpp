@@ -62,6 +62,13 @@ public:
     void reload_certificate();
     [[nodiscard]] std::string metrics();
 
+    // Playback starts where the worker leaves off: a video row and its published objects.
+    void put_video(const core::VideoRecord& video);
+    // Thread-safe, as the stores' administrative calls are.
+    void put_object(std::string_view key, std::string_view bytes);
+    [[nodiscard]] std::vector<core::ports::ViewEvent> views();
+    void fail_views(std::optional<core::ports::CatalogError> error);
+
 private:
     struct Loop;
     void run(const GatewayOptions& options, std::promise<void> ready);

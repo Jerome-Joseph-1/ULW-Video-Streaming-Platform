@@ -12,6 +12,7 @@
 #include "net/transport.hpp"
 
 #include "gateway.hpp"
+#include "playback.hpp"
 #include "routes.hpp"
 
 #include <array>
@@ -69,7 +70,7 @@ public:
 
 private:
     enum class Phase : std::uint8_t { Idle, Request, Lingering, Closed };
-    enum class ControlOp : std::uint8_t { None, Create, Offset, Commit, Discard };
+    enum class ControlOp : std::uint8_t { None, Create, Offset, Commit, Discard, Playlist };
 
     // Everything a create needs between parsing its body and the catalog insert.
     struct PendingCreate {
@@ -105,7 +106,7 @@ private:
         bool claimed = false;
     };
 
-    // One blocking storage call and its result. The inputs are copied in before the pool sees
+    // One blocking storage job and its result. The inputs are copied in before the pool sees
     // the job, so nothing the pool thread reads can change under it, whatever happens to the
     // request meanwhile.
     struct ControlJob {
@@ -119,6 +120,8 @@ private:
         std::optional<std::expected<core::ports::IngestId, core::ports::StorageError>> created;
         std::optional<std::expected<std::uint64_t, core::ports::StorageError>> offset;
         std::optional<std::expected<void, core::ports::StorageError>> done;
+        std::optional<PlaylistRequest> playlist;
+        std::optional<std::expected<std::string, PlaylistFailure>> body;
     };
 
     [[nodiscard]] Gateway& gw() const noexcept { return gateway_; }
@@ -138,6 +141,8 @@ private:
     void on_claimed(core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept;
     void on_found(core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept;
     void on_video(core::ports::CatalogResult<core::VideoRecord> result) noexcept;
+    void start_playlist(const core::VideoRecord& video) noexcept;
+    void on_playlist(ControlJob job) noexcept;
     void on_durable() noexcept;
     void drain_staging() noexcept;
     void submit(ControlOp op) noexcept;

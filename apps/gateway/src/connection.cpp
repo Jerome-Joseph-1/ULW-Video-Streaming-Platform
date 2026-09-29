@@ -1,5 +1,6 @@
 #include "connection.hpp"
 
+#include "core/util/hls.hpp"
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
 #include "infra/auth/token_extractor.hpp"
@@ -219,6 +220,11 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
         }
         break;
     }
+    case RouteId::MasterPlaylist:
+    case RouteId::MediaPlaylist:
+        ++(match->id == RouteId::MasterPlaylist ? gw().counters().playlists_master
+                                                : gw().counters().playlists_media);
+        [[fallthrough]];
     case RouteId::UploadOffset:
     case RouteId::CancelUpload:
     case RouteId::CommitUpload:
@@ -358,6 +364,8 @@ void Connection::advance() noexcept {
     case RouteId::CancelUpload:
     case RouteId::CommitUpload:
     case RouteId::GetVideo:
+    case RouteId::MasterPlaylist:
+    case RouteId::MediaPlaylist:
         if (req_.message_complete && !req_.started) {
             req_.started = true;
             start_lookup();
@@ -596,7 +604,8 @@ void Connection::on_durable() noexcept {
 }
 
 void Connection::start_lookup() noexcept {
-    if (req_.route == RouteId::GetVideo) {
+    if (req_.route == RouteId::GetVideo || req_.route == RouteId::MasterPlaylist ||
+        req_.route == RouteId::MediaPlaylist) {
         const auto id = core::VideoId::parse(req_.params[0]);
         if (!id) {
             fail(Status::NotFound);
@@ -672,6 +681,8 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
         return;
     case RouteId::CreateUpload:
     case RouteId::GetVideo:
+    case RouteId::MasterPlaylist:
+    case RouteId::MediaPlaylist:
     case RouteId::Healthz:
     case RouteId::Readyz:
     case RouteId::Metrics:
@@ -698,6 +709,10 @@ void Connection::on_video(core::ports::CatalogResult<core::VideoRecord> result) 
         return;
     }
     const core::VideoRecord& v = *result;
+    if (req_.route != RouteId::GetVideo) {
+        start_playlist(v);
+        return;
+    }
     std::string json = R"({"id":")" + v.id.to_string() + R"(","title":)";
     core::json::append_string(json, v.title);
     json +=
@@ -705,6 +720,68 @@ void Connection::on_video(core::ports::CatalogResult<core::VideoRecord> result) 
     json += v.duration ? std::to_string(v.duration->count()) : "null";
     json += "}";
     respond_json(Status::Ok, json);
+}
+
+// 409 for a video that exists but has nothing to play yet, or never will: the owner learns
+// why, and a player that retries a 409 later gets the playlist once the worker is done. Only
+// the owner gets this far, so it tells nobody else the id exists.
+void Connection::start_playlist(const core::VideoRecord& video) noexcept {
+    if (video.state != core::VideoState::Ready) {
+        fail(Status::Conflict);
+        return;
+    }
+    // A ready video always has one (the catalog enforces it); zero would still get the floor.
+    const core::Millis duration = video.duration.value_or(core::Millis{0});
+    ControlJob job;
+    job.op = ControlOp::Playlist;
+    job.playlist = PlaylistRequest{
+        .kind = req_.route == RouteId::MasterPlaylist ? PlaylistKind::Master : PlaylistKind::Media,
+        .video = video.id,
+        .rendition = std::string(req_.params[1]),
+        .ttl = core::hls::presign_ttl(duration)};
+    start_job(std::move(job));
+}
+
+void Connection::on_playlist(ControlJob job) noexcept {
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims == nullptr || !job.body || !job.playlist) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (!*job.body) {
+        switch (job.body->error()) {
+        case PlaylistFailure::NoSuchRendition:
+            fail(Status::NotFound);
+            return;
+        case PlaylistFailure::Unavailable:
+            fail(Status::ServiceUnavailable);
+            return;
+        case PlaylistFailure::Rejected:
+            ++gw().counters().playlists_rejected;
+            fail(Status::InternalServerError);
+            return;
+        case PlaylistFailure::Unsigned:
+            ++gw().counters().presign_failures;
+            fail(Status::InternalServerError);
+            return;
+        case PlaylistFailure::Broken:
+            fail(Status::InternalServerError);
+            return;
+        }
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (job.playlist->kind == PlaylistKind::Master) {
+        gw().views().record({.video = job.playlist->video,
+                             .viewer = claims->subject,
+                             .at = deps().clock.wall_now()});
+    }
+    // Private: every URL in it is signed for this viewer. A minute lets the player's own cache
+    // absorb its reloads without holding URLs close to expiry.
+    respond({.status = Status::Ok,
+             .content_type = "application/vnd.apple.mpegurl",
+             .cache_control = "private, max-age=60"},
+            **job.body);
 }
 
 void Connection::submit(ControlOp op) noexcept {
@@ -766,6 +843,11 @@ void Connection::run() noexcept {
         }
         job.done = std::expected<void, StorageError>{};
         return;
+    case ControlOp::Playlist:
+        if (job.playlist) {
+            job.body = build_playlist(deps().reader, *job.playlist, gw().limits().local_read_url);
+        }
+        return;
     case ControlOp::None:
         return;
     }
@@ -809,6 +891,9 @@ void Connection::complete() noexcept {
                                             respond({.status = Status::NoContent}, {});
                                         });
         }
+        return;
+    case ControlOp::Playlist:
+        on_playlist(std::move(job));
         return;
     case ControlOp::None:
         return;

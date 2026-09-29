@@ -154,4 +154,25 @@ TEST_F(ConfigTest, OverridesAreTakenAsGiven) {
     EXPECT_EQ(config->limits.auth_cookie, "auth_token_stage");
 }
 
+TEST_F(ConfigTest, TheFilesystemBackendTakesAFileServerForSegmentUrls) {
+    env["ULW_STORAGE"] = "fs";
+    env["ULW_FS_ROOT"] = "/var/lib/ulw";
+    const auto without = load();
+    ASSERT_TRUE(without);
+    EXPECT_TRUE(without->limits.local_read_url.empty());
+
+    env["ULW_FS_READ_URL"] = "http://127.0.0.1:8081/objects//";
+    const auto with = load();
+    ASSERT_TRUE(with);
+    EXPECT_EQ(with->limits.local_read_url, "http://127.0.0.1:8081/objects");
+
+    env["ULW_FS_READ_URL"] = "file:///var/lib/ulw/objects";
+    EXPECT_EQ(refused_variable(), "ULW_FS_READ_URL");
+}
+
+TEST_F(ConfigTest, AFileServerBesideAnObjectStoreIsRefused) {
+    env["ULW_FS_READ_URL"] = "http://127.0.0.1:8081";
+    EXPECT_EQ(refused_variable(), "ULW_FS_READ_URL");
+}
+
 } // namespace

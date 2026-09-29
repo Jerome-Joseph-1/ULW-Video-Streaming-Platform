@@ -5,11 +5,14 @@
 #include "core/ports/clock.hpp"
 #include "core/ports/random.hpp"
 #include "core/ports/storage.hpp"
+#include "core/ports/views.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor.hpp"
 #include "net/signals.hpp"
 #include "net/slab.hpp"
 #include "net/transport.hpp"
+
+#include "view_recorder.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -28,7 +31,10 @@ struct Deps {
     net::ITransportFactory& transports;
     net::OffloadPool& pool;
     core::ports::IIngestStore& store;
+    // Thread-safe: playlists are fetched and signed on the offload pool.
+    core::ports::IObjectReader& reader;
     core::ports::IUploadCatalog& catalog;
+    core::ports::IViewLog& views;
     core::ports::IJwtVerifier& verifier;
     const core::ports::IClock& clock;
     core::ports::IRandom& random;
@@ -62,6 +68,14 @@ struct Limits {
     // Our reaper aborts abandoned uploads before the bucket's 7-day lifecycle rule does, so the
     // catalog never points at an ingest the store has already dropped.
     std::chrono::hours upload_ttl{6 * 24};
+    // Filesystem backend only: the base URL a development file server publishes its objects
+    // under, which segment URLs are then built on. Empty means no playback from that backend.
+    std::string local_read_url;
+    // A master playlist fetch is one view event, 160 bytes held. 1024 of them are 160 KB,
+    // and at one write every 5 s they absorb 1024 / 5 = 204 new viewers a second on
+    // one shard before any is dropped.
+    std::size_t view_batch = 1024;
+    core::Millis view_interval{5'000};
 };
 
 struct Counters {
@@ -77,6 +91,11 @@ struct Counters {
     std::uint64_t requests = 0;
     std::uint64_t certificate_reloads = 0;
     std::uint64_t certificate_reload_failures = 0;
+    std::uint64_t playlists_master = 0;
+    std::uint64_t playlists_media = 0;
+    // A stored playlist broke a rewriting rule: the worker wrote something wrong.
+    std::uint64_t playlists_rejected = 0;
+    std::uint64_t presign_failures = 0;
 };
 
 enum class Admission : std::uint8_t { Admitted, UserAtLimit, Full };
@@ -103,7 +122,9 @@ public:
     // Destroys connections the kernel and every pending callback have let go of. Call after
     // each run_once.
     void reap() noexcept;
-    [[nodiscard]] bool finished() const noexcept { return draining_ && connections_.size() == 0; }
+    [[nodiscard]] bool finished() const noexcept {
+        return draining_ && connections_.size() == 0 && views_.idle();
+    }
     [[nodiscard]] bool ready() const noexcept { return !draining_; }
     [[nodiscard]] std::size_t connections() const noexcept { return connections_.size(); }
 
@@ -111,6 +132,7 @@ public:
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
     [[nodiscard]] std::size_t upload_slots_in_use() const noexcept { return upload_slots_; }
+    [[nodiscard]] ViewRecorder& views() noexcept { return views_; }
     // The counters above in the plain-text exposition format metric scrapers read.
     [[nodiscard]] std::string render_metrics() const;
 
@@ -134,6 +156,7 @@ private:
     bool draining_ = false;
     net::TimerId drain_timer_;
     std::vector<std::unique_ptr<Discard>> discards_;
+    ViewRecorder views_;
 };
 
 } // namespace gateway

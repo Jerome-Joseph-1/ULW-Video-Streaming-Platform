@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ULW playback</title>
+<script src="/hls.js"></script>
+</head>
+<body>
+<video id="video" muted playsinline width="640" height="360"></video>
+<script>
+// Records what the test asserts on: every stall hls.js reports, every 'waiting' once playback
+// has started, the level of each fragment actually played, and how playback ended.
+const params = new URLSearchParams(location.search);
+const video = document.getElementById('video');
+const state = {
+  levels: [],
+  stalls: [],
+  waitingAfterStart: 0,
+  started: false,
+  ended: false,
+  switchedTo: null,
+  playedLevels: [],
+  errors: [],
+  shortFragments: [],
+};
+window.player = { state };
+
+// A short forward buffer keeps later segments unfetched when the switch is asked for, so the
+// switch has to be made mid-stream rather than after everything is already buffered.
+const hls = new Hls({ maxBufferLength: 6, maxMaxBufferLength: 6, startLevel: 0 });
+window.player.hls = hls;
+hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+  state.levels = data.levels.map((l) => l.height);
+  // Manual from the start: the only switch is the one the test forces.
+  hls.currentLevel = 0;
+  video.play();
+});
+hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => { state.switchedTo = data.level; });
+// hls.js's own test for a complete append: the buffer covers the fragment to within 50 ms.
+// Muxed audio and video share one buffer, which covers only where both tracks do, so a segment
+// whose audio stops short of its video never passes it.
+hls.on(Hls.Events.FRAG_BUFFERED, (_, { frag }) => {
+  let covered = 0;
+  for (let i = 0; i < video.buffered.length; i++) {
+    covered += Math.max(0, Math.min(frag.end, video.buffered.end(i)) -
+      Math.max(frag.start, video.buffered.start(i)));
+  }
+  if (frag.duration - covered > 0.05) {
+    state.shortFragments.push(`level ${frag.level} sn ${frag.sn} ` +
+      `${frag.start.toFixed(3)}-${frag.end.toFixed(3)} covered ${covered.toFixed(3)} s`);
+  }
+});
+hls.on(Hls.Events.FRAG_CHANGED, (_, data) => { state.playedLevels.push(data.frag.level); });
+hls.on(Hls.Events.ERROR, (_, data) => {
+  if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+    state.stalls.push(video.currentTime);
+  } else {
+    // With what was buffered at the time, which is what explains an append that made no
+    // progress.
+    const frag = data.frag ? ` level ${data.frag.level} sn ${data.frag.sn}` +
+      ` ${data.frag.start.toFixed(3)}-${data.frag.end.toFixed(3)}` : '';
+    const buffered = [];
+    for (let i = 0; i < video.buffered.length; i++) {
+      buffered.push(`${video.buffered.start(i).toFixed(3)}-${video.buffered.end(i).toFixed(3)}`);
+    }
+    state.errors.push({ fatal: data.fatal,
+      what: `${data.type}/${data.details}${frag} buffered [${buffered.join(',')}]` });
+  }
+});
+video.addEventListener('playing', () => { state.started = true; });
+video.addEventListener('waiting', () => {
+  if (state.started) {
+    state.waitingAfterStart += 1;
+  }
+});
+video.addEventListener('ended', () => { state.ended = true; });
+hls.loadSource(`/api/v1/videos/${params.get('video')}/master.m3u8`);
+hls.attachMedia(video);
+</script>
+</body>
+</html>

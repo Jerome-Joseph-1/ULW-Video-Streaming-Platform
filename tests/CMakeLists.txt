@@ -15,6 +15,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/build_info_test.cpp
     unit/core/content_type_test.cpp
     unit/core/error_messages_test.cpp
+    unit/core/hls_test.cpp
     unit/core/ids_test.cpp
     unit/core/json_test.cpp
     unit/core/ladder_test.cpp
@@ -111,6 +112,19 @@ if(ULW_FUZZ)
     target_compile_options(http_fuzz PRIVATE -fsanitize=fuzzer)
     target_link_options(http_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
+
+ulw_add_executable(hls_fuzz_replay fuzz/hls_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(hls_fuzz_replay PRIVATE ulw::core_domain)
+add_test(NAME hls_fuzz_corpus
+    COMMAND hls_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/hls)
+set_tests_properties(hls_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(hls_fuzz fuzz/hls_fuzz.cpp)
+    target_link_libraries(hls_fuzz PRIVATE ulw::core_domain)
+    target_compile_options(hls_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(hls_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
     unit/s3/errors_test.cpp
@@ -128,6 +142,7 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
     gateway/gateway_harness.cpp
+    gateway/gateway_playback_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
     gateway/key_fetcher_test.cpp)
@@ -231,6 +246,7 @@ if(ULW_BUILD_WORKER)
     ulw_add_test_suite(ffmpeg_unit_tests unit
         unit/ffmpeg/command_test.cpp
         unit/ffmpeg/exit_code_test.cpp
+        unit/ffmpeg/hls_rewrite_test.cpp
         unit/ffmpeg/progress_test.cpp
         unit/ffmpeg/sandbox_test.cpp)
     target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
@@ -268,4 +284,23 @@ if(ULW_BUILD_WORKER)
         target_compile_definitions(worker_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
     endif()
     add_dependencies(worker_integration_tests transcode_worker ulw_sandbox)
+
+    # gateway_server against the Postgres and MinIO of deploy/local/compose.yaml, serving
+    # what the worker's ffmpeg command writes.
+    ulw_add_test_suite(playback_integration_tests integration
+        integration/playback_test.cpp
+        integration/postgres_harness.cpp
+        support/child_process.cpp
+        PROPERTIES RESOURCE_LOCK postgres)
+    target_link_libraries(playback_integration_tests PRIVATE
+        ulw::ffmpeg_adapter ulw::pg_store ulw::storage_s3 ulw::test_live_s3 ulw::devtoken ulw::os
+        PkgConfig::LIBPQ)
+    target_include_directories(playback_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/infra/postgres/src ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src)
+    target_compile_definitions(playback_integration_tests PRIVATE
+        ULW_GATEWAY_BIN="$<TARGET_FILE:gateway_server>")
+    if(ULW_CONFORMANCE_LIVE)
+        target_compile_definitions(playback_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+    endif()
+    add_dependencies(playback_integration_tests gateway_server)
 endif()

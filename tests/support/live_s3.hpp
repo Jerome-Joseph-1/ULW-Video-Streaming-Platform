@@ -47,6 +47,8 @@ struct LiveS3 {
 open_uploads(const LiveS3& target, std::string_view prefix);
 // Aborts every upload open under `prefix`, as far as it can: for cleaning up after a run.
 void abort_uploads(const LiveS3& target, std::string_view prefix);
+// Deletes the objects under `prefix`, as far as it can, from a bucket that outlives the run.
+void remove_objects(const LiveS3& target, std::string_view prefix);
 
 // "<what>-<16 hex digits>/", fresh per call: no two runs, concurrent or not, share a key, which
 // also keeps R2's one-write-per-second-per-key limit out of reach.

@@ -63,8 +63,21 @@ std::expected<void, ConfigError> load_storage(const EnvLookup& env, Config& conf
         return std::unexpected(std::move(location.error()));
     }
     config.storage_location = std::move(*location);
+    auto read_url = lookup(env, "ULW_FS_READ_URL");
     if (config.storage == StorageBackend::Filesystem) {
+        if (read_url && !read_url->starts_with("http://") && !read_url->starts_with("https://")) {
+            return error("ULW_FS_READ_URL", "must be an http or https URL");
+        }
+        // Trailing slashes are dropped so the key can follow a single one.
+        while (read_url && read_url->ends_with('/')) {
+            read_url->pop_back();
+        }
+        config.limits.local_read_url = std::move(read_url).value_or("");
         return {};
+    }
+    // An object store signs its own URLs; a file server set beside one would never be used.
+    if (read_url) {
+        return error("ULW_FS_READ_URL", "set, but ULW_STORAGE is not fs");
     }
     auto bucket = required(env, "ULW_BUCKET");
     if (!bucket) {

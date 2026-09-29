@@ -152,6 +152,29 @@ void abort_uploads(const LiveS3& target, std::string_view prefix) {
     }
 }
 
+void remove_objects(const LiveS3& target, std::string_view prefix) {
+    const auto bucket = infra::s3util::Bucket::make(target.profile, target.bucket);
+    if (!bucket) {
+        return;
+    }
+    const auto listed = send(target, infra::curl::Method::Get,
+                             bucket->root({{.name = "list-type", .value = "2"},
+                                           {.name = "prefix", .value = std::string(prefix)}}));
+    if (!listed || listed->status != 200) {
+        return;
+    }
+    const auto page = infra::s3util::parse_list_objects_v2(listed->body);
+    if (!page) {
+        return;
+    }
+    for (const std::string& name : page->keys) {
+        if (const auto key = core::StorageKey::parse(name)) {
+            [[maybe_unused]] const auto removed =
+                send(target, infra::curl::Method::Delete, bucket->object(*key));
+        }
+    }
+}
+
 std::string unique_prefix(std::string_view what) {
     os::SystemRandom random;
     std::array<std::byte, 8> raw{};

@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <chrono>
 #include <optional>
+#include <span>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -86,6 +88,13 @@ constexpr Sql kAbortedState = "SELECT state FROM uploads WHERE id = $1";
 constexpr Sql kTryLock =
     "SELECT pg_try_advisory_lock($1) FROM uploads WHERE id = $2 AND owner_id = $3";
 constexpr Sql kUnlock = "SELECT pg_advisory_unlock($1)";
+
+// A batch travels as three array literals, one column each, so any batch size is one
+// statement with three parameters.
+constexpr Sql kRecordViews = R"sql(
+INSERT INTO view_events (video_id, viewer_id, viewed_at)
+SELECT video, viewer, timestamptz 'epoch' + at * interval '1 microsecond'
+  FROM unnest($1::text::uuid[], $2::text::text[], $3::text::bigint[]) AS e(video, viewer, at))sql";
 
 CatalogError to_catalog_error(DbError e) noexcept {
     switch (e) {
@@ -453,6 +462,52 @@ private:
     CatalogCallback<void> done_;
 };
 
+// Owns the array literals it binds, since the statement may go out again after a
+// serialization failure.
+class RecordViews final : public Operation {
+public:
+    RecordViews(std::span<const core::ports::ViewEvent> batch, CatalogCallback<void> done)
+        : done_(std::move(done)) {
+        // Viewers are quoted: an unquoted NULL, in any case, is SQL NULL inside an array
+        // literal, and "null" is a valid subject. Quoting needs no escapes, since UserId allows
+        // only [A-Za-z0-9._:@|+-].
+        for (const core::ports::ViewEvent& e : batch) {
+            separate();
+            videos_ += e.video.to_string();
+            viewers_.append(1, '"').append(e.viewer.view()).append(1, '"');
+            times_ += std::to_string(micros_since_epoch(e.at));
+        }
+        videos_ += '}';
+        viewers_ += '}';
+        times_ += '}';
+    }
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = kRecordViews,
+                         .params = Params{}.add_text(videos_).add_text(viewers_).add_text(times_)};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        done_(outcome ? CatalogResult<void>{} : failure<void>(outcome.error()));
+        return std::nullopt;
+    }
+
+    void abandon(DbError error) noexcept override { done_(failure<void>(error)); }
+
+private:
+    void separate() {
+        const char c = videos_.empty() ? '{' : ',';
+        videos_ += c;
+        viewers_ += c;
+        times_ += c;
+    }
+
+    std::string videos_;
+    std::string viewers_;
+    std::string times_;
+    CatalogCallback<void> done_;
+};
+
 } // namespace
 
 class PgUploadCatalog::Impl {
@@ -461,6 +516,10 @@ public:
         : main_(std::move(main)), locks_(std::move(locks)), deferred_(reactor) {}
 
     Pool& main() noexcept { return *main_; }
+
+    void settle(CatalogCallback<void> done) {
+        deferred_.post([done = std::move(done)]() mutable noexcept { done({}); });
+    }
 
     template <class T> void refuse(CatalogCallback<T> done, CatalogError error) {
         deferred_.post(
@@ -677,6 +736,15 @@ void PgUploadCatalog::find_video(const core::VideoId& id, CatalogCallback<core::
         [done = std::move(done)](Outcome outcome) mutable noexcept {
             done(outcome ? decode_video(*outcome) : failure<core::VideoRecord>(outcome.error()));
         }));
+}
+
+void PgUploadCatalog::record_views(std::vector<core::ports::ViewEvent> batch,
+                                   CatalogCallback<void> done) {
+    if (batch.empty()) {
+        impl_->settle(std::move(done));
+        return;
+    }
+    impl_->main().submit(std::make_unique<RecordViews>(batch, std::move(done)));
 }
 
 } // namespace infra::postgres

@@ -84,6 +84,8 @@ struct Services {
     std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<infra::s3util::EnvCredentialProvider> credentials;
     std::unique_ptr<core::ports::IIngestStore> store;
+    // The same object as `store`, seen as a reader.
+    core::ports::IObjectReader* reader = nullptr;
     std::unique_ptr<infra::postgres::PgUploadCatalog> catalog;
     std::unique_ptr<gateway::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
@@ -130,9 +132,11 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
         if (!writers) {
             return std::unexpected("fs writer pool: " + errno_text(writers.error()));
         }
-        s.store = std::make_unique<infra::storage::FsStore>(
+        auto fs = std::make_unique<infra::storage::FsStore>(
             infra::storage::FsStore::Deps{.clock = s.clock, .random = s.random},
             std::move(*writers), config.storage_location, kFsChunk);
+        s.reader = fs.get();
+        s.store = std::move(fs);
         return {};
     }
     auto profile = config.storage == StorageBackend::R2
@@ -159,6 +163,7 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
     if (!store) {
         return std::unexpected("object store configuration refused");
     }
+    s.reader = store->get();
     s.store = std::move(*store);
     return {};
 }
@@ -239,7 +244,9 @@ int run() {
                                                                  .transports = *s.transports,
                                                                  .pool = *s.pool,
                                                                  .store = *s.store,
+                                                                 .reader = *s.reader,
                                                                  .catalog = *s.catalog,
+                                                                 .views = *s.catalog,
                                                                  .verifier = *s.verifier,
                                                                  .clock = s.clock,
                                                                  .random = s.random},
