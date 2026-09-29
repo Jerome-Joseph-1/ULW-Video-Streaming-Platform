@@ -18,6 +18,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/hls_test.cpp
     unit/core/ids_test.cpp
     unit/core/json_test.cpp
+    unit/core/key_package_test.cpp
     unit/core/ladder_test.cpp
     unit/core/parse_test.cpp
     unit/core/storage_key_test.cpp
@@ -342,6 +343,24 @@ target_include_directories(gateway_process_tests PRIVATE ${PROJECT_SOURCE_DIR}/t
 target_compile_definitions(gateway_process_tests PRIVATE
     ULW_GATEWAY_BIN="$<TARGET_FILE:gateway_server>")
 add_dependencies(gateway_process_tests gateway_server)
+
+# The directory contract runs against the in-memory directory here and against Postgres in
+# e2ee_integration_tests.
+ulw_add_test_suite(e2ee_unit_tests unit
+    conformance/e2ee_directory_contract.cpp
+    unit/e2ee/memory_directory_test.cpp)
+target_link_libraries(e2ee_unit_tests PRIVATE ulw::e2ee_directory_memory)
+target_include_directories(e2ee_unit_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/tests/conformance)
+
+ulw_add_test_suite(e2ee_integration_tests integration
+    conformance/e2ee_directory_contract.cpp
+    integration/postgres_e2ee_test.cpp
+    integration/postgres_harness.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(e2ee_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
+target_include_directories(e2ee_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp

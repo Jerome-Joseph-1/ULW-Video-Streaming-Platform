@@ -1,4 +1,4 @@
-# 0041. Soak flatness judged per unit of work against the memory limit
+# 0042. Soak flatness judged per unit of work against the memory limit
 
 Status: Accepted
 Date: 2026-09-29

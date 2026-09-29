@@ -2,7 +2,7 @@
 
 `tests/soak/soak.py` runs `gateway_server` and `transcode_worker` against the local Postgres and
 MinIO for hours, samples each process's RSS and open descriptors every minute into
-`samples.csv`, and judges whether both stayed flat. The criterion, and why, is ADR-0041.
+`samples.csv`, and judges whether both stayed flat. The criterion, and why, is ADR-0042.
 
 ```
 docker compose -f deploy/local/compose.yaml up -d --wait

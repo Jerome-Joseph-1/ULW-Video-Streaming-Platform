@@ -6,15 +6,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <libpq-fe.h>
+#include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace infra::postgres {
 
 // Built-in type OIDs are fixed by the system catalog and never renumbered; libpq ships no header
 // that names them.
 inline constexpr Oid kBoolOid = 16;
+inline constexpr Oid kByteaOid = 17;
 inline constexpr Oid kInt8Oid = 20;
 inline constexpr Oid kTextOid = 25;
+inline constexpr Oid kByteaArrayOid = 1001;
 inline constexpr Oid kUuidOid = 2950;
 
 // Statement parameters, sent in binary with explicit types. Integers and UUIDs skip a decimal
@@ -30,6 +35,10 @@ public:
     Params& add_uuid(const core::Uuid& value) noexcept;
     // Borrowed: the viewed bytes must stay put until the statement has been sent.
     Params& add_text(std::string_view value) noexcept;
+    // Borrowed, as text is. Sent as is: binary format needs no escaping.
+    Params& add_bytea(std::span<const std::byte> value) noexcept;
+    // A bytea[] as encode_bytea_array builds it. Borrowed.
+    Params& add_bytea_array(std::string_view encoded) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return count_; }
 
@@ -50,7 +59,8 @@ private:
         // Fixed-width values, already in network byte order.
         std::array<char, core::Uuid::kByteLength> bytes{};
         std::size_t length = 0;
-        std::string_view text;
+        // Variable-length values point at the caller's bytes instead.
+        std::string_view borrowed;
     };
 
     Slot& push(Oid type) noexcept;
@@ -58,5 +68,10 @@ private:
     std::array<Slot, kMax> slots_{};
     std::size_t count_ = 0;
 };
+
+// A one-dimensional bytea[] without NULLs in the binary array format (array_send): a header
+// naming the element type, the dimension, then each element as its length and its bytes. One
+// parameter then carries a whole batch of opaque blobs, with no escaping.
+[[nodiscard]] std::string encode_bytea_array(std::span<const std::vector<std::byte>> elements);
 
 } // namespace infra::postgres

@@ -4,10 +4,12 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
+#include <vector>
 
 namespace {
 
 using infra::postgres::parse_bool;
+using infra::postgres::parse_bytea;
 using infra::postgres::parse_int64;
 using infra::postgres::parse_uint64;
 
@@ -43,6 +45,21 @@ TEST(ParseBool, AcceptsOnlyTheServersTextForm) {
     EXPECT_EQ(parse_bool("f"), false);
     EXPECT_EQ(parse_bool("true"), std::nullopt);
     EXPECT_EQ(parse_bool(""), std::nullopt);
+}
+
+TEST(ParseBytea, ReadsHexOutputInEitherCase) {
+    EXPECT_EQ(parse_bytea("\\x00ff5C"),
+              (std::vector<std::byte>{std::byte{0x00}, std::byte{0xff}, std::byte{0x5c}}));
+    EXPECT_EQ(parse_bytea("\\x"), std::vector<std::byte>{});
+}
+
+TEST(ParseBytea, RefusesEscapeOutputAndBrokenHex) {
+    EXPECT_EQ(parse_bytea("abc"), std::nullopt);
+    EXPECT_EQ(parse_bytea("\\x0"), std::nullopt);
+    EXPECT_EQ(parse_bytea("\\x0g"), std::nullopt);
+    EXPECT_EQ(parse_bytea("\\x+1"), std::nullopt);
+    EXPECT_EQ(parse_bytea("\\x-1"), std::nullopt);
+    EXPECT_EQ(parse_bytea("x00"), std::nullopt);
 }
 
 } // namespace
