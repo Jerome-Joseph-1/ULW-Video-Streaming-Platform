@@ -295,6 +295,16 @@ void Gateway::retire(net::Slab<Connection>::Handle handle) noexcept {
     connections_.retire(handle);
 }
 
+std::size_t Gateway::busy_connections() noexcept {
+    std::size_t busy = 0;
+    connections_.for_each_live([&](const Connection& conn) {
+        if (!conn.idle()) {
+            ++busy;
+        }
+    });
+    return busy;
+}
+
 std::string Gateway::render_metrics() {
     const Counters& c = counters_;
     const ViewCounters& v = views_.counters();
