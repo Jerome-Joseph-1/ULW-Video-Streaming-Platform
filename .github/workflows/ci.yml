@@ -135,9 +135,11 @@ jobs:
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
 
-  # The M16 acceptance: three chat_server processes on ports 9101-9103 over one Postgres, their
-  # room's owner stopped until a survivor takes over, then resumed to be fenced out. The test is
-  # parameterised over both reactors, so one run covers io_uring and epoll.
+  # The M16 and M17 acceptance: three chat_server processes on ports 9101-9103 over one
+  # Postgres. Their room's owner stopped until a survivor takes over, then resumed to be fenced
+  # out; clients on every node seeing one order, rate limits, retries, resume, and no body in any
+  # log or table. The tests are parameterised over both reactors, so one run covers io_uring and
+  # epoll.
   cluster:
     runs-on: ubuntu-24.04
     services:
@@ -183,6 +185,14 @@ jobs:
       - run: cmake --preset ci
       # Generated headers must exist before clang-tidy can parse the sources.
       - run: cmake --build --preset ci --target ulw_build_info
+      # The bridge's own checks, the generated C header's drift check among them.
+      - name: OpenMLS bridge (rustfmt, clippy, cargo test)
+        working-directory: infra/e2ee/mls_ffi_bridge
+        run: |
+          rustup component add rustfmt clippy
+          cargo fmt --check
+          cargo clippy --locked --offline --all-targets -- -D warnings
+          cargo test --locked --offline
       - name: clang-tidy (changed files)
         if: github.event_name == 'pull_request'
         run: |
@@ -229,7 +239,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ws, http, hls, toml]
+        target: [ws, http, hls, toml, mls]
     env:
       CC: clang-19
       CXX: clang++-19
@@ -248,7 +258,7 @@ jobs:
             push) seconds=300 ;;
             *)
               if git diff --quiet "origin/$BASE_REF...HEAD" -- http codec ops tests/fuzz \
-                  core/src/hls.cpp core/include/core/util/hls.hpp; then
+                  core/src/hls.cpp core/include/core/util/hls.hpp infra/e2ee; then
                 seconds=0
               else
                 seconds=300

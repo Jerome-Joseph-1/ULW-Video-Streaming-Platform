@@ -37,7 +37,7 @@ if(ULW_BUILD_TESTS)
 endif()
 
 # The live packager terminates SRT itself, so ffmpeg can stay in its empty network namespace
-# (ADR-0043). Built static, without its command-line apps, against OpenSSL for the passphrase.
+# (ADR-0046). Built static, without its command-line apps, against OpenSSL for the passphrase.
 if(ULW_BUILD_WORKER)
     FetchContent_Declare(srt
         URL ${ULW_THIRD_PARTY_DIR}/srt-1.5.4.tar.gz

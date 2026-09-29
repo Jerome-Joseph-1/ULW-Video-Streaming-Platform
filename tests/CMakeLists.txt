@@ -191,6 +191,7 @@ if(ULW_FUZZ)
     target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
 ulw_add_test_suite(rt_unit_tests unit
+    unit/rt/recent_keys_test.cpp
     unit/rt/registry_test.cpp
     unit/rt/room_router_test.cpp
     unit/rt/wire_test.cpp)
@@ -311,9 +312,11 @@ target_include_directories(room_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
     unit/chat/envelope_test.cpp
-    unit/chat/session_test.cpp)
+    unit/chat/session_test.cpp
+    unit/chat/token_bucket_test.cpp)
 target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
@@ -323,7 +326,7 @@ ulw_add_test_suite(chat_cluster_tests integration
     integration/postgres_harness.cpp
     support/child_process.cpp
     PROPERTIES RESOURCE_LOCK postgres)
-target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::codec_ws
+target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::auth ulw::codec_ws
     ulw::net_lib ulw::os PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
@@ -361,6 +364,40 @@ ulw_add_test_suite(e2ee_integration_tests integration
 target_link_libraries(e2ee_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(e2ee_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
+if(ULW_BUILD_MLS)
+    ulw_add_test_suite(mls_unit_tests unit
+        unit/e2ee/mls_ffi_test.cpp
+        unit/e2ee/mls_test.cpp)
+    # The FFI test drives the bridge's C API directly, as well as through the wrapper.
+    target_link_libraries(mls_unit_tests PRIVATE ulw::e2ee_mls mls_ffi_bridge)
+
+    # The crate's own tests, among them the check that the committed C header is what cbindgen
+    # makes of src/lib.rs. Release, like the library, so the dependencies built once serve both.
+    add_test(NAME mls_ffi_bridge_cargo_tests
+        COMMAND ${ULW_CARGO_OFFLINE} test --release --locked --offline
+            --target-dir $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CARGO_TARGET_DIR>
+        WORKING_DIRECTORY $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CRATE_DIR>)
+    set_tests_properties(mls_ffi_bridge_cargo_tests PROPERTIES LABELS unit)
+
+    ulw_add_executable(mls_fuzz_replay fuzz/mls_fuzz.cpp fuzz/replay_main.cpp)
+    target_link_libraries(mls_fuzz_replay PRIVATE mls_ffi_bridge)
+    add_test(NAME mls_fuzz_corpus
+        COMMAND mls_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/mls)
+    set_tests_properties(mls_fuzz_corpus PROPERTIES LABELS unit)
+
+    if(ULW_FUZZ)
+        ulw_add_executable(mls_fuzz fuzz/mls_fuzz.cpp)
+        target_link_libraries(mls_fuzz PRIVATE mls_ffi_bridge_fuzz)
+        target_compile_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+        target_link_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+    endif()
+
+    # Three devices through the Postgres directory: key packages fetched from it, commits
+    # ordered by its epoch claims.
+    target_sources(e2ee_integration_tests PRIVATE integration/mls_directory_test.cpp)
+    target_link_libraries(e2ee_integration_tests PRIVATE ulw::e2ee_mls)
+endif()
 
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp

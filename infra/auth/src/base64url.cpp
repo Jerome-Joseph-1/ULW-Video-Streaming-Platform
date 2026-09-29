@@ -7,6 +7,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace infra::auth {
 
@@ -25,6 +27,30 @@ constexpr std::array<std::uint8_t, 256> kDecode = [] {
     }
     return table;
 }();
+
+// `make` turns each decoded octet into Out's element type.
+template <class Out, class Make> bool decode_into(std::string_view text, Out& out, Make make) {
+    // A lone trailing character carries 6 bits, less than a byte.
+    if (text.size() % 4 == 1) {
+        return false;
+    }
+    out.reserve(text.size() * 3 / 4);
+    std::uint32_t acc = 0;
+    unsigned bits = 0;
+    for (const char c : text) {
+        const std::uint8_t v = kDecode[static_cast<unsigned char>(c)];
+        if (v == kInvalid) {
+            return false;
+        }
+        acc = (acc << 6U) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(make((acc >> bits) & 0xFFU));
+        }
+    }
+    return (acc & ((1U << bits) - 1U)) == 0;
+}
 
 } // namespace
 
@@ -62,30 +88,17 @@ std::string encode_base64url(std::string_view bytes) {
 }
 
 std::optional<std::string> decode_base64url(std::string_view text) {
-    // A lone trailing character carries 6 bits, less than a byte.
-    if (text.size() % 4 == 1) {
-        return std::nullopt;
-    }
     std::string out;
-    out.reserve(text.size() * 3 / 4);
-    std::uint32_t acc = 0;
-    unsigned bits = 0;
-    for (const char c : text) {
-        const std::uint8_t v = kDecode[static_cast<unsigned char>(c)];
-        if (v == kInvalid) {
-            return std::nullopt;
-        }
-        acc = (acc << 6U) | v;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out.push_back(static_cast<char>((acc >> bits) & 0xFFU));
-        }
-    }
-    if ((acc & ((1U << bits) - 1U)) != 0) {
-        return std::nullopt;
-    }
-    return out;
+    return decode_into(text, out, [](std::uint32_t octet) { return static_cast<char>(octet); })
+               ? std::optional(std::move(out))
+               : std::nullopt;
+}
+
+std::optional<std::vector<std::byte>> decode_base64url_bytes(std::string_view text) {
+    std::vector<std::byte> out;
+    return decode_into(text, out, [](std::uint32_t octet) { return static_cast<std::byte>(octet); })
+               ? std::optional(std::move(out))
+               : std::nullopt;
 }
 
 } // namespace infra::auth

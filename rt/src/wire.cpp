@@ -39,7 +39,7 @@ void put_room(std::vector<std::byte>& out, const core::RoomId& room) {
     put_text(out, {text.data(), text.size()});
 }
 
-// Nodes and senders are at most 63 and 128 characters.
+// Nodes, senders and keys are at most 63, 128 and 64 characters.
 void put_short(std::vector<std::byte>& out, std::string_view text) {
     put_u8(out, static_cast<std::uint8_t>(text.size()));
     put_text(out, text);
@@ -141,6 +141,11 @@ public:
         return id ? std::optional(*id) : std::nullopt;
     }
 
+    [[nodiscard]] std::optional<MessageKey> key() noexcept {
+        const auto t = short_text();
+        return t ? MessageKey::parse(*t) : std::nullopt;
+    }
+
     [[nodiscard]] std::span<const std::byte> rest() noexcept { return std::exchange(rest_, {}); }
     [[nodiscard]] bool empty() const noexcept { return rest_.empty(); }
 
@@ -194,10 +199,12 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto request = in.u64();
         const auto room = in.room();
         const auto sender = in.sender();
-        if (!request || !room || !sender) {
+        const auto key = in.key();
+        if (!request || !room || !sender || !key) {
             return std::nullopt;
         }
-        return Send{.request = *request, .room = *room, .sender = *sender, .body = in.rest()};
+        return Send{
+            .request = *request, .room = *room, .sender = *sender, .key = *key, .body = in.rest()};
     }
     case Type::Reply: {
         const auto request = in.u64();
@@ -212,10 +219,12 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto room = in.room();
         const auto seq = in.u64();
         const auto sender = in.sender();
-        if (!room || !seq || !sender) {
+        const auto key = in.key();
+        if (!room || !seq || !sender || !key) {
             return std::nullopt;
         }
-        return Deliver{.room = *room, .seq = *seq, .sender = *sender, .body = in.rest()};
+        return Deliver{
+            .room = *room, .seq = *seq, .sender = *sender, .key = *key, .body = in.rest()};
     }
     }
     return std::nullopt;
@@ -277,11 +286,13 @@ void encode_unsubscribe(std::vector<std::byte>& out, const core::RoomId& room) {
 }
 
 void encode_send(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
-                 const core::UserId& sender, std::span<const std::byte> body) {
+                 const core::UserId& sender, const MessageKey& key,
+                 std::span<const std::byte> body) {
     const std::size_t at = begin(out, Type::Send);
     put_u64(out, request);
     put_room(out, room);
     put_short(out, sender.view());
+    put_short(out, key.view());
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }
@@ -296,11 +307,13 @@ void encode_reply(std::vector<std::byte>& out, std::uint64_t request, Status sta
 }
 
 void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::uint64_t seq,
-                    const core::UserId& sender, std::span<const std::byte> body) {
+                    const core::UserId& sender, const MessageKey& key,
+                    std::span<const std::byte> body) {
     const std::size_t at = begin(out, Type::Deliver);
     put_room(out, room);
     put_u64(out, seq);
     put_short(out, sender.view());
+    put_short(out, key.view());
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }

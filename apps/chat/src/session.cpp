@@ -261,6 +261,10 @@ void Session::respond(std::string_view bytes) {
 void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
     net::IReactor& reactor = server_.deps().reactor;
     reactor.send(conn_, bytes_of(response.bytes()));
+    // Passed authentication, which sets the user; without one, commands close the socket.
+    if (user_) {
+        client_ = server_.chat().attach(*this, *user_);
+    }
     phase_ = Phase::Open;
     ++server_.counters().upgrades;
     if (paused_) {
@@ -342,113 +346,38 @@ void Session::command(const codec::ws::Frame& frame) {
         send_text(out);
         return;
     }
-    if (auto* j = std::get_if<Join>(&*parsed)) {
-        join(*j);
-        return;
-    }
-    send(std::move(std::get<Send>(*parsed)));
-}
-
-void Session::join(const Join& join) {
-    if (std::ranges::find(rooms_, join.room) == rooms_.end()) {
-        if (rooms_.size() >= server_.limits().max_rooms_per_connection) {
-            std::string out;
-            write_error(out, "too_many_rooms", join.room);
-            send_text(out);
-            return;
-        }
-        if (!user_ || !server_.admit_join(*user_)) {
-            std::string out;
-            write_error(out, "busy", join.room);
-            send_text(out);
-            return;
-        }
-        rooms_.push_back(join.room);
-    }
-    ChatServer& server = server_;
-    const Handle handle = handle_;
-    const core::RoomId room = join.room;
-    server_.deps().router.join(
-        room, *this, [&server, handle, room](std::expected<void, rt::RouteError> r) noexcept {
-            if (Session* s = server.session(handle)) {
-                try {
-                    s->joined(room, r);
-                } catch (const std::bad_alloc&) {
-                    s->allocation_failed();
-                }
-            }
-        });
-}
-
-void Session::joined(const core::RoomId& room, std::expected<void, rt::RouteError> result) {
-    std::string out;
-    if (!result) {
-        std::erase(rooms_, room);
-        write_error(out, reason(result.error()), room);
-    } else {
-        write_joined(out, room);
-    }
-    send_text(out);
-}
-
-void Session::send(Send send) {
     // Set by the upgrade, which is the only way into the Open phase.
-    if (!user_) {
+    if (!client_) {
         close_with(kInternalError);
         return;
     }
-    // What a send holds while it waits: its body, and the rest of it on its way to the owner.
-    constexpr std::size_t kSendOverhead = 256;
-    const std::size_t bytes = send.body.size() + kSendOverhead;
-    if (send_bytes_in_flight_ + bytes > server_.limits().max_send_bytes_in_flight) {
-        std::string out;
-        write_error(out, "busy", send.room, send.ref);
-        send_text(out);
+    ChatService& chat = server_.chat();
+    if (const auto* j = std::get_if<Join>(&*parsed)) {
+        chat.join(*client_, *j);
         return;
     }
-    send_bytes_in_flight_ += bytes;
-    const auto body = bytes_of(send.body);
-    ChatServer& server = server_;
-    const Handle handle = handle_;
-    const core::RoomId room = send.room;
-    const std::optional<std::uint64_t> ref = send.ref;
-    server_.deps().router.send(room, *this, *user_, {body.begin(), body.end()},
-                               [&server, handle, room, ref,
-                                bytes](std::expected<std::uint64_t, rt::RouteError> r) noexcept {
-                                   if (Session* s = server.session(handle)) {
-                                       s->send_bytes_in_flight_ -= bytes;
-                                       try {
-                                           s->sent(room, ref, r);
-                                       } catch (const std::bad_alloc&) {
-                                           s->allocation_failed();
-                                       }
-                                   }
-                               });
+    chat.send(*client_, std::move(std::get<Send>(*parsed)));
 }
 
-void Session::sent(const core::RoomId& room, std::optional<std::uint64_t> ref,
-                   std::expected<std::uint64_t, rt::RouteError> result) {
-    std::string out;
-    if (!result) {
-        write_error(out, reason(result.error()), room, ref);
-    } else {
-        write_sent(out, room, ref, *result);
-    }
-    send_text(out);
-}
-
-void Session::deliver(const rt::Message& message) noexcept {
+bool Session::push(std::string_view text) noexcept {
     if (phase_ != Phase::Open) {
-        return;
+        return false;
     }
     try {
-        std::string out;
-        write_message(out, message);
-        send_text(out);
-        ++server_.counters().messages_delivered;
+        const auto bytes = bytes_of(text);
+        send_frame({.opcode = codec::ws::Opcode::Text,
+                    .fin = true,
+                    .payload = {bytes.begin(), bytes.end()},
+                    .close_code = codec::ws::CloseCode::NoStatus});
     } catch (const std::bad_alloc&) {
         allocation_failed();
     }
+    // A reader too far behind was abandoned by this very frame, which it will never read.
+    return phase_ == Phase::Open;
+}
+
+std::size_t Session::unsent_bytes() const noexcept {
+    return server_.deps().reactor.pending_send_bytes(conn_);
 }
 
 void Session::send_text(const std::string& text) {
@@ -568,8 +497,8 @@ void Session::close() noexcept {
     if (auth_ == Auth::Waiting) {
         server_.deps().verifier.cancel_wait(*this);
     }
-    for (const core::RoomId& room : rooms_) {
-        server_.deps().router.leave(room, *this);
+    if (client_) {
+        server_.chat().detach(*client_);
     }
     reactor.begin_close(conn_);
     server_.retire(handle_);

@@ -11,7 +11,7 @@
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
-#include "envelope.hpp"
+#include "chat_service.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -23,13 +23,13 @@
 namespace chat {
 
 // One client connection: an HTTP request (a probe, or the upgrade to a WebSocket), then, once
-// upgraded and authenticated, JSON commands in text frames. Retired through the server, never
-// destroyed from inside its own callbacks.
+// upgraded and authenticated, JSON commands in text frames, which the chat service carries
+// out. Retired through the server, never destroyed from inside its own callbacks.
 class Session final : public net::IStreamHandler,
                       public net::ITimerHandler,
                       public http::IRequestSink,
                       public core::ports::IKeyWaiter,
-                      public rt::IMember {
+                      public IClient {
 public:
     using Handle = net::Slab<Session>::Handle;
 
@@ -54,7 +54,10 @@ public:
     void on_message_complete() noexcept override;
 
     void on_keys_refreshed() noexcept override;
-    void deliver(const rt::Message& message) noexcept override;
+
+    bool push(std::string_view text) noexcept override;
+    [[nodiscard]] std::size_t unsent_bytes() const noexcept override;
+    void allocation_failed() noexcept override;
 
     // Close 1001 to an open WebSocket; anything else is closed at once.
     void drain() noexcept;
@@ -74,16 +77,10 @@ private:
     void read_frames(net::BorrowedBytes bytes);
     [[nodiscard]] bool within_control_budget(std::size_t in_this_read) noexcept;
     void command(const codec::ws::Frame& frame);
-    void join(const Join& join);
-    void send(Send send);
-    void joined(const core::RoomId& room, std::expected<void, rt::RouteError> result);
-    void sent(const core::RoomId& room, std::optional<std::uint64_t> ref,
-              std::expected<std::uint64_t, rt::RouteError> result);
 
     void send_text(const std::string& text);
     void send_frame(const codec::ws::Frame& frame);
     void close_with(codec::ws::CloseCode code);
-    void allocation_failed() noexcept;
     void abandon() noexcept;
     void arm(core::Millis delay) noexcept;
     [[nodiscard]] core::MonoTime now() const noexcept;
@@ -105,11 +102,10 @@ private:
     bool request_complete_ = false;
     bool paused_ = false;
     std::optional<core::UserId> user_;
+    // Set by the upgrade.
+    std::optional<ClientId> client_;
 
     codec::ws::Decoder decoder_;
-    // Rooms joined or being joined, to leave when the connection goes.
-    std::vector<core::RoomId> rooms_;
-    std::size_t send_bytes_in_flight_ = 0;
     std::uint32_t control_tokens_;
     core::MonoTime control_refilled_;
     bool closed_ = false;
