@@ -84,12 +84,11 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
         return std::unexpected(EnvelopeError::BadId);
     }
     // Transfer encoding only: what the bytes are is the clients' business.
-    const auto body = infra::auth::decode_base64url(*body_text);
+    auto body = infra::auth::decode_base64url_bytes(*body_text);
     if (!body) {
         return std::unexpected(EnvelopeError::BadBody);
     }
-    const auto bytes = std::as_bytes(std::span{*body});
-    return Send{.room = *room, .id = *id, .body = {bytes.begin(), bytes.end()}};
+    return Send{.room = *room, .id = *id, .body = std::move(*body)};
 }
 
 void append_room(std::string& out, const core::RoomId& room) {

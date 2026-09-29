@@ -1,9 +1,11 @@
 #include "infra/auth/base64url.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <gtest/gtest.h>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -62,6 +64,20 @@ TEST(Base64UrlTest, RejectsNonZeroBitsAfterTheLastByte) {
     EXPECT_EQ(decode_base64url("Zh"), std::nullopt);
     EXPECT_EQ(decode_base64url("Zm8"), std::string("fo"));
     EXPECT_EQ(decode_base64url("Zm9"), std::nullopt);
+}
+
+TEST(Base64UrlTest, DecodesToBytesExactlyAsToTextAndRefusesTheSame) {
+    std::string bytes;
+    for (int i = 0; i < 256; ++i) {
+        bytes.push_back(static_cast<char>(i));
+    }
+    const auto decoded = infra::auth::decode_base64url_bytes(encode_base64url(bytes));
+    ASSERT_TRUE(decoded);
+    const auto expected = std::as_bytes(std::span{bytes});
+    EXPECT_TRUE(std::ranges::equal(*decoded, expected));
+    for (const std::string_view bad : {"Zg==", "+/+/", "Zm9vY", "Zh"}) {
+        EXPECT_EQ(infra::auth::decode_base64url_bytes(bad), std::nullopt) << bad;
+    }
 }
 
 } // namespace
