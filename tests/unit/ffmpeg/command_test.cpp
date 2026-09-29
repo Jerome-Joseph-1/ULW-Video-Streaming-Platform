@@ -54,7 +54,8 @@ TEST(Gop, RoundsHalfwayUpAndNeverReachesZero) {
 constexpr std::string_view kFullGraph =
     "[0:v]split=3[v1][v2][v3];[v1]scale=-2:1080[v1o];[v2]scale=-2:720[v2o];[v3]scale=-2:360[v3o]";
 
-// The command in the spec, token for token, for a 1080p30 source with audio.
+// The command in the spec, token for token, for a 1080p30 source with audio, plus -bf 0
+// (transcode_args says why).
 TEST(TranscodeArgs, ReproduceTheSpecCommandForAFullLadder) {
     const auto ladder = core::choose_ladder(1080);
     const Args expected{"ffmpeg",
@@ -121,6 +122,8 @@ TEST(TranscodeArgs, ReproduceTheSpecCommandForAFullLadder) {
                         "4.0",
                         "-pix_fmt",
                         "yuv420p",
+                        "-bf",
+                        "0",
                         "-sc_threshold",
                         "0",
                         "-g",

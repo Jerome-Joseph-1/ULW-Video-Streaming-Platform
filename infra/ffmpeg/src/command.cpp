@@ -226,9 +226,16 @@ Args transcode_args(const std::string& ffmpeg, const std::filesystem::path& inpu
 
     const std::string gop = std::to_string(gop_frames(media.frame_rate));
     const std::string segment = std::to_string(kSegmentSeconds);
-    args.insert(args.end(), {"-preset", "veryfast", "-profile:v", "main", "-level", "4.0",
-                             "-pix_fmt", "yuv420p", "-sc_threshold", "0", "-g", gop, "-keyint_min",
-                             gop, "-force_key_frames", "expr:gte(t,n_forced*" + segment + ")"});
+    // No B-frames. With them each keyframe is decoded two frames before it is shown, and the
+    // HLS muxer, writing packets in decode order, closes a segment's audio at the keyframe's
+    // decode time: every segment's audio then ended 66 ms (at 30 fps) short of its video. A
+    // player's combined audio+video buffer only covers where both do, so no segment was ever
+    // fully buffered, and a rung switch that re-appends one over buffered media reads as an
+    // append that made no progress (hls.js's bufferAppendNoProgress).
+    args.insert(args.end(),
+                {"-preset", "veryfast", "-profile:v", "main", "-level", "4.0", "-pix_fmt",
+                 "yuv420p", "-bf", "0", "-sc_threshold", "0", "-g", gop, "-keyint_min", gop,
+                 "-force_key_frames", "expr:gte(t,n_forced*" + segment + ")"});
 
     std::string streams;
     for (std::size_t i = 0; i < ladder.size(); ++i) {

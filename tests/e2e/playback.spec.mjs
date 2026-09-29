@@ -93,12 +93,10 @@ test('an upload plays to its end, switches rendition without a stall, and never 
     `, stalls ${state.stalls.length}, waiting after start ${state.waitingAfterStart}` +
     `, duration ${duration.toFixed(2)} s`);
   expect(state.levels).toEqual([360, 720]);
-  console.log(`hls.js errors: ${JSON.stringify(state.errors)}`);
-  // hls.js 1.7 reports, without acting on it, a fragment of the new rung appended over media
-  // the old one had already buffered: the smooth switch replacing what it keeps, not a fault.
-  // Anything else, and anything fatal, fails the run.
-  expect(state.errors.filter((e) => e.fatal ||
-    !e.what.startsWith(`mediaError/bufferAppendNoProgress level ${top} `))).toEqual([]);
+  console.log(`hls.js errors: ${JSON.stringify(state.errors)}; short fragments: ` +
+    JSON.stringify(state.shortFragments));
+  expect(state.errors).toEqual([]);
+  expect(state.shortFragments).toEqual([]);
   expect(state.stalls).toEqual([]);
   expect(state.waitingAfterStart).toBe(0);
   expect(state.playedLevels[0]).toBe(0);

@@ -1,6 +1,6 @@
-// The playlist rewriter on what the worker's own ffmpeg command writes, not on a hand-written
-// sample: a few seconds of lavfi test pattern through transcode_args, then both playlists
-// through the rewriter.
+// What the worker's own ffmpeg command writes, not a hand-written sample: a few seconds of
+// lavfi test pattern through transcode_args, then its segments checked the way a player's
+// buffer sees them, and both playlists through the rewriter.
 #include "core/models/ladder.hpp"
 #include "core/ports/transcoder.hpp"
 #include "core/util/hls.hpp"
@@ -11,11 +11,13 @@
 #include <sys/wait.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <map>
 #include <set>
 #include <spawn.h>
 #include <sstream>
@@ -71,7 +73,43 @@ std::vector<std::string> lines(std::string_view text) {
     return out;
 }
 
-class RewriteFfmpegOutput : public ::testing::Test {
+// ffprobe's "12.345678", or 0 for "N/A".
+double seconds(std::string_view text) {
+    double value = 0;
+    // from_chars takes a [first, last) pointer pair.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    std::from_chars(text.data(), text.data() + text.size(), value);
+    return value;
+}
+
+// The end of each track in a segment, in seconds: the latest pts + duration of its packets.
+std::map<std::string, double> track_ends(const fs::path& init, const fs::path& segment,
+                                         const fs::path& scratch) {
+    const fs::path joined = scratch / "joined.mp4";
+    const fs::path listing = scratch / "packets.csv";
+    {
+        std::ofstream out(joined, std::ios::binary);
+        out << slurp(init) << slurp(segment);
+    }
+    if (run({"ffprobe", "-v", "error", "-show_entries", "packet=codec_type,pts_time,duration_time",
+             "-of", "csv=p=0", "-o", listing.string(), joined.string()}) != 0) {
+        return {};
+    }
+    std::map<std::string, double> ends;
+    for (const std::string& line : lines(slurp(listing))) {
+        const std::size_t a = line.find(',');
+        const std::size_t b = line.find(',', a + 1);
+        if (a == std::string::npos || b == std::string::npos) {
+            continue;
+        }
+        const std::string_view text = line;
+        double& end = ends[line.substr(0, a)];
+        end = std::max(end, seconds(text.substr(a + 1, b - a - 1)) + seconds(text.substr(b + 1)));
+    }
+    return ends;
+}
+
+class WorkerHlsOutput : public ::testing::Test {
 protected:
     // Two rungs are enough to have a master with more than one variant, and 360 lines keep
     // the encode to a second or two.
@@ -126,7 +164,41 @@ protected:
     fs::path out_;
 };
 
-TEST_F(RewriteFfmpegOutput, MasterListsEveryRungAndRoutesItThroughTheGateway) {
+// A player appends each fMP4 segment, audio and video together, into one buffer, and that
+// buffer only covers the time both tracks do. Audio stopping short of the video at a segment's
+// end leaves every segment partly unbuffered, which hls.js reports as an append without
+// progress whenever a rung switch appends a segment over buffered media.
+TEST_F(WorkerHlsOutput, EverySegmentsAudioReachesTheEndOfItsVideo) {
+    // Audio may overrun by up to one AAC frame, 1024 samples at 48 kHz; a millisecond of slack
+    // covers the rounding of ffprobe's six decimals.
+    constexpr double kAacFrame = 1024.0 / 48'000;
+    constexpr double kSlack = 0.001;
+    for (const core::Rung& rung : ladder_) {
+        std::vector<fs::path> segments;
+        fs::path init;
+        for (const auto& entry : fs::directory_iterator(out_ / rung.name)) {
+            if (entry.path().extension() == ".m4s") {
+                segments.push_back(entry.path());
+            } else if (entry.path().extension() == ".mp4") {
+                init = entry.path();
+            }
+        }
+        std::ranges::sort(segments);
+        ASSERT_GE(segments.size(), 3U) << rung.name;
+        for (const fs::path& segment : segments) {
+            const auto ends = track_ends(init, segment, dir_.path());
+            ASSERT_TRUE(ends.contains("audio") && ends.contains("video")) << segment;
+            const double audio = ends.at("audio");
+            const double video = ends.at("video");
+            EXPECT_GE(audio, video - kSlack) << segment << ": audio ends before its video";
+            if (segment != segments.back()) {
+                EXPECT_LE(audio, video + kAacFrame + kSlack) << segment;
+            }
+        }
+    }
+}
+
+TEST_F(WorkerHlsOutput, MasterListsEveryRungAndRoutesItThroughTheGateway) {
     const std::string master = slurp(out_ / "master.m3u8");
     const auto names = core::hls::list_renditions(master);
     ASSERT_TRUE(names) << core::hls::to_string(names.error()) << "\n" << master;
@@ -151,7 +223,7 @@ TEST_F(RewriteFfmpegOutput, MasterListsEveryRungAndRoutesItThroughTheGateway) {
                                               "/api/v1/videos/v/240p/index.m3u8"}));
 }
 
-TEST_F(RewriteFfmpegOutput, MediaPlaylistSignsTheInitAndEverySegmentTheWorkerPublishes) {
+TEST_F(WorkerHlsOutput, MediaPlaylistSignsTheInitAndEverySegmentTheWorkerPublishes) {
     for (const core::Rung& rung : ladder_) {
         const std::string media = slurp(out_ / rung.name / "index.m3u8");
         const std::string dir = "videos/v/hls/" + rung.name + "/";
