@@ -328,6 +328,19 @@ if(ULW_BUILD_MLS)
         unit/e2ee/mls_test.cpp)
     # The FFI test drives the bridge's C API directly, as well as through the wrapper.
     target_link_libraries(mls_unit_tests PRIVATE ulw::e2ee_mls mls_ffi_bridge)
+
+    ulw_add_executable(mls_fuzz_replay fuzz/mls_fuzz.cpp fuzz/replay_main.cpp)
+    target_link_libraries(mls_fuzz_replay PRIVATE mls_ffi_bridge)
+    add_test(NAME mls_fuzz_corpus
+        COMMAND mls_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/mls)
+    set_tests_properties(mls_fuzz_corpus PROPERTIES LABELS unit)
+
+    if(ULW_FUZZ)
+        ulw_add_executable(mls_fuzz fuzz/mls_fuzz.cpp)
+        target_link_libraries(mls_fuzz PRIVATE mls_ffi_bridge)
+        target_compile_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+        target_link_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
+    endif()
 endif()
 
 ulw_add_test_suite(auth_unit_tests unit
