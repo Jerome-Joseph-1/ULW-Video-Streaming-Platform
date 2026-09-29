@@ -329,6 +329,14 @@ if(ULW_BUILD_MLS)
     # The FFI test drives the bridge's C API directly, as well as through the wrapper.
     target_link_libraries(mls_unit_tests PRIVATE ulw::e2ee_mls mls_ffi_bridge)
 
+    # The crate's own tests, among them the check that the committed C header is what cbindgen
+    # makes of src/lib.rs. Release, like the library, so the dependencies built once serve both.
+    add_test(NAME mls_ffi_bridge_cargo_tests
+        COMMAND ${ULW_CARGO} test --release --locked --offline
+            --target-dir $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CARGO_TARGET_DIR>
+        WORKING_DIRECTORY $<TARGET_PROPERTY:mls_ffi_bridge,ULW_CRATE_DIR>)
+    set_tests_properties(mls_ffi_bridge_cargo_tests PROPERTIES LABELS unit)
+
     ulw_add_executable(mls_fuzz_replay fuzz/mls_fuzz.cpp fuzz/replay_main.cpp)
     target_link_libraries(mls_fuzz_replay PRIVATE mls_ffi_bridge)
     add_test(NAME mls_fuzz_corpus
