@@ -219,7 +219,7 @@ private:
             return std::unexpected(E2eeError::Corrupt);
         }
         if (!*same_user) {
-            return std::unexpected(E2eeError::Conflict);
+            return std::unexpected(E2eeError::NotFound);
         }
         // Ours already: a replay of this registration, or of one since retired.
         if (*revoked) {

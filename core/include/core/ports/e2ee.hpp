@@ -13,13 +13,11 @@
 namespace core::ports {
 
 enum class E2eeError : std::uint8_t {
-    // No such device for this user. A device registered by someone else reads the same, so a
-    // caller cannot probe for other people's devices.
+    // No such device for this user. A device registered by someone else reads the same, to
+    // every call registration included, so a caller cannot probe for other people's devices.
     NotFound,
-    // The device was deregistered. Its id stays retired: it can never be registered again.
+    // The device was deregistered. Its id stays retired while its tombstone is kept.
     Revoked,
-    // The device id is registered to another user.
-    Conflict,
     // The device has no key package left. This is the replenish signal: whoever asked should
     // tell the device to publish more, and try again after it has.
     Exhausted,

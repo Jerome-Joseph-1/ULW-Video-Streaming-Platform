@@ -166,7 +166,8 @@ TEST_P(DirectoryContract, OnlyTheNewestTombstonesAreKept) {
 
 TEST_P(DirectoryContract, AnotherUsersDeviceIsOutOfReach) {
     const core::DeviceId device = stocked_device(2);
-    EXPECT_EQ(enrol(bob, device).error(), E2eeError::Conflict);
+    EXPECT_EQ(enrol(bob, device).error(), E2eeError::NotFound)
+        << "registering must not reveal that the id is taken";
     EXPECT_EQ(fetch(bob, device).error(), E2eeError::NotFound);
     EXPECT_EQ(publish(bob, device, {package_of(300, 1)}).error(), E2eeError::NotFound);
     EXPECT_EQ(retire(bob, device).error(), E2eeError::NotFound);

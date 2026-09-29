@@ -79,7 +79,7 @@ void MemoryDirectory::register_device(const core::UserId& user, const core::Devi
     E2eeResult<void> result;
     if (const auto it = devices_.find(device); it != devices_.end()) {
         if (it->second.user != user) {
-            result = std::unexpected(E2eeError::Conflict);
+            result = std::unexpected(E2eeError::NotFound);
         } else if (it->second.revoked) {
             result = std::unexpected(E2eeError::Revoked);
         }

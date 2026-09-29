@@ -50,8 +50,6 @@ std::string_view to_string(E2eeError e) noexcept {
         return "device not found";
     case E2eeError::Revoked:
         return "device deregistered";
-    case E2eeError::Conflict:
-        return "device registered to another user";
     case E2eeError::Exhausted:
         return "no key package left";
     case E2eeError::Full:
