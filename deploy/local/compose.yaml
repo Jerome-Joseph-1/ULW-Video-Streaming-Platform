@@ -1,0 +1,44 @@
+# Backing services for local development and the live test suites. The passwords are
+# throwaway and only ever guard loopback ports.
+#
+#   docker compose -f deploy/local/compose.yaml up -d --wait
+#   ULW_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:55432/postgres build/ci/apps/migrate/ulw_migrate
+#
+# The integration tests (label `integration`) look for Postgres at
+# postgresql://postgres:testtest123@127.0.0.1:55432/postgres unless ULW_TEST_DATABASE_URL says
+# otherwise; the tests that pause it (docker pause) find it by container name, ulw-pg, or by
+# ULW_TEST_PG_CONTAINER. The live storage suites (ULW_CONFORMANCE_LIVE=ON) use MinIO on
+# 127.0.0.1:9000 with the credentials below, which tests/support/live_s3.cpp defaults to.
+services:
+  postgres:
+    # postgres:16 (16.15), pinned by digest so every checkout tests against the same server.
+    image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+    container_name: ulw-pg
+    environment:
+      POSTGRES_PASSWORD: testtest123
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  minio:
+    # MinIO no longer publishes docker.io/minio/minio. This is the community build of the same
+    # server, RELEASE.2026-08-04T00-00-00Z, pinned by digest so a retag cannot change it.
+    image: docker.io/pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    container_name: ulw-minio
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ulw-dev
+      MINIO_ROOT_PASSWORD: ulw-dev-secret
+    ports:
+      - "127.0.0.1:9000:9000"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

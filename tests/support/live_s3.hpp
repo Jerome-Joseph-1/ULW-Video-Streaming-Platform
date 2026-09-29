@@ -25,7 +25,7 @@ struct LiveS3 {
 };
 
 // ULW_MINIO_ENDPOINT, ULW_MINIO_ACCESS_KEY and ULW_MINIO_SECRET_KEY, each defaulting to the
-// MinIO of deploy/local/docker-compose.minio.yml; the bucket is ulw-test.
+// MinIO of deploy/local/compose.yaml; the bucket is ulw-test.
 [[nodiscard]] LiveS3 minio_from_env();
 // ULW_R2_ACCOUNT_ID, ULW_R2_ACCESS_KEY_ID, ULW_R2_SECRET_ACCESS_KEY and ULW_R2_BUCKET, or
 // nothing unless all four are set.
