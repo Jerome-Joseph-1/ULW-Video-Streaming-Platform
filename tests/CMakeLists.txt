@@ -125,6 +125,40 @@ if(ULW_FUZZ)
     target_compile_options(hls_fuzz PRIVATE -fsanitize=fuzzer)
     target_link_options(hls_fuzz PRIVATE -fsanitize=fuzzer)
 endif()
+
+ulw_add_test_suite(ws_unit_tests unit
+    unit/ws/decoder_test.cpp
+    unit/ws/encoder_test.cpp
+    unit/ws/handshake_test.cpp
+    unit/ws/split_test.cpp
+    unit/ws/utf8_test.cpp
+    unit/ws/ws_echo_server_test.cpp)
+target_link_libraries(ws_unit_tests PRIVATE ulw::codec_ws ulw::test_ws_echo)
+target_include_directories(ws_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
+# The Autobahn fuzzingclient's peer: tests/autobahn/run.sh.
+ulw_add_library(test_ws_echo support/ws_echo_server.cpp)
+target_include_directories(test_ws_echo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_ws_echo PUBLIC ulw::codec_ws ulw::net_lib)
+ulw_add_executable(ulw_ws_echo_server autobahn/ws_echo_main.cpp)
+target_link_libraries(ulw_ws_echo_server PRIVATE ulw::test_ws_echo)
+# The verdict check run.sh applies to Autobahn's report, on synthetic reports; no docker needed.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME autobahn_checker
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/autobahn/check_results_test.py)
+set_tests_properties(autobahn_checker PROPERTIES LABELS unit)
+
+ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
+target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
+add_test(NAME ws_fuzz_corpus COMMAND ws_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/ws)
+set_tests_properties(ws_fuzz_corpus PROPERTIES LABELS unit)
+
+if(ULW_FUZZ)
+    ulw_add_executable(ws_fuzz fuzz/ws_fuzz.cpp)
+    target_link_libraries(ws_fuzz PRIVATE ulw::codec_ws)
+    target_compile_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(ws_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
 ulw_add_test_suite(s3util_unit_tests unit
     unit/s3/credentials_test.cpp
     unit/s3/errors_test.cpp
