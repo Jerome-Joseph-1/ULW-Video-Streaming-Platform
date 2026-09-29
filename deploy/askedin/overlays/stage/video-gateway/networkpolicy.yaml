@@ -1,4 +1,5 @@
-# Only Envoy's data plane may open connections to the gateway. The gateway never trusts
+# Only Envoy's data plane may open connections to the gateway, and Prometheus in namespace
+# monitoring, for /metrics. The gateway never trusts
 # x-user-* headers anyway (it verifies the token itself), but nothing else in the cluster has
 # a reason to reach it past the Gateway's TLS and routing.
 #
@@ -26,5 +27,11 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/component: proxy
+      ports:
+        - port: http
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
       ports:
         - port: http

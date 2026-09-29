@@ -102,6 +102,20 @@ spec:
               cpu: "4"
               memory: 2Gi
               ephemeral-storage: 32Gi
+          # The worker touches <scratch>/heartbeat-<pod> on every pass of its job loop (at
+          # least every 5 s when idle) and on every lease beat while a job runs (every 20 s).
+          # Two minutes without either is a wedged process; a database that cannot be reached
+          # does not stop the touches, so an outage does not restart it.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - find /var/tmp/ulw-worker -maxdepth 1 -name 'heartbeat-*' -mmin -2 | grep -q .
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

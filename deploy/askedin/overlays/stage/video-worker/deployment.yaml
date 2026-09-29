@@ -86,22 +86,37 @@ spec:
           # renditions, plus the worker and ffmpeg's demuxer; the 1080p ladder measured 556 MB
           # resident with four threads. The worker is sized at 2 GiB, request equal to limit so
           # it is never the pod the node reclaims first.
-          # CPU: four x264 threads can use four cores; the request is two, what the node can
-          # set aside next to ~20 other pods, so a transcode runs at full speed only when the
-          # node is otherwise quiet.
+          # CPU: four x264 threads can use four cores. Stage shares k8s-prod's 8 vCPU with prod
+          # and ~20 other pods, so it reserves one and transcodes at full speed only when the
+          # node is otherwise quiet; prod reserves two.
           # Disk: a job starts only with three times its source free in the workspace
-          # (apps/worker/src/workspace.cpp), so 30 GiB of scratch takes sources up to 10 GiB.
-          # The check reads the node's free space, not the emptyDir's limit, so a source over
-          # 10 GiB can pass it and get the pod evicted at the limit instead.
+          # (apps/worker/src/workspace.cpp), so stage's 10 GiB of scratch takes sources up to
+          # 3.3 GiB, enough for test uploads; prod has 30 GiB. The check reads the node's free
+          # space, not the emptyDir's limit, so a larger source can pass it and get the pod
+          # evicted at the limit instead.
           resources:
             requests:
-              cpu: "2"
+              cpu: "1"
               memory: 2Gi
-              ephemeral-storage: 30Gi
+              ephemeral-storage: 10Gi
             limits:
               cpu: "4"
               memory: 2Gi
-              ephemeral-storage: 32Gi
+              ephemeral-storage: 12Gi
+          # The worker touches <scratch>/heartbeat-<pod> on every pass of its job loop (at
+          # least every 5 s when idle) and on every lease beat while a job runs (every 20 s).
+          # Two minutes without either is a wedged process; a database that cannot be reached
+          # does not stop the touches, so an outage does not restart it.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - find /var/tmp/ulw-worker -maxdepth 1 -name 'heartbeat-*' -mmin -2 | grep -q .
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -114,4 +129,4 @@ spec:
       volumes:
         - name: scratch
           emptyDir:
-            sizeLimit: 30Gi
+            sizeLimit: 10Gi
