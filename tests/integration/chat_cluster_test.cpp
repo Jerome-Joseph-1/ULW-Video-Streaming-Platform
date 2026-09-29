@@ -370,7 +370,7 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     // Resumed, the old owner still believes it owns the room: its write is fenced out.
     stalled.process->signal(SIGCONT);
     const std::string fenced = R"("msg":"fenced out","node":"chat-1","room":")" + room_ +
-                               R"(","generation":1,"write":"append","rows":0)";
+                               R"(","generation":1,"write":"append"})";
     ASSERT_TRUE(stalled.process->wait_for_output(fenced, seconds(30))) << stalled.process->output();
     const auto refused = alice->wait_for([](const Seen& s) { return s.ref == 7U; });
     ASSERT_TRUE(refused);

@@ -25,12 +25,12 @@ std::string_view write_name(rt::OwnerWrite write) noexcept {
 
 } // namespace
 
-// The acceptance evidence for fencing (ADR-0015): the write, its generation, and the rows it
-// updated, which a fenced write never does.
+// Which owner write was refused (ADR-0015), under which generation. Refused means it updated
+// no row; how many rows a write touched is the database's to show, not this line's to claim.
 void RoomLog::on_fenced_out(const core::RoomId& room, std::uint64_t generation,
                             rt::OwnerWrite write) noexcept {
     log_event(R"("level":"warn","msg":"fenced out","node":"{}","room":"{}","generation":{},)"
-              R"("write":"{}","rows":0)",
+              R"("write":"{}")",
               self_.view(), room.to_string(), generation, write_name(write));
 }
 
