@@ -1,4 +1,4 @@
-# 0046. One store connection per admitted upload, and a held body is the store's to end
+# 0045. One store connection per admitted upload, and a held body is the store's to end
 
 Status: Accepted
 Date: 2026-09-29

@@ -19,7 +19,7 @@ namespace {
 constexpr std::array kPartUploadBuckets{0.25, 0.5,  1.0,   2.5,   5.0,   10.0,
                                         30.0, 60.0, 120.0, 300.0, 600.0, 1200.0};
 // A healthy store takes the next buffer within milliseconds. A store that takes nothing at all
-// is failed by libcurl after 60 s under a byte a second (ADR-0046), about 65 s with its rate
+// is failed by libcurl after 60 s under a byte a second (ADR-0045), about 65 s with its rate
 // window; a stall past 300 s is a store trickling, which only the backstop ends.
 constexpr std::array kStallBuckets{0.005, 0.01, 0.025, 0.05, 0.1,  0.25, 0.5,
                                    1.0,   2.5,  5.0,   10.0, 30.0, 60.0, 300.0};

@@ -124,7 +124,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `admission_rejections_total` | counter | PATCHes answered `429` or `503` by admission |
 | `bytes_ingested_total` | counter | Chunk body bytes received |
 | `part_upload_duration_seconds` | histogram | From a chunk's first byte handed to the store to all of it durable |
-| `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more, observed when it ends: the store takes bytes again, fails the part (`503`), or the request ends (backstop, client gone). Buckets to 300 s; a store taking nothing is failed at about 60 s (ADR-0046) |
+| `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more, observed when it ends: the store takes bytes again, fails the part (`503`), or the request ends (backstop, client gone). Buckets to 300 s; a store taking nothing is failed at about 60 s (ADR-0045) |
 | `buffer_bytes_in_use` | gauge | Bytes held in connections' staging and body buffers |
 | `timeouts_total{kind="header"}` | counter | Request head not complete within 10 s, or an idle keep-alive closed |
 | `timeouts_total{kind="body"}` | counter | Body idle 30 s (`408`) |

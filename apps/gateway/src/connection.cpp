@@ -1354,7 +1354,7 @@ void Connection::on_timeout() noexcept {
     if (!req_.message_complete && req_.content_length > 0) {
         // Bytes waiting in staging mean the store is holding the body up, and the client is
         // backpressured, not idle. Only the store can tell a slow store from a broken one, so
-        // the store ends a wait that goes wrong (ADR-0046).
+        // the store ends a wait that goes wrong (ADR-0045).
         if (staging_head_ < staging_.size()) {
             arm_timer(std::min(limits.request_backstop - age, limits.body_idle_timeout));
             return;
