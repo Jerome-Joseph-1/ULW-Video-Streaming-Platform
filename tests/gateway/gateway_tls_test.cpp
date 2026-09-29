@@ -3,6 +3,7 @@
 #include "support/http_client.hpp"
 #include "support/tls_pki.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
@@ -66,11 +67,22 @@ TEST(GatewayTls, AClientThatNeverFinishesItsHandshakeIsDroppedAfterFiveSeconds) 
 }
 
 TEST(GatewayTls, PlaintextSentToTheTlsPortIsNeverAnswered) {
-    const GatewayUnderTest gw(tls());
+    GatewayUnderTest gw(tls());
     HttpClient plain({.port = gw.port()});
     ASSERT_TRUE(plain.send_raw("GET /api/v1/healthz HTTP/1.1\r\nHost: t\r\n\r\n"));
     EXPECT_FALSE(plain.read_response());
     EXPECT_TRUE(plain.closed_by_peer());
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
+    EXPECT_TRUE(metric_is(gw, "tls_handshakes_in_flight 0"));
+}
+
+TEST(GatewayTls, ASilentConnectionIsNotMistakenForAClosedOne) {
+    GatewayUnderTest gw(tls());
+    HttpClient silent({.port = gw.port()});
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 1; }));
+    // Well inside the five-second handshake timeout, which runs on the real clock here.
+    EXPECT_FALSE(silent.closed_by_peer(std::chrono::milliseconds(200)));
+    EXPECT_EQ(gw.connections(), 1U);
 }
 
 } // namespace

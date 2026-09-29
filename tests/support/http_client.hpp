@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -156,10 +157,29 @@ public:
         return read_response(method == "HEAD");
     }
 
-    // True once the server has closed the connection (EOF or reset) within the timeout.
-    bool closed_by_peer() {
+    // True once the server has closed the connection (EOF, close_notify or reset) within
+    // `limit`. A server that is still silent then, or that sends bytes instead, has not.
+    bool closed_by_peer(std::chrono::milliseconds limit = std::chrono::seconds(10)) {
+        if (!ssl_ || SSL_has_pending(ssl_.get()) == 0) {
+            pollfd p{.fd = fd_.get(), .events = POLLIN, .revents = 0};
+            if (::poll(&p, 1, static_cast<int>(limit.count())) != 1) {
+                return false;
+            }
+        }
         std::array<char, 1> b{};
-        return receive(b) == 0;
+        errno = 0;
+        if (ssl_) {
+            std::size_t n = 0;
+            if (SSL_read_ex(ssl_.get(), b.data(), b.size(), &n) == 1) {
+                return false;
+            }
+            const int code = SSL_get_error(ssl_.get(), 0);
+            // SO_RCVTIMEO expiring inside OpenSSL's read surfaces as a syscall error too.
+            return code == SSL_ERROR_ZERO_RETURN || code == SSL_ERROR_SSL ||
+                   (code == SSL_ERROR_SYSCALL && errno != EAGAIN && errno != EWOULDBLOCK);
+        }
+        const ssize_t n = ::recv(fd_.get(), b.data(), b.size(), 0);
+        return n == 0 || (n < 0 && (errno == ECONNRESET || errno == EPIPE));
     }
 
 private:
