@@ -25,6 +25,7 @@ e2e-load:
 # client outside the cluster's network.
 e2e-stunner:
 	python3 tests/cluster/stun_test.py
+	python3 tests/cluster/stunner_check_test.py
 	deploy/stunner/up.sh
 	tests/cluster/stunner_check.py
 
