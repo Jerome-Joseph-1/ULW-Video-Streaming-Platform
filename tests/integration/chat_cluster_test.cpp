@@ -429,6 +429,23 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     }
 }
 
+// No database is reached: the connection string is refused before any connection is tried.
+TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePassword) {
+    for (const std::string url :
+         {"postgres://ulw:hunt%zzer2@db/ulw", "host=db password=hunt%zzer2 dbname='ulw"}) {
+        auto chat = ChildProcess::start({ULW_CHAT_BIN},
+                                        {"ULW_NODE_ID=chat-1", "ULW_NODE_ADDRESS=127.0.0.1:9201",
+                                         "ULW_NODE_SECRET=startup-test-node-secret-000000000000",
+                                         "ULW_DEV_LOOPBACK_NODES=1", "ULW_DATABASE_URL=" + url,
+                                         "ULW_DEV_JWKS_FILE=/nonexistent/jwks.json",
+                                         "JWT_ISSUER=https://issuer.test"});
+        ASSERT_NE(chat, nullptr);
+        EXPECT_EQ(chat->wait_exit(seconds(30)), 2) << chat->output();
+        EXPECT_NE(chat->output().find("ULW_DATABASE_URL"), std::string::npos) << chat->output();
+        EXPECT_EQ(chat->output().find("hunt"), std::string::npos) << chat->output();
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatClusterTest,
                          ::testing::Values(net::ReactorKind::IoUring, net::ReactorKind::Epoll),
                          ulw::test::reactor_name);

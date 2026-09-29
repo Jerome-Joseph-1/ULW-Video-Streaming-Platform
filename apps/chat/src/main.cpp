@@ -158,7 +158,8 @@ int run() {
     auto store = infra::postgres::PgRoomStore::create(*s.reactor, *s.offload,
                                                       {.conninfo = config->database_url});
     if (!store) {
-        return fail("ULW_DATABASE_URL", store.error(), kBadConfig);
+        // libpq's reason quotes the offending part of the string, which may be the password.
+        return fail("ULW_DATABASE_URL", "not a connection string this server can use", kBadConfig);
     }
     s.store = std::move(*store);
     if (auto r = make_verifier(*config, s); !r) {
