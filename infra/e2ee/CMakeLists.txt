@@ -1,7 +1,11 @@
 # The OpenMLS bridge: a Rust staticlib built by cargo, and the C++ wrapper over its C API.
 # Cargo runs --locked --offline: Cargo.lock pins every crate by version and SHA-256, and the
-# one step that touches the network is the mls_ffi_fetch target (cargo fetch --locked).
+# one step that touches the network is the mls_ffi_fetch target, which installs the pinned
+# toolchain and fetches the crates. With RUSTUP_AUTO_INSTALL=0 a build that lacks the toolchain
+# fails at once instead of downloading it.
 find_program(ULW_CARGO cargo REQUIRED)
+set(ULW_CARGO_OFFLINE ${CMAKE_COMMAND} -E env RUSTUP_AUTO_INSTALL=0 ${ULW_CARGO}
+    CACHE INTERNAL "cargo, never installing a toolchain")
 
 set(ulw_mls_crate ${CMAKE_CURRENT_SOURCE_DIR}/mls_ffi_bridge)
 set(ulw_mls_target_dir ${CMAKE_CURRENT_BINARY_DIR}/cargo)
@@ -12,7 +16,7 @@ file(GLOB_RECURSE ulw_mls_rust_sources CONFIGURE_DEPENDS ${ulw_mls_crate}/src/*.
 # is not instrumented under any preset anyway (ADR-0039).
 add_custom_command(
     OUTPUT ${ulw_mls_staticlib}
-    COMMAND ${ULW_CARGO} build --release --locked --offline
+    COMMAND ${ULW_CARGO_OFFLINE} build --release --locked --offline
         --manifest-path ${ulw_mls_crate}/Cargo.toml --target-dir ${ulw_mls_target_dir}
     # rustup reads rust-toolchain.toml from the working directory.
     WORKING_DIRECTORY ${ulw_mls_crate}
@@ -23,7 +27,9 @@ add_custom_command(
     VERBATIM)
 add_custom_target(mls_ffi_bridge_build DEPENDS ${ulw_mls_staticlib})
 
+find_program(ULW_RUSTUP rustup)
 add_custom_target(mls_ffi_fetch
+    COMMAND ${ULW_RUSTUP} toolchain install --no-self-update
     COMMAND ${ULW_CARGO} fetch --locked --manifest-path ${ulw_mls_crate}/Cargo.toml
     WORKING_DIRECTORY ${ulw_mls_crate}
     COMMENT "Fetching the OpenMLS bridge's crates"
@@ -56,7 +62,7 @@ if(ULW_FUZZ)
 -Cllvm-args=-sanitizer-coverage-trace-compares")
     add_custom_command(
         OUTPUT ${ulw_mls_fuzz_lib}
-        COMMAND ${CMAKE_COMMAND} -E env "RUSTFLAGS=${ulw_sancov_flags}"
+        COMMAND ${CMAKE_COMMAND} -E env "RUSTFLAGS=${ulw_sancov_flags}" RUSTUP_AUTO_INSTALL=0
             ${ULW_CARGO} build --release --locked --offline --target ${ulw_mls_fuzz_triple}
             --manifest-path ${ulw_mls_crate}/Cargo.toml --target-dir ${ulw_mls_fuzz_dir}
         WORKING_DIRECTORY ${ulw_mls_crate}

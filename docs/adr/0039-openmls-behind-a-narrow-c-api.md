@@ -44,10 +44,13 @@ unpinned (hard boundary 6), under the ASan preset as well.
 - Pinning: `Cargo.toml` names exact versions (`openmls =0.9.0`, `openmls_rust_crypto`,
   `openmls_basic_credential` and `openmls_traits =0.6.0`); the committed `Cargo.lock` pins the
   whole graph, each crate with the SHA-256 cargo checks on download and on every build.
-  `rust-toolchain.toml` pins rustc 1.94.1, which rustup verifies against its signed manifest.
-  CMake builds with `cargo build --release --locked --offline`: the build never resolves or
-  downloads anything. The one networked step is `cargo fetch --locked` (the `mls_ffi_fetch`
-  target), which fills the registry cache from the lock file alone.
+  `rust-toolchain.toml` pins rustc 1.94.1 with the minimal profile, which rustup verifies
+  against its signed manifest; clippy and rustfmt are added by the lint job, which is the only
+  thing that uses them. CMake builds with `cargo build --release --locked --offline` and
+  `RUSTUP_AUTO_INSTALL=0`: the build never resolves or downloads anything, a toolchain included,
+  and a machine without the pinned toolchain fails loudly. The one networked step is the
+  `mls_ffi_fetch` target (or CI's setup action): `rustup toolchain install` and
+  `cargo fetch --locked`, which fills the registry cache from the lock file alone.
 - The Rust side always builds with the release profile and is not instrumented. Under the asan
   preset, ASan and LeakSanitizer still see every allocation Rust makes, since Rust allocates
   through the same `malloc`, and the C++ side is fully instrumented. `-Zsanitizer=address` would
