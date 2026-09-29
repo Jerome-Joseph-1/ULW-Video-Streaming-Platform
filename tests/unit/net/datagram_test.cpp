@@ -146,6 +146,13 @@ protected:
             ADD_FAILURE() << "bind_udp: " << std::strerror(fd.error());
             return {};
         }
+        // The tests queue up to 200 datagrams before reading any. A default receive buffer
+        // holds 256 small ones at 832 bytes of truesize on 6.18, and fewer where the kernel's
+        // truesize is larger. 1 MiB leaves room whatever it is, where net.core.rmem_max allows
+        // it; where it does not, 200 still leaves a fifth of the default spare. UDP has no
+        // autotuning for this to switch off.
+        const int rcvbuf = 1024 * 1024;
+        EXPECT_EQ(::setsockopt(fd->get(), SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf), 0);
         auto addr = *net::local_addr(fd->get());
         auto id = reactor->attach_datagram(std::move(*fd), sink);
         EXPECT_TRUE(id);
@@ -381,7 +388,7 @@ TEST_P(DatagramTest, NoCallbackFollowsCloseFromInsideOnDatagram) {
 // Datagrams that arrive after a stop wait in receive buffers. Closing the socket must give
 // every one back, or a few rounds of this starve every other socket on the reactor.
 TEST_P(DatagramTest, ClosingAStoppedSocketGivesBackWhatWaited) {
-    constexpr std::uint64_t kBurst = 250;
+    constexpr std::uint64_t kBurst = 200;
     const Peer peer = Peer::bind(AddrFamily::V4);
     for (int round = 0; round < 8; ++round) {
         Sink stopped;
@@ -453,7 +460,7 @@ TEST_P(DatagramTest, ManySocketsDrainingAtOnceLoseNothing) {
 // not retry a receive that fails at once on every iteration.
 TEST_P(DatagramTest, HeldDatagramsNeverMakeTheLoopSpin) {
     constexpr std::size_t kStopped = 8;
-    constexpr std::uint64_t kEach = 250;
+    constexpr std::uint64_t kEach = 200;
     const Peer peer = Peer::bind(AddrFamily::V4);
     std::vector<Sink> stopped(kStopped);
     std::vector<SocketAddr> addrs;
