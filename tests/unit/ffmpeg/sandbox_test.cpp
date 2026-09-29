@@ -149,6 +149,32 @@ TEST_F(SandboxTest, LimitsReachTheProgram) {
     EXPECT_EQ(stdout_, "2097152\n7\n0\n");
 }
 
+TEST_F(SandboxTest, AFileSizeLimitReachesTheProgramAndStopsAFileGrowingPastIt) {
+    const auto reported = run({"bash", "-c", "ulimit -f"}, {.writable = {},
+                                                            .address_space_bytes = 0,
+                                                            .cpu = {},
+                                                            .wall = {},
+                                                            .file_size_bytes = 3 * 1024 * 1024});
+    EXPECT_EQ(reported.exit_code, 0);
+    // bash counts ulimit -f in 1024-byte blocks.
+    EXPECT_EQ(stdout_, "3072\n");
+
+    const auto grown = run({"sh", "-c", "dd if=/dev/zero of=big bs=1M count=8 2>/dev/null"},
+                           {.writable = {},
+                            .address_space_bytes = 0,
+                            .cpu = {},
+                            .wall = {},
+                            .file_size_bytes = 3 * 1024 * 1024});
+    EXPECT_NE(grown.exit_code, 0);
+    EXPECT_LE(fs::file_size(writable_.path() / "big"), 3U * 1024 * 1024);
+}
+
+TEST_F(SandboxTest, WithoutAFileSizeLimitAFileGrowsFreely) {
+    const auto child = run({"bash", "-c", "ulimit -f"});
+    EXPECT_EQ(child.exit_code, 0);
+    EXPECT_EQ(stdout_, "unlimited\n");
+}
+
 TEST_F(SandboxTest, TheProgramHoldsNoCapabilitiesAndCannotRegainThem) {
     const auto child = run({"sh", "-c",
                             "grep -E '^Cap(Eff|Prm|Bnd)' /proc/self/status; "

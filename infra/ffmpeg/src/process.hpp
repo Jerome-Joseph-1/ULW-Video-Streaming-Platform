@@ -32,6 +32,8 @@ struct Limits {
     std::uint64_t address_space_bytes = 0;
     core::Seconds cpu{};
     core::Millis wall{};
+    // The most any file the child writes may grow to; 0 sets no limit.
+    std::uint64_t file_size_bytes = 0;
 };
 
 struct ChildExit {

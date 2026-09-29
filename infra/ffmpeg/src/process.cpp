@@ -139,6 +139,10 @@ std::vector<std::string> helper_argv(const Sandbox& sandbox, const Limits& limit
                                   "--cpu-seconds",
                                   std::to_string(limits.cpu.count()),
                                   "--"};
+    if (limits.file_size_bytes != 0) {
+        // Before the "--" that ends the helper's own options.
+        argv.insert(argv.end() - 1, {"--file-size", std::to_string(limits.file_size_bytes)});
+    }
     argv.insert(argv.end(), args.begin(), args.end());
     return argv;
 }
