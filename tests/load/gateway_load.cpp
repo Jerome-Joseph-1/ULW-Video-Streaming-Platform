@@ -298,6 +298,10 @@ private:
 struct Server {
     os::SystemClock clock;
     os::SystemRandom random;
+    // Warnings only: a line per request would be measured along with the connections.
+    ops::StdoutSink log_sink;
+    ops::Logger log{log_sink, clock, "gateway", ops::Level::Warn};
+    gateway::Health health;
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::ITransportFactory> transports;
     std::unique_ptr<net::OffloadPool> pool;
@@ -371,7 +375,9 @@ int run(const Args& args) {
                                                                  .views = *s.catalog,
                                                                  .verifier = s.verifier,
                                                                  .clock = s.clock,
-                                                                 .random = s.random},
+                                                                 .random = s.random,
+                                                                 .log = s.log,
+                                                                 .health = s.health},
                                                    limits);
     if (!s.reactor->listen(std::move(*listener), *s.gateway)) {
         return EXIT_FAILURE;

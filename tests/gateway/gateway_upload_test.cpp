@@ -395,8 +395,8 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     const auto ingested = gw.counters().bytes_ingested;
     EXPECT_LE(ingested, (std::uint64_t{256} * 1024) + (std::uint64_t{64} * 1024));
 
-    // A store that holds the body up is busy as far as the gateway can tell: a part queued for
-    // a connection looks exactly like this. Only the store, or the request backstop, ends it.
+    // A store that holds the body up is busy as far as the gateway can tell: a store slow to
+    // take a part looks exactly like this. Only the store, or the request backstop, ends it.
     const gateway::Limits limits;
     // Ten body timeouts, far past the 30 s the gateway once allowed a store holding a body.
     constexpr int kBodyTimeouts = 10;
@@ -407,10 +407,16 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     EXPECT_EQ(held.timeouts_body + held.timeouts_body_rate + held.timeouts_backstop, 0U);
     EXPECT_EQ(gw.claims(), 1U);
     EXPECT_EQ(gw.connections(), 1U);
+    // A stall is observed when it ends, and this one has not.
+    EXPECT_NE(gw.metrics().find("\nbackend_write_stall_seconds_count 0\n"), std::string::npos);
 
     gw.advance(limits.request_backstop);
     EXPECT_TRUE(uploader.closed_by_peer());
     EXPECT_EQ(gw.counters().timeouts_backstop, 1U);
+    // The stall that ended the request is counted, at its full length: past every bucket.
+    const std::string m = gw.metrics();
+    EXPECT_NE(m.find("\nbackend_write_stall_seconds_count 1\n"), std::string::npos) << m;
+    EXPECT_NE(m.find("backend_write_stall_seconds_bucket{le=\"300\"} 0\n"), std::string::npos);
     EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0 && gw.connections() == 0; }));
 }
 

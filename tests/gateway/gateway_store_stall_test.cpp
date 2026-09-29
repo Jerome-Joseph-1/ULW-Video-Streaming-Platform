@@ -1,7 +1,8 @@
 // The gateway over the S3 store and a scripted peer that stops reading a part's body: a store
 // that hangs on a connection it holds must fail the upload, since the gateway leaves a body the
-// store holds up to the store (docs/adr/0039).
+// store holds up to the store (docs/adr/0046).
 #include "core/util/json.hpp"
+#include "core/util/parse.hpp"
 #include "net/socket.hpp"
 
 #include "gateway_harness.hpp"
@@ -14,8 +15,10 @@
 #include <atomic>
 #include <chrono>
 #include <gtest/gtest.h>
+#include <optional>
 #include <poll.h>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -141,6 +144,21 @@ TEST(GatewayStoreStall, AStoreThatStopsReadingAPartFailsTheUploadWith503) {
     // have aged out, so within the limit plus five seconds, plus scheduling slack.
     EXPECT_LT(std::chrono::steady_clock::now() - started, kStallLimit + std::chrono::seconds(9));
     EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0; }));
+    // Short waits while the part streamed are observed too; the hang is the one that ended
+    // the request, observed when the store's failure did: longer than 2.5 s, inside a minute.
+    const std::string m = gw.metrics();
+    const auto sample = [&m](std::string_view name) -> std::optional<std::uint64_t> {
+        const auto at = m.find("\n" + std::string(name) + " ");
+        if (at == std::string::npos) {
+            return std::nullopt;
+        }
+        return core::parse_integer<std::uint64_t>(std::string_view(m).substr(
+            at + name.size() + 2, m.find('\n', at + 1) - at - name.size() - 2));
+    };
+    const auto count = sample("backend_write_stall_seconds_count");
+    ASSERT_TRUE(count) << m;
+    EXPECT_LT(sample(R"(backend_write_stall_seconds_bucket{le="2.5"})"), count) << m;
+    EXPECT_EQ(sample(R"(backend_write_stall_seconds_bucket{le="60"})"), count) << m;
 }
 
 } // namespace

@@ -1,12 +1,39 @@
 #include "config.hpp"
 
 #include "core/util/parse.hpp"
+#include "infra/postgres/connection_string.hpp"
+#include "infra/s3util/credentials.hpp"
+#include "infra/s3util/profile.hpp"
 
+#include <algorithm>
+#include <array>
+#include <string>
 #include <utility>
 
 namespace worker {
 
 namespace {
+
+constexpr std::array kSettings{
+    ops::Setting{.env = "ULW_DATABASE_URL", .key = "database.url", .secret = true},
+    ops::Setting{.env = "ULW_STORAGE", .key = "storage.backend"},
+    ops::Setting{.env = "ULW_R2_ACCOUNT_ID", .key = "storage.r2_account_id"},
+    ops::Setting{.env = "ULW_S3_ENDPOINT", .key = "storage.s3_endpoint"},
+    ops::Setting{.env = "ULW_FS_ROOT", .key = "storage.fs_root"},
+    ops::Setting{.env = "ULW_BUCKET", .key = "storage.bucket"},
+    ops::Setting{.env = "ULW_NODE_ID", .key = "worker.node_id"},
+    ops::Setting{.env = "HOSTNAME", .key = ""},
+    ops::Setting{.env = "ULW_SCRATCH_DIR", .key = "worker.scratch_dir"},
+    ops::Setting{.env = "ULW_SANDBOX_BIN", .key = "ffmpeg.sandbox_bin"},
+    ops::Setting{.env = "ULW_FFMPEG", .key = "ffmpeg.ffmpeg"},
+    ops::Setting{.env = "ULW_FFPROBE", .key = "ffmpeg.ffprobe"},
+    ops::Setting{.env = "ULW_FFMPEG_THREADS", .key = "ffmpeg.threads"},
+    ops::Setting{.env = "PATH", .key = ""},
+    ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
+    // Read by the store's credential provider; here only to be checked for.
+    ops::Setting{.env = "ULW_S3_ACCESS_KEY_ID", .key = "", .secret = true},
+    ops::Setting{.env = "ULW_S3_SECRET_ACCESS_KEY", .key = "", .secret = true},
+};
 
 // /var/tmp rather than /tmp: it survives reboots and is disk, where /tmp is often a tmpfs
 // sized in megabytes, and a workspace holds a whole upload.
@@ -79,6 +106,27 @@ std::expected<Storage, ConfigError> load_storage(const EnvLookup& env) {
     if (storage.backend == StorageBackend::Filesystem) {
         return storage;
     }
+    const auto profile = storage.backend == StorageBackend::R2
+                             ? infra::s3util::S3Profile::r2(storage.location)
+                             : infra::s3util::S3Profile::minio(storage.location);
+    if (!profile) {
+        return error(location_variable, storage.backend == StorageBackend::R2
+                                            ? "not an R2 account id"
+                                            : "not an http or https endpoint URL");
+    }
+    for (const std::string_view key : {"ULW_S3_ACCESS_KEY_ID", "ULW_S3_SECRET_ACCESS_KEY"}) {
+        if (!lookup(env, key)) {
+            return error(key, "not set");
+        }
+    }
+    // The same rules the start applies, so a key id it would refuse is refused here with exit
+    // 2 rather than at the start with exit 1 and a restart loop. Neither value is quoted back.
+    if (!infra::s3util::Credentials::make(
+            *lookup(env, "ULW_S3_ACCESS_KEY_ID"),
+            infra::s3util::SecretString(*lookup(env, "ULW_S3_SECRET_ACCESS_KEY")))) {
+        return error("ULW_S3_ACCESS_KEY_ID",
+                     "not an access key id: 1 to 128 letters, digits and -._~");
+    }
     auto bucket = required(env, "ULW_BUCKET");
     if (!bucket) {
         return std::unexpected(std::move(bucket.error()));
@@ -104,10 +152,26 @@ std::expected<core::NodeId, ConfigError> load_node(const EnvLookup& env) {
 
 } // namespace
 
+std::span<const ops::Setting> settings() noexcept {
+    return kSettings;
+}
+
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
+    ops::Level level = ops::Level::Info;
+    if (const auto text = lookup(env, "ULW_LOG_LEVEL")) {
+        const auto parsed = ops::parse_level(*text);
+        if (!parsed) {
+            return error("ULW_LOG_LEVEL", "expected debug, info, warn or error");
+        }
+        level = *parsed;
+    }
     auto database = required(env, "ULW_DATABASE_URL");
     if (!database) {
         return std::unexpected(std::move(database.error()));
+    }
+    // The reason libpq would give quotes the string, password and all.
+    if (!infra::postgres::connection_string_parses(*database)) {
+        return error("ULW_DATABASE_URL", "not a connection string libpq can read");
     }
     auto storage = load_storage(env);
     if (!storage) {
@@ -145,7 +209,51 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
                   .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
-                  .ffmpeg_threads = threads};
+                  .ffmpeg_threads = threads,
+                  .log_level = level};
+}
+
+void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log) {
+    const auto [storage,
+                location_variable] = [&]() -> std::pair<std::string_view, std::string_view> {
+        switch (config.storage) {
+        case StorageBackend::R2:
+            return {"r2", "ULW_R2_ACCOUNT_ID"};
+        case StorageBackend::Minio:
+            return {"minio", "ULW_S3_ENDPOINT"};
+        case StorageBackend::Filesystem:
+            return {"fs", "ULW_FS_ROOT"};
+        }
+        return {"r2", "ULW_R2_ACCOUNT_ID"};
+    }();
+    const std::array<std::pair<std::string_view, std::string>, 12> values{{
+        {"ULW_DATABASE_URL", config.database_url},
+        {"ULW_STORAGE", std::string(storage)},
+        {location_variable, config.storage_location},
+        {"ULW_BUCKET", config.bucket},
+        {"ULW_NODE_ID", std::string(config.node.view())},
+        {"ULW_SCRATCH_DIR", config.scratch.parent_path().string()},
+        {"ULW_SANDBOX_BIN", config.sandbox.string()},
+        {"ULW_FFMPEG", config.ffmpeg},
+        {"ULW_FFPROBE", config.ffprobe},
+        {"ULW_FFMPEG_THREADS", std::to_string(config.ffmpeg_threads)},
+        {"PATH", config.search_path},
+        {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
+    }};
+    for (const auto& [variable, value] : values) {
+        if (value.empty()) {
+            continue;
+        }
+        const bool secret = std::ranges::any_of(
+            kSettings, [&](const ops::Setting& s) { return s.env == variable && s.secret; });
+        // The node id may have come from HOSTNAME.
+        const ops::Origin origin = variable == "ULW_NODE_ID" && !layers.get("ULW_NODE_ID")
+                                       ? layers.origin("HOSTNAME")
+                                       : layers.origin(variable);
+        log.info("setting", {{"name", variable},
+                             {"value", secret ? std::string_view("<redacted>") : value},
+                             {"from", ops::to_string(origin)}});
+    }
 }
 
 } // namespace worker

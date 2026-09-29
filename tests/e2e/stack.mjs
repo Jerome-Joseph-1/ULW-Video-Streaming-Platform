@@ -180,7 +180,7 @@ export async function startStack() {
     ULW_SCRATCH_DIR: work,
     ULW_SANDBOX_BIN: bin('apps/worker/ulw_sandbox'),
   });
-  await gateway.waitFor(`port=${gatewayPort}`, 30_000);
+  await gateway.waitFor(`"port":${gatewayPort}`, 30_000);
 
   const proxied = [];
   const page = pageServer(gatewayPort, proxied);

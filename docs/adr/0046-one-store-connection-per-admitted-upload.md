@@ -1,4 +1,4 @@
-# 0039. One store connection per admitted upload, and a held body is the store's to end
+# 0046. One store connection per admitted upload, and a held body is the store's to end
 
 Status: Accepted
 Date: 2026-09-29
@@ -68,7 +68,12 @@ and RSS flat at 72.9 MB, and all 448 were committed with no timeout of any kind.
 - The store ends a wait that goes wrong. A part fails after 3 s without a connection being made,
   or after 60 s below 1 byte a second (`LOW_SPEED`, the multi's stall limit); its session fails
   and the client gets `503` from the storage error.
-- `timeouts_total{kind="backend"}` is removed.
+- `timeouts_total{kind="backend"}` is removed. A store that stalls surfaces as `503`s in
+  `responses_total{class="5xx"}` and in `backend_write_stall_seconds`, which observes each wait
+  on a store that took nothing more when the wait ends: the store takes bytes again, fails the
+  part, or the request ends another way (the backstop, the client leaving). A wait still going
+  is not observed until then. Its buckets gain 60 s, where libcurl's stall limit fails a store
+  that takes nothing, and 300 s, past which only a trickling store lasts.
 - Key-set fetches keep a multi of their own, capped at 8: one fetch per verifier at a time, with
   room for overlapping refreshes.
 
