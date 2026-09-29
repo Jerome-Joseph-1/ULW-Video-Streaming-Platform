@@ -65,11 +65,23 @@ How senders are limited in a room of thousands:
 
 - **Joining.** `{"type":"join","stream":"<name>"}`, with the stream's name as the live
   packager takes it (1 to 64 of `[A-Za-z0-9_-]`, `apps/live-packager/src/stream_id.hpp`). The
-  room is the first 16 bytes of SHA-256 over `ulw-live-chat:` and the name, with the version
-  set to 8 and the RFC 9562 variant (`apps/chat/src/live_chat.cpp`, and the same in SQL as
+  room is a version 8 UUID whose first byte is the stream-chat tag, 0x01, and whose other
+  bytes are the first 15 of SHA-256 over `ulw-live-chat:` and the name, with the version and
+  RFC 9562 variant bits set (`apps/chat/src/live_chat.cpp`, and the same in SQL as
   `live_chat_room(stream)`, migration 0007); `joined` names it, and sends and history use it
-  like any room id. A join that names a version 8 id as `room` is refused `bad_room`: nothing
-  else makes one, so nobody can create a stream's room ahead of it as a closed room.
+  like any room id. A join that names a stream's room id as `room` is refused `bad_room`, so
+  nobody can create a stream's room ahead of it as a closed room.
+- **Rooms named by something else.** Any room whose id is derived from a name is version 8,
+  every other room id is version 7 (ADR-0023), and the first byte says what the name was
+  (`core::ports::NamedRoom`), so derived ids of different kinds never collide:
+
+  | First byte | Named by | Derived in |
+  |---|---|---|
+  | `0x01` | a live stream (its chat) | `live_chat_room`, here |
+  | `0x02` | a user (their presence room, M18) | reserved for presence |
+
+  The digest fills the other bytes except the version and variant bits: 117 bits, as far from
+  a collision as any id needs.
 - **Opening.** A stream join asks for the live kind, so under ADR-0052 it is admitted only once
   the server side has recorded the room live (`record_live`, or the runbook's statement with
   `live_chat_room`), and refused `not_live` before. Whatever starts a stream opens its chat;

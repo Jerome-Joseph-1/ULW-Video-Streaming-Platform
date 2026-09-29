@@ -50,15 +50,31 @@ enum class RoomKind : std::uint8_t {
     return false;
 }
 
-// Whether the room is a stream's live chat by its id (ADR-0057): the one room a stream's name
-// derives, a version 8 UUID, which nothing else mints (room ids are version 7, ADR-0023). Only
-// such a room is ever recorded as StreamLiveChat, so the id alone says which rooms get the live
-// chat's bounds, on every node, with no lookup.
-[[nodiscard]] inline bool is_stream_chat(const RoomId& room) noexcept {
+// Rooms named by something else, their id derived from its name (ADR-0057): an RFC 9562
+// version 8 UUID whose first byte says what names it, the rest a digest of the name. Every other
+// room id is version 7 (ADR-0023), so no id is taken for another's.
+enum class NamedRoom : std::uint8_t {
+    // A live stream's chat, from the stream's name (apps/chat/src/live_chat.cpp).
+    StreamChat = 0x01,
+    // A user's presence room (M18).
+    Presence = 0x02,
+};
+
+// Whether the room's id was derived from a name of `kind`.
+[[nodiscard]] inline bool is_named_room(const RoomId& room, NamedRoom kind) noexcept {
     // RFC 9562 section 4: the version is the high nibble of byte 6.
     constexpr std::size_t kVersionByte = 6;
     constexpr unsigned kVersion8 = 0x80U;
-    return (std::to_integer<unsigned>(room.uuid().bytes()[kVersionByte]) & 0xF0U) == kVersion8;
+    const auto bytes = room.uuid().bytes();
+    return (std::to_integer<unsigned>(bytes[kVersionByte]) & 0xF0U) == kVersion8 &&
+           std::to_integer<std::uint8_t>(bytes[0]) == static_cast<std::uint8_t>(kind);
+}
+
+// Whether the room is a stream's live chat, by its id alone: only such a room is ever recorded
+// as StreamLiveChat, so the id says which rooms get the live chat's bounds, on every node, with
+// no lookup.
+[[nodiscard]] inline bool is_stream_chat(const RoomId& room) noexcept {
+    return is_named_room(room, NamedRoom::StreamChat);
 }
 
 // What admits answers for a join.

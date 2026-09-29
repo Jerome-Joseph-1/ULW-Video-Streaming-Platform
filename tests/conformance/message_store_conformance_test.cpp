@@ -279,11 +279,12 @@ protected:
 
     // A stream's room nothing has created yet: on Postgres it has no room_state row, as a stream's
     // room has before the server opens its chat. new_room() creates one, as a group chat, and a
-    // room created closed cannot be opened afterwards. Its id is version 8, as only a stream's
-    // chat has (core::ports::is_stream_chat); the rest of it is random, like a digest's.
+    // room created closed cannot be opened afterwards. Its id is version 8 and tagged 01, as only a
+    // stream's chat has (core::ports::is_stream_chat); the rest of it is random, like a digest's.
     core::RoomId unopened_room() {
         std::string text = core::RoomId::generate(clock_, random_).to_string();
         text[14] = '8';
+        text.replace(0, 2, "01");
         return *core::RoomId::parse(text);
     }
 
@@ -599,6 +600,13 @@ TEST_P(MessageStoreConformance, AJoinCannotOpenARoomRecordedClosed) {
 
 // ADR-0057: the id says which rooms get a live chat's bounds, so only a stream's room is opened.
 TEST_P(MessageStoreConformance, RecordLiveRefusesARoomThatIsNotAStreamsChat) {
+    // A presence room is named too (version 8), under its own tag.
+    std::string presence = unopened_room().to_string();
+    presence.replace(0, 2, "02");
+    const core::RoomId named = *core::RoomId::parse(presence);
+    ASSERT_FALSE(core::ports::is_stream_chat(named));
+    EXPECT_EQ(ask<void>([&](auto done) { store().record_live(named, std::move(done)); }),
+              MessageResult<void>{std::unexpected(MessageStoreError::Conflict)});
     const core::RoomId room = core::RoomId::generate(clock_, random_);
     ASSERT_FALSE(core::ports::is_stream_chat(room));
     EXPECT_EQ(ask<void>([&](auto done) { store().record_live(room, std::move(done)); }),

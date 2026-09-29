@@ -304,7 +304,7 @@ TEST_F(SequencedAppendTest, AnInsertThatFailsGivesTheSeqBack) {
 TEST_F(SequencedAppendTest, TheDatabaseNamesAStreamsRoomAsChatServerDoes) {
     // The value tests/unit/chat/live_chat_test.cpp pins for chat_server's own derivation.
     EXPECT_EQ(scalar(*conn_, "SELECT live_chat_room('show-1')"),
-              "1b9ed0d6-b6e8-86ac-b432-d7070ba83b94");
+              "011b9ed0-d6b6-88e6-ac34-32d7070ba83b");
     EXPECT_FALSE(conn_->exec("SELECT live_chat_room('show/1')"));
 }
 

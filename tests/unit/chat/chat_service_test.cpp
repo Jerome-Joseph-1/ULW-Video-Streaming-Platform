@@ -22,7 +22,7 @@ using rt::RouteError;
 constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
 constexpr std::string_view kOtherRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fe";
 // The stream show-1's live chat (tests/unit/chat/live_chat_test.cpp).
-constexpr std::string_view kLiveRoom = "1b9ed0d6-b6e8-86ac-b432-d7070ba83b94";
+constexpr std::string_view kLiveRoom = "011b9ed0-d6b6-88e6-ac34-32d7070ba83b";
 
 core::RoomId room_id(std::string_view text = kRoom) {
     return *core::RoomId::parse(text);

@@ -1,5 +1,7 @@
 #include "live_chat.hpp"
 
+#include "core/ports/message_store.hpp"
+
 #include <algorithm>
 #include <array>
 #include <format>
@@ -38,11 +40,16 @@ std::optional<core::RoomId> live_chat_room(std::string_view stream) {
         written != digest.size()) {
         return std::nullopt;
     }
-    digest[kVersionByte] = static_cast<unsigned char>((digest[kVersionByte] & 0x0FU) | kVersion8);
-    digest[kVariantByte] = static_cast<unsigned char>((digest[kVariantByte] & 0x3FU) | kVariant);
+    // The tag of a stream's chat, then the digest's first 15 bytes (ADR-0057).
+    std::array<unsigned char, core::Uuid::kByteLength> id{};
+    id[0] = static_cast<unsigned char>(core::ports::NamedRoom::StreamChat);
+    std::ranges::copy(std::span(digest).first<core::Uuid::kByteLength - 1>(),
+                      std::span(id).subspan<1>().begin());
+    id[kVersionByte] = static_cast<unsigned char>((id[kVersionByte] & 0x0FU) | kVersion8);
+    id[kVariantByte] = static_cast<unsigned char>((id[kVariantByte] & 0x3FU) | kVariant);
     std::string text;
     std::size_t at = 0;
-    for (const unsigned char b : std::span(digest).first<core::Uuid::kByteLength>()) {
+    for (const unsigned char b : id) {
         if (at == 4 || at == 6 || at == 8 || at == 10) {
             text += '-';
         }

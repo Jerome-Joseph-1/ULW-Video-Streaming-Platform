@@ -158,12 +158,15 @@ protected:
     }
 
     core::RoomId new_room() { return core::RoomId::generate(clock_, random_); }
-    // A room with a stream's kind of id (version 8), the only kind record_live opens.
-    core::RoomId stream_room() {
+    // A room with an id derived from a name (version 8) under the tag `tag`; 01, a stream's
+    // chat, is the only kind record_live opens.
+    core::RoomId named_room(std::string_view tag) {
         std::string text = new_room().to_string();
         text[14] = '8';
+        text.replace(0, 2, tag);
         return *core::RoomId::parse(text);
     }
+    core::RoomId stream_room() { return named_room("01"); }
 
     os::SystemClock clock_;
     os::SystemRandom random_;
@@ -272,9 +275,14 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
 // ADR-0057: the database itself refuses to record any other room live, so an operator's
 // statement cannot open a room whose id every node takes for a closed one.
 TEST_F(MessageStoreTest, OnlyAStreamsRoomCanBeRecordedLive) {
-    EXPECT_FALSE(
-        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
-                    Params{}.add_uuid(new_room().uuid())));
+    // A version 7 room, and a presence room (version 8, tag 02).
+    for (const core::RoomId& other : {new_room(), named_room("02")}) {
+        EXPECT_FALSE(
+            conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                        Params{}.add_uuid(other.uuid())));
+        EXPECT_EQ(ask<void>([&](auto done) { store_->record_live(other, std::move(done)); }),
+                  MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
+    }
     EXPECT_TRUE(
         conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
                     Params{}.add_uuid(stream_room().uuid())));

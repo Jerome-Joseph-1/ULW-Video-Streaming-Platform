@@ -124,8 +124,9 @@ messages, and can read its history, until that connection closes; the next `join
 - **Joining.** `{"type":"join","stream":"show-1"}`, with the stream's name as the live packager
   and the playback URL (`live/<stream>/`) have it: 1 to 64 of `A-Z a-z 0-9 _ -`, else
   `bad_stream`. `joined` names the room; sends and `history` use that room id like any other.
-  Its id is the first 16 bytes of SHA-256 over `ulw-live-chat:` and the name, as a version 8
-  UUID (`show-1` is `1b9ed0d6-b6e8-86ac-b432-d7070ba83b94`), and a `join` that gives such an id as
+  Its id is a version 8 UUID: the byte `0x01`, then the first 15 bytes of SHA-256 over
+  `ulw-live-chat:` and the name, with the version and variant bits set (`show-1` is
+  `011b9ed0-d6b6-88e6-ac34-32d7070ba83b`), and a `join` that gives such an id as
   `room` is refused with `bad_room`: a live chat is joined only by its stream.
 - **Open once the stream's chat is opened.** The server side records a stream's room live
   before viewers join (RUNBOOK, "Chat rooms"). Until then a stream join is refused with

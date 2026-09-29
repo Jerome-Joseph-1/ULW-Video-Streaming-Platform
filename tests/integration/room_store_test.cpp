@@ -154,9 +154,11 @@ TEST_P(RoomStoreTest, TheFirstNodeToResolveARoomCreatesItUnderGenerationOne) {
 }
 
 TEST_P(RoomStoreTest, ARoomTakesTheKindRecordedForIt) {
-    // A stream's room: only its kind of id (version 8) can be recorded live (ADR-0057).
+    // A stream's room: only its kind of id (version 8, tagged 01) can be recorded live
+    // (ADR-0057).
     std::string text = new_room().to_string();
     text[14] = '8';
+    text.replace(0, 2, "01");
     const core::RoomId room = *core::RoomId::parse(text);
     ASSERT_TRUE(
         conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
