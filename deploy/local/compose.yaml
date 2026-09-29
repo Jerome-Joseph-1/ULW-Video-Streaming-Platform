@@ -80,7 +80,7 @@ services:
           ulw-dev-key: ulw-dev-secret-testtest123-not-a-real-secret
         # The bus to the recorder (egress below); LiveKit reaches egress only through Redis.
         redis:
-          address: 127.0.0.1:56379
+          address: 127.0.0.1:7879
         rtc:
           # ICE candidates advertise loopback: the browsers under test run on this host. LiveKit
           # leaves loopback interfaces out of ICE unless told, and on the host's network no
@@ -101,6 +101,13 @@ services:
           # Rooms exist only because the signalling server opened them; a ticket for a room
           # that has gone must not bring it back with default settings.
           auto_create: false
+        api:
+          # ListParticipants from the room itself, not from its copy in Redis. Each published
+          # track stores a snapshot of its participant, and two tracks published in the same
+          # millisecond store theirs in either order, so the copy can keep one track for good
+          # (the ingest spec saw a WHIP publisher's audio missing for 20 s on a runner). LiveKit
+          # v1.13.7 marks this the coming default (pkg/config/config.go).
+          enable_psrpc_for_get_list_participants: true
         logging:
           level: info
     healthcheck:
@@ -115,9 +122,12 @@ services:
     container_name: ulw-livekit-redis
     profiles: ["calls"]
     network_mode: host
-    command: ["redis-server", "--bind", "127.0.0.1", "--port", "56379", "--save", "", "--appendonly", "no"]
+    # Its ports, and the recorder's below, sit under Linux's ephemeral range (32768 and up): a
+    # port in it can be held by some client socket on the host when the server starts, and the
+    # recorder's health server then fails to bind without a word.
+    command: ["redis-server", "--bind", "127.0.0.1", "--port", "7879", "--save", "", "--appendonly", "no"]
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "56379", "ping"]
+      test: ["CMD", "redis-cli", "-p", "7879", "ping"]
       interval: 2s
       timeout: 2s
       retries: 15
@@ -138,11 +148,11 @@ services:
         api_secret: ulw-dev-secret-testtest123-not-a-real-secret
         ws_url: ws://127.0.0.1:7880
         redis:
-          address: 127.0.0.1:56379
-        health_port: 57981
-        # Serves room composite layouts, which this project does not use; its default, 7980,
-        # would sit beside LiveKit's ports.
-        template_port: 57980
+          address: 127.0.0.1:7879
+        health_port: 7981
+        # Serves room composite layouts, which this project does not use; its default, spelled
+        # out beside the health port.
+        template_port: 7980
         log_level: info
         # A participant relay re-encodes one 720p stream, about one core. Egress admits a
         # request only while that much CPU is idle, which a laptop or a runner busy with the
@@ -152,7 +162,7 @@ services:
           participant_cpu_cost: 0.1
           max_cpu_utilization: 0.99
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:57981/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7981/"]
       interval: 2s
       timeout: 2s
       retries: 30
