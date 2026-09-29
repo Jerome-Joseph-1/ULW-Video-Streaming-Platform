@@ -113,7 +113,7 @@ The other limits are environment variables in the same files (`ULW_MAX_CONNECTIO
 `ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND`, `ULW_REQUESTS_PER_USER_PER_MINUTE`,
 `ULW_UPLOAD_BYTES_PER_USER_PER_DAY`), listed with their ranges in
 `docs/integration/operations-contract.md`; the defaults and their derivations are in
-docs/adr/0055. Each applies per replica, so with two replicas a user may reach twice a per-user
+docs/adr/0052. Each applies per replica, so with two replicas a user may reach twice a per-user
 limit. The byte quota is best effort: it lives in each replica's memory, is forgotten on a
 restart, and a user unseen while 16,384 others were active starts over.
 

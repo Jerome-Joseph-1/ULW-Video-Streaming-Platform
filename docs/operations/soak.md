@@ -12,7 +12,7 @@ tests/soak/soak.py --rejudge /tmp/soak-6h/samples.csv --clients 8        # judge
 ```
 
 The soak sets `ULW_ALLOW_ROOT=1` for the processes it starts, since a development host may run it
-as root, and both services refuse root otherwise (ADR-0055). Started by hand as root, either
+as root, and both services refuse root otherwise (ADR-0052). Started by hand as root, either
 service needs `ULW_ALLOW_ROOT=1`, or `ULW_RUN_AS_USER` naming the user to become.
 
 `--rejudge` prints two verdicts: the per-unit criterion in force (the RSS slope's 95% upper end
