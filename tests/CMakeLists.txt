@@ -284,4 +284,23 @@ if(ULW_BUILD_WORKER)
         target_compile_definitions(worker_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
     endif()
     add_dependencies(worker_integration_tests transcode_worker ulw_sandbox)
+
+    # gateway_server against the Postgres and MinIO of deploy/local/compose.yaml, serving
+    # what the worker's ffmpeg command writes.
+    ulw_add_test_suite(playback_integration_tests integration
+        integration/playback_test.cpp
+        integration/postgres_harness.cpp
+        support/child_process.cpp
+        PROPERTIES RESOURCE_LOCK postgres)
+    target_link_libraries(playback_integration_tests PRIVATE
+        ulw::ffmpeg_adapter ulw::pg_store ulw::storage_s3 ulw::test_live_s3 ulw::devtoken ulw::os
+        PkgConfig::LIBPQ)
+    target_include_directories(playback_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/infra/postgres/src ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src)
+    target_compile_definitions(playback_integration_tests PRIVATE
+        ULW_GATEWAY_BIN="$<TARGET_FILE:gateway_server>")
+    if(ULW_CONFORMANCE_LIVE)
+        target_compile_definitions(playback_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+    endif()
+    add_dependencies(playback_integration_tests gateway_server)
 endif()

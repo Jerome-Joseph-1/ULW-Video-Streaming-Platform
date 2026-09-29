@@ -2,11 +2,8 @@
 // object store: the M10 acceptance runs, including the workers that die and the ones that
 // come back from the dead.
 #include "core/models/ids.hpp"
-#include "infra/curl/http.hpp"
 #include "infra/ffmpeg/transcoder.hpp"
 #include "infra/postgres/job_queue.hpp"
-#include "infra/s3util/url.hpp"
-#include "infra/s3util/xml.hpp"
 #include "infra/storage/fs_transfer.hpp"
 #include "infra/storage/s3_transfer.hpp"
 #include "os/system_clock.hpp"
@@ -105,30 +102,6 @@ bool process_mentions(const std::string& needle) {
         }
     }
     return false;
-}
-
-// Deletes what a run left under `prefix` in a bucket that outlives it.
-void remove_prefix(const ulw::test::LiveS3& target, const std::string& prefix) {
-    const auto bucket = infra::s3util::Bucket::make(target.profile, target.bucket);
-    if (!bucket) {
-        return;
-    }
-    const auto listed = ulw::test::send(
-        target, infra::curl::Method::Get,
-        bucket->root({{.name = "list-type", .value = "2"}, {.name = "prefix", .value = prefix}}));
-    if (!listed || listed->status != 200) {
-        return;
-    }
-    const auto page = infra::s3util::parse_list_objects_v2(listed->body);
-    if (!page) {
-        return;
-    }
-    for (const std::string& name : page->keys) {
-        if (const auto key = core::StorageKey::parse(name)) {
-            [[maybe_unused]] const auto removed =
-                ulw::test::send(target, infra::curl::Method::Delete, bucket->object(*key));
-        }
-    }
 }
 
 // Root reads any process's environment, so as root the test runs its targets and the reader
@@ -307,7 +280,7 @@ protected:
         expect_published_hls(**store, video);
         worker->signal(SIGTERM);
         EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
-        remove_prefix(target, "videos/" + video.to_string() + "/");
+        ulw::test::remove_objects(target, "videos/" + video.to_string() + "/");
     }
 
     os::SystemClock clock_;
