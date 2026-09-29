@@ -59,21 +59,21 @@ void MemoryMessageStore::on_timeout() noexcept {
 void MemoryMessageStore::append(const core::RoomId& room, std::uint64_t seq,
                                 const core::UserId& sender, std::string key,
                                 std::vector<std::byte> body, core::WallTime sent_at,
-                                MessageCallback<void> done) {
-    MessageResult<void> result{};
+                                MessageCallback<std::uint64_t> done) {
+    MessageResult<std::uint64_t> result = seq;
     Room& r = rooms_[room];
     std::pair<std::string, std::string> sender_key{sender.view(), key};
     if (body.size() > core::ports::kMaxMessageBody) {
         result = std::unexpected(MessageStoreError::TooLarge);
-    } else if (const auto it = r.messages.find(seq); it != r.messages.end()) {
-        const StoredMessage& stored = it->second;
-        if (stored.sender != sender || stored.key != key || stored.body != body) {
-            result = std::unexpected(MessageStoreError::Conflict);
-        }
-    } else if (r.keys.contains(sender_key)) {
+    } else if (const auto stored = r.keys.find(sender_key); stored != r.keys.end()) {
+        // The same message again is answered with its seq; another under its key is refused.
+        const bool same = r.messages.at(stored->second).body == body;
+        result = same ? MessageResult<std::uint64_t>{stored->second}
+                      : std::unexpected(MessageStoreError::Conflict);
+    } else if (r.messages.contains(seq)) {
         result = std::unexpected(MessageStoreError::Conflict);
     } else {
-        r.keys.insert(std::move(sender_key));
+        r.keys.emplace(std::move(sender_key), seq);
         r.messages.emplace(
             seq, StoredMessage{.seq = seq,
                                .sender = sender,
@@ -155,9 +155,15 @@ void MemoryMessageStore::members(const core::RoomId& room, std::optional<core::U
 }
 
 void MemoryMessageStore::admits(const core::RoomId& room, const core::UserId& user,
-                                MessageCallback<bool> done) {
-    const auto it = members_.find(room);
-    const bool admitted = it == members_.end() || it->second.empty() || it->second.contains(user);
+                                core::ports::RoomKind asked, MessageCallback<bool> done) {
+    const auto listed = members_.find(room);
+    const bool has_members = listed != members_.end() && !listed->second.empty();
+    if (asked == core::ports::RoomKind::StreamLiveChat && has_members) {
+        asked = core::ports::RoomKind::GroupChat;
+    }
+    const core::ports::RoomKind kind = kinds_.try_emplace(room, asked).first->second;
+    const bool admitted =
+        core::ports::admits_anyone(kind) || (has_members && listed->second.contains(user));
     defer([done = std::move(done), admitted]() mutable noexcept { done(admitted); });
 }
 

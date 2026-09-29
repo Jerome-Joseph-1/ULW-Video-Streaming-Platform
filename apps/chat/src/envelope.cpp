@@ -41,14 +41,17 @@ std::optional<std::string_view> string_of(const core::json::Value& message, std:
 }
 
 std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "after", "delivery"})) {
+    if (!only(message, {"type", "room", "after", "delivery", "kind"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     auto room = room_of(message);
     if (!room) {
         return std::unexpected(room.error());
     }
-    Join join{.room = *room, .after = std::nullopt, .delivery = Delivery::Durable};
+    Join join{.room = *room,
+              .after = std::nullopt,
+              .delivery = Delivery::Durable,
+              .kind = core::ports::RoomKind::GroupChat};
     if (const core::json::Value* after = message.find("after")) {
         join.after = after->as_u64();
         if (!join.after) {
@@ -60,6 +63,16 @@ std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) 
         if (delivery == "lossy") {
             join.delivery = Delivery::Lossy;
         } else if (delivery != "durable") {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+    }
+    if (message.find("kind") != nullptr) {
+        const auto kind = string_of(message, "kind");
+        if (kind == "direct") {
+            join.kind = core::ports::RoomKind::DirectChat;
+        } else if (kind == "live") {
+            join.kind = core::ports::RoomKind::StreamLiveChat;
+        } else if (kind != "group") {
             return std::unexpected(EnvelopeError::Malformed);
         }
     }
@@ -91,7 +104,7 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
     return Send{.room = *room, .id = *id, .body = std::move(*body)};
 }
 
-std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
+[[nodiscard]] std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
     if (!only(message, {"type", "room", "before", "after", "limit"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
@@ -253,6 +266,8 @@ std::string_view reason(rt::RouteError e) noexcept {
         return "unavailable";
     case rt::RouteError::Busy:
         return "busy";
+    case rt::RouteError::Conflict:
+        return "conflict";
     }
     return "unavailable";
 }

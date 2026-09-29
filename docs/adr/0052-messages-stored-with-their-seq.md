@@ -59,8 +59,20 @@ What bounds a page of history:
   the message was stored under; the `room_state` row is still updated by nothing, so a fenced
   former owner gets no answer for it either. Two repeats in flight at once both miss the
   lookup; the second fails on the key's unique index, whole, and is run once more, when it
-  finds the first. The index holds the room, sender and key, never the body. A key reused with
-  a different body is the same message to the store: the first body stays.
+  finds the first. The index holds the room, sender and key, never the body.
+- **A key reused for another body is a conflict.** The lookup compares the stored body with
+  the new one: the same bytes are a repeat, answered with its seq; other bytes take no seq,
+  write nothing, and are answered `StoreError::Conflict`, which reaches the client as
+  `conflict` and is delivered to nobody. Answering the old seq instead would have the owner fan
+  out the new body under a seq whose stored body is the old one, so that history and what
+  members saw disagree. The router's cache of recent keys keeps a digest of each body for the
+  same reason, and gives the same answer without asking the store. Reply status `Conflict` is
+  new on the node channel, whose version is therefore 3 (ADR-0043's nodes speak 2).
+- **A repeat the store recognised is not delivered again.** The answer is a seq the owner has
+  already passed, and the owner, seeing it at or below its head, answers the sender and
+  delivers nothing. An owner that took the room since, and has not yet learnt the room's head,
+  cannot tell, and delivers the stored message once more under its original seq; a client that
+  has that seq already drops it.
 - **Every room, durable or lossy, writes this way**, before delivery. Storing the row costs
   nothing measurable over taking the seq alone (below), so there is no cheaper path for lossy
   rooms to keep, and E2EE rooms are always durable.
@@ -99,10 +111,27 @@ What bounds a page of history:
   `(room_id, seq)` is the `(room_id, seq DESC)` order, so no second index exists.
 - **Membership** is `chat_members(room_id, user_id)`, `user_id` in the `"C"` collation, so ids
   page in byte order whatever the database's default collation; the in-memory store orders them
-  the same way. A room with members is closed: `admits(room, user)` is true only for them. A
-  room with none is open to anyone, which is every room until something lists members, and what
-  a stream's live chat stays. The chat service asks before a client joins a room new to it; no
-  client command changes the list, which is the operators' (and later the product's) to set.
+  the same way. No client command changes it; it is the operators' (and later the product's) to
+  set.
+- **Who may be in a room follows from its kind, never from an empty list.** Direct and group
+  chats are closed: `admits(room, user, asked)` is true only for their members, and a closed
+  room with no members admits nobody. A stream's live chat is open to anyone. The kind is
+  recorded in `chat_rooms` by the room's first join, as the join names it (`"kind"` in the
+  envelope; a join that names none asks for a group chat), so a room is closed unless it was
+  created as live. A room that already lists members is recorded as a group chat whatever its
+  first join asks, and a recorded kind never changes: a later join cannot open a closed room.
+  A first join racing another waits for it and reads the kind it recorded. The chat service
+  asks before a client joins a room new to its connection, which is before the room plane
+  resolves, and so creates, the room. `room_state`'s `kind` (0003), written as `group_chat` for
+  every room until now, is copied from the recorded kind when the room is created, and its
+  `delivery` is lossy for a live chat and durable otherwise. A room created without a chat join
+  recording its kind first takes the kind one function in the room store chooses from the room
+  alone: a group chat, closed. Which kinds admit anyone is one function too
+  (`core::ports::admits_anyone`), so a new kind is a case in each, not a new rule.
+- **A member removed from the list keeps what they have until they reconnect.** The check runs
+  at a join, not per message: a connection already in the room goes on receiving its messages,
+  and may read its history, until it closes. Cutting it off at once needs the service to watch
+  the list (a notification on removal), which is not built.
 - **Sessions.** The message store drives its own pool of four sessions on the reactor, as the
   room store does, with a 2 s request timeout.
 - An in-memory store implements the same port, and one conformance suite
@@ -127,7 +156,7 @@ What bounds a page of history:
   | Write | p50 | p99 |
   |---|---|---|
   | seq and row in one statement (`append`) | 1.3-4.0 ms | 5-10 ms |
-  | seq alone (`append`, today's path) | 1.3-4.0 ms | 8-10 ms |
+  | seq alone (the seq-only append, since removed) | 1.3-4.0 ms | 8-10 ms |
   | seq, then the row as a second statement | 2.7-8.0 ms | 11-19 ms |
 
   The last row was measured before the store lost its second writer. With the message key's
@@ -157,6 +186,10 @@ What bounds a page of history:
   readiness probe could. A test runs the store's writes, an erroring one included, under those
   settings with every statement logged, and under the same with parameters logged, and
   searches the server's log for the body as text, hex and base64: found only in the second.
+- Two repeats of one key in flight at once make the second fail on the key's unique index,
+  and the server logs that `ERROR` at its default settings, with a `DETAIL` naming the room,
+  the sender and the key; the index holds nothing else, so the body is never in it. The
+  statement's parameters stay out of the line under the settings above.
 - A violated `NOT NULL` also writes the failing row, body and all, like a check constraint.
   None can be violated: every column is bound from a typed value that has no null (the room's
   uuid, the seq from `room_state`, the sender's id, the key, the body, which binds as an empty

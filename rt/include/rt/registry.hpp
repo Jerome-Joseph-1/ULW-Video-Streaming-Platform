@@ -41,6 +41,9 @@ enum class AppendError : std::uint8_t {
     Fenced,
     // The store did not answer; whether the write happened is unknown.
     Unavailable,
+    // The sender already used the message's key in the room for another body; nothing was
+    // written.
+    Conflict,
 };
 
 using AppendCallback =

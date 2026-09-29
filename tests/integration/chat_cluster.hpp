@@ -185,6 +185,8 @@ protected:
             return;
         }
         room_ = core::RoomId::generate(clock_, random_).to_string();
+        // The room the tests share is a group chat of the three users.
+        ASSERT_NO_FATAL_FAILURE(list_members(room_, {"alice", "bob", "carol"}));
         // Made up per run: no real secret lives in the repository.
         std::array<std::byte, 32> secret{};
         random_.fill(secret);
@@ -276,6 +278,31 @@ protected:
     }
 
     static std::string ref(std::uint64_t n) { return "r" + std::to_string(n); }
+
+    // Lists members for a room, as the service's operators do.
+    void list_members(const std::string& room, const std::vector<std::string>& users) const {
+        auto conn = db_->session();
+        for (const std::string& user : users) {
+            ASSERT_TRUE(
+                conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::text::uuid, $2)",
+                          infra::postgres::Params{}.add_text(room).add_text(user)));
+        }
+    }
+
+    // A join of `room` with `fields` added; "joined", or the error's reason.
+    static std::string join_answer(Client& client, const std::string& room,
+                                   const std::string& fields = "") {
+        if (!client.send(R"({"type":"join","room":")" + room + R"(")" + fields + "}")) {
+            return "not sent";
+        }
+        const auto answer = client.wait_for([](const Seen& s) {
+            return s.type == "joined" || (s.type == "error" && s.reason != "not_joined");
+        });
+        if (!answer) {
+            return "no answer";
+        }
+        return answer->type == "joined" ? "joined" : answer->reason;
+    }
 
     // Asks for a page of the room's history with `fields` (`,"after":7`, say) and returns the
     // messages that came before the page's end, as sent; nullopt for an error instead.

@@ -16,8 +16,11 @@ kubectl() { "$tools/kubectl" --kubeconfig "$kubeconfig" --context "$context" "$@
 # (tests/cluster/stunner_check.py). The network is in Docker's routed mode (Docker 27 or later):
 # in the default NAT mode Docker masquerades the client as the host, and with masquerading
 # merely switched off it still drops every packet addressed to a container that arrives from
-# another bridge, the replies included. 198.18.0.0/15 is reserved for benchmarking (RFC 2544)
-# and never routed, so it collides with no network a host is on.
+# another bridge, the replies included. Docker before 29 also needs its userland proxy off and
+# DNATed packets from this network accepted in DOCKER-USER, or the client reaches the node
+# through docker-proxy, from the kind network's gateway address; e2e.yml sets both on its
+# runner. 198.18.0.0/15 is reserved for benchmarking (RFC 2544) and never routed, so it
+# collides with no network a host is on.
 outside_network=$cluster-outside
 outside_subnet=198.18.0.0/24
 outside_gateway=198.18.0.1

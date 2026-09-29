@@ -24,15 +24,27 @@ using rt::StoreError;
 using rt::StoreResult;
 
 // A room nobody has asked for before is created by the first node that resolves it. Both rows
-// in one statement: a room never exists without its sequence counter.
+// in one statement: a room never exists without its sequence counter. Its kind is the one its
+// first chat join recorded in chat_rooms, which runs before the room is resolved; a room no
+// chat join recorded takes $3 (kind_of_unrecorded). A live chat is delivered lossy.
 constexpr Sql kCreateRoom = R"sql(
 WITH created AS (
     INSERT INTO room_assignments (room_id, owner_node) VALUES ($1, $2)
     ON CONFLICT (room_id) DO NOTHING
-    RETURNING owner_generation)
+    RETURNING owner_generation),
+kind AS (
+    SELECT coalesce((SELECT kind FROM chat_rooms WHERE room_id = $1), $3) AS kind)
 INSERT INTO room_state (room_id, owner_generation, kind, delivery)
-SELECT $1, owner_generation, 'group_chat', 'durable' FROM created
+SELECT $1, created.owner_generation, kind.kind,
+       CASE WHEN kind.kind = 'stream_live_chat' THEN 'lossy' ELSE 'durable' END
+  FROM created, kind
 RETURNING owner_generation)sql";
+
+// The kind of a room created without a chat join recording one first: closed, so that no room
+// is open by default. The one place a room's kind is chosen from the room alone.
+[[nodiscard]] std::string_view kind_of_unrecorded(const core::RoomId& /*room*/) noexcept {
+    return "group_chat";
+}
 
 // The fence moves with the owner: room_state takes the new generation in the same statement,
 // so from its commit on only the new owner's appends match. Under READ COMMITTED a second
@@ -83,13 +95,15 @@ RETURNING room_assignments.room_id)sql";
 
 // The fenced append and the message's row in one statement, so one transaction and one commit:
 // a seq is taken only with its row, and a fenced writer takes neither. A message whose key the
-// sender already used in the room answers the seq it was stored under and takes none; the
-// room_state row is still updated (by nothing), so that the answer, too, is fenced. A
-// concurrent repeat of the same key that commits first makes this one fail on the key's
+// sender already used in the room takes no seq: with the same body it is a repeat, answered
+// with the seq it was stored under; with another body it is a conflict, answered with none.
+// The room_state row is updated (by nothing) either way, so that those answers are fenced too.
+// A concurrent repeat of the same key that commits first makes this one fail on the key's
 // unique index, whole, seq included; run again, it finds the stored row.
 constexpr Sql kAppendMessage = R"sql(
 WITH prior AS (
-    SELECT seq FROM chat_messages WHERE room_id = $1 AND sender = $3 AND msg_key = $4),
+    SELECT seq, body = $5 AS same
+      FROM chat_messages WHERE room_id = $1 AND sender = $3 AND msg_key = $4),
 next AS (
     UPDATE room_state
        SET last_seq = last_seq + CASE WHEN EXISTS (SELECT 1 FROM prior) THEN 0 ELSE 1 END
@@ -101,9 +115,9 @@ stored AS (
       FROM next
      WHERE NOT EXISTS (SELECT 1 FROM prior)
     RETURNING seq)
-SELECT seq FROM prior WHERE EXISTS (SELECT 1 FROM next)
+SELECT seq, same FROM prior WHERE EXISTS (SELECT 1 FROM next)
 UNION ALL
-SELECT seq FROM stored)sql";
+SELECT seq, true FROM stored)sql";
 
 // '-infinity' is older than any staleness bound, so the rooms are claimable at once.
 constexpr Sql kRelease = R"sql(
@@ -182,7 +196,10 @@ public:
     [[nodiscard]] Statement start() noexcept override {
         step_ = Step::Create;
         return Statement{.sql = kCreateRoom,
-                         .params = Params{}.add_uuid(room_.uuid()).add_text(node_.view())};
+                         .params = Params{}
+                                       .add_uuid(room_.uuid())
+                                       .add_text(node_.view())
+                                       .add_text(kind_of_unrecorded(room_))};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -360,14 +377,19 @@ StoreResult<void> decode_nothing(const Result& /*r*/) {
     return {};
 }
 
-// No row: the room has moved on to another generation. Fenced out.
-StoreResult<std::optional<std::uint64_t>> decode_seq(const Result& r) noexcept {
+// The seq, a repeat's stored seq, or no row when fenced; a stored key with another body is a
+// conflict.
+[[nodiscard]] StoreResult<std::optional<std::uint64_t>> decode_append(const Result& r) noexcept {
     if (r.rows() == 0) {
         return std::optional<std::uint64_t>{};
     }
     const auto seq = r.get(0, 0).and_then(parse_uint64);
-    if (!seq) {
+    const auto same = r.get(0, 1).and_then(parse_bool);
+    if (!seq || !same) {
         return std::unexpected(StoreError::Corrupt);
+    }
+    if (!*same) {
+        return std::unexpected(StoreError::Conflict);
     }
     return seq;
 }
@@ -402,7 +424,7 @@ public:
             done_(std::unexpected(StoreError::Unavailable));
             return std::nullopt;
         }
-        done_(decode_seq(*outcome));
+        done_(decode_append(*outcome));
         return std::nullopt;
     }
 

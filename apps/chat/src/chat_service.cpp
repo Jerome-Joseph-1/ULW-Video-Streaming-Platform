@@ -143,14 +143,22 @@ void ChatService::join(ClientId id, const Join& join) {
             answer(*c->client, "busy", join.room);
             return;
         }
-        c->rooms.push_back(join.room);
         // Whether the user may be in the room at all. Asked only for rooms new to the
-        // connection, whose joins are rate limited; the answer may come from inside the call.
+        // connection, whose joins are rate limited. The room counts against the connection
+        // while the answer is on its way, which comes on a later iteration, never from inside
+        // the call; a call that could not be made leaves nothing behind.
+        c->rooms.push_back(join.room);
         c->admitting.push_back(join.room);
-        messages_.admits(join.room, c->user,
-                         [this, id, join](core::ports::MessageResult<bool> result) noexcept {
-                             admitted(id, join, result);
-                         });
+        try {
+            messages_.admits(join.room, c->user, join.kind,
+                             [this, id, join](core::ports::MessageResult<bool> result) noexcept {
+                                 admitted(id, join, result);
+                             });
+        } catch (...) {
+            std::erase(c->admitting, join.room);
+            std::erase(c->rooms, join.room);
+            throw;
+        }
         return;
     }
     enter(id, join);

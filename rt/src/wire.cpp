@@ -213,7 +213,7 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto request = in.u64();
         const auto status = in.u8();
         const auto seq = in.u64();
-        if (!request || !status || *status > static_cast<std::uint8_t>(Status::Busy) || !seq) {
+        if (!request || !status || *status > static_cast<std::uint8_t>(Status::Conflict) || !seq) {
             return std::nullopt;
         }
         return Reply{.request = *request, .status = static_cast<Status>(*status), .seq = *seq};

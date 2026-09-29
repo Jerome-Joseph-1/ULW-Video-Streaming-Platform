@@ -24,7 +24,6 @@
 
 namespace {
 
-using infra::postgres::Params;
 using std::chrono::seconds;
 using ulw::test::ChildProcess;
 using ulw::test::Client;
@@ -467,27 +466,95 @@ TEST_P(ChatClusterTest, HistorySurvivesARestartOfEveryNodeInTheOrderItWasSent) {
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(sent));
 }
 
+TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    ASSERT_NO_FATAL_FAILURE(join(*alice));
+    const std::string body = "sent before the restart";
+    ASSERT_TRUE(alice->send(send_command(room_, body, "kept-key")));
+    const auto ack =
+        alice->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
+    ASSERT_TRUE(ack);
+    alice.reset();
+    // Every node's memory of recent keys goes with it, and the room gets a new owner.
+    for (Node& n : nodes_) {
+        n.process->signal(SIGTERM);
+    }
+    for (Node& n : nodes_) {
+        ASSERT_EQ(n.process->wait_exit(seconds(30)), 0) << n.name << "\n" << n.process->output();
+    }
+    for (Node& n : nodes_) {
+        ASSERT_NO_FATAL_FAILURE(start(n, jwks_));
+    }
+    ASSERT_NO_FATAL_FAILURE(wait_ready());
+
+    auto again = connect(nodes_[1], 0);
+    ASSERT_TRUE(again);
+    ASSERT_NO_FATAL_FAILURE(join(*again));
+    ASSERT_TRUE(again->send(send_command(room_, body, "kept-key")));
+    const auto repeat =
+        again->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
+    ASSERT_TRUE(repeat);
+    EXPECT_EQ(repeat->seq, ack->seq);
+    ASSERT_TRUE(again->send(send_command(room_, "another body", "kept-key")));
+    const auto conflict =
+        again->wait_for([](const Seen& s) { return s.type == "error" && s.id == "kept-key"; });
+    ASSERT_TRUE(conflict);
+    EXPECT_EQ(conflict->reason, "conflict");
+    ASSERT_TRUE(again->send(send_command(room_, "after the resends", "marker")));
+    ASSERT_TRUE(again->message("after the resends"));
+    // Never sequenced again: the marker is the next seq, and nothing arrived under the key
+    // but the first message, under its own seq.
+    EXPECT_EQ(last_seq(), std::to_string(ack->seq + 1));
+    for (const Seen& s : again->messages()) {
+        EXPECT_TRUE(s.id != "kept-key" || (s.seq == ack->seq && s.body == body));
+    }
+    EXPECT_FALSE(again->ever_saw("another body"));
+    for (const Node& n : nodes_) {
+        EXPECT_EQ(metric(n, "messages_deduplicated_total"), 0U) << n.name << " answered it";
+    }
+    std::cout << "after every node restarted, the resend got seq " << repeat->seq
+              << " from the store, and another body under its id was a conflict\n";
+    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext({body, "another body"}, {"another body"}));
+}
+
 TEST_P(ChatClusterTest, ARoomWithMembersRefusesEveryoneElse) {
-    auto conn = db_->session();
-    ASSERT_TRUE(conn.exec("INSERT INTO chat_members (room_id, user_id) "
-                          "VALUES ($1::text::uuid, 'alice'), ($1::text::uuid, 'bob')",
-                          Params{}.add_text(room_)));
+    const std::string members_only = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(members_only, {"alice", "bob"}));
     auto alice = connect(nodes_[0], 0);
     auto carol = connect(nodes_[2], 2);
     ASSERT_TRUE(alice && carol);
-    ASSERT_NO_FATAL_FAILURE(join(*alice));
-    ASSERT_TRUE(carol->send(R"({"type":"join","room":")" + room_ + R"("})"));
-    const auto refused =
-        carol->wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
-    ASSERT_TRUE(refused);
-    EXPECT_EQ(refused->type, "error");
-    EXPECT_EQ(refused->reason, "not_member");
-    ASSERT_TRUE(carol->send(send_command(room_, "let me in", "sneak")));
+    EXPECT_EQ(join_answer(*alice, members_only), "joined");
+    EXPECT_EQ(join_answer(*carol, members_only), "not_member");
+    ASSERT_TRUE(carol->send(send_command(members_only, "let me in", "sneak")));
     const auto sneak = carol->wait_for([](const Seen& s) { return s.id == "sneak"; });
     ASSERT_TRUE(sneak);
     EXPECT_EQ(sneak->reason, "not_joined");
-    ASSERT_TRUE(send_until_heard(*alice, "members only"));
-    EXPECT_FALSE(carol->ever_saw(last_body_["alice"]));
+    ASSERT_TRUE(alice->send(send_command(members_only, "members only", "inside")));
+    ASSERT_TRUE(alice->message("members only"));
+    EXPECT_FALSE(carol->ever_saw("members only"));
+}
+
+TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedLater) {
+    const std::string nobody = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    EXPECT_EQ(join_answer(*alice, nobody), "not_member");
+    // Its first join recorded it as a group chat; asking for live afterwards opens nothing.
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_member");
+}
+
+TEST_P(ChatClusterTest, ALiveRoomAdmitsAnyone) {
+    const std::string live = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(alice && carol);
+    EXPECT_EQ(join_answer(*alice, live, R"(,"kind":"live")"), "joined");
+    // Joins after the first need not know what the room is.
+    EXPECT_EQ(join_answer(*carol, live), "joined");
+    ASSERT_TRUE(carol->send(send_command(live, "hello, stream", "live-1")));
+    ASSERT_TRUE(alice->message("hello, stream"));
 }
 
 // No database is reached: the connection string is refused before any connection is tried.

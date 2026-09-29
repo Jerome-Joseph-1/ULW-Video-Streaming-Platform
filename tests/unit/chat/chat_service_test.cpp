@@ -90,11 +90,13 @@ public:
         const core::RoomId& /*room*/, std::optional<std::uint64_t> /*before*/,
         std::size_t /*limit*/,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
+        directions.emplace_back("before");
         pages.push_back(std::move(done));
     }
     void history_after(
         const core::RoomId& /*room*/, std::uint64_t /*after*/, std::size_t /*limit*/,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
+        directions.emplace_back("after");
         pages.push_back(std::move(done));
     }
     void last_seq(const core::RoomId& /*room*/,
@@ -114,8 +116,9 @@ public:
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override {
         done(std::vector<core::UserId>{});
     }
-    void admits(const core::RoomId& /*room*/, const core::UserId& user,
+    void admits(const core::RoomId& /*room*/, const core::UserId& user, core::ports::RoomKind asked,
                 core::ports::MessageCallback<bool> done) override {
+        kinds.push_back(asked);
         const bool admitted = std::ranges::find(refused, user.view()) == refused.end();
         if (hold) {
             held.emplace_back(std::move(done), admitted);
@@ -131,9 +134,11 @@ public:
     }
 
     std::vector<std::string> refused;
+    std::vector<core::ports::RoomKind> kinds;
     bool hold = false;
     std::vector<std::pair<core::ports::MessageCallback<bool>, bool>> held;
     std::vector<core::ports::MessageCallback<std::vector<core::ports::StoredMessage>>> pages;
+    std::vector<std::string> directions;
 };
 
 class FakeClient final : public chat::IClient {
@@ -292,6 +297,18 @@ TEST_F(ChatServiceTest, AJoinOfARoomThatDoesNotAdmitTheUserIsRefusedAndNeverReac
     EXPECT_EQ(seen(mallory.take().at(0)).reason, "not_joined");
 }
 
+TEST_F(ChatServiceTest, TheKindAJoinNamesIsWhatTheMemberCheckIsAskedFor) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    service_->join(a, {.room = room_id(kOtherRoom),
+                       .after = std::nullopt,
+                       .delivery = chat::Delivery::Lossy,
+                       .kind = core::ports::RoomKind::StreamLiveChat});
+    EXPECT_EQ(messages_.kinds, (std::vector{core::ports::RoomKind::GroupChat,
+                                            core::ports::RoomKind::StreamLiveChat}));
+}
+
 TEST_F(ChatServiceTest, AJoinWaitsForTheMemberListAndAskingAgainMeanwhileIsBusy) {
     messages_.hold = true;
     FakeClient alice;
@@ -350,6 +367,28 @@ TEST_F(ChatServiceTest, AHistoryPageArrivesAsItsMessagesInTheStoresOrderThenItsC
     EXPECT_EQ(got[2], std::string(R"({"type":"history","room":")") + std::string(kRoom) +
                           R"(","count":2})");
     EXPECT_EQ(service_->counters().history_messages, 2U);
+}
+
+TEST_F(ChatServiceTest, AfterReadsForwardFromTheCursorAndBeforeOrNoCursorBackward) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit(9);
+    service_->history(a, {.room = room_id(), .before = std::nullopt, .after = 3});
+    history(a, 9);
+    history(a);
+    EXPECT_EQ(messages_.directions, (std::vector<std::string>{"after", "before", "before"}));
+}
+
+TEST_F(ChatServiceTest, HistoryIsRefusedWhileTheMemberCheckIsStillOut) {
+    messages_.hold = true;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    alice.take();
+    history(a);
+    EXPECT_TRUE(messages_.pages.empty());
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
 }
 
 TEST_F(ChatServiceTest, HistoryOfARoomNotJoinedIsRefusedWithoutReadingTheStore) {
@@ -419,6 +458,12 @@ TEST_F(ChatServiceTest, ASendIsAnsweredWithItsIdAndTheSeqTheOwnerGaveIt) {
     const Seen e = seen(alice.take().at(0));
     EXPECT_EQ(e.reason, "unavailable");
     EXPECT_EQ(e.id, "second");
+    // The id was already used for another body: the client learns it, and the id is spent.
+    send(a, "first", "something else");
+    rooms_.sends[2].done(std::unexpected(RouteError::Conflict));
+    const Seen c = seen(alice.take().at(0));
+    EXPECT_EQ(c.reason, "conflict");
+    EXPECT_EQ(c.id, "first");
 }
 
 TEST_F(ChatServiceTest, ARateLimitedSendIsRefusedWithWhenToRetryAndNeverReachesTheRoom) {
@@ -700,6 +745,21 @@ TEST_F(TwoJoins, AResumeInARoomAlreadyJoinedCostsAJoinAndAPlainRejoinDoesNot) {
     ASSERT_EQ(got.size(), 5U);
     EXPECT_EQ(seen(got[3]).type, "joined");
     EXPECT_EQ(seen(got[4]).reason, "busy");
+}
+
+TEST_F(TwoJoins, APageOfHistoryCostsAJoin) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    history(a);
+    history(a);
+    EXPECT_EQ(messages_.pages.size(), 1U);
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "busy");
+    clock_.advance(Millis{1'000});
+    history(a);
+    EXPECT_EQ(messages_.pages.size(), 2U);
 }
 
 class SmallBuffers : public ChatServiceTest {
