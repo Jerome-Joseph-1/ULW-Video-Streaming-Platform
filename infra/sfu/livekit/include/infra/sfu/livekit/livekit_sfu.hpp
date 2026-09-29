@@ -20,6 +20,9 @@ struct Config {
     std::string client_url;
     std::string api_key;
     std::string api_secret;
+    // Where LiveKit's recorder calls a stream's packager, "srt://live-{stream}.apps:9000":
+    // "{stream}" becomes the stream's id. Empty where nothing is relayed; relay is then refused.
+    std::string packager_srt;
 };
 
 enum class ConfigError : std::uint8_t {
@@ -28,6 +31,7 @@ enum class ConfigError : std::uint8_t {
     MissingApiKey,
     // Shorter than 32 bytes, or implausibly long.
     BadApiSecret,
+    BadPackagerAddress,
 };
 
 [[nodiscard]] std::string_view to_string(ConfigError e) noexcept;

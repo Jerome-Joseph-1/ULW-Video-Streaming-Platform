@@ -20,12 +20,10 @@ using core::ports::MediaError;
 // healthy answer and still short enough that a caller holding a user's join request can report
 // the failure while the user is waiting.
 constexpr core::Millis kRequestTimeout{5000};
-// Twice the request it authorises; LiveKit also allows a minute of clock skew.
-constexpr core::Seconds kApiTokenTtl =
-    2 * std::chrono::duration_cast<core::Seconds>(kRequestTimeout);
 // RoomService answers with the room or an empty object; a room with its codec list is under
 // 1 KiB. Error bodies have curl's own bound.
 constexpr std::size_t kMaxResponse = std::size_t{16} * 1024;
+constexpr CallLimits kRoomServiceLimits{.timeout = kRequestTimeout, .max_response = kMaxResponse};
 
 constexpr int kHttpNotFound = 404;
 constexpr int kHttpRequestTimeout = 408;
@@ -76,8 +74,7 @@ class RoomService::Call final : public curl::ITransferHandler,
                                 public curl::IBodySource,
                                 public net::ITimerHandler {
 public:
-    Call(RoomService& owner, std::string body, IfAbsent absent,
-         core::ports::MediaDone done) noexcept
+    Call(RoomService& owner, std::string body, IfAbsent absent, AnswerDone done) noexcept
         : owner_(owner), body_(std::move(body)), absent_(absent), done_(std::move(done)) {}
 
     ~Call() override {
@@ -102,7 +99,12 @@ public:
     }
 
     void on_transfer_done(curl::Result result) noexcept override {
-        owner_.finished(*this, classify(result, absent_));
+        const auto outcome = classify(result, absent_);
+        if (!outcome) {
+            owner_.finished(*this, std::unexpected(outcome.error()));
+            return;
+        }
+        owner_.finished(*this, result ? std::move(result->body) : std::string{});
     }
 
     void on_timeout() noexcept override {
@@ -117,14 +119,14 @@ public:
         return n;
     }
 
-    [[nodiscard]] core::ports::MediaDone take_callback() noexcept { return std::move(done_); }
+    [[nodiscard]] AnswerDone take_callback() noexcept { return std::move(done_); }
 
 private:
     RoomService& owner_;
     std::string body_;
     std::size_t sent_ = 0;
     IfAbsent absent_;
-    core::ports::MediaDone done_;
+    AnswerDone done_;
     std::optional<net::TimerId> timer_;
     MediaError failure_ = MediaError::Unavailable;
     std::unique_ptr<curl::Transfer> transfer_;
@@ -139,9 +141,28 @@ RoomService::~RoomService() = default;
 
 void RoomService::call(std::string_view method, std::string body, const Grant& grant,
                        IfAbsent absent, core::ports::MediaDone done) {
+    start(method, std::move(body), grant, absent, kRoomServiceLimits,
+          [done = std::move(done)](Answer answer) mutable noexcept {
+              if (!answer) {
+                  done(std::unexpected(answer.error()));
+                  return;
+              }
+              done({});
+          });
+}
+
+void RoomService::fetch(std::string_view method, std::string body, const Grant& grant,
+                        const CallLimits& limits, AnswerDone done) {
+    start(method, std::move(body), grant, IfAbsent::Fail, limits, std::move(done));
+}
+
+void RoomService::start(std::string_view method, std::string body, const Grant& grant,
+                        IfAbsent absent, const CallLimits& limits, AnswerDone done) {
     auto& call = *calls_.emplace_back(
         std::make_unique<Call>(*this, std::move(body), absent, std::move(done)));
-    const auto token = mint_token(key_, grant, clock_.wall_now(), kApiTokenTtl);
+    // Twice the request it authorises; LiveKit also allows a minute of clock skew.
+    const auto token = mint_token(key_, grant, clock_.wall_now(),
+                                  2 * std::chrono::ceil<core::Seconds>(limits.timeout));
     if (!token) {
         call.fail_later(MediaError::Refused);
         return;
@@ -155,8 +176,8 @@ void RoomService::call(std::string_view method, std::string body, const Grant& g
             .method = curl::Method::Post,
             .url = std::move(url),
             .headers = {"Content-Type: application/json", "Authorization: Bearer " + token->jwt},
-            .max_body = kMaxResponse,
-            .timeout = kRequestTimeout},
+            .max_body = limits.max_response,
+            .timeout = limits.timeout},
         call.body_size(), call, call);
     if (!transfer) {
         call.fail_later(classify(std::unexpected(std::move(transfer.error())), absent).error());
@@ -165,19 +186,18 @@ void RoomService::call(std::string_view method, std::string body, const Grant& g
     call.start(std::move(*transfer));
 }
 
-void RoomService::fail(core::ports::MediaError error, core::ports::MediaDone done) {
+void RoomService::fail(core::ports::MediaError error, AnswerDone done) {
     calls_
         .emplace_back(std::make_unique<Call>(*this, std::string{}, IfAbsent::Fail, std::move(done)))
         ->fail_later(error);
 }
 
-void RoomService::finished(Call& call,
-                           std::expected<void, core::ports::MediaError> outcome) noexcept {
-    core::ports::MediaDone done = call.take_callback();
+void RoomService::finished(Call& call, Answer outcome) noexcept {
+    AnswerDone done = call.take_callback();
     // Destroys the call and its transfer, which libcurl has already let go of.
     std::erase_if(calls_, [&](const auto& c) { return c.get() == &call; });
     // Last: the callback may destroy this service.
-    done(outcome);
+    done(std::move(outcome));
 }
 
 } // namespace infra::sfu::livekit::detail

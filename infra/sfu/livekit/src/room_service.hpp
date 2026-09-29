@@ -27,6 +27,15 @@ enum class IfAbsent : std::uint8_t {
 [[nodiscard]] std::expected<void, core::ports::MediaError> classify(const curl::Result& result,
                                                                     IfAbsent absent) noexcept;
 
+// What a call answered: its body on success.
+using Answer = std::expected<std::string, core::ports::MediaError>;
+using AnswerDone = std::move_only_function<void(Answer) noexcept>;
+
+struct CallLimits {
+    core::Millis timeout;
+    std::size_t max_response;
+};
+
 // Calls to LiveKit's server API (RoomService, and Egress for live streams), each authorised by
 // a token minted for that call alone. Reactor thread only.
 class RoomService {
@@ -43,9 +52,12 @@ public:
     // included.
     void call(std::string_view method, std::string body, const Grant& grant, IfAbsent absent,
               core::ports::MediaDone done);
+    // As call, for a method whose answer the caller reads, within its own limits.
+    void fetch(std::string_view method, std::string body, const Grant& grant,
+               const CallLimits& limits, AnswerDone done);
 
     // `done` runs later with `error`, and nothing is sent.
-    void fail(core::ports::MediaError error, core::ports::MediaDone done);
+    void fail(core::ports::MediaError error, AnswerDone done);
 
     [[nodiscard]] const ApiKey& key() const noexcept { return key_; }
     [[nodiscard]] const core::ports::IClock& clock() const noexcept { return clock_; }
@@ -53,7 +65,9 @@ public:
 private:
     class Call;
 
-    void finished(Call& call, std::expected<void, core::ports::MediaError> outcome) noexcept;
+    void start(std::string_view method, std::string body, const Grant& grant, IfAbsent absent,
+               const CallLimits& limits, AnswerDone done);
+    void finished(Call& call, Answer outcome) noexcept;
 
     net::IReactor& reactor_;
     curl::Multi& multi_;
