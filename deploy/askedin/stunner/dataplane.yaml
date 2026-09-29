@@ -1,0 +1,45 @@
+# The stunnerd pods the operator runs for every STUNner Gateway: templates/
+# stunner-default-dataplane.yaml of the same chart release as operator.yaml, with the image
+# pinned by digest and the pod run as an unprivileged user (stunnerd binds 3478, above the
+# privileged range, and needs no capability).
+apiVersion: stunner.l7mp.io/v1
+kind: Dataplane
+metadata:
+  name: default
+spec:
+  replicas: 1
+  image: docker.io/l7mp/stunnerd:1.2.1@sha256:a9a06157564d0630a8a95b9eab1307340bc1e710c53c890daff5fd0dfee50617
+  imagePullPolicy: IfNotPresent
+  command: ["stunnerd"]
+  args: ["-w", "--udp-thread-num=16", "--log-format=text"]
+  # The chart's numbers, checked against what they buy. A participant sends and receives about
+  # 2.5 Mbit/s of audio and 720p video, ~250 packets/s each way, so the relay handles ~500
+  # packets/s for it. At an assumed 10 us of user-space work per relayed packet (a read and a
+  # write syscall plus TURN framing, unmeasured), that is 0.5% of a core: the 500m request
+  # carries ~100 participants and the 2-core limit ~400. Memory is the Go runtime (~30 MB) plus
+  # one relay socket per allocation, whose kernel buffers are charged to the pod: 208 KiB each
+  # way at the default rmem/wmem, 416 KiB when both are full. 128 MiB covers ~230 allocations
+  # at worst, 512 MiB ~1150. The call capacity script replaces the 10 us with a measurement.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 128Mi
+    limits:
+      cpu: "2"
+      memory: 512Mi
+  # Allocations outlive a rollout this long: a draining pod keeps relaying the calls it holds
+  # while new ones land on its replacement.
+  terminationGracePeriodSeconds: 3600
+  enableMetricsEndpoint: false
+  hostNetwork: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]

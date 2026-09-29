@@ -26,3 +26,15 @@ nodes:
         hostPort: 18080
         listenAddress: 127.0.0.1
         protocol: TCP
+      # The WebRTC-facing ports, on the outside network's gateway address only (sandbox.sh):
+      # STUNner's TURN listener (deploy/stunner, NodePort 31478), which carries every media
+      # packet of every call, so it is the only UDP port published at all; and LiveKit's
+      # signalling, which production routes through askedin-gateway instead.
+      - containerPort: 31478
+        hostPort: 3478
+        listenAddress: 198.18.0.1
+        protocol: UDP
+      - containerPort: 30880
+        hostPort: 17880
+        listenAddress: 198.18.0.1
+        protocol: TCP

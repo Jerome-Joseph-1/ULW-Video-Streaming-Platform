@@ -101,7 +101,7 @@ public:
     // An owner write: the room's next sequence number for `message`, or nullopt when
     // `generation` is no longer the room's. Then nothing was written. A store that keeps
     // messages keeps this one in the same fenced write, so that no seq is ever taken without
-    // its message (ADR-0037).
+    // its message (ADR-0039).
     virtual void append(const core::RoomId& room, std::uint64_t generation, const Outgoing& message,
                         StoreCallback<std::optional<std::uint64_t>> done) = 0;
     // An owner write, for a node about to stop: the rooms it still holds at these generations

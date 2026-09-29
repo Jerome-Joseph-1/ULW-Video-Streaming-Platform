@@ -1,0 +1,38 @@
+# WebRTC media's way in (ADR-0013): one TURN listener on UDP 3478, which relays only to the
+# LiveKit endpoints the UDPRoute names. The operator creates the stunnerd Deployment and the
+# LoadBalancer Service for it in this namespace.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: stunner
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/part-of: ulw
+  annotations:
+    # The node delivers each client's packets with their source address intact, so STUNner
+    # answers with the address the client really has (XOR-MAPPED-ADDRESS). Under the default
+    # policy the node would masquerade them as its own.
+    stunner.l7mp.io/external-traffic-policy: local
+    # Only the TURN port faces clients; the health check stays inside the cluster.
+    stunner.l7mp.io/disable-health-check-expose: "true"
+spec:
+  gatewayClassName: stunner-gatewayclass
+  listeners:
+    - name: turn-udp
+      port: 3478
+      protocol: TURN-UDP
+---
+apiVersion: stunner.l7mp.io/v1
+kind: UDPRoute
+metadata:
+  name: livekit
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/part-of: ulw
+spec:
+  parentRefs:
+    - name: stunner
+  rules:
+    - backendRefs:
+        - name: livekit
+          port: 7882
