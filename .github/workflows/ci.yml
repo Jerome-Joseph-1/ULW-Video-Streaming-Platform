@@ -181,7 +181,6 @@ jobs:
         with:
           cache-key: clang-lint
       - run: tools/check-boundaries.sh
-      - run: python3 tools/check-docs.py
       - run: tools/check-format.sh
       # M22: end-to-end encryption changed neither the chat service nor the router, formatting
       # aside, since phase 2 was tagged. Nothing to compare against until it is.
@@ -212,6 +211,11 @@ jobs:
       - name: clang-tidy (full tree)
         if: github.event_name != 'pull_request'
         run: tools/run-clang-tidy.sh build/ci
+      # Last, and run even when a step above failed, so a branch whose decision number waits on
+      # another branch still gets its format and clang-tidy results.
+      - name: docs (decision numbering, routes documented)
+        if: ${{ !cancelled() }}
+        run: python3 tools/check-docs.py
 
   # The WebSocket codec against the Autobahn fuzzingclient, through the echo server on each
   # reactor. run.sh pins the image by digest and fails on any verdict outside its allowlist.

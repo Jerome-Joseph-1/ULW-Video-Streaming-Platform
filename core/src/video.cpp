@@ -161,14 +161,6 @@ std::expected<Video, DomainError> Video::rehydrate(const VideoRecord& record) {
     return Video{record};
 }
 
-std::expected<void, DomainError> Video::start_upload() noexcept {
-    if (const auto ok = require_state({VideoState::Init}); !ok) {
-        return ok;
-    }
-    enter(VideoState::Uploading);
-    return {};
-}
-
 std::expected<void, DomainError> Video::start_processing() noexcept {
     if (const auto ok = require_state({VideoState::Init, VideoState::Uploading}); !ok) {
         return ok;
