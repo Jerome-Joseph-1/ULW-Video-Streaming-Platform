@@ -105,7 +105,7 @@ TEST(AsyncLogSink, NoLineIsSplitOrLost) {
 }
 
 TEST(AsyncLogSink, DestructionGivesUpOnAReaderThatNeverComes) {
-    Pipe p = make_pipe();
+    const Pipe p = make_pipe();
     ASSERT_GE(::fcntl(p.write.get(), F_SETPIPE_SZ, 4096), 4096);
     // A full pipe that nobody reads.
     const std::string filler(4096, 'f');

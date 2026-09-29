@@ -42,6 +42,8 @@ public:
 
 private:
     void drain(const std::stop_token& stop);
+    [[nodiscard]] bool wait_writable(std::optional<core::MonoTime>& deadline,
+                                     const std::stop_token& stop) const;
     // Writes `out_` out; false when the flush deadline passed first.
     bool write_out(std::optional<core::MonoTime>& deadline, const std::stop_token& stop);
 

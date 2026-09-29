@@ -46,11 +46,11 @@ void AsyncLogSink::write(std::string_view line) noexcept {
 }
 
 // Waits for the reader with poll() rather than in write(), so the wait can end: when the sink is
-// destroyed, the eventfd wakes it and a deadline starts. Writes go out at most PIPE_BUF at a
-// time, which a pipe that polls writable takes without blocking.
-bool AsyncLogSink::write_out(std::optional<core::MonoTime>& deadline, const std::stop_token& stop) {
-    std::string_view rest(out_.data(), out_.size());
-    while (!rest.empty()) {
+// destroyed, the eventfd wakes it and the flush deadline starts. False once that deadline has
+// passed or the destination is gone.
+bool AsyncLogSink::wait_writable(std::optional<core::MonoTime>& deadline,
+                                 const std::stop_token& stop) const {
+    while (true) {
         if (!deadline && stop.stop_requested()) {
             deadline = std::chrono::steady_clock::now() + flush_limit_;
         }
@@ -59,7 +59,7 @@ bool AsyncLogSink::write_out(std::optional<core::MonoTime>& deadline, const std:
             const auto left = std::chrono::duration_cast<core::Millis>(
                 *deadline - std::chrono::steady_clock::now());
             if (left.count() <= 0) {
-                break;
+                return false;
             }
             timeout = static_cast<int>(std::min<core::Millis::rep>(left.count(), INT_MAX));
         }
@@ -70,11 +70,18 @@ bool AsyncLogSink::write_out(std::optional<core::MonoTime>& deadline, const std:
             continue;
         }
         if (ready < 0 || (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-            break;
+            return false;
         }
-        if ((fds[0].revents & POLLOUT) == 0) {
-            continue;
+        if ((fds[0].revents & POLLOUT) != 0) {
+            return true;
         }
+    }
+}
+
+// At most PIPE_BUF at a time, which a pipe that polls writable takes without blocking.
+bool AsyncLogSink::write_out(std::optional<core::MonoTime>& deadline, const std::stop_token& stop) {
+    std::string_view rest(out_.data(), out_.size());
+    while (!rest.empty() && wait_writable(deadline, stop)) {
         const ssize_t n = ::write(fd_, rest.data(), std::min<std::size_t>(rest.size(), PIPE_BUF));
         if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
             continue;
