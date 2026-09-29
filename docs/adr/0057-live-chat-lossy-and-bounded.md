@@ -113,6 +113,10 @@ How senders are limited in a room of thousands:
 - A viewer that stalls sees, when it reads again, what was already in its socket, then a jump
   in seqs, then the newest 64. It never sees a message twice or out of order, and it can fill
   the gap from history, as far back as the room still stores.
+- A viewer that stops reading altogether shuts its receive window, and the kernel ends the
+  connection once it has stayed shut for `TCP_USER_TIMEOUT` (20 s, `net::tune_connection`).
+  Its client reconnects and joins again; the node never held more than the bounds above for
+  it. A slow reader keeps its connection.
 - `lossy_drops_total` counts seqs lossy clients were moved past, including gaps of the room
   itself that a behind client was waiting across. A node whose count climbs has viewers that
   cannot keep up, not a fault of its own.

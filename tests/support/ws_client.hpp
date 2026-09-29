@@ -31,13 +31,10 @@ namespace ulw::test {
 class WsClient {
 public:
     // Upgrades on `path` with the given extra header lines ("Name: value\r\n" each). nullopt
-    // with the response status line in `refusal` when the server says anything but 101. A
-    // `receive_buffer` fixes the socket's, for a client that is to stop reading and should
-    // leave little of what the server sent in its own kernel.
+    // with the response status line in `refusal` when the server says anything but 101.
     static std::optional<WsClient> connect(std::uint16_t port, std::string_view path,
-                                           std::string_view headers, std::string* refusal,
-                                           int receive_buffer = 0) {
-        WsClient c(port, receive_buffer);
+                                           std::string_view headers, std::string* refusal) {
+        WsClient c(port);
         if (!c.fd_) {
             return std::nullopt;
         }
@@ -152,20 +149,26 @@ public:
         }
     }
 
+    // Reads at most `most` bytes of whatever has arrived, without waiting, and keeps them for
+    // the calls above: a reader far slower than what it is sent.
+    void read_at_most(std::size_t most) {
+        std::vector<std::byte> buf(most);
+        const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), MSG_DONTWAIT);
+        if (n > 0) {
+            in_.insert(in_.end(), buf.begin(), buf.begin() + n);
+        }
+    }
+
     [[nodiscard]] bool connected() const noexcept { return static_cast<bool>(fd_); }
 
 private:
-    WsClient(std::uint16_t port, int receive_buffer) {
+    explicit WsClient(std::uint16_t port) {
         fd_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
         if (!fd_) {
             return;
         }
         const int one = 1;
         ::setsockopt(fd_.get(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        // Before connect(): the window scale is agreed in the handshake.
-        if (receive_buffer > 0) {
-            ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof receive_buffer);
-        }
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
