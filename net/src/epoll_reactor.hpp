@@ -8,6 +8,7 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace net::detail {
@@ -34,6 +35,15 @@ public:
     void shutdown_write(ConnId conn) noexcept override;
     void begin_close(ConnId conn) noexcept override;
     [[nodiscard]] bool is_quiescent(ConnId conn) const noexcept override;
+    [[nodiscard]] std::expected<DatagramId, int>
+    attach_datagram(os::UniqueFd socket, IDatagramHandler& handler) override;
+    void start_receiving_datagrams(DatagramId socket) noexcept override;
+    void stop_receiving_datagrams(DatagramId socket) noexcept override;
+    [[nodiscard]] std::expected<void, int>
+    send_to(DatagramId socket, SocketAddr to, std::span<const std::byte> payload) noexcept override;
+    void begin_close(DatagramId socket) noexcept override;
+    [[nodiscard]] bool is_quiescent(DatagramId socket) const noexcept override;
+    [[nodiscard]] DatagramStats datagram_stats(DatagramId socket) const noexcept override;
     [[nodiscard]] std::expected<void, int> watch(int fd, Interest interest,
                                                  IReadyHandler& handler) override;
     void unwatch(int fd) noexcept override;
@@ -45,7 +55,7 @@ public:
     int run_once(core::Millis max_wait) override;
 
 private:
-    enum class Kind : std::uint8_t { Free, Stream, Watch, Listener };
+    enum class Kind : std::uint8_t { Free, Stream, Watch, Listener, Datagram };
 
     struct Slot {
         Kind kind = Kind::Free;
@@ -58,13 +68,16 @@ private:
         bool eof = false;
         bool shut_pending = false;
         bool accept_paused = false;
+        bool v6 = false;
         std::uint32_t gen = 1;
         std::uint32_t events = 0;
         os::UniqueFd owned;
         IStreamHandler* stream = nullptr;
         IReadyHandler* ready = nullptr;
         IAcceptHandler* acceptor = nullptr;
+        IDatagramHandler* dgram = nullptr;
         ByteQueue sendq;
+        DatagramStats stats;
     };
 
     // Re-enables listeners paused by descriptor exhaustion.
@@ -82,6 +95,14 @@ private:
         auto& s = self.slots_[static_cast<std::size_t>(conn.fd)];
         return s.kind == Kind::Stream && s.gen == conn.gen ? &s : SlotPtr{nullptr};
     }
+    [[nodiscard]] auto* datagram_slot(this auto& self, DatagramId socket) noexcept {
+        using SlotPtr = decltype(&self.slots_[0]);
+        if (socket.fd < 0 || static_cast<std::size_t>(socket.fd) >= self.slots_.size()) {
+            return SlotPtr{nullptr};
+        }
+        auto& s = self.slots_[static_cast<std::size_t>(socket.fd)];
+        return s.kind == Kind::Datagram && s.gen == socket.gen ? &s : SlotPtr{nullptr};
+    }
     [[nodiscard]] bool alive(int fd, std::uint32_t gen) const noexcept;
     [[nodiscard]] static std::uint32_t wanted_events(const Slot& s) noexcept;
     void update_events(int fd, Slot& s) noexcept;
@@ -95,6 +116,8 @@ private:
     void read_ready(int fd, Slot& s) noexcept;
     void flush(int fd, Slot& s) noexcept;
     void on_listener_event(int fd, Slot& s) noexcept;
+    void on_datagram_event(int fd, Slot& s, std::uint32_t events) noexcept;
+    void stop_datagrams(int fd, Slot& s) noexcept;
     void pause_accepting(int fd, Slot& s) noexcept;
     void run_deferred() noexcept;
 
@@ -118,6 +141,16 @@ private:
         int err = 0;
     };
     std::vector<DeferredError> deferred_errors_;
+    // Likewise for datagram sockets: a failed sendto (with its destination) or a failed
+    // start_receiving_datagrams (without).
+    struct DeferredDatagramError {
+        DatagramId socket;
+        std::optional<SocketAddr> to;
+        int err = 0;
+    };
+    std::vector<DeferredDatagramError> deferred_datagram_errors_;
+    // run_deferred trades this for the queue above, so neither gives up its capacity.
+    std::vector<DeferredDatagramError> reporting_datagram_errors_;
     AcceptRetry accept_retry_;
 };
 
