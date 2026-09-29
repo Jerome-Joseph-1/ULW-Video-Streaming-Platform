@@ -1,0 +1,28 @@
+# Everything the sandbox runs once Envoy Gateway's CRDs are in: the Gateway, the mock
+# auth-service, and the stage overlays exactly as they ship, with only what the sandbox must
+# change patched below. Rendered with
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone deploy/local/cluster
+# because the overlays live outside this directory.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - envoy.yaml
+  - mock-auth.yaml
+  - backing.yaml
+  - ../../askedin/overlays/stage/video-gateway/deployment.yaml
+  - ../../askedin/overlays/stage/video-gateway/service.yaml
+  - ../../askedin/overlays/stage/video-gateway/httproute.yaml
+  - ../../askedin/overlays/stage/video-gateway/networkpolicy.yaml
+  - ../../askedin/overlays/stage/video-worker/deployment.yaml
+  - ../../askedin/overlays/stage/video-worker/networkpolicy.yaml
+# Images built by e2e-up.sh and loaded into the node; nothing is pulled from Askedin's registry.
+images:
+  - name: git.askedin.com/askedin/askedin-monorepo/video-gateway
+    newName: ulw/video-gateway
+    newTag: e2e
+  - name: git.askedin.com/askedin/askedin-monorepo/video-worker
+    newName: ulw/video-worker
+    newTag: e2e
+patches:
+  - path: gateway-patch.yaml
+  - path: worker-patch.yaml

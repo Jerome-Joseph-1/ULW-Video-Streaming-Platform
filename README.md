@@ -27,6 +27,14 @@ tools/check-format.sh          # clang-format, --fix to apply
 tools/run-clang-tidy.sh build/dev [files...]
 ```
 
+## Sandbox cluster
+
+`make e2e-up` builds the images and brings up a kind replica of the deployment target (Envoy
+Gateway, a mock auth-service, Postgres and MinIO beside it, the stage overlays);
+`make e2e-test` runs the end-to-end checks through its route, `make validate-manifests`
+validates every manifest, and `make e2e-down` removes it all. Needs Docker. What ships to the
+real cluster, and how to apply it, is in [`deploy/askedin/RUNBOOK.md`](deploy/askedin/RUNBOOK.md).
+
 ## Layout
 
 - `core/` domain model and ports; no OS or vendor includes

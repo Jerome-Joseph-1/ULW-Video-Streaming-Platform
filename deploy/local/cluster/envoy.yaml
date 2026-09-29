@@ -1,0 +1,76 @@
+# The front door, laid out as on Askedin's cluster: Gateway askedin-gateway in namespace apps,
+# which routes from other namespaces attach to. Envoy Gateway itself comes from its pinned
+# install.yaml (tools.sh); this adds the class, the proxy image and the Gateway.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps-stage
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: sandbox
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: 1
+        container:
+          # The proxy Envoy Gateway v1.9.2 defaults to. e2e-up.sh loads it into the node from a
+          # pull pinned by digest (images.sh), so the tag names exactly that content.
+          image: docker.io/envoyproxy/envoy:distroless-v1.39.1
+      envoyService:
+        type: ClusterIP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: sandbox
+    namespace: envoy-gateway-system
+---
+# Plain HTTP where Askedin's listener terminates TLS: what reaches the backends is the same.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: askedin-gateway
+  namespace: apps
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# Publishes Envoy's listener on the kind node, which kind.yaml maps to 127.0.0.1:18080. Envoy
+# Gateway runs the proxy for listener port 80 on container port 10080.
+apiVersion: v1
+kind: Service
+metadata:
+  name: askedin-gateway-nodeport
+  namespace: envoy-gateway-system
+spec:
+  type: NodePort
+  selector:
+    gateway.envoyproxy.io/owning-gateway-name: askedin-gateway
+    gateway.envoyproxy.io/owning-gateway-namespace: apps
+  ports:
+    - name: http
+      port: 80
+      targetPort: 10080
+      nodePort: 30080
