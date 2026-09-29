@@ -5,11 +5,17 @@ name: e2e
 # the same job with the same steps. Everything happens inside this runner's kind cluster; the
 # workflow has no credentials and reaches nothing of Askedin's.
 #
-# The hls.js playback spec (tests/e2e) is not part of it: it starts its own gateway and worker
-# from a build tree and serves its own page, so it cannot be pointed at the sandbox route, and
-# ci.yml does not run it either. vod_flow's playback scenario covers the same route here.
+# Beside it, live playback (M31) on a build tree: tests/e2e/live-run.sh starts its own gateway
+# and packager, so it needs no cluster. It records the glass-to-glass latency it measures in
+# the run's summary. The VOD hls.js spec (tests/e2e/run.sh) is not run: vod_flow's playback
+# scenario covers the same route in the sandbox.
 on:
   workflow_dispatch:
+    inputs:
+      sandbox:
+        description: Also run the sandbox cluster job (false runs live playback alone)
+        type: boolean
+        default: true
   schedule:
     - cron: "43 3 * * *"
   push:
@@ -24,6 +30,7 @@ concurrency:
 
 jobs:
   sandbox:
+    if: github.event_name != 'workflow_dispatch' || inputs.sandbox
     runs-on: ubuntu-24.04
     # Cold image builds dominate; the rest is minutes.
     timeout-minutes: 75
@@ -101,3 +108,64 @@ jobs:
           if-no-files-found: warn
       - if: always()
         run: make e2e-down
+
+  # hls.js in Chrome for Testing plays a stream the test publisher sends live_packager over SRT,
+  # its playlist through the gateway's live route and LiveManifestCache, its segments from
+  # MinIO on the URLs the gateway signed; the media sequence only grows; the stream's end
+  # reaches the player as EXT-X-ENDLIST and playback ends cleanly (tests/e2e/live.e2e.mjs).
+  live-playback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+      ULW_LIVE_LATENCY_FILE: ${{ github.workspace }}/live-report/live-latency.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The toolchain, ffmpeg (with SRT, for the test publisher) and the user namespaces the
+      # packager's sandboxed ffmpeg needs.
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-14-ci-live-e2e
+      - name: Start MinIO
+        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      - run: cmake --preset ci
+      - run: cmake --build --preset ci --target gateway_server live_packager ulw_devtoken ulw_migrate
+      - run: mkdir -p live-report
+      - run: tests/e2e/live-run.sh build/ci
+        timeout-minutes: 15
+      - name: Record the measured latency
+        if: always()
+        run: |
+          report=live-report/live-latency.json
+          if [[ -f $report ]]; then
+            {
+              echo "### Live playback: glass-to-glass latency"
+              echo
+              jq -r '"Median \(.glassToGlassMs.median) ms, p95 \(.glassToGlassMs.p95) ms (picture clock, \(.samples) samples); program date time median \(.programDateTimeMs.median) ms; target duration \(.segmentSeconds) s; \(.stalls) stalls; gateway: \(.gateway.livePlaylistRequests) playlist requests, \(.gateway.storeReads) store reads."' "$report"
+              echo
+              echo '```json'
+              cat "$report"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat "$report"
+          fi
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-latency
+          path: live-report
+          if-no-files-found: warn
+      - if: failure()
+        run: docker compose -f deploy/local/compose.yaml logs minio
