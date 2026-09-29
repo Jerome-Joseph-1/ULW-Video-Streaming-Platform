@@ -1,4 +1,4 @@
-# 0046. A message is stored with its seq, in one statement, before it is delivered
+# 0052. A message is stored with its seq, in one statement, before it is delivered
 
 Status: Accepted
 Date: 2026-09-29

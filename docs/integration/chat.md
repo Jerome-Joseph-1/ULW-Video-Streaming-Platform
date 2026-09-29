@@ -34,7 +34,7 @@ listed origin. Native apps send the bearer header.
 
 ## Messages
 
-<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0046-messages-stored-with-their-seq.md -->
+<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0052-messages-stored-with-their-seq.md -->
 
 Every message is one JSON object in one text frame. Unknown `type`s and unknown fields are
 refused with an `error`, not ignored. Room ids are canonical lowercase UUIDs.
