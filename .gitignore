@@ -12,5 +12,6 @@ compile_commands.json
 /tests/e2e/node_modules/
 /tests/e2e/test-results/
 /tests/e2e/playwright-report/
+/tests/e2e/.browsers/
 /target/
 __pycache__/

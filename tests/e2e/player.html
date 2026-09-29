@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ULW playback</title>
+<script src="/hls.js"></script>
+</head>
+<body>
+<video id="video" muted playsinline width="640" height="360"></video>
+<script>
+// Records what the test asserts on: every stall hls.js reports, every 'waiting' once playback
+// has started, the level of each fragment actually played, and how playback ended.
+const params = new URLSearchParams(location.search);
+const video = document.getElementById('video');
+const state = {
+  levels: [],
+  stalls: [],
+  waitingAfterStart: 0,
+  started: false,
+  ended: false,
+  switchedTo: null,
+  playedLevels: [],
+  errors: [],
+};
+window.player = { state };
+
+// A short forward buffer keeps later segments unfetched when the switch is asked for, so the
+// switch has to be made mid-stream rather than after everything is already buffered.
+const hls = new Hls({ maxBufferLength: 6, maxMaxBufferLength: 6, startLevel: 0 });
+window.player.hls = hls;
+hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+  state.levels = data.levels.map((l) => l.height);
+  // Manual from the start: the only switch is the one the test forces.
+  hls.currentLevel = 0;
+  video.play();
+});
+hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => { state.switchedTo = data.level; });
+hls.on(Hls.Events.FRAG_CHANGED, (_, data) => { state.playedLevels.push(data.frag.level); });
+hls.on(Hls.Events.ERROR, (_, data) => {
+  if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+    state.stalls.push(video.currentTime);
+  } else {
+    state.errors.push(`${data.type}/${data.details}${data.fatal ? ' (fatal)' : ''}`);
+  }
+});
+video.addEventListener('playing', () => { state.started = true; });
+video.addEventListener('waiting', () => {
+  if (state.started) {
+    state.waitingAfterStart += 1;
+  }
+});
+video.addEventListener('ended', () => { state.ended = true; });
+hls.loadSource(`/api/v1/videos/${params.get('video')}/master.m3u8`);
+hls.attachMedia(video);
+</script>
+</body>
+</html>
