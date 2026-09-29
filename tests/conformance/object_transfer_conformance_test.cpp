@@ -201,6 +201,38 @@ TEST_P(TransferLaws, AnUploadReplacesTheObjectUnderTheSameKey) {
     EXPECT_TRUE(std::ranges::equal(read_file(local("down")), second));
 }
 
+TEST_P(TransferLaws, AnUploadNewCreatesTheObjectWhenTheKeyIsFree) {
+    const auto bytes = pattern(1000, 3);
+    write_file(local("up"), bytes);
+    const auto k = key("live/claim");
+    ASSERT_TRUE(transfer().upload_new(local("up"), k, segment_type()));
+    ASSERT_TRUE(transfer().download(k, local("down")));
+    EXPECT_TRUE(std::ranges::equal(read_file(local("down")), bytes));
+}
+
+TEST_P(TransferLaws, AnUploadNewNeverReplacesAnExistingObject) {
+    const auto first = pattern(1000, 4);
+    const auto second = pattern(2000, 5);
+    write_file(local("first"), first);
+    write_file(local("second"), second);
+    const auto k = key("live/claim");
+    ASSERT_TRUE(transfer().upload_new(local("first"), k, segment_type()));
+    EXPECT_EQ(transfer().upload_new(local("second"), k, segment_type()).error(),
+              StorageError::AlreadyExists);
+    ASSERT_TRUE(transfer().download(k, local("down")));
+    EXPECT_TRUE(std::ranges::equal(read_file(local("down")), first));
+}
+
+TEST_P(TransferLaws, AnUploadNewOverAnObjectPutByUploadIsRefusedToo) {
+    write_file(local("first"), pattern(10, 6));
+    write_file(local("second"), pattern(20, 7));
+    const auto k = key("live/claim");
+    ASSERT_TRUE(transfer().upload(local("first"), k, segment_type()));
+    EXPECT_EQ(transfer().upload_new(local("second"), k, segment_type()).error(),
+              StorageError::AlreadyExists);
+    EXPECT_EQ(transfer().size(k), 10U);
+}
+
 TEST_P(TransferLaws, ADownloadReplacesWhateverTheDestinationHeld) {
     const auto bytes = pattern(4096, 3);
     write_file(local("up"), bytes);

@@ -4,24 +4,30 @@
 #include "os/system_clock.hpp"
 #include "os/unique_fd.hpp"
 
+#include "live_command.hpp"
 #include "process.hpp"
 #include "support/temp_dir.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <grp.h>
 #include <gtest/gtest.h>
 #include <pthread.h>
 #include <stop_token>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -35,6 +41,7 @@ using infra::ffmpeg::Limits;
 using infra::ffmpeg::Sandbox;
 
 constexpr std::uint64_t kGiB = std::uint64_t{1} << 30U;
+constexpr std::uint64_t kFileLimit = std::uint64_t{3} << 20U;
 
 // Is a process with exactly this command line running anywhere on the host? Zombies count
 // as gone.
@@ -66,7 +73,8 @@ protected:
         }
     }
 
-    ChildExit run(const Args& args, Limits limits = {}, const std::stop_token& stop = {}) {
+    ChildExit run(const Args& args, Limits limits = {}, const std::stop_token& stop = {},
+                  int input = -1) {
         if (limits.writable.empty()) {
             limits.writable = writable_.path();
         }
@@ -81,19 +89,24 @@ protected:
         }
         stdout_.clear();
         auto child = infra::ffmpeg::run_sandboxed(
-            Sandbox{.helper = kHelper, .environment = {"PATH=/usr/bin:/bin"}}, limits, args, clock_,
+            Sandbox{.helper = kHelper,
+                    .environment = {"PATH=/usr/bin:/bin"},
+                    .syscall_filter = syscall_filter_},
+            limits, args, clock_,
             [this](std::string_view bytes) {
                 stdout_.append(bytes);
                 if (on_stdout_) {
                     on_stdout_(stdout_);
                 }
             },
-            stop);
+            stop, input);
         EXPECT_TRUE(child) << child.error();
         return child.value_or(ChildExit{});
     }
 
     const fs::path kHelper{ULW_SANDBOX_BIN};
+    // Off here so that an ordinary shell can stand in for ffmpeg; SyscallFilterTest turns it on.
+    bool syscall_filter_ = false;
     os::SystemClock clock_;
     ulw::test::TempDir writable_{"ulw-sandbox"};
     std::string stdout_;
@@ -147,6 +160,32 @@ TEST_F(SandboxTest, LimitsReachTheProgram) {
     EXPECT_EQ(stdout_, "2097152\n7\n0\n");
 }
 
+TEST_F(SandboxTest, AFileSizeLimitReachesTheProgramAndStopsAFileGrowingPastIt) {
+    const auto reported = run({"bash", "-c", "ulimit -f"}, {.writable = {},
+                                                            .address_space_bytes = 0,
+                                                            .cpu = {},
+                                                            .wall = {},
+                                                            .file_size_bytes = kFileLimit});
+    EXPECT_EQ(reported.exit_code, 0);
+    // bash counts ulimit -f in 1024-byte blocks.
+    EXPECT_EQ(stdout_, "3072\n");
+
+    const auto grown = run({"sh", "-c", "dd if=/dev/zero of=big bs=1M count=8 2>/dev/null"},
+                           {.writable = {},
+                            .address_space_bytes = 0,
+                            .cpu = {},
+                            .wall = {},
+                            .file_size_bytes = kFileLimit});
+    EXPECT_NE(grown.exit_code, 0);
+    EXPECT_LE(fs::file_size(writable_.path() / "big"), kFileLimit);
+}
+
+TEST_F(SandboxTest, WithoutAFileSizeLimitAFileGrowsFreely) {
+    const auto child = run({"bash", "-c", "ulimit -f"});
+    EXPECT_EQ(child.exit_code, 0);
+    EXPECT_EQ(stdout_, "unlimited\n");
+}
+
 TEST_F(SandboxTest, TheProgramHoldsNoCapabilitiesAndCannotRegainThem) {
     const auto child = run({"sh", "-c",
                             "grep -E '^Cap(Eff|Prm|Bnd)' /proc/self/status; "
@@ -170,6 +209,34 @@ TEST_F(SandboxTest, StdinIsEmptyAndNoOtherDescriptorLeaks) {
     EXPECT_EQ(child.exit_code, 0);
     // 0-2, and 3 for the directory ls is reading.
     EXPECT_EQ(stdout_, "0\n1\n2\n3\n");
+}
+
+TEST_F(SandboxTest, AnInputDescriptorBecomesStdinAndNothingElseLeaks) {
+    std::array<int, 2> fds{};
+    ASSERT_EQ(::pipe2(fds.data(), O_CLOEXEC), 0);
+    const os::UniqueFd read_end(fds[0]);
+    os::UniqueFd write_end(fds[1]);
+    constexpr std::string_view kBytes = "ts bytes";
+    ASSERT_EQ(::write(write_end.get(), kBytes.data(), kBytes.size()),
+              static_cast<ssize_t>(kBytes.size()));
+    write_end.reset();
+    const auto child = run({"sh", "-c", "cat; ls /proc/self/fd"}, {}, {}, read_end.get());
+    EXPECT_EQ(child.exit_code, 0);
+    EXPECT_EQ(stdout_, "ts bytes0\n1\n2\n3\n");
+}
+
+TEST_F(SandboxTest, ASocketFromOutsideStillCarriesBytesIntoTheNamespaceWithoutNetwork) {
+    std::array<int, 2> pair{};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair.data()), 0);
+    const os::UniqueFd ours(pair[0]);
+    const os::UniqueFd theirs(pair[1]);
+    constexpr std::string_view kBytes = "from the publisher";
+    ASSERT_EQ(::write(ours.get(), kBytes.data(), kBytes.size()),
+              static_cast<ssize_t>(kBytes.size()));
+    ASSERT_EQ(::shutdown(ours.get(), SHUT_WR), 0);
+    const auto child = run({"cat"}, {}, {}, theirs.get());
+    EXPECT_EQ(child.exit_code, 0);
+    EXPECT_EQ(stdout_, kBytes);
 }
 
 TEST_F(SandboxTest, TheWallClockDeadlineTerminatesAnOverrun) {
@@ -327,6 +394,182 @@ TEST_F(SandboxTest, TheHelpersOwnFailuresHaveTheirOwnCodes) {
                                       .wall = {}});
     EXPECT_EQ(child.exit_code, infra::ffmpeg::kSandboxSetupFailed);
     EXPECT_NE(child.stderr_tail.find("writable directory"), std::string::npos);
+}
+
+class SyscallFilterTest : public SandboxTest {
+protected:
+    SyscallFilterTest() { syscall_filter_ = true; }
+
+    const fs::path kProbe{ULW_SYSCALL_PROBE_BIN};
+};
+
+TEST_F(SyscallFilterTest, ACallTheTablesAllowRunsToTheEnd) {
+    const auto child = run({kProbe.string(), "getpid"});
+    EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
+    EXPECT_EQ(child.signal, 0);
+}
+
+TEST_F(SyscallFilterTest, EveryOtherCallKillsTheProgramWithSigsysAndClassifiesAsBlocked) {
+    for (const std::string name : {"ptrace", "mount", "keyctl", "bpf", "io_uring_setup", "socket",
+                                   "unshare", "setns", "kill", "process_vm_readv", "chroot"}) {
+        const auto child = run({kProbe.string(), name});
+        EXPECT_EQ(child.signal, SIGSYS) << name;
+        EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
+                  core::ports::TranscodeFailure::SyscallBlocked)
+            << name;
+    }
+}
+
+TEST_F(SyscallFilterTest, AnAbortStillEndsTheProgramWithSigabrtAndIsAPlainKill) {
+    const auto child = run({kProbe.string(), "abort"});
+    EXPECT_EQ(child.signal, SIGABRT);
+    EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
+              core::ports::TranscodeFailure::Killed);
+}
+
+TEST_F(SyscallFilterTest, WithoutTheFilterTheSameCallsReturnAnError) {
+    syscall_filter_ = false;
+    for (const std::string name : {"ptrace", "mount", "keyctl", "bpf", "io_uring_setup"}) {
+        const auto child = run({kProbe.string(), name});
+        EXPECT_EQ(child.signal, 0) << name;
+        EXPECT_EQ(child.exit_code, 0) << name;
+    }
+}
+
+TEST_F(SyscallFilterTest, ATranscodeWithThreadsStillRuns) {
+    Limits limits;
+    limits.address_space_bytes = 8 * kGiB;
+    const auto child = run({"ffmpeg",
+                            "-nostdin",
+                            "-v",
+                            "error",
+                            "-f",
+                            "lavfi",
+                            "-i",
+                            "testsrc2=size=640x360:rate=25",
+                            "-f",
+                            "lavfi",
+                            "-i",
+                            "sine=frequency=440:sample_rate=48000",
+                            "-t",
+                            "2",
+                            "-c:v",
+                            "libx264",
+                            "-threads",
+                            "4",
+                            "-c:a",
+                            "aac",
+                            "-f",
+                            "hls",
+                            "-hls_time",
+                            "1",
+                            "-hls_segment_type",
+                            "fmp4",
+                            "-hls_playlist_type",
+                            "vod",
+                            "-hls_segment_filename",
+                            "seg_%03d.m4s",
+                            "index.m3u8"},
+                           limits);
+    if (child.exit_code == infra::ffmpeg::kProgramNotFound) {
+        GTEST_SKIP() << "no ffmpeg on this host";
+    }
+    EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
+    EXPECT_TRUE(fs::exists(writable_.path() / "index.m3u8"));
+    EXPECT_TRUE(fs::exists(writable_.path() / "seg_000.m4s"));
+}
+
+// The live packager's command line, fed MPEG-TS over a pipe as the packager feeds it. It renames
+// each segment into place, which the worker's transcode never does.
+TEST_F(SyscallFilterTest, ALiveRemuxFromAPipeStillRuns) {
+    const auto source =
+        run({"ffmpeg", "-nostdin", "-v",       "error",
+             "-f",     "lavfi",    "-i",       "testsrc2=size=320x180:rate=25",
+             "-f",     "lavfi",    "-i",       "sine=frequency=440:sample_rate=48000",
+             "-t",     "3",        "-c:v",     "libx264",
+             "-g",     "25",       "-c:a",     "aac",
+             "-f",     "mpegts",   "source.ts"});
+    if (source.exit_code == infra::ffmpeg::kProgramNotFound) {
+        GTEST_SKIP() << "no ffmpeg on this host";
+    }
+    ASSERT_EQ(source.exit_code, 0) << source.stderr_tail;
+    std::string bytes(fs::file_size(writable_.path() / "source.ts"), '\0');
+    ASSERT_FALSE(bytes.empty());
+    std::ifstream(writable_.path() / "source.ts", std::ios::binary)
+        .read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+
+    std::array<int, 2> fds{};
+    ASSERT_EQ(::pipe2(fds.data(), O_CLOEXEC), 0);
+    os::UniqueFd read_end(fds[0]);
+    // More than a pipe holds, so a writer of its own; closing its end is the end of the stream.
+    std::jthread publisher([write_end = os::UniqueFd(fds[1]), &bytes] {
+        // A write with no reader left is EPIPE here rather than SIGPIPE for the whole test.
+        sigset_t pipe_signal;
+        sigemptyset(&pipe_signal);
+        sigaddset(&pipe_signal, SIGPIPE);
+        pthread_sigmask(SIG_BLOCK, &pipe_signal, nullptr);
+        std::string_view rest = bytes;
+        while (!rest.empty()) {
+            const ssize_t n = ::write(write_end.get(), rest.data(), rest.size());
+            if (n <= 0) {
+                return;
+            }
+            rest.remove_prefix(static_cast<std::size_t>(n));
+        }
+    });
+    const infra::ffmpeg::LiveRemuxJob job{.input = read_end.get(),
+                                          .out_dir = writable_.path(),
+                                          .segment_seconds = 1,
+                                          .listed_segments = 2,
+                                          .first_sequence = 5,
+                                          .epoch = 7,
+                                          .max_kbps = 8000,
+                                          .max_duration = core::Seconds{30}};
+    const auto child = run(infra::ffmpeg::live_remux_args("ffmpeg", job), {}, {}, read_end.get());
+    // An ffmpeg that died early leaves the writer blocked on a full pipe until no reader is left.
+    read_end.reset();
+    publisher.join();
+    EXPECT_EQ(child.signal, 0) << "SIGSYS is the filter killing it";
+    EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
+    const std::string segment = infra::ffmpeg::live_segment_name(7, 5);
+    EXPECT_TRUE(fs::exists(writable_.path() / infra::ffmpeg::live_init_name(7)));
+    EXPECT_TRUE(fs::exists(writable_.path() / segment));
+    EXPECT_FALSE(fs::exists(writable_.path() / (segment + ".tmp")));
+    EXPECT_TRUE(fs::exists(writable_.path() / std::string(infra::ffmpeg::kLivePlaylist)));
+}
+
+// The traces this filter came from were taken as root, and some libraries ask more of a caller
+// that is not (libgcrypt calls geteuid only then). CI runs these tests as an ordinary user;
+// as root this stands in for it.
+TEST_F(SyscallFilterTest, AnOrdinaryUsersFfprobeRunsToo) {
+    if (::geteuid() != 0) {
+        GTEST_SKIP() << "already an ordinary user, as every test here then is";
+    }
+    constexpr uid_t kNobody = 65534;
+    fs::permissions(writable_.path(), fs::perms::all);
+    const pid_t child = ::fork();
+    if (child == 0) {
+        const bool dropped =
+            ::setgroups(0, nullptr) == 0 && ::setgid(kNobody) == 0 && ::setuid(kNobody) == 0;
+        const auto ran =
+            dropped ? run({"ffprobe", "-v", "error", "-f", "lavfi", "-i",
+                           "testsrc=duration=1:size=64x64", "-show_entries", "format=duration"})
+                    : ChildExit{.exit_code = 99,
+                                .signal = 0,
+                                .ending = Ending::Exited,
+                                .wall = {},
+                                .peak_rss_kib = 0,
+                                .stderr_tail = {},
+                                .stderr_bytes = 0};
+        std::_Exit(ran.exit_code);
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    if (WEXITSTATUS(status) == infra::ffmpeg::kProgramNotFound) {
+        GTEST_SKIP() << "no ffprobe on this host";
+    }
+    EXPECT_EQ(WEXITSTATUS(status), 0) << "159 is the filter killing it";
 }
 
 TEST(SandboxCheck, NamesWhatWentWrong) {

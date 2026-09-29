@@ -22,6 +22,7 @@
 #include <string>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace infra::storage {
 
@@ -191,6 +192,25 @@ S3Transfer::download(const core::StorageKey& key, const std::filesystem::path& d
 std::expected<void, StorageError> S3Transfer::upload(const std::filesystem::path& source,
                                                      const core::StorageKey& key,
                                                      const core::ContentType& type) {
+    return put(source, key, type, false);
+}
+
+std::expected<void, StorageError> S3Transfer::upload_new(const std::filesystem::path& source,
+                                                         const core::StorageKey& key,
+                                                         const core::ContentType& type) {
+    if (!deps_.profile.supports_conditional_put) {
+        return std::unexpected(StorageError::Permanent);
+    }
+    const auto put_result = put(source, key, type, true);
+    if (!put_result && put_result.error() == StorageError::PreconditionFailed) {
+        return std::unexpected(StorageError::AlreadyExists);
+    }
+    return put_result;
+}
+
+std::expected<void, StorageError> S3Transfer::put(const std::filesystem::path& source,
+                                                  const core::StorageKey& key,
+                                                  const core::ContentType& type, bool create_only) {
     // Never through a link: the worker uploads what a sandboxed ffmpeg wrote, and a link there
     // could name any file the worker can read.
     const os::UniqueFd fd(::open(source.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
@@ -208,8 +228,11 @@ std::expected<void, StorageError> S3Transfer::upload(const std::filesystem::path
     if (!hash) {
         return std::unexpected(hash.error());
     }
-    const std::array headers{
-        s3util::Header{.name = "content-type", .value = std::string(type.view())}};
+    std::vector<s3util::Header> headers{
+        {.name = "content-type", .value = std::string(type.view())}};
+    if (create_only) {
+        headers.push_back({.name = "if-none-match", .value = "*"});
+    }
     const auto target = endpoint_->bucket().object(key);
     return control_->retrying<void>([&]() -> std::expected<void, Failed> {
         FileSource body(fd.get());

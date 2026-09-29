@@ -66,7 +66,10 @@ repository, l7mp.io, is unreachable from the build machines; GitHub is not).
 - The secret sits in two env files that must agree. The per-cluster step checks that, but
   only when someone runs it: a `TURN_SECRET` changed in one file and pushed with
   `create-k8s-secrets.sh` alone breaks that environment's relay until the step runs.
-- Docker 27 or later is needed for the sandbox's routed network.
+- Docker 27 or later is needed for the sandbox's routed network. Before Docker 29 the outside
+  client only keeps its address with the userland proxy off and a DOCKER-USER rule accepting
+  its DNATed packets (e2e.yml sets both on its runner); otherwise docker-proxy relays it from
+  the kind network's gateway and stunner_check.py fails.
 - Reopen if the call service needs to decide who may relay independently of LiveKit (for
   example, TURN for a peer-to-peer path that bypasses the SFU), or if STUNner's free tier stops
   covering what we use.

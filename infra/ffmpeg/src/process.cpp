@@ -137,8 +137,14 @@ std::vector<std::string> helper_argv(const Sandbox& sandbox, const Limits& limit
                                   "--address-space",
                                   std::to_string(limits.address_space_bytes),
                                   "--cpu-seconds",
-                                  std::to_string(limits.cpu.count()),
-                                  "--"};
+                                  std::to_string(limits.cpu.count())};
+    if (limits.file_size_bytes != 0) {
+        argv.insert(argv.end(), {"--file-size", std::to_string(limits.file_size_bytes)});
+    }
+    if (!sandbox.syscall_filter) {
+        argv.emplace_back("--no-syscall-filter");
+    }
+    argv.emplace_back("--");
     argv.insert(argv.end(), args.begin(), args.end());
     return argv;
 }
@@ -193,10 +199,10 @@ std::expected<Channels, std::string> open_channels() {
 }
 
 std::expected<pid_t, std::string> spawn(const Sandbox& sandbox, const Limits& limits,
-                                        const Args& args, Channels& channels) {
+                                        const Args& args, Channels& channels, int input) {
     FileActions actions;
     SpawnAttributes attributes;
-    if (!actions.dup2(channels.devnull.get(), STDIN_FILENO) ||
+    if (!actions.dup2(input >= 0 ? input : channels.devnull.get(), STDIN_FILENO) ||
         !actions.dup2(channels.out.write.get(), STDOUT_FILENO) ||
         !actions.dup2(channels.err.write.get(), STDERR_FILENO) || !attributes.isolate()) {
         return std::unexpected("spawn attributes refused");
@@ -323,13 +329,14 @@ private:
 std::expected<ChildExit, std::string>
 run_sandboxed(const Sandbox& sandbox, const Limits& limits, const Args& args,
               const core::ports::IClock& clock,
-              const std::function<void(std::string_view)>& on_stdout, const std::stop_token& stop) {
+              const std::function<void(std::string_view)>& on_stdout, const std::stop_token& stop,
+              int input) {
     auto channels = open_channels();
     if (!channels) {
         return std::unexpected(std::move(channels.error()));
     }
     const core::MonoTime started = clock.now();
-    const auto pid = spawn(sandbox, limits, args, *channels);
+    const auto pid = spawn(sandbox, limits, args, *channels, input);
     if (!pid) {
         return std::unexpected(pid.error());
     }
