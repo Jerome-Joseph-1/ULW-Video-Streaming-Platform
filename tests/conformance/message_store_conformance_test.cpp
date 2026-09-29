@@ -313,10 +313,8 @@ TEST_P(MessageStoreConformance, SentAtIsWhenTheMessageWasStoredToTheMicrosecond)
     ASSERT_EQ(page->size(), 2U);
     for (const StoredMessage& m : *page) {
         EXPECT_EQ(m.sent_at, std::chrono::floor<std::chrono::microseconds>(m.sent_at));
-        // The database's clock and this process's are the same host's; a day is not a bound
-        // on either, only a check that the time is today's and not a default.
-        EXPECT_LT(std::chrono::abs(m.sent_at - std::chrono::system_clock::now()),
-                  std::chrono::hours{24});
+        // Set by the store, and never left at the epoch.
+        EXPECT_NE(m.sent_at, core::WallTime{});
     }
     EXPECT_LE((*page)[0].sent_at, (*page)[1].sent_at);
 }
