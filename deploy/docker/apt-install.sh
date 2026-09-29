@@ -10,6 +10,15 @@ set -eu
 : "${UBUNTU_SNAPSHOT:?}"
 
 if [ ! -e /etc/ssl/certs/ca-certificates.crt ]; then
+    # The bootstrap brings ca-certificates and openssl (with libssl3t64) at whatever the live
+    # archive has; the pinned install below must take both back to the snapshot's versions.
+    case " $* " in
+    *" ca-certificates="*" openssl="* | *" openssl="*" ca-certificates="*) ;;
+    *)
+        echo "apt-install: the first install in an image must pin ca-certificates and openssl" >&2
+        exit 1
+        ;;
+    esac
     apt-get update -q
     apt-get install -qy --no-install-recommends ca-certificates
 fi
@@ -19,11 +28,11 @@ if [ -r /run/secrets/ca-bundle ]; then
 fi
 apt() {
     # The snapshot service answers 503 now and then under load; a retry gets through.
-    apt-get -o Acquire::https::CAInfo="$ca" -o Acquire::Retries=5 --snapshot "$UBUNTU_SNAPSHOT" "$@"
+    apt-get -o Acquire::https::CAInfo="$ca" -o Acquire::Retries=10 --snapshot "$UBUNTU_SNAPSHOT" "$@"
 }
 apt update -q
-# Every package is pinned, so a downgrade can only be a pin undoing the bootstrap ca-certificates
-# after the archive moved past the snapshot.
+# Every package is pinned, so a downgrade can only be a pin undoing the bootstrap's packages
+# after the live archive moved past the snapshot.
 apt install -qy --no-install-recommends --allow-downgrades "$@"
 apt-get clean
 rm -rf /var/lib/apt/lists/*

@@ -3,8 +3,9 @@
 #   docker build -f deploy/docker/Dockerfile --target gateway --build-arg ULW_GIT_SHA=$(git rev-parse --short=12 HEAD) -t video-gateway .
 #   docker build -f deploy/docker/Dockerfile --target worker  --build-arg ULW_GIT_SHA=... -t video-worker .
 #
-# gateway carries gateway_server and ulw_migrate (the migration Job runs the gateway image with
-# ulw_migrate as its command, so schema and server always come from one build). worker carries
+# gateway carries gateway_server and ulw_migrate (the video-gateway pod's init container runs
+# the gateway image with ulw_migrate as its command, so schema and server always come from one
+# build; docs/adr/0033). worker carries
 # transcode_worker, ulw_sandbox beside it, and ffmpeg.
 #
 # Builder and runtime are the same Ubuntu release, which is also what CI and the dev machines
@@ -21,6 +22,8 @@ FROM apt AS build
 RUN --mount=type=bind,source=deploy/docker/apt-install.sh,target=/usr/local/sbin/apt-install \
     --mount=type=secret,id=ca-bundle,mode=0444 \
     apt-install \
+        ca-certificates=20260601~24.04.1 \
+        openssl=3.0.13-0ubuntu3.15 \
         g++-14=14.2.0-4ubuntu2~24.04.1 \
         cmake=3.28.3-1build7 \
         ninja-build=1.11.1-2 \
@@ -46,6 +49,7 @@ RUN --mount=type=bind,source=deploy/docker/apt-install.sh,target=/usr/local/sbin
     --mount=type=secret,id=ca-bundle,mode=0444 \
     apt-install \
         ca-certificates=20260601~24.04.1 \
+        openssl=3.0.13-0ubuntu3.15 \
         libcurl4t64=8.5.0-2ubuntu10.15 \
         libpq5=16.15-0ubuntu0.24.04.1 \
         libssl3t64=3.0.13-0ubuntu3.15 \
