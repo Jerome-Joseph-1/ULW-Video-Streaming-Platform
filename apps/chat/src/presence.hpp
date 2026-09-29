@@ -72,7 +72,7 @@ struct PresenceClientId {
     friend bool operator==(PresenceClientId, PresenceClientId) = default;
 };
 
-// Who is online, for the clients that watch them (ADR-0055). Each user has a presence room,
+// Who is online, for the clients that watch them (ADR-0056). Each user has a presence room,
 // in the same registry and through the same owners and node channel as chat rooms. A node
 // joins it while the user is connected there (to announce them) or while a client there
 // watches them (to hear announcements). The room's order is the only coordination: every node

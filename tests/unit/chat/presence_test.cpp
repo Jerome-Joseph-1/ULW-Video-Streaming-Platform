@@ -270,7 +270,7 @@ TEST(PresenceRoom, EveryNodeDerivesTheSameVersion8RoomForAUserAndAnotherForAnoth
 }
 
 // Pinned: every node of every version must derive the same room for a user, and its first byte
-// is the presence tag, never a stream chat's (ADR-0055), so the two kinds of derived room never
+// is the presence tag, never a stream chat's (ADR-0056), so the two kinds of derived room never
 // share an id.
 TEST(PresenceRoom, AUsersRoomIsPinnedAndTaggedAsAPresenceRoom) {
     const core::RoomId alice = chat::presence_room(user("alice"));

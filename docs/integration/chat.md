@@ -161,7 +161,7 @@ messages, and can read its history, until that connection closes; the next `join
 
 ## Presence
 
-<!-- apps/chat/src/presence.hpp (PresenceLimits), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), docs/adr/0055-presence-over-the-room-plane.md -->
+<!-- apps/chat/src/presence.hpp (PresenceLimits), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), docs/adr/0056-presence-over-the-room-plane.md -->
 
 A client can watch other users and hear when they come online and go offline. A user is online
 while they have at least one open socket to any chat node, and for a grace of 10 s after their
@@ -220,4 +220,4 @@ starts with `02`) are reserved for presence: `join`, `send` or `history` naming 
 with `bad_room`. Presence events are never stored.
 
 Anyone signed in may watch anyone: there is no check of who may see whose presence yet. That is
-an open item before production ([ADR-0055](../adr/0055-presence-over-the-room-plane.md)).
+an open item before production ([ADR-0056](../adr/0056-presence-over-the-room-plane.md)).

@@ -31,7 +31,7 @@ inline constexpr core::Millis kOwnerStaleAfter{5'000};
 
 // Room ids derived from a name are RFC 9562 version 8 UUIDs whose first byte says what names
 // them; every other room id is version 7 (ADR-0023). 0x01 is a stream's live chat (M32), 0x02 a
-// user's presence room (ADR-0055), so a derived id of one kind is never taken for the other's.
+// user's presence room (ADR-0056), so a derived id of one kind is never taken for the other's.
 // M32 moves these tags to its shared header (core::ports::NamedRoom); until then they live here.
 inline constexpr std::uint8_t kStreamChatRoomTag = 0x01;
 inline constexpr std::uint8_t kPresenceRoomTag = 0x02;
@@ -45,7 +45,7 @@ inline constexpr std::uint8_t kPresenceRoomTag = 0x02;
 }
 
 // Rooms whose writes are sequenced and fanned out like any other's but never kept: presence
-// rooms, which chat_server derives (ADR-0055) and no client can name. A store takes their seqs,
+// rooms, which chat_server derives (ADR-0056) and no client can name. A store takes their seqs,
 // fenced as ever, and stores no message for them.
 [[nodiscard]] inline bool is_ephemeral_room(const core::RoomId& room) noexcept {
     return is_named_room(room, kPresenceRoomTag);
