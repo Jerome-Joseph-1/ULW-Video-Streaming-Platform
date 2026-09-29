@@ -80,10 +80,14 @@ Connection::Connection(Handle handle, Gateway& gateway) : handle_(handle), gatew
 
 Connection::~Connection() {
     release_slot();
+    release_client_holds();
 }
 
-void Connection::start(std::unique_ptr<net::ITransport> transport) noexcept {
+void Connection::start(std::unique_ptr<net::ITransport> transport, const net::IpAddress& peer,
+                       std::optional<ClientHold> hold) noexcept {
     transport_ = std::move(transport);
+    peer_ = peer;
+    connection_hold_ = hold;
     last_activity_ = now();
     receiving_ = true;
     transport_->start_receiving();
@@ -208,6 +212,9 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
         begin_request();
     }
     ++gw().counters().requests;
+    if (!admit_forwarded(head)) {
+        return http::HeadVerdict::reject(Status::TooManyRequests);
+    }
     req_.method = head.method;
     req_.content_length = head.content_length;
     req_.keep_alive =
@@ -263,20 +270,24 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
 
     if (!requires_auth(match->id)) {
         req_.authenticated = true;
-    } else {
-        infra::auth::TokenExtractor extractor(gw().limits().auth_cookie);
-        for (const http::HeaderField& h : head.headers) {
-            extractor.on_header(h.name, h.value);
-        }
-        const auto token = extractor.token();
-        if (!token) {
-            return http::HeadVerdict::reject(Status::Unauthorized);
-        }
-        req_.token = *token;
-        authenticate();
-        if (req_.body_error) {
-            return http::HeadVerdict::reject(*req_.body_error);
-        }
+        return http::HeadVerdict::accept();
+    }
+    return authenticate_head(head);
+}
+
+http::HeadVerdict Connection::authenticate_head(const http::RequestHead& head) noexcept {
+    infra::auth::TokenExtractor extractor(gw().limits().auth_cookie);
+    for (const http::HeaderField& h : head.headers) {
+        extractor.on_header(h.name, h.value);
+    }
+    const auto token = extractor.token();
+    if (!token) {
+        return http::HeadVerdict::reject(Status::Unauthorized);
+    }
+    req_.token = *token;
+    authenticate();
+    if (req_.body_error) {
+        return http::HeadVerdict::reject(*req_.body_error);
     }
     return http::HeadVerdict::accept();
 }
@@ -297,7 +308,29 @@ void Connection::authenticate() noexcept {
         return;
     }
     req_.claims = **result;
+    if (const auto charged = gw().charge_request(req_.claims->subject); !charged) {
+        ++gw().counters().limited_user_requests;
+        req_.retry_after = retry_after(charged.error());
+        req_.body_error = Status::TooManyRequests;
+        return;
+    }
     req_.authenticated = true;
+}
+
+bool Connection::admit_forwarded(const http::RequestHead& head) noexcept {
+    if (connection_hold_) {
+        return true;
+    }
+    const net::IpAddress client =
+        forwarded_client(peer_, head.headers, gw().limits().trusted_proxies);
+    request_hold_ = gw().hold_client(client);
+    if (request_hold_) {
+        return true;
+    }
+    ++gw().counters().limited_ip_requests;
+    // The hold frees as soon as one of the client's requests ends.
+    req_.retry_after = std::chrono::seconds{1};
+    return false;
 }
 
 void Connection::on_keys_refreshed() noexcept {
@@ -494,6 +527,15 @@ void Connection::start_append() noexcept {
     case Admission::Full:
         ++gw().counters().admission_rejections;
         fail(Status::ServiceUnavailable);
+        return;
+    }
+    // Charged by what the PATCH says it carries, before any of it is read: the bytes a
+    // refusal would otherwise have let in are what the quota exists to keep out.
+    if (const auto charged = gw().charge_upload_bytes(claims->subject, req_.content_length);
+        !charged) {
+        ++gw().counters().limited_user_bytes;
+        req_.retry_after = retry_after(charged.error());
+        fail(Status::TooManyRequests);
         return;
     }
     ++pending_;
@@ -1109,7 +1151,10 @@ void Connection::fail(Status status, std::optional<std::uint64_t> upload_offset)
         head.allow = req_.allow;
     }
     if (status == Status::ServiceUnavailable || status == Status::TooManyRequests) {
-        head.retry_after = kRetryAfter;
+        head.retry_after = req_.retry_after.value_or(kRetryAfter);
+    }
+    if (status == Status::Unauthorized) {
+        head.www_authenticate = req_.token.empty() ? "Bearer" : R"(Bearer error="invalid_token")";
     }
     respond(head, {});
 }
@@ -1173,6 +1218,10 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
         session_.reset();
     }
     release_slot();
+    if (request_hold_) {
+        gw().release_client(*request_hold_);
+        request_hold_.reset();
+    }
     const bool keep = req_.keep_alive && req_.message_complete && !draining_;
     head.connection = keep ? http::Connection::KeepAlive : http::Connection::Close;
     head.request_id = request_id();
@@ -1246,6 +1295,15 @@ void Connection::release_slot() noexcept {
     }
 }
 
+void Connection::release_client_holds() noexcept {
+    for (std::optional<ClientHold>* hold : {&connection_hold_, &request_hold_}) {
+        if (*hold) {
+            gateway_.release_client(**hold);
+            hold->reset();
+        }
+    }
+}
+
 void Connection::release_claim() noexcept {
     const core::UploadId* id = get(req_.upload_id);
     if (req_.claimed && id != nullptr) {
@@ -1279,6 +1337,7 @@ void Connection::close() noexcept {
     }
     release_claim();
     release_slot();
+    release_client_holds();
     if (key_wait_) {
         deps().verifier.cancel_wait(*this);
         key_wait_ = false;

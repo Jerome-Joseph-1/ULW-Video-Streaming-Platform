@@ -6,6 +6,7 @@
 #include "core/ports/storage.hpp"
 #include "http/request_parser.hpp"
 #include "http/response.hpp"
+#include "net/ip_address.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor.hpp"
 #include "net/slab.hpp"
@@ -44,7 +45,10 @@ public:
     Connection(Connection&&) = delete;
     Connection& operator=(Connection&&) = delete;
 
-    void start(std::unique_ptr<net::ITransport> transport) noexcept;
+    // `hold` is the peer's own count, nullopt for a trusted proxy, whose clients are counted a
+    // request at a time.
+    void start(std::unique_ptr<net::ITransport> transport, const net::IpAddress& peer,
+               std::optional<ClientHold> hold) noexcept;
     // The gateway is shutting down: finish the request in flight, then close.
     void drain() noexcept;
     // The drain deadline passed: close now, whatever is in flight.
@@ -103,6 +107,8 @@ private:
         // When the chunk's first byte went to the store.
         core::MonoTime append_started;
         std::optional<http::Status> body_error;
+        // A 429's or 503's own Retry-After; the default otherwise.
+        std::optional<std::chrono::seconds> retry_after;
         std::optional<RouteId> route;
         http::MethodSet allow;
         std::optional<http::Method> method;
@@ -142,6 +148,7 @@ private:
     void begin_request() noexcept;
     void on_parse(http::ParseResult result) noexcept;
     void advance() noexcept;
+    [[nodiscard]] http::HeadVerdict authenticate_head(const http::RequestHead& head) noexcept;
     void authenticate() noexcept;
 
     void start_create() noexcept;
@@ -174,6 +181,11 @@ private:
     void finish_request() noexcept;
     void release_claim() noexcept;
     void release_slot() noexcept;
+    void release_client_holds() noexcept;
+    // Behind a trusted proxy, counts the request against the client the proxy names; false
+    // once that client has max_connections_per_ip in flight. A direct peer was counted at
+    // accept.
+    [[nodiscard]] bool admit_forwarded(const http::RequestHead& head) noexcept;
     void linger() noexcept;
     void close() noexcept;
     void arm_timer(core::Millis delay) noexcept;
@@ -213,6 +225,11 @@ private:
 
     // The upload slot the current PATCH holds, released when that request ends.
     std::optional<core::UserId> slot_user_;
+    net::IpAddress peer_;
+    // The peer's count for this connection; none when the peer is a trusted proxy.
+    std::optional<ClientHold> connection_hold_;
+    // Behind a trusted proxy: the forwarded client's count for the request in flight.
+    std::optional<ClientHold> request_hold_;
 
     // Body bytes the store has not taken yet. Only filled while the parser is paused, so it
     // never holds more than one receive buffer or the parser's retained tail.

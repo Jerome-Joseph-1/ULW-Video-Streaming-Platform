@@ -19,11 +19,22 @@ namespace ulw::test {
 
 enum class Backend { Fake, Fs };
 
+// Production limits but the per-client ones, lifted: every test connects from 127.0.0.1, most as
+// one user, and under a manual clock a bucket never refills. Tests of those limits set them.
+[[nodiscard]] inline gateway::Limits unthrottled_limits() {
+    gateway::Limits limits;
+    limits.max_connections_per_ip = limits.max_connections;
+    limits.new_connections_per_ip_per_second = 1'000'000;
+    limits.requests_per_user_per_minute = 1'000'000;
+    limits.upload_bytes_per_user_per_day = std::uint64_t{1} << 50U;
+    return limits;
+}
+
 struct GatewayOptions {
     Backend backend = Backend::Fs;
     std::uint64_t chunk = std::uint64_t{8} * 1024 * 1024;
     infra::storage::FaultPlan plan{};
-    gateway::Limits limits{};
+    gateway::Limits limits = unthrottled_limits();
     // Time moves only when the test calls advance(), so timeouts need no waiting.
     bool manual_clock = false;
     gateway::Transport transport = gateway::Transport::Plain;

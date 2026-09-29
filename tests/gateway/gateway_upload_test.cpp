@@ -98,16 +98,22 @@ TEST_P(GatewayUpload, HealthAndReadinessNeedNoToken) {
     EXPECT_EQ(c.request("GET", "/api/v1/uploads", "")->status, 405);
 }
 
-TEST_P(GatewayUpload, UploadRoutesRefuseMissingAndBadTokens) {
+TEST_P(GatewayUpload, UploadRoutesRefuseMissingAndBadTokensWithABearerChallenge) {
     const GatewayUnderTest gw(over_transport());
     HttpClient c(gw.endpoint());
     const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
-    EXPECT_EQ(c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)))->status,
-              401);
+    const auto missing = c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)));
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 401);
+    // No credentials, so no error code (RFC 6750 section 3.1).
+    EXPECT_EQ(missing->header("www-authenticate"), "Bearer");
     HttpClient d(gw.endpoint());
-    EXPECT_EQ(
-        d.request("POST", "/api/v1/uploads", "forged", std::as_bytes(std::span(body)))->status,
-        401);
+    const auto forged =
+        d.request("POST", "/api/v1/uploads", "forged", std::as_bytes(std::span(body)));
+    ASSERT_TRUE(forged);
+    EXPECT_EQ(forged->status, 401);
+    EXPECT_EQ(forged->header("www-authenticate"), R"(Bearer error="invalid_token")");
+    EXPECT_EQ(forged->body, "");
 }
 
 TEST_P(GatewayUpload, InboundUserHeadersAreIgnored) {
