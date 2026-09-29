@@ -40,14 +40,15 @@ a word.
 
 - **Rooms.** A user's presence room is the RFC 9562 version 8 UUID of SHA-256 over a fixed
   namespace and the user id (`presence_room.hpp`): every node derives it, nothing is looked up.
-  The registry, ownership, fencing and forwarding are the chat rooms' own. Version 8 is the
-  room plane's ephemeral kind (`rt::is_ephemeral_room`): the store creates such a room with kind
+  The registry, ownership, fencing and forwarding are the chat rooms' own. Version 8 is the room
+  plane's ephemeral kind (`rt::is_ephemeral_room`): the store creates such a room with kind
   `presence` and takes its seqs with the fenced `UPDATE room_state SET last_seq = last_seq + 1`
   alone, storing no `chat_messages` row, in Postgres and in the in-memory stores alike (a
   conformance law). The envelope refuses version 8 room ids in `join`, `send` and `history`
-  (`bad_room`), so no client can read or write a presence room, and only nodes speak in one. Events are 9 bytes: a kind and the sender's tag,
-  64 bits of SHA-256 over the node's name and its start time, so a restarted node is a new
-  sender and its last run's announcements run out on their own.
+  (`bad_room`), so no client can read or write a presence room, and only nodes speak in one.
+  Events are 9 bytes: a kind and the sender's tag, 64 bits of SHA-256 over the node's name and
+  its start time, so a restarted node is a new sender and its last run's announcements run out
+  on their own.
 - **Membership.** A node joins the room while the user has a connection there or is in their
   grace, or while a client there watches them; the node is one member for all of those, as
   `ChatService` is for a chat room. It leaves when none of that holds and nothing it said is
@@ -72,8 +73,8 @@ a word.
   and no event is ever sent. The head a join answers is the room's `last_seq`, also after the
   room changed owners: a node taking a room over reads `last_seq` in the statement that claims
   it (`Ownership::last_seq`, `RoomRegistry::taken_at`) and counts on from there, so a hello said
-  under an earlier owner still shows. The join is membership, not a message: it costs a registry lookup
-  (a claim, the first time) and a place in the owner's heartbeat, both already bounded by
+  under an earlier owner still shows. The join is membership, not a message: it costs a registry
+  lookup (a claim, the first time) and a place in the owner's heartbeat, both already bounded by
   `Limits::max_connections`. `presence_events_sent_total` counts every event, and the cluster
   test checks it, with `forwards_total`, does not move for such a user.
 - **Timers.** One reactor timer per node: at once for rooms with something to send, otherwise at
@@ -91,9 +92,13 @@ a word.
     stop once no other node is left.
   - The owner dying mid fan-out can cost some nodes an event. A node sees that as a jump in the
     room's seqs at its next delivery and says again what it stands for: a `hello` if it watches,
-    an announcement if the user is connected there. A lost `offline` needs no repeat, since
-    the lease drops the announcement anyway. The router's join answer can itself lag a seq the
-    old owner took and never delivered; the same jump shows it.
+    a `probe` if the user is connected there (a probe, so that acks lost in the gap are sent
+    again and the node does not expire a watcher that is still there). A lost `offline` needs no
+    repeat, since the lease drops the announcement anyway. The router's join answer can itself
+    lag a seq the old owner took and never delivered; the same jump shows it.
+  - A watching node whose copy of an announcement expires while clients there still watch says
+    `hello` again: if only the renewals were lost, the announcing node answers, and the user is
+    shown online again after one offline.
 - **Limits.** 128 watches per connection, `too_many_watches` past it; watching oneself is
   `watching_self`. 8192 presence rooms per node (half the router's 16384): a watch that would
   make a new room past it is `busy`. Every watch that makes this node start watching a user
@@ -103,10 +108,14 @@ a word.
   remembered per room. About 1 KiB per room (8 MiB) and 16 bytes per watch (a room pointer in
   the connection's list, an id in the room's; 2.6 MiB for 1280 connections of 128): 11 MiB of
   the node's budget.
-- **Layering.** `chat_service.cpp` and `room_router.cpp` are untouched: the session dispatches
-  `watch` and `unwatch` to `Presence`, which uses `IRooms` as `ChatService` does. Presence
-  events are the nodes' own bytes in rooms no client can reach; end-to-end encryption, which is
-  about chat bodies, has nothing to do with them.
+- **Layering.** `chat_service.cpp` is untouched: the session dispatches `watch` and `unwatch`
+  to `Presence`, which uses `IRooms` as `ChatService` does. `room_router.cpp` changed in one
+  place, its `head()`: a node taking a room over now counts on from the `last_seq` its claim
+  read instead of from 0. That is a fix to the room plane, which every room needed (a member
+  joining after a takeover was told a head below what had been said), not something presence
+  asks of it; M22's freeze of the file starts at the phase-2 tag, after it. Presence events are
+  the nodes' own bytes in rooms no client can reach; end-to-end encryption, which is about chat
+  bodies, has nothing to do with them.
 
 ## Consequences
 
