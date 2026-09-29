@@ -90,8 +90,13 @@ protected:
 
     StoreResult<std::optional<std::uint64_t>> append(const core::RoomId& room,
                                                      std::uint64_t generation) {
-        return ask<std::optional<std::uint64_t>>(
-            [&](auto done) { store_->append(room, generation, std::move(done)); });
+        return ask<std::optional<std::uint64_t>>([&](auto done) {
+            store_->append(room, generation,
+                           {.sender = *core::UserId::parse("alice"),
+                            .key = *rt::MessageKey::parse("k1"),
+                            .body = {}},
+                           std::move(done));
+        });
     }
 
     StoreResult<std::vector<core::RoomId>> heartbeat(const core::NodeId& by,

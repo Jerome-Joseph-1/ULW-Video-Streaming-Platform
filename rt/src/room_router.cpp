@@ -1135,8 +1135,10 @@ private:
             return;
         }
         it->second.appending = true;
+        const Write& next = it->second.writes.front();
         const bool started = registry_.append(
-            room, [this, room](std::expected<std::uint64_t, AppendError> seq) noexcept {
+            room, Outgoing{.sender = next.sender, .key = next.key, .body = next.body},
+            [this, room](std::expected<std::uint64_t, AppendError> seq) noexcept {
                 appended(room, seq);
             });
         // Not owned any more, and not through a fence either: the rooms were released.

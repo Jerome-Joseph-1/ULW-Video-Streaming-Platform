@@ -29,7 +29,7 @@ need no change for it: whatever end-to-end encryption needs from them has to be 
 | | Binary WebSocket frames with a header of our own | Rejected for now: a second framing next to the JSON one for the same commands, for a third of the size |
 | Commits of a room ordered per epoch | The owner reads each body's MLS framing and refuses a second commit for an epoch | Rejected: the owner would parse bodies, which it must never do |
 | | A generic "first write per slot" check in the owner | Rejected: an interface ahead of its caller, and a slot high-water mark that dies with the owner until M19 persists it |
-| | The room's total order is the order: the first commit for an epoch, in seq order, is the one every member applies, and members discard later ones | Accepted: needs nothing of the server beyond what every room already has |
+| | The room's total order is the order: the first commit for an epoch, in seq order, is the one every member applies, and members discard later ones | Accepted: needs no reading of bodies, provided no member ever decides over a gap and every seq taken has its message stored (both below) |
 
 ## Decision
 
@@ -77,7 +77,16 @@ need no change for it: whatever end-to-end encryption needs from them has to be 
   Delivery Service by sequencing: commits and application messages share the room's order, and
   members apply the first valid commit for an epoch in seq order. Welcomes and key packages go
   through `IE2eeDeliveryService`, not through rooms. Nothing in the chat service or the router
-  looks at a body, so neither changes for Phase 3.
+  looks at a body, so neither changes for Phase 3. The rule "first commit in seq order wins" is
+  only sound if every member sees the same prefix, which takes three things:
+  - A client never applies a commit while any lower seq is missing: it fills the gap from
+    history first. A member that missed the winning commit and applied a later one would fork
+    the group.
+  - E2EE rooms are durable only; a lossy skip of a commit cannot be recovered from.
+  - No seq exists without its message: the owner stores the body in the same fenced write that
+    takes the seq, so a message sequenced and never delivered (the owner died mid fan-out) is
+    still in history for whoever missed it. `IRoomStore::append` already carries the message
+    for that reason; Postgres stores it from M19, which must land before the phase-2 tag.
 - **Memory.** Added to ADR-0036's budget: kept messages 32 MiB, remembered keys about 10 MiB.
   About 730 MiB at the very worst, in a 1 GiB pod.
 

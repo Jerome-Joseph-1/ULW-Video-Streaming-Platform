@@ -345,6 +345,8 @@ TEST_P(RoomRouterTest, MembersOnDifferentNodesSeeEachOthersMessagesInOneOrder) {
     EXPECT_EQ(a.router->rooms_owned(), 1U);
     EXPECT_EQ(b.router->rooms_owned(), 0U);
     EXPECT_EQ(b.router->counters().forwarded, 1U);
+    // Each message reached the store in the very write that took its seq.
+    EXPECT_EQ(db_.bodies.at(room_), (std::vector<std::string>{"one", "two"}));
 }
 
 TEST_P(RoomRouterTest, AWriteUnderAGenerationThatMovedOnIsFencedAndDeliveredNowhere) {
@@ -371,6 +373,7 @@ TEST_P(RoomRouterTest, AWriteUnderAGenerationThatMovedOnIsFencedAndDeliveredNowh
     EXPECT_EQ(a.events.fenced[0].write, rt::OwnerWrite::Append);
     EXPECT_EQ(a.events.fenced[0].generation, 1U);
     EXPECT_EQ(db_.rooms.at(room_).last_seq, 1U);
+    EXPECT_EQ(db_.bodies.at(room_), std::vector<std::string>{"before"});
     EXPECT_EQ(a.router->rooms_owned(), 0U);
 
     // Once chat-a has found the new owner, its members carry on through it.
