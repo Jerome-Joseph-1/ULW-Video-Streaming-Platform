@@ -127,6 +127,11 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-14-ci-browser
+      # run.sh needs Node 20 or later and nothing in tests/e2e pins one, so this is the current
+      # LTS, exact, rather than whatever the runner image ships.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
       # stack.mjs creates and drops its scratch database with psql.
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO
