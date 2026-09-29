@@ -5,11 +5,14 @@
 # fetched by fetch-chrome.sh.
 #
 # By default both peers run on this host against the LiveKit server of deploy/local/compose.yaml,
-# which is started if it is not running (and left running). The environment can point it
-# elsewhere:
+# which is started with its recorder if they are not running (and left running). The ingest spec
+# also needs gst-launch-1.0 with the good and bad plugins, ffmpeg, cargo and GStreamer's
+# development files (fetch-whipsink.sh builds whipsink), and the live_packager and ulw_sandbox
+# targets of the same build. The environment can point the suite elsewhere:
 #   LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
 #       Another LiveKit, such as the one deploy/stunner/up.sh puts behind STUNner in the kind
-#       sandbox. The local server is then left alone.
+#       sandbox. The local server is then left alone. The ingest spec's packager test needs a
+#       recorder (egress) beside that server, which the sandbox does not run.
 #   ULW_CALL_OUTSIDE_CONTAINER=<name>
 #       Runs the second peer of the call inside that container's network namespace (a sleeper on
 #       the sandbox's outside network, ulw-e2e-outside), so that it reaches the SFU as a client
@@ -38,7 +41,7 @@ export LIVEKIT_API_URL=${LIVEKIT_API_URL:-$local_livekit}
 export LIVEKIT_CLIENT_URL=${LIVEKIT_CLIENT_URL:-ws://127.0.0.1:7880}
 if [[ $LIVEKIT_API_URL == "$local_livekit" ]]; then
     docker compose -f "$root/deploy/local/compose.yaml" --profile calls up -d --wait livekit \
-        >/dev/null
+        egress >/dev/null
 fi
 
 ULW_E2E_CHROME=${ULW_E2E_CHROME:-$("$here/fetch-chrome.sh")}

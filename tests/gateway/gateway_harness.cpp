@@ -257,6 +257,12 @@ std::size_t GatewayUnderTest::connections() {
     return out;
 }
 
+std::size_t GatewayUnderTest::busy_connections() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->gateway->busy_connections(); });
+    return out;
+}
+
 std::size_t GatewayUnderTest::claims() {
     std::size_t out = 0;
     on_loop([&] { out = loop_->catalog->claims(); });

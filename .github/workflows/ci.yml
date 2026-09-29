@@ -175,6 +175,46 @@ jobs:
       - run: cmake --build --preset ci --target chat_server chat_cluster_tests
       - run: ctest --test-dir build/ci -R '^Reactors/ChatClusterTest\.' --output-on-failure
 
+  # M30's acceptance (tests/call/ingest.spec.mjs, ADR-0053): WHIP publishers, GStreamer's
+  # whipsink among them, against the LiveKit, Redis and egress of deploy/local/compose.yaml, and a
+  # relayed stream through to the live packager's playlist.
+  ingest:
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-ci
+      # gst-launch and the plugins the publisher's pipeline uses, and the development files
+      # whipsink builds against (fetch-whipsink.sh).
+      - name: Install GStreamer
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends gstreamer1.0-tools \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-nice libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev
+      # A build is only good for the GStreamer it linked against and the compiler that made it;
+      # fetch-whipsink.sh rebuilds whatever the key lets through that does not match either.
+      - name: GStreamer version
+        id: gstreamer
+        run: echo "version=$(pkg-config --modversion gstreamer-webrtc-1.0)" >>"$GITHUB_OUTPUT"
+      - name: Restore the whipsink build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: tests/call/.whipsink
+          key: whipsink-gst${{ steps.gstreamer.outputs.version }}-${{ hashFiles('tests/call/whipsink/*', 'tests/call/fetch-whipsink.sh') }}
+      - run: tests/call/fetch-whipsink.sh
+      - name: Start LiveKit, Redis and egress
+        run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit egress
+      - run: cmake --preset ci
+      - run: cmake --build --preset ci --target ulw_call_harness live_packager ulw_sandbox
+      - run: tests/call/run.sh build/ci ingest.spec.mjs
+      - if: failure()
+        run: docker compose -f deploy/local/compose.yaml --profile calls logs livekit egress
+
   lint:
     name: boundaries + format + tidy
     runs-on: ubuntu-24.04

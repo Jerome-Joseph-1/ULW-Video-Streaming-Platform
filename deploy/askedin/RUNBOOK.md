@@ -211,7 +211,7 @@ The role owns its database, which gives the migrations their DDL rights (docs/ad
 password percent-encoded.
 
 Chat message bodies travel as bound parameters, which the server writes to its log whenever it
-logs a statement with its parameters or an error in one (docs/adr/0052). Keep them out, on the
+logs a statement with its parameters or an error in one (docs/adr/0054). Keep them out, on the
 same database, as the same superuser, whatever statement logging is on now or later:
 
 ```sql
@@ -224,7 +224,7 @@ ALTER DATABASE ulw_stage SET auto_explain.log_parameter_max_length = 0;
 `SHOW log_parameter_max_length;` and `SHOW log_parameter_max_length_on_error;` in a new session
 as `ulw_stage` then print `0`.
 
-Chat rooms other than a stream's live chat admit only their listed members (docs/adr/0052).
+Chat rooms other than a stream's live chat admit only their listed members (docs/adr/0054).
 Until the product manages the lists, they are rows in `chat_members`, set as the service's role.
 Record the room as closed in the same transaction, before its first member, as the service's own
 statement does, so that it can never be recorded live while it lists anyone:

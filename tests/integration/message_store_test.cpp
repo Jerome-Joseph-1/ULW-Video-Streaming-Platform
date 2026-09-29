@@ -509,7 +509,7 @@ protected:
 };
 
 TEST_F(PlaintextTest, NoBodyReachesAProcessLogTheServerLogOrATextColumn) {
-    // What ADR-0052 asks of production Postgres, applied to these sessions: every statement
+    // What ADR-0054 asks of production Postgres, applied to these sessions: every statement
     // logged, and still no parameter in the log, on success or on error.
     constexpr std::string_view kProduction = "-c log_statement=all -c log_parameter_max_length=0 "
                                              "-c log_parameter_max_length_on_error=0";

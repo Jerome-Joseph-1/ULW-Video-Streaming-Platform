@@ -20,7 +20,6 @@
 #include "devtoken/dev_key.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
-#include "support/eventually.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
@@ -51,6 +50,7 @@ using ulw::test::ScratchDatabase;
 using ulw::test::WsClient;
 
 constexpr std::string_view kIssuer = "https://auth.test.askedin.com";
+constexpr std::chrono::milliseconds kReadyCheckPeriod{250};
 
 // Empty when the ports are not pinned: each node then reserves its own.
 std::vector<std::uint16_t> pinned_client_ports() {
@@ -222,9 +222,12 @@ protected:
     }
 
     void wait_ready() {
+        // Readiness is only visible over HTTP, so it is asked a few times a second rather than
+        // in a loop that would leave a connection in TIME_WAIT on every turn.
         for (const Node& n : nodes_) {
-            ASSERT_TRUE(ulw::test::eventually(
-                [&] { return ulw::test::http_get(n.port, "/readyz").status == 200; }, seconds(30)))
+            ASSERT_TRUE(n.process->poll_until(
+                [&] { return ulw::test::http_get(n.port, "/readyz").status == 200; }, seconds(30),
+                kReadyCheckPeriod))
                 << n.process->output();
         }
     }
