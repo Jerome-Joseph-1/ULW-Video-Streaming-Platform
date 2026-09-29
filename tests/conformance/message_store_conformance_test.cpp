@@ -153,16 +153,19 @@ public:
 
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                std::vector<std::byte> body, MessageCallback<std::uint64_t> done) override {
-        rooms_->append_message(
-            room, generations_.at(room), sender, key, body,
-            [done = std::move(done)](
-                rt::StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
-                if (!r || !*r) {
-                    done(std::unexpected(MessageStoreError::Unavailable));
-                    return;
-                }
-                done(**r);
-            });
+        rooms_->append_message(room, generations_.at(room), sender, key, body,
+                               [done = std::move(done)](
+                                   MessageResult<std::optional<std::uint64_t>> r) mutable noexcept {
+                                   if (!r) {
+                                       done(std::unexpected(r.error()));
+                                   } else if (!*r) {
+                                       // This test is the room's only owner; fenced would be a
+                                       // broken store.
+                                       done(std::unexpected(MessageStoreError::Corrupt));
+                                   } else {
+                                       done(**r);
+                                   }
+                               });
     }
 
 private:
@@ -387,6 +390,15 @@ TEST_P(MessageStoreConformance, APageEndsBeforeItsBodiesPassTheByteBound) {
     const auto back = before(room, std::nullopt, 10);
     ASSERT_TRUE(back);
     EXPECT_EQ(seqs(*back), (std::vector<std::uint64_t>{5, 4, 3, 2}));
+}
+
+TEST_P(MessageStoreConformance, ABodyOverTheBoundIsRefusedAndNothingIsStored) {
+    const core::RoomId room = new_room();
+    EXPECT_EQ(write(room, alice_, std::vector<std::byte>(kMaxMessageBody + 1)),
+              MessageResult<std::uint64_t>{std::unexpected(MessageStoreError::TooLarge)});
+    EXPECT_EQ(last_seq(room), 0U);
+    EXPECT_EQ(after(room, 0, 10), Page{});
+    EXPECT_EQ(write(room, alice_, std::vector<std::byte>(kMaxMessageBody)), 1U);
 }
 
 TEST_P(MessageStoreConformance, LastSeqIsZeroForAnEmptyRoomAndTheNewestOtherwise) {

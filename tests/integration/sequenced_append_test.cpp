@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <print>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -29,7 +30,7 @@ using infra::postgres::Params;
 using rt::StoreResult;
 using ulw::test::scalar;
 using ulw::test::ScratchDatabase;
-using Seq = StoreResult<std::optional<std::uint64_t>>;
+using Seq = core::ports::MessageResult<std::optional<std::uint64_t>>;
 
 std::vector<std::byte> bytes(std::string_view text) {
     std::vector<std::byte> out(text.size());
@@ -97,8 +98,13 @@ protected:
 
     Seq send(const core::RoomId& room, std::uint64_t generation, std::string_view body,
              std::string_view key) {
-        return ask<std::optional<std::uint64_t>>([&](auto done) {
-            rooms_->append_message(room, generation, alice_, key, bytes(body), std::move(done));
+        return write(room, generation, bytes(body), key);
+    }
+
+    Seq write(const core::RoomId& room, std::uint64_t generation, std::span<const std::byte> body,
+              std::string_view key) {
+        return ulw::test::ask<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+            rooms_->append_message(room, generation, alice_, key, body, std::move(done));
         });
     }
 
@@ -221,6 +227,20 @@ TEST_F(SequencedAppendTest, ConcurrentRepeatsOfOneKeyStoreItOnce) {
     EXPECT_EQ(history(room).size(), 1U);
 }
 
+TEST_F(SequencedAppendTest, AnOversizedBodyOrKeyIsTooLargeAndTakesNoSeq) {
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = owned_by(room, a_);
+    const Seq too_large{std::unexpected(core::ports::MessageStoreError::TooLarge)};
+    // What a peer node's frame can carry past the client edge's bound.
+    const std::vector<std::byte> body(core::ports::kMaxMessageBody + 1);
+    EXPECT_EQ(write(room, generation, body, "k1"), too_large);
+    EXPECT_EQ(
+        write(room, generation, bytes("hello"), std::string(core::ports::kMaxMessageKey + 1, 'k')),
+        too_large);
+    EXPECT_EQ(last_seq(room), "0");
+    EXPECT_EQ(send(room, generation, "hello"), Seq{1});
+}
+
 TEST_F(SequencedAppendTest, AnInsertThatFailsGivesTheSeqBack) {
     const core::RoomId room = new_room();
     const std::uint64_t generation = owned_by(room, a_);
@@ -229,7 +249,8 @@ TEST_F(SequencedAppendTest, AnInsertThatFailsGivesTheSeqBack) {
         conn_->exec("INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at) "
                     "VALUES ($1, 1, 'auth0|mallory', 'k', '\\x00', now())",
                     Params{}.add_uuid(room.uuid())));
-    EXPECT_EQ(send(room, generation, "lost"), Seq{std::unexpected(rt::StoreError::Unavailable)});
+    EXPECT_EQ(send(room, generation, "lost"),
+              Seq{std::unexpected(core::ports::MessageStoreError::Unavailable)});
     // The seq was not taken without its row.
     EXPECT_EQ(last_seq(room), "0");
 }

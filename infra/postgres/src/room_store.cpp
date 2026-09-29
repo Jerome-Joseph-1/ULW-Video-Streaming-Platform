@@ -5,8 +5,8 @@
 #include "operation.hpp"
 #include "pool.hpp"
 #include "result.hpp"
+#include "timer.hpp"
 
-#include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -17,6 +17,8 @@ namespace infra::postgres {
 
 namespace {
 
+using core::ports::MessageCallback;
+using core::ports::MessageStoreError;
 using rt::OwnedRoom;
 using rt::Ownership;
 using rt::StoreCallback;
@@ -413,7 +415,7 @@ class AppendMessage final : public Operation {
 public:
     AppendMessage(const core::RoomId& room, std::uint64_t generation, const core::UserId& sender,
                   std::string_view key, std::span<const std::byte> body,
-                  StoreCallback<std::optional<std::uint64_t>> done)
+                  MessageCallback<std::optional<std::uint64_t>> done)
         : room_(room), generation_(generation), sender_(sender), key_(key),
           body_(body.begin(), body.end()), done_(std::move(done)) {}
 
@@ -435,15 +437,20 @@ public:
             return start();
         }
         if (!outcome) {
-            done_(std::unexpected(StoreError::Unavailable));
+            done_(std::unexpected(MessageStoreError::Unavailable));
             return std::nullopt;
         }
-        done_(decode_seq(*outcome));
+        const auto seq = decode_seq(*outcome);
+        if (!seq) {
+            done_(std::unexpected(MessageStoreError::Corrupt));
+            return std::nullopt;
+        }
+        done_(*seq);
         return std::nullopt;
     }
 
     void abandon(DbError /*error*/) noexcept override {
-        done_(std::unexpected(StoreError::Unavailable));
+        done_(std::unexpected(MessageStoreError::Unavailable));
     }
 
 private:
@@ -453,7 +460,7 @@ private:
     std::string key_;
     std::vector<std::byte> body_;
     bool reran_ = false;
-    StoreCallback<std::optional<std::uint64_t>> done_;
+    MessageCallback<std::optional<std::uint64_t>> done_;
 };
 
 class Advertise final : public Operation {
@@ -587,7 +594,14 @@ std::optional<std::pair<core::RoomId, Ownership>> parse_notice(std::string_view 
 
 class PgRoomStore::Impl final : public INotificationSink {
 public:
-    explicit Impl(std::unique_ptr<Pool> pool) noexcept : pool_(std::move(pool)) {}
+    Impl(net::IReactor& reactor, std::unique_ptr<Pool> pool) noexcept
+        : pool_(std::move(pool)), refuse_(reactor, [this]() noexcept { answer_refused(); }) {}
+
+    // Answered on the next iteration, never from inside the call that was refused.
+    void refuse(MessageCallback<std::optional<std::uint64_t>> done) {
+        refused_.push_back(std::move(done));
+        refuse_.arm_unless_armed(core::Millis{0});
+    }
 
     // The listening pool is made after this, since it points here.
     void listen_on(std::unique_ptr<Pool> listening) noexcept { listening_ = std::move(listening); }
@@ -616,8 +630,18 @@ public:
     }
 
 private:
+    void answer_refused() noexcept {
+        std::vector<MessageCallback<std::optional<std::uint64_t>>> batch;
+        batch.swap(refused_);
+        for (auto& done : batch) {
+            done(std::unexpected(MessageStoreError::TooLarge));
+        }
+    }
+
     rt::IOwnershipListener* listener_ = nullptr;
     std::unique_ptr<Pool> pool_;
+    std::vector<MessageCallback<std::optional<std::uint64_t>>> refused_;
+    Timer refuse_;
     // Last: it calls into this object, and must stop before the members above go.
     std::unique_ptr<Pool> listening_;
 };
@@ -634,7 +658,7 @@ PgRoomStore::create(net::IReactor& reactor, net::OffloadPool& offload,
     if (!pool) {
         return std::unexpected(std::move(pool.error()));
     }
-    auto impl = std::make_unique<Impl>(std::move(*pool));
+    auto impl = std::make_unique<Impl>(reactor, std::move(*pool));
     auto listening = Pool::create(reactor, offload,
                                   PoolConfig{.conninfo = config.conninfo,
                                              .application_name = "ulw-rooms-listen",
@@ -684,10 +708,12 @@ void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
 void PgRoomStore::append_message(const core::RoomId& room, std::uint64_t generation,
                                  const core::UserId& sender, std::string_view key,
                                  std::span<const std::byte> body,
-                                 StoreCallback<std::optional<std::uint64_t>> done) {
-    if (body.size() > core::ports::kMaxMessageBody) {
-        // The client edge never decodes a larger message (ADR-0029); one here is a caller's bug.
-        std::abort();
+                                 MessageCallback<std::optional<std::uint64_t>> done) {
+    // The client edge decodes no larger message (ADR-0029), but a peer node's forward is
+    // bounded only by its frame: its input is answered, never trusted to fit.
+    if (body.size() > core::ports::kMaxMessageBody || key.size() > core::ports::kMaxMessageKey) {
+        impl_->refuse(std::move(done));
+        return;
     }
     impl_->pool().submit(
         std::make_unique<AppendMessage>(room, generation, sender, key, body, std::move(done)));

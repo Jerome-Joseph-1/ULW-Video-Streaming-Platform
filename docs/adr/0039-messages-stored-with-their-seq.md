@@ -43,7 +43,10 @@ What bounds a page of history:
   runs one statement: the fenced increment of `room_state.last_seq` and, from its result, the
   message's `INSERT` into `chat_messages`. It answers the new seq, or nothing when the
   generation is no longer the room's; then no seq was taken and no row written. If the insert
-  fails, the statement fails whole and the seq is not taken.
+  fails, the statement fails whole and the seq is not taken. A body over 64 KiB or a key over
+  64 characters is answered `TooLarge` and nothing is sent: the client edge decodes nothing
+  larger, but a peer node's forward is bounded only by its frame, and input a peer controls
+  must not stop the owner.
 - **Repeats are recognised by the sender's message key.** A client that got `unavailable`
   sends the same message again under the same key, to the same owner or, after a takeover, to
   the next one; either may have no memory of it, since a lost answer means it was never fanned

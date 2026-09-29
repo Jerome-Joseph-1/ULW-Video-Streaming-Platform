@@ -113,9 +113,9 @@ protected:
     }
 
     // The owner's write: the room's next seq and the message's row.
-    rt::StoreResult<std::optional<std::uint64_t>>
+    MessageResult<std::optional<std::uint64_t>>
     write(const core::RoomId& room, std::uint64_t generation, std::vector<std::byte> body) {
-        return ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+        return ask<std::optional<std::uint64_t>>([&](auto done) {
             rooms_->append_message(room, generation, alice_, std::format("m{}", ++keys_), body,
                                    std::move(done));
         });
@@ -196,7 +196,7 @@ TEST_F(MessageStoreTest, HistorySurvivesARestartInTheSameOrder) {
     const std::uint64_t generation = own(room);
     for (std::uint64_t seq = 1; seq <= 5; ++seq) {
         ASSERT_EQ(write(room, generation, bytes(std::format("body {}", seq))),
-                  (rt::StoreResult<std::optional<std::uint64_t>>{seq}));
+                  (MessageResult<std::optional<std::uint64_t>>{seq}));
     }
     const auto first = before(room, std::nullopt, 10);
     ASSERT_TRUE(first);
