@@ -162,8 +162,9 @@ How senders are limited in a room of thousands:
   names a stream for it.
 - Stale entries in the node's order of kept messages (each busy live chat drops its own oldest
   with every message) no longer count against the 131072 messages kept across rooms; they are
-  cleared out whenever they are as many as the bound, so a quiet group chat keeps what it
-  resumes from however busy the live chats beside it.
+  cleared out whenever the order is a quarter over the bound, so it holds at most 163840
+  entries (3.9 MiB) and a quiet group chat keeps what it resumes from however busy the live
+  chats beside it. Clearing looks at five entries for each one it removes.
 - Each node's allowance is its own, so the room's total is 60 a second on three nodes and grows
   with nodes. The owner's ceiling is far above it; if chat ever runs on dozens of nodes, move
   the limit to the owner.

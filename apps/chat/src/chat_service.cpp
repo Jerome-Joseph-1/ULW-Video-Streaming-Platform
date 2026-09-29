@@ -655,9 +655,10 @@ void ChatService::keep(Room& room, const rt::Message& message) {
         forget_oldest();
     }
     // A room dropping its own oldest (a busy live chat does, every message) leaves its entry
-    // here behind. Past twice the bound at least half are such, so clearing them out costs
-    // nothing per message, and the entries never count against rooms that keep theirs.
-    if (kept_order_.size() > 2 * limits_.buffer_messages) {
+    // here behind. Past a quarter over the bound at least that quarter is such, so clearing them
+    // out costs five entries looked at per entry cleared, nothing that grows per message, and
+    // the entries never count against rooms that keep theirs.
+    if (kept_order_.size() > limits_.buffer_messages + (limits_.buffer_messages / 4)) {
         std::erase_if(kept_order_, [this](const std::pair<core::RoomId, std::uint64_t>& e) {
             const Room* r = find(e.first);
             return r == nullptr || r->kept.empty() || e.second < r->kept.front().seq;

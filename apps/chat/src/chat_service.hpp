@@ -86,7 +86,7 @@ struct ServiceLimits {
     // counted as its body plus 256. 256 KiB is a few hundred ordinary messages: what a phone
     // that dropped off for a minute missed in a busy conversation. All rooms together keep at
     // most 32 MiB, and 131072 messages (the order they are dropped in costs 24 bytes each, with
-    // room for as many again of messages their own room dropped first: 6 MiB at most).
+    // room for a quarter more of messages their own room dropped first: 3.9 MiB at most).
     std::size_t room_buffer_bytes = std::size_t{256} * 1024;
     std::size_t buffer_bytes = std::size_t{32} << 20U;
     std::size_t buffer_messages = std::size_t{128} * 1024;
@@ -164,6 +164,9 @@ public:
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
     [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffered_bytes_; }
+    // Entries in the order kept messages are dropped in, those of messages already gone
+    // included: at most a quarter over buffer_messages.
+    [[nodiscard]] std::size_t kept_order_entries() const noexcept { return kept_order_.size(); }
 
 private:
     struct Room;

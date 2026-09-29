@@ -1118,6 +1118,23 @@ TEST_F(FewKept, AQuietRoomKeepsWhatItResumesFromWhileALiveChatRunsOnTheSameNode)
     EXPECT_EQ(service_->buffered_bytes(), 7 * (2 + 256U));
 }
 
+// Entries of messages a room dropped itself are cleared before the order is a quarter over the
+// bound: a live chat's every message leaves one, and none of them is ever read again.
+TEST_F(FewKept, TheOrderOfKeptMessagesStaysWithinAQuarterOverTheBound) {
+    FakeClient viewer;
+    const auto v = attach(viewer);
+    join(v, std::nullopt, chat::Delivery::Lossy, kLiveRoom);
+    rt::IMember& live = rooms_.admit();
+    std::size_t most = 0;
+    for (std::uint64_t seq = 1; seq <= 1'000; ++seq) {
+        deliver(live, seq, "hi", "carol", kLiveRoom);
+        most = std::max(most, service_->kept_order_entries());
+    }
+    EXPECT_LE(most, 125U);
+    // It did fill up to near the ceiling before clearing, not only after.
+    EXPECT_GT(most, 100U);
+}
+
 class FewMessages : public ChatServiceTest {
 protected:
     // Two ordinary messages per room, and four across rooms.
