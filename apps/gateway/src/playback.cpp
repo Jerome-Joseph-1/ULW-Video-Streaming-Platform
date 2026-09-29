@@ -110,7 +110,8 @@ struct LiveShape {
     bool ended = false;
 };
 
-// Only what the cache needs; rewrite_media has already vetted every line.
+// Only what the cache needs. It runs before rewrite_media, which then vets every line and
+// refuses the playlist over any it does not accept, so nothing here is served unchecked.
 std::optional<LiveShape> live_shape(std::string_view text) {
     constexpr std::string_view kTarget = "#EXT-X-TARGETDURATION:";
     LiveShape shape;
@@ -131,7 +132,8 @@ std::optional<LiveShape> live_shape(std::string_view text) {
             shape.ended = true;
         }
     }
-    if (shape.target_seconds == 0 || shape.target_seconds > kMaxLiveTargetSeconds) {
+    if (shape.target_seconds < kMinLiveTargetSeconds ||
+        shape.target_seconds > kMaxLiveTargetSeconds) {
         return std::nullopt;
     }
     return shape;

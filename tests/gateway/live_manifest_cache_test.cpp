@@ -280,9 +280,39 @@ TEST_F(LiveManifestCacheTest, AStoreFailureReachesEveryWaiterAndIsNotKept) {
 }
 
 TEST_F(LiveManifestCacheTest, ATargetDurationNoPackagerWritesIsRejectedAndNotKept) {
-    reader_.put(key("odd"), playlist(0, 11));
+    // ADR-0046: the packager's segments are 2 to 10 s.
+    reader_.put(key("long"), playlist(0, 11));
+    reader_.put(key("short"), playlist(0, 1));
     const LiveManifestCache& c = cache();
-    EXPECT_EQ(fetch("odd"), std::unexpected(PlaylistFailure::Rejected));
+    EXPECT_EQ(fetch("long"), std::unexpected(PlaylistFailure::Rejected));
+    EXPECT_EQ(fetch("short"), std::unexpected(PlaylistFailure::Rejected));
+    EXPECT_EQ(c.entries(), 0U);
+}
+
+TEST_F(LiveManifestCacheTest, FreshnessIsCountedFromWhenTheReadBegan) {
+    reader_.put(key("show"), playlist(0, 2));
+    cache();
+    Waiter w;
+    cache_->get("show", w);
+    // The read takes 600 ms of the copy's 1 s before it lands.
+    clock_.advance(core::Millis{600});
+    ASSERT_TRUE(pump_until(*reactor_, [&] { return !w.answers.empty(); }));
+    cache_->reap();
+    clock_.advance(core::Millis{399});
+    EXPECT_TRUE(answered_at_once("show"));
+    clock_.advance(core::Millis{1});
+    EXPECT_FALSE(answered_at_once("show"));
+    EXPECT_EQ(reader_.reads(), 2);
+}
+
+TEST_F(LiveManifestCacheTest, AReadSlowerThanTheFreshnessIntervalIsServedButNotKept) {
+    reader_.put(key("show"), playlist(0, 2));
+    const LiveManifestCache& c = cache();
+    Waiter w;
+    cache_->get("show", w);
+    clock_.advance(core::Millis{1'000});
+    ASSERT_TRUE(pump_until(*reactor_, [&] { return !w.answers.empty(); }));
+    ASSERT_TRUE(w.answers.front());
     EXPECT_EQ(c.entries(), 0U);
 }
 
@@ -300,6 +330,19 @@ TEST_F(LiveManifestCacheTest, TheLeastRecentlyWatchedStreamGoesPastTheEntryBound
     EXPECT_TRUE(answered_at_once("a"));
     EXPECT_TRUE(answered_at_once("c"));
     EXPECT_FALSE(answered_at_once("b"));
+}
+
+TEST_F(LiveManifestCacheTest, DroppingAStaleCopyForTheBoundIsNotAnEviction) {
+    for (const char* s : {"a", "b", "c"}) {
+        reader_.put(key(s), playlist(0));
+    }
+    const LiveManifestCache& c = cache({.max_entries = 2});
+    ASSERT_TRUE(fetch("a"));
+    ASSERT_TRUE(fetch("b"));
+    clock_.advance(core::Millis{1'000});
+    ASSERT_TRUE(fetch("c"));
+    EXPECT_EQ(c.entries(), 2U);
+    EXPECT_EQ(c.counters().evictions, 0U);
 }
 
 TEST_F(LiveManifestCacheTest, TheByteBoundEvictsAndCountsWhatIsHeld) {

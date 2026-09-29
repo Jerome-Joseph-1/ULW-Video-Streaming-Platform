@@ -41,6 +41,7 @@ struct LiveCacheCounters {
     std::uint64_t fetches = 0;
     // Misses that waited on a fetch another request had started.
     std::uint64_t joins = 0;
+    // Copies dropped for the bounds while still fresh.
     std::uint64_t evictions = 0;
 };
 
@@ -60,12 +61,12 @@ public:
 
 // The rewritten live playlists of one gateway process, keyed by stream id. An LRU bounded by
 // entries and bytes; each copy is fresh for as long as its playlist says (half its target
-// duration, see build_live_playlist), and a miss for a stream already being fetched waits on
-// that fetch instead of starting another, so any number of viewers of one stream cost one
-// store read per freshness interval. Fetches run on the offload pool. Failures other than
-// absence are handed to the requests waiting on that fetch and not kept: the next request
-// tries again, and single-flight already limits a failing store to one read at a time per
-// stream. Reactor thread only.
+// duration, see build_live_playlist) counted from when its read began, and a miss for a stream
+// already being fetched waits on that fetch instead of starting another, so any number of viewers
+// of one stream cost one store read per freshness interval. Fetches run on the offload pool.
+// Failures other than absence are handed to the requests waiting on that fetch and not kept: the
+// next request tries again, and single-flight already limits a failing store to one read at a time
+// per stream. Reactor thread only.
 class LiveManifestCache {
 public:
     struct Deps {
@@ -109,7 +110,11 @@ private:
     };
 
     void land(Flight& flight) noexcept;
-    void remember(Entry entry);
+    // Allocates, inside noexcept callers: running out of memory here ends the process, as it
+    // does anywhere on the loop. The cache is 4 MiB of a 1 GB budget (ADR-0027); a failure to
+    // allocate that much means the process is already lost, and unwinding half way through the
+    // list and the index would leave them disagreeing.
+    void remember(Entry entry, core::MonoTime now) noexcept;
     void erase(std::list<Entry>::iterator it) noexcept;
 
     Deps deps_;

@@ -7,8 +7,8 @@ namespace gateway {
 
 class LiveManifestCache::Flight final : public net::IOffloadJob {
 public:
-    Flight(LiveManifestCache& cache, std::string stream)
-        : cache_(cache), stream_(std::move(stream)) {}
+    Flight(LiveManifestCache& cache, std::string stream, core::MonoTime started)
+        : cache_(cache), stream_(std::move(stream)), started_(started) {}
 
     // On the pool. Only result_ is written, and nothing reads it before complete().
     void run() noexcept override {
@@ -17,6 +17,7 @@ public:
     void complete() noexcept override { cache_.land(*this); }
 
     [[nodiscard]] const std::string& stream() const noexcept { return stream_; }
+    [[nodiscard]] core::MonoTime started() const noexcept { return started_; }
     [[nodiscard]] const std::optional<std::expected<LivePlaylist, PlaylistFailure>>&
     result() const noexcept {
         return result_;
@@ -26,6 +27,7 @@ public:
 private:
     LiveManifestCache& cache_;
     std::string stream_;
+    core::MonoTime started_;
     std::vector<ILiveWaiter*> waiters_;
     std::optional<std::expected<LivePlaylist, PlaylistFailure>> result_;
 };
@@ -57,7 +59,7 @@ void LiveManifestCache::get(std::string_view stream, ILiveWaiter& waiter) noexce
         return;
     }
     ++counters_.fetches;
-    auto flight = std::make_unique<Flight>(*this, std::string(stream));
+    auto flight = std::make_unique<Flight>(*this, std::string(stream), deps_.clock.now());
     flight->waiters().push_back(&waiter);
     Flight& job = *flight;
     flights_.emplace(job.stream(), std::move(flight));
@@ -83,17 +85,22 @@ void LiveManifestCache::land(Flight& flight) noexcept {
         }
         return LiveAnswer{.body = (*result)->body, .ended = (*result)->ended};
     }();
+    // Freshness runs from the moment the read began, not from its landing: the copy is at
+    // least that old, so a slow store read shortens how long it is served rather than
+    // stretching it past T/2.
     const core::MonoTime now = deps_.clock.now();
     if (result && *result) {
         remember({.stream = flight.stream(),
                   .body = (*result)->body,
                   .ended = (*result)->ended,
-                  .expires = now + (*result)->fresh_for});
+                  .expires = flight.started() + (*result)->fresh_for},
+                 now);
     } else if (result && result->error() == PlaylistFailure::Absent) {
         remember({.stream = flight.stream(),
                   .body = {},
                   .absent = true,
-                  .expires = now + limits_.absent_for});
+                  .expires = flight.started() + limits_.absent_for},
+                 now);
     }
     for (ILiveWaiter* waiter : flight.waiters()) {
         waiter->on_live_playlist(answer);
@@ -101,19 +108,25 @@ void LiveManifestCache::land(Flight& flight) noexcept {
     flight.waiters().clear();
 }
 
-void LiveManifestCache::remember(Entry entry) {
+void LiveManifestCache::remember(Entry entry, core::MonoTime now) noexcept {
     if (const auto stale = index_.find(entry.stream); stale != index_.end()) {
         erase(stale->second);
     }
     // One copy bigger than the whole budget is served but never kept, rather than emptying
-    // the cache for it.
-    if (entry.cost() > limits_.max_bytes || limits_.max_entries == 0) {
+    // the cache for it; nor is one whose read took longer than it stays fresh.
+    if (entry.cost() > limits_.max_bytes || limits_.max_entries == 0 || entry.expires <= now) {
         return;
     }
     while (!lru_.empty() &&
            (lru_.size() >= limits_.max_entries || bytes_ + entry.cost() > limits_.max_bytes)) {
-        ++counters_.evictions;
-        erase(std::prev(lru_.end()));
+        const auto oldest = std::prev(lru_.end());
+        // Only a copy that could still have been served counts: dropping a stale one costs
+        // no store read, and counting it would make the metric rise with every new stream
+        // once the table is full of ids nobody asks for any more.
+        if (now < oldest->expires) {
+            ++counters_.evictions;
+        }
+        erase(oldest);
     }
     bytes_ += entry.cost();
     lru_.push_front(std::move(entry));

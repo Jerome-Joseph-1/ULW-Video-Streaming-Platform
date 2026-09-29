@@ -59,6 +59,7 @@ inline constexpr std::size_t kMaxStoredLivePlaylist = std::size_t{64} * 1024;
 
 // The packager's segment length is 2 to 10 s (ADR-0046); a target duration outside what any
 // packager writes is refused rather than cached for an unforeseen time.
+inline constexpr std::uint64_t kMinLiveTargetSeconds = 2;
 inline constexpr std::uint64_t kMaxLiveTargetSeconds = 10;
 
 // An ended playlist never changes again (ADR-0047 refuses to restart an ended stream), so it

@@ -14,7 +14,7 @@ one stream. The segment URLs in the playlist must be signed (the bucket is priva
 and a playlist cannot be redirected to the store, for the reason ADR-0024 gives.
 
 Nothing on the platform yet records a stream's owner or audience: the stream id is the only name
-a stream has, the packager is started with it, and live chat is joined by it (ADR-0057). The
+a stream has, the packager is started with it, and the live chat decision of milestone M32 (PR #45) has chat joined by it too. The
 recording of a stream becomes an ordinary video owned by its broadcaster (M33).
 
 ## Options
@@ -25,7 +25,7 @@ Who may fetch a live playlist:
 |---|---|---|
 | The owner only, as for VOD (section 8.11) | The same rule everywhere | Rejected: a live stream exists to be watched by others, and no record says who its owner is |
 | Anyone, without a token | Broadcasts are public; no JWT check per reload | Rejected: the gateway's routes all authenticate, the signed segment URLs would be handed to anyone on the internet, and an entitlement check later would change the contract |
-| Any signed-in viewer, by stream id | What live chat already does (ADR-0057); tokens are checked the same way as for VOD; an entitlement hook can be added where the id is resolved | Accepted |
+| Any signed-in viewer, by stream id | What M32's live chat decides (PR #45): a stream's chat is joined by the stream's name; tokens are checked the same way as for VOD; an entitlement hook can be added where the id is resolved | Accepted |
 
 How a playlist is served:
 
@@ -47,11 +47,14 @@ How a playlist is served:
   `EXT-X-PROGRAM-DATE-TIME`, discontinuities and `EXT-X-ENDLIST` pass through unchanged. No
   view events are recorded for live playback: there is no video id to record them against
   until the recording exists.
-- **Freshness.** A copy is fresh for half the playlist's own `EXT-X-TARGETDURATION`. The
+- **Freshness.** A copy is fresh for half the playlist's own `EXT-X-TARGETDURATION`, counted
+  from the moment its store read began, not from when it landed: a slow read shortens the time
+  a copy is served instead of stretching its age past T/2, and a read slower than T/2 is served
+  to the requests waiting on it but not kept. The
   packager replaces the playlist once per T, and players reload it about once per T, so a copy
   at most T/2 old means a reload always finds the newer playlist once the store has it, and the
   store sees two reads per segment per gateway process however many viewers there are. A target
-  duration outside what the packager writes (1 to 10 s) is refused as a broken playlist rather
+  duration outside what the packager writes (2 to 10 s, ADR-0046) is refused as a broken playlist rather
   than cached for an interval nobody chose. An ended playlist (with `EXT-X-ENDLIST`) never
   changes again, since ADR-0047 refuses to restart an ended stream, and is kept for 60 s, like
   a VOD playlist.
@@ -70,7 +73,10 @@ How a playlist is served:
   flight already bounds a failing store to one read at a time per stream.
 - **Bounds.** At most 512 streams and 4 MiB of rewritten playlists per process (a 10-segment
   window signs to about 7.5 KB, the longest window to about 85 KB), least recently used out
-  first. A copy larger than the whole budget is served and not kept.
+  first. A copy larger than the whole budget is served and not kept. The eviction counter counts
+  only copies that were still fresh when dropped: a stale one costs no store read, and counting
+  it would make the counter rise with every new stream once 512 ids (404 probes included) had
+  been asked for.
 - **Headers.** `Cache-Control: private, no-cache` on a live playlist: the gateway's copy already
   lags the store by up to T/2, and the browser's own cache would add its age on top.
   `private, max-age=60` on an ended one, as on a VOD playlist.
