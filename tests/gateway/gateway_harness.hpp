@@ -58,7 +58,7 @@ public:
     // Lets every connection waiting on an unknown signing key ("slow." tokens) continue.
     void refresh_keys();
     [[nodiscard]] std::size_t key_waiters();
-    // What SIGHUP does: reread the certificate and key.
+    // What SIGHUP does: reread the certificate and key. Returns once the reload has finished.
     void reload_certificate();
     [[nodiscard]] std::string metrics();
 

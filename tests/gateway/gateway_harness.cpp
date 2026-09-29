@@ -8,6 +8,7 @@
 #include "os/system_random.hpp"
 
 #include "../conformance/storage_harness.hpp"
+#include "support/eventually.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_verifier.hpp"
 #include "support/tls_pki.hpp"
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
+#include <gtest/gtest.h>
 #include <mutex>
 #include <unistd.h>
 
@@ -218,7 +220,14 @@ std::size_t GatewayUnderTest::key_waiters() {
 }
 
 void GatewayUnderTest::reload_certificate() {
+    const auto finished = [](const gateway::Counters& c) {
+        return c.certificate_reloads + c.certificate_reload_failures;
+    };
+    const std::uint64_t before = finished(counters());
     on_loop([&] { loop_->gateway->on_signal(net::Signal::Reload); });
+    if (!eventually([&] { return finished(counters()) > before; })) {
+        ADD_FAILURE() << "certificate reload never finished";
+    }
 }
 
 std::string GatewayUnderTest::metrics() {

@@ -39,7 +39,7 @@ public:
         }
         return std::make_unique<PlainTransport>(reactor_, *id);
     }
-    [[nodiscard]] std::expected<void, std::string> reload() override { return {}; }
+    void reload(OffloadPool& /*pool*/, IReloadHandler& done) override { done.on_reloaded({}); }
     [[nodiscard]] std::size_t handshakes_in_flight() const noexcept override { return 0; }
 
 private:

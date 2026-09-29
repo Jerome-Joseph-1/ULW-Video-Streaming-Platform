@@ -34,6 +34,15 @@ public:
     [[nodiscard]] virtual bool is_quiescent() const noexcept = 0;
 };
 
+class OffloadPool;
+
+class IReloadHandler {
+public:
+    virtual ~IReloadHandler() = default;
+    // On the loop. The error is a line fit for a log.
+    virtual void on_reloaded(const std::expected<void, std::string>& result) noexcept = 0;
+};
+
 // Makes the transport for each accepted socket. Single-threaded like the reactor it uses.
 class ITransportFactory {
 public:
@@ -42,9 +51,11 @@ public:
     // `handler` must outlive the transport. The connection starts out not receiving.
     [[nodiscard]] virtual std::expected<std::unique_ptr<ITransport>, int>
     attach(os::UniqueFd conn, IStreamHandler& handler) = 0;
-    // Rereads the certificate and key. On failure every connection, new ones included, keeps
-    // the previous pair.
-    [[nodiscard]] virtual std::expected<void, std::string> reload() = 0;
+    // Rereads the certificate and key on `pool`, because file reads would stall the loop, and
+    // reports to `done` on the loop. On failure every connection, new ones included, keeps the
+    // previous pair. Asked for while one is running, it runs once more after that one. The
+    // pool must be destroyed before the factory and `done`.
+    virtual void reload(OffloadPool& pool, IReloadHandler& done) = 0;
     [[nodiscard]] virtual std::size_t handshakes_in_flight() const noexcept = 0;
 };
 

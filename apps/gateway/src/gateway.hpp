@@ -75,6 +75,7 @@ struct Counters {
     std::uint64_t timeouts_backstop = 0;
     std::uint64_t bytes_ingested = 0;
     std::uint64_t requests = 0;
+    std::uint64_t certificate_reloads = 0;
     std::uint64_t certificate_reload_failures = 0;
 };
 
@@ -84,7 +85,8 @@ enum class Admission : std::uint8_t { Admitted, UserAtLimit, Full };
 // counters for them. Everything runs on the shard's reactor thread.
 class Gateway final : public net::IAcceptHandler,
                       public net::ISignalHandler,
-                      public net::ITimerHandler {
+                      public net::ITimerHandler,
+                      public net::IReloadHandler {
 public:
     Gateway(Deps deps, Limits limits);
     ~Gateway() override;
@@ -95,6 +97,7 @@ public:
     void on_signal(net::Signal signal) noexcept override;
     // The drain deadline.
     void on_timeout() noexcept override;
+    void on_reloaded(const std::expected<void, std::string>& result) noexcept override;
 
     void begin_drain() noexcept;
     // Destroys connections the kernel and every pending callback have let go of. Call after

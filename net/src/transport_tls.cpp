@@ -1,3 +1,4 @@
+#include "net/offload_pool.hpp"
 #include "net/transport.hpp"
 
 #include <algorithm>
@@ -136,6 +137,17 @@ std::expected<SslCtxPtr, std::string> make_context(const TlsFiles& files) {
         return std::unexpected("private key " + files.private_key + ": " + queued_errors());
     }
     return ctx;
+}
+
+// Tickets issued before a reload keep resuming after it: a new context draws new ticket keys,
+// and every returning client would pay a full handshake at once.
+void carry_ticket_keys(SSL_CTX* from, SSL_CTX* to) noexcept {
+    // OpenSSL 3 ticket keys: a 16-byte name, a 32-byte HMAC key and a 32-byte AES key.
+    std::array<unsigned char, 80> keys{};
+    if (SSL_CTX_get_tlsext_ticket_keys(from, keys.data(), keys.size()) == 1) {
+        static_cast<void>(SSL_CTX_set_tlsext_ticket_keys(to, keys.data(), keys.size()));
+    }
+    OPENSSL_cleanse(keys.data(), keys.size());
 }
 
 // The memory-BIO model (ADR-0001): the reactor owns the socket, ciphertext it read goes into the
@@ -498,7 +510,7 @@ private:
     bool write_shut_ = false;
 };
 
-class TlsTransports final : public ITransportFactory {
+class TlsTransports final : public ITransportFactory, public IOffloadJob {
 public:
     TlsTransports(IReactor& reactor, TlsFiles files, SslCtxPtr ctx) noexcept
         : reactor_(reactor), files_(std::move(files)), ctx_(std::move(ctx)) {}
@@ -529,24 +541,51 @@ public:
         return transport;
     }
 
-    [[nodiscard]] std::expected<void, std::string> reload() override {
-        auto ctx = make_context(files_);
-        if (!ctx) {
-            return std::unexpected(std::move(ctx.error()));
+    void reload(OffloadPool& pool, IReloadHandler& done) override {
+        pool_ = &pool;
+        done_ = &done;
+        if (loading_) {
+            again_ = true;
+            return;
         }
-        // Each SSL holds a reference to the context it was made from, so connections already
-        // open keep the old one until they close.
-        ctx_ = std::move(*ctx);
-        return {};
+        loading_ = true;
+        pool.submit(*this);
+    }
+
+    // On the pool: touches only the files, which never change, and its own result.
+    void run() noexcept override { loaded_ = make_context(files_); }
+
+    void complete() noexcept override {
+        loading_ = false;
+        std::expected<void, std::string> result;
+        if (loaded_) {
+            carry_ticket_keys(ctx_.get(), loaded_->get());
+            // Each SSL holds a reference to the context it was made from, so connections
+            // already open keep the old one until they close.
+            ctx_ = std::move(*loaded_);
+        } else {
+            result = std::unexpected(std::move(loaded_.error()));
+        }
+        loaded_ = std::unexpected(std::string{});
+        done_->on_reloaded(result);
+        if (std::exchange(again_, false)) {
+            loading_ = true;
+            pool_->submit(*this);
+        }
     }
 
     [[nodiscard]] std::size_t handshakes_in_flight() const noexcept override { return handshakes_; }
 
 private:
     IReactor& reactor_;
-    TlsFiles files_;
+    const TlsFiles files_;
     SslCtxPtr ctx_;
     std::size_t handshakes_ = 0;
+    OffloadPool* pool_ = nullptr;
+    IReloadHandler* done_ = nullptr;
+    std::expected<SslCtxPtr, std::string> loaded_ = std::unexpected(std::string{});
+    bool loading_ = false;
+    bool again_ = false;
 };
 
 } // namespace

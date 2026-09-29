@@ -1,3 +1,4 @@
+#include "net/offload_pool.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/transport.hpp"
 
@@ -7,16 +8,24 @@
 
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <future>
 #include <gtest/gtest.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <optional>
+#include <sstream>
+#include <string>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -154,12 +163,29 @@ std::size_t queued_in_kernel(int fd) {
     return static_cast<std::size_t>(n);
 }
 
+struct Reloads final : net::IReloadHandler {
+    std::vector<std::expected<void, std::string>> results;
+    void on_reloaded(const std::expected<void, std::string>& result) noexcept override {
+        results.push_back(result);
+    }
+};
+
+std::string file_text(const std::string& path) {
+    const std::ifstream in(path);
+    std::ostringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
 class TlsTransportTest : public ::testing::TestWithParam<ReactorKind> {
 protected:
     void SetUp() override {
         auto r = net::make_reactor(GetParam(), clock, 4096);
         ASSERT_TRUE(r) << std::strerror(r.error());
         reactor = std::move(*r);
+        auto p = net::OffloadPool::create(*reactor, 1);
+        ASSERT_TRUE(p) << std::strerror(p.error());
+        pool = std::move(*p);
         auto t = net::make_tls_transports(*reactor, TestPki::shared().server());
         ASSERT_TRUE(t) << t.error();
         transports = std::move(*t);
@@ -191,6 +217,15 @@ protected:
         return pump_until(*reactor, [&] { return peer.handshake_step(); });
     }
 
+    std::expected<void, std::string> reload() {
+        const std::size_t before = reloads.results.size();
+        transports->reload(*pool, reloads);
+        if (!pump_until(*reactor, [&] { return reloads.results.size() > before; })) {
+            return std::unexpected("reload never finished");
+        }
+        return reloads.results.back();
+    }
+
     void TearDown() override {
         for (auto& t : owned) {
             t->begin_close();
@@ -200,9 +235,12 @@ protected:
 
     ulw::test::FakeClock clock;
     std::unique_ptr<net::IReactor> reactor;
+    Reloads reloads;
     std::unique_ptr<net::ITransportFactory> transports;
     ulw::test::SslCtxPtr client_ctx;
     std::vector<std::unique_ptr<net::ITransport>> owned;
+    // Destroyed first: a reload it runs points at the transports and at `reloads`.
+    std::unique_ptr<net::OffloadPool> pool;
 };
 
 TEST_P(TlsTransportTest, HandshakeThenPlaintextBothWays) {
@@ -567,20 +605,85 @@ TEST_P(TlsTransportTest, AReloadServesTheNewCertificateAndAFailedOneKeepsTheOld)
     EXPECT_EQ(ulw::test::peer_common_name(a->ssl()), "first.localhost");
 
     static_cast<void>(TestPki::shared().issue("reload", "second.localhost"));
-    ASSERT_TRUE(transports->reload());
+    ASSERT_TRUE(reload());
     Upper two;
     auto b = connect(two);
     ASSERT_TRUE(handshake(*b));
     EXPECT_EQ(ulw::test::peer_common_name(b->ssl()), "second.localhost");
 
     std::filesystem::resize_file(files.private_key, 10);
-    const auto refused = transports->reload();
+    const auto refused = reload();
     ASSERT_FALSE(refused);
     EXPECT_NE(refused.error().find(files.private_key), std::string::npos);
     Upper three;
     auto c = connect(three);
     ASSERT_TRUE(handshake(*c));
     EXPECT_EQ(ulw::test::peer_common_name(c->ssl()), "second.localhost");
+}
+
+TEST_P(TlsTransportTest, AReloadReadsItsFilesOffTheLoop) {
+    const std::string stem =
+        GetParam() == ReactorKind::IoUring ? "offloop-io-uring" : "offloop-epoll";
+    auto files = TestPki::shared().issue(stem, "first.localhost");
+    auto made = net::make_tls_transports(*reactor, files);
+    ASSERT_TRUE(made) << made.error();
+    transports = std::move(*made);
+    static_cast<void>(TestPki::shared().issue(stem, "second.localhost"));
+    // The renewed chain comes through a FIFO, whose open blocks until someone writes it: a
+    // reload that read it on the loop would stop the loop until then.
+    const std::string chain = file_text(files.certificate_chain);
+    std::filesystem::remove(files.certificate_chain);
+    ASSERT_EQ(::mkfifo(files.certificate_chain.c_str(), 0600), 0);
+    std::promise<void> go;
+    std::jthread writer([&, released = go.get_future()] {
+        // A loop stalled by the reload never releases the writer; the deadline ends the test.
+        released.wait_for(std::chrono::seconds(10));
+        const os::UniqueFd out{::open(files.certificate_chain.c_str(), O_WRONLY | O_CLOEXEC)};
+        ASSERT_TRUE(out);
+        ASSERT_EQ(::write(out.get(), chain.data(), chain.size()),
+                  static_cast<ssize_t>(chain.size()));
+    });
+
+    transports->reload(*pool, reloads);
+    Upper one;
+    auto a = connect(one);
+    ASSERT_TRUE(handshake(*a));
+    EXPECT_EQ(ulw::test::peer_common_name(a->ssl()), "first.localhost");
+    EXPECT_TRUE(reloads.results.empty());
+
+    go.set_value();
+    ASSERT_TRUE(pump_until(*reactor, [&] { return !reloads.results.empty(); }));
+    ASSERT_TRUE(reloads.results.front()) << reloads.results.front().error();
+    writer.join();
+    std::filesystem::remove(files.certificate_chain);
+    Upper two;
+    auto b = connect(two);
+    ASSERT_TRUE(handshake(*b));
+    EXPECT_EQ(ulw::test::peer_common_name(b->ssl()), "second.localhost");
+}
+
+TEST_P(TlsTransportTest, ATicketIssuedBeforeAReloadResumesAfterIt) {
+    for (const int version : {TLS1_2_VERSION, TLS1_3_VERSION}) {
+        SCOPED_TRACE(version);
+        const auto ctx = TestPki::shared().client_context(version);
+        Upper first;
+        auto a = connect(first, ctx.get());
+        ASSERT_TRUE(handshake(*a));
+        std::vector<std::byte> none;
+        ASSERT_TRUE(pump_until(*reactor, [&] {
+            a->read(none);
+            return SSL_SESSION_is_resumable(SSL_get0_session(a->ssl())) == 1;
+        }));
+
+        ASSERT_TRUE(reload());
+        Upper second;
+        auto b = connect(second, ctx.get());
+        ASSERT_EQ(SSL_set_session(b->ssl(), SSL_get0_session(a->ssl())), 1);
+        ASSERT_TRUE(handshake(*b));
+        EXPECT_EQ(SSL_session_reused(b->ssl()), 1);
+        first.transport->begin_close();
+        second.transport->begin_close();
+    }
 }
 
 TEST_P(TlsTransportTest, AKeyThatDoesNotMatchTheCertificateIsRefused) {
