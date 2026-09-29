@@ -8,10 +8,12 @@
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
+#include <sys/prctl.h>
 #include <sys/socket.h>
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
@@ -349,6 +351,14 @@ int run(int argc, char** argv) {
                              "[--interval-ms N>=100] [--duration-s N] [--sample-s N] [--burst N] "
                              "[--max-rss-bytes-per-datagram N]");
         return 2;
+    }
+    // RSS is the leak signal here, so it must count the pages the process touched. Where
+    // transparent huge pages are "always", as on the GitHub runners, khugepaged collapses a partly
+    // touched 2 MiB range into a huge page on its own 10 s schedule, and RSS jumps by the rest of
+    // the range with nothing allocated: a single 1,528 KiB step, mid-run, failed the 1-byte bound.
+    if (::prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0) != 0) {
+        std::println(stderr, "PR_SET_THP_DISABLE: {}", std::strerror(errno));
+        return 1;
     }
     // One descriptor per peer plus the server's, the rings and the standard streams.
     const auto limits = os::raise_nofile_limit(65'536);
