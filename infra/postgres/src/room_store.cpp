@@ -24,19 +24,31 @@ using rt::StoreError;
 using rt::StoreResult;
 
 // A room nobody has asked for before is created by the first node that resolves it. Both rows
-// in one statement: a room never exists without its sequence counter. Its kind is the one its
-// first chat join recorded in chat_rooms, which runs before the room is resolved; a room no
-// chat join recorded takes $3 (kind_of_unrecorded). A live chat is delivered lossy. An ephemeral
-// room (rt::is_ephemeral_room, $4) is a presence room whatever else says: open to the nodes that
-// speak in it, never stored, and never recorded by a chat join, which cannot name it.
+// in one statement: a room never exists without its sequence counter. Its kind is the one
+// recorded in chat_rooms, by its first chat join (which runs before the room is resolved) or by
+// the server's record_live. A room created with no kind recorded, a presence room or any other
+// the room plane creates without a join, is recorded here as $3 (kind_of_unrecorded), in the
+// same statement, as a join records it before its member row: a record_live in flight holds the
+// chat_rooms key this waits on, and one that comes later waits on this statement's and finds the
+// room closed. Reading chat_rooms instead would miss a record_live that has not committed, and
+// copy a closed kind into room_state while chat_rooms then said live. The update that does
+// nothing on a conflict returns the kind already recorded, committed after this statement's
+// snapshot or not. A live chat is delivered lossy. An ephemeral room (rt::is_ephemeral_room,
+// $4) is a presence room in room_state whatever chat_rooms says: open to the nodes that speak in
+// it and never stored; in chat_rooms it is a closed room with no members, which no join is
+// admitted to and record_live refuses.
 constexpr Sql kCreateRoom = R"sql(
 WITH created AS (
     INSERT INTO room_assignments (room_id, owner_node) VALUES ($1, $2)
     ON CONFLICT (room_id) DO NOTHING
     RETURNING owner_generation),
+recorded AS (
+    INSERT INTO chat_rooms (room_id, kind)
+    SELECT $1, $3 FROM created
+    ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind
+    RETURNING kind),
 kind AS (
-    SELECT CASE WHEN $4 THEN 'presence'
-                ELSE coalesce((SELECT kind FROM chat_rooms WHERE room_id = $1), $3) END AS kind)
+    SELECT CASE WHEN $4 THEN 'presence' ELSE (SELECT kind FROM recorded) END AS kind)
 INSERT INTO room_state (room_id, owner_generation, kind, delivery)
 SELECT $1, created.owner_generation, kind.kind,
        CASE WHEN kind.kind = 'stream_live_chat' THEN 'lossy' ELSE 'durable' END

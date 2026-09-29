@@ -46,12 +46,22 @@ a word.
   alone, storing no `chat_messages` row, in Postgres and in the in-memory stores alike (a
   conformance law). The ephemeral rule wins over any kind a chat join recorded; a presence
   room is not a chat `RoomKind`, since its joins come from nodes through `IRooms` and never
-  pass the message store's `admits()` or record a kind in `chat_rooms`. The envelope refuses
-  version 8 room ids in `join`, `send` and `history` (`bad_room`), so no client can read or
-  write a presence room, and only nodes speak in one.
+  pass the message store's `admits()`. The envelope refuses version 8 room ids in `join`,
+  `send` and `history` (`bad_room`), so no client can read or write a presence room, and only
+  nodes speak in one.
   Events are 9 bytes: a kind and the sender's tag, 64 bits of SHA-256 over the node's name and
   its start time, so a restarted node is a new sender and its last run's announcements run out
   on their own.
+- **Created without a join.** A presence room is the one room the room plane creates with no
+  chat join before it, so nothing has recorded it in `chat_rooms`. Its creation records it
+  there itself, as a closed room (`group_chat`), in the statement that creates it, as M19's
+  joins record a room before its member row (ADR-0054); every room created with no kind
+  recorded is. The server's `record_live` then conflicts on the `chat_rooms` key: one that runs
+  after the creation, or waits on it, finds the room closed and is refused, and a creation that
+  runs while an uncommitted `record_live` holds the key waits for it and takes its kind. Reading
+  `chat_rooms` instead, as the creation did before, missed an uncommitted `record_live`, created
+  the room `group_chat` in `room_state`, and left `chat_rooms` saying live once it committed. A
+  Postgres test holds a `record_live` open while the room plane creates the room.
 - **Membership.** A node joins the room while the user has a connection there or is in their
   grace, or while a client there watches them; the node is one member for all of those, as
   `ChatService` is for a chat room. It leaves when none of that holds and nothing it said is
