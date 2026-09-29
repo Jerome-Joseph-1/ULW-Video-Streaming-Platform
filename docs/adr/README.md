@@ -56,3 +56,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0050](0050-clients-reach-the-sfu-with-a-ticket.md) | Clients reach the SFU with a ticket, not through our signalling | Accepted |
 | [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
 | [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted |
+| [0059](0059-live-playlists-through-a-single-flight-cache.md) | Live playlists are served from a single-flight cache, to any signed-in viewer | Accepted |
