@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 #include <optional>
+#include <string>
+#include <utility>
 
 namespace {
 
@@ -15,8 +17,8 @@ using infra::curl::Result;
 using infra::sfu::livekit::detail::classify;
 using infra::sfu::livekit::detail::IfAbsent;
 
-Result status(int code) {
-    return Response{.status = code, .headers = {}, .body = {}};
+Result status(int code, std::string body = {}) {
+    return Response{.status = code, .headers = {}, .body = std::move(body)};
 }
 
 Result failure(FailureKind kind) {
@@ -34,10 +36,21 @@ TEST(Classify, AnyTwoHundredIsSuccess) {
 }
 
 TEST(Classify, NotFoundSucceedsOnlyWhereAbsenceIsTheGoal) {
-    EXPECT_EQ(error_of(status(404), IfAbsent::Succeed), std::nullopt);
-    EXPECT_EQ(error_of(status(404), IfAbsent::Fail), MediaError::Refused);
+    const auto gone = status(404, R"({"code":"not_found","msg":"requested room does not exist"})");
+    EXPECT_EQ(error_of(gone, IfAbsent::Succeed), std::nullopt);
+    EXPECT_EQ(error_of(gone, IfAbsent::Fail), MediaError::Refused);
     // Absence forgives nothing else.
     EXPECT_EQ(error_of(status(403), IfAbsent::Succeed), MediaError::Refused);
+}
+
+TEST(Classify, ANotFoundThatIsNotAboutTheThingIsRefused) {
+    // A mistyped method, and a proxy's own page: neither says the room is gone.
+    EXPECT_EQ(
+        error_of(status(404, R"({"code":"bad_route","msg":"no handler"})"), IfAbsent::Succeed),
+        MediaError::Refused);
+    EXPECT_EQ(error_of(status(404, "<html>404 Not Found</html>"), IfAbsent::Succeed),
+              MediaError::Refused);
+    EXPECT_EQ(error_of(status(404), IfAbsent::Succeed), MediaError::Refused);
 }
 
 TEST(Classify, ClientErrorsAreRefusedAndServerErrorsRetryable) {

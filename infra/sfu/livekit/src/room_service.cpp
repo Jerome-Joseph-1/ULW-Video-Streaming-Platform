@@ -1,5 +1,7 @@
 #include "room_service.hpp"
 
+#include "core/util/json.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -29,6 +31,15 @@ constexpr int kHttpNotFound = 404;
 constexpr int kHttpRequestTimeout = 408;
 constexpr int kHttpTooManyRequests = 429;
 
+// Twirp answers 404 for a missing room or participant with the code not_found, but also for a
+// method it does not know (bad_route), and a proxy in front answers 404 in its own words. Only
+// the first means the thing is gone.
+bool names_not_found(std::string_view body) noexcept {
+    const auto error = core::json::parse(body);
+    const core::json::Value* code = error ? error->find("code") : nullptr;
+    return code != nullptr && code->as_string() == "not_found";
+}
+
 } // namespace
 
 std::expected<void, MediaError> classify(const curl::Result& result, IfAbsent absent) noexcept {
@@ -50,7 +61,7 @@ std::expected<void, MediaError> classify(const curl::Result& result, IfAbsent ab
     if (status >= 200 && status < 300) {
         return {};
     }
-    if (status == kHttpNotFound && absent == IfAbsent::Succeed) {
+    if (status == kHttpNotFound && absent == IfAbsent::Succeed && names_not_found(result->body)) {
         return {};
     }
     // Twirp's deadline_exceeded and canceled are 408, resource_exhausted is 429, and internal,
