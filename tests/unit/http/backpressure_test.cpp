@@ -40,6 +40,7 @@ public:
     [[nodiscard]] bool delivered_empty_fragment() const noexcept {
         return delivered_empty_fragment_;
     }
+    [[nodiscard]] std::size_t largest_fragment() const noexcept { return largest_fragment_; }
 
     // One store attempt; true once nothing is staged.
     bool drain_once() {
@@ -61,6 +62,7 @@ public:
         if (bytes.empty()) {
             delivered_empty_fragment_ = true;
         }
+        largest_fragment_ = std::max(largest_fragment_, bytes.size());
         const std::size_t n = std::min(kStoreBytes, bytes.size());
         for (const std::byte b : bytes.first(n)) {
             received_.back().body.push_back(static_cast<char>(b));
@@ -83,6 +85,7 @@ private:
     std::string staging_;
     bool delivered_while_paused_ = false;
     bool delivered_empty_fragment_ = false;
+    std::size_t largest_fragment_ = 0;
 };
 
 // Byte i is (i * 31 + 7) mod 251: no period that divides a chunk size, so a dropped,
@@ -192,6 +195,25 @@ TEST(Backpressure, ResumingWithNothingNewDeliversNoEmptyFragment) {
     EXPECT_EQ(parser.resume(), ParseProgress::NeedMore);
     EXPECT_FALSE(sink.delivered_empty_fragment());
     EXPECT_EQ(parser.feed(bytes_of(request).last(1)), ParseProgress::MessageComplete);
+}
+
+TEST(Backpressure, TheBodyOfAReceiveReachesTheSinkWholePastTheHeadBudget) {
+    ThrottledSink sink;
+    RequestParser parser{sink};
+    // One 64 KiB receive holding a head and the start of a large body: more than the head
+    // budget, so the parser cannot hand llhttp all of it before the head has ended.
+    const std::string body = patterned((64 * 1024) - 200);
+    const std::string request = patch("/u", body);
+    ASSERT_GT(request.size(), RequestParser::kMaxHeadBytes);
+
+    ASSERT_EQ(parser.feed(bytes_of(request)), ParseProgress::Paused);
+    // Paused on its first fragment, the sink holds the whole body and the parser holds nothing,
+    // so the receive sits in one buffer, not in two.
+    EXPECT_EQ(sink.largest_fragment(), body.size());
+    while (!sink.drain_once()) {
+    }
+    EXPECT_EQ(parser.resume(), ParseProgress::MessageComplete);
+    EXPECT_EQ(sink.received().back().body, body);
 }
 
 TEST(Backpressure, ResumeWithoutPauseIsHarmless) {
