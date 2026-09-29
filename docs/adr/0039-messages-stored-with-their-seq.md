@@ -115,18 +115,20 @@ What bounds a page of history:
 
   | Write | p50 | p99 |
   |---|---|---|
-  | seq and row in one statement (`append_message`) | 1.3-4.0 ms | 5-9 ms |
+  | seq and row in one statement (`append_message`) | 1.3-4.0 ms | 5-10 ms |
   | seq alone (`append`, today's path) | 1.3-4.0 ms | 8-10 ms |
   | seq, then the row as a second statement | 2.7-8.0 ms | 11-19 ms |
 
-  A read by primary key on the same pool: p50 0.35-0.4 ms. The commit's WAL flush is almost all
-  of a write, so storing the message in the seq's own statement is free, and a second
-  statement doubles the cost. A room's ceiling stays where ADR-0035 put it, one write per
-  commit.
-- Paging a 10,000-message room from newest to oldest, 100 per page, took 108-128 ms (about
-  1.1 ms a page). `EXPLAIN ANALYZE` of a page, with four other 10,000-message rooms in the
+  The last row was measured before the store lost its second writer. With the message key's
+  lookup and its unique index, the one statement measured p50 4.0 ms against 4.0 ms for the seq
+  alone, at a load average of 5. A read by primary key on the same pool: p50 0.35-0.4 ms. The
+  commit's WAL flush is almost all of a write, so storing the message in the seq's own
+  statement is free, and a second statement doubles the cost. A room's ceiling stays where
+  ADR-0035 put it, one write per commit. The tests report these timings and assert none.
+- Paging a 10,000-message room from newest to oldest, 100 per page, took 98-128 ms (about
+  1 ms a page). `EXPLAIN ANALYZE` of a page, with four other 10,000-message rooms in the
   table, shows an index scan of `chat_messages_pkey` (backward for older pages, forward for
-  newer) reading 101 rows, the page and the window's one row of lookahead, in 0.14-0.2 ms,
+  newer) reading 101 rows, the page and the window's one row of lookahead, in 0.11-0.2 ms,
   with no sort.
 - Bodies bound as parameters stay out of statement text and `pg_stat_activity`, but the server
   still writes bound parameters, bodies included (bytea prints as `\x` and hex), to its log:
