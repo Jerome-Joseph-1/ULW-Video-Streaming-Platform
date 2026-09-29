@@ -33,6 +33,6 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0027](0027-admission-control-from-measured-connection-memory.md) | Admission control from the measured memory of a connection | Accepted |
 | [0028](0028-segments-fetched-cross-origin-without-credentials.md) | Viewers fetch segments cross-origin, without credentials | Accepted |
 | [0029](0029-websocket-messages-own-their-payload.md) | WebSocket messages own their payload | Accepted |
-| [0032](0032-container-images-on-ubuntu-from-a-dated-snapshot.md) | Container images build and run on Ubuntu 24.04 from a dated snapshot | Accepted |
-| [0033](0033-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted |
-| [0034](0034-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted |
+| [0030](0030-container-images-on-ubuntu-from-a-dated-snapshot.md) | Container images build and run on Ubuntu 24.04 from a dated snapshot | Accepted |
+| [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted |
+| [0032](0032-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted |

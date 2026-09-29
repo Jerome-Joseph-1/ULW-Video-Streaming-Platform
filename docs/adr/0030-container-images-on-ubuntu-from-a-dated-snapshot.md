@@ -1,4 +1,4 @@
-# 0032. Container images build and run on Ubuntu 24.04 from a dated snapshot
+# 0030. Container images build and run on Ubuntu 24.04 from a dated snapshot
 
 Status: Accepted
 Date: 2026-09-29
@@ -27,7 +27,7 @@ by version and hash. CI and the development machines build on Ubuntu 24.04 with 
 - The runtime images hold only the shared libraries, `ca-certificates`, and for the worker
   `ffmpeg`; no compiler, no apt lists. They run as uid 10001 with a read-only root filesystem.
 - The gateway image also carries `ulw_migrate`, so the schema and the server always come from
-  one build (ADR-0033).
+  one build (ADR-0031).
 - A build behind a TLS-inspecting proxy passes its CA as the build secret `ca-bundle`; it is
   mounted for the apt steps only and never lands in a layer.
 

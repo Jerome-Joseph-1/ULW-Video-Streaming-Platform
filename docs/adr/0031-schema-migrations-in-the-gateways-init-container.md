@@ -1,4 +1,4 @@
-# 0033. Schema migrations run in the gateway's init container
+# 0031. Schema migrations run in the gateway's init container
 
 Status: Accepted
 Date: 2026-09-29

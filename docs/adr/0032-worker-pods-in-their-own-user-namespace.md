@@ -1,4 +1,4 @@
-# 0034. The worker pod runs in its own user namespace with a derived seccomp profile
+# 0032. The worker pod runs in its own user namespace with a derived seccomp profile
 
 Status: Accepted
 Date: 2026-09-29

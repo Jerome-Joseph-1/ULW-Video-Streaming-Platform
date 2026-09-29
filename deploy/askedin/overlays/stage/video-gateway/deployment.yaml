@@ -38,7 +38,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       # Every rollout, Woodpecker's rollout restart included, migrates the schema with the
-      # image it is about to run (docs/adr/0033). Migrations only ever add, so the pod still on
+      # image it is about to run (docs/adr/0031). Migrations only ever add, so the pod still on
       # the old image keeps working against the new schema until it is replaced.
       initContainers:
         - name: migrate

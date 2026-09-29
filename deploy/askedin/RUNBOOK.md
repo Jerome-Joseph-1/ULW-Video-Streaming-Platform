@@ -21,7 +21,7 @@ monorepo), and the real `JWKS_URL` and `JWT_ISSUER`.
 
 ## 1. Check the cluster can run the worker
 
-The worker gives each ffmpeg its own namespaces (docs/adr/0034), which needs pods in user
+The worker gives each ffmpeg its own namespaces (docs/adr/0032), which needs pods in user
 namespaces. On k8s-prod:
 
 ```sh
@@ -74,7 +74,7 @@ New keys for `.env.stage` and `.env.prod` (names only). The R2 bucket should hav
 rule aborting incomplete multipart uploads after 7 days; the gateway expires its uploads after 6.
 
 ```
-VIDEO_DATABASE_URL                    postgresql://… for the ulw database; the role needs DDL (docs/adr/0033)
+VIDEO_DATABASE_URL                    postgresql://… for the ulw database; the role needs DDL (docs/adr/0031)
 VIDEO_R2_ACCOUNT_ID
 VIDEO_R2_BUCKET
 VIDEO_GATEWAY_R2_ACCESS_KEY_ID        R2 token for the gateway: object read and write on the bucket
@@ -127,7 +127,7 @@ CREATE ROLE ulw_stage LOGIN;           -- ulw_prod for prod
 CREATE DATABASE ulw_stage OWNER ulw_stage;
 ```
 
-The role owns its database, which gives the migrations their DDL rights (docs/adr/0033).
+The role owns its database, which gives the migrations their DDL rights (docs/adr/0031).
 `VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
 password percent-encoded.
 
@@ -221,7 +221,7 @@ kubectl -n apps-stage rollout restart deployment/video-worker
 ```
 
 (`docker pull`, `docker tag`, `docker push` do the same as `crane tag`.) Migrations only add
-(docs/adr/0033), so the older build runs against the newer schema; the database is never rolled
+(docs/adr/0031), so the older build runs against the newer schema; the database is never rolled
 back. For prod, the tag is `master` and the namespace `apps`. Revert the commit on the branch
 too, or the next push redeploys it.
 

@@ -5,12 +5,12 @@
 #
 # gateway carries gateway_server and ulw_migrate (the video-gateway pod's init container runs
 # the gateway image with ulw_migrate as its command, so schema and server always come from one
-# build; docs/adr/0033). worker carries
+# build; docs/adr/0031). worker carries
 # transcode_worker, ulw_sandbox beside it, and ffmpeg.
 #
 # Builder and runtime are the same Ubuntu release, which is also what CI and the dev machines
 # build on, so the shared libraries the binaries link are the ones they were compiled against
-# (docs/adr/0032).
+# (docs/adr/0030).
 
 # ubuntu:24.04 (noble), 2026-09.
 ARG UBUNTU=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
