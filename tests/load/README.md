@@ -71,6 +71,22 @@ tests/load/flood.py --url http://127.0.0.1:8080 --duration 30 --rate 500 \
 `--rate` bounds combined requests/s across all workers (0 is unbounded, limited only by
 `--workers`). `--legit-url`/`--legit-token` work the same way as in `slowloris.py`.
 
+## call_capacity/call_capacity.py
+
+The call capacity check of brief section 14: 1:1 calls through the pinned LiveKit in a local
+container, each participant a LiveKit Python SDK client publishing one 700 kbps track and
+receiving its peer's. It reads the SFU container's own interface counters and CPU time and
+compares a call's egress with the derivation's 1.4 Mbit/s (brief 8.1, ADR-0012), then reports
+the bandwidth ceiling (540 Mbit/s over the measured egress per call) beside the CPU ceiling of
+the overlay's 2-core limit. It runs as the `call-capacity` job of `.github/workflows/e2e.yml`.
+
+```
+python3 -m venv /tmp/callcap
+/tmp/callcap/bin/pip install --require-hashes --only-binary :all: \
+    -r tests/load/call_capacity/requirements.txt
+sudo /tmp/callcap/bin/python tests/load/call_capacity/call_capacity.py --calls 4 --seconds 60
+```
+
 ## A minimal local run
 
 Build the gateway and its helpers, start a scratch Postgres database and MinIO bucket, mint a
