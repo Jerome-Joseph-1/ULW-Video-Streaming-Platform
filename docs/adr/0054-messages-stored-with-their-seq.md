@@ -1,4 +1,4 @@
-# 0052. A message is stored with its seq, in one statement, before it is delivered
+# 0054. A message is stored with its seq, in one statement, before it is delivered
 
 Status: Accepted
 Date: 2026-09-29
@@ -126,8 +126,9 @@ What bounds a page of history:
   the live kind (a stream join, ADR-0057) in a room not recorded as live is answered
   `Admission::NotLive`, which reaches the client as `not_live`, and records nothing. Recording
   a room as live is a server-side step only: `IMessageStore::record_live(room)`, or the SQL in
-  the runbook (section 3), which refuse a room that is not a stream's (ADR-0057), lists members, is recorded as another kind, or was already created on the room
-  plane as another kind (`room_state`'s kind and delivery are fixed at creation, so opening such
+  the runbook (section 3), which refuse a room that is not a stream's (ADR-0057), lists
+  members, is recorded as another kind, or was already created on the room plane as another
+  kind (`room_state`'s kind and delivery are fixed at creation, so opening such
   a room would leave it durable and `group_chat` there while `chat_rooms` said live). Adding a
   member records an unrecorded room as a group chat in the same statement, before its member
   row, so a member insert in flight holds the `chat_rooms` key that `record_live` waits on: the

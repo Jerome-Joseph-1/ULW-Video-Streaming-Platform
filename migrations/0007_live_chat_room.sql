@@ -2,7 +2,7 @@
 -- (apps/chat/src/live_chat.cpp, ADR-0057): an RFC 9562 version 8 UUID whose first byte is 0x01,
 -- the tag of a stream's chat among rooms named by something else, and whose other bytes are the
 -- first 15 of SHA-256 over 'ulw-live-chat:' and the name. Whatever opens a stream's chat records
--- this room live (ADR-0052's record_live, or the runbook's statement), and viewers joining the
+-- this room live (ADR-0054's record_live, or the runbook's statement), and viewers joining the
 -- stream by name reach it. A name the live packager would refuse is refused here too.
 CREATE FUNCTION live_chat_room(stream text) RETURNS uuid
 LANGUAGE plpgsql IMMUTABLE STRICT AS $$

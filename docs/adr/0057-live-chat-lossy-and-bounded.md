@@ -13,7 +13,7 @@ bounded depth while the node's memory stays flat, and the other viewers are unaf
 
 What was there: ADR-0043's lossy delivery skipped every new message while a client had more
 than 64 KiB unsent, so a viewer that stalled read the oldest of its backlog first and lost
-whatever came while it was stalled. Nothing tied a room to a stream. ADR-0052 (M19) records a
+whatever came while it was stalled. Nothing tied a room to a stream. ADR-0054 (M19) records a
 room's kind, lets only the server open a room to anyone (`record_live`), and stores every
 message of every room before delivery. Below
 the process, the kernel autotuned each connection's send buffer up to `tcp_wmem`'s 4 MiB, so a
@@ -41,15 +41,15 @@ How a live chat is tied to its stream:
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
-| A room id the product hands out with each stream, joined as `"kind":"live"` | ADR-0052 already has it | Rejected as the only way: every viewer needs the id from somewhere, and nothing says which rooms are streams' |
+| A room id the product hands out with each stream, joined as `"kind":"live"` | ADR-0054 already has it | Rejected as the only way: every viewer needs the id from somewhere, and nothing says which rooms are streams' |
 | A table from stream to room, written when the stream starts | Any room can be a stream's | Rejected: one more table and lookup per join, for a mapping a hash gives |
 | The room id derived from the stream's name, as a version 8 UUID, joined by the name and opened by the server side | No table; every node, client and SQL statement computes the same room; the id says the kind | Accepted |
 
-Whether live chat is stored (ADR-0052):
+Whether live chat is stored (ADR-0054):
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
-| Store nothing for lossy rooms | No database cost for a large audience's chatter | Rejected: the seq and the message are one statement (ADR-0052), a seq-only path would come back for one kind, and a viewer who arrives late has no context |
+| Store nothing for lossy rooms | No database cost for a large audience's chatter | Rejected: the seq and the message are one statement (ADR-0054), a seq-only path would come back for one kind, and a viewer who arrives late has no context |
 | Store every message, as for other rooms | One path | Rejected: a popular stream writes tens of messages a second for hours, kept forever |
 | Store every message, keeping the room's newest 1000 | Late viewers page back through the last few minutes; storage per live room is bounded | Accepted |
 
@@ -82,7 +82,7 @@ How senders are limited in a room of thousands:
 
   The digest fills the other bytes except the version and variant bits: 117 bits, as far from
   a collision as any id needs.
-- **Opening.** A stream join asks for the live kind, so under ADR-0052 it is admitted only once
+- **Opening.** A stream join asks for the live kind, so under ADR-0054 it is admitted only once
   the server side has recorded the room live (`record_live`, or the runbook's statement with
   `live_chat_room`), and refused `not_live` before. Whatever starts a stream opens its chat;
   until the product does that, operators do it by the stream's name. Opened, it admits anyone
@@ -91,7 +91,7 @@ How senders are limited in a room of thousands:
   (`core::ports::is_stream_chat`), with no recorded kind to look up per message, and the
   recorded kind can never disagree with it: `record_live` refuses any room whose id is not
   version 8, the database refuses to record one live (`chat_rooms_live_is_a_stream`, migration
-  0007), and a join cannot name the live kind for a room id (ADR-0052's `"kind":"live"` is
+  0007), and a join cannot name the live kind for a room id (ADR-0054's `"kind":"live"` is
   gone; a stream is joined by its name). So a room gets every bound below exactly when it is
   open to anyone.
 - **Delivery.** Every viewer of a live chat is lossy, whatever its join asked; a stalled
@@ -133,7 +133,7 @@ How senders are limited in a room of thousands:
   `Deliver` to each node with viewers; each node encodes each message once and hands it to its
   viewers. Thousands of viewers cost the owner one frame per node, and a node one copy per
   viewer into the socket, for the viewers that are keeping up.
-- **Storage.** Live chat messages are stored like any other (ADR-0052), before delivery, and
+- **Storage.** Live chat messages are stored like any other (ADR-0054), before delivery, and
   the room keeps its newest 1000: the append that stores seq N of a lossy room deletes seq
   N - 1000 in the same statement, one more primary key write. 1000 messages of at most 2000
   bytes are about 2 MiB a room; at the 60 a second of three nodes that is 17 s of the busiest

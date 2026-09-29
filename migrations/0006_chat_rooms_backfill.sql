@@ -1,5 +1,5 @@
 -- Records every room that existed before chat_rooms (0005) as a group chat, so that these rooms
--- become closed (ADR-0052). Until then no join was checked and every room admitted anyone; from
+-- become closed (ADR-0054). Until then no join was checked and every room admitted anyone; from
 -- here on only their listed members are admitted. Otherwise a room with no kind recorded would
 -- take the kind of its next join, and one with members listed but no kind recorded could be
 -- opened by the server. A stream's room from before this migration cannot be opened: it needs a
