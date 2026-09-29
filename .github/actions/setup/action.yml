@@ -25,6 +25,34 @@ runs:
     - name: Relax mmap randomisation for sanitizers
       shell: bash
       run: sudo sysctl -w vm.mmap_rnd_bits=28
+    # The OpenMLS bridge (ADR-0039) builds with cargo --locked --offline, so its crates must be
+    # in the registry cache before CMake runs. Skipped on trees without the bridge.
+    - name: Restore the cargo registry
+      if: hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock') != ''
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+        key: cargo-registry-${{ hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock') }}
+    # A cold build of the bridge takes minutes; cargo rebuilds what the lock file or the
+    # sources changed.
+    - name: Restore the bridge's cargo build
+      if: hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock') != ''
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: build/*/infra/e2ee/cargo*
+        key: cargo-build-${{ inputs.cache-key }}-${{ hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock', 'infra/e2ee/mls_ffi_bridge/src/**') }}
+        restore-keys: cargo-build-${{ inputs.cache-key }}-
+    # rustup installs the release rust-toolchain.toml names, checked against the channel's
+    # signed manifest; cargo fetch downloads exactly what Cargo.lock lists, checksums and all.
+    - name: Install the pinned Rust toolchain and fetch the bridge's crates
+      if: hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock') != ''
+      shell: bash
+      working-directory: infra/e2ee/mls_ffi_bridge
+      run: |
+        rustup toolchain install --no-self-update
+        cargo fetch --locked
     - name: Restore ccache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
