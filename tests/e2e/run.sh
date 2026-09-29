@@ -23,12 +23,17 @@ if [[ -z ${ULW_E2E_CHROME:-} ]]; then
     if [[ ! -x $shell ]]; then
         mkdir -p "$cache"
         zip=$(mktemp "$cache/download.XXXXXX")
-        trap 'rm -f "$zip"' EXIT
-        curl -fsSL -o "$zip" "https://storage.googleapis.com/chrome-for-testing-public/$chrome_version/linux64/chrome-headless-shell-linux64.zip"
-        echo "$chrome_sha256  $zip" | sha256sum --check --quiet -
+        # Removed here rather than by an EXIT trap, which the exec at the end would discard.
+        if ! curl -fsSL -o "$zip" "https://storage.googleapis.com/chrome-for-testing-public/$chrome_version/linux64/chrome-headless-shell-linux64.zip" ||
+            ! echo "$chrome_sha256  $zip" | sha256sum --check --quiet -; then
+            rm -f "$zip"
+            echo "run.sh: Chrome for Testing download failed or did not match its SHA-256" >&2
+            exit 1
+        fi
         rm -rf "$dir"
         mkdir -p "$dir"
         unzip -q "$zip" -d "$dir"
+        rm -f "$zip"
     fi
     export ULW_E2E_CHROME=$shell
 fi
