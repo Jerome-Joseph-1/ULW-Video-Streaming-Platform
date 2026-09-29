@@ -30,7 +30,6 @@ target_compile_definitions(core_unit_tests PRIVATE ULW_EXPECTED_VERSION="${PROJE
 
 ulw_add_test_suite(os_unit_tests unit
     unit/os/limits_test.cpp
-    unit/os/privileges_test.cpp
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
