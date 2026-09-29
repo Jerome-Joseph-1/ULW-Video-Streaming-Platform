@@ -1118,6 +1118,31 @@ TEST_F(FewKept, AQuietRoomKeepsWhatItResumesFromWhileALiveChatRunsOnTheSameNode)
     EXPECT_EQ(service_->buffered_bytes(), 7 * (2 + 256U));
 }
 
+class FewMessages : public ChatServiceTest {
+protected:
+    // Two ordinary messages per room, and four across rooms.
+    FewMessages() : ChatServiceTest({.room_buffer_bytes = 600, .buffer_messages = 4}) {}
+};
+
+TEST_F(FewMessages, MessagesARoomAlreadyDroppedDoNotCountAgainstEveryRoomsLimit) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    join(a, std::nullopt, chat::Delivery::Durable, kOtherRoom);
+    rt::IMember& quiet = rooms_.admit();
+    rt::IMember& busy = rooms_.admit();
+    deliver(quiet, 1);
+    for (std::uint64_t seq = 1; seq <= 5; ++seq) {
+        deliver(busy, seq, "hi", "bob", kOtherRoom);
+    }
+    // The busy room keeps its newest two, 4 and 5, and the quiet room its one: three messages
+    // kept, under the four allowed across rooms, so none of the quiet room's had to go.
+    EXPECT_EQ(service_->buffered_bytes(), 3 * (2 + 256U));
+    alice.take();
+    join(a, 0);
+    EXPECT_EQ(seqs(alice.take()), std::vector<std::uint64_t>{1});
+}
+
 TEST_F(ChatServiceTest, ADetachedClientIsToldNothingMoreEvenOfItsOwnSends) {
     FakeClient alice;
     FakeClient bob;
