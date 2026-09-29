@@ -94,6 +94,22 @@ WHIP endpoint, built for ingest (option c).
 - The browser loads `livekit-client`, pinned to an exact version by lockfile (2.22.3 in the call
   suite).
 
+- How the later milestones fit the port:
+  - **M27 (group calls, owner reassignment).** Media does not pass through the owning node, so
+    reassigning a room's owner does not interrupt anyone's media. The new owner reads the room's
+    generation from the state its fenced claim returned, calls `open_room` for it (idempotent)
+    and issues tickets from that handle. The deposed owner may still hold a handle for the same
+    generation; the port cannot stop it calling `close()`, so the fence has to: every SFU side
+    effect (open N+1, close N, end the call) is issued only after the owner's fenced write for
+    it succeeds, and the deposed owner's writes match no row.
+  - **M28 (simulcast and layer selection).** LiveKit's server API has no per-subscriber layer
+    selection; it happens in band, driven by the client SDK (adaptive stream, dynacast,
+    `setVideoQuality` on a remote track publication) from what the SFU reports to it. So M28's
+    code is browser code we ship with the call page, and our server stays out of it. tests/call
+    turns adaptive stream and dynacast off to measure raw packet flow; that is the test's
+    choice, not the product's default.
+  - **M30 (live ingest).** The `Publisher` role above.
+
 ## Consequences
 
 - Clients carry a LiveKit SDK; the ticket is the only LiveKit-shaped thing we send them.
