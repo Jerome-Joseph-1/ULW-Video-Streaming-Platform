@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/name: livekit
+    app.kubernetes.io/part-of: ulw
+spec:
+  selector:
+    app.kubernetes.io/name: livekit
+  ports:
+    - name: http
+      port: 7880
+      targetPort: http
+      appProtocol: kubernetes.io/ws
+    # STUNner relays to the endpoints behind this port (stunner/gateway.yaml); nothing uses
+    # the ClusterIP for media.
+    - name: rtc-udp
+      port: 7882
+      targetPort: rtc-udp
+      protocol: UDP
