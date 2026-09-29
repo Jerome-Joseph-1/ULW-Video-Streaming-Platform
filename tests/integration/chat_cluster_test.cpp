@@ -378,8 +378,7 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     // "fenced" when the append's own answer comes back first; "unavailable" when the resumed
     // node's heartbeat finds the fence while the append is still out, and its fate is unknown
     // to the node. Either way the client is told it was not sequenced for certain.
-    EXPECT_TRUE(refused->reason == "fenced" || refused->reason == "unavailable")
-        << refused->reason;
+    EXPECT_TRUE(refused->reason == "fenced" || refused->reason == "unavailable") << refused->reason;
     EXPECT_EQ(last_seq(), seq_before) << "the stale write updated a row";
     const std::string& logged = stalled.process->output();
     const std::size_t at = logged.find(fenced);
@@ -408,6 +407,25 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     }
     for (Node& n : nodes_) {
         EXPECT_EQ(n.process->wait_exit(seconds(30)), 0) << n.name << "\n" << n.process->output();
+    }
+
+    // Each ran on the reactor it was asked for, not a fallback.
+    const std::string reactor = GetParam() == net::ReactorKind::IoUring ? R"("reactor":"io_uring")"
+                                                                        : R"("reactor":"epoll")";
+    // Bodies, tokens and the node secret never reach a log (section 8.14).
+    std::vector<std::string> secrets = tokens_;
+    secrets.push_back(node_secret_);
+    for (const std::string body :
+         {"hello from chat-2", "hello from chat-1", "stale", "bob after the failover",
+          "carol after the failover", "alice is back"}) {
+        secrets.push_back(body);
+    }
+    for (const Node& n : nodes_) {
+        const std::string& output = n.process->output();
+        EXPECT_NE(output.find(reactor + ","), std::string::npos) << n.name << "\n" << output;
+        for (const std::string& secret : secrets) {
+            EXPECT_EQ(output.find(secret), std::string::npos) << n.name << " logged " << secret;
+        }
     }
 }
 
