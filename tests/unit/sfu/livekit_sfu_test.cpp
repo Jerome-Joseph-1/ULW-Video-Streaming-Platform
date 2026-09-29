@@ -345,6 +345,30 @@ TEST_P(LiveKitSfuTest, AServerThatIsNotListeningIsUnavailable) {
     EXPECT_EQ(room.error(), MediaError::Unavailable);
 }
 
+// libcurl refuses a URL longer than CURL_MAX_INPUT_LENGTH (8,000,000 bytes) when it is set, so
+// the request fails before anything reaches the network.
+std::string unsendable_url() {
+    return "http://127.0.0.1/" + std::string(std::size_t{8'000'001}, 'a');
+}
+
+TEST_P(LiveKitSfuTest, ARequestThatCannotBeSentFailsLaterAsRefused) {
+    start(unsendable_url());
+    const auto room = open();
+    ASSERT_FALSE(room);
+    EXPECT_EQ(room.error(), MediaError::Refused);
+}
+
+TEST_P(LiveKitSfuTest, ARequestThatCannotBeSentIsDroppedWithTheSfu) {
+    start(unsendable_url());
+    int calls = 0;
+    sfu->open_room(*core::RoomId::parse(kRoom), MediaGeneration{1}, 2,
+                   [&](OpenResult) noexcept { ++calls; });
+    EXPECT_EQ(calls, 0) << "callback ran inside open_room()";
+    sfu.reset();
+    ulw::test::pump_pending(*reactor);
+    EXPECT_EQ(calls, 0);
+}
+
 TEST_P(LiveKitSfuTest, DestroyingTheSfuDropsPendingCallbacks) {
     auto server = answering(200);
     start(server.base_url());
