@@ -44,7 +44,8 @@ constexpr std::size_t kDatagramBufSize =
 // At 1 Gbit/s of 1200-byte datagrams (about 104,000 a second) and a loop turning every
 // millisecond, about 104 sends are submitted per iteration and complete in the next, so 1024 is
 // five times the steady state. The limit is per reactor, not per socket: one socket may carry
-// the whole rate, as a socket facing the SFU does. 1024 x 2 KiB bounds the copies at about 2 MiB.
+// the whole rate, as a socket facing the SFU does. A pending send is about
+// 2.3 KB (the payload, a sockaddr_storage and a msghdr), so 1024 of them take about 2.3 MiB.
 constexpr std::size_t kMaxSendsInFlight = 1024;
 // A send's pool index replaces the descriptor and generation in its user_data: the pending
 // send records the descriptor, and its socket cannot be recycled while the send is in flight.

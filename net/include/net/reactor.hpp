@@ -86,9 +86,7 @@ struct DatagramStats {
     // receive buffers, and dropped as a full receive buffer would have dropped it.
     std::uint64_t stopped_drops = 0;
     std::uint64_t sent = 0;
-    // send_to returned EAGAIN.
     std::uint64_t send_refused = 0;
-    // Reported through on_send_error.
     std::uint64_t send_errors = 0;
 };
 

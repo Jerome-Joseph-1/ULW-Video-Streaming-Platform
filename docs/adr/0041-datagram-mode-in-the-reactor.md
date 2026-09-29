@@ -18,8 +18,8 @@ what `send_to` does when it cannot send, and how IPv4 peers of a dual-stack sock
 
 Measured on kernel 6.18 over loopback:
 
-- a default 208 KiB receive buffer holds 256 datagrams of up to about 200 bytes (832 bytes of
-  truesize each) and 92 datagrams of 1,200 to 1,472 bytes;
+- a default 208 KiB receive buffer holds 256 datagrams of up to 192 bytes (832 bytes of
+  truesize each), 166 of 200 bytes, and 92 of 1,200 to 1,472 bytes;
 - one multishot `RECVMSG`, armed on a socket with 250 datagrams queued and stopped on its first
   completion, had posted 98 datagrams before the cancel took effect;
 - `SENDMSG_ZC` of 1,200-byte datagrams cost 1,640 ns of CPU each against 1,440 ns for

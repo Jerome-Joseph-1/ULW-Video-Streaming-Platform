@@ -53,7 +53,10 @@ struct Sink final : net::IDatagramHandler {
 };
 
 // A stream whose first bytes run `hook`. Its completion lands in the same batch as datagram
-// completions submitted after it, which is how a test acts between two of them.
+// completions submitted after it, which is how a test acts between two of them. That order holds
+// on 6.18, where a submission with data waiting completes inline in submission order, but the
+// kernel does not promise it; if another kernel reorders them, the io_uring-only checks of the
+// tests that rely on it are where it shows.
 struct StreamHook final : net::IStreamHandler {
     std::function<void()> hook;
     bool fired = false;
