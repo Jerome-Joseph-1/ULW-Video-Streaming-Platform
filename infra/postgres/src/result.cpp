@@ -21,16 +21,6 @@ template <class T> std::optional<T> parse_whole(std::string_view text) noexcept 
     return value;
 }
 
-std::optional<std::uint8_t> hex_digit(char c) noexcept {
-    if (c >= '0' && c <= '9') {
-        return static_cast<std::uint8_t>(c - '0');
-    }
-    if (c >= 'a' && c <= 'f') {
-        return static_cast<std::uint8_t>(c - 'a' + 10);
-    }
-    return std::nullopt;
-}
-
 } // namespace
 
 std::optional<std::string_view> Result::get(int row, int column) const noexcept {
@@ -54,6 +44,27 @@ std::optional<std::uint64_t> parse_uint64(std::string_view text) noexcept {
     return parse_whole<std::uint64_t>(text);
 }
 
+std::optional<std::vector<std::byte>> parse_bytea(std::string_view text) {
+    // bytea_output = 'hex' has been the server default since 9.0; 'escape' output is refused
+    // rather than guessed at.
+    if (!text.starts_with("\\x") || text.size() % 2 != 0) {
+        return std::nullopt;
+    }
+    text.remove_prefix(2);
+    std::vector<std::byte> out;
+    out.reserve(text.size() / 2);
+    for (std::size_t i = 0; i < text.size(); i += 2) {
+        std::uint8_t value = 0;
+        const char* const first = std::to_address(text.begin() + static_cast<std::ptrdiff_t>(i));
+        const auto [ptr, ec] = std::from_chars(first, first + 2, value, 16);
+        if (ec != std::errc{} || ptr != first + 2) {
+            return std::nullopt;
+        }
+        out.push_back(static_cast<std::byte>(value));
+    }
+    return out;
+}
+
 std::optional<bool> parse_bool(std::string_view text) noexcept {
     if (text == "t") {
         return true;
@@ -62,22 +73,6 @@ std::optional<bool> parse_bool(std::string_view text) noexcept {
         return false;
     }
     return std::nullopt;
-}
-
-std::optional<std::vector<std::byte>> parse_hex(std::string_view text) {
-    if (text.size() % 2 != 0) {
-        return std::nullopt;
-    }
-    std::vector<std::byte> out(text.size() / 2);
-    for (std::size_t i = 0; i < out.size(); ++i) {
-        const auto high = hex_digit(text[2 * i]);
-        const auto low = hex_digit(text[(2 * i) + 1]);
-        if (!high || !low) {
-            return std::nullopt;
-        }
-        out[i] = static_cast<std::byte>((*high << 4U) | *low);
-    }
-    return out;
 }
 
 } // namespace infra::postgres

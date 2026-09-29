@@ -1,18 +1,15 @@
 #include "result.hpp"
 
-#include <cstddef>
 #include <cstdint>
-#include <format>
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
-#include <string>
 #include <vector>
 
 namespace {
 
 using infra::postgres::parse_bool;
-using infra::postgres::parse_hex;
+using infra::postgres::parse_bytea;
 using infra::postgres::parse_int64;
 using infra::postgres::parse_uint64;
 
@@ -50,22 +47,19 @@ TEST(ParseBool, AcceptsOnlyTheServersTextForm) {
     EXPECT_EQ(parse_bool(""), std::nullopt);
 }
 
-TEST(ParseHex, ReadsEveryByteValue) {
-    std::string hex;
-    std::vector<std::byte> all;
-    for (unsigned v = 0; v < 256; ++v) {
-        hex += std::format("{:02x}", v);
-        all.push_back(static_cast<std::byte>(v));
-    }
-    EXPECT_EQ(parse_hex(hex), all);
-    EXPECT_EQ(parse_hex(""), std::vector<std::byte>{});
+TEST(ParseBytea, ReadsHexOutputInEitherCase) {
+    EXPECT_EQ(parse_bytea("\\x00ff5C"),
+              (std::vector<std::byte>{std::byte{0x00}, std::byte{0xff}, std::byte{0x5c}}));
+    EXPECT_EQ(parse_bytea("\\x"), std::vector<std::byte>{});
 }
 
-TEST(ParseHex, RejectsAnOddLengthUppercaseAndPrefixes) {
-    EXPECT_EQ(parse_hex("abc"), std::nullopt);
-    EXPECT_EQ(parse_hex("AB"), std::nullopt);
-    EXPECT_EQ(parse_hex("\\x00"), std::nullopt);
-    EXPECT_EQ(parse_hex("0g"), std::nullopt);
+TEST(ParseBytea, RefusesEscapeOutputAndBrokenHex) {
+    EXPECT_EQ(parse_bytea("abc"), std::nullopt);
+    EXPECT_EQ(parse_bytea("\\x0"), std::nullopt);
+    EXPECT_EQ(parse_bytea("\\x0g"), std::nullopt);
+    EXPECT_EQ(parse_bytea("\\x+1"), std::nullopt);
+    EXPECT_EQ(parse_bytea("\\x-1"), std::nullopt);
+    EXPECT_EQ(parse_bytea("x00"), std::nullopt);
 }
 
 } // namespace

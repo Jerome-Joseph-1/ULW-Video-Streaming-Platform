@@ -24,8 +24,8 @@ struct MessageStoreConfig {
 };
 
 // IMessageStore on Postgres (migrations/0005_chat_messages.sql), driven by the reactor: no call
-// blocks the loop. Bodies travel as bound binary parameters and come back hex-encoded; neither
-// they nor anything derived from them reaches a log or an error.
+// blocks the loop. Bodies travel as bound binary parameters and come back as bytea hex text;
+// neither they nor anything derived from them reaches a log or an error.
 //
 // The offload pool resolves host names and must be stopped before this is destroyed. Calls
 // outstanding at destruction are dropped unanswered.

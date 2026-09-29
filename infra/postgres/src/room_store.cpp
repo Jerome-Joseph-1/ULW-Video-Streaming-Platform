@@ -413,7 +413,7 @@ public:
                                        .add_uuid(room_.uuid())
                                        .add_int(as_int(generation_))
                                        .add_text(sender_.view())
-                                       .add_bytes(body_)
+                                       .add_bytea(body_)
                                        .add_int(sent_at_)};
     }
 

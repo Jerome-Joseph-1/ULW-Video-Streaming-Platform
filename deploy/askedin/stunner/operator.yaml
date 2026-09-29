@@ -1,0 +1,194 @@
+# The STUNner gateway operator v1.2.1, installed once per cluster (ADR-0013). This is
+# templates/stunner.yaml of l7mp/stunner-helm at tag v1.2.1 (08555494a2fd) rendered with the
+# chart's defaults into namespace stunner-system, with these changes:
+#   - the image is pinned by digest as well as tag;
+#   - left out: the metrics Service and the metrics-reader and proxy ClusterRoles, which served
+#     a kube-rbac-proxy sidecar this release no longer runs (its metrics bind to 127.0.0.1),
+#     and the manager ConfigMap, which nothing mounts;
+#   - the container runs with a read-only root filesystem, no capabilities and the runtime's
+#     seccomp profile, as every ULW pod does.
+# Its CRDs come from the same chart (RUNBOOK.md step 7); the Gateway API CRDs are Envoy
+# Gateway's, already on the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stunner-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stunner-gateway-operator-controller-manager
+  namespace: stunner-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: stunner-gateway-operator-leader-election-role
+  namespace: stunner-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stunner-gateway-operator-manager-role
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["endpoints", "endpoints/status", "namespaces", "nodes", "nodes/status", "secrets",
+                "services/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets/finalizers", "daemonsets/status", "deployments/finalizers",
+                "deployments/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices", "endpointslices/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses", "gateways", "udproutes"]
+    verbs: ["get", "list", "patch", "update", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses/status", "gateways/status", "udproutes/status"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["stunner.l7mp.io"]
+    resources: ["dataplanes", "gatewayconfigs", "staticservices", "udproutes"]
+    verbs: ["get", "list", "patch", "update", "watch"]
+  - apiGroups: ["stunner.l7mp.io"]
+    resources: ["staticservices/finalizers", "udproutes/finalizers", "udproutes/status"]
+    verbs: ["patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stunner-gateway-operator-leader-election-rolebinding
+  namespace: stunner-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: stunner-gateway-operator-leader-election-role
+subjects:
+  - kind: ServiceAccount
+    name: stunner-gateway-operator-controller-manager
+    namespace: stunner-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stunner-gateway-operator-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: stunner-gateway-operator-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: stunner-gateway-operator-controller-manager
+    namespace: stunner-system
+---
+# Where the stunnerd pods fetch their configuration (and stunnerctl reads it).
+apiVersion: v1
+kind: Service
+metadata:
+  name: stunner-config-discovery
+  namespace: stunner-system
+  labels:
+    stunner.l7mp.io/config-discovery-service: "true"
+spec:
+  selector:
+    control-plane: stunner-gateway-operator-controller-manager
+  ports:
+    - name: cds
+      port: 13478
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stunner-gateway-operator-controller-manager
+  namespace: stunner-system
+  labels:
+    control-plane: stunner-gateway-operator-controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: stunner-gateway-operator-controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: stunner-gateway-operator-controller-manager
+        stunner.l7mp.io/config-discovery-service: enabled
+    spec:
+      serviceAccountName: stunner-gateway-operator-controller-manager
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: docker.io/l7mp/stunner-gateway-operator:1.2.1@sha256:0ea40a1d42d50a382803a6f182994e61ce6027673133bdeee970874610558516
+          imagePullPolicy: IfNotPresent
+          command: ["/manager"]
+          args:
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=127.0.0.1:8080
+            - --leader-elect
+            - --zap-encoder=console
+            - --zap-log-level=info
+            - --dataplane-mode=managed
+          env:
+            # The address the dataplane pods are told to fetch their configuration from.
+            - name: STUNNER_GATEWAY_OPERATOR_ADDRESS
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+          ports:
+            - name: cds
+              containerPort: 13478
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
