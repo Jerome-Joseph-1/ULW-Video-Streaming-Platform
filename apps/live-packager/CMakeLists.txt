@@ -2,6 +2,7 @@ ulw_add_library(live_packager_lib
     src/config.cpp
     src/live_window.cpp
     src/media_playlist.cpp
+    src/pipe.cpp
     src/publisher.cpp
     src/segment_tracker.cpp
     src/stream_id.cpp
