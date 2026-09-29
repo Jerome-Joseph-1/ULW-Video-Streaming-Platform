@@ -202,9 +202,10 @@ TEST(SdpAttributes, IceCredentialsAndOptions) {
     EXPECT_EQ(last(Parsed{in_media({"a=ice-options:trickle renomination"})}),
               (AttributeValue{IceOptions{.options = {"trickle", "renomination"}}}));
     // RFC 8839 section 5.4: ice-ufrag is 4 to 256 ice-chars, ice-pwd 22 to 256.
-    expect_refused_in_media(
-        {"a=ice-ufrag:abc", "a=ice-ufrag:ab-d", "a=ice-pwd:aaaaaaaaaaaaaaaaaaaaa",
-         "a=ice-ufrag:" + std::string(257, 'a'), "a=ice-options:", "a=ice-options:a  b"});
+    expect_refused_in_media({"a=ice-ufrag:abc", "a=ice-ufrag:ab-d",
+                             "a=ice-pwd:aaaaaaaaaaaaaaaaaaaaa",
+                             "a=ice-ufrag:" + std::string(257, 'a'),
+                             "a=ice-options:", "a=ice-options:a  b", "a=ice-options:google-ice"});
     EXPECT_TRUE(Parsed(with(minimal(), "a=ice-ufrag:" + std::string(256, '+'))).ok());
 }
 

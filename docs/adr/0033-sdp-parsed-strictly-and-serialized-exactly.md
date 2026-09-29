@@ -57,9 +57,12 @@ two spellings of one thing cannot write both back.
 ## Consequences
 
 - Valid but unusual SDP is refused: `a=setup:ACTIVE`, a number with a leading zero, two spaces
-  between fields, a blank line, an SHA-1 fingerprint. Chromium 141's offers and answers pass
-  (tests/data/sdp); Firefox and Safari have not been captured yet, and a refusal from either
-  is the first thing to check if a call fails to start from them.
+  between fields, a blank line, an SHA-1 fingerprint. So is `a=ice-options:google-ice`, which
+  browsers once sent: RFC 8839 section 5.6 limits an option tag to ALPHA, DIGIT, "+" and "/",
+  so its hyphen is outside the grammar, and no option we negotiate depends on it. Widening
+  the tag grammar for one legacy value would let any hyphenated tag through. Chromium 141's
+  offers and answers pass (tests/data/sdp); Firefox and Safari have not been captured yet,
+  and a refusal from either is the first thing to check if a call fails to start from them.
 - A refusal says which line and which rule, so a client bug is diagnosable from the log.
 - The answer M25 sends is a `Session` built by the SFU adapter, with views into strings it
   owns, and checked by parsing its own serialization in tests.
