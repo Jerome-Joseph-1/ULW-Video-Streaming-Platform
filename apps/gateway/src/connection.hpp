@@ -154,6 +154,7 @@ private:
     void on_playlist(ControlJob job) noexcept;
     void on_durable() noexcept;
     void drain_staging() noexcept;
+    void end_stall() noexcept;
     void submit(ControlOp op) noexcept;
     void start_job(ControlJob job) noexcept;
     void on_created(ControlJob job) noexcept;

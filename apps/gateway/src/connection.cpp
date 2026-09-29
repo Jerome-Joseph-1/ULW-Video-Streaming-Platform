@@ -585,6 +585,9 @@ void Connection::drain_staging() noexcept {
     while (staging_head_ < staging_.size()) {
         const std::size_t n = session_->write(std::span(staging_).subspan(staging_head_));
         if (n == 0) {
+            if (!req_.stalled_since) {
+                req_.stalled_since = now();
+            }
             return;
         }
         staging_head_ += n;
@@ -592,11 +595,7 @@ void Connection::drain_staging() noexcept {
     }
     staging_.clear();
     staging_head_ = 0;
-    if (req_.stalled_since) {
-        gw().backend_write_stall().observe(
-            std::chrono::duration_cast<core::Millis>(now() - *req_.stalled_since));
-        req_.stalled_since.reset();
-    }
+    end_stall();
     if (parser_paused_ && !req_.message_complete) {
         parser_paused_ = false;
         // The time the store held the body up is not the client's to answer for.
@@ -1153,11 +1152,22 @@ void Connection::fail_catalog(CatalogError error) noexcept {
     }
 }
 
+// A stall that ends the request (the body timeout gives up on the store, the client leaves) is
+// the longest there is, and must be counted with the rest.
+void Connection::end_stall() noexcept {
+    if (req_.stalled_since) {
+        gw().backend_write_stall().observe(
+            std::chrono::duration_cast<core::Millis>(now() - *req_.stalled_since));
+        req_.stalled_since.reset();
+    }
+}
+
 void Connection::respond(http::ResponseHead head, std::string_view body) noexcept {
     if (req_.responded || phase_ != Phase::Request) {
         return;
     }
     req_.responded = true;
+    end_stall();
     if (session_) {
         session_->abort();
         session_.reset();
@@ -1262,6 +1272,7 @@ void Connection::close() noexcept {
         return;
     }
     phase_ = Phase::Closed;
+    end_stall();
     if (session_) {
         session_->abort();
         session_.reset();
