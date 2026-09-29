@@ -2,7 +2,9 @@
 #include "support/fake_clock.hpp"
 #include "support/memory_log.hpp"
 
+#include <condition_variable>
 #include <gtest/gtest.h>
+#include <mutex>
 #include <string>
 
 namespace {
@@ -96,6 +98,41 @@ TEST_F(HealthProbeTest, TheQueueAgeAndStoreCountsAreCarriedOver) {
     database_error = "gone";
     probe.probe_once();
     EXPECT_EQ(health.oldest_queued_seconds(), 7U);
+}
+
+TEST_F(HealthProbeTest, StoppingLetsTheProbeInProgressFinishAndStartsNoOther) {
+    std::mutex mutex;
+    std::condition_variable changed;
+    int calls = 0;
+    bool release = false;
+    gateway::ProbeChecks blocking = checks();
+    blocking.database = [&]() -> std::expected<std::optional<core::Seconds>, std::string> {
+        std::unique_lock lock(mutex);
+        ++calls;
+        changed.notify_all();
+        changed.wait(lock, [&] { return release; });
+        return std::nullopt;
+    };
+    {
+        gateway::HealthProbe probe(health, blocking, clock, log);
+        probe.start(core::Millis{1});
+        {
+            std::unique_lock lock(mutex);
+            ASSERT_TRUE(
+                changed.wait_for(lock, std::chrono::seconds(10), [&] { return calls == 1; }));
+        }
+        probe.stop();
+        {
+            const std::scoped_lock lock(mutex);
+            release = true;
+        }
+        changed.notify_all();
+        // With a 1 ms interval, a probe the stop did not prevent comes within milliseconds.
+        std::unique_lock lock(mutex);
+        EXPECT_FALSE(
+            changed.wait_for(lock, std::chrono::milliseconds(300), [&] { return calls > 1; }));
+    }
+    EXPECT_EQ(calls, 1);
 }
 
 } // namespace

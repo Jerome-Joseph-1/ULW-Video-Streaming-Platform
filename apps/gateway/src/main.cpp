@@ -314,8 +314,11 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, ops::Lo
             notifier->watchdog();
             next_ping = s.clock.now() + *watchdog;
         }
-        if (notifier && s.gateway->draining() && !told_stopping) {
-            notifier->stopping();
+        if (s.gateway->draining() && !told_stopping) {
+            s.probe->stop();
+            if (notifier) {
+                notifier->stopping();
+            }
             told_stopping = true;
         }
     }

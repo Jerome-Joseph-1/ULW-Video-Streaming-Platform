@@ -96,8 +96,13 @@ public:
     HealthProbe& operator=(HealthProbe&&) = delete;
 
     void probe_once();
-    // Probes now and then every `interval` on a thread of its own, until destruction.
+    // Probes now and then every `interval` on a thread of its own, until stop().
     void start(core::Millis interval);
+    // No probe starts after this; one in progress finishes, and destruction waits for it. Called
+    // when the drain begins, so that a probe stuck on a dead dependency (5 s connect, 2 s
+    // statement, 6.3 s of store retries) runs out during the drain rather than after it, and
+    // the exit stays inside the manager's 45 s.
+    void stop() noexcept { thread_.request_stop(); }
 
 private:
     Health& health_;
