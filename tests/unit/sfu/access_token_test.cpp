@@ -108,15 +108,6 @@ TEST(AccessToken, CreateGrantNamesNoRoomAndNoParticipant) {
     EXPECT_EQ(read.claims.find("sub"), nullptr);
 }
 
-TEST(AccessToken, AdminGrantIsScopedToItsRoomAndCannotJoin) {
-    const ReadToken read =
-        mint_and_read({.permission = Permission::AdministerRoom, .room = kRoom, .identity = {}});
-    EXPECT_EQ(bool_at(read.claims, "video", "roomAdmin"), true);
-    EXPECT_EQ(string_at(read.claims, "video", "room"), kRoom);
-    EXPECT_EQ(bool_at(read.claims, "video", "roomJoin"), std::nullopt);
-    EXPECT_EQ(bool_at(read.claims, "video", "roomCreate"), std::nullopt);
-}
-
 TEST(AccessToken, NamesAreEscapedIntoTheClaims) {
     const ReadToken read =
         mint_and_read({.permission = Permission::JoinRoom, .room = R"(a"b\c)", .identity = "x\ny"});

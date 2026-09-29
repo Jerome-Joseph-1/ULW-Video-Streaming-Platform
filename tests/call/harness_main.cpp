@@ -1,6 +1,14 @@
-// The signalling side of tests/call, until the call handler carries it over the room WebSocket:
-// each run performs one SFU port operation against the LiveKit server and prints what the
-// handler would send the client.
+// The signalling side of tests/call, until the call handler carries it over the room WebSocket.
+// Like the handler, it is one long-lived process that keeps the rooms it opened: it reads one
+// command per line on stdin, runs it through the SFU port, and answers with one line on stdout.
+//
+//   open <room-id> <generation> <max-participants>   -> ok
+//   join <room-id> <generation> <user> <device-id>    -> the ticket, as JSON
+//   close <room-id> <generation>                      -> ok
+//
+// A command that fails answers "error <reason>". LIVEKIT_API_KEY and LIVEKIT_API_SECRET are
+// required; LIVEKIT_API_URL defaults to http://127.0.0.1:7880 and LIVEKIT_CLIENT_URL to
+// ws://127.0.0.1:7880.
 #include "core/models/ids.hpp"
 #include "core/ports/media.hpp"
 #include "core/util/json.hpp"
@@ -9,48 +17,36 @@
 #include "net/reactor_factory.hpp"
 #include "os/system_clock.hpp"
 
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <expected>
+#include <iostream>
+#include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <print>
-#include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 namespace {
 
-constexpr std::string_view kUsage = R"(usage:
-  ulw_call_harness open <room-id>
-  ulw_call_harness join <room-id> <user> <device-id>
-      Opens the room if need be and prints the participant's ticket as JSON.
-  ulw_call_harness remove <room-id> <user> <device-id>
-  ulw_call_harness close <room-id>
-LIVEKIT_API_KEY and LIVEKIT_API_SECRET are required; LIVEKIT_API_URL defaults to
-http://127.0.0.1:7880 and LIVEKIT_CLIENT_URL to ws://127.0.0.1:7880.
-)";
+using core::ports::IMediaRoom;
+using core::ports::MediaError;
+using core::ports::MediaGeneration;
 
-constexpr int kUsageError = 2;
-// A 1:1 call.
-constexpr std::uint16_t kCallParticipants = 2;
 // The harness holds one libcurl connection and the reactor's own descriptors.
 constexpr std::size_t kMaxFds = 64;
-
-int fail(std::string_view what) {
-    std::println(stderr, "ulw_call_harness: {}", what);
-    return 1;
-}
-
-int usage() {
-    std::print(stderr, "{}", kUsage);
-    return kUsageError;
-}
+// Twice the adapter's 5 s request timeout, which libcurl does not apply to a transfer still
+// queued for a connection.
+constexpr std::chrono::seconds kCommandDeadline{10};
 
 std::string env_or(const char* name, std::string_view fallback) {
     // Read once, before anything else could call setenv.
@@ -59,123 +55,29 @@ std::string env_or(const char* name, std::string_view fallback) {
     return value != nullptr ? std::string(value) : std::string(fallback);
 }
 
-struct Harness {
-    os::SystemClock clock;
-    std::unique_ptr<net::IReactor> reactor;
-    std::unique_ptr<infra::curl::Multi> multi;
-    std::unique_ptr<core::ports::ISfu> sfu;
-
-    template <class Pred> void run_until(Pred done) const {
-        while (!done()) {
-            reactor->run_once(core::Millis{100});
-        }
+template <class T> std::optional<T> parse_number(std::string_view text) {
+    std::uint64_t value = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (ec != std::errc{} || end != text.data() + text.size() ||
+        value > std::numeric_limits<T>::max()) {
+        return std::nullopt;
     }
-
-    [[nodiscard]] std::expected<std::unique_ptr<core::ports::IMediaRoom>, core::ports::MediaError>
-    open(const core::RoomId& room) const {
-        std::optional<
-            std::expected<std::unique_ptr<core::ports::IMediaRoom>, core::ports::MediaError>>
-            opened;
-        sfu->open_room(room, kCallParticipants,
-                       [&](auto result) noexcept { opened = std::move(result); });
-        run_until([&] { return opened.has_value(); });
-        return std::move(*opened);
-    }
-
-    template <class Start>
-    [[nodiscard]] std::expected<void, core::ports::MediaError> wait(Start start) const {
-        std::optional<std::expected<void, core::ports::MediaError>> outcome;
-        start([&](std::expected<void, core::ports::MediaError> r) noexcept { outcome = r; });
-        run_until([&] { return outcome.has_value(); });
-        return *outcome;
-    }
-};
-
-// On the heap: the reactor and the adapter keep references to the clock and to each other.
-std::unique_ptr<Harness> make_harness() {
-    auto harness = std::make_unique<Harness>();
-    Harness& h = *harness;
-    auto choice = net::make_reactor_with_fallback(net::ReactorKind::IoUring, h.clock, kMaxFds);
-    if (!choice) {
-        fail("cannot create a reactor");
-        return nullptr;
-    }
-    h.reactor = std::move(choice->reactor);
-    auto multi = infra::curl::Multi::create(*h.reactor);
-    if (!multi) {
-        fail("cannot start libcurl");
-        return nullptr;
-    }
-    h.multi = std::move(*multi);
-    auto sfu = infra::sfu::livekit::make_sfu(
-        *h.reactor, *h.multi, h.clock,
-        infra::sfu::livekit::Config{.api_url = env_or("LIVEKIT_API_URL", "http://127.0.0.1:7880"),
-                                    .client_url =
-                                        env_or("LIVEKIT_CLIENT_URL", "ws://127.0.0.1:7880"),
-                                    .api_key = env_or("LIVEKIT_API_KEY", ""),
-                                    .api_secret = env_or("LIVEKIT_API_SECRET", "")});
-    if (!sfu) {
-        fail(infra::sfu::livekit::to_string(sfu.error()));
-        return nullptr;
-    }
-    h.sfu = std::move(*sfu);
-    return harness;
+    return static_cast<T>(value);
 }
 
-int run(std::span<const std::string_view> args) {
-    if (args.empty()) {
-        return usage();
-    }
-    const std::string_view command = args[0];
-    const bool names_participant = command == "join" || command == "remove";
-    if (args.size() != (names_participant ? 4U : 2U)) {
-        return usage();
-    }
-    const auto room_id = core::RoomId::parse(args[1]);
-    if (!room_id) {
-        return fail("room id is not a UUID");
-    }
-    std::optional<core::UserId> user;
-    std::optional<core::DeviceId> device;
-    if (names_participant) {
-        auto u = core::UserId::parse(args[2]);
-        auto d = core::DeviceId::parse(args[3]);
-        if (!u || !d) {
-            return fail("user or device id malformed");
+std::vector<std::string_view> split(std::string_view line) {
+    std::vector<std::string_view> words;
+    while (!line.empty()) {
+        const auto space = line.find(' ');
+        if (space != 0) {
+            words.push_back(line.substr(0, space));
         }
-        user = *u;
-        device = *d;
+        line = space == std::string_view::npos ? std::string_view{} : line.substr(space + 1);
     }
-    if (command != "open" && command != "close" && !names_participant) {
-        return usage();
-    }
+    return words;
+}
 
-    const std::unique_ptr<Harness> h = make_harness();
-    if (!h) {
-        return 1;
-    }
-    auto room = h->open(*room_id);
-    if (!room) {
-        return fail(core::ports::to_string(room.error()));
-    }
-    if (command == "open") {
-        return 0;
-    }
-    if (command == "close") {
-        const auto closed =
-            h->wait([&](core::ports::MediaDone done) { (*room)->close(std::move(done)); });
-        return closed ? 0 : fail(core::ports::to_string(closed.error()));
-    }
-    auto participant = (*room)->join(*user, *device);
-    if (!participant) {
-        return fail(core::ports::to_string(participant.error()));
-    }
-    if (command == "remove") {
-        const auto removed =
-            h->wait([&](core::ports::MediaDone done) { (*participant)->remove(std::move(done)); });
-        return removed ? 0 : fail(core::ports::to_string(removed.error()));
-    }
-    const core::ports::MediaTicket& ticket = (*participant)->ticket();
+std::string ticket_json(const core::ports::MediaTicket& ticket) {
     std::string out = R"({"url":)";
     core::json::append_string(out, ticket.endpoint);
     out += R"(,"token":)";
@@ -184,16 +86,143 @@ int run(std::span<const std::string_view> args) {
     out += std::to_string(
         std::chrono::floor<std::chrono::seconds>(ticket.expires_at).time_since_epoch().count());
     out += '}';
-    std::println("{}", out);
-    return 0;
+    return out;
 }
+
+class Harness {
+public:
+    // On the heap: the reactor and the adapter keep references to the clock and to each other.
+    static std::unique_ptr<Harness> create() {
+        auto h = std::make_unique<Harness>();
+        auto choice =
+            net::make_reactor_with_fallback(net::ReactorKind::IoUring, h->clock_, kMaxFds);
+        if (!choice) {
+            std::println(stderr, "ulw_call_harness: cannot create a reactor");
+            return nullptr;
+        }
+        h->reactor_ = std::move(choice->reactor);
+        auto multi = infra::curl::Multi::create(*h->reactor_);
+        if (!multi) {
+            std::println(stderr, "ulw_call_harness: cannot start libcurl");
+            return nullptr;
+        }
+        h->multi_ = std::move(*multi);
+        auto sfu = infra::sfu::livekit::make_sfu(
+            *h->reactor_, *h->multi_, h->clock_,
+            infra::sfu::livekit::Config{
+                .api_url = env_or("LIVEKIT_API_URL", "http://127.0.0.1:7880"),
+                .client_url = env_or("LIVEKIT_CLIENT_URL", "ws://127.0.0.1:7880"),
+                .api_key = env_or("LIVEKIT_API_KEY", ""),
+                .api_secret = env_or("LIVEKIT_API_SECRET", "")});
+        if (!sfu) {
+            std::println(stderr, "ulw_call_harness: {}",
+                         infra::sfu::livekit::to_string(sfu.error()));
+            return nullptr;
+        }
+        h->sfu_ = std::move(*sfu);
+        return h;
+    }
+
+    // The answer line for one command line.
+    std::string run(std::string_view line) {
+        const std::vector<std::string_view> words = split(line);
+        if (words.size() < 3) {
+            return "error usage";
+        }
+        const auto room = core::RoomId::parse(words[1]);
+        const auto generation = parse_number<std::uint64_t>(words[2]);
+        if (!room || !generation) {
+            return "error bad room id or generation";
+        }
+        std::string key(words[1]);
+        key += ':';
+        key += words[2];
+        if (words[0] == "open" && words.size() == 4) {
+            const auto max = parse_number<std::uint16_t>(words[3]);
+            return max ? open(*room, MediaGeneration{*generation}, *max, std::move(key))
+                       : "error bad max-participants";
+        }
+        if (words[0] == "join" && words.size() == 5) {
+            const auto user = core::UserId::parse(words[3]);
+            const auto device = core::DeviceId::parse(words[4]);
+            return user && device ? join(key, *user, *device) : "error bad user or device id";
+        }
+        if (words[0] == "close" && words.size() == 3) {
+            return close(key);
+        }
+        return "error usage";
+    }
+
+private:
+    std::string open(const core::RoomId& room, MediaGeneration generation, std::uint16_t max,
+                     std::string key) {
+        std::optional<std::expected<std::unique_ptr<IMediaRoom>, MediaError>> opened;
+        sfu_->open_room(room, generation, max,
+                        [&](auto result) noexcept { opened = std::move(result); });
+        run_until([&] { return opened.has_value(); });
+        if (!*opened) {
+            return "error " + std::string(to_string(opened->error()));
+        }
+        rooms_.insert_or_assign(std::move(key), std::move(**opened));
+        return "ok";
+    }
+
+    std::string join(const std::string& key, const core::UserId& user,
+                     const core::DeviceId& device) {
+        const auto room = rooms_.find(key);
+        if (room == rooms_.end()) {
+            return "error not open";
+        }
+        const auto ticket = room->second->join(user, device);
+        return ticket ? ticket_json(*ticket) : "error " + std::string(to_string(ticket.error()));
+    }
+
+    std::string close(const std::string& key) {
+        const auto room = rooms_.find(key);
+        if (room == rooms_.end()) {
+            return "error not open";
+        }
+        std::optional<std::expected<void, MediaError>> closed;
+        room->second->close([&](std::expected<void, MediaError> r) noexcept { closed = r; });
+        run_until([&] { return closed.has_value(); });
+        rooms_.erase(room);
+        return *closed ? "ok" : "error " + std::string(to_string(closed->error()));
+    }
+
+    // A command still unanswered at its deadline ends the process: its callback, which points
+    // into this command's frame, may yet run.
+    template <class Pred> void run_until(Pred done) {
+        const auto deadline = std::chrono::steady_clock::now() + kCommandDeadline;
+        while (!done()) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                std::println(stderr, "ulw_call_harness: command timed out");
+                std::_Exit(1);
+            }
+            reactor_->run_once(core::Millis{100});
+        }
+    }
+
+    // Declared in dependency order, so rooms go first and the reactor last.
+    os::SystemClock clock_;
+    std::unique_ptr<net::IReactor> reactor_;
+    std::unique_ptr<infra::curl::Multi> multi_;
+    std::unique_ptr<core::ports::ISfu> sfu_;
+    std::map<std::string, std::unique_ptr<IMediaRoom>> rooms_;
+};
 
 } // namespace
 
-int main(int argc, char** argv) try {
-    const std::span<char*> raw(argv, static_cast<std::size_t>(argc));
-    const std::vector<std::string_view> args(raw.begin() + (raw.empty() ? 0 : 1), raw.end());
-    return run(args);
+int main() try {
+    const std::unique_ptr<Harness> harness = Harness::create();
+    if (!harness) {
+        return 1;
+    }
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::println("{}", harness->run(line));
+        static_cast<void>(std::fflush(stdout));
+    }
+    return 0;
 } catch (...) {
     static_cast<void>(std::fputs("ulw_call_harness: failed\n", stderr));
     return 1;

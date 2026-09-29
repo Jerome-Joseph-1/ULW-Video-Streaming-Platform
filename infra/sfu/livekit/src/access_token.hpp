@@ -20,8 +20,6 @@ enum class Permission : std::uint8_t {
     JoinRoom,
     // RoomService.CreateRoom and DeleteRoom, which LiveKit guards with one permission.
     CreateRooms,
-    // RoomService.RemoveParticipant in `room`.
-    AdministerRoom,
 };
 
 struct Grant {

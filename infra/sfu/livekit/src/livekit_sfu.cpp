@@ -14,7 +14,6 @@ namespace infra::sfu::livekit {
 
 namespace {
 
-using core::ports::IMediaParticipant;
 using core::ports::IMediaRoom;
 using core::ports::MediaDone;
 using core::ports::MediaError;
@@ -24,13 +23,11 @@ using detail::IfAbsent;
 using detail::Permission;
 using detail::RoomService;
 
-// A ticket is used once, to connect, but LiveKit also checks it when the client resumes a
-// dropped connection, until it pushes the participant a fresh token: every 5 minutes
-// (tokenRefreshInterval, pkg/service/roommanager.go in v1.13.7). Covering that first refresh
-// and the SDK's 30 s connect budget (15 s signal plus 15 s peer connection) gives 5.5 min,
-// rounded up to 6. A participant removed from the room can rejoin with its ticket for that long;
-// the signalling path withholds new tickets, not the old one.
-constexpr core::Seconds kTicketTtl{6 * 60};
+// A ticket is presented once, to connect: from then on LiveKit keeps the client's token fresh
+// itself (at join and every 5 min, pkg/service/roommanager.go in v1.13.7), so reconnects never
+// need the ticket again. One connect is the SDK's 15 s signal plus 15 s peer-connection budget,
+// and room.connect() retries once: 60 s. Clock skew needs nothing extra, LiveKit allows a minute.
+constexpr core::Seconds kTicketTtl{2 * (15 + 15)};
 // A room nobody has joined yet is kept while the tickets issued when it opened are still good.
 constexpr core::Seconds kEmptyRoomTimeout = kTicketTtl;
 
@@ -39,40 +36,12 @@ constexpr std::size_t kMinSecretBytes = 256 / 8;
 // Generated secrets are 43 to 64 characters; 256 bytes is far past any real one.
 constexpr std::size_t kMaxSecretBytes = 256;
 
-class LiveKitParticipant final : public IMediaParticipant {
-public:
-    LiveKitParticipant(RoomService& service, std::string room, std::string identity,
-                       MediaTicket ticket) noexcept
-        : service_(service), room_(std::move(room)), identity_(std::move(identity)),
-          ticket_(std::move(ticket)) {}
-
-    [[nodiscard]] const MediaTicket& ticket() const noexcept override { return ticket_; }
-
-    void remove(MediaDone done) override {
-        std::string body = R"({"room":)";
-        core::json::append_string(body, room_);
-        body += R"(,"identity":)";
-        core::json::append_string(body, identity_);
-        body += '}';
-        service_.call(
-            "RemoveParticipant", std::move(body),
-            Grant{.permission = Permission::AdministerRoom, .room = room_, .identity = {}},
-            IfAbsent::Succeed, std::move(done));
-    }
-
-private:
-    RoomService& service_;
-    std::string room_;
-    std::string identity_;
-    MediaTicket ticket_;
-};
-
 class LiveKitRoom final : public IMediaRoom {
 public:
     LiveKitRoom(RoomService& service, std::string client_url, std::string name) noexcept
         : service_(service), client_url_(std::move(client_url)), name_(std::move(name)) {}
 
-    [[nodiscard]] std::expected<std::unique_ptr<IMediaParticipant>, MediaError>
+    [[nodiscard]] std::expected<MediaTicket, MediaError>
     join(const core::UserId& user, const core::DeviceId& device) override {
         // A user id never holds '/', so the identity splits back apart unambiguously.
         std::string identity(user.view());
@@ -85,10 +54,9 @@ public:
         if (!token) {
             return std::unexpected(MediaError::Refused);
         }
-        return std::make_unique<LiveKitParticipant>(service_, name_, std::move(identity),
-                                                    MediaTicket{.endpoint = client_url_,
-                                                                .credential = std::move(token->jwt),
-                                                                .expires_at = token->expires_at});
+        return MediaTicket{.endpoint = client_url_,
+                           .credential = std::move(token->jwt),
+                           .expires_at = token->expires_at};
     }
 
     void close(MediaDone done) override {
@@ -115,9 +83,12 @@ public:
                    detail::ApiKey{.id = std::move(config.api_key),
                                   .secret = std::move(config.api_secret)}) {}
 
-    void open_room(const core::RoomId& room, std::uint16_t max_participants,
-                   OpenDone done) override {
+    void open_room(const core::RoomId& room, core::ports::MediaGeneration generation,
+                   std::uint16_t max_participants, OpenDone done) override {
+        // A room id never holds ':', so every generation of every room has a name of its own.
         std::string name = room.to_string();
+        name += ':';
+        name += std::to_string(std::to_underlying(generation));
         std::string body = R"({"name":)";
         core::json::append_string(body, name);
         body += R"(,"empty_timeout":)";

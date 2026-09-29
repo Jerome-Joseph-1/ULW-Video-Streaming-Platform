@@ -34,38 +34,37 @@ struct MediaTicket {
 
 using MediaDone = std::move_only_function<void(std::expected<void, MediaError>) noexcept>;
 
-class IMediaParticipant {
-public:
-    virtual ~IMediaParticipant() = default;
-    [[nodiscard]] virtual const MediaTicket& ticket() const noexcept = 0;
-    // Takes the participant out of the room, ending its media for everyone. Done when the media
-    // server has confirmed; a participant that never connected, or already left, counts as
-    // removed.
-    virtual void remove(MediaDone done) = 0;
-};
+// A call's media runs in one media-server room per generation, and a generation, once closed,
+// never opens again. That is how a participant is put out: the media server keeps a connected
+// client's credential fresh for as long as it stays connected, so no ticket can be withdrawn,
+// but a closed generation admits nobody. The caller owns the number: it lives in the room's
+// state, moves only forward, and moves only through the owner's fenced write (ADR-0015), so a
+// deposed owner can neither open a generation nor close the current one (ADR-0033).
+enum class MediaGeneration : std::uint64_t {};
 
 class IMediaRoom {
 public:
     virtual ~IMediaRoom() = default;
     // The device keeps two devices of one user apart: each is its own participant.
-    [[nodiscard]] virtual std::expected<std::unique_ptr<IMediaParticipant>, MediaError>
-    join(const UserId& user, const DeviceId& device) = 0;
-    // Ends the room for everyone in it. Closing a room the media server has already dropped
-    // succeeds.
+    [[nodiscard]] virtual std::expected<MediaTicket, MediaError> join(const UserId& user,
+                                                                      const DeviceId& device) = 0;
+    // Ends this generation for everyone in it; their tickets and refreshed credentials stop
+    // admitting anyone. Closing a generation the media server has already dropped succeeds.
     virtual void close(MediaDone done) = 0;
 };
 
 // Every member runs on the reactor thread, and every callback runs there later, never from
-// inside the call that was given it. Rooms and participants must not outlive their ISfu;
-// destroying the ISfu drops the callbacks still pending.
+// inside the call that was given it. Rooms must not outlive their ISfu; destroying the ISfu
+// drops the callbacks still pending.
 class ISfu {
 public:
     using OpenDone = std::move_only_function<void(
         std::expected<std::unique_ptr<IMediaRoom>, MediaError>) noexcept>;
 
     virtual ~ISfu() = default;
-    // Idempotent: opening a room that is already open yields the same room.
-    virtual void open_room(const RoomId& room, std::uint16_t max_participants, OpenDone done) = 0;
+    // Idempotent for one generation.
+    virtual void open_room(const RoomId& room, MediaGeneration generation,
+                           std::uint16_t max_participants, OpenDone done) = 0;
 };
 
 } // namespace core::ports

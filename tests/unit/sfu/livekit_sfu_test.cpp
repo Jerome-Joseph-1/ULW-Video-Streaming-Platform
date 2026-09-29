@@ -21,10 +21,10 @@
 
 namespace {
 
-using core::ports::IMediaParticipant;
 using core::ports::IMediaRoom;
 using core::ports::ISfu;
 using core::ports::MediaError;
+using core::ports::MediaGeneration;
 using infra::sfu::livekit::Config;
 using infra::sfu::livekit::ConfigError;
 using infra::sfu::livekit::make_sfu;
@@ -72,9 +72,9 @@ protected:
         sfu = std::move(*made);
     }
 
-    OpenResult open() {
+    OpenResult open(MediaGeneration generation = MediaGeneration{1}) {
         std::optional<OpenResult> got;
-        sfu->open_room(*core::RoomId::parse(kRoom), 2,
+        sfu->open_room(*core::RoomId::parse(kRoom), generation, 2,
                        [&](OpenResult r) noexcept { got = std::move(r); });
         EXPECT_FALSE(got.has_value()) << "callback ran inside open_room()";
         EXPECT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
@@ -119,10 +119,10 @@ core::json::Value claims_of(const ServedRequest& request) {
     return token ? std::move(token->claims) : core::json::Value{};
 }
 
-TEST_P(LiveKitSfuTest, OpeningARoomCreatesItWithTheCallsLimits) {
+TEST_P(LiveKitSfuTest, OpeningARoomCreatesItsGenerationWithTheCallsLimits) {
     auto server = answering(200);
     start(server.base_url() + "/");
-    ASSERT_TRUE(open());
+    ASSERT_TRUE(open(MediaGeneration{7}));
 
     const auto requests = server.requests();
     ASSERT_EQ(requests.size(), 1U);
@@ -131,11 +131,9 @@ TEST_P(LiveKitSfuTest, OpeningARoomCreatesItWithTheCallsLimits) {
     EXPECT_EQ(create.path(), "/twirp/livekit.RoomService/CreateRoom");
     EXPECT_EQ(create.header("content-type"), "application/json");
     const auto body = body_of(create);
-    EXPECT_EQ(string_at(body, "name"), kRoom);
+    EXPECT_EQ(string_at(body, "name"), std::string(kRoom) + ":7");
     ASSERT_NE(body.find("max_participants"), nullptr);
     EXPECT_EQ(body.find("max_participants")->as_u64(), 2U);
-    ASSERT_NE(body.find("empty_timeout"), nullptr);
-    EXPECT_EQ(body.find("empty_timeout")->as_u64(), 360U);
 
     const auto claims = claims_of(create);
     EXPECT_EQ(string_at(claims, "iss"), "fake-key");
@@ -148,22 +146,37 @@ TEST_P(LiveKitSfuTest, JoiningIssuesATicketForThatUsersDeviceWithoutARoundTrip) 
     start(server.base_url());
     auto room = open();
     ASSERT_TRUE(room);
-    auto participant =
-        (*room)->join(*core::UserId::parse("alice"), *core::DeviceId::parse(kDevice));
-    ASSERT_TRUE(participant);
+    auto ticket = (*room)->join(*core::UserId::parse("alice"), *core::DeviceId::parse(kDevice));
+    ASSERT_TRUE(ticket);
     EXPECT_EQ(server.request_count(), 1U);
 
-    const core::ports::MediaTicket& ticket = (*participant)->ticket();
-    EXPECT_EQ(ticket.endpoint, "wss://media.example.test");
-    const auto token = read_token(ticket.credential, kSecret);
+    EXPECT_EQ(ticket->endpoint, "wss://media.example.test");
+    const auto token = read_token(ticket->credential, kSecret);
     ASSERT_TRUE(token);
     EXPECT_EQ(string_at(token->claims, "sub"), "alice/" + std::string(kDevice));
-    EXPECT_EQ(string_at(token->claims, "video", "room"), kRoom);
+    EXPECT_EQ(string_at(token->claims, "video", "room"), std::string(kRoom) + ":1");
     EXPECT_EQ(bool_at(token->claims, "video", "roomJoin"), true);
-    EXPECT_EQ(bool_at(token->claims, "video", "roomAdmin"), std::nullopt);
-    EXPECT_EQ(ticket.expires_at, clock.wall_now() + std::chrono::minutes(6));
+    EXPECT_EQ(bool_at(token->claims, "video", "roomCreate"), std::nullopt);
+    EXPECT_EQ(ticket->expires_at, clock.wall_now() + std::chrono::seconds(60));
     EXPECT_EQ(token->claims.find("exp")->as_i64(),
-              std::chrono::floor<core::Seconds>(ticket.expires_at).time_since_epoch().count());
+              std::chrono::floor<core::Seconds>(ticket->expires_at).time_since_epoch().count());
+}
+
+TEST_P(LiveKitSfuTest, ATicketAdmitsToItsOwnGenerationOnly) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto first = open(MediaGeneration{1});
+    auto second = open(MediaGeneration{2});
+    ASSERT_TRUE(first && second);
+    const auto user = *core::UserId::parse("alice");
+    const auto device = *core::DeviceId::parse(kDevice);
+    auto old_ticket = (*first)->join(user, device);
+    auto new_ticket = (*second)->join(user, device);
+    ASSERT_TRUE(old_ticket && new_ticket);
+    EXPECT_EQ(string_at(read_token(old_ticket->credential, kSecret)->claims, "video", "room"),
+              std::string(kRoom) + ":1");
+    EXPECT_EQ(string_at(read_token(new_ticket->credential, kSecret)->claims, "video", "room"),
+              std::string(kRoom) + ":2");
 }
 
 TEST_P(LiveKitSfuTest, TwoDevicesOfOneUserAreTwoParticipants) {
@@ -175,47 +188,26 @@ TEST_P(LiveKitSfuTest, TwoDevicesOfOneUserAreTwoParticipants) {
     auto a = (*room)->join(user, *core::DeviceId::parse(kDevice));
     auto b = (*room)->join(user, *core::DeviceId::parse("0192f3a4-0000-7000-8000-00000000000e"));
     ASSERT_TRUE(a && b);
-    EXPECT_NE(string_at(read_token((*a)->ticket().credential, kSecret)->claims, "sub"),
-              string_at(read_token((*b)->ticket().credential, kSecret)->claims, "sub"));
+    EXPECT_NE(string_at(read_token(a->credential, kSecret)->claims, "sub"),
+              string_at(read_token(b->credential, kSecret)->claims, "sub"));
 }
 
-TEST_P(LiveKitSfuTest, RemovingAParticipantNamesItWithARoomScopedAdminToken) {
+TEST_P(LiveKitSfuTest, ClosingAGenerationDeletesItsRoom) {
     auto server = answering(200);
     start(server.base_url());
-    auto room = open();
-    ASSERT_TRUE(room);
-    auto participant = (*room)->join(*core::UserId::parse("bob"), *core::DeviceId::parse(kDevice));
-    ASSERT_TRUE(participant);
-    ASSERT_TRUE(wait([&](auto done) { (*participant)->remove(std::move(done)); }));
-
-    const auto requests = server.requests();
-    ASSERT_EQ(requests.size(), 2U);
-    EXPECT_EQ(requests[1].path(), "/twirp/livekit.RoomService/RemoveParticipant");
-    const auto body = body_of(requests[1]);
-    EXPECT_EQ(string_at(body, "room"), kRoom);
-    EXPECT_EQ(string_at(body, "identity"), "bob/" + std::string(kDevice));
-    const auto claims = claims_of(requests[1]);
-    EXPECT_EQ(bool_at(claims, "video", "roomAdmin"), true);
-    EXPECT_EQ(string_at(claims, "video", "room"), kRoom);
-    EXPECT_EQ(bool_at(claims, "video", "roomCreate"), std::nullopt);
-}
-
-TEST_P(LiveKitSfuTest, ClosingARoomDeletesIt) {
-    auto server = answering(200);
-    start(server.base_url());
-    auto room = open();
+    auto room = open(MediaGeneration{3});
     ASSERT_TRUE(room);
     ASSERT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
     const auto requests = server.requests();
     ASSERT_EQ(requests.size(), 2U);
     EXPECT_EQ(requests[1].path(), "/twirp/livekit.RoomService/DeleteRoom");
-    EXPECT_EQ(string_at(body_of(requests[1]), "room"), kRoom);
+    EXPECT_EQ(string_at(body_of(requests[1]), "room"), std::string(kRoom) + ":3");
     EXPECT_EQ(bool_at(claims_of(requests[1]), "video", "roomCreate"), true);
 }
 
-TEST_P(LiveKitSfuTest, RemovingWhatIsAlreadyGoneSucceeds) {
+TEST_P(LiveKitSfuTest, ClosingWhatIsAlreadyGoneSucceeds) {
     std::atomic<int> served{0};
-    // The room opens; everything after it has already gone.
+    // The room opens and has gone by the time it is closed.
     HttpTestServer server([&](const ServedRequest&) {
         return ++served == 1
                    ? Reply{.status = 200, .headers = {}, .body = "{}"}
@@ -224,9 +216,6 @@ TEST_P(LiveKitSfuTest, RemovingWhatIsAlreadyGoneSucceeds) {
     start(server.base_url());
     auto room = open();
     ASSERT_TRUE(room);
-    auto participant = (*room)->join(*core::UserId::parse("bob"), *core::DeviceId::parse(kDevice));
-    ASSERT_TRUE(participant);
-    EXPECT_TRUE(wait([&](auto done) { (*participant)->remove(std::move(done)); }));
     EXPECT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
 }
 
@@ -271,7 +260,8 @@ TEST_P(LiveKitSfuTest, DestroyingTheSfuDropsPendingCallbacks) {
     auto server = answering(200);
     start(server.base_url());
     int calls = 0;
-    sfu->open_room(*core::RoomId::parse(kRoom), 2, [&](OpenResult) noexcept { ++calls; });
+    sfu->open_room(*core::RoomId::parse(kRoom), MediaGeneration{1}, 2,
+                   [&](OpenResult) noexcept { ++calls; });
     sfu.reset();
     ulw::test::pump_for(*reactor, std::chrono::milliseconds(100));
     EXPECT_EQ(calls, 0);
@@ -281,11 +271,12 @@ TEST_P(LiveKitSfuTest, ACallbackMayDestroyTheSfu) {
     auto server = answering(200);
     start(server.base_url());
     bool called = false;
-    sfu->open_room(*core::RoomId::parse(kRoom), 2, [&](OpenResult room) noexcept {
-        room->reset();
-        sfu.reset();
-        called = true;
-    });
+    sfu->open_room(*core::RoomId::parse(kRoom), MediaGeneration{1}, 2,
+                   [&](OpenResult room) noexcept {
+                       room->reset();
+                       sfu.reset();
+                       called = true;
+                   });
     ASSERT_TRUE(pump_until(*reactor, [&] { return called; }));
     EXPECT_EQ(sfu, nullptr);
 }

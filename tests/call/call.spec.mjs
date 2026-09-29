@@ -1,12 +1,14 @@
 // M25 acceptance: two headless Chrome peers join one call with tickets the SFU adapter issues,
 // reach ICE connected, and receive each other's RTP for 10 s; then one peer's network vanishes
-// and the other sees it leave, within a measured bound, with its own call intact.
+// and the other sees it leave, within a measured bound, with its own call intact. And a
+// participant put out of a call stays out, whatever credential it kept.
 import { chromium, expect, test } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const harness = process.env.ULW_CALL_HARNESS;
@@ -19,8 +21,25 @@ const kFlowMs = 10_000;
 // its signal connection; 25 s leaves 3 s above both.
 const kDropBoundMs = 25_000;
 
-function sfu(...args) {
-  return execFileSync(harness, args, { encoding: 'utf8' }).trim();
+// The call handler's stand-in: one harness process for the whole test, holding the rooms it
+// opened as the handler would, driven one command line at a time.
+function startSignalling() {
+  const child = spawn(harness, [], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  const send = async (...words) => {
+    child.stdin.write(`${words.join(' ')}\n`);
+    const { value, done } = await lines.next();
+    if (done) throw new Error(`harness exited during: ${words.join(' ')}`);
+    if (value.startsWith('error')) throw new Error(`${words.join(' ')}: ${value}`);
+    return value;
+  };
+  return {
+    open: (room, generation) => send('open', room, generation, 2),
+    ticket: async (room, generation, user, device) =>
+      JSON.parse(await send('join', room, generation, user, device)),
+    close: (room, generation) => send('close', room, generation),
+    stop: () => child.stdin.end(),
+  };
 }
 
 function servePage() {
@@ -90,12 +109,13 @@ test('two peers exchange media and a dropped peer is detected', async () => {
   const pageServer = await servePage();
   const pageUrl = `http://127.0.0.1:${pageServer.address().port}/`;
   const browsers = [];
+  const sfu = startSignalling();
   try {
-    sfu('open', room);
+    await sfu.open(room, 1);
     const peers = [];
     for (const user of ['alice', 'bob']) {
       const device = randomUUID();
-      const ticket = JSON.parse(sfu('join', room, user, device));
+      const ticket = await sfu.ticket(room, 1, user, device);
       const { server, browser } = await launchPeer();
       browsers.push(server);
       const page = await browser.newPage();
@@ -156,8 +176,6 @@ test('two peers exchange media and a dropped peer is detected', async () => {
         .map((e) => ({ ...e, at: e.at - droppedAt }));
       expect(events.some((e) => e.type === 'disconnected'), 'alice lost the call').toBe(false);
       expect(await allConnected(alice.page)).toBe(true);
-      // LiveKit has already dropped bob, so removing him is a no-op that must still succeed.
-      sfu('remove', room, bob.user, bob.device);
     } finally {
       for (const pid of frozen) {
         try {
@@ -170,7 +188,7 @@ test('two peers exchange media and a dropped peer is detected', async () => {
 
     // The room is closed through the adapter; the remaining peer is told why.
     const closedAt = Date.now();
-    sfu('close', room);
+    await sfu.close(room, 1);
     await expect.poll(() => alice.page.evaluate(() =>
       window.events.find((e) => e.type === 'disconnected')), { timeout: 10_000 }).toBeTruthy();
     const ended = await alice.page.evaluate(() => window.events.find((e) => e.type === 'disconnected'));
@@ -179,10 +197,70 @@ test('two peers exchange media and a dropped peer is detected', async () => {
     expect(ended.reason).toBe(await alice.page.evaluate(() =>
       LivekitClient.DisconnectReason.ROOM_DELETED));
   } finally {
+    sfu.stop();
     for (const browser of browsers) await browser.close().catch(() => {});
     pageServer.close();
     console.log(JSON.stringify(metrics));
     mkdirSync(path.join(here, 'test-results'), { recursive: true });
     writeFileSync(path.join(here, 'test-results', `metrics-${room}.json`), JSON.stringify(metrics, null, 2));
+  }
+});
+
+// The review's probe of a removal that did not hold. LiveKit hands every client a fresh token as
+// soon as it joins and keeps renewing it, so a client that is put out still holds a credential
+// good for 10 minutes; only closing the generation that credential names keeps it out.
+test('an expelled participant cannot return, even with its refreshed token', async () => {
+  const room = randomUUID();
+  const metrics = { room };
+  const pageServer = await servePage();
+  const pageUrl = `http://127.0.0.1:${pageServer.address().port}/`;
+  const browsers = [];
+  const sfu = startSignalling();
+  try {
+    await sfu.open(room, 1);
+    const peers = {};
+    for (const user of ['alice', 'mallory']) {
+      const device = randomUUID();
+      const ticket = await sfu.ticket(room, 1, user, device);
+      const { server, browser } = await launchPeer();
+      browsers.push(server);
+      const page = await browser.newPage();
+      await page.goto(pageUrl);
+      await page.evaluate((t) => window.join(t), ticket);
+      peers[user] = { device, page, ticket };
+    }
+    const { alice, mallory } = peers;
+
+    await expect.poll(() => mallory.page.evaluate(() => window.room.engine.token),
+      { timeout: 10_000 }).not.toBe(mallory.ticket.token);
+    const refreshed = await mallory.page.evaluate(() => window.room.engine.token);
+
+    // Expulsion, as the call handler performs it: the next generation opens, the members who
+    // stay are ticketed into it, and the old one closes under everyone still in it.
+    const expelledAt = Date.now();
+    await sfu.open(room, 2);
+    const moved = await sfu.ticket(room, 2, 'alice', alice.device);
+    await alice.page.evaluate((t) => window.join(t), moved);
+    await sfu.close(room, 1);
+    await expect.poll(() => mallory.page.evaluate(() =>
+      window.events.find((e) => e.type === 'disconnected')), { timeout: 10_000 }).toBeTruthy();
+    metrics.expelledMs = Date.now() - expelledAt;
+
+    const withRefreshed = await mallory.page.evaluate((t) => window.tryConnect(t),
+      { url: mallory.ticket.url, token: refreshed });
+    const withTicket = await mallory.page.evaluate((t) => window.tryConnect(t), mallory.ticket);
+    metrics.retryWithRefreshed = withRefreshed;
+    metrics.retryWithTicket = withTicket;
+    expect(withRefreshed.admitted, 'the refreshed token let mallory back in').toBe(false);
+    expect(withTicket.admitted, 'the ticket let mallory back in').toBe(false);
+
+    // Alice carried on in the new generation.
+    expect(await alice.page.evaluate(() => window.room.state)).toBe('connected');
+    await sfu.close(room, 2);
+  } finally {
+    sfu.stop();
+    for (const browser of browsers) await browser.close().catch(() => {});
+    pageServer.close();
+    console.log(JSON.stringify(metrics));
   }
 });

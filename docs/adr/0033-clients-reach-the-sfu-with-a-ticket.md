@@ -29,28 +29,42 @@ WHIP endpoint, built for ingest (option c).
 
 ## Decision
 
-- The port is `ISfu::open_room(RoomId, max_participants) -> IMediaRoom`,
-  `IMediaRoom::join(UserId, DeviceId) -> IMediaParticipant`, `IMediaRoom::close()`, and
-  `IMediaParticipant { ticket(), remove() }` (`core/include/core/ports/media.hpp`). A
-  `MediaTicket` is an endpoint, an opaque credential and its expiry; core never sees a LiveKit
-  word. `apply_offer`, `add_ice_candidate` and the SDP they carry are gone from the port.
+- The port is `ISfu::open_room(RoomId, MediaGeneration, max_participants) -> IMediaRoom`,
+  `IMediaRoom::join(UserId, DeviceId) -> MediaTicket` and `IMediaRoom::close()`
+  (`core/include/core/ports/media.hpp`). A `MediaTicket` is an endpoint, an opaque credential
+  and its expiry; core never sees a LiveKit word. `apply_offer`, `add_ice_candidate` and the SDP
+  they carry are gone from the port.
 - Signalling over the room WebSocket is: the client asks to join a call; the call handler checks
   membership (the JWKS-authenticated user, ADR-0018), opens the room (idempotent) on the owning
   node, and answers with the ticket. Offers, answers and candidates run between browser and
   LiveKit. `codec/sdp` stays useful as test tooling and to validate SDP captured from LiveKit
   sessions, not as a relay.
-- `infra/sfu/livekit` implements the port. Rooms are LiveKit rooms named by the room id, created
-  with `max_participants` and `empty_timeout`; a participant is the identity `<user>/<device>`,
-  so two devices of one user are two participants. Tokens are HS256 JWTs with LiveKit's `video`
-  grant, minted in process from `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`: a join token grants
-  `roomJoin`, publish and subscribe in one room and nothing else, for 6 minutes (LiveKit pushes a
-  fresh token to a connected client every 5 minutes, and a resume before the first refresh
-  presents the ticket); each RoomService call carries its own 10 s token with only the
-  permission it needs. RoomService (Twirp JSON over HTTP) runs on the reactor through
-  `infra/curl`.
-- Removal is idempotent: removing a participant or closing a room that LiveKit has already
-  dropped succeeds. LiveKit's `auto_create` is off, so a ticket cannot recreate a room with
-  default settings.
+- `infra/sfu/livekit` implements the port. Each generation of a room is the LiveKit room
+  `<room id>:<generation>`, created with `max_participants`; a participant is the identity
+  `<user>/<device>`, so two devices of one user are two participants. Tokens are HS256 JWTs with
+  LiveKit's `video` grant, minted in process from `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`: a join
+  token grants `roomJoin`, publish and subscribe in one generation and nothing else. It lives
+  60 s, the SDK's connect budget (15 s signal plus 15 s peer connection) with its one retry: the
+  ticket is presented once, because LiveKit sends the client a fresh token the moment it joins
+  and renews it every 5 minutes, each good for 10 minutes (`refreshToken`,
+  `pkg/service/roommanager.go:765` and `1152-1166` in v1.13.7), and reconnects use that. Each
+  RoomService call carries its own 10 s token with only the permission it needs. RoomService
+  (Twirp JSON over HTTP) runs on the reactor through `infra/curl`.
+- **Putting a participant out is closing a generation.** No credential LiveKit has issued can be
+  withdrawn: a client removed with `RemoveParticipant` reconnects with the token LiveKit
+  refreshed for it and is issued another (the review reproduced this, and tests/call keeps the
+  probe), and LiveKit v1.13.7 has no call that revokes a token or stops the refresh; the
+  refreshed token copies the participant's grants (`roommanager.go:1146-1177`). What LiveKit
+  does refuse is a room that does not exist, since `auto_create` is off. So the call handler
+  expels, or applies a revoked membership, by moving the call on: it opens generation N+1,
+  sends the members who stay a ticket for it, which their clients connect with, and closes N, which disconnects everyone still in N and leaves every
+  credential naming N useless. Generations only move forward, so N never exists again.
+- The generation belongs to the caller, stored with the room's state (ADR-0015). It moves only
+  through the owner's fenced write, and the SFU is told only after that write commits: opening
+  N+1, closing N and ending the call each follow a fenced update of the generation or of the
+  call's state, and a deposed owner's update matches no row, so it never touches the SFU. Tickets
+  are issued for the generation the owner last wrote. Closing a generation that LiveKit has
+  already dropped succeeds.
 - TURN (STUNner, ADR-0013) is not an SFU concern: the call handler sends the per-session TURN
   credentials next to the ticket, and the client hands them to the SDK as its ICE servers with a
   relay-only policy. That is why `IceCredentials` left `join`.
@@ -62,9 +76,9 @@ WHIP endpoint, built for ingest (option c).
 - Clients carry a LiveKit SDK; the ticket is the only LiveKit-shaped thing we send them.
   Replacing the SFU changes the client SDK, the adapter and the ticket's contents, but not the
   port or the room WebSocket.
-- A ticket admits its holder until it expires even after `remove()`. Withholding new tickets is
-  what ends access; if that window matters, shorten the ticket and let LiveKit's refresh carry
-  connected clients, or add the participant to a deny list the adapter consults.
+- Expelling one participant reconnects every other one. For a 1:1 call that is one peer; for
+  the group calls of M27 it is the whole room, once per expulsion, which is rare by nature.
+- Membership changes that only add people need no new generation; only taking someone out does.
 - Our server no longer sees media negotiation, so it cannot veto a codec or a track. Publishing
   rights are fixed in the grant (publish and subscribe, all sources); narrowing them is a grant
   change.

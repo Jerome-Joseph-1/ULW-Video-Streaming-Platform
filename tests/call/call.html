@@ -38,9 +38,23 @@
     return room.localParticipant.identity;
   };
 
+  // What a client that kept its last credential would do after being put out: try again with it.
+  window.tryConnect = async ({ url, token }) => {
+    const room = new Room();
+    try {
+      await room.connect(url, token);
+      const identity = room.localParticipant.identity;
+      await room.disconnect();
+      return { admitted: true, identity };
+    } catch (e) {
+      return { admitted: false, error: String(e.message ?? e) };
+    }
+  };
+
+  // Connections of rooms already left are closed and have nothing more to say.
   window.mediaStats = async () => {
     const out = [];
-    for (const pc of window.peerConnections) {
+    for (const pc of window.peerConnections.filter((c) => c.connectionState !== 'closed')) {
       const inbound = { audio: 0, video: 0 };
       (await pc.getStats()).forEach((s) => {
         if (s.type === 'inbound-rtp') inbound[s.kind] += s.packetsReceived;
