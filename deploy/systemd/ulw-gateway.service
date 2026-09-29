@@ -45,6 +45,9 @@ MemoryMax=700M
 MemorySwapMax=0
 
 NoNewPrivileges=yes
+# The whole filesystem is read-only to the service: these units are for an object store (R2 or
+# MinIO). The filesystem backend, for development, needs its root writable:
+#   ReadWritePaths=/var/lib/ulw        # the ULW_FS_ROOT it is given
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

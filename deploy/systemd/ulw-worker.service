@@ -48,6 +48,9 @@ MemorySwapMax=0
 # The scratch workspace, /var/tmp/ulw-worker, lives in the private /var/tmp, which is on disk
 # and removed with the service; the worker sweeps what a crash left behind anyway.
 NoNewPrivileges=yes
+# The whole filesystem is read-only to the service: these units are for an object store (R2 or
+# MinIO). The filesystem backend, for development, needs its root writable:
+#   ReadWritePaths=/var/lib/ulw        # the ULW_FS_ROOT it is given
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
