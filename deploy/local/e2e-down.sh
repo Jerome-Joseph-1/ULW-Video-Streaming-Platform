@@ -16,5 +16,6 @@ docker rm --force ulw-e2e-pg ulw-e2e-minio >/dev/null 2>&1 || true
 # Postgres and MinIO stay: compose.yaml runs the same images.
 docker image rm "${built_images[@]}" "$eg_image" "${eg_image%:*}@$eg_digest" "$envoy_image" \
     "${envoy_image%:*}@$envoy_digest" "$kube_router_image" \
-    "${kube_router_image%:*}@$kube_router_digest" >/dev/null 2>&1 || true
+    "${kube_router_image%:*}@$kube_router_digest" "$metrics_server_image" \
+    "${ULW_METRICS_SERVER_REPO:-$metrics_server_repo}@$metrics_server_digest" >/dev/null 2>&1 || true
 rm -rf "$here/.state"

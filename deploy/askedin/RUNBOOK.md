@@ -200,11 +200,15 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 
    Every run must still end `ok`: a chunk cut off by the drain is resumed from `HEAD`'s offset.
    Stop the loop with Ctrl-C.
-4. Memory under load: **not available yet.** M14 asks for `kubectl top` staying inside the
-   derived limits while 500 uploads run against stage, but no load generator that uploads
-   through a route exists yet (`ulw_gateway_load` starts its own gateway; it is part B of M14).
-   Until then, record `kubectl -n apps-stage top pod -l app.kubernetes.io/name=video-gateway`
-   at rest and after step 2, and leave this check open. The limit and its derivation are in
+4. Memory under load, in the sandbox only: `make e2e-load` (with `make e2e-up` run first)
+   installs metrics-server, uploads through the route with 500 uploads in flight, samples
+   `kubectl top pods --containers` every 10 s, and fails if a gateway or worker container goes
+   over the limits in `overlays/*/video-gateway/deployment.yaml` and `video-worker/deployment.yaml`
+   or restarts. Reports are written to `load-report/`; the `e2e` workflow runs it nightly and
+   keeps them as an artifact. The check refuses every cluster but the sandbox and there is no
+   variant for stage: a load generator must not be pointed at a shared cluster. On stage,
+   record `kubectl -n apps-stage top pod -l app.kubernetes.io/name=video-gateway` at rest and
+   after step 2, and compare it with the sandbox report. The limit and its derivation are in
    `overlays/*/video-gateway/deployment.yaml`.
 
 ## 6. Rollback

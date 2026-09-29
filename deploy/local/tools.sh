@@ -20,6 +20,9 @@ pins=(
      https://github.com/woodpecker-ci/woodpecker/releases/download/v3.18.0/woodpecker-cli_linux_amd64.tar.gz"
     "envoy-gateway.yaml v1.9.2 0412a72907e57ff9b73c56a7bf6df5190bf0f6e4f8bb4bba34e38630bbab5778
      https://github.com/envoyproxy/gateway/releases/download/v1.9.2/install.yaml"
+    # metrics-server, for the load check's kubectl top (metrics-server.sh installs it).
+    "metrics-server.yaml v0.9.0 1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b
+     https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"
     # Docker's default seccomp profile, from which seccomp-profile.py derives the worker's.
     "moby-seccomp-default.json 85e237f 785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334
      https://raw.githubusercontent.com/moby/profiles/85e237f1fe229a0c61c9c7d8e743fa780d3b97ca/seccomp/default.json"

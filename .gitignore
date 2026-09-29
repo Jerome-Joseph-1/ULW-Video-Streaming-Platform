@@ -16,3 +16,4 @@ compile_commands.json
 /target/
 __pycache__/
 /deploy/local/.tools/
+/load-report/
