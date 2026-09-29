@@ -58,6 +58,19 @@ docker exec "$node" mkdir -p /var/lib/kubelet/seccomp/profiles
 docker cp "$root/deploy/askedin/seccomp/ulw-worker.json" \
     "$node:/var/lib/kubelet/seccomp/profiles/ulw-worker.json"
 
+# On a host with DMI (any cloud VM, the CI runners among them) kind's entrypoint bind-mounts
+# fake product_name and product_uuid files over the node's sysfs, so nodes of one cluster get
+# distinct ids. The kernel mounts a fresh sysfs in a user namespace only while every sysfs
+# mount it could reveal is fully visible (fs/namespace.c, mount_too_revealing), and a file
+# mounted over one hides it: runc then fails every hostUsers: false pod sandbox with "error
+# mounting sysfs ... operation not permitted", and the worker never starts. One node needs no
+# distinct id; the entrypoint puts them back whenever the node restarts, and this runs again.
+# shellcheck disable=SC2016 # expanded by the node's shell
+docker exec "$node" sh -c '
+    for f in /sys/devices/virtual/dmi/id/product_name /sys/devices/virtual/dmi/id/product_uuid; do
+        while findmnt --mountpoint "$f" >/dev/null; do umount "$f"; done
+    done'
+
 build_args=(--build-arg "ULW_GIT_SHA=$(git -C "$root" rev-parse --short=12 HEAD)")
 for proxy in HTTPS_PROXY https_proxy NO_PROXY no_proxy; do
     [[ -n ${!proxy:-} ]] && build_args+=(--build-arg "$proxy")
