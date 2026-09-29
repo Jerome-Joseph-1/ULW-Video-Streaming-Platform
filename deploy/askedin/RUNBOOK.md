@@ -38,6 +38,26 @@ kubectl get pods -A -l app.kubernetes.io/component=proxy,app.kubernetes.io/manag
   -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name   # expect namespace envoy-gateway-system
 ```
 
+It also admits Prometheus from namespace `monitoring` to scrape `/metrics`. If Prometheus runs
+elsewhere, change the second `from` in the same files:
+
+```sh
+kubectl get pods -A -l app.kubernetes.io/name=prometheus -o custom-columns=NS:.metadata.namespace
+```
+
+Check the node has room. Both environments run on k8s-prod's 8 vCPU / 24 GB, and the new
+requests are, per environment, 2 x 500m CPU and 2 x 600Mi for the gateways plus the worker's
+2Gi, and 1 CPU / 10Gi of scratch (stage) or 2 CPU / 30Gi (prod) for the worker: 5 CPU, 6.4Gi of
+memory and 40Gi of ephemeral storage for both. Compare with what is already allocated:
+
+```sh
+kubectl describe nodes | sed -n '/Allocated resources/,/Events/p'
+df -h /var/lib/kubelet                 # the scratch emptyDirs live here
+```
+
+If the node cannot take it, lower the prod worker's CPU request before the first prod apply;
+the gateways' memory requests are the budget of docs/adr/0027 and should not move.
+
 ## 2. Install the worker's seccomp profile on k8s-prod
 
 Once per node, and again whenever `seccomp/ulw-worker.json` changes:
@@ -98,6 +118,19 @@ kubectl -n "$NS" rollout restart deployment/video-gateway deployment/video-worke
 
 The worker gets no JWT settings at all.
 
+The role and database on k8s-prod's Postgres, once, as a superuser (psql prompts for the
+password with `\password`; it never goes on a command line):
+
+```sql
+CREATE ROLE ulw_stage LOGIN;           -- ulw_prod for prod
+\password ulw_stage
+CREATE DATABASE ulw_stage OWNER ulw_stage;
+```
+
+The role owns its database, which gives the migrations their DDL rights (docs/adr/0033).
+`VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
+password percent-encoded.
+
 ## 4. Pipeline and first deploy
 
 1. Copy `overlays/stage/*` and `overlays/prod/*` into the monorepo's overlay tree, and
@@ -144,24 +177,35 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
    cookie):
 
    ```sh
-   ULW_E2E_URL=https://<stage host> ULW_E2E_TOKEN=<token> KUBECONFIG=<stage kubeconfig> \
-     tests/cluster/vod_flow.py upload
+   ULW_E2E_URL=https://<stage host> ULW_E2E_TOKEN=<token> tests/cluster/vod_flow.py upload playback
    ```
 
-   It uploads a 6 s clip through the route and waits for `ready`.
-3. A pod kill mid-upload, same environment: `tests/cluster/vod_flow.py pod-kill`. It deletes
-   the gateway pod serving a chunk, checks the chunk is cut off, resumes from `HEAD`'s offset
-   against the remaining pod, and waits for `ready`. It reads the pods' `/metrics` through the
-   API server to find the right one; if that is refused it deletes both, and the client waits
-   for the replacements.
-4. Memory under load, while the 500-upload load test runs against stage:
+   It uploads a 6 s clip through the route, waits for `ready`, then fetches the master and
+   media playlists through the route and every segment from R2 at the presigned URLs. Against a
+   real URL the script runs only these two scenarios, only when named, and never runs kubectl.
+3. A pod kill mid-upload, by hand: the scripted `pod-kill` refuses every cluster but the
+   sandbox. While the upload scenario runs in a loop,
 
    ```sh
-   kubectl -n apps-stage top pod -l app.kubernetes.io/name=video-gateway   # each under 700Mi
+   while ULW_E2E_URL=https://<stage host> ULW_E2E_TOKEN=<token> \
+       tests/cluster/vod_flow.py upload; do :; done
    ```
 
-   The limit is derived in `overlays/*/video-gateway/deployment.yaml`. A gateway near 600Mi at
-   448 uploads means the per-connection terms in docs/adr/0027 are off; record the number.
+   delete one gateway pod in another terminal, then the other once its replacement is Ready:
+
+   ```sh
+   kubectl -n apps-stage get pods -l app.kubernetes.io/name=video-gateway
+   kubectl -n apps-stage delete pod <name>
+   ```
+
+   Every run must still end `ok`: a chunk cut off by the drain is resumed from `HEAD`'s offset.
+   Stop the loop with Ctrl-C.
+4. Memory under load: **not available yet.** M14 asks for `kubectl top` staying inside the
+   derived limits while 500 uploads run against stage, but no load generator that uploads
+   through a route exists yet (`ulw_gateway_load` starts its own gateway; it is part B of M14).
+   Until then, record `kubectl -n apps-stage top pod -l app.kubernetes.io/name=video-gateway`
+   at rest and after step 2, and leave this check open. The limit and its derivation are in
+   `overlays/*/video-gateway/deployment.yaml`.
 
 ## 6. Rollback
 

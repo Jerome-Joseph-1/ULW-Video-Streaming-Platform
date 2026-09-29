@@ -39,6 +39,14 @@ before it serves.
   role would take a second secret key and a second connection string.
 - A failing migration keeps the new pod in `Init:CrashLoopBackOff`; the old pods keep serving,
   so a bad migration stops a rollout rather than an outage. Watch for it after every deploy.
+- Both containers name the same mutable branch tag with `imagePullPolicy: Always`, and the
+  kubelet pulls them one after the other. A push landing between the two pulls of one pod start
+  pairs build B's server with build A's migrations; if B needs a migration of its own, its
+  queries against the missing column or table fail until the pod restarts. The window is the
+  seconds between the pulls, and Woodpecker's own restart follows every push, which runs both
+  from the new image; pinning the containers to a digest would close it, at the price of ArgoCD
+  seeing the live image differ from git after every deploy. After a deploy that adds a
+  migration, check `kubectl logs <pod> -c migrate` names it, and restart once more if not.
 - The worker is not ordered after the migration; Woodpecker restarts it only after the gateway's
   rollout completes (deploy/askedin/woodpecker.yml).
 - Reopen if the deploy flow gains a step that may apply manifests, or migrations become slow
