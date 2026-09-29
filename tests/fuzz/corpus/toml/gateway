@@ -1,0 +1,7 @@
+# gateway
+[listen]
+port = 8_080
+reactor = "epoll"
+
+[database]
+url = 'postgresql://u@h/db'

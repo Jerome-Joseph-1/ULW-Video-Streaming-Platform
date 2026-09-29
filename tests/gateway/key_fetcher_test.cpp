@@ -3,6 +3,7 @@
 
 #include "key_fetcher.hpp"
 #include "support/http_test_server.hpp"
+#include "support/memory_log.hpp"
 #include "support/reactor_harness.hpp"
 
 #include <gtest/gtest.h>
@@ -34,7 +35,7 @@ protected:
         auto m = infra::curl::Multi::create(*reactor);
         ASSERT_TRUE(m);
         multi = std::move(*m);
-        fetcher = std::make_unique<gateway::KeySetFetcher>(*multi);
+        fetcher = std::make_unique<gateway::KeySetFetcher>(*multi, log);
     }
     void TearDown() override {
         fetcher.reset();
@@ -43,6 +44,8 @@ protected:
     }
 
     os::SystemClock clock;
+    ulw::test::MemoryLog lines;
+    ops::Logger log{lines, clock, "gateway", ops::Level::Debug};
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<infra::curl::Multi> multi;
     std::unique_ptr<gateway::KeySetFetcher> fetcher;
@@ -63,21 +66,36 @@ TEST_P(KeySetFetcherTest, HandsTheReceiverTheKeySet) {
     EXPECT_EQ(receiver.results[0], R"({"keys":[]})");
 }
 
-TEST_P(KeySetFetcherTest, AnythingButOkIsAFailedFetch) {
-    auto server = serving(503, "try later");
+TEST_P(KeySetFetcherTest, AnythingButOkIsAFailedFetchLoggedWithItsStatusOnly) {
+    auto server = serving(503, R"({"keys":[{"kty":"OKP","x":"secret-looking-key"}]})");
     Receiver receiver;
     fetcher->fetch(server.base_url() + "/jwks", receiver);
     ASSERT_TRUE(pump_until(*reactor, [&] { return !receiver.results.empty(); }));
     ASSERT_EQ(receiver.results.size(), 1U);
     EXPECT_FALSE(receiver.results[0].has_value());
+    const auto failed = lines.events("key set fetch failed");
+    ASSERT_EQ(failed.size(), 1U);
+    EXPECT_NE(failed[0].find(R"("status":503)"), std::string::npos) << failed[0];
+    EXPECT_EQ(lines.all().find("secret-looking-key"), std::string::npos);
 }
 
-TEST_P(KeySetFetcherTest, AnUnreachableServerIsAFailedFetch) {
+TEST_P(KeySetFetcherTest, AnUnreachableServerIsAFailedFetchAndLogged) {
     Receiver receiver;
     // Nothing listens on port 1 of the loopback address.
     fetcher->fetch("http://127.0.0.1:1/jwks", receiver);
     ASSERT_TRUE(pump_until(*reactor, [&] { return !receiver.results.empty(); }));
     EXPECT_FALSE(receiver.results[0].has_value());
+    const auto failed = lines.events("key set fetch failed");
+    ASSERT_EQ(failed.size(), 1U);
+    EXPECT_NE(failed[0].find(R"("error":)"), std::string::npos) << failed[0];
+}
+
+TEST_P(KeySetFetcherTest, ASuccessfulFetchLogsNothing) {
+    auto server = serving(200, R"({"keys":[]})");
+    Receiver receiver;
+    fetcher->fetch(server.base_url() + "/jwks", receiver);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return !receiver.results.empty(); }));
+    EXPECT_TRUE(lines.lines().empty());
 }
 
 TEST_P(KeySetFetcherTest, ACancelledFetchNeverReachesItsReceiver) {

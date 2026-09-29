@@ -14,7 +14,7 @@
 #include <variant>
 #include <vector>
 
-// The JSON a client and chat_server exchange in WebSocket text frames (ADR-0036, ADR-0039).
+// The JSON a client and chat_server exchange in WebSocket text frames (ADR-0036, ADR-0043).
 // Client to server:
 //   {"type":"join","room":"<uuid>"}
 //       "after":<seq>        optional: also send what this node still holds after that seq
