@@ -320,6 +320,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_catalog_test.cpp
     integration/postgres_harness.cpp
     integration/postgres_job_queue_test.cpp
+    integration/postgres_live_recordings_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
