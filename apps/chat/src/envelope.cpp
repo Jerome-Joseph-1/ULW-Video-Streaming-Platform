@@ -91,6 +91,37 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
     return Send{.room = *room, .id = *id, .body = std::move(*body)};
 }
 
+std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "before", "after", "limit"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    History history{.room = *room, .before = std::nullopt, .after = std::nullopt};
+    const auto seq_at = [&](std::string_view field, std::optional<std::uint64_t>& into) {
+        const core::json::Value* v = message.find(field);
+        if (v == nullptr) {
+            return true;
+        }
+        into = v->as_u64();
+        return into.has_value();
+    };
+    if (!seq_at("before", history.before) || !seq_at("after", history.after) ||
+        (history.before && history.after)) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    if (const core::json::Value* limit = message.find("limit")) {
+        const auto n = limit->as_u64();
+        if (!n || *n == 0 || *n > kMaxHistoryLimit) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        history.limit = static_cast<std::size_t>(*n);
+    }
+    return history;
+}
+
 void append_room(std::string& out, const core::RoomId& room) {
     std::array<char, core::Uuid::kTextLength> text{};
     room.format_to(text);
@@ -122,6 +153,9 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     }
     if (name == "send") {
         return send_of(*message);
+    }
+    if (name == "history") {
+        return history_of(*message);
     }
     return std::unexpected(EnvelopeError::Malformed);
 }
@@ -155,6 +189,12 @@ void write_message(std::string& out, const rt::Message& message) {
     // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     out += infra::auth::encode_base64url(octets);
     out += R"("})";
+}
+
+void write_history(std::string& out, const core::RoomId& room, std::size_t count) {
+    out += R"({"type":"history",)";
+    append_room(out, room);
+    std::format_to(std::back_inserter(out), R"(,"count":{}}})", count);
 }
 
 void write_error(std::string& out, std::string_view reason, const std::optional<core::RoomId>& room,

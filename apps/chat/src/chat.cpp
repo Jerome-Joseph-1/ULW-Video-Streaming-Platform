@@ -150,6 +150,7 @@ std::string ChatServer::render_metrics() const {
         "messages_deduplicated_total {}\n"
         "lossy_drops_total {}\n"
         "messages_replayed_total {}\n"
+        "history_messages_total {}\n"
         "messages_kept_bytes {}\n"
         "protocol_errors_total {}\n"
         "control_floods_total {}\n"
@@ -167,7 +168,8 @@ std::string ChatServer::render_metrics() const {
         c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
         c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
         chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
-        chat_.buffered_bytes(), c.protocol_errors, c.control_floods, c.slow_consumers,
+        chat.history_messages, chat_.buffered_bytes(), c.protocol_errors, c.control_floods,
+        c.slow_consumers,
         c.allocation_failures + router.allocation_failures + chat.allocation_failures,
         deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,
         registry.fenced_writes, router.forwarded, router.forward_timeouts, router.peers_lost,

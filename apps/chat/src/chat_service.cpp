@@ -330,6 +330,91 @@ void ChatService::send(ClientId id, Send send) {
                       });
 }
 
+void ChatService::history(ClientId id, const History& history) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    Room* r = find(history.room);
+    if (r == nullptr || !r->joined ||
+        std::ranges::find(r->subscribers, id, &Room::Subscriber::id) == r->subscribers.end()) {
+        answer(*c->client, reason(rt::RouteError::NotJoined), history.room);
+        return;
+    }
+    // A read of the store, and up to a resume's worth of output: charged as a resume is.
+    if (!admit_join(c->user)) {
+        answer(*c->client, "busy", history.room);
+        return;
+    }
+    auto done =
+        [this, id, room = history.room](
+            core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
+            page_read(id, room, std::move(page));
+        };
+    if (history.after) {
+        messages_.history_after(history.room, *history.after, history.limit, std::move(done));
+    } else {
+        messages_.history_before(history.room, history.before, history.limit, std::move(done));
+    }
+}
+
+// The page's messages in the store's order, as many as fit what the client may still queue,
+// then the count. A client too far behind for even one gets busy, not an empty page, which
+// would read as the end of the room.
+void ChatService::page_read(
+    ClientId id, const core::RoomId& room,
+    core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    if (!page) {
+        answer(*c->client, reason(rt::RouteError::Unavailable), room);
+        return;
+    }
+    try {
+        const std::size_t budget =
+            limits_.replay_budget - std::min(c->client->unsent_bytes(), limits_.replay_budget);
+        // Every stored key came from a message key; one that is not is a row nothing here
+        // wrote, and the page is not sent at all rather than sent with a hole in it.
+        if (!std::ranges::all_of(*page, [](const core::ports::StoredMessage& m) {
+                return rt::MessageKey::parse(m.key).has_value();
+            })) {
+            answer(*c->client, reason(rt::RouteError::Unavailable), room);
+            return;
+        }
+        std::size_t used = 0;
+        std::size_t count = 0;
+        std::string out;
+        for (const core::ports::StoredMessage& m : *page) {
+            const std::size_t cost = message_wire_size(m.body.size());
+            const auto key = rt::MessageKey::parse(m.key);
+            if (used + cost > budget || !key) {
+                break;
+            }
+            used += cost;
+            out.clear();
+            write_message(
+                out,
+                rt::Message{
+                    .room = room, .seq = m.seq, .sender = m.sender, .key = *key, .body = m.body});
+            c->client->push(out);
+            ++count;
+        }
+        if (count == 0 && !page->empty()) {
+            answer(*c->client, reason(rt::RouteError::Busy), room);
+            return;
+        }
+        counters_.history_messages += count;
+        out.clear();
+        write_history(out, room, count);
+        c->client->push(out);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        c->client->allocation_failed();
+    }
+}
+
 void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key,
                        std::size_t bytes,
                        std::expected<std::uint64_t, rt::RouteError> result) noexcept {

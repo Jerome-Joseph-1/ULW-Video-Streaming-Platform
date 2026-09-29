@@ -229,6 +229,19 @@ protected:
                         .body = b});
     }
 
+    void history(chat::ClientId id, std::optional<std::uint64_t> before = std::nullopt,
+                 std::string_view room = kRoom) {
+        service_->history(id, {.room = room_id(room), .before = before, .after = std::nullopt});
+    }
+
+    static core::ports::StoredMessage stored(std::uint64_t seq, std::string_view body) {
+        return {.seq = seq,
+                .sender = *core::UserId::parse("bob"),
+                .key = "m" + std::to_string(seq),
+                .sent_at = core::WallTime{},
+                .body = bytes(body)};
+    }
+
     FakeRooms rooms_;
     FakeMessages messages_;
     ulw::test::FakeClock clock_;
@@ -317,6 +330,73 @@ TEST_F(ChatServiceTest, AnAnswerForAClientThatLeftMeanwhileIsDropped) {
     messages_.answer_admits(true);
     EXPECT_TRUE(rooms_.joins.empty());
     EXPECT_TRUE(alice.take().empty());
+}
+
+TEST_F(ChatServiceTest, AHistoryPageArrivesAsItsMessagesInTheStoresOrderThenItsCount) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit(9);
+    alice.take();
+    history(a, 9);
+    ASSERT_EQ(messages_.pages.size(), 1U);
+    messages_.pages[0](std::vector{stored(8, "later"), stored(7, "earlier")});
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 3U);
+    EXPECT_EQ(seen(got[0]).seq, 8U);
+    EXPECT_EQ(seen(got[0]).body, "later");
+    EXPECT_EQ(seen(got[0]).id, "m8");
+    EXPECT_EQ(seen(got[1]).seq, 7U);
+    EXPECT_EQ(got[2], std::string(R"({"type":"history","room":")") + std::string(kRoom) +
+                          R"(","count":2})");
+    EXPECT_EQ(service_->counters().history_messages, 2U);
+}
+
+TEST_F(ChatServiceTest, HistoryOfARoomNotJoinedIsRefusedWithoutReadingTheStore) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    history(a);
+    EXPECT_TRUE(messages_.pages.empty());
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
+}
+
+TEST_F(ChatServiceTest, AHistoryPageIsCutToWhatTheClientCanStillTakeButNeverToNothing) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit(2);
+    alice.take();
+    const std::string body(1000, 'x');
+    const std::size_t one = chat::message_wire_size(body.size());
+    // Room for one message and a little more, not two.
+    alice.unsent = chat::ServiceLimits{}.replay_budget - one - 10;
+    history(a);
+    messages_.pages[0](std::vector{stored(2, body), stored(1, body)});
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 2U);
+    EXPECT_EQ(seen(got[0]).seq, 2U);
+    EXPECT_EQ(got[1], std::string(R"({"type":"history","room":")") + std::string(kRoom) +
+                          R"(","count":1})");
+
+    alice.unsent = chat::ServiceLimits{}.replay_budget - 10;
+    history(a, 2);
+    messages_.pages[1](std::vector{stored(1, body)});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "busy");
+}
+
+TEST_F(ChatServiceTest, AnEmptyPageIsTheStartOfTheRoomAndAStoreThatFailsIsUnavailable) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit(0);
+    alice.take();
+    history(a);
+    messages_.pages[0](std::vector<core::ports::StoredMessage>{});
+    EXPECT_EQ(alice.take(), std::vector<std::string>{std::string(R"({"type":"history","room":")") +
+                                                     std::string(kRoom) + R"(","count":0})"});
+    history(a);
+    messages_.pages[1](std::unexpected(core::ports::MessageStoreError::Unavailable));
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
 }
 
 TEST_F(ChatServiceTest, ASendIsAnsweredWithItsIdAndTheSeqTheOwnerGaveIt) {

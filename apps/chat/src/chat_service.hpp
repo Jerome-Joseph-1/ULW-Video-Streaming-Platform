@@ -96,6 +96,8 @@ struct ServiceCounters {
     std::uint64_t lossy_drops = 0;
     // Messages sent again to a client resuming a room.
     std::uint64_t replayed = 0;
+    // Messages sent to clients from history.
+    std::uint64_t history_messages = 0;
     std::uint64_t allocation_failures = 0;
 };
 
@@ -130,6 +132,9 @@ public:
     void detach(ClientId id) noexcept;
     void join(ClientId id, const Join& join);
     void send(ClientId id, Send send);
+    // A page of the room's stored messages, as message frames and then a history frame, for a
+    // client in the room. Cut short to what the client can take while it is behind.
+    void history(ClientId id, const History& history);
     // Leaves the rooms no client here has used for `linger`. Cheap to call often.
     void sweep() noexcept;
 
@@ -162,6 +167,9 @@ private:
     void delivered(Room& room, const rt::Message& message) noexcept;
     void sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key, std::size_t bytes,
               std::expected<std::uint64_t, rt::RouteError> result) noexcept;
+    void
+    page_read(ClientId id, const core::RoomId& room,
+              core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
     void replay(const Room& room, Client& c, std::uint64_t after);
     void keep(Room& room, const rt::Message& message);
