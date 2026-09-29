@@ -1070,7 +1070,7 @@ std::uint64_t resident_kib(pid_t pid) {
     return 0;
 }
 
-TEST_P(ChatClusterTest, ASlowViewerCostsItsNodeNoMemoryAndOthersMissNothing) {
+TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     const std::string stream = "m32-" + room_.substr(0, 8);
     // A stream's chat is open once whoever started the stream records it (ADR-0057); before
     // that a viewer is refused, and nothing is recorded for it.
@@ -1094,9 +1094,9 @@ TEST_P(ChatClusterTest, ASlowViewerCostsItsNodeNoMemoryAndOthersMissNothing) {
         EXPECT_TRUE(joined && joined->type == "joined") << c.name();
         return joined ? joined->room : std::string();
     };
-    // Ten senders on each node, each a viewer too, and two viewers that only read. The slow one
-    // is on chat-2: it reads 16 KiB for every 30 messages sequenced, which send it 88 KiB. It
-    // never stops outright: the kernel ends a connection whose window stays shut for
+    // Ten senders on each node, each a viewer too, and two viewers that only read. Eight slow
+    // viewers are on chat-2: each reads 16 KiB for every 30 messages sequenced, which send it
+    // 88 KiB. None stops outright: the kernel ends a connection whose window stays shut for
     // TCP_USER_TIMEOUT (20 s), a stall shorter than this run under a sanitizer, and reads much
     // smaller than that leave the window shut.
     std::vector<std::unique_ptr<Client>> senders;
@@ -1115,13 +1115,16 @@ TEST_P(ChatClusterTest, ASlowViewerCostsItsNodeNoMemoryAndOthersMissNothing) {
         }
     }
     Node& slow_node = nodes_[1];
-    auto slow = connect_as(slow_node, "slow-viewer");
-    ASSERT_TRUE(slow);
-    ASSERT_EQ(join_live(*slow), live);
+    std::vector<std::unique_ptr<Client>> slow;
+    for (int k = 0; k < 8; ++k) {
+        slow.push_back(connect_as(slow_node, std::format("slow-viewer-{}", k)));
+        ASSERT_TRUE(slow.back());
+        ASSERT_EQ(join_live(*slow.back()), live);
+    }
     ASSERT_FALSE(HasFailure());
 
     // 900 messages of 2000 bytes, about 2.6 MiB for each viewer: rounds of one message per
-    // sender, each round read by everyone but the slow viewer before the next, so that no
+    // sender, each round read by everyone but the slow viewers before the next, so that no
     // one else is ever behind. A send the room or the user turns away as rate_limited is tried
     // again in the next round, with a new id since it was never sequenced; the room's allowance
     // (40, then 20 a second on each node) sets the pace.
@@ -1197,7 +1200,9 @@ TEST_P(ChatClusterTest, ASlowViewerCostsItsNodeNoMemoryAndOthersMissNothing) {
             }
         }
         while (trickled < acked / 30) {
-            slow->trickle(std::size_t{16} * 1024);
+            for (auto& c : slow) {
+                c->trickle(std::size_t{16} * 1024);
+            }
             ++trickled;
         }
         if (settled_kib == 0 && acked >= kSettled) {
@@ -1217,42 +1222,46 @@ TEST_P(ChatClusterTest, ASlowViewerCostsItsNodeNoMemoryAndOthersMissNothing) {
             }
         }
     }
-    // What the slow viewer's node held for it did not grow with what it was sent: from the
-    // settled point on it was sent 600 messages, 1.6 MiB on the wire, and read a few dozen
-    // KiB of them; an unbounded queue would hold the rest.
+    // What the slow viewers' node held for them did not grow with what they were sent: from the
+    // settled point on each was sent 600 messages, 1.6 MiB on the wire, and read a few hundred
+    // KiB of them; an unbounded queue would hold the rest, over 10 MiB for the eight. The
+    // bound leaves a few MiB for the allocator's own growth, which is not per message.
     // AddressSanitizer holds on to freed memory by design (its quarantine), so under it the
     // numbers are only reported.
-    const std::uint64_t owed_kib = (kMessages - settled_seq) * 2'700 / 1024;
-    EXPECT_TRUE(kAddressSanitizer || final_kib - std::min(final_kib, settled_kib) < owed_kib / 4)
+    const std::uint64_t owed_kib = slow.size() * (kMessages - settled_seq) * 2'700 / 1024;
+    EXPECT_TRUE(kAddressSanitizer || final_kib - std::min(final_kib, settled_kib) < owed_kib / 3)
         << "resident " << settled_kib << " KiB at seq " << settled_seq << ", " << final_kib
         << " KiB at seq " << kMessages;
 
-    // Reading in full, the slow viewer gets the rest of what it was owed, in order, up to the
+    // Reading in full, each slow viewer gets the rest of what it was owed, in order, up to the
     // last message, after gaps where it dropped the rest, which its node counted exactly.
-    ASSERT_TRUE(slow->wait_for(
-        [&](const Seen& seen) { return seen.type == "message" && seen.seq == kMessages; }));
-    const std::vector<Seen> got = slow->messages();
-    for (std::size_t k = 1; k < got.size(); ++k) {
-        ASSERT_LT(got[k - 1].seq, got[k].seq);
+    std::uint64_t missed = 0;
+    std::size_t fewest = kMessages;
+    for (auto& c : slow) {
+        ASSERT_TRUE(c->wait_for([&](const Seen& seen) {
+            return seen.type == "message" && seen.seq == kMessages;
+        })) << c->name();
+        const std::vector<Seen> got = c->messages();
+        for (std::size_t k = 1; k < got.size(); ++k) {
+            ASSERT_LT(got[k - 1].seq, got[k].seq) << c->name();
+        }
+        EXPECT_LT(got.size(), kMessages / 2) << c->name();
+        missed += kMessages - got.size();
+        fewest = std::min(fewest, got.size());
     }
-    EXPECT_LT(got.size(), kMessages / 2);
-    std::size_t tail = 1;
-    while (tail < got.size() && got[got.size() - tail - 1].seq + tail == kMessages) {
-        ++tail;
-    }
-    EXPECT_EQ(metric(slow_node, "lossy_drops_total"), kMessages - got.size());
+    EXPECT_EQ(metric(slow_node, "lossy_drops_total"), missed);
     for (std::size_t n = 0; n < nodes_.size(); ++n) {
         if (n != 1) {
             EXPECT_EQ(metric(nodes_[n], "lossy_drops_total"), 0U) << nodes_[n].name;
         }
     }
     std::cout << senders.size() + viewers.size() << " viewers on " << nodes_.size()
-              << " nodes got all " << kMessages << " messages in order; the slow one got "
-              << got.size() << " (ending with seqs " << got[got.size() - tail].seq << ".."
-              << got.back().seq << "), its node dropped " << metric(slow_node, "lossy_drops_total")
-              << " and was resident at " << settled_kib << " KiB at seq " << settled_seq << " and "
-              << final_kib << " KiB at the end, having sent it " << owed_kib << " KiB more; "
-              << attempts - kMessages << " sends were turned away or unanswered and tried again\n";
+              << " nodes got all " << kMessages << " messages in order; " << slow.size()
+              << " slow ones got as few as " << fewest << ", and their node dropped " << missed
+              << " for them; it was resident at " << settled_kib << " KiB at seq " << settled_seq
+              << " and " << final_kib << " KiB at the end, having sent them " << owed_kib
+              << " KiB more; " << attempts - kMessages
+              << " sends were turned away or unanswered and tried again\n";
 }
 
 // No database is reached: the connection string is refused before any connection is tried.
