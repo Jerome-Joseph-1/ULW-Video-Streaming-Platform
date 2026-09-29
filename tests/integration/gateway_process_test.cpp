@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -120,6 +121,11 @@ protected:
     [[nodiscard]] std::vector<std::string> env_without_allow_root() const {
         auto env = base_env();
         std::erase(env, std::string("ULW_ALLOW_ROOT=1"));
+        // CI runs these once per reactor.
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
+        if (const char* reactor = std::getenv("ULW_REACTOR")) {
+            env.push_back("ULW_REACTOR=" + std::string(reactor));
+        }
         return env;
     }
 };

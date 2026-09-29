@@ -42,6 +42,7 @@ ulw_add_test_suite(ops_unit_tests unit
     unit/ops/metrics_test.cpp
     unit/ops/notify_test.cpp
     unit/ops/process_test.cpp
+    unit/ops/root_test.cpp
     unit/ops/settings_test.cpp
     unit/ops/toml_test.cpp)
 target_link_libraries(ops_unit_tests PRIVATE ulw::ops)

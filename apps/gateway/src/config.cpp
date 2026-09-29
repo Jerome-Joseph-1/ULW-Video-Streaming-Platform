@@ -10,6 +10,8 @@
 #include "net/ip_address.hpp"
 #include "net/transport.hpp"
 
+#include "ops/root.hpp"
+
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -454,11 +456,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
         return std::unexpected(std::move(r.error()));
     }
     config.run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or("");
-    const std::string allow_root = lookup(env, "ULW_ALLOW_ROOT").value_or("0");
-    if (allow_root != "0" && allow_root != "1") {
+    const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
+    if (!allow_root) {
         return error("ULW_ALLOW_ROOT", "expected 0 or 1");
     }
-    config.allow_root = allow_root == "1";
+    config.allow_root = *allow_root;
     return config;
 }
 

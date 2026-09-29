@@ -10,7 +10,6 @@
 #include "net/socket.hpp"
 #include "net/transport.hpp"
 #include "os/limits.hpp"
-#include "os/privileges.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 #include "os/unique_fd.hpp"
@@ -22,6 +21,7 @@
 #include "ops/async_log.hpp"
 #include "ops/log.hpp"
 #include "ops/notify.hpp"
+#include "ops/root.hpp"
 #include "ops/settings.hpp"
 
 #include <cstdint>
@@ -83,25 +83,16 @@ int refuse(ops::Logger& log, std::string_view source, std::string_view reason) {
 // becomes the configured user before it opens a socket or starts a thread; not root, there is
 // nothing to give up. nullopt means carry on, anything else is the exit code.
 std::optional<int> leave_root(const std::string& user, bool allow_root, ops::Logger& log) {
-    if (!os::is_root()) {
-        return std::nullopt;
+    const auto step = ops::leave_root(user, allow_root);
+    if (!step) {
+        return step.error().configuration ? refuse(log, step.error().source, step.error().reason)
+                                          : fail(log, step.error().source, step.error().reason);
     }
-    if (user.empty()) {
-        if (allow_root) {
-            log.warn("running as root, as ULW_ALLOW_ROOT=1 allows");
-            return std::nullopt;
-        }
-        return refuse(log, "ULW_RUN_AS_USER",
-                      "not set, and the process runs as root; set it, or ULW_ALLOW_ROOT=1");
+    if (*step == ops::RootStep::StayedRoot) {
+        log.warn("running as root, as ULW_ALLOW_ROOT=1 allows");
+    } else if (*step == ops::RootStep::Dropped) {
+        log.info("dropped root", {{"user", user}});
     }
-    const auto identity = os::resolve_user(user);
-    if (!identity) {
-        return refuse(log, "ULW_RUN_AS_USER", identity.error());
-    }
-    if (auto r = os::drop_privileges(*identity); !r) {
-        return fail(log, "drop privileges", r.error());
-    }
-    log.info("dropped root", {{"user", user}, {"uid", identity->uid}, {"gid", identity->gid}});
     return std::nullopt;
 }
 

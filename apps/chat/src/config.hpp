@@ -35,6 +35,10 @@ struct Config {
     // Pages allowed to open a socket that authenticates with the cookie, as exact
     // "scheme://host[:port]" origins. Empty: the cookie is not accepted at all.
     std::vector<std::string> allowed_origins;
+    // Who to become when started as root.
+    std::string run_as_user;
+    // Stay root when started as root with no run_as_user; otherwise that is refused.
+    bool allow_root = false;
 };
 
 struct ConfigError {

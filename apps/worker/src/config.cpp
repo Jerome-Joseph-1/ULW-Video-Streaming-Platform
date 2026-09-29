@@ -5,6 +5,8 @@
 #include "infra/s3util/credentials.hpp"
 #include "infra/s3util/profile.hpp"
 
+#include "ops/root.hpp"
+
 #include <algorithm>
 #include <array>
 #include <string>
@@ -191,8 +193,8 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!sandbox) {
         return std::unexpected(std::move(sandbox.error()));
     }
-    const std::string allow_root = lookup(env, "ULW_ALLOW_ROOT").value_or("0");
-    if (allow_root != "0" && allow_root != "1") {
+    const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
+    if (!allow_root) {
         return error("ULW_ALLOW_ROOT", "expected 0 or 1");
     }
     unsigned threads = kDefaultThreads;
@@ -218,7 +220,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .ffmpeg_threads = threads,
                   .log_level = level,
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
-                  .allow_root = allow_root == "1"};
+                  .allow_root = *allow_root};
 }
 
 void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log) {

@@ -233,16 +233,15 @@ protected:
 
     void start(Node& node, const std::string& jwks) {
         std::vector<std::string> env{
-            "ULW_NODE_ID=" + node.name,
-            "ULW_LISTEN_PORT=" + std::to_string(node.port),
+            "ULW_NODE_ID=" + node.name, "ULW_LISTEN_PORT=" + std::to_string(node.port),
             "ULW_NODE_ADDRESS=127.0.0.1:" + std::to_string(node.node_port),
-            "ULW_DEV_LOOPBACK_NODES=1",
-            "ULW_NODE_SECRET=" + node_secret_,
-            "ULW_DATABASE_URL=" + db_->conninfo(),
-            "ULW_DEV_JWKS_FILE=" + jwks,
+            "ULW_DEV_LOOPBACK_NODES=1", "ULW_NODE_SECRET=" + node_secret_,
+            "ULW_DATABASE_URL=" + db_->conninfo(), "ULW_DEV_JWKS_FILE=" + jwks,
             "JWT_ISSUER=" + std::string(kIssuer),
             "ULW_REACTOR=" +
-                std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll")};
+                std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),
+            // Some runs start tests as root; this suite is not about that.
+            "ULW_ALLOW_ROOT=1"};
         for (const char* passed : {"ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"}) {
             // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
             if (const char* value = std::getenv(passed)) {
@@ -759,7 +758,7 @@ TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePasswor
                                          "ULW_NODE_SECRET=startup-test-node-secret-000000000000",
                                          "ULW_DEV_LOOPBACK_NODES=1", "ULW_DATABASE_URL=" + url,
                                          "ULW_DEV_JWKS_FILE=/nonexistent/jwks.json",
-                                         "JWT_ISSUER=https://issuer.test"});
+                                         "JWT_ISSUER=https://issuer.test", "ULW_ALLOW_ROOT=1"});
         ASSERT_NE(chat, nullptr);
         EXPECT_EQ(chat->wait_exit(seconds(30)), 2) << chat->output();
         EXPECT_NE(chat->output().find("ULW_DATABASE_URL"), std::string::npos) << chat->output();
