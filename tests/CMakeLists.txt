@@ -345,7 +345,7 @@ if(ULW_BUILD_MLS)
 
     if(ULW_FUZZ)
         ulw_add_executable(mls_fuzz fuzz/mls_fuzz.cpp)
-        target_link_libraries(mls_fuzz PRIVATE mls_ffi_bridge)
+        target_link_libraries(mls_fuzz PRIVATE mls_ffi_bridge_fuzz)
         target_compile_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
         target_link_options(mls_fuzz PRIVATE -fsanitize=fuzzer)
     endif()
