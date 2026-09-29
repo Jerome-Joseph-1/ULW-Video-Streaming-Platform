@@ -163,7 +163,7 @@ private:
     void begin_append(std::uint64_t at) noexcept;
 
     void respond(http::ResponseHead head, std::string_view body) noexcept;
-    void log_request(http::Status status) noexcept;
+    void record_response(http::Status status) noexcept;
     [[nodiscard]] std::string_view readiness_body() const noexcept;
     void respond_json(http::Status status, std::string_view json) noexcept;
     void fail(http::Status status,

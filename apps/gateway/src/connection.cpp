@@ -1166,7 +1166,7 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
     const bool keep = req_.keep_alive && req_.message_complete && !draining_;
     head.connection = keep ? http::Connection::KeepAlive : http::Connection::Close;
     head.request_id = request_id();
-    log_request(head.status);
+    record_response(head.status);
     head.content_length = body.size();
     std::array<char, kResponseHead> buf{};
     const auto n = http::write_response_head(head, buf);
@@ -1188,9 +1188,9 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
     finish_request();
 }
 
-// One line per response, without the target, headers or body: tokens travel in headers,
-// and ids are all a trace needs.
-void Connection::log_request(http::Status status) noexcept {
+// Counts the response and logs it in one line, without the target, headers or body: tokens
+// travel in headers, and ids are all a trace needs.
+void Connection::record_response(http::Status status) noexcept {
     const std::uint16_t code = http::code(status);
     const std::size_t status_class = code / 100;
     if (status_class >= 1 && status_class <= 5) {
