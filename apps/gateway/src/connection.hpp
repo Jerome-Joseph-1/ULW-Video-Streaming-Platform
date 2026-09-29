@@ -13,6 +13,7 @@
 #include "net/transport.hpp"
 
 #include "gateway.hpp"
+#include "live_manifest_cache.hpp"
 #include "playback.hpp"
 #include "routes.hpp"
 
@@ -34,7 +35,8 @@ class Connection final : public net::IStreamHandler,
                          public http::IRequestSink,
                          public core::ports::IIngestObserver,
                          public core::ports::IKeyWaiter,
-                         public net::IOffloadJob {
+                         public net::IOffloadJob,
+                         public ILiveWaiter {
 public:
     using Handle = net::Slab<Connection>::Handle;
 
@@ -75,6 +77,9 @@ public:
 
     void run() noexcept override;
     void complete() noexcept override;
+
+    void
+    on_live_playlist(const std::expected<LiveAnswer, PlaylistFailure>& answer) noexcept override;
 
 private:
     enum class Phase : std::uint8_t { Idle, Request, Lingering, Closed };
@@ -163,6 +168,8 @@ private:
     void on_video(core::ports::CatalogResult<core::VideoRecord> result) noexcept;
     void start_playlist(const core::VideoRecord& video) noexcept;
     void on_playlist(ControlJob job) noexcept;
+    void fail_playlist(PlaylistFailure failure) noexcept;
+    void start_live() noexcept;
     void on_durable() noexcept;
     void drain_staging() noexcept;
     void end_stall() noexcept;
@@ -246,6 +253,9 @@ private:
     // Only the pool thread touches this between submit and complete().
     ControlJob job_;
     bool job_running_ = false;
+
+    // The request waiting on the live playlist cache, if one is; it answers exactly once.
+    std::optional<std::uint64_t> live_wait_;
 };
 
 } // namespace gateway

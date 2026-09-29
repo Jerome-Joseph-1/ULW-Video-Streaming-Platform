@@ -9,6 +9,7 @@
 #include <array>
 #include <format>
 #include <iterator>
+#include <utility>
 
 namespace gateway {
 
@@ -28,6 +29,16 @@ constexpr std::size_t kMaxStaging = std::size_t{4} * 64 * 1024;
 constexpr core::Millis kLinger{2'000};
 constexpr std::size_t kResponseHead = 1024;
 constexpr std::chrono::seconds kRetryAfter{5};
+
+void count_playlist(Counters& counters, RouteId route) noexcept {
+    if (route == RouteId::MasterPlaylist) {
+        ++counters.playlists_master;
+    } else if (route == RouteId::MediaPlaylist) {
+        ++counters.playlists_media;
+    } else {
+        ++counters.playlists_live;
+    }
+}
 
 // Holds once the request is past authentication, lookup or claim, which is the only time the
 // handlers below are reached; a miss is a bug, answered with 500 rather than undefined
@@ -252,8 +263,8 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     }
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
-        ++(match->id == RouteId::MasterPlaylist ? gw().counters().playlists_master
-                                                : gw().counters().playlists_media);
+    case RouteId::LivePlaylist:
+        count_playlist(gw().counters(), match->id);
         [[fallthrough]];
     case RouteId::UploadOffset:
     case RouteId::CancelUpload:
@@ -438,6 +449,12 @@ void Connection::advance() noexcept {
         if (req_.message_complete && !req_.started) {
             req_.started = true;
             start_lookup();
+        }
+        return;
+    case RouteId::LivePlaylist:
+        if (req_.message_complete && !req_.started) {
+            req_.started = true;
+            start_live();
         }
         return;
     }
@@ -790,6 +807,7 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     case RouteId::GetVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
+    case RouteId::LivePlaylist:
     case RouteId::Healthz:
     case RouteId::Readyz:
     case RouteId::Metrics:
@@ -856,26 +874,7 @@ void Connection::on_playlist(ControlJob job) noexcept {
         return;
     }
     if (!*job.body) {
-        switch (job.body->error()) {
-        case PlaylistFailure::NoSuchRendition:
-            fail(Status::NotFound);
-            return;
-        case PlaylistFailure::Unavailable:
-            fail(Status::ServiceUnavailable);
-            return;
-        case PlaylistFailure::Rejected:
-            ++gw().counters().playlists_rejected;
-            fail(Status::InternalServerError);
-            return;
-        case PlaylistFailure::Unsigned:
-            ++gw().counters().presign_failures;
-            fail(Status::InternalServerError);
-            return;
-        case PlaylistFailure::Broken:
-            fail(Status::InternalServerError);
-            return;
-        }
-        fail(Status::InternalServerError);
+        fail_playlist(job.body->error());
         return;
     }
     if (job.playlist->kind == PlaylistKind::Master) {
@@ -889,6 +888,71 @@ void Connection::on_playlist(ControlJob job) noexcept {
              .content_type = "application/vnd.apple.mpegurl",
              .cache_control = "private, max-age=60"},
             **job.body);
+}
+
+void Connection::fail_playlist(PlaylistFailure failure) noexcept {
+    switch (failure) {
+    case PlaylistFailure::NoSuchRendition:
+    case PlaylistFailure::Absent:
+        fail(Status::NotFound);
+        return;
+    case PlaylistFailure::Unavailable:
+        fail(Status::ServiceUnavailable);
+        return;
+    case PlaylistFailure::Rejected:
+        ++gw().counters().playlists_rejected;
+        fail(Status::InternalServerError);
+        return;
+    case PlaylistFailure::Unsigned:
+        ++gw().counters().presign_failures;
+        fail(Status::InternalServerError);
+        return;
+    case PlaylistFailure::Broken:
+        fail(Status::InternalServerError);
+        return;
+    }
+    fail(Status::InternalServerError);
+}
+
+// Any signed-in viewer may watch any stream: a live stream is a broadcast, and nothing on the
+// platform records who may see one (ADR-0059). An id the packager could never have used is
+// answered like a stream that has not started.
+void Connection::start_live() noexcept {
+    const std::string_view stream = req_.params[0];
+    if (!valid_stream_id(stream)) {
+        fail(Status::NotFound);
+        return;
+    }
+    if (live_wait_) {
+        // A request that timed out while its answer was on the way; the cache still owes this
+        // connection that answer, and one waiter can wait for one thing at a time.
+        fail(Status::ServiceUnavailable);
+        return;
+    }
+    live_wait_ = request_seq_;
+    ++pending_;
+    gw().live().get(stream, *this);
+}
+
+void Connection::on_live_playlist(
+    const std::expected<LiveAnswer, PlaylistFailure>& answer) noexcept {
+    --pending_;
+    const std::optional<std::uint64_t> request = std::exchange(live_wait_, std::nullopt);
+    if (phase_ != Phase::Request || request != request_seq_) {
+        return;
+    }
+    if (!answer) {
+        fail_playlist(answer.error());
+        return;
+    }
+    // Private: the URLs are signed. A live playlist is never reused from the viewer's own
+    // cache: the gateway's copy already lags the store by up to half a segment, and a second
+    // layer of age would push the player further behind the live edge. An ended one is final
+    // and is kept like a VOD playlist.
+    respond({.status = Status::Ok,
+             .content_type = "application/vnd.apple.mpegurl",
+             .cache_control = answer->ended ? "private, max-age=60" : "private, no-cache"},
+            answer->body);
 }
 
 void Connection::submit(ControlOp op) noexcept {
