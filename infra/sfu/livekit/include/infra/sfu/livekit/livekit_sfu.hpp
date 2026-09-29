@@ -21,7 +21,9 @@ struct Config {
     std::string api_key;
     std::string api_secret;
     // Where LiveKit's recorder calls a stream's packager, "srt://live-{stream}.apps:9000":
-    // "{stream}" becomes the stream's id. Empty where nothing is relayed; relay is then refused.
+    // "{stream}" becomes the stream's id, and a relay is then refused unless the id is a DNS
+    // label (lowercase letters, digits and '-', at most 63). Empty where nothing is relayed;
+    // relay is then refused.
     std::string packager_srt;
 };
 

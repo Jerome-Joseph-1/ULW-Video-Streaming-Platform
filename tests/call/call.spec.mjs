@@ -290,45 +290,27 @@ test('a join through a handle whose room went idle opens the room again', async 
   }
 });
 
-// M30's way in: a publish-only ticket, used for WHIP with no SDK at all, reaches a call member.
-test('a publisher ticket ingests over WHIP and members receive it', async () => {
-  const room = randomUUID();
-  const metrics = { room };
-  const pageServer = await servePage();
-  const pageUrl = `http://127.0.0.1:${pageServer.address().port}/`;
-  const browsers = [];
+// A room's kind decides its tickets (ADR-0056): a publisher ticket for a call's generation
+// could bring it back after it was closed to put someone out, since LiveKit's WHIP POST
+// re-creates the room it names; and members never join a stream's room. Publishing into a
+// stream's room is the ingest suite's (ingest.spec.mjs).
+test("a room issues only its kind's tickets", async () => {
+  const call = randomUUID();
+  const stream = randomUUID();
   const sfu = startSignalling();
   try {
-    await sfu.open(room, 1);
-    const pages = [];
-    for (let i = 0; i < 2; ++i) {
-      const { server, browser } = await launchPeer();
-      browsers.push(server);
-      const page = await browser.newPage();
-      await page.goto(pageUrl);
-      pages.push(page);
-    }
-    const [viewer, source] = pages;
-    await viewer.evaluate((t) => window.join(t),
-      await sfu.ticket(room, 1, 'alice', randomUUID()));
-    const publisher = await sfu.ticket(room, 1, 'streamer', randomUUID(), 'publisher');
-    expect(publisher.url).toBe(`${process.env.LIVEKIT_API_URL}/whip/v1`);
-    metrics.whipStatus = await source.evaluate((t) => window.whipPublish(t), publisher);
-    expect(metrics.whipStatus).toBe(201);
-
-    await expect.poll(() => viewer.evaluate(() => window.events
-      .filter((e) => e.type === 'track-subscribed' && e.who.startsWith('streamer/'))
-      .map((e) => e.kind).sort()), { timeout: 20_000 }).toEqual(['audio', 'video']);
-    const before = await received(viewer);
-    await expect.poll(async () => {
-      const now = await received(viewer);
-      return now.audio > before.audio && now.video > before.video;
-    }, { timeout: 10_000 }).toBe(true);
-    await sfu.close(room, 1);
+    await sfu.open(call, 1);
+    await sfu.open(stream, 1, 0, 'stream');
+    await expect(sfu.ticket(call, 1, 'streamer', randomUUID(), 'publisher'))
+      .rejects.toThrow(/refused/);
+    await expect(sfu.ticket(stream, 1, 'alice', randomUUID())).rejects.toThrow(/refused/);
+    expect((await sfu.ticket(call, 1, 'alice', randomUUID())).url)
+      .toBe(process.env.LIVEKIT_CLIENT_URL);
+    expect((await sfu.ticket(stream, 1, 'streamer', randomUUID(), 'publisher')).url)
+      .toBe(`${process.env.LIVEKIT_API_URL}/whip/v1`);
+    await sfu.close(call, 1);
+    await sfu.close(stream, 1);
   } finally {
     sfu.stop();
-    for (const browser of browsers) await browser.close().catch(() => {});
-    pageServer.close();
-    console.log(JSON.stringify(metrics));
   }
 });

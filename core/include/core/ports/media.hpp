@@ -60,7 +60,9 @@ enum class MediaRole : std::uint8_t {
     Publisher,
 };
 
-// What a room carries. Only a stream's room may be relayed to a packager.
+// What a room carries, fixed per handle by the caller that opened it: a call's room issues
+// member tickets only, a stream's room publisher tickets only, and only a stream's room may be
+// relayed to a packager.
 enum class MediaRoomKind : std::uint8_t {
     Call,
     Stream,
@@ -91,9 +93,11 @@ public:
     // Sends what that participant publishes to `target`'s packager, re-encoded for it, until
     // the participant leaves or the generation closes; its leaving is how the packager learns
     // the stream is over. The participant must be in the room already: the media server looks
-    // for it for half a minute, not for as long as a ticket lasts. Idempotent: a participant
-    // already relayed gets the running relay's id, so a retry after `Unavailable` never starts
-    // a second one. Refused for a call's room.
+    // for it for half a minute, not for as long as a ticket lasts. Idempotent: calls made while
+    // one for the same participant is in flight share its answer, and a participant already
+    // relayed gets the running relay's id. One case is left: a retry after the start timed out
+    // here, while the media server may still be starting it, can start a second (ADR-0056).
+    // Refused for a call's room.
     virtual void relay(const UserId& user, const DeviceId& device, const MediaRelay& target,
                        RelayDone done) = 0;
     // Ends this generation for everyone in it; members' tickets and refreshed credentials stop

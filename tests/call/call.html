@@ -54,32 +54,6 @@
     }
   };
 
-  // A WHIP client (RFC 9725) in a few lines: the ingest path takes a plain peer connection, no
-  // SDK. Candidates go in the offer, so nothing trickles. Headless Chrome gathers its host
-  // candidates at once but never reports gathering complete here, so the offer goes after one
-  // second; LiveKit learns the browser's real address from its first connectivity check anyway.
-  window.whipPublish = async ({ url, token }) => {
-    const media = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
-    for (const track of media.getTracks()) pc.addTransceiver(track, { direction: 'sendonly' });
-    await pc.setLocalDescription(await pc.createOffer());
-    await new Promise((resolve) => {
-      setTimeout(resolve, 1000);
-      pc.addEventListener('icegatheringstatechange', () => {
-        if (pc.iceGatheringState === 'complete') resolve();
-      });
-    });
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/sdp', authorization: `Bearer ${token}` },
-      body: pc.localDescription.sdp,
-    });
-    if (response.status === 201) {
-      await pc.setRemoteDescription({ type: 'answer', sdp: await response.text() });
-    }
-    return response.status;
-  };
-
   // A WHIP publish in the order RFC 9725 gives a client that trickles and takes its ICE servers
   // from the answer's Link headers (sections 4.3.1 and 4.6): the offer goes out before local
   // gathering starts, the ICE servers are set, then gathering runs and its candidates follow

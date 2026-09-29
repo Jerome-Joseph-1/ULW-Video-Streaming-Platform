@@ -9,9 +9,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace infra::sfu::livekit {
 
@@ -114,6 +117,19 @@ constexpr CallLimits kListRelayLimits{.timeout = core::Millis{5000},
     });
 }
 
+// A stream id put into a host name must be a DNS label (RFC 1123): lowercase letters, digits
+// and '-', not at either end, 63 characters at most. Refused rather than rewritten, so two ids
+// never name one host.
+constexpr std::size_t kMaxDnsLabel = 63;
+[[nodiscard]] bool valid_host_label(std::string_view id) noexcept {
+    return !id.empty() && id.size() <= kMaxDnsLabel && id.front() != '-' && id.back() != '-' &&
+           std::ranges::all_of(id, [](char c) {
+               return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+           });
+}
+
+constexpr std::string_view kStreamPlaceholder = "{stream}";
+
 [[nodiscard]] bool valid_passphrase(std::string_view passphrase) noexcept {
     return passphrase.size() >= kMinPassphrase && passphrase.size() <= kMaxPassphrase &&
            std::ranges::all_of(passphrase, [](char c) { return c >= ' ' && c <= '~'; });
@@ -140,7 +156,7 @@ void append_percent_encoded(std::string& out, std::string_view text) {
 // the stream's id, with the stream id and passphrase its handshake checks (ADR-0046).
 std::string packager_url(std::string_view configured, const core::ports::MediaRelay& target) {
     std::string url;
-    constexpr std::string_view kPlaceholder = "{stream}";
+    constexpr std::string_view kPlaceholder = kStreamPlaceholder;
     const auto at = configured.find(kPlaceholder);
     if (at == std::string_view::npos) {
         url = configured;
@@ -178,8 +194,9 @@ std::string relay_body(std::string_view room, std::string_view identity, std::st
     return body;
 }
 
-// The id of a relay LiveKit already runs for `identity`, from a ListEgress answer holding only
-// active ones. nullopt when there is none; an unreadable answer is an error.
+// The id of a relay LiveKit runs for `identity`, from a ListEgress answer. `active` there also
+// lists egresses that are ending, which will not carry the stream, so only starting and active
+// ones count. nullopt when there is none; an unreadable answer is an error.
 std::expected<std::optional<std::string>, MediaError> running_relay(std::string_view answer,
                                                                     std::string_view identity) {
     const auto parsed = core::json::parse(answer);
@@ -194,7 +211,10 @@ std::expected<std::optional<std::string>, MediaError> running_relay(std::string_
         const core::json::Value* participant = item.find("participant");
         const core::json::Value* named = participant ? participant->find("identity") : nullptr;
         const core::json::Value* id = item.find("egress_id");
-        if (named != nullptr && named->as_string() == identity && id != nullptr &&
+        const core::json::Value* status = item.find("status");
+        const bool live = status != nullptr && (status->as_string() == "EGRESS_STARTING" ||
+                                                status->as_string() == "EGRESS_ACTIVE");
+        if (live && named != nullptr && named->as_string() == identity && id != nullptr &&
             id->as_string()) {
             return std::string(*id->as_string());
         }
@@ -213,23 +233,106 @@ std::string identity_of(const core::UserId& user, const core::DeviceId& device) 
 constexpr Grant kCreateRooms{.permission = Permission::CreateRooms, .room = {}, .identity = {}};
 constexpr Grant kRecordRooms{.permission = Permission::RecordRoom, .room = {}, .identity = {}};
 
+using RelayResult = std::expected<std::string, MediaError>;
+
+// Relay starts in flight, by room and identity. LiveKit records an egress only once its start
+// has answered, about half a second later, so a second relay() inside that window would list
+// nothing and start another: it waits for the first one's answer instead. Reactor thread only.
+class RelayStarts {
+public:
+    explicit RelayStarts(RoomService& service) noexcept : service_(service) {}
+
+    // `start` is the StartParticipantEgress body, used if LiveKit runs none for `identity` yet.
+    void run(std::string_view room, std::string_view identity, std::string start,
+             core::ports::RelayDone done) {
+        std::string key(room);
+        key += '\n';
+        key += identity;
+        const auto [waiters, first] = waiting_.try_emplace(key);
+        waiters->second.push_back(std::move(done));
+        if (!first) {
+            return;
+        }
+        std::string list = R"({"room_name":)";
+        core::json::append_string(list, room);
+        list += R"(,"active":true})";
+        service_.fetch("Egress/ListEgress", std::move(list), kRecordRooms, kListRelayLimits,
+                       [this, key = std::move(key), identity = std::string(identity),
+                        start = std::move(start)](Answer listed) mutable noexcept {
+                           if (!listed) {
+                               finish(key, std::unexpected(listed.error()));
+                               return;
+                           }
+                           auto running = running_relay(*listed, identity);
+                           if (!running) {
+                               finish(key, std::unexpected(running.error()));
+                               return;
+                           }
+                           if (*running) {
+                               finish(key, std::move(**running));
+                               return;
+                           }
+                           service_.fetch("Egress/StartParticipantEgress", std::move(start),
+                                          kRecordRooms, kStartRelayLimits,
+                                          [this, key = std::move(key)](Answer started) noexcept {
+                                              finish(key, started_relay(started));
+                                          });
+                       });
+    }
+
+private:
+    static RelayResult started_relay(const Answer& started) {
+        if (!started) {
+            return std::unexpected(started.error());
+        }
+        const auto info = core::json::parse(*started);
+        const core::json::Value* id = info ? info->find("egress_id") : nullptr;
+        // Started, perhaps, with no id to show for it: the retry's listing will find it.
+        if (id == nullptr || !id->as_string()) {
+            return std::unexpected(MediaError::Unavailable);
+        }
+        return std::string(*id->as_string());
+    }
+
+    void finish(const std::string& key, const RelayResult& result) noexcept {
+        const auto found = waiting_.find(key);
+        if (found == waiting_.end()) {
+            return;
+        }
+        // Taken out first: a callback may destroy the ISfu, and this with it.
+        std::vector<core::ports::RelayDone> waiters = std::move(found->second);
+        waiting_.erase(found);
+        for (core::ports::RelayDone& done : waiters) {
+            done(result);
+        }
+    }
+
+    RoomService& service_;
+    std::map<std::string, std::vector<core::ports::RelayDone>, std::less<>> waiting_;
+};
+
 class LiveKitRoom final : public IMediaRoom {
 public:
-    LiveKitRoom(RoomService& service, const Endpoints& endpoints, std::string name,
-                MediaRoomKind kind, std::uint16_t max_participants) noexcept
-        : service_(service), endpoints_(endpoints), name_(std::move(name)), kind_(kind),
-          max_participants_(max_participants) {}
+    LiveKitRoom(RoomService& service, RelayStarts& relays, const Endpoints& endpoints,
+                std::string name, MediaRoomKind kind, std::uint16_t max_participants) noexcept
+        : service_(service), relays_(relays), endpoints_(endpoints), name_(std::move(name)),
+          kind_(kind), max_participants_(max_participants) {}
 
     void join(const core::UserId& user, const core::DeviceId& device, MediaRole role,
               core::ports::TicketDone done) override {
-        if (closed_) {
-            service_.fail(MediaError::Closed, [done = std::move(done)](Answer r) mutable noexcept {
-                done(std::unexpected(r.error()));
-            });
+        const bool member = role == MediaRole::Member;
+        // A call admits members and a stream its publisher, nothing else: a publisher ticket
+        // for a call's generation could bring it back after it was closed to put someone out
+        // (ADR-0056), and members never join a stream's room (ADR-0014).
+        const bool fits = member == (kind_ == MediaRoomKind::Call);
+        if (closed_ || !fits) {
+            service_.fail(closed_ ? MediaError::Closed : MediaError::Refused,
+                          [done = std::move(done)](Answer r) mutable noexcept {
+                              done(std::unexpected(r.error()));
+                          });
             return;
         }
         std::string identity = identity_of(user, device);
-        const bool member = role == MediaRole::Member;
         // Copies, not this: the room handle may be gone by the time the room is back.
         service_.call("RoomService/CreateRoom", create_room_body(name_, max_participants_),
                       kCreateRooms, IfAbsent::Fail,
@@ -268,52 +371,20 @@ public:
         }
         if (kind_ != MediaRoomKind::Stream || endpoints_.packager.empty() ||
             !valid_stream_id(target.stream) || !valid_passphrase(target.passphrase) ||
+            (endpoints_.packager.contains(kStreamPlaceholder) &&
+             !valid_host_label(target.stream)) ||
             target.keyframe_interval < kMinKeyframeInterval ||
             target.keyframe_interval > kMaxKeyframeInterval) {
             refuse(MediaError::Refused);
             return;
         }
         // Listed first, so that a retry after a lost answer finds the relay the first attempt
-        // started instead of starting another. Copies, not this: the handle may be gone first.
-        std::string identity = identity_of(user, device);
-        std::string list = R"({"room_name":)";
-        core::json::append_string(list, name_);
-        list += R"(,"active":true})";
-        service_.fetch(
-            "Egress/ListEgress", std::move(list), kRecordRooms, kListRelayLimits,
-            [&service = service_, identity,
-             start = relay_body(name_, identity, packager_url(endpoints_.packager, target),
-                                target.keyframe_interval),
-             done = std::move(done)](Answer listed) mutable noexcept {
-                if (!listed) {
-                    done(std::unexpected(listed.error()));
-                    return;
-                }
-                auto running = running_relay(*listed, identity);
-                if (!running) {
-                    done(std::unexpected(running.error()));
-                    return;
-                }
-                if (*running) {
-                    done(std::move(**running));
-                    return;
-                }
-                service.fetch(
-                    "Egress/StartParticipantEgress", std::move(start), kRecordRooms,
-                    kStartRelayLimits, [done = std::move(done)](Answer started) mutable noexcept {
-                        if (!started) {
-                            done(std::unexpected(started.error()));
-                            return;
-                        }
-                        const auto info = core::json::parse(*started);
-                        const core::json::Value* id = info ? info->find("egress_id") : nullptr;
-                        if (id == nullptr || !id->as_string()) {
-                            done(std::unexpected(MediaError::Unavailable));
-                            return;
-                        }
-                        done(std::string(*id->as_string()));
-                    });
-            });
+        // started instead of starting another.
+        const std::string identity = identity_of(user, device);
+        relays_.run(name_, identity,
+                    relay_body(name_, identity, packager_url(endpoints_.packager, target),
+                               target.keyframe_interval),
+                    std::move(done));
     }
 
     void close(MediaDone done) override {
@@ -327,6 +398,7 @@ public:
 
 private:
     RoomService& service_;
+    RelayStarts& relays_;
     const Endpoints& endpoints_;
     std::string name_;
     MediaRoomKind kind_;
@@ -360,14 +432,15 @@ public:
                     done(std::unexpected(created.error()));
                     return;
                 }
-                done(std::make_unique<LiveKitRoom>(service_, endpoints_, std::move(name), kind,
-                                                   max_participants));
+                done(std::make_unique<LiveKitRoom>(service_, relays_, endpoints_, std::move(name),
+                                                   kind, max_participants));
             });
     }
 
 private:
     Endpoints endpoints_;
     RoomService service_;
+    RelayStarts relays_{service_};
 };
 
 [[nodiscard]] bool has_scheme(std::string_view url, std::string_view plain,

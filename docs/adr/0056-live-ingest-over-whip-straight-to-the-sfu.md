@@ -81,6 +81,12 @@ against the running servers:
   answers `200` and leaves the new session running (tested). The stream's room is opened as a
   `MediaRoomKind::Stream` without a participant limit, since the recorder joins beside the
   publisher.
+- **A room's kind is fixed per handle by the caller that opens it**, and `join` enforces it: a
+  call's room issues member tickets only and a stream's room publisher tickets only (`Refused`
+  otherwise, before anything is sent). Otherwise a publisher ticket for a call's generation
+  could bring back a generation that was closed to put someone out, and the expelled member
+  could rejoin it. The adapter cannot check that the caller named the right kind; the stream
+  service and the call handler each open only their own.
 - **Relay.** `IMediaRoom::relay(user, device, MediaRelay{stream, passphrase, keyframe_interval})`
   starts a participant egress for that identity with one SRT output to the stream's packager
   (ADR-0046), re-encoded to 1280x720 at 30 fps and 2800 kbit/s (the worker's 720p rung) with a
@@ -88,14 +94,22 @@ against the running servers:
   not the source's: no encoder setting is asked of a publisher.
   - **Where** is the adapter's configuration, not the caller's: `packager_srt`, `srt://host:port`
     with an optional `{stream}` in the host, to which the relay adds `streamid` and the
-    percent-encoded `passphrase`. A caller cannot point the recorder anywhere else.
+    percent-encoded `passphrase`. A caller cannot point the recorder anywhere else. With
+    `{stream}` configured, a stream id must also be a DNS label (lowercase letters, digits and
+    `-`, not at either end, at most 63): stream ids allow uppercase, `_` and 64 characters, and
+    such an id is refused rather than rewritten, so two ids never name one host.
   - **Refused unsent**: a call's room, a stream id that is not one key segment, a passphrase SRT
     would refuse, a keyframe interval outside the packager's 2 to 10 s, an adapter with no
     packager configured, a room closed through its handle (`Closed`).
   - **Idempotent**: the relay lists the room's active egresses first (`ListEgress`) and answers
-    the id of one already running for that identity instead of starting another, so a retry
-    after a lost answer does not start a second. A start that answers without an id is
-    `Unavailable`; the retry's listing finds it. The start has its own limits: 5 s, ten times
+    the id of one starting or active for that identity instead of starting another, so a retry
+    after a lost answer does not start a second. `active` in that listing also returns
+    egresses that are ending, which carry nothing more; those do not count. LiveKit records an
+    egress only once its start has answered, half a second later, so calls for the same
+    identity while one is in flight are queued on its answer instead of listing for
+    themselves (one reactor thread, no lock). A start that answers without an id is
+    `Unavailable`; the retry's listing finds it. The one case left is a retry after our own
+    start timed out while LiveKit may still be starting it (below). The start has its own limits: 5 s, ten times
     the 530 to 541 ms seven local starts took (500 ms of it LiveKit's RPC waiting for a busier
     recorder to bid, `ShortCircuitTimeout`); the listing reads up to 64 KiB, as each egress is
     about 3 KiB.

@@ -225,7 +225,7 @@ TEST_P(LiveKitSfuTest, JoiningIssuesATicketForThatUsersDevice) {
 TEST_P(LiveKitSfuTest, APublisherTicketIsForWhipAndCannotSubscribe) {
     auto server = answering(200);
     start(server.base_url());
-    auto room = open();
+    auto room = open(MediaGeneration{1}, MediaRoomKind::Stream);
     ASSERT_TRUE(room);
     const auto ticket = join(**room, "streamer", kDevice, MediaRole::Publisher);
     ASSERT_TRUE(ticket);
@@ -241,7 +241,7 @@ TEST_P(LiveKitSfuTest, APublisherTicketIsForWhipAndCannotSubscribe) {
 TEST_P(LiveKitSfuTest, APublisherTicketLivesNoLongerThanAMembers) {
     auto server = answering(200);
     start(server.base_url());
-    auto room = open();
+    auto room = open(MediaGeneration{1}, MediaRoomKind::Stream);
     ASSERT_TRUE(room);
     const auto publisher = join(**room, "streamer", kDevice, MediaRole::Publisher);
     ASSERT_TRUE(publisher);
@@ -327,8 +327,9 @@ TEST_P(LiveKitSfuTest, RelayingStartsARecorderToThatStreamsPackager) {
 TEST_P(LiveKitSfuTest, ARelayAlreadyRunningIsReturnedAndNotStartedAgain) {
     // A retry after an answer that was lost: LiveKit runs the first attempt's relay.
     auto server = egress_server(
-        R"({"items":[{"egress_id":"EG_other","participant":{"identity":"someone/x"}},)"
-        R"({"egress_id":"EG_running","participant":{"identity":"streamer/)" +
+        R"({"items":[{"egress_id":"EG_other","status":"EGRESS_ACTIVE",)"
+        R"("participant":{"identity":"someone/x"}},)"
+        R"({"egress_id":"EG_running","status":"EGRESS_ACTIVE","participant":{"identity":"streamer/)" +
         std::string(kDevice) + R"("}}]})");
     start(server.base_url());
     auto room = open(MediaGeneration{1}, MediaRoomKind::Stream);
@@ -337,6 +338,63 @@ TEST_P(LiveKitSfuTest, ARelayAlreadyRunningIsReturnedAndNotStartedAgain) {
     ASSERT_TRUE(relayed);
     EXPECT_EQ(*relayed, "EG_running");
     EXPECT_EQ(server.request_count(), 2U) << "a second relay was started";
+}
+
+TEST_P(LiveKitSfuTest, ARelayThatIsEndingIsNotTakenForTheRunningOne) {
+    // ListEgress's `active` includes egresses on their way out, which will carry nothing more.
+    auto server = egress_server(
+        R"({"items":[{"egress_id":"EG_ending","status":"EGRESS_ENDING","participant":)"
+        R"({"identity":"streamer/)" +
+        std::string(kDevice) + R"("}}]})");
+    start(server.base_url());
+    auto room = open(MediaGeneration{1}, MediaRoomKind::Stream);
+    ASSERT_TRUE(room);
+    const auto relayed = relay(**room, stream_target());
+    ASSERT_TRUE(relayed);
+    EXPECT_EQ(*relayed, "EG_started");
+    EXPECT_EQ(server.request_count(), 3U);
+}
+
+TEST_P(LiveKitSfuTest, RelaysAskedForTogetherStartOneRecorder) {
+    // LiveKit lists an egress only once its start has answered; until then every listing is
+    // empty, so the second call must wait for the first rather than list for itself.
+    auto server = egress_server(R"({"items":[]})");
+    start(server.base_url());
+    auto room = open(MediaGeneration{1}, MediaRoomKind::Stream);
+    ASSERT_TRUE(room);
+    std::optional<RelayResult> first;
+    std::optional<RelayResult> second;
+    (*room)->relay(*core::UserId::parse("streamer"), *core::DeviceId::parse(kDevice),
+                   stream_target(), [&](RelayResult r) noexcept { first = std::move(r); });
+    (*room)->relay(*core::UserId::parse("streamer"), *core::DeviceId::parse(kDevice),
+                   stream_target(), [&](RelayResult r) noexcept { second = std::move(r); });
+    ASSERT_TRUE(pump_until(*reactor, [&] { return first && second; }));
+    ASSERT_TRUE(*first && *second);
+    EXPECT_EQ(**first, "EG_started");
+    EXPECT_EQ(**second, "EG_started");
+    int starts = 0;
+    for (const ServedRequest& request : server.requests()) {
+        starts += request.path().ends_with("/StartParticipantEgress") ? 1 : 0;
+    }
+    EXPECT_EQ(starts, 1);
+    // Once answered, a later call lists again rather than waiting on what is over.
+    ASSERT_TRUE(relay(**room, stream_target()));
+    EXPECT_EQ(server.request_count(), 5U);
+}
+
+TEST_P(LiveKitSfuTest, APackagerHostNamedByStreamTakesOnlyDnsLabels) {
+    auto server = egress_server(R"({"items":[]})");
+    start(server.base_url());
+    auto room = open(MediaGeneration{1}, MediaRoomKind::Stream);
+    ASSERT_TRUE(room);
+    // Valid as a stream id, not as a host name: uppercase, '_' and 64 characters.
+    for (const std::string& id :
+         {std::string("Stream1"), std::string("s_1"), std::string(64, 's')}) {
+        auto target = stream_target();
+        target.stream = id;
+        EXPECT_EQ(relay(**room, target), RelayResult(std::unexpected(MediaError::Refused))) << id;
+    }
+    EXPECT_EQ(server.request_count(), 1U);
 }
 
 TEST_P(LiveKitSfuTest, RelayingFailsByWhetherARetryCanHelp) {
@@ -435,13 +493,31 @@ TEST_P(LiveKitSfuTest, ThePlainClientUrlGivesAPlainWhipUrl) {
     auto made = make_sfu(*reactor, *multi, clock, std::move(config));
     ASSERT_TRUE(made);
     sfu = std::move(*made);
-    auto room = open();
-    ASSERT_TRUE(room);
-    const auto publisher = join(**room, "streamer", kDevice, MediaRole::Publisher);
-    const auto member = join(**room, "alice");
+    auto call = open(MediaGeneration{1}, MediaRoomKind::Call);
+    auto stream = open(MediaGeneration{2}, MediaRoomKind::Stream);
+    ASSERT_TRUE(call && stream);
+    const auto publisher = join(**stream, "streamer", kDevice, MediaRole::Publisher);
+    const auto member = join(**call, "alice");
     ASSERT_TRUE(publisher && member);
     EXPECT_EQ(publisher->endpoint, "http://127.0.0.1:7880/whip/v1");
     EXPECT_EQ(member->endpoint, "ws://127.0.0.1:7880/");
+}
+
+TEST_P(LiveKitSfuTest, ARoomIssuesOnlyTheTicketsOfItsKind) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto call = open(MediaGeneration{1}, MediaRoomKind::Call);
+    auto stream = open(MediaGeneration{2}, MediaRoomKind::Stream);
+    ASSERT_TRUE(call && stream);
+    // A publisher ticket would let its holder bring a closed call generation back and rejoin
+    // it; members never join a stream's room.
+    const auto publisher = join(**call, "streamer", kDevice, MediaRole::Publisher);
+    ASSERT_FALSE(publisher);
+    EXPECT_EQ(publisher.error(), MediaError::Refused);
+    const auto member = join(**stream, "alice");
+    ASSERT_FALSE(member);
+    EXPECT_EQ(member.error(), MediaError::Refused);
+    EXPECT_EQ(server.request_count(), 2U) << "a refused join re-created its room";
 }
 
 TEST_P(LiveKitSfuTest, ATicketAdmitsToItsOwnGenerationOnly) {
