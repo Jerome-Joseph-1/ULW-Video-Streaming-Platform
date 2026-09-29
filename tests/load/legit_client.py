@@ -1,7 +1,12 @@
 """The ordinary client slowloris.py and flood.py run beside their abusive traffic, to show it is
 not degraded: it creates one small upload with its own token, then keeps reading that video's
 state (GET /api/v1/videos/{id}, an authenticated catalog lookup that answers 200 through the
-same route the abusive traffic hits). Latency and error rate come back as a summary."""
+same route the abusive traffic hits). Latency and error rate come back as a summary.
+
+The gateway limits connections per client address, so a run on one host gives this client an
+address of its own (SOURCE_ADDRESS, e.g. 127.0.0.2: all of 127.0.0.0/8 is loopback on Linux).
+Without one it shares the abusive traffic's address and is refused with it, as a real client
+behind the attacker's NAT would be."""
 import http.client
 import json
 import statistics
@@ -11,9 +16,13 @@ import time
 import urllib.parse
 
 
+# (host, port) to bind before connecting; set by the scripts' --legit-source.
+SOURCE_ADDRESS = None
+
+
 def connect(parts, timeout):
     kind = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
-    return kind(parts.hostname, parts.port, timeout=timeout)
+    return kind(parts.hostname, parts.port, timeout=timeout, source_address=SOURCE_ADDRESS)
 
 
 def create_video(url, token):
