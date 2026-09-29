@@ -67,6 +67,53 @@ std::string fixture(std::string_view name) {
     return all.str();
 }
 
+std::string replace_all(std::string text, std::string_view from, const std::string& to) {
+    for (std::size_t at = text.find(from); at != std::string::npos;
+         at = text.find(from, at + to.size())) {
+        text.replace(at, from.size(), to);
+    }
+    return text;
+}
+
+// A room's offer: Chromium's audio and video sections repeated `peers` times, each copy with
+// its own mid, msid track and ssrc, then the data channel, all in one BUNDLE group.
+std::string room_offer(std::string_view chromium, std::size_t audio, std::size_t video) {
+    const auto section = [&](std::string_view from, std::string_view to) {
+        return std::string{
+            chromium.substr(chromium.find(from), chromium.find(to) - chromium.find(from))};
+    };
+    const std::string audio_section = section("m=audio", "m=video");
+    const std::string video_section = section("m=video", "m=application");
+    const std::string data_section{chromium.substr(chromium.find("m=application"))};
+    std::string head{chromium.substr(0, chromium.find("m=audio"))};
+
+    std::string body;
+    std::string group = "a=group:BUNDLE";
+    std::size_t mid = 0;
+    const auto add = [&](std::string copy, std::string_view old_mid) {
+        const std::string n = std::to_string(mid);
+        copy = replace_all(std::move(copy), std::string{"a=mid:"} + std::string{old_mid} + "\r\n",
+                           "a=mid:" + n + "\r\n");
+        copy = replace_all(std::move(copy), "f6c70c4b-182d-47d9-a7fc-29bb78403f69",
+                           "audio-track-" + n);
+        copy = replace_all(std::move(copy), "f31e9fcc-7ad5-41a9-be21-83c232db3878",
+                           "video-track-" + n);
+        copy = replace_all(std::move(copy), "456453856", std::to_string(456453856 + mid));
+        body += copy;
+        group += " " + n;
+        ++mid;
+    };
+    for (std::size_t i = 0; i < audio; ++i) {
+        add(audio_section, "0");
+    }
+    for (std::size_t i = 0; i < video; ++i) {
+        add(video_section, "1");
+    }
+    add(data_section, "2");
+    head = replace_all(std::move(head), "a=group:BUNDLE 0 1 2", group);
+    return head + body;
+}
+
 std::size_t lines_starting(std::string_view text, std::string_view prefix) {
     std::size_t n = 0;
     std::size_t at = 0;
@@ -220,6 +267,26 @@ TEST(ChromiumSdp, AnLfOnlyCopyReadsTheSameAndSerializesWithCrlf) {
     ASSERT_TRUE(b.ok());
     EXPECT_EQ(a.session(), b.session());
     EXPECT_EQ(serialize(b.session()), crlf);
+}
+
+TEST(ChromiumSdp, ElevenSectionOfferFromFiveRemotesRoundTrips) {
+    const std::string text = room_offer(fixture("chromium_offer.sdp"), 5, 5);
+    ASSERT_GT(text.size(), 25U * 1024) << "a Pion offer for five remotes is about 27 KB";
+    const Parsed p{text};
+    ASSERT_TRUE(p.ok()) << ::testing::PrintToString(p.error());
+    EXPECT_EQ(p.session().media.size(), 11U);
+    EXPECT_EQ(require<Group>(p.session().attributes).tags.size(), 11U);
+    EXPECT_EQ(serialize(p.session()), text);
+}
+
+TEST(ChromiumSdp, LargestPlannedRoomFitsTheDefaultLimits) {
+    const std::string text = room_offer(fixture("chromium_offer.sdp"), 6, 12);
+    const Parsed p{text};
+    ASSERT_TRUE(p.ok()) << ::testing::PrintToString(p.error());
+    EXPECT_EQ(p.session().media.size(), 19U);
+    EXPECT_EQ(serialize(p.session()), text);
+    // JSON turns each CR and LF into two bytes; the WebSocket message limit is 64 KiB.
+    EXPECT_LT(text.size() + (2 * lines_starting(text, "")) + 256, std::size_t{64} * 1024);
 }
 
 } // namespace

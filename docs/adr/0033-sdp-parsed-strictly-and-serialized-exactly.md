@@ -51,7 +51,7 @@ two spellings of one thing cannot write both back.
   digest of that length; rtpmap, fmtp and rtcp-fb name formats of their m= line, and a payload
   type is mapped once; extmap ids are unique across session and section; simulcast names only
   rids declared with the same direction.
-- Limits are parameters with derived defaults: 48 KiB, 8 media sections, 256 attributes per
+- Limits are parameters with derived defaults: 58 KiB, 32 media sections, 256 attributes per
   level; 128 formats per m= line is fixed by the payload type space.
 
 ## Consequences
