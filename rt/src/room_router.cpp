@@ -32,7 +32,7 @@ constexpr std::size_t kWriteOverhead = 256;
 // largest; past that the room is flooded, and the owner sheds load with Busy.
 constexpr std::size_t kMaxRoomQueueBytes = std::size_t{1} << 20U;
 // All rooms' queues together: 64 of them full. The owner's share of the node's memory budget
-// (ADR-0038), whatever mix of rooms is busy.
+// (ADR-0034), whatever mix of rooms is busy.
 constexpr std::size_t kMaxQueueBytes = std::size_t{64} << 20U;
 // Frames waiting for a connection to another node to open: a handful of subscriptions and
 // forwards. A peer that takes longer to answer than this fills is treated as down.

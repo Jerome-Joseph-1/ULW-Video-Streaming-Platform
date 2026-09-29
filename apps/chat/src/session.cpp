@@ -488,7 +488,7 @@ void Session::close_with(codec::ws::CloseCode code) {
     arm(server_.limits().handshake_timeout);
 }
 
-// ADR-0038: the connection whose input could not be held pays for it, not the process.
+// ADR-0034: the connection whose input could not be held pays for it, not the process.
 void Session::allocation_failed() noexcept {
     ++server_.counters().allocation_failures;
     abandon();

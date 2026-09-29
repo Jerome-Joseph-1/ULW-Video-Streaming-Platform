@@ -1,4 +1,4 @@
-# 0038. chat_server's client edge: envelope, limits and allocation failure
+# 0034. chat_server's client edge: envelope, limits and allocation failure
 
 Status: Accepted
 Date: 2026-09-29

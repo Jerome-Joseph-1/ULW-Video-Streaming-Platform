@@ -442,7 +442,7 @@ TEST_P(RoomRouterTest, RoomsReleasedByADrainAreTakenAtOnceByANodeWithMembers) {
     EXPECT_EQ(send(b, bob, "bob", "still here"), 1U);
 }
 
-// ---- the node channel's handshake (ADR-0037)
+// ---- the node channel's handshake (ADR-0033)
 
 TEST_P(RoomRouterTest, APeerThatSkipsTheHandshakeIsCutOffBeforeAnythingHappens) {
     const Node& a = start("chat-a");

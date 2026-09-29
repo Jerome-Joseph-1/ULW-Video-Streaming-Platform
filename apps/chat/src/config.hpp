@@ -21,7 +21,7 @@ struct Config {
     // address the channel listens on.
     std::string node_address;
     // ULW_NODE_SECRET: what every node proves it holds before the node channel carries anything
-    // (ADR-0037). Never logged.
+    // (ADR-0033). Never logged.
     std::string node_secret;
     net::ReactorKind reactor = net::ReactorKind::IoUring;
     std::string database_url;

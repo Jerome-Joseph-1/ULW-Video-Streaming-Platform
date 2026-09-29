@@ -11,7 +11,7 @@
 #include <variant>
 #include <vector>
 
-// The node channel's frames (ADR-0037): a 4-byte big-endian length, then a type byte and the
+// The node channel's frames (ADR-0033): a 4-byte big-endian length, then a type byte and the
 // type's fields. Integers are big-endian, a room is its 36-character canonical text, and a
 // node or sender is a length byte and its characters. A body runs to the end of its frame.
 namespace rt::wire {

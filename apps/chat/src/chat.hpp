@@ -22,7 +22,7 @@ struct Limits {
     // and max_send_bytes_in_flight of sends: 64 + 256 + 128 = 448 KiB, and 1280 of them 560 MiB
     // at the very worst. The router adds its owner queues (64 MiB) and node-channel
     // connections (32 x ~2.1 MiB), about 690 MiB in all, inside a 1 GiB pod with room for the
-    // kernel's socket buffers (ADR-0038). A connection that is only listening costs a few KiB.
+    // kernel's socket buffers (ADR-0034). A connection that is only listening costs a few KiB.
     std::size_t max_connections = 1280;
     // A client shows a handful of conversations at once; 64 bounds what one socket makes this
     // node track and subscribe to.

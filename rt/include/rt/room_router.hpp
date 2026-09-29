@@ -44,7 +44,7 @@ enum class RouteError : std::uint8_t {
     // neither sequenced nor delivered. Sending again reaches the new owner.
     Fenced,
     // No owner could be reached, or it did not answer in time. A message may or may not have
-    // been sequenced; the owner never retries on its own (ADR-0037).
+    // been sequenced; the owner never retries on its own (ADR-0033).
     Unavailable,
     // The room's owner has more writes queued than it takes.
     Busy,
@@ -79,7 +79,7 @@ struct RouterConfig {
     // The numeric host:port other nodes dial, published through the store.
     std::string advertise;
     // Shared by every node of the deployment; each end of a node-channel connection proves it
-    // holds it before anything else is exchanged (ADR-0037). kMinNodeSecretBytes at least.
+    // holds it before anything else is exchanged (ADR-0033). kMinNodeSecretBytes at least.
     std::string secret;
     // A room this node owns that has had no members here, no subscribed node and no write for
     // this long is given up, so that rooms nobody uses do not pile up on their owner. A minute
@@ -104,7 +104,7 @@ struct RouterCounters {
     std::uint64_t slow_peers = 0;
 };
 
-// One node's share of the room plane (ADR-0015, ADR-0037). Members join rooms here, wherever
+// One node's share of the room plane (ADR-0015, ADR-0033). Members join rooms here, wherever
 // the room's owner is; every mutation goes to the owner, which sequences it with a fenced
 // append and fans it out: to its own members directly, and to every node with members, over
 // the node channel, for them to deliver to theirs. Single-threaded, like the reactor.

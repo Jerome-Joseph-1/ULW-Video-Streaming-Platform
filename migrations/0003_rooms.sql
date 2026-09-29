@@ -6,7 +6,7 @@ CREATE TABLE room_state (room_id uuid PRIMARY KEY REFERENCES room_assignments(ro
   owner_generation bigint NOT NULL, last_seq bigint NOT NULL DEFAULT 0, kind text NOT NULL,
   delivery text NOT NULL);   -- durable | lossy
 
--- Where each chat node takes connections from the others (ADR-0037). A restarted pod comes back
+-- Where each chat node takes connections from the others (ADR-0033). A restarted pod comes back
 -- under a new name, so rows of departed nodes stay behind; nothing reads them once no room
 -- names their node.
 CREATE TABLE chat_nodes (

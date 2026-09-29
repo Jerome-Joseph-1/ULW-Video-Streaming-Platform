@@ -171,7 +171,7 @@ int run() {
                                                                  .advertise = config->node_address,
                                                                  .secret = config->node_secret},
                                                 *s.room_log);
-    // Only the address other nodes dial, never every interface (ADR-0037).
+    // Only the address other nodes dial, never every interface (ADR-0033).
     auto node_listener = net::listen_on(config->node_address);
     if (!node_listener) {
         return fail("listen on the node port", errno_text(node_listener.error()));
