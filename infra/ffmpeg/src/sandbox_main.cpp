@@ -1,27 +1,15 @@
-<<<<<<< HEAD
-// ulw_sandbox --writable DIR --address-space BYTES --cpu-seconds N [--no-syscall-filter]
-//             -- PROGRAM [ARGS...]
+// ulw_sandbox --writable DIR --address-space BYTES --cpu-seconds N [--file-size BYTES]
+//             [--no-syscall-filter] -- PROGRAM [ARGS...]
 //
 // Runs PROGRAM confined: an empty network namespace (unshare -n), a pid namespace with a
-// /proc of its own, every mount read-only except DIR, the given RLIMIT_AS and RLIMIT_CPU, no
+// /proc of its own, every mount read-only except DIR, the given RLIMIT_AS and RLIMIT_CPU, and
+// when asked for RLIMIT_FSIZE, the size a file may grow to (SIGXFSZ ends a program at it), no
 // core dumps, no descriptors beyond the standard three, no capabilities, so the program
 // cannot undo any of it, and last a seccomp filter that kills it for any system call ffmpeg
 // has no use for (seccomp_filter.hpp). --no-syscall-filter leaves that one out, for tests that
 // need an ordinary shell as the program. posix_spawn cannot do any of this in the child, hence a
 // separate program. Without a PROGRAM it sets everything up and exits 0, which is how the worker
 // checks at startup that the host allows it.
-=======
-// ulw_sandbox --writable DIR --address-space BYTES --cpu-seconds N [--file-size BYTES]
-//             -- PROGRAM [ARGS...]
-//
-// Runs PROGRAM confined: an empty network namespace (unshare -n), a pid namespace with a
-// /proc of its own, every mount read-only except DIR, the given RLIMIT_AS and RLIMIT_CPU, and
-// when asked for RLIMIT_FSIZE, the size a file may grow to (SIGXFSZ ends a program at it), no
-// core dumps, no descriptors beyond the standard three, and no capabilities, so the program
-// cannot undo any of it. posix_spawn cannot do any of this in the child, hence a separate
-// program. Without a PROGRAM it sets everything up and exits 0, which is how the worker checks
-// at startup that the host allows it.
->>>>>>> origin/main
 //
 // Three processes: this helper, which the worker started; its child, pid 1 of the new pid
 // namespace; and PROGRAM, pid 1's child. When pid 1 exits the kernel kills everything left in
@@ -77,12 +65,9 @@ struct Options {
     std::filesystem::path writable;
     rlim_t address_space = 0;
     rlim_t cpu_seconds = 0;
-<<<<<<< HEAD
-    bool syscall_filter = true;
-=======
     // 0: no limit on the size of a file the program writes.
     rlim_t file_size = 0;
->>>>>>> origin/main
+    bool syscall_filter = true;
     std::vector<char*> program;
 };
 
@@ -93,7 +78,8 @@ struct Options {
 
 [[noreturn]] void usage() {
     std::println(stderr, "usage: ulw_sandbox --writable DIR --address-space BYTES "
-                         "--cpu-seconds N [--no-syscall-filter] -- [PROGRAM ARGS...]");
+                         "--cpu-seconds N [--file-size BYTES] [--no-syscall-filter] -- "
+                         "[PROGRAM ARGS...]");
     std::_Exit(kSetupFailed);
 }
 
