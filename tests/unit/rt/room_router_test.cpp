@@ -646,6 +646,9 @@ TEST_P(RoomRouterTest, AJoinFailsWhenTheOwnerCannotBeReachedAndThePeerIsReported
     db_.addresses["chat-a"] = "127.0.0.1:" + std::to_string(dead);
     Member bob;
     EXPECT_EQ(join(b, bob), std::unexpected(RouteError::Unavailable));
+    // The loss is reported when the connect is refused, which on a loaded host can come after
+    // the join has already given up on its forward timeout.
+    ASSERT_TRUE(pump([&] { return !b.events.lost.empty(); }));
     EXPECT_EQ(b.events.lost, std::vector<std::string>{"chat-a"});
     EXPECT_EQ(b.router->rooms_joined(), 0U);
 }

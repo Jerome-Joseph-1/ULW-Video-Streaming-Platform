@@ -105,6 +105,24 @@ bool ChildProcess::wait_for_output(std::string_view text, std::chrono::milliseco
     return true;
 }
 
+bool ChildProcess::poll_until(const std::function<bool()>& ready, std::chrono::milliseconds limit,
+                              std::chrono::milliseconds period) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (!ready()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            return false;
+        }
+        const auto next = std::min(deadline, now + period);
+        for (int left = remaining_ms(next); left > 0; left = remaining_ms(next)) {
+            if (!read_some(std::chrono::milliseconds(left))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void ChildProcess::signal(int sig) const noexcept {
     ::kill(pid_, sig);
 }
