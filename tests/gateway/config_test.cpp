@@ -1,0 +1,134 @@
+#include "config.hpp"
+
+#include <gtest/gtest.h>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+
+using gateway::Config;
+using gateway::StorageBackend;
+
+class ConfigTest : public ::testing::Test {
+protected:
+    [[nodiscard]] std::expected<Config, gateway::ConfigError> load() const {
+        return gateway::load_config([this](std::string_view name) -> std::optional<std::string> {
+            const auto it = env.find(std::string(name));
+            return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
+        });
+    }
+
+    [[nodiscard]] std::string refused_variable() const {
+        const auto config = load();
+        EXPECT_FALSE(config.has_value());
+        return config ? std::string() : config.error().variable;
+    }
+
+    std::map<std::string, std::string, std::less<>> env{
+        {"ULW_R2_ACCOUNT_ID", "0123456789abcdef0123456789abcdef"},
+        {"ULW_BUCKET", "ulw-media"},
+        {"ULW_DATABASE_URL", "postgresql://ulw@db/ulw"},
+        {"JWKS_URL", "https://auth.example.test/.well-known/jwks.json"},
+        {"JWT_ISSUER", "https://auth.example.test"},
+    };
+};
+
+TEST_F(ConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->port, 8080);
+    EXPECT_EQ(config->reactor, net::ReactorKind::IoUring);
+    EXPECT_EQ(config->storage, StorageBackend::R2);
+    EXPECT_EQ(config->storage_location, "0123456789abcdef0123456789abcdef");
+    EXPECT_EQ(config->bucket, "ulw-media");
+    EXPECT_EQ(config->jwt_audience, "askedin-platform");
+    EXPECT_EQ(config->limits.auth_cookie, "auth_token");
+    EXPECT_TRUE(config->dev_jwks_file.empty());
+}
+
+TEST_F(ConfigTest, EachRequiredVariableIsNamedWhenMissing) {
+    for (const std::string name :
+         {"ULW_R2_ACCOUNT_ID", "ULW_BUCKET", "ULW_DATABASE_URL", "JWKS_URL", "JWT_ISSUER"}) {
+        const std::string saved = env.at(name);
+        env.erase(name);
+        EXPECT_EQ(refused_variable(), name);
+        env[name] = saved;
+    }
+}
+
+TEST_F(ConfigTest, AnEmptyVariableCountsAsUnset) {
+    env["ULW_DATABASE_URL"] = "";
+    EXPECT_EQ(refused_variable(), "ULW_DATABASE_URL");
+}
+
+TEST_F(ConfigTest, KeysFetchedOverPlainHttpAreRefused) {
+    env["JWKS_URL"] = "http://auth.example.test/.well-known/jwks.json";
+    EXPECT_EQ(refused_variable(), "JWKS_URL");
+}
+
+TEST_F(ConfigTest, ALocalKeySetReplacesTheJwksUrl) {
+    env.erase("JWKS_URL");
+    env["ULW_DEV_JWKS_FILE"] = "/run/ulw/dev-jwks.json";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->dev_jwks_file, "/run/ulw/dev-jwks.json");
+    EXPECT_TRUE(config->jwks_url.empty());
+}
+
+TEST_F(ConfigTest, BothKeySourcesAtOnceAreRefused) {
+    env["ULW_DEV_JWKS_FILE"] = "/run/ulw/dev-jwks.json";
+    EXPECT_EQ(refused_variable(), "JWKS_URL");
+}
+
+TEST_F(ConfigTest, FilesystemStorageNeedsARootAndNoBucket) {
+    env["ULW_STORAGE"] = "fs";
+    env.erase("ULW_BUCKET");
+    EXPECT_EQ(refused_variable(), "ULW_FS_ROOT");
+    env["ULW_FS_ROOT"] = "/var/lib/ulw";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->storage, StorageBackend::Filesystem);
+    EXPECT_EQ(config->storage_location, "/var/lib/ulw");
+}
+
+TEST_F(ConfigTest, MinioIsReachedThroughItsEndpoint) {
+    env["ULW_STORAGE"] = "minio";
+    EXPECT_EQ(refused_variable(), "ULW_S3_ENDPOINT");
+    env["ULW_S3_ENDPOINT"] = "http://127.0.0.1:9000";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->storage, StorageBackend::Minio);
+    EXPECT_EQ(config->storage_location, "http://127.0.0.1:9000");
+}
+
+TEST_F(ConfigTest, UnknownChoicesAndOutOfRangeNumbersAreRefused) {
+    const std::vector<std::pair<std::string, std::string>> bad = {
+        {"ULW_STORAGE", "gcs"},        {"ULW_REACTOR", "kqueue"},     {"ULW_LISTEN_PORT", "0"},
+        {"ULW_LISTEN_PORT", "65536"},  {"ULW_LISTEN_PORT", "80x"},    {"ULW_OFFLOAD_THREADS", "0"},
+        {"ULW_OFFLOAD_THREADS", "65"}, {"ULW_OFFLOAD_THREADS", "-1"},
+    };
+    for (const auto& [name, value] : bad) {
+        env[name] = value;
+        EXPECT_EQ(refused_variable(), name) << name << "=" << value;
+        env.erase(name);
+    }
+}
+
+TEST_F(ConfigTest, OverridesAreTakenAsGiven) {
+    env["ULW_LISTEN_PORT"] = "9443";
+    env["ULW_REACTOR"] = "epoll";
+    env["ULW_OFFLOAD_THREADS"] = "8";
+    env["JWT_AUDIENCE"] = "ulw";
+    env["ULW_AUTH_COOKIE"] = "auth_token_stage";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->port, 9443);
+    EXPECT_EQ(config->reactor, net::ReactorKind::Epoll);
+    EXPECT_EQ(config->offload_threads, 8U);
+    EXPECT_EQ(config->jwt_audience, "ulw");
+    EXPECT_EQ(config->limits.auth_cookie, "auth_token_stage");
+}
+
+} // namespace

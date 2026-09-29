@@ -81,6 +81,8 @@ add_subdirectory(http)
 add_subdirectory(infra/storage/s3/s3util)
 add_subdirectory(infra/storage/s3)
 add_subdirectory(infra/postgres)
+add_subdirectory(infra/auth)
+add_subdirectory(tools/devtoken)
 add_subdirectory(apps/gateway)
 add_subdirectory(apps/migrate)
 

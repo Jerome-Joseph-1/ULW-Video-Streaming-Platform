@@ -1,0 +1,6 @@
+# Key files go through POSIX read/write and key bytes through OpenSSL's unsigned char
+# interfaces, as in infra/; the same checks are off for the same reason.
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic

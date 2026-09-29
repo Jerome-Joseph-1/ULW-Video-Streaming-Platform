@@ -108,10 +108,13 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/infra/storage/s3/s3util/src)
 
 ulw_add_test_suite(gateway_tests unit
+    gateway/config_test.cpp
     gateway/gateway_harness.cpp
-    gateway/gateway_upload_test.cpp)
+    gateway/gateway_upload_test.cpp
+    gateway/key_fetcher_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
-    ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness OpenSSL::Crypto)
+    ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
+    OpenSSL::Crypto)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 ulw_add_library(test_http_server support/http_test_server.cpp)
@@ -178,3 +181,21 @@ target_include_directories(postgres_integration_tests
 target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
+
+ulw_add_test_suite(auth_unit_tests unit
+    unit/auth/base64url_test.cpp
+    unit/auth/claims_test.cpp
+    unit/auth/devtoken_test.cpp
+    unit/auth/jwk_test.cpp
+    unit/auth/jwks_verifier_test.cpp
+    unit/auth/jws_test.cpp
+    unit/auth/local_verifier_test.cpp
+    unit/auth/result_cache_test.cpp
+    unit/auth/signature_test.cpp
+    unit/auth/test_claims.cpp
+    unit/auth/test_keys.cpp
+    unit/auth/token_extractor_test.cpp)
+target_link_libraries(auth_unit_tests PRIVATE ulw::auth ulw::devtoken OpenSSL::Crypto)
+# Most suites test the module's internals: parsers, signature and claim checks, verdict cache.
+target_include_directories(auth_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/auth/src
+    ${PROJECT_SOURCE_DIR}/tests)

@@ -21,8 +21,8 @@ using ulw::test::HttpClient;
 using ulw::test::HttpResponse;
 using ulw::test::kMiB;
 
-constexpr std::string_view kAlice = "user:alice";
-constexpr std::string_view kBob = "user:bob";
+constexpr std::string_view kAlice = "user.alice";
+constexpr std::string_view kBob = "user.bob";
 
 std::string sha256(std::span<const std::byte> bytes) {
     std::array<unsigned char, 32> md{};
@@ -110,6 +110,44 @@ TEST(GatewayUpload, InboundUserHeadersAreIgnored) {
     EXPECT_EQ(r->status, 401);
 }
 
+TEST(GatewayUpload, AKeyServerOutageIsARetryNotASignOut) {
+    const GatewayUnderTest gw({});
+    HttpClient c(gw.port());
+    const auto r =
+        c.request("GET", "/api/v1/videos/01890a5d-ac96-774b-bcce-b302099a8057", "down.alice");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 503);
+    EXPECT_EQ(r->header("retry-after"), "5");
+}
+
+TEST(GatewayUpload, TheAuthCookieStandsInForTheHeader) {
+    const GatewayUnderTest gw({});
+    HttpClient c(gw.port());
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    const auto r = c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)),
+                             {{"cookie", "theme=dark; auth_token=user.alice"}});
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 201);
+}
+
+TEST(GatewayUpload, TwoCandidateTokensAreRefusedRatherThanGuessed) {
+    const GatewayUnderTest gw({});
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    // A sibling subdomain can plant a second cookie of the same name.
+    HttpClient c(gw.port());
+    const auto cookies = c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)),
+                                   {{"cookie", "auth_token=user.alice; auth_token=user.bob"}});
+    ASSERT_TRUE(cookies);
+    EXPECT_EQ(cookies->status, 401);
+    HttpClient d(gw.port());
+    const auto headers =
+        d.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)),
+                  {{"authorization", "Bearer user.bob"}});
+    ASSERT_TRUE(headers);
+    // A repeated Authorization field never reaches authentication: the parser refuses it.
+    EXPECT_EQ(headers->status, 400);
+}
+
 TEST(GatewayUpload, HundredMegabytesReassembleByteIdentical) {
     GatewayUnderTest gw({.backend = Backend::Fs});
     const auto data = ulw::test::pattern(100 * kMiB, 11);
@@ -179,7 +217,7 @@ TEST(GatewayUpload, ClientKilledMidChunkResumesFromHead) {
         ASSERT_EQ(patch(c, upload, 0, std::span(data).first(2 * kMiB))->status, 204);
         // Declare a whole chunk, send half of it, and vanish.
         const std::string head = "PATCH /api/v1/uploads/" + upload +
-                                 " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                                 " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                                  "Upload-Offset: " +
                                  std::to_string(2 * kMiB) +
                                  "\r\nContent-Length: " + std::to_string(kMiB) + "\r\n\r\n";
@@ -260,7 +298,7 @@ TEST(GatewayUpload, ConcurrentAppendToOneUploadIs409) {
     ASSERT_TRUE(up);
     HttpClient first(gw.port());
     const std::string head = "PATCH /api/v1/uploads/" + up->upload_id +
-                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                              "Upload-Offset: 0\r\nContent-Length: " +
                              std::to_string(kMiB) + "\r\n\r\n";
     ASSERT_TRUE(first.send_raw(head));
@@ -290,7 +328,7 @@ TEST(GatewayUpload, AdmissionCapsConcurrentUploadsPerUser) {
         ASSERT_TRUE(up);
         auto h = std::make_unique<HttpClient>(gw.port());
         const std::string head = "PATCH /api/v1/uploads/" + up->upload_id +
-                                 " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                                 " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                                  "Upload-Offset: 0\r\nContent-Length: " +
                                  std::to_string(kMiB) + "\r\n\r\n";
         ASSERT_TRUE(h->send_raw(head));
@@ -329,7 +367,7 @@ TEST(GatewayUpload, StalledBackendThrottlesTheClientInsteadOfBuffering) {
     timeval tv{.tv_sec = 0, .tv_usec = 200'000};
     ::setsockopt(uploader.fd(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     const std::string head = "PATCH /api/v1/uploads/" + up->upload_id +
-                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                              "Upload-Offset: 0\r\nContent-Length: " +
                              std::to_string(data.size()) + "\r\n\r\n";
     ASSERT_TRUE(uploader.send_raw(head));
@@ -443,7 +481,7 @@ TEST(GatewayUpload, StalledBodyGets408) {
     const auto up = create_upload(c, kMiB);
     ASSERT_TRUE(up);
     const std::string head = "PATCH /api/v1/uploads/" + up->upload_id +
-                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                              "Upload-Offset: 0\r\nContent-Length: 1000\r\n\r\nabc";
     ASSERT_TRUE(c.send_raw(head));
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 1; }));
@@ -457,7 +495,7 @@ TEST(GatewayUpload, StalledBodyGets408) {
 
 std::string patch_head(const std::string& upload, std::uint64_t length) {
     return "PATCH /api/v1/uploads/" + upload +
-           " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+           " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
            "Upload-Offset: 0\r\nContent-Length: " +
            std::to_string(length) + "\r\n\r\n";
 }
@@ -554,7 +592,7 @@ TEST(GatewayUpload, TheDrainDeadlineEndsRequestsStillInFlight) {
     const auto up = create_upload(c, kMiB);
     ASSERT_TRUE(up);
     const std::string head = "PATCH /api/v1/uploads/" + up->upload_id +
-                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                              "Upload-Offset: 0\r\nContent-Length: 1000\r\n\r\nabc";
     ASSERT_TRUE(c.send_raw(head));
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 1; }));
@@ -608,7 +646,7 @@ TEST(GatewayUpload, TheTotalCapRefusesEveryoneWith503) {
     ASSERT_TRUE(held);
     HttpClient holder(gw.port());
     const std::string head = "PATCH /api/v1/uploads/" + held->upload_id +
-                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                             " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                              "Upload-Offset: 0\r\nContent-Length: " +
                              std::to_string(kMiB) + "\r\n\r\n";
     ASSERT_TRUE(holder.send_raw(head));
@@ -692,7 +730,7 @@ TEST(GatewayUpload, AResumeFromHeadIsAcceptedAfterAMultiChunkPatchWasCutOff) {
         // but the request never finishes, so the catalog never hears of it.
         HttpClient cut(gw.port());
         const std::string head = "PATCH " + path +
-                                 " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user:alice\r\n"
+                                 " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                                  "Upload-Offset: 0\r\nContent-Length: " +
                                  std::to_string(2 * kMiB) + "\r\n\r\n";
         ASSERT_TRUE(cut.send_raw(head));
@@ -729,7 +767,7 @@ TEST(GatewayUpload, ARequestWaitsForAKeyRefreshThenProceeds) {
     HttpClient c(gw.port());
     const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
     ASSERT_TRUE(
-        c.send_request("POST", "/api/v1/uploads", "slow:alice", std::as_bytes(std::span(body))));
+        c.send_request("POST", "/api/v1/uploads", "slow.alice", std::as_bytes(std::span(body))));
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.key_waiters() == 1; }));
     gw.refresh_keys();
     const auto r = c.read_response();
@@ -741,7 +779,7 @@ TEST(GatewayUpload, AConnectionClosedWhileWaitingForKeysIsForgotten) {
     GatewayUnderTest gw({.manual_clock = true});
     HttpClient c(gw.port());
     ASSERT_TRUE(
-        c.send_request("GET", "/api/v1/videos/01890a5d-ac96-774b-bcce-b302099a8057", "slow:alice"));
+        c.send_request("GET", "/api/v1/videos/01890a5d-ac96-774b-bcce-b302099a8057", "slow.alice"));
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.key_waiters() == 1; }));
     gw.drain();
     gw.advance(gateway::Limits{}.drain_deadline);

@@ -1,10 +1,12 @@
 #include "infra/curl/fetcher.hpp"
 #include "net/reactor_factory.hpp"
+#include "net/socket.hpp"
 #include "os/system_clock.hpp"
 
 #include "support/http_test_server.hpp"
 #include "support/reactor_harness.hpp"
 
+#include <chrono>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
@@ -29,7 +31,7 @@ protected:
         auto m = infra::curl::Multi::create(*reactor);
         ASSERT_TRUE(m);
         multi = std::move(*m);
-        fetcher = std::make_unique<HttpFetcher>(*multi);
+        fetcher = std::make_unique<HttpFetcher>(*multi, std::chrono::seconds(10));
     }
     void TearDown() override {
         fetcher.reset();
@@ -92,6 +94,22 @@ TEST_P(FetcherTest, CallbackMayDestroyTheFetcher) {
     }));
     ASSERT_TRUE(pump_until(*reactor, [&] { return called; }));
     EXPECT_EQ(fetcher, nullptr);
+}
+
+TEST_P(FetcherTest, AFetchLeftUnansweredFailsAtItsTimeout) {
+    // Connections land in the backlog and are never accepted, so the request goes out and no
+    // answer ever comes back.
+    auto listener = net::listen_tcp({.port = 0, .loopback_only = true, .reuse_port = false});
+    ASSERT_TRUE(listener);
+    const auto port = net::local_port(listener->get());
+    ASSERT_TRUE(port);
+    HttpFetcher impatient(*multi, core::Millis{100});
+    std::optional<Result> got;
+    ASSERT_TRUE(impatient.get("http://127.0.0.1:" + std::to_string(*port) + "/jwks", 1024,
+                              [&](Result r) noexcept { got = std::move(r); }));
+    ASSERT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
+    ASSERT_FALSE(got->has_value());
+    EXPECT_EQ(got->error().kind, FailureKind::Timeout);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, FetcherTest,
