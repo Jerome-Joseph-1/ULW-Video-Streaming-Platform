@@ -164,6 +164,14 @@ public:
         }
         return {};
     }
+    std::expected<void, core::ports::StorageError>
+    upload_new(const std::filesystem::path& source, const core::StorageKey& key,
+               const core::ContentType& type) override {
+        if (objects_.contains(key.str())) {
+            return std::unexpected(core::ports::StorageError::AlreadyExists);
+        }
+        return upload(source, key, type);
+    }
 
 private:
     Journal& journal_;

@@ -36,10 +36,39 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends ffmpeg python3-yaml
-      # The worker runs ffmpeg in a network namespace of its own (ADR-0025) and refuses to
-      # start without it; the runners' AppArmor policy refuses unprivileged user namespaces.
+      # The worker runs ffmpeg in user, network, mount and pid namespaces of its own (ADR-0025)
+      # and refuses to start without them. Ubuntu 24.04's AppArmor lets a process without host
+      # capabilities, as the worker is, create a user namespace but not use it. The probe is
+      # the worker's sandbox in miniature; its first result goes to the log, the second must
+      # pass. The sandbox runner only: RUNBOOK.md step 1 covers Askedin's nodes.
       - name: Allow the worker sandbox's user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          probe() {
+            unshare --user --map-root-user --net --mount --pid --fork --mount-proc true
+          }
+          probe && echo "restricted: namespaces usable" || echo "restricted: namespaces refused"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          probe
+      # stunner_check.py's client on the outside network (198.18.0.0/24, sandbox.sh) must reach
+      # 198.18.0.1:3478 through Docker's DNAT and keep its source address. Docker before 29,
+      # which this image ships, does neither by default: while the userland proxy is on, its nat
+      # rules skip DNAT for packets arriving from any Docker bridge, so docker-proxy takes them
+      # and forwards them from the kind network's gateway address; with the proxy off, its bridge
+      # isolation drops the DNATed packet on the way into the kind network. The proxy off and
+      # DNATed packets from the outside network accepted in DOCKER-USER, the chain Docker leaves
+      # to the host, give the path Docker 29 has out of the box; replies pass Docker's own
+      # conntrack rule.
+      - name: Let the outside network reach the published ports through DNAT
+        run: |
+          version=$(docker version --format '{{.Server.Version}}')
+          echo "docker $version"
+          if (( ${version%%.*} >= 29 )); then exit 0; fi
+          config=/etc/docker/daemon.json
+          { sudo cat "$config" 2>/dev/null || echo '{}'; } \
+            | jq '. + {"userland-proxy": false}' | sudo tee "$config.new"
+          sudo mv "$config.new" "$config"
+          sudo systemctl restart docker
+          sudo iptables -I DOCKER-USER -s 198.18.0.0/24 -m conntrack --ctstate DNAT -j ACCEPT
       - run: make e2e-up
         timeout-minutes: 45
       - run: make e2e-test
@@ -54,6 +83,17 @@ jobs:
         with:
           name: load-report
           path: load-report
+          if-no-files-found: warn
+      # Pods, events, unready pods' descriptions and logs, and the host's user namespace and
+      # AppArmor settings; the script also prints the telling lines into this log.
+      - name: Collect the sandbox's state
+        if: failure()
+        run: deploy/local/diagnose.sh diagnostics
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: diagnostics
+          path: diagnostics
           if-no-files-found: warn
       - if: always()
         run: make e2e-down

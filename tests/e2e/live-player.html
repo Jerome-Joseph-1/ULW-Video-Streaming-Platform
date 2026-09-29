@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ULW live playback</title>
+<script src="/hls.js"></script>
+</head>
+<body>
+<video id="video" muted playsinline width="640" height="360"></video>
+<canvas id="probe" width="640" height="360" hidden></canvas>
+<script>
+// What the test asserts on, and the two latency measurements: the picture's own clock, read
+// from the strip ulw-live-testsource draws into every frame, and the segment's
+// EXT-X-PROGRAM-DATE-TIME as hls.js maps it onto the playing position.
+const params = new URLSearchParams(location.search);
+const video = document.getElementById('video');
+const canvas = document.getElementById('probe');
+const context = canvas.getContext('2d', { willReadFrequently: true });
+
+// The strip: kBits cells of kCell px at the top left, the low kBits bits of the frame's
+// creation time in milliseconds, least significant first (apps/live-packager/testsource).
+const kBits = 24;
+const kCell = 16;
+const kWrap = 2 ** kBits;
+
+const state = {
+  started: false,
+  startedAfterMs: null,
+  ended: false,
+  stalls: 0,
+  waitingAfterStart: 0,
+  errors: [],
+  playlists: [],
+  latencies: [],
+};
+window.player = { state };
+
+const loadedAt = Date.now();
+// hls.js's defaults: three target durations behind the live edge, what a viewer would get.
+const hls = new Hls({ liveSyncDurationCount: Number(params.get('sync') ?? 3) });
+window.player.hls = hls;
+
+hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play(); });
+hls.on(Hls.Events.LEVEL_UPDATED, (_, data) => {
+  state.playlists.push({ startSN: data.details.startSN, endSN: data.details.endSN,
+    live: data.details.live, fragments: data.details.fragments.length });
+});
+hls.on(Hls.Events.ERROR, (_, data) => {
+  if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+    state.stalls += 1;
+  } else {
+    state.errors.push({ fatal: data.fatal, what: `${data.type}/${data.details}`,
+      detail: data.error ? data.error.message : data.reason, mime: data.mimeType });
+  }
+});
+video.addEventListener('playing', () => {
+  if (!state.started) {
+    state.started = true;
+    state.startedAfterMs = Date.now() - loadedAt;
+  }
+});
+video.addEventListener('waiting', () => { if (state.started) { state.waitingAfterStart += 1; } });
+video.addEventListener('ended', () => { state.ended = true; });
+
+function readStrip() {
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const row = context.getImageData(0, kCell / 2, kBits * kCell, 1).data;
+  let value = 0;
+  for (let bit = 0; bit < kBits; bit++) {
+    const at = (bit * kCell + kCell / 2) * 4;
+    const luma = (row[at] + row[at + 1] + row[at + 2]) / 3;
+    if (luma > 128) { value += 2 ** bit; }
+  }
+  return value;
+}
+
+// Every 200 ms, whatever is on the glass at that moment: how old is the moment it shows.
+setInterval(() => {
+  if (!state.started || video.readyState < 2 || video.ended) { return; }
+  const now = Date.now();
+  const created = readStrip();
+  const stripMs = (((now - created) % kWrap) + kWrap) % kWrap;
+  const playing = hls.playingDate ? hls.playingDate.getTime() : null;
+  state.latencies.push({ at: now, stripMs, pdtMs: playing === null ? null : now - playing,
+    position: video.currentTime });
+}, 200);
+
+hls.loadSource(params.get('src'));
+hls.attachMedia(video);
+</script>
+</body>
+</html>

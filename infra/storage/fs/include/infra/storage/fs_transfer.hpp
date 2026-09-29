@@ -19,8 +19,14 @@ public:
     [[nodiscard]] std::expected<void, core::ports::StorageError>
     upload(const std::filesystem::path& source, const core::StorageKey& key,
            const core::ContentType& type) override;
+    [[nodiscard]] std::expected<void, core::ports::StorageError>
+    upload_new(const std::filesystem::path& source, const core::StorageKey& key,
+               const core::ContentType& type) override;
 
 private:
+    [[nodiscard]] std::expected<void, core::ports::StorageError>
+    place(const std::filesystem::path& source, const core::StorageKey& key, bool create_only);
+
     [[nodiscard]] std::filesystem::path object_path(const core::StorageKey& key) const;
 
     std::filesystem::path objects_;
