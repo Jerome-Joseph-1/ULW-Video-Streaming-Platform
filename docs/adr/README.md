@@ -47,4 +47,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0041](0041-a-job-result-the-queue-refuses-fails-the-job.md) | A job result the queue refuses fails the job | Accepted |
 | [0042](0042-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged per unit of work against the memory limit | Accepted |
 | [0043](0043-chat-service-policy-between-edge-and-rooms.md) | The chat service: policy between the client edge and the room plane | Accepted |
-| [0044](0044-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
+| [0053](0053-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |

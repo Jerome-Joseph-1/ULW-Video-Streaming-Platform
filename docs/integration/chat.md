@@ -142,7 +142,7 @@ What changes:
 
 ## Presence
 
-<!-- apps/chat/src/presence.hpp (PresenceLimits), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), docs/adr/0044-presence-over-the-room-plane.md -->
+<!-- apps/chat/src/presence.hpp (PresenceLimits), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), docs/adr/0053-presence-over-the-room-plane.md -->
 
 A client can watch other users and hear when they come online and go offline. A user is online
 while they have at least one open socket to any chat node, and for a grace of 10 s after their
