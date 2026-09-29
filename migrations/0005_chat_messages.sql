@@ -3,7 +3,7 @@
 -- index what it says. The table has no check constraint: a violated one reports the failing
 -- row, body included, in the error and the server log. A violated NOT NULL reports it too; the
 -- store binds every column from a value that cannot be null, and bounds the body's size before
--- it sends one. Bound parameters reach the log by other routes too (ADR-0052 lists the
+-- it sends one. Bound parameters reach the log by other routes too (ADR-0054 lists the
 -- settings that keep them out).
 --
 -- History pages walk the primary key in either direction; a backward scan of (room_id, seq) is
@@ -37,7 +37,7 @@ CREATE TABLE chat_members (
 -- Who may be in a room follows from its kind (section 8.15): a direct or group chat admits only
 -- its members, even while it has none; a stream's live chat admits anyone. The kind is recorded
 -- once, by the room's first join, and a room that already lists members is never recorded as
--- live (ADR-0052). room_state's kind (0003) is copied from here when the room is created.
+-- live (ADR-0054). room_state's kind (0003) is copied from here when the room is created.
 CREATE TABLE chat_rooms (
     room_id uuid PRIMARY KEY,
     kind    text NOT NULL CHECK (kind IN ('direct_chat', 'group_chat', 'stream_live_chat'))

@@ -54,5 +54,8 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0048](0048-seccomp-allowlist-for-the-ffmpeg-child.md) | The ffmpeg child runs under a syscall allowlist | Accepted |
 | [0049](0049-upload-reaper-as-a-cron-job.md) | Abandoned uploads are reaped by a CronJob | Accepted |
 | [0050](0050-clients-reach-the-sfu-with-a-ticket.md) | Clients reach the SFU with a ticket, not through our signalling | Accepted |
-| [0052](0052-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted |
-| [0053](0053-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
+| [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
+| [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted |
+| [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted |
+| [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted |
+| [0055](0055-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |

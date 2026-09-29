@@ -27,7 +27,7 @@ struct Limits {
     // connections (32 x ~2.1 MiB) and recent message keys (10 MiB), and the chat service the
     // messages it keeps for resuming clients (32 MiB), presence its rooms and watch lists (11 MiB):
     // about 740 MiB in all, inside a 1 GiB pod with room for the kernel's socket buffers (ADR-0036,
-    // ADR-0043, ADR-0053). A connection that is only listening costs a few KiB.
+    // ADR-0043, ADR-0055). A connection that is only listening costs a few KiB.
     std::size_t max_connections = 1280;
     // Output a client has not read yet. A delivery is at most 64 KiB, so this is four of the
     // largest, or thousands of ordinary ones: a reader that far behind is closed, and resumes

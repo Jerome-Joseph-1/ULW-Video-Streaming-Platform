@@ -172,6 +172,113 @@ protected:
     const core::UserId alice_ = *core::UserId::parse("auth0|alice");
 };
 
+// A member added by the store's own statement, whose transaction has not committed, when the
+// server tries to open the room: the member's statement recorded the room closed first, so
+// record_live waits on that record and is refused.
+TEST_F(MessageStoreTest, AMemberInsertInFlightKeepsTheRoomClosedToRecordLive) {
+    const core::RoomId room = new_room();
+    auto adding = db_->session();
+    ASSERT_TRUE(adding.exec("BEGIN"));
+    ASSERT_TRUE(adding.exec(infra::postgres::message_sql::kAddMember,
+                            Params{}.add_uuid(room.uuid()).add_text(alice_.view())));
+
+    std::optional<MessageResult<void>> recorded;
+    store_->record_live(room, [&](MessageResult<void> r) noexcept { recorded = r; });
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] {
+        return scalar(*conn_, "SELECT count(*) FROM pg_stat_activity WHERE "
+                              "datname = current_database() AND wait_event_type = 'Lock'") == "1";
+    }));
+    ASSERT_TRUE(adding.exec("COMMIT"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return recorded.has_value(); }));
+
+    EXPECT_EQ(*recorded,
+              MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
+    EXPECT_EQ(scalar(*conn_, "SELECT kind FROM chat_rooms WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "group_chat");
+}
+
+// The same member insert in flight when the room's first joins arrive: one that asks for live
+// is refused at once and records nothing; one that asks for a group chat waits on the closed
+// record and takes it. Neither can leave the room open.
+TEST_F(MessageStoreTest, AMemberInsertInFlightAndAFirstJoinNeverLeaveTheRoomOpen) {
+    const core::RoomId room = new_room();
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    auto adding = db_->session();
+    ASSERT_TRUE(adding.exec("BEGIN"));
+    ASSERT_TRUE(adding.exec(infra::postgres::message_sql::kAddMember,
+                            Params{}.add_uuid(room.uuid()).add_text(alice_.view())));
+
+    EXPECT_EQ(ask<core::ports::Admission>([&](auto done) {
+                  store_->admits(room, bob, core::ports::RoomKind::StreamLiveChat, std::move(done));
+              }),
+              core::ports::Admission::NotLive);
+
+    std::optional<MessageResult<core::ports::Admission>> grouped;
+    store_->admits(room, bob, core::ports::RoomKind::GroupChat,
+                   [&](MessageResult<core::ports::Admission> r) noexcept { grouped = r; });
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] {
+        return scalar(*conn_, "SELECT count(*) FROM pg_stat_activity WHERE "
+                              "datname = current_database() AND wait_event_type = 'Lock'") == "1";
+    }));
+    ASSERT_TRUE(adding.exec("COMMIT"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return grouped.has_value(); }));
+
+    EXPECT_EQ(*grouped, core::ports::Admission::NotMember);
+    EXPECT_EQ(ask<core::ports::Admission>([&](auto done) {
+                  store_->admits(room, alice_, core::ports::RoomKind::StreamLiveChat,
+                                 std::move(done));
+              }),
+              core::ports::Admission::NotLive);
+    EXPECT_EQ(scalar(*conn_, "SELECT kind FROM chat_rooms WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "group_chat");
+}
+
+// A room the room plane created closed keeps its kind and delivery in room_state, so it cannot be
+// opened afterwards: chat_rooms and room_state would disagree. One opened before it was created
+// is created live, and opening it again still answers ok.
+TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
+    const core::RoomId closed = new_room();
+    ASSERT_NE(own(closed), 0U);
+    EXPECT_EQ(ask<void>([&](auto done) { store_->record_live(closed, std::move(done)); }),
+              MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_rooms WHERE room_id = $1",
+                     Params{}.add_uuid(closed.uuid())),
+              "0");
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', kind, delivery) FROM room_state "
+                     "WHERE room_id = $1",
+                     Params{}.add_uuid(closed.uuid())),
+              "group_chat durable");
+
+    const core::RoomId live = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
+    ASSERT_NE(own(live), 0U);
+    EXPECT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', kind, delivery) FROM room_state "
+                     "WHERE room_id = $1",
+                     Params{}.add_uuid(live.uuid())),
+              "stream_live_chat lossy");
+}
+
+// A join reads a recorded room's kind and writes nothing.
+TEST_F(MessageStoreTest, AJoinOfARecordedRoomWritesNothing) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(room, alice_, std::move(done)); }));
+    const auto xmin = [&] {
+        return scalar(*conn_, "SELECT xmin::text FROM chat_rooms WHERE room_id = $1",
+                      Params{}.add_uuid(room.uuid()));
+    };
+    const std::string before = xmin();
+    EXPECT_EQ(ask<core::ports::Admission>([&](auto done) {
+                  store_->admits(room, alice_, core::ports::RoomKind::GroupChat, std::move(done));
+              }),
+              core::ports::Admission::Admitted);
+    EXPECT_EQ(xmin(), before);
+}
+
 TEST_F(MessageStoreTest, BodiesAreByteaNeverTextAndNothingIndexesThem) {
     EXPECT_EQ(scalar(*conn_,
                      "SELECT data_type || ' ' || is_nullable FROM information_schema.columns "
@@ -402,7 +509,7 @@ protected:
 };
 
 TEST_F(PlaintextTest, NoBodyReachesAProcessLogTheServerLogOrATextColumn) {
-    // What ADR-0052 asks of production Postgres, applied to these sessions: every statement
+    // What ADR-0054 asks of production Postgres, applied to these sessions: every statement
     // logged, and still no parameter in the log, on success or on error.
     constexpr std::string_view kProduction = "-c log_statement=all -c log_parameter_max_length=0 "
                                              "-c log_parameter_max_length_on_error=0";

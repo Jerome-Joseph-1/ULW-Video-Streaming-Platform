@@ -17,6 +17,7 @@
 #include "config.hpp"
 #include "key_fetcher.hpp"
 #include "log.hpp"
+#include "ops/root.hpp"
 
 #include <array>
 #include <cstdio>
@@ -148,6 +149,27 @@ int run() {
     if (!limits) {
         return fail("raise RLIMIT_NOFILE", errno_text(limits.error()));
     }
+    // Both bound while still root, if started so: a port under 1024 needs the privilege the
+    // drop gives up. Only the address other nodes dial, never every interface (ADR-0035).
+    auto node_listener = net::listen_on(config->node_address);
+    if (!node_listener) {
+        return fail("listen on the node port", errno_text(node_listener.error()));
+    }
+    auto listener = net::listen_tcp({.port = config->port});
+    if (!listener) {
+        return fail("listen", errno_text(listener.error()));
+    }
+    // Before any thread exists: glibc then has no other thread to carry the change to.
+    const auto step = ops::leave_root(config->run_as_user, config->allow_root);
+    if (!step) {
+        return fail(step.error().source, step.error().reason,
+                    step.error().configuration ? kBadConfig : EXIT_FAILURE);
+    }
+    if (*step == ops::RootStep::StayedRoot) {
+        chat::log_event(R"("level":"warn","msg":"running as root, as ULW_ALLOW_ROOT=1 allows")");
+    } else if (*step == ops::RootStep::Dropped) {
+        chat::log_event(R"("level":"info","msg":"dropped root","user":"{}")", config->run_as_user);
+    }
 
     Services s;
     auto choice = net::make_reactor_with_fallback(config->reactor, s.clock, limits->soft);
@@ -183,11 +205,6 @@ int run() {
                                                                  .advertise = config->node_address,
                                                                  .secret = config->node_secret},
                                                 *s.room_log);
-    // Only the address other nodes dial, never every interface (ADR-0035).
-    auto node_listener = net::listen_on(config->node_address);
-    if (!node_listener) {
-        return fail("listen on the node port", errno_text(node_listener.error()));
-    }
     if (auto r = s.router->start(std::move(*node_listener)); !r) {
         return fail("register the node listener", errno_text(r.error()));
     }
@@ -210,10 +227,6 @@ int run() {
         return fail("signalfd", errno_text(signals.error()));
     }
     s.signals = std::move(*signals);
-    auto listener = net::listen_tcp({.port = config->port});
-    if (!listener) {
-        return fail("listen", errno_text(listener.error()));
-    }
     if (auto r = s.reactor->listen(std::move(*listener), *s.server); !r) {
         return fail("register listener", errno_text(r.error()));
     }

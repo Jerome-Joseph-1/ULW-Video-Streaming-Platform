@@ -30,7 +30,7 @@ inline constexpr core::Millis kStoreTimeout{2'000};
 inline constexpr core::Millis kOwnerStaleAfter{5'000};
 
 // Rooms whose writes are sequenced and fanned out like any other's but never kept: RFC 9562
-// version 8 ids, which chat_server derives for presence (ADR-0053) and no client can name. A
+// version 8 ids, which chat_server derives for presence (ADR-0055) and no client can name. A
 // store takes their seqs, fenced as ever, and stores no message for them.
 [[nodiscard]] inline bool is_ephemeral_room(const core::RoomId& room) noexcept {
     return (room.uuid().bytes()[6] & std::byte{0xF0}) == std::byte{0x80};

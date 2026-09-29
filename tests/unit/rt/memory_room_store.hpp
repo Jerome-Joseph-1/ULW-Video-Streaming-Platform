@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -40,6 +42,9 @@ public:
     std::unordered_map<std::string, core::Uuid> holders;
     // Each room's messages, as stored with their seqs from 1.
     std::unordered_map<core::RoomId, std::vector<std::string>> bodies;
+    // The seq of each stored message by (room, sender, key), as the store's unique key finds a
+    // repeat.
+    std::map<std::tuple<core::RoomId, std::string, std::string>, std::uint64_t> keys;
     // Every append that matched no row, as (room, generation).
     std::vector<std::pair<core::RoomId, std::uint64_t>> refused_appends;
 
@@ -151,17 +156,31 @@ public:
     void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& message,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override {
         std::string body(ulw::test::as_text(message.body));
-        answer("", std::move(done), [this, room, generation, body = std::move(body)] {
-            MemoryRooms::Room& r = db_.rooms.at(room);
-            if (r.generation != generation) {
-                db_.refused_appends.emplace_back(room, generation);
-                return rt::StoreResult<std::optional<std::uint64_t>>{std::nullopt};
-            }
-            if (!rt::is_ephemeral_room(room)) {
-                db_.bodies[room].push_back(body);
-            }
-            return rt::StoreResult<std::optional<std::uint64_t>>{++r.last_seq};
-        });
+        auto key = std::make_tuple(room, std::string(message.sender.view()),
+                                   std::string(message.key.view()));
+        answer("", std::move(done),
+               [this, room, generation, body = std::move(body), key = std::move(key)] {
+                   using Answer = rt::StoreResult<std::optional<std::uint64_t>>;
+                   MemoryRooms::Room& r = db_.rooms.at(room);
+                   if (r.generation != generation) {
+                       db_.refused_appends.emplace_back(room, generation);
+                       return Answer{std::nullopt};
+                   }
+                   // An ephemeral room's seq is taken, and its message is not kept.
+                   if (rt::is_ephemeral_room(room)) {
+                       return Answer{++r.last_seq};
+                   }
+                   // A key stored already: the same message again, or another under its key.
+                   if (const auto it = db_.keys.find(key); it != db_.keys.end()) {
+                       if (db_.bodies[room].at(it->second - 1) != body) {
+                           return Answer{std::unexpected(rt::StoreError::Conflict)};
+                       }
+                       return Answer{it->second};
+                   }
+                   db_.bodies[room].push_back(body);
+                   db_.keys.emplace(key, ++r.last_seq);
+                   return Answer{r.last_seq};
+               });
     }
 
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,

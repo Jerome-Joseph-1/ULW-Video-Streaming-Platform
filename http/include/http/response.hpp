@@ -36,6 +36,9 @@ struct ResponseHead {
     std::string_view location = {};
     std::optional<std::uint64_t> upload_offset = std::nullopt;
     std::optional<std::chrono::seconds> retry_after = std::nullopt;
+    // A 401's challenge (RFC 9110 section 11.6.1): `Bearer`, with an error for a token that
+    // was sent and refused (RFC 6750 section 3).
+    std::string_view www_authenticate = {};
     MethodSet allow = {};
     std::string_view request_id = {};
 };

@@ -13,6 +13,7 @@
 #include "os/system_random.hpp"
 
 #include "config.hpp"
+#include "ops/root.hpp"
 #include "reaper.hpp"
 
 #include <cstdio>
@@ -38,6 +39,9 @@ std::optional<std::string> read_env(std::string_view name) {
     const char* value = std::getenv(std::string(name).c_str());
     return value == nullptr ? std::nullopt : std::optional<std::string>(value);
 }
+
+// What a configuration that can never run exits with, as for the gateway and the worker.
+constexpr int kBadConfig = 2;
 
 int fail(std::string_view what, std::string_view why) {
     std::println(stderr, "ulw_reaper: {}: {}", what, why);
@@ -115,6 +119,11 @@ int run() {
     const auto config = reaper::load_config(read_env);
     if (!config) {
         return fail(config.error().variable, config.error().reason);
+    }
+    // Before any thread exists: glibc then has no other thread to carry the change to.
+    if (const auto step = ops::leave_root(config->run_as_user, config->allow_root); !step) {
+        const int code = fail(step.error().source, step.error().reason);
+        return step.error().configuration ? kBadConfig : code;
     }
     Services services;
     auto reactor = net::make_reactor(net::ReactorKind::Epoll, services.clock, kMaxDescriptors);

@@ -39,6 +39,10 @@ struct Config {
     // ULW_PRESENCE_GRACE_MS: how long a user whose last connection closed still shows online.
     // Unset: PresenceLimits::grace.
     std::optional<core::Millis> presence_grace;
+    // Who to become when started as root.
+    std::string run_as_user;
+    // Stay root when started as root with no run_as_user; otherwise that is refused.
+    bool allow_root = false;
 };
 
 struct ConfigError {

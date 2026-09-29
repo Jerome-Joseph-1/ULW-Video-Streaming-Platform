@@ -51,7 +51,8 @@ public:
     void members(const core::RoomId& room, std::optional<core::UserId> after, std::size_t limit,
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override;
     void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
-                core::ports::MessageCallback<bool> done) override;
+                core::ports::MessageCallback<core::ports::Admission> done) override;
+    void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
 
     void on_timeout() noexcept override;
 
@@ -77,7 +78,7 @@ private:
     std::unordered_map<core::RoomId, Room> rooms_;
     // Ordered bytewise, as the durable store lists them.
     std::unordered_map<core::RoomId, std::set<core::UserId, ByteOrder>> members_;
-    // As recorded by each room's first join.
+    // As recorded by each room's first join or member, or by record_live.
     std::unordered_map<core::RoomId, core::ports::RoomKind> kinds_;
 };
 

@@ -12,7 +12,7 @@
 // who does not is exactly one offline on every watching node; a user nobody watches costs no
 // presence message at all.
 // ULW_CHAT_CLUSTER_PORTS=9101,9102,9103 pins the client ports (the CI job does); otherwise
-// free ones are taken.
+// ones outside the ephemeral range are reserved.
 
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
@@ -23,14 +23,10 @@
 #include "devtoken/dev_key.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
-#include "support/eventually.hpp"
 #include "support/reactor_harness.hpp"
+#include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
 #include "support/ws_client.hpp"
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include <algorithm>
 #include <array>
@@ -57,27 +53,13 @@ using ulw::test::ScratchDatabase;
 using ulw::test::WsClient;
 
 constexpr std::string_view kIssuer = "https://auth.test.askedin.com";
+constexpr std::chrono::milliseconds kReadyCheckPeriod{250};
 constexpr std::array kUsers{"alice", "bob", "carol", "dave"};
 // Short, so that the presence tests wait seconds for a grace to run out, not the default ten.
 constexpr std::chrono::milliseconds kGrace{2'000};
 
-std::uint16_t free_port() {
-    const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    socklen_t len = sizeof addr;
-    // bind() and getsockname() take every address family through the generic header.
-    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
-    if (::bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 ||
-        ::getsockname(fd.get(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-        return 0;
-    }
-    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
-    return ntohs(addr.sin_port);
-}
-
-std::vector<std::uint16_t> client_ports() {
+// Empty when the ports are not pinned: each node then reserves its own.
+std::vector<std::uint16_t> pinned_client_ports() {
     std::vector<std::uint16_t> ports;
     // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
     const char* pinned = std::getenv("ULW_CHAT_CLUSTER_PORTS");
@@ -86,9 +68,6 @@ std::vector<std::uint16_t> client_ports() {
         const std::size_t comma = rest.find(',');
         ports.push_back(core::parse_integer<std::uint16_t>(rest.substr(0, comma)).value_or(0));
         rest = comma == std::string_view::npos ? "" : rest.substr(comma + 1);
-    }
-    while (ports.size() < 3) {
-        ports.push_back(free_port());
     }
     return ports;
 }
@@ -206,6 +185,7 @@ private:
 struct Node {
     std::string name;
     std::uint16_t port = 0;
+    bool port_pinned = false;
     std::uint16_t node_port = 0;
     std::unique_ptr<ChildProcess> process;
 };
@@ -239,49 +219,64 @@ protected:
                                           .ttl = seconds(600)},
                                          clock_.wall_now()));
         }
-        const auto ports = client_ports();
+        const auto pinned = pinned_client_ports();
         for (std::size_t i = 0; i < 3; ++i) {
             nodes_.push_back({.name = "chat-" + std::to_string(i + 1),
-                              .port = ports[i],
-                              .node_port = free_port(),
+                              .port = i < pinned.size() ? pinned[i] : std::uint16_t{0},
+                              .port_pinned = i < pinned.size(),
+                              .node_port = 0,
                               .process = nullptr});
-            ASSERT_NE(nodes_.back().port, 0);
             ASSERT_NO_FATAL_FAILURE(start(nodes_.back(), jwks_));
         }
         ASSERT_NO_FATAL_FAILURE(wait_ready());
     }
 
     void wait_ready() {
+        // Readiness is only visible over HTTP, so it is asked a few times a second rather than
+        // in a loop that would leave a connection in TIME_WAIT on every turn.
         for (const Node& n : nodes_) {
-            ASSERT_TRUE(ulw::test::eventually(
-                [&] { return ulw::test::http_get(n.port, "/readyz").status == 200; }, seconds(30)))
+            ASSERT_TRUE(n.process->poll_until(
+                [&] { return ulw::test::http_get(n.port, "/readyz").status == 200; }, seconds(30),
+                kReadyCheckPeriod))
                 << n.process->output();
         }
     }
 
     void start(Node& node, const std::string& jwks) {
         std::vector<std::string> env{
-            "ULW_NODE_ID=" + node.name,
-            "ULW_LISTEN_PORT=" + std::to_string(node.port),
-            "ULW_NODE_ADDRESS=127.0.0.1:" + std::to_string(node.node_port),
-            "ULW_DEV_LOOPBACK_NODES=1",
-            "ULW_NODE_SECRET=" + node_secret_,
-            "ULW_DATABASE_URL=" + db_->conninfo(),
-            "ULW_DEV_JWKS_FILE=" + jwks,
-            "JWT_ISSUER=" + std::string(kIssuer),
+            "ULW_NODE_ID=" + node.name, "ULW_DEV_LOOPBACK_NODES=1",
+            "ULW_NODE_SECRET=" + node_secret_, "ULW_DATABASE_URL=" + db_->conninfo(),
+            "ULW_DEV_JWKS_FILE=" + jwks, "JWT_ISSUER=" + std::string(kIssuer),
             "ULW_PRESENCE_GRACE_MS=" + std::to_string(kGrace.count()),
             "ULW_REACTOR=" +
-                std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll")};
+                std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),
+            // Some runs start tests as root; this suite is not about that.
+            "ULW_ALLOW_ROOT=1"};
         for (const char* passed : {"ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"}) {
             // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
             if (const char* value = std::getenv(passed)) {
                 env.push_back(std::string(passed) + "=" + value);
             }
         }
-        node.process = ChildProcess::start({ULW_CHAT_BIN}, env);
-        ASSERT_NE(node.process, nullptr);
-        ASSERT_TRUE(node.process->wait_for_output(R"("msg":"listening")", seconds(30)))
-            << node.process->output();
+        auto started = ulw::test::start_until_listening(
+            [&] {
+                if (!node.port_pinned) {
+                    node.port = ulw::test::reserve_port();
+                }
+                node.node_port = ulw::test::reserve_port();
+                if (node.port == 0 || node.node_port == 0) {
+                    return std::unique_ptr<ChildProcess>();
+                }
+                auto with_ports = env;
+                with_ports.push_back("ULW_LISTEN_PORT=" + std::to_string(node.port));
+                with_ports.push_back("ULW_NODE_ADDRESS=127.0.0.1:" +
+                                     std::to_string(node.node_port));
+                return ChildProcess::start({ULW_CHAT_BIN}, with_ports);
+            },
+            R"("msg":"listening")", seconds(30));
+        node.process = std::move(started.process);
+        ASSERT_NE(node.process, nullptr) << "no port to listen on";
+        ASSERT_TRUE(started.ready) << node.process->output();
     }
 
     std::unique_ptr<Client> connect(const Node& node, std::size_t user) {
@@ -312,14 +307,34 @@ protected:
 
     static std::string ref(std::uint64_t n) { return "r" + std::to_string(n); }
 
-    // Lists members for a room, as the service's operators do.
+    // Lists members for a room, as the service's operators do (RUNBOOK section 3): the room is
+    // recorded closed first.
     void list_members(const std::string& room, const std::vector<std::string>& users) const {
         auto conn = db_->session();
+        ASSERT_TRUE(conn.exec("INSERT INTO chat_rooms (room_id, kind) "
+                              "VALUES ($1::text::uuid, 'group_chat') "
+                              "ON CONFLICT (room_id) DO NOTHING",
+                              Params{}.add_text(room)));
         for (const std::string& user : users) {
             ASSERT_TRUE(
                 conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::text::uuid, $2)",
                           Params{}.add_text(room).add_text(user)));
         }
+    }
+
+    // Records a room as a stream's live chat, as the server side does (RUNBOOK section 3); the
+    // kind it is then recorded as.
+    [[nodiscard]] std::string record_live(const std::string& room) const {
+        auto conn = db_->session();
+        return ulw::test::scalar(
+            conn,
+            "INSERT INTO chat_rooms (room_id, kind) "
+            "SELECT $1::text::uuid, 'stream_live_chat' WHERE NOT EXISTS "
+            "(SELECT 1 FROM chat_members WHERE room_id = $1::text::uuid) "
+            "AND NOT EXISTS (SELECT 1 FROM room_state WHERE room_id = $1::text::uuid "
+            "AND kind <> 'stream_live_chat') "
+            "ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind RETURNING kind",
+            Params{}.add_text(room));
     }
 
     // A join of `room` with `fields` added; "joined", or the error's reason.
@@ -895,9 +910,10 @@ TEST_P(ChatClusterTest, AReconnectWithinTheGraceIsNoEventAndALeaveIsOneOfflineOn
     alice.reset();
     alice = connect(nodes_[1], 0);
     ASSERT_TRUE(alice);
-    ASSERT_TRUE(ulw::test::eventually(
+    // Each check is a request: paced, as readiness is.
+    ASSERT_TRUE(nodes_[0].process->poll_until(
         [&] { return metric(nodes_[0], "presence_events_sent_total") >= before + 2; },
-        seconds(30)));
+        seconds(30), kReadyCheckPeriod));
     // Everything chat-1 sent has had a grace's time to reach every node.
     const auto quiet_until = [](std::chrono::steady_clock::time_point until) {
         return std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -957,8 +973,9 @@ TEST_P(ChatClusterTest, AUserNobodyWatchesCostsNoPresenceMessage) {
     EXPECT_EQ(metric(nodes_[0], "presence_rooms"), 1U);
     dave.reset();
     // The grace runs out, and chat-1 leaves dave's room: nothing is left of him.
-    ASSERT_TRUE(ulw::test::eventually([&] { return metric(nodes_[0], "presence_rooms") == 0; },
-                                      seconds(30)));
+    ASSERT_TRUE(nodes_[0].process->poll_until(
+        [&] { return metric(nodes_[0], "presence_rooms") == 0; }, seconds(30),
+        kReadyCheckPeriod));
     EXPECT_EQ(total("presence_events_sent_total"), sent);
     EXPECT_EQ(total("presence_events_received_total"), received);
     EXPECT_EQ(total("forwards_total"), forwards);
@@ -1097,12 +1114,28 @@ TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedL
     auto bob = connect(nodes_[1], 1);
     ASSERT_TRUE(alice && bob);
     EXPECT_EQ(join_answer(*alice, nobody), "not_member");
-    // Its first join recorded it as a group chat; asking for live afterwards opens nothing.
-    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_member");
+    // Its first join recorded it as a group chat; asking for live afterwards opens nothing, and
+    // neither can the server.
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+    EXPECT_EQ(record_live(nobody), "group_chat");
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+}
+
+TEST_P(ChatClusterTest, AJoinThatAsksForLiveCannotOpenARoomTheServerDidNot) {
+    const std::string room = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    EXPECT_EQ(join_answer(*alice, room, R"(,"kind":"live")"), "not_live");
+    auto conn = db_->session();
+    EXPECT_EQ(ulw::test::scalar(conn,
+                                "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
+                                Params{}.add_text(room)),
+              "0");
 }
 
 TEST_P(ChatClusterTest, ALiveRoomAdmitsAnyone) {
     const std::string live = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_EQ(record_live(live), "stream_live_chat");
     auto alice = connect(nodes_[0], 0);
     auto carol = connect(nodes_[2], 2);
     ASSERT_TRUE(alice && carol);
@@ -1122,7 +1155,7 @@ TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePasswor
                                          "ULW_NODE_SECRET=startup-test-node-secret-000000000000",
                                          "ULW_DEV_LOOPBACK_NODES=1", "ULW_DATABASE_URL=" + url,
                                          "ULW_DEV_JWKS_FILE=/nonexistent/jwks.json",
-                                         "JWT_ISSUER=https://issuer.test"});
+                                         "JWT_ISSUER=https://issuer.test", "ULW_ALLOW_ROOT=1"});
         ASSERT_NE(chat, nullptr);
         EXPECT_EQ(chat->wait_exit(seconds(30)), 2) << chat->output();
         EXPECT_NE(chat->output().find("ULW_DATABASE_URL"), std::string::npos) << chat->output();

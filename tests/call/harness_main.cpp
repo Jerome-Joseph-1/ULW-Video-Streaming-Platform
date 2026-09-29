@@ -2,13 +2,15 @@
 // Like the handler, it is one long-lived process that keeps the rooms it opened: it reads one
 // command per line on stdin, runs it through the SFU port, and answers with one line on stdout.
 //
-//   open <room-id> <generation> <max-participants>   -> ok
+//   open <room-id> <generation> <max-participants> <call|stream>  -> ok
 //   join <room-id> <generation> <user> <device-id> <member|publisher>  -> the ticket, as JSON
+//   relay <room-id> <generation> <user> <device-id> <stream-id> <keyframe-seconds> <passphrase>
+//                                                     -> ok <relay id>
 //   close <room-id> <generation>                      -> ok
 //
 // A command that fails answers "error <reason>". LIVEKIT_API_KEY and LIVEKIT_API_SECRET are
 // required; LIVEKIT_API_URL defaults to http://127.0.0.1:7880 and LIVEKIT_CLIENT_URL to
-// ws://127.0.0.1:7880.
+// ws://127.0.0.1:7880. ULW_LIVE_PACKAGER_SRT, where relays go, defaults to none.
 #include "core/models/ids.hpp"
 #include "core/ports/media.hpp"
 #include "core/util/json.hpp"
@@ -113,7 +115,8 @@ public:
                 .api_url = env_or("LIVEKIT_API_URL", "http://127.0.0.1:7880"),
                 .client_url = env_or("LIVEKIT_CLIENT_URL", "ws://127.0.0.1:7880"),
                 .api_key = env_or("LIVEKIT_API_KEY", ""),
-                .api_secret = env_or("LIVEKIT_API_SECRET", "")});
+                .api_secret = env_or("LIVEKIT_API_SECRET", ""),
+                .packager_srt = env_or("ULW_LIVE_PACKAGER_SRT", "")});
         if (!sfu) {
             std::println(stderr, "ulw_call_harness: {}",
                          infra::sfu::livekit::to_string(sfu.error()));
@@ -137,10 +140,15 @@ public:
         std::string key(words[1]);
         key += ':';
         key += words[2];
-        if (words[0] == "open" && words.size() == 4) {
+        if (words[0] == "open" && words.size() == 5) {
             const auto max = parse_number<std::uint16_t>(words[3]);
-            return max ? open(*room, MediaGeneration{*generation}, *max, std::move(key))
-                       : "error bad max-participants";
+            if (!max || (words[4] != "call" && words[4] != "stream")) {
+                return "error bad max-participants or kind";
+            }
+            return open(*room, MediaGeneration{*generation},
+                        words[4] == "call" ? core::ports::MediaRoomKind::Call
+                                           : core::ports::MediaRoomKind::Stream,
+                        *max, std::move(key));
         }
         if (words[0] == "join" && words.size() == 6) {
             const auto user = core::UserId::parse(words[3]);
@@ -152,6 +160,18 @@ public:
                         words[5] == "member" ? core::ports::MediaRole::Member
                                              : core::ports::MediaRole::Publisher);
         }
+        if (words[0] == "relay" && words.size() == 8) {
+            const auto user = core::UserId::parse(words[3]);
+            const auto device = core::DeviceId::parse(words[4]);
+            const auto keyframes = parse_number<std::uint32_t>(words[6]);
+            if (!user || !device || !keyframes) {
+                return "error bad user, device id or keyframe interval";
+            }
+            return relay(key, *user, *device,
+                         core::ports::MediaRelay{.stream = std::string(words[5]),
+                                                 .passphrase = std::string(words[7]),
+                                                 .keyframe_interval = core::Seconds{*keyframes}});
+        }
         if (words[0] == "close" && words.size() == 3) {
             return close(key);
         }
@@ -159,10 +179,10 @@ public:
     }
 
 private:
-    std::string open(const core::RoomId& room, MediaGeneration generation, std::uint16_t max,
-                     std::string key) {
+    std::string open(const core::RoomId& room, MediaGeneration generation,
+                     core::ports::MediaRoomKind kind, std::uint16_t max, std::string key) {
         std::optional<std::expected<std::unique_ptr<IMediaRoom>, MediaError>> opened;
-        sfu_->open_room(room, generation, max,
+        sfu_->open_room(room, generation, kind, max,
                         [&](auto result) noexcept { opened = std::move(result); });
         run_until([&] { return opened.has_value(); });
         if (!*opened) {
@@ -183,6 +203,18 @@ private:
                            [&](auto result) noexcept { ticket = std::move(result); });
         run_until([&] { return ticket.has_value(); });
         return *ticket ? ticket_json(**ticket) : "error " + std::string(to_string(ticket->error()));
+    }
+
+    std::string relay(const std::string& key, const core::UserId& user,
+                      const core::DeviceId& device, const core::ports::MediaRelay& target) {
+        const auto room = rooms_.find(key);
+        if (room == rooms_.end()) {
+            return "error not open";
+        }
+        std::optional<std::expected<std::string, MediaError>> relayed;
+        room->second->relay(user, device, target, [&](auto r) noexcept { relayed = std::move(r); });
+        run_until([&] { return relayed.has_value(); });
+        return *relayed ? "ok " + **relayed : "error " + std::string(to_string(relayed->error()));
     }
 
     std::string close(const std::string& key) {

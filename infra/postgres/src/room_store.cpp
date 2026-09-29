@@ -643,7 +643,7 @@ private:
         std::vector<StoreCallback<std::optional<std::uint64_t>>> batch;
         batch.swap(refused_);
         // The router's store port has no "too large": to it this is a write that did not
-        // happen, which it answers as unavailable (ADR-0052).
+        // happen, which it answers as unavailable (ADR-0054).
         for (auto& done : batch) {
             done(std::unexpected(StoreError::Unavailable));
         }

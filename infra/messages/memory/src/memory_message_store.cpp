@@ -133,6 +133,7 @@ void MemoryMessageStore::last_seq(const core::RoomId& room, MessageCallback<std:
 
 void MemoryMessageStore::add_member(const core::RoomId& room, const core::UserId& user,
                                     MessageCallback<void> done) {
+    kinds_.try_emplace(room, core::ports::RoomKind::GroupChat);
     members_[room].insert(user);
     defer([done = std::move(done)]() mutable noexcept { done({}); });
 }
@@ -163,16 +164,42 @@ void MemoryMessageStore::members(const core::RoomId& room, std::optional<core::U
 }
 
 void MemoryMessageStore::admits(const core::RoomId& room, const core::UserId& user,
-                                core::ports::RoomKind asked, MessageCallback<bool> done) {
+                                core::ports::RoomKind asked,
+                                MessageCallback<core::ports::Admission> done) {
+    auto recorded = kinds_.find(room);
+    if (recorded == kinds_.end()) {
+        if (core::ports::admits_anyone(asked)) {
+            defer([done = std::move(done)]() mutable noexcept {
+                done(core::ports::Admission::NotLive);
+            });
+            return;
+        }
+        recorded = kinds_.emplace(room, asked).first;
+    }
+    const auto listed = members_.find(room);
+    const bool member = listed != members_.end() && listed->second.contains(user);
+    const auto answer = core::ports::admission(asked, recorded->second, member);
+    defer([done = std::move(done), answer]() mutable noexcept { done(answer); });
+}
+
+void MemoryMessageStore::record_live(const core::RoomId& room, MessageCallback<void> done) {
     const auto listed = members_.find(room);
     const bool has_members = listed != members_.end() && !listed->second.empty();
-    if (asked == core::ports::RoomKind::StreamLiveChat && has_members) {
-        asked = core::ports::RoomKind::GroupChat;
+    const auto recorded = kinds_.find(room);
+    bool open = false;
+    if (recorded != kinds_.end()) {
+        open = recorded->second == core::ports::RoomKind::StreamLiveChat;
+    } else if (!has_members) {
+        kinds_.emplace(room, core::ports::RoomKind::StreamLiveChat);
+        open = true;
     }
-    const core::ports::RoomKind kind = kinds_.try_emplace(room, asked).first->second;
-    const bool admitted =
-        core::ports::admits_anyone(kind) || (has_members && listed->second.contains(user));
-    defer([done = std::move(done), admitted]() mutable noexcept { done(admitted); });
+    defer([done = std::move(done), open]() mutable noexcept {
+        if (open) {
+            done({});
+        } else {
+            done(std::unexpected(core::ports::MessageStoreError::Conflict));
+        }
+    });
 }
 
 } // namespace infra::messages

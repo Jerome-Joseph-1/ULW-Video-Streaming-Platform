@@ -21,9 +21,11 @@
 //       "after":<seq>        optional: also send what this node still holds after that seq
 //       "delivery":"lossy"   optional: skip messages while this connection is behind, rather
 //                            than be closed for it ("durable", the default)
-//       "kind":"live"        optional: what the room is, recorded by the room's first join:
-//                            "direct" or "group" (the default) admit only members, "live"
-//                            admits anyone
+//       "kind":"live"        optional: what the room is. "direct" or "group" (the default)
+//                            admit only members, and the first join of a room with no kind
+//                            recorded records it; "live" admits anyone, but only in a room
+//                            the server recorded as live, and is refused with not_live
+//                            elsewhere
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
 //   {"type":"history","room":"<uuid>"}   the room's stored messages, from the store, not this
 //       "before":<seq>       optional: those below it, newest first (the default: the newest)
