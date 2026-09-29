@@ -40,9 +40,12 @@ TEST(IpAddress, AnIpv4AddressEqualsItsMappedIpv6Form) {
 }
 
 TEST(IpAddress, PrintsInTheFormItsFamilyIsWrittenIn) {
-    EXPECT_EQ(ip("198.51.100.20").to_string(), "198.51.100.20");
-    EXPECT_EQ(ip("::ffff:198.51.100.20").to_string(), "198.51.100.20");
-    EXPECT_EQ(ip("2001:DB8:0:0::1").to_string(), "2001:db8::1");
+    net::IpAddress::Text text{};
+    EXPECT_EQ(ip("198.51.100.20").format(text), "198.51.100.20");
+    EXPECT_EQ(ip("::ffff:198.51.100.20").format(text), "198.51.100.20");
+    EXPECT_EQ(ip("2001:DB8:0:0::1").format(text), "2001:db8::1");
+    EXPECT_EQ(ip("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff").format(text),
+              "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff");
 }
 
 TEST(IpAddress, PrefixClearsEveryBitPastIt) {

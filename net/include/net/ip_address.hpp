@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <string>
 #include <string_view>
 
 namespace net {
@@ -27,8 +26,12 @@ public:
 
     [[nodiscard]] const std::array<std::uint8_t, kBytes>& bytes() const noexcept { return bytes_; }
     [[nodiscard]] bool is_v4() const noexcept;
-    // Dotted for IPv4, RFC 5952 text for IPv6; for logs.
-    [[nodiscard]] std::string to_string() const;
+    // INET6_ADDRSTRLEN: the longest text form, "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255"
+    // and its terminator.
+    static constexpr std::size_t kTextLength = 46;
+    using Text = std::array<char, kTextLength>;
+    // Dotted for IPv4, RFC 5952 text for IPv6, written into `out` without allocating; for logs.
+    [[nodiscard]] std::string_view format(Text& out) const noexcept;
     // The same address with every bit past the first `bits` cleared.
     [[nodiscard]] IpAddress prefix(unsigned bits) const noexcept;
 

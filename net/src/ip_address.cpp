@@ -42,15 +42,15 @@ bool IpAddress::is_v4() const noexcept {
     return std::equal(kMappedPrefix.begin(), kMappedPrefix.end(), bytes_.begin());
 }
 
-std::string IpAddress::to_string() const {
-    std::array<char, INET6_ADDRSTRLEN> text{};
+std::string_view IpAddress::format(Text& out) const noexcept {
+    static_assert(kTextLength == INET6_ADDRSTRLEN);
     const bool v4 = is_v4();
     const void* source = v4 ? static_cast<const void*>(&bytes_[kMappedPrefix.size()])
                             : static_cast<const void*>(bytes_.data());
-    if (::inet_ntop(v4 ? AF_INET : AF_INET6, source, text.data(), text.size()) == nullptr) {
+    if (::inet_ntop(v4 ? AF_INET : AF_INET6, source, out.data(), out.size()) == nullptr) {
         return {};
     }
-    return std::string(text.data());
+    return {out.data()};
 }
 
 IpAddress IpAddress::prefix(unsigned bits) const noexcept {

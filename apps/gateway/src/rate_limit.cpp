@@ -58,7 +58,9 @@ net::IpAddress forwarded_client(const net::IpAddress& peer,
                                 std::size_t hops) noexcept {
     std::size_t seen = 0;
     // Repeated fields are one list in order (RFC 9110 section 5.3), so the count runs from the
-    // last entry of the last field.
+    // last entry of the last field. Envoy merges a client's repeated X-Forwarded-For fields into
+    // one before appending its own entry, so behind it there is one field; a peer that sends
+    // several is read the same way.
     for (const http::HeaderField& field : std::views::reverse(headers)) {
         if (!iequals(field.name, "x-forwarded-for")) {
             continue;

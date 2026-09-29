@@ -328,8 +328,9 @@ bool Connection::admit_forwarded(const http::RequestHead& head) noexcept {
     const net::IpAddress client =
         forwarded_client(peer_, head.headers, gw().limits().trusted_proxy_hops);
     if (deps().log.enabled(ops::Level::Debug)) {
+        net::IpAddress::Text text{};
         deps().log.debug("forwarded client",
-                         {{"request_id", request_id()}, {"client", client.to_string()}});
+                         {{"request_id", request_id()}, {"client", client.format(text)}});
     }
     request_hold_ = gw().hold_client(client);
     if (request_hold_) {
