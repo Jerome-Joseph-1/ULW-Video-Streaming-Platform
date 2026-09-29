@@ -23,27 +23,32 @@ struct PresenceLimits {
     // A contact list or a conversation sidebar shows a few dozen people at once; 128 bounds what
     // one socket makes this node join and track.
     std::size_t max_watches_per_client = 128;
-    // Watches that make this node join a user's presence room, per user, across their
-    // connections here: a join may create the room's row. A fresh client may watch its whole
-    // list at once; after that one a second, as for chat joins (ServiceLimits::join_burst).
+    // Watches that make this node start watching a user (the first here, each costing a hello
+    // and later an unwatch, and perhaps a join that creates the room's row), per watching user
+    // across their connections here. A fresh client may watch its whole list at once; after
+    // that one a second, as for chat joins (ServiceLimits::join_burst). Watching and
+    // unwatching in a loop is held to that too.
     std::uint32_t watch_burst = 128;
     std::uint32_t watches_per_second = 1;
     // Presence rooms this node is in at once: half the router's rt::RouterConfig::max_rooms
     // (16384), so that watching cannot crowd out chat rooms. A user connected here always gets
     // theirs, and those are at most Limits::max_connections (1280); watches past the cap are
-    // answered busy. Each room costs about 1 KiB here, 8 MiB in all.
+    // answered busy. Each room costs about 1 KiB here, 8 MiB in all. The watch lists add 16
+    // bytes per watch (a room pointer in the client's, an id in the room's): 1280 connections
+    // of 128 watches are 2.6 MiB.
     std::size_t max_rooms = 8'192;
     // How long after a user's last connection here closes they still count as online. A page
     // reload, or a reconnect after a drain's Close 1001, is back within a second or two; a
     // client backing off 1, 2 and 4 s between tries is back within 7 s after three failures.
     // Ten seconds covers that, and a user who really left shows offline ten seconds later.
     core::Millis grace{10'000};
-    // A node that announced a user online says so again this often while another node
-    // watches, and a watching node forgets an announcement not renewed within `expiry`: that
-    // is how a node that died, or drained before a user's grace ran out, stops holding them
-    // online. One renewal may be lost to an owner changing hands (rt::kOwnerStaleAfter, 5 s)
-    // and a forward timing out (3 s) and still land before the second is due; 2.5 renewals
-    // leave room for that and a retry.
+    // A node that announced a user online probes again this often while another node watches;
+    // watching nodes forget an announcement, and the announcing node a watcher, not heard from
+    // within `expiry`. That is how a node that died, or drained before a user's grace ran out,
+    // stops holding them online, and a watching node that died stops the renewals. One renewal
+    // may be lost to an owner changing hands (rt::kOwnerStaleAfter, 5 s) and a forward timing
+    // out (3 s) and still land before the second is due; 2.5 renewals leave room for that and
+    // a retry.
     core::Millis refresh{60'000};
     core::Millis expiry{150'000};
 };
@@ -54,8 +59,11 @@ struct PresenceCounters {
     std::uint64_t received = 0;
     // Presence changes pushed to watching clients.
     std::uint64_t notified = 0;
-    // Announcements dropped because their node stopped renewing them.
+    // Announcements, and watching nodes, dropped because they stopped being renewed.
     std::uint64_t expired = 0;
+    // Deliveries past a gap in a presence room's seqs, after which this node said again what
+    // it had said there.
+    std::uint64_t gaps = 0;
     std::uint64_t allocation_failures = 0;
 };
 
@@ -74,14 +82,17 @@ struct PresenceClientId {
 // Events, each naming the node that sent it:
 //   hello    a node started watching; nodes with the user connected answer `online`.
 //   unwatch  a node stopped watching.
-//   probe    the user connected at a node that cannot know who watches; like `online`, and
-//            watching nodes answer `ack` so the sender knows it is watched.
+//   probe    the user is connected at the sender, which asks who watches: when it cannot know
+//            (it joined a room something was said in) and, as a renewal, every minute; like
+//            `online`, and watching nodes answer `ack`.
 //   ack      a watching node answering a probe.
-//   online   the user is connected at the sender: an answer to a hello, or a renewal.
+//   online   the user is connected at the sender: an answer to a hello.
 //   offline  the user's grace at the sender ran out with no connection back.
 // A user is online at a watching node while any node's announcement stands there. A node whose
-// user has never been watched joins the room, finds its head at 0 (nothing was ever said in
-// it), and says nothing: a user nobody watches costs no event.
+// user has never been watched joins the room, finds its head at 0 (the room's last_seq: nothing
+// was ever said in it), and says nothing: a user nobody watches costs no event. A node that
+// sees a gap in the room's seqs says again what it had said there (a hello, an announcement),
+// since whoever missed it with it cannot know.
 //
 // Everything runs on the reactor thread; time comes from the injected clock, deadlines from
 // one timer on the reactor.
@@ -116,7 +127,8 @@ private:
     struct Client {
         IClient* client;
         core::UserId user;
-        std::vector<core::UserId> watching;
+        // Rooms with this client in their `local`, which keeps them from being erased.
+        std::vector<Room*> watching;
     };
 
     [[nodiscard]] static std::optional<Kind> kind_of(std::byte b) noexcept;

@@ -2,15 +2,13 @@
 
 #include "envelope.hpp"
 #include "presence_room.hpp"
+#include "sha256.hpp"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <format>
 #include <iterator>
-#include <openssl/evp.h>
 #include <span>
-#include <stdexcept>
 #include <string>
 
 namespace chat {
@@ -32,13 +30,8 @@ constexpr std::size_t kMaxNodesPerRoom = 64;
 constexpr std::size_t kEventSize = 9;
 
 std::uint64_t incarnation_tag(const core::NodeId& self, core::WallTime started) {
-    const std::string name = std::format("{} {}", self.view(), started.time_since_epoch().count());
-    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-    std::size_t length = 0;
-    if (EVP_Q_digest(nullptr, "SHA256", nullptr, name.data(), name.size(), digest.data(),
-                     &length) != 1) {
-        throw std::runtime_error("SHA-256 unavailable");
-    }
+    const auto digest =
+        sha256(std::format("{} {}", self.view(), started.time_since_epoch().count()));
     std::uint64_t tag = 0;
     for (const unsigned char b : std::span(digest).first<sizeof tag>()) {
         tag = (tag << 8U) | b;
@@ -67,9 +60,10 @@ std::optional<Presence::Kind> Presence::kind_of(std::byte b) noexcept {
 }
 
 struct Presence::Room final : rt::IMember {
-    struct Source {
+    // Another node, as last heard from.
+    struct Heard {
         std::uint64_t node;
-        core::MonoTime heard;
+        core::MonoTime at;
     };
 
     Room(Presence& owner, const core::UserId& watched)
@@ -87,9 +81,9 @@ struct Presence::Room final : rt::IMember {
     core::RoomId id;
     bool joined = false;
     bool joining = false;
-    // The latest seq seen: the join's answer or a delivery. 0 at the join means nothing was said
-    // in the room under its owner, so no node was watching then; one that starts later says
-    // hello, which this node hears.
+    // The latest seq seen: the join's answer (the room's last_seq) or a delivery. 0 at the join
+    // means nothing was ever said in the room, so no node was watching then; one that starts
+    // later says hello, which this node hears.
     std::uint64_t head = 0;
     bool sending = false;
     std::optional<core::MonoTime> retry_at;
@@ -103,14 +97,14 @@ struct Presence::Room final : rt::IMember {
     // A hello, or a failed announcement, wants an online from this node.
     bool answer = false;
     core::MonoTime refresh_at;
-    std::vector<std::uint64_t> watchers;
+    std::vector<Heard> watchers;
 
     // The watchers' side: clients here that watch the user, and every node's announcement.
     std::vector<PresenceClientId> local;
     // This node's hello stands in the room.
     bool watching = false;
     bool ack = false;
-    std::vector<Source> sources;
+    std::vector<Heard> sources;
     bool shown_online = false;
 };
 
@@ -154,10 +148,8 @@ void Presence::detach(PresenceClientId id) noexcept {
     if (it == clients_.end()) {
         return;
     }
-    for (const core::UserId& user : it->second.watching) {
-        if (const auto r = rooms_.find(user); r != rooms_.end()) {
-            drop_watch(*r->second, id);
-        }
+    for (Room* room : it->second.watching) {
+        drop_watch(*room, id);
     }
     if (const auto r = rooms_.find(it->second.user); r != rooms_.end()) {
         Room& room = *r->second;
@@ -176,20 +168,27 @@ void Presence::watch(PresenceClientId id, const core::UserId& user) {
     }
     Client& client = c->second;
     const auto known = rooms_.find(user);
-    if (std::ranges::find(client.watching, user) != client.watching.end()) {
-        tell(*client.client, "watching", *known->second);
+    Room* room = known == rooms_.end() ? nullptr : known->second.get();
+    if (room != nullptr && std::ranges::find(client.watching, room) != client.watching.end()) {
+        tell(*client.client, "watching", *room);
         return;
     }
     std::string refusal;
-    if (client.watching.size() >= limits_.max_watches_per_client) {
+    if (user == client.user) {
+        // The connection asking is itself the answer; watching it would only cost events.
+        write_user_error(refusal, "watching_self", user);
+    } else if (client.watching.size() >= limits_.max_watches_per_client) {
         write_user_error(refusal, "too_many_watches", user);
-    } else if (known == rooms_.end()) {
+    } else if (room == nullptr && rooms_.size() >= limits_.max_rooms) {
+        write_user_error(refusal, "busy", user);
+    } else if (room == nullptr || room->local.empty()) {
+        // This node starts watching the user: a hello now, an unwatch later.
         const core::MonoTime now = clock_.now();
         const auto bucket =
             watch_joins_
                 .try_emplace(client.user, limits_.watch_burst, limits_.watches_per_second, now)
                 .first;
-        if (rooms_.size() >= limits_.max_rooms || !bucket->second.take(now)) {
+        if (!bucket->second.take(now)) {
             write_user_error(refusal, "busy", user);
         }
     }
@@ -198,7 +197,7 @@ void Presence::watch(PresenceClientId id, const core::UserId& user) {
         return;
     }
     Room& r = room_of(user);
-    client.watching.push_back(user);
+    client.watching.push_back(&r);
     r.local.push_back(id);
     tell(*client.client, "watching", r);
     wake(r);
@@ -206,12 +205,12 @@ void Presence::watch(PresenceClientId id, const core::UserId& user) {
 
 void Presence::unwatch(PresenceClientId id, const core::UserId& user) {
     const auto c = clients_.find(id.value);
-    if (c == clients_.end() || std::erase(c->second.watching, user) == 0) {
+    const auto r = rooms_.find(user);
+    if (c == clients_.end() || r == rooms_.end() ||
+        std::erase(c->second.watching, r->second.get()) == 0) {
         return;
     }
-    if (const auto r = rooms_.find(user); r != rooms_.end()) {
-        drop_watch(*r->second, id);
-    }
+    drop_watch(*r->second, id);
 }
 
 void Presence::drop_watch(Room& room, PresenceClientId id) noexcept {
@@ -223,6 +222,14 @@ void Presence::drop_watch(Room& room, PresenceClientId id) noexcept {
 // is not, a second hello or ack, change nothing. That is what lets every send be retried
 // without a key of its own, and a node act on the room's order alone.
 void Presence::delivered(Room& room, const rt::Message& message) noexcept {
+    // Seqs rise by one; a jump is events this node never got, among them perhaps a hello it
+    // owed an answer or an announcement it should know of. Nobody can tell whom a gap cost, so
+    // this node says again what it stands for, and whoever it cost does likewise.
+    if (message.seq > room.head + 1) {
+        ++counters_.gaps;
+        room.watching = room.watching && room.local.empty();
+        room.answer = room.answer || room.wanted();
+    }
     room.head = std::max(room.head, message.seq);
     // Only nodes speak in a presence room, each under the user's name; clients cannot reach
     // it (the envelope refuses version 8 room ids).
@@ -238,10 +245,17 @@ void Presence::delivered(Room& room, const rt::Message& message) noexcept {
         node = (node << 8U) | std::to_integer<std::uint64_t>(message.body[i]);
     }
     ++counters_.received;
-    const auto remember = [](std::vector<std::uint64_t>& nodes, std::uint64_t n) {
-        if (std::ranges::find(nodes, n) == nodes.end() && nodes.size() < kMaxNodesPerRoom) {
-            nodes.push_back(n);
+    const core::MonoTime now = clock_.now();
+    const auto remember = [now](std::vector<Room::Heard>& nodes, std::uint64_t n) {
+        const auto it = std::ranges::find(nodes, n, &Room::Heard::node);
+        if (it != nodes.end()) {
+            it->at = now;
+        } else if (nodes.size() < kMaxNodesPerRoom) {
+            nodes.push_back({.node = n, .at = now});
         }
+    };
+    const auto forget = [](std::vector<Room::Heard>& nodes, std::uint64_t n) {
+        std::erase_if(nodes, [n](const Room::Heard& h) { return h.node == n; });
     };
     try {
         switch (*kind) {
@@ -253,22 +267,15 @@ void Presence::delivered(Room& room, const rt::Message& message) noexcept {
             remember(room.watchers, node);
             break;
         case Kind::Unwatch:
-            std::erase(room.watchers, node);
+            forget(room.watchers, node);
             break;
         case Kind::Probe:
-        case Kind::Online: {
-            const core::MonoTime now = clock_.now();
-            const auto it = std::ranges::find(room.sources, node, &Room::Source::node);
-            if (it != room.sources.end()) {
-                it->heard = now;
-            } else if (room.sources.size() < kMaxNodesPerRoom) {
-                room.sources.push_back({.node = node, .heard = now});
-            }
+        case Kind::Online:
+            remember(room.sources, node);
             room.ack = room.ack || (*kind == Kind::Probe && node != tag_ && !room.local.empty());
             break;
-        }
         case Kind::Offline:
-            std::erase_if(room.sources, [node](const Room::Source& s) { return s.node == node; });
+            forget(room.sources, node);
             break;
         }
     } catch (const std::bad_alloc&) {
@@ -307,12 +314,18 @@ void Presence::pump(Room& room, core::MonoTime now) {
     room.retry_at.reset();
     if (!room.joined) {
         if (!room.joining && !idle(room)) {
+            // Set first: the answer may come inside the call.
             room.joining = true;
-            rooms_plane_.join(room.id, room,
-                              [this, user = room.user](
-                                  std::expected<std::uint64_t, rt::RouteError> result) noexcept {
-                                  joined(user, result);
-                              });
+            try {
+                rooms_plane_.join(room.id, room,
+                                  [this, user = room.user](
+                                      std::expected<std::uint64_t, rt::RouteError> r) noexcept {
+                                      joined(user, r);
+                                  });
+            } catch (...) {
+                room.joining = false;
+                throw;
+            }
         }
         return;
     }
@@ -321,14 +334,15 @@ void Presence::pump(Room& room, core::MonoTime now) {
     }
     const bool wanted = room.wanted();
     const bool watched_elsewhere =
-        std::ranges::any_of(room.watchers, [this](std::uint64_t n) { return n != tag_; });
-    if (wanted && !room.announced && (room.head > 0 || room.answer)) {
+        std::ranges::any_of(room.watchers, [this](const Room::Heard& h) { return h.node != tag_; });
+    const bool renew = room.announced && now >= room.refresh_at && watched_elsewhere;
+    if (wanted && ((!room.announced && (room.head > 0 || room.answer)) || renew)) {
+        // A first announcement where someone may have been watching, or a renewal: either way
+        // the watching nodes answer, so that this node knows who still watches.
         post(room, Kind::Probe, now);
     } else if (!wanted && room.announced) {
         post(room, Kind::Offline, now);
-    } else if (wanted &&
-               (room.answer || (room.announced && now >= room.refresh_at && watched_elsewhere))) {
-        // An answer to a hello, or a renewal.
+    } else if (wanted && room.answer) {
         post(room, Kind::Online, now);
     } else if (room.local.empty() == room.watching) {
         post(room, room.watching ? Kind::Unwatch : Kind::Hello, now);
@@ -344,6 +358,25 @@ void Presence::post(Room& room, Kind kind, core::MonoTime now) {
     if (!key) {
         return;
     }
+    std::vector<std::byte> body(kEventSize);
+    body[0] = static_cast<std::byte>(kind);
+    for (std::size_t i = 1; i < kEventSize; ++i) {
+        body[i] = static_cast<std::byte>(tag_ >> (8U * (kEventSize - 1 - i)));
+    }
+    // What the send stands for is set before it, since its answer may come inside the call,
+    // and put back if the call throws, as though it had never been made.
+    struct Before {
+        bool announced = false;
+        bool answer = false;
+        core::MonoTime refresh_at;
+        bool watching = false;
+        bool ack = false;
+    };
+    const Before before{.announced = room.announced,
+                        .answer = room.answer,
+                        .refresh_at = room.refresh_at,
+                        .watching = room.watching,
+                        .ack = room.ack};
     switch (kind) {
     case Kind::Probe:
     case Kind::Online:
@@ -364,18 +397,23 @@ void Presence::post(Room& room, Kind kind, core::MonoTime now) {
         room.ack = false;
         break;
     }
-    std::vector<std::byte> body(kEventSize);
-    body[0] = static_cast<std::byte>(kind);
-    for (std::size_t i = 1; i < kEventSize; ++i) {
-        body[i] = static_cast<std::byte>(tag_ >> (8U * (kEventSize - 1 - i)));
-    }
     room.sending = true;
+    try {
+        rooms_plane_.send(room.id, room, room.user, *key, std::move(body),
+                          [this, user = room.user,
+                           kind](std::expected<std::uint64_t, rt::RouteError> result) noexcept {
+                              posted(user, kind, result);
+                          });
+    } catch (...) {
+        room.announced = before.announced;
+        room.answer = before.answer;
+        room.refresh_at = before.refresh_at;
+        room.watching = before.watching;
+        room.ack = before.ack;
+        room.sending = false;
+        throw;
+    }
     ++counters_.sent;
-    rooms_plane_.send(room.id, room, room.user, *key, std::move(body),
-                      [this, user = room.user,
-                       kind](std::expected<std::uint64_t, rt::RouteError> result) noexcept {
-                          posted(user, kind, result);
-                      });
 }
 
 // A failed send may or may not have been sequenced. Either way it is sent again if the state
@@ -418,11 +456,12 @@ void Presence::expire(Room& room, core::MonoTime now) noexcept {
     if (room.grace_ends && now >= *room.grace_ends && room.connections == 0) {
         room.grace_ends.reset();
     }
-    // This node's own announcement is known here first-hand; only other nodes' run out.
-    const auto erased = std::erase_if(room.sources, [&](const Room::Source& s) {
-        return s.node != tag_ && now - s.heard >= limits_.expiry;
-    });
-    counters_.expired += erased;
+    // This node's own announcement and watch are known here first-hand; only other nodes'
+    // run out.
+    const auto stale = [&](const Room::Heard& h) {
+        return h.node != tag_ && now - h.at >= limits_.expiry;
+    };
+    counters_.expired += std::erase_if(room.sources, stale) + std::erase_if(room.watchers, stale);
     show(room);
 }
 

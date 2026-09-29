@@ -896,6 +896,19 @@ TEST_P(ChatClusterTest, AReconnectWithinTheGraceIsNoEventAndALeaveIsOneOfflineOn
         EXPECT_EQ(watchers[i]->count(presence("offline")), 1U) << nodes_[i].name;
         EXPECT_EQ(watchers[i]->count(is_presence), 2U) << nodes_[i].name;
     }
+    // Sequenced like any room's, and kept nowhere.
+    auto conn = db_->session();
+    const std::string sequenced = ulw::test::scalar(
+        conn, "SELECT coalesce(sum(last_seq), 0) FROM room_state WHERE kind = 'presence'",
+        Params{});
+    EXPECT_NE(sequenced, "0");
+    EXPECT_EQ(
+        ulw::test::scalar(conn,
+                          "SELECT count(*) FROM chat_messages JOIN room_state USING (room_id) "
+                          "WHERE kind = 'presence'",
+                          Params{}),
+        "0");
+    std::cout << "presence rooms took " << sequenced << " seqs and stored no row\n";
     std::cout << "alice reconnected through chat-2 within the " << kGrace.count()
               << " ms grace: no event on any node; she left: one offline on each of "
               << nodes_.size() << " nodes\n";

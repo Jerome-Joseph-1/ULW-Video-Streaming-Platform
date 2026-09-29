@@ -65,7 +65,11 @@ public:
                 }
                 const std::uint64_t seq = ++heads_[s.room];
                 ++sequenced[s.room];
-                const std::vector<rt::IMember*> to = members_[s.room];
+                std::vector<rt::IMember*> to = members_[s.room];
+                if (const auto lost = losing_.find(s.room); lost != losing_.end()) {
+                    std::erase(to, lost->second);
+                    losing_.erase(lost);
+                }
                 for (rt::IMember* m : to) {
                     m->deliver({.room = s.room,
                                 .seq = seq,
@@ -79,6 +83,29 @@ public:
     }
 
     [[nodiscard]] std::size_t members(const core::RoomId& room) { return members_[room].size(); }
+
+    // The room's next event reaches every member but the one that joined `nth` (from 0), as
+    // when an owner dies between its deliveries.
+    void lose_next(const core::RoomId& room, std::size_t nth) {
+        losing_.insert_or_assign(room, members_[room].at(nth));
+    }
+
+    // Another node takes the room over. Sends still waiting for their seq are lost with the old
+    // owner (their senders hear unavailable), and the new owner answers joins from where the
+    // store's count stands, as rt::RoomRegistry::taken_at has it.
+    void new_owner(const core::RoomId& room) {
+        std::vector<Sending> lost;
+        std::erase_if(sends_, [&](Sending& s) {
+            if (s.room != room) {
+                return false;
+            }
+            lost.push_back(std::move(s));
+            return true;
+        });
+        for (Sending& s : lost) {
+            s.done(std::unexpected(rt::RouteError::Unavailable));
+        }
+    }
 
     // Sends to answer `unavailable` before sequencing any.
     int failing = 0;
@@ -103,6 +130,7 @@ private:
     std::vector<Sending> sends_;
     std::map<core::RoomId, std::vector<rt::IMember*>> members_;
     std::map<core::RoomId, std::uint64_t> heads_;
+    std::map<core::RoomId, rt::IMember*> losing_;
 };
 
 struct Event {
@@ -428,6 +456,86 @@ TEST_F(PresenceTest, WatchingTheSameUserTwiceAnswersTwiceAndJoinsOnce) {
               (std::vector{watching("alice", "offline"), watching("alice", "offline")}));
     EXPECT_EQ(plane_.members(chat::presence_room(user("alice"))), 1U);
     EXPECT_EQ(plane_.sequenced[chat::presence_room(user("alice"))], 1U) << "one hello";
+}
+
+TEST_F(PresenceTest, AStandingHelloIsAnsweredByAUserWhoConnectsAfterTheRoomChangedOwners) {
+    Watcher bob;
+    node(1).watch(connect(1, bob, "bob"), user("alice"));
+    run();
+    ASSERT_EQ(bob.take(), std::vector{watching("alice", "offline")});
+    plane_.new_owner(chat::presence_room(user("alice")));
+    Watcher alice;
+    connect(0, alice, "alice");
+    EXPECT_EQ(bob.take(), std::vector{presence("alice", "online")})
+        << "the new owner's join answer showed the hello, and alice's node probed";
+}
+
+TEST_F(PresenceTest, AWatcherThatMissedAnAnnouncementSaysHelloAgainAtTheGap) {
+    const core::RoomId room = chat::presence_room(user("alice"));
+    Watcher bob;
+    Watcher carol;
+    node(1).watch(connect(1, bob, "bob"), user("alice"));
+    run();
+    node(2).watch(connect(2, carol, "carol"), user("alice"));
+    run();
+    bob.take();
+    carol.take();
+    // chat-2 joined the room first. alice's probe reaches everyone but it; chat-3's ack to
+    // the probe is the next thing chat-2 hears, a seq past the one it last saw.
+    plane_.lose_next(room, 0);
+    Watcher alice;
+    connect(0, alice, "alice");
+    EXPECT_EQ(carol.take(), std::vector{presence("alice", "online")});
+    EXPECT_EQ(bob.take(), std::vector{presence("alice", "online")})
+        << "not a minute later, at the renewal";
+    EXPECT_EQ(node(1).counters().gaps, 1U);
+}
+
+TEST_F(PresenceTest, WatchingAndUnwatchingInALoopIsHeldToTheWatchBucket) {
+    Watcher bob;
+    connect(1, bob, "bob");
+    Watcher mallory;
+    const auto m = connect(1, mallory, "mallory");
+    const std::uint64_t before = sent();
+    for (int i = 0; i < 1'000; ++i) {
+        node(1).watch(m, user("bob"));
+        run();
+        node(1).unwatch(m, user("bob"));
+        run();
+    }
+    // The burst of 128 starts, each a hello, bob's node answering it, and an unwatch; the
+    // other 872 are refused.
+    EXPECT_EQ(sent() - before, 3U * 128U);
+    const auto refused = std::ranges::count(mallory.got, "busy", &Event::reason);
+    EXPECT_EQ(refused, 1'000 - 128);
+}
+
+TEST_F(PresenceTest, AUserCannotWatchThemselves) {
+    Watcher alice;
+    node(0).watch(connect(0, alice, "alice"), user("alice"));
+    run();
+    EXPECT_EQ(alice.take(),
+              std::vector{(Event{
+                  .type = "error", .user = "alice", .status = {}, .reason = "watching_self"})});
+    EXPECT_EQ(sent(), 0U);
+}
+
+TEST_F(PresenceTest, RenewalsStopOnceTheOnlyNodeWatchingHasDied) {
+    Watcher bob;
+    node(1).watch(connect(1, bob, "bob"), user("alice"));
+    Watcher alice;
+    connect(0, alice, "alice");
+    advance(Millis{120'000});
+    const std::uint64_t renewing = node(0).counters().sent;
+    EXPECT_GE(renewing, 3U) << "the probe and two renewals";
+    // chat-2 dies; nothing more acks chat-1's renewals, and after the expiry it stops.
+    nodes_[1].reset();
+    run();
+    advance(Millis{200'000});
+    const std::uint64_t stopped = node(0).counters().sent;
+    EXPECT_LE(stopped - renewing, 3U);
+    advance(Millis{600'000});
+    EXPECT_EQ(node(0).counters().sent, stopped);
 }
 
 } // namespace

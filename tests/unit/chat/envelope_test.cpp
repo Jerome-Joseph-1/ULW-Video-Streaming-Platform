@@ -145,13 +145,15 @@ TEST(Envelope, WatchAndUnwatchNameAUser) {
               std::unexpected(EnvelopeError::BadUser));
 }
 
-TEST(Envelope, APresenceRoomCannotBeJoinedOrSentToAsAChatRoom) {
+TEST(Envelope, APresenceRoomCannotBeJoinedSentToOrReadAsAChatRoom) {
     const std::string presence = chat::presence_room(*core::UserId::parse("bob")).to_string();
     EXPECT_EQ(chat::parse_command(R"({"type":"join","room":")" + presence + R"("})"),
               std::unexpected(EnvelopeError::BadRoom));
     EXPECT_EQ(
         chat::parse_command(R"({"type":"send","room":")" + presence + R"(","id":"a","body":""})"),
         std::unexpected(EnvelopeError::BadRoom));
+    EXPECT_EQ(chat::parse_command(R"({"type":"history","room":")" + presence + R"("})"),
+              std::unexpected(EnvelopeError::BadRoom));
 }
 
 TEST(Envelope, AMessageReturnsItsBodyBytesExactlyAndItsId) {
