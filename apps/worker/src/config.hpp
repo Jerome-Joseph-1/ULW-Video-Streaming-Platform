@@ -37,6 +37,8 @@ struct Config {
     std::string search_path;
     unsigned ffmpeg_threads = 1;
     ops::Level log_level = ops::Level::Info;
+    // Who to become when started as root; empty stays root, with a warning.
+    std::string run_as_user;
 };
 
 struct ConfigError {

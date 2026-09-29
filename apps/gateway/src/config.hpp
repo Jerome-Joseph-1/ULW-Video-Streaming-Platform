@@ -47,6 +47,8 @@ struct Config {
     // The size every chunk but an upload's last has, and the object store's part size.
     std::uint64_t chunk_size = std::uint64_t{8} << 20U;
     ops::Level log_level = ops::Level::Info;
+    // Who to become when started as root; empty stays root, with a warning.
+    std::string run_as_user;
     Limits limits;
 };
 

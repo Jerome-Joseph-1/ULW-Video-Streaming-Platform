@@ -10,6 +10,7 @@
 #include "net/socket.hpp"
 #include "net/transport.hpp"
 #include "os/limits.hpp"
+#include "os/privileges.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
@@ -27,6 +28,7 @@
 #include <cstdlib>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -74,6 +76,30 @@ int fail(ops::Logger& log, std::string_view what, std::string_view why) {
 int refuse(ops::Logger& log, std::string_view source, std::string_view reason) {
     log.error("configuration refused", {{"source", source}, {"reason", reason}});
     return kExitConfig;
+}
+
+// Started as root (by hand, or by a supervisor that stays root to raise a limit), the process
+// becomes the configured user before it opens a socket or starts a thread; not root, there is
+// nothing to give up. nullopt means carry on, anything else is the exit code.
+std::optional<int> leave_root(const std::string& user, ops::Logger& log) {
+    if (!os::is_root()) {
+        return std::nullopt;
+    }
+    if (user.empty()) {
+        // Every deployment starts unprivileged (the images' USER, the units' User=), so root
+        // here is a developer's shell or a test harness, which refusing would only break.
+        log.warn("running as root; set ULW_RUN_AS_USER to drop to an unprivileged user");
+        return std::nullopt;
+    }
+    const auto identity = os::resolve_user(user);
+    if (!identity) {
+        return refuse(log, "ULW_RUN_AS_USER", identity.error());
+    }
+    if (auto r = os::drop_privileges(*identity); !r) {
+        return fail(log, "drop privileges", r.error());
+    }
+    log.info("dropped root", {{"user", user}, {"uid", identity->uid}, {"gid", identity->gid}});
+    return std::nullopt;
 }
 
 // Owns everything the gateway borrows, in construction order, so that destruction runs in
@@ -352,6 +378,10 @@ int run(std::span<const std::string_view> args) {
     boot.set_threshold(config->log_level);
     boot.info("starting", {{"version", info.version}, {"git_sha", info.git_sha}});
     gateway::log_effective(*config, *layers, boot);
+    // Before any thread exists: glibc then has no other thread to carry the change to.
+    if (const auto code = leave_root(config->run_as_user, boot)) {
+        return *code;
+    }
 
     // Before any thread exists, so every thread inherits the mask.
     if (auto r = net::block_shutdown_signals(); !r) {

@@ -28,6 +28,7 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_MAX_CONNECTIONS", .key = "limits.max_connections"},
     ops::Setting{.env = "ULW_MAX_UPLOAD_SLOTS", .key = "limits.max_upload_slots"},
     ops::Setting{.env = "ULW_MAX_UPLOADS_PER_USER", .key = "limits.max_uploads_per_user"},
+    ops::Setting{.env = "ULW_RUN_AS_USER", .key = "process.user"},
     ops::Setting{.env = "ULW_STORAGE", .key = "storage.backend"},
     ops::Setting{.env = "ULW_R2_ACCOUNT_ID", .key = "storage.r2_account_id"},
     ops::Setting{.env = "ULW_S3_ENDPOINT", .key = "storage.s3_endpoint"},
@@ -348,6 +349,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (auto r = load_limits(env, config); !r) {
         return std::unexpected(std::move(r.error()));
     }
+    config.run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or("");
     return config;
 }
 
@@ -375,7 +377,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         }
         return {"r2", "ULW_R2_ACCOUNT_ID"};
     }();
-    const std::array<std::pair<std::string_view, std::string>, 21> values{{
+    const std::array<std::pair<std::string_view, std::string>, 22> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -385,6 +387,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_MAX_CONNECTIONS", std::to_string(config.limits.max_connections)},
         {"ULW_MAX_UPLOAD_SLOTS", std::to_string(config.limits.max_upload_slots)},
         {"ULW_MAX_UPLOADS_PER_USER", std::to_string(config.limits.max_uploads_per_user)},
+        {"ULW_RUN_AS_USER", config.run_as_user},
         {"ULW_STORAGE", std::string(storage)},
         {location_variable, config.storage_location},
         {"ULW_FS_READ_URL", config.limits.local_read_url},

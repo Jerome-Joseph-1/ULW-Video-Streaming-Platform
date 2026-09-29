@@ -51,6 +51,16 @@ TEST_F(WorkerConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->ffmpeg_threads, 4U);
 }
 
+TEST_F(WorkerConfigTest, TheUserToDropToIsOptionalAndTakenAsGiven) {
+    const auto unset = load();
+    ASSERT_TRUE(unset);
+    EXPECT_TRUE(unset->run_as_user.empty());
+    env["ULW_RUN_AS_USER"] = "ulw";
+    const auto set = load();
+    ASSERT_TRUE(set);
+    EXPECT_EQ(set->run_as_user, "ulw");
+}
+
 TEST_F(WorkerConfigTest, EachRequiredVariableIsNamedWhenMissing) {
     for (const std::string name : {"ULW_DATABASE_URL", "ULW_R2_ACCOUNT_ID", "ULW_BUCKET"}) {
         const std::string saved = env.at(name);

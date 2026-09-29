@@ -30,6 +30,7 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_FFMPEG_THREADS", .key = "ffmpeg.threads"},
     ops::Setting{.env = "PATH", .key = ""},
     ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
+    ops::Setting{.env = "ULW_RUN_AS_USER", .key = "process.user"},
     // Read by the store's credential provider; here only to be checked for.
     ops::Setting{.env = "ULW_S3_ACCESS_KEY_ID", .key = "", .secret = true},
     ops::Setting{.env = "ULW_S3_SECRET_ACCESS_KEY", .key = "", .secret = true},
@@ -210,7 +211,8 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .ffmpeg_threads = threads,
-                  .log_level = level};
+                  .log_level = level,
+                  .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or("")};
 }
 
 void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log) {
@@ -226,7 +228,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         }
         return {"r2", "ULW_R2_ACCOUNT_ID"};
     }();
-    const std::array<std::pair<std::string_view, std::string>, 12> values{{
+    const std::array<std::pair<std::string_view, std::string>, 13> values{{
         {"ULW_DATABASE_URL", config.database_url},
         {"ULW_STORAGE", std::string(storage)},
         {location_variable, config.storage_location},
@@ -239,6 +241,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_FFMPEG_THREADS", std::to_string(config.ffmpeg_threads)},
         {"PATH", config.search_path},
         {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
+        {"ULW_RUN_AS_USER", config.run_as_user},
     }};
     for (const auto& [variable, value] : values) {
         if (value.empty()) {
