@@ -149,6 +149,8 @@ private:
         phase_ = Phase::Open;
     }
 
+    // feed() and encode() allocate, so a failed allocation here terminates the process: fine for
+    // a test server, a decision still to make for the chat server (ADR-0029).
     void echo(net::BorrowedBytes bytes) noexcept {
         codec::ws::Decoded decoded = decoder_.feed(bytes);
         for (codec::ws::Frame& frame : decoded.frames) {
