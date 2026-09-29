@@ -28,10 +28,9 @@ inline constexpr std::size_t kMaxHistoryRows = 256;
 inline constexpr std::size_t kMaxMembersPage = 1024;
 
 enum class MessageStoreError : std::uint8_t {
-    // Unreachable, timed out, or lost a race with a concurrent write of the same seq; the call
-    // may be repeated.
+    // Unreachable, timed out, or lost a race with a concurrent write; the call may be repeated.
     Unavailable,
-    // The seq is already stored with a different sender or body. Nothing was written.
+    // A write that disagrees with what is stored under the same seq. Nothing was written.
     Conflict,
     // The body is larger than kMaxMessageBody. Nothing was written.
     TooLarge,
@@ -53,21 +52,15 @@ struct StoredMessage {
     friend bool operator==(const StoredMessage&, const StoredMessage&) = default;
 };
 
-// Where a room's sequenced messages and its members are kept. Bodies are opaque bytes, end to
-// end: they are stored and returned exactly, and never parsed, logged or indexed. Plaintext
-// today and MLS ciphertext later are the same thing to the store.
+// Where a room's sequenced messages are read back, and its members kept. Bodies are opaque
+// bytes, end to end: they are stored and returned exactly, and never parsed, logged or indexed.
+// Plaintext today and MLS ciphertext later are the same thing to the store.
+//
+// Messages are written by the room's owner, in the same fenced write that takes their seq
+// (ADR-0039), so no seq is ever taken without its message; this port has no writer of its own.
 class IMessageStore {
 public:
     virtual ~IMessageStore() = default;
-
-    // Stores a message under a `seq` (from 1) taken elsewhere, for stores whose sequence counter
-    // is not beside the messages. A room store that keeps both writes them in one step instead
-    // (ADR-0039), so that no seq exists without its message. Idempotent: appending a seq again
-    // with the same sender and body succeeds and keeps the first sent_at, so a write whose
-    // answer was lost can be repeated. Any other sender or body is Conflict.
-    virtual void append(const RoomId& room, std::uint64_t seq, const UserId& sender,
-                        std::vector<std::byte> body, WallTime sent_at,
-                        MessageCallback<void> done) = 0;
 
     // Messages below `before` (the newest when nullopt), newest first: scrolling back.
     // Messages above `after`, oldest first: resuming from the last seq a client saw.
@@ -79,7 +72,8 @@ public:
     virtual void history_after(const RoomId& room, std::uint64_t after, std::size_t limit,
                                MessageCallback<std::vector<StoredMessage>> done) = 0;
 
-    // The highest seq stored for the room, 0 for none.
+    // The room's sequence counter, the one source of the last seq its owner took; 0 for a room
+    // with none. A seq taken with its message is also the newest stored one.
     virtual void last_seq(const RoomId& room, MessageCallback<std::uint64_t> done) = 0;
 
     // Both idempotent.

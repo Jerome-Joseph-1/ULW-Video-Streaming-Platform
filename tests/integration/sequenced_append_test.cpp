@@ -181,50 +181,38 @@ TEST_F(SequencedAppendTest, AnInsertThatFailsGivesTheSeqBack) {
     EXPECT_EQ(last_seq(room), "0");
 }
 
-TEST_F(SequencedAppendTest, OneStatementCostsOneCommitWhereTwoWritesCostTwo) {
+TEST_F(SequencedAppendTest, StoringTheMessageCostsWhatTakingTheSeqAloneDoes) {
     // An owner writes a room's messages one at a time (ADR-0035), each before delivery: these
-    // are per-message latencies of a durable room, and their inverse its ceiling.
+    // are per-message latencies of a durable room. Reported, not asserted: they measure the
+    // host as much as the statement.
     constexpr std::size_t kCount = 300;
-    const core::RoomId together = new_room();
-    const core::RoomId apart = new_room();
-    const std::uint64_t g_together = owned_by(together, a_);
-    const std::uint64_t g_apart = owned_by(apart, a_);
+    const core::RoomId with_row = new_room();
+    const core::RoomId seq_only = new_room();
+    const std::uint64_t g_with_row = owned_by(with_row, a_);
+    const std::uint64_t g_seq_only = owned_by(seq_only, a_);
     std::vector<double> combined;
-    std::vector<double> seq_then_row;
-    std::vector<double> seq_only;
+    std::vector<double> alone;
     for (std::size_t i = 0; i < kCount; ++i) {
         auto started = std::chrono::steady_clock::now();
-        ASSERT_TRUE(send(together, g_together, "a line of chat, about forty bytes long"));
+        ASSERT_TRUE(send(with_row, g_with_row, "a line of chat, about forty bytes long"));
         combined.push_back(millis(std::chrono::steady_clock::now() - started));
 
         started = std::chrono::steady_clock::now();
-        const auto seq = ask<std::optional<std::uint64_t>>(
-            [&](auto done) { rooms_->append(apart, g_apart, std::move(done)); });
-        ASSERT_TRUE(seq && *seq);
-        const auto mid = std::chrono::steady_clock::now();
-        ASSERT_TRUE(ulw::test::ask<void>(*reactor_, [&](auto done) {
-            messages_->append(apart, **seq, alice_, bytes("a line of chat, about forty bytes long"),
-                              at(0), std::move(done));
-        }));
-        seq_only.push_back(millis(mid - started));
-        seq_then_row.push_back(millis(std::chrono::steady_clock::now() - started));
+        ASSERT_TRUE(ask<std::optional<std::uint64_t>>(
+            [&](auto done) { rooms_->append(seq_only, g_seq_only, std::move(done)); }));
+        alone.push_back(millis(std::chrono::steady_clock::now() - started));
     }
-    const auto quantile = [](std::vector<double>& samples, double q) {
-        std::ranges::sort(samples);
-        return samples[static_cast<std::size_t>(q * static_cast<double>(samples.size() - 1))];
-    };
     const auto report = [&](std::string_view name, std::vector<double>& samples) {
-        const double p50 = quantile(samples, 0.5);
-        const double p99 = quantile(samples, 0.99);
-        std::println("{}: p50 {:.3f} ms, p99 {:.3f} ms", name, p50, p99);
-        RecordProperty(std::format("{}_p50_ms", name), std::format("{:.3f}", p50));
-        return p50;
+        std::ranges::sort(samples);
+        const auto at_quantile = [&](double q) {
+            return samples[static_cast<std::size_t>(q * static_cast<double>(samples.size() - 1))];
+        };
+        std::println("{}: p50 {:.3f} ms, p99 {:.3f} ms", name, at_quantile(0.5), at_quantile(0.99));
+        RecordProperty(std::format("{}_p50_ms", name), std::format("{:.3f}", at_quantile(0.5)));
+        RecordProperty(std::format("{}_p99_ms", name), std::format("{:.3f}", at_quantile(0.99)));
     };
-    const double one = report("seq_and_row_in_one_statement", combined);
-    const double two = report("seq_then_row_as_two_statements", seq_then_row);
-    report("seq_alone", seq_only);
-    // Loose: a single statement must not cost more than the two it replaces.
-    EXPECT_LT(one, two * 1.5);
+    report("seq_and_row_in_one_statement", combined);
+    report("seq_alone", alone);
 }
 
 } // namespace

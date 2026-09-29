@@ -24,8 +24,9 @@ struct MessageStoreConfig {
 };
 
 // IMessageStore on Postgres (migrations/0005_chat_messages.sql), driven by the reactor: no call
-// blocks the loop. Bodies travel as bound binary parameters and come back as bytea hex text;
-// neither they nor anything derived from them reaches a log or an error.
+// blocks the loop. It only reads messages; PgRoomStore::append_message writes them. Bodies come
+// back in bytea's hex text form, and neither they nor anything derived from them reaches a log
+// or an error.
 //
 // The offload pool resolves host names and must be stopped before this is destroyed. Calls
 // outstanding at destruction are dropped unanswered.
@@ -49,9 +50,6 @@ public:
     PgMessageStore(PgMessageStore&&) = delete;
     PgMessageStore& operator=(PgMessageStore&&) = delete;
 
-    void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
-                std::vector<std::byte> body, core::WallTime sent_at,
-                core::ports::MessageCallback<void> done) override;
     void history_before(
         const core::RoomId& room, std::optional<std::uint64_t> before, std::size_t limit,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;

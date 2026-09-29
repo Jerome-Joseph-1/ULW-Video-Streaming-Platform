@@ -4,7 +4,6 @@
 #include "operation.hpp"
 #include "pool.hpp"
 #include "result.hpp"
-#include "timer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -29,10 +28,6 @@ using core::ports::StoredMessage;
 std::int64_t as_int(std::uint64_t n) noexcept {
     return static_cast<std::int64_t>(
         std::min<std::uint64_t>(n, std::numeric_limits<std::int64_t>::max()));
-}
-
-std::int64_t micros_since_epoch(core::WallTime t) noexcept {
-    return std::chrono::floor<std::chrono::microseconds>(t.time_since_epoch()).count();
 }
 
 // One statement that binds nothing borrowed, and whose outcome `decode` turns into the answer.
@@ -63,21 +58,6 @@ private:
     Decode decode_;
     MessageCallback<T> done_;
 };
-
-MessageResult<void> decode_append(const Result& r) {
-    if (r.get(0, 0).and_then(parse_bool) == true) {
-        return {};
-    }
-    const auto same = r.get(0, 1);
-    if (!same) {
-        return std::unexpected(MessageStoreError::Unavailable);
-    }
-    const auto equal = parse_bool(*same);
-    if (!equal) {
-        return std::unexpected(MessageStoreError::Corrupt);
-    }
-    return *equal ? MessageResult<void>{} : std::unexpected(MessageStoreError::Conflict);
-}
 
 MessageResult<std::vector<StoredMessage>> decode_page(const Result& r) {
     std::vector<StoredMessage> page;
@@ -120,45 +100,6 @@ MessageResult<std::vector<core::UserId>> decode_members(const Result& r) {
     }
     return members;
 }
-
-class Append final : public Operation {
-public:
-    Append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
-           std::vector<std::byte> body, core::WallTime sent_at, MessageCallback<void> done)
-        : room_(room), seq_(seq), sender_(sender), body_(std::move(body)),
-          sent_at_(micros_since_epoch(sent_at)), done_(std::move(done)) {}
-
-    [[nodiscard]] Statement start() noexcept override {
-        return Statement{.sql = message_sql::kAppend,
-                         .params = Params{}
-                                       .add_uuid(room_.uuid())
-                                       .add_int(as_int(seq_))
-                                       .add_text(sender_.view())
-                                       .add_bytea(body_)
-                                       .add_int(sent_at_)};
-    }
-
-    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
-        if (!outcome) {
-            done_(std::unexpected(MessageStoreError::Unavailable));
-        } else {
-            done_(decode_append(*outcome));
-        }
-        return std::nullopt;
-    }
-
-    void abandon(DbError /*error*/) noexcept override {
-        done_(std::unexpected(MessageStoreError::Unavailable));
-    }
-
-private:
-    core::RoomId room_;
-    std::uint64_t seq_;
-    core::UserId sender_;
-    std::vector<std::byte> body_;
-    std::int64_t sent_at_;
-    MessageCallback<void> done_;
-};
 
 // The members call binds the id it pages after; it has to outlive the statement.
 class Members final : public Operation {
@@ -232,29 +173,12 @@ private:
 
 class PgMessageStore::Impl {
 public:
-    Impl(net::IReactor& reactor, std::unique_ptr<Pool> pool) noexcept
-        : pool_(std::move(pool)), refuse_(reactor, [this]() noexcept { answer_refused(); }) {}
+    explicit Impl(std::unique_ptr<Pool> pool) noexcept : pool_(std::move(pool)) {}
 
     [[nodiscard]] Pool& pool() noexcept { return *pool_; }
 
-    // Answered on the next iteration, never from inside the call that was refused.
-    void refuse(MessageCallback<void> done) {
-        refused_.push_back(std::move(done));
-        refuse_.arm_unless_armed(core::Millis{0});
-    }
-
 private:
-    void answer_refused() noexcept {
-        std::vector<MessageCallback<void>> batch;
-        batch.swap(refused_);
-        for (auto& done : batch) {
-            done(std::unexpected(MessageStoreError::TooLarge));
-        }
-    }
-
     std::unique_ptr<Pool> pool_;
-    std::vector<MessageCallback<void>> refused_;
-    Timer refuse_;
 };
 
 std::expected<std::unique_ptr<PgMessageStore>, std::string>
@@ -269,25 +193,13 @@ PgMessageStore::create(net::IReactor& reactor, net::OffloadPool& offload,
     if (!pool) {
         return std::unexpected(std::move(pool.error()));
     }
-    return std::make_unique<PgMessageStore>(Token{},
-                                            std::make_unique<Impl>(reactor, std::move(*pool)));
+    return std::make_unique<PgMessageStore>(Token{}, std::make_unique<Impl>(std::move(*pool)));
 }
 
 PgMessageStore::PgMessageStore(Token /*token*/, std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
 
 PgMessageStore::~PgMessageStore() = default;
-
-void PgMessageStore::append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
-                            std::vector<std::byte> body, core::WallTime sent_at,
-                            MessageCallback<void> done) {
-    if (body.size() > core::ports::kMaxMessageBody) {
-        impl_->refuse(std::move(done));
-        return;
-    }
-    impl_->pool().submit(
-        std::make_unique<Append>(room, seq, sender, std::move(body), sent_at, std::move(done)));
-}
 
 void PgMessageStore::history_before(const core::RoomId& room, std::optional<std::uint64_t> before,
                                     std::size_t limit,

@@ -13,7 +13,8 @@ namespace infra::messages {
 
 // The message store without a database, for tests and single-process development. Same
 // contract as the durable one: answers arrive on a later loop iteration, and sent_at keeps
-// microseconds, as a timestamptz does.
+// microseconds, as a timestamptz does. It keeps no sequence counter, so it has a writer of its
+// own: whatever takes the seq appends the message here, and last_seq is the highest stored.
 class MemoryMessageStore final : public core::ports::IMessageStore, public net::ITimerHandler {
 public:
     explicit MemoryMessageStore(net::IReactor& reactor);
@@ -23,9 +24,12 @@ public:
     MemoryMessageStore(MemoryMessageStore&&) = delete;
     MemoryMessageStore& operator=(MemoryMessageStore&&) = delete;
 
+    // Stores a message under `seq` (from 1). Idempotent: the same seq with the same sender and
+    // body succeeds and keeps the first sent_at; any other is Conflict. Over kMaxMessageBody is
+    // TooLarge.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
                 std::vector<std::byte> body, core::WallTime sent_at,
-                core::ports::MessageCallback<void> done) override;
+                core::ports::MessageCallback<void> done);
     void history_before(
         const core::RoomId& room, std::optional<std::uint64_t> before, std::size_t limit,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;

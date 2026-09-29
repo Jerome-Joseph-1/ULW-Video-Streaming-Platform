@@ -289,8 +289,8 @@ ulw_add_test_suite(message_store_conformance_tests conformance
     conformance/message_store_conformance_test.cpp
     integration/postgres_harness.cpp
     PROPERTIES RESOURCE_LOCK postgres)
-target_link_libraries(message_store_conformance_tests PRIVATE ulw::messages_memory ulw::pg_store
-    PkgConfig::LIBPQ)
+target_link_libraries(message_store_conformance_tests PRIVATE ulw::messages_memory ulw::pg_rooms
+    ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(message_store_conformance_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 

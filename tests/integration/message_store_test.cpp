@@ -2,6 +2,7 @@
 // what it wrote outlives the process that wrote it. The behaviour it shares with the in-memory
 // store is in conformance/message_store_conformance_test.cpp.
 #include "infra/postgres/message_store.hpp"
+#include "infra/postgres/room_store.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor_factory.hpp"
 #include "os/system_clock.hpp"
@@ -90,10 +91,15 @@ protected:
         auto store = PgMessageStore::create(*reactor_, *offload_, {.conninfo = db_->conninfo()});
         ASSERT_TRUE(store) << store.error();
         store_ = std::move(*store);
+        auto rooms = infra::postgres::PgRoomStore::create(*reactor_, *offload_,
+                                                          {.conninfo = db_->conninfo()});
+        ASSERT_TRUE(rooms) << rooms.error();
+        rooms_ = std::move(*rooms);
     }
 
     void stop() {
         offload_.reset();
+        rooms_.reset();
         store_.reset();
         reactor_.reset();
     }
@@ -102,10 +108,20 @@ protected:
         return ulw::test::ask<T>(*reactor_, std::move(call));
     }
 
-    MessageResult<void> append(const core::RoomId& room, std::uint64_t seq,
-                               std::vector<std::byte> body) {
-        return ask<void>([&](auto done) {
-            store_->append(room, seq, alice_, std::move(body), at(0), std::move(done));
+    // Takes the room as the owner would, and answers the generation to write under.
+    std::uint64_t own(const core::RoomId& room) {
+        const auto owner = ulw::test::ask_store<rt::Ownership>(
+            *reactor_, [&](auto done) { rooms_->resolve(room, node_, std::move(done)); });
+        EXPECT_TRUE(owner);
+        return owner ? owner->generation : 0;
+    }
+
+    // The owner's write: the room's next seq and the message's row.
+    rt::StoreResult<std::optional<std::uint64_t>>
+    write(const core::RoomId& room, std::uint64_t generation, std::vector<std::byte> body) {
+        return ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+            rooms_->append_message(room, generation, alice_, std::move(body), at(0),
+                                   std::move(done));
         });
     }
 
@@ -152,6 +168,8 @@ protected:
     std::unique_ptr<net::IReactor> reactor_;
     std::unique_ptr<net::OffloadPool> offload_;
     std::unique_ptr<PgMessageStore> store_;
+    std::unique_ptr<infra::postgres::PgRoomStore> rooms_;
+    const core::NodeId node_ = *core::NodeId::parse("chat-a");
     const core::UserId alice_ = *core::UserId::parse("auth0|alice");
 };
 
@@ -177,9 +195,10 @@ TEST_F(MessageStoreTest, BodiesAreByteaNeverTextAndNothingIndexesThem) {
 
 TEST_F(MessageStoreTest, HistorySurvivesARestartInTheSameOrder) {
     const core::RoomId room = new_room();
-    // Appended out of order, as retries after a lost answer can land them.
-    for (const std::uint64_t seq : std::array<std::uint64_t, 5>{3, 1, 2, 5, 4}) {
-        ASSERT_TRUE(append(room, seq, bytes(std::format("body {}", seq))));
+    const std::uint64_t generation = own(room);
+    for (std::uint64_t seq = 1; seq <= 5; ++seq) {
+        ASSERT_EQ(write(room, generation, bytes(std::format("body {}", seq))),
+                  (rt::StoreResult<std::optional<std::uint64_t>>{seq}));
     }
     const auto first = before(room, std::nullopt, 10);
     ASSERT_TRUE(first);
@@ -261,40 +280,6 @@ TEST_F(MessageStoreTest, HistoryOfATenThousandMessageRoomWalksThePrimaryKey) {
     RecordProperty("page_10k_ms", std::format("{:.1f}", took));
 }
 
-TEST_F(MessageStoreTest, AnAppendIsOneRoundTripAndACommit) {
-    // An owner appends a room's messages one at a time (ADR-0035), each before its delivery,
-    // so this is what every message of a durable room waits for. A read by primary key beside
-    // it separates the round trip from the commit's WAL flush.
-    constexpr std::size_t kCount = 500;
-    const core::RoomId room = new_room();
-    std::vector<double> appends;
-    std::vector<double> reads;
-    for (std::uint64_t seq = 1; seq <= kCount; ++seq) {
-        auto started = std::chrono::steady_clock::now();
-        ASSERT_TRUE(append(room, seq, bytes("a line of chat, about forty bytes long")));
-        appends.push_back(millis(std::chrono::steady_clock::now() - started));
-        started = std::chrono::steady_clock::now();
-        ASSERT_TRUE(
-            ask<std::uint64_t>([&](auto done) { store_->last_seq(room, std::move(done)); }));
-        reads.push_back(millis(std::chrono::steady_clock::now() - started));
-    }
-    const auto quantile = [](std::vector<double>& samples, double q) {
-        std::ranges::sort(samples);
-        return samples[static_cast<std::size_t>(q * static_cast<double>(samples.size() - 1))];
-    };
-    const double append_p50 = quantile(appends, 0.5);
-    const double append_p99 = quantile(appends, 0.99);
-    const double read_p50 = quantile(reads, 0.5);
-    std::println(
-        "{} sequential appends: p50 {:.3f} ms, p99 {:.3f} ms; a read by key: p50 {:.3f} ms", kCount,
-        append_p50, append_p99, read_p50);
-    RecordProperty("append_p50_ms", std::format("{:.3f}", append_p50));
-    RecordProperty("append_p99_ms", std::format("{:.3f}", append_p99));
-    RecordProperty("read_p50_ms", std::format("{:.3f}", read_p50));
-    // Loose: the check is that an append is one statement, not a batch window or a retry loop.
-    EXPECT_LT(append_p50, 50.0);
-}
-
 TEST_F(MessageStoreTest, APlaintextBodyNeverReachesALogOrAnError) {
     const std::string marker = "plaintext-" + core::Uuid::v7(clock_, random_).to_string();
     const core::RoomId room = new_room();
@@ -303,13 +288,8 @@ TEST_F(MessageStoreTest, APlaintextBodyNeverReachesALogOrAnError) {
 
     ::testing::internal::CaptureStderr();
     ::testing::internal::CaptureStdout();
-    ASSERT_TRUE(append(room, 1, bytes(marker)));
-    // Every path a body takes: a repeat, a conflict, an oversized body, and reads.
-    EXPECT_TRUE(append(room, 1, bytes(marker)));
-    EXPECT_FALSE(append(room, 1, bytes(marker + " edited")));
-    std::string huge = marker;
-    huge.resize(core::ports::kMaxMessageBody + 1, 'x');
-    EXPECT_FALSE(append(room, 2, bytes(huge)));
+    const std::uint64_t generation = own(room);
+    ASSERT_TRUE(write(room, generation, bytes(marker)));
     EXPECT_TRUE(before(room, std::nullopt, 10));
     const std::string out = ::testing::internal::GetCapturedStdout();
     const std::string err = ::testing::internal::GetCapturedStderr();

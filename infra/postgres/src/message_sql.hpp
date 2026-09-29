@@ -9,19 +9,6 @@
 // time, for that.
 namespace infra::postgres::message_sql {
 
-// One round trip whether the row is new or a repeat. The second column compares against the
-// row as it stood when the statement began, so for a row this statement inserted it is NULL,
-// and for a row a concurrent statement committed meanwhile it is NULL too: that append lost a
-// race and learns nothing about the stored bytes.
-inline constexpr Sql kAppend = R"sql(
-WITH inserted AS (
-    INSERT INTO chat_messages (room_id, seq, sender, body, sent_at)
-    VALUES ($1, $2, $3, $4, timestamptz 'epoch' + $5 * interval '1 microsecond')
-    ON CONFLICT (room_id, seq) DO NOTHING
-    RETURNING 1)
-SELECT EXISTS (SELECT 1 FROM inserted),
-       (SELECT sender = $3 AND body = $4 FROM chat_messages WHERE room_id = $1 AND seq = $2))sql";
-
 // Both pages walk the primary key from the cursor and stop at the row limit; the running sum
 // then cuts the page where its bodies pass the byte bound. The window reads rows in index
 // order and one row ahead of what it emits, so the limit stops the scan early.
@@ -53,8 +40,9 @@ SELECT seq, sender, (extract(epoch FROM sent_at) * 1000000)::bigint, body
 // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
 inline constexpr Sql kHistoryAfter = kHistoryAfterText.data();
 
+// The counter the owner's fenced write advances, not max(seq): one source for both.
 inline constexpr Sql kLastSeq =
-    "SELECT coalesce(max(seq), 0) FROM chat_messages WHERE room_id = $1";
+    "SELECT coalesce((SELECT last_seq FROM room_state WHERE room_id = $1), 0)";
 
 inline constexpr Sql kAddMember = R"sql(
 INSERT INTO chat_members (room_id, user_id) VALUES ($1, $2)

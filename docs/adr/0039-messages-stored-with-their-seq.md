@@ -56,16 +56,23 @@ What bounds a page of history:
   `sent_at` from its clock. The Postgres implementation is `append_message` above. This changes
   `room_router.cpp` once, in M19, before phase 2 is tagged; after that, encrypted bodies change
   nothing on this path.
-- **Reads, and a store of its own.** `core::ports::IMessageStore`
-  (`core/include/core/ports/message_store.hpp`) serves history: `history_before(room, before,
-  limit)` newest first, `history_after(room, after, limit)` oldest first, `last_seq(room)`, and
-  membership (`add_member`/`remove_member`/`members`). Its `append(room, seq, ...)` writes under
-  a seq taken elsewhere, for stores whose counter is not in the same database (the in-memory
-  room store of tests and single-process runs). It is idempotent: the same seq with the same
-  sender and body succeeds and keeps the first `sent_at`; any other is `Conflict` and changes
-  nothing. Every call answers once, on the reactor thread, never from inside the call. Errors
-  are values (`Unavailable`, `Conflict`, `TooLarge`, `Corrupt`); none carries text, so none can
-  carry a body.
+- **One writer.** `append_message` is the only statement that writes `chat_messages`. The
+  message store below has no writer: a row written under a seq "taken elsewhere" could sit
+  above `last_seq` and make every later append for its room fail. The seq-only
+  `IRoomStore::append` still exists, because the router calls it today; it takes a seq with no
+  row, so rooms written through it have holes in their history. The wiring step removes it,
+  with the router change above, so that no path takes a seq without its message.
+- **One counter.** `room_state.last_seq` is the only source of a room's last seq. The message
+  store's `last_seq(room)` reads it, not `max(seq)` of the messages; with `append_message` as
+  the only writer the two agree.
+- **Reads.** `core::ports::IMessageStore` (`core/include/core/ports/message_store.hpp`) serves
+  history: `history_before(room, before, limit)` newest first, `history_after(room, after,
+  limit)` oldest first, `last_seq(room)`, and membership (`add_member`/`remove_member`/
+  `members`). Every call answers once, on the reactor thread, never from inside the call.
+  Errors are values (`Unavailable`, `Conflict`, `TooLarge`, `Corrupt`); none carries text, so
+  none can carry a body. The in-memory store implements the same port, and keeps a writer of
+  its own, `append(room, seq, ...)`, for whatever takes seqs in tests and single-process runs:
+  it has no counter to take them from.
 - **Opaque bodies.** `body` is `bytea NOT NULL`, bound as a binary parameter and read back with
   `encode(body, 'hex')`, so the server's `bytea_output` setting does not matter. Nothing parses,
   collates or indexes it: the only index is the primary key `(room_id, seq)`, and the table has

@@ -2,6 +2,7 @@
 
 #include "core/ports/message_store.hpp"
 #include "net/reactor.hpp"
+#include "rt/room_store.hpp"
 
 #include "support/reactor_harness.hpp"
 
@@ -19,6 +20,17 @@ core::ports::MessageResult<T> ask(net::IReactor& reactor, Call call) {
     if (!pump_until(reactor, [&] { return answer.has_value(); })) {
         ADD_FAILURE() << "the message store never answered";
         return std::unexpected(core::ports::MessageStoreError::Unavailable);
+    }
+    return std::move(*answer);
+}
+
+// The same, for the room store.
+template <class T, class Call> rt::StoreResult<T> ask_store(net::IReactor& reactor, Call call) {
+    std::optional<rt::StoreResult<T>> answer;
+    call([&answer](rt::StoreResult<T> r) noexcept { answer = std::move(r); });
+    if (!pump_until(reactor, [&] { return answer.has_value(); })) {
+        ADD_FAILURE() << "the room store never answered";
+        return std::unexpected(rt::StoreError::Unavailable);
     }
     return std::move(*answer);
 }
