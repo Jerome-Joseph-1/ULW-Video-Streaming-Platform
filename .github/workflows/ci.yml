@@ -185,6 +185,14 @@ jobs:
       - run: cmake --preset ci
       # Generated headers must exist before clang-tidy can parse the sources.
       - run: cmake --build --preset ci --target ulw_build_info
+      # The bridge's own checks, the generated C header's drift check among them.
+      - name: OpenMLS bridge (rustfmt, clippy, cargo test)
+        working-directory: infra/e2ee/mls_ffi_bridge
+        run: |
+          rustup component add rustfmt clippy
+          cargo fmt --check
+          cargo clippy --locked --offline --all-targets -- -D warnings
+          cargo test --locked --offline
       - name: clang-tidy (changed files)
         if: github.event_name == 'pull_request'
         run: |
@@ -231,7 +239,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ws, http, hls, toml]
+        target: [ws, http, hls, toml, mls]
     env:
       CC: clang-19
       CXX: clang++-19
@@ -250,7 +258,7 @@ jobs:
             push) seconds=300 ;;
             *)
               if git diff --quiet "origin/$BASE_REF...HEAD" -- http codec ops tests/fuzz \
-                  core/src/hls.cpp core/include/core/util/hls.hpp; then
+                  core/src/hls.cpp core/include/core/util/hls.hpp infra/e2ee; then
                 seconds=0
               else
                 seconds=300
