@@ -485,6 +485,7 @@ if(ULW_BUILD_WORKER)
         unit/ffmpeg/hls_rewrite_test.cpp
         unit/ffmpeg/live_command_test.cpp
         unit/ffmpeg/progress_test.cpp
+        unit/ffmpeg/recording_verdict_test.cpp
         unit/ffmpeg/sandbox_test.cpp
         unit/ffmpeg/seccomp_filter_test.cpp)
     target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)

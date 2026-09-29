@@ -244,6 +244,18 @@ std::expected<void, PublishError> Publisher::put(const fs::path& file, std::stri
     return {};
 }
 
+std::expected<void, PublishError> Publisher::mark_ending() {
+    const fs::path file = config_.outbox / kEndedByName;
+    {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << epoch_ << '\n';
+        if (!out) {
+            return std::unexpected(PublishError::UploadFailed);
+        }
+    }
+    return put(file, kEndedByName, claim_type());
+}
+
 std::expected<void, PublishError> Publisher::publish_playlist(const MediaPlaylist& playlist) {
     // A packager that started after this one claimed the next epoch. The check comes right
     // before the write and cannot be atomic with it, so a stale writer can still land one
@@ -335,6 +347,10 @@ FinishResult Publisher::finish(std::string_view ffmpeg_playlist) {
         result.problem = pumped.error();
     }
     if (result.problem == PublishError::Superseded || window_.playlist().segments.empty()) {
+        return result;
+    }
+    if (const auto marked = mark_ending(); !marked) {
+        result.problem = marked.error();
         return result;
     }
     if (const auto ended = publish_playlist(window_.ended()); ended) {

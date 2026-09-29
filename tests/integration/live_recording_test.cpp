@@ -206,7 +206,9 @@ protected:
 
     // `recording` false: a packager that ends the stream but has no database, as one killed
     // between the end and the job would leave it.
-    std::unique_ptr<ChildProcess> start_packager(bool recording = true) {
+    // `database_url`, when given, replaces the scratch database's.
+    std::unique_ptr<ChildProcess> start_packager(bool recording = true,
+                                                 const std::string& database_url = {}) {
         scratch_dirs_.push_back(std::make_unique<TempDir>("ulw-rec-scratch"));
         std::vector<std::string> env{"PATH=" + env_or("PATH", "/usr/bin:/bin"),
                                      "ULW_STREAM_ID=" + stream_,
@@ -219,7 +221,8 @@ protected:
         const auto storage = storage_env();
         env.insert(env.end(), storage.begin(), storage.end());
         if (recording) {
-            env.push_back("ULW_DATABASE_URL=" + db_->conninfo());
+            env.push_back("ULW_DATABASE_URL=" +
+                          (database_url.empty() ? db_->conninfo() : database_url));
             env.push_back("ULW_STREAM_OWNER=" + std::string(kOwner));
         }
         auto packager = ChildProcess::start({ULW_LIVE_PACKAGER_BIN}, env);
@@ -477,6 +480,42 @@ TEST_F(LiveRecordingTest, AStreamEndedByARestartedPackagerWithNoMediaOfItsOwnIsR
     const auto packager = start_packager();
     ASSERT_TRUE(ingest_port(*packager)) << packager->output();
     packager->signal(SIGUSR1);
+    ASSERT_EQ(packager->wait_exit(kJobPatience), 0) << packager->output();
+    EXPECT_NE(packager->output().find("recording: queued as video"), std::string::npos)
+        << packager->output();
+    run_worker_to_done();
+    expect_one_ready_video(static_cast<double>(published) * 2.0);
+}
+
+TEST_F(LiveRecordingTest, ARestartAfterAFailedRecordingOfAnEndWithNoMediaOfItsOwnRecordsIt) {
+    std::uint64_t published = 0;
+    {
+        const auto packager = start_packager();
+        const auto port = ingest_port(*packager);
+        ASSERT_TRUE(port) << packager->output();
+        const auto publisher = start_publisher(*port, 0);
+        const std::string playlist = "live/" + stream_ + "/index.m3u8";
+        while (published_segments(stored_text(playlist).value_or("")) < 3) {
+            ASSERT_FALSE(publisher->wait_exit(kSamplePeriod)) << publisher->output();
+        }
+        packager->signal(SIGKILL);
+        EXPECT_EQ(packager->wait_exit(kExitPatience), 128 + SIGKILL);
+        publisher->signal(SIGKILL);
+        published = published_segments(stored_text(playlist).value_or(""));
+    }
+    {
+        // Epoch 1 ends the stream with no media of its own, and cannot reach its database.
+        const auto packager =
+            start_packager(true, "postgresql://ulw@127.0.0.1:1/ulw?connect_timeout=2");
+        ASSERT_TRUE(ingest_port(*packager)) << packager->output();
+        packager->signal(SIGUSR1);
+        EXPECT_EQ(packager->wait_exit(kJobPatience), 1) << packager->output();
+        EXPECT_NE(packager->output().find("recording: failed"), std::string::npos)
+            << packager->output();
+    }
+    // The restart holds no claim; the stream's ended_by tells it epoch 1's claim was the
+    // ender's own, not a newer packager's.
+    const auto packager = start_packager();
     ASSERT_EQ(packager->wait_exit(kJobPatience), 0) << packager->output();
     EXPECT_NE(packager->output().find("recording: queued as video"), std::string::npos)
         << packager->output();

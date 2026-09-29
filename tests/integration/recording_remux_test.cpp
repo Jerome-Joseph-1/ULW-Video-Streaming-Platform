@@ -82,10 +82,4 @@ TEST_F(RecordingRemuxTest, ACopyStoppedAtItsWallClockBudgetMayPassAnotherTime) {
         << copied.error().detail;
 }
 
-TEST(RecordingCopyCpu, CoversFourTimesTheMeasuredCostOfTheLargestRecording) {
-    EXPECT_EQ(infra::ffmpeg::recording_copy_cpu(0), core::Seconds{60});
-    // 607.5 GB, a 12-hour stream at 100 Mbit/s with its eighth: 608 GB at 20 CPU-s each.
-    EXPECT_EQ(infra::ffmpeg::recording_copy_cpu(607'500'000'000), core::Seconds{60 + (608 * 20)});
-}
-
 } // namespace

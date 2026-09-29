@@ -53,7 +53,13 @@ public:
             rows.try_emplace(recording.stream,
                              RecordingRow{.video = recording.video, .failure = {}});
             find_unavailable = find_fails_after_lost_commit;
-            return std::unexpected(RecordingStoreError::Unavailable);
+            return std::unexpected(RecordingStoreError::Unknown);
+        }
+        if (unknown_outcome) {
+            if (winner) {
+                rows.try_emplace(recording.stream, RecordingRow{.video = winner, .failure = {}});
+            }
+            return std::unexpected(RecordingStoreError::Unknown);
         }
         return rows
             .try_emplace(recording.stream, RecordingRow{.video = recording.video, .failure = {}})
@@ -75,6 +81,10 @@ public:
     bool lose_commit = false;
     bool find_fails_after_lost_commit = false;
     bool find_unavailable = false;
+    // The commit's answer is lost and the row is `winner`'s, or none yet (a commit still on
+    // its way).
+    bool unknown_outcome = false;
+    std::optional<core::VideoId> winner;
 };
 
 // The filesystem store, whose streams take nothing: every write answers `error`.
@@ -117,7 +127,7 @@ class PassThroughCopier final : public live::IRecordingCopier {
 public:
     std::expected<void, RemuxError> run(const RecordingRemuxJob& job,
                                         const std::function<void(std::string_view)>& on_output,
-                                        const std::stop_token& /*stop*/) override {
+                                        const std::stop_token& stop) override {
         {
             const std::lock_guard lock(mutex_);
             jobs.push_back(job);
@@ -134,6 +144,12 @@ public:
             if (!refuse || (refuse_only && *refuse_only != job.from)) {
                 on_output(std::string_view(buffer.data(), static_cast<std::size_t>(n)));
             }
+        }
+        // As the sandbox does: a stop kills the child, whatever it had read.
+        if (stop.stop_requested() && !refuse) {
+            const std::lock_guard lock(mutex_);
+            stopped_joining = stopped_joining || job.from == RecordingInput::MpegTs;
+            return std::unexpected(RemuxError{.kind = RemuxFailure::Stopped, .detail = "stopped"});
         }
         if (refuse && (!refuse_only || *refuse_only == job.from)) {
             return std::unexpected(RemuxError{.kind = *refuse, .detail = "refused"});
@@ -158,6 +174,7 @@ public:
     std::optional<RemuxFailure> refuse;
     // Only the stage reading this input fails; the other reports being stopped.
     std::optional<RecordingInput> refuse_only;
+    bool stopped_joining = false;
 
 private:
     std::mutex mutex_;
@@ -468,6 +485,77 @@ TEST_F(RecorderTest, ARecordingPastItsBoundMarksTheStreamUnrecordable) {
     const auto done = record(std::nullopt, nullptr, 10);
     EXPECT_EQ(done.outcome, RecordOutcome::Unrecordable) << done.detail;
     EXPECT_NE(catalog.rows["show"].failure.find("past its bound"), std::string::npos);
+}
+
+TEST_F(RecorderTest, TheEndersWrittenEpochKeepsARestartFromTakingItsClaimForANewerRun) {
+    // Epoch 1 ended the stream without a segment of its own, then failed to record it; the
+    // restart holds no claim, and only ended_by says epoch_1 was the ender's.
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    ulw::test::write_file(live_dir() / "epoch_1", "claimed\n");
+    ulw::test::write_file(live_dir() / "ended_by", "1\n");
+    EXPECT_EQ(record().outcome, RecordOutcome::Recorded);
+}
+
+TEST_F(RecorderTest, AClaimAboveTheEnderStillFencesARestartOut) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    ulw::test::write_file(live_dir() / "epoch_1", "claimed\n");
+    ulw::test::write_file(live_dir() / "epoch_2", "claimed\n");
+    ulw::test::write_file(live_dir() / "ended_by", "1\n");
+    EXPECT_EQ(record().outcome, RecordOutcome::Superseded);
+}
+
+TEST_F(RecorderTest, AnInsertOfUnknownOutcomeWithNoRowYetKeepsItsRecordingAndFails) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    catalog.unknown_outcome = true;
+    EXPECT_EQ(record().outcome, RecordOutcome::Failed);
+    ASSERT_EQ(catalog.recorded.size(), 1U);
+    EXPECT_EQ(raw_of(catalog.recorded[0].video), "I0;S0;S1;S2;S3;");
+}
+
+TEST_F(RecorderTest, AnInsertOfUnknownOutcomeBeatenByAnotherVideoRemovesItsRecording) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    const auto other = core::VideoId::generate(clock, random);
+    catalog.unknown_outcome = true;
+    catalog.winner = other;
+    const auto done = record();
+    EXPECT_EQ(done.outcome, RecordOutcome::AlreadyRecorded);
+    EXPECT_EQ(done.video, other);
+    ASSERT_EQ(catalog.recorded.size(), 1U);
+    EXPECT_FALSE(fs::exists(videos_dir() / catalog.recorded[0].video.to_string() / "raw"));
+}
+
+TEST_F(RecorderTest, AFailedInsertBeatenByAnotherVideoRemovesItsRecording) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    const auto other = core::VideoId::generate(clock, random);
+    catalog.before_record = [&] {
+        catalog.rows.try_emplace("show", RecordingRow{.video = other, .failure = {}});
+    };
+    catalog.unavailable = true;
+    const auto done = record();
+    EXPECT_EQ(done.outcome, RecordOutcome::AlreadyRecorded);
+    EXPECT_EQ(done.video, other);
+    for (const auto& dir : fs::directory_iterator(videos_dir())) {
+        EXPECT_TRUE(fs::is_empty(dir.path())) << dir.path();
+    }
+}
+
+TEST_F(RecorderTest, AFeedThatFailsStopsTheJoiningStageRatherThanEndingItsInput) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    // A segment the plan found that is unreadable by the time it is copied: a store error.
+    store.download_error_for = "seg_0_2.m4s";
+    EXPECT_EQ(record().outcome, RecordOutcome::Failed);
+    for (const RecordingRemuxJob& job : copier.jobs) {
+        if (job.from == RecordingInput::MpegTs) {
+            EXPECT_TRUE(copier.stopped_joining) << "the joining stage saw a clean end of input";
+        }
+    }
+    EXPECT_TRUE(catalog.rows.empty());
 }
 
 TEST(RecordingBound, TheLongestStreamAtTheHighestBitrateWithAnEighthForTheContainer) {

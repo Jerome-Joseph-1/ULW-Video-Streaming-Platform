@@ -45,6 +45,12 @@ enum class PublishError : std::uint8_t {
 
 [[nodiscard]] std::string_view to_string(PublishError e) noexcept;
 
+// The epoch of the run that ended the stream, written just before the playlist's ENDLIST. That
+// run may have published no segment of its own (ended before a publisher came), so the ended
+// playlist alone does not name it; whoever records the stream needs it to tell that run's own
+// claim from a newer packager's.
+inline constexpr std::string_view kEndedByName = "ended_by";
+
 struct PublisherConfig {
     StreamId stream;
     WindowConfig window;
@@ -105,6 +111,7 @@ private:
     [[nodiscard]] std::expected<void, PublishError>
     put(const std::filesystem::path& file, std::string_view name, const core::ContentType& type);
     [[nodiscard]] std::expected<void, PublishError> publish_playlist(const MediaPlaylist& playlist);
+    [[nodiscard]] std::expected<void, PublishError> mark_ending();
 
     PublisherConfig config_;
     core::ports::IObjectTransfer& store_;

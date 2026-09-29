@@ -4,6 +4,7 @@ ulw_add_library(ffmpeg_adapter
     src/live_command.cpp
     src/live_remux.cpp
     src/recording_remux.cpp
+    src/recording_verdict.cpp
     src/process.cpp
     src/progress.cpp
     src/transcoder.cpp)

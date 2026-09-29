@@ -4,6 +4,7 @@
 
 #include "command.hpp"
 #include "process.hpp"
+#include "recording_verdict.hpp"
 
 #include <chrono>
 #include <utility>
@@ -53,38 +54,6 @@ Args recording_remux_args(const std::string& ffmpeg, const RecordingRemuxJob& jo
     return args;
 }
 
-std::string last_line(std::string_view text) {
-    while (text.ends_with('\n') || text.ends_with('\r')) {
-        text.remove_suffix(1);
-    }
-    const std::size_t nl = text.rfind('\n');
-    return std::string(nl == std::string_view::npos ? text : text.substr(nl + 1));
-}
-
-// Only an ffmpeg that exited by itself with an error status has judged the input; a signal or
-// a budget says nothing about it.
-std::expected<void, RemuxError> judge(const ChildExit& child, std::string_view program) {
-    if (child.ending == Ending::Stopped) {
-        return std::unexpected(RemuxError{.kind = RemuxFailure::Stopped, .detail = "stopped"});
-    }
-    if (child.ending == Ending::Exited && child.signal == 0 && child.exit_code == 0) {
-        return {};
-    }
-    const bool refused = child.ending == Ending::Exited && child.signal == 0;
-    std::string detail = std::string(program) + " exited " + std::to_string(child.exit_code);
-    if (child.ending == Ending::TimedOut) {
-        detail += " past its wall-clock budget";
-    } else if (child.ending == Ending::CpuExhausted) {
-        detail += " past its CPU budget";
-    }
-    const std::string said = last_line(child.stderr_tail);
-    if (!said.empty()) {
-        detail += ": " + said;
-    }
-    return std::unexpected(RemuxError{
-        .kind = refused ? RemuxFailure::Refused : RemuxFailure::Unavailable, .detail = detail});
-}
-
 std::optional<std::uint32_t> field(std::string_view text, std::string_view name) {
     const std::string key = std::string(name) + "=";
     const std::size_t at = text.find(key);
@@ -98,13 +67,16 @@ std::optional<std::uint32_t> field(std::string_view text, std::string_view name)
 
 } // namespace
 
-core::Seconds recording_copy_cpu(std::uint64_t bytes) noexcept {
+core::Seconds recording_copy_cpu(std::uint64_t bytes, core::Seconds duration) noexcept {
     constexpr std::uint64_t kBytesPerGb = 1'000'000'000;
     constexpr std::uint64_t kCpuSecondsPerGb = std::uint64_t{5} * 4;
+    constexpr std::int64_t kCpuSecondsPerHour = 110;
+    constexpr std::int64_t kSecondsPerHour = 3600;
     constexpr std::int64_t kFloor = 60;
     const auto per_bytes = static_cast<std::int64_t>(
         ((bytes / kBytesPerGb) + (bytes % kBytesPerGb != 0 ? 1 : 0)) * kCpuSecondsPerGb);
-    return core::Seconds{kFloor + per_bytes};
+    const std::int64_t hours = (duration.count() + kSecondsPerHour - 1) / kSecondsPerHour;
+    return core::Seconds{kFloor + per_bytes + (hours * kCpuSecondsPerHour)};
 }
 
 RecordingRemuxer::RecordingRemuxer(RecordingRemuxConfig config, const core::ports::IClock& clock)
@@ -127,7 +99,7 @@ RecordingRemuxer::run(const RecordingRemuxJob& job,
         return std::unexpected(
             RemuxError{.kind = RemuxFailure::Unavailable, .detail = child.error()});
     }
-    return judge(*child, "ffmpeg");
+    return recording_verdict(*child, "ffmpeg");
 }
 
 std::expected<std::optional<AudioFormat>, RemuxError>
@@ -164,7 +136,7 @@ RecordingRemuxer::probe_audio(const std::filesystem::path& init,
         return std::unexpected(
             RemuxError{.kind = RemuxFailure::Unavailable, .detail = child.error()});
     }
-    if (auto judged = judge(*child, "ffprobe"); !judged) {
+    if (auto judged = recording_verdict(*child, "ffprobe"); !judged) {
         return std::unexpected(judged.error());
     }
     const auto rate = field(out, "sample_rate");

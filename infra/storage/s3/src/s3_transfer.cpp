@@ -171,8 +171,9 @@ public:
         if (completed.error() != StorageError::NotFound) {
             return completed;
         }
-        // A retry of a completion whose answer was lost finds the upload gone. The key is this
-        // stream's alone, so an object of its length there is its own.
+        // A retry of a completion whose answer was lost finds the upload gone. Nothing else
+        // writes this key (the recorder's is a video id it just made), so an object of this
+        // stream's length there is its own completion.
         const auto present = whole_object_present();
         done_ = present.has_value();
         return present;

@@ -64,7 +64,7 @@ struct RecorderSettings {
     // Holds the segment on its way to ffmpeg and the children's empty writable directory.
     std::filesystem::path work_dir;
     // The longest the copies may run in wall-clock time: that of the stream they copy. Their
-    // CPU time is derived from max_bytes (recording_copy_cpu).
+    // CPU time is derived from it and max_bytes (recording_copy_cpu).
     core::Seconds wall{};
     // The most the recording can be (recording_bound); the store sizes its pieces from it.
     std::uint64_t max_bytes = 0;

@@ -57,12 +57,13 @@ struct RecordingRemuxJob {
 };
 
 enum class RemuxFailure : std::uint8_t {
-    // The child could not be started, was killed by a signal (the kernel's OOM killer among
-    // them), or ran past its wall-clock or CPU budget: on another start, or a quieter host, the
+    // The child could not be started (the sandbox helper's own exits, 125 to 127), was killed
+    // by a signal (the kernel's OOM killer, the syscall filter) or interrupted (ffmpeg's 255),
+    // or ran past its wall-clock or CPU budget: on another start, or a fixed deployment, the
     // same input may go through.
     Unavailable,
-    // ffmpeg or ffprobe exited on its own with an error: it read the input and refused it, and
-    // does so every time.
+    // ffmpeg or ffprobe exited on its own with its error status: it read the input and refused
+    // it, and does so every time. Running out of its address space is one such exit.
     Refused,
     // The caller's stop token fired.
     Stopped,
@@ -74,11 +75,14 @@ struct RemuxError {
     std::string detail;
 };
 
-// CPU time a copy of up to `bytes` may take. Measured with ffmpeg 6.1 on 121 MB of 720p at
-// 8 Mbit/s: the fMP4-to-TS copy took 0.47 CPU-seconds and the TS-to-TS copy 0.60, pipe I/O
-// included, so at most 5 CPU-seconds per GB. Four times that, and a minute for startup and
-// probing: 3.4 hours for the 607.5 GB of a 12-hour stream at 100 Mbit/s.
-[[nodiscard]] core::Seconds recording_copy_cpu(std::uint64_t bytes) noexcept;
+// CPU time a copy of up to `bytes` of a stream up to `duration` long may take. Measured with
+// ffmpeg 6.1, pipe I/O included: on 121 MB of 720p at 8 Mbit/s the fMP4-to-TS copy took 0.47
+// CPU-seconds and the TS-to-TS copy 0.60, so at most 5 CPU-seconds per GB; a run without audio
+// is given AAC silence, whose encoding is bound by the duration instead, 4.56 CPU-seconds per
+// 10 minutes, 27.4 an hour. Four times each (20 per GB, 110 per hour), and a minute for startup
+// and probing: 3.8 hours for a 12-hour stream at 100 Mbit/s, 25 minutes for one at 1 Mbit/s.
+[[nodiscard]] core::Seconds recording_copy_cpu(std::uint64_t bytes,
+                                               core::Seconds duration) noexcept;
 
 // Copies the video and the audio of a recording into MPEG-TS, without decoding them, with
 // ffmpeg as a sandboxed child whose stdout is handed to `on_output` as it arrives. Blocks until

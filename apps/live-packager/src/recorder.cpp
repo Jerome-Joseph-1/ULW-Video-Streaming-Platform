@@ -2,11 +2,13 @@
 
 #include "core/models/content_type.hpp"
 #include "core/models/storage_key.hpp"
+#include "core/util/parse.hpp"
 #include "infra/ffmpeg/live_remux.hpp"
 
 #include "log.hpp"
 #include "media_playlist.hpp"
 #include "pipe.hpp"
+#include "publisher.hpp"
 #include "recording_plan.hpp"
 
 #include <algorithm>
@@ -33,6 +35,7 @@ using infra::ffmpeg::RecordingRemuxJob;
 using infra::ffmpeg::RemuxError;
 using infra::ffmpeg::RemuxFailure;
 using infra::postgres::RecordingRow;
+using infra::postgres::RecordingStoreError;
 
 // Our playlists are a few KB; a store answering with more is not our playlist.
 constexpr std::uint64_t kMaxPlaylistBytes = std::uint64_t{1} << 20U;
@@ -113,7 +116,7 @@ public:
         : deps_(deps), settings_(settings), stop_(std::move(stop)),
           pieces_(settings.work_dir / "pieces"), child_dir_(settings.work_dir / "child") {}
 
-    Step<void> prepare() {
+    [[nodiscard]] Step<void> prepare() {
         std::error_code ec;
         fs::remove_all(settings_.work_dir, ec);
         fs::create_directories(pieces_, ec);
@@ -124,17 +127,23 @@ public:
         return {};
     }
 
-    // No run newer than both the ended playlist's last one and this process's own claim has
-    // claimed the stream. This process's claim is above the last run's when it published
-    // nothing itself: it claimed, then found the stream ended, or ended it without media. A
-    // newer claim belongs to a packager still publishing, which will overwrite the stale end
-    // this one saw.
-    Step<void> fence(const MediaPlaylist& ended) {
+    // No run newer than the one that ended the stream has claimed it. The ender is the newest
+    // of the last segment's run, the run named in `ended_by`, and this process: the latter two
+    // are above the first when a run ended the stream without a segment of its own (it claimed
+    // and found the stream ended, or was ended before a publisher came). `ended_by` keeps that
+    // across a restart, which has no claim of its own. A claim above the ender belongs to a
+    // packager still publishing, which will overwrite the stale end this one saw.
+    [[nodiscard]] Step<void> fence(const MediaPlaylist& ended) {
         const auto last = infra::ffmpeg::live_init_epoch(ended.segments.back().init);
         if (!last) {
             return problem(Severity::Permanent, "stored playlist invalid");
         }
-        const std::uint32_t newest = std::max(*last, settings_.own_claim.value_or(*last));
+        const auto ender = ended_by();
+        if (!ender) {
+            return std::unexpected(ender.error());
+        }
+        const std::uint32_t newest =
+            std::max({*last, ender->value_or(*last), settings_.own_claim.value_or(*last)});
         const std::uint32_t next = newest + 1;
         const auto claim = key_in(settings_.stream, "epoch_" + std::to_string(next));
         if (!claim) {
@@ -150,9 +159,42 @@ public:
         return {};
     }
 
+    // The epoch the stream's ender wrote down; nullopt when none did (a stream ended before
+    // this was written down, which the playlist's own last run then stands for).
+    [[nodiscard]] Step<std::optional<std::uint32_t>> ended_by() {
+        const auto key = key_in(settings_.stream, kEndedByName);
+        if (!key) {
+            return std::unexpected(key.error());
+        }
+        const fs::path file = pieces_ / kEndedByName;
+        const auto got = deps_.store.download(*key, file);
+        if (!got) {
+            if (got.error() == core::ports::StorageError::NotFound) {
+                return std::nullopt;
+            }
+            return problem(Severity::Transient, "ended_by unreadable");
+        }
+        // A decimal epoch and a newline.
+        constexpr std::uint64_t kMaxBytes = 16;
+        if (*got > kMaxBytes) {
+            return problem(Severity::Permanent, "ended_by invalid");
+        }
+        std::string text(*got, '\0');
+        std::ifstream in(file, std::ios::binary);
+        in.read(text.data(), static_cast<std::streamsize>(text.size()));
+        while (text.ends_with('\n')) {
+            text.pop_back();
+        }
+        const auto epoch = core::parse_integer<std::uint32_t>(text);
+        if (!in || !epoch) {
+            return problem(Severity::Permanent, "ended_by invalid");
+        }
+        return *epoch;
+    }
+
     // The playlist still ends where it did, and the fence still holds: the recording covers
     // the stream to its real end.
-    Step<void> confirm(const MediaPlaylist& ended) {
+    [[nodiscard]] Step<void> confirm(const MediaPlaylist& ended) {
         const auto now = read_playlist(deps_.store, settings_.stream, pieces_);
         if (!now) {
             return std::unexpected(now.error());
@@ -169,7 +211,7 @@ public:
         return fence(ended);
     }
 
-    Step<RecordResult> record(const MediaPlaylist& ended) {
+    [[nodiscard]] Step<RecordResult> record(const MediaPlaylist& ended) {
         if (auto fenced = fence(ended); !fenced) {
             return std::unexpected(fenced.error());
         }
@@ -201,7 +243,7 @@ public:
                                                .title = "Live stream " + settings_.stream.str(),
                                                .source = *key});
         if (!row) {
-            return unrecorded(video, *key);
+            return unrecorded(video, *key, row.error() == RecordingStoreError::Unknown);
         }
         if (row->video == video) {
             return RecordResult{.outcome = RecordOutcome::Recorded, .video = video, .detail = {}};
@@ -218,9 +260,12 @@ private:
         void operator()() const noexcept { source->request_stop(); }
     };
 
-    // The insert may have committed and only its answer been lost: the object is removed only
-    // when the stream's row is known not to name it.
-    Step<RecordResult> unrecorded(const core::VideoId& video, const core::StorageKey& key) {
+    // The insert failed. When it failed before its commit nothing was written; when the commit's
+    // answer was lost (`maybe_written`), it may have landed, or may land yet on the session that
+    // sent it. The object is removed only when the stream's row names another outcome, or, for
+    // an insert known not to have been written, when there is no row.
+    [[nodiscard]] Step<RecordResult> unrecorded(const core::VideoId& video,
+                                                const core::StorageKey& key, bool maybe_written) {
         const auto known = deps_.catalog.find(settings_.stream.str());
         if (!known) {
             return problem(Severity::Transient, "database unavailable; recording kept");
@@ -229,12 +274,16 @@ private:
         if (row && row->video == video) {
             return RecordResult{.outcome = RecordOutcome::Recorded, .video = video, .detail = {}};
         }
-        discard(key);
         if (row) {
+            discard(key);
             return RecordResult{.outcome = RecordOutcome::AlreadyRecorded,
                                 .video = row->video,
                                 .detail = row->failure};
         }
+        if (maybe_written) {
+            return problem(Severity::Transient, "insert outcome unknown; recording kept");
+        }
+        discard(key);
         return problem(Severity::Transient, "database unavailable");
     }
 
@@ -250,7 +299,7 @@ private:
 
     // Downloads `name` of the stream to `file`; a missing object is for good, since the
     // packager never deletes one and the bucket's rule only expires them.
-    Step<void> fetch(std::string_view name, const fs::path& file) {
+    [[nodiscard]] Step<void> fetch(std::string_view name, const fs::path& file) {
         const auto key = key_in(settings_.stream, name);
         if (!key) {
             return std::unexpected(key.error());
@@ -267,7 +316,7 @@ private:
 
     // Each run's audio, and the stream's: the first a run carries. A run without it gets
     // silence of that format, so the joined recording keeps one audio stream throughout.
-    Step<void> probe(const RecordingPlan& plan) {
+    [[nodiscard]] Step<void> probe(const RecordingPlan& plan) {
         for (const RecordingRun& run : plan.runs) {
             if (formats_.contains(run.epoch)) {
                 continue;
@@ -294,7 +343,7 @@ private:
                 .input = input,
                 .work_dir = child_dir_,
                 .wall = settings_.wall,
-                .cpu = infra::ffmpeg::recording_copy_cpu(settings_.max_bytes),
+                .cpu = infra::ffmpeg::recording_copy_cpu(settings_.max_bytes, settings_.wall),
                 .silence = silence};
     }
 
@@ -304,7 +353,7 @@ private:
     // jump where a restarted run's timestamps begin again, and whose output streams into the
     // store. Concatenated fMP4 of two runs would not do: ffmpeg skips the second moov and reads
     // the second run's fragments on the first run's timeline, backwards.
-    Step<void> assemble(const RecordingPlan& plan, const core::StorageKey& key) {
+    [[nodiscard]] Step<void> assemble(const RecordingPlan& plan, const core::StorageKey& key) {
         auto output = deps_.streams.begin(key, recording_type(), settings_.max_bytes);
         if (!output) {
             return problem(Severity::Transient, "the store refused the recording");
@@ -319,7 +368,7 @@ private:
         std::jthread joiner([&] {
             joining = deps_.copier.run(
                 job(RecordingInput::MpegTs, joined->read.get(), {}),
-                [this](std::string_view out) { keep(out); }, abort_.get_token());
+                [this](std::string_view out) noexcept { keep(out); }, abort_.get_token());
             if (!joining) {
                 abort_.request_stop();
             }
@@ -330,6 +379,11 @@ private:
             if (!fed) {
                 break;
             }
+        }
+        // A run that could not be fed must not look to the joining stage like the end of its
+        // input: it would judge, and perhaps refuse, a truncated recording.
+        if (!fed) {
+            abort_.request_stop();
         }
         joined->write.reset();
         joiner.join();
@@ -366,8 +420,18 @@ private:
         return {};
     }
 
-    // On the joining stage's thread only, until it is joined.
-    void keep(std::string_view out) {
+    // On the joining stage's thread only, until it is joined. The store's write may throw
+    // (allocating a part); nothing may leave the stage's thread.
+    void keep(std::string_view out) noexcept {
+        try {
+            keep_or_throw(out);
+        } catch (...) {
+            upload_error_ = core::ports::StorageError::Transient;
+            abort_.request_stop();
+        }
+    }
+
+    void keep_or_throw(std::string_view out) {
         if (upload_error_ || past_bound_) {
             return;
         }
@@ -384,7 +448,7 @@ private:
         bytes_ += out.size();
     }
 
-    Step<void> feed(const RecordingRun& run, int joined) {
+    [[nodiscard]] Step<void> feed(const RecordingRun& run, int joined) {
         auto pipe = make_pipe();
         if (!pipe) {
             return problem(Severity::Transient, "pipe");
@@ -396,7 +460,7 @@ private:
         std::jthread copier([&] {
             copied = deps_.copier.run(
                 job(RecordingInput::FragmentedMp4, pipe->read.get(), silence),
-                [this, joined](std::string_view out) {
+                [this, joined](std::string_view out) noexcept {
                     if (!write_all(joined, std::as_bytes(std::span(out)), abort_.get_token())) {
                         abort_.request_stop();
                     }
@@ -419,7 +483,7 @@ private:
         return {};
     }
 
-    Step<void> pour_run(const RecordingRun& run, int sink) {
+    [[nodiscard]] Step<void> pour_run(const RecordingRun& run, int sink) {
         if (auto poured = pour(init_file(run.epoch), sink); !poured) {
             return poured;
         }
@@ -440,7 +504,7 @@ private:
 
     // Pours a downloaded piece into `sink`. A pipe that will take no more means the ffmpeg
     // reading it has stopped, which the caller learns from its result.
-    Step<void> pour(const fs::path& file, int sink) {
+    [[nodiscard]] Step<void> pour(const fs::path& file, int sink) {
         const os::UniqueFd in(::open(file.c_str(), O_RDONLY | O_CLOEXEC));
         if (!in) {
             return problem(Severity::Transient, "piece unreadable");
