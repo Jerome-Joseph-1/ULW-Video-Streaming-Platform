@@ -107,6 +107,16 @@ What bounds a page of history:
   room store does, with a 2 s request timeout.
 - An in-memory store implements the same port, and one conformance suite
   (`tests/conformance/message_store_conformance_test.cpp`) runs against both.
+- **History reaches clients through the chat service**, not the router: an envelope command,
+  `history`, with a `before` or `after` cursor and a limit of at most 100. The service reads the
+  page from the message store and sends it as ordinary `message` frames, then a `history` frame
+  with their count; a count of 0 is the end of the room in that direction. The page is cut to
+  what the connection can still queue (the 128 KiB a resume may, ADR-0043), and a connection too
+  far behind for one message gets `busy`, never an empty page. It is charged to the same
+  allowance as joins, since each is a read of the database. Only a connection that joined the
+  room may ask, so the member check at the join covers history too. A client that resumes
+  through a node that kept nothing sees the head seq in `joined` and fills the gap from
+  history; nothing on the node reads the store for it.
 
 ## Consequences
 
@@ -151,8 +161,8 @@ What bounds a page of history:
   None can be violated: every column is bound from a typed value that has no null (the room's
   uuid, the seq from `room_state`, the sender's id, the key, the body, which binds as an empty
   value when empty, and `now()`).
-- The history endpoint that serves these pages to clients, and the join answer that tells a
-  client the room's head seq so it can see a gap, are the chat service's.
+- A join of a room new to a connection now waits for one primary-key read of the member list,
+  as well as for the room's owner. Joins are rate limited per user, so this is not per message.
 - History is never deleted. Retention, and what a user's deletion request removes, are open.
 - Nothing partitions `chat_messages` yet. Reopen when maintenance or vacuum of it becomes
   noticeable.
