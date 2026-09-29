@@ -308,41 +308,149 @@ TEST_F(MessageStoreTest, HistoryOfATenThousandMessageRoomWalksThePrimaryKey) {
     RecordProperty("page_10k_ms", std::format("{:.1f}", took));
 }
 
-TEST_F(MessageStoreTest, APlaintextBodyNeverReachesALogOrAnError) {
-    const std::string marker = "plaintext-" + core::Uuid::v7(clock_, random_).to_string();
-    const core::RoomId room = new_room();
+// Every form a body could take in a log line: as sent, as bytea prints it, and as base64.
+std::vector<std::string> forms_of(std::string_view text) {
+    std::string hex;
+    for (const char c : text) {
+        hex += std::format("{:02x}", static_cast<unsigned char>(c));
+    }
+    constexpr std::string_view kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string base64;
+    std::uint32_t bits = 0;
+    int held = 0;
+    for (const char c : text) {
+        bits = (bits << 8U) | static_cast<unsigned char>(c);
+        held += 8;
+        while (held >= 6) {
+            held -= 6;
+            base64 += kAlphabet[(bits >> static_cast<unsigned>(held)) & 0x3FU];
+        }
+    }
+    // A trailing partial group depends on what follows the text; the whole groups before it
+    // are what any encoding of a body holding the text contains.
+    return {std::string{text}, hex, base64};
+}
+
+bool holds_any(std::string_view haystack, const std::vector<std::string>& forms) {
+    return std::ranges::any_of(
+        forms, [&](const std::string& f) { return haystack.find(f) != std::string_view::npos; });
+}
+
+class PlaintextTest : public MessageStoreTest {
+protected:
+    // One owner's write of `marker` under the given session settings, and one that fails on a
+    // row already where its seq would go, so that the server reports an error carrying it.
+    void write_twice(const std::string& options, const std::string& marker) {
+        std::string conninfo = db_->conninfo();
+        if (!options.empty()) {
+            conninfo += " options='" + options + "'";
+        }
+        auto created =
+            infra::postgres::PgRoomStore::create(*reactor_, *offload_, {.conninfo = conninfo});
+        ASSERT_TRUE(created) << created.error();
+        auto& rooms = sessions_.emplace_back(std::move(*created));
+        const core::RoomId room = new_room();
+        const auto owner = ulw::test::ask_store<rt::Ownership>(
+            *reactor_, [&](auto done) { rooms->resolve(room, node_, std::move(done)); });
+        ASSERT_TRUE(owner);
+        const auto write = [&](std::string_view key) {
+            return ask<std::optional<std::uint64_t>>([&](auto done) {
+                rooms->append_message(room, owner->generation, alice_, key, bytes(marker),
+                                      std::move(done));
+            });
+        };
+        ASSERT_EQ(write("k1"), (MessageResult<std::optional<std::uint64_t>>{1}));
+        ASSERT_TRUE(conn_->exec("INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, "
+                                "sent_at) VALUES ($1, 2, 'auth0|mallory', 'k', '\\x00', now())",
+                                Params{}.add_uuid(room.uuid())));
+        EXPECT_FALSE(write("k2"));
+        EXPECT_TRUE(before(room, std::nullopt, 10));
+    }
+
+    // The server's log from `since` on, once it holds `last`: the log is one stream, so
+    // everything written before `last` is in it by then.
+    std::optional<std::string> log_through(const std::string& since, const std::string& last) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto log = ulw::test::run_process({"docker", "logs", "--since", since, *container_});
+            if (log.exit_code != 0) {
+                ADD_FAILURE() << log.output;
+                return std::nullopt;
+            }
+            if (log.output.find(last) != std::string::npos) {
+                return std::move(log.output);
+            }
+        }
+        ADD_FAILURE() << "the server's log never showed the logged body";
+        return std::nullopt;
+    }
+
+    std::string new_marker() { return "plaintext-" + core::Uuid::v7(clock_, random_).to_string(); }
+
+    void TearDown() override {
+        // The offload pool stops before the stores it may be resolving for.
+        offload_.reset();
+        sessions_.clear();
+        MessageStoreTest::TearDown();
+    }
+
+    std::optional<std::string> container_ = ulw::test::postgres_container();
+    std::vector<std::unique_ptr<infra::postgres::PgRoomStore>> sessions_;
+};
+
+TEST_F(PlaintextTest, NoBodyReachesAProcessLogTheServerLogOrATextColumn) {
+    // What ADR-0039 asks of production Postgres, applied to these sessions: every statement
+    // logged, and still no parameter in the log, on success or on error.
+    constexpr std::string_view kProduction = "-c log_statement=all -c log_parameter_max_length=0 "
+                                             "-c log_parameter_max_length_on_error=0";
+    // What it forbids: the same, with parameters logged in full.
+    constexpr std::string_view kLeaky = "-c log_statement=all -c log_parameter_max_length=-1 "
+                                        "-c log_parameter_max_length_on_error=-1";
+    EXPECT_EQ(scalar(*conn_, "SHOW log_parameter_max_length_on_error"), "0");
+
+    const std::string as_configured = new_marker();
+    const std::string production = new_marker();
+    const std::string leaked = new_marker();
     const auto since = std::format(
         "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
 
     ::testing::internal::CaptureStderr();
     ::testing::internal::CaptureStdout();
-    const std::uint64_t generation = own(room);
-    ASSERT_TRUE(write(room, generation, bytes(marker)));
-    EXPECT_TRUE(before(room, std::nullopt, 10));
+    write_twice("", as_configured);
+    write_twice(std::string{kProduction}, production);
+    write_twice(std::string{kLeaky}, leaked);
     const std::string out = ::testing::internal::GetCapturedStdout();
     const std::string err = ::testing::internal::GetCapturedStderr();
-    EXPECT_EQ(out.find(marker), std::string::npos);
-    EXPECT_EQ(err.find(marker), std::string::npos);
+    for (const std::string& marker : {as_configured, production, leaked}) {
+        EXPECT_FALSE(holds_any(out, forms_of(marker)));
+        EXPECT_FALSE(holds_any(err, forms_of(marker)));
+    }
 
-    // Statements carry bodies as bound parameters: their text, which the server shows in
-    // pg_stat_activity and writes with any error, never holds one.
-    EXPECT_EQ(scalar(*conn_,
-                     "SELECT count(*) FROM pg_stat_activity WHERE strpos(query, $1) > 0 "
-                     "AND pid <> pg_backend_pid()",
-                     Params{}.add_text(marker)),
-              "0");
-    // Nor does any text column.
-    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_messages WHERE strpos(sender, $1) > 0",
-                     Params{}.add_text(marker)),
-              "0");
+    // Read back to this process and searched here, so that no statement carries a marker.
+    std::string activity;
+    const auto queries = conn_->exec("SELECT coalesce(string_agg(query, ' '), '') FROM "
+                                     "pg_stat_activity WHERE pid <> pg_backend_pid()");
+    ASSERT_TRUE(queries);
+    activity = queries->get(0, 0).value_or("");
+    const auto text =
+        conn_->exec("SELECT coalesce(string_agg(sender || ' ' || msg_key, ' '), '') FROM "
+                    "chat_messages");
+    ASSERT_TRUE(text);
+    const std::string columns{text->get(0, 0).value_or("")};
+    for (const std::string& marker : {as_configured, production, leaked}) {
+        EXPECT_FALSE(holds_any(activity, forms_of(marker)));
+        EXPECT_FALSE(holds_any(columns, forms_of(marker)));
+    }
 
-    const auto container = ulw::test::postgres_container();
-    if (!container) {
+    if (!container_) {
         GTEST_SKIP() << "no docker access to the server's log; the process checks above ran";
     }
-    const auto log = ulw::test::run_process({"docker", "logs", "--since", since, *container});
-    ASSERT_EQ(log.exit_code, 0) << log.output;
-    EXPECT_EQ(log.output.find(marker), std::string::npos);
+    // The leaked body shows that the search finds a logged body in the form the server writes.
+    const auto log = log_through(since, forms_of(leaked)[1]);
+    ASSERT_TRUE(log);
+    EXPECT_FALSE(holds_any(*log, forms_of(as_configured)));
+    EXPECT_FALSE(holds_any(*log, forms_of(production)));
 }
 
 } // namespace
