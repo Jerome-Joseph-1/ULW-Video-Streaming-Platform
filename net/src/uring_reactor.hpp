@@ -86,7 +86,6 @@ private:
         // A datagram receive ended with every buffer in use; it is re-armed once one is back.
         bool starved = false;
         Interest interest = Interest::None;
-        std::uint16_t sends_in_flight = 0;
         // Datagrams that arrived after stop_receiving_datagrams, still in their ring buffers:
         // a list threaded through held_next_, oldest first.
         std::int32_t held_head = -1;

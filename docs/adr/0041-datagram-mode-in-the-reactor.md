@@ -61,10 +61,14 @@ Measured on kernel 6.18 over loopback:
   whatever the mask, and level triggering would report it on every wait), reads with
   `recvfrom(MSG_TRUNC)` at most 64 datagrams per wakeup, and sends with `sendto`.
 - `send_to` copies the payload and either takes the datagram or refuses it with `EAGAIN`, which
-  the caller drops or retries. io_uring holds at most 256 sends in flight per socket (the
-  default send buffer's worth of small datagrams) and 1,024 per reactor (five times the steady
-  state at 1 Gbit/s of 1,200-byte datagrams); epoll refuses when the kernel's send buffer is
-  full. Kernel refusals after acceptance (`EACCES`, `ENETUNREACH`, ...) arrive through
+  the caller drops or retries. io_uring holds at most 1,024 sends in flight per reactor: at
+  1 Gbit/s of 1,200-byte datagrams and a loop turning every millisecond, about 104 sends are
+  submitted per iteration and complete in the next, so that is five times the steady state.
+  There is no per-socket limit, because one socket facing the SFU may carry the whole rate; a
+  per-socket share of the same budget would leave it little headroom over one stalled
+  iteration. epoll refuses only when the kernel's send buffer is full. So the reactors refuse
+  on different grounds: io_uring by the count of sends it holds, whichever socket they belong
+  to, epoll by the socket's own kernel buffer. Kernel refusals after acceptance (`EACCES`, `ENETUNREACH`, ...) arrive through
   `on_send_error` from the loop on both reactors, never from inside `send_to`.
 - A receive error (an ICMP error queued on a connected socket) stops receiving and is reported
   through `on_error`; `start_receiving_datagrams` resumes.

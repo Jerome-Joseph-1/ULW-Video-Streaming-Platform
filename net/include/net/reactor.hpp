@@ -145,8 +145,10 @@ public:
     // is full the kernel drops new ones, which is the backpressure UDP has.
     virtual void stop_receiving_datagrams(DatagramId socket) noexcept = 0;
     // Copies `payload` and never blocks or queues without bound. EAGAIN means the datagram was
-    // not taken (the socket's in-flight limit or its kernel send buffer is full) and is the
-    // caller's to drop or retry: a late media packet is worth less than a fresh one. Also
+    // not taken and is the caller's to drop or retry: a late media packet is worth less than a
+    // fresh one. The reactors refuse on different grounds: io_uring once it holds 1,024 sends
+    // not yet completed, across all its sockets, which only happens when a single iteration
+    // sends that many; epoll when the socket's kernel send buffer is full. Also
     // EMSGSIZE past kMaxDatagramSize, EAFNOSUPPORT for an IPv6 destination on an IPv4 socket,
     // and EBADF for a closed socket. Whatever the kernel refuses later arrives through
     // on_send_error, never from inside this call.

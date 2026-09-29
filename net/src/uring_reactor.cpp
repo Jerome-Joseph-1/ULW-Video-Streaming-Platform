@@ -38,12 +38,10 @@ constexpr unsigned kDatagramBufCount = 512;
 // payload: 16 + 28 + 2048 = 2092 bytes, 1 MiB for the ring.
 constexpr std::size_t kDatagramBufSize =
     sizeof(io_uring_recvmsg_out) + sizeof(sockaddr_in6) + kMaxDatagramSize;
-// The default 208 KiB send buffer also holds 256 small datagrams; past that the kernel is
-// holding sends back and more of them in flight only adds latency.
-constexpr std::uint16_t kMaxSendsPerSocket = 256;
 // At 1 Gbit/s of 1200-byte datagrams (about 104,000 a second) and a loop turning every
 // millisecond, about 104 sends are submitted per iteration and complete in the next, so 1024 is
-// five times the steady state. 1024 x 2 KiB bounds the copies at about 2 MiB.
+// five times the steady state. The limit is per reactor, not per socket: one socket may carry
+// the whole rate, as a socket facing the SFU does. 1024 x 2 KiB bounds the copies at about 2 MiB.
 constexpr std::size_t kMaxSendsInFlight = 1024;
 // A send's pool index replaces the descriptor and generation in its user_data: the pending
 // send records the descriptor, and its socket cannot be recycled while the send is in flight.
@@ -351,7 +349,6 @@ void UringReactor::finalize(Slot& s) noexcept {
     s.stats = {};
     s.v6 = s.starved = s.zero_copy = false;
     s.held_error = 0;
-    s.sends_in_flight = 0;
     s.receiving = s.recv_armed = s.send_armed = s.poll_armed = false;
     s.closing = s.failed = s.eof = s.eof_delivered = s.delivery_queued = s.accept_paused = false;
     s.shut_pending = false;
@@ -632,7 +629,7 @@ std::expected<void, int> UringReactor::send_to(DatagramId socket, SocketAddr to,
     if (!addr_len) {
         return std::unexpected(addr_len.error());
     }
-    if (s->sends_in_flight >= kMaxSendsPerSocket || sends_in_flight_ >= kMaxSendsInFlight) {
+    if (sends_in_flight_ >= kMaxSendsInFlight) {
         ++s->stats.send_refused;
         return std::unexpected(EAGAIN);
     }
@@ -666,7 +663,6 @@ std::expected<void, int> UringReactor::send_to(DatagramId socket, SocketAddr to,
     io_uring_sqe_set_data64(sqe, (std::uint64_t{index} << kSendIndexShift) |
                                      static_cast<std::uint8_t>(Op::SendTo));
     ++s->in_flight;
-    ++s->sends_in_flight;
     ++sends_in_flight_;
     return {};
 }
@@ -1029,7 +1025,6 @@ void UringReactor::on_send_to(std::size_t index, const io_uring_cqe& cqe) noexce
     }
     free_sends_.push_back(static_cast<std::uint32_t>(index));
     --sends_in_flight_;
-    --s.sends_in_flight;
     assert(s.in_flight > 0);
     --s.in_flight;
     if (s.closing && s.in_flight == 0) {
