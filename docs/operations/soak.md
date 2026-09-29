@@ -115,10 +115,11 @@ tests/soak/chat_soak.py --rejudge /tmp/chat-soak-6h/samples.csv --clients 64
 its own database there and drops it at the end. Client ports are 19101 to 19103 and node ports
 100 above (`--port`). `ULW_REACTOR=epoll` runs the nodes on the fallback reactor.
 
-- **The mix follows the server.** At the start the soak tries `kind` on join, `history` and
-  `watch`; a `malformed` answer means that server predates them (M19, M18), and the summary
-  names what it left out. Run the 6 h soak on a `main` that has both, so that history pages,
-  stored messages and presence are part of what is judged.
+- **The mix follows the server.** Where the database has member lists (M19), the soak lists
+  its users as members of the rooms they use, as an operator would. At the start it tries
+  `history` and `watch`; a `malformed` answer means that server predates them (M19, M18), and
+  the summary names what it left out. Run the 6 h soak on a `main` that has M18 and M19, so
+  that history pages, stored messages and presence are part of what is judged.
 - **Verdict.** A run passes when every node is flat, every path of the mix ran (the summary's
   "paths exercised" list: owner takeovers and fenced writes, rate limits, deduplication,
   resumes, lossy skips, slow consumers, refused upgrades, bad commands, SIGHUP, and history and

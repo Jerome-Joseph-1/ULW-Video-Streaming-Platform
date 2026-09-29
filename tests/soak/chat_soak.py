@@ -43,10 +43,11 @@ The load (--clients and --pause scale it):
   prefill     in the warm-up only: large frames that fill io_uring's receive pool, and 60
               more senders in the pool rooms that bring each node's order of kept messages to
               its cap (PREFILL_FRAME, PREFILL_SENDERS, ADR-0055)
-Commands the running chat_server does not know are found at the start by trying each one and
-reading `malformed` as absent: `kind` on join (rooms are then made "live", which admit anyone),
-`history` (M19) and `watch`/`unwatch` (M18). What is absent is left out of the mix and named in
-the summary.
+Where the database has member lists (M19), every user of the soak is listed in the pool rooms,
+and the visitors in the rooms they open, as an operator would list them: a group chat admits
+only its members. Commands the running chat_server does not know are found at the start by
+trying each one and reading `malformed` as absent: `history` (M19) and `watch`/`unwatch` (M18).
+What is absent is left out of the mix and named in the summary.
 
 Every connection comes from its own address in 127/8 (loopback_source()), and every node runs
 without transparent huge pages (without_huge_pages()).
@@ -357,12 +358,12 @@ def b64(data):
 
 class Features:
     def __init__(self):
-        self.kind = False
+        self.members = False
         self.history = False
         self.presence = False
 
     def absent(self):
-        return [name for name, on in [("kind on join (M19)", self.kind),
+        return [name for name, on in [("member lists (M19)", self.members),
                                       ("history (M19)", self.history),
                                       ("watch and unwatch (M18)", self.presence)] if not on]
 
@@ -399,6 +400,9 @@ class Stack:
                        env={**os.environ, "ULW_DATABASE_URL": self.database_url,
                             "ULW_ALLOW_ROOT": "1"},
                        stdout=subprocess.DEVNULL)
+        self.features.members = subprocess.run(
+            ["psql", self.database_url, "-Atc", "SELECT to_regclass('chat_members') IS NOT NULL"],
+            check=True, capture_output=True, text=True).stdout.strip() == "t"
         key = self.out / "dev-key.json"
         subprocess.run([self.bin / "ulw_devtoken", "keygen", key], check=True)
         jwks = subprocess.run([self.bin / "ulw_devtoken", "jwks", key], check=True,
@@ -461,12 +465,22 @@ class Stack:
                 out[name] = int(value)
         return out
 
-    def detect(self, user, other):
+    def grant(self, rooms, users):
+        """Lists `users` as members of `rooms`, as an operator would (M19: a group chat admits
+        only its members). A server without member lists has no table for them."""
+        if not self.features.members:
+            return
+        sql = ("INSERT INTO chat_members (room_id, user_id) SELECT r, u FROM "
+               f"unnest('{{{','.join(rooms)}}}'::uuid[]) r CROSS JOIN "
+               f"unnest('{{{','.join(users)}}}'::text[]) u ON CONFLICT DO NOTHING;\n")
+        subprocess.run(["psql", self.database_url, "-q", "-v", "ON_ERROR_STOP=1"], input=sql,
+                       text=True, check=True, stdout=subprocess.DEVNULL)
+
+    def detect(self, user, other, room):
         """Tries each command main may not have; `malformed` means this server lacks it, any
-        other answer that it has it."""
+        other answer that it has it. `room` must admit `user`."""
         f = self.features
         ws = Ws.connect(self.ports[NODES[0]], self.tokens[user])
-        room = str(uuid.uuid4())
 
         def answer():
             while True:
@@ -482,13 +496,10 @@ class Stack:
             return not (m["type"] == "error" and m.get("reason") == "malformed")
 
         try:
-            ws.send_json({"type": "join", "room": room, "kind": "live"})
-            f.kind = known()
-            if not f.kind:
-                ws.send_json({"type": "join", "room": room})
-                m = answer()
-                if m["type"] != "joined":
-                    raise RuntimeError(f"feature probe could not join: {m}")
+            ws.send_json({"type": "join", "room": room})
+            m = answer()
+            if m["type"] != "joined":
+                raise RuntimeError(f"feature probe could not join: {m}")
             ws.send_json({"type": "history", "room": room, "limit": 1})
             f.history = known()
             ws.send_json({"type": "watch", "user": other})
@@ -529,13 +540,28 @@ class Stack:
 
 
 class Rooms:
-    """The pool rooms and the highest seq any client has seen in each."""
+    """The pool rooms, the rooms visitors open one by one, and the highest seq any client has
+    seen in each pool room."""
 
-    def __init__(self, rng):
-        self.pool = [str(uuid.UUID(int=rng.getrandbits(128), version=4)) for _ in range(ROOM_POOL)]
-        self.firehose = str(uuid.UUID(int=rng.getrandbits(128), version=4))
+    def __init__(self, rng, fresh):
+        def made():
+            return str(uuid.UUID(int=rng.getrandbits(128), version=4))
+
+        self.pool = [made() for _ in range(ROOM_POOL)]
+        self.firehose = made()
+        self.probe = made()
+        self.fresh = [made() for _ in range(fresh)]
         self.lock = threading.Lock()
         self.heads = {}
+        self.next_fresh = 0
+
+    def open_fresh(self):
+        """A room nobody has joined yet, or None once the run has used them all."""
+        with self.lock:
+            if self.next_fresh == len(self.fresh):
+                return None
+            self.next_fresh += 1
+            return self.fresh[self.next_fresh - 1]
 
     def saw(self, room, seq):
         with self.lock:
@@ -570,8 +596,6 @@ class Actor(threading.Thread):
 
     def join_room(self, room, lossy=False, after=None):
         cmd = {"type": "join", "room": room}
-        if self.stack.features.kind:
-            cmd["kind"] = "live"
         if lossy:
             cmd["delivery"] = "lossy"
         if after is not None:
@@ -753,9 +777,10 @@ class Visitors(Actor):
         try:
             actor.connect(f"v{seed % VISITORS:02d}")
             for _ in range(actor.rng.randint(1, 2)):
-                if actor.rng.random() < 0.2:
+                fresh = self.rooms.open_fresh() if actor.rng.random() < 0.2 else None
+                if fresh:
                     self.counts.add("new_rooms")
-                    actor.join_room(str(uuid.uuid4()))
+                    actor.join_room(fresh)
                 else:
                     room = actor.rng.choice(self.rooms.pool)
                     head = self.rooms.head(room)
@@ -1094,10 +1119,14 @@ def main():
     users = ([f"c{i:02d}" for i in range(args.clients)] + [f"v{i:02d}" for i in range(VISITORS)] +
              [f"slow{i}" for i in range(SLOW_MAX)] + ["burst", "hose", "probe", "fill"] +
              [f"p{i:02d}" for i in range(PREFILL_SENDERS // len(NODES))])
+    # Visitors open one room in about every five seconds: a fifth of one visit a second.
+    rooms = Rooms(random.Random(42), int(args.hours * 3600 / 5 * 1.5) + 100)
     stack.copy_binaries()
     stack.prepare(users)
+    stack.grant(rooms.pool + [rooms.firehose, rooms.probe], users)
+    stack.grant(rooms.fresh, [u for u in users if u.startswith("v")])
     stack.start()
-    stack.detect("probe", "hose")
+    stack.detect("probe", "hose", rooms.probe)
     pids = stack.pids()
     (out / "pids.json").write_text(json.dumps({**pids, "soak": os.getpid()}))
     absent = stack.features.absent()
@@ -1106,7 +1135,6 @@ def main():
 
     stop = threading.Event()
     counts = Counts()
-    rooms = Rooms(random.Random(42))
     client_users = users[:args.clients]
     threads = [Client(stack, counts, stop, rooms, i, client_users, args.pause, scale)
                for i in range(args.clients)]
