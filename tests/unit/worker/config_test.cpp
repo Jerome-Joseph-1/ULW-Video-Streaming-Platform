@@ -157,6 +157,13 @@ TEST_F(WorkerConfigTest, WhatCannotWorkIsRefusedBeforeAnythingStarts) {
     EXPECT_EQ(refused_variable(), "ULW_S3_ACCESS_KEY_ID");
 }
 
+TEST_F(WorkerConfigTest, AnAccessKeyIdTheSignerWouldRefuseIsRefusedAtTheCheck) {
+    for (const std::string& id : {std::string("AKIA EXAMPLE"), std::string(129, 'A')}) {
+        env["ULW_S3_ACCESS_KEY_ID"] = id;
+        EXPECT_EQ(refused_variable(), "ULW_S3_ACCESS_KEY_ID") << id;
+    }
+}
+
 TEST_F(WorkerConfigTest, TheLogLevelIsOneOfFour) {
     EXPECT_EQ(load()->log_level, ops::Level::Info);
     env["ULW_LOG_LEVEL"] = "warn";

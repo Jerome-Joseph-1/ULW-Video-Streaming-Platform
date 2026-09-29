@@ -136,6 +136,17 @@ TEST_F(ConfigTest, AnObjectStoreLocationOrKeysThatCannotWorkAreRefused) {
     EXPECT_TRUE(load());
 }
 
+TEST_F(ConfigTest, AnAccessKeyIdTheSignerWouldRefuseIsRefusedAtTheCheck) {
+    // Each would pass a check for presence and fail the start, which restarts in a loop.
+    for (const std::string& id :
+         {std::string("AKIA EXAMPLE"), std::string("AKIA/EXAMPLE"), std::string(129, 'A')}) {
+        env["ULW_S3_ACCESS_KEY_ID"] = id;
+        EXPECT_EQ(refused_variable(), "ULW_S3_ACCESS_KEY_ID") << id;
+    }
+    env["ULW_S3_ACCESS_KEY_ID"] = std::string(128, 'A');
+    EXPECT_TRUE(load());
+}
+
 TEST_F(ConfigTest, BothKeySourcesAtOnceAreRefused) {
     const KeySetFile file(kKeySet);
     env["ULW_DEV_JWKS_FILE"] = file.path();

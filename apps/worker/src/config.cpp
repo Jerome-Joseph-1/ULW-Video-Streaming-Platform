@@ -2,6 +2,7 @@
 
 #include "core/util/parse.hpp"
 #include "infra/postgres/connection_string.hpp"
+#include "infra/s3util/credentials.hpp"
 #include "infra/s3util/profile.hpp"
 
 #include <algorithm>
@@ -117,6 +118,14 @@ std::expected<Storage, ConfigError> load_storage(const EnvLookup& env) {
         if (!lookup(env, key)) {
             return error(key, "not set");
         }
+    }
+    // The same rules the start applies, so a key id it would refuse is refused here with exit
+    // 2 rather than at the start with exit 1 and a restart loop. Neither value is quoted back.
+    if (!infra::s3util::Credentials::make(
+            *lookup(env, "ULW_S3_ACCESS_KEY_ID"),
+            infra::s3util::SecretString(*lookup(env, "ULW_S3_SECRET_ACCESS_KEY")))) {
+        return error("ULW_S3_ACCESS_KEY_ID",
+                     "not an access key id: 1 to 128 letters, digits and -._~");
     }
     auto bucket = required(env, "ULW_BUCKET");
     if (!bucket) {

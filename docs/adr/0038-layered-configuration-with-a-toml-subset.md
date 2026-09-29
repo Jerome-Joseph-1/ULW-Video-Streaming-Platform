@@ -47,11 +47,12 @@ already set the environment variable names, which must keep working.
   such that a 50 GiB upload needs at most 10,000 parts (so at least 5.12 MiB);
   `max_upload_slots <= max_connections`; `max_uploads_per_user <= max_upload_slots`; the
   connection string parses (the reason is never quoted, since libpq's quotes the password); the
-  R2 account id or MinIO endpoint makes a store profile and both store keys are set; the
+  R2 account id or MinIO endpoint makes a store profile, both store keys are set, and the key
+  id passes the signer's own rule (1 to 128 unreserved characters); the
   development key set reads and holds a usable key; the TLS certificate and key load and
   match; and, once the descriptor limit is raised, `max_connections <= (RLIMIT_NOFILE - 64) /
   2`. Worker: node id an RFC 1123 label, absolute paths, 1..64 ffmpeg threads, storage choice,
-  location and keys, and the connection string. Whatever can be checked without starting
+  location and keys under the same rules, and the connection string. Whatever can be checked without starting
   anything is checked here, so `--check-config` refuses it and a unit that could never start
   exits 2 once instead of restarting every two seconds.
 - The new gateway settings are `ULW_CHUNK_SIZE`, `ULW_MAX_CONNECTIONS`, `ULW_MAX_UPLOAD_SLOTS`,
