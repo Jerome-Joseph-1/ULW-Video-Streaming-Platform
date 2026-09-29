@@ -47,7 +47,8 @@ std::string_view IpAddress::format(Text& out) const noexcept {
     const bool v4 = is_v4();
     const void* source = v4 ? static_cast<const void*>(&bytes_[kMappedPrefix.size()])
                             : static_cast<const void*>(bytes_.data());
-    if (::inet_ntop(v4 ? AF_INET : AF_INET6, source, out.data(), out.size()) == nullptr) {
+    if (::inet_ntop(v4 ? AF_INET : AF_INET6, source, out.data(),
+                    static_cast<socklen_t>(out.size())) == nullptr) {
         return {};
     }
     return {out.data()};
