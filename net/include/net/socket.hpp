@@ -1,5 +1,6 @@
 #pragma once
 
+#include "net/socket_addr.hpp"
 #include "os/unique_fd.hpp"
 
 #include <cstdint>
@@ -45,5 +46,10 @@ enum class EndpointScope : std::uint8_t { Unspecified, Loopback, Routable };
 [[nodiscard]] std::expected<os::UniqueFd, int> listen_on(std::string_view address) noexcept;
 // 0 once a started connect has succeeded, otherwise the errno it failed with.
 [[nodiscard]] int connect_result(int fd) noexcept;
+
+// A nonblocking, close-on-exec UDP socket bound to `local`. IPv6 sockets are dual-stack whatever
+// net.ipv6.bindv6only says, so binding the IPv6 wildcard takes IPv4 peers too.
+[[nodiscard]] std::expected<os::UniqueFd, int> bind_udp(const SocketAddr& local);
+[[nodiscard]] std::expected<SocketAddr, int> local_addr(int fd) noexcept;
 
 } // namespace net

@@ -56,6 +56,7 @@ ulw_add_test_suite(net_unit_tests unit
     unit/net/reactor_test.cpp
     unit/net/signals_test.cpp
     unit/net/slab_test.cpp
+    unit/net/sockaddr_test.cpp
     unit/net/timing_wheel_test.cpp
     unit/net/transport_tls_test.cpp)
 target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo ulw::test_tls)
