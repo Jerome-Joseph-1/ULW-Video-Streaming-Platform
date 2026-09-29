@@ -36,6 +36,7 @@ using infra::ffmpeg::Limits;
 using infra::ffmpeg::Sandbox;
 
 constexpr std::uint64_t kGiB = std::uint64_t{1} << 30U;
+constexpr std::uint64_t kFileLimit = std::uint64_t{3} << 20U;
 
 // Is a process with exactly this command line running anywhere on the host? Zombies count
 // as gone.
@@ -154,7 +155,7 @@ TEST_F(SandboxTest, AFileSizeLimitReachesTheProgramAndStopsAFileGrowingPastIt) {
                                                             .address_space_bytes = 0,
                                                             .cpu = {},
                                                             .wall = {},
-                                                            .file_size_bytes = 3 * 1024 * 1024});
+                                                            .file_size_bytes = kFileLimit});
     EXPECT_EQ(reported.exit_code, 0);
     // bash counts ulimit -f in 1024-byte blocks.
     EXPECT_EQ(stdout_, "3072\n");
@@ -164,9 +165,9 @@ TEST_F(SandboxTest, AFileSizeLimitReachesTheProgramAndStopsAFileGrowingPastIt) {
                             .address_space_bytes = 0,
                             .cpu = {},
                             .wall = {},
-                            .file_size_bytes = 3 * 1024 * 1024});
+                            .file_size_bytes = kFileLimit});
     EXPECT_NE(grown.exit_code, 0);
-    EXPECT_LE(fs::file_size(writable_.path() / "big"), 3U * 1024 * 1024);
+    EXPECT_LE(fs::file_size(writable_.path() / "big"), kFileLimit);
 }
 
 TEST_F(SandboxTest, WithoutAFileSizeLimitAFileGrowsFreely) {

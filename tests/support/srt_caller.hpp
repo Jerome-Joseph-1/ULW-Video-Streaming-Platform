@@ -20,7 +20,8 @@ public:
     SrtCaller& operator=(SrtCaller&&) = delete;
 
     // True when the handshake completed. An empty passphrase or stream id is not sent.
-    bool connect(std::uint16_t port, std::string_view passphrase, std::string_view stream_id) {
+    [[nodiscard]] bool connect(std::uint16_t port, std::string_view passphrase,
+                               std::string_view stream_id) const {
         const int live = SRTT_LIVE;
         // Refusals come back at once, but a listener that is gone never answers.
         const int patience_ms = 1000;
@@ -43,7 +44,7 @@ public:
                              sizeof address) != SRT_ERROR;
     }
 
-    bool send(std::string_view payload) {
+    [[nodiscard]] bool send(std::string_view payload) const {
         return ::srt_sendmsg(socket_, payload.data(), static_cast<int>(payload.size()), -1, 0) ==
                static_cast<int>(payload.size());
     }

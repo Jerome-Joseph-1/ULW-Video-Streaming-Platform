@@ -328,7 +328,7 @@ TEST_F(PublisherTest, FinishEndsWhatIsVisibleWhenASegmentBrokeTheKeyframeContrac
     ASSERT_TRUE(publisher);
     publisher->begin_epoch(kFirstMedia);
     segments(0, 0, 2);
-    std::string text = ffmpeg_playlist(0, 0, 1, init(0)) + "#EXTINF:4.000000,\nseg_0_1.m4s\n";
+    const std::string text = ffmpeg_playlist(0, 0, 1, init(0)) + "#EXTINF:4.000000,\nseg_0_1.m4s\n";
     const auto finished = publisher->finish(text);
     EXPECT_TRUE(finished.ended);
     EXPECT_EQ(finished.problem, PublishError::KeyframeIntervalExceeded);

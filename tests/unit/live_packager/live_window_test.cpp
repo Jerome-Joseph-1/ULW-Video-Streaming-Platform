@@ -9,7 +9,6 @@ namespace {
 using live::LiveWindow;
 using live::MediaPlaylist;
 using live::Micros;
-using live::WindowConfig;
 
 constexpr Micros kTwoSeconds{2'000'000};
 const core::WallTime kStart{std::chrono::milliseconds{1'790'672'777'431}};
@@ -95,7 +94,7 @@ MediaPlaylist earlier_run(std::uint64_t media_sequence, std::size_t count,
 }
 
 TEST(LiveWindow, ResumingContinuesTheSequenceWhereTheEarlierRunStopped) {
-    LiveWindow window =
+    const LiveWindow window =
         LiveWindow::resume({.target_seconds = 2, .max_segments = 6}, earlier_run(20, 6));
     EXPECT_EQ(window.next_sequence(), 26U);
     EXPECT_EQ(window.playlist().media_sequence, 20U);
@@ -130,7 +129,7 @@ TEST(LiveWindow, TheDiscontinuitySequenceAdvancesWhenADiscontinuityLeavesTheWind
 }
 
 TEST(LiveWindow, ResumingIntoASmallerWindowDropsTheOldestAndKeepsTheSequenceAligned) {
-    LiveWindow window =
+    const LiveWindow window =
         LiveWindow::resume({.target_seconds = 2, .max_segments = 4}, earlier_run(20, 10));
     EXPECT_EQ(window.playlist().segments.size(), 4U);
     EXPECT_EQ(window.playlist().media_sequence, 26U);
@@ -139,7 +138,7 @@ TEST(LiveWindow, ResumingIntoASmallerWindowDropsTheOldestAndKeepsTheSequenceAlig
 }
 
 TEST(LiveWindow, ResumingKeepsTheTargetDurationThePlayersAlreadyHold) {
-    LiveWindow window =
+    const LiveWindow window =
         LiveWindow::resume({.target_seconds = 4, .max_segments = 6}, earlier_run(0, 2));
     EXPECT_EQ(window.playlist().target_seconds, 2U);
 }

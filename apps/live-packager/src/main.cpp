@@ -169,10 +169,16 @@ int run() {
     if (!storage) {
         return fail("storage", storage.error());
     }
-    auto listener = infra::srt::IngestListener::bind({.host = config->ingest_host,
-                                                      .port = config->ingest_port,
-                                                      .passphrase = config->srt_passphrase,
-                                                      .stream_id = config->stream.str()});
+    // Before the listener and after everything that holds an SRT socket: main's locals are
+    // destroyed in reverse, and libsrt's cleanup must come last.
+    const auto srt = infra::srt::Runtime::start();
+    if (!srt) {
+        return fail("srt", srt.error());
+    }
+    auto listener = infra::srt::IngestListener::bind(*srt, {.host = config->ingest_host,
+                                                            .port = config->ingest_port,
+                                                            .passphrase = config->srt_passphrase,
+                                                            .stream_id = config->stream.str()});
     if (!listener) {
         return fail("ingest", listener.error());
     }

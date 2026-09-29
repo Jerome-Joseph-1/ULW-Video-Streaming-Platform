@@ -49,6 +49,26 @@ inline constexpr core::Millis kReadWait{100};
 // for an MTU of 1500 (1500 - 20 IP - 8 UDP - 16 SRT = 1456).
 inline constexpr std::size_t kMaxPayload = 1456;
 
+// libsrt's process-wide state, for as long as this lives. Started before any listener or
+// caller and dropped after the last of them, on the path out of main: libsrt's worker threads
+// hold OpenSSL state that is only released when they end, and they end in srt_cleanup, which a
+// static destructor runs too late for a leak check to see.
+class Runtime {
+public:
+    [[nodiscard]] static std::expected<Runtime, std::string> start();
+
+    ~Runtime();
+    Runtime(Runtime&& other) noexcept;
+    Runtime& operator=(Runtime&&) = delete;
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
+
+private:
+    Runtime() noexcept = default;
+
+    bool owns_ = true;
+};
+
 // One connected caller. Only the payload leaves: what it carries (MPEG-TS from LiveKit
 // egress) is not looked at here.
 class Session {
@@ -72,8 +92,9 @@ private:
 // encryption and the retransmission, on UDP, in this process; ffmpeg never touches the network.
 class IngestListener {
 public:
+    // `runtime` is proof that libsrt is started, and must outlive the listener.
     [[nodiscard]] static std::expected<IngestListener, std::string>
-    bind(const IngestConfig& config);
+    bind(const Runtime& runtime, const IngestConfig& config);
 
     ~IngestListener();
     IngestListener(IngestListener&& other) noexcept;

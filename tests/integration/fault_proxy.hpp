@@ -12,6 +12,7 @@
 #include <list>
 #include <mutex>
 #include <poll.h>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -33,13 +34,16 @@ public:
         listener_ = os::UniqueFd(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0));
         sockaddr_in address = loopback(0);
         const int one = 1;
-        ::setsockopt(listener_.get(), SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the sockets API's own cast.
-        ::bind(listener_.get(), reinterpret_cast<const sockaddr*>(&address), sizeof address);
-        ::listen(listener_.get(), 16);
         socklen_t length = sizeof address;
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the sockets API's own cast.
-        ::getsockname(listener_.get(), reinterpret_cast<sockaddr*>(&address), &length);
+        // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): the sockets API's own casts.
+        if (::setsockopt(listener_.get(), SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
+            ::bind(listener_.get(), reinterpret_cast<const sockaddr*>(&address), sizeof address) !=
+                0 ||
+            ::listen(listener_.get(), 16) != 0 ||
+            ::getsockname(listener_.get(), reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+            throw std::runtime_error("fault proxy: cannot listen");
+        }
+        // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
         port_ = ntohs(address.sin_port);
         acceptor_ = std::jthread([this](const std::stop_token& stop) { accept_loop(stop); });
     }
@@ -89,7 +93,7 @@ private:
     }
 
     void relay(os::UniqueFd client, const std::stop_token& stop) {
-        os::UniqueFd upstream(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0));
+        const os::UniqueFd upstream(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0));
         const sockaddr_in address = loopback(upstream_port_);
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the sockets API's own cast.
         if (::connect(upstream.get(), reinterpret_cast<const sockaddr*>(&address),
@@ -103,17 +107,18 @@ private:
             if (::poll(fds.data(), fds.size(), 100) <= 0) {
                 continue;
             }
-            for (std::size_t i = 0; i < fds.size(); ++i) {
-                if (fds[i].revents == 0) {
+            for (const bool from_client : {true, false}) {
+                const pollfd& ready = from_client ? fds.front() : fds.back();
+                if (ready.revents == 0) {
                     continue;
                 }
-                const int from = fds[i].fd;
-                const int to = i == 0 ? upstream.get() : client.get();
+                const int from = ready.fd;
+                const int to = from_client ? upstream.get() : client.get();
                 const ssize_t n = ::read(from, buffer.data(), buffer.size());
                 if (n <= 0) {
                     return;
                 }
-                if (i == 0 && failing_.load() &&
+                if (from_client && failing_.load() &&
                     std::string_view(buffer.data(), static_cast<std::size_t>(n))
                         .starts_with("PUT ")) {
                     constexpr std::string_view kRefusal =

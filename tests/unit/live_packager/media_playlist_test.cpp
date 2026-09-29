@@ -9,7 +9,6 @@ namespace {
 using live::MediaPlaylist;
 using live::Micros;
 using live::PlaylistError;
-using live::Segment;
 
 // What ffmpeg 6.1 wrote for a live remux of MPEG-TS, `-hls_segment_type fmp4 -start_number 7`,
 // after the publisher went away.

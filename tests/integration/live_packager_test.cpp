@@ -13,6 +13,7 @@
 #include "support/child_process.hpp"
 #include "support/live_s3.hpp"
 #include "support/srt_caller.hpp"
+#include "support/srt_runtime.hpp"
 #include "support/temp_dir.hpp"
 
 #include <algorithm>
@@ -101,7 +102,7 @@ protected:
              "ULW_S3_ENDPOINT=" + options.endpoint, "ULW_BUCKET=" + minio_.bucket,
              "ULW_S3_ACCESS_KEY_ID=" + kAccessKey, "ULW_S3_SECRET_ACCESS_KEY=" + kSecretKey,
              "ULW_SCRATCH_DIR=" + scratch_dirs_.back()->path().string(),
-             "ULW_SANDBOX_BIN=" ULW_SANDBOX_BIN});
+             std::string("ULW_SANDBOX_BIN=") + ULW_SANDBOX_BIN});
         EXPECT_NE(packager, nullptr);
         return packager;
     }
@@ -119,8 +120,8 @@ protected:
 
     // A duration of 0 means until killed. `keyframe_seconds` is the publisher's keyframe
     // interval, which is the packager's segment length unless a test says otherwise.
-    std::unique_ptr<ChildProcess> start_publisher(std::uint16_t port, unsigned duration,
-                                                  unsigned keyframe_seconds = 2) const {
+    [[nodiscard]] std::unique_ptr<ChildProcess>
+    start_publisher(std::uint16_t port, unsigned duration, unsigned keyframe_seconds = 2) const {
         std::vector<std::string> argv{ULW_LIVE_TESTSOURCE, "127.0.0.1:" + std::to_string(port)};
         if (duration != 0) {
             argv.push_back(std::to_string(duration));
@@ -154,12 +155,15 @@ protected:
     // a segment's place is media_sequence + index and its name says so, and everything it lists
     // is in the store.
     void watch(ChildProcess& publisher, const std::function<bool()>& until = {}) {
-        do {
+        while (true) {
             sample();
             if (until && until()) {
                 return;
             }
-        } while (!publisher.wait_exit(kSamplePeriod));
+            if (publisher.wait_exit(kSamplePeriod)) {
+                break;
+            }
+        }
         sample();
     }
 
@@ -393,11 +397,11 @@ TEST_F(LivePackagerTest,
     const auto port = ingest_port(*packager);
     ASSERT_TRUE(port) << packager->output();
     {
-        ulw::test::SrtCaller wrong_passphrase;
+        const ulw::test::SrtCaller wrong_passphrase;
         EXPECT_FALSE(wrong_passphrase.connect(*port, "not the right passphrase", stream_));
-        ulw::test::SrtCaller wrong_stream;
+        const ulw::test::SrtCaller wrong_stream;
         EXPECT_FALSE(wrong_stream.connect(*port, kPassphrase, "another-stream"));
-        ulw::test::SrtCaller unencrypted;
+        const ulw::test::SrtCaller unencrypted;
         EXPECT_FALSE(unencrypted.connect(*port, "", stream_));
     }
     const auto publisher = start_publisher(*port, 6);
@@ -413,7 +417,7 @@ TEST_F(LivePackagerTest, AnAuthenticatedInputThatIsNotMpegtsIsGivenUpOnAndPublis
     const auto port = ingest_port(*packager);
     ASSERT_TRUE(port) << packager->output();
     {
-        ulw::test::SrtCaller caller;
+        const ulw::test::SrtCaller caller;
         ASSERT_TRUE(caller.connect(*port, kPassphrase, stream_));
         const std::string garbage(1316, 'x');
         for (int i = 0; i < 300; ++i) {
@@ -431,7 +435,7 @@ TEST_F(LivePackagerTest, APublisherThatConnectsAndSendsNothingIsGivenUpOn) {
     const auto packager = start_packager();
     const auto port = ingest_port(*packager);
     ASSERT_TRUE(port) << packager->output();
-    ulw::test::SrtCaller caller;
+    const ulw::test::SrtCaller caller;
     ASSERT_TRUE(caller.connect(*port, kPassphrase, stream_));
     // Five target durations, and the connection is still open.
     EXPECT_EQ(packager->wait_exit(kExitPatience), 1) << packager->output();

@@ -133,7 +133,7 @@ TEST(SegmentTracker, SkipsSegmentsAlreadyHandledThatFfmpegStillLists) {
     for (std::uint64_t n = 5; n < 9; ++n) {
         dir.write(n);
     }
-    SegmentTracker tracker(0, 7);
+    const SegmentTracker tracker(0, 7);
     const auto ready = tracker.scan(playlist(5, 4), dir.lookup());
     ASSERT_TRUE(ready);
     ASSERT_EQ(ready->size(), 2U);
@@ -171,7 +171,7 @@ TEST(SegmentTracker, ReportsASegmentNamedOtherThanItsSequenceNumberSays) {
 }
 
 TEST(SegmentTracker, AHalfWrittenPlaylistIsUnreadableRatherThanEmpty) {
-    Directory dir;
+    const Directory dir;
     EXPECT_EQ(SegmentTracker(0, 0).scan("", dir.lookup()).error(), ScanError::Unreadable);
     EXPECT_EQ(SegmentTracker(0, 0).scan("#EXTM3U\n#EXTINF:2.0,\n", dir.lookup()).error(),
               ScanError::Unreadable);

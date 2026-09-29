@@ -15,25 +15,6 @@ namespace {
 // SRT's reject codes above SRT_REJC_PREDEFINED are the HTTP status codes, so 401.
 constexpr int kUnauthorized = SRT_REJC_PREDEFINED + 401;
 
-// libsrt is started once and stays up for the life of the process.
-struct Library {
-    Library() : started(::srt_startup() >= 0) {}
-    ~Library() { ::srt_cleanup(); }
-    Library(const Library&) = delete;
-    Library& operator=(const Library&) = delete;
-    Library(Library&&) = delete;
-    Library& operator=(Library&&) = delete;
-    bool started;
-};
-
-bool ensure_library() {
-    static const Library library;
-    // Handshake refusals and the like are logged by libsrt at warning level on stderr, one
-    // block of lines for every stray packet a port scan sends; only real faults are wanted.
-    ::srt_setloglevel(LOG_CRIT);
-    return library.started;
-}
-
 struct AddressList {
     addrinfo* head = nullptr;
     ~AddressList() {
@@ -110,6 +91,24 @@ bool set_option(SRTSOCKET socket, SRT_SOCKOPT flag, const void* value, int size)
 
 } // namespace
 
+std::expected<Runtime, std::string> Runtime::start() {
+    if (::srt_startup() < 0) {
+        return std::unexpected(last_error("srt startup"));
+    }
+    // Handshake refusals and the like are logged by libsrt at warning level on stderr, one
+    // block of lines for every stray packet a port scan sends; only real faults are wanted.
+    ::srt_setloglevel(LOG_CRIT);
+    return Runtime();
+}
+
+Runtime::~Runtime() {
+    if (owns_) {
+        ::srt_cleanup();
+    }
+}
+
+Runtime::Runtime(Runtime&& other) noexcept : owns_(std::exchange(other.owns_, false)) {}
+
 Session::~Session() {
     if (socket_ != SRT_INVALID_SOCK) {
         ::srt_close(socket_);
@@ -149,15 +148,13 @@ IngestListener::~IngestListener() {
     }
 }
 
-std::expected<IngestListener, std::string> IngestListener::bind(const IngestConfig& config) {
+std::expected<IngestListener, std::string> IngestListener::bind(const Runtime& /*runtime*/,
+                                                                const IngestConfig& config) {
     if (config.passphrase.size() < kMinPassphrase || config.passphrase.size() > kMaxPassphrase) {
         return std::unexpected("passphrase must be 10 to 79 characters");
     }
     if (config.stream_id.empty()) {
         return std::unexpected("stream id is empty");
-    }
-    if (!ensure_library()) {
-        return std::unexpected(last_error("srt startup"));
     }
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
