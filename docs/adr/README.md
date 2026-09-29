@@ -57,4 +57,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
 | [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted |
 | [0052](0052-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted |
+| [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted |
 | [0057](0057-live-chat-lossy-and-bounded.md) | A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere | Accepted |

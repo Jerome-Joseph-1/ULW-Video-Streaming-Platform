@@ -11,9 +11,9 @@
 # ULW_TEST_PG_CONTAINER. The live storage suites (ULW_CONFORMANCE_LIVE=ON) use MinIO on
 # 127.0.0.1:9000 with the credentials below, which tests/support/live_s3.cpp defaults to.
 # The call suite (tests/call/run.sh) uses the LiveKit server on 127.0.0.1:7880 with the fake API
-# key below; it runs only when asked for:
+# key below, and its live ingest spec also the recorder; they run only when asked for:
 #
-#   docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit
+#   docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit egress
 services:
   postgres:
     # postgres:16 (16.15), pinned by digest so every checkout tests against the same server.
@@ -63,37 +63,107 @@ services:
     image: docker.io/livekit/livekit-server@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3
     container_name: ulw-livekit
     profiles: ["calls"]
+    # On the host's network, as are the recorder and its Redis: the recorder joins rooms as a
+    # client, and a WHIP publisher's trickled candidates are host addresses the server must reach
+    # (ADR-0053); from a bridge network neither would be reachable at the loopback address the
+    # server advertises.
+    network_mode: host
+    depends_on:
+      redis:
+        condition: service_healthy
     environment:
       # The key and secret are fake and guard nothing but loopback ports. HS256 wants a key of
       # at least 256 bits (RFC 7518 section 3.2), hence the padding.
       LIVEKIT_CONFIG: |
         port: 7880
-        bind_addresses: ["0.0.0.0"]
+        bind_addresses: ["127.0.0.1"]
         keys:
           ulw-dev-key: ulw-dev-secret-testtest123-not-a-real-secret
+        # The bus to the recorder (egress below); LiveKit reaches egress only through Redis.
+        redis:
+          address: 127.0.0.1:7879
         rtc:
-          # ICE candidates advertise loopback: the browsers under test run on this host, and
-          # nothing else may reach the SFU. STUNner fronts it everywhere else (ADR-0013).
+          # ICE candidates advertise loopback: the browsers under test run on this host. LiveKit
+          # leaves loopback interfaces out of ICE unless told, and on the host's network no
+          # forwarder brings loopback traffic to another interface. The media ports listen on
+          # every host address, as checks towards a publisher's host candidates leave from them;
+          # they carry nothing but DTLS sessions a ticket set up. STUNner fronts the SFU
+          # everywhere else (ADR-0013).
           node_ip: 127.0.0.1
+          enable_loopback_candidate: true
           use_external_ip: false
           tcp_port: 7881
           # One UDP port per peer connection, and a participant holds two (publish and
           # subscribe): 20 ports carry the 10 connections of five 1:1 calls, more than any local
-          # run makes, while keeping the published range, and docker's per-port forwarders, small.
+          # run makes.
           port_range_start: 50000
           port_range_end: 50019
         room:
           # Rooms exist only because the signalling server opened them; a ticket for a room
           # that has gone must not bring it back with default settings.
           auto_create: false
+        api:
+          # ListParticipants from the room itself, not from its copy in Redis. Each published
+          # track stores a snapshot of its participant, and two tracks published in the same
+          # millisecond store theirs in either order, so the copy can keep one track for good
+          # (the ingest spec saw a WHIP publisher's audio missing for 20 s on a runner). LiveKit
+          # v1.13.7 marks this the coming default (pkg/config/config.go).
+          enable_psrpc_for_get_list_participants: true
         logging:
           level: info
-    ports:
-      - "127.0.0.1:7880:7880"
-      - "127.0.0.1:7881:7881"
-      - "127.0.0.1:50000-50019:50000-50019/udp"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7880/"]
       interval: 2s
       timeout: 2s
       retries: 15
+
+  redis:
+    # redis 7.4.6 (alpine), pinned by digest. Only LiveKit and its recorder use it, as their bus.
+    image: docker.io/library/redis@sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
+    container_name: ulw-livekit-redis
+    profiles: ["calls"]
+    network_mode: host
+    # Its ports, and the recorder's below, sit under Linux's ephemeral range (32768 and up): a
+    # port in it can be held by some client socket on the host when the server starts, and the
+    # recorder's health server then fails to bind without a word.
+    command: ["redis-server", "--bind", "127.0.0.1", "--port", "7879", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7879", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  egress:
+    # livekit/egress v1.14.1, pinned by digest (ADR-0046): the recorder that relays a live
+    # stream's publisher to the packager over SRT (ADR-0053).
+    image: docker.io/livekit/egress@sha256:bf2b648b947349c3e9ff7aa8c718f00378d5c06af7624652a3653318e00333ce
+    container_name: ulw-livekit-egress
+    profiles: ["calls"]
+    network_mode: host
+    depends_on:
+      livekit:
+        condition: service_healthy
+    environment:
+      EGRESS_CONFIG_BODY: |
+        api_key: ulw-dev-key
+        api_secret: ulw-dev-secret-testtest123-not-a-real-secret
+        ws_url: ws://127.0.0.1:7880
+        redis:
+          address: 127.0.0.1:7879
+        health_port: 7981
+        # Serves room composite layouts, which this project does not use; its default, spelled
+        # out beside the health port.
+        template_port: 7980
+        log_level: info
+        # A participant relay re-encodes one 720p stream, about one core. Egress admits a
+        # request only while that much CPU is idle, which a laptop or a runner busy with the
+        # rest of a test run often is not; the cost here keeps the local recorder from turning
+        # every request away. Askedin's deployment keeps the default.
+        cpu_cost:
+          participant_cpu_cost: 0.1
+          max_cpu_utilization: 0.99
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7981/"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

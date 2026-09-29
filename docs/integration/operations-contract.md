@@ -17,6 +17,8 @@ page does not repeat it.
 | DNS and TLS | Envoy | TLS terminates at Askedin's Envoy Gateway; the service speaks plain HTTP behind it (ADR-0001). The HTTPRoute sends `/api/v1/uploads` and `/api/v1/videos` to the gateway. |
 | Envoy route timeout | Envoy | None (`request: 0s`). A chunk may take up to 1024 s at the gateway's minimum rate, and the gateway enforces its own timeouts. Upstream idle timeout below the gateway's 10 s keep-alive timeout (5 s in the shipped `BackendTrafficPolicy`). |
 | Seccomp profile | worker nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
+| Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on every hostname of `askedin-gateway`: the stage HTTPRoute names none, as the video routes do not. `/twirp` is never routed (ADR-0050, ADR-0053). |
+| LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP). It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Not in the overlays yet: it ships with the packager's. |
 
 ### Environment, by name
 

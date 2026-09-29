@@ -38,11 +38,14 @@ using MediaDone = std::move_only_function<void(std::expected<void, MediaError>) 
 using TicketDone = std::move_only_function<void(std::expected<MediaTicket, MediaError>) noexcept>;
 
 // A call's media runs in one media-server room per generation, and a generation, once closed,
-// never opens again. That is how a participant is put out: the media server keeps a connected
-// client's credential fresh for as long as it stays connected, so no ticket can be withdrawn,
-// but a closed generation admits nobody. The caller owns the number: it lives in the room's
-// state, moves only forward, and moves only through the owner's fenced write (ADR-0015), so a
-// deposed owner can neither open a generation nor close the current one (ADR-0050).
+// is never opened again by the caller. That is how a participant is put out: the media server
+// keeps a connected client's credential fresh for as long as it stays connected, so no ticket
+// can be withdrawn, but a closed generation admits no member. A publisher ticket is the
+// exception: until it expires, a WHIP POST with it brings its closed generation's room back
+// (the media server skips its own room check on that path), which is why it lives no longer
+// than a member's ticket (ADR-0053). The caller owns the number: it lives in the room's state,
+// moves only forward, and moves only through the owner's fenced write (ADR-0015), so a deposed
+// owner can neither open a generation nor close the current one (ADR-0050).
 enum class MediaGeneration : std::uint64_t {};
 
 enum class MediaRole : std::uint8_t {
@@ -51,9 +54,32 @@ enum class MediaRole : std::uint8_t {
     Member,
     // A live stream's source (M30): publishes camera and microphone, receives nothing. Its
     // ticket's endpoint takes a WHIP offer (RFC 9725) with the credential as bearer token, so
-    // an encoder or a browser can publish with no SDK.
+    // an encoder or a browser can publish with no SDK. It lives as long as a member's ticket;
+    // WHIP sends a bearer token with every later request on the session too, so a client asks
+    // for a fresh ticket for each PATCH and for its DELETE (ADR-0053).
     Publisher,
 };
+
+// What a room carries, fixed per handle by the caller that opened it: a call's room issues
+// member tickets only, a stream's room publisher tickets only, and only a stream's room may be
+// relayed to a packager.
+enum class MediaRoomKind : std::uint8_t {
+    Call,
+    Stream,
+};
+
+// A live stream's packager, as the relay reaches it (ADR-0046, ADR-0053): which stream it takes,
+// the secret it admits the relay with, and the segment length it cuts at, which becomes the
+// relay's keyframe interval. Where the packager listens is the media adapter's configuration,
+// not the caller's to choose.
+struct MediaRelay {
+    std::string stream;
+    std::string passphrase;
+    Seconds keyframe_interval;
+};
+
+// The relay's id at the media server.
+using RelayDone = std::move_only_function<void(std::expected<std::string, MediaError>) noexcept>;
 
 class IMediaRoom {
 public:
@@ -64,7 +90,17 @@ public:
     // that is gone.
     virtual void join(const UserId& user, const DeviceId& device, MediaRole role,
                       TicketDone done) = 0;
-    // Ends this generation for everyone in it; their tickets and refreshed credentials stop
+    // Sends what that participant publishes to `target`'s packager, re-encoded for it, until
+    // the participant leaves or the generation closes; its leaving is how the packager learns
+    // the stream is over. The participant must be in the room already: the media server looks
+    // for it for half a minute, not for as long as a ticket lasts. Idempotent: calls made while
+    // one for the same participant is in flight share its answer, and a participant already
+    // relayed gets the running relay's id. One case is left: a retry after the start timed out
+    // here, while the media server may still be starting it, can start a second (ADR-0053).
+    // Refused for a call's room.
+    virtual void relay(const UserId& user, const DeviceId& device, const MediaRelay& target,
+                       RelayDone done) = 0;
+    // Ends this generation for everyone in it; members' tickets and refreshed credentials stop
     // admitting anyone. Closing a generation the media server has already dropped succeeds.
     virtual void close(MediaDone done) = 0;
 };
@@ -79,7 +115,7 @@ public:
 
     virtual ~ISfu() = default;
     // Idempotent for one generation. `max_participants` 0 means no limit of the room's own.
-    virtual void open_room(const RoomId& room, MediaGeneration generation,
+    virtual void open_room(const RoomId& room, MediaGeneration generation, MediaRoomKind kind,
                            std::uint16_t max_participants, OpenDone done) = 0;
 };
 
