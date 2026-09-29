@@ -9,7 +9,7 @@
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use openmls::prelude::tls_codec::Deserialize as _;
 use openmls::prelude::*;
@@ -88,8 +88,16 @@ pub struct UlwMlsGroup {
 
 type Outcome = Result<(), UlwMlsStatus>;
 
+// The default hook prints the panic, and OpenMLS values in it, to stderr of whatever process
+// hosts the bridge. The status already reports it, so the message is dropped instead.
+fn quiet_panics() {
+    static QUIET: Once = Once::new();
+    QUIET.call_once(|| panic::set_hook(Box::new(|_| {})));
+}
+
 // The group may be half-updated after a panic; the status tells the caller to drop it.
 fn boundary(body: impl FnOnce() -> Outcome) -> UlwMlsStatus {
+    quiet_panics();
     match panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(Ok(())) => UlwMlsStatus::Ok,
         Ok(Err(status)) => status,
@@ -211,6 +219,7 @@ pub unsafe extern "C" fn ulw_mls_client_free(client: *mut UlwMlsClient) {
     if client.is_null() {
         return;
     }
+    quiet_panics();
     let _ = panic::catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: the caller hands the handle back exactly once.
         drop(unsafe { Box::from_raw(client) });
@@ -343,6 +352,7 @@ pub unsafe extern "C" fn ulw_mls_group_free(group: *mut UlwMlsGroup) {
     if group.is_null() {
         return;
     }
+    quiet_panics();
     let _ = panic::catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: the caller hands the handle back exactly once.
         let mut handle = unsafe { Box::from_raw(group) };
