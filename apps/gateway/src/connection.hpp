@@ -53,6 +53,8 @@ public:
     void drain() noexcept;
     // The drain deadline passed: close now, whatever is in flight.
     void abort() noexcept;
+    // No byte of a request has been read since the last response: what drain() closes at once.
+    [[nodiscard]] bool idle() const noexcept { return phase_ == Phase::Idle; }
     // Nothing (the kernel, the catalog, the pool, the verifier) can still reach this object.
     [[nodiscard]] bool quiescent() const noexcept;
     // Heap bytes held for the request: staged body and a buffered JSON body.

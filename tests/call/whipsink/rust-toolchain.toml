@@ -1,0 +1,5 @@
+# What builds whipsink for the ingest spec; the same release as the OpenMLS bridge's (ADR-0044).
+# fetch-whipsink.sh copies it next to the crate it builds.
+[toolchain]
+channel = "1.94.1"
+profile = "minimal"

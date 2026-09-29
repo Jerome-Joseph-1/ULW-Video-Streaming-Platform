@@ -493,9 +493,17 @@ TEST_P(GatewayUpload, PipelinedRequestsAreAnsweredInOrder) {
     ASSERT_TRUE(c.send_raw("GET /api/v1/healthz HTTP/1.1\r\nHost: t\r\n\r\n"
                            "GET /api/v1/readyz HTTP/1.1\r\nHost: t\r\n\r\n"
                            "GET /api/v1/nowhere HTTP/1.1\r\nHost: t\r\n\r\n"));
-    EXPECT_EQ(c.read_response()->body, "ok\n");
-    EXPECT_EQ(c.read_response()->body, "ready\n");
-    EXPECT_EQ(c.read_response()->status, 404);
+    // Each checked before use: a response that never came is a failure, not an empty optional
+    // read as a string.
+    const auto health = c.read_response();
+    ASSERT_TRUE(health);
+    EXPECT_EQ(health->body, "ok\n");
+    const auto ready = c.read_response();
+    ASSERT_TRUE(ready);
+    EXPECT_EQ(ready->body, "ready\n");
+    const auto missing = c.read_response();
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 404);
 }
 
 TEST_P(GatewayUpload, BadCreateRequestsAre400) {

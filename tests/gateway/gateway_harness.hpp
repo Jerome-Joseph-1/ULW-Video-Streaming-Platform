@@ -77,6 +77,8 @@ public:
     [[nodiscard]] std::vector<infra::catalog::MemoryCatalog::Job> jobs();
     [[nodiscard]] gateway::Counters counters();
     [[nodiscard]] std::size_t connections();
+    // Connections the gateway has read part of a request from; accepted alone is not enough.
+    [[nodiscard]] std::size_t busy_connections();
     [[nodiscard]] std::size_t claims();
     void drain();
     // Manual clock only: moves time forward on the loop thread and returns once the timers
