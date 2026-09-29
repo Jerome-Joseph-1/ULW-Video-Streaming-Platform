@@ -7,6 +7,12 @@
 #
 #   ULW_BUILDER    build with this docker buildx builder instead of the default one; the images
 #                  then reach the node as OCI archives and never enter the local image store
+#                  Behind a proxy on the host's loopback, the builder needs host networking: a
+#                  docker-container builder created with --driver-opt network=host, the proxy
+#                  and its CA (env.HTTPS_PROXY, env.SSL_CERT_FILE) as driver options, and a
+#                  buildkitd config holding [worker.oci] networkMode = "host", so the RUN steps
+#                  reach the proxy too. Pin its image, moby/buildkit, by digest. Its build
+#                  cache is several GB: `docker buildx prune -a` once the images are loaded.
 #   ULW_CA_BUNDLE  CA bundle handed to image builds (build secret ca-bundle) on machines whose
 #                  outbound HTTPS goes through a TLS-inspecting proxy
 set -euo pipefail
