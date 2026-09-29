@@ -129,7 +129,10 @@ until docker exec "$pg" pg_isready --quiet --username postgres; do sleep 1; done
 until docker exec "$minio" mc alias set local http://127.0.0.1:9000 ulw-e2e "$password" \
     >/dev/null 2>&1; do sleep 1; done
 docker exec "$minio" mc mb --ignore-existing "local/$bucket" >/dev/null
-docker exec "$minio" mc admin config get local api | grep -q 'stale_uploads_expiry=168h' \
+# An environment override is not stored: `config get` still shows stale_uploads_expiry=24h and
+# reports the override on a comment line of its own, which is the only place the effective value
+# shows (mc has no command that prints it).
+docker exec "$minio" mc admin config get local api | grep -qxF '# MINIO_API_STALE_UPLOADS_EXPIRY=168h' \
     || { log "MinIO did not take the 7-day stale upload expiry"; exit 1; }
 
 # The mock auth-service's certificate, from a CA that exists only here. The gateway trusts
