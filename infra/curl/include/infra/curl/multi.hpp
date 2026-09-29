@@ -38,7 +38,7 @@ public:
     // A ceiling on descriptors and on the sockets the peer holds open for us; a transfer beyond
     // it waits in libcurl's queue, with no timer running, for a connection to come free. An
     // upload store passes the uploads its process admits, so none of them ever waits
-    // (ADR-0037). Every other multi fetches key sets, one at a time per verifier: 8 leaves room
+    // (ADR-0039). Every other multi fetches key sets, one at a time per verifier: 8 leaves room
     // for overlapping refreshes while still bounding what a fault can open.
     static constexpr std::size_t kDefaultMaxConnections = 8;
     // Less than a byte a second for this long ends a transfer, whether the peer stopped reading

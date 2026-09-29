@@ -1,6 +1,6 @@
 // The gateway over the S3 store and a scripted peer that stops reading a part's body: a store
 // that hangs on a connection it holds must fail the upload, since the gateway leaves a body the
-// store holds up to the store (docs/adr/0037).
+// store holds up to the store (docs/adr/0039).
 #include "core/util/json.hpp"
 #include "net/socket.hpp"
 

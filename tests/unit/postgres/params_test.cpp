@@ -8,10 +8,14 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
+using infra::postgres::encode_bytea_array;
 using infra::postgres::kBoolOid;
+using infra::postgres::kByteaArrayOid;
+using infra::postgres::kByteaOid;
 using infra::postgres::kInt8Oid;
 using infra::postgres::kTextOid;
 using infra::postgres::kUuidOid;
@@ -85,6 +89,44 @@ TEST(Params, WireListsParametersInTheOrderAdded) {
     EXPECT_EQ((std::array{wire.types[0], wire.types[1], wire.types[2]}),
               (std::array{kTextOid, kInt8Oid, kBoolOid}));
     EXPECT_EQ(wire.values[3], nullptr);
+}
+
+TEST(Params, ByteaBindsTheCallersBytesWithoutACopy) {
+    const std::vector<std::byte> body{std::byte{0x00}, std::byte{0x5c}, std::byte{0xff}};
+    Params params;
+    params.add_bytea(body);
+    const Params::Wire wire = params.wire();
+    EXPECT_EQ(wire.types[0], kByteaOid);
+    EXPECT_EQ(wire.formats[0], 1);
+    EXPECT_EQ(static_cast<const void*>(wire.values[0]), static_cast<const void*>(body.data()));
+    EXPECT_EQ(bytes_of(wire, 0), std::string("\x00\x5c\xff", 3));
+}
+
+TEST(Params, ByteaArrayIsTheBinaryArrayFormat) {
+    const std::vector<std::vector<std::byte>> elements{{std::byte{0xab}},
+                                                       {std::byte{0x01}, std::byte{0x02}}};
+    const std::string encoded = encode_bytea_array(elements);
+    // ndim 1, no nulls, element type 17 (bytea), 2 elements from index 1, then each element's
+    // length and bytes.
+    EXPECT_EQ(encoded, std::string("\0\0\0\1"
+                                   "\0\0\0\0"
+                                   "\0\0\0\x11"
+                                   "\0\0\0\2"
+                                   "\0\0\0\1"
+                                   "\0\0\0\1\xab"
+                                   "\0\0\0\2\1\2",
+                                   31));
+    Params params;
+    params.add_bytea_array(encoded);
+    EXPECT_EQ(params.wire().types[0], kByteaArrayOid);
+    EXPECT_EQ(bytes_of(params.wire(), 0), encoded);
+}
+
+TEST(Params, EmptyByteaArrayHasNoDimension) {
+    EXPECT_EQ(encode_bytea_array({}), std::string("\0\0\0\0"
+                                                  "\0\0\0\0"
+                                                  "\0\0\0\x11",
+                                                  12));
 }
 
 } // namespace

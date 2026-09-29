@@ -11,9 +11,12 @@ What ships:
 | `overlays/{stage,prod}/video-worker/` | Deployment (1 replica), NetworkPolicy; no Service, no route |
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
 | `woodpecker.yml` | Builds and pushes both images, then `rollout restart`; never applies a manifest |
+| `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
+| `overlays/stage/stunner/` | The TURN Gateway on UDP 3478 and the UDPRoute to LiveKit |
+| `overlays/stage/livekit/` | LiveKit (1 replica), Service, HTTPRoute for its signalling (`/rtc`), NetworkPolicy |
 
-`chat` and `live-packager` have no overlays yet: their binaries do not exist. STUNner comes with
-the realtime plane.
+`chat` and `live-packager` have no overlays yet: their binaries do not exist. The realtime plane
+(STUNner and LiveKit) is stage only until its phase is tagged there; step 7.
 
 Open decisions, yours: whether this builds inside the Askedin monorepo or pushes from this
 repository (the image names `git.askedin.com/askedin/askedin-monorepo/<svc>` assume the
@@ -231,3 +234,172 @@ too, or the next push redeploys it.
 
 To take the plane out entirely: delete the HTTPRoute first (uploads stop at the edge), then
 scale both deployments to 0. Uploads in progress resume once it is back.
+
+## 7. The realtime plane: STUNner and LiveKit (stage)
+
+Media from browsers enters through STUNner, a TURN server run as a Gateway API implementation
+beside Envoy Gateway (docs/adr/0013); LiveKit is the SFU behind it (docs/adr/0020). LiveKit hands
+each client a TURN credential minted from a secret it shares with STUNner (docs/adr/0037).
+
+### Check the cluster first
+
+```sh
+# v1.x, from Envoy Gateway:
+kubectl get crd gateways.gateway.networking.k8s.io \
+  -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}'
+kubectl get svc -A | grep -w 3478        # nothing may hold UDP 3478 yet
+```
+
+STUNner's Gateway is a LoadBalancer Service on UDP 3478 with `externalTrafficPolicy: Local`, so
+TURN clients should keep their own source address. On K3s, ServiceLB publishes it on the
+node's address. Open UDP 3478 to the internet on the node's firewall, and nothing else: every
+call's media arrives on that one port, and LiveKit's own UDP port (7882) stays inside the
+cluster.
+
+Whether ServiceLB really keeps the client's address is not tested anywhere before stage: the
+sandbox has no ServiceLB and publishes a NodePort instead. The probe in "Verify on stage"
+tells: `binding.mapped` must be the probing machine's public address. If it is a node or pod
+address instead, calls still work (media goes through the relay, not the reflexive address),
+but STUNner sees every client as the node, so its logs and any per-client limit lose the
+client. The fix is the path the sandbox proves, a NodePort under `externalTrafficPolicy: Local`
+with the node forwarding 3478 to it:
+
+```sh
+kubectl -n apps-stage annotate gateway stunner --overwrite \
+  stunner.l7mp.io/service-type=NodePort 'stunner.l7mp.io/nodeport={"turn-udp": 31478}'
+# on k8s-prod, persisted in its firewall configuration:
+iptables -t nat -A PREROUTING -p udp --dport 3478 -j REDIRECT --to-ports 31478
+```
+
+Put the annotations in `overlays/stage/stunner/gateway.yaml` too, or ArgoCD reverts them, then
+probe again. Running stunnerd in the host's network, the other usual fix, is ruled out: pods
+may not use `hostNetwork` (docs/adr/0013).
+
+### Secrets
+
+STUNner holds one shared secret for the whole cluster, and LiveKit in each environment signs
+its clients' TURN credentials with that same secret (docs/adr/0037). So `TURN_SECRET` is not a
+per-environment value, even though it lives in both env files: a copy that differs breaks
+every call of the environment whose LiveKit holds it.
+
+New keys for `.env.stage` and `.env.prod` (names only):
+
+```
+TURN_SECRET              32+ random bytes, base64; the same value in both files
+TURN_HOST                where browsers reach STUNner: the node's public IP, or a DNS name for it
+LIVEKIT_KEYS             "<api key>: <api secret>", the secret at least 32 characters
+```
+
+STUNner's secret is created by a script of its own, `scripts/create-turn-secret.sh`, run once
+per cluster and never from `create-k8s-secrets.sh`, which runs per environment. It refuses when
+the two env files disagree:
+
+```sh
+#!/usr/bin/env bash
+# STUNner's shared TURN secret: one per cluster, used by stage and prod alike.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+turn_secret() { (set -a; source "$1"; printf '%s' "${TURN_SECRET:?TURN_SECRET missing from $1}"); }
+stage=$(turn_secret .env.stage)
+prod=$(turn_secret .env.prod)
+if [[ $stage != "$prod" ]]; then
+    echo "create-turn-secret: TURN_SECRET differs between .env.stage and .env.prod;" \
+        "STUNner has one per cluster, so set both to the same value" >&2
+    exit 1
+fi
+# From a file descriptor, so the secret never appears in a process list.
+kubectl -n stunner-system create secret generic stunner-secrets \
+    --from-literal=type=ephemeral --from-file=secret=<(printf '%s' "$stage") \
+    --dry-run=client -o yaml | kubectl apply -f -
+```
+
+The secret carries no `ASKEDIN_ENV`: it belongs to neither environment. `stunner-system` must
+exist first (the operator step below creates it).
+
+Lines for `scripts/create-k8s-secrets.sh`, per environment as usual; only stage runs LiveKit so
+far, so guard them until prod does:
+
+```sh
+if [[ $NS == apps-stage ]]; then
+  kubectl -n "$NS" create secret generic sfu-secrets \
+    --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
+    --from-literal=LIVEKIT_KEYS="$LIVEKIT_KEYS" \
+    --from-literal=TURN_HOST="$TURN_HOST" \
+    --from-literal=TURN_SECRET="$TURN_SECRET" \
+    --dry-run=client -o yaml | kubectl apply -f -
+fi
+```
+
+The call service gets the same `LIVEKIT_KEYS` pair once it ships. Add LiveKit to the
+rollout-restart list; STUNner rereads its secret by itself:
+
+```sh
+kubectl -n "$NS" rollout restart deployment/livekit
+```
+
+To rotate `TURN_SECRET`: change it in both env files, run `scripts/create-turn-secret.sh`, then
+`create-k8s-secrets.sh` for each environment, which restarts LiveKit. Calls in progress
+reconnect once with credentials under the new secret.
+
+### Install, once per cluster
+
+STUNner's CRDs come from its chart at v1.2.1, checked against the hash `deploy/local/tools.sh`
+pins:
+
+```sh
+curl -fsSLo stunner-crds.yaml https://raw.githubusercontent.com/l7mp/stunner-helm/08555494a2fdb53c0f8a0146cfa1c951dbb83f1b/helm/stunner/crds/stunner-crds.yaml
+echo "720ab0c18e0e51b8cee18259685061e03cc0d3d01e90a0c0fc20c5144351b279  stunner-crds.yaml" | sha256sum -c
+kubectl apply --server-side -f stunner-crds.yaml
+kubectl apply -f stunner/operator.yaml
+kubectl -n stunner-system rollout status deployment/stunner-gateway-operator-controller-manager
+scripts/create-turn-secret.sh          # and create-k8s-secrets.sh for stage, as above
+kubectl apply -f stunner/dataplane.yaml -f stunner/gatewayclass.yaml
+```
+
+Do not install the chart's own Gateway API CRDs: Envoy Gateway owns them, and a second copy at
+another version would fight it. Then copy `overlays/stage/stunner/` and `overlays/stage/livekit/`
+into the monorepo's stage overlay tree like the others; ArgoCD applies them. The LiveKit
+Deployment pulls `livekit/livekit-server` by digest, so Woodpecker has nothing to build for it.
+
+### Verify on stage
+
+```sh
+kubectl get gatewayclass stunner-gatewayclass                 # ACCEPTED True
+kubectl -n apps-stage get gateway stunner                     # PROGRAMMED True, ADDRESS the node's
+kubectl -n apps-stage get udproutes.stunner.l7mp.io livekit \
+  -o jsonpath='{.status.parents[0].conditions[*].type}={.status.parents[0].conditions[*].status}'
+kubectl -n apps-stage get deploy stunner livekit              # 1/1 each
+```
+
+From a machine outside the cluster (a laptop on another network), with the stage secret:
+
+```sh
+TURN_SECRET=$(set -a; . ./.env.stage; printf '%s' "$TURN_SECRET") \
+  tests/cluster/turn_probe.py <TURN_HOST> 3478 \
+  --permit <livekit pod IP> --forbid <any other pod IP> --forbid 127.0.0.1 --forbid <node IP>
+```
+
+The secret goes in through the environment, read from the env file, so it never reaches the
+command line or the shell history.
+
+It only sends STUN and TURN requests. Expect `binding.mapped` to be the machine's public
+address (compare `curl -s https://ifconfig.me`): anything else means the node masquerades
+the traffic and `externalTrafficPolicy` is not taking effect. Expect `allocate` a success
+with `integrity: true` and a relayed address inside the cluster, the `permit` peer a success,
+the `forbid` peer an error, and `wrong_password` and `expired` errors (400 or 401).
+
+### Rollback
+
+ArgoCD owns the stage overlays, so anything deleted by hand comes back at the next sync. Revert
+or remove the overlay on `development` first: take out `overlays/stage/stunner/` to stop media
+(STUNner then relays to nothing and calls stop at once), and `overlays/stage/livekit/` as well
+to remove the plane. Once ArgoCD has synced, check both are gone:
+
+```sh
+kubectl -n apps-stage get gateway,udproutes.stunner.l7mp.io,deploy -l app.kubernetes.io/part-of=ulw
+```
+
+To stop media before the sync lands, delete the UDPRoute by hand as well
+(`kubectl -n apps-stage delete udproutes.stunner.l7mp.io livekit`). The operator removes the
+stunnerd Deployment and Service when its Gateway goes. If nothing else uses STUNner, delete
+`stunner/*.yaml` and the CRDs last; they are not in any overlay.

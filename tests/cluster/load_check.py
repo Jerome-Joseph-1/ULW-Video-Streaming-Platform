@@ -52,7 +52,7 @@ GATEWAY_UPLOAD_SLOTS = 448
 UPLOADS_PER_USER = 2
 # Most of the admitted uploads must be in flight together at the peak: the check is void if the
 # driver ramped too slowly or the route dropped them. Every admitted upload has a store
-# connection of its own (docs/adr/0037), so the peak lasts until the uploads finish.
+# connection of its own (docs/adr/0039), so the peak lasts until the uploads finish.
 MIN_PEAK_FRACTION = 0.9
 WORKLOADS = ("video-gateway", "video-worker")
 
