@@ -46,7 +46,13 @@ runs as a Deployment, so replicas have neither stable names nor a fixed list of 
   as the other's. Mutual TLS would also do, but it brings certificates to issue, rotate and
   check per pod, for a channel that only has to tell our nodes from everything else; a shared
   secret in the deployment's secret store is one value, rotated by rolling the Deployment.
-  Payloads are not encrypted: the channel stays on the cluster's private network.
+  Only the start of a connection is authenticated: frames after the handshake carry no MAC and
+  are not encrypted. Anyone on the path between two nodes can read room bodies and, by
+  rewriting or injecting frames into an established connection, forward messages as any user.
+  That is acceptable only because the channel stays on the cluster's private network behind
+  the NetworkPolicy below; where that network cannot be trusted, TLS on the node port (keyed
+  per pod, or with a pre-shared key derived from the same secret) is the upgrade path, and
+  the frame format does not change for it.
 - A node with members in a room subscribes to the room's owner; the owner delivers each message
   it sequences to its own members and to every subscribed connection. A subscription lives as
   long as its connection. When the owner changes (a notification, a claim, a failed forward),
@@ -69,6 +75,8 @@ runs as a Deployment, so replicas have neither stable names nor a fixed list of 
 - The chat port for node traffic must be reachable only from chat pods: a NetworkPolicy
   admitting the `chat` pods alone to the node port is part of deploying chat. The handshake
   keeps other callers from doing anything, but not from trying.
+- Anyone who can see or alter traffic between two nodes can read every room they share and
+  inject messages under any sender, the handshake notwithstanding.
 - Anyone who has the secret can act as any user in any room; it belongs in the deployment's
   secret store beside the database credentials, and rotating it means restarting every node
   together (nodes with different secrets refuse each other).
