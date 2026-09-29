@@ -19,7 +19,8 @@ spec:
   # carries ~100 participants and the 2-core limit ~400. Memory is the Go runtime (~30 MB) plus
   # one relay socket per allocation, whose kernel buffers are charged to the pod: 208 KiB each
   # way at the default rmem/wmem, 416 KiB when both are full. 128 MiB covers ~230 allocations
-  # at worst, 512 MiB ~1150. The call capacity script replaces the 10 us with a measurement.
+  # at worst, 512 MiB ~1150. The 10 us is still unmeasured: tests/load/call_capacity ran its calls
+  straight against LiveKit, without TURN, so it says nothing about this relay's cost per packet.
   resources:
     requests:
       cpu: 500m
