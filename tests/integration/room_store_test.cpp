@@ -183,10 +183,13 @@ TEST_P(RoomStoreTest, AnEphemeralRoomTakesFencedSeqsAndStoresNoMessage) {
     // A stream chat's derived id (tag 0x01) is not ephemeral: its messages are kept.
     ASSERT_FALSE(
         rt::is_ephemeral_room(*core::RoomId::parse("01a0eb86-6cca-8dce-84cc-3bb47615f9fd")));
-    // No chat join can name it; were a kind recorded for it anyway, the ephemeral rule wins.
-    ASSERT_TRUE(
+    // No chat join can name it, and it can never be recorded live (only a stream's room can be,
+    // ADR-0057); were a closed kind recorded for it anyway, the ephemeral rule wins.
+    ASSERT_FALSE(
         conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
                     Params{}.add_uuid(room.uuid())));
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'group_chat')",
+                            Params{}.add_uuid(room.uuid())));
     ASSERT_TRUE(resolve(room, a_));
     EXPECT_EQ(scalar(*conn_, "SELECT kind FROM room_state WHERE room_id = $1",
                      Params{}.add_uuid(room.uuid())),
