@@ -17,6 +17,18 @@ source "$here/sandbox.sh"
 source "$here/images.sh"
 require_sandbox
 
+# The digest in images.sh was taken from a promoter manifest; this confirms that the registry's
+# tag still names it, so a retagged release fails here instead of running unreviewed content.
+# Skipped with a mirror, whose tags mean nothing.
+if [[ -z ${ULW_METRICS_SERVER_REPO:-} ]]; then
+    got=$(docker buildx imagetools inspect "$metrics_server_image" \
+        --format '{{json .Manifest.Digest}}' | tr -d '"')
+    if [[ $got != "$metrics_server_digest" ]]; then
+        echo "$metrics_server_image is now $got, not the pinned $metrics_server_digest" >&2
+        exit 1
+    fi
+fi
+
 source_repo=${ULW_METRICS_SERVER_REPO:-$metrics_server_repo}
 archive=$(mktemp --suffix=.tar)
 trap 'rm -f "$archive"' EXIT
