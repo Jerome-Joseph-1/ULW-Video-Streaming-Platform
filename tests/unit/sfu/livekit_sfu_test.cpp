@@ -159,6 +159,18 @@ TEST_P(LiveKitSfuTest, OpeningARoomCreatesItsGenerationWithTheCallsLimits) {
     EXPECT_EQ(bool_at(claims, "video", "roomJoin"), std::nullopt);
 }
 
+TEST_P(LiveKitSfuTest, NoLimitIsSentAsLiveKitsZero) {
+    auto server = answering(200);
+    start(server.base_url());
+    std::optional<OpenResult> got;
+    sfu->open_room(*core::RoomId::parse(kRoom), MediaGeneration{1}, 0,
+                   [&](OpenResult r) noexcept { got = std::move(r); });
+    ASSERT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
+    ASSERT_TRUE(*got);
+    // LiveKit reads 0 as unset, and a generation's room is only ever created with one setting.
+    EXPECT_EQ(body_of(server.requests().at(0)).find("max_participants")->as_u64(), 0U);
+}
+
 TEST_P(LiveKitSfuTest, JoiningReopensTheGenerationBeforeIssuingItsTicket) {
     auto server = answering(200);
     start(server.base_url());

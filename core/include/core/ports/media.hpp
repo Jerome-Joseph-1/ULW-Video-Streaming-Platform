@@ -78,7 +78,7 @@ public:
         std::expected<std::unique_ptr<IMediaRoom>, MediaError>) noexcept>;
 
     virtual ~ISfu() = default;
-    // Idempotent for one generation.
+    // Idempotent for one generation. `max_participants` 0 means no limit of the room's own.
     virtual void open_room(const RoomId& room, MediaGeneration generation,
                            std::uint16_t max_participants, OpenDone done) = 0;
 };
