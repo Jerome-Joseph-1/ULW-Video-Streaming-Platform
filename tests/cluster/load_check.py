@@ -3,10 +3,11 @@
 deploy/local/metrics-server.sh): M14's "kubectl top stays within the derived limits under 500
 concurrent uploads".
 
-    tests/cluster/load_check.py [--uploads 500] [--hold-seconds 120] [--out DIR]
+    tests/cluster/load_check.py [--uploads 500] [--ready-wait 120] [--out DIR]
 
 Uploads go through Envoy's HTTPRoute with tokens minted by the mock auth-service, driven by
-tests/load/upload_load.py. While they run, `kubectl top pods --containers` is sampled every 10 s
+tests/load/upload_load.py, each holding one connection open and sending a real MP4 the worker
+transcodes; how many videos reached ready is reported, not required. While they run, `kubectl top pods --containers` is sampled every 10 s
 for the video-gateway and video-worker pods. The run fails if any sample exceeds a container's
 CPU or memory limit as the applied Deployment declares it (the stage overlay, which is what
 deploy/askedin/overlays ships), if a container restarted or was OOM-killed (a killed pod has no
@@ -30,11 +31,19 @@ import time
 import uuid
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "load"))
+import upload_load  # noqa: E402
 import vod_flow  # noqa: E402
 
 ROOT = vod_flow.ROOT
 NAMESPACE = vod_flow.NAMESPACE
 SAMPLE_INTERVAL_S = 10
+# The gauges are cheap to read and move fast: the gateway ends a queued upload after its 30 s
+# body idle timeout, so the peak lasts about that long and a 10 s poll could straddle it.
+GAUGE_INTERVAL_S = 2
+# The clip every upload sends: 4 s of 1280x720 at 2 Mbit/s is 1.06 MiB, which SAFE_RATE holds
+# open for 68 s, and a real transcode for the worker, as vod_flow's upload scenario has.
+CLIP_SECONDS, CLIP_BITRATE = 4, "2M"
 # apps/gateway/src/gateway.hpp Limits::max_upload_slots: the most uploads the gateway holds at
 # once, per pod; further creates are refused with 503.
 GATEWAY_UPLOAD_SLOTS = 448
@@ -42,7 +51,9 @@ GATEWAY_UPLOAD_SLOTS = 448
 # room for an upload whose commit lags, so no create is refused with 429.
 UPLOADS_PER_USER = 2
 # Most of the admitted uploads must be in flight together at the peak: the check is void if the
-# driver ramped too slowly or the route dropped them.
+# driver ramped too slowly or the route dropped them. The peak is a burst: the gateway streams
+# only as many chunk bodies as the store has connections (64), and ends the rest after its 30 s
+# body idle timeout.
 MIN_PEAK_FRACTION = 0.9
 WORKLOADS = ("video-gateway", "video-worker")
 
@@ -158,28 +169,40 @@ class Sampler(threading.Thread):
         super().__init__(daemon=True)
         self.stop_event = threading.Event()
         self.samples = []
+        self.gauges = []
         self.started = time.monotonic()
 
     def run(self):
+        ticks = SAMPLE_INTERVAL_S // GAUGE_INTERVAL_S
+        tick = 0
         while not self.stop_event.is_set():
-            self.take()
-            self.stop_event.wait(SAMPLE_INTERVAL_S)
+            self.read_gauges()
+            if tick % ticks == 0:
+                self.take()
+            tick += 1
+            self.stop_event.wait(GAUGE_INTERVAL_S)
 
     def take(self):
         rows = top_rows()
         if rows is None:
             return
+        gauges = self.gauges[-1] if self.gauges else {}
         self.samples.append({"t": time.monotonic() - self.started, "containers": rows,
-                             "uploads_in_flight": self.uploads_in_flight()})
+                             "uploads_in_flight": gauges.get("uploads_in_flight")})
 
-    @staticmethod
-    def uploads_in_flight():
-        total, seen = 0, False
+    def read_gauges(self):
+        totals, seen = {"uploads_in_flight": 0, "connections_current": 0}, False
         for pod in vod_flow.gateway_pods():
-            count = vod_flow.uploads_in_flight(pod)
-            if count is not None:
-                total, seen = total + count, True
-        return total if seen else None
+            text = vod_flow.kubectl(
+                "get", "--raw", f"/api/v1/namespaces/{NAMESPACE}/pods/{pod}:8080/proxy/metrics",
+                check_rc=False).stdout
+            for name in totals:
+                match = re.search(rf"^{name} (\d+)$", text, re.M)
+                if match:
+                    totals[name] += int(match.group(1))
+                    seen = True
+        if seen:
+            self.gauges.append({"t": time.monotonic() - self.started, **totals})
 
     def finish(self):
         self.stop_event.set()
@@ -217,6 +240,28 @@ def peaks(samples):
     return peak
 
 
+def count_ready(committed, tokens, wait_s):
+    """How many of the committed videos reached ready within wait_s; the worker has limited CPU
+    and is not expected to finish all of them, so this is reported, never required."""
+    states = {}
+    deadline = time.monotonic() + wait_s
+    while True:
+        for video in committed:
+            if states.get(video["video_id"]) in ("ready", "failed"):
+                continue
+            status, _, data = vod_flow.request(
+                "GET", f"/api/v1/videos/{video['video_id']}", tokens[video["token_index"]])
+            states[video["video_id"]] = json.loads(data)["state"] if status == 200 else f"http {status}"
+        pending = [v for v in states.values() if v not in ("ready", "failed")]
+        if not pending or time.monotonic() >= deadline:
+            break
+        time.sleep(5)
+    counts = {}
+    for state in states.values():
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
 def run(args):
     vod_flow.require_sandbox(vod_flow.SANDBOX_KUBECONFIG)
     vod_flow.KUBECTL_ALLOWED = True
@@ -226,26 +271,32 @@ def run(args):
     wait_for_metrics()
     restarts_before = restarts()
 
-    rate = max(1, args.size // args.hold_seconds)
+    rate = upload_load.SAFE_RATE
     users = math.ceil(args.uploads / UPLOADS_PER_USER)
     admitted = min(args.uploads, GATEWAY_UPLOAD_SLOTS * len(vod_flow.gateway_pods()))
     with tempfile.TemporaryDirectory() as tmp:
+        clip = pathlib.Path(tmp, "load.mp4")
+        size = len(vod_flow.make_clip(clip, CLIP_SECONDS, CLIP_BITRATE))
         token_file = pathlib.Path(tmp, "tokens")
         mint_tokens(users, token_file)
+        tokens = token_file.read_text(encoding="utf-8").split()
         sampler = Sampler()
-        sampler.take()
         sampler.start()
-        print(f"  {args.uploads} uploads, {users} users, {args.size} bytes each at {rate} B/s")
-        driver = subprocess.run(
-            [sys.executable, str(ROOT / "tests/load/upload_load.py"), "--url", vod_flow.SANDBOX_URL,
-             "--token-file", str(token_file), "--uploads", str(args.uploads),
-             "--size", str(args.size), "--rate", str(rate)],
-            capture_output=True, text=True)
-        sampler.finish()
-    if driver.returncode != 0:
-        raise Failure(f"upload_load.py exited {driver.returncode}: {driver.stderr.strip()}")
-    load = json.loads(driver.stdout)
+        print(f"  {args.uploads} uploads, {users} users, {size} bytes each at {rate} B/s")
+        try:
+            driver = subprocess.run(
+                [sys.executable, str(ROOT / "tests/load/upload_load.py"), "--url",
+                 vod_flow.SANDBOX_URL, "--token-file", str(token_file), "--uploads",
+                 str(args.uploads), "--payload", str(clip), "--rate", str(rate)],
+                capture_output=True, text=True)
+            if driver.returncode != 0:
+                raise Failure(f"upload_load.py exited {driver.returncode}: {driver.stderr.strip()}")
+            load = json.loads(driver.stdout)
+            videos = count_ready(load["committed_videos"], tokens, args.ready_wait)
+        finally:
+            sampler.finish()
     sampler.take()
+    print(f"  videos after {args.ready_wait} s at most: {videos}")
 
     problems = violations(sampler.samples, limits)
     restarts_after = restarts()
@@ -254,9 +305,8 @@ def run(args):
         if count != before or reason == "OOMKilled":
             problems.append(f"{key[0]}/{key[1]} restarted ({before} -> {count}, last exit "
                             f"{reason}): its samples stop where the kill happened")
-    in_flight = [s["uploads_in_flight"] for s in sampler.samples
-                 if s["uploads_in_flight"] is not None]
-    peak_in_flight = max(in_flight, default=None)
+    peak_in_flight = max((g["uploads_in_flight"] for g in sampler.gauges), default=None)
+    peak_connections = max((g["connections_current"] for g in sampler.gauges), default=None)
     if peak_in_flight is not None and peak_in_flight < MIN_PEAK_FRACTION * admitted:
         problems.append(f"peak uploads in flight {peak_in_flight}, expected at least "
                         f"{MIN_PEAK_FRACTION * admitted:.0f} of the {admitted} the gateway admits")
@@ -269,9 +319,10 @@ def run(args):
             problems.append(f"no sample of a {workload} pod")
 
     report = {
-        "uploads": args.uploads, "users": users, "size_bytes": args.size, "rate_bytes_per_s": rate,
+        "uploads": args.uploads, "users": users, "size_bytes": size, "rate_bytes_per_s": rate,
         "sample_interval_s": SAMPLE_INTERVAL_S, "samples": len(sampler.samples),
-        "peak_uploads_in_flight": peak_in_flight, "admitted_expected": admitted,
+        "peak_uploads_in_flight": peak_in_flight, "peak_connections": peak_connections,
+        "admitted_expected": admitted, "videos": videos,
         "limits": {f"{w}/{c}": v for (w, c), v in limits.items()},
         "peaks": peaks(sampler.samples), "upload_load": {
             k: load[k] for k in ("attempted", "completed", "status_counts", "errors_by_kind",
@@ -281,7 +332,8 @@ def run(args):
     write_reports(args.out, report, sampler.samples)
     for name, peak in report["peaks"].items():
         print(f"  {name}: peak {peak['cpu_m']}m, {peak['memory'] >> 20} MiB")
-    print(f"  peak uploads in flight {peak_in_flight}; reports in {args.out}")
+    print(f"  peak uploads in flight {peak_in_flight}, connections {peak_connections}; "
+          f"reports in {args.out}")
     if problems:
         raise Failure("; ".join(problems))
 
@@ -290,12 +342,8 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--uploads", type=int, default=500)
-    # Each upload's bytes are built in memory by the driver, and 500 of them are alive at once;
-    # 1 MiB keeps that to half a gigabyte. What loads the gateway is the number of uploads held
-    # open, not their size.
-    parser.add_argument("--size", type=int, default=1 << 20)
-    parser.add_argument("--hold-seconds", type=int, default=120,
-                        help="how long the driver paces each upload over (twelve samples)")
+    parser.add_argument("--ready-wait", type=int, default=120,
+                        help="seconds to wait, after the uploads end, for the videos to be ready")
     parser.add_argument("--out", type=pathlib.Path, default=ROOT / "load-report")
     args = parser.parse_args(argv)
     try:
