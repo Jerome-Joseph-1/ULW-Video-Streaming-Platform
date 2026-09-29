@@ -15,6 +15,8 @@ openmls = "=0.9.0"
 openmls_basic_credential = "=0.6.0"
 openmls_rust_crypto = "=0.6.0"
 openmls_traits = "=0.6.0"
+# Already OpenMLS's own dependency; named here to keep its pool on the caller's thread.
+rayon = "=1.12.0"
 
 [dev-dependencies]
 cbindgen = { version = "=0.29.4", default-features = false }

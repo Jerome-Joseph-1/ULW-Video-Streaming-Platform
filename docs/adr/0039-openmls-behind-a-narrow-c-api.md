@@ -55,6 +55,13 @@ unpinned (hard boundary 6), under the ASan preset as well.
   preset, ASan and LeakSanitizer still see every allocation Rust makes, since Rust allocates
   through the same `malloc`, and the C++ side is fully instrumented. `-Zsanitizer=address` would
   instrument Rust too but needs a nightly toolchain, which the pinning rules out.
+- The bridge runs on the caller's thread only and never starts one, which is also what the
+  reactor model expects of anything a loop thread calls. OpenMLS computes update paths with
+  rayon's parallel iterators, unconditionally outside wasm, and those would start rayon's
+  global pool of one thread per CPU. So each calling thread becomes the sole worker of a
+  one-thread rayon pool of its own (`use_current_thread`), and every call runs inside it; the
+  parallel iterators then run in place. A test counts `/proc/self/task` around a full cycle.
+  rayon leaks such a pool once per calling thread, a few hundred bytes.
 - `ULW_BUILD_MLS` defaults to `ULW_BUILD_TESTS`: production images build without tests and so
   without cargo.
 

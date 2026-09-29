@@ -1,7 +1,9 @@
 #include "infra/e2ee/mls.hpp"
 
 #include <cstddef>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -165,6 +167,27 @@ TEST(Mls, LoserOfAnEpochDropsItsCommitAndFollowsTheWinner) {
     const auto hello = t.bob->encrypt(bytes("agreed"));
     ASSERT_TRUE(hello);
     expect_reads(*t.alice, *hello, "agreed");
+}
+
+std::size_t threads_in_this_process() {
+    return static_cast<std::size_t>(
+        std::distance(std::filesystem::directory_iterator{"/proc/self/task"},
+                      std::filesystem::directory_iterator{}));
+}
+
+// OpenMLS computes update paths with rayon, which on its own starts a pool of threads; the
+// bridge keeps that work on the caller's thread (ADR-0039). ctest runs every test in a process
+// of its own, so a pool started here cannot hide behind one another test started first.
+TEST(Mls, NeverStartsAThread) {
+    const std::size_t before = threads_in_this_process();
+    Trio t;
+    t.form();
+    t.remove_carol();
+    ASSERT_FALSE(testing::Test::HasFatalFailure());
+    const auto hello = t.alice->encrypt(bytes("one thread"));
+    ASSERT_TRUE(hello);
+    expect_reads(*t.bob, *hello, "one thread");
+    EXPECT_EQ(threads_in_this_process(), before);
 }
 
 TEST(Mls, RemovingSomeoneOutsideTheGroupIsNotAMember) {

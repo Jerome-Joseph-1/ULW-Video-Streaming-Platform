@@ -97,10 +97,51 @@ fn quiet_panics() {
     QUIET.call_once(|| panic::set_hook(Box::new(|_| {})));
 }
 
+// OpenMLS derives and encrypts update paths with rayon's parallel iterators, unconditionally
+// outside wasm. Called from an ordinary thread they start rayon's global pool, one thread per
+// CPU, whose std-based synchronisation no sanitizer here can see. Instead each calling thread
+// becomes the only worker of a pool of its own, and every call runs inside it: the parallel
+// iterators then run on the caller's thread, in order, and the bridge never starts a thread.
+// rayon leaks a pool built this way, once per calling thread. A thread that already works for
+// another rayon pool cannot join this one and keeps using its own.
+thread_local! {
+    static CALLER_POOL: Option<rayon::ThreadPool> = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .use_current_thread()
+        .build()
+        .ok();
+}
+
+// `install` wants a Send closure because it may hand the work to a pool thread. Here the pool's
+// only worker is the calling thread, which runs the closure in place, so nothing crosses threads.
+struct StaysOnThisThread<F>(F);
+// SAFETY: see above; the closure is run by the thread that made it.
+unsafe impl<F> Send for StaysOnThisThread<F> {}
+
+impl<F> StaysOnThisThread<F> {
+    // A method, so the closure below captures the whole wrapper rather than its field.
+    fn run<R>(self) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        (self.0)()
+    }
+}
+
+fn on_caller_thread<R: Send>(body: impl FnOnce() -> R) -> R {
+    CALLER_POOL.with(|pool| match pool {
+        Some(pool) => {
+            let body = StaysOnThisThread(body);
+            pool.install(move || body.run())
+        }
+        None => body(),
+    })
+}
+
 // The group may be half-updated after a panic; the status tells the caller to drop it.
 fn boundary(body: impl FnOnce() -> Outcome) -> UlwMlsStatus {
     quiet_panics();
-    match panic::catch_unwind(AssertUnwindSafe(body)) {
+    match panic::catch_unwind(AssertUnwindSafe(|| on_caller_thread(body))) {
         Ok(Ok(())) => UlwMlsStatus::Ok,
         Ok(Err(status)) => status,
         Err(_) => UlwMlsStatus::Internal,
