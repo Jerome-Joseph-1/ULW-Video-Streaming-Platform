@@ -369,7 +369,16 @@ the `forbid` peer an error, and `wrong_password` and `expired` errors (400 or 40
 
 ### Rollback
 
-Delete the UDPRoute (`kubectl -n apps-stage delete udproutes.stunner.l7mp.io livekit`): STUNner
-then relays to nothing and calls stop at once. To remove the plane, delete the Gateway (the
-operator removes its Deployment and Service), scale LiveKit to 0, and, if nothing else uses
-STUNner, delete `stunner/*.yaml` and the CRDs.
+ArgoCD owns the stage overlays, so anything deleted by hand comes back at the next sync. Revert
+or remove the overlay on `development` first: take out `overlays/stage/stunner/` to stop media
+(STUNner then relays to nothing and calls stop at once), and `overlays/stage/livekit/` as well
+to remove the plane. Once ArgoCD has synced, check both are gone:
+
+```sh
+kubectl -n apps-stage get gateway,udproutes.stunner.l7mp.io,deploy -l app.kubernetes.io/part-of=ulw
+```
+
+To stop media before the sync lands, delete the UDPRoute by hand as well
+(`kubectl -n apps-stage delete udproutes.stunner.l7mp.io livekit`). The operator removes the
+stunnerd Deployment and Service when its Gateway goes. If nothing else uses STUNner, delete
+`stunner/*.yaml` and the CRDs last; they are not in any overlay.
