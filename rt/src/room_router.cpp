@@ -455,7 +455,10 @@ public:
                                 .request = 0});
             return;
         }
-        const std::optional<Ownership> owner = it->second.owner;
+        // The newest owner known, which a notification may have named before this node's
+        // subscription has moved there; failing that, the one it subscribed to.
+        const std::optional<Ownership> owner =
+            registry_.known_owner(room).or_else([&] { return it->second.owner; });
         if (!owner || owner->node == config_.self) {
             done(std::unexpected(RouteError::Unavailable));
             return;
