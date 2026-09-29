@@ -71,10 +71,12 @@ of the stream, and would take the stream's one video.
   like an upload, titled `Live stream <stream id>`.
 - **The end must be the real one.** Before copying, and again after the copy and before the
   row: the playlist is read back and must still end, with the same last segment; and no claim
-  `epoch_<E+1>` may exist above the epoch E of its last segment, unless it is this process's
-  own (a packager that claimed and then found the stream ended publishes nothing). Either
-  failing means a newer packager is publishing, whose own end records the stream; the run
-  removes what it stored and exits 0.
+  `epoch_<N+1>` may exist, where N is the higher of the last segment's epoch and this process's
+  own claim. This process's claim is the higher one when it published nothing itself: it
+  claimed and then found the stream ended, or ended the stream (SIGUSR1, a publisher that never
+  came or went silent) before a segment of its own, which leaves the previous run's window
+  ended under its epoch. A claim above that belongs to a packager still publishing, whose own
+  end records the stream; the run removes what it stored and exits 0.
 - **The steps.** (1) If `live_recordings` has the stream, stop. (2) Read the playlist; not
   ended, or no segment: nothing to record. (3) The fence above. (4) Plan the runs; probe each
   run's init segment for its audio. (5) Generate a UUIDv7 video id, stream the recording to
@@ -82,13 +84,24 @@ of the stream, and would take the stream's one video.
   (`processing`), its `transcode` job (source that key, `request_id` the stream id), and
   `NOTIFY job_available`. A run whose row does not go in (another recorder's did), or whose
   database is down, removes its object; the next run makes its own with a new id.
-- **Failures.** One that may pass (the store, the database, a sandbox that does not start, a
-  stop) exits 1, and the pod's restart tries again from the first step. One that cannot (an
-  init segment or a segment gone, ffmpeg refusing the input, an unreadable playlist, the
-  recording past its bound) is written as the stream's row with no video and the reason, after
-  the fence is checked again, and the packager exits 0: nothing crash-loops, and nothing
-  records the stream afterwards. A place in the plan no epoch has a segment for is counted in
-  the log and skipped.
+- **Failures.** One that may pass exits 1, and the pod's restart tries again from the first
+  step: every error of the store (a credential, a bucket, a disk can be put right), the
+  database, a sandbox that does not start, a copy killed by a signal (the OOM killer) or past
+  its wall-clock or CPU budget, and a stop. One that cannot is written as the stream's row with
+  no video and the reason, after the fence is checked again, and the packager exits 0, so
+  nothing crash-loops and nothing records the stream afterwards: an init segment or a segment
+  gone (the packager never deletes one, so it expired), ffmpeg or ffprobe exiting on its own
+  with an error on the input, an unreadable playlist, and the recording past its bound, which
+  the recorder counts itself rather than taking from the store. When one ffmpeg stage fails the
+  other is stopped; the failure reported is the stage's that was not stopped. A place in the
+  plan no epoch has a segment for is counted in the log and skipped.
+- **A lost answer.** An insert whose answer is lost may have committed. Before removing its
+  object after a failed insert, the run reads the stream's row again: a row naming its video
+  means the insert went in, and the video is recorded; no row, or another video, and the
+  object is removed; no answer at all, and the object is kept (at worst an unreferenced
+  object, never a video without its source). A multipart completion retried after a lost
+  answer finds the upload gone; the key is the stream's own, so an object of the stream's
+  length under it is taken as the completion.
 - **Assembly.** For each run of the plan, a sandboxed `ffmpeg -f mp4 -i pipe:0 -map 0:v:0
   -map 0:a:0? -c copy -f mpegts pipe:1` is fed the run's init segment and its segments,
   downloaded one at a time into the packager's scratch; its stdout goes into the stdin of one
@@ -111,8 +124,11 @@ of the stream, and would take the stream's one video.
   to a whole MiB, at least 16 MiB: 16 MiB at the default 20 Mbit/s, 65 MiB at the ceiling. One
   part is held in memory at a time. A stream written past its bound fails (Permanent). The
   filesystem backend writes a temporary beside the key and renames it.
-- **Budget.** The copies get the stream's maximum duration as their wall-clock budget, and a
-  twentieth of it as CPU; copying runs at the store's speed, far faster than real time.
+- **Budget.** Each copy gets the stream's maximum duration as its wall-clock budget, and CPU
+  time from the recording's bound: measured with ffmpeg 6.1 on 121 MB of 720p at 8 Mbit/s,
+  the fMP4-to-TS copy took 0.47 CPU-seconds and the TS-to-TS copy 0.60, pipe I/O included, so
+  at most 5 CPU-seconds per GB; four times that and a minute, 3.4 hours at the 607.5 GB
+  ceiling. (A twentieth of the wall clock, 36 minutes, would not have covered the ceiling.)
 
 ## Consequences
 

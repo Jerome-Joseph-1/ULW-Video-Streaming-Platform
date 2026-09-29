@@ -104,7 +104,9 @@ migrated schema with a role holding exactly these.
 It exits `0` once the stream has ended and its video and job are queued, when the stream was
 already recorded, when a newer packager of the stream holds it (`recording: superseded`), when
 the stream cannot be recorded at all (`recording: unrecordable: <reason>`, written to
-`live_recordings.failure`), and when drained by SIGTERM; and non-zero otherwise. Run it with a
+`live_recordings.failure`), and when drained by SIGTERM while the stream is live; and non-zero
+otherwise. SIGTERM while it records stops the copy and exits `1`: the stream is not recorded
+yet, and the next start records it. Run it with a
 restart on failure: a packager killed between the end and the job, or unable to reach the store
 or the database then, records the stream on its next start. Started for a stream that has
 already ended, it takes no publisher and only records.
