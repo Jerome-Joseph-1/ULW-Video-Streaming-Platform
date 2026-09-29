@@ -63,7 +63,17 @@ public:
 
 private:
     enum class Kind : std::uint8_t { Free, Stream, Watch, Listener, Datagram };
-    enum class Op : std::uint8_t { Recv = 1, Send, Cancel, Poll, Accept, DatagramRecv, SendTo };
+    enum class Op : std::uint8_t {
+        Recv = 1,
+        Send,
+        Cancel,
+        Poll,
+        Accept,
+        DatagramRecv,
+        SendTo,
+        // The zero-copy probe's send, whose completions may outlive the probe.
+        Probe
+    };
 
     struct Slot {
         Kind kind = Kind::Free;

@@ -190,7 +190,9 @@ void UringReactor::cancel_everything() noexcept {
         io_uring_cqe* cqe = nullptr;
         io_uring_for_each_cqe(&ring_, head, cqe) {
             ++seen;
-            if (io_uring_cqe_get_data64(cqe) != 0 && (cqe->flags & IORING_CQE_F_MORE) == 0) {
+            const std::uint64_t token = io_uring_cqe_get_data64(cqe);
+            if (token != 0 && token != static_cast<std::uint8_t>(Op::Probe) &&
+                (cqe->flags & IORING_CQE_F_MORE) == 0) {
                 --outstanding;
             }
         }
@@ -248,12 +250,14 @@ bool UringReactor::probe_zero_copy_send() noexcept {
     io_uring_sqe* sqe = next_sqe();
     io_uring_prep_sendmsg_zc(sqe, fd->get(), &msg, 0);
     sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
-    io_uring_sqe_set_data64(sqe, 0);
-    // The send completes inline on a local socket; the notification follows at once.
+    io_uring_sqe_set_data64(sqe, static_cast<std::uint8_t>(Op::Probe));
+    // The send completes inline on a local socket and the notification follows at once. Waiting
+    // is bounded by count, not by the clock, which a test may hold still; if it runs out, the
+    // late completions are recognised by their operation and ignored.
     std::optional<int> result;
     bool more = true;
-    const auto deadline = clock_.now() + kCancelGrace;
-    while (more && clock_.now() < deadline) {
+    const auto waits = kCancelGrace / kCancelSlice;
+    for (auto i = decltype(waits){0}; more && i < waits; ++i) {
         __kernel_timespec ts{.tv_sec = 0, .tv_nsec = kCancelSlice.count()};
         io_uring_cqe* cqe = nullptr;
         if (io_uring_submit_and_wait_timeout(&ring_, &cqe, 1, &ts, nullptr) < 0 || cqe == nullptr) {
@@ -791,6 +795,9 @@ int UringReactor::run_once(core::Millis max_wait) {
 void UringReactor::dispatch(const io_uring_cqe& cqe) noexcept {
     const std::uint64_t token = io_uring_cqe_get_data64(&cqe);
     const auto op = static_cast<Op>(token & 0xFFU);
+    if (op == Op::Probe) {
+        return;
+    }
     if (op == Op::SendTo) {
         on_send_to(token >> kSendIndexShift, cqe);
         return;
@@ -838,6 +845,7 @@ void UringReactor::dispatch(const io_uring_cqe& cqe) noexcept {
         on_datagram_recv(fd, s, cqe.res, bid, more);
         break;
     case Op::SendTo:
+    case Op::Probe:
         break;
     case Op::Send:
         on_send(fd, s, cqe.res);
