@@ -67,7 +67,7 @@ public:
         return std::unexpected(StorageError::Permanent);
     }
     [[nodiscard]] std::expected<void, StorageError> remove(const core::StorageKey& key) override {
-        removed.push_back(std::string(key.view()));
+        removed.emplace_back(key.view());
         return removal;
     }
     [[nodiscard]] std::expected<std::vector<core::StorageKey>, StorageError>

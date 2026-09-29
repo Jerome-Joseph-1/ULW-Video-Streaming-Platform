@@ -165,25 +165,28 @@ TEST_F(MigrateTest, DdlWaitingOnALockGivesUpInsteadOfStallingTraffic) {
 
 TEST_F(MigrateTest, CommandLineReportsOutcomeInItsExitCode) {
     const std::string url = "ULW_DATABASE_URL=" + db->conninfo();
+    // Some runs start tests as root; this suite is not about that.
+    const std::string root = "ULW_ALLOW_ROOT=1";
     EXPECT_EQ(ulw::test::run_process({ULW_MIGRATE_BIN, "--frobnicate"}, {url}).exit_code, 2);
     EXPECT_EQ(ulw::test::run_process({"env", "-u", "ULW_DATABASE_URL", ULW_MIGRATE_BIN}).exit_code,
               2);
-    const auto applied = ulw::test::run_process({ULW_MIGRATE_BIN}, {url});
+    const auto applied = ulw::test::run_process({ULW_MIGRATE_BIN}, {url, root});
     EXPECT_EQ(applied.exit_code, 0) << applied.output;
     EXPECT_NE(applied.output.find("applied 0001_initial"), std::string::npos) << applied.output;
-    const auto status = ulw::test::run_process({ULW_MIGRATE_BIN, "--status"}, {url});
+    const auto status = ulw::test::run_process({ULW_MIGRATE_BIN, "--status"}, {url, root});
     EXPECT_EQ(status.exit_code, 0) << status.output;
     EXPECT_TRUE(status.output.starts_with("0001 initial")) << status.output;
     EXPECT_NE(status.output.find(" applied "), std::string::npos) << status.output;
     const auto unreachable = ulw::test::run_process(
-        {ULW_MIGRATE_BIN}, {"ULW_DATABASE_URL=postgresql://nobody@127.0.0.1:1/none"});
+        {ULW_MIGRATE_BIN}, {"ULW_DATABASE_URL=postgresql://nobody@127.0.0.1:1/none", root});
     EXPECT_EQ(unreachable.exit_code, 1) << unreachable.output;
 }
 
 TEST_F(MigrateTest, APasswordNeverReachesTheOutput) {
     for (const std::string url : {"postgresql://ulw:Sup3r%Secret@127.0.0.1:1/ulw",
                                   "postgresql://ulw:Sup3rSecret@127.0.0.1:1/ulw"}) {
-        const auto r = ulw::test::run_process({ULW_MIGRATE_BIN}, {"ULW_DATABASE_URL=" + url});
+        const auto r = ulw::test::run_process({ULW_MIGRATE_BIN},
+                                              {"ULW_DATABASE_URL=" + url, "ULW_ALLOW_ROOT=1"});
         EXPECT_EQ(r.exit_code, 1) << r.output;
         EXPECT_EQ(r.output.find("Sup3r"), std::string::npos) << r.output;
     }

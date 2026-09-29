@@ -31,6 +31,7 @@ target_compile_definitions(core_unit_tests PRIVATE ULW_EXPECTED_VERSION="${PROJE
 
 ulw_add_test_suite(os_unit_tests unit
     unit/os/limits_test.cpp
+    unit/os/privileges_test.cpp
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
@@ -41,6 +42,7 @@ ulw_add_test_suite(ops_unit_tests unit
     unit/ops/metrics_test.cpp
     unit/ops/notify_test.cpp
     unit/ops/process_test.cpp
+    unit/ops/root_test.cpp
     unit/ops/settings_test.cpp
     unit/ops/toml_test.cpp)
 target_link_libraries(ops_unit_tests PRIVATE ulw::ops)
@@ -90,6 +92,7 @@ ulw_add_test_suite(net_unit_tests unit
     unit/net/connect_test.cpp
     unit/net/datagram_test.cpp
     unit/net/echo_server_test.cpp
+    unit/net/ip_address_test.cpp
     unit/net/offload_pool_test.cpp
     unit/net/reactor_factory_test.cpp
     unit/net/reactor_test.cpp
@@ -232,13 +235,15 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
     gateway/gateway_harness.cpp
+    gateway/gateway_limits_test.cpp
     gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
     gateway/gateway_store_stall_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
     gateway/health_test.cpp
-    gateway/key_fetcher_test.cpp)
+    gateway/key_fetcher_test.cpp
+    gateway/rate_limit_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
     ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)

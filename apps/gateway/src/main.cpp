@@ -12,6 +12,7 @@
 #include "os/limits.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
+#include "os/unique_fd.hpp"
 
 #include "config.hpp"
 #include "gateway.hpp"
@@ -20,6 +21,7 @@
 #include "ops/async_log.hpp"
 #include "ops/log.hpp"
 #include "ops/notify.hpp"
+#include "ops/root.hpp"
 #include "ops/settings.hpp"
 
 #include <cstdint>
@@ -27,6 +29,7 @@
 #include <cstdlib>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -74,6 +77,23 @@ int fail(ops::Logger& log, std::string_view what, std::string_view why) {
 int refuse(ops::Logger& log, std::string_view source, std::string_view reason) {
     log.error("configuration refused", {{"source", source}, {"reason", reason}});
     return kExitConfig;
+}
+
+// Started as root (by hand, or by a supervisor that stays root to raise a limit), the process
+// becomes the configured user before it opens a socket or starts a thread; not root, there is
+// nothing to give up. nullopt means carry on, anything else is the exit code.
+std::optional<int> leave_root(const std::string& user, bool allow_root, ops::Logger& log) {
+    const auto step = ops::leave_root(user, allow_root);
+    if (!step) {
+        return step.error().configuration ? refuse(log, step.error().source, step.error().reason)
+                                          : fail(log, step.error().source, step.error().reason);
+    }
+    if (*step == ops::RootStep::StayedRoot) {
+        log.warn("running as root, as ULW_ALLOW_ROOT=1 allows");
+    } else if (*step == ops::RootStep::Dropped) {
+        log.info("dropped root", {{"user", user}});
+    }
+    return std::nullopt;
 }
 
 // Owns everything the gateway borrows, in construction order, so that destruction runs in
@@ -224,8 +244,8 @@ gateway::ProbeChecks probe_checks(Services& s) {
             .store_paging_errors = s.paging_errors};
 }
 
-int serve(const gateway::Config& config, const os::NofileLimits& limits, ops::Logger& log,
-          const std::optional<ops::Notifier>& notifier) {
+int serve(const gateway::Config& config, const os::NofileLimits& limits, os::UniqueFd listener,
+          ops::Logger& log, const std::optional<ops::Notifier>& notifier) {
     const auto info = core::build_info();
     Services s(log);
     auto choice = net::make_reactor_with_fallback(config.reactor, s.clock, limits.soft);
@@ -279,11 +299,7 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, ops::Lo
         return fail(log, "signalfd", errno_text(signals.error()));
     }
     s.signals = std::move(*signals);
-    auto listener = net::listen_tcp({.port = config.port});
-    if (!listener) {
-        return fail(log, "listen", errno_text(listener.error()));
-    }
-    if (auto r = s.reactor->listen(std::move(*listener), *s.gateway); !r) {
+    if (auto r = s.reactor->listen(std::move(listener), *s.gateway); !r) {
         return fail(log, "register listener", errno_text(r.error()));
     }
     s.database_check = std::make_unique<infra::postgres::PgHealthCheck>(config.database_url);
@@ -354,7 +370,6 @@ int run(std::span<const std::string_view> args) {
     boot.set_threshold(config->log_level);
     boot.info("starting", {{"version", info.version}, {"git_sha", info.git_sha}});
     gateway::log_effective(*config, *layers, boot);
-
     // Before any thread exists, so every thread inherits the mask.
     if (auto r = net::block_shutdown_signals(); !r) {
         return fail(boot, "block signals", errno_text(r.error()));
@@ -365,6 +380,20 @@ int run(std::span<const std::string_view> args) {
     }
     if (auto r = gateway::check_descriptor_budget(config->limits, limits->soft); !r) {
         return refuse(boot, r.error().variable, r.error().reason);
+    }
+    // Bound while still root, if started so: a port under 1024 needs the privilege the drop
+    // gives up.
+    os::UniqueFd listener;
+    if (!cli->check) {
+        auto bound = net::listen_tcp({.port = config->port});
+        if (!bound) {
+            return fail(boot, "listen", errno_text(bound.error()));
+        }
+        listener = std::move(*bound);
+    }
+    // Before any thread exists: glibc then has no other thread to carry the change to.
+    if (const auto code = leave_root(config->run_as_user, config->allow_root, boot)) {
+        return *code;
     }
     if (cli->check) {
         boot.info("configuration valid");
@@ -382,7 +411,7 @@ int run(std::span<const std::string_view> args) {
     int code = EXIT_FAILURE;
     {
         ops::Logger log(**sink, clock, "gateway", config->log_level);
-        code = serve(*config, *limits, log, *notifier);
+        code = serve(*config, *limits, std::move(listener), log, *notifier);
     }
     const std::uint64_t dropped = (*sink)->close();
     if (dropped > 0) {

@@ -159,7 +159,8 @@ class Stack:
         subprocess.run(["psql", self.admin_url, "-qc", f"CREATE DATABASE {self.name}"],
                        check=True)
         subprocess.run([self.bin / "ulw_migrate"], check=True,
-                       env={**os.environ, "ULW_DATABASE_URL": self.database_url},
+                       env={**os.environ, "ULW_DATABASE_URL": self.database_url,
+                            "ULW_ALLOW_ROOT": "1"},
                        stdout=subprocess.DEVNULL)
         code = self.s3("PUT", self.bucket)
         if code != "200":
@@ -190,6 +191,8 @@ class Stack:
             "ULW_BUCKET": self.bucket,
             "ULW_S3_ACCESS_KEY_ID": self.access,
             "ULW_S3_SECRET_ACCESS_KEY": self.secret,
+            # The soak may run as root on a development host.
+            "ULW_ALLOW_ROOT": "1",
         }
 
     def connection(self, timeout=60):
@@ -205,7 +208,13 @@ class Stack:
                        "ULW_DEV_JWKS_FILE": str(self.out / "jwks.json"), "JWT_ISSUER": ISSUER,
                        "ULW_TRANSPORT": "tls", "ULW_TLS_CERT_FILE": str(self.out / "cert.pem"),
                        "ULW_TLS_KEY_FILE": str(self.out / "key.pem"),
-                       "ULW_MAX_UPLOAD_SLOTS": str(UPLOAD_SLOTS)}
+                       "ULW_MAX_UPLOAD_SLOTS": str(UPLOAD_SLOTS),
+                       # One address and four users stand in for every client, and the soak
+                       # fills every slot at once: the per-client limits, which have tests of
+                       # their own, would refuse its load rather than serve it.
+                       "ULW_MAX_CONNECTIONS_PER_IP": "448",
+                       "ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND": "65536",
+                       "ULW_REQUESTS_PER_USER_PER_MINUTE": "1000000"}
         if os.environ.get("ULW_REACTOR"):
             gateway_env["ULW_REACTOR"] = os.environ["ULW_REACTOR"]
         scratch = self.out / "scratch"

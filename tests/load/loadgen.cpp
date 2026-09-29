@@ -22,6 +22,8 @@
 #include <exception>
 #include <memory>
 #include <print>
+#include <ranges>
+#include <span>
 #include <string_view>
 #include <unistd.h>
 #include <vector>
@@ -47,8 +49,8 @@ struct Conn {
     bool open = false;
 };
 
-bool parse(int argc, char** argv, Args& args) {
-    for (int i = 1; i + 1 < argc; i += 2) {
+bool parse(std::span<char*> argv, Args& args) {
+    for (std::size_t i = 1; i + 1 < argv.size(); i += 2) {
         const std::string_view flag = argv[i];
         const std::string_view v = argv[i + 1];
         auto num = [&](auto& out) {
@@ -79,7 +81,7 @@ bool parse(int argc, char** argv, Args& args) {
             return false;
         }
     }
-    return argc % 2 == 1;
+    return argv.size() % 2 == 1;
 }
 
 int open_conn(std::uint16_t port) {
@@ -91,6 +93,8 @@ int open_conn(std::uint16_t port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    // connect() takes every address family through the generic sockaddr header.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (::connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 &&
         errno != EINPROGRESS) {
         ::close(fd);
@@ -101,7 +105,7 @@ int open_conn(std::uint16_t port) {
 
 int run(int argc, char** argv) {
     Args args;
-    if (!parse(argc, argv, args)) {
+    if (!parse(std::span(argv, static_cast<std::size_t>(argc)), args)) {
         std::println(stderr, "usage: ulw_loadgen --port P --connections N --seconds S "
                              "--mode pingpong|idle|noread");
         return 2;
@@ -114,8 +118,8 @@ int run(int argc, char** argv) {
     const int ep = ::epoll_create1(EPOLL_CLOEXEC);
     std::vector<Conn> conns(args.connections);
     std::array<std::byte, kMessage> msg{};
-    for (std::size_t i = 0; i < msg.size(); ++i) {
-        msg[i] = static_cast<std::byte>('a' + (i % 26));
+    for (auto [i, b] : std::views::enumerate(msg)) {
+        b = static_cast<std::byte>('a' + (i % 26));
     }
     std::uint64_t connect_failures = 0;
     for (std::size_t i = 0; i < conns.size(); ++i) {
@@ -144,8 +148,8 @@ int run(int argc, char** argv) {
 
     while (std::chrono::steady_clock::now() < deadline) {
         const int n = ::epoll_wait(ep, events.data(), static_cast<int>(events.size()), 100);
-        for (int k = 0; k < n; ++k) {
-            const auto& ev = events[static_cast<std::size_t>(k)];
+        for (const epoll_event& ev :
+             std::span(events).first(static_cast<std::size_t>(std::max(n, 0)))) {
             Conn& c = conns[ev.data.u64];
             if (!c.open) {
                 continue;
@@ -170,9 +174,9 @@ int run(int argc, char** argv) {
                     drop(errors);
                     continue;
                 }
-                for (ssize_t j = 0; j < r; ++j) {
-                    if (buf[static_cast<std::size_t>(j)] !=
-                        msg[(c.received + static_cast<std::size_t>(j)) % kMessage]) {
+                const auto got = std::span(buf).first(r > 0 ? static_cast<std::size_t>(r) : 0);
+                for (const auto [j, byte] : std::views::enumerate(got)) {
+                    if (byte != msg.at((c.received + static_cast<std::size_t>(j)) % kMessage)) {
                         ++mismatches;
                         break;
                     }
