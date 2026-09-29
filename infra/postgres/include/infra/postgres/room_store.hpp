@@ -1,0 +1,71 @@
+#pragma once
+
+#include "net/offload_pool.hpp"
+#include "net/reactor.hpp"
+#include "rt/room_store.hpp"
+
+#include <cstddef>
+#include <expected>
+#include <memory>
+#include <string>
+
+namespace infra::postgres {
+
+struct RoomStoreConfig {
+    std::string conninfo;
+    // Every call is one statement on primary keys. A node sends a heartbeat and a sweep a
+    // second plus one append per message; four sessions carry thousands of messages a second,
+    // and three nodes hold 3 x (4 + 1 listening) = 15 of Postgres' default 100 connections.
+    std::size_t connections = 4;
+    // As the catalog's: a handful of round trips on the private network, or a server that is
+    // gone.
+    core::Millis connect_timeout{5000};
+};
+
+// IRoomStore on Postgres (migrations/0003_rooms.sql), driven by the reactor: no call blocks the
+// loop, and each gives up after rt::kStoreTimeout. One more session LISTENs for ownership
+// changes, and reports a resync whenever it (re)starts listening.
+//
+// The offload pool resolves host names and must be stopped before this is destroyed. Calls
+// outstanding at destruction are dropped unanswered.
+class PgRoomStore final : public rt::IRoomStore {
+    class Impl;
+    struct Token {
+        explicit Token() = default;
+    };
+
+public:
+    // Refuses a connection string that does not parse, and one that would make libpq look the
+    // host up itself.
+    [[nodiscard]] static std::expected<std::unique_ptr<PgRoomStore>, std::string>
+    create(net::IReactor& reactor, net::OffloadPool& offload, const RoomStoreConfig& config);
+
+    // Only create() can make the token.
+    PgRoomStore(Token token, std::unique_ptr<Impl> impl) noexcept;
+    ~PgRoomStore() override;
+    PgRoomStore(const PgRoomStore&) = delete;
+    PgRoomStore& operator=(const PgRoomStore&) = delete;
+    PgRoomStore(PgRoomStore&&) = delete;
+    PgRoomStore& operator=(PgRoomStore&&) = delete;
+
+    void watch(rt::IOwnershipListener& listener) noexcept override;
+    void resolve(const core::RoomId& room, const core::NodeId& node,
+                 rt::StoreCallback<rt::Ownership> done) override;
+    void claim_stale(std::vector<core::RoomId> rooms, const core::NodeId& node,
+                     rt::StoreCallback<std::vector<rt::OwnedRoom>> done) override;
+    void heartbeat(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
+                   rt::StoreCallback<std::vector<core::RoomId>> done) override;
+    void append(const core::RoomId& room, std::uint64_t generation,
+                rt::StoreCallback<std::optional<std::uint64_t>> done) override;
+    void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
+                 rt::StoreCallback<void> done) override;
+    void advertise(const core::NodeId& node, std::string address,
+                   rt::StoreCallback<void> done) override;
+    void find_address(const core::NodeId& node,
+                      rt::StoreCallback<std::optional<std::string>> done) override;
+
+private:
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace infra::postgres

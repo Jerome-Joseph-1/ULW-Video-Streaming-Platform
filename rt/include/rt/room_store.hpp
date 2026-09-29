@@ -35,6 +35,8 @@ struct Ownership {
 struct OwnedRoom {
     core::RoomId room;
     std::uint64_t generation = 0;
+
+    friend bool operator==(const OwnedRoom&, const OwnedRoom&) = default;
 };
 
 enum class StoreError : std::uint8_t {

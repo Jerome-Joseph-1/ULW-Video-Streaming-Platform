@@ -269,6 +269,16 @@ target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
 
+# The room registry's store against a live Postgres, as the suite above.
+ulw_add_test_suite(room_store_integration_tests integration
+    integration/postgres_harness.cpp
+    integration/room_store_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(room_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg_store
+    PkgConfig::LIBPQ)
+target_include_directories(room_store_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
 ulw_add_test_suite(auth_unit_tests unit
     unit/auth/base64url_test.cpp
     unit/auth/claims_test.cpp
