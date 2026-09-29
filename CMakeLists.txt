@@ -89,6 +89,7 @@ add_subdirectory(apps/migrate)
 if(ULW_BUILD_WORKER)
     add_subdirectory(infra/ffmpeg)
     add_subdirectory(apps/worker)
+    add_subdirectory(apps/live-packager)
 endif()
 
 if(ULW_BUILD_TESTS)

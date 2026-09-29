@@ -1,0 +1,212 @@
+#include "core/version.hpp"
+#include "infra/ffmpeg/live_remux.hpp"
+#include "infra/ffmpeg/transcoder.hpp"
+#include "infra/s3util/credentials.hpp"
+#include "infra/s3util/profile.hpp"
+#include "infra/storage/fs_transfer.hpp"
+#include "infra/storage/s3_transfer.hpp"
+#include "os/system_clock.hpp"
+#include "os/system_random.hpp"
+
+#include "config.hpp"
+#include "ingest.hpp"
+#include "log.hpp"
+#include "publisher.hpp"
+#include "stream_runner.hpp"
+
+#include <sys/prctl.h>
+
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <expected>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <print>
+#include <pthread.h>
+#include <stop_token>
+#include <string>
+#include <system_error>
+#include <thread>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+std::optional<std::string> read_env(std::string_view name) {
+    // Read once, before any thread exists, so nothing can race it with setenv.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+    const char* value = std::getenv(std::string(name).c_str());
+    return value == nullptr ? std::nullopt : std::optional<std::string>(value);
+}
+
+int fail(std::string_view what, std::string_view why) {
+    std::println(stderr, "live_packager: {}: {}", what, why);
+    return EXIT_FAILURE;
+}
+
+std::string_view to_string(live::StorageBackend backend) noexcept {
+    switch (backend) {
+    case live::StorageBackend::R2:
+        return "r2";
+    case live::StorageBackend::Minio:
+        return "minio";
+    case live::StorageBackend::Filesystem:
+        return "fs";
+    }
+    return "r2";
+}
+
+struct Storage {
+    std::unique_ptr<infra::s3util::EnvCredentialProvider> credentials;
+    std::unique_ptr<core::ports::IObjectTransfer> transfer;
+};
+
+std::expected<Storage, std::string> make_storage(const live::Config& config,
+                                                 const core::ports::IClock& clock,
+                                                 core::ports::IRandom& random) {
+    using live::StorageBackend;
+    Storage storage;
+    if (config.storage == StorageBackend::Filesystem) {
+        storage.transfer = std::make_unique<infra::storage::FsTransfer>(config.storage_location);
+        return storage;
+    }
+    auto profile = config.storage == StorageBackend::R2
+                       ? infra::s3util::S3Profile::r2(config.storage_location)
+                       : infra::s3util::S3Profile::minio(config.storage_location);
+    if (!profile) {
+        return std::unexpected("object store location is malformed");
+    }
+    auto credentials =
+        infra::s3util::EnvCredentialProvider::load({.access_key_id = "ULW_S3_ACCESS_KEY_ID",
+                                                    .secret_access_key = "ULW_S3_SECRET_ACCESS_KEY",
+                                                    .session_token = std::nullopt});
+    if (!credentials) {
+        return std::unexpected(credentials.error().variable + " is unset or malformed");
+    }
+    storage.credentials =
+        std::make_unique<infra::s3util::EnvCredentialProvider>(std::move(*credentials));
+    auto transfer = infra::storage::S3Transfer::create({.credentials = *storage.credentials,
+                                                        .clock = clock,
+                                                        .random = random,
+                                                        .profile = std::move(*profile),
+                                                        .bucket = config.bucket});
+    if (!transfer) {
+        return std::unexpected("object store configuration refused");
+    }
+    storage.transfer = std::move(*transfer);
+    return storage;
+}
+
+// SIGTERM and SIGINT are blocked in every thread and taken here, synchronously, so no
+// handler runs in the middle of a libcurl call.
+void watch_signals(const std::stop_token& stop, std::stop_source& shutdown, sigset_t signals) {
+    // Wakes this often only to notice that the packager finished on its own.
+    constexpr timespec kTick{.tv_sec = 0, .tv_nsec = 100'000'000};
+    while (!stop.stop_requested()) {
+        const int sig = ::sigtimedwait(&signals, nullptr, &kTick);
+        if (sig > 0) {
+            live::log("signal {}: ending the stream", sig);
+            shutdown.request_stop();
+            return;
+        }
+    }
+}
+
+int run() {
+    const auto info = core::build_info();
+    auto config = live::load_config(read_env);
+    if (!config) {
+        return fail(config.error().variable, config.error().reason);
+    }
+    // Makes /proc/<pid>/environ, which holds the storage keys, unreadable to other processes
+    // of our user, the sandboxed ffmpeg included.
+    if (::prctl(PR_SET_DUMPABLE, 0) != 0) {
+        return fail("prctl", std::generic_category().message(errno));
+    }
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGTERM);
+    sigaddset(&signals, SIGINT);
+    if (const int rc = ::pthread_sigmask(SIG_BLOCK, &signals, nullptr); rc != 0) {
+        return fail("block signals", std::generic_category().message(rc));
+    }
+
+    // What an earlier run left is not needed: the store has the stream's state.
+    std::error_code ec;
+    fs::remove_all(config->scratch, ec);
+    const fs::path media_dir = config->scratch / "media";
+    fs::create_directories(media_dir, ec);
+    if (ec) {
+        return fail("ULW_SCRATCH_DIR", ec.message());
+    }
+    fs::path sandbox = config->sandbox;
+    if (sandbox.empty()) {
+        sandbox = fs::read_symlink("/proc/self/exe", ec).parent_path() / "ulw_sandbox";
+        if (ec) {
+            return fail("ULW_SANDBOX_BIN", "not set, and /proc/self/exe is unreadable");
+        }
+    }
+    const os::SystemClock clock;
+    os::SystemRandom random;
+    // ADR-0025: without the sandbox the packager does not start, rather than run ffmpeg bare.
+    if (const auto refused = infra::ffmpeg::check_sandbox(sandbox, media_dir, clock)) {
+        return fail("sandbox", *refused);
+    }
+    auto storage = make_storage(*config, clock, random);
+    if (!storage) {
+        return fail("storage", storage.error());
+    }
+    auto listener = live::IngestListener::bind(config->ingest_host, config->ingest_port);
+    if (!listener) {
+        return fail("ingest", listener.error());
+    }
+    const infra::ffmpeg::LiveRemuxer remuxer(
+        {.sandbox = sandbox, .ffmpeg = config->ffmpeg, .search_path = config->search_path}, clock);
+    auto publisher = live::Publisher::open({.stream = config->stream,
+                                            .window = {.target_seconds = config->segment_seconds,
+                                                       .max_segments = config->window_segments},
+                                            .media_dir = media_dir,
+                                            .outbox = config->scratch / "outbox"},
+                                           *storage->transfer, clock);
+    if (!publisher) {
+        return fail("stream", live::to_string(publisher.error()));
+    }
+
+    std::stop_source shutdown;
+    const std::jthread signal_thread([&shutdown, signals](const std::stop_token& stop) {
+        watch_signals(stop, shutdown, signals);
+    });
+    live::log("{} ({}) stream={} storage={} ingest={}:{} segment={}s window={} sandbox={}",
+              info.version, info.git_sha, config->stream.str(), to_string(config->storage),
+              config->ingest_host, listener->port(), config->segment_seconds,
+              config->window_segments, sandbox.string());
+    if (publisher->resumed()) {
+        live::log("continuing at segment {}", publisher->next_sequence());
+    }
+    const auto outcome =
+        live::run_stream(*publisher, *listener, remuxer, clock,
+                         {.media_dir = media_dir,
+                          .segment_seconds = config->segment_seconds,
+                          .listed_segments = live::listed_segments(config->window_segments),
+                          .max_duration = config->max_duration},
+                         shutdown.get_token());
+    live::log("stopped");
+    return outcome == live::Outcome::Ended ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+} // namespace
+
+// Formatting and allocation are all that can still throw; report it and exit.
+int main() {
+    try {
+        return run();
+    } catch (const std::exception& e) {
+        static_cast<void>(std::fputs(e.what(), stderr));
+        return EXIT_FAILURE;
+    } catch (...) {
+        return EXIT_FAILURE;
+    }
+}

@@ -48,7 +48,7 @@ LiveRemuxer::LiveRemuxer(LiveRemuxConfig config, const core::ports::IClock& cloc
     : config_(std::move(config)), clock_(clock) {}
 
 std::expected<LiveRemuxResult, std::string> LiveRemuxer::run(const LiveRemuxJob& job,
-                                                             std::stop_token stop) const {
+                                                             const std::stop_token& stop) const {
     const Sandbox sandbox{.helper = config_.sandbox,
                           .environment = {"PATH=" + config_.search_path}};
     const Limits limits{.writable = job.out_dir,

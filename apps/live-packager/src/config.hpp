@@ -1,0 +1,57 @@
+#pragma once
+
+#include "core/util/time.hpp"
+
+#include "stream_id.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <filesystem>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+
+namespace live {
+
+enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
+
+struct Config {
+    StreamId stream;
+    // Where the publisher connects. A numeric address; loopback unless told otherwise.
+    std::string ingest_host;
+    std::uint16_t ingest_port = 0;
+    StorageBackend storage = StorageBackend::R2;
+    // The R2 account id, the MinIO endpoint URL, or the filesystem root.
+    std::string storage_location;
+    std::string bucket;
+    // ULW_SCRATCH_DIR/<stream>: this packager's alone, which startup clears.
+    std::filesystem::path scratch;
+    std::filesystem::path sandbox;
+    std::string ffmpeg;
+    std::string search_path;
+    std::uint32_t segment_seconds = 0;
+    std::size_t window_segments = 0;
+    core::Seconds max_duration{};
+};
+
+struct ConfigError {
+    std::string variable;
+    std::string reason;
+};
+
+using EnvLookup = std::function<std::optional<std::string>(std::string_view name)>;
+
+// Everything comes from the environment, as for the worker: arguments are visible to every
+// user through /proc, and the storage keys are secrets.
+[[nodiscard]] std::expected<Config, ConfigError> load_config(const EnvLookup& env);
+
+// How many segments ffmpeg keeps in its own playlist: twice the window, so that an uploader
+// that falls a whole window behind still finds every segment listed. Upload failures are given
+// up on after one window (see stream_runner.cpp), before the list can move past a segment.
+[[nodiscard]] constexpr std::uint32_t listed_segments(std::size_t window_segments) noexcept {
+    return static_cast<std::uint32_t>(2 * window_segments);
+}
+
+} // namespace live

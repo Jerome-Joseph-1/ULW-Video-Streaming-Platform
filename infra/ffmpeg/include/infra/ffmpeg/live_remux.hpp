@@ -78,8 +78,8 @@ public:
     LiveRemuxer(LiveRemuxConfig config, const core::ports::IClock& clock);
 
     // Fails only when the child could not be started.
-    [[nodiscard]] std::expected<LiveRemuxResult, std::string> run(const LiveRemuxJob& job,
-                                                                  std::stop_token stop) const;
+    [[nodiscard]] std::expected<LiveRemuxResult, std::string>
+    run(const LiveRemuxJob& job, const std::stop_token& stop) const;
 
 private:
     LiveRemuxConfig config_;

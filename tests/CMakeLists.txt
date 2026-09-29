@@ -306,6 +306,18 @@ if(ULW_BUILD_WORKER)
     target_link_libraries(worker_unit_tests PRIVATE ulw::worker_lib ulw::os)
     target_include_directories(worker_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
+    ulw_add_test_suite(live_packager_unit_tests unit
+        unit/live_packager/config_test.cpp
+        unit/live_packager/ingest_test.cpp
+        unit/live_packager/live_window_test.cpp
+        unit/live_packager/media_playlist_test.cpp
+        unit/live_packager/publisher_test.cpp
+        unit/live_packager/segment_tracker_test.cpp
+        unit/live_packager/stream_id_test.cpp)
+    target_link_libraries(live_packager_unit_tests PRIVATE
+        ulw::live_packager_lib ulw::storage_fs_transfer ulw::os)
+    target_include_directories(live_packager_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
     # The adapter on real ffmpeg, and the worker binary against the Postgres and MinIO of
     # deploy/local/compose.yaml.
     ulw_add_test_suite(worker_integration_tests integration
