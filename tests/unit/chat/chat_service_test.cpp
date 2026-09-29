@@ -2,6 +2,7 @@
 #include "infra/auth/base64url.hpp"
 
 #include "chat_service.hpp"
+#include "live_chat.hpp"
 #include "support/fake_clock.hpp"
 
 #include <format>
@@ -481,6 +482,81 @@ TEST_F(ChatServiceTest, JoiningAgainForgetsWhatALossyClientWasOwed) {
     deliver(room, 3);
     service_->drained(v);
     EXPECT_EQ(seqs(viewer.take()), std::vector<std::uint64_t>{3});
+}
+
+TEST_F(ChatServiceTest, EveryViewerOfALiveChatIsLossyWhateverItsJoinAsked) {
+    const std::string live = chat::live_chat_room("show-1").to_string();
+    FakeClient viewer;
+    const auto v = attach(viewer);
+    join(v, std::nullopt, chat::Delivery::Durable, live);
+    rt::IMember& room = rooms_.admit();
+    viewer.take();
+    viewer.unsent = kBehind;
+    deliver(room, 1, "hi", "bob", live);
+    deliver(room, 2, "hi", "bob", live);
+    EXPECT_TRUE(viewer.take().empty()) << "a durable client is never held back";
+    viewer.unsent = 0;
+    service_->drained(v);
+    EXPECT_EQ(seqs(viewer.take()), (std::vector<std::uint64_t>{1, 2}));
+}
+
+TEST_F(ChatServiceTest, ALiveChatTakesItsAllowanceFromAllSendersHereAndTheRestKeepTheirs) {
+    const std::string live = chat::live_chat_room("show-1").to_string();
+    std::vector<std::unique_ptr<FakeClient>> clients;
+    std::vector<chat::ClientId> ids;
+    for (int user = 0; user < 5; ++user) {
+        clients.push_back(std::make_unique<FakeClient>());
+        ids.push_back(attach(*clients.back(), "user" + std::to_string(user)));
+        join(ids.back(), std::nullopt, chat::Delivery::Lossy, live);
+        join(ids.back());
+    }
+    rooms_.admit();
+    rooms_.admit();
+    // Four users, each within their own ten, use up the room's forty.
+    for (std::size_t user = 0; user < 4; ++user) {
+        for (int i = 0; i < 10; ++i) {
+            send(ids[user], std::format("u{}-{}", user, i), "hi", live);
+        }
+    }
+    EXPECT_EQ(rooms_.sends.size(), 40U);
+    clients[4]->take();
+    send(ids[4], "late", "hi", live);
+    EXPECT_EQ(rooms_.sends.size(), 40U);
+    const Seen refused = seen(clients[4]->take().at(0));
+    EXPECT_EQ(refused.reason, "rate_limited");
+    EXPECT_EQ(refused.retry_after_ms, 50U) << "20 a second";
+    EXPECT_EQ(service_->counters().rate_limited, 1U);
+    // The room refused it, not the user: their ten are all still theirs elsewhere.
+    for (int i = 0; i < 10; ++i) {
+        send(ids[4], std::format("elsewhere-{}", i));
+    }
+    EXPECT_EQ(rooms_.sends.size(), 50U);
+    // Half a second gives the user one token back and the room ten.
+    clock_.advance(Millis{500});
+    send(ids[4], "in-time", "hi", live);
+    ASSERT_EQ(rooms_.sends.size(), 51U);
+    EXPECT_EQ(rooms_.sends.back().key, key("in-time"));
+}
+
+TEST_F(ChatServiceTest, ALiveChatMessageIsALineAndNoLonger) {
+    const std::string live = chat::live_chat_room("show-1").to_string();
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a, std::nullopt, chat::Delivery::Lossy, live);
+    join(a);
+    rooms_.admit();
+    rooms_.admit();
+    alice.take();
+    send(a, "long", std::string(2'001, 'x'), live);
+    EXPECT_TRUE(rooms_.sends.empty());
+    const Seen refused = seen(alice.take().at(0));
+    EXPECT_EQ(refused.reason, "too_large");
+    EXPECT_EQ(refused.id, "long");
+    send(a, "line", std::string(2'000, 'x'), live);
+    // Other rooms carry up to what the connection decodes.
+    send(a, "letter", std::string(20'000, 'x'));
+    EXPECT_EQ(rooms_.sends.size(), 2U);
+    EXPECT_EQ(service_->counters().rate_limited, 0U);
 }
 
 TEST_F(ChatServiceTest, AClientResumingAfterASeqGetsWhatThisNodeKeptSinceInOrder) {

@@ -1,5 +1,7 @@
 #include "chat_service.hpp"
 
+#include "live_chat.hpp"
+
 #include <algorithm>
 #include <iterator>
 #include <optional>
@@ -55,6 +57,8 @@ struct ChatService::Room final : rt::IMember {
     std::vector<Waiting> waiting;
     std::deque<Kept> kept;
     std::size_t kept_bytes = 0;
+    // A stream's live chat: what this node lets into it, from all its senders together.
+    std::optional<TokenBucket> live_sends;
     // The latest seq known: the room plane's answer to the join, or a later delivery.
     std::uint64_t head = 0;
     // Since when no client here has been in the room.
@@ -210,14 +214,17 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
     if (c == nullptr) {
         return;
     }
+    // An audience of thousands is not held back by its slowest viewer, nor closed for being
+    // one: a live chat is lossy whatever the join asked for.
+    const Delivery delivery = is_live_chat(room.id) ? Delivery::Lossy : join.delivery;
     const auto it = std::ranges::find(room.subscribers, id, &Room::Subscriber::id);
     if (it == room.subscribers.end()) {
         room.subscribers.push_back(
-            {.id = id, .client = c->client, .delivery = join.delivery, .behind = std::nullopt});
+            {.id = id, .client = c->client, .delivery = delivery, .behind = std::nullopt});
     } else {
         // What it was owed as a lossy client is not sent now that it has joined again; the seqs
         // it sees show the gap.
-        it->delivery = join.delivery;
+        it->delivery = delivery;
         it->behind.reset();
         std::erase(c->behind, room.id);
     }
@@ -282,10 +289,26 @@ void ChatService::send(ClientId id, Send send) {
         answer(*c->client, reason(rt::RouteError::Busy), send.room, send.id);
         return;
     }
+    const bool live = is_live_chat(send.room);
+    if (live && send.body.size() > limits_.live_body) {
+        answer(*c->client, "too_large", send.room, send.id);
+        return;
+    }
     const core::MonoTime now = clock_.now();
     const auto bucket =
         sends_.try_emplace(c->user, limits_.send_burst, limits_.sends_per_second, now).first;
-    if (const auto taken = bucket->second.take(now); !taken) {
+    auto taken = bucket->second.take(now);
+    if (taken && live) {
+        if (!r->live_sends) {
+            r->live_sends.emplace(limits_.live_room_burst, limits_.live_room_sends_per_second, now);
+        }
+        // The room's allowance ran out, not the user's: the user keeps their token.
+        taken = r->live_sends->take(now);
+        if (!taken) {
+            bucket->second.give_back();
+        }
+    }
+    if (!taken) {
         ++counters_.rate_limited;
         std::string out;
         write_rate_limited(out, send.room, send.id, taken.error());

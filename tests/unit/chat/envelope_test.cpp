@@ -2,6 +2,7 @@
 #include "infra/auth/base64url.hpp"
 
 #include "envelope.hpp"
+#include "live_chat.hpp"
 
 #include <algorithm>
 #include <gtest/gtest.h>
@@ -33,6 +34,32 @@ TEST(Envelope, AJoinNamesItsRoomAndMayAskToResumeAndToBeLossy) {
     ASSERT_TRUE(resume);
     EXPECT_EQ(std::get<chat::Join>(*resume).after, 41U);
     EXPECT_EQ(std::get<chat::Join>(*resume).delivery, chat::Delivery::Lossy);
+}
+
+TEST(Envelope, AStreamsLiveChatIsJoinedByTheStreamsNameAndNeverByItsRoom) {
+    const auto c = chat::parse_command(R"({"type":"join","stream":"show-1","after":3})");
+    ASSERT_TRUE(c);
+    EXPECT_EQ(std::get<chat::Join>(*c).room, chat::live_chat_room("show-1"));
+    EXPECT_EQ(std::get<chat::Join>(*c).after, 3U);
+
+    const std::string live = chat::live_chat_room("show-1").to_string();
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","room":")" + live + R"("})"),
+              std::unexpected(EnvelopeError::BadRoom));
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":"show/1"})"),
+              std::unexpected(EnvelopeError::BadStream));
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":""})"),
+              std::unexpected(EnvelopeError::BadStream));
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":7})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","stream":"show-1","room":")" +
+                                  std::string(kRoom) + R"("})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::reason(EnvelopeError::BadStream), "bad_stream");
+    // Once joined, the room is named by its id like any other.
+    const auto send =
+        chat::parse_command(R"({"type":"send","room":")" + live + R"(","id":"a","body":"aGk"})");
+    ASSERT_TRUE(send);
+    EXPECT_EQ(std::get<chat::Send>(*send).room, chat::live_chat_room("show-1"));
 }
 
 TEST(Envelope, ASendCarriesItsIdAndTheBytesItsBodyEncodes) {

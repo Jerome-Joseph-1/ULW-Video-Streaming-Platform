@@ -88,6 +88,19 @@ struct ServiceLimits {
     std::size_t room_buffer_bytes = std::size_t{256} * 1024;
     std::size_t buffer_bytes = std::size_t{32} << 20U;
     std::size_t buffer_messages = std::size_t{128} * 1024;
+    // A stream's live chat (ADR-0057). Its owner sequences about a thousand messages a second
+    // (ADR-0035) for every node's senders, and an audience of thousands, each within their own
+    // two a second, would ask for far more and have the owner turn everyone away as busy. So
+    // each node lets 20 a second into the room, 40 at once: three nodes make 60 a second, more
+    // than anyone reads and 18 KB/s to each viewer at 300 bytes a message, and the owner's
+    // ceiling holds up to sixteen nodes with room to spare.
+    std::uint32_t live_room_burst = 40;
+    std::uint32_t live_room_sends_per_second = 20;
+    // A live chat message is a line: 500 characters, what the large platforms allow, of up to
+    // four UTF-8 bytes each. Bounded so that a room's kept messages hold the lossy_depth a
+    // viewer is owed (64 x (2000 + 256) is 141 KiB of the 256) and a live room's stored
+    // messages stay small.
+    std::size_t live_body = 2'000;
     // How long a room stays joined, and its messages kept, after its last client here left:
     // a page reload, a network switch, or a slow reader's reconnect take seconds; a client's
     // backoff reaches half a minute after a few failures.

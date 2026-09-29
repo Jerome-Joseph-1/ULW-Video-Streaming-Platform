@@ -3,6 +3,8 @@
 #include "core/util/json.hpp"
 #include "infra/auth/base64url.hpp"
 
+#include "live_chat.hpp"
+
 #include <algorithm>
 #include <array>
 #include <format>
@@ -40,11 +42,31 @@ std::optional<std::string_view> string_of(const core::json::Value& message, std:
     return v == nullptr ? std::nullopt : v->as_string();
 }
 
-std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "after", "delivery"})) {
+// A stream's live chat is joined by the stream's name, never by its room's id: the name is what
+// makes the room a live chat, and a live chat is the only room an id of its kind names.
+std::expected<core::RoomId, EnvelopeError> joined_room_of(const core::json::Value& message) {
+    if (message.find("stream") == nullptr) {
+        auto room = room_of(message);
+        if (room && is_live_chat(*room)) {
+            return std::unexpected(EnvelopeError::BadRoom);
+        }
+        return room;
+    }
+    const auto stream = string_of(message, "stream");
+    if (message.find("room") != nullptr || !stream) {
         return std::unexpected(EnvelopeError::Malformed);
     }
-    auto room = room_of(message);
+    if (!is_stream_name(*stream)) {
+        return std::unexpected(EnvelopeError::BadStream);
+    }
+    return live_chat_room(*stream);
+}
+
+std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "stream", "after", "delivery"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = joined_room_of(message);
     if (!room) {
         return std::unexpected(room.error());
     }
@@ -199,6 +221,8 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "bad_id";
     case EnvelopeError::BadBody:
         return "bad_body";
+    case EnvelopeError::BadStream:
+        return "bad_stream";
     }
     return "malformed";
 }

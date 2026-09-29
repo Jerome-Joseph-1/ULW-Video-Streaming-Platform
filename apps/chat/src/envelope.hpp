@@ -16,7 +16,9 @@
 
 // The JSON a client and chat_server exchange in WebSocket text frames (ADR-0036, ADR-0043).
 // Client to server:
-//   {"type":"join","room":"<uuid>"}
+//   {"type":"join","room":"<uuid>"}   or, for a live stream's chat, "stream":"<name>" instead
+//       of "room": the stream's name as its playback URL carries it. Joined names the room, whose
+//       id is what sends to it carry. A stream's chat is always lossy.
 //       "after":<seq>        optional: also send what this node still holds after that seq
 //       "delivery":"lossy"   optional: skip messages while this connection is behind, rather
 //                            than be closed for it ("durable", the default)
@@ -64,6 +66,8 @@ enum class EnvelopeError : std::uint8_t {
     BadId,
     // Not base64url.
     BadBody,
+    // Not a live stream's name.
+    BadStream,
 };
 
 [[nodiscard]] std::expected<Command, EnvelopeError> parse_command(std::string_view text);
