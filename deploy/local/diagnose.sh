@@ -58,12 +58,31 @@ for pod in $not_ready; do
 done
 
 node=$cluster-control-plane
+# A pod with hostUsers: false gets a fresh sysfs from runc inside its own user and network
+# namespaces. These show what the node's /sys looks like and whether that mount works there.
+{
+    section "node /sys mounts"
+    docker exec "$node" sh -c "grep -E ' /sys[ /]' /proc/self/mountinfo"
+    section "node: sysfs in a new user and network namespace"
+    docker exec "$node" unshare --user --map-root-user --net --mount \
+        sh -c 'mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /mnt && echo mounted'
+    section "node: sysfs in a new user namespace, node's network namespace"
+    docker exec "$node" unshare --user --map-root-user --mount \
+        sh -c 'mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /mnt && echo mounted'
+    section "host: sysfs in a new user and network namespace"
+    unshare --user --map-root-user --net --mount \
+        sh -c 'mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /mnt && echo mounted'
+    section "host /sys mounts"
+    grep -E ' /sys[ /]' /proc/self/mountinfo
+    section "node runtime"
+    docker exec "$node" sh -c 'containerd --version; runc --version | head -1'
+} >"$out/userns-probe.txt" 2>&1
 docker exec "$node" journalctl -u kubelet --no-pager 2>&1 | tail -300 >"$out/kubelet.txt"
 docker exec "$node" journalctl -u containerd --no-pager 2>&1 | tail -300 >"$out/containerd.txt"
 
 # The job log's copy: the host facts, the pod table, the recent events, and each unready pod's
 # state, last events and log tail.
-cat "$out/host.txt"
+cat "$out/host.txt" "$out/userns-probe.txt"
 section pods; cat "$out/pods.txt"
 section "events (last 60)"; tail -60 "$out/events.txt"
 for pod in $not_ready; do
