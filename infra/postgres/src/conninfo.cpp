@@ -98,12 +98,10 @@ std::expected<ConnTarget, std::string> parse_conninfo(const std::string& conninf
     char* error = nullptr;
     const ConninfoHandle options{PQconninfoParse(conninfo.c_str(), &error)};
     if (!options) {
-        std::string message = error != nullptr ? error : "connection string does not parse";
+        // libpq's reason quotes the token it choked on, which for a URL is as likely as not
+        // the password; it goes nowhere.
         PQfreemem(error);
-        while (!message.empty() && message.back() == '\n') {
-            message.pop_back();
-        }
-        return std::unexpected(std::move(message));
+        return std::unexpected(std::string(kUnparsable));
     }
     ConnTarget target;
     for (const PQconninfoOption* o = options.get(); o->keyword != nullptr; ++o) {

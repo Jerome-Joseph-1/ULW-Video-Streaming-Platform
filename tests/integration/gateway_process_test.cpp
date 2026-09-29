@@ -101,6 +101,30 @@ TEST_F(GatewayConfigTest, BadConfigurationExitsTwoAndNamesTheCulprit) {
     EXPECT_NE(flag_output.find("--no-such-flag"), std::string::npos) << flag_output;
 }
 
+// libpq quotes the token it cannot parse, which here is the password, and a failed connection
+// names parts of the string; neither may reach the log.
+TEST_F(GatewayConfigTest, NoPasswordReachesTheLogWhenTheDatabaseUrlIsBadOrUnreachable) {
+    auto env = base_env();
+    std::erase_if(env, [](const std::string& e) { return e.starts_with("ULW_DATABASE_URL="); });
+    auto malformed = env;
+    malformed.emplace_back("ULW_DATABASE_URL=postgresql://ulw:Sup3r%Secret@127.0.0.1:1/ulw");
+    const auto [code, output] = run({}, malformed);
+    EXPECT_NE(code, 0);
+    EXPECT_EQ(output.find("Sup3r"), std::string::npos) << output;
+
+    auto unreachable = env;
+    unreachable.emplace_back("ULW_DATABASE_URL=postgresql://ulw:Sup3rSecret@127.0.0.1:1/ulw");
+    unreachable.push_back("ULW_LISTEN_PORT=" + std::to_string(ulw::test::free_port()));
+    const auto gateway = ChildProcess::start({ULW_GATEWAY_BIN}, unreachable);
+    ASSERT_NE(gateway, nullptr);
+    ASSERT_TRUE(
+        gateway->wait_for_output(R"("event":"dependency down","dependency":"database")", kPatience))
+        << gateway->output();
+    gateway->signal(SIGTERM);
+    EXPECT_EQ(gateway->wait_exit(kPatience), 0);
+    EXPECT_EQ(gateway->output().find("Sup3r"), std::string::npos) << gateway->output();
+}
+
 TEST_F(GatewayConfigTest, TheConnectionStringIsRefusedOnTheCommandLine) {
     const auto [code, output] = run({"--database-url=postgresql://u:pw@h/db"}, base_env());
     EXPECT_EQ(code, 2);

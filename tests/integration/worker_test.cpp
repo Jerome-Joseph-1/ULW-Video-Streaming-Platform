@@ -474,6 +474,27 @@ TEST_F(WorkerTest, TellsTheServiceManagerWhenItIsReadyAliveAndStopping) {
     EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
 }
 
+TEST(WorkerBinary, NoPasswordReachesTheLogWhenTheDatabaseUrlIsBadOrUnreachable) {
+    const TempDir scratch("ulw-worker-secret");
+    for (const std::string url : {"postgresql://ulw:Sup3r%Secret@127.0.0.1:1/ulw",
+                                  "postgresql://ulw:Sup3rSecret@127.0.0.1:1/ulw"}) {
+        const auto worker = ChildProcess::start(
+            {ULW_WORKER_BIN},
+            {"ULW_DATABASE_URL=" + url, "ULW_STORAGE=fs", "ULW_FS_ROOT=" + scratch.path().string(),
+             "ULW_NODE_ID=w", "ULW_SCRATCH_DIR=" + scratch.path().string(),
+             "PATH=" + env_or("PATH", "/usr/bin:/bin")});
+        ASSERT_NE(worker, nullptr);
+        // Either refused as configuration, or running and failing to claim.
+        if (!worker->wait_for_output(R"("call":"claim")", kExitPatience)) {
+            EXPECT_EQ(worker->wait_exit(kExitPatience), 2) << worker->output();
+        } else {
+            worker->signal(SIGTERM);
+            EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
+        }
+        EXPECT_EQ(worker->output().find("Sup3r"), std::string::npos) << worker->output();
+    }
+}
+
 TEST(WorkerBinary, VersionNamesTheReleaseAndTheCommitAndBadConfigurationExitsTwo) {
     const auto version = ChildProcess::start({ULW_WORKER_BIN, "--version"}, {});
     ASSERT_NE(version, nullptr);
