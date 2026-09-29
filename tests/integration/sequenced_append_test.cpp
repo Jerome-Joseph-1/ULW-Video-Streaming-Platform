@@ -210,6 +210,36 @@ TEST_F(SequencedAppendTest, ARepeatThroughTheNextOwnerGetsTheOriginalSeq) {
     EXPECT_EQ(history(room).size(), 1U);
 }
 
+TEST_F(SequencedAppendTest, ConcurrentWritesToOneRoomTakeEverySeqOnce) {
+    // More in flight than the pool has sessions, so that writes queue on the room's row.
+    constexpr std::size_t kWrites = 200;
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = owned_by(room, a_);
+    std::vector<Seq> answers;
+    for (std::size_t i = 0; i < kWrites; ++i) {
+        rooms_->append_message(room, generation, alice_, std::format("k{}", i),
+                               bytes(std::format("body {}", i)),
+                               [&answers](Seq r) noexcept { answers.push_back(r); });
+    }
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answers.size() == kWrites; }));
+    std::vector<std::uint64_t> seqs;
+    for (const Seq& answer : answers) {
+        ASSERT_TRUE(answer && *answer);
+        seqs.push_back(**answer);
+    }
+    std::ranges::sort(seqs);
+    for (std::size_t i = 0; i < kWrites; ++i) {
+        EXPECT_EQ(seqs[i], i + 1);
+    }
+    EXPECT_EQ(last_seq(room), std::to_string(kWrites));
+    const auto stored = history(room);
+    ASSERT_EQ(stored.size(), kWrites);
+    // Each seq holds the body that was answered with it.
+    for (std::size_t i = 0; i < kWrites; ++i) {
+        EXPECT_EQ(stored[i].body, bytes(std::format("body {}", stored[i].key.substr(1))));
+    }
+}
+
 TEST_F(SequencedAppendTest, ConcurrentRepeatsOfOneKeyStoreItOnce) {
     constexpr std::size_t kRepeats = 8;
     const core::RoomId room = new_room();
