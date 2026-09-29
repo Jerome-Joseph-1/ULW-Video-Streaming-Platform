@@ -76,12 +76,10 @@ auto observe(const Video& video) {
         video.duration().transform([](Millis d) { return d.count(); })};
 }
 
-enum class Op : std::uint8_t { StartUpload, StartProcessing, MarkReady, MarkFailed };
+enum class Op : std::uint8_t { StartProcessing, MarkReady, MarkFailed };
 
 std::expected<void, DomainError> apply(Video& video, Op op) {
     switch (op) {
-    case Op::StartUpload:
-        return video.start_upload();
     case Op::StartProcessing:
         return video.start_processing();
     case Op::MarkReady:
@@ -95,8 +93,7 @@ std::expected<void, DomainError> apply(Video& video, Op op) {
 std::string name_of(VideoState state, Op op) {
     constexpr std::array<std::string_view, 5> kStates{"Init", "Uploading", "Processing", "Ready",
                                                       "Failed"};
-    constexpr std::array<std::string_view, 4> kOps{"StartUpload", "StartProcessing", "MarkReady",
-                                                   "MarkFailed"};
+    constexpr std::array<std::string_view, 3> kOps{"StartProcessing", "MarkReady", "MarkFailed"};
     return std::string(kStates.at(static_cast<std::size_t>(state))) + "_" +
            std::string(kOps.at(static_cast<std::size_t>(op)));
 }
@@ -129,8 +126,7 @@ TEST_P(LegalTransition, EntersTheTargetStateAndBumpsTheVersionOnce) {
 
 INSTANTIATE_TEST_SUITE_P(
     Video, LegalTransition,
-    testing::Values(LegalCase{VideoState::Init, Op::StartUpload, VideoState::Uploading},
-                    LegalCase{VideoState::Init, Op::StartProcessing, VideoState::Processing},
+    testing::Values(LegalCase{VideoState::Init, Op::StartProcessing, VideoState::Processing},
                     LegalCase{VideoState::Init, Op::MarkFailed, VideoState::Failed},
                     LegalCase{VideoState::Uploading, Op::StartProcessing, VideoState::Processing},
                     LegalCase{VideoState::Uploading, Op::MarkFailed, VideoState::Failed},
@@ -162,15 +158,11 @@ INSTANTIATE_TEST_SUITE_P(
     Video, IllegalTransition,
     testing::Values(
         IllegalCase{VideoState::Init, Op::MarkReady, DomainError::InvalidTransition},
-        IllegalCase{VideoState::Uploading, Op::StartUpload, DomainError::InvalidTransition},
         IllegalCase{VideoState::Uploading, Op::MarkReady, DomainError::InvalidTransition},
-        IllegalCase{VideoState::Processing, Op::StartUpload, DomainError::InvalidTransition},
         IllegalCase{VideoState::Processing, Op::StartProcessing, DomainError::InvalidTransition},
-        IllegalCase{VideoState::Ready, Op::StartUpload, DomainError::AlreadyTerminal},
         IllegalCase{VideoState::Ready, Op::StartProcessing, DomainError::AlreadyTerminal},
         IllegalCase{VideoState::Ready, Op::MarkReady, DomainError::AlreadyTerminal},
         IllegalCase{VideoState::Ready, Op::MarkFailed, DomainError::AlreadyTerminal},
-        IllegalCase{VideoState::Failed, Op::StartUpload, DomainError::AlreadyTerminal},
         IllegalCase{VideoState::Failed, Op::StartProcessing, DomainError::AlreadyTerminal},
         IllegalCase{VideoState::Failed, Op::MarkReady, DomainError::AlreadyTerminal},
         IllegalCase{VideoState::Failed, Op::MarkFailed, DomainError::AlreadyTerminal}),
@@ -188,14 +180,13 @@ TEST(Video, CreateStartsInInitAtVersionZero) {
     EXPECT_EQ(video->duration(), std::nullopt);
 }
 
-TEST(Video, UploadedVideoWalksToReadyInThreeVersions) {
+TEST(Video, UploadedVideoWalksToReadyInTwoVersions) {
     auto video = Video::create(video_id(), owner(), std::string(kTitle));
     ASSERT_TRUE(video.has_value());
-    ASSERT_TRUE(video->start_upload().has_value());
     ASSERT_TRUE(video->start_processing().has_value());
     ASSERT_TRUE(video->mark_ready(kDuration).has_value());
     EXPECT_EQ(video->state(), VideoState::Ready);
-    EXPECT_EQ(video->version(), 3U);
+    EXPECT_EQ(video->version(), 2U);
     EXPECT_EQ(video->duration(), kDuration);
 }
 
