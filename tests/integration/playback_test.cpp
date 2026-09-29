@@ -13,8 +13,8 @@
 #include "media_clips.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
-#include "support/free_port.hpp"
 #include "support/live_s3.hpp"
+#include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
 
 #include <chrono>
@@ -180,10 +180,7 @@ protected:
         alice_ = mint("alice");
         bob_ = mint("bob");
 
-        port_ = ulw::test::free_port();
-        ASSERT_NE(port_, 0);
         std::vector<std::string> env{
-            "ULW_LISTEN_PORT=" + std::to_string(port_),
             "ULW_STORAGE=minio",
             "ULW_S3_ENDPOINT=" + env_or("ULW_MINIO_ENDPOINT", "http://127.0.0.1:9000"),
             "ULW_BUCKET=" + minio_.bucket,
@@ -199,10 +196,17 @@ protected:
         if (const char* reactor = std::getenv("ULW_REACTOR")) {
             env.push_back("ULW_REACTOR=" + std::string(reactor));
         }
-        gateway_ = ChildProcess::start({ULW_GATEWAY_BIN}, env);
+        auto started = ulw::test::start_until_listening(
+            [&] {
+                port_ = ulw::test::reserve_port();
+                auto with_port = env;
+                with_port.push_back("ULW_LISTEN_PORT=" + std::to_string(port_));
+                return port_ == 0 ? nullptr : ChildProcess::start({ULW_GATEWAY_BIN}, with_port);
+            },
+            R"("event":"listening")", seconds(30));
+        gateway_ = std::move(started.process);
         ASSERT_NE(gateway_, nullptr);
-        ASSERT_TRUE(gateway_->wait_for_output(R"("port":)" + std::to_string(port_), seconds(30)))
-            << gateway_->output();
+        ASSERT_TRUE(started.ready) << gateway_->output();
     }
 
     [[nodiscard]] std::string prefix() const { return "videos/" + video_.to_string() + "/hls/"; }
