@@ -68,7 +68,7 @@ How senders are limited in a room of thousands:
   room is a version 8 UUID whose first byte is the stream-chat tag, 0x01, and whose other
   bytes are the first 15 of SHA-256 over `ulw-live-chat:` and the name, with the version and
   RFC 9562 variant bits set (`apps/chat/src/live_chat.cpp`, and the same in SQL as
-  `live_chat_room(stream)`, migration 0007); `joined` names it, and sends and history use it
+  `live_chat_room(stream)`, migration 0008); `joined` names it, and sends and history use it
   like any room id. A join that names a stream's room id as `room` is refused `bad_room`, so
   nobody can create a stream's room ahead of it as a closed room.
 - **Rooms named by something else.** Any room whose id is derived from a name is version 8,
@@ -91,7 +91,7 @@ How senders are limited in a room of thousands:
   (`core::ports::is_stream_chat`), with no recorded kind to look up per message, and the
   recorded kind can never disagree with it: `record_live` refuses any room whose id is not
   version 8, the database refuses to record one live (`chat_rooms_live_is_a_stream`, migration
-  0007), and a join cannot name the live kind for a room id (ADR-0054's `"kind":"live"` is
+  0008), and a join cannot name the live kind for a room id (ADR-0054's `"kind":"live"` is
   gone; a stream is joined by its name). So a room gets every bound below exactly when it is
   open to anyone.
 - **Delivery.** Every viewer of a live chat is lossy, whatever its join asked; a stalled
