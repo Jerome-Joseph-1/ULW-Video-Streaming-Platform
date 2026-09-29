@@ -4,6 +4,9 @@
 // The M17 acceptance on the same cluster: clients on every node see one order by last_seq; a
 // rate-limited send is refused and reaches nobody; a repeated send is delivered once; a client
 // that comes back resumes from its last seq; no body shows in any log or in the database.
+// The M18 acceptance: a user who reconnects within the grace is no event to anyone watching; one
+// who does not is exactly one offline on every watching node; a user nobody watches costs no
+// presence message at all.
 // ULW_CHAT_CLUSTER_PORTS=9101,9102,9103 pins the client ports (the CI job does); otherwise
 // free ones are taken.
 
@@ -49,6 +52,9 @@ using ulw::test::ScratchDatabase;
 using ulw::test::WsClient;
 
 constexpr std::string_view kIssuer = "https://auth.test.askedin.com";
+constexpr std::array kUsers{"alice", "bob", "carol", "dave"};
+// Short, so that the presence tests wait seconds for a grace to run out, not the default ten.
+constexpr std::chrono::milliseconds kGrace{2'000};
 
 std::uint16_t free_port() {
     const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
@@ -91,6 +97,8 @@ struct Seen {
     std::string body;
     std::string reason;
     std::optional<std::uint64_t> retry_after_ms;
+    std::string user;
+    std::string status;
 };
 
 std::optional<Seen> parse_seen(const std::string& text) {
@@ -108,7 +116,9 @@ std::optional<Seen> parse_seen(const std::string& text) {
            .id = string("id"),
            .body = infra::auth::decode_base64url(string("body")).value_or("<not base64url>"),
            .reason = string("reason"),
-           .retry_after_ms = std::nullopt};
+           .retry_after_ms = std::nullopt,
+           .user = string("user"),
+           .status = string("status")};
     if (const core::json::Value* seq = json->find("seq")) {
         s.seq = seq->as_u64().value_or(0);
     }
@@ -207,7 +217,7 @@ protected:
         ASSERT_TRUE(key);
         const auto jwks = files_.path() / "jwks.json";
         std::ofstream(jwks) << key->public_jwks();
-        for (const char* user : {"alice", "bob", "carol"}) {
+        for (const char* user : kUsers) {
             tokens_.push_back(*key->mint({.issuer = std::string(kIssuer),
                                           .audience = "askedin-platform",
                                           .subject = user,
@@ -241,6 +251,7 @@ protected:
             "ULW_DATABASE_URL=" + db_->conninfo(),
             "ULW_DEV_JWKS_FILE=" + jwks,
             "JWT_ISSUER=" + std::string(kIssuer),
+            "ULW_PRESENCE_GRACE_MS=" + std::to_string(kGrace.count()),
             "ULW_REACTOR=" +
                 std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll")};
         for (const char* passed : {"ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"}) {
@@ -263,8 +274,7 @@ protected:
             ADD_FAILURE() << "upgrade refused: " << refusal;
             return nullptr;
         }
-        return std::make_unique<Client>(std::move(*ws),
-                                        std::array{"alice", "bob", "carol"}.at(user));
+        return std::make_unique<Client>(std::move(*ws), kUsers.at(user));
     }
 
     void join(Client& client, std::optional<std::uint64_t> after = std::nullopt) {
@@ -748,6 +758,101 @@ TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingLearnsWhatItMi
               << ", which kept nothing; joined named the head " << joined->seq << "\n";
     missed.emplace_back("before bob left");
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
+}
+
+TEST_P(ChatClusterTest, AReconnectWithinTheGraceIsNoEventAndALeaveIsOneOfflineOnEveryNode) {
+    const auto presence = [](std::string_view status) {
+        return [status](const Seen& s) {
+            return s.type == "presence" && s.user == "alice" && s.status == status;
+        };
+    };
+    const auto is_presence = [](const Seen& s) { return s.type == "presence"; };
+    const auto is_presence_after_online = [](const Seen& s) {
+        return s.type == "presence" && s.status != "online";
+    };
+    // bob watches alice from every node before she connects.
+    std::vector<std::unique_ptr<Client>> watchers;
+    for (const Node& n : nodes_) {
+        watchers.push_back(connect(n, 1));
+        ASSERT_TRUE(watchers.back());
+        ASSERT_TRUE(watchers.back()->send(R"({"type":"watch","user":"alice"})"));
+        const auto answer = watchers.back()->wait_for(
+            [](const Seen& s) { return s.type == "watching" || s.type == "error"; });
+        ASSERT_TRUE(answer) << n.name;
+        EXPECT_EQ(answer->type, "watching") << answer->reason;
+        EXPECT_EQ(answer->status, "offline");
+    }
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    for (auto& w : watchers) {
+        ASSERT_TRUE(w->wait_for(presence("online")));
+    }
+
+    // alice drops off chat-1 and is back through chat-2 within the grace. chat-1 answers
+    // chat-2's announcement with an ack (bob watches there too) and, once its grace has run
+    // out, says she is offline there: two events, which change nothing for anyone watching.
+    const std::uint64_t before = metric(nodes_[0], "presence_events_sent_total");
+    alice.reset();
+    alice = connect(nodes_[1], 0);
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(ulw::test::eventually(
+        [&] { return metric(nodes_[0], "presence_events_sent_total") >= before + 2; },
+        seconds(30)));
+    // Everything chat-1 sent has had a grace's time to reach every node.
+    const auto quiet_until = [](std::chrono::steady_clock::time_point until) {
+        return std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
+                            until - std::chrono::steady_clock::now()),
+                        std::chrono::milliseconds{1});
+    };
+    auto until = std::chrono::steady_clock::now() + kGrace;
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        EXPECT_FALSE(watchers[i]->wait_for(is_presence_after_online, quiet_until(until)))
+            << nodes_[i].name << " heard the reconnect";
+        EXPECT_EQ(watchers[i]->count(is_presence), 1U) << "online, and nothing since";
+    }
+
+    // Now she leaves for good.
+    alice.reset();
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        ASSERT_TRUE(watchers[i]->wait_for(presence("offline"))) << nodes_[i].name;
+    }
+    // Twice the grace more: long enough for a second offline from any node to arrive.
+    until = std::chrono::steady_clock::now() + (kGrace * 2);
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        EXPECT_FALSE(watchers[i]->wait_for([](const Seen&) { return false; }, quiet_until(until)));
+        EXPECT_EQ(watchers[i]->count(presence("offline")), 1U) << nodes_[i].name;
+        EXPECT_EQ(watchers[i]->count(is_presence), 2U) << nodes_[i].name;
+    }
+    std::cout << "alice reconnected through chat-2 within the " << kGrace.count()
+              << " ms grace: no event on any node; she left: one offline on each of "
+              << nodes_.size() << " nodes\n";
+}
+
+TEST_P(ChatClusterTest, AUserNobodyWatchesCostsNoPresenceMessage) {
+    const auto total = [&](std::string_view name) {
+        std::uint64_t sum = 0;
+        for (const Node& n : nodes_) {
+            sum += metric(n, name);
+        }
+        return sum;
+    };
+    const std::uint64_t sent = total("presence_events_sent_total");
+    const std::uint64_t received = total("presence_events_received_total");
+    const std::uint64_t forwards = total("forwards_total");
+    auto dave = connect(nodes_[0], 3);
+    ASSERT_TRUE(dave);
+    EXPECT_EQ(metric(nodes_[0], "presence_rooms"), 1U);
+    dave.reset();
+    // The grace runs out, and chat-1 leaves dave's room: nothing is left of him.
+    ASSERT_TRUE(ulw::test::eventually([&] { return metric(nodes_[0], "presence_rooms") == 0; },
+                                      seconds(30)));
+    EXPECT_EQ(total("presence_events_sent_total"), sent);
+    EXPECT_EQ(total("presence_events_received_total"), received);
+    EXPECT_EQ(total("forwards_total"), forwards);
+    std::cout << "dave came and went with nobody watching: presence events sent "
+              << total("presence_events_sent_total") - sent << ", received "
+              << total("presence_events_received_total") - received << ", forwards "
+              << total("forwards_total") - forwards << " across " << nodes_.size() << " nodes\n";
 }
 
 // No database is reached: the connection string is refused before any connection is tried.
