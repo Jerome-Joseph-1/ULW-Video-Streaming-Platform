@@ -20,6 +20,19 @@ std::string trimmed(const char* message) {
     return out;
 }
 
+// libpq's message for a connection that failed names the host, the user and the database from
+// the connection string, and is only ever one bug away from more of it. What it did is said
+// in words of our own instead.
+std::string connect_failure(const PGconn* conn) {
+    if (PQconnectionNeedsPassword(conn) != 0) {
+        return "the server asked for a password the connection string does not give";
+    }
+    if (PQconnectionUsedPassword(conn) != 0) {
+        return "the server refused the login";
+    }
+    return "the server did not accept a connection";
+}
+
 } // namespace
 
 std::expected<SyncConnection, DbFailure> SyncConnection::open(const std::string& conninfo,
@@ -55,8 +68,8 @@ std::expected<SyncConnection, DbFailure> SyncConnection::open(const std::string&
             DbFailure{.error = DbError::ConnectionLost, .message = "out of memory"});
     }
     if (PQstatus(conn.get()) != CONNECTION_OK) {
-        return std::unexpected(DbFailure{.error = DbError::ConnectionLost,
-                                         .message = trimmed(PQerrorMessage(conn.get()))});
+        return std::unexpected(
+            DbFailure{.error = DbError::ConnectionLost, .message = connect_failure(conn.get())});
     }
     ignore_notices(conn.get());
     return SyncConnection{std::move(conn)};

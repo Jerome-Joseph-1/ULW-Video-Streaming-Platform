@@ -8,6 +8,7 @@
 #include "core/ports/transcoder.hpp"
 
 #include "lease_keeper.hpp"
+#include "ops/log.hpp"
 #include "workspace.hpp"
 
 #include <cstdint>
@@ -40,11 +41,13 @@ enum class JobOutcome : std::uint8_t {
     Abandoned,
     // A fenced write matched no row: another worker holds the job now.
     FencedOut,
-    // The final write could not reach the database; the lease will lapse and the job rerun.
+    // The final write did not happen: the database was unreachable, or refused the call. The
+    // lease will lapse and the reaper requeue or fail the job.
     Unrecorded,
 };
 
 [[nodiscard]] std::string_view to_string(JobOutcome outcome) noexcept;
+[[nodiscard]] std::string_view to_string(core::ports::JobQueueError error) noexcept;
 
 struct JobDeps {
     core::ports::IJobQueue& queue;
@@ -55,6 +58,8 @@ struct JobDeps {
     const core::ports::IClock& clock;
     core::ports::IRandom& random;
     FreeSpace free_space;
+    // Used from the job's thread and the lease keeper's.
+    ops::Logger& log;
     // Touched by the lease keeper while a job runs; none in tests that do not look at it.
     const Heartbeat* heartbeat = nullptr;
 };
