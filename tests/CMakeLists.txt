@@ -344,3 +344,13 @@ if(ULW_BUILD_WORKER)
     endif()
     add_dependencies(playback_integration_tests gateway_server)
 endif()
+
+ulw_add_test_suite(sfu_unit_tests unit
+    unit/sfu/access_token_test.cpp
+    unit/sfu/livekit_sfu_test.cpp
+    unit/sfu/room_service_test.cpp)
+target_link_libraries(sfu_unit_tests PRIVATE ulw::sfu_livekit ulw::auth ulw::test_http_server
+    OpenSSL::Crypto)
+# White-box tests of token minting and of how RoomService answers are read.
+target_include_directories(sfu_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src
+    ${PROJECT_SOURCE_DIR}/tests)
