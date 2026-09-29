@@ -7,11 +7,12 @@
 // three-rung HLS transcode the worker issues, over h264/aac mp4, vp9/opus webm, mpeg4/mp3 avi,
 // hevc/aac and av1 mkv, mpegts, flv, ogg, wmv and prores mov inputs, and over truncated,
 // random and empty files. Every input gave the same 40 names, the runtime's start-up and thread
-// creation among them; five of them (clone3, ioctl, prctl, fcntl, prlimit64) are admitted only in
-// the forms below. The additions marked below are calls the traces could not reach because
-// they need a signal or a clock the runs never met. Anything else kills the whole process:
-// ptrace, mount, keyctl, bpf, io_uring_setup, socket, unshare, setns, fork, kill and the rest of
-// the kernel's surface a decoder exploit would reach for.
+// creation among them; ioctl, prctl, fcntl and prlimit64 are admitted only with the arguments
+// below, and clone3, which glibc used for threads, is answered ENOSYS so that it uses clone, also
+// checked. The additions marked below are calls the traces could not reach because they need a
+// signal or a clock the runs never met, and tgkill and tkill for SIGABRT alone. Anything else kills
+// the whole process: ptrace, mount, keyctl, bpf, io_uring_setup, socket, unshare, setns, fork, kill
+// and the rest of the kernel's surface a decoder exploit would reach for.
 #pragma once
 
 #include <linux/audit.h>
@@ -25,8 +26,10 @@
 #include <array>
 #include <bit>
 #include <cerrno>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <fcntl.h>
 #include <sched.h>
 #include <span>
 #include <unistd.h>
@@ -112,7 +115,8 @@ inline constexpr std::array<std::uint32_t, 2> kIoctls = {0x5401 /* TCGETS */,
 // bounding set, which is empty.
 inline constexpr std::array<std::uint32_t, 2> kPrctls = {PR_SET_NAME, PR_CAPBSET_READ};
 // F_GETFD, F_SETFD, F_GETFL, F_SETFL and F_DUPFD_CLOEXEC, on descriptors it already holds.
-inline constexpr std::array<std::uint32_t, 5> kFcntls = {1, 2, 3, 4, 1030};
+inline constexpr std::array<std::uint32_t, 5> kFcntls = {F_GETFD, F_SETFD, F_GETFL, F_SETFL,
+                                                         F_DUPFD_CLOEXEC};
 
 // Every CLONE_NEW* flag. CLONE_NEWTIME is the one in the low word that no header above 5.6
 // carries.
@@ -122,6 +126,8 @@ inline constexpr std::uint32_t kNewNamespaces = CLONE_NEWNS | CLONE_NEWCGROUP | 
 // A thread, and nothing else: threads share the address space, the signal handlers and the
 // thread group, and a clone without them would make a process.
 inline constexpr std::uint32_t kThreadFlags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD;
+
+inline constexpr std::array<std::uint32_t, 1> kAbort = {SIGABRT};
 
 inline constexpr std::uint32_t kAllow = SECCOMP_RET_ALLOW;
 inline constexpr std::uint32_t kKill = SECCOMP_RET_KILL_PROCESS;
@@ -232,6 +238,12 @@ private:
     allow_arguments_in(SYS_ioctl, 1, kIoctls);
     allow_arguments_in(SYS_prctl, 0, kPrctls);
     allow_arguments_in(SYS_fcntl, 1, kFcntls);
+    // abort() raises SIGABRT with tgkill, and __stack_chk_fail, malloc's checks and av_assert
+    // all end there. Only that signal: a filter cannot tell that the target is the caller's own
+    // process (the pid is an argument, not something it can compare with getpid), so a decoder
+    // could send SIGABRT to another process of this namespace, which is only ever the helper.
+    allow_arguments_in(SYS_tgkill, 2, kAbort);
+    allow_arguments_in(SYS_tkill, 1, kAbort);
 
     // prlimit64(0, resource, NULL, old): reading this process's own limits, as the C library
     // does for the thread stack size. Setting one is not.

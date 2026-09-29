@@ -32,16 +32,24 @@ and ffmpeg alike and cannot be tighter than the worker needs.
 - The allowlist is what ffmpeg 6.1.1 and ffprobe called under `strace -f`: the probe and the
   three-rung HLS transcode the worker issues, on h264/aac mp4, vp9/opus webm, mpeg4/mp3 avi,
   hevc/aac and av1 mkv, mpegts, flv, ogg, wmv and prores mov inputs, and on truncated, random
-  and empty files. Every run gave the same 40 names, five of which (`clone3`, `ioctl`, `prctl`, `fcntl`,
-  `prlimit64`) are admitted only in the forms below. Seven more are added for what a run
+  and empty files. Every run gave the same 40 names. Of them `ioctl`, `prctl`, `fcntl` and
+  `prlimit64` are admitted only with the arguments below, and `clone3` is answered `ENOSYS`, so
+  that glibc's threads use `clone`, which is checked too. Seven more are added for what a run
   cannot show without the occasion: `rt_sigreturn` (a handler for SIGTERM, which is how the
-  worker stops it), the clocks and sleeps a fallback or a wait reaches, and `gettid`.
+  worker stops it), the clocks and sleeps a fallback or a wait reaches, and `gettid`. `tgkill`
+  and `tkill` are added for `SIGABRT` alone (next item).
 - Arguments are checked where a call is both needed and dangerous: `ioctl` only for the
   terminal queries `TCGETS` and `TIOCGWINSZ`; `prctl` only `PR_SET_NAME` and
   `PR_CAPBSET_READ`; `fcntl` only descriptor and status flags; `prlimit64` only as a read of
   the caller's own limits; `clone` only as a thread (`CLONE_THREAD`, `CLONE_VM`,
-  `CLONE_SIGHAND`) with no `CLONE_NEW*` flag. `fork` and `vfork` are not allowed, so ffmpeg
+  `CLONE_SIGHAND`) with no `CLONE_NEW*` flag; `tgkill` and `tkill` only with `SIGABRT`. `fork` and `vfork` are not allowed, so ffmpeg
   cannot start a process.
+- `abort()` raises `SIGABRT` with `tgkill`, and `av_assert`, glibc's heap checks and
+  `__stack_chk_fail` all end in `abort()`. Without the exception they would die of `SIGSYS`
+  and read as filter kills. A filter compares registers, not pids, so it cannot restrict the
+  target to the caller's own process; `SIGABRT` may be sent to any process of the pid
+  namespace, which holds only the helper (pid 1), and a signal sent to pid 1 from inside its
+  namespace is dropped unless pid 1 has a handler for it.
 - `clone3` answers `ENOSYS`. Its flags are in memory, where a filter cannot read them, and
   glibc falls back to `clone` on that answer. The one other benign errno.
 - Everything else, and every call of another ABI (32-bit, x32), is `SECCOMP_RET_KILL_PROCESS`,
@@ -49,10 +57,12 @@ and ffmpeg alike and cannot be tighter than the worker needs.
 - `execve` is allowed: the helper's child needs it once, and the filter cannot tell that one
   from a later one. What it starts inherits the filter, `no_new_privs` and an empty capability
   set, and the root is read-only.
-- A child killed by `SIGSYS` classifies as `Rejected`: the input drove the decoder to a call it
-  has no business making, and the same input does it again, so requeueing would only repeat
-  it. The port has no value of its own for it; the job's log line carries exit code 159
-  (128 + `SIGSYS`).
+- A child killed by `SIGSYS` classifies as its own kind, `SyscallBlocked`. It cannot be told
+  apart from a gap in this allowlist, which is our bug, not the owner's, so it is neither a
+  rejection of the file nor a plain kill: the worker runs it once more, as for a crash, and
+  then fails the video with "the decoder was stopped by the sandbox", never "could not be
+  decoded". Each occurrence logs `ffmpeg_syscall_blocked_total=N` (the worker's counters are
+  log lines) with the job's exit code 159 (128 + `SIGSYS`) above it.
 - The filter is per architecture (x86-64 and AArch64 tables; the legacy names `access` and
   `mkdir` are replaced by `faccessat` and `mkdirat` where the architecture has no legacy
   calls). AArch64 is untested here.
@@ -62,7 +72,7 @@ and ffmpeg alike and cannot be tighter than the worker needs.
 ## Consequences
 
 - A new ffmpeg or libc that calls something not on the list kills the transcode. The failure
-  is `Rejected`, and the job's video shows "could not be decoded" until the list is extended:
+  is `SyscallBlocked`, and the job's video fails after one rerun until the list is extended:
   re-trace on every ffmpeg bump (`strace -f -c`, both the probe and the transcode) and add
   what is new. The worker image pins ffmpeg's version for this reason as well.
 - The filter costs one comparison per call for the ones early in the table and the kernel's

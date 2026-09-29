@@ -1,7 +1,7 @@
 // syscall_probe NAME: makes one system call with all-zero arguments, and exits 0 if the process
 // is still there afterwards. Run under the sandbox's syscall filter, a call it kills is the
 // signal that ended the run; the arguments are of no interest, only whether the call was let
-// through to fail.
+// through to fail. "abort" is std::abort(), which sends SIGABRT to itself.
 #include <sys/syscall.h>
 
 #include <array>
@@ -38,6 +38,9 @@ int main(int argc, char** argv) {
     const std::span args(argv, static_cast<std::size_t>(argc));
     if (args.size() != 2) {
         return 2;
+    }
+    if (std::strcmp(args[1], "abort") == 0) {
+        std::abort();
     }
     for (const Call& call : kCalls) {
         if (std::strcmp(call.name, args[1]) == 0) {

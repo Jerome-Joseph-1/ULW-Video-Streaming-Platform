@@ -347,15 +347,22 @@ TEST_F(SyscallFilterTest, ACallTheTablesAllowRunsToTheEnd) {
     EXPECT_EQ(child.signal, 0);
 }
 
-TEST_F(SyscallFilterTest, EveryOtherCallKillsTheProgramWithSigsysAndRejectsTheInput) {
+TEST_F(SyscallFilterTest, EveryOtherCallKillsTheProgramWithSigsysAndClassifiesAsBlocked) {
     for (const std::string name : {"ptrace", "mount", "keyctl", "bpf", "io_uring_setup", "socket",
                                    "unshare", "setns", "kill", "process_vm_readv", "chroot"}) {
         const auto child = run({kProbe.string(), name});
         EXPECT_EQ(child.signal, SIGSYS) << name;
         EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
-                  core::ports::TranscodeFailure::Rejected)
+                  core::ports::TranscodeFailure::SyscallBlocked)
             << name;
     }
+}
+
+TEST_F(SyscallFilterTest, AnAbortStillEndsTheProgramWithSigabrtAndIsAPlainKill) {
+    const auto child = run({kProbe.string(), "abort"});
+    EXPECT_EQ(child.signal, SIGABRT);
+    EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
+              core::ports::TranscodeFailure::Killed);
 }
 
 TEST_F(SyscallFilterTest, WithoutTheFilterTheSameCallsReturnAnError) {

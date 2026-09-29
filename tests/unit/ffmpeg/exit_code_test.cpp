@@ -46,9 +46,8 @@ TEST(ExitCode, AnyOtherSignalIsAKill) {
     EXPECT_EQ(classify(255, kExited, Ending::Exited), TranscodeFailure::Killed);
 }
 
-TEST(ExitCode, AKillBySeccompRejectsTheInputInsteadOfRequeueingIt) {
-    // The decoder tried a call the filter forbids; the same file makes it try again.
-    EXPECT_EQ(killed_by(SIGSYS), TranscodeFailure::Rejected);
+TEST(ExitCode, AKillBySeccompIsItsOwnKindNeitherARejectionNorAPlainKill) {
+    EXPECT_EQ(killed_by(SIGSYS), TranscodeFailure::SyscallBlocked);
 }
 
 TEST(ExitCode, ACpuLimitReachedIsABudgetWhateverTheSignal) {

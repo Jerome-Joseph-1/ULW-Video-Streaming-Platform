@@ -142,6 +142,21 @@ TEST_F(JobRunnerTest, ASecondCrashFailsTheJobForGood) {
               std::vector<std::string>{"queue fail permanent the decoder crashed on this file"});
 }
 
+TEST_F(JobRunnerTest, ABlockedSyscallIsRunOnceMoreAndThenFailsWithTheSandboxsOwnReason) {
+    transcoder.run_failures.push_back(failure(TranscodeFailure::SyscallBlocked, 159));
+    transcoder.run_failures.push_back(failure(TranscodeFailure::SyscallBlocked, 159));
+    EXPECT_EQ(run(), JobOutcome::Failed);
+    EXPECT_EQ(transcoder.runs, 2);
+    EXPECT_EQ(writes(), std::vector<std::string>{
+                            "queue fail permanent the decoder was stopped by the sandbox"});
+}
+
+TEST_F(JobRunnerTest, ABlockedSyscallThatDoesNotRecurLetsTheJobFinish) {
+    transcoder.run_failures.push_back(failure(TranscodeFailure::SyscallBlocked, 159));
+    EXPECT_EQ(run(), JobOutcome::Done);
+    EXPECT_EQ(transcoder.runs, 2);
+}
+
 TEST_F(JobRunnerTest, ACrashWhileVerifyingIsVerifiedOnceMore) {
     // ffprobe or ffmpeg reading our own output crashed: the same exit code rule applies.
     transcoder.verify_failures.push_back(failure(TranscodeFailure::Crashed, 139));
@@ -365,6 +380,9 @@ TEST_F(JobRunnerTest, ProgressReachesTheQueueFromTheKeepersSession) {
 TEST(Disposition, FollowsTheExitCodeRules) {
     EXPECT_EQ(worker::disposition(TranscodeFailure::Crashed, false), Disposition::RerunOnce);
     EXPECT_EQ(worker::disposition(TranscodeFailure::Crashed, true), Disposition::FailPermanently);
+    EXPECT_EQ(worker::disposition(TranscodeFailure::SyscallBlocked, false), Disposition::RerunOnce);
+    EXPECT_EQ(worker::disposition(TranscodeFailure::SyscallBlocked, true),
+              Disposition::FailPermanently);
     EXPECT_EQ(worker::disposition(TranscodeFailure::Killed, false), Disposition::Requeue);
     EXPECT_EQ(worker::disposition(TranscodeFailure::Sandbox, false), Disposition::Requeue);
     EXPECT_EQ(worker::disposition(TranscodeFailure::Rejected, false), Disposition::FailPermanently);

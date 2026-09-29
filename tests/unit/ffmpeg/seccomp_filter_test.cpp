@@ -90,7 +90,7 @@ TEST_F(SeccompFilter, KillsEveryNumberOutsideItsTables) {
     const auto known = [](long nr) {
         return std::ranges::contains(seccomp::kAllowed, static_cast<int>(nr)) || nr == SYS_ioctl ||
                nr == SYS_prctl || nr == SYS_fcntl || nr == SYS_prlimit64 || nr == SYS_clone ||
-               nr == SYS_clone3;
+               nr == SYS_tgkill || nr == SYS_tkill || nr == SYS_clone3;
     };
     // Well past the highest number any kernel assigns, and the x32 range on top of it.
     for (long nr = 0; nr < 1024; ++nr) {
@@ -172,6 +172,17 @@ TEST_F(SeccompFilter, AllowsDescriptorFlagsButNotLeasesOrSignals) {
     EXPECT_EQ(verdict(call(SYS_fcntl, 3, F_DUPFD_CLOEXEC)), seccomp::kAllow);
     EXPECT_EQ(verdict(call(SYS_fcntl, 3, F_SETLEASE)), seccomp::kKill);
     EXPECT_EQ(verdict(call(SYS_fcntl, 3, F_SETOWN)), seccomp::kKill);
+}
+
+TEST_F(SeccompFilter, AllowsAnAbortButNoOtherSignalToBeSent) {
+    EXPECT_EQ(verdict(call(SYS_tgkill, 1, 2, SIGABRT)), seccomp::kAllow);
+    EXPECT_EQ(verdict(call(SYS_tkill, 2, SIGABRT)), seccomp::kAllow);
+    for (const int sig : {SIGKILL, SIGTERM, SIGSEGV, SIGUSR1, 0}) {
+        EXPECT_EQ(verdict(call(SYS_tgkill, 1, 2, static_cast<std::uint64_t>(sig))), seccomp::kKill)
+            << sig;
+        EXPECT_EQ(verdict(call(SYS_tkill, 2, static_cast<std::uint64_t>(sig))), seccomp::kKill)
+            << sig;
+    }
 }
 
 TEST_F(SeccompFilter, AllowsReadingOwnLimitsButNotSettingAny) {
