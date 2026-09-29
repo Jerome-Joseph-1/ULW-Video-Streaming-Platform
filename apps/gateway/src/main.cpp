@@ -7,6 +7,7 @@
 #include "net/offload_pool.hpp"
 #include "net/signals.hpp"
 #include "net/socket.hpp"
+#include "net/transport.hpp"
 #include "os/limits.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
@@ -27,7 +28,7 @@
 
 namespace {
 
-// 65536 descriptors: 512 client connections plus their backend sockets need a few thousand,
+// 65536 descriptors: 448 client connections plus their backend sockets need a few thousand,
 // and the reactor's descriptor-indexed slot table stays at a few megabytes.
 constexpr std::size_t kMaxDescriptors = 65'536;
 // Wakes the loop at least this often; nothing depends on it but the drain check.
@@ -75,6 +76,7 @@ struct Services {
     os::SystemClock clock;
     os::SystemRandom random;
     std::unique_ptr<net::IReactor> reactor;
+    std::unique_ptr<net::ITransportFactory> transports;
     std::unique_ptr<net::OffloadPool> pool;
     std::unique_ptr<infra::curl::Multi> multi;
     // Key set fetches get a multi of their own: the store's is capped at 64 connections, and
@@ -98,6 +100,23 @@ struct Services {
         pool.reset();
     }
 };
+
+// The certificate and key are read here, so a deployment with unreadable or mismatched files
+// fails at startup rather than on its first client.
+std::expected<void, std::string> make_transports(const gateway::Config& config, Services& s) {
+    if (config.transport == gateway::Transport::Plain) {
+        s.transports = net::make_plain_transports(*s.reactor);
+        return {};
+    }
+    auto tls =
+        net::make_tls_transports(*s.reactor, {.certificate_chain = config.tls_certificate_chain,
+                                              .private_key = config.tls_private_key});
+    if (!tls) {
+        return std::unexpected(std::move(tls.error()));
+    }
+    s.transports = std::move(*tls);
+    return {};
+}
 
 std::expected<void, std::string> make_store(const gateway::Config& config, Services& s) {
     using gateway::StorageBackend;
@@ -190,6 +209,9 @@ int run() {
         return fail("reactor", errno_text(choice.error()));
     }
     s.reactor = std::move(choice->reactor);
+    if (auto r = make_transports(*config, s); !r) {
+        return fail("ULW_TRANSPORT=tls", r.error());
+    }
     auto pool = net::OffloadPool::create(*s.reactor, config->offload_threads);
     if (!pool) {
         return fail("offload pool", errno_text(pool.error()));
@@ -214,6 +236,7 @@ int run() {
     }
 
     s.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *s.reactor,
+                                                                 .transports = *s.transports,
                                                                  .pool = *s.pool,
                                                                  .store = *s.store,
                                                                  .catalog = *s.catalog,
@@ -235,11 +258,12 @@ int run() {
     }
     // Says which keys tokens are checked against, so a development key set left configured in
     // a real deployment shows on the first line of the log.
-    std::println("gateway_server {} ({}) port={} reactor={}{} keys={}", info.version, info.git_sha,
-                 config->port, net::to_string(choice->kind),
-                 choice->fell_back_from_io_uring ? " (io_uring unavailable)" : "",
-                 config->dev_jwks_file.empty() ? config->jwks_url
-                                               : "DEVELOPMENT " + config->dev_jwks_file);
+    std::println(
+        "gateway_server {} ({}) port={} transport={} reactor={}{} keys={}", info.version,
+        info.git_sha, config->port, config->transport == gateway::Transport::Tls ? "tls" : "plain",
+        net::to_string(choice->kind),
+        choice->fell_back_from_io_uring ? " (io_uring unavailable)" : "",
+        config->dev_jwks_file.empty() ? config->jwks_url : "DEVELOPMENT " + config->dev_jwks_file);
     static_cast<void>(std::fflush(stdout));
 
     while (!s.gateway->finished()) {

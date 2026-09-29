@@ -15,7 +15,7 @@ namespace net::detail {
 namespace {
 
 // 4096 SQEs: each iteration submits at most a few per active connection, and the gateway
-// caps connections at 512 per shard.
+// caps connections at 448 per shard.
 constexpr unsigned kRingEntries = 4096;
 constexpr std::uint16_t kBufGroup = 1;
 // 256 x 64 KiB = 16 MiB of receive buffers shared by every connection on the ring. Pages are

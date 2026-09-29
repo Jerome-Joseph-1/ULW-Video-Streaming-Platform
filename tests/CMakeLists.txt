@@ -1,11 +1,13 @@
 include(GoogleTest)
 
 # One executable per label keeps `ctest -L` meaningful and link times short.
+# PROPERTIES after the sources are set on every test the suite discovers.
 function(ulw_add_test_suite name label)
-    ulw_add_executable(${name} ${ARGN})
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "" "PROPERTIES")
+    ulw_add_executable(${name} ${arg_UNPARSED_ARGUMENTS})
     target_link_libraries(${name} PRIVATE GTest::gtest_main GTest::gmock)
     gtest_discover_tests(${name}
-        PROPERTIES LABELS ${label}
+        PROPERTIES LABELS ${label} ${arg_PROPERTIES}
         DISCOVERY_TIMEOUT 30)
 endfunction()
 
@@ -38,6 +40,11 @@ ulw_add_executable(ulw_echo_server load/echo_main.cpp)
 target_link_libraries(ulw_echo_server PRIVATE ulw::test_echo)
 ulw_add_executable(ulw_loadgen load/loadgen.cpp)
 
+# A CA and server certificates generated at run time, and the OpenSSL client side of tests.
+ulw_add_library(test_tls support/tls_pki.cpp)
+target_include_directories(test_tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_tls PUBLIC ulw::net_lib OpenSSL::SSL)
+
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
     unit/net/echo_server_test.cpp
@@ -46,8 +53,9 @@ ulw_add_test_suite(net_unit_tests unit
     unit/net/reactor_test.cpp
     unit/net/signals_test.cpp
     unit/net/slab_test.cpp
-    unit/net/timing_wheel_test.cpp)
-target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo)
+    unit/net/timing_wheel_test.cpp
+    unit/net/transport_tls_test.cpp)
+target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo ulw::test_tls)
 # White-box tests of the reactor internals.
 target_include_directories(net_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/net/src ${PROJECT_SOURCE_DIR}/tests)
 
@@ -110,12 +118,19 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
     gateway/gateway_harness.cpp
+    gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
     gateway/key_fetcher_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
-    OpenSSL::Crypto)
+    ulw::test_tls OpenSSL::Crypto)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Not a test: the M9 memory measurement, run by hand (see the file's header).
+ulw_add_executable(ulw_gateway_load load/gateway_load.cpp)
+target_link_libraries(ulw_gateway_load PRIVATE
+    ulw::gateway_lib ulw::catalog_memory ulw::storage_fake ulw::test_tls)
+target_include_directories(ulw_gateway_load PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 ulw_add_library(test_http_server support/http_test_server.cpp)
 target_include_directories(test_http_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
@@ -169,12 +184,14 @@ target_compile_definitions(postgres_unit_tests
     PRIVATE ULW_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/migrations")
 
 # Against a live Postgres: ULW_TEST_DATABASE_URL, or the one deploy/local/compose.yaml runs.
+# The pool test docker-pauses that server, so under ctest -j no other test may be using it.
 ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_catalog_test.cpp
     integration/postgres_harness.cpp
     integration/postgres_job_queue_test.cpp
     integration/postgres_migrate_test.cpp
-    integration/postgres_pool_test.cpp)
+    integration/postgres_pool_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)

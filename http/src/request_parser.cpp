@@ -19,6 +19,7 @@
 #include <span>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace http {
@@ -260,10 +261,14 @@ private:
                                                  : Status::BadRequest));
             }
         }
-        // Only reached with the head complete: the budget failed above otherwise.
-        if (err == HPE_OK && first < input.size()) {
-            const std::span<const std::byte> rest = input.subspan(first);
-            err = llhttp_execute(&parser_, as_chars(rest), rest.size());
+        if (err == HPE_PAUSED && std::exchange(head_pause_, false)) {
+            // The head ended inside the slice the budget allowed. The body runs on through the
+            // whole input from here, so the sink gets the rest of a receive as one fragment:
+            // cut at the slice, a sink pausing on the first part would leave the second held
+            // here, and a receive would occupy both the sink's buffer and this one.
+            llhttp_resume(&parser_);
+            const char* const at = llhttp_get_error_pos(&parser_);
+            err = llhttp_execute(&parser_, at, input.size() - static_cast<std::size_t>(at - begin));
         }
         if (err == HPE_OK) {
             if (from_tail) {
@@ -435,7 +440,8 @@ private:
         };
         const std::optional<Status> rejected = sink_.on_head(head).rejection();
         if (!rejected) {
-            return 0;
+            head_pause_ = true;
+            return HPE_PAUSED;
         }
         // Only a bodiless request on a persistent connection ends at a known boundary.
         const bool must_close = !keep_alive_ || content_length_ > 0;
@@ -493,6 +499,9 @@ private:
     std::size_t head_bytes_ = 0;
     bool headers_begun_ = false;
     bool head_complete_ = false;
+    // on_headers_complete paused llhttp only so that execute() can carry on past the head
+    // budget; nobody outside sees that pause.
+    bool head_pause_ = false;
     std::size_t name_begin_ = 0;
     std::size_t value_begin_ = 0;
     bool in_name_ = false;

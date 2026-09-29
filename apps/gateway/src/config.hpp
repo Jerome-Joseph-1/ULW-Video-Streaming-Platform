@@ -15,9 +15,17 @@ namespace gateway {
 
 enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
 
+// Plain in the Askedin deployment, where Envoy terminates TLS in front of the gateway
+// (ADR-0001); TLS where the gateway faces clients itself.
+enum class Transport : std::uint8_t { Plain, Tls };
+
 struct Config {
     std::uint16_t port = 8080;
     net::ReactorKind reactor = net::ReactorKind::IoUring;
+    Transport transport = Transport::Plain;
+    // Only with Transport::Tls, and then both.
+    std::string tls_certificate_chain;
+    std::string tls_private_key;
     // Only control calls (create, offset, commit, discard) block, each for one object-store
     // round trip; four keep one slow commit from queueing the rest behind it.
     std::size_t offload_threads = 4;

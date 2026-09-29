@@ -59,16 +59,17 @@ Connection::~Connection() {
     release_slot();
 }
 
-void Connection::start(net::ConnId conn) noexcept {
-    conn_ = conn;
+void Connection::start(std::unique_ptr<net::ITransport> transport) noexcept {
+    transport_ = std::move(transport);
     last_activity_ = now();
     receiving_ = true;
-    deps().reactor.start_receiving(conn_);
+    transport_->start_receiving();
     arm_timer(gw().limits().header_timeout);
 }
 
 bool Connection::quiescent() const noexcept {
-    return pending_ == 0 && deps().reactor.is_quiescent(conn_);
+    // A connection retired before start() never reached the reactor.
+    return pending_ == 0 && (!transport_ || transport_->is_quiescent());
 }
 
 void Connection::drain() noexcept {
@@ -156,21 +157,21 @@ void Connection::on_parse(http::ParseResult result) noexcept {
     case http::ParseProgress::NeedMore:
         if (!receiving_ && !peer_eof_) {
             receiving_ = true;
-            deps().reactor.start_receiving(conn_);
+            transport_->start_receiving();
         }
         break;
     case http::ParseProgress::Paused:
         parser_paused_ = true;
         if (receiving_) {
             receiving_ = false;
-            deps().reactor.stop_receiving(conn_);
+            transport_->stop_receiving();
         }
         break;
     case http::ParseProgress::MessageComplete:
         parser_paused_ = true;
         if (receiving_) {
             receiving_ = false;
-            deps().reactor.stop_receiving(conn_);
+            transport_->stop_receiving();
         }
         req_.message_complete = true;
         break;
@@ -1029,14 +1030,14 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
     std::array<char, kResponseHead> buf{};
     const auto n = http::write_response_head(head, buf);
     if (n) {
-        deps().reactor.send(conn_, std::as_bytes(std::span(buf.data(), *n)));
+        transport_->send(std::as_bytes(std::span(buf.data(), *n)));
         if (!body.empty()) {
-            deps().reactor.send(conn_, std::as_bytes(std::span(body)));
+            transport_->send(std::as_bytes(std::span(body)));
         }
     } else {
         const std::string_view fallback =
             http::fixed_response(Status::InternalServerError, http::Connection::Close);
-        deps().reactor.send(conn_, std::as_bytes(std::span(fallback)));
+        transport_->send(std::as_bytes(std::span(fallback)));
         head.connection = http::Connection::Close;
     }
     if (head.connection == http::Connection::Close) {
@@ -1083,10 +1084,10 @@ void Connection::linger() noexcept {
     release_claim();
     // FIN after the response, then read and discard until the client closes or the linger
     // ends: closing with unread input would send RST and could destroy the response.
-    deps().reactor.shutdown_write(conn_);
+    transport_->shutdown_write();
     if (!receiving_ && !peer_eof_) {
         receiving_ = true;
-        deps().reactor.start_receiving(conn_);
+        transport_->start_receiving();
     }
     arm_timer(kLinger);
 }
@@ -1109,7 +1110,7 @@ void Connection::close() noexcept {
     }
     deps().reactor.cancel_timer(timer_);
     timer_ = {};
-    deps().reactor.begin_close(conn_);
+    transport_->begin_close();
     gw().retire(handle_);
 }
 

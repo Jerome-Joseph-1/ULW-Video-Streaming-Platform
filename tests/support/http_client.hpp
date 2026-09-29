@@ -2,6 +2,8 @@
 
 #include "os/unique_fd.hpp"
 
+#include "tls_pki.hpp"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -10,11 +12,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <fcntl.h>
 #include <map>
 #include <memory>
+#include <openssl/ssl.h>
 #include <optional>
+#include <poll.h>
 #include <span>
 #include <string>
 #include <string_view>
@@ -41,10 +49,18 @@ struct HttpResponse {
     }
 };
 
+// Where a test server listens, and the client context that reaches it through TLS; without
+// one the client speaks plaintext.
+struct Endpoint {
+    std::uint16_t port = 0;
+    SSL_CTX* tls = nullptr;
+};
+
 // A blocking HTTP/1.1 client for tests: one connection, requests in sequence.
 class HttpClient {
 public:
-    explicit HttpClient(std::uint16_t port) {
+    explicit HttpClient(Endpoint endpoint) {
+        const std::uint16_t port = endpoint.port;
         fd_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
         timeval tv{.tv_sec = 30, .tv_usec = 0};
         ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
@@ -60,20 +76,39 @@ public:
         if (::connect(fd_.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
             fd_.reset();
         }
+        if (fd_ && endpoint.tls != nullptr && !start_tls(endpoint.tls)) {
+            ssl_.reset();
+            fd_.reset();
+        }
     }
 
     [[nodiscard]] bool connected() const { return static_cast<bool>(fd_); }
     [[nodiscard]] int fd() const { return fd_.get(); }
-    void close() { fd_.reset(); }
+    [[nodiscard]] SSL* ssl() const { return ssl_.get(); }
+    void close() {
+        ssl_.reset();
+        fd_.reset();
+    }
+
+    // One write, through TLS if the connection has it; 0 once the peer stops accepting within
+    // the send timeout.
+    std::size_t send_some(std::span<const std::byte> bytes) {
+        if (ssl_) {
+            std::size_t n = 0;
+            return SSL_write_ex(ssl_.get(), bytes.data(), bytes.size(), &n) == 1 ? n : 0;
+        }
+        const ssize_t n = ::send(fd_.get(), bytes.data(), bytes.size(), MSG_NOSIGNAL);
+        return n > 0 ? static_cast<std::size_t>(n) : 0;
+    }
 
     // Sends everything; false if the peer stopped accepting before the timeout.
     bool send_raw(std::span<const std::byte> bytes) {
         while (!bytes.empty()) {
-            const ssize_t n = ::send(fd_.get(), bytes.data(), bytes.size(), MSG_NOSIGNAL);
-            if (n <= 0) {
+            const std::size_t n = send_some(bytes);
+            if (n == 0) {
                 return false;
             }
-            bytes = bytes.subspan(static_cast<std::size_t>(n));
+            bytes = bytes.subspan(n);
         }
         return true;
     }
@@ -104,11 +139,11 @@ public:
                 return r;
             }
             std::array<char, 65536> buf{};
-            const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), 0);
-            if (n <= 0) {
+            const std::size_t n = receive(buf);
+            if (n == 0) {
                 return std::nullopt;
             }
-            in_.append(buf.data(), static_cast<std::size_t>(n));
+            in_.append(buf.data(), n);
         }
     }
 
@@ -122,13 +157,76 @@ public:
         return read_response(method == "HEAD");
     }
 
-    // True once the server has closed the connection (EOF or reset) within the timeout.
-    bool closed_by_peer() {
-        char b = 0;
-        return ::recv(fd_.get(), &b, 1, 0) <= 0;
+    // True once the server has closed the connection (EOF, close_notify or reset) within
+    // `limit`. A server that is still silent then, or that sends bytes instead, has not.
+    bool closed_by_peer(std::chrono::milliseconds limit = std::chrono::seconds(10)) {
+        if (!ssl_ || SSL_has_pending(ssl_.get()) == 0) {
+            pollfd p{.fd = fd_.get(), .events = POLLIN, .revents = 0};
+            if (::poll(&p, 1, static_cast<int>(limit.count())) != 1) {
+                return false;
+            }
+        }
+        std::array<char, 1> b{};
+        errno = 0;
+        if (ssl_) {
+            std::size_t n = 0;
+            if (SSL_read_ex(ssl_.get(), b.data(), b.size(), &n) == 1) {
+                return false;
+            }
+            const int code = SSL_get_error(ssl_.get(), 0);
+            // SO_RCVTIMEO expiring inside OpenSSL's read surfaces as a syscall error too.
+            return code == SSL_ERROR_ZERO_RETURN || code == SSL_ERROR_SSL ||
+                   (code == SSL_ERROR_SYSCALL && errno != EAGAIN && errno != EWOULDBLOCK);
+        }
+        const ssize_t n = ::recv(fd_.get(), b.data(), b.size(), 0);
+        return n == 0 || (n < 0 && (errno == ECONNRESET || errno == EPIPE));
     }
 
 private:
+    // 0 on end of stream, error or timeout, whether the stream is TLS or not.
+    std::size_t receive(std::span<char> into) {
+        if (ssl_) {
+            std::size_t n = 0;
+            return SSL_read_ex(ssl_.get(), into.data(), into.size(), &n) == 1 ? n : 0;
+        }
+        const ssize_t n = ::recv(fd_.get(), into.data(), into.size(), 0);
+        return n > 0 ? static_cast<std::size_t>(n) : 0;
+    }
+
+    bool start_tls(SSL_CTX* ctx) {
+        // OpenSSL writes to the socket with write(), which has no MSG_NOSIGNAL: a server that
+        // closed first would kill the test process instead of failing the write.
+        static_cast<void>(std::signal(SIGPIPE, SIG_IGN));
+        ssl_.reset(SSL_new(ctx));
+        if (!ssl_ || SSL_set_fd(ssl_.get(), fd_.get()) != 1 || SSL_connect(ssl_.get()) != 1) {
+            return false;
+        }
+        return SSL_version(ssl_.get()) != TLS1_3_VERSION || await_ticket();
+    }
+
+    // A TLS 1.3 client is done before the server has read its Finished. The server sends its
+    // tickets only once it has, so a ticket means the server's side of the handshake is over
+    // too, and a test that moves the clock next cannot catch it half way.
+    bool await_ticket() {
+        const int flags = ::fcntl(fd_.get(), F_GETFL);
+        ::fcntl(fd_.get(), F_SETFL, flags | O_NONBLOCK);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        bool ticket = false;
+        while (!ticket && std::chrono::steady_clock::now() < deadline) {
+            pollfd p{.fd = fd_.get(), .events = POLLIN, .revents = 0};
+            ::poll(&p, 1, 100);
+            std::array<char, 1> b{};
+            std::size_t n = 0;
+            if (SSL_peek_ex(ssl_.get(), b.data(), b.size(), &n) != 1 &&
+                SSL_get_error(ssl_.get(), 0) != SSL_ERROR_WANT_READ) {
+                break;
+            }
+            ticket = SSL_SESSION_is_resumable(SSL_get0_session(ssl_.get())) == 1;
+        }
+        ::fcntl(fd_.get(), F_SETFL, flags);
+        return ticket;
+    }
+
     std::optional<HttpResponse> parse(bool head_request) {
         const std::size_t end = in_.find("\r\n\r\n");
         if (end == std::string::npos) {
@@ -174,6 +272,7 @@ private:
     }
 
     os::UniqueFd fd_;
+    SslPtr ssl_;
     std::string in_;
 };
 

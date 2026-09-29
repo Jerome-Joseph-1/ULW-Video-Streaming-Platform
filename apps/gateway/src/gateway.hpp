@@ -9,6 +9,7 @@
 #include "net/reactor.hpp"
 #include "net/signals.hpp"
 #include "net/slab.hpp"
+#include "net/transport.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -23,6 +24,8 @@ class Connection;
 
 struct Deps {
     net::IReactor& reactor;
+    // Every client socket's bytes go through this, never straight to the reactor.
+    net::ITransportFactory& transports;
     net::OffloadPool& pool;
     core::ports::IIngestStore& store;
     core::ports::IUploadCatalog& catalog;
@@ -32,12 +35,12 @@ struct Deps {
 };
 
 struct Limits {
-    // 600 MB left for connections on a 1 GB box / ~348 KB each (64 KiB pump buffer, ~35 KB
-    // TLS state, 128 KiB + 16 KiB kernel buffers, ~100 KB backend socket) = 1724; a /3 safety
-    // factor rounds down to 512.
-    std::size_t max_connections = 512;
+    // 600 MB left for connections on a 1 GB box / ~428 KB each (36 KB session and parser,
+    // 92 KB pump, 52 KB TLS, measured; 128 KiB + 16 KiB kernel buffers, ~100 KB backend socket)
+    // = 1401; a /3 safety factor gives 467, rounded down to 448 (docs/adr/0027).
+    std::size_t max_connections = 448;
     // Chunk uploads are what cost the budget above, so admission counts them, not sockets.
-    std::size_t max_upload_slots = 512;
+    std::size_t max_upload_slots = 448;
     std::size_t max_uploads_per_user = 3;
     core::Millis header_timeout{10'000};
     core::Millis body_idle_timeout{30'000};
@@ -72,6 +75,8 @@ struct Counters {
     std::uint64_t timeouts_backstop = 0;
     std::uint64_t bytes_ingested = 0;
     std::uint64_t requests = 0;
+    std::uint64_t certificate_reloads = 0;
+    std::uint64_t certificate_reload_failures = 0;
 };
 
 enum class Admission : std::uint8_t { Admitted, UserAtLimit, Full };
@@ -80,7 +85,8 @@ enum class Admission : std::uint8_t { Admitted, UserAtLimit, Full };
 // counters for them. Everything runs on the shard's reactor thread.
 class Gateway final : public net::IAcceptHandler,
                       public net::ISignalHandler,
-                      public net::ITimerHandler {
+                      public net::ITimerHandler,
+                      public net::IReloadHandler {
 public:
     Gateway(Deps deps, Limits limits);
     ~Gateway() override;
@@ -91,6 +97,7 @@ public:
     void on_signal(net::Signal signal) noexcept override;
     // The drain deadline.
     void on_timeout() noexcept override;
+    void on_reloaded(const std::expected<void, std::string>& result) noexcept override;
 
     void begin_drain() noexcept;
     // Destroys connections the kernel and every pending callback have let go of. Call after
