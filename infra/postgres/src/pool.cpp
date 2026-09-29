@@ -110,7 +110,7 @@ public:
     }
 
 private:
-    enum class Phase : std::uint8_t { Operation, Rollback };
+    enum class Phase : std::uint8_t { Listen, Operation, Rollback };
 
     void start_connect(const Endpoints* endpoints) noexcept {
         state_ = State::Connecting;
@@ -151,6 +151,10 @@ private:
                 attempt_failed();
                 return;
             }
+            if (pool_.config_.listen) {
+                start_listening(*pool_.config_.listen);
+                return;
+            }
             become_idle();
             return;
         case PGRES_POLLING_FAILED:
@@ -165,8 +169,17 @@ private:
             lose(DbError::ConnectionLost);
             return;
         }
-        // Nothing here LISTENs, but a notification libpq has queued would otherwise stay put.
+        take_notifications();
+    }
+
+    // Also drains a session that does not LISTEN: a notification libpq has queued would
+    // otherwise stay put.
+    void take_notifications() noexcept {
+        INotificationSink* const sink = pool_.config_.notifications;
         for (NotifyHandle n{PQnotifies(conn_.get())}; n; n.reset(PQnotifies(conn_.get()))) {
+            if (sink != nullptr) {
+                sink->on_notification(n->extra);
+            }
         }
     }
 
@@ -175,6 +188,7 @@ private:
             lose(DbError::ConnectionLost);
             return;
         }
+        take_notifications();
         if (writing_) {
             flush();
             if (state_ != State::Busy) {
@@ -220,11 +234,32 @@ private:
         }
     }
 
+    void start_listening(const Sql& listen) noexcept {
+        state_ = State::Busy;
+        phase_ = Phase::Listen;
+        deadline_ = pool_.reactor_.now() + pool_.config_.request_timeout;
+        pool_.watchdog_.arm_unless_armed(kWatchdogTick);
+        send(Statement{.sql = listen, .params = {}});
+    }
+
     void statement_done() noexcept {
         ResultHandle raw = std::move(result_);
         const ExecStatusType status = raw ? PQresultStatus(raw.get()) : PGRES_FATAL_ERROR;
         const bool ok = status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK;
         const DbError error = ok ? DbError::Rejected : error_of(raw.get(), conn_.get());
+        if (phase_ == Phase::Listen) {
+            // A session that cannot listen is no use to its pool; the next one might.
+            if (!ok) {
+                lose(error);
+                return;
+            }
+            phase_ = Phase::Operation;
+            if (pool_.config_.notifications != nullptr) {
+                pool_.config_.notifications->on_listening();
+            }
+            become_idle();
+            return;
+        }
         if (phase_ == Phase::Rollback) {
             if (!ok) {
                 lose(error);

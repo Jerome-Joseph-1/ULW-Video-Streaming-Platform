@@ -1,4 +1,4 @@
-# 0033. Live media reaches the packager as MPEG-TS on a socket it hands to ffmpeg
+# 0037. Live media reaches the packager over SRT, which it terminates itself
 
 Status: Accepted
 Date: 2026-09-29

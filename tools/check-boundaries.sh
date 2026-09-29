@@ -37,6 +37,11 @@ if [[ -d codec ]]; then
     check "codec depends on rt/infra/apps" '#include "(rt|infra|apps)/' codec
 fi
 
+# The realtime runtime defines the ports its adapters implement, never the other way round.
+if [[ -d rt ]]; then
+    check "rt depends on infra/apps" '#include "(infra|apps)/' rt
+fi
+
 if [[ -f apps/gateway/CMakeLists.txt ]]; then
     hits=$(grep -nE '^[^#]*(ffmpeg|libav)' apps/gateway/CMakeLists.txt || true)
     [[ -n $hits ]] && fail "gateway links ffmpeg/libav" "$hits"

@@ -36,5 +36,9 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0030](0030-container-images-on-ubuntu-from-a-dated-snapshot.md) | Container images build and run on Ubuntu 24.04 from a dated snapshot | Accepted |
 | [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted |
 | [0032](0032-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted |
-| [0033](0033-live-media-reaches-the-packager-as-mpegts-on-an-inherited-socket.md) | Live media reaches the packager as MPEG-TS on a socket it hands to ffmpeg | Accepted |
-| [0034](0034-live-playlist-window-and-restart.md) | The live playlist is a window the packager owns, and it continues across a restart | Accepted |
+| [0033](0033-sdp-parsed-strictly-and-serialized-exactly.md) | SDP is parsed strictly into a typed model that serializes back exactly | Accepted |
+| [0034](0034-rtp-and-rtcp-read-in-place.md) | RTP and RTCP are read in place, for tooling and tests | Accepted |
+| [0035](0035-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
+| [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
+| [0037](0037-live-media-reaches-the-packager-over-srt.md) | Live media reaches the packager over SRT, which it terminates itself | Accepted |
+| [0038](0038-live-playlist-window-and-restart.md) | The live playlist is a window the packager owns, and it continues across a restart | Accepted |
