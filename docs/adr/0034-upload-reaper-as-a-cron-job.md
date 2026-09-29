@@ -32,13 +32,25 @@ a session no row names.
   statement sets `uploads.state = 'aborted'`, fails its video (`state = 'failed'`,
   `error_reason = 'upload expired'`, in the same statement, as the failed-job path does) and
   takes `pg_try_advisory_xact_lock` on the key the gateway's claim uses (the fenced pattern of the job
-  queue, applied to uploads). Then the store's `discard` releases the session.
-- The lock is the whole safety argument, and it holds from both sides. A PATCH streaming into an
-  upload holds the session-level advisory lock on that key, so the reaper's transaction-level
-  lock fails and the upload is skipped until the next pass. A commit racing the reaper takes the
-  row lock first or second: first, and the reaper's update re-tests `state = 'active'` on the new
-  row version and touches nothing; second, and the commit finds the upload `aborted` and answers
-  Conflict, never a job for a video that has failed.
+  queue, applied to uploads). Then the store's session is discarded and the object at its key
+  removed (not found is the usual answer), and the reaper asks the store for the upload's offset:
+  only "not found" counts the upload as expired. Anything else is a release failure, counted
+  separately and logged with the key, and the pass exits non-zero. It is not retried, the row
+  being aborted already: a session is left for the sweep below, an object that would not go
+  stays until someone reads the log.
+- The lock protects appends, not commits. A PATCH streaming into an upload holds the session-level
+  advisory lock on that key, so the reaper's transaction-level lock fails and the upload is
+  skipped until the next pass. A commit does not take the claim: the gateway completes the
+  store's session, and only then asks the catalog to complete the upload. Against the catalog the
+  race is safe either way: the commit takes the row lock first, and the reaper's update re-tests
+  `state = 'active'` on the new row version and touches nothing; or second, and the commit finds
+  the upload `aborted` and answers Conflict, never a job for a video that has failed.
+- Against the store it is not, which is why the reaper removes the object at the upload's key
+  after releasing the session. A commit that finished in the store just before the abort leaves
+  a whole object no video references, and neither the sweep (it lists sessions) nor the lifecycle
+  rule (it aborts sessions) would ever touch it. Releasing the session first means a commit still
+  in flight can no longer complete one; the key is removed second. Safe because the row is
+  aborted and its video failed, so nothing can name that key.
 - The state is `aborted`, not a new `expired`: the schema's check constraint, the domain model
   and every reader already treat `aborted` as terminal, and the video's `error_reason` says why.
 - The store is released after the row is aborted, not before: a `discard` that fails then leaves

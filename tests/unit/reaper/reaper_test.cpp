@@ -50,7 +50,8 @@ public:
     }
     [[nodiscard]] std::expected<std::uint64_t, StorageError>
     durable_offset(const core::ports::IngestId& /*id*/) override {
-        return std::unexpected(StorageError::Permanent);
+        return still_held ? std::expected<std::uint64_t, StorageError>(1)
+                          : std::unexpected(released_answer);
     }
     [[nodiscard]] std::expected<void, StorageError>
     commit(const core::ports::IngestId& /*id*/) override {
@@ -65,9 +66,9 @@ public:
     put(const core::StorageKey& /*key*/, std::span<const std::byte> /*bytes*/) override {
         return std::unexpected(StorageError::Permanent);
     }
-    [[nodiscard]] std::expected<void, StorageError>
-    remove(const core::StorageKey& /*key*/) override {
-        return std::unexpected(StorageError::Permanent);
+    [[nodiscard]] std::expected<void, StorageError> remove(const core::StorageKey& key) override {
+        removed.push_back(std::string(key.view()));
+        return removal;
     }
     [[nodiscard]] std::expected<std::vector<core::StorageKey>, StorageError>
     list(std::string_view /*prefix*/) override {
@@ -80,6 +81,10 @@ public:
     }
 
     std::vector<std::string> discarded;
+    std::vector<std::string> removed;
+    std::expected<void, StorageError> removal;
+    bool still_held = false;
+    StorageError released_answer = StorageError::NotFound;
     std::vector<core::WallTime> cutoffs;
     std::expected<std::size_t, StorageError> sweep = 0;
 };
@@ -119,6 +124,46 @@ TEST_F(ReaperTest, ReleasesTheSessionOfEveryUploadTheCatalogExpired) {
     EXPECT_EQ(report.uploads_expired, 2U);
     EXPECT_EQ(store.discarded, (std::vector<std::string>{"session-0", "session-1"}));
     EXPECT_TRUE(report.problems.empty());
+}
+
+TEST_F(ReaperTest, AlsoRemovesTheObjectACommitFinishedJustAheadOfTheAbort) {
+    catalog.replies.emplace_back(uploads(2));
+    static_cast<void>(run());
+    EXPECT_EQ(store.removed, (std::vector<std::string>{"videos/v/original", "videos/v/original"}));
+}
+
+TEST_F(ReaperTest, NoObjectToRemoveIsTheUsualCase) {
+    catalog.replies.emplace_back(uploads(1));
+    store.removal = std::unexpected(StorageError::NotFound);
+    const auto report = run();
+    EXPECT_EQ(report.uploads_expired, 1U);
+    EXPECT_TRUE(report.problems.empty());
+}
+
+TEST_F(ReaperTest, AnObjectThatCannotBeRemovedIsAFailureNotAnExpiry) {
+    catalog.replies.emplace_back(uploads(1));
+    store.removal = std::unexpected(StorageError::Transient);
+    const auto report = run();
+    EXPECT_EQ(report.uploads_expired, 0U);
+    EXPECT_EQ(report.uploads_release_failed, 1U);
+    ASSERT_EQ(report.problems.size(), 1U);
+    EXPECT_NE(report.problems[0].find("videos/v/original"), std::string::npos);
+}
+
+TEST_F(ReaperTest, ASessionTheStoreStillHoldsIsAFailureNotAnExpiry) {
+    catalog.replies.emplace_back(uploads(1));
+    store.still_held = true;
+    const auto report = run();
+    EXPECT_EQ(report.uploads_expired, 0U);
+    EXPECT_EQ(report.uploads_release_failed, 1U);
+}
+
+TEST_F(ReaperTest, AStoreThatCannotSayWhetherItLetGoIsAFailureToo) {
+    catalog.replies.emplace_back(uploads(1));
+    store.released_answer = StorageError::Transient;
+    const auto report = run();
+    EXPECT_EQ(report.uploads_expired, 0U);
+    EXPECT_EQ(report.uploads_release_failed, 1U);
 }
 
 TEST_F(ReaperTest, AsksAgainOnlyWhileBatchesComeBackFull) {

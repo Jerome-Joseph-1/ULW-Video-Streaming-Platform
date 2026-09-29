@@ -13,8 +13,10 @@
 #include "postgres_harness.hpp"
 #include "reaper.hpp"
 #include "support/live_s3.hpp"
+#include "support/reactor_harness.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <gtest/gtest.h>
 #include <map>
@@ -40,6 +42,11 @@ public:
 
 private:
     core::WallTime wall_;
+};
+
+class NoObserver final : public core::ports::IIngestObserver {
+public:
+    void on_ingest_progress() noexcept override {}
 };
 
 class UploadReaperLive : public ::testing::Test {
@@ -118,6 +125,31 @@ protected:
         return *id;
     }
 
+    // The gateway's half of a commit that the reaper then overtakes: every byte sent and the
+    // store's session completed into an object, before the catalog has heard of it.
+    [[nodiscard]] bool complete_in_store(const core::ports::IngestId& id) {
+        NoObserver observer;
+        auto session = store_->open(id, 0, observer);
+        if (!session) {
+            return false;
+        }
+        const std::array<std::byte, 1> body{};
+        const bool sent = ulw::test::pump_until(
+            *reactor_, [&] { return (*session)->write(body) == body.size(); });
+        (*session)->finish();
+        const bool done = ulw::test::pump_until(*reactor_, [&] {
+            return (*session)->state() != core::ports::IngestState::Open &&
+                   (*session)->state() != core::ports::IngestState::Finalizing;
+        });
+        session->reset();
+        return sent && done && store_->commit(id).has_value();
+    }
+
+    [[nodiscard]] bool object_exists(const core::StorageKey& key) {
+        const auto keys = store_->list(key.view());
+        return keys && std::ranges::find(*keys, key) != keys->end();
+    }
+
     [[nodiscard]] std::optional<MultipartUpload> listed(const std::string& upload_id) const {
         const auto open = ulw::test::open_uploads(target_, "");
         if (!open) {
@@ -170,6 +202,20 @@ TEST_F(UploadReaperLive, AbortsTheStoreSessionOfAnExpiredUploadAndFailsItsVideo)
     EXPECT_TRUE(listed(live->backend_ref));
     EXPECT_EQ(video_state("expired"), "failed");
     EXPECT_EQ(video_state("live"), "init");
+}
+
+TEST_F(UploadReaperLive, AnObjectAFinishedCommitLeftBehindTheAbortedRowIsRemoved) {
+    const auto raced = start("raced", -3600);
+    ASSERT_TRUE(raced);
+    ASSERT_TRUE(complete_in_store(*raced));
+    ASSERT_TRUE(object_exists(raced->key)) << "the interleaving was not reached";
+
+    const auto report = run(clock_);
+
+    EXPECT_TRUE(report.problems.empty());
+    EXPECT_EQ(report.uploads_expired, 1U);
+    EXPECT_FALSE(object_exists(raced->key));
+    EXPECT_EQ(video_state("raced"), "failed");
 }
 
 TEST_F(UploadReaperLive, ASecondPassFindsNothingLeftToDo) {

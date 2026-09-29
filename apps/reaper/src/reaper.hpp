@@ -14,13 +14,17 @@ namespace reaper {
 struct Options {
     // How many uploads one catalog call expires; a full batch is followed by another.
     std::size_t batch = 100;
-    // How old a multipart upload with no catalog row must be before it is aborted: longer than
+    // How old a storage session with no catalog row must be before it is aborted: longer than
     // any upload may live, so that no active upload's session can be mistaken for an orphan.
     core::Seconds orphan_after{};
 };
 
 struct Report {
+    // Aborted in the catalog and gone from the store: session released, object removed.
     std::size_t uploads_expired = 0;
+    // Aborted in the catalog, but the store did not confirm the release. They are not retried
+    // as uploads; the sweep gets the session once it is old enough.
+    std::size_t uploads_release_failed = 0;
     std::size_t parts_orphaned = 0;
     // What went wrong, one line each. The phases are independent, so one failing does not stop
     // the other.

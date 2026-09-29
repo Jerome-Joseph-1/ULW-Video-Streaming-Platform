@@ -23,9 +23,12 @@ class IUploadExpiry {
 public:
     virtual ~IUploadExpiry() = default;
     // Aborts up to `limit` uploads that are still active at their expires_at, fails their
-    // videos, and returns them. Each abort is one statement, so a commit racing it either
-    // completes the upload first, and then it is left alone, or finds it aborted. An upload
-    // whose owner is streaming into it holds its claim and is skipped until the next call.
+    // videos, and returns them. Each abort is one statement, so a catalog commit racing it
+    // either completes the upload first, and then it is left alone, or finds it aborted. A
+    // commit does not hold the upload's claim, though: one whose object the store had finished
+    // just before the abort is answered Conflict and leaves that object at the upload's key,
+    // which is why the caller removes the key as well as the session. An upload whose owner is
+    // streaming into it holds its claim and is skipped until the next call.
     [[nodiscard]] virtual std::expected<std::vector<ExpiredUpload>, CatalogError>
     expire(WallTime now, std::size_t limit) = 0;
 };
