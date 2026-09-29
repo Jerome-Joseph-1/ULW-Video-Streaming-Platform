@@ -164,6 +164,9 @@ std::optional<CloseCode> Decoder::read_rest_of_header() noexcept {
     const std::span<const std::byte> header = std::span{header_}.first(header_have_);
     const std::uint8_t length7 = u8(header[1]) & kLength7;
     const std::span<const std::byte> extended = header.subspan(2, header.size() - 2 - kMaskBytes);
+    // A length in a longer form than it needs (5 in 16 bits, 200 in 64) is accepted. RFC 6455
+    // section 5.2 says "the minimal number of bytes MUST be used", but binds the sender and
+    // gives the receiver no rule to fail on; the limits below hold whatever the form.
     const std::uint64_t length = extended.empty() ? length7 : big_endian(extended);
     // RFC 6455 section 5.2: the most significant bit of a 64-bit length must be 0.
     if (length7 == kLength64 && (length >> 63U) != 0) {

@@ -3,6 +3,7 @@
 
 #include "wire.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -81,6 +82,21 @@ TEST(WsDecoder, ReadsSixteenAndSixtyFourBitLengths) {
     ASSERT_EQ(d.frames.size(), 2U);
     EXPECT_EQ(d.frames[0], message(Opcode::Binary, medium));
     EXPECT_EQ(d.frames[1], message(Opcode::Binary, large));
+}
+
+TEST(WsDecoder, AcceptsLengthsInALongerFormThanTheyNeed) {
+    // RFC 6455 section 5.2 requires the minimal form of the sender only. "Hello" (5 bytes) in
+    // the 16-bit form, then in the 64-bit form, masked with the key of section 5.7.
+    const Bytes masked_hello = bytes({0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58});
+    const Bytes wire = concat({bytes({0x81, 0x80 | 126, 0x00, 0x05}), masked_hello,
+                               bytes({0x81, 0x80 | 127, 0, 0, 0, 0, 0, 0, 0, 0x05}), masked_hello});
+
+    const Decoded d = decode_whole(wire);
+
+    EXPECT_FALSE(d.error);
+    ASSERT_EQ(d.frames.size(), 2U);
+    EXPECT_EQ(d.frames[0], message(Opcode::Text, text("Hello")));
+    EXPECT_EQ(d.frames[1], message(Opcode::Text, text("Hello")));
 }
 
 TEST(WsDecoder, DeliversControlFramesBetweenFragmentsBeforeTheMessage) {
@@ -195,6 +211,27 @@ TEST(WsDecoder, CountsEveryFragmentAgainstTheLimit) {
     EXPECT_FALSE(
         decode_whole(concat({raw_frame(kBinary, Bytes(60)), raw_frame(kFin | 0x0, Bytes(40))}), 100)
             .error);
+}
+
+TEST(WsDecoder, NeverReservesPastTheLimitWhileReassembling) {
+    // 7-byte fragments make the buffer grow many times; doubling unchecked would end at 1792.
+    constexpr std::size_t kLimit = 1000;
+    Bytes wire;
+    std::size_t sent = 0;
+    while (sent < kLimit) {
+        const std::size_t n = std::min<std::size_t>(7, kLimit - sent);
+        sent += n;
+        const unsigned first = (sent == n ? kBinary : 0x0) | (sent == kLimit ? kFin : 0x0);
+        const Bytes part = raw_frame(first, Bytes(n, std::byte{0x42}));
+        wire.insert(wire.end(), part.begin(), part.end());
+    }
+
+    const Decoded d = decode_whole(wire, kLimit);
+
+    EXPECT_FALSE(d.error);
+    ASSERT_EQ(d.frames.size(), 1U);
+    EXPECT_EQ(d.frames[0].payload.size(), kLimit);
+    EXPECT_LE(d.frames[0].payload.capacity(), kLimit);
 }
 
 TEST(WsDecoder, LeavesControlFramesOutOfTheMessageLimit) {
