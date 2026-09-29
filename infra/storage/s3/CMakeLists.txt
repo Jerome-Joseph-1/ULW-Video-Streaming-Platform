@@ -2,6 +2,7 @@ ulw_add_library(storage_s3
     src/control.cpp
     src/endpoint.cpp
     src/failure.cpp
+    src/multipart.cpp
     src/part_session.cpp
     src/s3_store.cpp
     src/s3_transfer.cpp)

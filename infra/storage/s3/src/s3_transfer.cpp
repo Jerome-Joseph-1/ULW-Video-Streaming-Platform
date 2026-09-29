@@ -9,15 +9,19 @@
 #include "control.hpp"
 #include "endpoint.hpp"
 #include "failure.hpp"
+#include "multipart.hpp"
 
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <fcntl.h>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <unistd.h>
@@ -108,6 +112,99 @@ std::expected<std::string, StorageError> file_sha256(int fd) {
         offset += n;
     }
 }
+
+// Parts go up one at a time as they fill; the ETags S3 answers with are all the state kept.
+class S3ObjectStream final : public core::ports::IObjectStream {
+public:
+    S3ObjectStream(const s3::Control& control, const s3util::Bucket& bucket, core::StorageKey key,
+                   std::string upload_id, std::uint32_t max_parts)
+        : control_(control), bucket_(bucket), key_(std::move(key)),
+          upload_id_(std::move(upload_id)), max_parts_(max_parts) {
+        buffer_.reserve(S3Transfer::kStreamPart);
+    }
+    ~S3ObjectStream() override {
+        if (!done_) {
+            // An abort that fails leaves the upload to the bucket's lifecycle rule.
+            [[maybe_unused]] const auto aborted =
+                s3::abort_upload(control_, bucket_, key_, upload_id_);
+        }
+    }
+    S3ObjectStream(const S3ObjectStream&) = delete;
+    S3ObjectStream& operator=(const S3ObjectStream&) = delete;
+    S3ObjectStream(S3ObjectStream&&) = delete;
+    S3ObjectStream& operator=(S3ObjectStream&&) = delete;
+
+    std::expected<void, StorageError> write(std::span<const std::byte> bytes) override {
+        if (done_) {
+            return std::unexpected(StorageError::Permanent);
+        }
+        while (!bytes.empty()) {
+            const std::size_t take =
+                std::min(bytes.size(), S3Transfer::kStreamPart - buffer_.size());
+            buffer_.insert(buffer_.end(), bytes.begin(),
+                           bytes.begin() + static_cast<std::ptrdiff_t>(take));
+            bytes = bytes.subspan(take);
+            if (buffer_.size() == S3Transfer::kStreamPart) {
+                if (auto sent = send_part(); !sent) {
+                    return sent;
+                }
+            }
+        }
+        return {};
+    }
+
+    std::expected<void, StorageError> commit() override {
+        if (done_) {
+            return {};
+        }
+        // Only the last part may be short, and an object needs one part even when empty.
+        if (!buffer_.empty() || parts_.empty()) {
+            if (auto sent = send_part(); !sent) {
+                return sent;
+            }
+        }
+        auto completed = s3::complete_upload(control_, bucket_, key_, upload_id_, parts_);
+        done_ = completed.has_value();
+        return completed;
+    }
+
+private:
+    std::expected<void, StorageError> send_part() {
+        if (parts_.size() == max_parts_) {
+            return std::unexpected(StorageError::Permanent);
+        }
+        const auto number = static_cast<std::uint32_t>(parts_.size() + 1);
+        const auto target =
+            bucket_.object(key_, {{.name = "partNumber", .value = std::to_string(number)},
+                                  {.name = "uploadId", .value = upload_id_}});
+        auto etag = control_.retrying<std::string>([&]() -> std::expected<std::string, Failed> {
+            auto response = control_.send(curl::Method::Put, target, {}, buffer_, 0);
+            if (!response) {
+                return std::unexpected(response.error());
+            }
+            const auto tag = response->header("etag");
+            if (!tag) {
+                return std::unexpected(Failed{.error = StorageError::Corrupt, .retry_after = {}});
+            }
+            return std::string(*tag);
+        });
+        if (!etag) {
+            return std::unexpected(etag.error());
+        }
+        parts_.push_back({.part_number = number, .etag = std::move(*etag)});
+        buffer_.clear();
+        return {};
+    }
+
+    const s3::Control& control_;
+    const s3util::Bucket& bucket_;
+    core::StorageKey key_;
+    std::string upload_id_;
+    std::uint32_t max_parts_;
+    std::vector<std::byte> buffer_;
+    std::vector<s3util::CompletedPart> parts_;
+    bool done_ = false;
+};
 
 std::optional<std::uint64_t> content_length(const curl::Response& response) {
     const auto header = response.header("content-length");
@@ -206,6 +303,16 @@ std::expected<void, StorageError> S3Transfer::upload_new(const std::filesystem::
         return std::unexpected(StorageError::AlreadyExists);
     }
     return put_result;
+}
+
+std::expected<std::unique_ptr<core::ports::IObjectStream>, StorageError>
+S3Transfer::begin(const core::StorageKey& key, const core::ContentType& type) {
+    auto upload_id = s3::initiate_upload(*control_, endpoint_->bucket(), key, type);
+    if (!upload_id) {
+        return std::unexpected(upload_id.error());
+    }
+    return std::make_unique<S3ObjectStream>(*control_, endpoint_->bucket(), key,
+                                            std::move(*upload_id), deps_.profile.max_parts);
 }
 
 std::expected<void, StorageError> S3Transfer::put(const std::filesystem::path& source,
