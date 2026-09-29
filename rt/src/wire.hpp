@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/ports/message_store.hpp"
 #include "rt/message_key.hpp"
 
 #include <array>
@@ -23,6 +24,8 @@ inline constexpr std::uint8_t kVersion = 3;
 // the other fields, which take at most 239 bytes (a Send: type, request, room, sender, key).
 inline constexpr std::size_t kMaxBody = std::size_t{64} * 1024;
 inline constexpr std::size_t kMaxFrame = kMaxBody + 256;
+// The store takes any body the node channel carries (ADR-0052).
+static_assert(kMaxBody == core::ports::kMaxMessageBody);
 // Handshake nonces, and the HMAC-SHA256 tags over them.
 inline constexpr std::size_t kNonceBytes = 32;
 inline constexpr std::size_t kMacBytes = 32;

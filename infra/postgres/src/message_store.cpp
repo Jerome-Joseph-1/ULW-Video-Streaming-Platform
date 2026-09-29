@@ -59,7 +59,7 @@ private:
     MessageCallback<T> done_;
 };
 
-MessageResult<std::vector<StoredMessage>> decode_page(const Result& r) {
+[[nodiscard]] MessageResult<std::vector<StoredMessage>> decode_page(const Result& r) {
     std::vector<StoredMessage> page;
     page.reserve(static_cast<std::size_t>(r.rows()));
     for (int row = 0; row < r.rows(); ++row) {
@@ -82,7 +82,7 @@ MessageResult<std::vector<StoredMessage>> decode_page(const Result& r) {
     return page;
 }
 
-MessageResult<std::uint64_t> decode_last_seq(const Result& r) {
+[[nodiscard]] MessageResult<std::uint64_t> decode_last_seq(const Result& r) {
     const auto seq = r.get(0, 0).and_then(parse_uint64);
     if (!seq) {
         return std::unexpected(MessageStoreError::Corrupt);
@@ -90,7 +90,7 @@ MessageResult<std::uint64_t> decode_last_seq(const Result& r) {
     return *seq;
 }
 
-MessageResult<std::vector<core::UserId>> decode_members(const Result& r) {
+[[nodiscard]] MessageResult<std::vector<core::UserId>> decode_members(const Result& r) {
     std::vector<core::UserId> members;
     members.reserve(static_cast<std::size_t>(r.rows()));
     for (int row = 0; row < r.rows(); ++row) {
@@ -172,7 +172,7 @@ private:
 };
 
 // The names section 8.15 gives the kinds, as chat_rooms.kind holds them.
-std::string_view kind_text(core::ports::RoomKind kind) noexcept {
+[[nodiscard]] std::string_view kind_text(core::ports::RoomKind kind) noexcept {
     switch (kind) {
     case core::ports::RoomKind::DirectChat:
         return "direct_chat";
@@ -184,7 +184,7 @@ std::string_view kind_text(core::ports::RoomKind kind) noexcept {
     return "group_chat";
 }
 
-std::optional<core::ports::RoomKind> kind_of(std::string_view text) noexcept {
+[[nodiscard]] std::optional<core::ports::RoomKind> kind_of(std::string_view text) noexcept {
     for (const auto kind : {core::ports::RoomKind::DirectChat, core::ports::RoomKind::GroupChat,
                             core::ports::RoomKind::StreamLiveChat}) {
         if (kind_text(kind) == text) {

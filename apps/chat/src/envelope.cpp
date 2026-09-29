@@ -104,7 +104,7 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
     return Send{.room = *room, .id = *id, .body = std::move(*body)};
 }
 
-std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
+[[nodiscard]] std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
     if (!only(message, {"type", "room", "before", "after", "limit"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }

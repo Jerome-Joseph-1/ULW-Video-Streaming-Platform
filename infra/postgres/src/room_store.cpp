@@ -42,7 +42,7 @@ RETURNING owner_generation)sql";
 
 // The kind of a room created without a chat join recording one first: closed, so that no room
 // is open by default. The one place a room's kind is chosen from the room alone.
-std::string_view kind_of_unrecorded(const core::RoomId& /*room*/) noexcept {
+[[nodiscard]] std::string_view kind_of_unrecorded(const core::RoomId& /*room*/) noexcept {
     return "group_chat";
 }
 
@@ -379,7 +379,7 @@ StoreResult<void> decode_nothing(const Result& /*r*/) {
 
 // The seq, a repeat's stored seq, or no row when fenced; a stored key with another body is a
 // conflict.
-StoreResult<std::optional<std::uint64_t>> decode_append(const Result& r) noexcept {
+[[nodiscard]] StoreResult<std::optional<std::uint64_t>> decode_append(const Result& r) noexcept {
     if (r.rows() == 0) {
         return std::optional<std::uint64_t>{};
     }
