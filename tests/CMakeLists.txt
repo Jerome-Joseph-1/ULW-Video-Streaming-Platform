@@ -387,6 +387,11 @@ ulw_add_executable(rtp_fuzz_replay fuzz/rtp_fuzz.cpp fuzz/replay_main.cpp)
 target_link_libraries(rtp_fuzz_replay PRIVATE ulw::codec_rtp)
 add_test(NAME rtp_fuzz_corpus COMMAND rtp_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/rtp)
 set_tests_properties(rtp_fuzz_corpus PROPERTIES LABELS unit)
+# The committed tables against tshark's reading of the committed pcap; skipped without tshark.
+add_test(NAME rtp_pcap_tshark
+    COMMAND bash -c "command -v tshark >/dev/null || exit 77; exec \"$0\" --check"
+        ${CMAKE_CURRENT_SOURCE_DIR}/media/capture_rtp.sh)
+set_tests_properties(rtp_pcap_tshark PROPERTIES LABELS unit SKIP_RETURN_CODE 77)
 
 if(ULW_FUZZ)
     ulw_add_executable(rtp_fuzz fuzz/rtp_fuzz.cpp)
