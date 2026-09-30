@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The allowlist checker refuses what would waive too much, check-image-pins.py refuses an
-unpinned image and a misused exemption, and trivy-report.py marks a finding allowlisted only
-where Trivy would honour the entry (docs/adr/0072)."""
+unpinned image and a misused exemption, trivy-report.py marks a finding allowlisted only
+where Trivy would honour the entry (docs/adr/0072), and split-resources.py writes nothing
+outside its directory."""
 import datetime
 import importlib.util
 import io
@@ -26,6 +27,7 @@ def load(name: str, path: pathlib.Path):
 allowlists = load("check_allowlists", HERE / "check-allowlists.py")
 pins = load("check_image_pins", ROOT / "deploy" / "local" / "check-image-pins.py")
 report = load("trivy_report", HERE / "trivy-report.py")
+split = load("split_resources", HERE / "split-resources.py")
 
 SOON = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
 PAST = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
@@ -208,6 +210,38 @@ class ReportTest(unittest.TestCase):
                                            AVCODEC))
         self.assertFalse(report.purl_covers("pkg:deb/ubuntu/libavcodec60?arch=arm64", AVCODEC))
         self.assertFalse(report.purl_covers("pkg:deb/ubuntu/libavformat60", AVCODEC))
+
+
+class SplitResourcesTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.dir.name)
+        self.out = self.root / "out"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def split(self, manifest: str) -> int:
+        source = self.root / "in.yaml"
+        source.write_text(manifest, encoding="utf-8")
+        with redirect_stderr(io.StringIO()):
+            return split.main([str(self.out), str(source)])
+
+    def test_one_file_per_resource(self):
+        rc = self.split("kind: ClusterRole\nmetadata:\n  name: system:kube-router\n---\n"
+                        "kind: Service\nmetadata:\n  name: api\n  namespace: apps\n")
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()),
+                         ["clusterrole-cluster-system:kube-router.yaml", "service-apps-api.yaml"])
+
+    def test_a_name_that_is_not_one_path_component_is_refused(self):
+        # "../Escaped" as the kind would write <OUTDIR>/../escaped-x-api.yaml.
+        for kind, name in (("../Escaped", "api"), ("Service", "a/b"), ("Service", "a b")):
+            with self.subTest(kind=kind, name=name):
+                rc = self.split(f"kind: '{kind}'\nmetadata:\n  name: '{name}'\n  namespace: x\n")
+                self.assertEqual(rc, 1)
+                self.assertEqual(list(self.out.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["in.yaml", "out"])
 
 
 if __name__ == "__main__":
