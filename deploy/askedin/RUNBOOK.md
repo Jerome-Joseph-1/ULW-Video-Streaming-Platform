@@ -353,6 +353,51 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 `askedin-gateway`. If the video plane gets a hostname of its own, add `hostnames:` to both
 `httproute.yaml` files.
 
+### 4a. Deploying by digest
+
+The overlays name the images by branch tag (`:development`, `:master`) with
+`imagePullPolicy: Always`. A tag is mutable: whoever can push to the registry can change what
+the next restart, reschedule or node drain runs, and two gateway pods started a minute apart can
+run different builds. LiveKit, which is not built here, is already pinned by digest. Ours cannot
+be written into the manifests at commit time, because the digest only exists once the pipeline
+has built that very commit. So the pipeline has to write it, and ArgoCD, which owns the
+manifests, then deploys exactly that digest. Nothing in `woodpecker.yml` does this yet: it needs
+two things only you can set up, a Woodpecker secret allowed to push to the monorepo branch
+ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist:
+
+1. Put a `kustomization.yaml` in each of `overlays/{stage,prod}/video-gateway`, `video-worker`
+   and `upload-reaper`, listing that directory's manifests under `resources:` and the image under
+   `images:`. ArgoCD renders a directory with a `kustomization.yaml` through kustomize on its
+   own. Change `imagePullPolicy: Always` to `IfNotPresent`: a digest never changes, so there is
+   nothing to pull again.
+2. Add a step to `woodpecker.yml` after both image steps, in place of `rollout-restart`: resolve
+   the digest of the tag just pushed under the commit's SHA (not the branch tag, which a
+   concurrent build may have moved), write it with kustomize, and commit it. With `crane` and
+   `kustomize` in an image pinned by tag and digest like every other step:
+
+   ```sh
+   gw=git.askedin.com/askedin/askedin-monorepo/video-gateway
+   wk=git.askedin.com/askedin/askedin-monorepo/video-worker
+   gw_digest=$(crane digest "$gw:$CI_COMMIT_SHA")
+   wk_digest=$(crane digest "$wk:$CI_COMMIT_SHA")
+   (cd "overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
+   (cd "overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
+   (cd "overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
+   git commit -am "deploy: video images $CI_COMMIT_SHA [skip ci]" && git push
+   ```
+
+   `$env` is `stage` on `development` and `prod` on `master`. The commit carries `[skip ci]`, so
+   it does not build again; ArgoCD sees the new digest and rolls the deployments itself, the
+   gateway's init container migrating first as today. Drop the restricted kubeconfig then: the
+   pipeline no longer touches the cluster.
+3. Rollback (section 6) becomes a revert of that commit, or `kustomize edit set image` to the
+   digest of `<good sha>`, instead of a retag and a restart.
+
+Until then, what a pod runs is at least recorded: `kubectl -n apps-stage get pods -o
+jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'`
+prints each pod's resolved digest, which must match `crane digest <image>:<sha>` of the commit
+you meant to deploy.
+
 ## 5. Verify on stage (M14)
 
 1. ArgoCD shows the stage application Synced and Healthy; then:
