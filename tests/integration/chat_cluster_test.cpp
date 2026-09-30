@@ -755,6 +755,42 @@ TEST_P(ChatClusterTest, ARoomWithMembersRefusesEveryoneElse) {
     EXPECT_FALSE(carol->ever_saw("members only"));
 }
 
+// Members are taken off a list in the database, by the product or an operator. Every node hears
+// of it and stops delivering the room to that user's sockets at once (ADR-0073), wherever the
+// room is owned.
+TEST_P(ChatClusterTest, AMemberDeletedInTheDatabaseStopsReceivingOnEveryNode) {
+    const std::string members_only = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(members_only, {"alice", "bob", "carol"}));
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    auto carol = connect(nodes_[1], 2);
+    ASSERT_TRUE(alice && bob && carol);
+    for (Client* c : {alice.get(), bob.get(), carol.get()}) {
+        ASSERT_EQ(join_answer(*c, members_only), "joined");
+    }
+    ASSERT_TRUE(alice->send(send_command(members_only, "before", "m1")));
+    ASSERT_TRUE(bob->message("before"));
+
+    auto conn = db_->session();
+    ASSERT_TRUE(conn.exec("DELETE FROM chat_members WHERE room_id = $1::text::uuid AND user_id = "
+                          "'bob'",
+                          Params{}.add_text(members_only)));
+    const auto removed = bob->wait_for([&](const Seen& s) {
+        return s.type == "error" && s.room == members_only && s.reason == "not_member";
+    });
+    ASSERT_TRUE(removed) << "bob was never told";
+
+    ASSERT_TRUE(alice->send(send_command(members_only, "after", "m2")));
+    // Carol shares bob's node, so its fan-out of "after" reached both sockets together; bob's
+    // answer to a command sent once carol has it comes behind anything that fan-out sent him.
+    ASSERT_TRUE(carol->message("after"));
+    ASSERT_TRUE(bob->send(send_command(members_only, "let me back", "m3")));
+    const auto refused = bob->wait_for([](const Seen& s) { return s.id == "m3"; });
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->reason, "not_joined");
+    EXPECT_FALSE(bob->ever_saw("after"));
+}
+
 TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedLater) {
     const std::string nobody = core::RoomId::generate(clock_, random_).to_string();
     auto alice = connect(nodes_[0], 0);

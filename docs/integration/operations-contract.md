@@ -264,7 +264,12 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `allocation_failures_total`, `rooms_active`, `rooms_joined`, `room_reassignments_total`,
 `fenced_writes_total`, `forwards_total`, `forward_timeouts_total`, `peers_lost_total`,
 `peers_refused_total`, `slow_peers_total`, `presence_rooms`, `presence_events_sent_total`,
-`presence_events_received_total`, `presence_notifications_total`, `presence_expired_total`
+`presence_events_received_total`, `presence_notifications_total`, `token_expiries_total`
+(sockets closed with 4001 as their token ran out), `member_removals_total` (sockets taken out of
+a room because their user left its member list, ADR-0073), `member_check_failures_total`
+(member checks after a lost listening session that failed other than for an unreachable
+database, each settled by taking the user's sockets out of the room with `unavailable`, and
+logged), `presence_expired_total`
 (announcements and watching nodes dropped because they stopped being renewed, normally a node
 that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
 node repeated what it had said there), `jwks_keys_expired` (as the gateway's). Chat is a draft ([chat.md](chat.md)).

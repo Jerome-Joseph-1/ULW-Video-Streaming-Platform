@@ -286,14 +286,58 @@ private:
 
 } // namespace
 
-class PgMessageStore::Impl {
+namespace {
+
+// "<room> <user>", as notify_chat_member_removed() writes it.
+std::optional<std::pair<core::RoomId, core::UserId>> parse_removal(std::string_view payload) {
+    const std::size_t space = payload.find(' ');
+    if (space == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto room = core::RoomId::parse(payload.substr(0, space));
+    const auto user = core::UserId::parse(payload.substr(space + 1));
+    if (!room || !user) {
+        return std::nullopt;
+    }
+    return std::pair{*room, *user};
+}
+
+} // namespace
+
+class PgMessageStore::Impl final : public INotificationSink {
 public:
     explicit Impl(std::unique_ptr<Pool> pool) noexcept : pool_(std::move(pool)) {}
 
+    // The listening pool is made after this, since it points here.
+    void listen_on(std::unique_ptr<Pool> listening) noexcept { listening_ = std::move(listening); }
     [[nodiscard]] Pool& pool() noexcept { return *pool_; }
+    void watch(core::ports::IMemberListener* listener) noexcept { listener_ = listener; }
+
+    void on_listening() noexcept override {
+        if (listener_ != nullptr) {
+            listener_->on_members_resync();
+        }
+    }
+
+    void on_notification(std::string_view payload) noexcept override {
+        if (listener_ == nullptr) {
+            return;
+        }
+        // Only the trigger writes to the channel; what it cannot have written leaves every
+        // list in doubt.
+        const auto removal = parse_removal(payload);
+        if (!removal) {
+            listener_->on_members_resync();
+            return;
+        }
+        listener_->on_member_removed(removal->first, removal->second);
+    }
 
 private:
+    core::ports::IMemberListener* listener_ = nullptr;
     std::unique_ptr<Pool> pool_;
+    // Last: it calls into this object, and must stop before the members above go.
+    std::unique_ptr<Pool> listening_;
 };
 
 std::expected<std::unique_ptr<PgMessageStore>, std::string>
@@ -308,7 +352,20 @@ PgMessageStore::create(net::IReactor& reactor, net::OffloadPool& offload,
     if (!pool) {
         return std::unexpected(std::move(pool.error()));
     }
-    return std::make_unique<PgMessageStore>(Token{}, std::make_unique<Impl>(std::move(*pool)));
+    auto impl = std::make_unique<Impl>(std::move(*pool));
+    auto listening = Pool::create(reactor, offload,
+                                  PoolConfig{.conninfo = config.conninfo,
+                                             .application_name = "ulw-messages-listen",
+                                             .connections = 1,
+                                             .connect_timeout = config.connect_timeout,
+                                             .request_timeout = config.request_timeout,
+                                             .listen = "LISTEN chat_member_removed",
+                                             .notifications = impl.get()});
+    if (!listening) {
+        return std::unexpected(std::move(listening.error()));
+    }
+    impl->listen_on(std::move(*listening));
+    return std::make_unique<PgMessageStore>(Token{}, std::move(impl));
 }
 
 PgMessageStore::PgMessageStore(Token /*token*/, std::unique_ptr<Impl> impl) noexcept
@@ -373,6 +430,10 @@ void PgMessageStore::admits(const core::RoomId& room, const core::UserId& user,
 
 void PgMessageStore::record_live(const core::RoomId& room, MessageCallback<void> done) {
     impl_->pool().submit(std::make_unique<RecordLive>(room, std::move(done)));
+}
+
+void PgMessageStore::watch_members(core::ports::IMemberListener* listener) noexcept {
+    impl_->watch(listener);
 }
 
 } // namespace infra::postgres
