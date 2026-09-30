@@ -363,6 +363,37 @@ TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
     EXPECT_EQ(alice->close_status(seconds(10)), 1003);
 }
 
+// A valid token does not carry a request that is not a WebSocket handshake.
+TEST_P(ChatSessionTest, AnUpgradeThatBreaksTheHandshakeIsRefusedWhateverItsToken) {
+    const std::string token = "Authorization: Bearer user.alice\r\n";
+    // WsClient sends one of each already; a second is a handshake error, even one that is
+    // well formed on its own (16 zero bytes in base64).
+    const std::string second_key = "Sec-WebSocket-Key: " + std::string(22, 'A') + "==\r\n";
+    EXPECT_EQ(refusal(token + second_key), "HTTP/1.1 400 Bad Request");
+    EXPECT_EQ(refusal(token + "Sec-WebSocket-Version: 13\r\n"), "HTTP/1.1 426 Upgrade Required");
+    // Nothing here takes a body.
+    EXPECT_EQ(refusal(token + "Content-Length: 5\r\n"), "HTTP/1.1 400 Bad Request");
+    EXPECT_TRUE(open_as("alice"));
+}
+
+// RFC 6455 section 5: a client's frame unmasked, with an opcode no one defined, or with a
+// reserved bit no extension negotiated, fails the connection with 1002, and the node counts it.
+TEST_P(ChatSessionTest, AFrameThatBreaksTheProtocolClosesWith1002AndIsCounted) {
+    const std::vector<std::vector<unsigned char>> frames{
+        {0x81, 0x02, 'h', 'i'},
+        {0x83, 0x80, 0x01, 0x02, 0x03, 0x04},
+        {0xC1, 0x80, 0x01, 0x02, 0x03, 0x04},
+    };
+    for (const auto& frame : frames) {
+        auto alice = open_as("alice");
+        ASSERT_TRUE(alice);
+        ASSERT_TRUE(alice->send_raw(std::as_bytes(std::span(frame))));
+        EXPECT_EQ(alice->close_status(seconds(10)), 1002) << static_cast<int>(frame[0]);
+    }
+    const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
+    EXPECT_NE(metrics.body.find("protocol_errors_total 3\n"), std::string::npos) << metrics.body;
+}
+
 TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryConnection) {
     node_.reset();
     node_ = std::make_unique<Node>(GetParam(),
