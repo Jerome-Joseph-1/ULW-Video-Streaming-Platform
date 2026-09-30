@@ -272,7 +272,10 @@ database, each settled by taking the user's sockets out of the room with `unavai
 logged), `presence_expired_total`
 (announcements and watching nodes dropped because they stopped being renewed, normally a node
 that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
-node repeated what it had said there), `jwks_keys_expired` (as the gateway's). Chat is a draft ([chat.md](chat.md)).
+node repeated what it had said there), `jwks_keys_expired` (as the gateway's),
+`unrecorded_joins_total` (refused joins of rooms with no kind recorded that recorded nothing,
+their user past the allowance: steady growth is someone walking room ids). Chat is a draft
+([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at
