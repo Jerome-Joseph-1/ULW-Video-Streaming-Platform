@@ -91,6 +91,11 @@ public:
     void advance(core::Millis d);
     // Lets every connection waiting on an unknown signing key ("slow." tokens) continue.
     void refresh_keys();
+    // Both in one turn of the loop: a response the key refresh lets through is sent, and the
+    // drain begins, before the loop does anything else.
+    void refresh_keys_then_drain();
+    // Response bytes the gateway holds that its kernel has not taken yet.
+    [[nodiscard]] std::size_t queued_output();
     [[nodiscard]] std::size_t key_waiters();
     // What SIGHUP does: reread the certificate and key. Returns once the reload has finished.
     void reload_certificate();
