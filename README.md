@@ -23,6 +23,12 @@ python3 tools/check-docs.py # ADR numbering and sections, route/doc coverage
 tools/e2ee_diagnostic_check.sh [<base> <head>]  # chat service and router unchanged, phase-2..phase-3
 ```
 
+SonarQube Cloud analysis (`.github/workflows/sonar.yml`, ADR-0078) runs on the Free plan for
+public repositories and is advisory. It skips itself until the owner imports the project
+(choosing the Free plan, with no card details) and adds the `SONAR_TOKEN` secret. If the
+repository ever becomes private, the Free plan's limits apply; to stay free, delete
+`SONAR_TOKEN` and the job skips itself.
+
 ## Run locally
 
 ```sh

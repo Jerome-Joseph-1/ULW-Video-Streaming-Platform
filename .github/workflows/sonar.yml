@@ -1,0 +1,88 @@
+name: sonar
+
+# SonarQube Cloud analysis, Free plan for public repositories (docs/adr/0078). Advisory: the
+# quality gate is reported on the dashboard and the pull request, never waited on here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonar-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyse:
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      SONAR_SCANNER_VERSION: 8.1.0.6389
+      # The linux-x64 zip's SHA-256: the scan action's own sonar-scanner-version file at the
+      # pinned commit, Maven Central's .sha256, and a local download all agree.
+      SONAR_SCANNER_SHA256: bb8f709f9cb73352f8d1260a3b3c506c0f41146754bc630762c126d795499d0b
+    steps:
+      # Until the owner adds SONAR_TOKEN, and on pull requests from forks, which get no
+      # secrets, every later step is skipped and the job passes. Only whether the secret is set
+      # reaches this step, never its value; the value is in the scan step's env alone.
+      - name: Check for SONAR_TOKEN
+        id: token
+        env:
+          HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
+        run: |
+          if [ "${HAS_SONAR_TOKEN:-}" = "true" ]; then
+            echo "present=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "present=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::SONAR_TOKEN is not set; skipping SonarQube Cloud analysis"
+          fi
+      # Full history for blame and for new-code detection.
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - if: steps.token.outputs.present == 'true'
+        uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-ci
+      # The whole ci build, as reactor-matrix does, so generated headers and sources exist and
+      # build/ci/compile_commands.json matches what was compiled.
+      - if: steps.token.outputs.present == 'true'
+        run: cmake --preset ci
+      - if: steps.token.outputs.present == 'true'
+        run: cmake --build --preset ci
+      # The scanner is fetched here, checked against its SHA-256, and placed where the scan
+      # action's tool cache looks (sonar-scanner-cli/<version as semver>/linux-x64 plus a
+      # .complete marker), so the action never downloads it. The action is told to fetch from
+      # an address that cannot resolve: if its cache layout ever stops matching this, the step
+      # fails instead of downloading something unchecked.
+      - name: Install the pinned SonarScanner CLI
+        if: steps.token.outputs.present == 'true'
+        run: |
+          zip=$RUNNER_TEMP/sonar-scanner.zip
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$zip" \
+            "https://repo1.maven.org/maven2/org/sonarsource/scanner/cli/sonar-scanner-cli/${SONAR_SCANNER_VERSION}/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip"
+          echo "$SONAR_SCANNER_SHA256  $zip" | sha256sum --check --strict
+          IFS=. read -r major minor patch build <<<"$SONAR_SCANNER_VERSION"
+          cache=$RUNNER_TOOL_CACHE/sonar-scanner-cli/$major.$minor.$patch-build.$build
+          rm -rf "$cache"
+          mkdir -p "$cache"
+          unzip -q "$zip" -d "$RUNNER_TEMP/sonar-scanner"
+          mv "$RUNNER_TEMP/sonar-scanner/sonar-scanner-${SONAR_SCANNER_VERSION}-linux-x64" "$cache/linux-x64"
+          touch "$cache/linux-x64.complete"
+          rm -f "$zip"
+      - name: SonarQube Cloud scan
+        if: steps.token.outputs.present == 'true'
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          scannerVersion: ${{ env.SONAR_SCANNER_VERSION }}
+          scannerBinariesUrl: https://scanner-download-disabled.invalid
+      - if: steps.token.outputs.present == 'true'
+        run: ccache --show-stats
