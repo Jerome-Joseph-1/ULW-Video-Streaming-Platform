@@ -1,6 +1,7 @@
 #include "live_command.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -92,10 +93,38 @@ TEST(LiveRemuxArgs, ConvertAdtsAudioAndKeepAStreamThatHasNone) {
     EXPECT_TRUE(has(args, "0:a:0?"));
 }
 
-TEST(LiveRemuxArgs, ProbeForOneSecondNotTheDefaultFive) {
+TEST(LiveRemuxArgs, ProbeForASegmentLengthAndASecondAtTheMaximumBitrate) {
+    // 2 s segments: 3 s, and 3 s at 20 Mbit/s is 7.5 MB, twice.
     const Args args = infra::ffmpeg::live_remux_args("ffmpeg", job());
-    EXPECT_EQ(after(args, "-analyzeduration"), "1000000");
-    EXPECT_EQ(after(args, "-probesize"), "1000000");
+    EXPECT_EQ(after(args, "-analyzeduration"), "3000000");
+    EXPECT_EQ(after(args, "-probesize"), "15000000");
+
+    // The window follows the segment length and the bytes the bitrate: 11 s at 1 Mbit/s.
+    LiveRemuxJob slow = job();
+    slow.segment_seconds = 10;
+    slow.max_kbps = 1'000;
+    const Args slow_args = infra::ffmpeg::live_remux_args("ffmpeg", slow);
+    EXPECT_EQ(after(slow_args, "-analyzeduration"), "11000000");
+    EXPECT_EQ(after(slow_args, "-probesize"), "2750000");
+}
+
+TEST(LiveProbe, CoversAKeyframeIntervalWhateverTheSegmentLength) {
+    for (std::uint32_t segment = 2; segment <= 10; ++segment) {
+        const auto probe = infra::ffmpeg::live_probe(20'000, segment);
+        EXPECT_EQ(probe.window, core::Seconds{segment} + core::Seconds{1}) << segment;
+        EXPECT_EQ(probe.bytes, std::uint64_t{20'000} * 125 * (segment + 1) * 2) << segment;
+    }
+}
+
+TEST(LiveProbe, StaysBoundedWhateverTheConfiguration) {
+    const auto most = infra::ffmpeg::live_probe(UINT32_MAX, UINT32_MAX);
+    EXPECT_EQ(most.window, core::Seconds{11});
+    EXPECT_EQ(most.bytes, 275'000'000U);
+    // Never below the megabyte it probed before, nor a window shorter than the slack.
+    const auto least = infra::ffmpeg::live_probe(0, 0);
+    EXPECT_EQ(least.window, core::Seconds{1});
+    EXPECT_EQ(least.bytes, 1'000'000U);
+    EXPECT_EQ(infra::ffmpeg::live_probe(500, 2).bytes, 1'000'000U);
 }
 
 TEST(LiveInitName, RoundTripsTheEpoch) {

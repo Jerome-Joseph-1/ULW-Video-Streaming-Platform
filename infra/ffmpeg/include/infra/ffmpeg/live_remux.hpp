@@ -35,6 +35,18 @@ inline constexpr core::Millis kSegmentDriftAllowance{500};
 [[nodiscard]] std::uint64_t live_max_file_bytes(std::uint32_t max_kbps,
                                                 std::uint32_t segment_seconds) noexcept;
 
+// How much of the stream ffmpeg reads before it writes the init segment. It needs a video
+// keyframe to learn the picture's size, and the publisher sends one every segment length
+// (ADR-0046) from wherever it joined, so the window is a segment length plus a second of
+// slack for the relay's start and a late keyframe: a shorter window fails a stream whose first
+// keyframe comes late, with "dimensions not set". `bytes` is the window at `max_kbps`, twice.
+// Both are bounded whatever the arguments.
+struct LiveProbe {
+    core::Millis window{};
+    std::uint64_t bytes = 0;
+};
+[[nodiscard]] LiveProbe live_probe(std::uint32_t max_kbps, std::uint32_t segment_seconds) noexcept;
+
 // Each run writes its own init segment: after a restart the codec parameters may differ, and a
 // name reused would replace the init segment the window's older segments still point at.
 [[nodiscard]] std::string live_init_name(std::uint32_t epoch);
@@ -85,6 +97,9 @@ struct LiveRemuxResult {
     std::uint64_t peak_rss_kib = 0;
     // The last line ffmpeg printed to stderr.
     std::string detail;
+    // ffmpeg gave up on a stream it found no codec parameters for in the probe window, which
+    // for video means that no keyframe came within it.
+    bool unprobed = false;
 };
 
 // Copies the video and audio of an MPEG-TS stream into fMP4 HLS segments without decoding

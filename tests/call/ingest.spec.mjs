@@ -102,7 +102,7 @@ function whipsink(ticket) {
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve(code ?? signal)));
-  return {
+  const packager = {
     output: () => output,
     // The session's resource, once the POST has been answered: whipsink logs its Location.
     resource: () => {
@@ -350,6 +350,18 @@ test('a candidate trickled after the answer is honoured', async () => {
   }
 });
 
+// Every packager the running test started, so that a failed test shows what its packager
+// logged: why ffmpeg stopped, or why the publisher was given up on.
+const startedPackagers = [];
+
+test.afterEach(async ({}, testInfo) => { // eslint-disable-line no-empty-pattern
+  const packagers = startedPackagers.splice(0);
+  if (testInfo.status === testInfo.expectedStatus) return;
+  for (const packager of packagers) {
+    console.log(`live_packager output (${testInfo.title}):\n${packager.output()}`);
+  }
+});
+
 // The M31 packager as tests/e2e runs it, but writing to a directory: ULW_STORAGE=fs.
 function startPackager(streamId, passphrase, root) {
   const work = path.join(root, 'scratch');
@@ -373,7 +385,7 @@ function startPackager(streamId, passphrase, root) {
   child.stdout.on('data', collect);
   child.stderr.on('data', collect);
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve(code ?? signal)));
-  return {
+  const packager = {
     output: () => output,
     exited,
     playlist: path.join(root, 'store', 'objects', 'live', streamId, 'index.m3u8'),
@@ -381,6 +393,8 @@ function startPackager(streamId, passphrase, root) {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     },
   };
+  startedPackagers.push(packager);
+  return packager;
 }
 
 function readPlaylist(file) {

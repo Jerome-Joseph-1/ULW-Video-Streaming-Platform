@@ -4,6 +4,8 @@
 #include "process.hpp"
 
 #include <chrono>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace infra::ffmpeg {
@@ -19,6 +21,9 @@ constexpr std::uint64_t kRemuxAddressSpace = kGiB;
 // A twentieth of the run's length in CPU seconds: fifteen times the measured cost, so a stream
 // at a bitrate several times the test source's still fits.
 constexpr std::int64_t kWallPerCpu = 20;
+// What ffmpeg 6 prints when the probe window ends before a stream's parameters are known; the
+// last line is only the "Error opening output files" that follows it.
+constexpr std::string_view kUnprobed = "Could not find codec parameters";
 
 std::string last_line(std::string_view text) {
     while (text.ends_with('\n') || text.ends_with('\r')) {
@@ -67,7 +72,8 @@ std::expected<LiveRemuxResult, std::string> LiveRemuxer::run(const LiveRemuxJob&
                            .signal = child->signal,
                            .wall = child->wall,
                            .peak_rss_kib = child->peak_rss_kib,
-                           .detail = last_line(child->stderr_tail)};
+                           .detail = last_line(child->stderr_tail),
+                           .unprobed = child->stderr_tail.find(kUnprobed) != std::string::npos};
 }
 
 } // namespace infra::ffmpeg
