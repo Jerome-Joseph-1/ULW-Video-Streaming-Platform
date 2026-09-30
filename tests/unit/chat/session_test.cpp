@@ -95,6 +95,10 @@ public:
     // Every session fails as if out of memory, and the keys arrive in the same turn, before the
     // failed sessions have closed.
     std::atomic<bool> fail_then_refresh_keys = false;
+    // What the verifier says of keys_expired(); `keys_expired` follows once the node's thread has
+    // seen it.
+    std::atomic<bool> expire_keys = false;
+    std::atomic<bool> keys_expired = false;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -181,6 +185,10 @@ private:
             if (fail_then_refresh_keys.exchange(false)) {
                 server->for_each_session([](chat::Session& s) noexcept { s.allocation_failed(); });
                 verifier.refresh_keys();
+            }
+            if (expire_keys != verifier.expired) {
+                verifier.expired = expire_keys;
+                keys_expired = verifier.expired;
             }
             key_waiters = verifier.waiting();
             http_parsers = server->http_parsers();
@@ -533,6 +541,18 @@ std::optional<std::uint64_t> metric(std::uint16_t port, std::string_view name) {
     const std::size_t start = at + line.size();
     return core::parse_integer<std::uint64_t>(
         std::string_view(body).substr(start, body.find('\n', start) - start));
+}
+
+// Once the keys go unrefreshed too long every token is refused, so the gauge an alert watches
+// says so while it lasts.
+TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
+    node_->expire_keys = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->keys_expired.load(); }));
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 1U);
+    node_->expire_keys = false;
+    ASSERT_TRUE(ulw::test::eventually([&] { return !node_->keys_expired.load(); }));
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
 }
 
 // Both viewers fall behind a sender that never stops. One never reads again, and is reset once it

@@ -71,13 +71,16 @@ spec:
               # One libpq session and one libcurl handle, working through a batch of 100 rows
               # at a time.
               # The CPU limit bounds a runaway pass beside the gateways on the same node.
+              # Disk: its log only (read-only root filesystem, no volume), sized as video-gateway's.
               resources:
                 requests:
                   cpu: 50m
                   memory: 64Mi
+                  ephemeral-storage: 64Mi
                 limits:
                   cpu: 500m
                   memory: 128Mi
+                  ephemeral-storage: 256Mi
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
