@@ -60,6 +60,10 @@ public:
     [[nodiscard]] bool idle() const noexcept { return phase_ == Phase::Idle; }
     // Nothing (the kernel, the catalog, the pool, the verifier) can still reach this object.
     [[nodiscard]] bool quiescent() const noexcept;
+    // Bytes sent to the client that the kernel has not taken yet.
+    [[nodiscard]] std::size_t queued_output() const noexcept {
+        return transport_ ? transport_->pending_send_bytes() : 0;
+    }
     // Heap bytes held for the request: staged body and a buffered JSON body.
     [[nodiscard]] std::size_t buffered_bytes() const noexcept {
         return staging_.capacity() + req_.body.capacity();
@@ -206,10 +210,14 @@ private:
     void close() noexcept;
     // Reads what the client pipelined, from the loop.
     void resume() noexcept;
+    // What resume() does once the loop comes round: the next request, unless held back.
+    void read_next_request() noexcept;
     // Output the peer has not acknowledged: queued in the transport, or held by the kernel.
     [[nodiscard]] bool output_waiting() const noexcept;
     // Output the peer's window holds back: queued in the transport, or unsent in the kernel.
     [[nodiscard]] bool response_held_back() const noexcept;
+    // Stops reading until a held-back response has gone; false when none is held back.
+    [[nodiscard]] bool hold_back_request() noexcept;
     void arm_timer(core::Millis delay) noexcept;
     // Between requests: the header timeout, and a look at a held-back response.
     void on_idle_timeout(core::MonoTime t) noexcept;
@@ -244,6 +252,8 @@ private:
     bool resume_pending_ = false;
     // A keep-alive response still waits in the transport; reading resumes once it has gone.
     bool awaiting_drain_ = false;
+    // A new request's first bytes, read while the last response was held back.
+    std::vector<std::byte> held_;
     bool draining_ = false;
     bool peer_eof_ = false;
     // Outstanding catalog callbacks, offload jobs and key waits: all hold `this`.

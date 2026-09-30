@@ -54,7 +54,7 @@ The gateway's client connections:
 |---|---|---|
 | Keep the user timeout | It already ends a client that asks and never reads | Rejected: it resets a reader the gateway has not given up on, wherever the gateway's own timer is longer than 20 s |
 | Clear it, and watch acknowledgements as chat does | The same mechanism everywhere | Rejected: once the gateway stops reading while a response waits, every state with output waiting has a timer of its own; a watch would add a system call a second per connection for a bound that is already there |
-| Clear it, stop reading requests while a response waits in the gateway, and rely on its timers | The header timeout then runs from the last response for a client that does not read it | Accepted |
+| Clear it, hold a new request back while the last response is held back by the client's window, and rely on its timers | The header timeout then runs from the last response for a client that does not read it | Accepted |
 
 The node channel:
 
@@ -91,19 +91,21 @@ that may still be reading.
   Each server clears the timeout only where the kernel answers `TCP_INFO` (`net::send_progress`)
   on the socket; where it does not, the connection keeps the kernel's 20 s, which then bounds it
   as before. Linux has answered with the fields read since 4.6.
-- **Gateway, while open.** `on_accept` clears the timeout after `tune_connection`. When a
-  keep-alive response ends with part of it held back by the client's window (still in the
-  transport, or unsent in the kernel, `SendProgress::unsent`), the gateway reads nothing more
-  from the client until it has gone; the header timeout runs from the response meanwhile, so
-  a client that does not take it within 10 s is closed and counted in
-  `timeouts_total{kind="header"}`, however many requests it sent after it. The transport's
-  queue draining (`on_writable`) is noticed at once; the kernel says nothing when a window
-  opens, so a held-back response is looked at every 100 ms (`kDrainCheck`), a `getsockopt`
-  each, and a request sent once the response has gone waits at most that long. A client that
-  takes the response in time, however slowly, is read from again, and the header timeout still
-  counts from the end of that response. Output sent and only waiting for its acknowledgement
-  does not stop reading. So a client that never reads holds at most its own receive buffer,
-  one send buffer and one response.
+- **Gateway, while open.** `on_accept` clears the timeout after `tune_connection`. The gateway
+  keeps reading after a keep-alive response, and decides only when a new request arrives:
+  its first bytes, or a request the client pipelined behind the response. If part of the
+  response is then still held back (queued in the transport, or unsent in the kernel,
+  `SendProgress::unsent`), the request is kept unparsed, reading stops, and the header timeout
+  keeps counting from the response, so a client that does not take it within 10 s is closed
+  and counted in `timeouts_total{kind="header"}`, however many requests it sent after it. The
+  transport's queue draining (`on_writable`) is noticed at once; the kernel says nothing when a
+  window opens, so while a request waits the response is looked at every 100 ms
+  (`kDrainCheck`), a `getsockopt` each. A client that asks again only once it has read its
+  response, as a player does, finds it gone and never waits: whatever the response's size,
+  and whether or not it outgrew the congestion window on the way. Only a client that asks
+  before its last response has left the gateway's kernel waits, at most 100 ms after it has.
+  So a client that never reads holds at most its own receive buffer, one send buffer, one
+  response and the one receive that brought its next request.
 - **Gateway, at close.** Whatever closes a connection (a timeout, the linger's end, the drain
   deadline, the client's EOF or error): if the transport still holds part of the response,
   the close is a reset, which drops what the kernel holds too; if only the kernel holds output
@@ -112,7 +114,9 @@ that may still be reading.
   nothing waiting, a plain FIN.
 - **Gateway, on a drain.** An idle connection whose last response is still waiting for the
   client is given the 2 s linger to read it, as after `Connection: close`, instead of being
-  closed at once; one with nothing waiting is closed at once, as before.
+  closed at once; one with nothing waiting is closed at once, as before. A lingering
+  connection parses nothing more, so a request the client pipelined behind its last response
+  goes unanswered, as after `Connection: close`.
 - **Node channel.** Both ends clear the timeout on a new connection. On every tick (250 ms),
   each authenticated accepted connection and each open dialled one whose output waits (in the
   reactor, or unacknowledged in the kernel) reads what the other node has acknowledged; one
@@ -134,9 +138,11 @@ that may still be reading.
   gateway's own timers allow, and a node that reads a little at a time keeps its link however
   long it takes, as long as some of what waits for it is acknowledged every 20 s.
 - A client that asks and never reads is closed 10 s after the first response its window held
-  back, where the kernel took 20 s. A pipelining client that reads is served as before, a
-  response at a time, but a large response delays the next request by up to 100 ms when the
-  client's window held part of it back.
+  back, where the kernel took 20 s. A client that asks again after reading its response is
+  served as before. One that pipelines behind a response not yet sent in full (a large
+  playlist on a link slower than the response, or an io_uring send not yet completed) has its
+  next request wait until the response has gone, plus up to 100 ms when only the kernel held
+  it back; in the tests, a client that reads its response first is answered with no wait.
 - A response that takes more than 10 s to read on a keep-alive connection is still cut off by
   the header timeout, which counts from when the response was queued, as before; the gateway
   cuts it with a reset if it still held part of it. That is the gateway's limit, not the
@@ -148,13 +154,16 @@ that may still be reading.
   acknowledges nothing either, and is closed at the same 20 s the kernel used to take. On the
   dialling side such a link also counts in `peers_lost_total`, as it did.
 - The watch costs a `getsockopt` per node-channel connection per tick, about 130 a second at
-  the 32 accepted connections a node allows; the gateway's, one per close and ten a second per
-  connection whose response is held back.
+  the 32 accepted connections a node allows; the gateway's, one per close, one per request that
+  arrives after a keep-alive response with the transport's queue empty, and ten a second per
+  connection holding a request back.
 - `tests/gateway/gateway_playback_test.cpp` and `tests/unit/rt/room_router_test.cpp` check that
   the server's socket has no user timeout, read a response, deliveries and forwarded writes
   8 KiB every 250 ms of wall clock for four to five seconds, and check that a reader that stops
   is reset. With the kernel's timeout at 1.5 s and the old code, each slow reader was reset
   about 2 s in; with the old code as it ran, the check of the socket fails (20000). The
   gateway's tests also cover a client that asks and never reads (the old code answered all
-  eight of its requests and kept it open), and a drain that lets a client finish reading its
-  last response.
+  eight of its requests and kept it open), a close that finds the largest playlist still in
+  the gateway (a reset) or only in the kernel (the response in full, then a FIN), a drain that
+  lets a client finish reading its last response, and a drain just after a response, which
+  answers nothing the client pipelined behind it.

@@ -65,12 +65,17 @@ struct Endpoint {
 class HttpClient {
 public:
     // A `receive_buffer` fixes the kernel's receive buffer (which Linux doubles) before the
-    // connection opens, for a client whose window must shut after that many unread bytes.
-    explicit HttpClient(Endpoint endpoint, int receive_buffer = 0) {
+    // connection opens, for a client whose window must shut after that many unread bytes. A
+    // `max_segment` is the segment size the client announces: the server's kernel sizes its
+    // first send buffer from it, loopback's 64 KiB segments making it megabytes.
+    explicit HttpClient(Endpoint endpoint, int receive_buffer = 0, int max_segment = 0) {
         const std::uint16_t port = endpoint.port;
         fd_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
         if (receive_buffer > 0) {
             ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof receive_buffer);
+        }
+        if (max_segment > 0) {
+            ::setsockopt(fd_.get(), IPPROTO_TCP, TCP_MAXSEG, &max_segment, sizeof max_segment);
         }
         timeval tv{.tv_sec = kSocketTimeout.count(), .tv_usec = 0};
         ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);

@@ -389,6 +389,8 @@ std::string long_media_playlist() {
 // A player's receive buffer, fixed small, which Linux doubles: the gateway's side of the
 // connection sees its window shut after 16 KiB unread, and open again a read at a time.
 constexpr int kPlayerReceiveBuffer = 8 * 1024;
+// The segment size a client on an Ethernet path announces.
+constexpr int kEthernetSegment = 1460;
 
 // A player that frees its window a little at a time keeps its connection for as long as it
 // reads. The kernel's own count of a shut window (TCP_USER_TIMEOUT) restarts only when the
@@ -434,35 +436,44 @@ TEST_P(GatewayPlayback, APlayerReadingAPlaylistALittleAtATimeKeepsItsConnection)
     EXPECT_GT(r->body.size(), std::size_t{100'000});
     EXPECT_TRUE(r->body.ends_with("#EXT-X-ENDLIST\n"));
 
-    // Still open, and still served. The gateway reads no further request until it has seen the
-    // response go, which it looks for on a timer of its held clock.
-    gw.advance(core::Millis{100});
+    // Still open, and still served at once: the response had gone when the client asked again.
     const auto again = c.request("GET", "/healthz", "");
     ASSERT_TRUE(again);
     EXPECT_EQ(again->status, 200);
     EXPECT_EQ(gw.counters().timeouts_header, 0U);
 }
 
-// How a connection the gateway gave up on with its response unread ended for the client: with
-// the whole response and a FIN when the kernel held all that was left of it, which it then
-// finishes; with a reset, and part of the response missing, when the gateway still held some.
-void expect_ended_as_the_response_allows(HttpClient& c) {
+// A connection the gateway gave up on while the kernel held all that was left of the response
+// ends with a FIN, after the kernel has finished the response, as it did before the user
+// timeout was cleared.
+void expect_the_response_then_a_fin(HttpClient& c) {
     const auto end = c.read_to_end();
     ASSERT_TRUE(end) << "the connection was never closed";
+    EXPECT_EQ(*end, 0);
     const auto r = c.take_response();
-    if (*end == 0) {
-        ASSERT_TRUE(r);
-        EXPECT_EQ(r->status, 200);
-        EXPECT_TRUE(r->body.ends_with("#EXT-X-ENDLIST\n"));
-    } else {
-        EXPECT_EQ(*end, ECONNRESET);
-        EXPECT_FALSE(r);
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 200);
+    EXPECT_TRUE(r->body.ends_with("#EXT-X-ENDLIST\n"));
+}
+
+// The largest playlist the gateway serves: 16,000 segments, 512 KB stored and about 1.5 MB
+// signed.
+std::string largest_media_playlist() {
+    std::string text = "#EXTM3U\n"
+                       "#EXT-X-VERSION:7\n"
+                       "#EXT-X-TARGETDURATION:4\n"
+                       "#EXT-X-PLAYLIST-TYPE:VOD\n"
+                       "#EXT-X-MAP:URI=\"init_0.mp4\"\n";
+    for (int k = 0; k < 16'000; ++k) {
+        text += std::format("#EXTINF:4.000000,\nseg_{:05}.m4s\n", k);
     }
+    text += "#EXT-X-ENDLIST\n";
+    return text;
 }
 
 // A player that stops reading is still ended by the header timeout, as an idle connection with
 // its response unread. A response the gateway handed all of to the kernel is finished by it
-// after a FIN, as before; one the gateway still held part of is cut off with a reset.
+// after a FIN, as before.
 TEST_P(GatewayPlayback, APlayerThatStopsReadingIsClosedAtTheHeaderTimeout) {
     GatewayOptions o = options();
     o.manual_clock = true;
@@ -473,11 +484,71 @@ TEST_P(GatewayPlayback, APlayerThatStopsReadingIsClosedAtTheHeaderTimeout) {
     ASSERT_TRUE(c.connected());
     ASSERT_TRUE(c.send_request("GET", path("720p/index.m3u8"), kAlice));
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().responses.at(1) == 1; }));
+    // The kernel has taken the whole response (on io_uring, once the send completes).
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.queued_output() == 0; }));
 
     gw.advance(o.limits.header_timeout);
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
     EXPECT_EQ(gw.counters().timeouts_header, 1U);
-    expect_ended_as_the_response_allows(c);
+    expect_the_response_then_a_fin(c);
+}
+
+// A response the gateway still held part of when it gave up on the connection is cut off
+// either way, so the close is a reset, which drops what the kernel held too. The client
+// announces the segment size of an ordinary network, which keeps the gateway's send buffer to
+// tens of kilobytes, as it is on one; the largest playlist, 1.5 MB, is far more than that
+// buffer and the client's window take.
+TEST_P(GatewayPlayback, APlayerThatStopsReadingWithTheResponseStillInTheGatewayIsReset) {
+    GatewayOptions o = options();
+    o.manual_clock = true;
+    GatewayUnderTest gw(o);
+    publish(gw);
+    gw.put_object(key("720p/index.m3u8"), largest_media_playlist());
+    HttpClient c(gw.endpoint(), kPlayerReceiveBuffer, kEthernetSegment);
+    ASSERT_TRUE(c.connected());
+    ASSERT_TRUE(c.send_request("GET", path("720p/index.m3u8"), kAlice));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().responses.at(1) == 1; }));
+    ASSERT_GT(gw.queued_output(), 0U);
+
+    gw.advance(o.limits.header_timeout);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
+    EXPECT_EQ(gw.counters().timeouts_header, 1U);
+    const auto end = c.read_to_end();
+    ASSERT_TRUE(end) << "the connection was never closed";
+    EXPECT_EQ(*end, ECONNRESET);
+    EXPECT_FALSE(c.take_response());
+}
+
+// A drain that finds a connection just after a keep-alive response lingers on it and answers
+// nothing more, even a request the client had already pipelined behind that response.
+TEST_P(GatewayPlayback, ADrainJustAfterAResponseAnswersNoPipelinedRequest) {
+    GatewayUnderTest gw(options());
+    HttpClient c(gw.endpoint());
+    ASSERT_TRUE(c.connected());
+    // A create with a body the gateway refuses, sent as a token it has no key for yet, then a
+    // probe behind it in the same write.
+    const std::string body = "{}";
+    const std::string first = "POST /api/v1/uploads HTTP/1.1\r\nHost: test\r\n"
+                              "Authorization: Bearer slow.alice\r\n"
+                              "Content-Length: " +
+                              std::to_string(body.size()) + "\r\n\r\n" + body;
+    ASSERT_TRUE(c.send_raw(first + "GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n"));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.key_waiters() == 1; }));
+    // The refusal is sent, and the drain begins, in one turn of the loop.
+    gw.refresh_keys_then_drain();
+    const auto end = c.read_to_end();
+    ASSERT_TRUE(end) << "the connection was never closed";
+    const auto r = c.take_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 400);
+    EXPECT_FALSE(c.take_response());
+    // The client sees the FIN at once; the gateway lets the connection go when the linger
+    // ends, 2 s on, having parsed nothing more. Where the response was still being sent when
+    // the drain began (on io_uring, whose send completes in a later turn, and under TLS), the
+    // connection lingers; otherwise it is closed at once.
+    ASSERT_TRUE(
+        ulw::test::eventually([&] { return gw.connections() == 0; }, std::chrono::seconds(5)));
+    EXPECT_EQ(gw.counters().requests, 1U);
 }
 
 // A client that keeps asking and never reads is not read from while its last response is held
@@ -506,10 +577,11 @@ TEST_P(GatewayPlayback, AClientThatAsksAndNeverReadsIsClosedAtTheHeaderTimeout) 
         gw.advance(step);
     }
     EXPECT_EQ(answered, 1U);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.queued_output() == 0; }));
     gw.advance(step);
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
     EXPECT_EQ(gw.counters().timeouts_header, 1U);
-    expect_ended_as_the_response_allows(c);
+    expect_the_response_then_a_fin(c);
 }
 
 // A client still reading its last response when the drain begins is given the linger to

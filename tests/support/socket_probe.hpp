@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -39,10 +40,11 @@ inline std::optional<std::uint16_t> tcp_port(int fd, bool peer) {
 // the process holds. nullopt when no such socket is open. Only reads its options.
 inline std::optional<int> user_timeout_of(std::uint16_t local, std::uint16_t remote) {
     std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd", ec)) {
+    for (std::filesystem::directory_iterator it("/proc/self/fd", ec), end; !ec && it != end;
+         it.increment(ec)) {
         int fd = -1;
         try {
-            fd = std::stoi(entry.path().filename().string());
+            fd = std::stoi(it->path().filename().string());
         } catch (const std::exception&) {
             continue;
         }

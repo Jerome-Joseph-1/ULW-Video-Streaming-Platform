@@ -183,10 +183,17 @@ void Connection::begin_request() noexcept {
 }
 
 void Connection::on_data(net::BorrowedBytes bytes) noexcept {
-    last_activity_ = now();
     if (phase_ == Phase::Lingering) {
+        last_activity_ = now();
         return;
     }
+    // The first bytes of a new request, while the last response is held back: kept until it
+    // has gone, at most the one receive that brought them, since reading stops here.
+    if (phase_ == Phase::Idle && (awaiting_drain_ || hold_back_request())) {
+        held_.insert(held_.end(), bytes.begin(), bytes.end());
+        return;
+    }
+    last_activity_ = now();
     if (phase_ == Phase::Idle) {
         begin_request();
     }
@@ -1386,28 +1393,39 @@ void Connection::finish_request() noexcept {
         close();
         return;
     }
-    // Nothing more is read while the response is held back, in the transport or in the kernel
-    // behind a shut window: a client that keeps asking and never reads would otherwise queue
-    // responses without end, each request restarting the header timeout. The timeout runs
-    // from now, so a client that does not take this one within it is closed (ADR-0071).
-    if (response_held_back()) {
-        awaiting_drain_ = true;
-        if (receiving_) {
-            receiving_ = false;
-            transport_->stop_receiving();
-        }
-        arm_timer(std::min(kDrainCheck, gw().limits().header_timeout));
-        return;
-    }
     resume();
 }
 
 bool Connection::response_held_back() const noexcept {
+    // An io_uring send still in flight counts here as held back; its completion drains the
+    // queue and on_writable resumes at once.
     if (transport_->pending_send_bytes() > 0) {
         return true;
     }
+    // Without TCP_INFO (or a kernel that fills in too little of it) only the transport is
+    // looked at; such a connection kept the kernel's user timeout, which still bounds it.
     const auto progress = net::send_progress(fd_);
     return progress && progress->unsent;
+}
+
+bool Connection::hold_back_request() noexcept {
+    // A new request is not read while the last response is held back, in the transport or in
+    // the kernel behind a shut window: a client that keeps asking and never reads would
+    // otherwise queue responses without end, each request restarting the header timeout.
+    // The request waits, and the header timeout keeps counting from that response, so a
+    // client that does not take it within the timeout is closed (ADR-0071). A client whose
+    // response has gone when it asks again, as any client that reads it has, never waits.
+    if (!response_held_back()) {
+        return false;
+    }
+    awaiting_drain_ = true;
+    if (receiving_) {
+        receiving_ = false;
+        transport_->stop_receiving();
+    }
+    const auto idle = std::chrono::duration_cast<core::Millis>(now() - last_activity_);
+    arm_timer(std::clamp(gw().limits().header_timeout - idle, core::Millis{0}, kDrainCheck));
+    return true;
 }
 
 void Connection::resume() noexcept {
@@ -1457,6 +1475,10 @@ void Connection::release_claim() noexcept {
 
 void Connection::linger() noexcept {
     phase_ = Phase::Lingering;
+    // Whatever the client asked next goes unanswered: nothing is parsed from here on.
+    resume_pending_ = false;
+    awaiting_drain_ = false;
+    held_.clear();
     release_claim();
     // FIN after the response, then read and discard until the client closes or the linger
     // ends: closing with unread input would send RST and could destroy the response.
@@ -1494,6 +1516,8 @@ void Connection::close() noexcept {
     // is finished by the kernel after a FIN, as before the user timeout was cleared, and the
     // timeout is set again to bound that orphan: without it the kernel keeps one for as long
     // as the peer answers its probes of a shut window (ADR-0071).
+    // An io_uring send still in flight counts as held by the transport, so such a close errs
+    // toward a reset.
     if (transport_->pending_send_bytes() > 0 ||
         (output_waiting() && !net::restore_user_timeout(fd_))) {
         net::abort_on_close(fd_);
@@ -1555,21 +1579,35 @@ void Connection::on_idle_timeout(core::MonoTime t) noexcept {
     arm_timer(header_timeout - idle);
 }
 
+void Connection::read_next_request() noexcept {
+    // A request the client pipelined behind a response still held back waits too.
+    if (phase_ == Phase::Idle && (!held_.empty() || !parser_.unparsed().empty()) &&
+        hold_back_request()) {
+        return;
+    }
+    // Counted from the end of the last response, however long the client took to read it.
+    const auto idle = std::chrono::duration_cast<core::Millis>(now() - last_activity_);
+    arm_timer(std::max(gw().limits().header_timeout - idle, core::Millis{0}));
+    if (!held_.empty()) {
+        const std::vector<std::byte> bytes = std::exchange(held_, {});
+        on_data(bytes);
+        return;
+    }
+    on_parse(parser_.resume());
+}
+
 void Connection::on_timeout() noexcept {
     timer_ = {};
     if (phase_ == Phase::Closed) {
         return;
     }
-    if (resume_pending_) {
-        resume_pending_ = false;
-        // Counted from the end of the last response, however long the client took to read it.
-        const auto idle = std::chrono::duration_cast<core::Millis>(now() - last_activity_);
-        arm_timer(std::max(gw().limits().header_timeout - idle, core::Millis{0}));
-        on_parse(parser_.resume());
-        return;
-    }
     if (phase_ == Phase::Lingering) {
         close();
+        return;
+    }
+    if (resume_pending_) {
+        resume_pending_ = false;
+        read_next_request();
         return;
     }
     const core::MonoTime t = now();
