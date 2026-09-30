@@ -96,6 +96,8 @@ public:
     void refresh_keys_then_drain();
     // Response bytes the gateway holds that its kernel has not taken yet.
     [[nodiscard]] std::size_t queued_output();
+    // Bytes of new requests the gateway holds unparsed behind a held-back response.
+    [[nodiscard]] std::size_t held_bytes();
     [[nodiscard]] std::size_t key_waiters();
     // What SIGHUP does: reread the certificate and key. Returns once the reload has finished.
     void reload_certificate();
