@@ -64,8 +64,9 @@ TEST_F(MakePrivateDir, RefusesAFileInTheDirectorysPlace) {
 }
 
 TEST_F(MakePrivateDir, RefusesADirectoryAnotherUserOwns) {
-    // Root can hand a directory to another user; anyone else is not root, and "/" is root's.
-    fs::path dir = "/";
+    // Root can hand a directory to another user; anyone else is not root, and /proc/1 is root's
+    // (in root's /proc).
+    fs::path dir = "/proc/1";
     if (::geteuid() == 0) {
         dir = tmp.path() / "theirs";
         ASSERT_EQ(::mkdir(dir.c_str(), 0777), 0);
@@ -77,6 +78,42 @@ TEST_F(MakePrivateDir, RefusesADirectoryAnotherUserOwns) {
     ASSERT_FALSE(made);
     EXPECT_NE(made.error().find("owned by uid"), std::string::npos) << made.error();
     EXPECT_EQ(mode_of(dir), before);
+}
+
+TEST_F(MakePrivateDir, RefusesAParentAnotherUserOwns) {
+    // Only root can make a directory another user owns.
+    if (::geteuid() != 0) {
+        GTEST_SKIP() << "needs root";
+    }
+    const fs::path root = tmp.path() / "theirs";
+    ASSERT_EQ(::mkdir(root.c_str(), 0700), 0);
+    ASSERT_EQ(::chmod(root.c_str(), 0777), 0);
+    ASSERT_EQ(::chown(root.c_str(), 65534, 65534), 0);
+    const auto made = os::make_private_dir(root / "node-1");
+    ASSERT_FALSE(made);
+    EXPECT_NE(made.error().find("owned by uid 65534"), std::string::npos) << made.error();
+    EXPECT_FALSE(fs::exists(root / "node-1"));
+}
+
+TEST_F(MakePrivateDir, RefusesAParentThatIsASymbolicLink) {
+    const fs::path target = tmp.path() / "elsewhere";
+    ASSERT_EQ(::mkdir(target.c_str(), 0755), 0);
+    const fs::path root = tmp.path() / "scratch";
+    fs::create_directory_symlink(target, root);
+    const auto made = os::make_private_dir(root / "node-1");
+    ASSERT_FALSE(made);
+    EXPECT_NE(made.error().find("not a directory"), std::string::npos) << made.error();
+    EXPECT_FALSE(fs::exists(target / "node-1"));
+}
+
+TEST_F(MakePrivateDir, RefusesAPathEndingInASlash) {
+    // open("link/", O_DIRECTORY | O_NOFOLLOW) would follow the link.
+    const fs::path target = tmp.path() / "elsewhere";
+    ASSERT_EQ(::mkdir(target.c_str(), 0755), 0);
+    fs::create_directory_symlink(target, tmp.path() / "node-1");
+    const auto made = os::make_private_dir(tmp.path() / "node-1/");
+    ASSERT_FALSE(made);
+    EXPECT_EQ(mode_of(target), 0755U);
 }
 
 } // namespace

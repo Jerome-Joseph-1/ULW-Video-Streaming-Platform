@@ -35,6 +35,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -52,14 +53,28 @@ int fail(std::string_view what, std::string_view why) {
     return EXIT_FAILURE;
 }
 
-// The stream's scratch directory, emptied, and the media directory in it. What an earlier run
-// left is not needed: the store has the stream's state. Owner-only, and refused if someone else
-// made it first, since its default is under the shared /var/tmp.
-std::expected<fs::path, std::string> fresh_scratch(const fs::path& scratch) {
-    std::error_code ec;
-    fs::remove_all(scratch, ec);
+// The stream's scratch directory, emptied, and the media directory in it. Owner-only, and
+// refused if it is a link, someone else's, or kept in a directory someone else owns, since its
+// default is under the shared /var/tmp; checked before anything in it is removed. What an
+// earlier run left is not needed: the store has the stream's state.
+[[nodiscard]] std::expected<fs::path, std::string> fresh_scratch(const fs::path& scratch) {
     if (auto made = os::make_private_dir(scratch); !made) {
         return std::unexpected(std::move(made.error()));
+    }
+    std::error_code ec;
+    std::vector<fs::path> left;
+    for (auto it = fs::directory_iterator(scratch, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        left.push_back(it->path());
+    }
+    for (const fs::path& entry : left) {
+        // remove_all takes a link away without following it.
+        if (!ec) {
+            fs::remove_all(entry, ec);
+        }
+    }
+    if (ec) {
+        return std::unexpected(ec.message());
     }
     fs::path media_dir = scratch / "media";
     fs::create_directories(media_dir, ec);
