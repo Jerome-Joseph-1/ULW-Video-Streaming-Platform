@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <format>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -334,8 +335,81 @@ std::optional<std::string> check_media_playlist(std::string_view text) {
     return std::nullopt;
 }
 
-std::optional<std::string> check_master_playlist(std::string_view text,
-                                                 std::span<const core::Rung> ladder) {
+namespace {
+
+// An attribute list with BANDWIDTH replaced and AVERAGE-BANDWIDTH dropped. Commas inside a
+// quoted value (CODECS="avc1...,mp4a...") do not separate attributes.
+std::string with_bandwidth(std::string_view attributes, std::uint64_t bandwidth) {
+    std::string out;
+    const auto keep = [&](std::string_view attribute) {
+        const std::string_view name = attribute.substr(0, attribute.find('='));
+        if (name == "AVERAGE-BANDWIDTH") {
+            return;
+        }
+        if (!out.empty()) {
+            out += ',';
+        }
+        if (name == "BANDWIDTH") {
+            out += "BANDWIDTH=" + std::to_string(bandwidth);
+        } else {
+            out += attribute;
+        }
+    };
+    bool quoted = false;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < attributes.size(); ++i) {
+        if (attributes[i] == '"') {
+            quoted = !quoted;
+        } else if (attributes[i] == ',' && !quoted) {
+            keep(attributes.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    keep(attributes.substr(start));
+    return out;
+}
+
+} // namespace
+
+std::string settle_master_bandwidth(std::string_view text, std::span<const core::Rung> ladder,
+                                    bool has_audio) {
+    constexpr std::string_view kStreamInf = "#EXT-X-STREAM-INF:";
+    std::string out;
+    out.reserve(text.size());
+    // A variant's tag is followed by its URI, which says which rung it is.
+    std::optional<std::string_view> tag;
+    const auto flush = [&] {
+        if (tag) {
+            out.append(*tag).push_back('\n');
+            tag.reset();
+        }
+    };
+    for_each_line(text, [&](std::string_view line) {
+        if (tag && !line.empty() && !line.starts_with('#')) {
+            const auto rung = std::ranges::find_if(
+                ladder, [&](const core::Rung& r) { return line == r.name + "/index.m3u8"; });
+            if (rung != ladder.end()) {
+                const std::uint64_t kbps =
+                    std::uint64_t{rung->video_kbps} + (has_audio ? core::kAudioKbps : 0U);
+                out.append(kStreamInf)
+                    .append(with_bandwidth(tag->substr(kStreamInf.size()), kbps * 1000 * 11 / 10))
+                    .push_back('\n');
+                tag.reset();
+            }
+        }
+        flush();
+        if (line.starts_with(kStreamInf)) {
+            tag = line;
+        } else {
+            out.append(line).push_back('\n');
+        }
+    });
+    flush();
+    return out;
+}
+
+std::optional<std::string>
+check_master_playlist(std::string_view text, std::span<const core::Rung> ladder, bool has_audio) {
     if (!text.starts_with("#EXTM3U") || text.find("#EXT-X-VERSION:7") == std::string_view::npos) {
         return "master playlist lacks #EXT-X-VERSION:7";
     }
@@ -358,6 +432,9 @@ std::optional<std::string> check_master_playlist(std::string_view text,
         if (text.find("\n" + rung.name + "/index.m3u8") == std::string_view::npos) {
             return "master playlist does not reference " + rung.name;
         }
+    }
+    if (settle_master_bandwidth(text, ladder, has_audio) != text) {
+        return "master playlist BANDWIDTH is not the ladder's";
     }
     return std::nullopt;
 }

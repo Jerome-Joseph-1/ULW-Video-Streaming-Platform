@@ -498,6 +498,64 @@ kubectl -n apps-stage get pods -o \
   jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'
 ```
 
+### Image builds and the worker's ffmpeg
+
+The two images come from different distributions (docs/adr/0074): `video-gateway` is Ubuntu
+24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
+packages, ffmpeg among them, from snapshot.debian.org; both images' binaries are built on
+Ubuntu, since only Ubuntu's glibc lets them carry the CET marks the hardening check requires.
+On the worker those marks are a static property only: Debian's own `libc.so.6` is unmarked, so
+the kernel does not enable a shadow stack for the worker's processes. And because the worker's
+binaries run on trixie's libraries, the Ubuntu release they are built on must not have a newer
+glibc or libstdc++ than trixie; the trixie workflow fails if they stop loading there.
+Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org over
+http for the worker's bootstrap of ca-certificates (signed and checked for freshness), and
+Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes its CA as the
+build secret `ca-bundle`. The pipeline itself is unchanged: `target: worker` still builds the
+worker image.
+
+#### Updating the worker's ffmpeg
+
+The platform's on-call engineer owns this. The daily trigger is the nightly e2e run: its
+sandbox job's "Image vulnerabilities" step (tools/security/trivy-image.sh) fails as soon as a
+HIGH or CRITICAL with a fix in the archive affects the worker image, and that failure is the
+signal to bump. Every Monday, also read debian-security-announce (or
+https://security-tracker.debian.org/tracker/source-package/ffmpeg) for trixie DSAs the gate
+does not rate HIGH. For a DSA against ffmpeg, OpenSSL or glibc, bump within two working days;
+otherwise bump at least monthly.
+
+1. Pick a timestamp after the DSA's upload reached snapshot.debian.org: the `first_seen` of the
+   `debian-security` archive in
+   `https://snapshot.debian.org/mr/package/ffmpeg/<version>/binfiles/ffmpeg/<version>?fileinfo=1`
+   (the version URL-encoded, `7%3A7.1.5-0%2Bdeb13u1`).
+2. If Docker Hub has a newer `debian:trixie-slim` (a new 13.x point release), move the
+   Dockerfile's `DEBIAN` digest to it. The base image's own packages (libc6, util-linux,
+   perl-base, ncurses, libsystemd0 and the rest) are upgraded to the snapshot's versions at
+   every build whatever the digest, but a current base keeps that upgrade small.
+3. In a `debian:trixie-slim` container at the digest the Dockerfile names, with this checkout
+   mounted, print the candidates at that timestamp:
+
+   ```sh
+   DEBIAN_SNAPSHOT=<timestamp> deploy/docker/apt-install-debian.sh --policy \
+       ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 openssl-provider-legacy
+   ```
+
+4. Set `DEBIAN_SNAPSHOT` in `deploy/docker/Dockerfile` to the timestamp and every pinned version
+   in the `worker` stage to its candidate. A build fails if a pin is not
+   what the snapshot holds, so nothing drifts silently.
+5. If ffmpeg's upstream version changed (the part before `-0+deb13u`, say 7.1.5 to 7.1.6; a
+   `+deb13uN` patch alone does not need it), run in that container, with ffmpeg and strace
+   installed, `tools/trace-ffmpeg-syscalls.sh` as root and as an ordinary user (setpriv, from
+   util-linux, when given a uid; `runuser -u <user> --` otherwise) and
+   `tools/ffmpeg-address-space.sh --full`. Extend `infra/ffmpeg/src/seccomp_filter.hpp` with
+   any new call, each with its reason (docs/adr/0048); a command line that nears its address
+   space limit is a finding for docs/adr/0074 before it is a bump. The trixie workflow runs both
+   on every pull request that touches the Dockerfile, so its log shows them too.
+6. Open the pull request, then dispatch the e2e workflow on its branch (Actions, e2e, "Run
+   workflow"): pull requests do not run it. Its sandbox job builds the worker image, runs the
+   VOD flow through it, checks the release binaries' hardening and runs the Trivy gate. Deploy
+   as usual (step 4).
+
 ## 5. Verify on stage (M14)
 
 1. ArgoCD shows the stage application Synced and Healthy; then:

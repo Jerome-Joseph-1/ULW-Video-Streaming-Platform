@@ -1,0 +1,156 @@
+name: trixie
+
+# The worker image's ffmpeg (Debian 13, docs/adr/0074) under the code that drives it. ci.yml's
+# unit and integration jobs run the runner's Ubuntu ffmpeg 6.1; this builds the ffmpeg suites and
+# the worker's, the live packager's and the live recording's integration suites on the runner,
+# as the image's binaries are built on Ubuntu, and runs them inside the worker image, on its
+# libraries and its ffmpeg 7.1. It also re-traces the syscalls and re-measures the address
+# space the sandbox's limits must hold, there. Only when the image or the code around
+# ffmpeg changes, and nightly, since a snapshot bump can land without touching that code.
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/docker/**
+      - infra/ffmpeg/**
+      - apps/worker/**
+      - apps/live-packager/**
+      - tests/unit/ffmpeg/**
+      - tests/integration/ffmpeg_transcoder_test.cpp
+      - tests/integration/worker_test.cpp
+      - tests/integration/recording_remux_test.cpp
+      - tests/integration/live_packager_test.cpp
+      - tests/integration/live_recording_test.cpp
+      - infra/curl/**
+      - infra/storage/**
+      - infra/postgres/**
+      - cmake/**
+      - CMakeLists.txt
+      - CMakePresets.json
+      - tools/trace-ffmpeg-syscalls.sh
+      - tools/ffmpeg-address-space.sh
+      - .github/workflows/trixie.yml
+  pull_request:
+    paths:
+      - deploy/docker/**
+      - infra/ffmpeg/**
+      - apps/worker/**
+      - apps/live-packager/**
+      - tests/unit/ffmpeg/**
+      - tests/integration/ffmpeg_transcoder_test.cpp
+      - tests/integration/worker_test.cpp
+      - tests/integration/recording_remux_test.cpp
+      - tests/integration/live_packager_test.cpp
+      - tests/integration/live_recording_test.cpp
+      - infra/curl/**
+      - infra/storage/**
+      - infra/postgres/**
+      - cmake/**
+      - CMakeLists.txt
+      - CMakePresets.json
+      - tools/trace-ffmpeg-syscalls.sh
+      - tools/ffmpeg-address-space.sh
+      - .github/workflows/trixie.yml
+  schedule:
+    - cron: "11 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trixie-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ffmpeg:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The toolchain, and the user namespaces the worker's sandbox needs (ADR-0025).
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-14-ci-trixie
+      - name: Start MinIO
+        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      - run: cmake --preset ci -DULW_BUILD_MLS=OFF -DULW_CONFORMANCE_LIVE=ON
+      - run: >-
+          cmake --build --preset ci --target ffmpeg_unit_tests worker_integration_tests
+          live_packager_integration_tests live_recording_integration_tests
+      - run: docker build -f deploy/docker/Dockerfile --target worker -t ulw-worker-test .
+      # The image's own binaries, built on Ubuntu, against trixie's libraries. They link with
+      # -z now, so a symbol version trixie lacks (a newer glibc or libstdc++ on the build
+      # release) fails at load, before main: exit 127 or the loader's message. A refusal of
+      # the empty configuration is main running, which is the pass.
+      - name: The image's binaries load on trixie
+        run: |
+          status=0
+          for binary in transcode_worker ulw_sandbox; do
+            code=0
+            output=$(docker run --rm --entrypoint "/usr/local/bin/$binary" ulw-worker-test 2>&1) ||
+              code=$?
+            echo "$binary: exit $code: $output"
+            if [[ $code -eq 127 ]] || grep -qE \
+                "error while loading shared libraries|symbol lookup error|version .* not found" \
+                <<<"$output"; then
+              echo "::error::$binary does not load on trixie"
+              status=1
+            fi
+          done
+          exit $status
+      # Inside the worker image as root, with the workspace at the same path, since the suites
+      # name the helper and the worker by their build paths; privileged for the sandbox's
+      # namespaces, as the runner's own jobs get them. The suites run as the runner's uid, as
+      # ci.yml's do, and ffmpeg_unit_tests as root too.
+      - name: Suites, syscall trace and address space on the image's ffmpeg
+        run: |
+          docker run --rm --privileged --network host --user 0 --entrypoint bash \
+            -v "$PWD:$PWD" -w "$PWD" \
+            -e ULW_TEST_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:55432/postgres \
+            ulw-worker-test -euo pipefail -c '
+            # strace for the trace, python3 for the child the sandbox tests allocate in.
+            deploy/docker/apt-install-debian.sh strace=6.13+ds-1 python3=3.13.5-1 >/dev/null
+            ffmpeg -version | head -1
+            useradd -u "$(stat -c %u .)" -M -d /tmp tester
+            as_tester() {
+              runuser -u tester -- env ULW_TEST_DATABASE_URL="$ULW_TEST_DATABASE_URL" "$@"
+            }
+            status=0
+            for suite in ffmpeg_unit_tests worker_integration_tests \
+                live_packager_integration_tests live_recording_integration_tests; do
+              echo "::group::$suite"
+              as_tester "build/ci/tests/$suite" --gtest_brief=1 || { echo "::error::$suite"; status=1; }
+              echo "::endgroup::"
+            done
+            echo "::group::ffmpeg_unit_tests as root"
+            build/ci/tests/ffmpeg_unit_tests --gtest_brief=1 ||
+              { echo "::error::ffmpeg_unit_tests as root"; status=1; }
+            echo "::endgroup::"
+            allowed=$(grep -oE "SYS_[a-z_0-9]+" infra/ffmpeg/src/seccomp_filter.hpp |
+              sed "s/^SYS_//" | sort -u)
+            for who in root tester; do
+              if [[ $who == root ]]; then traced=$(tools/trace-ffmpeg-syscalls.sh)
+              else traced=$(runuser -u tester -- tools/trace-ffmpeg-syscalls.sh); fi
+              missing=$(comm -23 <(echo "$traced") <(echo "$allowed"))
+              echo "traced as $who: $(echo "$traced" | wc -l) names; not allowed: ${missing:-none}"
+              [[ -z $missing ]] || { echo "::error::syscalls outside the allowlist: $missing"; status=1; }
+            done
+            as_tester tools/ffmpeg-address-space.sh --full || status=1
+            exit $status
+          '
