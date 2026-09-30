@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <numeric>
+#include <optional>
 #include <vector>
 
 namespace core::json {
@@ -16,15 +18,27 @@ bool is_ws(char c) noexcept {
 
 // Sorted, so that n keys cost n log n comparisons: one lookup per key as it arrives would cost
 // n^2 / 2, which for the 7,000 keys a 64 KiB chat command holds is a tenth of a second of the
-// reactor thread per message.
-bool has_duplicate_key(const std::vector<Value::Member>& members) {
-    std::vector<std::string_view> keys;
-    keys.reserve(members.size());
-    for (const auto& [key, value] : members) {
-        keys.emplace_back(key);
+// reactor thread per message. `key_ends[i]` is where member i's key ends in the text. Returns the
+// end of the first key, in text order, that repeats an earlier one: where a lookup per key would
+// have stopped.
+std::optional<std::size_t> first_duplicate_key(const std::vector<Value::Member>& members,
+                                               const std::vector<std::size_t>& key_ends) {
+    if (members.size() < 2) {
+        return std::nullopt;
     }
-    std::ranges::sort(keys);
-    return std::ranges::adjacent_find(keys) != keys.end();
+    std::vector<std::size_t> order(members.size());
+    std::ranges::iota(order, std::size_t{0});
+    // Stable, so each run of equal keys stays in text order and all but its first are repeats.
+    std::ranges::stable_sort(order, {},
+                             [&](std::size_t i) -> std::string_view { return members[i].first; });
+    std::optional<std::size_t> first;
+    for (std::size_t i = 1; i < order.size(); ++i) {
+        if (members[order[i]].first == members[order[i - 1]].first) {
+            const std::size_t end = key_ends[order[i]];
+            first = first ? std::min(*first, end) : end;
+        }
+    }
+    return first;
 }
 
 std::optional<unsigned> hex_digit(char c) noexcept {
@@ -339,6 +353,7 @@ private:
             ++pos_;
             return true;
         }
+        std::vector<std::size_t> key_ends;
         for (;;) {
             skip_ws();
             if (pos_ >= text_.size() || text_[pos_] != '"') {
@@ -348,6 +363,7 @@ private:
             if (!string(key)) {
                 return false;
             }
+            key_ends.push_back(pos_);
             skip_ws();
             if (pos_ >= text_.size() || text_[pos_] != ':') {
                 return set_error("expected ':'");
@@ -364,9 +380,12 @@ private:
                 continue;
             }
             if (pos_ < text_.size() && text_[pos_] == '}') {
-                // Checked once the members are all in place, where their keys stay put.
-                if (has_duplicate_key(out.members_)) {
-                    return set_error("duplicate key");
+                // Checked once every member is in place, comparing the stored keys themselves:
+                // views taken while members_ grew would dangle, since each reallocation moves
+                // the strings, and a short key's bytes live inside its string (SSO).
+                if (const auto at = first_duplicate_key(out.members_, key_ends)) {
+                    error_ = {.offset = *at, .reason = "duplicate key"};
+                    return false;
                 }
                 ++pos_;
                 return true;
