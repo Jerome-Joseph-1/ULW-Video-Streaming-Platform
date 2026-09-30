@@ -51,6 +51,8 @@ struct Config {
     std::string run_as_user;
     // Stay root when started as root with no run_as_user; otherwise that is refused.
     bool allow_root = false;
+    // ULW_DEV_MODE=1: a development run, which dev_jwks_file needs.
+    bool dev_mode = false;
     Limits limits;
 };
 

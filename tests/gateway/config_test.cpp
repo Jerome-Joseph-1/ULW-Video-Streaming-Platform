@@ -466,4 +466,33 @@ TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {
               std::string::npos);
 }
 
+// A development run says so beside the key set it trusts, and where the switch came from.
+TEST_F(ConfigTest, DevelopmentModeIsLoggedWithTheLocalKeySet) {
+    const KeySetFile file(kKeySet);
+    env.erase("JWKS_URL");
+    env["ULW_DEV_JWKS_FILE"] = file.path();
+    env["ULW_DEV_MODE"] = "1";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().reason;
+    const auto layers = ops::Settings::layer(
+        gateway::settings(), nullptr,
+        [this](std::string_view name) -> std::optional<std::string> {
+            const auto it = env.find(std::string(name));
+            return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
+        },
+        ops::CommandLine{});
+    ASSERT_TRUE(layers);
+    const os::SystemClock clock;
+    ulw::test::MemoryLog lines;
+    ops::Logger log(lines, clock, "gateway", ops::Level::Info);
+    gateway::log_effective(*config, *layers, log);
+    const std::string all = lines.all();
+    const auto keys = all.find(R"("name":"ULW_DEV_JWKS_FILE")");
+    const auto mode = all.find(R"("name":"ULW_DEV_MODE","value":"1","from":"env")");
+    ASSERT_NE(keys, std::string::npos) << all;
+    ASSERT_NE(mode, std::string::npos) << all;
+    // The line after it.
+    EXPECT_EQ(all.find('\n', keys), all.rfind('\n', mode)) << all;
+}
+
 } // namespace

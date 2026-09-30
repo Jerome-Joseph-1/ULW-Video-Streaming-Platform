@@ -260,6 +260,8 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
     }
     config.jwks_url = std::move(url).value_or("");
     config.dev_jwks_file = std::move(file).value_or("");
+    // allow_dev_only has refused anything but "0", "1" or empty.
+    config.dev_mode = lookup(env, "ULW_DEV_MODE") == "1";
     auto issuer = required(env, "JWT_ISSUER");
     if (!issuer) {
         return std::unexpected(std::move(issuer.error()));
@@ -531,6 +533,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_DATABASE_URL", config.database_url},
         {"JWKS_URL", config.jwks_url},
         {"ULW_DEV_JWKS_FILE", config.dev_jwks_file},
+        {"ULW_DEV_MODE", config.dev_mode ? "1" : ""},
         {"JWT_ISSUER", config.jwt_issuer},
         {"JWT_AUDIENCE", config.jwt_audience},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},
