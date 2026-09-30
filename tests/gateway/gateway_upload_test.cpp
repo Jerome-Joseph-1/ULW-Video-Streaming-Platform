@@ -127,6 +127,32 @@ TEST_P(GatewayUpload, InboundUserHeadersAreIgnored) {
     EXPECT_EQ(r->status, 401);
 }
 
+// A gateway that let an identity header win over the token's subject would file bob's upload
+// under alice, and let alice read bob's by naming him.
+TEST_P(GatewayUpload, AUserHeaderBesideAValidTokenDoesNotChangeWhoIsAsking) {
+    const GatewayUnderTest gw(over_transport());
+    HttpClient c(gw.endpoint());
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    const auto created = c.request("POST", "/api/v1/uploads", kBob, std::as_bytes(std::span(body)),
+                                   {{"x-user-id", "alice"}, {"x-user-email", "alice@example.com"}});
+    ASSERT_TRUE(created);
+    ASSERT_EQ(created->status, 201);
+    const auto doc = core::json::parse(created->body);
+    ASSERT_TRUE(doc);
+    const std::string upload =
+        "/api/v1/uploads/" + std::string(*doc->find("upload_id")->as_string());
+    const std::string video = "/api/v1/videos/" + std::string(*doc->find("video_id")->as_string());
+
+    HttpClient alice(gw.endpoint());
+    EXPECT_EQ(alice.request("HEAD", upload, kAlice)->status, 404);
+    EXPECT_EQ(alice.request("GET", video, kAlice)->status, 404);
+    HttpClient alice_naming_bob(gw.endpoint());
+    EXPECT_EQ(alice_naming_bob.request("HEAD", upload, kAlice, {}, {{"x-user-id", "bob"}})->status,
+              404);
+    HttpClient bob(gw.endpoint());
+    EXPECT_EQ(bob.request("HEAD", upload, kBob)->status, 204);
+}
+
 TEST_P(GatewayUpload, AKeyServerOutageIsARetryNotASignOut) {
     const GatewayUnderTest gw(over_transport());
     HttpClient c(gw.endpoint());
