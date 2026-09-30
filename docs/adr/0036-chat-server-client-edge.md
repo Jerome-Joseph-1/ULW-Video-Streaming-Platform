@@ -27,12 +27,14 @@ sequenced messages, and M17 owns the rest (acks, resume, rate limits).
     output and 128 KiB of sends not yet answered (each counted as its body plus 256 bytes,
     wherever it waits: an owner's queue or the node channel), 448 KiB in all; 1280
     connections are 560 MiB;
-  - until its one HTTP request is answered, a client connection also holds the request
-    parser: about 28 KiB of fixed buffers for the head, plus the bytes that arrive behind it,
-    at most 256 KiB, in a buffer grown only as they arrive. The session frees the parser as it
-    answers (bytes behind an accepted upgrade go to the frame decoder first), so an open socket
-    holds none of it, and the connections still in their handshake are bounded by the
-    handshake timeout;
+  - until its one HTTP request is answered, a client connection holds the request parser
+    instead: about 28 KiB of fixed buffers for the head, plus the bytes that arrive behind it,
+    at most 256 KiB, in a buffer grown only as they arrive, so at worst about 284 KiB. The
+    session frees the parser as it answers (bytes behind an accepted upgrade go to the frame
+    decoder first), so an open socket holds none of it, and a connection still in its handshake
+    holds nothing of the 448 KiB above. Each connection is in one phase or the other, and 284 KiB
+    is below 448 KiB, so the 560 MiB for 1280 connections holds whatever mix of phases they are
+    in;
   - an owner's queues of writes awaiting their sequence numbers hold at most 1 MiB per room and
     64 MiB across rooms, again body plus 256 bytes a write; past either, the write is `busy`;
   - at most 32 node-channel connections, each holding one frame (64 KiB) being decoded, 1 MiB

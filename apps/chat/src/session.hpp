@@ -74,6 +74,7 @@ private:
 
     void route(const http::RequestHead& head) noexcept;
     void authenticate() noexcept;
+    void parse_failed(const http::ParseError& error);
     void answer_request();
     void respond(std::string_view bytes);
     void accept_upgrade(const codec::ws::UpgradeResponse& response);

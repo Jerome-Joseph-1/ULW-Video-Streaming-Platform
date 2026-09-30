@@ -129,7 +129,7 @@ Session* ChatServer::session(net::Slab<Session>::Handle handle) noexcept {
     return sessions_.get(handle);
 }
 
-std::size_t ChatServer::http_parsers() noexcept {
+std::size_t ChatServer::http_parsers() const noexcept {
     std::size_t parsing = 0;
     sessions_.for_each_live(
         [&parsing](const Session& s) noexcept { parsing += s.parsing_http() ? 1U : 0U; });

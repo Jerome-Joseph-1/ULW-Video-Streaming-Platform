@@ -17,6 +17,7 @@ namespace {
 // RFC 6455 section 7.4.1.
 constexpr codec::ws::CloseCode kUnsupportedData{1003};
 constexpr codec::ws::CloseCode kPolicyViolation{1008};
+constexpr codec::ws::CloseCode kMessageTooBig{1009};
 constexpr codec::ws::CloseCode kInternalError{1011};
 
 std::span<const std::byte> bytes_of(std::string_view text) noexcept {
@@ -64,7 +65,7 @@ void Session::on_data(net::BorrowedBytes bytes) noexcept {
             }
             const http::ParseResult r = parser_->feed(bytes);
             if (!r) {
-                respond(http::fixed_response(r.error().status, http::Connection::Close));
+                parse_failed(r.error());
             }
             leave_http();
             return;
@@ -162,7 +163,9 @@ void Session::authenticate() noexcept {
 }
 
 void Session::on_keys_refreshed() noexcept {
-    if (closed_ || auth_ != Auth::Waiting) {
+    // Past the request phase the request has had its answer, an error or an abandonment, and
+    // must not get a second one.
+    if (closed_ || auth_ != Auth::Waiting || phase_ != Phase::Request) {
         return;
     }
     authenticate();
@@ -174,6 +177,33 @@ void Session::on_keys_refreshed() noexcept {
         leave_http();
     } catch (const std::bad_alloc&) {
         allocation_failed();
+    }
+}
+
+// The parser's one allocation is the buffer for bytes behind a request, and it reports failing to
+// grow it as 503. That can happen in the very feed() that accepted an upgrade: the 101 is out, and
+// only WebSocket may follow it.
+// Not covered by a test: the one way in is std::bad_alloc from growing a std::vector, and injecting
+// that means replacing the global operator new in chat_unit_tests, which the ASan and TSan unit
+// runs replace themselves.
+void Session::parse_failed(const http::ParseError& error) {
+    const bool out_of_memory = error.status == http::Status::ServiceUnavailable;
+    switch (phase_) {
+    case Phase::Request:
+        if (out_of_memory) {
+            ++server_.counters().allocation_failures;
+        }
+        respond(http::fixed_response(error.status, http::Connection::Close));
+        return;
+    case Phase::Open:
+        if (out_of_memory) {
+            allocation_failed();
+            return;
+        }
+        close_with(kMessageTooBig);
+        return;
+    case Phase::Closing:
+        return;
     }
 }
 

@@ -7,6 +7,7 @@
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
+#include "session.hpp"
 #include "support/eventually.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
@@ -86,6 +87,9 @@ public:
     // setting refresh_keys lets them go on.
     std::atomic<std::size_t> key_waiters = 0;
     std::atomic<bool> refresh_keys = false;
+    // Every session fails as if out of memory, and the keys arrive in the same turn, before the
+    // failed sessions have closed.
+    std::atomic<bool> fail_then_refresh_keys = false;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -166,6 +170,10 @@ private:
             (*reactor)->run_once(core::Millis{5});
             server->reap();
             if (refresh_keys.exchange(false)) {
+                verifier.refresh_keys();
+            }
+            if (fail_then_refresh_keys.exchange(false)) {
+                server->for_each_session([](chat::Session& s) noexcept { s.allocation_failed(); });
                 verifier.refresh_keys();
             }
             key_waiters = verifier.waiting();
@@ -507,6 +515,22 @@ TEST_P(ChatSessionTest, FramesSentBehindAnUpgradeWaitingOnKeysAreReadOnceItIsAcc
     ASSERT_TRUE(alice);
     expect_first_frames_answered(*alice);
     EXPECT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 0; }));
+}
+
+TEST_P(ChatSessionTest, AnUpgradeThatFailedWhileWaitingOnKeysIsNotAcceptedWhenTheyArrive) {
+    auto upgrade = std::async(std::launch::async, [&] {
+        std::string status;
+        const bool opened =
+            WsClient::connect(node_->port(), "/rt", "Authorization: Bearer slow.alice\r\n", &status)
+                .has_value();
+        return std::pair{opened, status};
+    });
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->key_waiters == 1; }));
+    node_->fail_then_refresh_keys = true;
+    const auto [opened, status] = upgrade.get();
+    // Closed without a response: no 101 after the failure.
+    EXPECT_FALSE(opened);
+    EXPECT_EQ(status, "");
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,
