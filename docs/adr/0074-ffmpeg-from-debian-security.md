@@ -24,7 +24,7 @@ Debian's and Ubuntu's security trackers), read on 2026-09-30:
 | NVD HIGH among them | 4 | 5 |
 
 Trivy 0.74.0 (the scanner PR #64 pins) on the two worker images, 2026-09-30, counting distinct
-CVEs:
+CVEs (the "after" column matches the e2e sandbox job's Trivy report in run 36731818461):
 
 | | before: Ubuntu 24.04 image | after: Debian 13 image |
 |---|---|---|
@@ -65,11 +65,12 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
   `trixie-updates`) and the security archive (`trixie-security`), through
   `deploy/docker/apt-install-debian.sh`: apt checks each index against the snapshot's signed
   Release file and the archive keys the base image ships. The snapshot is fetched over https:
-  its Release files are past their Valid-Until by design, so that check is off, and plain http
-  would let anyone on the path serve an older signed Release and roll back every unpinned
-  package with it. The base image has no CA bundle, so ca-certificates is bootstrapped from
-  the live archive (http, but signed and with Valid-Until checked) and then pinned back to the
-  snapshot's version; a build behind a TLS-inspecting proxy passes its CA as the `ca-bundle`
+  the security and updates suites' Release files are past their Valid-Until by design (trixie's
+  own has none), so that check is off, and plain http would let anyone on the path serve an
+  older signed Release and roll back every unpinned package with it. The base image has no CA
+  bundle, so ca-certificates is bootstrapped from the live archive (http, but signed, and fresh
+  where the suite sets a Valid-Until) and then pinned back to the snapshot's version, with
+  openssl, libssl3t64 and openssl-provider-legacy; a build behind a TLS-inspecting proxy passes its CA as the `ca-bundle`
   build secret instead.
 - The packages the base image already holds (libc6, util-linux, perl-base, ncurses,
   libsystemd0 and the rest) are upgraded to the snapshot's versions before the pinned install,
@@ -78,8 +79,10 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
 - Pinned at `DEBIAN_SNAPSHOT=20260930T100000Z`: `ffmpeg=7:7.1.5-0+deb13u1` (DSA-6361-1, in
   debian-security since 20260622T192543Z), `openssl` and `libssl3t64` `3.5.7-1~deb13u3` (in
   debian-security since 20260930T060347Z, which fixes the two OpenSSL HIGHs deb13u2 had),
-  `libcurl4t64=8.14.1-2+deb13u5`, `libpq5=17.11-0+deb13u1`, `liburing2=2.9-1`,
-  `ca-certificates=20250419`.
+  `openssl-provider-legacy` at the same version (libssl3t64 depends on it),
+  `libcurl4t64=8.14.1-2+deb13u5`, `libpq5=17.11-0+deb13u1`, `ca-certificates=20250419`.
+  The install fails if any package in the image ends up at a version the snapshot does not
+  offer, which catches a package the bootstrap took past the snapshot and nothing pinned back.
 - `transcode_worker` and `ulw_sandbox` are built on Ubuntu 24.04, in the same `build` stage as
   the gateway's binaries, and copied into the Debian image. Building them on trixie was the
   first choice, for binaries that link exactly the libraries they were compiled against, and
@@ -88,12 +91,15 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
   `crti.o`, `crtn.o`) carry no CET property note, so nothing linked on trixie is marked,
   whatever it is compiled with; forcing the mark at link time would claim what those objects
   were not built for. Ubuntu builds its glibc with CET, so its binaries pass. They run on
-  trixie through stable sonames and symbol versions: glibc 2.39 to 2.41, the same GCC 14.2
-  libstdc++, OpenSSL 3.0 to 3.5 (`libssl.so.3`, which OpenSSL keeps compatible across 3.x),
-  libpq 16 to 17 (`libpq.so.5`), libcurl 8.5 to 8.14 (`libcurl.so.4`) and liburing 2.5 to
-  2.9 (`liburing.so.2`). What would break shows at run time rather than at link time, so the
-  trixie workflow runs Ubuntu-built suites inside the worker image, on its libraries and its
-  ffmpeg, on every change to either. On Debian's runtime the marks are also only a promise:
+  trixie through stable sonames and symbol versions: glibc 2.39 to 2.41 (the binaries need
+  GLIBC_2.36 at most), the same GCC 14.2 libstdc++ (GLIBCXX_3.4.31 at most), OpenSSL 3.0 to
+  3.5 (`libcrypto.so.3`, for EVP digests; OpenSSL keeps 3.x compatible), libpq 16 to 17
+  (`libpq.so.5`) and libcurl 8.5 to 8.14 (`libcurl.so.4`). The constraint this puts on the
+  build: the Ubuntu release it runs on must not have a newer glibc or libstdc++ than trixie,
+  or the binaries would need symbol versions trixie lacks. They link with `-z now`, so that
+  fails at load, and the trixie workflow runs the image's own `transcode_worker` and
+  `ulw_sandbox` on every change to either side and fails on a loader error; it also runs
+  Ubuntu-built suites inside the worker image, on its libraries and its ffmpeg. On Debian's runtime the marks are also only a promise:
   its unmarked `libc.so.6` keeps the kernel from enabling a shadow stack for the process. The
   trixie build attempt did find one real difference: libcurl 8.14 declares
   `CURL_HTTP_VERSION_1_1` as a long, which made a cast in `infra/curl` fail

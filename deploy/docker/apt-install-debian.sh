@@ -11,14 +11,16 @@
 # offers for each package instead of installing, which is how a bump finds the versions to pin.
 #
 # The image's own sources (deb.debian.org, the live archive) are replaced by the snapshot's,
-# over https. A snapshot's Release files are past the Valid-Until they were signed with, by
-# design, so apt's check of it is off, and TLS to snapshot.debian.org is what keeps an older
-# signed Release from being replayed on the way; which archive state is installed is the
-# pinned timestamp's choice. The base image has no CA bundle, so ca-certificates is
-# bootstrapped from the live archive first (plain http, but signed and with Valid-Until
-# checked), and the pinned install takes it, openssl and libssl3t64 back to the snapshot's
-# versions. A build behind a TLS-inspecting proxy hands its CA in as the build secret
-# `ca-bundle`, which the snapshot's https is checked against instead.
+# over https. The security and updates suites' Release files carry a Valid-Until a week or so
+# after signing, which a snapshot is past by design, so apt's check of it is off (trixie's own
+# Release has none); TLS to snapshot.debian.org is what keeps an older signed Release from
+# being replayed on the way, and which archive state is installed is the pinned timestamp's
+# choice. The base image has no CA bundle, so ca-certificates is bootstrapped from the live
+# archive first (plain http, but signed, and fresh where the suite sets a Valid-Until), and
+# the pinned install takes it, openssl, libssl3t64 and openssl-provider-legacy back to the
+# snapshot's versions; the last step fails the build if any installed package is at a
+# version the snapshot does not offer. A build behind a TLS-inspecting proxy hands its CA in
+# as the build secret `ca-bundle`, which the snapshot's https is checked against instead.
 set -eu
 : "${DEBIAN_SNAPSHOT:?}"
 
@@ -44,14 +46,15 @@ if [ -r /run/secrets/ca-bundle ]; then
     ca=/run/secrets/ca-bundle
 elif [ ! -e "$ca" ]; then
     if ! $policy; then
-        # The bootstrap brings ca-certificates, openssl and libssl3t64 at whatever the live
-        # archive has; the pinned install below must take all three back to the snapshot's.
-        for pkg in ca-certificates openssl libssl3t64; do
+        # The bootstrap brings ca-certificates, openssl, libssl3t64 and the legacy provider
+        # libssl3t64 depends on at whatever the live archive has; the pinned install below must
+        # take all four back to the snapshot's (the check at the end fails the build if not).
+        for pkg in ca-certificates openssl libssl3t64 openssl-provider-legacy; do
             case " $* " in
             *" $pkg="*) ;;
             *)
                 echo "apt-install-debian: the first install in an image must pin" \
-                    "ca-certificates, openssl and libssl3t64" >&2
+                    "ca-certificates, openssl, libssl3t64 and openssl-provider-legacy" >&2
                 exit 1
                 ;;
             esac
@@ -97,5 +100,19 @@ DEBIAN_FRONTEND=noninteractive apt upgrade -qy --no-install-recommends --without
 # Every package is pinned, so a downgrade can only be a pin undoing the bootstrap's packages
 # after the live archive moved past the snapshot.
 DEBIAN_FRONTEND=noninteractive apt install -qy --no-install-recommends --allow-downgrades "$@"
+# Every installed package at a version the snapshot offers: an upgrade never downgrades, so a
+# package the bootstrap took past the snapshot and nothing pinned back would otherwise stay at
+# the live archive's version, and a rebuild would install different bytes.
+dpkg-query -W -f '${Package} ${Version}\n' | sort >/tmp/installed
+# shellcheck disable=SC2046 # one argument per installed package
+apt-cache madison $(cut -d' ' -f1 /tmp/installed) |
+    awk -F'|' '{gsub(/ /, "", $1); gsub(/ /, "", $2); print $1 " " $2}' | sort -u >/tmp/offered
+stray=$(comm -23 /tmp/installed /tmp/offered)
+rm -f /tmp/installed /tmp/offered
+if [ -n "$stray" ]; then
+    echo "apt-install-debian: installed at versions snapshot $DEBIAN_SNAPSHOT does not offer:" >&2
+    echo "$stray" >&2
+    exit 1
+fi
 apt-get clean
 rm -rf /var/lib/apt/lists/*

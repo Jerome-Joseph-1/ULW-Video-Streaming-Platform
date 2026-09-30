@@ -14,9 +14,11 @@
 # (docs/adr/0074); the gateway has no ffmpeg and stays on the Ubuntu release CI and the dev
 # machines build on (docs/adr/0030). Both images' binaries are built here, on Ubuntu: Debian's
 # glibc start files carry no CET marking, so nothing linked on trixie is marked for IBT and
-# SHSTK (tools/check-hardening.sh). The worker's binaries run on trixie's newer glibc,
-# libstdc++, OpenSSL 3, libcurl 4, libpq 5 and liburing 2 through those libraries' stable
-# sonames and symbol versions, which the trixie workflow exercises with the ffmpeg suites.
+# SHSTK (tools/check-hardening.sh). The worker's binaries run on trixie's newer glibc and
+# libstdc++, OpenSSL 3's libcrypto (EVP digests), libcurl 4 and libpq 5 through those
+# libraries' stable sonames and symbol versions, so the Ubuntu release built on must never have
+# a newer glibc or libstdc++ than trixie; the trixie workflow loads the image's binaries and
+# runs the ffmpeg suites there to hold that.
 
 # ubuntu:24.04 (noble), 2026-09.
 ARG UBUNTU=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
@@ -87,7 +89,7 @@ RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/loc
         libcurl4t64=8.14.1-2+deb13u5 \
         libpq5=17.11-0+deb13u1 \
         libssl3t64=3.5.7-1~deb13u3 \
-        liburing2=2.9-1 \
+        openssl-provider-legacy=3.5.7-1~deb13u3 \
         ffmpeg=7:7.1.5-0+deb13u1 \
  && useradd --system --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin ulw \
  && install -d -o 10001 -g 10001 -m 0700 /var/tmp/ulw-worker

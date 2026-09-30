@@ -359,6 +359,10 @@ The two images come from different distributions (docs/adr/0074): `video-gateway
 24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
 packages, ffmpeg among them, from snapshot.debian.org; both images' binaries are built on
 Ubuntu, since only Ubuntu's glibc lets them carry the CET marks the hardening check requires.
+On the worker those marks are a static property only: Debian's own `libc.so.6` is unmarked, so
+the kernel does not enable a shadow stack for the worker's processes. And because the worker's
+binaries run on trixie's libraries, the Ubuntu release they are built on must not have a newer
+glibc or libstdc++ than trixie; the trixie workflow fails if they stop loading there.
 Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org over
 http for the worker's bootstrap of ca-certificates (signed and checked for freshness), and
 Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes its CA as the
@@ -388,7 +392,7 @@ otherwise bump at least monthly.
 
    ```sh
    DEBIAN_SNAPSHOT=<timestamp> deploy/docker/apt-install-debian.sh --policy \
-       ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 liburing2
+       ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 openssl-provider-legacy
    ```
 
 4. Set `DEBIAN_SNAPSHOT` in `deploy/docker/Dockerfile` to the timestamp and every pinned version

@@ -21,6 +21,12 @@ on:
       - tests/integration/recording_remux_test.cpp
       - tests/integration/live_packager_test.cpp
       - tests/integration/live_recording_test.cpp
+      - infra/curl/**
+      - infra/storage/**
+      - infra/postgres/**
+      - cmake/**
+      - CMakeLists.txt
+      - CMakePresets.json
       - tools/trace-ffmpeg-syscalls.sh
       - tools/ffmpeg-address-space.sh
       - .github/workflows/trixie.yml
@@ -36,6 +42,12 @@ on:
       - tests/integration/recording_remux_test.cpp
       - tests/integration/live_packager_test.cpp
       - tests/integration/live_recording_test.cpp
+      - infra/curl/**
+      - infra/storage/**
+      - infra/postgres/**
+      - cmake/**
+      - CMakeLists.txt
+      - CMakePresets.json
       - tools/trace-ffmpeg-syscalls.sh
       - tools/ffmpeg-address-space.sh
       - .github/workflows/trixie.yml
@@ -82,6 +94,26 @@ jobs:
           cmake --build --preset ci --target ffmpeg_unit_tests worker_integration_tests
           live_packager_integration_tests live_recording_integration_tests
       - run: docker build -f deploy/docker/Dockerfile --target worker -t ulw-worker-test .
+      # The image's own binaries, built on Ubuntu, against trixie's libraries. They link with
+      # -z now, so a symbol version trixie lacks (a newer glibc or libstdc++ on the build
+      # release) fails at load, before main: exit 127 or the loader's message. A refusal of
+      # the empty configuration is main running, which is the pass.
+      - name: The image's binaries load on trixie
+        run: |
+          status=0
+          for binary in transcode_worker ulw_sandbox; do
+            code=0
+            output=$(docker run --rm --entrypoint "/usr/local/bin/$binary" ulw-worker-test 2>&1) ||
+              code=$?
+            echo "$binary: exit $code: $output"
+            if [[ $code -eq 127 ]] || grep -qE \
+                "error while loading shared libraries|symbol lookup error|version .* not found" \
+                <<<"$output"; then
+              echo "::error::$binary does not load on trixie"
+              status=1
+            fi
+          done
+          exit $status
       # Inside the worker image as root, with the workspace at the same path, since the suites
       # name the helper and the worker by their build paths; privileged for the sandbox's
       # namespaces, as the runner's own jobs get them. The suites run as the runner's uid, as
