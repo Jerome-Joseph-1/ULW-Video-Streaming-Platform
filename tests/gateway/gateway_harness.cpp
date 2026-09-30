@@ -300,6 +300,19 @@ void GatewayUnderTest::refresh_keys() {
     on_loop([&] { loop_->verifier.refresh_keys(); });
 }
 
+std::size_t GatewayUnderTest::queued_output() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->gateway->queued_output(); });
+    return out;
+}
+
+void GatewayUnderTest::refresh_keys_then_drain() {
+    on_loop([&] {
+        loop_->verifier.refresh_keys();
+        loop_->gateway->begin_drain();
+    });
+}
+
 std::size_t GatewayUnderTest::key_waiters() {
     std::size_t out = 0;
     on_loop([&] { out = loop_->verifier.waiting(); });
