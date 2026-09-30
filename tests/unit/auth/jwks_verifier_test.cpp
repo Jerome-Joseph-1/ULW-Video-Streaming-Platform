@@ -368,7 +368,9 @@ TEST_F(JwksVerifierTest, KeysUnrefreshedForADayAreDroppedAndEveryTokenRefusedUnt
         *reactor_, fetcher_,
         JwksConfig{.url = std::string(kUrl),
                    .claims = ulw::test::kTestRules,
-                   .on_keys_expired = [&expiries](core::Millis age) { expiries.push_back(age); }});
+                   .on_keys_expired = [&expiries](core::Millis age) noexcept {
+                       expiries.push_back(age);
+                   }});
     const std::string token =
         signed_token(ed_key(), "EdDSA",
                      test_payload({{"exp", ulw::test::numeric_date(std::int64_t{3} * 24 * 3600)}}));

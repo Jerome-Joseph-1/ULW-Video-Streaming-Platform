@@ -46,7 +46,9 @@ struct JwksConfig {
     core::Millis max_key_age = kDefaultMaxKeyAge;
     // Called on the reactor thread when the keys are dropped for their age, with the time since
     // the last successful fetch; for a log line, since every token is refused from then on.
-    std::function<void(core::Millis age)> on_keys_expired = nullptr;
+    // noexcept: it runs inside the verifier's noexcept expiry path, where a throw would end the
+    // process.
+    std::move_only_function<void(core::Millis age) const noexcept> on_keys_expired = nullptr;
 };
 
 // Verifies tokens against the JWK set at a URL, fetched on the reactor thread and cached:

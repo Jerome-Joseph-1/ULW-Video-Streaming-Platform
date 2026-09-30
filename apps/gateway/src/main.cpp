@@ -226,7 +226,7 @@ std::expected<void, std::string> make_verifier(const gateway::Config& config, Se
             .url = config.jwks_url,
             .claims = std::move(rules),
             .max_key_age = std::chrono::hours(config.jwks_max_stale_hours),
-            .on_keys_expired = [&log](core::Millis age) {
+            .on_keys_expired = [&log](core::Millis age) noexcept {
                 log.error("jwks keys expired",
                           {{"hours_without_refresh",
                             std::chrono::duration_cast<std::chrono::hours>(age).count()}});

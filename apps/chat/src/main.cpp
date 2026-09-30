@@ -136,7 +136,7 @@ std::expected<void, std::string> make_verifier(const chat::Config& config, Servi
             .url = config.jwks_url,
             .claims = std::move(rules),
             .max_key_age = std::chrono::hours(config.jwks_max_stale_hours),
-            .on_keys_expired = [](core::Millis age) {
+            .on_keys_expired = [](core::Millis age) noexcept {
                 chat::log_event(
                     R"("level":"error","msg":"jwks keys expired","hours_without_refresh":{})",
                     std::chrono::duration_cast<std::chrono::hours>(age).count());

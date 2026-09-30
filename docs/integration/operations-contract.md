@@ -64,6 +64,8 @@ effective configuration, secrets as `<redacted>`.
 | `JWT_ISSUER` | required | never set | required | Secret by convention |
 | `JWT_AUDIENCE` | default `askedin-platform` | | same | |
 | `ULW_AUTH_COOKIE` | default `auth_token` | | same | `auth_token_stage` on stage |
+| `ULW_JWKS_MAX_STALE_HOURS` | 1 to 168, default 24 | | same | How long the keys stay trusted while every JWKS refetch fails; past it every token is refused and `jwks_keys_expired` is `1` ([auth.md](auth.md)) |
+| `ULW_DEV_MODE` | `0` (default) or `1` | | same | `1` marks a development run, which `ULW_DEV_JWKS_FILE` needs; that file is refused in a Kubernetes pod whatever this says. Never set in stage or production |
 | `ULW_LISTEN_PORT` | default 8080 | | default 9101 | |
 | `ULW_TRANSPORT` | `plain` (default) or `tls` | | | `tls` needs `ULW_TLS_CERT_FILE` and `ULW_TLS_KEY_FILE`. Session tickets are sealed with a random in-memory key replaced every 12 h; the key before it still opens tickets for 12 h more, so a ticket resumes for 12 to 24 h, across certificate reloads, and a leaked key opens at most a day of resumed sessions. Nothing to configure; replicas do not share keys, so a client resumes only on the replica that issued its ticket |
 | `ULW_REACTOR` | `io_uring` (default) or `epoll` | | same | Falls back to epoll when io_uring is unavailable |
