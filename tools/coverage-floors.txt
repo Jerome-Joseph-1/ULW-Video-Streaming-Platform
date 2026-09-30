@@ -1,0 +1,13 @@
+# Coverage floors per top-level directory (ADR-0074): <directory> <line %> <branch %>.
+# Each is the measured value rounded down to a whole percent. Raise one when coverage rises;
+# never lower one.
+apps 86 79
+codec 95 85
+core 91 83
+http 94 94
+infra 85 74
+net 86 73
+ops 91 84
+os 46 24
+rt 88 77
+tools 52 43
