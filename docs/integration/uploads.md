@@ -127,12 +127,16 @@ A `409` on `PATCH` carries the authoritative `Upload-Offset` too, so a client ca
 Only one `PATCH` per upload runs at a time. A second one while the first is in flight gets
 `409` with the current offset; do not upload one file over parallel connections.
 
-Upload lifetime: an upload must be committed within 6 days of its create, to within the clock
-skew between the gateway's hosts. From that moment `PATCH`, `HEAD` and commit answer `410 Gone`, as the tus protocol's expiration
-extension does, even with every byte durable, and the upload has to start again with a new
-create. The answer is the same before and after the upload reaper aborts the upload and fails its
-video, and for an upload that was cancelled. `DELETE` is still allowed. A committed upload never
-expires: a repeated commit and `HEAD` answer as before.
+Upload lifetime: an upload must be committed within 6 days of its create request. From that
+moment `PATCH`, `HEAD` and commit answer `410 Gone`, as the tus protocol's expiration extension
+does, even with every byte durable, and the upload has to start again with a new create. The
+answer is the same before and after the upload reaper aborts the upload and fails its video, and
+for an upload that was cancelled. `DELETE` is still allowed. A committed upload never expires: a
+repeated commit and `HEAD` answer as before.
+
+The moment holds to within the clock skew between the hosts that judge it: the gateway
+instances, and the reaper's. A gateway whose clock is behind the reaper's can, for that skew,
+answer `409` for an upload the reaper has already aborted.
 
 ## Limits and admission
 
@@ -195,7 +199,7 @@ the request and byte allowances in all.
 | `405` | `Allow` | Wrong method for the path | Fix the client |
 | `408` | | Body idle for 30 s, or slower than 8 KiB/s | Resume from `HEAD` |
 | `409` | `Upload-Offset` | `PATCH`: offset is not the durable offset, another `PATCH` on this upload is running, or the upload is committed or cancelled. Commit: not all bytes durable yet, or cancelled. `DELETE`: already committed. | Resume from the returned offset; commit once it equals `size_bytes`. If the upload is committed or cancelled, stop. |
-| `410` | | `PATCH`, `HEAD` or commit on an upload past its expiry, 6 days after its create, unless it was committed | Stop; start a new upload |
+| `410` | | `PATCH`, `HEAD` or commit on an upload past its expiry, 6 days after its create request, unless it was committed | Stop; start a new upload |
 | `411` | | `Transfer-Encoding` on a create or `PATCH` | Send `Content-Length` |
 | `413` | | Create body over 4 KiB, or `PATCH` body over 16 MiB | Send smaller chunks |
 | `429` | `Retry-After` | This user already has 3 chunk uploads running on this instance (`Retry-After: 5`); this user is over 300 requests a minute or 100 GiB a day; this client address has 20 requests in flight (`Retry-After: 1`) | Wait `Retry-After` seconds, then retry the same request |
