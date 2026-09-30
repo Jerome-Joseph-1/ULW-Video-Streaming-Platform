@@ -425,6 +425,42 @@ TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
               R"({"type":"sent","room":")" + std::string(kRoom) + R"(","id":"m5","seq":1})");
 }
 
+// Every frame is encoded into one buffer the server keeps, and every message's text into one
+// the service keeps: a large message leaves nothing of itself in a smaller one sent after it.
+TEST_P(ChatSessionTest, AMessageAfterALargerOneIsSentExactlyToEveryMember) {
+    auto alice = open_as("alice");
+    auto bob = open_as("bob");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    const std::string join = R"({"type":"join","room":")" + std::string(kRoom) + R"("})";
+    ASSERT_TRUE(alice->send_text(join));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+    ASSERT_TRUE(bob->send_text(join));
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+    const std::string large =
+        infra::auth::encode_base64url(std::string(std::size_t{24} * 1024, 'L'));
+    const std::string small = "cw";
+    std::uint64_t seq = 0;
+    for (const std::string* body : {&large, &small, &large, &small}) {
+        ++seq;
+        const std::string id = "m" + std::to_string(seq);
+        ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
+                                     R"(","id":")" + id + R"(","body":")" + *body + R"("})"));
+        const std::string message = R"({"type":"message","room":")" + std::string(kRoom) +
+                                    R"(","seq":)" + std::to_string(seq) +
+                                    R"(,"sender":"alice","id":")" + id + R"(","body":")" + *body +
+                                    R"("})";
+        EXPECT_EQ(alice->next_text(seconds(10)), message) << id;
+        EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"sent","room":")" + std::string(kRoom) +
+                                                     R"(","id":")" + id + R"(","seq":)" +
+                                                     std::to_string(seq) + "}")
+            << id;
+        EXPECT_EQ(bob->next_text(seconds(10)), message) << id;
+    }
+}
+
 TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);

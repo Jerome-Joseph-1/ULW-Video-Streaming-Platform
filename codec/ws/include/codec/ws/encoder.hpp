@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <span>
 #include <vector>
 
 namespace codec::ws {
@@ -22,6 +23,11 @@ enum class EncodeError : std::uint8_t {
 // caller keeps the sequence valid: Continuation only inside a message it started with fin unset.
 [[nodiscard]] std::expected<void, EncodeError> encode(const Frame& frame,
                                                       std::vector<std::byte>& out);
+// The same for a payload the caller already holds, which is not copied into a Frame first. With
+// no close status, a Close takes no payload. `payload` must not point into `out`: growing `out`
+// would move the bytes it reads.
+[[nodiscard]] std::expected<void, EncodeError>
+encode(Opcode opcode, bool fin, std::span<const std::byte> payload, std::vector<std::byte>& out);
 
 // The client's side, for tests and tools: every frame masked with a fresh key.
 class ClientEncoder {

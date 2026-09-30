@@ -184,6 +184,24 @@ TEST(Json, ReadsNestedStructures) {
     EXPECT_EQ(v->find("x")->kind(), Kind::Null);
 }
 
+// A string is read into room for its written length: escapes that decode shorter (or, for
+// \u, longer than one byte) and a backslash at the very end still read as they should.
+TEST(Json, ReadsStringsOfEveryLengthAndEscapeMix) {
+    EXPECT_EQ(parse(R"("")")->as_string(), "");
+    EXPECT_EQ(parse(R"("\\")")->as_string(), "\\");
+    EXPECT_EQ(parse(R"("a\"b")")->as_string(), "a\"b");
+    EXPECT_EQ(parse(R"("\u00e9\u20ac\ud83d\ude00")")->as_string(),
+              "\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80");
+    const std::string long_text(std::size_t{20} * 1024, 'x');
+    const auto doc = parse(R"({"a":")" + long_text + R"(\n","b":"\")" + long_text + R"("})");
+    ASSERT_TRUE(doc);
+    EXPECT_EQ(doc->find("a")->as_string(), long_text + "\n");
+    EXPECT_EQ(doc->find("b")->as_string(), "\"" + long_text);
+    for (const std::string_view s : {R"("abc\)", R"("\)", R"("abc\")", R"(")"}) {
+        EXPECT_FALSE(parse(s)) << s;
+    }
+}
+
 TEST(Json, EscapedStringsRoundTrip) {
     const std::string raw = "q\"b\\s\x01\x1f\n\t\xc3\xa9";
     std::string out;

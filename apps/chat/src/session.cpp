@@ -514,11 +514,7 @@ bool Session::push(std::string_view text) noexcept {
         return false;
     }
     try {
-        const auto bytes = bytes_of(text);
-        send_frame({.opcode = codec::ws::Opcode::Text,
-                    .fin = true,
-                    .payload = {bytes.begin(), bytes.end()},
-                    .close_code = codec::ws::CloseCode::NoStatus});
+        send_text(text);
     } catch (const std::bad_alloc&) {
         allocation_failed();
     }
@@ -530,25 +526,36 @@ std::size_t Session::unsent_bytes() const noexcept {
     return server_.deps().reactor.pending_send_bytes(conn_);
 }
 
-void Session::send_text(const std::string& text) {
-    const auto bytes = bytes_of(text);
-    send_frame({.opcode = codec::ws::Opcode::Text,
-                .fin = true,
-                .payload = {bytes.begin(), bytes.end()},
-                .close_code = codec::ws::CloseCode::NoStatus});
+// The text goes straight into the server's frame buffer, not through a Frame of its own.
+void Session::send_text(std::string_view text) {
+    if (phase_ != Phase::Open) {
+        return;
+    }
+    std::vector<std::byte>& out = server_.frame_buffer();
+    out.clear();
+    if (!codec::ws::encode(codec::ws::Opcode::Text, true, bytes_of(text), out)) {
+        abandon();
+        return;
+    }
+    transmit(out);
 }
 
 void Session::send_frame(const codec::ws::Frame& frame) {
     if (phase_ != Phase::Open) {
         return;
     }
-    std::vector<std::byte> out;
+    std::vector<std::byte>& out = server_.frame_buffer();
+    out.clear();
     if (!codec::ws::encode(frame, out)) {
         abandon();
         return;
     }
+    transmit(out);
+}
+
+void Session::transmit(std::span<const std::byte> frame) {
     net::IReactor& reactor = server_.deps().reactor;
-    reactor.send(conn_, out);
+    reactor.send(conn_, frame);
     watch_output();
     if (reactor.pending_send_bytes(conn_) > server_.limits().max_backlog) {
         ++server_.counters().slow_consumers;
