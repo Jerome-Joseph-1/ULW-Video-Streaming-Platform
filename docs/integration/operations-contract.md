@@ -65,7 +65,7 @@ effective configuration, secrets as `<redacted>`.
 | `JWT_AUDIENCE` | default `askedin-platform` | | same | |
 | `ULW_AUTH_COOKIE` | default `auth_token` | | same | `auth_token_stage` on stage |
 | `ULW_LISTEN_PORT` | default 8080 | | default 9101 | |
-| `ULW_TRANSPORT` | `plain` (default) or `tls` | | | `tls` needs `ULW_TLS_CERT_FILE` and `ULW_TLS_KEY_FILE` |
+| `ULW_TRANSPORT` | `plain` (default) or `tls` | | | `tls` needs `ULW_TLS_CERT_FILE` and `ULW_TLS_KEY_FILE`. Session tickets are sealed with a random in-memory key replaced every 12 h; the key before it still opens tickets for 12 h more, so a ticket resumes for 12 to 24 h, across certificate reloads, and a leaked key opens at most a day of resumed sessions. Nothing to configure; replicas do not share keys, so a client resumes only on the replica that issued its ticket |
 | `ULW_REACTOR` | `io_uring` (default) or `epoll` | | same | Falls back to epoll when io_uring is unavailable |
 | `ULW_OFFLOAD_THREADS` | 1 to 64, default 4 | | | |
 | `ULW_MAX_CONNECTIONS` | 1 to 65536, default 448 | | | Past this, a new connection is closed at accept |
