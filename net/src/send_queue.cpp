@@ -1,18 +1,43 @@
 #include "send_queue.hpp"
 
+#include <sys/mman.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <new>
 
 namespace net::detail {
+
+namespace {
+
+void unmap(Chunk* chunk) noexcept {
+    chunk->~Chunk();
+    ::munmap(chunk, sizeof(Chunk));
+}
+
+} // namespace
+
+ChunkPool::~ChunkPool() {
+    while (free_ != nullptr) {
+        Chunk* c = free_;
+        free_ = c->next;
+        unmap(c);
+    }
+}
 
 Chunk* ChunkPool::acquire() {
     Chunk* c = free_;
     if (c != nullptr) {
         free_ = c->next;
+        --kept_;
     } else {
-        owned_.push_back(std::make_unique<Chunk>());
-        c = owned_.back().get();
+        void* mem = ::mmap(nullptr, sizeof(Chunk), PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mem == MAP_FAILED) {
+            throw std::bad_alloc();
+        }
+        c = ::new (mem) Chunk;
     }
     c->next = nullptr;
     c->begin = c->end = 0;
@@ -21,9 +46,14 @@ Chunk* ChunkPool::acquire() {
 }
 
 void ChunkPool::release(Chunk* chunk) noexcept {
+    --in_use_;
+    if (kept_ >= keep_) {
+        unmap(chunk);
+        return;
+    }
     chunk->next = free_;
     free_ = chunk;
-    --in_use_;
+    ++kept_;
 }
 
 ByteQueue::~ByteQueue() {
