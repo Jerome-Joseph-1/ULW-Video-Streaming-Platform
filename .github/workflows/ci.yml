@@ -219,6 +219,8 @@ jobs:
   lint:
     name: boundaries + format + tidy
     runs-on: ubuntu-24.04
+    # The full-tree tidy on main took 59-88 min (runner speed varies); well past that is a hang.
+    timeout-minutes: 150
     env:
       CC: clang-19
       CXX: clang++-19
