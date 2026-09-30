@@ -98,18 +98,20 @@ it before issuing tokens with it.
 
 ## Rejections
 
-<!-- apps/gateway/src/connection.cpp (on_head, authenticate), apps/chat/src/session.cpp (route, answer_request) -->
+<!-- apps/gateway/src/connection.cpp (on_head, authenticate, fail), http/src/response.cpp (write_response_head), apps/chat/src/session.cpp (route, answer_request) -->
 
 | Case | Gateway (HTTP) | Chat (`GET /rt` upgrade) |
 |---|---|---|
-| No token, malformed header, duplicate token cookie | `401` | `401` |
-| Any verification failure: bad signature, unknown `kid`, expired, wrong `iss` or `aud`, missing or malformed subject | `401` | `401` |
+| No token, malformed header, duplicate token cookie | `401` with `WWW-Authenticate: Bearer` | `401` |
+| Any verification failure: bad signature, unknown `kid`, expired, wrong `iss` or `aud`, missing or malformed subject | `401` with `WWW-Authenticate: Bearer error="invalid_token"` | `401` |
 | The key set cannot be fetched and no cached key fits the token | `503` with `Retry-After: 5` | `503` |
 | Cookie token on a socket whose `Origin` is not allowed (see [chat.md](chat.md)) | n/a | `403` |
 
-Every rejection has an empty body (`Content-Length: 0`) and no `WWW-Authenticate` header. The
-gateway's responses carry `X-Request-Id`; quote it when reporting a problem. The reason for a
-401 is not sent to the client.
+Every rejection has an empty body (`Content-Length: 0`). A gateway `401` carries the RFC 6750
+challenge: exactly `WWW-Authenticate: Bearer` when no token could be read from the request, and
+exactly `WWW-Authenticate: Bearer error="invalid_token"` when one was read and failed
+verification. Chat's `401` carries no `WWW-Authenticate` header. The gateway's responses carry
+`X-Request-Id`; quote it when reporting a problem. Which check failed is not sent to the client.
 
 Client action:
 
