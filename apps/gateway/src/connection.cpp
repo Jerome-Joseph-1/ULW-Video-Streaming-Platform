@@ -260,8 +260,11 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     }
     req_.method = head.method;
     req_.content_length = head.content_length;
+    // Counted whether or not the connection stays open: one that closes after this response
+    // never reads the count again.
+    ++requests_;
     req_.keep_alive =
-        head.keep_alive && !draining_ && ++requests_ < gw().limits().max_requests_per_connection;
+        head.keep_alive && !draining_ && requests_ < gw().limits().max_requests_per_connection;
 
     const auto match = kRouter.match(head.method, head.target);
     if (!match) {

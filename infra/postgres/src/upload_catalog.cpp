@@ -489,7 +489,7 @@ public:
     Impl(net::IReactor& reactor, std::unique_ptr<Pool> main, std::unique_ptr<Pool> locks)
         : main_(std::move(main)), locks_(std::move(locks)), deferred_(reactor) {}
 
-    Pool& main() noexcept { return *main_; }
+    Pool& main_pool() noexcept { return *main_; }
 
     void settle(CatalogCallback<void> done) {
         deferred_.post([done = std::move(done)]() mutable noexcept { done({}); });
@@ -649,11 +649,11 @@ PgUploadCatalog::PgUploadCatalog(Token /*token*/, std::unique_ptr<Impl> impl) no
 PgUploadCatalog::~PgUploadCatalog() = default;
 
 void PgUploadCatalog::create_upload(NewUpload upload, CatalogCallback<void> done) {
-    impl_->main().submit(std::make_unique<CreateUpload>(std::move(upload), std::move(done)));
+    impl_->main_pool().submit(std::make_unique<CreateUpload>(std::move(upload), std::move(done)));
 }
 
 void PgUploadCatalog::find_upload(const core::UploadId& id, CatalogCallback<StoredUpload> done) {
-    impl_->main().submit(std::make_unique<Query>(
+    impl_->main_pool().submit(std::make_unique<Query>(
         Statement{.sql = kFindUpload, .params = Params{}.add_uuid(id.uuid())},
         [done = std::move(done)](Outcome outcome) mutable noexcept {
             done(outcome ? decode_upload(*outcome) : failure<StoredUpload>(outcome.error()));
@@ -675,7 +675,7 @@ void PgUploadCatalog::record_progress(const core::UploadId& id, const core::Vide
         impl_->refuse(std::move(done), CatalogError::Conflict);
         return;
     }
-    impl_->main().submit(std::make_unique<Query>(
+    impl_->main_pool().submit(std::make_unique<Query>(
         Statement{.sql = kRecordProgress,
                   .params = Params{}
                                 .add_uuid(id.uuid())
@@ -697,15 +697,16 @@ void PgUploadCatalog::record_progress(const core::UploadId& id, const core::Vide
 
 void PgUploadCatalog::commit_upload(const core::UploadId& id, const core::VideoId& video,
                                     const std::string& request_id, CatalogCallback<void> done) {
-    impl_->main().submit(std::make_unique<CommitUpload>(id, video, request_id, std::move(done)));
+    impl_->main_pool().submit(
+        std::make_unique<CommitUpload>(id, video, request_id, std::move(done)));
 }
 
 void PgUploadCatalog::abort_upload(const core::UploadId& id, CatalogCallback<void> done) {
-    impl_->main().submit(std::make_unique<AbortUpload>(id, std::move(done)));
+    impl_->main_pool().submit(std::make_unique<AbortUpload>(id, std::move(done)));
 }
 
 void PgUploadCatalog::find_video(const core::VideoId& id, CatalogCallback<core::VideoRecord> done) {
-    impl_->main().submit(std::make_unique<Query>(
+    impl_->main_pool().submit(std::make_unique<Query>(
         Statement{.sql = kFindVideo, .params = Params{}.add_uuid(id.uuid())},
         [done = std::move(done)](Outcome outcome) mutable noexcept {
             done(outcome ? decode_video(*outcome) : failure<core::VideoRecord>(outcome.error()));
@@ -718,7 +719,7 @@ void PgUploadCatalog::record_views(std::vector<core::ports::ViewEvent> batch,
         impl_->settle(std::move(done));
         return;
     }
-    impl_->main().submit(std::make_unique<RecordViews>(batch, std::move(done)));
+    impl_->main_pool().submit(std::make_unique<RecordViews>(batch, std::move(done)));
 }
 
 } // namespace infra::postgres

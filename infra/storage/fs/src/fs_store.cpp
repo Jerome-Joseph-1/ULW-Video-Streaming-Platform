@@ -231,7 +231,7 @@ public:
         std::vector<std::byte> bytes;
         std::uint64_t at = 0;
         std::uint64_t chunk = 0;
-        bool final = false;
+        bool finalizing = false;
     };
 
     WriteJob(FsStore& store, Session& owner, Request request)
@@ -273,7 +273,7 @@ public:
         // drops when a session reopened below it re-sends what is already there. Syncing
         // once per chunk mirrors the object stores, where bytes become durable a part at a
         // time, and keeps fdatasync off the per-buffer path.
-        if (end > *on_disk && (req_.final || end / req_.chunk > *on_disk / req_.chunk)) {
+        if (end > *on_disk && (req_.finalizing || end / req_.chunk > *on_disk / req_.chunk)) {
             if (::fdatasync(req_.fd.get()) != 0) {
                 error_ = from_errno(errno);
                 return;
@@ -292,7 +292,7 @@ public:
     [[nodiscard]] Session* owner() const noexcept { return owner_; }
     [[nodiscard]] std::optional<StorageError> error() const noexcept { return error_; }
     [[nodiscard]] std::optional<std::uint64_t> durable() const noexcept { return durable_; }
-    [[nodiscard]] bool final() const noexcept { return req_.final; }
+    [[nodiscard]] bool finalizing() const noexcept { return req_.finalizing; }
     [[nodiscard]] const fs::path& dir() const noexcept { return req_.dir; }
     [[nodiscard]] os::UniqueFd take_fd() noexcept { return std::move(req_.fd); }
     [[nodiscard]] std::vector<std::byte> take_buffer() noexcept {
@@ -407,7 +407,7 @@ public:
             durable_ = std::max(durable_, *d);
         }
         if (state_ == IngestState::Finalizing) {
-            if (job.final()) {
+            if (job.finalizing()) {
                 state_ = IngestState::Committed;
             } else {
                 // No write can arrive once finishing, so this job carries the rest.
@@ -437,7 +437,7 @@ private:
                                                          .bytes = std::move(bytes),
                                                          .at = at,
                                                          .chunk = id_.chunk_size,
-                                                         .final = finalizing}));
+                                                         .finalizing = finalizing}));
     }
 
     FsStore& store_;
