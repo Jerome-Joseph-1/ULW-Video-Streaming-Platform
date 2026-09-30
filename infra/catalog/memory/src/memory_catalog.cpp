@@ -101,7 +101,7 @@ void MemoryCatalog::record_progress(const core::UploadId& id, const core::VideoI
 void MemoryCatalog::commit_upload(const core::UploadId& id, const core::VideoId& video,
                                   const std::string& request_id,
                                   CatalogCallback<core::VideoState> done) {
-    core::ports::CatalogResult<core::VideoState> result = std::unexpected(CatalogError::NotFound);
+    core::ports::CatalogResult<core::VideoState> result;
     const auto it = uploads_.find(id);
     const auto v = videos_.find(video);
     if (it == uploads_.end() || v == videos_.end()) {

@@ -66,7 +66,9 @@ UPDATE uploads SET state = 'completed', durable_offset = size_bytes
  WHERE id = $1 AND video_id = $2 AND state = 'active'
 RETURNING object_key)sql";
 
-// The video row cannot be missing: deleting a video deletes its uploads.
+// The video row cannot be missing: deleting a video deletes its uploads. deleted_at is not
+// checked, as kStartProcessing does not check it: a soft-deleted video still answers its state,
+// because the commit went through.
 constexpr Sql kUploadState = R"sql(
 SELECT uploads.state, videos.state
   FROM uploads JOIN videos ON videos.id = uploads.video_id

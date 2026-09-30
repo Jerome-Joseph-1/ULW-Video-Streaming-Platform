@@ -301,8 +301,8 @@ TEST_P(CatalogTest, ConcurrentCommitsFromTwoGatewaysQueueOneJob) {
     Reply<core::VideoState> second;
     catalog->commit_upload(u.upload.id, u.video.id, "req-1", first.callback());
     other->commit_upload(u.upload.id, u.video.id, "req-2", second.callback());
-    EXPECT_TRUE(ulw::test::wait(*reactor, first));
-    EXPECT_TRUE(ulw::test::wait(*reactor, second));
+    EXPECT_EQ(ulw::test::wait(*reactor, first), core::VideoState::Processing);
+    EXPECT_EQ(ulw::test::wait(*reactor, second), core::VideoState::Processing);
     EXPECT_EQ(jobs_for(u), "1");
 }
 

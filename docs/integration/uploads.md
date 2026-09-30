@@ -97,11 +97,12 @@ Response `200`, `application/json`:
 {"video_id":"01a0ece4-69d0-781f-822e-f9f2e975cd5f","state":"processing"}
 ```
 
-`state` is the video's state as the commit read it: `processing` after the first commit.
-Commit is idempotent: repeating it after a success answers `200` again and queues no second job,
-with the video's state as it is then, `processing`, `ready` or `failed`
-([videos-and-playback.md](videos-and-playback.md#lifecycle)). A client that lost the first answer
-can repeat the commit instead of polling `GET /api/v1/videos/{id}` once.
+`state` is the video's state as the commit left or found it: `processing` after the first
+commit. Commit is idempotent: repeating it after a success answers `200` again and queues no
+second job, with the video's state as it is then, `processing`, `ready` or `failed`
+([videos-and-playback.md](videos-and-playback.md#lifecycle)). So a client that lost the answer
+to its commit can repeat the commit to learn both that it went through and where the video
+stands.
 
 ### Cancel: `DELETE /api/v1/uploads/{id}`
 
@@ -297,8 +298,8 @@ Content-Type: application/json
 {"video_id":"01a0ece4-69d0-781f-822e-f9f2e975cd5f","state":"processing"}
 ```
 
-The second commit answered the same `200` and body. After it, `PATCH` and `DELETE` answer
-`409` with `Upload-Offset: 15893815`.
+The second commit answered the same `200` and body: the video was still `processing`. After it,
+`PATCH` and `DELETE` answer `409` with `Upload-Offset: 15893815`.
 
 Poll the video until it is ready (5 s apart; this 12 s clip was ready at the second poll):
 
