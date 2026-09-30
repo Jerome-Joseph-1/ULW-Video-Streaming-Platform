@@ -237,6 +237,47 @@ TEST_P(GatewayUpload, CommitIsIdempotentAndQueuesOneJob) {
     EXPECT_EQ(jobs[0].source_key.str(), "videos/" + up->video_id + "/raw");
 }
 
+TEST_P(GatewayUpload, ARepeatedCommitReportsTheVideosStateAsItIsNow) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(2 * kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    ASSERT_TRUE(upload_all(c, *up, data));
+    const std::string commit = "/api/v1/uploads/" + up->upload_id + "/commit";
+    const auto answer = [&](std::string_view state) {
+        return R"({"video_id":")" + up->video_id + R"(","state":")" + std::string(state) + R"("})";
+    };
+    const auto first = c.request("POST", commit, kAlice);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->status, 200);
+    EXPECT_EQ(first->body, answer("processing"));
+
+    // What the worker leaves behind, as it would write it.
+    core::VideoRecord video{.id = *core::VideoId::parse(up->video_id),
+                            .owner = *core::UserId::parse(kAlice.substr(kAlice.find('.') + 1)),
+                            .title = "trip.mp4",
+                            .state = core::VideoState::Ready,
+                            .version = 3,
+                            .error_reason = std::nullopt,
+                            .duration = core::Millis{5'000}};
+    gw.put_video(video);
+    const auto ready = c.request("POST", commit, kAlice);
+    ASSERT_TRUE(ready);
+    EXPECT_EQ(ready->status, 200);
+    EXPECT_EQ(ready->body, answer("ready"));
+
+    video.state = core::VideoState::Failed;
+    video.error_reason = "the file could not be decoded as video";
+    video.duration = std::nullopt;
+    gw.put_video(video);
+    const auto failed = c.request("POST", commit, kAlice);
+    ASSERT_TRUE(failed);
+    EXPECT_EQ(failed->status, 200);
+    EXPECT_EQ(failed->body, answer("failed"));
+    EXPECT_EQ(gw.jobs().size(), 1U);
+}
+
 TEST_P(GatewayUpload, CommitBeforeEveryByteArrivedIs409) {
     GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
     const auto data = ulw::test::pattern(2 * kMiB);

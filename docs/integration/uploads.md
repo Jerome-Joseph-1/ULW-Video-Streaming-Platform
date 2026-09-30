@@ -85,7 +85,7 @@ right even after a `PATCH` whose response was lost. For a committed upload it is
 
 ### Commit: `POST /api/v1/uploads/{id}/commit`
 
-<!-- apps/gateway/src/connection.cpp (on_found, on_committed), infra/postgres/src/upload_catalog.cpp (CommitUpload) -->
+<!-- apps/gateway/src/connection.cpp (on_found, on_committed), infra/postgres/src/upload_catalog.cpp (CommitUpload, kFindVideo) -->
 
 No body (`Content-Length` 0 or absent). Once all `size_bytes` are durable, the file is assembled
 in the store, the video moves to `processing` and one transcode job is queued, in one
@@ -97,9 +97,11 @@ Response `200`, `application/json`:
 {"video_id":"01a0ece4-69d0-781f-822e-f9f2e975cd5f","state":"processing"}
 ```
 
-Commit is idempotent: repeating it after a success answers the same `200` and queues no second
-job. The `state` in this answer is always `processing`, even on a repeat after the video is
-`ready`; read the real state from `GET /api/v1/videos/{id}`.
+`state` is the video's state when the answer is written: `processing` after the first commit.
+Commit is idempotent: repeating it after a success answers `200` again and queues no second job,
+with the video's state as it is then, `processing`, `ready` or `failed`
+([videos-and-playback.md](videos-and-playback.md#lifecycle)). A client that lost the first answer
+can repeat the commit instead of polling `GET /api/v1/videos/{id}` once.
 
 ### Cancel: `DELETE /api/v1/uploads/{id}`
 
