@@ -358,6 +358,84 @@ TEST_F(MessageStoreTest, AJoinOfARecordedRoomWritesNothing) {
     EXPECT_EQ(xmin(), before);
 }
 
+// Membership is what keeps a closed room closed: a member taken off is refused at the next join,
+// and taking them off again, or taking off someone never added, changes nothing.
+TEST_F(MessageStoreTest, AMemberTakenOffAClosedRoomIsNoLongerAdmitted) {
+    const core::RoomId room = new_room();
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    const auto admits = [&](const core::UserId& user) {
+        return ask<core::ports::Admission>([&](auto done) {
+            store_->admits(room, user, core::ports::RoomKind::GroupChat, std::move(done));
+        });
+    };
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(room, alice_, std::move(done)); }));
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(room, bob, std::move(done)); }));
+    EXPECT_EQ(admits(bob), core::ports::Admission::Admitted);
+
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->remove_member(room, bob, std::move(done)); }));
+    EXPECT_EQ(admits(bob), core::ports::Admission::NotMember);
+    EXPECT_EQ(admits(alice_), core::ports::Admission::Admitted);
+    EXPECT_TRUE(ask<void>([&](auto done) { store_->remove_member(room, bob, std::move(done)); }));
+    const core::UserId never = *core::UserId::parse("auth0|never");
+    EXPECT_TRUE(ask<void>([&](auto done) { store_->remove_member(room, never, std::move(done)); }));
+
+    // The last member gone leaves the room closed, not open to anyone.
+    ASSERT_TRUE(
+        ask<void>([&](auto done) { store_->remove_member(room, alice_, std::move(done)); }));
+    EXPECT_EQ(admits(alice_), core::ports::Admission::NotMember);
+    EXPECT_EQ(ask<core::ports::Admission>([&](auto done) {
+                  store_->admits(room, bob, core::ports::RoomKind::StreamLiveChat, std::move(done));
+              }),
+              core::ports::Admission::NotLive);
+}
+
+// Pages of members in byte order of their ids, whatever the database's own collation, each
+// starting after the last id of the one before.
+TEST_F(MessageStoreTest, MembersArePagedInByteOrderAfterTheLastIdSeen) {
+    const core::RoomId room = new_room();
+    const core::RoomId other = new_room();
+    // Upper case sorts before lower case in bytes, and after it in en_US.
+    const std::vector<std::string> ids{"auth0|Zed", "auth0|alice", "auth0|bob", "auth0|carol",
+                                       "google|dave"};
+    for (const auto& id : {ids[3], ids[1], ids[4], ids[0], ids[2]}) {
+        const core::UserId user = *core::UserId::parse(id);
+        ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(room, user, std::move(done)); }));
+    }
+    const core::UserId stranger = *core::UserId::parse("auth0|aaron");
+    ASSERT_TRUE(
+        ask<void>([&](auto done) { store_->add_member(other, stranger, std::move(done)); }));
+    // Adding again is idempotent.
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(room, alice_, std::move(done)); }));
+
+    using Members = std::vector<core::UserId>;
+    const auto page = [&](std::optional<core::UserId> after, std::size_t limit) {
+        return ask<Members>(
+            [&](auto done) { store_->members(room, std::move(after), limit, std::move(done)); });
+    };
+    const auto names = [](const Members& members) {
+        std::vector<std::string> out;
+        for (const auto& m : members) {
+            out.emplace_back(m.view());
+        }
+        return out;
+    };
+    const auto first = page(std::nullopt, 2);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(names(*first), (std::vector<std::string>{ids[0], ids[1]}));
+    const auto second = page(first->back(), 2);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(names(*second), (std::vector<std::string>{ids[2], ids[3]}));
+    const auto last = page(second->back(), 2);
+    ASSERT_TRUE(last);
+    EXPECT_EQ(names(*last), (std::vector<std::string>{ids[4]}));
+    const auto past = page(last->back(), 2);
+    ASSERT_TRUE(past);
+    EXPECT_TRUE(past->empty());
+    const auto all = page(std::nullopt, 100);
+    ASSERT_TRUE(all);
+    EXPECT_EQ(names(*all), ids);
+}
+
 TEST_F(MessageStoreTest, BodiesAreByteaNeverTextAndNothingIndexesThem) {
     EXPECT_EQ(scalar(*conn_,
                      "SELECT data_type || ' ' || is_nullable FROM information_schema.columns "
