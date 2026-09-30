@@ -122,6 +122,9 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         {"connections_current", "gauge"},
         {"uploads_in_flight", "gauge"},
         {"admission_rejections_total", "counter"},
+        {"rate_limited_total", "counter"},
+        {"rate_limit_entries", "gauge"},
+        {"rate_limit_evictions_total", "counter"},
         {"bytes_ingested_total", "counter"},
         {"part_upload_duration_seconds", "histogram"},
         {"backend_write_stall_seconds", "histogram"},
@@ -254,9 +257,10 @@ TEST_F(GatewayReadiness, AProbeThatStopsAnsweringIsNotTakenAsHealthForever) {
 TEST_F(GatewayReadiness, DrainingWinsOverAHealthyProbe) {
     GatewayUnderTest gw(GatewayOptions{});
     HttpClient c(gw.endpoint());
-    // Half a request, so the connection is busy and outlives the drain.
+    // Half a request, so the connection is busy and outlives the drain. Accepted is not busy:
+    // until the gateway has read those bytes the connection is idle, and a drain closes it.
     ASSERT_TRUE(c.send_raw("GET /readyz HTTP/1.1\r\nHost: t\r\n"));
-    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 1; }));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.busy_connections() == 1; }));
     gw.drain();
     ASSERT_TRUE(c.send_raw("\r\n"));
     const auto r = c.read_response();

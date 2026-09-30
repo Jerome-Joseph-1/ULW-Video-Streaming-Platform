@@ -1,6 +1,7 @@
 #include "core/ports/auth.hpp"
 #include "core/ports/catalog.hpp"
 #include "core/ports/e2ee.hpp"
+#include "core/ports/media.hpp"
 
 namespace core::ports {
 
@@ -64,6 +65,18 @@ std::string_view to_string(E2eeError e) noexcept {
         return "corrupt record";
     }
     return "unknown e2ee error";
+}
+
+std::string_view to_string(MediaError e) noexcept {
+    switch (e) {
+    case MediaError::Unavailable:
+        return "media server unavailable";
+    case MediaError::Refused:
+        return "media server refused the request";
+    case MediaError::Closed:
+        return "media room closed";
+    }
+    return "unknown media error";
 }
 
 } // namespace core::ports

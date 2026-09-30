@@ -212,7 +212,9 @@ protected:
         auto scratch = std::make_unique<TempDir>("ulw-worker-" + node);
         std::vector<std::string> env{"ULW_DATABASE_URL=" + db_->conninfo(), "ULW_NODE_ID=" + node,
                                      "ULW_SCRATCH_DIR=" + scratch->path().string(),
-                                     "PATH=" + env_or("PATH", "/usr/bin:/bin")};
+                                     "PATH=" + env_or("PATH", "/usr/bin:/bin"),
+                                     // Some runs start tests as root; this suite is not about that.
+                                     "ULW_ALLOW_ROOT=1"};
         env.insert(env.end(), storage_env.begin(), storage_env.end());
         if (!wrapper.empty()) {
             // The wrapper may start it as another user.
@@ -551,7 +553,7 @@ TEST(WorkerBinary, NoPasswordReachesTheLogWhenTheDatabaseUrlIsBadOrUnreachable) 
             {ULW_WORKER_BIN},
             {"ULW_DATABASE_URL=" + url, "ULW_STORAGE=fs", "ULW_FS_ROOT=" + scratch.path().string(),
              "ULW_NODE_ID=w", "ULW_SCRATCH_DIR=" + scratch.path().string(),
-             "PATH=" + env_or("PATH", "/usr/bin:/bin")});
+             "PATH=" + env_or("PATH", "/usr/bin:/bin"), "ULW_ALLOW_ROOT=1"});
         ASSERT_NE(worker, nullptr);
         // Either refused as configuration, or running and failing to claim.
         if (!worker->wait_for_output(R"("call":"claim")", kExitPatience)) {

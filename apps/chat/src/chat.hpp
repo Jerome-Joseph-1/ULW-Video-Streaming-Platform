@@ -8,6 +8,7 @@
 #include "rt/room_router.hpp"
 
 #include "chat_service.hpp"
+#include "presence.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -24,9 +25,9 @@ struct Limits {
     // and service.max_send_bytes_in_flight of sends: 64 + 256 + 128 = 448 KiB, and 1280 of them
     // 560 MiB at the very worst. The router adds its owner queues (64 MiB), node-channel
     // connections (32 x ~2.1 MiB) and recent message keys (10 MiB), and the chat service the
-    // messages it keeps for resuming clients (32 MiB): about 730 MiB in all, inside a 1 GiB pod
-    // with room for the kernel's socket buffers (ADR-0036, ADR-0043). A connection that is only
-    // listening costs a few KiB.
+    // messages it keeps for resuming clients (32 MiB), presence its rooms and watch lists (11 MiB):
+    // about 740 MiB in all, inside a 1 GiB pod with room for the kernel's socket buffers (ADR-0036,
+    // ADR-0043, ADR-0056). A connection that is only listening costs a few KiB.
     std::size_t max_connections = 1280;
     // Output a client has not read yet. A delivery is at most 64 KiB, so this is four of the
     // largest, or thousands of ordinary ones: a reader that far behind is closed, and resumes
@@ -48,6 +49,7 @@ struct Limits {
     // Clients get a Close 1001 and this long to answer it before a drain cuts them off.
     core::Millis drain_deadline{5'000};
     ServiceLimits service;
+    PresenceLimits presence;
 };
 
 // Who may open a socket: the cookie that carries the token, and the pages allowed to use it.
@@ -57,8 +59,10 @@ struct Access {
 };
 
 struct Deps {
+    core::NodeId node;
     net::IReactor& reactor;
     rt::RoomRouter& router;
+    core::ports::IMessageStore& messages;
     core::ports::IJwtVerifier& verifier;
     const core::ports::IClock& clock;
 };
@@ -151,6 +155,7 @@ public:
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
     [[nodiscard]] ChatService& chat() noexcept { return chat_; }
+    [[nodiscard]] Presence& presence() noexcept { return presence_; }
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
     void retire(net::Slab<Session>::Handle handle) noexcept;
 
@@ -160,8 +165,9 @@ private:
     Limits limits_;
     Counters counters_;
     RouterRooms rooms_;
-    // Sessions detach from it as they close, so it outlives them.
+    // Sessions detach from both as they close, so they outlive them.
     ChatService chat_;
+    Presence presence_;
     net::Slab<Session> sessions_;
     bool draining_ = false;
     bool released_ = false;

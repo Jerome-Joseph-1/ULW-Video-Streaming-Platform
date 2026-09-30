@@ -105,6 +105,24 @@ bool ChildProcess::wait_for_output(std::string_view text, std::chrono::milliseco
     return true;
 }
 
+bool ChildProcess::poll_until(const std::function<bool()>& ready, std::chrono::milliseconds limit,
+                              std::chrono::milliseconds period) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (!ready()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            return false;
+        }
+        const auto next = std::min(deadline, now + period);
+        for (int left = remaining_ms(next); left > 0; left = remaining_ms(next)) {
+            if (!read_some(std::chrono::milliseconds(left))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void ChildProcess::signal(int sig) const noexcept {
     ::kill(pid_, sig);
 }
@@ -140,6 +158,23 @@ std::optional<int> ChildProcess::wait_exit(std::chrono::milliseconds limit) {
     }
     exit_code_ = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
     return exit_code_;
+}
+
+Started start_until_listening(const std::function<std::unique_ptr<ChildProcess>()>& start,
+                              std::string_view ready_marker, std::chrono::milliseconds limit) {
+    Started last;
+    for (int attempt = 1; attempt <= kPortAttempts; ++attempt) {
+        last.process = start();
+        if (last.process == nullptr) {
+            return last;
+        }
+        last.ready = last.process->wait_for_output(ready_marker, limit);
+        if (last.ready ||
+            last.process->output().find("Address already in use") == std::string::npos) {
+            return last;
+        }
+    }
+    return last;
 }
 
 } // namespace ulw::test

@@ -6,21 +6,26 @@
 #include "core/ports/random.hpp"
 #include "core/ports/storage.hpp"
 #include "core/ports/views.hpp"
+#include "net/ip_address.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor.hpp"
 #include "net/signals.hpp"
 #include "net/slab.hpp"
 #include "net/transport.hpp"
 
+#include "bounded_table.hpp"
 #include "health.hpp"
 #include "ops/log.hpp"
 #include "ops/metrics.hpp"
+#include "rate_limit.hpp"
 #include "view_recorder.hpp"
 
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <expected>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -55,6 +60,28 @@ struct Limits {
     // Chunk uploads are what cost the budget above, so admission counts them, not sockets.
     std::size_t max_upload_slots = 448;
     std::size_t max_uploads_per_user = 3;
+    // Brief 8.13's per-client limits, counted per address (an IPv6 /64, see client_key). 20
+    // connections hold a household behind one NAT: a browser opens up to 6 per origin, and
+    // each user's uploader 3 PATCHes and a control request besides.
+    std::size_t max_connections_per_ip = 20;
+    // A client reuses its connections, so 10 new ones a second, saved up for at most one
+    // second, is well above any browser's need and far below a flood's: every one the gateway
+    // takes on costs it a TLS handshake.
+    std::uint32_t new_connections_per_ip_per_second = 10;
+    // One user's uploader at 100 Mbit/s finishes an 8 MiB chunk every 0.67 s, 90 PATCHes a
+    // minute however many run at once; 300 leaves 210 more for playlists, polls and retries,
+    // and caps one account at 300 x 8 MiB a minute, 40 MiB/s.
+    std::uint32_t requests_per_user_per_minute = 300;
+    // Two 50 GiB uploads, the largest there is, a day: one and a complete retry of it. At that
+    // a user takes 100 GiB of the 600 Mbit/s port's 6.5 TB a day (75 MB/s x 86,400 s), 1.7%.
+    // Refilled evenly, 100 GiB / 86,400 s = 1.2 MiB/s, so a refused 16 MiB PATCH waits 13 s.
+    std::uint64_t upload_bytes_per_user_per_day = std::uint64_t{100} << 30U;
+    // Peers whose X-Forwarded-For names the client (the Envoy data plane in front). None by
+    // default: then every peer is the client itself, and a forged header changes nothing.
+    std::vector<net::IpNetwork> trusted_proxies;
+    // How many of them stand in front, each appending one X-Forwarded-For entry: the client is
+    // that many entries from the right.
+    std::size_t trusted_proxy_hops = 1;
     core::Millis header_timeout{10'000};
     core::Millis body_idle_timeout{30'000};
     // A chunk body must average at least this rate over each window the gateway spends reading
@@ -93,6 +120,15 @@ struct Counters {
     std::uint64_t rejected_socket = 0;
     // Accepted by the kernel after the drain began.
     std::uint64_t rejected_draining = 0;
+    // The address already had max_connections_per_ip open, or opened them faster than
+    // new_connections_per_ip_per_second.
+    std::uint64_t rejected_ip_connections = 0;
+    std::uint64_t rejected_ip_rate = 0;
+    // Answered 429: a proxied client with max_connections_per_ip requests in flight, a user
+    // past requests_per_user_per_minute, a PATCH past upload_bytes_per_user_per_day.
+    std::uint64_t limited_ip_requests = 0;
+    std::uint64_t limited_user_requests = 0;
+    std::uint64_t limited_user_bytes = 0;
     std::uint64_t admission_rejections = 0;
     std::uint64_t timeouts_header = 0;
     std::uint64_t timeouts_body = 0;
@@ -112,6 +148,10 @@ struct Counters {
 };
 
 enum class Admission : std::uint8_t { Admitted, UserAtLimit, Full };
+
+// A client address's hold on the gateway: its direct connection, or one request a trusted
+// proxy relayed for it. While any is held the address's count cannot be forgotten.
+using ClientHold = std::uint32_t;
 
 // One shard of the gateway: a listener, the connections it accepted and the admission
 // counters for them. Everything runs on the shard's reactor thread.
@@ -140,6 +180,8 @@ public:
     }
     [[nodiscard]] bool draining() const noexcept { return draining_; }
     [[nodiscard]] std::size_t connections() const noexcept { return connections_.size(); }
+    // Connections a drain lets finish: some of a request read, and not yet closed.
+    [[nodiscard]] std::size_t busy_connections() noexcept;
 
     [[nodiscard]] const Deps& deps() const noexcept { return deps_; }
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }
@@ -153,6 +195,18 @@ public:
     // Everything the gateway counts, in the text format metric scrapers read.
     [[nodiscard]] std::string render_metrics();
 
+    [[nodiscard]] bool trusted_proxy(const net::IpAddress& peer) const noexcept;
+    // nullopt when the client already holds max_connections_per_ip.
+    [[nodiscard]] std::optional<ClientHold> hold_client(const net::IpAddress& client) noexcept;
+    void release_client(ClientHold hold) noexcept;
+    // A refusal says how long until the user's bucket would allow it.
+    [[nodiscard]] std::expected<void, core::Millis>
+    charge_request(const core::UserId& user) noexcept;
+    [[nodiscard]] std::expected<void, core::Millis>
+    charge_upload_bytes(const core::UserId& user, std::uint64_t bytes) noexcept;
+    // Bytes charged for a PATCH body that never arrived.
+    void refund_upload_bytes(const core::UserId& user, std::uint64_t bytes) noexcept;
+
     [[nodiscard]] Admission acquire_upload_slot(const core::UserId& user) noexcept;
     void release_upload_slot(const core::UserId& user) noexcept;
     void retire(net::Slab<Connection>::Handle handle) noexcept;
@@ -164,9 +218,26 @@ public:
 private:
     class Discard;
 
+    struct ClientEntry {
+        TokenBucket new_connections;
+    };
+    struct UserEntry {
+        TokenBucket requests;
+        TokenBucket upload_bytes;
+    };
+
+    // Refuses a direct peer at its limits, before a byte of it is read or a handshake begun.
+    [[nodiscard]] std::optional<ClientHold> admit_peer(const net::IpAddress& peer) noexcept;
+    [[nodiscard]] UserEntry* user_entry(const core::UserId& user) noexcept;
+
     Deps deps_;
     Limits limits_;
     Counters counters_;
+    BucketRule new_connection_rule_;
+    BucketRule request_rule_;
+    BucketRule upload_byte_rule_;
+    BoundedTable<net::IpAddress, ClientEntry, AddressHash> clients_;
+    BoundedTable<core::UserId, UserEntry, UserHash> users_;
     net::Slab<Connection> connections_;
     std::unordered_map<core::UserId, std::size_t> uploads_by_user_;
     std::size_t upload_slots_ = 0;

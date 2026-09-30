@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/ports/message_store.hpp"
 #include "rt/message_key.hpp"
 
 #include <array>
@@ -17,12 +18,14 @@
 // node or sender is a length byte and its characters. A body runs to the end of its frame.
 namespace rt::wire {
 
-// 2: Send and Deliver carry the client's message key.
-inline constexpr std::uint8_t kVersion = 2;
+// 2: Send and Deliver carry the client's message key. 3: a Reply may say Conflict.
+inline constexpr std::uint8_t kVersion = 3;
 // The largest message a client may send (codec::ws::Decoder's 64 KiB, ADR-0029), plus room for
 // the other fields, which take at most 239 bytes (a Send: type, request, room, sender, key).
 inline constexpr std::size_t kMaxBody = std::size_t{64} * 1024;
 inline constexpr std::size_t kMaxFrame = kMaxBody + 256;
+// The store takes any body the node channel carries (ADR-0054).
+static_assert(kMaxBody == core::ports::kMaxMessageBody);
 // Handshake nonces, and the HMAC-SHA256 tags over them.
 inline constexpr std::size_t kNonceBytes = 32;
 inline constexpr std::size_t kMacBytes = 32;
@@ -61,6 +64,8 @@ enum class Status : std::uint8_t {
     Unavailable = 3,
     // The room's queue of writes is full.
     Busy = 4,
+    // The sender's key is stored with another body. Nothing was written.
+    Conflict = 5,
 };
 
 struct Hello {

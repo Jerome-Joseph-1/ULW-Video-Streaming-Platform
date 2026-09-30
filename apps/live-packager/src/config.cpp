@@ -115,6 +115,26 @@ std::expected<Storage, ConfigError> load_storage(const EnvLookup& env) {
     return storage;
 }
 
+// Both or neither: a database without an owner, or the reverse, is a half-configured recorder.
+std::expected<std::optional<RecordingTarget>, ConfigError> load_recording(const EnvLookup& env) {
+    auto url = lookup(env, "ULW_DATABASE_URL");
+    const auto owner_text = lookup(env, "ULW_STREAM_OWNER");
+    if (!url && !owner_text) {
+        return std::nullopt;
+    }
+    if (!url) {
+        return error("ULW_DATABASE_URL", "not set, and ULW_STREAM_OWNER is");
+    }
+    if (!owner_text) {
+        return error("ULW_STREAM_OWNER", "not set, and ULW_DATABASE_URL is");
+    }
+    const auto owner = core::UserId::parse(*owner_text);
+    if (!owner) {
+        return error("ULW_STREAM_OWNER", "not a user id");
+    }
+    return RecordingTarget{.database_url = std::move(*url), .owner = *owner};
+}
+
 } // namespace
 
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
@@ -174,6 +194,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!kbps) {
         return std::unexpected(kbps.error());
     }
+    auto recording = load_recording(env);
+    if (!recording) {
+        return std::unexpected(std::move(recording.error()));
+    }
     return Config{.stream = std::move(*stream),
                   .ingest_host =
                       lookup(env, "ULW_LIVE_INGEST_HOST").value_or(std::string(kDefaultIngestHost)),
@@ -187,11 +211,13 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .scratch = *scratch / *stream_text,
                   .sandbox = std::move(*sandbox),
                   .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
+                  .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .segment_seconds = *segment,
                   .window_segments = *window,
                   .max_duration = core::Seconds{static_cast<std::int64_t>(*hours) * 3600},
-                  .max_kbps = *kbps};
+                  .max_kbps = *kbps,
+                  .recording = std::move(*recording)};
 }
 
 } // namespace live

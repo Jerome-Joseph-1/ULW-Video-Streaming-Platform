@@ -200,17 +200,20 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto room = in.room();
         const auto sender = in.sender();
         const auto key = in.key();
-        if (!request || !room || !sender || !key) {
+        const auto body = in.rest();
+        // A frame may be a little longer than the largest body, for the other fields; a body
+        // past kMaxBody is one no client could have sent, and nothing downstream takes it.
+        if (!request || !room || !sender || !key || body.size() > kMaxBody) {
             return std::nullopt;
         }
         return Send{
-            .request = *request, .room = *room, .sender = *sender, .key = *key, .body = in.rest()};
+            .request = *request, .room = *room, .sender = *sender, .key = *key, .body = body};
     }
     case Type::Reply: {
         const auto request = in.u64();
         const auto status = in.u8();
         const auto seq = in.u64();
-        if (!request || !status || *status > static_cast<std::uint8_t>(Status::Busy) || !seq) {
+        if (!request || !status || *status > static_cast<std::uint8_t>(Status::Conflict) || !seq) {
             return std::nullopt;
         }
         return Reply{.request = *request, .status = static_cast<Status>(*status), .seq = *seq};
@@ -220,11 +223,11 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto seq = in.u64();
         const auto sender = in.sender();
         const auto key = in.key();
-        if (!room || !seq || !sender || !key) {
+        const auto body = in.rest();
+        if (!room || !seq || !sender || !key || body.size() > kMaxBody) {
             return std::nullopt;
         }
-        return Deliver{
-            .room = *room, .seq = *seq, .sender = *sender, .key = *key, .body = in.rest()};
+        return Deliver{.room = *room, .seq = *seq, .sender = *sender, .key = *key, .body = body};
     }
     }
     return std::nullopt;

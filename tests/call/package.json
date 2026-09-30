@@ -1,0 +1,10 @@
+{
+  "name": "ulw-call-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Call suite: two headless Chrome peers through the local LiveKit server, joined with tickets the SFU adapter issues.",
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "livekit-client": "2.22.3"
+  }
+}

@@ -1,5 +1,10 @@
 #include "uring_reactor.hpp"
 
+#include "net/socket.hpp"
+
+#include "sockaddr.hpp"
+
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 #include <algorithm>
@@ -7,8 +12,10 @@
 #include <cerrno>
 #include <charconv>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <poll.h>
+#include <utility>
 
 namespace net::detail {
 
@@ -22,6 +29,27 @@ constexpr std::uint16_t kBufGroup = 1;
 // only touched once the kernel writes into them, so idle connections cost nothing here.
 constexpr unsigned kBufCount = 256;
 constexpr std::size_t kBufSize = std::size_t{64} * 1024;
+constexpr std::uint16_t kDatagramGroup = 2;
+// A default 208 KiB receive buffer holds 256 small datagrams (832 bytes of truesize each,
+// measured on 6.18). 512 buffers let two sockets drain a full receive buffer in the same batch
+// before the ring runs dry.
+constexpr unsigned kDatagramBufCount = 512;
+// A stopped socket holds at most an eighth of the ring, so eight have to stop mid-burst at once
+// before a socket still receiving finds it empty. 64 is also what one epoll wakeup reads.
+constexpr std::uint16_t kMaxHeldPerSocket = 64;
+// RECVMSG writes a header, then the source address in the room msg_namelen reserves, then the
+// payload: 16 + 28 + 2048 = 2092 bytes, 1 MiB for the ring.
+constexpr std::size_t kDatagramBufSize =
+    sizeof(io_uring_recvmsg_out) + sizeof(sockaddr_in6) + kMaxDatagramSize;
+// At 1 Gbit/s of 1200-byte datagrams (about 104,000 a second) and a loop turning every
+// millisecond, about 104 sends are submitted per iteration and complete in the next, so 1024 is
+// five times the steady state. The limit is per reactor, not per socket: one socket may carry
+// the whole rate, as a socket facing the SFU does. A pending send is about
+// 2.3 KB (the payload, a sockaddr_storage and a msghdr), so 1024 of them take about 2.3 MiB.
+constexpr std::size_t kMaxSendsInFlight = 1024;
+// A send's pool index replaces the descriptor and generation in its user_data: the pending
+// send records the descriptor, and its socket cannot be recycled while the send is in flight.
+constexpr unsigned kSendIndexShift = 8;
 // The shortest delay the wheel expresses. Descriptors come back as soon as connections close;
 // the pause only has to keep a listener that cannot accept from spinning the loop.
 constexpr core::Millis kAcceptRetry = TimingWheel::kTick;
@@ -90,6 +118,19 @@ std::expected<std::unique_ptr<UringReactor>, int> UringReactor::create(core::por
                               io_uring_buf_ring_mask(kBufCount), static_cast<int>(i));
     }
     io_uring_buf_ring_advance(reactor->buf_ring_, kBufCount);
+    reactor->dgram_ring_ =
+        io_uring_setup_buf_ring(&reactor->ring_, kDatagramBufCount, kDatagramGroup, 0, &rc);
+    if (reactor->dgram_ring_ == nullptr) {
+        return std::unexpected(-rc);
+    }
+    for (unsigned i = 0; i < kDatagramBufCount; ++i) {
+        io_uring_buf_ring_add(reactor->dgram_ring_,
+                              reactor->dgram_mem_.get() + (i * kDatagramBufSize), kDatagramBufSize,
+                              static_cast<unsigned short>(i),
+                              io_uring_buf_ring_mask(kDatagramBufCount), static_cast<int>(i));
+    }
+    io_uring_buf_ring_advance(reactor->dgram_ring_, kDatagramBufCount);
+    reactor->zero_copy_supported_ = reactor->probe_zero_copy_send();
     return reactor;
 }
 
@@ -97,8 +138,14 @@ UringReactor::UringReactor(core::ports::IClock& clock, std::size_t max_fds)
     : clock_(clock),
       // NOLINTNEXTLINE(*-avoid-c-arrays): for_overwrite leaves the pages untouched.
       buf_mem_(std::make_unique_for_overwrite<std::byte[]>(kBufCount * kBufSize)), slots_(max_fds),
-      wheel_(clock.now()), now_(clock.now()) {
+      // NOLINTNEXTLINE(*-avoid-c-arrays): for_overwrite leaves the pages untouched.
+      dgram_mem_(std::make_unique_for_overwrite<std::byte[]>(kDatagramBufCount * kDatagramBufSize)),
+      held_next_(kDatagramBufCount, -1), held_len_(kDatagramBufCount, 0), wheel_(clock.now()),
+      now_(clock.now()) {
     accept_retry_.self = this;
+    recv_msg_.msg_namelen = sizeof(sockaddr_in6);
+    send_pool_.reserve(kMaxSendsInFlight);
+    free_sends_.reserve(kMaxSendsInFlight);
 }
 
 UringReactor::~UringReactor() {
@@ -111,6 +158,9 @@ UringReactor::~UringReactor() {
     }
     if (buf_ring_ != nullptr) {
         io_uring_free_buf_ring(&ring_, buf_ring_, kBufCount, kBufGroup);
+    }
+    if (dgram_ring_ != nullptr) {
+        io_uring_free_buf_ring(&ring_, dgram_ring_, kDatagramBufCount, kDatagramGroup);
     }
     if (ring_ready_) {
         io_uring_queue_exit(&ring_);
@@ -141,7 +191,9 @@ void UringReactor::cancel_everything() noexcept {
         io_uring_cqe* cqe = nullptr;
         io_uring_for_each_cqe(&ring_, head, cqe) {
             ++seen;
-            if (io_uring_cqe_get_data64(cqe) != 0 && (cqe->flags & IORING_CQE_F_MORE) == 0) {
+            const std::uint64_t token = io_uring_cqe_get_data64(cqe);
+            if (token != 0 && token != static_cast<std::uint8_t>(Op::Probe) &&
+                (cqe->flags & IORING_CQE_F_MORE) == 0) {
                 --outstanding;
             }
         }
@@ -165,6 +217,68 @@ io_uring_sqe* UringReactor::next_sqe() noexcept {
         std::abort();
     }
     return sqe;
+}
+
+// Zero copy is only used where the kernel also says whether it managed it
+// (IORING_SEND_ZC_REPORT_USAGE, 6.2): 6.1 has SENDMSG_ZC but rejects the flag with EINVAL, and
+// the opcode probe cannot tell the two apart, so one real send to ourselves decides.
+bool UringReactor::probe_zero_copy_send() noexcept {
+    io_uring_probe* probe = io_uring_get_probe_ring(&ring_);
+    if (probe == nullptr) {
+        return false;
+    }
+    const bool known = io_uring_opcode_supported(probe, IORING_OP_SENDMSG_ZC) != 0;
+    io_uring_free_probe(probe);
+    if (!known) {
+        return false;
+    }
+    auto fd = bind_udp(SocketAddr::loopback(AddrFamily::V4, 0));
+    if (!fd) {
+        return false;
+    }
+    const auto self = local_addr(fd->get());
+    if (!self || !to_sockaddr(*self, false, probe_.addr)) {
+        return false;
+    }
+    probe_.iov = {.iov_base = &probe_.payload, .iov_len = 1};
+    probe_.msg.msg_name = &probe_.addr;
+    probe_.msg.msg_namelen = sizeof(sockaddr_in);
+    probe_.msg.msg_iov = &probe_.iov;
+    probe_.msg.msg_iovlen = 1;
+    // As many sends at once as the reactor ever holds: on the 6.8 kernel of CI's runners a single
+    // zero-copy send succeeds while a burst of them to one socket fails some, so only a burst
+    // confirms zero copy is safe to use.
+    for (std::size_t i = 0; i < kMaxSendsInFlight; ++i) {
+        io_uring_sqe* sqe = next_sqe();
+        io_uring_prep_sendmsg_zc(sqe, fd->get(), &probe_.msg, 0);
+        sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
+        io_uring_sqe_set_data64(sqe, static_cast<std::uint8_t>(Op::Probe));
+    }
+    // Every send completes inline on a local socket and its notification follows at once.
+    // Waiting is bounded by count, not by the clock, which a test may hold still; if it runs
+    // out, the late completions are recognised by their operation and ignored.
+    std::size_t succeeded = 0;
+    std::size_t finished = 0;
+    const auto waits = kCancelGrace / kCancelSlice;
+    for (auto i = decltype(waits){0}; finished < kMaxSendsInFlight && i < waits; ++i) {
+        __kernel_timespec ts{.tv_sec = 0, .tv_nsec = kCancelSlice.count()};
+        io_uring_cqe* first = nullptr;
+        static_cast<void>(io_uring_submit_and_wait_timeout(&ring_, &first, 1, &ts, nullptr));
+        unsigned head = 0;
+        unsigned seen = 0;
+        io_uring_cqe* cqe = nullptr;
+        io_uring_for_each_cqe(&ring_, head, cqe) {
+            ++seen;
+            if ((cqe->flags & IORING_CQE_F_NOTIF) == 0 && cqe->res == 1) {
+                ++succeeded;
+            }
+            if ((cqe->flags & IORING_CQE_F_MORE) == 0) {
+                ++finished;
+            }
+        }
+        io_uring_cq_advance(&ring_, seen);
+    }
+    return finished == kMaxSendsInFlight && succeeded == kMaxSendsInFlight;
 }
 
 void UringReactor::prepare(io_uring_sqe* sqe, int fd, Slot& s, Op op) noexcept {
@@ -247,6 +361,10 @@ void UringReactor::finalize(Slot& s) noexcept {
     s.stream = nullptr;
     s.ready = nullptr;
     s.acceptor = nullptr;
+    s.dgram = nullptr;
+    s.stats = {};
+    s.v6 = s.starved = s.zero_copy = false;
+    s.held_error = 0;
     s.receiving = s.recv_armed = s.send_armed = s.poll_armed = false;
     s.closing = s.failed = s.eof = s.eof_delivered = s.delivery_queued = s.accept_paused = false;
     s.shut_pending = false;
@@ -259,6 +377,83 @@ void UringReactor::return_buffer(std::uint16_t bid) noexcept {
     io_uring_buf_ring_add(buf_ring_, buf_mem_.get() + (static_cast<std::size_t>(bid) * kBufSize),
                           kBufSize, bid, io_uring_buf_ring_mask(kBufCount), 0);
     io_uring_buf_ring_advance(buf_ring_, 1);
+}
+
+void UringReactor::arm_datagram_recv(int fd, Slot& s) noexcept {
+    // Multishot, unlike stream receives (ADR-0021): each completion is one whole datagram, and
+    // the few already posted when stop_receiving_datagrams runs are held in their buffers,
+    // bounded by the ring, instead of the megabytes a stream socket can have queued.
+    io_uring_sqe* sqe = next_sqe();
+    io_uring_prep_recvmsg_multishot(sqe, fd, &recv_msg_, 0);
+    sqe->flags |= IOSQE_BUFFER_SELECT;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access): see arm_recv.
+    sqe->buf_group = kDatagramGroup;
+    prepare(sqe, fd, s, Op::DatagramRecv);
+    s.recv_armed = true;
+}
+
+UringReactor::Datagram UringReactor::parse_datagram(std::uint16_t bid, int res) noexcept {
+    std::byte* const buf = dgram_mem_.get() + (static_cast<std::size_t>(bid) * kDatagramBufSize);
+    io_uring_recvmsg_out* out = io_uring_recvmsg_validate(buf, res, &recv_msg_);
+    if (out == nullptr) {
+        // Shorter than the header the kernel always writes: dropped like a truncated datagram
+        // rather than parsed.
+        return {.from = {}, .payload = {}, .truncated = true};
+    }
+    const auto* name = static_cast<const std::byte*>(io_uring_recvmsg_name(out));
+    const auto* payload = static_cast<const std::byte*>(io_uring_recvmsg_payload(out, &recv_msg_));
+    return {.from =
+                from_sockaddr({name, std::min<std::size_t>(out->namelen, recv_msg_.msg_namelen)}),
+            .payload = {payload, io_uring_recvmsg_payload_length(out, res, &recv_msg_)},
+            .truncated = (out->flags & MSG_TRUNC) != 0};
+}
+
+void UringReactor::return_datagram_buffer(std::uint16_t bid) noexcept {
+    io_uring_buf_ring_add(dgram_ring_,
+                          dgram_mem_.get() + (static_cast<std::size_t>(bid) * kDatagramBufSize),
+                          kDatagramBufSize, bid, io_uring_buf_ring_mask(kDatagramBufCount), 0);
+    io_uring_buf_ring_advance(dgram_ring_, 1);
+}
+
+void UringReactor::hold(Slot& s, std::uint16_t bid, int res) noexcept {
+    if (!s.receiving && s.held_count >= kMaxHeldPerSocket) {
+        // Dropped as it would have been had the socket's receive buffer been full, rather than
+        // let one stopped socket pin the ring every other socket shares.
+        ++s.stats.stopped_drops;
+        return_datagram_buffer(bid);
+        return;
+    }
+    ++s.held_count;
+    held_next_[bid] = -1;
+    held_len_[bid] = res;
+    if (s.held_tail < 0) {
+        s.held_head = bid;
+    } else {
+        held_next_[static_cast<std::size_t>(s.held_tail)] = bid;
+    }
+    s.held_tail = bid;
+    ++held_count_;
+}
+
+std::uint16_t UringReactor::pop_held(Slot& s) noexcept {
+    const auto bid = static_cast<std::uint16_t>(s.held_head);
+    s.held_head = held_next_[bid];
+    if (s.held_head < 0) {
+        s.held_tail = -1;
+    }
+    --s.held_count;
+    --held_count_;
+    return bid;
+}
+
+void UringReactor::release_held(Slot& s) noexcept {
+    while (s.held_head >= 0) {
+        return_datagram_buffer(pop_held(s));
+    }
+}
+
+bool UringReactor::datagram_buffer_free() const noexcept {
+    return held_count_ < kDatagramBufCount;
 }
 
 void UringReactor::queue_delivery(int fd, Slot& s) noexcept {
@@ -395,6 +590,146 @@ bool UringReactor::is_quiescent(ConnId conn) const noexcept {
     return s.kind != Kind::Stream || s.gen != conn.gen;
 }
 
+std::expected<DatagramId, int> UringReactor::attach_datagram(os::UniqueFd socket,
+                                                             IDatagramHandler& handler) {
+    const int fd = socket.get();
+    if (fd < 0 || static_cast<std::size_t>(fd) >= slots_.size()) {
+        return std::unexpected(EMFILE);
+    }
+    Slot& s = slots_[static_cast<std::size_t>(fd)];
+    if (s.kind != Kind::Free) {
+        return std::unexpected(EEXIST);
+    }
+    const auto v6 = udp_socket_is_v6(fd);
+    if (!v6) {
+        return std::unexpected(v6.error());
+    }
+    s.kind = Kind::Datagram;
+    s.owned = std::move(socket);
+    s.dgram = &handler;
+    s.v6 = *v6;
+    s.zero_copy = zero_copy_supported_;
+    return DatagramId{.fd = fd, .gen = s.gen};
+}
+
+void UringReactor::start_receiving_datagrams(DatagramId socket) noexcept {
+    Slot* s = datagram_slot(socket);
+    if (s == nullptr || s->receiving) {
+        return;
+    }
+    s->receiving = true;
+    if (s->held_head >= 0 || s->held_error != 0) {
+        // Delivered from the loop, never from inside this call, as for streams.
+        if (!s->delivery_queued) {
+            s->delivery_queued = true;
+            datagram_deliveries_.push_back(socket);
+        }
+    } else if (!s->recv_armed && !s->starved) {
+        arm_datagram_recv(socket.fd, *s);
+    }
+}
+
+void UringReactor::stop_receiving_datagrams(DatagramId socket) noexcept {
+    Slot* s = datagram_slot(socket);
+    if (s == nullptr || !s->receiving) {
+        return;
+    }
+    s->receiving = false;
+    if (s->recv_armed) {
+        cancel_op(socket.fd, *s, Op::DatagramRecv);
+    }
+}
+
+std::expected<void, int> UringReactor::send_to(DatagramId socket, SocketAddr to,
+                                               std::span<const std::byte> payload) noexcept {
+    Slot* s = datagram_slot(socket);
+    if (s == nullptr) {
+        return std::unexpected(EBADF);
+    }
+    if (payload.size() > kMaxDatagramSize) {
+        return std::unexpected(EMSGSIZE);
+    }
+    sockaddr_storage addr{};
+    const auto addr_len = to_sockaddr(to, s->v6, addr);
+    if (!addr_len) {
+        return std::unexpected(addr_len.error());
+    }
+    if (sends_in_flight_ >= kMaxSendsInFlight) {
+        ++s->stats.send_refused;
+        return std::unexpected(EAGAIN);
+    }
+    std::uint32_t index = 0;
+    if (free_sends_.empty()) {
+        // Grows to the working set once; the capacity was reserved up front.
+        index = static_cast<std::uint32_t>(send_pool_.size());
+        send_pool_.push_back(std::make_unique_for_overwrite<PendingSend>());
+    } else {
+        index = free_sends_.back();
+        free_sends_.pop_back();
+    }
+    PendingSend& p = *send_pool_[index];
+    p.fd = socket.fd;
+    p.to = to;
+    p.addr = addr;
+    std::ranges::copy(payload, p.payload.begin());
+    p.iov = {.iov_base = p.payload.data(), .iov_len = payload.size()};
+    p.msg = {};
+    p.msg.msg_name = &p.addr;
+    p.msg.msg_namelen = *addr_len;
+    p.msg.msg_iov = &p.iov;
+    p.msg.msg_iovlen = 1;
+    p.pending = 0;
+    submit_send(index, *s, s->zero_copy);
+    ++sends_in_flight_;
+    return {};
+}
+
+void UringReactor::submit_send(std::uint32_t index, Slot& s, bool zero_copy) noexcept {
+    PendingSend& p = *send_pool_[index];
+    io_uring_sqe* sqe = next_sqe();
+    if (zero_copy) {
+        io_uring_prep_sendmsg_zc(sqe, p.fd, &p.msg, 0);
+        sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
+        ++s.stats.zero_copy_sends;
+    } else {
+        io_uring_prep_sendmsg(sqe, p.fd, &p.msg, 0);
+    }
+    io_uring_sqe_set_data64(sqe, (std::uint64_t{index} << kSendIndexShift) |
+                                     static_cast<std::uint8_t>(Op::SendTo));
+    p.zero_copy = zero_copy;
+    ++p.pending;
+    ++s.in_flight;
+}
+
+void UringReactor::begin_close(DatagramId socket) noexcept {
+    Slot* s = datagram_slot(socket);
+    if (s == nullptr) {
+        return;
+    }
+    s->closing = true;
+    s->receiving = false;
+    s->dgram = nullptr;
+    release_held(*s);
+    if (s->in_flight == 0) {
+        finalize(*s);
+    } else {
+        cancel_all(socket.fd, *s);
+    }
+}
+
+bool UringReactor::is_quiescent(DatagramId socket) const noexcept {
+    if (socket.fd < 0 || static_cast<std::size_t>(socket.fd) >= slots_.size()) {
+        return true;
+    }
+    const Slot& s = slots_[static_cast<std::size_t>(socket.fd)];
+    return s.kind != Kind::Datagram || s.gen != socket.gen;
+}
+
+DatagramStats UringReactor::datagram_stats(DatagramId socket) const noexcept {
+    const Slot* s = datagram_slot(socket);
+    return s == nullptr ? DatagramStats{} : s->stats;
+}
+
 std::expected<void, int> UringReactor::watch(int fd, Interest interest, IReadyHandler& handler) {
     if (fd < 0 || static_cast<std::size_t>(fd) >= slots_.size()) {
         return std::unexpected(EMFILE);
@@ -446,8 +781,9 @@ void UringReactor::cancel_timer(TimerId timer) noexcept {
 }
 
 int UringReactor::run_once(core::Millis max_wait) {
-    core::Millis wait =
-        deliveries_.empty() && deferred_errors_.empty() ? max_wait : core::Millis{0};
+    const bool idle = deliveries_.empty() && deferred_errors_.empty() &&
+                      datagram_deliveries_.empty() && (starved_.empty() || !datagram_buffer_free());
+    core::Millis wait = idle ? max_wait : core::Millis{0};
     if (const auto next = wheel_.next_expiry(now())) {
         wait = std::min(wait, *next);
     }
@@ -479,23 +815,27 @@ int UringReactor::run_once(core::Millis max_wait) {
 
 void UringReactor::dispatch(const io_uring_cqe& cqe) noexcept {
     const std::uint64_t token = io_uring_cqe_get_data64(&cqe);
+    const auto op = static_cast<Op>(token & 0xFFU);
+    if (op == Op::Probe) {
+        return;
+    }
+    if (op == Op::SendTo) {
+        on_send_to(token >> kSendIndexShift, cqe);
+        return;
+    }
     const auto fd = static_cast<int>(token >> kSlotShift);
     const auto gen = static_cast<std::uint32_t>((token >> kGenShift) & 0xFFFFFFFFU);
-    const auto op = static_cast<Op>(token & 0xFFU);
     const bool more = (cqe.flags & IORING_CQE_F_MORE) != 0;
-    std::span<const std::byte> data;
     std::optional<std::uint16_t> bid;
     if ((cqe.flags & IORING_CQE_F_BUFFER) != 0) {
         bid = static_cast<std::uint16_t>(cqe.flags >> IORING_CQE_BUFFER_SHIFT);
-        if (cqe.res > 0) {
-            data = {buf_mem_.get() + (static_cast<std::size_t>(*bid) * kBufSize),
-                    static_cast<std::size_t>(cqe.res)};
-        }
     }
 
     Slot& s = slots_[static_cast<std::size_t>(fd)];
     if (s.gen != gen || s.kind == Kind::Free) {
-        if (bid) {
+        if (bid && op == Op::DatagramRecv) {
+            return_datagram_buffer(*bid);
+        } else if (bid) {
             return_buffer(*bid);
         }
         if (!more) {
@@ -510,11 +850,23 @@ void UringReactor::dispatch(const io_uring_cqe& cqe) noexcept {
     }
 
     switch (op) {
-    case Op::Recv:
+    case Op::Recv: {
+        std::span<const std::byte> data;
+        if (bid && cqe.res > 0) {
+            data = {buf_mem_.get() + (static_cast<std::size_t>(*bid) * kBufSize),
+                    static_cast<std::size_t>(cqe.res)};
+        }
         on_recv(fd, s, cqe.res, data);
         if (bid) {
             return_buffer(*bid);
         }
+        break;
+    }
+    case Op::DatagramRecv:
+        on_datagram_recv(fd, s, cqe.res, bid, more);
+        break;
+    case Op::SendTo:
+    case Op::Probe:
         break;
     case Op::Send:
         on_send(fd, s, cqe.res);
@@ -640,6 +992,94 @@ void UringReactor::on_accept(int fd, Slot& s, int res, bool more) noexcept {
     }
 }
 
+void UringReactor::on_datagram_recv(int fd, Slot& s, int res, std::optional<std::uint16_t> bid,
+                                    bool more) noexcept {
+    if (!more) {
+        s.recv_armed = false;
+    }
+    const std::uint32_t gen = s.gen;
+    if (bid) {
+        if (s.closing || res < 0) {
+            return_datagram_buffer(*bid);
+        } else {
+            take_datagram(s, *bid, res);
+        }
+    } else if (res == -ENOBUFS) {
+        // Re-arming now would fail the same way at once; rearm_starved waits for a buffer.
+        ++s.stats.ring_exhausted;
+        if (!s.closing && !s.starved) {
+            s.starved = true;
+            starved_.push_back(DatagramId{.fd = fd, .gen = gen});
+        }
+    } else if (res < 0 && res != -ECANCELED && !s.closing) {
+        if (s.receiving && s.held_head < 0) {
+            s.receiving = false;
+            s.dgram->on_error(-res);
+        } else {
+            s.held_error = -res;
+        }
+    }
+    if (alive(fd, gen) && s.receiving && !s.recv_armed && !s.starved && s.held_head < 0 &&
+        s.held_error == 0) {
+        arm_datagram_recv(fd, s);
+    }
+}
+
+void UringReactor::take_datagram(Slot& s, std::uint16_t bid, int res) noexcept {
+    const Datagram d = parse_datagram(bid, res);
+    if (d.truncated) {
+        ++s.stats.truncated;
+        return_datagram_buffer(bid);
+        return;
+    }
+    // Behind datagrams already held, a new one waits its turn even once receiving resumes.
+    if (!s.receiving || s.held_head >= 0) {
+        hold(s, bid, res);
+        return;
+    }
+    ++s.stats.received;
+    s.dgram->on_datagram(d.from, d.payload);
+    return_datagram_buffer(bid);
+}
+
+void UringReactor::on_send_to(std::size_t index, const io_uring_cqe& cqe) noexcept {
+    PendingSend& p = *send_pool_[index];
+    Slot& s = slots_[static_cast<std::size_t>(p.fd)];
+    if ((cqe.flags & IORING_CQE_F_NOTIF) != 0) {
+        // The kernel is done with the payload. A copy anyway (loopback, or a device that
+        // cannot send from user pages) costs more than a plain send (measured: 1,640 against
+        // 1,440 ns per 1,200-byte datagram on loopback), so the socket stops asking.
+        if ((static_cast<std::uint32_t>(cqe.res) & IORING_NOTIF_USAGE_ZC_COPIED) != 0) {
+            ++s.stats.zero_copy_copied;
+            s.zero_copy = false;
+        }
+    } else if (!s.closing && cqe.res >= 0) {
+        ++s.stats.sent;
+    } else if (!s.closing && cqe.res != -ECANCELED && p.zero_copy) {
+        // A zero-copy send can fail where a plain one of the same datagram succeeds, as a burst
+        // of them did on the runners' 6.8 kernel. The datagram goes again as a plain send, and
+        // the socket sends plainly from now on; only a plain failure is the caller's to hear of.
+        s.zero_copy = false;
+        submit_send(static_cast<std::uint32_t>(index), s, false);
+    } else if (!s.closing && cqe.res != -ECANCELED) {
+        ++s.stats.send_errors;
+        s.dgram->on_send_error(p.to, -cqe.res);
+    }
+    // A zero-copy send reports twice: its result, then the notification that frees the payload.
+    if ((cqe.flags & IORING_CQE_F_MORE) != 0) {
+        return;
+    }
+    assert(s.in_flight > 0 && p.pending > 0);
+    --s.in_flight;
+    if (--p.pending == 0) {
+        free_sends_.push_back(static_cast<std::uint32_t>(index));
+        --sends_in_flight_;
+    }
+    if (s.closing && s.in_flight == 0) {
+        finalize(s);
+    }
+}
+
 void UringReactor::AcceptRetry::on_timeout() noexcept {
     for (const int fd : self->listeners_) {
         Slot& s = self->slots_[static_cast<std::size_t>(fd)];
@@ -680,6 +1120,9 @@ void UringReactor::run_deferred() noexcept {
     }
     delivering_.clear();
 
+    deliver_held_datagrams();
+    rearm_starved();
+
     reporting_.swap(deferred_errors_);
     for (const DeferredError& e : reporting_) {
         if (Slot* s = stream_slot(e.conn)) {
@@ -687,6 +1130,57 @@ void UringReactor::run_deferred() noexcept {
         }
     }
     reporting_.clear();
+}
+
+void UringReactor::deliver_held_datagrams() noexcept {
+    delivering_datagrams_.swap(datagram_deliveries_);
+    for (const DatagramId socket : delivering_datagrams_) {
+        Slot* s = datagram_slot(socket);
+        if (s == nullptr) {
+            continue;
+        }
+        s->delivery_queued = false;
+        while (s->receiving && s->held_head >= 0) {
+            // Off the list before the callback, which may close the socket and release the rest.
+            const std::uint16_t bid = pop_held(*s);
+            const Datagram d = parse_datagram(bid, held_len_[bid]);
+            ++s->stats.received;
+            s->dgram->on_datagram(d.from, d.payload);
+            return_datagram_buffer(bid);
+            if (!alive(socket.fd, socket.gen)) {
+                break;
+            }
+        }
+        if (!alive(socket.fd, socket.gen) || !s->receiving || s->held_head >= 0) {
+            continue;
+        }
+        if (s->held_error != 0) {
+            s->receiving = false;
+            s->dgram->on_error(std::exchange(s->held_error, 0));
+        } else if (!s->recv_armed && !s->starved) {
+            arm_datagram_recv(socket.fd, *s);
+        }
+    }
+    delivering_datagrams_.clear();
+}
+
+void UringReactor::rearm_starved() noexcept {
+    // Every buffer the kernel filled this iteration is back by now, so only held datagrams can
+    // keep the ring empty; until one of those is delivered or dropped, re-arming would spin.
+    if (starved_.empty() || !datagram_buffer_free()) {
+        return;
+    }
+    for (const DatagramId socket : starved_) {
+        Slot* s = datagram_slot(socket);
+        if (s == nullptr || !s->starved) {
+            continue;
+        }
+        s->starved = false;
+        if (s->receiving && !s->recv_armed && s->held_head < 0) {
+            arm_datagram_recv(socket.fd, *s);
+        }
+    }
+    starved_.clear();
 }
 
 } // namespace net::detail

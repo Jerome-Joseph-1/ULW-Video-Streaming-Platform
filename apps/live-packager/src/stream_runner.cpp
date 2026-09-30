@@ -3,6 +3,7 @@
 #include "os/unique_fd.hpp"
 
 #include "log.hpp"
+#include "pipe.hpp"
 #include "watch.hpp"
 
 #include <array>
@@ -10,16 +11,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
-#include <fcntl.h>
 #include <fstream>
 #include <mutex>
 #include <optional>
-#include <poll.h>
 #include <span>
 #include <string>
 #include <system_error>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -35,7 +33,6 @@ namespace fs = std::filesystem;
 constexpr std::chrono::milliseconds kTick{25};
 // ffmpeg's own playlist is a few hundred bytes a segment.
 constexpr std::uintmax_t kMaxPlaylistBytes = std::uintmax_t{1} << 20U;
-constexpr int kWriteWaitMs = 100;
 
 std::optional<std::string> read_playlist(const fs::path& file) {
     std::error_code ec;
@@ -60,32 +57,6 @@ struct RemuxRun {
     std::optional<std::expected<infra::ffmpeg::LiveRemuxResult, std::string>> result;
 };
 
-// Writes all of `bytes` to a pipe, waiting for room but never past `stop`: a reader that has
-// gone leaves the pipe full for good.
-bool write_all(int fd, std::span<const std::byte> bytes, const std::stop_token& stop) {
-    while (!bytes.empty()) {
-        pollfd waiting{.fd = fd, .events = POLLOUT, .revents = 0};
-        if (::poll(&waiting, 1, kWriteWaitMs) < 0 && errno != EINTR) {
-            return false;
-        }
-        if (stop.stop_requested()) {
-            return false;
-        }
-        if ((waiting.revents & POLLOUT) == 0) {
-            continue;
-        }
-        const ssize_t n = ::write(fd, bytes.data(), bytes.size());
-        if (n < 0) {
-            if (errno == EINTR || errno == EAGAIN) {
-                continue;
-            }
-            return false;
-        }
-        bytes = bytes.subspan(static_cast<std::size_t>(n));
-    }
-    return true;
-}
-
 // Moves the publisher's payload into the pipe ffmpeg reads, and closes the pipe when the
 // publisher is gone, which is ffmpeg's end of input.
 void relay(infra::srt::Session& session, std::vector<std::byte> first, os::UniqueFd sink,
@@ -104,19 +75,6 @@ void relay(infra::srt::Session& session, std::vector<std::byte> first, os::Uniqu
             return;
         }
     }
-}
-
-struct Pipe {
-    os::UniqueFd read;
-    os::UniqueFd write;
-};
-
-std::optional<Pipe> make_pipe() {
-    std::array<int, 2> fds{};
-    if (::pipe2(fds.data(), O_CLOEXEC) != 0) {
-        return std::nullopt;
-    }
-    return Pipe{.read = os::UniqueFd(fds[0]), .write = os::UniqueFd(fds[1])};
 }
 
 const char* describe(infra::ffmpeg::LiveEnd end) {
