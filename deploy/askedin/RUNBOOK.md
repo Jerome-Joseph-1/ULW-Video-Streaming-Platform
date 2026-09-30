@@ -79,6 +79,22 @@ elsewhere, change the second `from` in the same files:
 kubectl get pods -A -l app.kubernetes.io/name=prometheus -o custom-columns=NS:.metadata.namespace
 ```
 
+Both the gateway's and the worker's NetworkPolicies also limit what they reach out to: cluster
+DNS in `kube-system`, and TCP 5432 (Postgres) and 443 (R2; for the gateway also Askedin's JWKS).
+The worker's 5432 and 443 exclude the pod network, `10.42.0.0/16` (K3s's default; change it in
+`overlays/*/video-worker/networkpolicy.yaml` if the cluster's differs). The gateway's 443 does
+not, in case `JWKS_URL` names an in-cluster Service; a policy matches the pod's own port, so if
+that Service's pods listen on a port other than 443, add it to the gateway's egress rule, or the
+gateway can fetch no keys (`auth_failures` rise with 503s). Check, before the first apply:
+
+```sh
+kubectl get pods -n kube-system -l k8s-app=kube-dns -o name        # cluster DNS is in kube-system
+kubectl cluster-info dump | grep -m1 -o -- '--cluster-cidr=[^"]*'  # expect 10.42.0.0/16
+```
+
+After it, the gateway's log shows no failed key fetch and its `/readyz` stays 200; a worker
+that cannot reach the bucket fails its first job with a store error.
+
 The gateway limits each client address (20 connections, or 20 requests in flight before they
 are authenticated, and 10 new connections a second) and each user (300 requests a minute, 100
 GiB of uploads a day), per replica. Behind Envoy every connection comes from Envoy's pods, so
