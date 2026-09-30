@@ -1,4 +1,5 @@
 #include "core/ports/clock.hpp"
+#include "core/ports/random.hpp"
 #include "core/util/time.hpp"
 #include "core/util/uuid.hpp"
 
@@ -12,6 +13,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -181,6 +183,34 @@ TEST(UuidV7, LaterIdsSortAfterEarlierOnes) {
     const Uuid second = Uuid::v7(clock, random);
     EXPECT_EQ(timestamp_ms(second), timestamp_ms(first) + 1);
     EXPECT_LT(first, second);
+}
+
+// Random bytes 0x10, 0x21, 0x32, ... in order: each can be found in the id.
+class CountingRandom final : public core::ports::IRandom {
+public:
+    void fill(std::span<std::byte> out) noexcept override {
+        for (std::byte& b : out) {
+            b = static_cast<std::byte>(next_);
+            next_ += 0x11U;
+        }
+    }
+
+private:
+    unsigned next_ = 0x10;
+};
+
+TEST(UuidV7, KeepsTheRandomBitsWhereTheyFall) {
+    const FakeClock clock;
+    CountingRandom random;
+    const Uuid id = Uuid::v7(clock, random);
+    const auto tail = id.bytes().subspan<6>();
+    // Byte 6 keeps its own low nibble under the version, byte 8 its low six bits under the
+    // variant; the rest are the random bytes as they came.
+    constexpr std::array<unsigned, 10> kExpected{0x70, 0x21, 0xb2, 0x43, 0x54,
+                                                 0x65, 0x76, 0x87, 0x98, 0xa9};
+    for (std::size_t k = 0; k < kExpected.size(); ++k) {
+        EXPECT_EQ(std::to_integer<unsigned>(tail[k]), kExpected.at(k)) << "byte " << 6 + k;
+    }
 }
 
 TEST(UuidV7, IsReproducibleFromTheClockAndSeed) {

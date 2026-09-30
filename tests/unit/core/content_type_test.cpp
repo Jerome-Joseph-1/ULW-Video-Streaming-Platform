@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -15,6 +16,16 @@ TEST(ContentType, LowercasesAValidMediaType) {
     const auto t = ContentType::parse("Video/MP4");
     ASSERT_TRUE(t.has_value());
     EXPECT_EQ(t->view(), "video/mp4");
+}
+
+TEST(ContentType, AcceptsEachEndOfTheLetterAndDigitRanges) {
+    for (const auto& [in, out] :
+         {std::pair{"A/Z", "a/z"}, std::pair{"a/z", "a/z"},
+          std::pair{"APPLICATION/ZIP", "application/zip"}, std::pair{"x0/x9", "x0/x9"}}) {
+        const auto t = ContentType::parse(in);
+        ASSERT_TRUE(t.has_value()) << in;
+        EXPECT_EQ(t->view(), out);
+    }
 }
 
 TEST(ContentType, RejectsParametersAndMalformedTypes) {
