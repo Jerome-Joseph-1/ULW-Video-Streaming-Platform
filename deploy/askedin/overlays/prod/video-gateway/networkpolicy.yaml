@@ -4,9 +4,9 @@
 # reach other namespaces' services or the node's other ports. Ports, not addresses, as for the
 # upload reaper: Postgres runs on the node's host and R2 is on the internet (RUNBOOK.md, 3a). If
 # JWKS_URL names an in-cluster Service whose pods listen on a port other than 443, that target
-# port must be added here, or every token is refused once the cached keys expire. The gateway never trusts
-# x-user-* headers anyway (it verifies the token itself), but nothing else in the cluster has
-# a reason to reach it past the Gateway's TLS and routing.
+# port must be added here, or every token is refused once the cached keys expire. The gateway
+# never trusts x-user-* headers anyway (it verifies the token itself), but nothing else in the
+# cluster has a reason to reach it past the Gateway's TLS and routing.
 #
 # Assumes Envoy Gateway's default layout: data-plane pods in envoy-gateway-system, labelled
 # app.kubernetes.io/component=proxy. Confirm on the cluster before the first apply (RUNBOOK.md);

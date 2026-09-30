@@ -89,7 +89,7 @@ gateway can fetch no keys (`auth_failures` rise with 503s). Check, before the fi
 
 ```sh
 kubectl get pods -n kube-system -l k8s-app=kube-dns -o name        # cluster DNS is in kube-system
-kubectl cluster-info dump | grep -m1 -o -- '--cluster-cidr=[^"]*'  # expect 10.42.0.0/16
+kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}'           # each a /24 in 10.42.0.0/16
 ```
 
 After it, the gateway's log shows no failed key fetch and its `/readyz` stays 200; a worker
