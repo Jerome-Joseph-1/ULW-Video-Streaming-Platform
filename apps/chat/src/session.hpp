@@ -27,6 +27,10 @@ namespace chat {
 // One client connection: an HTTP request (a probe, or the upgrade to a WebSocket), then, once
 // upgraded and authenticated, JSON commands in text frames, which the chat service carries
 // out. Retired through the server, never destroyed from inside its own callbacks.
+// Close code for a socket whose token expired: reconnect with a fresh token
+// (docs/integration/chat.md). In the range RFC 6455 section 7.4.2 leaves to applications.
+inline constexpr codec::ws::CloseCode kTokenExpired{4001};
+
 class Session final : public net::IStreamHandler,
                       public net::ITimerHandler,
                       public http::IRequestSink,
@@ -93,6 +97,7 @@ private:
     [[nodiscard]] bool stalled(core::MonoTime at) noexcept;
     [[nodiscard]] std::optional<net::SendProgress> send_progress() const noexcept;
     void give_up() noexcept;
+    [[nodiscard]] bool closed_for_expiry(core::MonoTime at) noexcept;
     void arm(core::Millis delay) noexcept;
     [[nodiscard]] core::MonoTime now() const noexcept;
 
@@ -123,6 +128,9 @@ private:
     bool request_complete_ = false;
     bool paused_ = false;
     std::optional<core::UserId> user_;
+    // When the token the socket was opened with stops being accepted: its exp plus the clock
+    // skew any check allows. The socket is closed then, with kTokenExpired (ADR-0075).
+    std::optional<core::MonoTime> expires_;
     // Set by the upgrade.
     std::optional<ClientId> client_;
     std::optional<PresenceClientId> presence_;

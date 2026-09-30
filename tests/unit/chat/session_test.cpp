@@ -354,6 +354,45 @@ TEST_P(ChatSessionTest, PingsAreAnsweredUntilTheBurstRunsOutThenTheStreamIsCut) 
               1008U);
 }
 
+// A socket must not outlive the token it was opened with: a user whose tokens stopped being
+// issued (signed out, banned) would otherwise go on receiving for as long as it answers pings.
+TEST_P(ChatSessionTest, ASocketClosesWhenItsTokenExpiresWithTheCodeThatSaysReconnect) {
+    node_.reset();
+    // Pings and the idle timeout far off, so that only the token can end the socket.
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    // The token expires an hour after it was checked (FakeVerifier), and a check accepts it for
+    // the clock skew past that.
+    node_->advance(std::chrono::hours(1) + core::ports::kTokenClockSkew - seconds(1));
+    std::vector<std::byte> join;
+    ASSERT_TRUE(alice->append(join, codec::ws::Opcode::Text,
+                              R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_raw(join));
+    const auto answer = alice->next_frame(seconds(10));
+    ASSERT_TRUE(answer);
+    EXPECT_EQ(answer->first, codec::ws::Opcode::Text) << "closed before its token expired";
+
+    node_->advance(seconds(1));
+    std::optional<std::string> close;
+    while (const auto frame = alice->next_frame(seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Close) {
+            close = frame->second;
+            break;
+        }
+    }
+    ASSERT_TRUE(close) << "still open after its token expired";
+    ASSERT_GE(close->size(), 2U);
+    EXPECT_EQ((static_cast<unsigned char>((*close)[0]) << 8U) |
+                  static_cast<unsigned char>((*close)[1]),
+              4001U);
+}
+
 TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);

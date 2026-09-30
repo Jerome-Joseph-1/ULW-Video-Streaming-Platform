@@ -11,6 +11,10 @@
 
 namespace core::ports {
 
+// How far past its `exp` a token is still accepted, for clocks that disagree a little
+// (infra/auth's claim check says why a minute).
+inline constexpr Seconds kTokenClockSkew{60};
+
 struct Claims {
     UserId subject;
     std::string email;

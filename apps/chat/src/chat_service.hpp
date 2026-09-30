@@ -119,6 +119,8 @@ struct ServiceCounters {
     // Messages sent to clients from history.
     std::uint64_t history_messages = 0;
     std::uint64_t allocation_failures = 0;
+    // A client taken out of a room because its user left the room's member list.
+    std::uint64_t removals = 0;
 };
 
 // Identifies an attached client; never reused while the service lives.
@@ -133,15 +135,16 @@ struct ClientId {
 // room's latest messages, and hands each message to every client in the room. Bodies are
 // opaque bytes here: carried, kept and passed on, never read. Everything runs on the reactor
 // thread.
-class ChatService {
+class ChatService final : public core::ports::IMemberListener {
 public:
-    // `messages` answers whether a room admits a user. Its answers must never reach a destroyed
-    // service: destroy the store first, which drops what it still owes.
+    // `messages` answers whether a room admits a user, and tells the service of removals from
+    // member lists from construction on. Neither its answers nor its removals may reach a
+    // destroyed service: destroy the store first, which drops what it still owes.
     ChatService(IRooms& rooms, core::ports::IMessageStore& messages,
                 const core::ports::IClock& clock, ServiceLimits limits);
     // Leaves every room, which also drops what the room plane owes for sends still in flight:
     // nothing calls back into a destroyed service. The room plane must outlive it.
-    ~ChatService();
+    ~ChatService() override;
     ChatService(const ChatService&) = delete;
     ChatService& operator=(const ChatService&) = delete;
     ChatService(ChatService&&) = delete;
@@ -161,6 +164,13 @@ public:
     // Leaves the rooms no client here has used for `linger`. Cheap to call often.
     void sweep() noexcept;
 
+    // The user's clients here leave the room, and are told `not_member`; a join of it still
+    // waiting for the member list is refused when the answer comes (ADR-0075). A stream's live
+    // chat admits anyone, list or not, and is left alone.
+    void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
+    // Every client's closed rooms are checked against the member lists again.
+    void on_members_resync() noexcept override;
+
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
     [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffered_bytes_; }
@@ -177,6 +187,9 @@ private:
         std::vector<core::RoomId> rooms;
         // Of `rooms`, those whose member list has not answered yet.
         std::vector<core::RoomId> admitting;
+        // Of `admitting`, those whose user has since left the member list: refused whatever the
+        // answer, which may have been read before the removal.
+        std::vector<core::RoomId> revoked;
         // Of `rooms`, those in which it is lossy and behind.
         std::vector<core::RoomId> behind;
         std::size_t send_bytes_in_flight = 0;
@@ -207,6 +220,9 @@ private:
     void drop_oldest(Room& room) noexcept;
     void forget_oldest() noexcept;
     void erase(const core::RoomId& room) noexcept;
+    // Takes the client out of one room: its subscription, its place in the queue for the room
+    // plane, and whatever it was still owed.
+    void leave(ClientId id, Client& c, const core::RoomId& room) noexcept;
     void answer(IClient& client, std::string_view reason, const core::RoomId& room,
                 const std::optional<rt::MessageKey>& id = std::nullopt) noexcept;
 

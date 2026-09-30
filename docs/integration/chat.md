@@ -114,8 +114,10 @@ Who may join a room depends on its kind, which is recorded once and never change
   [A stream's live chat](#a-streams-live-chat)), and refused with `not_live` until it is open.
 
 No client command changes a member list; they are set by the service's operators, and later by
-the product, in the database. A member removed from the list keeps receiving the room's
-messages, and can read its history, until that connection closes; the next `join` is refused.
+the product, in the database. A member removed from the list is taken out of the room at once
+on every socket they have, on every node (ADR-0075): each gets an `error` with `not_member` for
+the room, unasked, and receives nothing more from it; `send` and `history` there answer
+`not_joined`, and the next `join` is refused.
 
 ### A stream's live chat
 
@@ -156,7 +158,7 @@ messages, and can read its history, until that connection closes; the next `join
 | `bad_id` | `id` is not a message id | Fix the client |
 | `bad_body` | `body` is not base64url | Fix the client |
 | `bad_stream` | `stream` is not a stream name | Fix the client |
-| `not_member` | The room has a member list without you | Do not retry |
+| `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |
 | `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
@@ -191,6 +193,7 @@ messages, and can read its history, until that connection closes; the next `join
 | Handshake | 10 s from accept to a complete upgrade request | Connection closed |
 | Idle | The server pings after 30 s of silence and closes after 75 s with nothing received | Answer pings (browsers do this themselves) |
 | Server drain | Close `1001`, then 5 s | Reconnect |
+| Token lifetime | The socket is closed when the token it was opened with expires: at its `exp` plus 60 s | Close `4001`: get a fresh token, reconnect, and `join` each room with `after` to resume |
 
 ## Presence
 

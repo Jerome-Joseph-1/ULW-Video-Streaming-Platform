@@ -137,6 +137,9 @@ public:
                      core::ports::MessageCallback<void> done) override {
         done({});
     }
+    void watch_members(core::ports::IMemberListener* listener) noexcept override {
+        watcher = listener;
+    }
 
     // Answers the oldest held admits with what it would have answered, or with `result`'s error.
     void answer_admits(core::ports::MessageResult<void> result) {
@@ -150,6 +153,7 @@ public:
     }
 
     std::vector<std::string> refused;
+    core::ports::IMemberListener* watcher = nullptr;
     // Whether every room is recorded as live; otherwise a join that asks for live is NotLive.
     bool live = true;
     std::vector<core::ports::RoomKind> kinds;
@@ -318,6 +322,81 @@ TEST_F(ChatServiceTest, AJoinOfARoomThatDoesNotAdmitTheUserIsRefusedAndNeverReac
     send(m, "try");
     EXPECT_TRUE(rooms_.sends.empty());
     EXPECT_EQ(seen(mallory.take().at(0)).reason, "not_joined");
+}
+
+// Membership is checked at the join; a user taken off the list afterwards must stop hearing the
+// room at once, not when the connection closes (ADR-0075).
+TEST_F(ChatServiceTest, AUserRemovedFromTheMemberListLeavesTheRoomAndHearsNothingMore) {
+    ASSERT_NE(messages_.watcher, nullptr) << "the service does not listen for removals";
+    FakeClient alice;
+    FakeClient bob;
+    FakeClient bob_phone;
+    const auto a = attach(alice);
+    const auto b = attach(bob, "bob");
+    const auto p = attach(bob_phone, "bob");
+    join(a);
+    join(b);
+    join(p);
+    rt::IMember& member = rooms_.admit();
+    alice.take();
+    bob.take();
+    bob_phone.take();
+
+    messages_.watcher->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    for (FakeClient* removed : {&bob, &bob_phone}) {
+        const auto got = removed->take();
+        ASSERT_EQ(got.size(), 1U);
+        EXPECT_EQ(seen(got[0]).type, "error");
+        EXPECT_EQ(seen(got[0]).reason, "not_member");
+    }
+    EXPECT_TRUE(alice.take().empty());
+    EXPECT_EQ(service_->counters().removals, 2U);
+
+    deliver(member, 1, "after");
+    EXPECT_EQ(seen(alice.take().at(0)).body, "after");
+    EXPECT_TRUE(bob.take().empty());
+    EXPECT_TRUE(bob_phone.take().empty());
+    // Nor may it send there, or read the room's history.
+    send(b, "still-here");
+    EXPECT_TRUE(rooms_.sends.empty());
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_joined");
+    history(b);
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_joined");
+}
+
+// The member list may have been read before the removal committed: a join still waiting for it
+// is refused whatever it says.
+TEST_F(ChatServiceTest, AJoinWaitingForTheMemberListWhenItsUserIsRemovedIsRefused) {
+    messages_.hold = true;
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    join(b);
+    messages_.watcher->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    messages_.answer_admits({});
+    EXPECT_TRUE(rooms_.joins.empty());
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
+    // Asking again asks the member list again.
+    join(b);
+    ASSERT_EQ(messages_.held.size(), 1U);
+}
+
+// Removals said while the store was not listening are lost: a resync checks every closed room a
+// client here is in against its member list again.
+TEST_F(ChatServiceTest, AfterAResyncAClientNoLongerOnTheListLeavesTheRoom) {
+    FakeClient alice;
+    FakeClient bob;
+    const auto a = attach(alice);
+    const auto b = attach(bob, "bob");
+    join(a);
+    join(b);
+    rooms_.admit();
+    alice.take();
+    bob.take();
+    messages_.refused = {"bob"};
+    messages_.watcher->on_members_resync();
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
+    EXPECT_TRUE(alice.take().empty());
+    EXPECT_EQ(service_->counters().removals, 1U);
 }
 
 TEST_F(ChatServiceTest, TheKindAJoinNamesIsWhatTheMemberCheckIsAskedFor) {

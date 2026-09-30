@@ -82,7 +82,9 @@ struct ChatService::Room final : rt::IMember {
 ChatService::ChatService(IRooms& rooms, core::ports::IMessageStore& messages,
                          const core::ports::IClock& clock, ServiceLimits limits)
     : rooms_plane_(rooms), messages_(messages), clock_(clock), limits_(limits),
-      next_sweep_(clock.now()) {}
+      next_sweep_(clock.now()) {
+    messages_.watch_members(this);
+}
 
 ChatService::~ChatService() {
     for (auto& [id, room] : rooms_) {
@@ -98,6 +100,7 @@ ClientId ChatService::attach(IClient& client, const core::UserId& user) {
                                       .user = user,
                                       .rooms = {},
                                       .admitting = {},
+                                      .revoked = {},
                                       .behind = {},
                                       .send_bytes_in_flight = 0,
                                       .replayed_bytes = 0,
@@ -202,6 +205,9 @@ void ChatService::admitted(ClientId id, const Join& join,
         return;
     }
     std::erase(c->admitting, join.room);
+    if (std::erase(c->revoked, join.room) != 0) {
+        result = core::ports::Admission::NotMember;
+    }
     if (!result || *result != core::ports::Admission::Admitted) {
         std::erase(c->rooms, join.room);
         answer(*c->client, refusal(result), join.room);
@@ -432,7 +438,8 @@ void ChatService::page_read(
     ClientId id, const core::RoomId& room,
     core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
     Client* c = find(id);
-    if (c == nullptr) {
+    // Gone from the room meanwhile, taken out by a removal from its member list.
+    if (c == nullptr || std::ranges::find(c->rooms, room) == c->rooms.end()) {
         return;
     }
     if (!page) {
@@ -716,6 +723,83 @@ void ChatService::sweep() noexcept {
     // A full bucket is the same as none.
     std::erase_if(joins_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(sends_, [now](const auto& entry) { return entry.second.full(now); });
+}
+
+void ChatService::leave(ClientId id, Client& c, const core::RoomId& room) noexcept {
+    std::erase(c.rooms, room);
+    std::erase(c.behind, room);
+    Room* r = find(room);
+    if (r == nullptr) {
+        return;
+    }
+    if (const auto s = std::ranges::find(r->subscribers, id, &Room::Subscriber::id);
+        s != r->subscribers.end()) {
+        counters_.lossy_drops += owed(s->behind, r->head);
+        r->subscribers.erase(s);
+    }
+    std::erase_if(r->waiting, [id](const Room::Waiting& w) { return w.id == id; });
+    if (r->subscribers.empty() && r->waiting.empty()) {
+        r->unused_since = clock_.now();
+    }
+}
+
+void ChatService::on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept {
+    if (core::ports::is_stream_chat(room)) {
+        return;
+    }
+    for (auto& [value, c] : clients_) {
+        if (c.user != user || std::ranges::find(c.rooms, room) == c.rooms.end()) {
+            continue;
+        }
+        if (std::ranges::find(c.admitting, room) != c.admitting.end()) {
+            if (std::ranges::find(c.revoked, room) == c.revoked.end()) {
+                try {
+                    c.revoked.push_back(room);
+                } catch (const std::bad_alloc&) {
+                    // Without the mark the answer would admit it: the client goes instead.
+                    ++counters_.allocation_failures;
+                    c.client->allocation_failed();
+                }
+            }
+            continue;
+        }
+        leave(ClientId{value}, c, room);
+        ++counters_.removals;
+        answer(*c.client, "not_member", room);
+    }
+}
+
+void ChatService::on_members_resync() noexcept {
+    // Each user's closed rooms once, however many of their clients are in them.
+    std::vector<std::pair<core::RoomId, core::UserId>> pairs;
+    try {
+        for (const auto& [value, c] : clients_) {
+            for (const core::RoomId& room : c.rooms) {
+                if (core::ports::is_stream_chat(room) ||
+                    std::ranges::find(c.admitting, room) != c.admitting.end()) {
+                    continue;
+                }
+                const std::pair<core::RoomId, core::UserId> pair{room, c.user};
+                if (std::ranges::find(pairs, pair) == pairs.end()) {
+                    pairs.push_back(pair);
+                }
+            }
+        }
+        for (const auto& [room, user] : pairs) {
+            // A recorded room, so the check records nothing: its kind was recorded by the join
+            // that let the client in.
+            messages_.admits(
+                room, user, core::ports::RoomKind::GroupChat,
+                [this, room, user](core::ports::MessageResult<core::ports::Admission> r) noexcept {
+                    if (r && *r == core::ports::Admission::NotMember) {
+                        on_member_removed(room, user);
+                    }
+                });
+        }
+    } catch (const std::bad_alloc&) {
+        // Those not asked about now are left as they are; the next resync asks again.
+        ++counters_.allocation_failures;
+    }
 }
 
 void ChatService::erase(const core::RoomId& room) noexcept {

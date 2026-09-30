@@ -164,6 +164,10 @@ void Session::authenticate() noexcept {
         return;
     }
     user_ = (*result)->subject;
+    // On the reactor's clock from here: the wall clock may be stepped while the socket lives.
+    const core::Millis left = std::chrono::duration_cast<core::Millis>(
+        (*result)->expires_at + core::ports::kTokenClockSkew - server_.deps().clock.wall_now());
+    expires_ = now() + std::max(left, core::Millis{0});
     auth_ = Auth::Passed;
 }
 
@@ -312,7 +316,12 @@ void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
         paused_ = false;
         reactor.start_receiving(conn_);
     }
-    arm(server_.limits().ping_interval);
+    core::Millis first = server_.limits().ping_interval;
+    if (expires_) {
+        first = std::min(first, std::chrono::ceil<core::Millis>(
+                                    std::max(*expires_ - now(), core::MonoTime::duration{0})));
+    }
+    arm(first);
 }
 
 // Once the request is answered the connection never parses HTTP again, so the parser goes, with
@@ -571,6 +580,21 @@ void Session::abandon() noexcept {
 
 // ---- lifetime
 
+// The token the socket was opened with is no longer accepted: the client is to reconnect with
+// a fresh one (ADR-0075).
+bool Session::closed_for_expiry(core::MonoTime at) noexcept {
+    if (!expires_ || at < *expires_) {
+        return false;
+    }
+    ++server_.counters().token_expiries;
+    try {
+        close_with(kTokenExpired);
+    } catch (const std::bad_alloc&) {
+        allocation_failed();
+    }
+    return true;
+}
+
 void Session::on_timeout() noexcept {
     timer_ = {};
     const Limits& limits = server_.limits();
@@ -583,6 +607,9 @@ void Session::on_timeout() noexcept {
         close();
         return;
     case Phase::Open: {
+        if (closed_for_expiry(at)) {
+            return;
+        }
         if (quiet >= limits.idle_timeout) {
             give_up();
             return;
@@ -616,6 +643,9 @@ void Session::on_timeout() noexcept {
         }
         if (watching_) {
             next = std::min(next, at + limits.stall_check);
+        }
+        if (expires_) {
+            next = std::min(next, *expires_);
         }
         arm(std::chrono::ceil<core::Millis>(next - at));
         return;
