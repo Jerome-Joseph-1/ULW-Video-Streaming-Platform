@@ -137,9 +137,11 @@ a word.
   place, its `head()`: a node taking a room over now counts on from the `last_seq` its claim
   read instead of from 0. That is a fix to the room plane, which every room needed (a member
   joining after a takeover was told a head below what had been said), not something presence
-  asks of it; M22's freeze of the file starts at the phase-2 tag, after it. Presence events are
-  the nodes' own bytes in rooms no client can reach; end-to-end encryption, which is about chat
-  bodies, has nothing to do with them.
+  asks of it. M22's freeze covers the E2EE phase only, the phase-2 tag to the phase-3 tag
+  (`tools/e2ee_diagnostic_check.sh`), so this change, made before phase-2, is outside it, and
+  later phases may change the file again. Presence events are the nodes' own bytes in rooms no
+  client can reach; end-to-end encryption, which is about chat bodies, has nothing to do with
+  them.
 
 ## Consequences
 
