@@ -227,6 +227,26 @@ TEST_P(ChatSessionTest, TheCookieCountsOnlyFromAnAllowedPage) {
     EXPECT_TRUE(open(cookie + "Origin: " + std::string(kAllowed) + "\r\n"));
 }
 
+// Messages carry the sender the node authenticated; a node that took it from an identity header
+// would let anyone speak as anyone.
+TEST_P(ChatSessionTest, IdentityHeadersNeitherAuthenticateNorRenameTheSender) {
+    const std::string as_alice = "X-User-Id: alice\r\nX-User-Email: alice@example.com\r\n";
+    EXPECT_EQ(refusal(as_alice), "HTTP/1.1 401 Unauthorized");
+    EXPECT_EQ(refusal(as_alice + "Origin: " + std::string(kAllowed) + "\r\n"),
+              "HTTP/1.1 401 Unauthorized");
+
+    auto bob = open("Authorization: Bearer user.bob\r\n" + as_alice);
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(bob->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+    ASSERT_TRUE(bob->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
+                               R"(","id":"m1","body":"eA"})"));
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"message","room":")" + std::string(kRoom) +
+                  R"(","seq":1,"sender":"bob","id":"m1","body":"eA"})");
+}
+
 TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);

@@ -131,6 +131,27 @@ bool environ_readable_by_its_user(pid_t pid) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+// Every path under `root`, relative to it and sorted.
+std::vector<std::string> tree_of(const fs::path& root) {
+    std::vector<std::string> paths;
+    for (const auto& e : fs::recursive_directory_iterator(root)) {
+        paths.push_back(fs::relative(e.path(), root).string());
+    }
+    std::ranges::sort(paths);
+    return paths;
+}
+
+// What each of a process's descriptors refers to: a path, or a socket, pipe or anon inode.
+std::vector<std::string> descriptor_targets(pid_t pid) {
+    std::vector<std::string> targets;
+    std::error_code ec;
+    for (const auto& fd : fs::directory_iterator("/proc/" + std::to_string(pid) + "/fd", ec)) {
+        std::error_code gone;
+        targets.push_back(fs::read_symlink(fd.path(), gone).string());
+    }
+    return targets;
+}
+
 template <class Pred> bool within(std::chrono::milliseconds limit, Pred pred) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
     while (!pred()) {
@@ -166,16 +187,21 @@ protected:
 
     // What the gateway's commit leaves: a video in processing and its transcode job queued.
     core::VideoId queue_video(core::ports::IObjectTransfer& store) {
+        return queue_video(store, clip(), "req-1");
+    }
+    core::VideoId queue_video(core::ports::IObjectTransfer& store, const fs::path& media,
+                              const std::string& request_id) {
         const auto video = core::VideoId::generate(clock_, random_);
         const std::string source = "videos/" + video.to_string() + "/raw";
-        EXPECT_TRUE(store.upload(clip(), *core::StorageKey::parse(source),
+        EXPECT_TRUE(store.upload(media, *core::StorageKey::parse(source),
                                  *core::ContentType::parse("video/mp4")));
         EXPECT_TRUE(conn_->exec("INSERT INTO videos (id, owner_id, title, state) "
                                 "VALUES ($1, 'auth0|tester', 'clip', 'processing')",
                                 Params{}.add_uuid(video.uuid())));
-        EXPECT_TRUE(conn_->exec("INSERT INTO jobs (video_id, kind, source_key, request_id) "
-                                "VALUES ($1, 'transcode', $2, 'req-1')",
-                                Params{}.add_uuid(video.uuid()).add_text(source)));
+        EXPECT_TRUE(
+            conn_->exec("INSERT INTO jobs (video_id, kind, source_key, request_id) "
+                        "VALUES ($1, 'transcode', $2, $3)",
+                        Params{}.add_uuid(video.uuid()).add_text(source).add_text(request_id)));
         return video;
     }
 
@@ -310,6 +336,49 @@ TEST_F(WorkerTest, AnUploadedMp4BecomesHlsAndTheVideoReady) {
     EXPECT_NE(worker->output().find(R"("realtime":)"), std::string::npos);
     EXPECT_NE(worker->output().find(R"("ffmpeg_peak_rss_kib":)"), std::string::npos);
     EXPECT_TRUE(fs::is_empty(scratch_dirs_.back()->path() / "worker-a"));
+
+    worker->signal(SIGTERM);
+    EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
+}
+
+// Brief section 14: fifty jobs one after another leave the scratch space as the first left it,
+// nothing on disk and no descriptor more. A leaked workspace or file would grow both by one a
+// job. The first job sets the baseline, once the database sessions and the log are open.
+TEST_F(WorkerTest, FiftySequentialJobsLeakNoWorkspaceNorDescriptor) {
+    constexpr int kJobs = 50;
+    const fs::path small = files_.path() / "small.mp4";
+    // One 240p rung and two seconds: a fraction of a second of transcoding each.
+    ASSERT_TRUE(ulw::test::make_clip(small, {.size = "320x240", .rate = "25", .seconds = 2}));
+    const auto worker = start_worker("worker-a", fs_env());
+    const fs::path scratch = scratch_dirs_.back()->path();
+    const auto run_one = [&](int n) {
+        const std::string request = std::format("seq-{}", n);
+        queue_video(fs_store_, small, request);
+        return worker->wait_for_output(
+            std::format(R"("request_id":"{}","outcome":"done")", request), kJobPatience);
+    };
+    const auto in_scratch = [&](const std::vector<std::string>& targets) {
+        return std::ranges::count_if(
+            targets, [&](const std::string& t) { return t.starts_with(scratch.string()); });
+    };
+
+    ASSERT_TRUE(run_one(0)) << worker->output();
+    ASSERT_TRUE(fs::is_empty(scratch / "worker-a"));
+    // The worker's own directory and its heartbeat file, which live as long as it does.
+    const std::vector<std::string> baseline_tree = tree_of(scratch);
+    const std::vector<std::string> baseline = descriptor_targets(worker->pid());
+    ASSERT_EQ(in_scratch(baseline), 0);
+
+    for (int n = 1; n <= kJobs; ++n) {
+        ASSERT_TRUE(run_one(n)) << "job " << n << "\n" << worker->output();
+        EXPECT_TRUE(fs::is_empty(scratch / "worker-a")) << "after job " << n;
+    }
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM jobs WHERE state = 'done'", Params{}),
+              std::to_string(kJobs + 1));
+    EXPECT_EQ(tree_of(scratch), baseline_tree);
+    const std::vector<std::string> after = descriptor_targets(worker->pid());
+    EXPECT_LE(after.size(), baseline.size()) << ::testing::PrintToString(after);
+    EXPECT_EQ(in_scratch(after), 0) << ::testing::PrintToString(after);
 
     worker->signal(SIGTERM);
     EXPECT_EQ(worker->wait_exit(kExitPatience), 0);

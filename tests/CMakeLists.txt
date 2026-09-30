@@ -412,6 +412,24 @@ target_include_directories(chat_cluster_tests
 target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
 add_dependencies(chat_cluster_tests chat_server)
 
+# The M22 acceptance on the same cluster: MLS messages through it, stored as ciphertext gzip
+# cannot shrink, and readable nowhere.
+if(ULW_BUILD_MLS)
+    find_package(ZLIB REQUIRED)
+    ulw_add_test_suite(chat_e2ee_tests integration
+        integration/chat_e2ee_test.cpp
+        integration/postgres_harness.cpp
+        support/child_process.cpp
+        PROPERTIES RESOURCE_LOCK postgres)
+    target_link_libraries(chat_e2ee_tests PRIVATE ulw::e2ee_mls ulw::pg_store ulw::devtoken
+        ulw::auth ulw::codec_ws ulw::net_lib ulw::os PkgConfig::LIBPQ ZLIB::ZLIB)
+    target_include_directories(chat_e2ee_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+    target_compile_definitions(chat_e2ee_tests PRIVATE
+        ULW_CHAT_BIN="$<TARGET_FILE:chat_server>" ZLIB_CONST)
+    add_dependencies(chat_e2ee_tests chat_server)
+endif()
+
 # gateway_server as its service manager runs it, against a scratch database.
 ulw_add_test_suite(gateway_process_tests integration
     integration/gateway_process_test.cpp
