@@ -445,21 +445,35 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     HttpClient uploader(gw.endpoint());
     timeval tv{.tv_sec = 0, .tv_usec = 200'000};
     ::setsockopt(uploader.fd(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    // A fixed send buffer, so the client stalls at the same point on every host. Left to
+    // autotune, it grows towards tcp_wmem's maximum while a send is already waiting on it, and
+    // that send times out although the socket has room again.
+    const int send_buffer = 256 * 1024;
+    ASSERT_EQ(::setsockopt(uploader.fd(), SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof send_buffer),
+              0);
     const std::string head = "PATCH /api/v1/uploads/" + up->upload_id +
                              " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                              "Upload-Offset: 0\r\nContent-Length: " +
                              std::to_string(data.size()) + "\r\n\r\n";
     ASSERT_TRUE(uploader.send_raw(head));
+    // Writes the body until a send has taken nothing for its whole timeout. That is the
+    // kernel's state at that moment, not for good: a late window update can still open room, so
+    // every push goes on until the socket refuses again. Each send asks for the rest of the body
+    // from `sent`, the same bytes every time, as a TLS write that did not complete must be
+    // retried.
+    std::size_t sent = 0;
+    const auto push_until_refused = [&] {
+        while (sent < data.size()) {
+            const std::size_t n = uploader.send_some(std::span(data).subspan(sent));
+            if (n == 0) {
+                return;
+            }
+            sent += n;
+        }
+    };
     // With nothing drained, the client's writes must stall once the kernel buffers on both
     // sides are full; the gateway itself holds at most its staging bound.
-    std::size_t sent = 0;
-    while (sent < data.size()) {
-        const std::size_t n = uploader.send_some(std::span(data).subspan(sent));
-        if (n == 0) {
-            break;
-        }
-        sent += n;
-    }
+    push_until_refused();
     EXPECT_LT(sent, data.size());
     const auto ingested = gw.counters().bytes_ingested;
     EXPECT_LE(ingested, (std::uint64_t{256} * 1024) + (std::uint64_t{64} * 1024));
@@ -488,13 +502,13 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     constexpr int kBodyTimeouts = 10;
     for (int i = 0; i < kBodyTimeouts; ++i) {
         gw.advance(limits.body_idle_timeout);
-        // The client keeps pushing into a full socket; nothing more may land in the gateway.
-        if (i == 0 || i == kBodyTimeouts - 1) {
-            EXPECT_EQ(uploader.send_some(std::span(data).subspan(sent, 1024)), 0U);
-        }
-        EXPECT_EQ(buffered(), held_once_stalled);
+        // The client keeps pushing whatever its socket takes; nothing more may land in the
+        // gateway.
+        push_until_refused();
+        EXPECT_LT(sent, data.size()) << "at body timeout " << i;
+        EXPECT_EQ(buffered(), held_once_stalled) << "at body timeout " << i;
+        EXPECT_EQ(gw.counters().bytes_ingested, ingested) << "at body timeout " << i;
     }
-    EXPECT_EQ(gw.counters().bytes_ingested, ingested);
     const gateway::Counters held = gw.counters();
     EXPECT_EQ(held.timeouts_body + held.timeouts_body_rate + held.timeouts_backstop, 0U);
     EXPECT_EQ(gw.claims(), 1U);
