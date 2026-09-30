@@ -55,6 +55,7 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_DATABASE_URL", .key = "database.url", .secret = true},
     ops::Setting{.env = "JWKS_URL", .key = "auth.jwks_url"},
     ops::Setting{.env = "ULW_DEV_JWKS_FILE", .key = "auth.dev_jwks_file"},
+    ops::Setting{.env = "ULW_JWKS_MAX_STALE_HOURS", .key = "auth.jwks_max_stale_hours"},
     ops::Setting{.env = "ULW_DEV_MODE", .key = "dev.mode"},
     // Not a setting: the kubelet sets it in every container, and it is read only to refuse
     // development settings there.
@@ -241,26 +242,19 @@ std::optional<std::string> read_key_set(const std::string& path) {
 }
 
 std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config) {
-    auto url = lookup(env, "JWKS_URL");
-    auto file = lookup(env, "ULW_DEV_JWKS_FILE");
-    if (url && file) {
-        return error("JWKS_URL", "set together with ULW_DEV_JWKS_FILE; choose one");
+    auto source = ops::key_source(env);
+    if (!source) {
+        return error(source.error().variable, source.error().reason);
     }
-    if (!url && !file) {
-        return error("JWKS_URL", "not set");
+    config.jwks_url = std::move(source->url);
+    config.dev_jwks_file = std::move(source->file);
+    // A week is past any outage anyone would wait out; an hour is short of a bad night.
+    auto stale = number<std::uint32_t>(env, "ULW_JWKS_MAX_STALE_HOURS", 24, 1, 168);
+    if (!stale) {
+        return std::unexpected(std::move(stale.error()));
     }
-    // Over plain HTTP anyone on the path could hand us their own keys and sign any identity.
-    if (url && !url->starts_with("https://")) {
-        return error("JWKS_URL", "must be an https URL");
-    }
-    // A local key set signs any identity its holder likes; in a real deployment it would be a
-    // way in, not a convenience.
-    if (auto r = ops::allow_dev_only("ULW_DEV_JWKS_FILE", env); !r) {
-        return error(r.error().variable, r.error().reason);
-    }
-    config.jwks_url = std::move(url).value_or("");
-    config.dev_jwks_file = std::move(file).value_or("");
-    // allow_dev_only has refused anything but "0", "1" or empty.
+    config.jwks_max_stale_hours = *stale;
+    // key_source has refused anything but "0", "1" or empty.
     config.dev_mode = lookup(env, "ULW_DEV_MODE") == "1";
     auto issuer = required(env, "JWT_ISSUER");
     if (!issuer) {
@@ -503,7 +497,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     // Checked as given; the blocks themselves hold no text to print back.
     const std::string proxies =
         config.limits.trusted_proxies.empty() ? "" : layers.get("ULW_TRUSTED_PROXIES").value_or("");
-    const std::array<std::pair<std::string_view, std::string>, 30> values{{
+    const std::array<std::pair<std::string_view, std::string>, 31> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -532,6 +526,8 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_CHUNK_SIZE", std::to_string(config.chunk_size)},
         {"ULW_DATABASE_URL", config.database_url},
         {"JWKS_URL", config.jwks_url},
+        {"ULW_JWKS_MAX_STALE_HOURS",
+         config.jwks_url.empty() ? "" : std::to_string(config.jwks_max_stale_hours)},
         {"ULW_DEV_JWKS_FILE", config.dev_jwks_file},
         {"ULW_DEV_MODE", config.dev_mode ? "1" : ""},
         {"JWT_ISSUER", config.jwt_issuer},

@@ -51,12 +51,14 @@ spec:
                 secretKeyRef:
                   name: video-gateway-secrets
                   key: ULW_DATABASE_URL
-          # One libpq connection running a handful of DDL statements.
+          # One libpq connection running a handful of DDL statements. The CPU limit only
+          # bounds a runaway: it is the pod's init phase, so it takes nothing from the gateway.
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
             limits:
+              cpu: 500m
               memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
