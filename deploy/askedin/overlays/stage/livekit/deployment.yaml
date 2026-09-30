@@ -105,13 +105,16 @@ spec:
           # cache, ~500 packets x 1.5 KB = 750 KB, for ~4 tracks per participant in a 1:1 call
           # (audio and video, sent and received): ~3 MB each. 256 MiB then holds ~50
           # participants and 1 GiB ~300; the 3 MB is still an estimate.
+          # Disk: its log only (read-only root filesystem, no volume), sized as video-gateway's.
           resources:
             requests:
               cpu: 500m
               memory: 256Mi
+              ephemeral-storage: 64Mi
             limits:
               cpu: "2"
               memory: 1Gi
+              ephemeral-storage: 256Mi
           readinessProbe:
             httpGet:
               path: /

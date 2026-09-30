@@ -42,7 +42,8 @@ for pin in "${pins[@]}"; do
     rm -f "$tools/$name" "$tools/$name.pin"
     echo "fetching $name $version" >&2
     archive=$tools/${url##*/}.part
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$archive" "$url"
+    curl -fsSL --proto =https --proto-redir =https --retry 5 --retry-all-errors --retry-delay 2 \
+        -o "$archive" "$url"
     if ! echo "$sum  $archive" | sha256sum --check --status; then
         rm -f "$archive"
         echo "$name $version: SHA-256 mismatch, expected $sum" >&2

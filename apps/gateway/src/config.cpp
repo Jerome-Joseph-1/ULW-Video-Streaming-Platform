@@ -254,6 +254,8 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
         return std::unexpected(std::move(stale.error()));
     }
     config.jwks_max_stale_hours = *stale;
+    // key_source has refused anything but "0", "1" or empty.
+    config.dev_mode = lookup(env, "ULW_DEV_MODE") == "1";
     auto issuer = required(env, "JWT_ISSUER");
     if (!issuer) {
         return std::unexpected(std::move(issuer.error()));
@@ -527,6 +529,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_JWKS_MAX_STALE_HOURS",
          config.jwks_url.empty() ? "" : std::to_string(config.jwks_max_stale_hours)},
         {"ULW_DEV_JWKS_FILE", config.dev_jwks_file},
+        {"ULW_DEV_MODE", config.dev_mode ? "1" : ""},
         {"JWT_ISSUER", config.jwt_issuer},
         {"JWT_AUDIENCE", config.jwt_audience},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},

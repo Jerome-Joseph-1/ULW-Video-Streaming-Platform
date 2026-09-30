@@ -26,20 +26,20 @@ ARG UBUNTU=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09
 ARG DEBIAN=debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 
 FROM ${UBUNTU} AS apt
-ENV UBUNTU_SNAPSHOT=20260925T000000Z
+ENV UBUNTU_SNAPSHOT=20260930T000000Z
 
 FROM apt AS build
 RUN --mount=type=bind,source=deploy/docker/apt-install.sh,target=/usr/local/sbin/apt-install \
     --mount=type=secret,id=ca-bundle,mode=0444 \
     apt-install \
         ca-certificates=20260601~24.04.1 \
-        openssl=3.0.13-0ubuntu3.15 \
-        libssl3t64=3.0.13-0ubuntu3.15 \
+        openssl=3.0.13-0ubuntu3.16 \
+        libssl3t64=3.0.13-0ubuntu3.16 \
         g++-14=14.2.0-4ubuntu2~24.04.1 \
         cmake=3.28.3-1build7 \
         ninja-build=1.11.1-2 \
         pkgconf=1.8.1-2build1 \
-        libssl-dev=3.0.13-0ubuntu3.15 \
+        libssl-dev=3.0.13-0ubuntu3.16 \
         libcurl4-openssl-dev=8.5.0-2ubuntu10.15 \
         libpq-dev=16.15-0ubuntu0.24.04.1 \
         liburing-dev=2.5-1build1
@@ -61,10 +61,10 @@ RUN --mount=type=bind,source=deploy/docker/apt-install.sh,target=/usr/local/sbin
     --mount=type=secret,id=ca-bundle,mode=0444 \
     apt-install \
         ca-certificates=20260601~24.04.1 \
-        openssl=3.0.13-0ubuntu3.15 \
+        openssl=3.0.13-0ubuntu3.16 \
         libcurl4t64=8.5.0-2ubuntu10.15 \
         libpq5=16.15-0ubuntu0.24.04.1 \
-        libssl3t64=3.0.13-0ubuntu3.15 \
+        libssl3t64=3.0.13-0ubuntu3.16 \
         liburing2=2.5-1build1 \
  && useradd --system --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin ulw
 

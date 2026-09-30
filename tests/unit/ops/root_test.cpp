@@ -1,5 +1,6 @@
 #include "ops/process.hpp"
 #include "ops/root.hpp"
+#include "support/user_id.hpp"
 
 #include <linux/audit.h>
 #include <linux/filter.h>
@@ -16,7 +17,7 @@
 #include <cstdlib>
 #include <functional>
 #include <gtest/gtest.h>
-#include <pwd.h>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <unistd.h>
@@ -81,11 +82,11 @@ TEST_F(LeaveRootTest, RootWithNoUserIsAConfigurationErrorUnlessAllowed) {
 }
 
 TEST_F(LeaveRootTest, ANamedUserIsBecomeAndAnUnknownOneRefused) {
-    const passwd* nobody = ::getpwnam("nobody");
-    if (nobody == nullptr) {
+    const std::optional<uid_t> nobody = ulw::test::user_id("nobody");
+    if (!nobody) {
         GTEST_SKIP() << "no nobody user on this host";
     }
-    const uid_t uid = nobody->pw_uid;
+    const uid_t uid = *nobody;
     EXPECT_EQ(in_child([] {
                   const auto unknown = ops::leave_root("no-such-user-in-any-passwd", false);
                   return !unknown && unknown.error().configuration && ::getuid() == 0 ? 0 : 1;
@@ -105,7 +106,7 @@ TEST_F(LeaveRootTest, ANamedUserIsBecomeAndAnUnknownOneRefused) {
 // back; where it is 0 the kernel itself leaves the flag off, and the next test is the one that
 // shows the step is taken.
 TEST_F(LeaveRootTest, AProcessThatTurnedDumpsOffKeepsThemOffAfterTheDrop) {
-    if (::getpwnam("nobody") == nullptr) {
+    if (!ulw::test::user_id("nobody")) {
         GTEST_SKIP() << "no nobody user on this host";
     }
     EXPECT_EQ(in_child([] {
@@ -153,7 +154,7 @@ bool refuse_set_dumpable() {
 // Whatever fs.suid_dumpable is: the flag is put back after the drop, and a failure to put it back
 // refuses the drop with the errno, rather than serving dumpable.
 TEST_F(LeaveRootTest, ADropThatCannotTurnDumpsBackOffIsRefused) {
-    if (::getpwnam("nobody") == nullptr) {
+    if (!ulw::test::user_id("nobody")) {
         GTEST_SKIP() << "no nobody user on this host";
     }
     EXPECT_EQ(in_child([] {
