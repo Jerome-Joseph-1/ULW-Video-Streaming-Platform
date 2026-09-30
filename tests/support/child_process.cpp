@@ -33,6 +33,12 @@ int remaining_ms(std::chrono::steady_clock::time_point deadline) {
     return static_cast<int>(std::max<std::chrono::milliseconds::rep>(left.count(), 0));
 }
 
+int remaining_ms_up(std::chrono::steady_clock::time_point deadline) {
+    const auto left =
+        std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+    return static_cast<int>(std::max<std::chrono::milliseconds::rep>(left.count(), 0));
+}
+
 } // namespace
 
 std::unique_ptr<ChildProcess> ChildProcess::start(const std::vector<std::string>& argv,
@@ -114,7 +120,9 @@ bool ChildProcess::poll_until(const std::function<bool()>& ready, std::chrono::m
             return false;
         }
         const auto next = std::min(deadline, now + period);
-        for (int left = remaining_ms(next); left > 0; left = remaining_ms(next)) {
+        // Rounded up: cut to whole milliseconds, the wait for the deadline ends short of it,
+        // and the check would be asked in a spin through the fraction left.
+        for (int left = remaining_ms_up(next); left > 0; left = remaining_ms_up(next)) {
             if (!read_some(std::chrono::milliseconds(left))) {
                 return false;
             }

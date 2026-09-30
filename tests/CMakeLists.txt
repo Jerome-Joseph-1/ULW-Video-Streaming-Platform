@@ -87,6 +87,14 @@ ulw_add_library(test_tls support/tls_pki.cpp)
 target_include_directories(test_tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(test_tls PUBLIC ulw::net_lib OpenSSL::SSL)
 
+# The test harness itself: the child processes, the client and the port reservations other
+# suites rely on, and the soak's own setup.
+ulw_add_test_suite(test_support_tests unit
+    support/child_process.cpp
+    unit/support/child_process_test.cpp)
+target_link_libraries(test_support_tests PRIVATE ulw::os ulw::test_tls OpenSSL::SSL)
+target_include_directories(test_support_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
     unit/net/connect_test.cpp
