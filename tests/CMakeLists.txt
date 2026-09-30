@@ -91,7 +91,8 @@ target_link_libraries(test_tls PUBLIC ulw::net_lib OpenSSL::SSL)
 # suites rely on, and the soak's own setup.
 ulw_add_test_suite(test_support_tests unit
     support/child_process.cpp
-    unit/support/child_process_test.cpp)
+    unit/support/child_process_test.cpp
+    unit/support/http_client_test.cpp)
 target_link_libraries(test_support_tests PRIVATE ulw::os ulw::test_tls OpenSSL::SSL)
 target_include_directories(test_support_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
