@@ -208,6 +208,52 @@ protected:
         return reloads.results.back();
     }
 
+    // Connects with `ctx`, offering `session` when there is one, and returns once the client
+    // holds a ticket. The connection and its handler stay until the test ends.
+    TlsPeer* connect_for_ticket(SSL_CTX* ctx, SSL_SESSION* session) {
+        auto h = std::make_unique<Held>();
+        h->peer = connect(h->upper, ctx);
+        if (session != nullptr) {
+            EXPECT_EQ(SSL_set_session(h->peer->ssl(), session), 1);
+        }
+        EXPECT_TRUE(handshake(*h->peer));
+        std::vector<std::byte> none;
+        EXPECT_TRUE(pump_until(*reactor, [&] {
+            h->peer->read(none);
+            return SSL_SESSION_is_resumable(SSL_get0_session(h->peer->ssl())) == 1;
+        }));
+        held.push_back(std::move(h));
+        return held.back()->peer.get();
+    }
+
+    // Closes what connect_for_ticket kept and, once the reactor is done with them, lets the
+    // transports and their handlers go.
+    void release_held() {
+        for (const auto& h : held) {
+            h->upper.transport->begin_close();
+        }
+        ASSERT_TRUE(pump_until(*reactor, [&] {
+            return std::ranges::all_of(
+                held, [](const auto& h) { return h->upper.transport->is_quiescent(); });
+        }));
+        std::erase_if(owned, [&](const auto& t) {
+            return std::ranges::any_of(
+                held, [&](const auto& h) { return h->upper.transport == t.get(); });
+        });
+        held.clear();
+    }
+
+    // The client's session, ticket included, for as long as the test keeps it.
+    static ulw::test::SslSessionPtr ticket_of(TlsPeer& peer) {
+        return ulw::test::SslSessionPtr{SSL_get1_session(peer.ssl())};
+    }
+
+    // Moves the clock on and lets the loop run whatever came due.
+    void idle_for(Millis span) {
+        clock.advance(span);
+        pump_pending(*reactor);
+    }
+
     void TearDown() override {
         for (auto& t : owned) {
             t->begin_close();
@@ -220,6 +266,12 @@ protected:
     Reloads reloads;
     std::unique_ptr<net::ITransportFactory> transports;
     ulw::test::SslCtxPtr client_ctx;
+    // Connections kept by connect_for_ticket; their handlers outlive the transports below.
+    struct Held {
+        Upper upper;
+        std::unique_ptr<TlsPeer> peer;
+    };
+    std::vector<std::unique_ptr<Held>> held;
     std::vector<std::unique_ptr<net::ITransport>> owned;
     // Destroyed first: a reload it runs points at the transports and at `reloads`.
     std::unique_ptr<net::OffloadPool> pool;
@@ -713,48 +765,46 @@ TEST_P(TlsTransportTest, TicketKeysRotateAndATicketStopsResumingOnceItsKeyIsGone
     for (const int version : {TLS1_2_VERSION, TLS1_3_VERSION}) {
         SCOPED_TRACE(version);
         const auto ctx = TestPki::shared().client_context(version);
-        // A connection that takes a ticket and keeps it; the handler outlives the connection.
-        struct Held {
-            Upper upper;
-            std::unique_ptr<TlsPeer> peer;
-        };
-        std::vector<std::unique_ptr<Held>> held;
-        const auto connect_with = [&](SSL_SESSION* session) -> TlsPeer* {
-            auto h = std::make_unique<Held>();
-            h->peer = connect(h->upper, ctx.get());
-            if (session != nullptr) {
-                EXPECT_EQ(SSL_set_session(h->peer->ssl(), session), 1);
-            }
-            EXPECT_TRUE(handshake(*h->peer));
-            std::vector<std::byte> none;
-            EXPECT_TRUE(pump_until(*reactor, [&] {
-                h->peer->read(none);
-                return SSL_SESSION_is_resumable(SSL_get0_session(h->peer->ssl())) == 1;
-            }));
-            held.push_back(std::move(h));
-            return held.back()->peer.get();
-        };
-
-        TlsPeer* first = connect_with(nullptr);
-        SSL_SESSION* ticket = SSL_get0_session(first->ssl());
+        const auto ticket = ticket_of(*connect_for_ticket(ctx.get(), nullptr));
 
         // One interval on, a newer key seals, and the old one still opens.
         clock.advance(std::chrono::hours(12) + std::chrono::seconds(1));
-        TlsPeer* later = connect_with(ticket);
+        TlsPeer* later = connect_for_ticket(ctx.get(), ticket.get());
         EXPECT_EQ(SSL_session_reused(later->ssl()), 1);
-        SSL_SESSION* fresh = SSL_get0_session(later->ssl());
+        const auto fresh = ticket_of(*later);
 
         // Another interval on, the key that sealed the first ticket is gone; the ticket the
         // second connection was given, sealed with the key after it, still resumes.
         clock.advance(std::chrono::hours(12) + std::chrono::seconds(1));
-        TlsPeer* refused = connect_with(ticket);
+        TlsPeer* refused = connect_for_ticket(ctx.get(), ticket.get());
         EXPECT_EQ(SSL_session_reused(refused->ssl()), 0);
-        TlsPeer* renewed = connect_with(fresh);
+        TlsPeer* renewed = connect_for_ticket(ctx.get(), fresh.get());
         EXPECT_EQ(SSL_session_reused(renewed->ssl()), 1);
-        for (const auto& h : held) {
-            h->upper.transport->begin_close();
-        }
-        pump_pending(*reactor);
+        release_held();
+    }
+}
+
+// The keys are replaced on schedule whether or not a handshake comes along to do it, so a key is
+// wiped a day after it was made on a server nobody reached in between. Were it replaced only by
+// the next handshake, a server idle for 20 hours would make its second key then, and a ticket
+// sealed with it would still resume 17 hours later.
+TEST_P(TlsTransportTest, TicketKeysRotateOnScheduleOnAnIdleServer) {
+    for (const int version : {TLS1_2_VERSION, TLS1_3_VERSION}) {
+        SCOPED_TRACE(version);
+        const auto ctx = TestPki::shared().client_context(version);
+        static_cast<void>(connect_for_ticket(ctx.get(), nullptr));
+
+        // Nobody connects until hour 20; the second key was made at hour 12.
+        idle_for(std::chrono::hours(12) + std::chrono::seconds(1));
+        idle_for(std::chrono::hours(8));
+        const auto sealed = ticket_of(*connect_for_ticket(ctx.get(), nullptr));
+
+        // Hour 36 and a little: the key made at hour 12 has had its two intervals.
+        idle_for(std::chrono::hours(4) + std::chrono::seconds(1));
+        idle_for(std::chrono::hours(12) + std::chrono::seconds(1));
+        TlsPeer* late = connect_for_ticket(ctx.get(), sealed.get());
+        EXPECT_EQ(SSL_session_reused(late->ssl()), 0);
+        release_held();
     }
 }
 

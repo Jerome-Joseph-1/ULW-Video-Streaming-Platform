@@ -29,6 +29,8 @@ struct Config {
     std::string database_url;
     // Exactly one of the two: Askedin's JWKS, or a local key set for offline development.
     std::string jwks_url;
+    // ULW_JWKS_MAX_STALE_HOURS: how long keys stay trusted while every refetch fails.
+    std::uint32_t jwks_max_stale_hours = 24;
     std::string dev_jwks_file;
     std::string jwt_issuer;
     std::string jwt_audience;
