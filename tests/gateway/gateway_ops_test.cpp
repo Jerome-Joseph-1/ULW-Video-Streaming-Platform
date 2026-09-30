@@ -276,6 +276,18 @@ TEST_F(GatewayReadiness, DrainingWinsOverAHealthyProbe) {
     EXPECT_EQ(r->body, "draining\n");
 }
 
+// What DrainingWinsOverAHealthyProbe waits on: a connection is busy once a byte of a request has
+// been read from it, not when it is accepted. Counted from the accept, the wait could end before
+// the gateway had read the half request, and the drain would close the connection as idle.
+TEST_F(GatewayReadiness, AnAcceptedConnectionIsBusyOnlyOnceARequestByteIsRead) {
+    GatewayUnderTest gw(GatewayOptions{});
+    HttpClient c(gw.endpoint());
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 1; }));
+    EXPECT_EQ(gw.busy_connections(), 0U);
+    ASSERT_TRUE(c.send_raw("GET /readyz HTTP/1.1\r\n"));
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.busy_connections() == 1; }));
+}
+
 TEST_F(GatewayReadiness, TheUnprefixedProbePathsAnswerLikeTheApiOnes) {
     GatewayUnderTest gw(GatewayOptions{});
     EXPECT_EQ(readyz(gw, "/readyz"), std::pair(200, std::string("ready\n")));
