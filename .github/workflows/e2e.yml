@@ -97,20 +97,31 @@ jobs:
       # The release build's binaries, as the images carry them (docs/adr/0072).
       - name: Release binaries hardened
         if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        # Outside the checkout, so nothing copied out of an image lands in the workspace.
         run: |
           for image in ulw/video-gateway:e2e ulw/video-worker:e2e; do
-            dir=release-bin/${image//[:\/]/-}
+            dir=$RUNNER_TEMP/release-bin/${image//[:\/]/-}
             mkdir -p "$dir"
             container=$(docker create "$image")
             docker cp "$container:/usr/local/bin/." "$dir"
             docker rm "$container" >/dev/null
           done
-          tools/check-hardening.sh release-bin/*/*
-      # The two images Askedin runs, for OS and library vulnerabilities; HIGH and CRITICAL with
-      # a fix available fail (tools/security/trivy-image.sh). mock-auth is the sandbox's own.
+          tools/check-hardening.sh "$RUNNER_TEMP"/release-bin/*/*
+      # The two images Askedin runs, for OS and library vulnerabilities. Every HIGH or CRITICAL,
+      # by Trivy's rating or NVD's, fixed or not, goes into the job summary and the JSON report
+      # below; HIGH and CRITICAL by Trivy's rating with a fix available fail
+      # (tools/security/trivy-image.sh). mock-auth is the sandbox's own.
       - name: Image vulnerabilities
         if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        env:
+          TRIVY_REPORT_DIR: ${{ runner.temp }}/trivy-image
         run: tools/security/trivy-image.sh ulw/video-gateway:e2e ulw/video-worker:e2e
+      - if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-image
+          path: ${{ runner.temp }}/trivy-image
+          if-no-files-found: warn
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

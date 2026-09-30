@@ -23,10 +23,14 @@ target_compile_options(ulw_warnings INTERFACE
 # drops the binary's IBT and SHSTK markings (tools/check-hardening.sh, docs/adr/0072).
 # A list, not a target: llhttp and srt install(EXPORT) their targets, which may not name one of
 # ours.
-set(ulw_hardening_flags
-    -fstack-protector-strong -fstack-clash-protection -fcf-protection
-    # _FORTIFY_SOURCE needs optimisation to do anything and warns at -O0.
-    "$<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=3>")
+set(ulw_hardening_flags -fstack-protector-strong -fstack-clash-protection -fcf-protection)
+# _FORTIFY_SOURCE needs optimisation to do anything and warns at -O0; under a sanitizer it is off,
+# since the sanitizer checks the same calls and the __*_chk wrappers hide them from ASan's
+# interceptors. Decided here rather than in a generator expression, where ULW_SANITIZE's comma
+# ("address,undefined") would split the argument.
+if(NOT ULW_SANITIZE)
+    list(APPEND ulw_hardening_flags "$<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=3>")
+endif()
 target_compile_options(ulw_warnings INTERFACE ${ulw_hardening_flags})
 target_link_options(ulw_warnings INTERFACE
     -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack)

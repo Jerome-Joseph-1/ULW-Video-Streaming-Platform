@@ -50,32 +50,74 @@ SHA-256.
 
 | Check | Where | When | Fails on |
 |---|---|---|---|
-| CodeQL (`c-cpp`, `security-extended`) | `security.yml` `codeql` | pull requests, pushes to main, weekly | the alerts it uploads to code scanning; branch protection decides whether an open alert blocks |
+| CodeQL (`c-cpp`, `security-extended`, `.github/codeql/codeql-config.yml`) | `security.yml` `codeql` | pull requests, pushes to main, weekly | the alerts it uploads to code scanning; branch protection decides whether an open alert blocks |
 | osv-scanner | `security.yml` `dependencies` (`tools/security/osv-scan.sh`) | pull requests, pushes to main, weekly | any advisory not allowlisted, of any severity |
 | Trivy config | `security.yml` `iac` (`tools/security/trivy-config.sh`) | pull requests, pushes to main, weekly | any misconfiguration not allowlisted, of any severity |
-| actionlint (with shellcheck), zizmor | `security.yml` `workflows` (`tools/security/lint-workflows.sh`) | pull requests, pushes to main, weekly | any finding |
+| actionlint (with shellcheck), zizmor, online | `security.yml` `workflows` (`tools/security/lint-workflows.sh`) | pull requests, pushes to main, weekly | any finding, including an action pin that is not the tag its comment names, not in that action's own repository, or a known-vulnerable release |
 | Binary hardening, ci build | `ci.yml` `build-test`, both compilers' ci preset | wherever ci.yml runs | any executable under `apps/` or `tools/` lacking PIE, full RELRO, NX, no RWX segment, stack protector, IBT or SHSTK; any first-party, llhttp or srt unit compiled without `-D_FORTIFY_SOURCE=3`, `-fstack-protector-strong`, `-fstack-clash-protection` or `-fcf-protection`; no `__*_chk` import in any executable |
-| Binary hardening, release images | `e2e.yml` `sandbox` | nightly, manual, phase tags | the same, on the binaries copied out of the gateway and worker images |
-| Trivy image | `e2e.yml` `sandbox` (`tools/security/trivy-image.sh`) | nightly, manual, phase tags | a HIGH or CRITICAL vulnerability with a fixed version, not allowlisted |
+| Binary hardening, release images | `e2e.yml` `sandbox` | nightly, manual, phase tags | the ELF checks only (PIE, full RELRO, NX, no RWX segment, stack protector, IBT, SHSTK, and a `__*_chk` import in at least one executable) on the binaries copied out of the gateway and worker images; an image carries no compile database, so the per-unit flag check is the ci build's alone |
+| Trivy image | `e2e.yml` `sandbox` (`tools/security/trivy-image.sh`) | nightly, manual, phase tags | a vulnerability Trivy rates HIGH or CRITICAL with a fixed version, not allowlisted. Every HIGH or CRITICAL by Trivy's or NVD's rating, fixed or not, allowlisted or not, goes into the job summary and a JSON artifact |
 
 The four `security.yml` jobs run in parallel and alongside `ci.yml`. The workflow grants no
 permissions at the top; each job asks for `contents: read`, and CodeQL's alone adds
 `security-events: write` for the upload. CodeQL builds the ci preset with GCC 14 and
 `ULW_BUILD_TESTS=OFF`: the tests would double the build, and nothing they contain ships.
-ccache is off for that build, because CodeQL sees only the compiler invocations that run.
+ccache is off for that build, because CodeQL sees only the compiler invocations that run, and
+the setup action neither restores nor saves a ccache for the job (`ccache: "false"`), so no
+empty cache is saved under its key. Its configuration file keeps `security-extended` and drops
+alerts under `build/`, where FetchContent unpacks llhttp and srt: those are upstream's, and the
+`dependencies` job tracks their advisories.
+
+zizmor runs with the job's own token (`GH_TOKEN`, `contents: read`), which turns on its online
+audits of every pinned action: `impostor-commit` (the SHA is in that action's repository, not
+only in a fork), `ref-version-mismatch` (the SHA is the tag its comment names) and
+`known-vulnerable-actions`. Without a token, as on a developer's machine, the script runs it
+offline and says so.
 
 The image scan is on the nightly sandbox job because that is the one job that builds the
-images; building them on every pull request would add a release build with LTO to each. It
-fails on HIGH and CRITICAL with a fix: an unfixed one has nothing to upgrade to, and the
-Ubuntu snapshot the Dockerfile pins (`deploy/docker/apt-install.sh`) is what moves when a fix
-lands. The unfixed ones are printed in the log all the same. mock-auth's image is the
-sandbox's test double and is not scanned.
+images; building them on every pull request would add a release build with LTO to each.
+mock-auth's image is the sandbox's test double and is not scanned. The scan runs twice over
+each image:
+
+- a report, with no filter at all, saved as JSON and uploaded (`trivy-image` artifact), and
+  summarised by `tools/security/trivy-report.py` into the job summary: every vulnerability that
+  Trivy or NVD rates HIGH or CRITICAL, fixed or not, with allowlisted ones marked and their
+  expiry, never left out. It never fails.
+- the gate: Trivy's HIGH and CRITICAL with a fixed version (`--ignore-unfixed`), less the
+  allowlist. An unfixed one has nothing to upgrade to; the Ubuntu snapshot the Dockerfile pins
+  (`deploy/docker/apt-install.sh`) is what moves when a fix lands.
+
+The report is there because the gate alone would show nothing of the images' worst exposure,
+the worker's ffmpeg (`7:6.1.1-3ubuntu5`, from universe). Trivy 0.74.0, run over those nine
+packages as the worker image installs them, reports 57 CVEs, each on all nine binary packages,
+and:
+
+- rates every one by Ubuntu's priority, which is medium or low for all 57, where NVD rates one
+  critical (CVE-2026-40962) and five high (CVE-2024-32230, CVE-2024-7055, CVE-2025-1594,
+  CVE-2026-66036, CVE-2026-66039). A `--severity HIGH,CRITICAL` filter drops them all;
+- records every one as `affected`, with no fixed version: Ubuntu fixes ffmpeg for 24.04 only in
+  Ubuntu Pro's ESM archive, and Trivy's data treats a fix there as no fix. `--ignore-unfixed`
+  drops them all again.
+
+So the gate cannot fail on ffmpeg today, and the summary is where it shows. An allowlist entry
+for an ffmpeg CVE, should one ever be needed (when Trivy rates it HIGH or CRITICAL and a fix
+exists that the image cannot take), names the CVE and the purls of the binary packages it
+waives, one per package, `pkg:deb/ubuntu/libavcodec60@6.1.1-3ubuntu5?arch=amd64&distro=ubuntu-24.04&epoch=7`
+and likewise `libavformat60`, `libavutil58`, `libswscale7`, `libavfilter9`, `libavdevice60`,
+`libswresample4`, `libpostproc57` and `ffmpeg`, never paths, and expires within 92 days. With the
+version in the purl, an upgraded package is no longer covered. Trivy matches a purl to that
+binary package only (checked with 0.74.0: an entry for `libavcodec60` leaves the other eight
+reported). `check-allowlists.py` enforces the purls and the 92 days.
 
 The hardening check refuses a sanitizer build (by `ULW_SANITIZE` in the cache, or by
 `__asan_init`, `__tsan_init` or `__ubsan_handle_*` in the symbols): it ships nowhere, and ASan
 changes the layout the check reads. `_FORTIFY_SOURCE` leaves a mark only where a call's bounds
 were unknown at compile time, so a binary without a `__*_chk` import proves nothing; hence the
 compile-database check per unit and the one-import floor across all executables.
+`_FORTIFY_SOURCE` is off in sanitizer builds (`cmake/Warnings.cmake`): the `__*_chk` wrappers
+would hide the calls from ASan's interceptors, and the sanitizer checks the same bounds. It is
+decided at configure time, since `ULW_SANITIZE`'s comma (`address,undefined`) would split a
+generator expression's argument.
 
 ### How each is pinned
 
@@ -90,7 +132,9 @@ compile-database check per unit and the one-import floor across all executables.
 
 The pins live in one place, `tools/security/tools.sh`, which fetches into
 `tools/security/.tools`, checks each SHA-256 before unpacking, and serves the same binaries to
-CI and to a developer's machine. The advisory data is not pinned, deliberately: osv-scanner
+CI and to a developer's machine. Its stamp beside each binary holds the archive's pin and the
+unpacked binary's own SHA-256, checked on every use, so a binary changed after it was verified
+is fetched and verified again. The advisory data is not pinned, deliberately: osv-scanner
 asks api.osv.dev and Trivy downloads its database at scan time, since a scan against last
 month's advisories would miss what the check is for.
 
@@ -118,16 +162,34 @@ snapshot's versions; the image scan covers them. Rust's toolchain is pinned by
 | File | Scanner | An entry needs |
 |---|---|---|
 | `tools/security/osv-scanner.toml` | osv-scanner | `id`, `reason`, `ignoreUntil` |
-| `tools/security/trivyignore.yaml` | Trivy config and image | `id`, `statement`, `expired_at`, and `paths` or `purls` |
-| `tools/security/trivy-data/registries.yaml` | Trivy KSV-0125 | the registries the manifests may name, each with why |
+| `tools/security/trivyignore.yaml` | Trivy config and image | `id`, `statement`, `expired_at`, and `paths` (a misconfiguration: the one resource's file) or `purls` (a vulnerability: the binary packages', and within 92 days) |
+| `tools/security/trivy-data/registries.yaml` | Trivy KSV-0125 | the registries the manifests may name, each with why. docker.io is trusted whole only because `deploy/local/check-image-pins.py` (in `validate-manifests.sh`) fails any image not named by `@sha256` digest, apart from this repository's own builds, and any the sandbox loads into kind by tag whose tag `deploy/local/images.sh` does not pin to a digest |
 | `.github/zizmor.yml` | zizmor | a disabled audit, with why and when to revisit |
 
 `tools/security/check-allowlists.py` runs before each scan and fails an entry without a
 reason, without an expiry, with an expiry more than a year out, or (Trivy) without a path or
 package to scope it to. Past its date an entry stops applying, in the scanner itself, and the
-finding fails its job again until someone looks at it afresh. The Trivy config scan renders the
-sandbox's kustomizations one resource to a file so that an entry can name one resource, not a
-whole rendering.
+finding fails its job again until someone looks at it afresh. Trivy's ignore file scopes an
+entry by path or package only, never by resource name, so the config scan stages one resource
+per file (`tools/security/split-resources.py`): the sandbox's kustomizations as rendered, and
+each file of `deploy/` holding several resources, which becomes a directory of the same name
+less `.yaml`. An entry then names exactly the resources its check fires on; the STUNner
+operator's KSV-0049 is the only one that names its leader-election Role.
+
+### Required status checks
+
+A check that does not block a merge is advice. The repository's owner sets these as required
+on `main`, as a GitHub ruleset (repository settings, Rules), since no file in the repository
+can:
+
+- `codeql`, `dependencies`, `iac`, `workflows` (`security.yml`);
+- `build-test (gcc/ci)` and `build-test (clang/ci)` (`ci.yml`), which carry the hardening check;
+- code scanning merge protection, so that a pull request introducing a CodeQL alert of high or
+  critical security severity, or error severity, cannot merge until it is fixed or dismissed
+  with a reason.
+
+The image scan and the release binaries' check run nightly, not on pull requests, and cannot be
+required; their failures show on the nightly run and its summary.
 
 ### cppcheck
 
@@ -160,9 +222,11 @@ cppcheck is not added. Reopen if clang-tidy is dropped, or a cppcheck release pa
 - zizmor's `self-repository` audit is disabled until actionlint accepts `uses: $/...`, which
   its newest release rejects; `.github/zizmor.yml` says when to revisit.
 - CodeQL adds one GCC build of the servers per pull request, in parallel with the rest.
-- The first nightly image scan may find HIGH vulnerabilities in the worker's ffmpeg whose only
-  fixes are in Ubuntu Pro's ESM archive; those need either an allowlist entry, with a
-  statement and an expiry, or a different ffmpeg, decided then.
+- The worker image's ffmpeg carries unfixed CVEs that NVD rates high and critical, and the gate
+  cannot fail on them (above); they show in each nightly run's summary until the snapshot
+  moves to an ffmpeg that fixes them or the worker takes its ffmpeg from elsewhere.
+- Setting the required checks and code scanning merge protection is the owner's to do, once,
+  in GitHub's settings.
 - Changing a vendored tarball means updating `tools/security/cpp-deps.py` as well as
   `third_party/README.md`.
 - Upgrading a scanner is a change to `tools/security/tools.sh` (version, SHA-256, URL), and for

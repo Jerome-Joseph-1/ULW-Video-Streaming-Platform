@@ -5,7 +5,9 @@
 # tools/security/osv-scanner.toml, or past its ignoreUntil there, fails.
 #
 # Extra arguments go to osv-scanner, e.g. --offline-vulnerabilities --download-offline-databases
-# where api.osv.dev cannot be reached (the C and C++ commits need the API).
+# where api.osv.dev cannot be reached. That is for a developer's machine only: offline,
+# osv-scanner cannot match the C and C++ commits (only the API answers commit queries), so
+# those three dependencies go unchecked. CI runs online.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -31,5 +33,13 @@ while IFS= read -r file; do
         exit 1
     fi
 done < <(git ls-files '*requirements*.txt')
+
+for arg in "$@"; do
+    if [[ $arg == --offline* ]]; then
+        echo "osv-scan: WARNING: offline, for local use only; the vendored C and C++" \
+            "(cpp-deps.json) are not checked, since only api.osv.dev answers commit queries" >&2
+        break
+    fi
+done
 
 "$tools/osv-scanner" scan source --config tools/security/osv-scanner.toml "$@" "${lockfiles[@]}"

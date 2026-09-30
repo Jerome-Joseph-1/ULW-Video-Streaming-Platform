@@ -3,7 +3,9 @@
 and no expiry is more than a year out, so nothing is waived for good.
 
   tools/security/osv-scanner.toml   [[IgnoredVulns]]: id, reason, ignoreUntil
-  tools/security/trivyignore.yaml   every entry: id, statement, expired_at, and paths or purls
+  tools/security/trivyignore.yaml   every entry: id, statement, expired_at, and paths or purls;
+                                    a vulnerability (an image's package) by purls only, one per
+                                    binary package, and for at most 92 days
 
 An entry past its date is left alone here: the scanner stops honouring it and the finding fails
 its job, which is the point.
@@ -17,6 +19,9 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 OSV = ROOT / "tools" / "security" / "osv-scanner.toml"
 TRIVY = ROOT / "tools" / "security" / "trivyignore.yaml"
 MAX_DAYS = 366
+# An image's vulnerability waits on a package upgrade, not on a design decision, so it is looked
+# at again within a quarter.
+MAX_VULN_DAYS = 92
 
 
 def as_date(value) -> datetime.date | None:
@@ -32,12 +37,12 @@ def as_date(value) -> datetime.date | None:
     return None
 
 
-def check_expiry(where: str, value, errors: list[str]) -> None:
+def check_expiry(where: str, value, errors: list[str], days: int = MAX_DAYS) -> None:
     date = as_date(value)
     if date is None:
         errors.append(f"{where}: no expiry date")
-    elif date > datetime.date.today() + datetime.timedelta(days=MAX_DAYS):
-        errors.append(f"{where}: expires {date}, more than a year out")
+    elif date > datetime.date.today() + datetime.timedelta(days=days):
+        errors.append(f"{where}: expires {date}, more than {days} days out")
 
 
 def main() -> int:
@@ -64,6 +69,14 @@ def main() -> int:
                     errors.append(f"{where}: no id")
                 if len(str(entry.get("statement", "")).strip()) < 40:
                     errors.append(f"{where}: no statement, or one too short to say why")
+                if kind == "vulnerabilities":
+                    purls = entry.get("purls") or []
+                    if entry.get("paths") or not purls:
+                        errors.append(f"{where}: scope it by the binary packages' purls only")
+                    elif any(not str(p).startswith("pkg:") or "/" not in str(p) for p in purls):
+                        errors.append(f"{where}: not a package URL in purls")
+                    check_expiry(where, entry.get("expired_at"), errors, MAX_VULN_DAYS)
+                    continue
                 if not entry.get("paths") and not entry.get("purls"):
                     errors.append(f"{where}: applies everywhere; scope it with paths or purls")
                 check_expiry(where, entry.get("expired_at"), errors)

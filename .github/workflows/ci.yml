@@ -43,13 +43,15 @@ jobs:
           cache-key: ${{ matrix.compiler }}-${{ matrix.preset }}
       - run: cmake --preset ${{ matrix.preset }}
       - run: cmake --build --preset ${{ matrix.preset }}
-      # PIE, full RELRO, NX, no RWX segment, stack protector, IBT and SHSTK on every server and
-      # tool, and the hardening flags on every unit that goes into them (docs/adr/0072). Not on
-      # the sanitizer build, which ships nowhere and which the script refuses.
-      - name: binary hardening
-        if: matrix.preset == 'ci'
-        run: tools/check-hardening.sh build/ci
+        id: build
       - run: ctest --preset ${{ matrix.test }}
+      # PIE, full RELRO, NX, no RWX segment, stack protector, IBT and SHSTK on every server and
+      # tool, and the hardening flags on every unit that goes into them (docs/adr/0072). Runs
+      # whenever the build did, whatever the tests did, so each failure shows on its own. Not
+      # on the sanitizer build, which ships nowhere and which the script refuses.
+      - name: binary hardening
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.preset == 'ci' }}
+        run: tools/check-hardening.sh build/ci
       # The runner is not root, so the step above skips these; only root can change to another
       # user's ids, and the drop's order and checks are only proven by doing it. The gateway's
       # own run covers both reactors, since it binds its listener before the drop.

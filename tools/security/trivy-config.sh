@@ -23,22 +23,17 @@ mkdir -p "$scan/deploy"
 git ls-files -z deploy | grep -zv '^deploy/local/cluster/\|^deploy/stunner/' \
     | xargs -0 cp --parents -t "$scan"
 for kustomization in deploy/local/cluster deploy/stunner; do
-    out=$scan/rendered/${kustomization//\//-}
-    mkdir -p "$out"
-    "$kubectl" kustomize --load-restrictor LoadRestrictionsNone "$kustomization" \
-        | python3 -c '
-import sys
-import yaml
-
-for doc in yaml.safe_load_all(sys.stdin):
-    if not doc:
-        continue
-    meta = doc["metadata"]
-    name = "-".join([doc["kind"], meta.get("namespace", "cluster"), meta["name"]]).lower()
-    with open(f"{sys.argv[1]}/{name}.yaml", "x", encoding="utf-8") as f:
-        yaml.safe_dump(doc, f, sort_keys=False)
-' "$out"
+    "$kubectl" kustomize --load-restrictor LoadRestrictionsNone "$kustomization" |
+        python3 tools/security/split-resources.py "$scan/rendered/${kustomization//\//-}"
 done
+# A file holding several resources becomes a directory of the same name, less .yaml, with one
+# file per resource, so an ignore entry can name one of them (split-resources.py).
+while IFS= read -r -d '' manifest; do
+    if [[ $(grep -c '^kind:' "$manifest") -gt 1 ]]; then
+        python3 tools/security/split-resources.py "${manifest%.yaml}" "$manifest"
+        rm "$manifest"
+    fi
+done < <(find "$scan/deploy" -name '*.yaml' -print0)
 
 TRIVY_CACHE_DIR=${TRIVY_CACHE_DIR:-$root/build/security/trivy-cache} "$trivy" config \
     --skip-check-update --quiet --exit-code 1 \

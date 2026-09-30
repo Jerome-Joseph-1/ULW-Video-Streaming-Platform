@@ -2,8 +2,13 @@
 # (tools/security/trivy-config.sh) and `trivy image` (tools/security/trivy-image.sh). Each entry
 # is one check on the named files only, says why, and expires; past expired_at the finding
 # fails its job again until someone looks at it afresh. tools/security/check-allowlists.py
-# enforces all of that. Paths are as trivy-config.sh stages them: deploy/... as in the
-# repository, rendered/<kustomization>/<kind>-<namespace>-<name>.yaml for the sandbox's.
+# enforces all of that. Paths are as trivy-config.sh stages them, one resource per file:
+# deploy/... as in the repository for a file with one resource, deploy/.../<file less
+# .yaml>/<kind>-<namespace>-<name>.yaml for one with several, and
+# rendered/<kustomization>/<kind>-<namespace>-<name>.yaml for the sandbox's renderings.
+#
+# A vulnerability entry (an image's package, `vulnerabilities:`) is scoped by the purls of the
+# binary packages it waives, not by paths, and expires within 92 days (docs/adr/0072).
 
 misconfigurations:
   # The worker's ffmpeg runs in user, pid and mount namespaces of its own and mounts a /proc
@@ -20,30 +25,40 @@ misconfigurations:
       (hostUsers: false), which needs procMount Unmasked; ADR-0025 and ADR-0032.
     expired_at: 2027-09-01
 
-  # The STUNner gateway operator's RBAC, as its Helm chart ships it (operator.yaml's header):
-  # it reads the TURN credentials' Secrets and writes the stunnerd Deployments, Services and
-  # ConfigMaps it renders from Gateways. Narrowing it is STUNner's to do.
+  # The STUNner gateway operator's RBAC, as its Helm chart ships it (operator.yaml's header).
+  # Its ClusterRole reads Secrets in every namespace (get, list, watch: the TURN credentials a
+  # GatewayConfig may name, wherever it lives) and creates, updates and deletes the stunnerd
+  # Deployments and DaemonSets, Services and ConfigMaps it renders from Gateways. Its
+  # leader-election Role manages ConfigMaps (and Leases) in stunner-system only. Each entry
+  # names only the resources its check fires on, one file per resource (split-resources.py).
+  # Narrowing the ClusterRole is STUNner's to do.
   - id: KSV-0041
-    paths: &stunner-operator-rbac
-      - deploy/askedin/stunner/operator.yaml
+    paths: &stunner-manager-role
+      - deploy/askedin/stunner/operator/clusterrole-cluster-stunner-gateway-operator-manager-role.yaml
       - rendered/deploy-stunner/clusterrole-cluster-stunner-gateway-operator-manager-role.yaml
-      - rendered/deploy-stunner/role-stunner-system-stunner-gateway-operator-leader-election-role.yaml
-    statement: &stunner-operator-statement >-
-      Upstream STUNner operator RBAC (stunner-helm v1.2.1): it reads Secrets (get, list, watch
-      only) for TURN credentials and manages the dataplane Deployments, Services and ConfigMaps
-      and its leader-election ConfigMap.
+    statement: &stunner-manager-statement >-
+      Upstream STUNner operator ClusterRole (stunner-helm v1.2.1): it reads Secrets cluster-wide
+      (get, list, watch only) for TURN credentials, and manages the dataplane's Deployments,
+      DaemonSets, Services and ConfigMaps.
     expired_at: 2027-09-01
   - id: KSV-0048
-    paths: *stunner-operator-rbac
-    statement: *stunner-operator-statement
-    expired_at: 2027-09-01
-  - id: KSV-0049
-    paths: *stunner-operator-rbac
-    statement: *stunner-operator-statement
+    paths: *stunner-manager-role
+    statement: *stunner-manager-statement
     expired_at: 2027-09-01
   - id: KSV-0056
-    paths: *stunner-operator-rbac
-    statement: *stunner-operator-statement
+    paths: *stunner-manager-role
+    statement: *stunner-manager-statement
+    expired_at: 2027-09-01
+  - id: KSV-0049
+    paths:
+      - deploy/askedin/stunner/operator/clusterrole-cluster-stunner-gateway-operator-manager-role.yaml
+      - rendered/deploy-stunner/clusterrole-cluster-stunner-gateway-operator-manager-role.yaml
+      - deploy/askedin/stunner/operator/role-stunner-system-stunner-gateway-operator-leader-election-role.yaml
+      - rendered/deploy-stunner/role-stunner-system-stunner-gateway-operator-leader-election-role.yaml
+    statement: >-
+      Upstream STUNner operator RBAC (stunner-helm v1.2.1): the ClusterRole manages the
+      dataplane's ConfigMaps in any namespace; the leader-election Role manages its lock
+      ConfigMap in stunner-system.
     expired_at: 2027-09-01
 
   # Kubernetes runs the images and ignores HEALTHCHECK; the manifests' startup, readiness and

@@ -31,6 +31,14 @@ trap 'rm -rf "$manifests"' EXIT
     "$root/deploy/askedin/overlays" "$root/deploy/askedin/stunner" "$manifests/sandbox.yaml" \
     "$manifests/stunner.yaml"
 
+# Every image by digest (check-image-pins.py): what Askedin runs and what the host runs
+# directly, and, for the sandbox's kustomizations as rendered, a tag images.sh pins to one.
+mapfile -t pinned_files < <(find "$root/deploy/askedin" \( -name '*.yaml' -o -name '*.yml' \) \
+    -print | sort)
+python3 "$here/check-image-pins.py" "$here/images.sh" \
+    --loaded "$manifests/sandbox.yaml" "$manifests/stunner.yaml" \
+    -- "${pinned_files[@]}" "$here/compose.yaml" "$here/kind.yaml"
+
 buildx=$(grep -om1 'woodpeckerci/plugin-docker-buildx:[^ ]*' "$root/deploy/askedin/woodpecker.yml")
 "$tools/woodpecker-cli" --disable-update-check lint --strict --plugins-privileged "$buildx" \
     "$root/deploy/askedin/woodpecker.yml"

@@ -4,6 +4,11 @@ inputs:
   cache-key:
     description: Distinguishes ccache contents between jobs.
     required: true
+  ccache:
+    description: >-
+      "false" skips restoring, and so saving, the ccache: for a job that builds with
+      CCACHE_DISABLE, whose empty cache would otherwise be saved under its key.
+    default: "true"
 runs:
   using: composite
   steps:
@@ -54,6 +59,7 @@ runs:
         rustup toolchain install --no-self-update
         cargo fetch --locked
     - name: Restore ccache
+      if: inputs.ccache != 'false'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/ccache
@@ -62,6 +68,7 @@ runs:
     # In ccache's own configuration file (~/.config/ccache/ccache.conf) rather than
     # $GITHUB_ENV, which would hand every later step of the job whatever was written to it.
     - name: Configure ccache
+      if: inputs.ccache != 'false'
       shell: bash
       run: |
         ccache --set-config=cache_dir="$HOME/.cache/ccache"

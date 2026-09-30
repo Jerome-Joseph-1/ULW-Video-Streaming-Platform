@@ -30,10 +30,16 @@ only=" $* "
 for pin in "${pins[@]}"; do
     read -r name version sum url <<<"${pin//$'\n'/ }"
     [[ $# -eq 0 || $only == *" $name "* ]] || continue
-    # The stamp names the archive's hash, so a changed pin fetches again.
-    if [[ -x $tools/$name && $(cat "$tools/$name.pin" 2>/dev/null) == "$version $sum" ]]; then
-        continue
+    # The stamp names the archive's hash, so a changed pin fetches again, and the unpacked
+    # binary's own hash, so a binary changed after it was verified is fetched again too.
+    if [[ -x $tools/$name && -f $tools/$name.pin ]]; then
+        read -r pinned_version pinned_sum binary_sum <"$tools/$name.pin" || true
+        if [[ "$pinned_version $pinned_sum" == "$version $sum" && -n ${binary_sum:-} ]] &&
+            echo "$binary_sum  $tools/$name" | sha256sum --check --status; then
+            continue
+        fi
     fi
+    rm -f "$tools/$name" "$tools/$name.pin"
     echo "fetching $name $version" >&2
     archive=$tools/${url##*/}.part
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$archive" "$url"
@@ -49,7 +55,8 @@ for pin in "${pins[@]}"; do
     esac
     rm -f "$archive"
     chmod 0755 "$tools/$name"
-    echo "$version $sum" >"$tools/$name.pin"
+    binary_sum=$(sha256sum "$tools/$name")
+    echo "$version $sum ${binary_sum%% *}" >"$tools/$name.pin"
 done
 
 echo "$tools"
