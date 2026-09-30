@@ -92,9 +92,9 @@ void append_payload(const FrameView& frame, std::vector<std::byte>& out) {
     out.insert(out.end(), frame.payload.begin(), frame.payload.end());
 }
 
-std::expected<void, EncodeError>
-encode_frame(const FrameView& frame, const std::optional<MaskKey>& mask,
-             std::vector<std::byte>& out) {
+std::expected<void, EncodeError> encode_frame(const FrameView& frame,
+                                              const std::optional<MaskKey>& mask,
+                                              std::vector<std::byte>& out) {
     const auto size = payload_size(frame);
     if (!size) {
         return std::unexpected(size.error());

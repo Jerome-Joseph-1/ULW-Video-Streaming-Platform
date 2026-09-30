@@ -248,6 +248,28 @@ TEST(Envelope, AMessagesWireSizeBoundsWhatWriteMessageMakes) {
     }
 }
 
+TEST(Envelope, AMessageWrittenIntoAReusedTextIsTheSameAsIntoANewOne) {
+    const auto sender = *core::UserId::parse("auth0|alice");
+    const auto message = [&](const std::string& body) {
+        return rt::Message{.room = room(),
+                           .seq = 3,
+                           .sender = sender,
+                           .key = *rt::MessageKey::parse("k"),
+                           .body = std::as_bytes(std::span{body})};
+    };
+    std::string reused;
+    for (const std::size_t size : {std::size_t{48} * 1024, std::size_t{1}, std::size_t{0},
+                                   std::size_t{30} * 1024, std::size_t{2}}) {
+        const std::string body(size, static_cast<char>('a' + (size % 26)));
+        std::string fresh;
+        chat::write_message(fresh, message(body));
+        reused.clear();
+        chat::write_message(reused, message(body));
+        EXPECT_EQ(reused, fresh) << size;
+        EXPECT_LE(fresh.size() + 4, chat::message_wire_size(size)) << size;
+    }
+}
+
 TEST(Envelope, RepliesAreTheDocumentedShapes) {
     const auto id = *rt::MessageKey::parse("m-3");
     std::string out;
