@@ -118,9 +118,10 @@ public:
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override {
         done(std::vector<core::UserId>{});
     }
-    void admits(const core::RoomId& /*room*/, const core::UserId& user, core::ports::RoomKind asked,
+    void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
                 core::ports::MessageCallback<core::ports::Admission> done) override {
         kinds.push_back(asked);
+        asked_rooms.push_back(room);
         auto answer = core::ports::Admission::Admitted;
         if (std::ranges::find(refused, user.view()) != refused.end()) {
             answer = core::ports::Admission::NotMember;
@@ -157,6 +158,7 @@ public:
     // Whether every room is recorded as live; otherwise a join that asks for live is NotLive.
     bool live = true;
     std::vector<core::ports::RoomKind> kinds;
+    std::vector<core::RoomId> asked_rooms;
     bool hold = false;
     std::vector<
         std::pair<core::ports::MessageCallback<core::ports::Admission>, core::ports::Admission>>
@@ -325,7 +327,7 @@ TEST_F(ChatServiceTest, AJoinOfARoomThatDoesNotAdmitTheUserIsRefusedAndNeverReac
 }
 
 // Membership is checked at the join; a user taken off the list afterwards must stop hearing the
-// room at once, not when the connection closes (ADR-0075).
+// room at once, not when the connection closes (ADR-0073).
 TEST_F(ChatServiceTest, AUserRemovedFromTheMemberListLeavesTheRoomAndHearsNothingMore) {
     ASSERT_NE(messages_.watcher, nullptr) << "the service does not listen for removals";
     FakeClient alice;
@@ -461,6 +463,55 @@ TEST_F(ChatServiceTest, AResyncAsksAboutEachRoomAndUserOnceAndOnlyAFewAtATime) {
     }
     EXPECT_LE(most, 4U);
     EXPECT_EQ(messages_.kinds.size() - asked_before, std::size_t{kRooms});
+}
+
+// A listening session that flaps faster than the checks drain must not re-ask the same rooms
+// each time and never reach the rest: what a resync queued and has not asked stays queued.
+TEST_F(ChatServiceTest, ResyncsInARowStillCheckEveryRoom) {
+    constexpr int kRooms = 10;
+    const auto room = [](int i) {
+        return std::format("01a0eb86-6cca-7dce-84cc-3bb47615f9{:02}", i);
+    };
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    for (int i = 0; i < kRooms; ++i) {
+        join(b, std::nullopt, chat::Delivery::Durable, room(i));
+        rooms_.admit();
+    }
+    messages_.hold = true;
+    const std::size_t before = messages_.asked_rooms.size();
+    for (int round = 0; round < 3; ++round) {
+        messages_.watcher->on_members_resync();
+        for (int i = 0; i < 4 && !messages_.held.empty(); ++i) {
+            messages_.answer_admits({});
+        }
+    }
+    const std::vector<core::RoomId> asked(messages_.asked_rooms.begin() +
+                                              static_cast<std::ptrdiff_t>(before),
+                                          messages_.asked_rooms.end());
+    for (int i = 0; i < kRooms; ++i) {
+        EXPECT_NE(std::ranges::find(asked, room_id(room(i))), asked.end())
+            << room(i) << " was never checked";
+    }
+}
+
+// A check that fails for a reason other than the store being unreachable will fail the same
+// way again: it is not retried for ever, pausing every other check each time, but settled on
+// the safe side, the user out of the room.
+TEST_F(ChatServiceTest, ACheckThatFailsForGoodTakesTheUserOutOfTheRoom) {
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    join(b);
+    rooms_.admit();
+    bob.take();
+    messages_.hold = true;
+    messages_.watcher->on_members_resync();
+    ASSERT_EQ(messages_.held.size(), 1U);
+    messages_.answer_admits(std::unexpected(core::ports::MessageStoreError::Corrupt));
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
+    clock_.advance(Millis{1'000});
+    service_->sweep();
+    EXPECT_TRUE(messages_.held.empty()) << "asked again";
 }
 
 // A join whose member list was read before a removal that went unannounced is let in after the

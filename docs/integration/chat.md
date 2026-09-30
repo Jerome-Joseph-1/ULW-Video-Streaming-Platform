@@ -115,7 +115,7 @@ Who may join a room depends on its kind, which is recorded once and never change
 
 No client command changes a member list; they are set by the service's operators, and later by
 the product, in the database. A member removed from the list is taken out of the room at once
-on every socket they have, on every node (ADR-0075): each gets an `error` with `not_member` for
+on every socket they have, on every node (ADR-0073): each gets an `error` with `not_member` for
 the room, unasked, and receives nothing more from it; `send` and `history` there answer
 `not_joined`, and the next `join` is refused.
 

@@ -1,4 +1,4 @@
-# 0075. A chat socket ends with its token, and a room with its membership
+# 0073. A chat socket ends with its token, and a room with its membership
 
 Status: Accepted
 Date: 2026-09-30
@@ -54,7 +54,14 @@ one, and nothing told a chat node that a row went.
   message store's pool, so joins and history reads queue behind four at most, and a node at
   its ceiling finishes in seconds. A read that fails (the database is still partitioned, the
   pool backing off) is asked again a second later, with the rest held until then, so no
-  removal is lost to the outage that caused the resync. A join still waiting for its member
+  removal is lost to the outage that caused the resync. A read that fails otherwise (a row the
+  store cannot read) would fail the same way again: it is logged, counted in
+  `member_check_failures_total`, and settled on the safe side, the user taken out of the room.
+  A resync that comes while an earlier one's reads are still queued keeps them where they are
+  and adds behind them every room and user not queued already, those already asked included,
+  since they may have been read before the removal it is for; so a listening session that
+  flaps never starves the rooms at the tail. At most one
+  read per room of each client is queued (connections times rooms per client). A join still waiting for its member
   list when the resync comes may have read it before a removal that went unannounced: it is
   read again once the join is let in. This happens only when the listening session was lost.
 - Removals are counted in `member_removals_total`.

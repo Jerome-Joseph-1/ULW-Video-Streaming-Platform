@@ -31,6 +31,12 @@ namespace chat {
 // (docs/integration/chat.md). In the range RFC 6455 section 7.4.2 leaves to applications.
 inline constexpr codec::ws::CloseCode kTokenExpired{4001};
 
+// When a socket opened at `now` (monotonic) with a token that expires at `expires_at` stops
+// being accepted: exp plus kTokenClockSkew, on the monotonic clock. A token that outlives what
+// the monotonic clock can count gets MonoTime::max(); one already past gets `now`.
+[[nodiscard]] core::MonoTime token_deadline(core::MonoTime now, core::WallTime wall_now,
+                                            core::WallTime expires_at) noexcept;
+
 class Session final : public net::IStreamHandler,
                       public net::ITimerHandler,
                       public http::IRequestSink,
@@ -129,7 +135,7 @@ private:
     bool paused_ = false;
     std::optional<core::UserId> user_;
     // When the token the socket was opened with stops being accepted: its exp plus the clock
-    // skew any check allows. The socket is closed then, with kTokenExpired (ADR-0075).
+    // skew any check allows. The socket is closed then, with kTokenExpired (ADR-0073).
     std::optional<core::MonoTime> expires_;
     // Set by the upgrade.
     std::optional<ClientId> client_;

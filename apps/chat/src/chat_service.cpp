@@ -1,5 +1,7 @@
 #include "chat_service.hpp"
 
+#include "log.hpp"
+
 #include <algorithm>
 #include <functional>
 #include <iterator>
@@ -20,8 +22,6 @@ constexpr core::Millis kSweepEvery{1'000};
 // A resync's member checks asked at once: the message store's pool (MessageStoreConfig), so
 // that joins and history reads queued behind them wait for at most one check each.
 constexpr std::size_t kRechecksInFlight = 4;
-// Checks a resync may owe: one per room of each client, at 1280 connections of 64 rooms.
-constexpr std::size_t kMaxRechecks = std::size_t{1280} * 64;
 
 // What a lossy client behind from `behind` is still owed of a room whose latest seq is `head`:
 // dropped for it when it leaves or joins again before it is sent them.
@@ -800,11 +800,11 @@ void ChatService::on_member_removed(const core::RoomId& room, const core::UserId
 }
 
 void ChatService::on_members_resync() noexcept {
-    // What an earlier resync still owes is covered by this one, asked after the store listens
-    // again: its checks may have been read before a removal this one is for.
+    // Checks asked before now may have been read before a removal this resync is for: a failure
+    // of one of them is not asked again (below, rechecked), since this resync asks anew. Those
+    // still queued are asked after now, and stay where they are: a session that flaps faster
+    // than the queue drains must not start over from the same rooms each time.
     ++recheck_generation_;
-    rechecks_.clear();
-    rechecks_queued_.clear();
     resync_owed_ = false;
     try {
         for (auto& [value, c] : clients_) {
@@ -840,7 +840,8 @@ std::size_t ChatService::RecheckHash::operator()(const Recheck& r) const noexcep
 }
 
 bool ChatService::recheck(const core::RoomId& room, const core::UserId& user) {
-    if (rechecks_.size() >= kMaxRechecks) {
+    // One per room of each client.
+    if (rechecks_.size() >= limits_.max_clients * limits_.max_rooms_per_client) {
         return false;
     }
     Recheck pair{room, user};
@@ -897,9 +898,22 @@ void ChatService::ask_rechecks() noexcept {
 void ChatService::rechecked(const Recheck& pair, std::uint64_t generation,
                             core::ports::MessageResult<core::ports::Admission> result) noexcept {
     --rechecks_in_flight_;
+    if (!result && result.error() != core::ports::MessageStoreError::Unavailable) {
+        // Not the store being unreachable: asking again would fail the same way, and pause every
+        // other check each time. Settled on the safe side: the user leaves the room.
+        log_event(
+            R"("level":"warn","msg":"member check failed for good; the user leaves the room",)"
+            R"("room":"{}","user":"{}")",
+            pair.first.to_string(), pair.second.view());
+        ++counters_.failed_rechecks;
+        on_member_removed(pair.first, pair.second);
+        ask_rechecks();
+        return;
+    }
     if (!result) {
         // The store is still down, or went down again: the check waits a second, and so do the
-        // rest. A later resync asks it anyway.
+        // rest, however long the outage lasts; a second's pause bounds what it costs. A later
+        // resync asks it anyway.
         rechecks_resume_ = clock_.now() + kSweepEvery;
         if (generation == recheck_generation_) {
             try {

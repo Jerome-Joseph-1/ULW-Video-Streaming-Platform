@@ -411,6 +411,26 @@ TEST_P(ChatSessionTest, ATokenThatExpiresAtTheEndOfTimeKeepsItsSocketOpen) {
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
 }
 
+// The same without UBSan: the deadline of a token at the end of time is the end of the
+// monotonic clock, not a sum that wrapped past it.
+TEST(TokenDeadline, IsExpPlusTheSkewOnTheMonotonicClockAndNeverWraps) {
+    const core::MonoTime now{std::chrono::hours(1000)};
+    const core::WallTime wall{std::chrono::seconds(1767225600)};
+    EXPECT_EQ(chat::token_deadline(now, wall, wall + std::chrono::hours(1)),
+              now + std::chrono::hours(1) + core::ports::kTokenClockSkew);
+    EXPECT_EQ(chat::token_deadline(now, wall, wall - seconds(30)), now + seconds(30));
+    EXPECT_EQ(chat::token_deadline(now, wall, wall - seconds(90)), now);
+    constexpr auto kLast =
+        std::chrono::floor<std::chrono::seconds>(core::WallTime::duration::max()) - seconds(1);
+    EXPECT_EQ(chat::token_deadline(now, wall, core::WallTime{kLast}),
+              now + (core::WallTime{kLast} - wall) + core::ports::kTokenClockSkew);
+    // Past what the monotonic clock can count from where it stands: never, not a wrapped sum.
+    const core::MonoTime late = core::MonoTime::max() - std::chrono::hours(1);
+    EXPECT_EQ(chat::token_deadline(late, wall, wall + std::chrono::hours(2)),
+              core::MonoTime::max());
+    EXPECT_EQ(chat::token_deadline(late, wall, core::WallTime{kLast}), core::MonoTime::max());
+}
+
 TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);

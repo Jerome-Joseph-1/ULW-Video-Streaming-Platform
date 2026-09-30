@@ -193,7 +193,7 @@ public:
     int resyncs = 0;
 };
 
-// Only a row that leaves a room's list tells the nodes (ADR-0075): an update that writes a
+// Only a row that leaves a room's list tells the nodes (ADR-0073): an update that writes a
 // member's row without changing its room or user must not take them out of the room.
 TEST_F(MessageStoreTest, AnUpdateThatKeepsTheRoomAndTheUserRemovesNobody) {
     Removals removals;

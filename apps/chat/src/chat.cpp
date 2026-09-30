@@ -54,9 +54,20 @@ void RoomLog::on_node_taken() noexcept {
               self_.view());
 }
 
+namespace {
+
+// The service's limits, with the clients it may hold: the server's connections.
+ServiceLimits service_limits(const Limits& limits) noexcept {
+    ServiceLimits service = limits.service;
+    service.max_clients = limits.max_connections;
+    return service;
+}
+
+} // namespace
+
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(limits), rooms_(deps.router),
-      chat_(rooms_, deps.messages, deps.clock, limits_.service),
+      chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
       presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
       sessions_(limits_.max_connections) {}
 
@@ -182,7 +193,8 @@ std::string ChatServer::render_metrics() const {
                        "presence_expired_total {}\n"
                        "presence_gaps_total {}\n"
                        "token_expiries_total {}\n"
-                       "member_removals_total {}\n",
+                       "member_removals_total {}\n"
+                       "member_check_failures_total {}\n",
                        c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
                        c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
                        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
@@ -195,7 +207,7 @@ std::string ChatServer::render_metrics() const {
                        router.forward_timeouts, router.peers_lost, router.peers_refused,
                        router.slow_peers, presence_.rooms(), presence.sent, presence.received,
                        presence.notified, presence.expired, presence.gaps, c.token_expiries,
-                       chat.removals);
+                       chat.removals, chat.failed_rechecks);
 }
 
 } // namespace chat

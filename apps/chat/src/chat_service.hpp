@@ -52,6 +52,9 @@ struct ServiceLimits {
     // A client shows a handful of conversations at once; 64 bounds what one socket makes this
     // node track and subscribe to.
     std::size_t max_rooms_per_client = 64;
+    // The clients the node may hold at once: its connections (chat::Limits::max_connections,
+    // which the server copies here). With max_rooms_per_client, bounds what a resync may queue.
+    std::size_t max_clients = 1280;
     // Joins of new rooms per user, across all their connections: a join may create the room,
     // a row that outlives everyone in it. A fresh user may fill one connection's rooms at once;
     // after that one a second, far faster than a person opens conversations and far slower
@@ -122,6 +125,9 @@ struct ServiceCounters {
     std::uint64_t allocation_failures = 0;
     // A client taken out of a room because its user left the room's member list.
     std::uint64_t removals = 0;
+    // A resync's member check that failed other than for an unreachable store, settled as a
+    // removal (counted in removals too).
+    std::uint64_t failed_rechecks = 0;
 };
 
 // Identifies an attached client; never reused while the service lives.
@@ -166,7 +172,7 @@ public:
     void sweep() noexcept;
 
     // The user's clients here leave the room, and are told `not_member`; a join of it still
-    // waiting for the member list is refused when the answer comes (ADR-0075). A stream's live
+    // waiting for the member list is refused when the answer comes (ADR-0073). A stream's live
     // chat admits anyone, list or not, and is left alone.
     void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
     // Every client's closed rooms are checked against the member lists again: each room and user
@@ -260,8 +266,8 @@ private:
     std::size_t kept_messages_ = 0;
     core::MonoTime next_sweep_;
     // The checks a resync still owes, oldest first, each once (rechecks_queued_). At most one per
-    // room of each client here, so a node's 1280 connections of 64 rooms make at most 81920;
-    // a check past that is not queued, and another resync runs once the queue empties.
+    // room of each client here (max_clients x max_rooms_per_client: 81920 by default); a check
+    // past that is not queued, and another resync runs once the queue empties.
     std::deque<Recheck> rechecks_;
     std::unordered_set<Recheck, RecheckHash> rechecks_queued_;
     std::size_t rechecks_in_flight_ = 0;

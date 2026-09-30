@@ -659,7 +659,7 @@ TEST_P(ChatClusterTest, ARoomWithMembersRefusesEveryoneElse) {
 }
 
 // Members are taken off a list in the database, by the product or an operator. Every node hears
-// of it and stops delivering the room to that user's sockets at once (ADR-0075), wherever the
+// of it and stops delivering the room to that user's sockets at once (ADR-0073), wherever the
 // room is owned.
 TEST_P(ChatClusterTest, AMemberDeletedInTheDatabaseStopsReceivingOnEveryNode) {
     const std::string members_only = core::RoomId::generate(clock_, random_).to_string();
