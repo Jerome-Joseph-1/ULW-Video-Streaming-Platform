@@ -4,6 +4,9 @@
 
 #include <sys/prctl.h>
 
+#include <cerrno>
+#include <system_error>
+
 namespace ops {
 
 std::optional<bool> parse_allow_root(std::optional<std::string_view> text) noexcept {
@@ -42,8 +45,9 @@ std::expected<RootStep, RootRefusal> leave_root(std::string_view user, bool allo
             RootRefusal{.configuration = false, .source = "drop privileges", .reason = r.error()});
     }
     if (!was_dumpable && ::prctl(PR_SET_DUMPABLE, 0) != 0) {
-        return std::unexpected(RootRefusal{
-            .configuration = false, .source = "drop privileges", .reason = "PR_SET_DUMPABLE"});
+        return std::unexpected(RootRefusal{.configuration = false,
+                                           .source = "PR_SET_DUMPABLE",
+                                           .reason = std::generic_category().message(errno)});
     }
     return RootStep::Dropped;
 }
