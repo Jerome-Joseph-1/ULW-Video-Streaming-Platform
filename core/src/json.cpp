@@ -2,7 +2,9 @@
 
 #include "core/util/parse.hpp"
 
+#include <algorithm>
 #include <array>
+#include <vector>
 
 namespace core::json {
 
@@ -10,6 +12,19 @@ namespace {
 
 bool is_ws(char c) noexcept {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+// Sorted, so that n keys cost n log n comparisons: one lookup per key as it arrives would cost
+// n^2 / 2, which for the 7,000 keys a 64 KiB chat command holds is a tenth of a second of the
+// reactor thread per message.
+bool has_duplicate_key(const std::vector<Value::Member>& members) {
+    std::vector<std::string_view> keys;
+    keys.reserve(members.size());
+    for (const auto& [key, value] : members) {
+        keys.emplace_back(key);
+    }
+    std::ranges::sort(keys);
+    return std::ranges::adjacent_find(keys) != keys.end();
 }
 
 std::optional<unsigned> hex_digit(char c) noexcept {
@@ -333,9 +348,6 @@ private:
             if (!string(key)) {
                 return false;
             }
-            if (out.find(key) != nullptr) {
-                return set_error("duplicate key");
-            }
             skip_ws();
             if (pos_ >= text_.size() || text_[pos_] != ':') {
                 return set_error("expected ':'");
@@ -352,6 +364,10 @@ private:
                 continue;
             }
             if (pos_ < text_.size() && text_[pos_] == '}') {
+                // Checked once the members are all in place, where their keys stay put.
+                if (has_duplicate_key(out.members_)) {
+                    return set_error("duplicate key");
+                }
                 ++pos_;
                 return true;
             }

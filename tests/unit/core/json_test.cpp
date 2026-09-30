@@ -1,5 +1,6 @@
 #include "core/util/json.hpp"
 
+#include <chrono>
 #include <gtest/gtest.h>
 #include <string>
 
@@ -59,6 +60,40 @@ TEST(Json, RejectsDuplicateKeys) {
     const auto v = parse(R"({"sub":"alice","sub":"mallory"})");
     ASSERT_FALSE(v);
     EXPECT_EQ(v.error().reason, "duplicate key");
+}
+
+TEST(Json, RejectsADuplicateKeyFarFromItsTwin) {
+    std::string doc = "{\"dup\":0";
+    for (int i = 0; i < 1000; ++i) {
+        doc += ",\"k" + std::to_string(i) + "\":0";
+    }
+    const auto clean = parse(doc + "}");
+    ASSERT_TRUE(clean);
+    EXPECT_EQ(clean->as_object()->size(), 1001U);
+    const auto twice = parse(doc + ",\"dup\":1}");
+    ASSERT_FALSE(twice);
+    EXPECT_EQ(twice.error().reason, "duplicate key");
+    const auto nested = parse(R"({"a":{"x":1,"y":2,"x":3},"b":0})");
+    ASSERT_FALSE(nested);
+    EXPECT_EQ(nested.error().reason, "duplicate key");
+}
+
+// The duplicate check must not be quadratic: a peer chooses how many keys an object holds, and
+// every parse runs on a reactor thread. A megabyte of distinct keys (about 110,000) took 40 s
+// when each key was looked up among those before it; sorted, it is milliseconds.
+TEST(Json, ManyKeysCostNoMoreThanASort) {
+    constexpr std::size_t kBytes = std::size_t{1} << 20U;
+    std::string doc = "{";
+    for (int i = 0; doc.size() < kBytes - 16; ++i) {
+        doc += (i == 0 ? "\"" : ",\"") + std::to_string(i) + "\":0";
+    }
+    doc += "}";
+    const auto started = std::chrono::steady_clock::now();
+    const auto v = parse(doc, {.max_depth = 32, .max_bytes = kBytes});
+    const auto took = std::chrono::steady_clock::now() - started;
+    ASSERT_TRUE(v);
+    EXPECT_GT(v->as_object()->size(), 100'000U);
+    EXPECT_LT(took, std::chrono::seconds(3));
 }
 
 TEST(Json, RejectsTrailingDataAndUnterminatedInput) {
