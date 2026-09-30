@@ -14,7 +14,9 @@ namespace infra::auth::detail {
 // RFC 7519 section 4.1.4 allows "a small leeway, usually no more than a few minutes". Hosts
 // under NTP agree to milliseconds; a minute covers one whose sync has lapsed for a while
 // without stretching a stolen token's life by much.
-inline constexpr core::Seconds kClockSkew{60};
+// The port's, so that a service which ends a session at a token's expiry ends it when a check
+// here would first refuse the token.
+inline constexpr core::Seconds kClockSkew = core::ports::kTokenClockSkew;
 
 // `payload` must come from a token whose signature has already been checked.
 [[nodiscard]] core::ports::VerifyResult check_claims(std::string_view payload,

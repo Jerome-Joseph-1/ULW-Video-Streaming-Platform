@@ -55,10 +55,15 @@ public:
                 core::ports::Recording recording,
                 core::ports::MessageCallback<core::ports::Admission> done) override;
     void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
+    // Told of remove_member's removals only: nothing else changes this store's lists.
+    void watch_members(core::ports::IMemberListener* listener) noexcept override {
+        listener_ = listener;
+    }
 
     void on_timeout() noexcept override;
 
 private:
+    core::ports::IMemberListener* listener_ = nullptr;
     struct ByteOrder {
         bool operator()(const core::UserId& a, const core::UserId& b) const noexcept {
             return a.view() < b.view();

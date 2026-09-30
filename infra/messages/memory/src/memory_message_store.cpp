@@ -140,10 +140,16 @@ void MemoryMessageStore::add_member(const core::RoomId& room, const core::UserId
 
 void MemoryMessageStore::remove_member(const core::RoomId& room, const core::UserId& user,
                                        MessageCallback<void> done) {
+    bool removed = false;
     if (const auto it = members_.find(room); it != members_.end()) {
-        it->second.erase(user);
+        removed = it->second.erase(user) != 0;
     }
-    defer([done = std::move(done)]() mutable noexcept { done({}); });
+    defer([this, done = std::move(done), removed, room, user]() mutable noexcept {
+        done({});
+        if (removed && listener_ != nullptr) {
+            listener_->on_member_removed(room, user);
+        }
+    });
 }
 
 void MemoryMessageStore::members(const core::RoomId& room, std::optional<core::UserId> after,

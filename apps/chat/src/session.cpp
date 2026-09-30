@@ -148,6 +148,25 @@ void Session::route(const http::RequestHead& head) noexcept {
     authenticate();
 }
 
+core::MonoTime token_deadline(core::MonoTime now, core::WallTime wall_now,
+                              core::WallTime expires_at) noexcept {
+    // An exp may be anything up to the wall clock's last second but one, so the skew is added to
+    // what is left, not to exp, and the sum held to what the clocks can count.
+    using Duration = core::WallTime::duration;
+    const Duration skew = core::ports::kTokenClockSkew;
+    Duration left = expires_at - wall_now;
+    // Only a wall clock within a minute of the epoch leaves room for this to saturate, since exp
+    // is at most the clock's last second but one; kept so that no clock reading can overflow.
+    left = left > Duration::max() - skew ? Duration::max() : left + skew;
+    if (left <= Duration::zero()) {
+        return now;
+    }
+    if (left >= core::MonoTime::max() - now) {
+        return core::MonoTime::max();
+    }
+    return now + std::chrono::duration_cast<core::MonoTime::duration>(left);
+}
+
 void Session::authenticate() noexcept {
     const auto result =
         server_.deps().verifier.verify(token_, server_.deps().clock.wall_now(), *this);
@@ -164,6 +183,8 @@ void Session::authenticate() noexcept {
         return;
     }
     user_ = (*result)->subject;
+    // On the reactor's clock from here: the wall clock may be stepped while the socket lives.
+    expires_ = token_deadline(now(), server_.deps().clock.wall_now(), (*result)->expires_at);
     auth_ = Auth::Passed;
 }
 
@@ -312,7 +333,12 @@ void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
         paused_ = false;
         reactor.start_receiving(conn_);
     }
-    arm(server_.limits().ping_interval);
+    core::Millis first = server_.limits().ping_interval;
+    if (expires_) {
+        first = std::min(first, std::chrono::ceil<core::Millis>(
+                                    std::max(*expires_ - now(), core::MonoTime::duration{0})));
+    }
+    arm(first);
 }
 
 // Once the request is answered the connection never parses HTTP again, so the parser goes, with
@@ -571,6 +597,21 @@ void Session::abandon() noexcept {
 
 // ---- lifetime
 
+// The token the socket was opened with is no longer accepted: the client is to reconnect with
+// a fresh one (ADR-0073).
+bool Session::closed_for_expiry(core::MonoTime at) noexcept {
+    if (!expires_ || at < *expires_) {
+        return false;
+    }
+    ++server_.counters().token_expiries;
+    try {
+        close_with(kTokenExpired);
+    } catch (const std::bad_alloc&) {
+        allocation_failed();
+    }
+    return true;
+}
+
 void Session::on_timeout() noexcept {
     timer_ = {};
     const Limits& limits = server_.limits();
@@ -583,6 +624,9 @@ void Session::on_timeout() noexcept {
         close();
         return;
     case Phase::Open: {
+        if (closed_for_expiry(at)) {
+            return;
+        }
         if (quiet >= limits.idle_timeout) {
             give_up();
             return;
@@ -616,6 +660,9 @@ void Session::on_timeout() noexcept {
         }
         if (watching_) {
             next = std::min(next, at + limits.stall_check);
+        }
+        if (expires_) {
+            next = std::min(next, *expires_);
         }
         arm(std::chrono::ceil<core::Millis>(next - at));
         return;

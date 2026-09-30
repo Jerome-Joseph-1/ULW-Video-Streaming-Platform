@@ -13,6 +13,7 @@
 #include "os/system_random.hpp"
 
 #include "config.hpp"
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 #include "reaper.hpp"
 
@@ -116,6 +117,10 @@ std::expected<void, std::string> make_store(const reaper::Config& config, Servic
 
 int run() {
     const auto info = core::build_info();
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        return fail("disable core dumps", std::generic_category().message(r.error()));
+    }
     const auto config = reaper::load_config(read_env);
     if (!config) {
         return fail(config.error().variable, config.error().reason);
