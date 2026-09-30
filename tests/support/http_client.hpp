@@ -64,9 +64,19 @@ struct Endpoint {
 // failing, so an interrupted call is made again; a timeout is EAGAIN and still ends it.
 class HttpClient {
 public:
-    explicit HttpClient(Endpoint endpoint) {
+    // A `receive_buffer` fixes the kernel's receive buffer (which Linux doubles) before the
+    // connection opens, for a client whose window must shut after that many unread bytes. A
+    // `max_segment` is the segment size the client announces: the server's kernel sizes its
+    // first send buffer from it, loopback's 64 KiB segments making it megabytes.
+    explicit HttpClient(Endpoint endpoint, int receive_buffer = 0, int max_segment = 0) {
         const std::uint16_t port = endpoint.port;
         fd_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+        if (receive_buffer > 0) {
+            ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof receive_buffer);
+        }
+        if (max_segment > 0) {
+            ::setsockopt(fd_.get(), IPPROTO_TCP, TCP_MAXSEG, &max_segment, sizeof max_segment);
+        }
         timeval tv{.tv_sec = kSocketTimeout.count(), .tv_usec = 0};
         ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
         ::setsockopt(fd_.get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
@@ -199,6 +209,91 @@ public:
         return n == 0 || (n < 0 && (errno == ECONNRESET || errno == EPIPE));
     }
 
+    // Waits up to `limit` for a response to be readable without reading it: true once some
+    // of it has arrived.
+    bool readable(std::chrono::milliseconds limit = std::chrono::seconds(10)) {
+        if (ssl_ && SSL_has_pending(ssl_.get()) != 0) {
+            return true;
+        }
+        pollfd p{.fd = fd_.get(), .events = POLLIN, .revents = 0};
+        return ::poll(&p, 1, static_cast<int>(limit.count())) == 1;
+    }
+
+    // Reads at most `max` bytes of what has arrived, into the response being assembled: what
+    // a player does that frees its receive window a little at a time. 0 when nothing has
+    // arrived, nullopt once the connection has ended or failed.
+    std::optional<std::size_t> read_some(std::size_t max) {
+        std::array<char, 65536> buf{};
+        const std::size_t want = std::min(max, buf.size());
+        if (ssl_) {
+            if (SSL_has_pending(ssl_.get()) == 0 && !readable(std::chrono::milliseconds(0))) {
+                return 0;
+            }
+            std::size_t n = 0;
+            const int rc =
+                ssl_retrying([&] { return SSL_read_ex(ssl_.get(), buf.data(), want, &n); });
+            const int err = errno;
+            if (rc != 1) {
+                const int code = SSL_get_error(ssl_.get(), rc);
+                if (code == SSL_ERROR_WANT_READ) {
+                    return 0;
+                }
+                last_errno_ = err;
+                return std::nullopt;
+            }
+            in_.append(buf.data(), n);
+            return n;
+        }
+        ssize_t n = ::recv(fd_.get(), buf.data(), want, MSG_DONTWAIT);
+        while (n < 0 && errno == EINTR) {
+            n = ::recv(fd_.get(), buf.data(), want, MSG_DONTWAIT);
+        }
+        // EWOULDBLOCK is EAGAIN on Linux.
+        if (n < 0 && errno == EAGAIN) {
+            return 0;
+        }
+        if (n <= 0) {
+            last_errno_ = n < 0 ? errno : 0;
+            return std::nullopt;
+        }
+        in_.append(buf.data(), static_cast<std::size_t>(n));
+        return static_cast<std::size_t>(n);
+    }
+
+    // Waits up to `limit` for the connection to break (the peer's FIN or reset), without
+    // reading anything: a paced reader's pause that ends early if the server gives up on it.
+    bool broken_within(std::chrono::milliseconds limit) {
+        pollfd p{.fd = fd_.get(), .events = POLLRDHUP, .revents = 0};
+        int rc = ::poll(&p, 1, static_cast<int>(limit.count()));
+        while (rc < 0 && errno == EINTR) {
+            rc = ::poll(&p, 1, static_cast<int>(limit.count()));
+        }
+        return rc == 1;
+    }
+
+    // Reads everything left, into the response being assembled, until the connection ends: 0
+    // if it ended in an orderly close, the error it ended in otherwise (ECONNRESET for a
+    // reset), nullopt if it had not ended after `limit`.
+    std::optional<int> read_to_end(std::chrono::milliseconds limit = std::chrono::seconds(10)) {
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto n = read_some(std::size_t{64} * 1024);
+            if (!n) {
+                return last_errno_;
+            }
+            if (*n == 0) {
+                readable(std::chrono::milliseconds(100));
+            }
+        }
+        return std::nullopt;
+    }
+
+    // The response read_some has assembled, once all of it has arrived; never reads.
+    std::optional<HttpResponse> take_response() { return parse(false); }
+
+    // The bytes read and not yet taken as a response.
+    [[nodiscard]] std::size_t buffered() const { return in_.size(); }
+
 private:
     static constexpr std::chrono::seconds kSocketTimeout{30};
 
@@ -329,6 +424,7 @@ private:
     os::UniqueFd fd_;
     SslPtr ssl_;
     std::string in_;
+    int last_errno_ = 0;
 };
 
 } // namespace ulw::test

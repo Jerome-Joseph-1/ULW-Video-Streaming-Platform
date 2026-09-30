@@ -10,6 +10,7 @@
 #include "net/ip_address.hpp"
 #include "net/transport.hpp"
 
+#include "ops/dev_only.hpp"
 #include "ops/root.hpp"
 
 #include <algorithm>
@@ -55,6 +56,10 @@ constexpr std::array kSettings{
     ops::Setting{.env = "JWKS_URL", .key = "auth.jwks_url"},
     ops::Setting{.env = "ULW_DEV_JWKS_FILE", .key = "auth.dev_jwks_file"},
     ops::Setting{.env = "ULW_JWKS_MAX_STALE_HOURS", .key = "auth.jwks_max_stale_hours"},
+    ops::Setting{.env = "ULW_DEV_MODE", .key = "dev.mode"},
+    // Not a setting: the kubelet sets it in every container, and it is read only to refuse
+    // development settings there.
+    ops::Setting{.env = "KUBERNETES_SERVICE_HOST", .key = ""},
     ops::Setting{.env = "JWT_ISSUER", .key = "auth.issuer"},
     ops::Setting{.env = "JWT_AUDIENCE", .key = "auth.audience"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
@@ -248,6 +253,11 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
     // Over plain HTTP anyone on the path could hand us their own keys and sign any identity.
     if (url && !url->starts_with("https://")) {
         return error("JWKS_URL", "must be an https URL");
+    }
+    // A local key set signs any identity its holder likes; in a real deployment it would be a
+    // way in, not a convenience.
+    if (auto r = ops::allow_dev_only("ULW_DEV_JWKS_FILE", env); !r) {
+        return error(r.error().variable, r.error().reason);
     }
     config.jwks_url = std::move(url).value_or("");
     config.dev_jwks_file = std::move(file).value_or("");

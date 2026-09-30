@@ -4,9 +4,11 @@
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
+#include "ops/dev_only.hpp"
 #include "ops/root.hpp"
 
 #include <algorithm>
+#include <string>
 #include <utility>
 
 namespace chat {
@@ -124,6 +126,33 @@ std::expected<std::uint32_t, ConfigError> jwks_max_stale_hours(const EnvLookup& 
     return *value;
 }
 
+// Where the keys come from: exactly one of JWKS_URL and ULW_DEV_JWKS_FILE, the other empty.
+struct KeySource {
+    std::string url;
+    std::string file;
+};
+
+std::expected<KeySource, ConfigError> key_source(const EnvLookup& env) {
+    auto url = lookup(env, "JWKS_URL");
+    auto file = lookup(env, "ULW_DEV_JWKS_FILE");
+    if (url && file) {
+        return error("JWKS_URL", "set together with ULW_DEV_JWKS_FILE; choose one");
+    }
+    if (!url && !file) {
+        return error("JWKS_URL", "not set");
+    }
+    // Over plain HTTP anyone on the path could hand us their own keys and sign any identity.
+    if (url && !url->starts_with("https://")) {
+        return error("JWKS_URL", "must be an https URL");
+    }
+    // A local key set signs any identity its holder likes; in a real deployment it would be a
+    // way in, not a convenience.
+    if (auto r = ops::allow_dev_only("ULW_DEV_JWKS_FILE", env); !r) {
+        return error(r.error().variable, r.error().reason);
+    }
+    return KeySource{.url = std::move(url).value_or(""), .file = std::move(file).value_or("")};
+}
+
 } // namespace
 
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
@@ -178,17 +207,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
         return error("ULW_DATABASE_URL", "not set");
     }
 
-    auto url = lookup(env, "JWKS_URL");
-    auto file = lookup(env, "ULW_DEV_JWKS_FILE");
-    if (url && file) {
-        return error("JWKS_URL", "set together with ULW_DEV_JWKS_FILE; choose one");
-    }
-    if (!url && !file) {
-        return error("JWKS_URL", "not set");
-    }
-    // Over plain HTTP anyone on the path could hand us their own keys and sign any identity.
-    if (url && !url->starts_with("https://")) {
-        return error("JWKS_URL", "must be an https URL");
+    auto keys = key_source(env);
+    if (!keys) {
+        return std::unexpected(std::move(keys.error()));
     }
     const auto max_stale_hours = jwks_max_stale_hours(env);
     if (!max_stale_hours) {
@@ -217,9 +238,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .node_secret = std::move(*node_secret),
                   .reactor = reactor,
                   .database_url = std::move(*database),
-                  .jwks_url = std::move(url).value_or(""),
+                  .jwks_url = std::move(keys->url),
                   .jwks_max_stale_hours = *max_stale_hours,
-                  .dev_jwks_file = std::move(file).value_or(""),
+                  .dev_jwks_file = std::move(keys->file),
                   .jwt_issuer = std::move(*issuer),
                   .jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform"),
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
