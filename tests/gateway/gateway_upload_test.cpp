@@ -278,6 +278,28 @@ TEST_P(GatewayUpload, ARepeatedCommitReportsTheVideosStateAsItIsNow) {
     EXPECT_EQ(gw.jobs().size(), 1U);
 }
 
+// The state comes from the commit itself: a video lookup that would fail cannot turn a commit
+// that went through into an error.
+TEST_P(GatewayUpload, ACommitThatWentThroughIsAnsweredWhateverAVideoLookupWouldSay) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(2 * kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    ASSERT_TRUE(upload_all(c, *up, data));
+    const std::string commit = "/api/v1/uploads/" + up->upload_id + "/commit";
+    const std::string processing = R"({"video_id":")" + up->video_id + R"(","state":"processing"})";
+    for (const auto error :
+         {core::ports::CatalogError::Unavailable, core::ports::CatalogError::NotFound}) {
+        gw.fail_find_video(error);
+        const auto r = c.request("POST", commit, kAlice);
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 200);
+        EXPECT_EQ(r->body, processing);
+    }
+    EXPECT_EQ(gw.jobs().size(), 1U);
+}
+
 // Past expires_at an upload never committed is gone to PATCH, HEAD and commit, before the
 // reaper aborts it as after; a committed one still answers as committed.
 TEST_P(GatewayUpload, AnUploadPastItsExpiryIsGoneToPatchHeadAndCommit) {

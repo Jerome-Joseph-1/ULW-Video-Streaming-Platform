@@ -338,6 +338,10 @@ void GatewayUnderTest::fail_views(std::optional<core::ports::CatalogError> error
     on_loop([&] { loop_->catalog->fail_views(error); });
 }
 
+void GatewayUnderTest::fail_find_video(std::optional<core::ports::CatalogError> error) {
+    on_loop([&] { loop_->catalog->fail_find_video(error); });
+}
+
 std::string GatewayUnderTest::metrics() {
     std::string out;
     on_loop([&] { out = loop_->gateway->render_metrics(); });

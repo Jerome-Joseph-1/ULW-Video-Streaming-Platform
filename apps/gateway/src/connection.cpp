@@ -1216,7 +1216,7 @@ void Connection::on_committed(ControlJob job) noexcept {
     ++pending_;
     deps().catalog.commit_upload(
         *id, video, std::string(request_id()),
-        [this, video](core::ports::CatalogResult<void> result) noexcept {
+        [this, video](core::ports::CatalogResult<core::VideoState> result) noexcept {
             --pending_;
             if (phase_ != Phase::Request) {
                 return;
@@ -1225,23 +1225,11 @@ void Connection::on_committed(ControlJob job) noexcept {
                 fail_catalog(result.error());
                 return;
             }
-            // The video's state as it stands: processing after the first commit, and whatever
-            // the worker has made of it since on a repeat.
-            ++pending_;
-            deps().catalog.find_video(
-                video, [this](core::ports::CatalogResult<core::VideoRecord> found) noexcept {
-                    --pending_;
-                    if (phase_ != Phase::Request) {
-                        return;
-                    }
-                    if (!found) {
-                        fail_catalog(found.error());
-                        return;
-                    }
-                    respond_json(Status::Ok,
-                                 std::format(R"({{"video_id":"{}","state":"{}"}})",
-                                             found->id.to_string(), state_name(found->state)));
-                });
+            // Read in the commit's own transaction, so a commit that went through is never
+            // answered with an error: processing the first time, and on a repeat whatever the
+            // worker has made of the video since.
+            respond_json(Status::Ok, std::format(R"({{"video_id":"{}","state":"{}"}})",
+                                                 video.to_string(), state_name(*result)));
         });
 }
 

@@ -66,7 +66,11 @@ UPDATE uploads SET state = 'completed', durable_offset = size_bytes
  WHERE id = $1 AND video_id = $2 AND state = 'active'
 RETURNING object_key)sql";
 
-constexpr Sql kUploadState = "SELECT state FROM uploads WHERE id = $1 AND video_id = $2";
+// The video row cannot be missing: deleting a video deletes its uploads.
+constexpr Sql kUploadState = R"sql(
+SELECT uploads.state, videos.state
+  FROM uploads JOIN videos ON videos.id = uploads.video_id
+ WHERE uploads.id = $1 AND uploads.video_id = $2)sql";
 
 constexpr Sql kStartProcessing = R"sql(
 UPDATE videos SET state = 'processing', version = version + 1, updated_at = now()
@@ -303,7 +307,7 @@ private:
 class CommitUpload final : public Operation {
 public:
     CommitUpload(const core::UploadId& upload, const core::VideoId& video, std::string request_id,
-                 CatalogCallback<void> done) noexcept
+                 CatalogCallback<core::VideoState> done) noexcept
         : upload_(upload), video_(video), request_id_(std::move(request_id)),
           done_(std::move(done)) {}
 
@@ -314,7 +318,7 @@ public:
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
         if (!outcome) {
-            return finish(failure<void>(outcome.error()));
+            return finish(failure<core::VideoState>(outcome.error()));
         }
         switch (step_) {
         case Step::Begin:
@@ -329,7 +333,7 @@ public:
             step_ = Step::StartProcessing;
             return Statement{.sql = kStartProcessing, .params = Params{}.add_uuid(video_.uuid())};
         case Step::ReadState:
-            return finish(settled(outcome->get(0, 0)));
+            return finish(settled(outcome->get(0, 0), outcome->get(0, 1)));
         case Step::StartProcessing:
             // The upload was active, so its video should have been init or uploading.
             if (outcome->affected() != 1) {
@@ -347,12 +351,13 @@ public:
             step_ = Step::Commit;
             return Statement{.sql = kCommit, .params = {}};
         case Step::Commit:
-            return finish({});
+            // The update above moved it there, inside this transaction.
+            return finish(core::VideoState::Processing);
         }
         return finish(std::unexpected(CatalogError::Unavailable));
     }
 
-    void abandon(DbError error) noexcept override { done_(failure<void>(error)); }
+    void abandon(DbError error) noexcept override { done_(failure<core::VideoState>(error)); }
 
 private:
     enum class Step : std::uint8_t {
@@ -366,22 +371,25 @@ private:
     };
 
     // The upload was not active. Completed means an earlier commit went through, and this one
-    // succeeds without doing anything (the pool rolls back the empty transaction).
-    static CatalogResult<void> settled(std::optional<std::string_view> state) noexcept {
-        if (!state) {
+    // succeeds without doing anything (the pool rolls back the empty transaction), answering
+    // the video's state as it stands.
+    static CatalogResult<core::VideoState> settled(std::optional<std::string_view> upload,
+                                                   std::optional<std::string_view> video) noexcept {
+        if (!upload) {
             return std::unexpected(CatalogError::NotFound);
         }
-        if (*state == "completed") {
-            return {};
+        if (*upload != "completed") {
+            return std::unexpected(CatalogError::Conflict);
         }
-        return std::unexpected(CatalogError::Conflict);
+        // The column's enum type admits no other value; the commit went through whatever it says.
+        return video.and_then(parse_video_state).value_or(core::VideoState::Processing);
     }
 
     [[nodiscard]] Params ids() const noexcept {
         return Params{}.add_uuid(upload_.uuid()).add_uuid(video_.uuid());
     }
 
-    std::optional<Statement> finish(CatalogResult<void> result) noexcept {
+    std::optional<Statement> finish(CatalogResult<core::VideoState> result) noexcept {
         done_(result);
         return std::nullopt;
     }
@@ -391,7 +399,7 @@ private:
     std::string request_id_;
     std::string source_key_;
     Step step_ = Step::Begin;
-    CatalogCallback<void> done_;
+    CatalogCallback<core::VideoState> done_;
 };
 
 class AbortUpload final : public Operation {
@@ -696,7 +704,8 @@ void PgUploadCatalog::record_progress(const core::UploadId& id, const core::Vide
 }
 
 void PgUploadCatalog::commit_upload(const core::UploadId& id, const core::VideoId& video,
-                                    const std::string& request_id, CatalogCallback<void> done) {
+                                    const std::string& request_id,
+                                    CatalogCallback<core::VideoState> done) {
     impl_->main().submit(std::make_unique<CommitUpload>(id, video, request_id, std::move(done)));
 }
 
