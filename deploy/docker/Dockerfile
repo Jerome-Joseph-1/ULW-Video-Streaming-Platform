@@ -75,7 +75,7 @@ ENTRYPOINT ["/usr/local/bin/gateway_server"]
 # ffmpeg"). The binaries are built on the same snapshot, so they link what they were compiled
 # against.
 FROM ${DEBIAN} AS debian-apt
-ENV DEBIAN_SNAPSHOT=20260929T000000Z
+ENV DEBIAN_SNAPSHOT=20260930T100000Z
 
 FROM debian-apt AS worker-build
 RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/local/sbin/apt-install-debian \
@@ -84,7 +84,7 @@ RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/loc
         cmake=3.31.6-2 \
         ninja-build=1.12.1-1 \
         pkgconf=1.8.1-4 \
-        libssl-dev=3.5.7-1~deb13u2 \
+        libssl-dev=3.5.7-1~deb13u3 \
         libcurl4-openssl-dev=8.14.1-2+deb13u5 \
         libpq-dev=17.11-0+deb13u1 \
         liburing-dev=2.9-1
@@ -101,10 +101,10 @@ FROM debian-apt AS worker
 RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/local/sbin/apt-install-debian \
     apt-install-debian \
         ca-certificates=20250419 \
-        openssl=3.5.7-1~deb13u2 \
+        openssl=3.5.7-1~deb13u3 \
         libcurl4t64=8.14.1-2+deb13u5 \
         libpq5=17.11-0+deb13u1 \
-        libssl3t64=3.5.7-1~deb13u2 \
+        libssl3t64=3.5.7-1~deb13u3 \
         liburing2=2.9-1 \
         ffmpeg=7:7.1.5-0+deb13u1 \
  && useradd --system --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin ulw \

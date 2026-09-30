@@ -353,6 +353,44 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 `askedin-gateway`. If the video plane gets a hostname of its own, add `hostnames:` to both
 `httproute.yaml` files.
 
+### Image builds and the worker's ffmpeg
+
+The two images come from different distributions (docs/adr/0071): `video-gateway` is Ubuntu
+24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
+packages, ffmpeg among them, from snapshot.debian.org, and its binaries built on trixie too.
+Woodpecker's builder needs to reach both snapshot services (snapshot.debian.org over plain
+http, which apt checks against the archive's signatures) as well as Docker Hub for both base
+images. The pipeline itself is unchanged: `target: worker` still builds the worker image.
+
+#### Updating the worker's ffmpeg
+
+The platform's on-call engineer owns this. Every Monday, check debian-security-announce (or
+https://security-tracker.debian.org/tracker/source-package/ffmpeg) for trixie DSAs against
+ffmpeg or the worker's other pinned packages (OpenSSL, libcurl, libpq, glibc). For a DSA against
+ffmpeg, OpenSSL or glibc, bump within two working days; otherwise bump at least monthly.
+
+1. Pick a timestamp after the DSA's upload reached snapshot.debian.org: the `first_seen` of the
+   `debian-security` archive in
+   `http://snapshot.debian.org/mr/package/ffmpeg/<version>/binfiles/ffmpeg/<version>?fileinfo=1`
+   (the version URL-encoded, `7%3A7.1.5-0%2Bdeb13u1`).
+2. In a `debian:trixie-slim` container at the digest the Dockerfile names, with this checkout
+   mounted, print the candidates at that timestamp:
+
+   ```sh
+   DEBIAN_SNAPSHOT=<timestamp> deploy/docker/apt-install-debian.sh --policy \
+       ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 liburing2 \
+       g++-14 cmake ninja-build pkgconf libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev
+   ```
+
+3. Set `DEBIAN_SNAPSHOT` in `deploy/docker/Dockerfile` to the timestamp and every pinned version
+   in the `worker-build` and `worker` stages to its candidate. A build fails if a pin is not
+   what the snapshot holds, so nothing drifts silently.
+4. If ffmpeg's upstream version changed (not just its `+deb13uN`), run
+   `tools/trace-ffmpeg-syscalls.sh` in that container, as root and as an ordinary user, and
+   extend `infra/ffmpeg/src/seccomp_filter.hpp` with anything new (docs/adr/0048).
+5. Open the pull request; the e2e workflow's sandbox job builds the worker image and runs the
+   VOD flow through it. Deploy as usual (step 4).
+
 ## 5. Verify on stage (M14)
 
 1. ArgoCD shows the stage application Synced and Healthy; then:

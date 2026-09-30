@@ -10,6 +10,31 @@ permissions:
   contents: read
 
 jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: When the OpenSSL and ffmpeg fixes reached the snapshot archive
+        run: |
+          for q in openssl/3.5.7-1~deb13u3/libssl3t64 ffmpeg/7:7.1.5-0+deb13u1/ffmpeg; do
+            src=${q%%/*}; rest=${q#*/}; v=${rest%%/*}; bin=${rest#*/}
+            enc=$(echo "$v" | sed 's/:/%3A/; s/+/%2B/; s/~/%7E/')
+            /usr/lib/apt/apt-helper download-file \
+              "http://snapshot.debian.org/mr/package/$src/$enc/binfiles/$bin/$enc?fileinfo=1" /tmp/mr.json || continue
+            echo "$q"; grep -oE '"archive_name":"[a-z-]*","first_seen":"[0-9TZ]*","name":"[^"]*amd64.deb"' /tmp/mr.json || cat /tmp/mr.json
+          done
+      - name: Candidates at the Dockerfile's snapshot
+        run: |
+          export DEBIAN_SNAPSHOT=$(sed -n 's/^ENV DEBIAN_SNAPSHOT=//p' deploy/docker/Dockerfile)
+          echo "snapshot $DEBIAN_SNAPSHOT"
+          deploy/docker/apt-install-debian.sh --policy \
+            ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 liburing2 \
+            g++-14 cmake ninja-build pkgconf libssl-dev libcurl4-openssl-dev libpq-dev \
+            liburing-dev python3 | grep -E '^[a-z0-9]|Candidate'
+
   # The worker's and the live packager's ffmpeg suites and the syscall trace, on trixie with the
   # image's ffmpeg, from the worker-build stage (same snapshot, same toolchain).
   trixie-tests:
@@ -34,7 +59,8 @@ jobs:
           docker run --rm --privileged --network host -v "$PWD:/w" -w /w \
             -e ULW_TEST_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:55432/postgres \
             ulw-worker-build bash -euo pipefail -c '
-            deploy/docker/apt-install-debian.sh ffmpeg=7:7.1.5-0+deb13u1 strace=6.13+ds-1
+            py=$(deploy/docker/apt-install-debian.sh --policy python3 | awk "/Candidate/{print \$2}")
+            deploy/docker/apt-install-debian.sh ffmpeg=7:7.1.5-0+deb13u1 strace=6.13+ds-1 python3="$py"
             ffmpeg -version | head -1
             useradd -u "$(stat -c %u /w)" -m tester
             as_tester() { runuser -u tester -- env ULW_TEST_DATABASE_URL="$ULW_TEST_DATABASE_URL" "$@"; }
@@ -118,6 +144,7 @@ jobs:
           done
           python3 - <<'PY'
           import json
+          summary = []
           for name in ("worker-before", "worker-after"):
               d = json.load(open(name + ".json"))
               vulns = [v for r in d.get("Results", []) for v in r.get("Vulnerabilities") or []]
@@ -128,6 +155,7 @@ jobs:
                   return sum(1 for v in vulns if pred(v))
               def uniq(pred):
                   return len({v["VulnerabilityID"] for v in vulns if pred(v)})
+              print = lambda *a: summary.append(" ".join(map(str, a)))
               print(f"== {name}: {len(vulns)} findings, {uniq(lambda v: True)} distinct CVEs")
               for sev in ("CRITICAL", "HIGH"):
                   print(f"  trivy {sev}: {count(lambda v: v['Severity'] == sev)} findings,"
@@ -139,8 +167,15 @@ jobs:
               print(f"  ffmpeg packages: {uniq(ff)} CVEs; trivy HIGH/CRIT"
                     f" {uniq(lambda v: ff(v) and v['Severity'] in ('HIGH', 'CRITICAL'))};"
                     f" nvd HIGH/CRIT {uniq(lambda v: ff(v) and nvd(v) in ('HIGH', 'CRITICAL'))}")
+              print("  HIGH/CRITICAL (trivy) with a fixed version:")
+              for v in vulns:
+                  if v["Severity"] in ("HIGH", "CRITICAL") and v.get("FixedVersion"):
+                      print(f"    {v['VulnerabilityID']} {v['PkgName']} {v['InstalledVersion']} -> {v['FixedVersion']}")
+              import builtins
               for v in sorted(vulns, key=lambda v: (v["Severity"], v["VulnerabilityID"])):
                   if v["Severity"] in ("HIGH", "CRITICAL") or nvd(v) in ("HIGH", "CRITICAL"):
-                      print(f"    {v['VulnerabilityID']} {v['PkgName']} {v['InstalledVersion']}"
+                      builtins.print(f"    {v['VulnerabilityID']} {v['PkgName']} {v['InstalledVersion']}"
                             f" trivy={v['Severity']} nvd={nvd(v)} fixed={v.get('FixedVersion', '')}")
+          import builtins
+          builtins.print("\n".join(summary))
           PY

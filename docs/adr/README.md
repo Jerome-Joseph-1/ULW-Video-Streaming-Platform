@@ -74,3 +74,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0068](0068-a-failed-job-fails-its-video.md) | A job that fails for good fails its video in the same statement | Accepted |
 | [0069](0069-chat-soak-flatness-per-command-delivery-and-connection.md) | Chat soak flatness judged per command, delivery and connection | Accepted |
 | [0070](0070-live-chat-lossy-and-bounded.md) | A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere | Accepted |
+| [0071](0071-ffmpeg-from-debian-security.md) | The worker's ffmpeg comes from Debian 13's security archive | Accepted |
