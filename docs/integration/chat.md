@@ -100,9 +100,10 @@ delivered, and the `id` stays with the first message. Send the new message under
 
 ### Member lists
 
-<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms), migrations/0009_chat_rooms_recorded_at.sql, infra/postgres/src/upload_reaper.cpp (kForgetUnused) -->
+<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms), migrations/0010_chat_rooms_recorded_at.sql, infra/postgres/src/upload_reaper.cpp (kForgetUnused) -->
 
-Who may join a room depends on its kind, which is recorded once and never changes:
+Who may join a room depends on its kind, which is recorded once and never changes while the
+room is in use (a room nothing used may be forgotten, below):
 
 - **Direct and group chats** (`"kind":"direct"` or `"group"`, the default) admit only their
   members. Anyone else's `join` is refused with `not_member`, so they can neither send to the
@@ -110,9 +111,11 @@ Who may join a room depends on its kind, which is recorded once and never change
   join of a room with no kind recorded records the kind it names; so does listing its first
   member (as a group chat). Such a join is refused with `not_member`, since the room lists
   nobody yet. Each user's refused joins record at most 20 rooms at once and then one a minute,
-  per chat node; past that a join is refused the same and records nothing. A room recorded by a
-  join and never used (no members, never joined by anyone admitted) is forgotten a day later,
-  and the next join of it records it again.
+  per chat node; past that a join is refused the same and records nothing. A direct or group
+  chat recorded more than a day ago and never used (no members, never on the room plane) is
+  forgotten, at the latest within a few reaper passes; the next join of it records it again, as
+  the kind that join names, which may be the other closed kind. A stream's live chat is never
+  forgotten.
 - **A stream's live chat** admits anyone. Only the server opens one, and only a stream's room
   can be one; a client cannot. It is joined by the stream's name (see
   [A stream's live chat](#a-streams-live-chat)), and refused with `not_live` until it is open.

@@ -22,6 +22,10 @@ struct Options {
     // How long a chat room recorded by a join, and never used, is kept: long enough that a
     // room whose members are being added just after its first join is used by then.
     core::Seconds unused_room_after{std::chrono::hours(24)};
+    // Chat rooms looked at per pass, `batch` per statement, from where the last pass stopped: a
+    // pass costs the same however many rooms there are, and a lap over a million takes a day of
+    // passes each 15 minutes (ADR-0077).
+    std::size_t rooms_per_pass = 10'000;
 };
 
 struct Report {
@@ -39,7 +43,8 @@ struct Report {
 };
 
 // One pass: uploads past their expires_at are aborted in the catalog and their storage sessions
-// released, then sessions no upload owns are swept, then chat rooms nothing used are forgotten.
+// released, then sessions no upload owns are swept, then chat rooms nothing used are forgotten
+// (up to Options::rooms_per_pass looked at).
 [[nodiscard]] Report run_once(core::ports::IUploadExpiry& uploads, core::ports::IIngestStore& store,
                               core::ports::IObjectAdmin& admin, core::ports::IUnusedRooms& rooms,
                               const core::ports::IClock& clock, const Options& options);

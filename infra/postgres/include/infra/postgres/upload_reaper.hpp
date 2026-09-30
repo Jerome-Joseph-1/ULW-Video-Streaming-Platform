@@ -21,7 +21,7 @@ public:
 
     [[nodiscard]] std::expected<std::vector<core::ports::ExpiredUpload>, core::ports::CatalogError>
     expire(core::WallTime now, std::size_t limit) override;
-    [[nodiscard]] std::expected<std::size_t, core::ports::CatalogError>
+    [[nodiscard]] std::expected<core::ports::UnusedRoomsScan, core::ports::CatalogError>
     forget_unused(core::WallTime recorded_before, std::size_t limit) override;
 
 private:

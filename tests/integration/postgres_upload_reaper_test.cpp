@@ -271,14 +271,19 @@ TEST_F(UploadReaperTest, AnUnreachableDatabaseIsUnavailable) {
     EXPECT_EQ(expired.error(), CatalogError::Unavailable);
 }
 
-// What a refused join leaves (ADR-0054's kind record, migration 0009) goes once it is a day old;
-// a room anything uses stays, however old.
-TEST_F(UploadReaperTest, ForgetsOnlyChatRoomsNothingUsedRecordedInTheWeekBeforeTheCutoff) {
+// What a refused join leaves (ADR-0054's kind record, migration 0010) goes once it is a day old,
+// however old; a room anything uses stays (ADR-0077). Each call looks at a batch of rooms, oldest
+// first, from where the last one stopped, and starts over once it reaches the cutoff.
+TEST_F(UploadReaperTest, ForgetsEveryChatRoomNothingUsedADayOnWalkingABatchAtATime) {
     auto conn = db->session();
     const auto room = [&](std::string_view id, std::string_view age) {
         ASSERT_TRUE(conn.exec("INSERT INTO chat_rooms (room_id, kind, recorded_at) "
                               "VALUES ($1::text::uuid, 'group_chat', now() - $2::text::interval)",
                               Params{}.add_text(id).add_text(age)));
+    };
+    const auto count = [&](std::string_view id) {
+        return scalar(conn, "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
+                      Params{}.add_text(id));
     };
     constexpr std::string_view kUnused = "01a0eb86-6cca-7dce-84cc-000000000001";
     constexpr std::string_view kFresh = "01a0eb86-6cca-7dce-84cc-000000000002";
@@ -286,12 +291,13 @@ TEST_F(UploadReaperTest, ForgetsOnlyChatRoomsNothingUsedRecordedInTheWeekBeforeT
     constexpr std::string_view kResolved = "01a0eb86-6cca-7dce-84cc-000000000004";
     constexpr std::string_view kAncient = "01a0eb86-6cca-7dce-84cc-000000000005";
     constexpr std::string_view kUnused2 = "01a0eb86-6cca-7dce-84cc-000000000006";
-    room(kUnused, "2 days");
-    room(kUnused2, "3 days");
-    room(kFresh, "1 hour");
-    room(kListed, "2 days");
-    room(kResolved, "2 days");
+    // Oldest first: ancient, unused2, then the three of two days.
     room(kAncient, "30 days");
+    room(kUnused2, "3 days");
+    room(kListed, "2 days 2 hours");
+    room(kResolved, "2 days 1 hour");
+    room(kUnused, "2 days");
+    room(kFresh, "1 hour");
     ASSERT_TRUE(
         conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::text::uuid, 'alice')",
                   Params{}.add_text(kListed)));
@@ -300,25 +306,52 @@ TEST_F(UploadReaperTest, ForgetsOnlyChatRoomsNothingUsedRecordedInTheWeekBeforeT
                           Params{}.add_text(kResolved)));
 
     const auto cutoff = clock.wall_now() - std::chrono::hours(24);
-    // Oldest first, a batch at a time.
-    const auto first = reaper->forget_unused(cutoff, 1);
+    const auto first = reaper->forget_unused(cutoff, 2);
     ASSERT_TRUE(first);
-    EXPECT_EQ(*first, 1U);
-    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
-                     Params{}.add_text(kUnused2)),
-              "0");
-    const auto rest = reaper->forget_unused(cutoff, 10);
-    ASSERT_TRUE(rest);
-    EXPECT_EQ(*rest, 1U);
+    EXPECT_EQ(first->forgotten, 2U);
+    EXPECT_FALSE(first->finished);
+    EXPECT_EQ(count(kAncient), "0") << "a room recorded before the last week is never forgotten";
+    EXPECT_EQ(count(kUnused2), "0");
+    // From where the first stopped: listed, resolved, unused, and the end of the walk.
+    const auto second = reaper->forget_unused(cutoff, 2);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->forgotten, 0U);
+    EXPECT_FALSE(second->finished);
+    const auto third = reaper->forget_unused(cutoff, 2);
+    ASSERT_TRUE(third);
+    EXPECT_EQ(third->forgotten, 1U);
+    EXPECT_TRUE(third->finished);
+    EXPECT_EQ(count(kUnused), "0");
+    // The next lap starts over, and finds nothing more.
     const auto again = reaper->forget_unused(cutoff, 10);
     ASSERT_TRUE(again);
-    EXPECT_EQ(*again, 0U);
-    for (const std::string_view kept : {kFresh, kListed, kResolved, kAncient}) {
-        EXPECT_EQ(scalar(conn, "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
-                         Params{}.add_text(kept)),
-                  "1")
-            << kept;
+    EXPECT_EQ(again->forgotten, 0U);
+    EXPECT_TRUE(again->finished);
+    for (const std::string_view kept : {kFresh, kListed, kResolved}) {
+        EXPECT_EQ(count(kept), "1") << kept;
     }
+
+    // However old a room is, the next lap finds it.
+    constexpr std::string_view kLate = "01a0eb86-6cca-7dce-84cc-000000000007";
+    room(kLate, "40 days");
+    const auto late = reaper->forget_unused(cutoff, 10);
+    ASSERT_TRUE(late);
+    EXPECT_EQ(late->forgotten, 1U);
+    EXPECT_EQ(count(kLate), "0");
+}
+
+// A stream's live chat is opened by the server (record_live) and lists nobody, however many
+// viewers it has: it is not what a refused join leaves, and must never be forgotten.
+TEST_F(UploadReaperTest, AStreamsLiveChatWithNoMembersIsNeverForgotten) {
+    auto conn = db->session();
+    ASSERT_TRUE(conn.exec("INSERT INTO chat_rooms (room_id, kind, recorded_at) "
+                          "VALUES (live_chat_room('evening-show'), 'stream_live_chat', "
+                          "now() - interval '2 days')"));
+    const auto cutoff = clock.wall_now() - std::chrono::hours(24);
+    const auto forgotten = reaper->forget_unused(cutoff, 10);
+    ASSERT_TRUE(forgotten);
+    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM chat_rooms WHERE kind = 'stream_live_chat'"), "1")
+        << "the reaper deleted an open live chat";
 }
 
 } // namespace

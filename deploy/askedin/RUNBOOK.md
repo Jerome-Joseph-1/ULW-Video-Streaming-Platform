@@ -316,12 +316,26 @@ build the gateways run), and a NetworkPolicy that lets it reach cluster DNS, Pos
 the store (443) and nothing else. It aborts uploads past their `expires_at`, fails their videos
 with "upload expired", releases their storage sessions, removes any object a finished commit
 left at their key, and aborts sessions older than the uploads' lifetime that no upload owns
-(docs/adr/0049). It also forgets chat rooms that a refused join recorded more than a day ago and
-nothing used since (no members, never on the room plane). Each pass prints
+(docs/adr/0049). It also forgets direct and group chat rooms that a refused join recorded more
+than a day ago and nothing used since (no members, never on the room plane), however old; a
+stream's live chat is never forgotten. It looks at 10,000 rooms a pass at most, from where the
+last pass stopped, and starts over from the oldest once it reaches the cutoff
+(`chat_rooms_forget_cursor`, docs/adr/0077). Each pass prints
 `reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run`,
 `reaper_parts_orphaned_last_run` and `reaper_chat_rooms_forgotten_last_run` on stdout, as
 gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
 confirmed, and the Job's log says which.
+
+**Deploy the release that carries migration 0010 off-peak.** Migrations run inside a
+transaction, so its index on `chat_rooms (recorded_at, room_id)` is built without
+`CONCURRENTLY`: until the gateway's migrate container commits it, every chat join of a closed
+room, every member listing and every live chat opened waits (the column it adds is a catalog
+change, with no rewrite). The build sorts every row of `chat_rooms`, a uuid, a text and a
+timestamp each: a few seconds per million rooms, so check first with
+`SELECT count(*) FROM chat_rooms;`. Taking its locks waits at most 5 s for traffic before the
+migration gives up and the init container runs it again (`lock_timeout`, docs/adr/0031). A join
+that waits past the chat service's request timeout is answered `unavailable`, and the client
+retries it.
 
 The NetworkPolicy allows ports, not addresses, because Postgres runs on the node's host and R2
 is on the internet. If the host's address is stable, add it as an `ipBlock` to the 5432 rule.

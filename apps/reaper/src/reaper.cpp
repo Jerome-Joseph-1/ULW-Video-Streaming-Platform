@@ -61,15 +61,17 @@ void expire_uploads(core::ports::IUploadExpiry& uploads, core::ports::IIngestSto
 void forget_rooms(core::ports::IUnusedRooms& rooms, const core::ports::IClock& clock,
                   const Options& options, Report& report) {
     const core::WallTime before = clock.wall_now() - options.unused_room_after;
-    while (true) {
-        const auto forgotten = rooms.forget_unused(before, options.batch);
-        if (!forgotten) {
-            report.problems.push_back(std::format("forget unused chat rooms: {}",
-                                                  core::ports::to_string(forgotten.error())));
+    // A batch of rooms looked at per statement, from where the last pass stopped, until the walk
+    // reaches the cutoff or the pass has looked at its share.
+    for (std::size_t walked = 0; walked < options.rooms_per_pass; walked += options.batch) {
+        const auto scan = rooms.forget_unused(before, options.batch);
+        if (!scan) {
+            report.problems.push_back(
+                std::format("forget unused chat rooms: {}", core::ports::to_string(scan.error())));
             return;
         }
-        report.rooms_forgotten += *forgotten;
-        if (*forgotten < options.batch) {
+        report.rooms_forgotten += scan->forgotten;
+        if (scan->finished) {
             return;
         }
     }
