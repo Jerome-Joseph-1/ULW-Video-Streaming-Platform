@@ -114,7 +114,9 @@ claim_from(core::ports::IObjectTransfer& store, const PublisherConfig& config, s
     {
         std::ofstream out(file, std::ios::binary | std::ios::trunc);
         out << "claimed\n";
-        if (!out) {
+        // As for the playlist: a write the disk refuses shows only when the buffer goes out.
+        out.close();
+        if (out.fail()) {
             return std::unexpected(PublishError::ClaimFailed);
         }
     }
