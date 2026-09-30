@@ -508,10 +508,39 @@ TEST_F(ChatServiceTest, ACheckThatFailsForGoodTakesTheUserOutOfTheRoom) {
     messages_.watcher->on_members_resync();
     ASSERT_EQ(messages_.held.size(), 1U);
     messages_.answer_admits(std::unexpected(core::ports::MessageStoreError::Corrupt));
-    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
+    // Not not_member, which says the list left the user out: the list was never read, and a
+    // join asks it again.
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "unavailable");
+    EXPECT_EQ(service_->counters().failed_rechecks, 1U);
     clock_.advance(Millis{1'000});
     service_->sweep();
     EXPECT_TRUE(messages_.held.empty()) << "asked again";
+}
+
+// Shutdown destroys the message store before the server, whose destructor still sweeps the
+// service: once stopped, the service must not call the store, whatever a resync left queued.
+TEST_F(ChatServiceTest, AStoppedServiceAsksTheStoreNothingMoreThoughChecksWereQueued) {
+    constexpr int kRooms = 6;
+    const auto room = [](int i) { return std::format("01a0eb86-6cca-7dce-84cc-3bb47615f90{}", i); };
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    for (int i = 0; i < kRooms; ++i) {
+        join(b, std::nullopt, chat::Delivery::Durable, room(i));
+        rooms_.admit();
+    }
+    messages_.hold = true;
+    messages_.watcher->on_members_resync();
+    ASSERT_EQ(messages_.held.size(), 4U);
+    // The store is down: the checks fail, and wait a second.
+    while (!messages_.held.empty()) {
+        messages_.answer_admits(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
+    const std::size_t asked = messages_.asked_rooms.size();
+    service_->stop();
+    clock_.advance(Millis{1'000});
+    service_->sweep();
+    messages_.watcher->on_members_resync();
+    EXPECT_EQ(messages_.asked_rooms.size(), asked) << "the store was called after stop";
 }
 
 // A join whose member list was read before a removal that went unannounced is let in after the

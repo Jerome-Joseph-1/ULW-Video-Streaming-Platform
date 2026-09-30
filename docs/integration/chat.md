@@ -117,7 +117,10 @@ No client command changes a member list; they are set by the service's operators
 the product, in the database. A member removed from the list is taken out of the room at once
 on every socket they have, on every node (ADR-0073): each gets an `error` with `not_member` for
 the room, unasked, and receives nothing more from it; `send` and `history` there answer
-`not_joined`, and the next `join` is refused.
+`not_joined`, and the next `join` is refused. After a node lost track of removals for a while it
+checks every member list its sockets rely on again; a list it cannot read for a reason other
+than an outage takes the socket out of the room the same way, but with `unavailable`, since the
+list never said no: join again.
 
 ### A stream's live chat
 
@@ -166,7 +169,7 @@ the room, unasked, and receives nothing more from it; `send` and `history` there
 | `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |
 | `rate_limited` | Past the send allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered |
 | `busy` | Join or history allowance exceeded, too many sends awaiting answers, the room's owner queue is full, or too much unread output for a history page | Back off and retry |
-| `unavailable` | The room's owner or the store could not be reached, or the server could not take the command just then | Retry; resend a `send` with the same `id` |
+| `unavailable` | The room's owner or the store could not be reached, or the server could not take the command just then; also sent unasked, with `room`, when the server could not confirm your membership of a room you are in (below), which you then no longer receive | Retry; resend a `send` with the same `id`; `join` a room it was sent unasked for again |
 | `fenced` | The room changed owners while the write was in flight | Retry with the same `id` |
 | `conflict` | This `id` was already used for a different message in the room | Send it under a new `id` |
 

@@ -125,8 +125,8 @@ struct ServiceCounters {
     std::uint64_t allocation_failures = 0;
     // A client taken out of a room because its user left the room's member list.
     std::uint64_t removals = 0;
-    // A resync's member check that failed other than for an unreachable store, settled as a
-    // removal (counted in removals too).
+    // A resync's member check that failed other than for an unreachable store, settled by
+    // taking the user's clients out of the room, told `unavailable` (counted in removals too).
     std::uint64_t failed_rechecks = 0;
 };
 
@@ -170,6 +170,9 @@ public:
     void drained(ClientId id) noexcept;
     // Leaves the rooms no client here has used for `linger`. Cheap to call often.
     void sweep() noexcept;
+    // From here on the message store is never called again: what a resync still owes is
+    // dropped, and resyncs are ignored. For shutdown, where the store goes first.
+    void stop() noexcept;
 
     // The user's clients here leave the room, and are told `not_member`; a join of it still
     // waiting for the member list is refused when the answer comes (ADR-0073). A stream's live
@@ -235,6 +238,9 @@ private:
     // Takes the client out of one room: its subscription, its place in the queue for the room
     // plane, and whatever it was still owed.
     void leave(ClientId id, Client& c, const core::RoomId& room) noexcept;
+    // The user's clients leave a room whose member list could not be read after a resync, and
+    // are told `unavailable`: the list never said no, and a join reads it again.
+    void unconfirmed(const core::RoomId& room, const core::UserId& user) noexcept;
     // A room and a user a resync still has to check against the member list.
     using Recheck = std::pair<core::RoomId, core::UserId>;
     struct RecheckHash {
@@ -276,6 +282,8 @@ private:
     // No check is asked before this: the last one failed, and the store is given a second.
     core::MonoTime rechecks_resume_;
     bool asking_rechecks_ = false;
+    // stop(): the store is never called again.
+    bool stopped_ = false;
     bool resync_owed_ = false;
 };
 

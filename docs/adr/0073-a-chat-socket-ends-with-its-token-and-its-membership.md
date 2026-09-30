@@ -56,7 +56,9 @@ one, and nothing told a chat node that a row went.
   pool backing off) is asked again a second later, with the rest held until then, so no
   removal is lost to the outage that caused the resync. A read that fails otherwise (a row the
   store cannot read) would fail the same way again: it is logged, counted in
-  `member_check_failures_total`, and settled on the safe side, the user taken out of the room.
+  `member_check_failures_total`, and settled on the safe side: the user's sockets leave the
+  room, told `unavailable` rather than `not_member`, since the list never said no and a join
+  reads it again.
   A resync that comes while an earlier one's reads are still queued keeps them where they are
   and adds behind them every room and user not queued already, those already asked included,
   since they may have been read before the removal it is for; so a listening session that

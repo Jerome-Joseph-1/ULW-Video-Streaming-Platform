@@ -723,6 +723,13 @@ void ChatService::forget_oldest() noexcept {
     }
 }
 
+void ChatService::stop() noexcept {
+    stopped_ = true;
+    rechecks_.clear();
+    rechecks_queued_.clear();
+    resync_owed_ = false;
+}
+
 void ChatService::sweep() noexcept {
     ask_rechecks();
     const core::MonoTime now = clock_.now();
@@ -799,7 +806,23 @@ void ChatService::on_member_removed(const core::RoomId& room, const core::UserId
     }
 }
 
+void ChatService::unconfirmed(const core::RoomId& room, const core::UserId& user) noexcept {
+    for (auto& [value, c] : clients_) {
+        // A join waiting for its list is answered by that read, which came after the resync.
+        if (c.user != user || std::ranges::find(c.rooms, room) == c.rooms.end() ||
+            std::ranges::find(c.admitting, room) != c.admitting.end()) {
+            continue;
+        }
+        leave(ClientId{value}, c, room);
+        ++counters_.removals;
+        answer(*c.client, "unavailable", room);
+    }
+}
+
 void ChatService::on_members_resync() noexcept {
+    if (stopped_) {
+        return;
+    }
     // Checks asked before now may have been read before a removal this resync is for: a failure
     // of one of them is not asked again (below, rechecked), since this resync asks anew. Those
     // still queued are asked after now, and stay where they are: a session that flaps faster
@@ -860,7 +883,7 @@ bool ChatService::recheck(const core::RoomId& room, const core::UserId& user) {
 
 void ChatService::ask_rechecks() noexcept {
     // A check answered from inside admits comes back here: the loop below asks the next.
-    if (asking_rechecks_) {
+    if (asking_rechecks_ || stopped_) {
         return;
     }
     asking_rechecks_ = true;
@@ -900,13 +923,14 @@ void ChatService::rechecked(const Recheck& pair, std::uint64_t generation,
     --rechecks_in_flight_;
     if (!result && result.error() != core::ports::MessageStoreError::Unavailable) {
         // Not the store being unreachable: asking again would fail the same way, and pause every
-        // other check each time. Settled on the safe side: the user leaves the room.
+        // other check each time. Settled on the safe side: the user leaves the room, told
+        // `unavailable`, since the list never said no and a join reads it again.
         log_event(
             R"("level":"warn","msg":"member check failed for good; the user leaves the room",)"
             R"("room":"{}","user":"{}")",
             pair.first.to_string(), pair.second.view());
         ++counters_.failed_rechecks;
-        on_member_removed(pair.first, pair.second);
+        unconfirmed(pair.first, pair.second);
         ask_rechecks();
         return;
     }

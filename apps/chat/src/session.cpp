@@ -155,6 +155,8 @@ core::MonoTime token_deadline(core::MonoTime now, core::WallTime wall_now,
     using Duration = core::WallTime::duration;
     const Duration skew = core::ports::kTokenClockSkew;
     Duration left = expires_at - wall_now;
+    // Only a wall clock within a minute of the epoch leaves room for this to saturate, since exp
+    // is at most the clock's last second but one; kept so that no clock reading can overflow.
     left = left > Duration::max() - skew ? Duration::max() : left + skew;
     if (left <= Duration::zero()) {
         return now;

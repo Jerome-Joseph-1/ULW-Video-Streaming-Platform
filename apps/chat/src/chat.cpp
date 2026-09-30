@@ -72,6 +72,9 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       sessions_(limits_.max_connections) {}
 
 ChatServer::~ChatServer() {
+    // The message store is destroyed first (Services in main.cpp), and reap() below sweeps the
+    // service, which would otherwise ask it what a resync still owes.
+    chat_.stop();
     deps_.reactor.cancel_timer(drain_timer_);
     sessions_.for_each_live([](Session& s) { s.close(); });
     reap();

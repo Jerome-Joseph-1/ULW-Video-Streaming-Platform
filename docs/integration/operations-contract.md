@@ -264,7 +264,8 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 (sockets closed with 4001 as their token ran out), `member_removals_total` (sockets taken out of
 a room because their user left its member list, ADR-0073), `member_check_failures_total`
 (member checks after a lost listening session that failed other than for an unreachable
-database, each settled by taking the user out of the room, and logged), `presence_expired_total`
+database, each settled by taking the user's sockets out of the room with `unavailable`, and
+logged), `presence_expired_total`
 (announcements and watching nodes dropped because they stopped being renewed, normally a node
 that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
 node repeated what it had said there). Chat is a draft ([chat.md](chat.md)).
