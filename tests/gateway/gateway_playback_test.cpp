@@ -2,7 +2,9 @@
 #include "playback.hpp"
 #include "support/eventually.hpp"
 #include "support/http_client.hpp"
+#include "support/socket_probe.hpp"
 
+#include <cerrno>
 #include <chrono>
 #include <format>
 #include <gtest/gtest.h>
@@ -392,8 +394,9 @@ constexpr int kPlayerReceiveBuffer = 8 * 1024;
 // reads. The kernel's own count of a shut window (TCP_USER_TIMEOUT) restarts only when the
 // window opens wide enough for the whole unsent head of its queue, so it ended such a reader
 // a fixed time after its window first shut, reading or not (ADR-0071): with that timeout at
-// 1.5 s, this reader was reset about 2 s in. The gateway's clock is held, so nothing but the
-// kernel can end this connection while the read goes on for some four seconds.
+// 1.5 s, this reader was reset about 2 s in. The gateway's socket has no user timeout, which
+// is what guards the fix: the read below lasts seconds, not the 20 s the timeout was. The
+// gateway's clock is held, so nothing but the kernel could end this connection meanwhile.
 TEST_P(GatewayPlayback, APlayerReadingAPlaylistALittleAtATimeKeepsItsConnection) {
     GatewayOptions o = options();
     o.manual_clock = true;
@@ -404,9 +407,12 @@ TEST_P(GatewayPlayback, APlayerReadingAPlaylistALittleAtATimeKeepsItsConnection)
     ASSERT_TRUE(c.connected());
     ASSERT_TRUE(c.send_request("GET", path("720p/index.m3u8"), kAlice));
     ASSERT_TRUE(c.readable());
+    const auto client_port = ulw::test::tcp_port(c.fd(), false);
+    ASSERT_TRUE(client_port);
+    EXPECT_EQ(ulw::test::user_timeout_of(gw.port(), *client_port), 0);
 
-    // 8 KiB, then a pause of 250 ms, long enough for the gateway's side to probe the shut
-    // window, which ends early only if the connection breaks.
+    // 8 KiB, then a wall-clock pause of 250 ms, long enough for the gateway's side to probe
+    // the shut window; the pause is a poll that ends early if the connection breaks.
     constexpr std::size_t kStep = std::size_t{8} * 1024;
     constexpr std::chrono::milliseconds kPause{250};
     const auto began = std::chrono::steady_clock::now();
@@ -428,17 +434,36 @@ TEST_P(GatewayPlayback, APlayerReadingAPlaylistALittleAtATimeKeepsItsConnection)
     EXPECT_GT(r->body.size(), std::size_t{100'000});
     EXPECT_TRUE(r->body.ends_with("#EXT-X-ENDLIST\n"));
 
-    // Still open, and still served.
+    // Still open, and still served. The gateway reads no further request until it has seen the
+    // response go, which it looks for on a timer of its held clock.
+    gw.advance(core::Millis{100});
     const auto again = c.request("GET", "/healthz", "");
     ASSERT_TRUE(again);
     EXPECT_EQ(again->status, 200);
     EXPECT_EQ(gw.counters().timeouts_header, 0U);
 }
 
+// How a connection the gateway gave up on with its response unread ended for the client: with
+// the whole response and a FIN when the kernel held all that was left of it, which it then
+// finishes; with a reset, and part of the response missing, when the gateway still held some.
+void expect_ended_as_the_response_allows(HttpClient& c) {
+    const auto end = c.read_to_end();
+    ASSERT_TRUE(end) << "the connection was never closed";
+    const auto r = c.take_response();
+    if (*end == 0) {
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 200);
+        EXPECT_TRUE(r->body.ends_with("#EXT-X-ENDLIST\n"));
+    } else {
+        EXPECT_EQ(*end, ECONNRESET);
+        EXPECT_FALSE(r);
+    }
+}
+
 // A player that stops reading is still ended by the header timeout, as an idle connection with
-// its response unread, and ended with a reset: the kernel drops what it still held for it at
-// once, instead of keeping it for a peer that no longer reads.
-TEST_P(GatewayPlayback, APlayerThatStopsReadingIsResetAtTheHeaderTimeout) {
+// its response unread. A response the gateway handed all of to the kernel is finished by it
+// after a FIN, as before; one the gateway still held part of is cut off with a reset.
+TEST_P(GatewayPlayback, APlayerThatStopsReadingIsClosedAtTheHeaderTimeout) {
     GatewayOptions o = options();
     o.manual_clock = true;
     GatewayUnderTest gw(o);
@@ -452,7 +477,67 @@ TEST_P(GatewayPlayback, APlayerThatStopsReadingIsResetAtTheHeaderTimeout) {
     gw.advance(o.limits.header_timeout);
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
     EXPECT_EQ(gw.counters().timeouts_header, 1U);
-    EXPECT_TRUE(c.reset_by_peer());
+    expect_ended_as_the_response_allows(c);
+}
+
+// A client that keeps asking and never reads is not read from while its last response is held
+// back by its shut window, so each request no longer restarts the header timeout: it is
+// closed a header timeout after the first response it left unread. Without that, requests
+// 9 s apart held the connection open, and queued a playlist each, for 1000 requests.
+TEST_P(GatewayPlayback, AClientThatAsksAndNeverReadsIsClosedAtTheHeaderTimeout) {
+    GatewayOptions o = options();
+    o.manual_clock = true;
+    GatewayUnderTest gw(o);
+    publish(gw);
+    gw.put_object(key("720p/index.m3u8"), long_media_playlist());
+    HttpClient c(gw.endpoint(), kPlayerReceiveBuffer);
+    ASSERT_TRUE(c.connected());
+    const core::Millis step = o.limits.header_timeout - core::Millis{1'000};
+    std::uint64_t answered = 0;
+    for (int k = 0; k < 8; ++k) {
+        ASSERT_TRUE(c.send_request("GET", path("720p/index.m3u8"), kAlice));
+        // An answer comes within milliseconds or, once the gateway has stopped reading, not
+        // at all: a second is ample either way.
+        if (!ulw::test::eventually([&] { return gw.counters().responses.at(1) > answered; },
+                                   std::chrono::seconds(1))) {
+            break;
+        }
+        ++answered;
+        gw.advance(step);
+    }
+    EXPECT_EQ(answered, 1U);
+    gw.advance(step);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
+    EXPECT_EQ(gw.counters().timeouts_header, 1U);
+    expect_ended_as_the_response_allows(c);
+}
+
+// A client still reading its last response when the drain begins is given the linger to
+// finish it, not closed at once, and one that has finished reading is let go.
+TEST_P(GatewayPlayback, ADrainLetsAPlayerFinishReadingItsLastResponse) {
+    GatewayUnderTest gw(options());
+    publish(gw);
+    gw.put_object(key("720p/index.m3u8"), long_media_playlist());
+    HttpClient c(gw.endpoint(), kPlayerReceiveBuffer);
+    ASSERT_TRUE(c.connected());
+    ASSERT_TRUE(c.send_request("GET", path("720p/index.m3u8"), kAlice));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().responses.at(1) == 1; }));
+    gw.drain();
+    // Read as fast as it comes: the whole response, then the gateway's FIN.
+    std::optional<ulw::test::HttpResponse> r;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!r && std::chrono::steady_clock::now() < deadline) {
+        ASSERT_TRUE(c.read_some(std::size_t{64} * 1024)) << c.buffered() << " bytes read";
+        r = c.take_response();
+        if (!r) {
+            c.readable(std::chrono::milliseconds(100));
+        }
+    }
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 200);
+    EXPECT_TRUE(r->body.ends_with("#EXT-X-ENDLIST\n"));
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.finished(); }));
 }
 
 INSTANTIATE_TEST_SUITE_P(Transports, GatewayPlayback,

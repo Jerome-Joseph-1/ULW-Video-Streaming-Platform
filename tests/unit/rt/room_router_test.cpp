@@ -8,6 +8,7 @@
 #include "support/fake_random.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/reserve_port.hpp"
+#include "support/socket_probe.hpp"
 #include "wire.hpp"
 
 #include <arpa/inet.h>
@@ -1039,16 +1040,17 @@ TEST_P(RoomRouterTest, ALinkBrokenInsideASendIsTakenDownAfterwardsNotInsideIt) {
 }
 
 // A node that reads a little at a time: 8 KiB of receive buffer, which Linux doubles, read
-// 8 KiB at a time with a pause of 250 ms between reads, long enough for the other side to probe
-// the shut window. The kernel's own count of a shut window (TCP_USER_TIMEOUT) restarts only
-// when the window opens wide enough for the whole unsent head of its queue, so it ended such a
-// link a fixed time after the window first shut, reading or not (ADR-0071): with that timeout
-// at 1.5 s, these links were reset about 2 s in. Here they are read for some four seconds, and
-// the node's own stall timeout, held to one second, lets them be.
+// 8 KiB at a time with a wall-clock pause of 250 ms between reads (the reactor pumped
+// meanwhile), long enough for the other side to probe the shut window. The kernel's own count
+// of a shut window (TCP_USER_TIMEOUT) restarts only when the window opens wide enough for the
+// whole unsent head of its queue, so it ended such a link a fixed time after the window first
+// shut, reading or not (ADR-0071): with that timeout at 1.5 s, these links were reset about
+// 2 s in. The node's socket has no user timeout, which is what guards the fix; the links are
+// then read for some five seconds, twice the node's own stall timeout, which lets them be.
 constexpr int kSlowNodeBuffer = 8 * 1024;
 constexpr std::size_t kSlowNodeRead = std::size_t{8} * 1024;
 constexpr std::chrono::milliseconds kSlowNodePause{250};
-constexpr core::Millis kTestStallTimeout{1'000};
+constexpr core::Millis kTestStallTimeout{2'500};
 
 TEST_P(RoomRouterTest, ASubscriberReadingALittleAtATimeKeepsItsLinkAndIsResetOnceItStops) {
     Node& a = start("chat-a", kSecret, {.peer_stall_timeout = kTestStallTimeout});
@@ -1062,11 +1064,14 @@ TEST_P(RoomRouterTest, ASubscriberReadingALittleAtATimeKeepsItsLinkAndIsResetOnc
     peer.send(subscribe);
     const auto reply = peer.next();
     ASSERT_TRUE(reply && std::holds_alternative<wire::Reply>(*reply));
+    const auto peer_port = ulw::test::tcp_port(peer.fd(), false);
+    ASSERT_TRUE(peer_port);
+    EXPECT_EQ(ulw::test::user_timeout_of(a.port, *peer_port), 0);
 
-    // Six deliveries of 16 KiB, far below what the node queues for a peer before it calls
+    // Eight deliveries of 16 KiB, far below what the node queues for a peer before it calls
     // the peer slow.
     const std::string body(std::size_t{16} * 1024, 'm');
-    constexpr std::size_t kMessages = 6;
+    constexpr std::size_t kMessages = 8;
     for (std::size_t i = 0; i < kMessages; ++i) {
         ASSERT_TRUE(send(a, alice, "alice", body));
     }
@@ -1088,11 +1093,11 @@ TEST_P(RoomRouterTest, ASubscriberReadingALittleAtATimeKeepsItsLinkAndIsResetOnc
             ulw::test::pump_for(*reactor_, kSlowNodePause);
         }
     }
-    EXPECT_GE(std::chrono::steady_clock::now() - began, std::chrono::seconds(3));
+    EXPECT_GE(std::chrono::steady_clock::now() - began, 2 * kTestStallTimeout);
     EXPECT_EQ(a.router->counters().slow_peers, 0U);
 
     // It stops reading. Its window shuts on the next deliveries, the rest wait in the node,
-    // and a second after the last acknowledgement the node gives up on it with a reset.
+    // and a stall timeout after the last acknowledgement the node gives up on it with a reset.
     for (std::size_t i = 0; i < kMessages; ++i) {
         ASSERT_TRUE(send(a, alice, "alice", body));
     }
@@ -1123,13 +1128,17 @@ TEST_P(RoomRouterTest, AnOwnerReadingALittleAtATimeKeepsItsLinkAndIsResetOnceItS
     conn->send(ok);
     ASSERT_TRUE(pump([&] { return joined.has_value(); }));
     ASSERT_TRUE(*joined);
+    const auto node_port = ulw::test::tcp_port(conn->fd(), true);
+    const auto owner_port = ulw::test::tcp_port(conn->fd(), false);
+    ASSERT_TRUE(node_port && owner_port);
+    EXPECT_EQ(ulw::test::user_timeout_of(*node_port, *owner_port), 0);
 
-    // Bob forwards six writes of 16 KiB; "chat-a" reads them a little at a time and
+    // Bob forwards eight writes of 16 KiB; "chat-a" reads them a little at a time and
     // sequences each as it reads it. Those it reads after their forward timeout are answered
     // unavailable by then, which is the owner's lateness and no fault of the link.
     const std::string big(std::size_t{16} * 1024, 'f');
     const auto body = std::as_bytes(std::span{big});
-    constexpr std::size_t kWrites = 6;
+    constexpr std::size_t kWrites = 8;
     std::size_t answered = 0;
     for (std::size_t i = 0; i < kWrites; ++i) {
         b.router->send(room_, bob, *core::UserId::parse("bob"), next_key(),
@@ -1157,12 +1166,12 @@ TEST_P(RoomRouterTest, AnOwnerReadingALittleAtATimeKeepsItsLinkAndIsResetOnceItS
             ulw::test::pump_for(*reactor_, kSlowNodePause);
         }
     }
-    EXPECT_GE(std::chrono::steady_clock::now() - began, std::chrono::seconds(3));
+    EXPECT_GE(std::chrono::steady_clock::now() - began, 2 * kTestStallTimeout);
     ASSERT_TRUE(pump([&] { return answered == kWrites; }));
     EXPECT_EQ(b.router->counters().slow_peers, 0U);
     EXPECT_TRUE(b.events.lost.empty());
 
-    // It stops reading: a second after its last acknowledgement the link is taken down, as
+    // It stops reading: a stall timeout after its last acknowledgement the link is taken down, as
     // for any lost peer, and reset.
     for (std::size_t i = 0; i < kWrites; ++i) {
         b.router->send(room_, bob, *core::UserId::parse("bob"), next_key(),

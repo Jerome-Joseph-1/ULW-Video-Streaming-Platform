@@ -204,9 +204,15 @@ private:
     [[nodiscard]] bool admit_forwarded(const http::RequestHead& head) noexcept;
     void linger() noexcept;
     void close() noexcept;
+    // Reads what the client pipelined, from the loop.
+    void resume() noexcept;
     // Output the peer has not acknowledged: queued in the transport, or held by the kernel.
     [[nodiscard]] bool output_waiting() const noexcept;
+    // Output the peer's window holds back: queued in the transport, or unsent in the kernel.
+    [[nodiscard]] bool response_held_back() const noexcept;
     void arm_timer(core::Millis delay) noexcept;
+    // Between requests: the header timeout, and a look at a held-back response.
+    void on_idle_timeout(core::MonoTime t) noexcept;
     void restart_rate_window() noexcept;
     // Ends a chunk body that fell below the minimum rate, or returns how long until the
     // current window closes.
@@ -236,6 +242,8 @@ private:
     bool receiving_ = false;
     bool parser_paused_ = false;
     bool resume_pending_ = false;
+    // A keep-alive response still waits in the transport; reading resumes once it has gone.
+    bool awaiting_drain_ = false;
     bool draining_ = false;
     bool peer_eof_ = false;
     // Outstanding catalog callbacks, offload jobs and key waits: all hold `this`.

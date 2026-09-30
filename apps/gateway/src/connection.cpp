@@ -28,6 +28,9 @@ constexpr std::size_t kMaxJsonBody = std::size_t{4} * 1024;
 constexpr std::size_t kMaxStaging = std::size_t{4} * 64 * 1024;
 // Long enough for a client to read an error response before the socket goes away.
 constexpr core::Millis kLinger{2'000};
+// How often a connection that stopped reading behind a held-back response looks whether the
+// client has taken it: a request the client sends once it has waits at most this long.
+constexpr core::Millis kDrainCheck{100};
 constexpr std::size_t kResponseHead = 1024;
 constexpr std::chrono::seconds kRetryAfter{5};
 
@@ -114,9 +117,16 @@ bool Connection::quiescent() const noexcept {
 
 void Connection::drain() noexcept {
     draining_ = true;
-    if (phase_ == Phase::Idle) {
-        close();
+    if (phase_ != Phase::Idle) {
+        return;
     }
+    // A client still reading its last response is given the linger to finish it, as after a
+    // response that closes; one with nothing waiting is closed at once.
+    if (output_waiting()) {
+        linger();
+        return;
+    }
+    close();
 }
 
 void Connection::abort() noexcept {
@@ -1352,6 +1362,31 @@ void Connection::finish_request() noexcept {
         close();
         return;
     }
+    // Nothing more is read while the response is held back, in the transport or in the kernel
+    // behind a shut window: a client that keeps asking and never reads would otherwise queue
+    // responses without end, each request restarting the header timeout. The timeout runs
+    // from now, so a client that does not take this one within it is closed (ADR-0071).
+    if (response_held_back()) {
+        awaiting_drain_ = true;
+        if (receiving_) {
+            receiving_ = false;
+            transport_->stop_receiving();
+        }
+        arm_timer(std::min(kDrainCheck, gw().limits().header_timeout));
+        return;
+    }
+    resume();
+}
+
+bool Connection::response_held_back() const noexcept {
+    if (transport_->pending_send_bytes() > 0) {
+        return true;
+    }
+    const auto progress = net::send_progress(fd_);
+    return progress && progress->unsent;
+}
+
+void Connection::resume() noexcept {
     // Parse whatever the client pipelined from the loop rather than from inside this response.
     resume_pending_ = true;
     arm_timer(core::Millis{0});
@@ -1430,12 +1465,13 @@ void Connection::close() noexcept {
     }
     deps().reactor.cancel_timer(timer_);
     timer_ = {};
-    // Every close with output still waiting gives up on a peer that has not read it: a timer
-    // ran out, the peer left or failed, or the drain deadline passed. What the transport holds
-    // is dropped either way; a reset drops what the kernel holds too, at once, where a FIN
-    // behind it would leave an orphan the kernel keeps for as long as the peer answers its
-    // probes of a shut window (ADR-0071).
-    if (output_waiting()) {
+    // A response the transport still holds part of is cut off whatever happens, so the close
+    // is a reset, which drops what the kernel holds too, at once. One the kernel holds all of
+    // is finished by the kernel after a FIN, as before the user timeout was cleared, and the
+    // timeout is set again to bound that orphan: without it the kernel keeps one for as long
+    // as the peer answers its probes of a shut window (ADR-0071).
+    if (transport_->pending_send_bytes() > 0 ||
+        (output_waiting() && !net::restore_user_timeout(fd_))) {
         net::abort_on_close(fd_);
     }
     transport_->begin_close();
@@ -1451,7 +1487,12 @@ bool Connection::output_waiting() const noexcept {
     return progress && progress->waiting;
 }
 
-void Connection::on_writable() noexcept {}
+void Connection::on_writable() noexcept {
+    if (awaiting_drain_ && phase_ == Phase::Idle && !response_held_back()) {
+        awaiting_drain_ = false;
+        resume();
+    }
+}
 
 void Connection::on_peer_eof() noexcept {
     peer_eof_ = true;
@@ -1468,6 +1509,28 @@ void Connection::on_error(int /*err*/) noexcept {
     close();
 }
 
+void Connection::on_idle_timeout(core::MonoTime t) noexcept {
+    const core::Millis header_timeout = gw().limits().header_timeout;
+    const auto idle = std::chrono::duration_cast<core::Millis>(t - last_activity_);
+    if (idle >= header_timeout) {
+        ++gw().counters().timeouts_header;
+        close();
+        return;
+    }
+    // The kernel says nothing when a shut window lets the rest of a response go, so a
+    // held-back response is looked at again every kDrainCheck.
+    if (awaiting_drain_) {
+        if (!response_held_back()) {
+            awaiting_drain_ = false;
+            resume();
+            return;
+        }
+        arm_timer(std::min(kDrainCheck, header_timeout - idle));
+        return;
+    }
+    arm_timer(header_timeout - idle);
+}
+
 void Connection::on_timeout() noexcept {
     timer_ = {};
     if (phase_ == Phase::Closed) {
@@ -1475,7 +1538,9 @@ void Connection::on_timeout() noexcept {
     }
     if (resume_pending_) {
         resume_pending_ = false;
-        arm_timer(gw().limits().header_timeout);
+        // Counted from the end of the last response, however long the client took to read it.
+        const auto idle = std::chrono::duration_cast<core::Millis>(now() - last_activity_);
+        arm_timer(std::max(gw().limits().header_timeout - idle, core::Millis{0}));
         on_parse(parser_.resume());
         return;
     }
@@ -1486,13 +1551,7 @@ void Connection::on_timeout() noexcept {
     const core::MonoTime t = now();
     const Limits& limits = gw().limits();
     if (phase_ == Phase::Idle) {
-        const auto idle = std::chrono::duration_cast<core::Millis>(t - last_activity_);
-        if (idle >= limits.header_timeout) {
-            ++gw().counters().timeouts_header;
-            close();
-            return;
-        }
-        arm_timer(limits.header_timeout - idle);
+        on_idle_timeout(t);
         return;
     }
     const auto age = std::chrono::duration_cast<core::Millis>(t - request_started_);

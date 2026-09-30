@@ -37,12 +37,17 @@ struct ListenOptions {
 // window): a peer that keeps reading, but frees its window a little at a time, is ended as if
 // it had vanished.
 [[nodiscard]] std::expected<void, int> clear_user_timeout(int fd) noexcept;
+// Sets tune_connection's TCP_USER_TIMEOUT again: for a connection about to be closed with a
+// FIN while the kernel still holds output for the peer, whose orphan it then bounds.
+[[nodiscard]] std::expected<void, int> restore_user_timeout(int fd) noexcept;
 
 // How much of what was sent on a TCP connection its peer has acknowledged, and whether anything
-// sent, or queued in the kernel to send, still waits for it (TCP_INFO).
+// sent, or queued in the kernel to send, still waits for it (TCP_INFO). `unsent` is the part
+// the kernel has not sent at all: what the peer's window holds back.
 struct SendProgress {
     std::uint64_t acked = 0;
     bool waiting = false;
+    bool unsent = false;
 };
 [[nodiscard]] std::expected<SendProgress, int> send_progress(int fd) noexcept;
 

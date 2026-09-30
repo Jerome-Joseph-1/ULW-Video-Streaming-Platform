@@ -143,8 +143,9 @@ messages, and can read its history, until that connection closes; the next `join
 - **History** keeps the chat's newest 1000 messages; older ones are deleted as new ones are
   stored, and a page below them is empty. A resend under an `id` whose message is already that
   old is stored again, as a new message.
-- A viewer whose client stops reading altogether for 20 s is disconnected by the server's
-  kernel (TCP user timeout). Reconnect and join the stream again.
+- A viewer whose connection acknowledges nothing the server sent it for 20 s is disconnected
+  by the server, with a reset (counted in `stalled_readers_total`). A client that keeps
+  reading, however slowly, is not. Reconnect and join the stream again.
 
 ### Errors
 

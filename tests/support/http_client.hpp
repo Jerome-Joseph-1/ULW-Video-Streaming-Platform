@@ -266,20 +266,21 @@ public:
         return rc == 1;
     }
 
-    // Reads everything left until the connection ends: true if it ended in a reset, false if
-    // it ended in an orderly close, or had not ended after `limit`.
-    bool reset_by_peer(std::chrono::milliseconds limit = std::chrono::seconds(10)) {
+    // Reads everything left, into the response being assembled, until the connection ends: 0
+    // if it ended in an orderly close, the error it ended in otherwise (ECONNRESET for a
+    // reset), nullopt if it had not ended after `limit`.
+    std::optional<int> read_to_end(std::chrono::milliseconds limit = std::chrono::seconds(10)) {
         const auto deadline = std::chrono::steady_clock::now() + limit;
         while (std::chrono::steady_clock::now() < deadline) {
             const auto n = read_some(std::size_t{64} * 1024);
             if (!n) {
-                return last_errno_ == ECONNRESET;
+                return last_errno_;
             }
             if (*n == 0) {
                 readable(std::chrono::milliseconds(100));
             }
         }
-        return false;
+        return std::nullopt;
     }
 
     // The response read_some has assembled, once all of it has arrived; never reads.

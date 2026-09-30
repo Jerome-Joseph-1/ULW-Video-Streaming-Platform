@@ -189,7 +189,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `part_upload_duration_seconds` | histogram | From a chunk's first byte handed to the store to all of it durable |
 | `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more, observed when it ends: the store takes bytes again, fails the part (`503`), or the request ends (backstop, client gone). Buckets to 300 s; a store taking nothing is failed at about 60 s (ADR-0045) |
 | `buffer_bytes_in_use` | gauge | Bytes held in connections' staging and body buffers |
-| `timeouts_total{kind="header"}` | counter | Request head not complete within 10 s, or an idle keep-alive closed; reset if its last response is still unread (ADR-0071) |
+| `timeouts_total{kind="header"}` | counter | Request head not complete within 10 s, or an idle keep-alive closed, 10 s after its last response was queued (nothing more is read from a client while that response waits in the gateway). The close is a reset if part of the response had not yet reached the kernel; otherwise a FIN, after which the kernel finishes the response for at most 20 s. The same holds for the 2 s linger after a `Connection: close` response, and for a drain, which lingers on a connection still reading its response (ADR-0071) |
 | `timeouts_total{kind="body"}` | counter | Body idle 30 s (`408`) |
 | `timeouts_total{kind="body_rate"}` | counter | Body under 8 KiB/s over a 30 s window (`408`) |
 | `timeouts_total{kind="backstop"}` | counter | Request older than 6 h, closed |
