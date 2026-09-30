@@ -240,9 +240,14 @@ COMMIT;
 DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user sub>';
 ```
 
-A member removed this way keeps receiving the room's messages, and can read its history, until
-their connection closes; their next join is refused. To cut them off at once, also restart the
-chat pods.
+A member removed this way is cut off at once on every chat node, however the row goes (a DELETE,
+or an UPDATE that moves it to another room or user; one that leaves both as they were removes
+nobody): a trigger (migration 0009) notifies the nodes, each takes that user's sockets out of the
+room, and the client gets an `error` with `not_member` for it (docs/adr/0075). Their next join is
+refused. No restart is needed. If a node's listening session to Postgres was down when the row
+went, the node checks every closed room its clients are in once it listens again, four checks at
+a time and retrying each second while the database fails, so a removal made during a database
+outage takes effect once the node reconnects. `member_removals_total` counts the sockets taken out.
 
 A stream's live chat admits anyone, and only the server side opens one: a client's join can
 record a room only as closed, and a stream join is refused with `not_live` until the stream's

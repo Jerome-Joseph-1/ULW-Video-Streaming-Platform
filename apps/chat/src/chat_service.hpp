@@ -16,6 +16,7 @@
 #include <optional>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -168,7 +169,10 @@ public:
     // waiting for the member list is refused when the answer comes (ADR-0075). A stream's live
     // chat admits anyone, list or not, and is left alone.
     void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
-    // Every client's closed rooms are checked against the member lists again.
+    // Every client's closed rooms are checked against the member lists again: each room and user
+    // once, a few at a time, and a check that fails is asked again a second later, so that a
+    // store that is still down loses no removal. A join still waiting for its member list is
+    // checked again once it is let in, since the list it was let in by may predate the removal.
     void on_members_resync() noexcept override;
 
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
@@ -190,6 +194,8 @@ private:
         // Of `admitting`, those whose user has since left the member list: refused whatever the
         // answer, which may have been read before the removal.
         std::vector<core::RoomId> revoked;
+        // Of `admitting`, those a resync came during: checked again once let in.
+        std::vector<core::RoomId> unchecked;
         // Of `rooms`, those in which it is lossy and behind.
         std::vector<core::RoomId> behind;
         std::size_t send_bytes_in_flight = 0;
@@ -223,6 +229,17 @@ private:
     // Takes the client out of one room: its subscription, its place in the queue for the room
     // plane, and whatever it was still owed.
     void leave(ClientId id, Client& c, const core::RoomId& room) noexcept;
+    // A room and a user a resync still has to check against the member list.
+    using Recheck = std::pair<core::RoomId, core::UserId>;
+    struct RecheckHash {
+        [[nodiscard]] std::size_t operator()(const Recheck& r) const noexcept;
+    };
+    // Queues a check unless it is queued already; false when the queue is full.
+    [[nodiscard]] bool recheck(const core::RoomId& room, const core::UserId& user);
+    // Asks the queued checks, up to kRechecksInFlight at once, unless a failure paused them.
+    void ask_rechecks() noexcept;
+    void rechecked(const Recheck& pair, std::uint64_t generation,
+                   core::ports::MessageResult<core::ports::Admission> result) noexcept;
     void answer(IClient& client, std::string_view reason, const core::RoomId& room,
                 const std::optional<rt::MessageKey>& id = std::nullopt) noexcept;
 
@@ -242,6 +259,18 @@ private:
     // Messages kept across rooms; kept_order_ may also hold entries of messages already gone.
     std::size_t kept_messages_ = 0;
     core::MonoTime next_sweep_;
+    // The checks a resync still owes, oldest first, each once (rechecks_queued_). At most one per
+    // room of each client here, so a node's 1280 connections of 64 rooms make at most 81920;
+    // a check past that is not queued, and another resync runs once the queue empties.
+    std::deque<Recheck> rechecks_;
+    std::unordered_set<Recheck, RecheckHash> rechecks_queued_;
+    std::size_t rechecks_in_flight_ = 0;
+    // Bumped by each resync: what an earlier one failed to check, the later one asks anew.
+    std::uint64_t recheck_generation_ = 0;
+    // No check is asked before this: the last one failed, and the store is given a second.
+    core::MonoTime rechecks_resume_;
+    bool asking_rechecks_ = false;
+    bool resync_owed_ = false;
 };
 
 } // namespace chat

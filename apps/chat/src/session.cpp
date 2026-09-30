@@ -165,9 +165,22 @@ void Session::authenticate() noexcept {
     }
     user_ = (*result)->subject;
     // On the reactor's clock from here: the wall clock may be stepped while the socket lives.
-    const core::Millis left = std::chrono::duration_cast<core::Millis>(
-        (*result)->expires_at + core::ports::kTokenClockSkew - server_.deps().clock.wall_now());
-    expires_ = now() + std::max(left, core::Millis{0});
+    // An exp may be anything up to the wall clock's last second but one, so the skew is added to
+    // what is left, not to exp, and the sum held to what the clocks can count: a token that
+    // runs past the monotonic clock's range simply never expires here.
+    using Duration = core::WallTime::duration;
+    const Duration skew = core::ports::kTokenClockSkew;
+    Duration left = (*result)->expires_at - server_.deps().clock.wall_now();
+    left = left > Duration::max() - skew ? Duration::max() : left + skew;
+    const core::MonoTime start = now();
+    const auto room = core::MonoTime::max() - start;
+    if (left <= Duration::zero()) {
+        expires_ = start;
+    } else if (left >= room) {
+        expires_ = core::MonoTime::max();
+    } else {
+        expires_ = start + std::chrono::duration_cast<core::MonoTime::duration>(left);
+    }
     auth_ = Auth::Passed;
 }
 

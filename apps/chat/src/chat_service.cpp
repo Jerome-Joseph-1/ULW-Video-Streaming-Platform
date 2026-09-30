@@ -1,6 +1,7 @@
 #include "chat_service.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -16,6 +17,11 @@ namespace {
 constexpr std::size_t kMessageOverhead = 256;
 // Rooms are looked over for lingering this often; a room lingers a second longer at most.
 constexpr core::Millis kSweepEvery{1'000};
+// A resync's member checks asked at once: the message store's pool (MessageStoreConfig), so
+// that joins and history reads queued behind them wait for at most one check each.
+constexpr std::size_t kRechecksInFlight = 4;
+// Checks a resync may owe: one per room of each client, at 1280 connections of 64 rooms.
+constexpr std::size_t kMaxRechecks = std::size_t{1280} * 64;
 
 // What a lossy client behind from `behind` is still owed of a room whose latest seq is `head`:
 // dropped for it when it leaves or joins again before it is sent them.
@@ -82,10 +88,12 @@ struct ChatService::Room final : rt::IMember {
 ChatService::ChatService(IRooms& rooms, core::ports::IMessageStore& messages,
                          const core::ports::IClock& clock, ServiceLimits limits)
     : rooms_plane_(rooms), messages_(messages), clock_(clock), limits_(limits),
-      next_sweep_(clock.now()) {
+      next_sweep_(clock.now()), rechecks_resume_(clock.now()) {
     messages_.watch_members(this);
 }
 
+// No watch_members(nullptr) here: the store is gone by now (destroyed first, as the
+// constructor's contract says), and took the listener with it.
 ChatService::~ChatService() {
     for (auto& [id, room] : rooms_) {
         if (room->joined || room->joining) {
@@ -101,6 +109,7 @@ ClientId ChatService::attach(IClient& client, const core::UserId& user) {
                                       .rooms = {},
                                       .admitting = {},
                                       .revoked = {},
+                                      .unchecked = {},
                                       .behind = {},
                                       .send_bytes_in_flight = 0,
                                       .replayed_bytes = 0,
@@ -208,6 +217,7 @@ void ChatService::admitted(ClientId id, const Join& join,
     if (std::erase(c->revoked, join.room) != 0) {
         result = core::ports::Admission::NotMember;
     }
+    const bool unchecked = std::erase(c->unchecked, join.room) != 0;
     if (!result || *result != core::ports::Admission::Admitted) {
         std::erase(c->rooms, join.room);
         answer(*c->client, refusal(result), join.room);
@@ -219,7 +229,21 @@ void ChatService::admitted(ClientId id, const Join& join,
         ++counters_.allocation_failures;
         std::erase(c->rooms, join.room);
         c->client->allocation_failed();
+        return;
     }
+    if (!unchecked) {
+        return;
+    }
+    // Let in by a list that may have been read before a removal the resync was for.
+    try {
+        if (!recheck(join.room, c->user)) {
+            resync_owed_ = true;
+        }
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        resync_owed_ = true;
+    }
+    ask_rechecks();
 }
 
 // Into a room the client may be in: joined on the room plane once for the node, and subscribed.
@@ -700,11 +724,17 @@ void ChatService::forget_oldest() noexcept {
 }
 
 void ChatService::sweep() noexcept {
+    ask_rechecks();
     const core::MonoTime now = clock_.now();
     if (now < next_sweep_) {
         return;
     }
     next_sweep_ = now + kSweepEvery;
+    // Checks a full queue or a failed allocation left out: a resync of its own, once the one
+    // before is done.
+    if (resync_owed_ && rechecks_.empty() && rechecks_in_flight_ == 0) {
+        on_members_resync();
+    }
     std::vector<core::RoomId> unused;
     try {
         for (const auto& [id, room] : rooms_) {
@@ -770,36 +800,123 @@ void ChatService::on_member_removed(const core::RoomId& room, const core::UserId
 }
 
 void ChatService::on_members_resync() noexcept {
-    // Each user's closed rooms once, however many of their clients are in them.
-    std::vector<std::pair<core::RoomId, core::UserId>> pairs;
+    // What an earlier resync still owes is covered by this one, asked after the store listens
+    // again: its checks may have been read before a removal this one is for.
+    ++recheck_generation_;
+    rechecks_.clear();
+    rechecks_queued_.clear();
+    resync_owed_ = false;
     try {
-        for (const auto& [value, c] : clients_) {
+        for (auto& [value, c] : clients_) {
             for (const core::RoomId& room : c.rooms) {
-                if (core::ports::is_stream_chat(room) ||
-                    std::ranges::find(c.admitting, room) != c.admitting.end()) {
+                if (core::ports::is_stream_chat(room)) {
                     continue;
                 }
-                const std::pair<core::RoomId, core::UserId> pair{room, c.user};
-                if (std::ranges::find(pairs, pair) == pairs.end()) {
-                    pairs.push_back(pair);
+                // Its list is being read now, perhaps from before the removal: asked again once
+                // the answer lets it in, when the room is recorded.
+                if (std::ranges::find(c.admitting, room) != c.admitting.end()) {
+                    if (std::ranges::find(c.unchecked, room) == c.unchecked.end()) {
+                        c.unchecked.push_back(room);
+                    }
+                    continue;
+                }
+                if (!recheck(room, c.user)) {
+                    resync_owed_ = true;
                 }
             }
         }
-        for (const auto& [room, user] : pairs) {
+    } catch (const std::bad_alloc&) {
+        // Those not queued now are asked by another resync once these are done.
+        ++counters_.allocation_failures;
+        resync_owed_ = true;
+    }
+    ask_rechecks();
+}
+
+std::size_t ChatService::RecheckHash::operator()(const Recheck& r) const noexcept {
+    const std::size_t room = std::hash<core::RoomId>{}(r.first);
+    return room ^ (std::hash<core::UserId>{}(r.second) + 0x9e3779b97f4a7c15U + (room << 6U) +
+                   (room >> 2U));
+}
+
+bool ChatService::recheck(const core::RoomId& room, const core::UserId& user) {
+    if (rechecks_.size() >= kMaxRechecks) {
+        return false;
+    }
+    Recheck pair{room, user};
+    if (rechecks_queued_.contains(pair)) {
+        return true;
+    }
+    rechecks_.push_back(pair);
+    try {
+        rechecks_queued_.insert(std::move(pair));
+    } catch (const std::bad_alloc&) {
+        rechecks_.pop_back();
+        throw;
+    }
+    return true;
+}
+
+void ChatService::ask_rechecks() noexcept {
+    // A check answered from inside admits comes back here: the loop below asks the next.
+    if (asking_rechecks_) {
+        return;
+    }
+    asking_rechecks_ = true;
+    while (!rechecks_.empty() && rechecks_in_flight_ < kRechecksInFlight &&
+           clock_.now() >= rechecks_resume_) {
+        Recheck pair = std::move(rechecks_.front());
+        rechecks_.pop_front();
+        rechecks_queued_.erase(pair);
+        ++rechecks_in_flight_;
+        try {
             // A recorded room, so the check records nothing: its kind was recorded by the join
             // that let the client in.
-            messages_.admits(
-                room, user, core::ports::RoomKind::GroupChat,
-                [this, room, user](core::ports::MessageResult<core::ports::Admission> r) noexcept {
-                    if (r && *r == core::ports::Admission::NotMember) {
-                        on_member_removed(room, user);
-                    }
-                });
+            messages_.admits(pair.first, pair.second, core::ports::RoomKind::GroupChat,
+                             [this, pair, generation = recheck_generation_](
+                                 core::ports::MessageResult<core::ports::Admission> r) noexcept {
+                                 rechecked(pair, generation, r);
+                             });
+        } catch (const std::bad_alloc&) {
+            // Not asked: the next sweep asks again.
+            ++counters_.allocation_failures;
+            --rechecks_in_flight_;
+            rechecks_resume_ = clock_.now() + kSweepEvery;
+            try {
+                if (!recheck(pair.first, pair.second)) {
+                    resync_owed_ = true;
+                }
+            } catch (const std::bad_alloc&) {
+                resync_owed_ = true;
+            }
         }
-    } catch (const std::bad_alloc&) {
-        // Those not asked about now are left as they are; the next resync asks again.
-        ++counters_.allocation_failures;
     }
+    asking_rechecks_ = false;
+}
+
+void ChatService::rechecked(const Recheck& pair, std::uint64_t generation,
+                            core::ports::MessageResult<core::ports::Admission> result) noexcept {
+    --rechecks_in_flight_;
+    if (!result) {
+        // The store is still down, or went down again: the check waits a second, and so do the
+        // rest. A later resync asks it anyway.
+        rechecks_resume_ = clock_.now() + kSweepEvery;
+        if (generation == recheck_generation_) {
+            try {
+                if (!recheck(pair.first, pair.second)) {
+                    resync_owed_ = true;
+                }
+            } catch (const std::bad_alloc&) {
+                ++counters_.allocation_failures;
+                resync_owed_ = true;
+            }
+        }
+        return;
+    }
+    if (*result == core::ports::Admission::NotMember) {
+        on_member_removed(pair.first, pair.second);
+    }
+    ask_rechecks();
 }
 
 void ChatService::erase(const core::RoomId& room) noexcept {

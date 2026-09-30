@@ -393,6 +393,24 @@ TEST_P(ChatSessionTest, ASocketClosesWhenItsTokenExpiresWithTheCodeThatSaysRecon
               4001U);
 }
 
+// A token may name any exp the wall clock can hold: its deadline plus the skew must not run past
+// the clock's range (signed overflow, caught by UBSan), and such a socket lives on.
+TEST_P(ChatSessionTest, ATokenThatExpiresAtTheEndOfTimeKeepsItsSocketOpen) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto alice = open("Authorization: Bearer forever.alice\r\n");
+    ASSERT_TRUE(alice);
+    node_->advance(std::chrono::hours(2));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+}
+
 TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);

@@ -11,6 +11,7 @@
 #include "conformance/message_store_harness.hpp"
 #include "message_sql.hpp"
 #include "postgres_harness.hpp"
+#include "support/reactor_harness.hpp"
 
 #include <algorithm>
 #include <array>
@@ -180,6 +181,47 @@ protected:
     std::uint64_t keys_ = 0;
     const core::UserId alice_ = *core::UserId::parse("auth0|alice");
 };
+
+class Removals final : public core::ports::IMemberListener {
+public:
+    void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override {
+        removed.emplace_back(room, user);
+    }
+    void on_members_resync() noexcept override { ++resyncs; }
+
+    std::vector<std::pair<core::RoomId, core::UserId>> removed;
+    int resyncs = 0;
+};
+
+// Only a row that leaves a room's list tells the nodes (ADR-0075): an update that writes a
+// member's row without changing its room or user must not take them out of the room.
+TEST_F(MessageStoreTest, AnUpdateThatKeepsTheRoomAndTheUserRemovesNobody) {
+    Removals removals;
+    store_->watch_members(&removals);
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return removals.resyncs > 0; }))
+        << "the store never listened";
+    const core::RoomId kept = new_room();
+    const core::RoomId left = new_room();
+    for (const core::RoomId& room : {kept, left}) {
+        ASSERT_TRUE(
+            ask<void>([&](auto done) { store_->add_member(room, alice_, std::move(done)); }));
+    }
+    ASSERT_TRUE(conn_->exec("UPDATE chat_members SET user_id = user_id WHERE room_id = $1",
+                            Params{}.add_uuid(kept.uuid())));
+    // Notifications arrive in commit order: once this one is heard, the update's would have been.
+    ASSERT_TRUE(
+        conn_->exec("DELETE FROM chat_members WHERE room_id = $1", Params{}.add_uuid(left.uuid())));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return !removals.removed.empty(); }));
+    ASSERT_EQ(removals.removed.size(), 1U);
+    EXPECT_EQ(removals.removed[0].first, left) << "the unchanged row removed its member";
+
+    // A row moved to another user does take the first out.
+    ASSERT_TRUE(conn_->exec("UPDATE chat_members SET user_id = 'auth0|bob' WHERE room_id = $1",
+                            Params{}.add_uuid(kept.uuid())));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return removals.removed.size() == 2; }));
+    EXPECT_EQ(removals.removed[1], std::pair(kept, alice_));
+    store_->watch_members(nullptr);
+}
 
 // A member added by the store's own statement, whose transaction has not committed, when the
 // server tries to open the room: the member's statement recorded the room closed first, so

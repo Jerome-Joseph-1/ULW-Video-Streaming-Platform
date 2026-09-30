@@ -399,6 +399,91 @@ TEST_F(ChatServiceTest, AfterAResyncAClientNoLongerOnTheListLeavesTheRoom) {
     EXPECT_EQ(service_->counters().removals, 1U);
 }
 
+// A resync comes after the store lost its way to the database, so its checks may fail too: a
+// removal they would have found must not be lost with them. They are asked again once the
+// store answers, paced so that a store still down is not asked again at once.
+TEST_F(ChatServiceTest, AResyncWhoseChecksFailAsksAgainAndStillFindsTheRemoval) {
+    FakeClient alice;
+    FakeClient bob;
+    const auto a = attach(alice);
+    const auto b = attach(bob, "bob");
+    join(a);
+    join(b);
+    rooms_.admit();
+    alice.take();
+    bob.take();
+    messages_.hold = true;
+    messages_.refused = {"bob"};
+    messages_.watcher->on_members_resync();
+    ASSERT_EQ(messages_.held.size(), 2U);
+    while (!messages_.held.empty()) {
+        messages_.answer_admits(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
+    EXPECT_TRUE(bob.take().empty());
+    // Not at once: the store that just failed is not asked again in the same breath.
+    service_->sweep();
+    EXPECT_TRUE(messages_.held.empty());
+
+    clock_.advance(Millis{1'000});
+    service_->sweep();
+    ASSERT_EQ(messages_.held.size(), 2U) << "the failed checks were dropped";
+    while (!messages_.held.empty()) {
+        messages_.answer_admits({});
+    }
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
+    EXPECT_TRUE(alice.take().empty());
+    EXPECT_EQ(service_->counters().removals, 1U);
+}
+
+// A node holds up to 1280 connections of 64 rooms each: a resync asks about each room and user
+// once, however many of the user's clients are in it, and no more at a time than the store has
+// connections, so that joins and history reads are not queued behind tens of thousands.
+TEST_F(ChatServiceTest, AResyncAsksAboutEachRoomAndUserOnceAndOnlyAFewAtATime) {
+    constexpr int kRooms = 6;
+    const auto room = [](int i) { return std::format("01a0eb86-6cca-7dce-84cc-3bb47615f90{}", i); };
+    FakeClient phone;
+    FakeClient laptop;
+    const auto p = attach(phone, "bob");
+    const auto l = attach(laptop, "bob");
+    for (int i = 0; i < kRooms; ++i) {
+        join(p, std::nullopt, chat::Delivery::Durable, room(i));
+        join(l, std::nullopt, chat::Delivery::Durable, room(i));
+        rooms_.admit();
+    }
+    const std::size_t asked_before = messages_.kinds.size();
+    messages_.hold = true;
+    messages_.watcher->on_members_resync();
+    EXPECT_EQ(messages_.held.size(), 4U);
+    std::size_t most = messages_.held.size();
+    while (!messages_.held.empty()) {
+        messages_.answer_admits({});
+        most = std::max(most, messages_.held.size());
+    }
+    EXPECT_LE(most, 4U);
+    EXPECT_EQ(messages_.kinds.size() - asked_before, std::size_t{kRooms});
+}
+
+// A join whose member list was read before a removal that went unannounced is let in after the
+// resync looked over the rooms: the resync must ask about it again once it is in.
+TEST_F(ChatServiceTest, AJoinStillWaitingForTheMemberListDuringAResyncIsCheckedOnceAdmitted) {
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    messages_.hold = true;
+    join(b);
+    ASSERT_EQ(messages_.held.size(), 1U);
+    // Removed after the join's read, while the store was not listening.
+    messages_.refused = {"bob"};
+    messages_.watcher->on_members_resync();
+    EXPECT_TRUE(messages_.held.size() == 1U);
+    messages_.answer_admits({});
+    rooms_.admit();
+    EXPECT_EQ(seen(bob.take().at(0)).type, "joined");
+    ASSERT_EQ(messages_.held.size(), 1U) << "the room the resync skipped is never checked";
+    messages_.answer_admits({});
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
+    EXPECT_EQ(service_->counters().removals, 1U);
+}
+
 TEST_F(ChatServiceTest, TheKindAJoinNamesIsWhatTheMemberCheckIsAskedFor) {
     FakeClient alice;
     const auto a = attach(alice);

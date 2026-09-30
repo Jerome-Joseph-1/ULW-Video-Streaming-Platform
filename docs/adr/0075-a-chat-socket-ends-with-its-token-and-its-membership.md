@@ -48,8 +48,15 @@ one, and nothing told a chat node that a row went.
 - **Missed notifications.** Postgres keeps no notifications for a session that is not listening.
   When the listening session (re)connects, the service checks every closed room each of its
   clients is in against the member list again, one primary-key read per room and user, and
-  removes those no longer listed. That is at most 64 reads per connection, and happens only
-  when the listening session was lost.
+  removes those no longer listed. That is at most 64 reads per connection, so at most 81,920
+  per node (1280 connections of 64 rooms), fewer where users share rooms: each room and user
+  is read once, however many of the user's sockets are in it. The reads go four at a time, the
+  message store's pool, so joins and history reads queue behind four at most, and a node at
+  its ceiling finishes in seconds. A read that fails (the database is still partitioned, the
+  pool backing off) is asked again a second later, with the rest held until then, so no
+  removal is lost to the outage that caused the resync. A join still waiting for its member
+  list when the resync comes may have read it before a removal that went unannounced: it is
+  read again once the join is let in. This happens only when the listening session was lost.
 - Removals are counted in `member_removals_total`.
 
 ## Consequences
