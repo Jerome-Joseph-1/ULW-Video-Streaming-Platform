@@ -1,9 +1,11 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/ports/message_store.hpp"
 #include "core/util/time.hpp"
 #include "rt/message_key.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -28,16 +30,32 @@ inline constexpr core::Millis kStoreTimeout{2'000};
 // comparison both use the database's clock, so skew between nodes does not enter.
 inline constexpr core::Millis kOwnerStaleAfter{5'000};
 
+// Rooms whose writes are sequenced and fanned out like any other's but never kept: presence
+// rooms (core::ports::NamedRoom::Presence), which chat_server derives (ADR-0056) and no client
+// can name. A store takes their seqs, fenced as ever, and stores no message for them. Other
+// named rooms, a stream's chat among them, are kept as any room is.
+[[nodiscard]] inline bool is_ephemeral_room(const core::RoomId& room) noexcept {
+    return core::ports::is_named_room(room, core::ports::NamedRoom::Presence);
+}
+
 struct Ownership {
     core::NodeId node;
     std::uint64_t generation = 0;
+    // The room's last_seq as resolve's answer found it; 0 in a notification or read_owners. When
+    // the answer names the asking node, it starts counting its head there, not from 0.
+    std::uint64_t last_seq = 0;
 
-    friend bool operator==(const Ownership&, const Ownership&) = default;
+    // Who holds the room, under which generation: last_seq describes an answer, not the owner.
+    friend bool operator==(const Ownership& a, const Ownership& b) noexcept {
+        return a.node == b.node && a.generation == b.generation;
+    }
 };
 
 struct OwnedRoom {
     core::RoomId room;
     std::uint64_t generation = 0;
+    // As Ownership::last_seq, in the answer to claim_stale.
+    std::uint64_t last_seq = 0;
 
     friend bool operator==(const OwnedRoom&, const OwnedRoom&) = default;
 };
@@ -49,6 +67,9 @@ enum class StoreError : std::uint8_t {
     Corrupt,
     // Another run of the same node, still alive, holds the node's name.
     NodeTaken,
+    // The sender's key is already stored in the room with a different body. Nothing was
+    // written, and no seq taken.
+    Conflict,
 };
 
 // A message on its way to its sequence number. The body is a view, valid only during the call

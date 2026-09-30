@@ -183,6 +183,8 @@ public:
     }
     [[nodiscard]] bool draining() const noexcept { return draining_; }
     [[nodiscard]] std::size_t connections() const noexcept { return connections_.size(); }
+    // Connections a drain lets finish: some of a request read, and not yet closed.
+    [[nodiscard]] std::size_t busy_connections() noexcept;
 
     [[nodiscard]] const Deps& deps() const noexcept { return deps_; }
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }

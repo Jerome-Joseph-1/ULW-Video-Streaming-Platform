@@ -7,6 +7,7 @@
 #include "control.hpp"
 #include "endpoint.hpp"
 #include "failure.hpp"
+#include "multipart.hpp"
 #include "part_session.hpp"
 
 #include <algorithm>
@@ -30,11 +31,8 @@ using core::ports::IngestId;
 using core::ports::StorageError;
 using s3::Control;
 using s3::Failed;
+using s3::kMaxDocumentBytes;
 
-// The largest document S3 sends here is a 1,000-entry listing: at most 1,000 keys of 1,024
-// bytes plus a few hundred bytes of markup each, about 1.4 MB. 4 MiB leaves room for keys
-// that arrive entity-escaped.
-constexpr std::size_t kMaxDocumentBytes = std::size_t{4} << 20U;
 // S3's largest ListParts page.
 constexpr std::string_view kPartsPerPage = "1000";
 
@@ -160,20 +158,6 @@ std::expected<void, StorageError> completed(const Control& control, const s3util
     return {};
 }
 
-// Aborts one multipart upload; NotFound means it was already gone.
-std::expected<void, StorageError> abort_upload(const Control& control, const s3util::Bucket& bucket,
-                                               const core::StorageKey& key,
-                                               const std::string& upload_id) {
-    const auto target = bucket.object(key, {{.name = "uploadId", .value = upload_id}});
-    return control.retrying<void>([&]() -> std::expected<void, Failed> {
-        auto response = control.send(curl::Method::Delete, target, {}, {}, 0);
-        if (!response) {
-            return std::unexpected(response.error());
-        }
-        return {};
-    });
-}
-
 } // namespace
 
 std::expected<std::unique_ptr<S3Store>, S3ConfigError>
@@ -216,22 +200,7 @@ std::expected<IngestId, StorageError> S3Store::create(const core::StorageKey& ke
     if (total_bytes == 0 || total_bytes > deps_.profile.max_parts * part_size_) {
         return std::unexpected(StorageError::Permanent);
     }
-    const std::array headers{
-        s3util::Header{.name = "content-type", .value = std::string(type.view())}};
-    const auto target = endpoint_->bucket().object(key, {{.name = "uploads", .value = ""}});
-    // Not idempotent: a retry after a lost response leaves the first upload orphaned, which
-    // reap_abandoned() collects.
-    auto upload_id = control_->retrying<std::string>([&]() -> std::expected<std::string, Failed> {
-        auto response = control_->send(curl::Method::Post, target, headers, {}, kMaxDocumentBytes);
-        if (!response) {
-            return std::unexpected(response.error());
-        }
-        auto parsed = s3util::parse_initiate_multipart_upload(response->body);
-        if (!parsed) {
-            return std::unexpected(s3::failed(parsed.error()));
-        }
-        return std::move(parsed->upload_id);
-    });
+    auto upload_id = s3::initiate_upload(*control_, endpoint_->bucket(), key, type);
     if (!upload_id) {
         return std::unexpected(upload_id.error());
     }
@@ -299,22 +268,7 @@ std::expected<void, StorageError> S3Store::commit(const IngestId& id) {
         const auto& part = (*parts)[i];
         completion.push_back({.part_number = part.part_number, .etag = part.etag});
     }
-    const std::string body = s3util::complete_multipart_upload_body(completion);
-    const std::array headers{s3util::Header{.name = "content-type", .value = "application/xml"}};
-    const auto target = bucket.object(id.key, {{.name = "uploadId", .value = id.backend_ref}});
-    const auto done = control_->retrying<void>([&]() -> std::expected<void, Failed> {
-        auto response = control_->send(curl::Method::Post, target, headers,
-                                       std::as_bytes(std::span(body)), kMaxDocumentBytes);
-        if (!response) {
-            return std::unexpected(response.error());
-        }
-        // The status line goes out before S3 has finished assembling, so a late failure
-        // arrives as an <Error> inside a 200 and the body always has to be read.
-        if (auto parsed = s3util::parse_complete_multipart_upload(response->body); !parsed) {
-            return std::unexpected(s3::failed(parsed.error()));
-        }
-        return {};
-    });
+    const auto done = s3::complete_upload(*control_, bucket, id.key, id.backend_ref, completion);
     if (!done && done.error() == StorageError::NotFound) {
         // A retry of a completion whose response was lost finds NoSuchUpload.
         return completed(*control_, bucket, id);
@@ -329,7 +283,7 @@ void S3Store::discard(const IngestId& id) noexcept {
     // Gone already counts as done, which is all discard promises; any other failure leaves
     // the upload for the reaper.
     [[maybe_unused]] const auto aborted =
-        abort_upload(*control_, endpoint_->bucket(), id.key, id.backend_ref);
+        s3::abort_upload(*control_, endpoint_->bucket(), id.key, id.backend_ref);
 }
 
 std::expected<core::ports::ReadGrant, StorageError> S3Store::grant_read(const core::StorageKey& key,
@@ -436,7 +390,7 @@ std::expected<std::size_t, StorageError> S3Store::reap_abandoned(core::WallTime 
             if (upload.initiated >= older_than || !key) {
                 continue;
             }
-            if (abort_upload(*control_, endpoint_->bucket(), *key, upload.upload_id)) {
+            if (s3::abort_upload(*control_, endpoint_->bucket(), *key, upload.upload_id)) {
                 ++reaped;
             }
         }

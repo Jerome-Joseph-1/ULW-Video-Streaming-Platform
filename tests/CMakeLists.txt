@@ -292,7 +292,8 @@ target_include_directories(curl_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(storage_s3_unit_tests unit
     unit/s3store/part_session_test.cpp
-    unit/s3store/s3_store_test.cpp)
+    unit/s3store/s3_store_test.cpp
+    unit/s3store/s3_stream_test.cpp)
 target_link_libraries(storage_s3_unit_tests PRIVATE ulw::storage_s3 ulw::test_http_server)
 # White-box tests of the adapter's internals.
 target_include_directories(storage_s3_unit_tests PRIVATE
@@ -327,6 +328,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_catalog_test.cpp
     integration/postgres_harness.cpp
     integration/postgres_job_queue_test.cpp
+    integration/postgres_live_recordings_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
@@ -367,13 +369,36 @@ target_link_libraries(room_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg
 target_include_directories(room_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
+# The message store's laws, on the in-memory store and on Postgres (skipped without one).
+ulw_add_test_suite(message_store_conformance_tests conformance
+    conformance/message_store_conformance_test.cpp
+    integration/postgres_harness.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(message_store_conformance_tests PRIVATE ulw::messages_memory ulw::pg_rooms
+    ulw::pg_store PkgConfig::LIBPQ)
+target_include_directories(message_store_conformance_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
+# Its schema, plans and timings, and the owner's fenced write of a message, on a live Postgres
+# as the suites above.
+ulw_add_test_suite(message_store_integration_tests integration
+    integration/message_store_test.cpp
+    integration/postgres_harness.cpp
+    integration/sequenced_append_test.cpp
+    PROPERTIES RESOURCE_LOCK postgres)
+target_link_libraries(message_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg_store
+    PkgConfig::LIBPQ)
+target_include_directories(message_store_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
 ulw_add_test_suite(chat_unit_tests unit
     unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
     unit/chat/envelope_test.cpp
+    unit/chat/presence_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
-target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::os)
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 # The M16 acceptance: three chat_server processes on the Postgres the suites above use.
@@ -485,6 +510,7 @@ if(ULW_BUILD_WORKER)
         unit/ffmpeg/hls_rewrite_test.cpp
         unit/ffmpeg/live_command_test.cpp
         unit/ffmpeg/progress_test.cpp
+        unit/ffmpeg/recording_verdict_test.cpp
         unit/ffmpeg/sandbox_test.cpp
         unit/ffmpeg/seccomp_filter_test.cpp)
     target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
@@ -519,6 +545,8 @@ if(ULW_BUILD_WORKER)
         unit/live_packager/live_window_test.cpp
         unit/live_packager/media_playlist_test.cpp
         unit/live_packager/publisher_test.cpp
+        unit/live_packager/recorder_test.cpp
+        unit/live_packager/recording_plan_test.cpp
         unit/live_packager/segment_tracker_test.cpp
         unit/live_packager/stream_id_test.cpp
         unit/live_packager/watch_test.cpp)
@@ -530,9 +558,11 @@ if(ULW_BUILD_WORKER)
     # deploy/local/compose.yaml.
     ulw_add_test_suite(worker_integration_tests integration
         integration/ffmpeg_transcoder_test.cpp
+        integration/recording_remux_test.cpp
         integration/postgres_harness.cpp
         integration/worker_test.cpp
-        support/child_process.cpp)
+        support/child_process.cpp
+        PROPERTIES RESOURCE_LOCK postgres)
     target_link_libraries(worker_integration_tests PRIVATE
         ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
         ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
@@ -565,6 +595,28 @@ if(ULW_BUILD_WORKER)
         target_compile_definitions(live_packager_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
     endif()
     add_dependencies(live_packager_integration_tests live_packager ulw_sandbox)
+
+    # A live stream to a ready video (M33): live_packager fed over SRT, then transcode_worker,
+    # on a scratch Postgres database, the filesystem store and MinIO.
+    ulw_add_test_suite(live_recording_integration_tests integration
+        integration/live_recording_test.cpp
+        integration/postgres_harness.cpp
+        support/child_process.cpp
+        PROPERTIES RESOURCE_LOCK postgres)
+    target_link_libraries(live_recording_integration_tests PRIVATE
+        ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
+        ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
+    target_include_directories(live_recording_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+    target_compile_definitions(live_recording_integration_tests PRIVATE
+        ULW_LIVE_PACKAGER_BIN="$<TARGET_FILE:live_packager>"
+        ULW_LIVE_TESTSOURCE="${PROJECT_SOURCE_DIR}/apps/live-packager/testsource/ulw-live-testsource"
+        ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
+        ULW_WORKER_BIN="$<TARGET_FILE:transcode_worker>")
+    if(ULW_CONFORMANCE_LIVE)
+        target_compile_definitions(live_recording_integration_tests PRIVATE ULW_CONFORMANCE_LIVE)
+    endif()
+    add_dependencies(live_recording_integration_tests live_packager transcode_worker ulw_sandbox)
 
     # gateway_server against the Postgres and MinIO of deploy/local/compose.yaml, serving
     # what the worker's ffmpeg command writes.

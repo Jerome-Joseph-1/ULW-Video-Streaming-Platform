@@ -31,8 +31,8 @@ public:
     }
     std::expected<std::uint64_t, core::ports::StorageError>
     download(const core::StorageKey& key, const std::filesystem::path& destination) override {
-        if (download_error) {
-            return std::unexpected(*download_error);
+        if (download_error || name_of(key) == download_error_for) {
+            return std::unexpected(download_error.value_or(core::ports::StorageError::Transient));
         }
         return inner_.download(key, destination);
     }
@@ -72,6 +72,8 @@ public:
     std::set<std::string> fail_once;
     bool fail_all_uploads = false;
     std::optional<core::ports::StorageError> download_error;
+    // Only downloads of this object fail, with download_error or Transient.
+    std::string download_error_for;
     std::optional<core::ports::StorageError> size_error;
 
 private:
@@ -93,6 +95,14 @@ inline std::string ffmpeg_playlist(std::uint32_t epoch, std::uint64_t first, std
 
 inline void write_file(const std::filesystem::path& file, std::string_view bytes = "bytes") {
     std::ofstream(file, std::ios::binary) << bytes;
+}
+
+inline std::string read_file(const std::filesystem::path& file) {
+    std::error_code ec;
+    std::string text(std::filesystem::file_size(file, ec), '\0');
+    std::ifstream in(file, std::ios::binary);
+    in.read(text.data(), static_cast<std::streamsize>(text.size()));
+    return text;
 }
 
 } // namespace ulw::test

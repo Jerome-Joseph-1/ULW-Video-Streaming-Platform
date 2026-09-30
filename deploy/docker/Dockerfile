@@ -25,6 +25,7 @@ RUN --mount=type=bind,source=deploy/docker/apt-install.sh,target=/usr/local/sbin
     apt-install \
         ca-certificates=20260601~24.04.1 \
         openssl=3.0.13-0ubuntu3.15 \
+        libssl3t64=3.0.13-0ubuntu3.15 \
         g++-14=14.2.0-4ubuntu2~24.04.1 \
         cmake=3.28.3-1build7 \
         ninja-build=1.11.1-2 \

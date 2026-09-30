@@ -2,6 +2,7 @@
 #include "infra/auth/base64url.hpp"
 
 #include "envelope.hpp"
+#include "presence_room.hpp"
 
 #include <algorithm>
 #include <gtest/gtest.h>
@@ -33,6 +34,54 @@ TEST(Envelope, AJoinNamesItsRoomAndMayAskToResumeAndToBeLossy) {
     ASSERT_TRUE(resume);
     EXPECT_EQ(std::get<chat::Join>(*resume).after, 41U);
     EXPECT_EQ(std::get<chat::Join>(*resume).delivery, chat::Delivery::Lossy);
+    EXPECT_EQ(join.kind, core::ports::RoomKind::GroupChat);
+
+    for (const auto& [text, kind] : {std::pair{"direct", core::ports::RoomKind::DirectChat},
+                                     std::pair{"group", core::ports::RoomKind::GroupChat},
+                                     std::pair{"live", core::ports::RoomKind::StreamLiveChat}}) {
+        const auto named = chat::parse_command(
+            std::string{
+                R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":")"} +
+            text + R"("})");
+        ASSERT_TRUE(named) << text;
+        EXPECT_EQ(std::get<chat::Join>(*named).kind, kind) << text;
+    }
+    EXPECT_EQ(chat::parse_command(
+                  R"({"type":"join","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","kind":"open"})"),
+              std::unexpected(EnvelopeError::Malformed));
+}
+
+TEST(Envelope, AHistoryPageRunsBackFromTheNewestUnlessGivenACursor) {
+    const auto newest =
+        chat::parse_command(R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
+    ASSERT_TRUE(newest);
+    const auto& h = std::get<chat::History>(*newest);
+    EXPECT_EQ(h.room, room());
+    EXPECT_FALSE(h.before);
+    EXPECT_FALSE(h.after);
+    EXPECT_EQ(h.limit, chat::kDefaultHistoryLimit);
+
+    const auto back = chat::parse_command(
+        R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","before":90,"limit":100})");
+    ASSERT_TRUE(back);
+    EXPECT_EQ(std::get<chat::History>(*back).before, 90U);
+    EXPECT_EQ(std::get<chat::History>(*back).limit, 100U);
+
+    const auto forth = chat::parse_command(
+        R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","after":0,"limit":1})");
+    ASSERT_TRUE(forth);
+    EXPECT_EQ(std::get<chat::History>(*forth).after, 0U);
+}
+
+TEST(Envelope, AHistoryPageWithBothCursorsOrALimitOutOfRangeIsMalformed) {
+    for (const std::string_view extra :
+         {R"(,"before":9,"after":2)", R"(,"limit":0)", R"(,"limit":101)", R"(,"after":-1)",
+          R"(,"before":"9")", R"(,"from":9)"}) {
+        const std::string text =
+            std::string{R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")"} +
+            std::string{extra} + "}";
+        EXPECT_EQ(chat::parse_command(text), std::unexpected(EnvelopeError::Malformed)) << text;
+    }
 }
 
 TEST(Envelope, ASendCarriesItsIdAndTheBytesItsBodyEncodes) {
@@ -89,6 +138,37 @@ TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
     // A second copy of a field is refused by the parser.
     EXPECT_EQ(chat::parse_command(R"({"type":"join","type":"send",)" + room + "}"),
               std::unexpected(EnvelopeError::NotJson));
+}
+
+TEST(Envelope, WatchAndUnwatchNameAUser) {
+    const auto w = chat::parse_command(R"({"type":"watch","user":"auth0|bob"})");
+    ASSERT_TRUE(w);
+    EXPECT_EQ(std::get<chat::Watch>(*w).user.view(), "auth0|bob");
+    const auto u = chat::parse_command(R"({"user":"auth0|bob","type":"unwatch"})");
+    ASSERT_TRUE(u);
+    EXPECT_EQ(std::get<chat::Unwatch>(*u).user.view(), "auth0|bob");
+
+    EXPECT_EQ(chat::parse_command(R"({"type":"watch"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"watch","user":7})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"watch","user":"bob","room":"x"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"watch","user":"bob smith"})"),
+              std::unexpected(EnvelopeError::BadUser));
+    EXPECT_EQ(chat::parse_command(R"({"type":"unwatch","user":""})"),
+              std::unexpected(EnvelopeError::BadUser));
+}
+
+TEST(Envelope, APresenceRoomCannotBeJoinedSentToOrReadAsAChatRoom) {
+    const std::string presence = chat::presence_room(*core::UserId::parse("bob")).to_string();
+    EXPECT_EQ(chat::parse_command(R"({"type":"join","room":")" + presence + R"("})"),
+              std::unexpected(EnvelopeError::BadRoom));
+    EXPECT_EQ(
+        chat::parse_command(R"({"type":"send","room":")" + presence + R"(","id":"a","body":""})"),
+        std::unexpected(EnvelopeError::BadRoom));
+    EXPECT_EQ(chat::parse_command(R"({"type":"history","room":")" + presence + R"("})"),
+              std::unexpected(EnvelopeError::BadRoom));
 }
 
 TEST(Envelope, AMessageReturnsItsBodyBytesExactlyAndItsId) {
@@ -153,8 +233,21 @@ TEST(Envelope, RepliesAreTheDocumentedShapes) {
         out,
         R"({"type":"error","reason":"rate_limited","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","id":"m-3","retry_after_ms":500})");
     out.clear();
+    chat::write_history(out, room(), 3);
+    EXPECT_EQ(out, R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","count":3})");
+    out.clear();
     chat::write_error(out, chat::reason(EnvelopeError::NotJson));
     EXPECT_EQ(out, R"({"type":"error","reason":"not_json"})");
+    const auto bob = *core::UserId::parse("auth0|bob");
+    out.clear();
+    chat::write_presence(out, "watching", bob, false);
+    EXPECT_EQ(out, R"({"type":"watching","user":"auth0|bob","status":"offline"})");
+    out.clear();
+    chat::write_presence(out, "presence", bob, true);
+    EXPECT_EQ(out, R"({"type":"presence","user":"auth0|bob","status":"online"})");
+    out.clear();
+    chat::write_user_error(out, "too_many_watches", bob);
+    EXPECT_EQ(out, R"({"type":"error","reason":"too_many_watches","user":"auth0|bob"})");
 }
 
 } // namespace

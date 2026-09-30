@@ -469,6 +469,45 @@ TEST_F(PublisherTest, StoppingBeforeThePublisherReturnsCanEndTheOldWindow) {
     EXPECT_EQ(playlist.segments.size(), 2U);
 }
 
+TEST_F(PublisherTest, TheRunThatEndsTheStreamWritesItsEpochDownBeforeTheEnd) {
+    {
+        auto publisher = open();
+        ASSERT_TRUE(publisher);
+        publisher->begin_epoch(kFirstMedia);
+        segments(0, 0, 2);
+        ASSERT_TRUE(publisher->pump(ffmpeg_playlist(0, 0, 2, init(0))));
+        EXPECT_FALSE(fs::exists(stored_path("ended_by")));
+    }
+    // Epoch 1 ends the stream without a segment of its own; only ended_by names it.
+    auto publisher = open();
+    ASSERT_TRUE(publisher);
+    ASSERT_EQ(publisher->epoch(), 1U);
+    ASSERT_TRUE(publisher->finish({}).ended);
+    EXPECT_EQ(stored("ended_by"), "1\n");
+    const auto marked = std::ranges::find(store.uploads, "ended_by");
+    ASSERT_NE(marked, store.uploads.end());
+    EXPECT_EQ(std::find(marked, store.uploads.end(), "index.m3u8"), store.uploads.end() - 1);
+}
+
+TEST_F(PublisherTest, AStaleRunCannotOverwriteTheNewerEndersEpoch) {
+    auto stale = open();
+    ASSERT_TRUE(stale);
+    stale->begin_epoch(kFirstMedia);
+    segments(0, 0, 2);
+    ASSERT_TRUE(stale->pump(ffmpeg_playlist(0, 0, 2, init(0))));
+    // Epoch 1 takes the stream over and ends it without media of its own.
+    auto newer = open();
+    ASSERT_TRUE(newer);
+    ASSERT_EQ(newer->epoch(), 1U);
+    ASSERT_TRUE(newer->finish({}).ended);
+    ASSERT_EQ(stored("ended_by"), "1\n");
+
+    const auto finished = stale->finish(ffmpeg_playlist(0, 0, 2, init(0)));
+    EXPECT_FALSE(finished.ended);
+    EXPECT_EQ(finished.problem, PublishError::Superseded);
+    EXPECT_EQ(stored("ended_by"), "1\n");
+}
+
 TEST_F(PublisherTest, PumpingAloneLeavesTheStreamOpenForAnotherRunToContinue) {
     {
         auto publisher = open();

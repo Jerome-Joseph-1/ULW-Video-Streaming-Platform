@@ -9,13 +9,16 @@ page does not repeat it.
 
 | Dependency | Used by | Requirement |
 |---|---|---|
-| Postgres 16 | gateway, worker | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
+| Postgres 16 | gateway, worker, chat | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
+| Postgres log settings | chat | Bound parameters stay out of the server log: `log_parameter_max_length_on_error = 0` (the default), and `log_parameter_max_length = 0` whenever statement logging is on (`log_statement` `mod` or `all`, `log_min_duration_statement`, `log_min_duration_sample`, `log_transaction_sample_rate`), with `auto_explain.log_parameter_max_length = 0` if auto_explain is loaded. Otherwise chat message bodies, plaintext or ciphertext, are written to the log (ADR-0054). RUNBOOK step 3 sets them on the database. |
 | R2 bucket | gateway, worker | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
 | R2 API tokens | gateway, worker | One per component (ADR-0066). The gateway's token must allow, on `videos/<video id>/raw` and `videos/<video id>/hls/...`: CreateMultipartUpload, UploadPart, ListParts, CompleteMultipartUpload, AbortMultipartUpload (which must be permitted), HeadObject, GetObject (playlists it rewrites, and presigned GET for segments and init) and PutObject. The upload reaper runs with the gateway's secret and additionally needs ListMultipartUploads (bucket level), ListObjectsV2 and DeleteObject. |
 | Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS (`JWKS_URL` must be `https://`). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
 | DNS and TLS | Envoy | TLS terminates at Askedin's Envoy Gateway; the service speaks plain HTTP behind it (ADR-0001). The HTTPRoute sends `/api/v1/uploads` and `/api/v1/videos` to the gateway. |
 | Envoy route timeout | Envoy | None (`request: 0s`). A chunk may take up to 1024 s at the gateway's minimum rate, and the gateway enforces its own timeouts. Upstream idle timeout below the gateway's 10 s keep-alive timeout (5 s in the shipped `BackendTrafficPolicy`). |
 | Seccomp profile | worker nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
+| Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on every hostname of `askedin-gateway`: the stage HTTPRoute names none, as the video routes do not. `/twirp` is never routed (ADR-0050, ADR-0053). |
+| LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP). It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Not in the overlays yet: it ships with the packager's. |
 
 ### Environment, by name
 
@@ -79,10 +82,47 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` | same | | |
 | `ULW_CONFIG` | optional TOML file | same | | See above |
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
+| `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
 | `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET`, `ULW_ALLOWED_ORIGINS` | | | required, required (32+ bytes), optional | Chat has no Askedin overlay yet |
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
+
+<!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
+
+The live packager (one process per stream, environment only, no Askedin overlay yet) takes
+`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR`, `ULW_FFMPEG` and
+`ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
+live-only with neither; one without the other stops it at startup:
+
+| Variable | Live packager | Notes |
+|---|---|---|
+| `ULW_DATABASE_URL` | with recording | Secret; the same database as the gateway's |
+| `ULW_STREAM_OWNER` | with recording | The broadcaster's Askedin user id (`sub`), who owns the video |
+
+The role in its database URL needs no more than `SELECT, INSERT` on `live_recordings`, `INSERT`
+and `SELECT (id)` on `videos` (the insert returns the id it wrote), `INSERT` on `jobs`, and
+`USAGE` on `jobs_id_seq`; its `NOTIFY job_available` needs no grant. Checked against the
+migrated schema with a role holding exactly these.
+
+It exits `0` once the stream has ended and its video and job are queued, when the stream was
+already recorded, when a newer packager of the stream holds it (`recording: superseded`), when
+the stream cannot be recorded at all (`recording: unrecordable: <reason>`, written to
+`live_recordings.failure`), and when drained by SIGTERM while the stream is live; and non-zero
+otherwise. SIGTERM while it records stops the copy and exits `1`: the stream is not recorded
+yet, and the next start records it. Run it with a
+restart on failure: a packager killed between the end and the job, or unable to reach the store
+or the database then, records the stream on its next start. Started for a stream that has
+already ended, it takes no publisher and only records.
+
+While it records it holds one upload part in memory, 16 MiB at the default
+`ULW_LIVE_MAX_KBPS` and up to 65 MiB at its 100 Mbit/s ceiling (the part grows with
+`ULW_LIVE_MAX_KBPS` times `ULW_LIVE_MAX_HOURS`), beside two copying ffmpeg children of about
+60 MB each; its scratch holds one segment. The recording is stored as the video's source,
+`videos/<id>/raw`, so the `videos/` rules apply to it: the 7-day abort of incomplete multipart
+uploads (row above) and the upload reaper's sweep collect a copy that died midway. The `live/`
+prefix needs an expiry of days, not hours: the recording is read back from the segments after
+the stream ends.
 
 ## Probes and metrics
 
@@ -209,10 +249,16 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `connections_accepted_total`, `connections_rejected_total{reason="capacity"}`,
 `connections_current`, `websocket_upgrades_total`, `auth_failures_total`,
 `origin_rejections_total`, `messages_received_total`, `messages_delivered_total`,
+`messages_rate_limited_total`, `messages_deduplicated_total`, `lossy_drops_total`,
+`messages_replayed_total`, `history_messages_total`, `messages_kept_bytes`,
 `protocol_errors_total`, `control_floods_total`, `slow_consumers_total`,
 `allocation_failures_total`, `rooms_active`, `rooms_joined`, `room_reassignments_total`,
 `fenced_writes_total`, `forwards_total`, `forward_timeouts_total`, `peers_lost_total`,
-`peers_refused_total`, `slow_peers_total`. Chat is a draft ([chat.md](chat.md)).
+`peers_refused_total`, `slow_peers_total`, `presence_rooms`, `presence_events_sent_total`,
+`presence_events_received_total`, `presence_notifications_total`, `presence_expired_total`
+(announcements and watching nodes dropped because they stopped being renewed, normally a node
+that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
+node repeated what it had said there). Chat is a draft ([chat.md](chat.md)).
 
 ## Shutdown
 

@@ -15,8 +15,19 @@ std::size_t RecentKeys::EntryHash::operator()(const Entry& e) const noexcept {
     return h;
 }
 
-std::optional<std::uint64_t> RecentKeys::find(const core::RoomId& room, const core::UserId& sender,
-                                              const MessageKey& key) const {
+std::uint64_t RecentKeys::digest(std::span<const std::byte> body) noexcept {
+    // The 64-bit FNV offset basis and prime.
+    std::uint64_t h = 0xcbf29ce484222325ULL;
+    for (const std::byte b : body) {
+        h ^= std::to_integer<std::uint64_t>(b);
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+std::optional<RecentKeys::Sequenced> RecentKeys::find(const core::RoomId& room,
+                                                      const core::UserId& sender,
+                                                      const MessageKey& key) const {
     const auto it = seqs_.find(Entry{.room = room, .sender = sender, .key = key});
     if (it == seqs_.end()) {
         return std::nullopt;
@@ -25,13 +36,13 @@ std::optional<std::uint64_t> RecentKeys::find(const core::RoomId& room, const co
 }
 
 void RecentKeys::remember(const core::RoomId& room, const core::UserId& sender,
-                          const MessageKey& key, std::uint64_t seq, core::MonoTime now) {
+                          const MessageKey& key, Sequenced sequenced, core::MonoTime now) {
     while (!order_.empty() && (order_.size() >= capacity_ || now - order_.front().at > window_)) {
         seqs_.erase(seqs_.find(*order_.front().entry));
         order_.pop_front();
     }
     const auto [it, fresh] =
-        seqs_.try_emplace(Entry{.room = room, .sender = sender, .key = key}, seq);
+        seqs_.try_emplace(Entry{.room = room, .sender = sender, .key = key}, sequenced);
     if (!fresh) {
         return;
     }

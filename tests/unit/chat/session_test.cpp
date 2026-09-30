@@ -1,4 +1,5 @@
 #include "infra/auth/base64url.hpp"
+#include "infra/messages/memory_message_store.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
@@ -96,6 +97,18 @@ private:
         ulw::test::MemoryRooms db;
         ulw::test::FakeVerifier verifier;
         auto store = std::make_unique<ulw::test::MemoryRoomStore>(**reactor, db);
+        auto messages = std::make_unique<infra::messages::MemoryMessageStore>(**reactor);
+        // The rooms these tests join as live, recorded so as the server side does: a join alone
+        // cannot open a room.
+        for (const std::string_view room :
+             {kRoom, std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f901"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f902"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f903"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f904"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f905"}}) {
+            messages->record_live(*core::RoomId::parse(room),
+                                  [](core::ports::MessageResult<void> /*recorded*/) noexcept {});
+        }
         chat::RoomLog log(*core::NodeId::parse("chat-1"));
         os::SystemRandom random;
         rt::RoomRouter router(**reactor, *store, clock, random,
@@ -108,8 +121,12 @@ private:
             return;
         }
         auto server = std::make_unique<chat::ChatServer>(
-            chat::Deps{
-                .reactor = **reactor, .router = router, .verifier = verifier, .clock = clock},
+            chat::Deps{.node = *core::NodeId::parse("chat-1"),
+                       .reactor = **reactor,
+                       .router = router,
+                       .messages = *messages,
+                       .verifier = verifier,
+                       .clock = clock},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
             limits_);
         if (!(*reactor)->listen(std::move(*clients), *server)) {
@@ -141,6 +158,7 @@ private:
             ++turns_;
             turns_.notify_all();
         }
+        messages.reset();
         server.reset();
         store.reset();
     }
@@ -212,7 +230,8 @@ TEST_P(ChatSessionTest, TheCookieCountsOnlyFromAnAllowedPage) {
 TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
+                                 R"(","kind":"live"})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
     // base64url of `hi "there"`.
@@ -236,7 +255,8 @@ TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"not_json"})");
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":"not-a-room"})"));
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"bad_room"})");
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
+                                 R"(","kind":"live"})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
 }
@@ -298,9 +318,11 @@ TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
 
 TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryConnection) {
     node_.reset();
-    node_ = std::make_unique<Node>(GetParam(), chat::Limits{.service = {.join_burst = 2}});
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.service = {.join_burst = 2}, .presence = {}});
     const auto join = [](WsClient& ws, std::string_view room) {
-        EXPECT_TRUE(ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"("})"));
+        EXPECT_TRUE(
+            ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"(","kind":"live"})"));
         const auto answer = ws.next_text(seconds(10));
         return answer.value_or("").find(R"("type":"joined")") != std::string::npos;
     };
@@ -319,7 +341,8 @@ TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryCo
 TEST_P(ChatSessionTest, SendsInFlightAreBoundedInBytes) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
+                                 R"(","kind":"live"})"));
     ASSERT_TRUE(alice->next_text(seconds(10)));
     // Three sends of 45 KiB while the store answers nothing: two fit the connection's 128 KiB,
     // the third does not, however few sends that is.
@@ -348,7 +371,8 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     node_ = std::make_unique<Node>(GetParam(),
                                    chat::Limits{.ping_interval = core::Millis{1'000},
                                                 .idle_timeout = core::Millis{1'100},
-                                                .service = {}},
+                                                .service = {},
+                                                .presence = {}},
                                    true);
     auto quiet = open_as("alice");
     ASSERT_TRUE(quiet);
@@ -367,6 +391,27 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     }
     EXPECT_EQ(later_pings, 0);
     EXPECT_FALSE(quiet->connected());
+}
+
+TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {
+    node_.reset();
+    chat::Limits limits;
+    limits.presence.grace = core::Millis{200};
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    auto bob = open_as("bob");
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(bob->send_text(R"({"type":"watch","user":"alice"})"));
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"watching","user":"alice","status":"offline"})");
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"presence","user":"alice","status":"online"})");
+    alice.reset();
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"presence","user":"alice","status":"offline"})");
+    ASSERT_TRUE(bob->send_text(R"({"type":"watch","user":"not a user"})"));
+    EXPECT_EQ(bob->next_text(seconds(10)), R"({"type":"error","reason":"bad_user"})");
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,
