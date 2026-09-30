@@ -25,8 +25,11 @@ spec:
         app.kubernetes.io/name: mock-auth
     spec:
       automountServiceAccountToken: false
+      # The image's own user (distroless nonroot, deploy/local/mock-auth/Dockerfile).
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -52,6 +55,7 @@ spec:
               cpu: 50m
               memory: 32Mi
             limits:
+              cpu: 200m
               memory: 64Mi
           securityContext:
             allowPrivilegeEscalation: false

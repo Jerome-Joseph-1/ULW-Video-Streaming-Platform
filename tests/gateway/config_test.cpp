@@ -97,6 +97,7 @@ TEST_F(ConfigTest, ALocalKeySetReplacesTheJwksUrl) {
     const KeySetFile file(kKeySet);
     env.erase("JWKS_URL");
     env["ULW_DEV_JWKS_FILE"] = file.path();
+    env["ULW_DEV_MODE"] = "1";
     const auto config = load();
     ASSERT_TRUE(config) << config.error().reason;
     EXPECT_EQ(config->dev_jwks_file, file.path());
@@ -104,8 +105,25 @@ TEST_F(ConfigTest, ALocalKeySetReplacesTheJwksUrl) {
     EXPECT_TRUE(config->jwks_url.empty());
 }
 
+// Whoever can set it signs any identity they like, so it takes development mode said outright,
+// and never in a Kubernetes pod, where every real deployment runs.
+TEST_F(ConfigTest, ALocalKeySetIsRefusedOutsideDevelopmentModeAndInAnyPod) {
+    const KeySetFile file(kKeySet);
+    env.erase("JWKS_URL");
+    env["ULW_DEV_JWKS_FILE"] = file.path();
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env["ULW_DEV_MODE"] = "0";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env["ULW_DEV_MODE"] = "1";
+    env["KUBERNETES_SERVICE_HOST"] = "10.43.0.1";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env.erase("KUBERNETES_SERVICE_HOST");
+    EXPECT_TRUE(load());
+}
+
 TEST_F(ConfigTest, ALocalKeySetThatCannotBeReadOrUsedIsRefused) {
     env.erase("JWKS_URL");
+    env["ULW_DEV_MODE"] = "1";
     env["ULW_DEV_JWKS_FILE"] = "/nonexistent/jwks.json";
     EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
     const KeySetFile garbage(R"({"keys":[{"kty":"RSA"}]})");
@@ -414,7 +432,8 @@ TEST_F(ConfigTest, OnlyTheConnectionStringAndTheStoreKeysAreSecretAndTheKeysEnvO
     for (const ops::Setting& s : gateway::settings()) {
         const bool store_key =
             s.env == "ULW_S3_ACCESS_KEY_ID" || s.env == "ULW_S3_SECRET_ACCESS_KEY";
-        EXPECT_EQ(s.key.empty(), store_key) << s.env;
+        // The kubelet's, read to know the process runs in a pod; nobody configures it.
+        EXPECT_EQ(s.key.empty(), store_key || s.env == "KUBERNETES_SERVICE_HOST") << s.env;
         EXPECT_EQ(s.secret, store_key || s.env == "ULW_DATABASE_URL") << s.env;
     }
 }
