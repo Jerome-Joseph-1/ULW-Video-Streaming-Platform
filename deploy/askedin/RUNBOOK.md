@@ -357,7 +357,8 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 
 The two images come from different distributions (docs/adr/0074): `video-gateway` is Ubuntu
 24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
-packages, ffmpeg among them, from snapshot.debian.org, and its binaries built on trixie too.
+packages, ffmpeg among them, from snapshot.debian.org; both images' binaries are built on
+Ubuntu, since only Ubuntu's glibc lets them carry the CET marks the hardening check requires.
 Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org over
 http for the worker's bootstrap of ca-certificates (signed and checked for freshness), and
 Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes its CA as the
@@ -387,12 +388,11 @@ otherwise bump at least monthly.
 
    ```sh
    DEBIAN_SNAPSHOT=<timestamp> deploy/docker/apt-install-debian.sh --policy \
-       ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 liburing2 \
-       g++-14 cmake ninja-build pkgconf libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev
+       ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 liburing2
    ```
 
 4. Set `DEBIAN_SNAPSHOT` in `deploy/docker/Dockerfile` to the timestamp and every pinned version
-   in the `worker-build` and `worker` stages to its candidate. A build fails if a pin is not
+   in the `worker` stage to its candidate. A build fails if a pin is not
    what the snapshot holds, so nothing drifts silently.
 5. If ffmpeg's upstream version changed (the part before `-0+deb13u`, say 7.1.5 to 7.1.6; a
    `+deb13uN` patch alone does not need it), run in that container, with ffmpeg and strace

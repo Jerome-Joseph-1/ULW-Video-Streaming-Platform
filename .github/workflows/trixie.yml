@@ -1,10 +1,11 @@
 name: trixie
 
 # The worker image's ffmpeg (Debian 13, docs/adr/0074) under the code that drives it. ci.yml's
-# unit and integration jobs run the runner's Ubuntu ffmpeg 6.1; this runs the ffmpeg suites and
-# the worker's, the live packager's and the live recording's integration suites on the image's
-# 7.1, built in the image's own worker-build stage, and re-traces the syscalls and re-measures
-# the address space the sandbox's limits must hold. Only when the image or the code around
+# unit and integration jobs run the runner's Ubuntu ffmpeg 6.1; this builds the ffmpeg suites and
+# the worker's, the live packager's and the live recording's integration suites on the runner,
+# as the image's binaries are built on Ubuntu, and runs them inside the worker image, on its
+# libraries and its ffmpeg 7.1. It also re-traces the syscalls and re-measures the address
+# space the sandbox's limits must hold, there. Only when the image or the code around
 # ffmpeg changes, and nightly, since a snapshot bump can land without touching that code.
 on:
   push:
@@ -63,36 +64,41 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
+    env:
+      CC: gcc-14
+      CXX: g++-14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The worker runs ffmpeg in namespaces of its own (ADR-0025); see ci.yml's setup.
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The toolchain, and the user namespaces the worker's sandbox needs (ADR-0025).
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-14-ci-trixie
       - name: Start MinIO
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
-      # The image's toolchain and snapshot, with the sources: what the worker is built with.
-      - run: docker build -f deploy/docker/Dockerfile --target worker-build -t ulw-worker-build .
-      # Privileged for the sandbox's namespaces, as the runner's own jobs get them; the suites
-      # run as the runner's uid, as CI's other jobs do, and ffmpeg_unit_tests as root too.
+      - run: cmake --preset ci -DULW_BUILD_MLS=OFF -DULW_CONFORMANCE_LIVE=ON
+      - run: >-
+          cmake --build --preset ci --target ffmpeg_unit_tests worker_integration_tests
+          live_packager_integration_tests live_recording_integration_tests
+      - run: docker build -f deploy/docker/Dockerfile --target worker -t ulw-worker-test .
+      # Inside the worker image as root, with the workspace at the same path, since the suites
+      # name the helper and the worker by their build paths; privileged for the sandbox's
+      # namespaces, as the runner's own jobs get them. The suites run as the runner's uid, as
+      # ci.yml's do, and ffmpeg_unit_tests as root too.
       - name: Suites, syscall trace and address space on the image's ffmpeg
         run: |
-          docker run --rm --privileged --network host -v "$PWD:/w" -w /w \
+          docker run --rm --privileged --network host --user 0 --entrypoint bash \
+            -v "$PWD:$PWD" -w "$PWD" \
             -e ULW_TEST_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:55432/postgres \
-            ulw-worker-build bash -euo pipefail -c '
-            ffmpeg=$(sed -n "s/^ *ffmpeg=\([^ ]*\).*/\1/p" deploy/docker/Dockerfile)
-            deploy/docker/apt-install-debian.sh "ffmpeg=$ffmpeg" strace=6.13+ds-1 \
-              python3=3.13.5-1 >/dev/null
+            ulw-worker-test -euo pipefail -c '
+            # strace for the trace, python3 for the child the sandbox tests allocate in.
+            deploy/docker/apt-install-debian.sh strace=6.13+ds-1 python3=3.13.5-1 >/dev/null
             ffmpeg -version | head -1
-            useradd -u "$(stat -c %u /w)" -m tester
+            useradd -u "$(stat -c %u .)" -M -d /tmp tester
             as_tester() {
               runuser -u tester -- env ULW_TEST_DATABASE_URL="$ULW_TEST_DATABASE_URL" "$@"
             }
-            as_tester bash -c "CC=gcc-14 CXX=g++-14 cmake --preset ci -DULW_BUILD_MLS=OFF \
-              -DULW_CONFORMANCE_LIVE=ON >/dev/null"
-            as_tester cmake --build --preset ci -j4 --target ffmpeg_unit_tests \
-              worker_integration_tests live_packager_integration_tests \
-              live_recording_integration_tests
             status=0
             for suite in ffmpeg_unit_tests worker_integration_tests \
                 live_packager_integration_tests live_recording_integration_tests; do

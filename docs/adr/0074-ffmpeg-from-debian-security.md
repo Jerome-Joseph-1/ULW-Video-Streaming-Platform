@@ -79,18 +79,25 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
   debian-security since 20260622T192543Z), `openssl` and `libssl3t64` `3.5.7-1~deb13u3` (in
   debian-security since 20260930T060347Z, which fixes the two OpenSSL HIGHs deb13u2 had),
   `libcurl4t64=8.14.1-2+deb13u5`, `libpq5=17.11-0+deb13u1`, `liburing2=2.9-1`,
-  `ca-certificates=20250419`; to build, `g++-14=14.2.0-19`, `cmake=3.31.6-2`,
-  `ninja-build=1.12.1-1`, `pkgconf=1.8.1-4` and the matching -dev packages.
-- `transcode_worker` and `ulw_sandbox` are built in a trixie stage (`worker-build`) from the
-  same snapshot, with trixie's GCC 14, CMake and -dev packages, so they link the glibc,
-  libstdc++, OpenSSL, libcurl, libpq and liburing they were compiled against, as ADR-0030
-  asks. Ubuntu-built binaries would probably load on trixie (glibc 2.41 is newer than noble's
-  2.39, both carry GCC 14.2's libstdc++, and the sonames match), but OpenSSL (3.0 against 3.5),
-  libpq (16 against 17) and libcurl (8.5 against 8.14) would each be a version the binary was
-  never compiled against, and a difference would show only at run time. The trixie build
-  already found one: libcurl 8.14 declares `CURL_HTTP_VERSION_1_1` as a long, which made a cast
-  in `infra/curl` fail `-Wuseless-cast`; the code now compiles against both. Two builder stages
-  cost one more compile of the worker's two targets per image build.
+  `ca-certificates=20250419`.
+- `transcode_worker` and `ulw_sandbox` are built on Ubuntu 24.04, in the same `build` stage as
+  the gateway's binaries, and copied into the Debian image. Building them on trixie was the
+  first choice, for binaries that link exactly the libraries they were compiled against, and
+  it was tried: the release binaries' hardening check (`tools/check-hardening.sh`, ADR-0072)
+  then failed on both, "no IBT/SHSTK marking". Debian 13's glibc start files (`Scrt1.o`,
+  `crti.o`, `crtn.o`) carry no CET property note, so nothing linked on trixie is marked,
+  whatever it is compiled with; forcing the mark at link time would claim what those objects
+  were not built for. Ubuntu builds its glibc with CET, so its binaries pass. They run on
+  trixie through stable sonames and symbol versions: glibc 2.39 to 2.41, the same GCC 14.2
+  libstdc++, OpenSSL 3.0 to 3.5 (`libssl.so.3`, which OpenSSL keeps compatible across 3.x),
+  libpq 16 to 17 (`libpq.so.5`), libcurl 8.5 to 8.14 (`libcurl.so.4`) and liburing 2.5 to
+  2.9 (`liburing.so.2`). What would break shows at run time rather than at link time, so the
+  trixie workflow runs Ubuntu-built suites inside the worker image, on its libraries and its
+  ffmpeg, on every change to either. On Debian's runtime the marks are also only a promise:
+  its unmarked `libc.so.6` keeps the kernel from enabling a shadow stack for the process. The
+  trixie build attempt did find one real difference: libcurl 8.14 declares
+  `CURL_HTTP_VERSION_1_1` as a long, which made a cast in `infra/curl` fail
+  `-Wuseless-cast`; that code now compiles against both.
 - The gateway image (`gateway`, with `ulw_migrate` and `ulw_reaper`) stays on Ubuntu 24.04 as
   ADR-0030 has it: it carries no ffmpeg, and its libraries are covered by Ubuntu's free
   updates in main. CI and the other e2e jobs keep the runner's Ubuntu ffmpeg; the e2e sandbox
@@ -102,8 +109,8 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
   `clone3` to `clone`, which the filter checks). The ffmpeg suites and the worker's, live
   packager's and live recording's integration suites pass on 7.1.5 under the filter.
 - The trixie workflow keeps that true: on every pull request that touches the Dockerfile or
-  the code around ffmpeg, and nightly, it builds the `worker-build` stage, installs the image's
-  ffmpeg and runs those suites, the trace and `tools/ffmpeg-address-space.sh` there. ci.yml's
+  the code around ffmpeg, and nightly, it builds those suites on the runner, builds the worker
+  image, and runs the suites, the trace and `tools/ffmpeg-address-space.sh` inside it. ci.yml's
   jobs run the runner's ffmpeg 6.1, on which `settle_master_bandwidth` changes nothing.
 - ffmpeg 7 rewrites the master playlist when a run ends, with each variant's measured peak and
   average segment bitrate (`AVERAGE-BANDWIDTH` is new). Those differ between two runs of a job,
@@ -156,8 +163,9 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
   (1 GiB); the 1080p three-rung transcode with `-threads 4` about 1.7-1.9 GB then 2970 MiB
   (4 GiB); the decode check 1299 then 1722 MiB (4 GiB). The silence stage had a tenth of its
   budget left, and a remux that runs out loses the recording for good (ADR-0055), so the
-  remuxes now run with `MALLOC_ARENA_MAX=2`: on 7.1.5 the silence stage peaks at 435 MiB and
-  the live remux at 412 MiB, at the same resident size, and the 1 GiB limit stays.
+  remuxes now run with `MALLOC_ARENA_MAX=2`: on 7.1.5 the silence stage peaks at 435-539 MiB
+  and the live remux at 412-428 MiB (a development host and a CI runner, both 4 cores), at the
+  same resident size, and the 1 GiB limit stays.
   `tools/ffmpeg-address-space.sh` measures each command line under its limit and environment.
 - An x264 encode at its default thread count went from 971 to 1236-1491 MiB, which is why the
   syscall filter test's source clip now gets 4 GiB; the remux it tests keeps the packager's
