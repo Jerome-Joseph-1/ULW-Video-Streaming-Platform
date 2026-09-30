@@ -168,9 +168,20 @@ public:
     // Reads at most `most` bytes of whatever has arrived, without waiting, and keeps them for
     // the calls above: a reader far slower than what it is sent. Returns how many it read.
     std::size_t read_at_most(std::size_t most) {
+        // Already ended: error() keeps reporting what ended it.
+        if (!fd_) {
+            return 0;
+        }
         std::vector<std::byte> buf(most);
         const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), MSG_DONTWAIT);
+        // EWOULDBLOCK is EAGAIN on Linux.
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+            return 0;
+        }
         if (n <= 0) {
+            // Kept as read_more keeps it: a reset is reported once, and would be lost here.
+            error_ = n < 0 ? errno : 0;
+            fd_.reset();
             return 0;
         }
         in_.insert(in_.end(), buf.begin(), buf.begin() + n);
