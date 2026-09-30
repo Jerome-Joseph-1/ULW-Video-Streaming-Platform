@@ -167,6 +167,13 @@ jobs:
               print(f"  ffmpeg packages: {uniq(ff)} CVEs; trivy HIGH/CRIT"
                     f" {uniq(lambda v: ff(v) and v['Severity'] in ('HIGH', 'CRITICAL'))};"
                     f" nvd HIGH/CRIT {uniq(lambda v: ff(v) and nvd(v) in ('HIGH', 'CRITICAL'))}")
+              crit = sorted({(v["VulnerabilityID"], v["PkgName"]) for v in vulns if v["Severity"] == "CRITICAL"})
+              print(f"  trivy CRITICAL: {crit}")
+              by_src = {}
+              for v in vulns:
+                  if v["Severity"] == "HIGH":
+                      by_src.setdefault(v.get("PkgID", v["PkgName"]).split("@")[0] if False else (v.get("SrcName") or v["PkgName"]), set()).add(v["VulnerabilityID"])
+              print("  trivy HIGH by source package: " + ", ".join(f"{k} {len(x)}" for k, x in sorted(by_src.items())))
               print("  HIGH/CRITICAL (trivy) with a fixed version:")
               for v in vulns:
                   if v["Severity"] in ("HIGH", "CRITICAL") and v.get("FixedVersion"):

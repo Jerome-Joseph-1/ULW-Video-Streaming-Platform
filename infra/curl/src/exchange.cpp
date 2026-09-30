@@ -136,7 +136,10 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     set(curl_easy_setopt(e, CURLOPT_FOLLOWLOCATION, 0L));
     // Over HTTP/2 every part to one host would share one connection and one flow-control
     // window, so a single stalled upload could slow all the others.
-    set(curl_easy_setopt(e, CURLOPT_HTTP_VERSION, static_cast<long>(CURL_HTTP_VERSION_1_1)));
+    // The option is read as a long. libcurl 8.5 declares the value in an enum and 8.14 (the
+    // worker image's, docs/adr/0071) as a long, so a cast would be useless on one of them.
+    constexpr long kHttp11 = CURL_HTTP_VERSION_1_1;
+    set(curl_easy_setopt(e, CURLOPT_HTTP_VERSION, kHttp11));
     set(curl_easy_setopt(e, CURLOPT_CONNECTTIMEOUT_MS, kConnectTimeoutMs));
     set(curl_easy_setopt(e, CURLOPT_LOW_SPEED_LIMIT, kLowSpeedBytes));
     set(curl_easy_setopt(e, CURLOPT_LOW_SPEED_TIME, kLowSpeedSeconds));
