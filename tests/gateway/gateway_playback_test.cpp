@@ -4,6 +4,10 @@
 #include "support/http_client.hpp"
 #include "support/socket_probe.hpp"
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 #include <cerrno>
 #include <chrono>
 #include <format>
@@ -582,6 +586,45 @@ TEST_P(GatewayPlayback, AClientThatAsksAndNeverReadsIsClosedAtTheHeaderTimeout) 
     ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
     EXPECT_EQ(gw.counters().timeouts_header, 1U);
     expect_the_response_then_a_fin(c);
+}
+
+// Holds a client's writes back while set, so the ones made meanwhile leave in one segment.
+void cork(HttpClient& c, bool on) {
+    const int value = on ? 1 : 0;
+    ASSERT_EQ(::setsockopt(c.fd(), IPPROTO_TCP, TCP_CORK, &value, sizeof value), 0);
+}
+
+// A request the parser turns away at its head leaves reading on, and the parser waiting for the
+// loop to resume it. The next request, read before then in a receive of its own while the
+// refusal is still on its way, is held back until the refusal has gone, and is then answered.
+// The two requests reach the gateway in one segment, as a TLS record each, so the second is
+// read right behind the refusal, and on io_uring the refusal's send completes a turn later.
+// The gateway's clock is held, so only an answer, not the header timeout, ends the wait.
+TEST_P(GatewayPlayback, ARequestHeldBackBehindARefusalFromTheParserIsAnswered) {
+    GatewayOptions o = options();
+    o.manual_clock = true;
+    GatewayUnderTest gw(o);
+    HttpClient c(gw.endpoint());
+    ASSERT_TRUE(c.connected());
+    // Answered first, so that under TLS the session tickets have gone before the refusal.
+    const auto first = c.request("GET", "/healthz", "");
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->status, 200);
+
+    cork(c, true);
+    ASSERT_TRUE(c.send_raw("GET /no-such-route HTTP/1.1\r\nHost: test\r\n\r\n"));
+    ASSERT_TRUE(c.send_raw("GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n"));
+    cork(c, false);
+    const auto refused = c.read_response();
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 404);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().responses.at(1) == 2; }))
+        << "the request behind the refusal was never answered";
+    const auto answered = c.read_response();
+    ASSERT_TRUE(answered);
+    EXPECT_EQ(answered->status, 200);
+    EXPECT_EQ(gw.counters().requests, 3U);
+    EXPECT_EQ(gw.counters().timeouts_header, 0U);
 }
 
 // A client still reading its last response when the drain begins is given the linger to

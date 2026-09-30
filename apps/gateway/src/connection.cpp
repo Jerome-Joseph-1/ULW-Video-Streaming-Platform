@@ -193,6 +193,10 @@ void Connection::on_data(net::BorrowedBytes bytes) noexcept {
         held_.insert(held_.end(), bytes.begin(), bytes.end());
         return;
     }
+    parse(bytes);
+}
+
+void Connection::parse(net::BorrowedBytes bytes) noexcept {
     last_activity_ = now();
     if (phase_ == Phase::Idle) {
         begin_request();
@@ -1414,7 +1418,8 @@ bool Connection::hold_back_request() noexcept {
     // otherwise queue responses without end, each request restarting the header timeout.
     // The request waits, and the header timeout keeps counting from that response, so a
     // client that does not take it within the timeout is closed (ADR-0071). A client whose
-    // response has gone when it asks again, as any client that reads it has, never waits.
+    // response has gone when it asks again, as any client that reads it has, does not wait
+    // for a drain check; on io_uring a send not yet completed holds it until the next turn.
     if (!response_held_back()) {
         return false;
     }
@@ -1588,12 +1593,25 @@ void Connection::read_next_request() noexcept {
     // Counted from the end of the last response, however long the client took to read it.
     const auto idle = std::chrono::duration_cast<core::Millis>(now() - last_activity_);
     arm_timer(std::max(gw().limits().header_timeout - idle, core::Millis{0}));
-    if (!held_.empty()) {
-        const std::vector<std::byte> bytes = std::exchange(held_, {});
-        on_data(bytes);
+    // The parser resumes first: after a request it refused at the head, reading went on, so
+    // bytes may have been held while it still waited to resume, and fed to it before then
+    // they would only be kept, with nothing left to resume it. What it kept came first.
+    const http::ParseResult resumed = parser_.resume();
+    if (held_.empty()) {
+        on_parse(resumed);
         return;
     }
-    on_parse(parser_.resume());
+    const std::vector<std::byte> bytes = std::exchange(held_, {});
+    if (resumed == http::ParseProgress::NeedMore && phase_ == Phase::Idle) {
+        parse(bytes);
+        return;
+    }
+    // A request it kept goes first, and the held bytes queue behind it: in the parser, or held
+    // again if its response is held back in turn.
+    on_parse(resumed);
+    if (phase_ == Phase::Idle || phase_ == Phase::Request) {
+        on_data(bytes);
+    }
 }
 
 void Connection::on_timeout() noexcept {

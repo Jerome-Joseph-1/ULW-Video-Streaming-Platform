@@ -101,11 +101,17 @@ that may still be reading.
   transport's queue draining (`on_writable`) is noticed at once; the kernel says nothing when a
   window opens, so while a request waits the response is looked at every 100 ms
   (`kDrainCheck`), a `getsockopt` each. A client that asks again only once it has read its
-  response, as a player does, finds it gone and never waits: whatever the response's size,
-  and whether or not it outgrew the congestion window on the way. Only a client that asks
-  before its last response has left the gateway's kernel waits, at most 100 ms after it has.
-  So a client that never reads holds at most its own receive buffer, one send buffer, one
-  response and the one receive that brought its next request.
+  response, as a player does, finds it gone and does not wait for a drain check: whatever
+  the response's size, and whether or not it outgrew the congestion window on the way. On
+  io_uring a send counts as held back until it completes, so such a request can still take
+  this path, the first on a TLS connection until the session tickets' send completes; it
+  resumes on the next turn of the loop, with no 100 ms wait. Only a client that asks before
+  its last response has left the gateway's kernel waits, at most 100 ms after it has. A
+  request held back behind a response is parsed, once that has gone, after whatever the
+  parser kept from earlier receives: a request refused at its head leaves reading on, so the
+  next can be held before the parser has resumed. So a client that never reads holds at most
+  its own receive buffer, one send buffer, one response and the one receive that brought its
+  next request.
 - **Gateway, at close.** Whatever closes a connection (a timeout, the linger's end, the drain
   deadline, the client's EOF or error): if the transport still holds part of the response,
   the close is a reset, which drops what the kernel holds too; if only the kernel holds output
@@ -154,8 +160,9 @@ that may still be reading.
   acknowledges nothing either, and is closed at the same 20 s the kernel used to take. On the
   dialling side such a link also counts in `peers_lost_total`, as it did.
 - The watch costs a `getsockopt` per node-channel connection per tick, about 130 a second at
-  the 32 accepted connections a node allows; the gateway's, one per close, one per request that
-  arrives after a keep-alive response with the transport's queue empty, and ten a second per
+  the 32 accepted connections a node allows; the gateway's, one per close, one per receive
+  that arrives between requests with the transport's queue empty (a new connection's first
+  request included, not only a request after a keep-alive response), and ten a second per
   connection holding a request back.
 - `tests/gateway/gateway_playback_test.cpp` and `tests/unit/rt/room_router_test.cpp` check that
   the server's socket has no user timeout, read a response, deliveries and forwarded writes
@@ -165,5 +172,7 @@ that may still be reading.
   gateway's tests also cover a client that asks and never reads (the old code answered all
   eight of its requests and kept it open), a close that finds the largest playlist still in
   the gateway (a reset) or only in the kernel (the response in full, then a FIN), a drain that
-  lets a client finish reading its last response, and a drain just after a response, which
-  answers nothing the client pipelined behind it.
+  lets a client finish reading its last response, a drain just after a response, which
+  answers nothing the client pipelined behind it, and a request read right behind one refused
+  at its head while the refusal is still being sent, which the first version of this change
+  left unanswered until the header timeout (on io_uring over TLS, where the test reaches it).

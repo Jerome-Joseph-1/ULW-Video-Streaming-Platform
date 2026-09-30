@@ -162,6 +162,8 @@ private:
     }
 
     void begin_request() noexcept;
+    // Bytes of a request that is not held back: fed to the parser, which is told of them.
+    void parse(net::BorrowedBytes bytes) noexcept;
     void on_parse(http::ParseResult result) noexcept;
     void advance() noexcept;
     [[nodiscard]] http::HeadVerdict authenticate_head(const http::RequestHead& head) noexcept;
