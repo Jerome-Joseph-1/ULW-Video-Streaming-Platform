@@ -1418,9 +1418,9 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     const std::uint64_t allowed_kib =
         (slow.size() * 67) + ((kMessages - settled_seq) * 300 / 1024) + 1024;
     constexpr std::uint64_t kClients = 20;
-    constexpr std::uint64_t kClientQueueKib = 6 * 16;
+    constexpr std::uint64_t kClientQueueKib = std::uint64_t{6} * 16;
     constexpr std::uint64_t kPeers = 4;
-    constexpr std::uint64_t kPeerQueueKib = 70 * 16;
+    constexpr std::uint64_t kPeerQueueKib = std::uint64_t{70} * 16;
     constexpr std::uint64_t kKeptKib = 256;
     constexpr std::uint64_t kTopPadKib = 128;
     const std::uint64_t step_kib =
