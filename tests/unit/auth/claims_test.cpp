@@ -107,6 +107,8 @@ TEST_F(ClaimsTest, ExpiryIsRequiredAndMustBeAnIntegerTheClockCanHold) {
     // Past what a nanosecond system_clock can represent (year 2262).
     EXPECT_EQ(error_of(test_payload({{"exp", "9300000000"}})), AuthError::Malformed);
     EXPECT_EQ(error_of(test_payload({{"exp", "18446744073709551615"}})), AuthError::Malformed);
+    // Before what it can represent (year 1677), which would overflow on the way to a time point.
+    EXPECT_EQ(error_of(test_payload({{"nbf", "-9300000000"}})), AuthError::Malformed);
     EXPECT_EQ(error_of(test_payload({{"nbf", R"("soon")"}})), AuthError::Malformed);
 }
 
@@ -150,6 +152,7 @@ TEST_F(ClaimsTest, EmailIsOptionalButMustBeAPrintableString) {
     EXPECT_EQ(error_of(test_payload({{"email", "7"}})), AuthError::Malformed);
     EXPECT_EQ(error_of(test_payload({{"email", R"("a@b.test\r\nX-Injected: 1")"}})),
               AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"email", R"("a@b.test\u007f")"}})), AuthError::Malformed);
     EXPECT_EQ(error_of(test_payload({{"email", '"' + std::string(255, 'a') + '"'}})),
               AuthError::Malformed);
 }
