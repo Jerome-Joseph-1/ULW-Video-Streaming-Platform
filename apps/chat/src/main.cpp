@@ -132,7 +132,15 @@ std::expected<void, std::string> make_verifier(const chat::Config& config, Servi
     s.key_fetcher = std::make_unique<chat::KeySetFetcher>(*s.key_multi);
     s.verifier = std::make_unique<infra::auth::JwksVerifier>(
         *s.reactor, *s.key_fetcher,
-        infra::auth::JwksConfig{.url = config.jwks_url, .claims = std::move(rules)});
+        infra::auth::JwksConfig{
+            .url = config.jwks_url,
+            .claims = std::move(rules),
+            .max_key_age = std::chrono::hours(config.jwks_max_stale_hours),
+            .on_keys_expired = [](core::Millis age) {
+                chat::log_event(
+                    R"("level":"error","msg":"jwks keys expired","hours_without_refresh":{})",
+                    std::chrono::duration_cast<std::chrono::hours>(age).count());
+            }});
     return {};
 }
 

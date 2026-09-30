@@ -161,6 +161,16 @@ TEST_F(ChatConfigTest, ADevelopmentKeySetReplacesTheJwksUrlButNotBoth) {
     EXPECT_TRUE(config->jwks_url.empty());
 }
 
+TEST_F(ChatConfigTest, KeysStayTrustedADayWithoutARefreshUnlessSetInHours) {
+    EXPECT_EQ(load()->jwks_max_stale_hours, 24U);
+    env["ULW_JWKS_MAX_STALE_HOURS"] = "6";
+    EXPECT_EQ(load()->jwks_max_stale_hours, 6U);
+    for (const char* bad : {"0", "169", "1.5", "24h"}) {
+        env["ULW_JWKS_MAX_STALE_HOURS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_JWKS_MAX_STALE_HOURS") << bad;
+    }
+}
+
 TEST_F(ChatConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
     env["ULW_ALLOWED_ORIGINS"] = "https://app.askedin.com,http://localhost:5173";
     const auto config = load();

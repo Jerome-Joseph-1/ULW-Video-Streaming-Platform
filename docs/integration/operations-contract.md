@@ -207,12 +207,14 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `presign_failures_total` | counter | A segment URL could not be signed; the viewer got `500` |
 | `view_events_recorded_total`, `view_events_dropped_total`, `view_batches_failed_total` | counter | Master-playlist fetches recorded as views |
 | `jobs_oldest_queued_seconds` | gauge | How long the oldest transcode job due to run has waited; `0` when none waits, `NaN` while the database does not answer |
+| `jwks_keys_expired` | gauge | `1` while every token is refused because the JWKS went unrefreshed for `ULW_JWKS_MAX_STALE_HOURS` ([auth.md](auth.md)) |
 | `store_paging_errors_total` | counter | Store failures only a fix on our side cures: signature, credentials, bucket |
 | `log_messages_dropped_total` | counter | Log lines dropped because the log reader fell behind |
 | `open_fds` | gauge | Descriptors open in the process |
 | `resident_memory_bytes` | gauge | Resident set size of the process |
 
-Worth alerting on: `readyz` failing outside a rollout; any rise in `playlists_rejected_total`,
+Worth alerting on: `readyz` failing outside a rollout; `jwks_keys_expired` at `1` (page: no
+token verifies until Askedin's JWKS is reachable again); any rise in `playlists_rejected_total`,
 `presign_failures_total`, `view_batches_failed_total` or `store_paging_errors_total` (page:
 retrying will not fix it); `admission_rejections_total` rising steadily;
 `backend_write_stall_seconds` observations at 30 s and above rising (the bucket is slow);
@@ -262,7 +264,7 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `presence_events_received_total`, `presence_notifications_total`, `presence_expired_total`
 (announcements and watching nodes dropped because they stopped being renewed, normally a node
 that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
-node repeated what it had said there). Chat is a draft ([chat.md](chat.md)).
+node repeated what it had said there), `jwks_keys_expired` (as the gateway's). Chat is a draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

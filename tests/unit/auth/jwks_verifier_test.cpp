@@ -360,6 +360,76 @@ TEST_F(JwksVerifierTest, AFailedRefetchKeepsTheKeysAndRetriesWithCappedBackoff) 
     EXPECT_EQ(fetcher_.requests, expected_requests + 1);
 }
 
+// A key Askedin withdraws while its JWKS cannot be reached must not verify for ever: after a
+// day without a successful fetch the keys, and every verdict they gave, are dropped.
+TEST_F(JwksVerifierTest, KeysUnrefreshedForADayAreDroppedAndEveryTokenRefusedUntilAFetchLands) {
+    std::vector<core::Millis> expiries;
+    verifier_ = std::make_unique<JwksVerifier>(
+        *reactor_, fetcher_,
+        JwksConfig{.url = std::string(kUrl),
+                   .claims = ulw::test::kTestRules,
+                   .on_keys_expired = [&expiries](core::Millis age) { expiries.push_back(age); }});
+    const std::string token =
+        signed_token(ed_key(), "EdDSA",
+                     test_payload({{"exp", ulw::test::numeric_date(std::int64_t{3} * 24 * 3600)}}));
+    EXPECT_TRUE(verify_through_fetch(token, key_set({ed_key().jwk()})));
+    EXPECT_FALSE(verifier_->keys_expired());
+
+    // Every refetch fails from here: the endpoint is down, or blocked.
+    const auto fail_fetches_for = [&](core::Millis span) {
+        const core::MonoTime until = clock_.now() + span;
+        while (clock_.now() < until) {
+            if (fetcher_.in_flight()) {
+                fetcher_.respond(std::nullopt);
+            }
+            advance(std::min<core::Millis>(
+                seconds(30), std::chrono::duration_cast<core::Millis>(until - clock_.now())));
+        }
+    };
+    fail_fetches_for(std::chrono::hours(24) - seconds(1));
+    EXPECT_TRUE(verify(token).value_or(refused(AuthError::KeysUnavailable)).has_value());
+    EXPECT_FALSE(verifier_->keys_expired());
+    EXPECT_TRUE(expiries.empty());
+
+    fail_fetches_for(seconds(1));
+    EXPECT_EQ(verify(token), refused(AuthError::KeysUnavailable));
+    EXPECT_TRUE(verifier_->keys_expired());
+    ASSERT_EQ(expiries.size(), 1U);
+    EXPECT_GE(expiries.front(), std::chrono::hours(24));
+    // A token never seen before fares no better.
+    EXPECT_EQ(verify(signed_token(ed_key(), "EdDSA", test_payload({{"sub", "\"bob\""}}))),
+              refused(AuthError::KeysUnavailable));
+
+    // The next fetch that lands puts the keys back.
+    while (!fetcher_.in_flight()) {
+        advance(seconds(30));
+    }
+    fetcher_.respond(key_set({ed_key().jwk()}));
+    EXPECT_FALSE(verifier_->keys_expired());
+    EXPECT_TRUE(verify(token).value_or(refused(AuthError::KeysUnavailable)).has_value());
+    EXPECT_EQ(expiries.size(), 1U);
+}
+
+TEST_F(JwksVerifierTest, HowLongKeysStayTrustedIsConfigurable) {
+    verifier_ = std::make_unique<JwksVerifier>(*reactor_, fetcher_,
+                                               JwksConfig{.url = std::string(kUrl),
+                                                          .claims = ulw::test::kTestRules,
+                                                          .max_key_age = std::chrono::hours(1)});
+    const std::string token = signed_token(ed_key(), "EdDSA", test_payload());
+    const core::MonoTime start = clock_.now();
+    EXPECT_TRUE(verify_through_fetch(token, key_set({ed_key().jwk()})));
+    for (int i = 0; i < 240 && !verifier_->keys_expired(); ++i) {
+        if (fetcher_.in_flight()) {
+            fetcher_.respond(std::nullopt);
+        }
+        advance(seconds(30));
+        static_cast<void>(verify(token));
+    }
+    EXPECT_TRUE(verifier_->keys_expired());
+    EXPECT_GE(clock_.now() - start, std::chrono::hours(1));
+    EXPECT_LE(clock_.now() - start, std::chrono::hours(1) + seconds(30));
+}
+
 TEST_F(JwksVerifierTest, AFailedFirstFetchAnswersKeysUnavailableUntilARetryLands) {
     const std::string token = signed_token(ed_key(), "EdDSA", test_payload());
     EXPECT_EQ(verify_through_fetch(token, ""), refused(AuthError::KeysUnavailable));
