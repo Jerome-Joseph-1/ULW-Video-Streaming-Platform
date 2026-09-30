@@ -2,8 +2,12 @@
 #include "support/child_process.hpp"
 #include "support/eventually.hpp"
 
+#include <sys/types.h>
+
 #include <chrono>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <string>
 
 namespace {
 
@@ -28,6 +32,29 @@ TEST(ChildProcess, PollUntilAsksAtMostOncePerPeriod) {
         limit, period));
     EXPECT_GE(asked, 2);
     EXPECT_LE(asked, static_cast<int>(limit / period) + 1);
+}
+
+// The datagram soak measures a leak by its RSS, which transparent huge pages grow with nothing
+// allocated: where THP is "always", khugepaged collapses a partly touched 2 MiB range into a huge
+// page mid-run (a 1,528 KiB step failed the 1-byte bound on a runner). The soak turns THP off for
+// itself before it allocates anything.
+TEST(DatagramSoak, RunsWithTransparentHugePagesOff) {
+    const auto soak = ulw::test::ChildProcess::start(
+        {ULW_DATAGRAM_SOAK_BIN, "--peers", "4", "--duration-s", "60", "--sample-s", "30"}, {});
+    ASSERT_TRUE(soak);
+    const auto thp_enabled = [pid = soak->pid()]() -> std::string {
+        std::ifstream status("/proc/" + std::to_string(pid) + "/status");
+        std::string line;
+        while (std::getline(status, line)) {
+            if (line.starts_with("THP_enabled:")) {
+                return line;
+            }
+        }
+        return {};
+    };
+    EXPECT_TRUE(ulw::test::eventually([&] { return thp_enabled() == "THP_enabled:\t0"; }))
+        << "last read: \"" << thp_enabled() << "\"\n"
+        << soak->output();
 }
 
 } // namespace
