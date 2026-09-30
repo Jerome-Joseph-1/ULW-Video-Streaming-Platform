@@ -61,7 +61,10 @@ std::expected<void, std::string> make_private_dir(const std::filesystem::path& d
     }
     // Whoever owns the parent can rename our directory away and put another in its place, so it
     // must be ours or root's: a Kubernetes emptyDir, the image's own directory or a PrivateTmp
-    // qualifies, one another user made first in a shared /var/tmp does not.
+    // qualifies, one another user made first in a shared /var/tmp does not. Its mode is not
+    // checked: a root-owned parent that anyone may write, without the sticky bit, is accepted,
+    // because that is what a kubelet-made emptyDir is (0777, or 2777 with an fsGroup), and in a
+    // pod no other user shares it.
     auto parent_fd = open_directory(AT_FDCWD, parent, parent);
     if (!parent_fd) {
         return std::unexpected(std::move(parent_fd.error()));

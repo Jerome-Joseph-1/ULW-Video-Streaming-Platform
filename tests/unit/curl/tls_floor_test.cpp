@@ -46,15 +46,30 @@ public:
     }
     // Once the client is done: the version of the ServerHello sent, 0 when none was.
     [[nodiscard]] int answered_with() {
-        thread_.join();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
         return answered_.load();
+    }
+    // Once the client is done: whether its ClientHello arrived.
+    [[nodiscard]] bool heard_hello() {
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        return hello_seen_.load();
     }
 
 private:
     static void on_message(int write_p, int /*version*/, int content_type, const void* buf,
                            std::size_t len, SSL* ssl, void* /*arg*/) {
-        if (write_p == 1 && content_type == SSL3_RT_HANDSHAKE && len > 0 &&
-            *static_cast<const unsigned char*>(buf) == SSL3_MT_SERVER_HELLO) {
+        if (content_type != SSL3_RT_HANDSHAKE || len == 0) {
+            return;
+        }
+        const unsigned char type = *static_cast<const unsigned char*>(buf);
+        if (write_p == 0 && type == SSL3_MT_CLIENT_HELLO) {
+            hello_seen_.store(true);
+        }
+        if (write_p == 1 && type == SSL3_MT_SERVER_HELLO) {
             answered_.store(SSL_version(ssl));
         }
     }
@@ -77,13 +92,17 @@ private:
 
     // One server per test at a time, and the callback has no user pointer of its own.
     static inline std::atomic<int> answered_{0};
+    static inline std::atomic<bool> hello_seen_{false};
     ulw::test::SslCtxPtr ctx_;
     os::UniqueFd listener_;
     std::uint16_t port_ = 0;
     std::jthread thread_;
 
 public:
-    static void reset() noexcept { answered_.store(0); }
+    static void reset() noexcept {
+        answered_.store(0);
+        hello_seen_.store(false);
+    }
 };
 
 infra::curl::Result get(const std::string& url) {
@@ -99,8 +118,11 @@ TEST(TlsFloor, AServerThatStopsAtTls12IsRefusedBeforeItAnswers) {
     OneShotTlsServer server(TLS1_2_VERSION);
     const auto result = get(server.url());
     ASSERT_FALSE(result);
+    // The client did reach the server and offer a handshake, which was then refused on its
+    // version: not a connection that never happened.
+    EXPECT_TRUE(server.heard_hello()) << result.error().detail;
     EXPECT_EQ(server.answered_with(), 0) << "the handshake went on at TLS 1.2";
-    EXPECT_NE(result.error().kind, FailureKind::Tls) << result.error().detail;
+    EXPECT_EQ(result.error().kind, FailureKind::Network) << result.error().detail;
 }
 
 TEST(TlsFloor, ATls13ServerIsAnsweredAtTls13) {

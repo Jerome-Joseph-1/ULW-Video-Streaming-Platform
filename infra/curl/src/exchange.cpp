@@ -129,9 +129,10 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     // the services call over https (Askedin's JWKS, R2, an https MinIO) must speak TLS 1.3
     // (docs/integration/operations-contract.md): it drops TLS 1.2's static-RSA and CBC suites
     // and renegotiation, and encrypts the certificate. The maximum is libcurl's default, the
-    // newest the TLS library offers. The option is read as a long; libcurl 8.5 declares the two
-    // values in separate enums, where or-ing them is a deprecated conversion, and 8.14 as
-    // longs, where a cast would be useless, so each is converted implicitly, then combined.
+    // newest the TLS library offers. The option is read as a long. libcurl 8.5 declares the two
+    // values in separate enums, where or-ing them is a deprecated conversion, so each becomes a
+    // long by implicit conversion first, which also holds whatever integer type another
+    // release gives them, without a cast that could be useless there.
     constexpr long kTlsMin = CURL_SSLVERSION_TLSv1_3;
     constexpr long kTlsMax = CURL_SSLVERSION_MAX_DEFAULT;
     constexpr long kTlsVersions = kTlsMin | kTlsMax;

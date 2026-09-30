@@ -64,10 +64,15 @@ TEST_F(MakePrivateDir, RefusesAFileInTheDirectorysPlace) {
 }
 
 TEST_F(MakePrivateDir, RefusesADirectoryAnotherUserOwns) {
-    // Root can hand a directory to another user; anyone else is not root, and /proc/1 is root's
-    // (in root's /proc).
-    fs::path dir = "/proc/1";
-    if (::geteuid() == 0) {
+    // Root can hand a directory to another user. Anyone else is not root, and /usr is root's
+    // on any host this runs on; it is refused before anything is changed in it.
+    fs::path dir = "/usr";
+    if (::geteuid() != 0) {
+        struct stat st {};
+        if (::lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != 0) {
+            GTEST_SKIP() << "not root, and /usr is not a directory of root's to try instead";
+        }
+    } else {
         dir = tmp.path() / "theirs";
         ASSERT_EQ(::mkdir(dir.c_str(), 0777), 0);
         ASSERT_EQ(::chmod(dir.c_str(), 0777), 0);
