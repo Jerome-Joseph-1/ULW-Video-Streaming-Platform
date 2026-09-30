@@ -23,7 +23,29 @@ Debian's and Ubuntu's security trackers), read on 2026-09-30:
 | NVD CRITICAL among them | 0 | 1 |
 | NVD HIGH among them | 4 | 5 |
 
-@SCAN@
+Trivy 0.74.0 (the scanner PR #64 pins) on the two worker images, 2026-09-30, counting distinct
+CVEs:
+
+| | before: Ubuntu 24.04 image | after: Debian 13 image |
+|---|---|---|
+| In ffmpeg's own packages (ffmpeg, libav*, libsw*, libpostproc) | 57 | 31 |
+| ... of which NVD rates HIGH or CRITICAL | 6 | 4 |
+| Whole image, NVD CRITICAL | 2 | 2 |
+| Whole image, NVD HIGH | 15 | 39 |
+| Whole image, Trivy CRITICAL | 0 | 1 (CVE-2026-6653, libxml2, no fix yet) |
+| Whole image, Trivy HIGH | 1 | 50 |
+| Trivy HIGH or CRITICAL with a fixed version available | 1 (CVE-2026-84782, OpenSSL) | 0 |
+
+The whole-image rows go up, and the reason matters for reading them. Debian's `ffmpeg` package
+pulls in 207 packages against Ubuntu's smaller set (libavdevice brings SDL, X11, Mesa and
+LLVM; libavfilter brings librsvg and libxml2), so there is more to scan; and Trivy rates an
+Ubuntu package by Ubuntu's priority, which puts most of them at medium, while for Debian it
+falls back to other vendors' ratings where Debian gives none. Of the 50 Trivy HIGHs after, 16
+are ffmpeg's own and the rest are util-linux (4), libxml2 (7), libcjson1 (5), libcurl (4),
+libexpat (4) and single ones in X11, ncurses, perl-base, systemd's libraries, libtiff and
+librsvg; none has a fix in trixie yet, so the gate that fails on fixable HIGHs passes. The old
+image fails it on OpenSSL. What was asked for is the row that decides this ADR: ffmpeg's open
+CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as DSAs land.
 
 ## Options
 
@@ -43,19 +65,41 @@ Debian's and Ubuntu's security trackers), read on 2026-09-30:
   `trixie-updates`) and the security archive (`trixie-security`), through
   `deploy/docker/apt-install-debian.sh`: apt checks each index against the snapshot's signed
   Release file and the archive keys the base image ships.
-@PINS@
+- Pinned at `DEBIAN_SNAPSHOT=20260930T100000Z`: `ffmpeg=7:7.1.5-0+deb13u1` (DSA-6361-1, in
+  debian-security since 20260622T192543Z), `openssl` and `libssl3t64` `3.5.7-1~deb13u3` (in
+  debian-security since 20260930T060347Z, which fixes the two OpenSSL HIGHs deb13u2 had),
+  `libcurl4t64=8.14.1-2+deb13u5`, `libpq5=17.11-0+deb13u1`, `liburing2=2.9-1`,
+  `ca-certificates=20250419`; to build, `g++-14=14.2.0-19`, `cmake=3.31.6-2`,
+  `ninja-build=1.12.1-1`, `pkgconf=1.8.1-4` and the matching -dev packages.
 - `transcode_worker` and `ulw_sandbox` are built in a trixie stage (`worker-build`) from the
   same snapshot, with trixie's GCC 14, CMake and -dev packages, so they link the glibc,
   libstdc++, OpenSSL, libcurl, libpq and liburing they were compiled against, as ADR-0030
-  asks. Running Ubuntu-built binaries on trixie happens to load (trixie's glibc 2.41 and
-  libstdc++ are newer than noble's 2.39), but OpenSSL (3.0 against 3.5), libpq (16 against 17)
-  and libcurl would each be a version the binary was never built or tested against, and the
-  first library whose sonames or symbols differ would break only at run time.
+  asks. Ubuntu-built binaries would probably load on trixie (glibc 2.41 is newer than noble's
+  2.39, both carry GCC 14.2's libstdc++, and the sonames match), but OpenSSL (3.0 against 3.5),
+  libpq (16 against 17) and libcurl (8.5 against 8.14) would each be a version the binary was
+  never compiled against, and a difference would show only at run time. The trixie build
+  already found one: libcurl 8.14 declares `CURL_HTTP_VERSION_1_1` as a long, which made a cast
+  in `infra/curl` fail `-Wuseless-cast`; the code now compiles against both. Two builder stages
+  cost one more compile of the worker's two targets per image build.
 - The gateway image (`gateway`, with `ulw_migrate` and `ulw_reaper`) stays on Ubuntu 24.04 as
   ADR-0030 has it: it carries no ffmpeg, and its libraries are covered by Ubuntu's free
   updates in main. CI and the other e2e jobs keep the runner's Ubuntu ffmpeg; the e2e sandbox
   job builds and runs the Debian worker image.
-@SECCOMP@
+- The syscall allowlist (ADR-0048) needs nothing new: `tools/trace-ffmpeg-syscalls.sh`, now
+  also covering the worker's keyframe and decode checks and the live recording's remux, gave 39
+  names on 7.1.5 as root and as an ordinary user, all already allowed (glibc 2.41 still falls
+  back from `clone3` to `clone`). The ffmpeg suites and the worker's, live packager's and live
+  recording's integration suites pass on 7.1.5 under the filter.
+- ffmpeg 7 rewrites the master playlist when a run ends, with each variant's measured peak and
+  average segment bitrate (`AVERAGE-BANDWIDTH` is new). Those differ between two runs of a job,
+  and everything but the segments must not (a rerun can overwrite some of another run's keys;
+  `TranscoderTest.SegmentsOfTwoRunsMixIntoARenditionThatPlays`). The transcoder writes the
+  master back with the ladder's declared rates plus a tenth and no `AVERAGE-BANDWIDTH`, exactly
+  what 6.1 wrote (`settle_master_bandwidth`).
+- The other arguments behave as on 6.1: the transcode and the live remux produce the same
+  playlists (version 7, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, fMP4 segments,
+  `temp_file`'s renames), and `-analyzeduration`/`-probesize` still bound the live probe: the
+  packager's late-keyframe test (ADR-0057) passes on 7.1.5.
 
 ## Updates
 
