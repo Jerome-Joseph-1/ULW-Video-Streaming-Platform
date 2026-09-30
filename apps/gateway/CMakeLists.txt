@@ -4,7 +4,9 @@ ulw_add_library(gateway_lib
     src/gateway.cpp
     src/health.cpp
     src/key_fetcher.cpp
+    src/live_manifest_cache.cpp
     src/playback.cpp
+    src/rate_limit.cpp
     src/view_recorder.cpp)
 target_include_directories(gateway_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 target_link_libraries(gateway_lib PUBLIC

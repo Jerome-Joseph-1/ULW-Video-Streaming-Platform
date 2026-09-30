@@ -1,6 +1,7 @@
 #include "config.hpp"
 
 #include "core/util/parse.hpp"
+#include "infra/ffmpeg/live_remux.hpp"
 #include "infra/srt/ingest.hpp"
 
 #include <utility>
@@ -17,7 +18,7 @@ constexpr std::string_view kDefaultIngestHost = "127.0.0.1";
 // (ADR-0014), so a segment must last more than a second. Past 10 s the stream is not live to
 // its viewers: they sit three target durations behind the edge.
 constexpr std::uint32_t kMinSegmentSeconds = 2;
-constexpr std::uint32_t kMaxSegmentSeconds = 10;
+constexpr std::uint32_t kMaxSegmentSeconds = infra::ffmpeg::kLiveMaxSegmentSeconds;
 constexpr std::uint32_t kDefaultSegmentSeconds = 2;
 // RFC 8216 section 6.2.2: a live playlist holds at least three target durations. Ten segments
 // at the default 2 s keep 20 s, room for a viewer's stall or a slow reload. 64 keeps
@@ -32,7 +33,7 @@ constexpr std::uint64_t kMaxHours = 12;
 // well above it, and past 100 the pipe, not the packager, is the limit.
 constexpr std::uint32_t kMinKbps = 500;
 constexpr std::uint32_t kDefaultKbps = 20'000;
-constexpr std::uint32_t kMaxKbps = 100'000;
+constexpr std::uint32_t kMaxKbps = infra::ffmpeg::kLiveMaxKbps;
 
 std::unexpected<ConfigError> error(std::string_view variable, std::string_view reason) {
     return std::unexpected(
@@ -115,6 +116,26 @@ std::expected<Storage, ConfigError> load_storage(const EnvLookup& env) {
     return storage;
 }
 
+// Both or neither: a database without an owner, or the reverse, is a half-configured recorder.
+std::expected<std::optional<RecordingTarget>, ConfigError> load_recording(const EnvLookup& env) {
+    auto url = lookup(env, "ULW_DATABASE_URL");
+    const auto owner_text = lookup(env, "ULW_STREAM_OWNER");
+    if (!url && !owner_text) {
+        return std::nullopt;
+    }
+    if (!url) {
+        return error("ULW_DATABASE_URL", "not set, and ULW_STREAM_OWNER is");
+    }
+    if (!owner_text) {
+        return error("ULW_STREAM_OWNER", "not set, and ULW_DATABASE_URL is");
+    }
+    const auto owner = core::UserId::parse(*owner_text);
+    if (!owner) {
+        return error("ULW_STREAM_OWNER", "not a user id");
+    }
+    return RecordingTarget{.database_url = std::move(*url), .owner = *owner};
+}
+
 } // namespace
 
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
@@ -174,6 +195,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!kbps) {
         return std::unexpected(kbps.error());
     }
+    auto recording = load_recording(env);
+    if (!recording) {
+        return std::unexpected(std::move(recording.error()));
+    }
     return Config{.stream = std::move(*stream),
                   .ingest_host =
                       lookup(env, "ULW_LIVE_INGEST_HOST").value_or(std::string(kDefaultIngestHost)),
@@ -187,11 +212,13 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .scratch = *scratch / *stream_text,
                   .sandbox = std::move(*sandbox),
                   .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
+                  .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .segment_seconds = *segment,
                   .window_segments = *window,
                   .max_duration = core::Seconds{static_cast<std::int64_t>(*hours) * 3600},
-                  .max_kbps = *kbps};
+                  .max_kbps = *kbps,
+                  .recording = std::move(*recording)};
 }
 
 } // namespace live

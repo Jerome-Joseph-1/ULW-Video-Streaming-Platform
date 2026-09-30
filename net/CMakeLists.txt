@@ -2,11 +2,13 @@ pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing>=2.5)
 
 ulw_add_library(net_lib
     src/epoll_reactor.cpp
+    src/ip_address.cpp
     src/job_queue.cpp
     src/offload_pool.cpp
     src/reactor_factory.cpp
     src/send_queue.cpp
     src/signals.cpp
+    src/sockaddr.cpp
     src/socket.cpp
     src/timing_wheel.cpp
     src/transport_plain.cpp

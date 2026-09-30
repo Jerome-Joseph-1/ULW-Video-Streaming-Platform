@@ -4,40 +4,27 @@
 // The M17 acceptance on the same cluster: clients on every node see one order by last_seq; a
 // rate-limited send is refused and reaches nobody; a repeated send is delivered once; a client
 // that comes back resumes from its last seq; no body shows in any log or in the database.
-// ULW_CHAT_CLUSTER_PORTS=9101,9102,9103 pins the client ports (the CI job does); otherwise
-// free ones are taken.
+// The M19 acceptance: every message is stored with its seq, as the bytes that were sent and in
+// no readable form besides; history survives a restart of every node, in order; a client that
+// resumes through a node that kept nothing fills the gap from history; a room with members
+// refuses anyone else.
+// The M18 acceptance: a user who reconnects within the grace is no event to anyone watching; one
+// who does not is exactly one offline on every watching node; a user nobody watches costs no
+// presence message at all.
 
-#include "core/util/json.hpp"
-#include "core/util/parse.hpp"
-#include "infra/auth/base64url.hpp"
-#include "os/system_clock.hpp"
-#include "os/system_random.hpp"
-
-#include "devtoken/dev_key.hpp"
-#include "postgres_harness.hpp"
-#include "support/child_process.hpp"
-#include "support/eventually.hpp"
-#include "support/reactor_harness.hpp"
-#include "support/temp_dir.hpp"
-#include "support/ws_client.hpp"
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include "chat_cluster.hpp"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <csignal>
-#include <cstdlib>
+#include <cstdint>
 #include <format>
-#include <fstream>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -45,343 +32,13 @@ namespace {
 using infra::postgres::Params;
 using std::chrono::seconds;
 using ulw::test::ChildProcess;
-using ulw::test::ScratchDatabase;
-using ulw::test::WsClient;
+using ulw::test::Client;
+using ulw::test::kGrace;
+using ulw::test::kReadyCheckPeriod;
+using ulw::test::Node;
+using ulw::test::Seen;
 
-constexpr std::string_view kIssuer = "https://auth.test.askedin.com";
-
-std::uint16_t free_port() {
-    const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    socklen_t len = sizeof addr;
-    // bind() and getsockname() take every address family through the generic header.
-    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
-    if (::bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 ||
-        ::getsockname(fd.get(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-        return 0;
-    }
-    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
-    return ntohs(addr.sin_port);
-}
-
-std::vector<std::uint16_t> client_ports() {
-    std::vector<std::uint16_t> ports;
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
-    const char* pinned = std::getenv("ULW_CHAT_CLUSTER_PORTS");
-    std::string_view rest = pinned == nullptr ? "" : pinned;
-    while (!rest.empty()) {
-        const std::size_t comma = rest.find(',');
-        ports.push_back(core::parse_integer<std::uint16_t>(rest.substr(0, comma)).value_or(0));
-        rest = comma == std::string_view::npos ? "" : rest.substr(comma + 1);
-    }
-    while (ports.size() < 3) {
-        ports.push_back(free_port());
-    }
-    return ports;
-}
-
-// A server message, the fields the test looks at. The body is decoded: what the sender sent.
-struct Seen {
-    std::string type;
-    std::uint64_t seq = 0;
-    std::string sender;
-    std::string id;
-    std::string body;
-    std::string reason;
-    std::optional<std::uint64_t> retry_after_ms;
-};
-
-std::optional<Seen> parse_seen(const std::string& text) {
-    const auto json = core::json::parse(text);
-    if (!json) {
-        return std::nullopt;
-    }
-    const auto string = [&](std::string_view key) {
-        const core::json::Value* v = json->find(key);
-        return std::string(v == nullptr ? "" : v->as_string().value_or(""));
-    };
-    Seen s{.type = string("type"),
-           .seq = 0,
-           .sender = string("sender"),
-           .id = string("id"),
-           .body = infra::auth::decode_base64url(string("body")).value_or("<not base64url>"),
-           .reason = string("reason"),
-           .retry_after_ms = std::nullopt};
-    if (const core::json::Value* seq = json->find("seq")) {
-        s.seq = seq->as_u64().value_or(0);
-    }
-    if (const core::json::Value* after = json->find("retry_after_ms")) {
-        s.retry_after_ms = after->as_u64();
-    }
-    return s;
-}
-
-// One user's socket and everything the server has sent it.
-class Client {
-public:
-    Client(WsClient ws, std::string name) : ws_(std::move(ws)), name_(std::move(name)) {}
-
-    [[nodiscard]] const std::string& name() const noexcept { return name_; }
-    [[nodiscard]] const std::vector<Seen>& seen() const noexcept { return seen_; }
-
-    bool send(const std::string& json) { return ws_.send_text(json); }
-
-    // Reads until a message matching `pred` arrives, keeping everything read.
-    template <class Pred>
-    std::optional<Seen> wait_for(Pred pred, std::chrono::milliseconds limit = seconds(15)) {
-        for (const Seen& s : seen_) {
-            if (pred(s)) {
-                return s;
-            }
-        }
-        const auto deadline = std::chrono::steady_clock::now() + limit;
-        while (std::chrono::steady_clock::now() < deadline) {
-            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now());
-            const auto text = ws_.next_text(left);
-            if (!text) {
-                return std::nullopt;
-            }
-            auto s = parse_seen(*text);
-            if (!s) {
-                ADD_FAILURE() << name_ << " got something that is not JSON: " << *text;
-                return std::nullopt;
-            }
-            seen_.push_back(*s);
-            if (pred(*s)) {
-                return s;
-            }
-        }
-        return std::nullopt;
-    }
-
-    std::optional<Seen> message(const std::string& body) {
-        return wait_for([&](const Seen& s) { return s.type == "message" && s.body == body; });
-    }
-
-    [[nodiscard]] bool ever_saw(const std::string& body) const {
-        return std::ranges::any_of(seen_, [&](const Seen& s) { return s.body == body; });
-    }
-
-    template <class Pred> [[nodiscard]] std::size_t count(Pred pred) const {
-        return static_cast<std::size_t>(std::ranges::count_if(seen_, pred));
-    }
-
-    [[nodiscard]] std::vector<Seen> messages() const {
-        std::vector<Seen> out;
-        std::ranges::copy_if(seen_, std::back_inserter(out),
-                             [](const Seen& s) { return s.type == "message"; });
-        return out;
-    }
-
-private:
-    WsClient ws_;
-    std::string name_;
-    std::vector<Seen> seen_;
-};
-
-struct Node {
-    std::string name;
-    std::uint16_t port = 0;
-    std::uint16_t node_port = 0;
-    std::unique_ptr<ChildProcess> process;
-};
-
-class ChatClusterTest : public ::testing::TestWithParam<net::ReactorKind> {
-protected:
-    void SetUp() override {
-        ScratchDatabase::open(db_);
-        if (IsSkipped() || HasFatalFailure()) {
-            return;
-        }
-        room_ = core::RoomId::generate(clock_, random_).to_string();
-        // Made up per run: no real secret lives in the repository.
-        std::array<std::byte, 32> secret{};
-        random_.fill(secret);
-        for (const std::byte b : secret) {
-            node_secret_ += std::format("{:02x}", std::to_integer<unsigned>(b));
-        }
-        auto key = devtoken::DevKey::generate();
-        ASSERT_TRUE(key);
-        const auto jwks = files_.path() / "jwks.json";
-        std::ofstream(jwks) << key->public_jwks();
-        for (const char* user : {"alice", "bob", "carol"}) {
-            tokens_.push_back(*key->mint({.issuer = std::string(kIssuer),
-                                          .audience = "askedin-platform",
-                                          .subject = user,
-                                          .email = {},
-                                          .ttl = seconds(600)},
-                                         clock_.wall_now()));
-        }
-        const auto ports = client_ports();
-        for (std::size_t i = 0; i < 3; ++i) {
-            nodes_.push_back({.name = "chat-" + std::to_string(i + 1),
-                              .port = ports[i],
-                              .node_port = free_port(),
-                              .process = nullptr});
-            ASSERT_NE(nodes_.back().port, 0);
-            ASSERT_NO_FATAL_FAILURE(start(nodes_.back(), jwks.string()));
-        }
-        for (const Node& n : nodes_) {
-            ASSERT_TRUE(ulw::test::eventually(
-                [&] { return ulw::test::http_get(n.port, "/readyz").status == 200; }, seconds(30)))
-                << n.process->output();
-        }
-    }
-
-    void start(Node& node, const std::string& jwks) {
-        std::vector<std::string> env{
-            "ULW_NODE_ID=" + node.name,
-            "ULW_LISTEN_PORT=" + std::to_string(node.port),
-            "ULW_NODE_ADDRESS=127.0.0.1:" + std::to_string(node.node_port),
-            "ULW_DEV_LOOPBACK_NODES=1",
-            "ULW_NODE_SECRET=" + node_secret_,
-            "ULW_DATABASE_URL=" + db_->conninfo(),
-            "ULW_DEV_JWKS_FILE=" + jwks,
-            "JWT_ISSUER=" + std::string(kIssuer),
-            "ULW_REACTOR=" +
-                std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll")};
-        for (const char* passed : {"ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"}) {
-            // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
-            if (const char* value = std::getenv(passed)) {
-                env.push_back(std::string(passed) + "=" + value);
-            }
-        }
-        node.process = ChildProcess::start({ULW_CHAT_BIN}, env);
-        ASSERT_NE(node.process, nullptr);
-        ASSERT_TRUE(node.process->wait_for_output(R"("msg":"listening")", seconds(30)))
-            << node.process->output();
-    }
-
-    std::unique_ptr<Client> connect(const Node& node, std::size_t user) {
-        std::string refusal;
-        auto ws = WsClient::connect(node.port, "/rt",
-                                    "Authorization: Bearer " + tokens_[user] + "\r\n", &refusal);
-        if (!ws) {
-            ADD_FAILURE() << "upgrade refused: " << refusal;
-            return nullptr;
-        }
-        return std::make_unique<Client>(std::move(*ws),
-                                        std::array{"alice", "bob", "carol"}.at(user));
-    }
-
-    void join(Client& client, std::optional<std::uint64_t> after = std::nullopt) {
-        ASSERT_TRUE(client.send(R"({"type":"join","room":")" + room_ + R"(")" +
-                                (after ? R"(,"after":)" + std::to_string(*after) : "") + "}"));
-        const auto joined =
-            client.wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
-        ASSERT_TRUE(joined);
-        ASSERT_EQ(joined->type, "joined") << joined->reason;
-    }
-
-    static std::string send_command(const std::string& room, const std::string& body,
-                                    const std::string& id) {
-        return R"({"type":"send","room":")" + room + R"(","id":")" + id + R"(","body":")" +
-               infra::auth::encode_base64url(body) + R"("})";
-    }
-
-    static std::string ref(std::uint64_t n) { return "r" + std::to_string(n); }
-
-    // Sends until the client gets its own message back: then its node routes to the room's
-    // current owner and receives what that owner sequences. Returns the message's seq.
-    std::optional<std::uint64_t> send_until_heard(Client& client, const std::string& body) {
-        for (int attempt = 0; attempt < 10; ++attempt) {
-            const std::string id = ref(next_ref_++);
-            const std::string text = body + " #" + std::to_string(attempt);
-            if (!client.send(send_command(room_, text, id))) {
-                return std::nullopt;
-            }
-            const auto outcome = client.wait_for([&](const Seen& s) {
-                return (s.type == "message" && s.body == text) || (s.type == "error" && s.id == id);
-            });
-            if (outcome && outcome->type == "message") {
-                last_body_[client.name()] = text;
-                return outcome->seq;
-            }
-        }
-        return std::nullopt;
-    }
-
-    [[nodiscard]] std::string owner() const {
-        auto conn = db_->session();
-        return ulw::test::scalar(conn,
-                                 "SELECT owner_node || ' ' || owner_generation "
-                                 "FROM room_assignments WHERE room_id = $1::text::uuid",
-                                 Params{}.add_text(room_));
-    }
-
-    [[nodiscard]] std::string last_seq() const {
-        auto conn = db_->session();
-        return ulw::test::scalar(conn,
-                                 "SELECT last_seq FROM room_state WHERE room_id = $1::text::uuid",
-                                 Params{}.add_text(room_));
-    }
-
-    // Every row of every table, as text; bytea shows as hex.
-    [[nodiscard]] std::string database_text() const {
-        auto conn = db_->session();
-        return ulw::test::scalar(conn, R"sql(
-SELECT string_agg(query_to_xml(format('SELECT t::text AS row FROM %I.%I t', table_schema,
-                                      table_name), false, false, '')::text, E'\n')
-  FROM information_schema.tables
- WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema'))sql");
-    }
-
-    [[nodiscard]] static std::uint64_t metric(const Node& node, std::string_view name) {
-        const std::string body = ulw::test::http_get(node.port, "/metrics").body;
-        const std::string line = std::string(name) + " ";
-        const std::size_t at = body.find(line);
-        if (at == std::string::npos || (at > 0 && body[at - 1] != '\n')) {
-            ADD_FAILURE() << name << " is not in the metrics";
-            return 0;
-        }
-        const std::size_t start = at + line.size();
-        return core::parse_integer<std::uint64_t>(
-                   std::string_view(body).substr(start, body.find('\n', start) - start))
-            .value_or(0);
-    }
-
-    // Section 8.15: bodies are never logged, indexed or stored as anything a grep could read.
-    // The database is searched for each body as it was sent, as the client encoded it, and as
-    // bytea would show it. Until messages are stored (M19) there are no rows a body could be
-    // in, so only the logs half can fail; from then on this must also check that the rows grew
-    // by the stored bodies, or it proves nothing about them.
-    void expect_no_plaintext(const std::vector<std::string>& bodies) const {
-        const std::string database = database_text();
-        ASSERT_NE(database.find(room_), std::string::npos) << "no rows read";
-        for (const std::string& body : bodies) {
-            std::string hex;
-            for (const char c : body) {
-                hex += std::format("{:02x}", static_cast<unsigned char>(c));
-            }
-            for (const std::string& form : {body, infra::auth::encode_base64url(body), hex}) {
-                EXPECT_EQ(database.find(form), std::string::npos) << "the database holds " << form;
-                for (const Node& n : nodes_) {
-                    EXPECT_EQ(n.process->output().find(form), std::string::npos)
-                        << n.name << " logged " << form;
-                }
-            }
-        }
-        if (!HasFailure()) {
-            std::cout << "searched " << database.size() << " bytes of rows and " << nodes_.size()
-                      << " logs for " << bodies.size() << (bodies.size() == 1 ? " body" : " bodies")
-                      << " in three forms: none found\n";
-        }
-    }
-
-    os::SystemClock clock_;
-    os::SystemRandom random_;
-    std::unique_ptr<ScratchDatabase> db_;
-    ulw::test::TempDir files_{"ulw-chat-cluster"};
-    std::vector<std::string> tokens_;
-    std::vector<Node> nodes_;
-    std::string room_;
-    std::string node_secret_;
-    std::uint64_t next_ref_ = 100;
-    std::unordered_map<std::string, std::string> last_body_;
-};
+class ChatClusterTest : public ulw::test::ChatCluster {};
 
 TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeliveredNowhere) {
     auto alice = connect(nodes_[0], 0);
@@ -578,6 +235,7 @@ TEST_P(ChatClusterTest, ARateLimitedSendIsRefusedAndReachesNobody) {
         ASSERT_TRUE(bob->send(send_command(room_, bodies.back(), std::format("b{}", i))));
     }
     std::vector<std::string> limited;
+    std::vector<std::string> refused;
     std::uint64_t retry_after_ms = 0;
     for (std::size_t i = 0; i < kBurst; ++i) {
         const std::string id = std::format("b{}", i);
@@ -589,6 +247,7 @@ TEST_P(ChatClusterTest, ARateLimitedSendIsRefusedAndReachesNobody) {
             ASSERT_TRUE(answer->retry_after_ms) << id;
             retry_after_ms = std::max(retry_after_ms, *answer->retry_after_ms);
             limited.push_back(id);
+            refused.push_back(bodies[i]);
         }
     }
     ASSERT_GE(limited.size(), 1U);
@@ -628,7 +287,7 @@ TEST_P(ChatClusterTest, ARateLimitedSendIsRefusedAndReachesNobody) {
     std::cout << "bob sent " << kBurst << " at once: " << limited.size()
               << " refused as rate_limited (retry after " << retry_after_ms
               << " ms), delivered to nobody; the rest reached all three nodes\n";
-    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(bodies));
+    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(bodies, refused));
 }
 
 TEST_P(ChatClusterTest, ASendRepeatedWithItsIdIsDeliveredOnceWhereverItIsRepeated) {
@@ -720,7 +379,7 @@ TEST_P(ChatClusterTest, AClientThatComesBackResumesFromItsLastSeq) {
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
 }
 
-TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingLearnsWhatItMissed) {
+TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingFillsTheGapFromHistory) {
     auto alice = connect(nodes_[0], 0);
     auto bob = connect(nodes_[1], 1);
     ASSERT_TRUE(alice && bob);
@@ -744,10 +403,291 @@ TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingLearnsWhatItMi
     ASSERT_TRUE(joined);
     EXPECT_EQ(joined->seq, *last + 3) << "the client can tell it missed three messages";
     EXPECT_TRUE(elsewhere->messages().empty());
+    // It fills the gap from history, which the store has whichever node the client is on.
+    const auto filled = history(*elsewhere, std::format(R"(,"after":{})", *last));
+    ASSERT_TRUE(filled);
+    ASSERT_EQ(filled->size(), 3U);
+    for (std::size_t i = 0; i < filled->size(); ++i) {
+        EXPECT_EQ((*filled)[i].seq, *last + 1 + i);
+        EXPECT_EQ((*filled)[i].body, missed[i]);
+        EXPECT_EQ((*filled)[i].sender, "alice");
+    }
     std::cout << "bob came back through chat-3 after seq " << *last
-              << ", which kept nothing; joined named the head " << joined->seq << "\n";
-    missed.emplace_back("before bob left");
+              << ", which kept nothing; joined named the head " << joined->seq
+              << ", and history sent seqs " << filled->front().seq << ".." << filled->back().seq
+              << "\n";
+    missed.push_back(last_body_["alice"]);
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
+}
+
+TEST_P(ChatClusterTest, AReconnectWithinTheGraceIsNoEventAndALeaveIsOneOfflineOnEveryNode) {
+    const auto presence = [](std::string_view status) {
+        return [status](const Seen& s) {
+            return s.type == "presence" && s.user == "alice" && s.status == status;
+        };
+    };
+    const auto is_presence = [](const Seen& s) { return s.type == "presence"; };
+    const auto is_presence_after_online = [](const Seen& s) {
+        return s.type == "presence" && s.status != "online";
+    };
+    // bob watches alice from every node before she connects.
+    std::vector<std::unique_ptr<Client>> watchers;
+    for (const Node& n : nodes_) {
+        watchers.push_back(connect(n, 1));
+        ASSERT_TRUE(watchers.back());
+        ASSERT_TRUE(watchers.back()->send(R"({"type":"watch","user":"alice"})"));
+        const auto answer = watchers.back()->wait_for(
+            [](const Seen& s) { return s.type == "watching" || s.type == "error"; });
+        ASSERT_TRUE(answer) << n.name;
+        EXPECT_EQ(answer->type, "watching") << answer->reason;
+        EXPECT_EQ(answer->status, "offline");
+    }
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    for (auto& w : watchers) {
+        ASSERT_TRUE(w->wait_for(presence("online")));
+    }
+
+    // alice drops off chat-1 and is back through chat-2 within the grace. chat-1 answers
+    // chat-2's announcement with an ack (bob watches there too) and, once its grace has run
+    // out, says she is offline there: two events, which change nothing for anyone watching.
+    const std::uint64_t before = metric(nodes_[0], "presence_events_sent_total");
+    alice.reset();
+    alice = connect(nodes_[1], 0);
+    ASSERT_TRUE(alice);
+    // Each check is a request: paced, as readiness is.
+    ASSERT_TRUE(nodes_[0].process->poll_until(
+        [&] { return metric(nodes_[0], "presence_events_sent_total") >= before + 2; }, seconds(30),
+        kReadyCheckPeriod));
+    // Everything chat-1 sent has had a grace's time to reach every node.
+    const auto quiet_until = [](std::chrono::steady_clock::time_point until) {
+        return std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
+                            until - std::chrono::steady_clock::now()),
+                        std::chrono::milliseconds{1});
+    };
+    auto until = std::chrono::steady_clock::now() + kGrace;
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        EXPECT_FALSE(watchers[i]->wait_for(is_presence_after_online, quiet_until(until)))
+            << nodes_[i].name << " heard the reconnect";
+        EXPECT_EQ(watchers[i]->count(is_presence), 1U) << "online, and nothing since";
+    }
+
+    // Now she leaves for good.
+    alice.reset();
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        ASSERT_TRUE(watchers[i]->wait_for(presence("offline"))) << nodes_[i].name;
+    }
+    // Twice the grace more: long enough for a second offline from any node to arrive.
+    until = std::chrono::steady_clock::now() + (kGrace * 2);
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        EXPECT_FALSE(watchers[i]->wait_for([](const Seen&) { return false; }, quiet_until(until)));
+        EXPECT_EQ(watchers[i]->count(presence("offline")), 1U) << nodes_[i].name;
+        EXPECT_EQ(watchers[i]->count(is_presence), 2U) << nodes_[i].name;
+    }
+    // Sequenced like any room's, and kept nowhere.
+    auto conn = db_->session();
+    const std::string sequenced = ulw::test::scalar(
+        conn, "SELECT coalesce(sum(last_seq), 0) FROM room_state WHERE kind = 'presence'",
+        Params{});
+    EXPECT_NE(sequenced, "0");
+    EXPECT_EQ(
+        ulw::test::scalar(conn,
+                          "SELECT count(*) FROM chat_messages JOIN room_state USING (room_id) "
+                          "WHERE kind = 'presence'",
+                          Params{}),
+        "0");
+    std::cout << "presence rooms took " << sequenced << " seqs and stored no row\n";
+    std::cout << "alice reconnected through chat-2 within the " << kGrace.count()
+              << " ms grace: no event on any node; she left: one offline on each of "
+              << nodes_.size() << " nodes\n";
+}
+
+TEST_P(ChatClusterTest, AUserNobodyWatchesCostsNoPresenceMessage) {
+    const auto total = [&](std::string_view name) {
+        std::uint64_t sum = 0;
+        for (const Node& n : nodes_) {
+            sum += metric(n, name);
+        }
+        return sum;
+    };
+    const std::uint64_t sent = total("presence_events_sent_total");
+    const std::uint64_t received = total("presence_events_received_total");
+    const std::uint64_t forwards = total("forwards_total");
+    auto dave = connect(nodes_[0], 3);
+    ASSERT_TRUE(dave);
+    EXPECT_EQ(metric(nodes_[0], "presence_rooms"), 1U);
+    dave.reset();
+    // The grace runs out, and chat-1 leaves dave's room: nothing is left of him.
+    ASSERT_TRUE(nodes_[0].process->poll_until(
+        [&] { return metric(nodes_[0], "presence_rooms") == 0; }, seconds(30), kReadyCheckPeriod));
+    EXPECT_EQ(total("presence_events_sent_total"), sent);
+    EXPECT_EQ(total("presence_events_received_total"), received);
+    EXPECT_EQ(total("forwards_total"), forwards);
+    std::cout << "dave came and went with nobody watching: presence events sent "
+              << total("presence_events_sent_total") - sent << ", received "
+              << total("presence_events_received_total") - received << ", forwards "
+              << total("forwards_total") - forwards << " across " << nodes_.size() << " nodes\n";
+}
+
+TEST_P(ChatClusterTest, HistorySurvivesARestartOfEveryNodeInTheOrderItWasSent) {
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    ASSERT_NO_FATAL_FAILURE(join(*alice));
+    ASSERT_NO_FATAL_FAILURE(join(*bob));
+    std::vector<std::string> sent;
+    for (int i = 0; i < 6; ++i) {
+        Client& from = i % 2 == 0 ? *alice : *bob;
+        sent.push_back(std::format("kept across restarts {}", i));
+        ASSERT_TRUE(from.send(send_command(room_, sent.back(), std::format("keep-{}", i))));
+        ASSERT_TRUE(alice->message(sent.back()));
+    }
+    const std::vector<Seen> live = alice->messages();
+    alice.reset();
+    bob.reset();
+
+    for (Node& n : nodes_) {
+        n.process->signal(SIGTERM);
+    }
+    for (Node& n : nodes_) {
+        ASSERT_EQ(n.process->wait_exit(seconds(30)), 0) << n.name << "\n" << n.process->output();
+    }
+    for (Node& n : nodes_) {
+        ASSERT_NO_FATAL_FAILURE(start(n, jwks_));
+    }
+    ASSERT_NO_FATAL_FAILURE(wait_ready());
+
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(carol);
+    ASSERT_NO_FATAL_FAILURE(join(*carol));
+    const auto newest = history(*carol, R"(,"limit":4)");
+    ASSERT_TRUE(newest);
+    const auto oldest = history(*carol, std::format(R"(,"before":{})", newest->back().seq));
+    ASSERT_TRUE(oldest);
+    std::vector<Seen> all = *newest;
+    all.insert(all.end(), oldest->begin(), oldest->end());
+    ASSERT_EQ(all.size(), live.size());
+    // Newest first from the store, as the live order reversed, byte for byte.
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        const Seen& was = live[live.size() - 1 - i];
+        EXPECT_EQ(all[i].seq, was.seq);
+        EXPECT_EQ(all[i].id, was.id);
+        EXPECT_EQ(all[i].sender, was.sender);
+        EXPECT_EQ(all[i].body, was.body);
+    }
+    const auto past_the_start = history(*carol, std::format(R"(,"before":{})", live.front().seq));
+    ASSERT_TRUE(past_the_start);
+    EXPECT_TRUE(past_the_start->empty());
+    std::cout << "after all three nodes restarted, history gave seqs " << all.front().seq << ".."
+              << all.back().seq << " newest first, as they were delivered\n";
+    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(sent));
+}
+
+TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    ASSERT_NO_FATAL_FAILURE(join(*alice));
+    const std::string body = "sent before the restart";
+    ASSERT_TRUE(alice->send(send_command(room_, body, "kept-key")));
+    const auto ack =
+        alice->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
+    ASSERT_TRUE(ack);
+    alice.reset();
+    // Every node's memory of recent keys goes with it, and the room gets a new owner.
+    for (Node& n : nodes_) {
+        n.process->signal(SIGTERM);
+    }
+    for (Node& n : nodes_) {
+        ASSERT_EQ(n.process->wait_exit(seconds(30)), 0) << n.name << "\n" << n.process->output();
+    }
+    for (Node& n : nodes_) {
+        ASSERT_NO_FATAL_FAILURE(start(n, jwks_));
+    }
+    ASSERT_NO_FATAL_FAILURE(wait_ready());
+
+    auto again = connect(nodes_[1], 0);
+    ASSERT_TRUE(again);
+    ASSERT_NO_FATAL_FAILURE(join(*again));
+    ASSERT_TRUE(again->send(send_command(room_, body, "kept-key")));
+    const auto repeat =
+        again->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
+    ASSERT_TRUE(repeat);
+    EXPECT_EQ(repeat->seq, ack->seq);
+    ASSERT_TRUE(again->send(send_command(room_, "another body", "kept-key")));
+    const auto conflict =
+        again->wait_for([](const Seen& s) { return s.type == "error" && s.id == "kept-key"; });
+    ASSERT_TRUE(conflict);
+    EXPECT_EQ(conflict->reason, "conflict");
+    ASSERT_TRUE(again->send(send_command(room_, "after the resends", "marker")));
+    ASSERT_TRUE(again->message("after the resends"));
+    // Never sequenced again: the marker is the next seq, and nothing arrived under the key
+    // but the first message, under its own seq.
+    EXPECT_EQ(last_seq(), std::to_string(ack->seq + 1));
+    for (const Seen& s : again->messages()) {
+        EXPECT_TRUE(s.id != "kept-key" || (s.seq == ack->seq && s.body == body));
+    }
+    EXPECT_FALSE(again->ever_saw("another body"));
+    for (const Node& n : nodes_) {
+        EXPECT_EQ(metric(n, "messages_deduplicated_total"), 0U) << n.name << " answered it";
+    }
+    std::cout << "after every node restarted, the resend got seq " << repeat->seq
+              << " from the store, and another body under its id was a conflict\n";
+    ASSERT_NO_FATAL_FAILURE(expect_no_plaintext({body, "another body"}, {"another body"}));
+}
+
+TEST_P(ChatClusterTest, ARoomWithMembersRefusesEveryoneElse) {
+    const std::string members_only = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(members_only, {"alice", "bob"}));
+    auto alice = connect(nodes_[0], 0);
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(alice && carol);
+    EXPECT_EQ(join_answer(*alice, members_only), "joined");
+    EXPECT_EQ(join_answer(*carol, members_only), "not_member");
+    ASSERT_TRUE(carol->send(send_command(members_only, "let me in", "sneak")));
+    const auto sneak = carol->wait_for([](const Seen& s) { return s.id == "sneak"; });
+    ASSERT_TRUE(sneak);
+    EXPECT_EQ(sneak->reason, "not_joined");
+    ASSERT_TRUE(alice->send(send_command(members_only, "members only", "inside")));
+    ASSERT_TRUE(alice->message("members only"));
+    EXPECT_FALSE(carol->ever_saw("members only"));
+}
+
+TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedLater) {
+    const std::string nobody = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    EXPECT_EQ(join_answer(*alice, nobody), "not_member");
+    // Its first join recorded it as a group chat; asking for live afterwards opens nothing, and
+    // neither can the server.
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+    EXPECT_EQ(record_live(nobody), "group_chat");
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+}
+
+TEST_P(ChatClusterTest, AJoinThatAsksForLiveCannotOpenARoomTheServerDidNot) {
+    const std::string room = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    EXPECT_EQ(join_answer(*alice, room, R"(,"kind":"live")"), "not_live");
+    auto conn = db_->session();
+    EXPECT_EQ(ulw::test::scalar(conn,
+                                "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
+                                Params{}.add_text(room)),
+              "0");
+}
+
+TEST_P(ChatClusterTest, ALiveRoomAdmitsAnyone) {
+    const std::string live = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_EQ(record_live(live), "stream_live_chat");
+    auto alice = connect(nodes_[0], 0);
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(alice && carol);
+    EXPECT_EQ(join_answer(*alice, live, R"(,"kind":"live")"), "joined");
+    // Joins after the first need not know what the room is.
+    EXPECT_EQ(join_answer(*carol, live), "joined");
+    ASSERT_TRUE(carol->send(send_command(live, "hello, stream", "live-1")));
+    ASSERT_TRUE(alice->message("hello, stream"));
 }
 
 // No database is reached: the connection string is refused before any connection is tried.
@@ -759,7 +699,7 @@ TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePasswor
                                          "ULW_NODE_SECRET=startup-test-node-secret-000000000000",
                                          "ULW_DEV_LOOPBACK_NODES=1", "ULW_DATABASE_URL=" + url,
                                          "ULW_DEV_JWKS_FILE=/nonexistent/jwks.json",
-                                         "JWT_ISSUER=https://issuer.test"});
+                                         "JWT_ISSUER=https://issuer.test", "ULW_ALLOW_ROOT=1"});
         ASSERT_NE(chat, nullptr);
         EXPECT_EQ(chat->wait_exit(seconds(30)), 2) << chat->output();
         EXPECT_NE(chat->output().find("ULW_DATABASE_URL"), std::string::npos) << chat->output();

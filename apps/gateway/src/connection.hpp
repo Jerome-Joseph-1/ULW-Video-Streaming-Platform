@@ -6,12 +6,14 @@
 #include "core/ports/storage.hpp"
 #include "http/request_parser.hpp"
 #include "http/response.hpp"
+#include "net/ip_address.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor.hpp"
 #include "net/slab.hpp"
 #include "net/transport.hpp"
 
 #include "gateway.hpp"
+#include "live_manifest_cache.hpp"
 #include "playback.hpp"
 #include "routes.hpp"
 
@@ -33,7 +35,8 @@ class Connection final : public net::IStreamHandler,
                          public http::IRequestSink,
                          public core::ports::IIngestObserver,
                          public core::ports::IKeyWaiter,
-                         public net::IOffloadJob {
+                         public net::IOffloadJob,
+                         public ILiveWaiter {
 public:
     using Handle = net::Slab<Connection>::Handle;
 
@@ -44,11 +47,16 @@ public:
     Connection(Connection&&) = delete;
     Connection& operator=(Connection&&) = delete;
 
-    void start(std::unique_ptr<net::ITransport> transport) noexcept;
+    // `hold` is the peer's own count, nullopt for a trusted proxy, whose clients are counted a
+    // request at a time.
+    void start(std::unique_ptr<net::ITransport> transport, const net::IpAddress& peer,
+               std::optional<ClientHold> hold) noexcept;
     // The gateway is shutting down: finish the request in flight, then close.
     void drain() noexcept;
     // The drain deadline passed: close now, whatever is in flight.
     void abort() noexcept;
+    // No byte of a request has been read since the last response: what drain() closes at once.
+    [[nodiscard]] bool idle() const noexcept { return phase_ == Phase::Idle; }
     // Nothing (the kernel, the catalog, the pool, the verifier) can still reach this object.
     [[nodiscard]] bool quiescent() const noexcept;
     // Heap bytes held for the request: staged body and a buffered JSON body.
@@ -71,6 +79,9 @@ public:
 
     void run() noexcept override;
     void complete() noexcept override;
+
+    void
+    on_live_playlist(const std::expected<LiveAnswer, PlaylistFailure>& answer) noexcept override;
 
 private:
     enum class Phase : std::uint8_t { Idle, Request, Lingering, Closed };
@@ -97,12 +108,18 @@ private:
         std::optional<std::uint64_t> upload_offset;
         std::optional<core::UploadId> upload_id;
         std::uint64_t content_length = 0;
+        // Charged against the user's byte quota at admission, and the body bytes read since;
+        // what was charged and never sent is given back when the request ends.
+        std::uint64_t bytes_charged = 0;
+        std::uint64_t bytes_received = 0;
         std::array<char, core::Uuid::kTextLength> request_id{};
         // Set when the store stopped taking the body, cleared when it took all that waited.
         std::optional<core::MonoTime> stalled_since;
         // When the chunk's first byte went to the store.
         core::MonoTime append_started;
         std::optional<http::Status> body_error;
+        // A 429's or 503's own Retry-After; the default otherwise.
+        std::optional<std::chrono::seconds> retry_after;
         std::optional<RouteId> route;
         http::MethodSet allow;
         std::optional<http::Method> method;
@@ -142,6 +159,7 @@ private:
     void begin_request() noexcept;
     void on_parse(http::ParseResult result) noexcept;
     void advance() noexcept;
+    [[nodiscard]] http::HeadVerdict authenticate_head(const http::RequestHead& head) noexcept;
     void authenticate() noexcept;
 
     void start_create() noexcept;
@@ -152,6 +170,8 @@ private:
     void on_video(core::ports::CatalogResult<core::VideoRecord> result) noexcept;
     void start_playlist(const core::VideoRecord& video) noexcept;
     void on_playlist(ControlJob job) noexcept;
+    void fail_playlist(PlaylistFailure failure) noexcept;
+    void start_live() noexcept;
     void on_durable() noexcept;
     void drain_staging() noexcept;
     void end_stall() noexcept;
@@ -174,6 +194,13 @@ private:
     void finish_request() noexcept;
     void release_claim() noexcept;
     void release_slot() noexcept;
+    void release_client_holds() noexcept;
+    void release_request_hold() noexcept;
+    void settle_upload_bytes() noexcept;
+    // Behind a trusted proxy, counts the request against the client the proxy names; false
+    // once that client has max_connections_per_ip in flight. A direct peer was counted at
+    // accept.
+    [[nodiscard]] bool admit_forwarded(const http::RequestHead& head) noexcept;
     void linger() noexcept;
     void close() noexcept;
     void arm_timer(core::Millis delay) noexcept;
@@ -213,6 +240,11 @@ private:
 
     // The upload slot the current PATCH holds, released when that request ends.
     std::optional<core::UserId> slot_user_;
+    net::IpAddress peer_;
+    // The peer's count for this connection; none when the peer is a trusted proxy.
+    std::optional<ClientHold> connection_hold_;
+    // Behind a trusted proxy: the forwarded client's count for the request in flight.
+    std::optional<ClientHold> request_hold_;
 
     // Body bytes the store has not taken yet. Only filled while the parser is paused, so it
     // never holds more than one receive buffer or the parser's retained tail.

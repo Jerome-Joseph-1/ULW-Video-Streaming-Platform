@@ -165,8 +165,13 @@ def main():
                         help="combined requests/s across all workers; 0 means unbounded")
     parser.add_argument("--token", help="bearer token; adds the 'valid' request shape when given")
     parser.add_argument("--legit-url", help="base URL for a concurrent legit client loop")
+    parser.add_argument("--legit-source", metavar="ADDRESS",
+                        help="local address the legit client connects from, e.g. 127.0.0.2, so "
+                             "the gateway's per-address limits tell it from the abusive traffic")
     parser.add_argument("--legit-token", help="bearer token for the legit client; required with --legit-url")
     args = parser.parse_args()
+    if args.legit_source:
+        legit_client.SOURCE_ADDRESS = (args.legit_source, 0)
     if args.legit_url and not args.legit_token:
         parser.error("--legit-url needs --legit-token")
 

@@ -1,21 +1,22 @@
-// What one live E2E run needs, started from the build tree: a bucket on the local MinIO that
-// anyone may read (the gateway's live route comes later; until then the player fetches the
-// stream straight from the store), live_packager, and the test publisher feeding it.
+// What one live E2E run needs, started from the build tree: the VOD run's gateway and page
+// server (stack.mjs) on a bucket of its own, live_packager writing the stream into that bucket,
+// and the test publisher feeding it. The player reaches the playlist only through the gateway's
+// live route and the segments only through the URLs it signs; the bucket is private.
 import { spawn } from 'node:child_process';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import http from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { config } from './stack.mjs';
+import { config, startStack } from './stack.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
 const bin = (rel) => path.join(config.build, rel);
 
-export const bucket = 'ulw-live-e2e';
+// A bucket of its own, so a run beside another checkout's cannot touch its objects.
+export const bucket = process.env.ULW_LIVE_E2E_BUCKET ?? 'ulw-live-e2e';
 // What the packager's SRT listener requires of its caller, as LiveKit egress would be given it
 // in the stream URL.
 const passphrase = 'e2e passphrase of 24 chars';
@@ -23,7 +24,7 @@ const passphrase = 'e2e passphrase of 24 chars';
 const encode = (text) => encodeURIComponent(text).replace(/[!'()*]/g, (c) =>
   `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 
-// AWS Signature Version 4 for the few calls the run makes itself; the packager signs its own.
+// AWS Signature Version 4 for the clean-up the run does itself; the services sign their own.
 async function s3(method, pathname, { query = {}, body = '' } = {}) {
   const endpoint = new URL(config.minio);
   const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
@@ -49,23 +50,6 @@ async function s3(method, pathname, { query = {}, body = '' } = {}) {
     `Signature=${createHmac('sha256', key).update(toSign).digest('hex')}`;
   const url = `${endpoint.origin}${pathname}${canonicalQuery ? `?${canonicalQuery}` : ''}`;
   return fetch(url, { method, headers, body: body === '' ? undefined : body });
-}
-
-async function prepareBucket() {
-  const created = await s3('PUT', `/${bucket}`);
-  const text = await created.text();
-  if (!created.ok && !text.includes('BucketAlreadyOwnedByYou')) {
-    throw new Error(`cannot create bucket ${bucket}: ${created.status} ${text}`);
-  }
-  const policy = JSON.stringify({
-    Version: '2012-10-17',
-    Statement: [{ Effect: 'Allow', Principal: { AWS: ['*'] }, Action: ['s3:GetObject'],
-      Resource: [`arn:aws:s3:::${bucket}/live/*`] }],
-  });
-  const put = await s3('PUT', `/${bucket}`, { query: { policy: '' }, body: policy });
-  if (!put.ok) {
-    throw new Error(`cannot set the bucket policy: ${put.status} ${await put.text()}`);
-  }
 }
 
 async function removeStream(id) {
@@ -111,28 +95,13 @@ class Process {
   }
 }
 
-function pageServer() {
-  const files = {
-    '/': ['text/html', path.join(here, 'live-player.html')],
-    '/hls.js': ['text/javascript', path.join(here, 'node_modules/hls.js/dist/hls.min.js')],
-  };
-  return http.createServer((req, res) => {
-    const file = files[new URL(req.url, 'http://page').pathname];
-    if (!file) {
-      res.writeHead(404);
-      res.end();
-      return;
-    }
-    res.writeHead(200, { 'content-type': file[0] });
-    res.end(readFileSync(file[1]));
-  });
-}
-
 // `seconds` is how long the publisher runs; the packager ends the stream when it stops.
 export async function startLiveStack({ seconds, segment = 2, window = 10 }) {
+  const stack = await startStack({ player: 'live-player.html', bucket, worker: false });
+  // An earlier version of this run opened the bucket to anonymous reads; nothing may now.
+  await s3('DELETE', `/${bucket}`, { query: { policy: '' } });
   const work = mkdtempSync(path.join(tmpdir(), 'ulw-live-e2e-'));
   const id = `e2e-${randomBytes(6).toString('hex')}`;
-  await prepareBucket();
 
   const packager = new Process('live_packager', bin('apps/live-packager/live_packager'), [], {
     PATH: process.env.PATH,
@@ -149,16 +118,29 @@ export async function startLiveStack({ seconds, segment = 2, window = 10 }) {
     ULW_SCRATCH_DIR: work,
     ULW_SANDBOX_BIN: bin('apps/live-packager/ulw_sandbox'),
   });
-  const [, port] = await packager.waitFor(/ingest=127\.0\.0\.1:(\d+)/, 30_000);
-
-  const page = pageServer();
-  await new Promise((resolve) => page.listen(0, '127.0.0.1', resolve));
+  let port;
+  try {
+    [, port] = await packager.waitFor(/ingest=127\.0\.0\.1:(\d+)/, 30_000);
+  } catch (e) {
+    await packager.stop();
+    await stack.stop();
+    throw e;
+  }
+  const route = `/api/v1/live/${id}/index.m3u8`;
 
   return {
     id,
-    manifest: `${new URL(config.minio).origin}/${bucket}/live/${id}/index.m3u8`,
-    origin: `http://127.0.0.1:${page.address().port}`,
-    storageOrigin: new URL(config.minio).origin,
+    token: stack.token,
+    // What the player loads: the gateway's route on the page's own origin, as behind the
+    // Askedin route.
+    manifest: `${stack.origin}${route}`,
+    // The same route asked of the gateway directly, for the run's own observer.
+    gatewayManifest: `${stack.gateway}${route}`,
+    gateway: stack.gateway,
+    origin: stack.origin,
+    storageOrigin: stack.storageOrigin,
+    proxied: stack.proxied,
+    gatewayOutput: stack.gatewayOutput,
     packager,
     // Starts the publisher: the moment the stream begins.
     publish() {
@@ -171,14 +153,17 @@ export async function startLiveStack({ seconds, segment = 2, window = 10 }) {
       return publisher;
     },
     async stop() {
-      await new Promise((resolve) => page.close(resolve));
-      if (this.publisher) {
-        await this.publisher.stop();
+      try {
+        if (this.publisher) {
+          await this.publisher.stop();
+        }
+        const code = await packager.stop();
+        await removeStream(id);
+        rmSync(work, { recursive: true, force: true });
+        return code;
+      } finally {
+        await stack.stop();
       }
-      const code = await packager.stop();
-      await removeStream(id);
-      rmSync(work, { recursive: true, force: true });
-      return code;
     },
   };
 }

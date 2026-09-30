@@ -105,4 +105,53 @@ TEST(RequestFraming, SimilarlyNamedFieldIsNotATransferCoding) {
     EXPECT_EQ(sink.requests()[0].body, "ok");
 }
 
+// A fold or a space before the colon is where front ends and origins disagree on which fields
+// a request has (RFC 9112 sections 5.1 and 5.2); a field this parser would read differently
+// from a proxy in front of it is a request smuggled past that proxy.
+TEST(RequestFraming, ObsoleteLineFoldingIsABadRequest) {
+    for (const std::string_view request :
+         {"PATCH /a HTTP/1.1\r\nHost: a\r\nContent-Length: 2\r\nTransfer-Encoding:\r\n chunked\r\n"
+          "\r\nok",
+          "PATCH /a HTTP/1.1\r\nHost: a\r\nX-Note: one\r\n\ttwo\r\nContent-Length: 2\r\n\r\nok",
+          "PATCH /a HTTP/1.1\r\nHost: a\r\nContent-Length:\r\n 2\r\n\r\nok"}) {
+        const Outcome o = parse(request);
+        EXPECT_EQ(o.result, fatal(Status::BadRequest)) << request;
+        EXPECT_EQ(o.heads, 0U) << request;
+    }
+}
+
+TEST(RequestFraming, WhitespaceBeforeTheColonIsABadRequest) {
+    for (const std::string_view request :
+         {"PATCH /a HTTP/1.1\r\nHost: a\r\nTransfer-Encoding : chunked\r\nContent-Length: 5\r\n\r\n"
+          "0\r\n\r\n",
+          "PATCH /a HTTP/1.1\r\nHost: a\r\nContent-Length : 2\r\n\r\nok",
+          "PATCH /a HTTP/1.1\r\nHost: a\r\nContent-Length\t: 2\r\n\r\nok"}) {
+        const Outcome o = parse(request);
+        EXPECT_EQ(o.result, fatal(Status::BadRequest)) << request;
+        EXPECT_EQ(o.heads, 0U) << request;
+    }
+}
+
+TEST(RequestFraming, ConflictingContentLengthsAreABadRequest) {
+    for (const std::string_view request :
+         {"PATCH /a HTTP/1.1\r\nHost: a\r\nContent-Length: 2\r\nContent-Length: 7\r\n\r\nokGET / ",
+          "PATCH /a HTTP/1.1\r\nHost: a\r\nContent-Length: 2, 7\r\n\r\nokGET / "}) {
+        const Outcome o = parse(request);
+        EXPECT_EQ(o.result, fatal(Status::BadRequest)) << request;
+        EXPECT_EQ(o.heads, 0U) << request;
+    }
+}
+
+// A bare LF ends a line for some parsers and not for others, which is enough to hide a field.
+TEST(RequestFraming, ALineEndedByABareLineFeedIsABadRequest) {
+    for (const std::string_view request :
+         {"PATCH /a HTTP/1.1\r\nHost: a\nContent-Length: 2\r\n\r\nok",
+          "PATCH /a HTTP/1.1\r\nHost: a\r\nX-Note: a\nTransfer-Encoding: chunked\r\n"
+          "Content-Length: 2\r\n\r\nok"}) {
+        const Outcome o = parse(request);
+        EXPECT_EQ(o.result, fatal(Status::BadRequest)) << request;
+        EXPECT_EQ(o.heads, 0U) << request;
+    }
+}
+
 } // namespace

@@ -233,9 +233,41 @@ TEST_F(WireTest, ASendWhoseKeyDoesNotParseIsMalformed) {
     }
 }
 
+TEST_F(WireTest, ASendOrDeliverWithABodyPastTheLargestIsMalformed) {
+    // The frame bound leaves room for the other fields; with a one-letter sender and key, a
+    // body can take some of it, which the frame length alone would let through.
+    const auto frame = [&](std::uint8_t type, std::size_t body) {
+        std::string fields;
+        if (type == 4) {
+            fields += std::string(8, '\0');
+            fields += room_.to_string();
+        } else {
+            fields += room_.to_string();
+            fields += std::string(8, '\0');
+            fields[fields.size() - 1] = '\x01';
+        }
+        fields += "\x01"
+                  "a"
+                  "\x01"
+                  "k";
+        fields += std::string(body, 'x');
+        return raw(type, fields);
+    };
+    for (const std::uint8_t type : {std::uint8_t{4}, std::uint8_t{6}}) {
+        wire::Decoder largest;
+        largest.feed(frame(type, wire::kMaxBody));
+        const auto fits = largest.next();
+        ASSERT_TRUE(fits && *fits) << int{type};
+
+        wire::Decoder over;
+        over.feed(frame(type, wire::kMaxBody + 1));
+        EXPECT_EQ(over.next(), std::unexpected(wire::DecodeError::Malformed)) << int{type};
+    }
+}
+
 TEST_F(WireTest, AReplyWithAStatusNobodyDefinedIsMalformed) {
     std::string reply(8, '\0');
-    reply += '\x05';
+    reply += '\x06';
     reply += std::string(8, '\0');
     EXPECT_EQ(error_of(raw(5, reply)), wire::DecodeError::Malformed);
 }

@@ -9,6 +9,7 @@
 #include <array>
 #include <format>
 #include <iterator>
+#include <utility>
 
 namespace gateway {
 
@@ -28,6 +29,16 @@ constexpr std::size_t kMaxStaging = std::size_t{4} * 64 * 1024;
 constexpr core::Millis kLinger{2'000};
 constexpr std::size_t kResponseHead = 1024;
 constexpr std::chrono::seconds kRetryAfter{5};
+
+void count_playlist(Counters& counters, RouteId route) noexcept {
+    if (route == RouteId::MasterPlaylist) {
+        ++counters.playlists_master;
+    } else if (route == RouteId::MediaPlaylist) {
+        ++counters.playlists_media;
+    } else {
+        ++counters.playlists_live;
+    }
+}
 
 // Holds once the request is past authentication, lookup or claim, which is the only time the
 // handlers below are reached; a miss is a bug, answered with 500 rather than undefined
@@ -80,10 +91,14 @@ Connection::Connection(Handle handle, Gateway& gateway) : handle_(handle), gatew
 
 Connection::~Connection() {
     release_slot();
+    release_client_holds();
 }
 
-void Connection::start(std::unique_ptr<net::ITransport> transport) noexcept {
+void Connection::start(std::unique_ptr<net::ITransport> transport, const net::IpAddress& peer,
+                       std::optional<ClientHold> hold) noexcept {
     transport_ = std::move(transport);
+    peer_ = peer;
+    connection_hold_ = hold;
     last_activity_ = now();
     receiving_ = true;
     transport_->start_receiving();
@@ -208,6 +223,9 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
         begin_request();
     }
     ++gw().counters().requests;
+    if (!admit_forwarded(head)) {
+        return http::HeadVerdict::reject(Status::TooManyRequests);
+    }
     req_.method = head.method;
     req_.content_length = head.content_length;
     req_.keep_alive =
@@ -245,8 +263,8 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     }
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
-        ++(match->id == RouteId::MasterPlaylist ? gw().counters().playlists_master
-                                                : gw().counters().playlists_media);
+    case RouteId::LivePlaylist:
+        count_playlist(gw().counters(), match->id);
         [[fallthrough]];
     case RouteId::UploadOffset:
     case RouteId::CancelUpload:
@@ -263,20 +281,24 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
 
     if (!requires_auth(match->id)) {
         req_.authenticated = true;
-    } else {
-        infra::auth::TokenExtractor extractor(gw().limits().auth_cookie);
-        for (const http::HeaderField& h : head.headers) {
-            extractor.on_header(h.name, h.value);
-        }
-        const auto token = extractor.token();
-        if (!token) {
-            return http::HeadVerdict::reject(Status::Unauthorized);
-        }
-        req_.token = *token;
-        authenticate();
-        if (req_.body_error) {
-            return http::HeadVerdict::reject(*req_.body_error);
-        }
+        return http::HeadVerdict::accept();
+    }
+    return authenticate_head(head);
+}
+
+http::HeadVerdict Connection::authenticate_head(const http::RequestHead& head) noexcept {
+    infra::auth::TokenExtractor extractor(gw().limits().auth_cookie);
+    for (const http::HeaderField& h : head.headers) {
+        extractor.on_header(h.name, h.value);
+    }
+    const auto token = extractor.token();
+    if (!token) {
+        return http::HeadVerdict::reject(Status::Unauthorized);
+    }
+    req_.token = *token;
+    authenticate();
+    if (req_.body_error) {
+        return http::HeadVerdict::reject(*req_.body_error);
     }
     return http::HeadVerdict::accept();
 }
@@ -297,7 +319,38 @@ void Connection::authenticate() noexcept {
         return;
     }
     req_.claims = **result;
+    if (const auto charged = gw().charge_request(req_.claims->subject); !charged) {
+        ++gw().counters().limited_user_requests;
+        req_.retry_after = retry_after(charged.error());
+        req_.body_error = Status::TooManyRequests;
+        return;
+    }
     req_.authenticated = true;
+    // From here the user's own limits govern the request. One address can carry hundreds of
+    // users (a carrier-grade NAT), and holding them all to 20 in flight would let the busiest
+    // few lock the rest out; the address count is for the requests nobody vouches for.
+    release_request_hold();
+}
+
+bool Connection::admit_forwarded(const http::RequestHead& head) noexcept {
+    if (connection_hold_) {
+        return true;
+    }
+    const net::IpAddress client =
+        forwarded_client(peer_, head.headers, gw().limits().trusted_proxy_hops);
+    if (deps().log.enabled(ops::Level::Debug)) {
+        net::IpAddress::Text text{};
+        deps().log.debug("forwarded client",
+                         {{"request_id", request_id()}, {"client", client.format(text)}});
+    }
+    request_hold_ = gw().hold_client(client);
+    if (request_hold_) {
+        return true;
+    }
+    ++gw().counters().limited_ip_requests;
+    // The hold frees as soon as one of the client's requests ends.
+    req_.retry_after = std::chrono::seconds{1};
+    return false;
 }
 
 void Connection::on_keys_refreshed() noexcept {
@@ -323,6 +376,7 @@ http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept
         return http::BodyVerdict::Continue;
     }
     gw().counters().bytes_ingested += bytes.size();
+    req_.bytes_received += bytes.size();
     rate_window_bytes_ += bytes.size();
     if (!session_ || staging_head_ < staging_.size()) {
         if (staging_.size() - staging_head_ + bytes.size() > kMaxStaging) {
@@ -395,6 +449,12 @@ void Connection::advance() noexcept {
         if (req_.message_complete && !req_.started) {
             req_.started = true;
             start_lookup();
+        }
+        return;
+    case RouteId::LivePlaylist:
+        if (req_.message_complete && !req_.started) {
+            req_.started = true;
+            start_live();
         }
         return;
     }
@@ -496,6 +556,16 @@ void Connection::start_append() noexcept {
         fail(Status::ServiceUnavailable);
         return;
     }
+    // Charged by what the PATCH says it carries, before any of it is read: the bytes a
+    // refusal would otherwise have let in are what the quota exists to keep out.
+    if (const auto charged = gw().charge_upload_bytes(claims->subject, req_.content_length);
+        !charged) {
+        ++gw().counters().limited_user_bytes;
+        req_.retry_after = retry_after(charged.error());
+        fail(Status::TooManyRequests);
+        return;
+    }
+    req_.bytes_charged = req_.content_length;
     ++pending_;
     deps().catalog.claim_upload(*id, claims->subject, [this](auto result) noexcept {
         --pending_;
@@ -737,6 +807,7 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     case RouteId::GetVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
+    case RouteId::LivePlaylist:
     case RouteId::Healthz:
     case RouteId::Readyz:
     case RouteId::Metrics:
@@ -803,26 +874,7 @@ void Connection::on_playlist(ControlJob job) noexcept {
         return;
     }
     if (!*job.body) {
-        switch (job.body->error()) {
-        case PlaylistFailure::NoSuchRendition:
-            fail(Status::NotFound);
-            return;
-        case PlaylistFailure::Unavailable:
-            fail(Status::ServiceUnavailable);
-            return;
-        case PlaylistFailure::Rejected:
-            ++gw().counters().playlists_rejected;
-            fail(Status::InternalServerError);
-            return;
-        case PlaylistFailure::Unsigned:
-            ++gw().counters().presign_failures;
-            fail(Status::InternalServerError);
-            return;
-        case PlaylistFailure::Broken:
-            fail(Status::InternalServerError);
-            return;
-        }
-        fail(Status::InternalServerError);
+        fail_playlist(job.body->error());
         return;
     }
     if (job.playlist->kind == PlaylistKind::Master) {
@@ -836,6 +888,65 @@ void Connection::on_playlist(ControlJob job) noexcept {
              .content_type = "application/vnd.apple.mpegurl",
              .cache_control = "private, max-age=60"},
             **job.body);
+}
+
+void Connection::fail_playlist(PlaylistFailure failure) noexcept {
+    switch (failure) {
+    case PlaylistFailure::NoSuchRendition:
+    case PlaylistFailure::Absent:
+        fail(Status::NotFound);
+        return;
+    case PlaylistFailure::Unavailable:
+        fail(Status::ServiceUnavailable);
+        return;
+    case PlaylistFailure::Rejected:
+        ++gw().counters().playlists_rejected;
+        fail(Status::InternalServerError);
+        return;
+    case PlaylistFailure::Unsigned:
+        ++gw().counters().presign_failures;
+        fail(Status::InternalServerError);
+        return;
+    case PlaylistFailure::Broken:
+        fail(Status::InternalServerError);
+        return;
+    }
+    fail(Status::InternalServerError);
+}
+
+// Any signed-in viewer may watch any stream: a live stream is a broadcast, and nothing on the
+// platform records who may see one (ADR-0059). An id the packager could never have used is
+// answered like a stream that has not started.
+void Connection::start_live() noexcept {
+    const std::string_view stream = req_.params[0];
+    if (!valid_stream_id(stream)) {
+        fail(Status::NotFound);
+        return;
+    }
+    ++pending_;
+    gw().live().get(stream, *this);
+}
+
+void Connection::on_live_playlist(
+    const std::expected<LiveAnswer, PlaylistFailure>& answer) noexcept {
+    --pending_;
+    // A waiting request ends only with its connection (the backstop and the drain deadline
+    // close it), so an answer that finds no request in progress is for one that is gone.
+    if (phase_ != Phase::Request) {
+        return;
+    }
+    if (!answer) {
+        fail_playlist(answer.error());
+        return;
+    }
+    // Private: the URLs are signed. A live playlist is never reused from the viewer's own
+    // cache: the gateway's copy already lags the store by up to half a segment, and a second
+    // layer of age would push the player further behind the live edge. An ended one is final
+    // and is kept like a VOD playlist.
+    respond({.status = Status::Ok,
+             .content_type = "application/vnd.apple.mpegurl",
+             .cache_control = answer->ended ? "private, max-age=60" : "private, no-cache"},
+            answer->body);
 }
 
 void Connection::submit(ControlOp op) noexcept {
@@ -1109,7 +1220,10 @@ void Connection::fail(Status status, std::optional<std::uint64_t> upload_offset)
         head.allow = req_.allow;
     }
     if (status == Status::ServiceUnavailable || status == Status::TooManyRequests) {
-        head.retry_after = kRetryAfter;
+        head.retry_after = req_.retry_after.value_or(kRetryAfter);
+    }
+    if (status == Status::Unauthorized) {
+        head.www_authenticate = req_.token.empty() ? "Bearer" : R"(Bearer error="invalid_token")";
     }
     respond(head, {});
 }
@@ -1173,6 +1287,8 @@ void Connection::respond(http::ResponseHead head, std::string_view body) noexcep
         session_.reset();
     }
     release_slot();
+    release_request_hold();
+    settle_upload_bytes();
     const bool keep = req_.keep_alive && req_.message_complete && !draining_;
     head.connection = keep ? http::Connection::KeepAlive : http::Connection::Close;
     head.request_id = request_id();
@@ -1246,6 +1362,30 @@ void Connection::release_slot() noexcept {
     }
 }
 
+void Connection::release_request_hold() noexcept {
+    if (request_hold_) {
+        gateway_.release_client(*request_hold_);
+        request_hold_.reset();
+    }
+}
+
+void Connection::settle_upload_bytes() noexcept {
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims != nullptr && req_.bytes_charged > req_.bytes_received) {
+        gateway_.refund_upload_bytes(claims->subject, req_.bytes_charged - req_.bytes_received);
+    }
+    req_.bytes_charged = 0;
+}
+
+void Connection::release_client_holds() noexcept {
+    for (std::optional<ClientHold>* hold : {&connection_hold_, &request_hold_}) {
+        if (*hold) {
+            gateway_.release_client(**hold);
+            hold->reset();
+        }
+    }
+}
+
 void Connection::release_claim() noexcept {
     const core::UploadId* id = get(req_.upload_id);
     if (req_.claimed && id != nullptr) {
@@ -1279,6 +1419,8 @@ void Connection::close() noexcept {
     }
     release_claim();
     release_slot();
+    release_client_holds();
+    settle_upload_bytes();
     if (key_wait_) {
         deps().verifier.cancel_wait(*this);
         key_wait_ = false;

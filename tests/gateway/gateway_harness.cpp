@@ -239,6 +239,20 @@ void GatewayUnderTest::set_plan(const infra::storage::FaultPlan& plan) {
     fake_->set_plan(plan);
 }
 
+void GatewayUnderTest::hold_fetches(bool held) {
+    fake_->hold_fetches(held);
+}
+
+std::size_t GatewayUnderTest::held_fetches() const {
+    return fake_->held_fetches();
+}
+
+bool GatewayUnderTest::finished() {
+    bool out = false;
+    on_loop([&] { out = loop_->gateway->finished(); });
+    return out;
+}
+
 std::vector<infra::catalog::MemoryCatalog::Job> GatewayUnderTest::jobs() {
     std::vector<infra::catalog::MemoryCatalog::Job> out;
     on_loop([&] { out = loop_->catalog->jobs(); });
@@ -254,6 +268,12 @@ gateway::Counters GatewayUnderTest::counters() {
 std::size_t GatewayUnderTest::connections() {
     std::size_t out = 0;
     on_loop([&] { out = loop_->gateway->connections(); });
+    return out;
+}
+
+std::size_t GatewayUnderTest::busy_connections() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->gateway->busy_connections(); });
     return out;
 }
 

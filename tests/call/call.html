@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ULW call peer</title>
+<script>
+  // The SDK keeps its peer connections private. Recording them as they are made lets the test
+  // read ICE state and RTP statistics through the standard API instead of SDK internals.
+  window.peerConnections = [];
+  const Native = window.RTCPeerConnection;
+  window.RTCPeerConnection = class extends Native {
+    constructor(...args) {
+      super(...args);
+      window.peerConnections.push(this);
+    }
+  };
+</script>
+<script src="/livekit-client.umd.js"></script>
+</head>
+<body>
+<script>
+  const { Room, RoomEvent } = LivekitClient;
+  window.events = [];
+  const note = (type, detail = {}) => window.events.push({ type, at: Date.now(), ...detail });
+
+  window.join = async ({ url, token }) => {
+    // Off so that every packet sent is counted as received. Layer selection is left to these two
+    // in the product (ADR-0050, M28); they are not the default to copy.
+    const room = new Room({ adaptiveStream: false, dynacast: false });
+    window.room = room;
+    room.on(RoomEvent.ParticipantConnected, (p) => note('participant-connected', { who: p.identity }));
+    room.on(RoomEvent.ParticipantDisconnected, (p) => note('participant-disconnected', { who: p.identity }));
+    room.on(RoomEvent.TrackSubscribed, (track, _pub, p) =>
+      note('track-subscribed', { who: p.identity, kind: track.kind }));
+    room.on(RoomEvent.TrackUnsubscribed, (track, _pub, p) =>
+      note('track-unsubscribed', { who: p.identity, kind: track.kind }));
+    room.on(RoomEvent.Reconnecting, () => note('reconnecting'));
+    room.on(RoomEvent.Disconnected, (reason) => note('disconnected', { reason }));
+    await room.connect(url, token);
+    await room.localParticipant.enableCameraAndMicrophone();
+    return room.localParticipant.identity;
+  };
+
+  // What a client that kept its last credential would do after being put out: try again with it.
+  window.tryConnect = async ({ url, token }) => {
+    const room = new Room();
+    try {
+      await room.connect(url, token);
+      const identity = room.localParticipant.identity;
+      await room.disconnect();
+      return { admitted: true, identity };
+    } catch (e) {
+      return { admitted: false, error: String(e.message ?? e) };
+    }
+  };
+
+  // A WHIP publish in the order RFC 9725 gives a client that trickles and takes its ICE servers
+  // from the answer's Link headers (sections 4.3.1 and 4.6): the offer goes out before local
+  // gathering starts, the ICE servers are set, then gathering runs and its candidates follow
+  // by PATCH once the session exists. Built so that only the trickle can connect it: the
+  // answer's own candidates are dropped before they reach ICE, and with nowhere to send checks
+  // the browser can only answer the server's, so a connection means the server checked towards
+  // a candidate it was sent late. Each request after the POST carries a fresh ticket from
+  // `window.freshTicket`, as a client asks the stream service for one (ADR-0053).
+  window.whipTrickled = async ({ url, token }) => {
+    const media = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
+    window.whipConnection = pc;
+    for (const track of media.getTracks()) pc.addTransceiver(track, { direction: 'sendonly' });
+    const offer = await pc.createOffer();
+    const authorization = `Bearer ${token}`;
+    const created = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/sdp', authorization },
+      body: offer.sdp,
+    });
+    if (created.status !== 201) return { created: created.status };
+    const iceServers = [...(created.headers.get('link') ?? '').matchAll(
+      /<([^>]+)>\s*;\s*rel="?ice-server"?([^,]*)/g)].map(([, urls, params]) => ({
+      urls,
+      username: /username="([^"]*)"/.exec(params)?.[1],
+      credential: /credential="([^"]*)"/.exec(params)?.[1],
+    }));
+    pc.setConfiguration({ bundlePolicy: 'max-bundle', iceServers });
+
+    // Gathering here does not always report its end, so the first UDP candidate is what waits.
+    const candidates = [];
+    const gathered = new Promise((resolve) => pc.addEventListener('icecandidate', (e) => {
+      if (e.candidate?.candidate) candidates.push(e.candidate);
+      if (!e.candidate || e.candidate.protocol === 'udp') resolve();
+    }));
+    await pc.setLocalDescription(offer);
+    const answer = (await created.text()).split('\r\n');
+    const isCandidate = (line) => line.startsWith('a=candidate:') || line === 'a=end-of-candidates';
+    await pc.setRemoteDescription({ type: 'answer',
+      sdp: answer.filter((line) => !isCandidate(line)).join('\r\n') });
+    await gathered;
+
+    const first = pc.getTransceivers()[0];
+    const attribute = (name) => offer.sdp.split('\r\n').find((l) => l.startsWith(`a=${name}:`));
+    const trickled = candidates.filter((c) => c.sdpMid === first.mid);
+    const fragment = [attribute('ice-ufrag'), attribute('ice-pwd'),
+      `m=${first.sender.track.kind} 9 UDP/TLS/RTP/SAVPF 0`, `a=mid:${first.mid}`,
+      ...trickled.map((c) => `a=${c.candidate}`), ''];
+    const resource = new URL(created.headers.get('location'), url).href;
+    const fresh = async () => `Bearer ${(await window.freshTicket()).token}`;
+    const patched = await fetch(resource, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/trickle-ice-sdpfrag',
+        'if-match': created.headers.get('etag'), authorization: await fresh() },
+      body: fragment.join('\r\n'),
+    });
+    window.whipEnd = async () => (await fetch(resource,
+      { method: 'DELETE', headers: { authorization: await fresh() } })).status;
+    return {
+      created: created.status,
+      patched: patched.status,
+      droppedFromAnswer: answer.filter((line) => line.startsWith('a=candidate:')).length,
+      trickled: trickled.map((c) => `${c.address}:${c.port}`),
+    };
+  };
+
+  // The trickled connection's state and, once it has one, the addresses of its selected pair.
+  window.whipPath = async () => {
+    const pc = window.whipConnection;
+    const out = { state: pc.connectionState };
+    const stats = new Map();
+    (await pc.getStats()).forEach((s) => stats.set(s.id, s));
+    for (const s of stats.values()) {
+      if (s.type !== 'transport' || !s.selectedCandidatePairId) continue;
+      const pair = stats.get(s.selectedCandidatePairId);
+      const local = stats.get(pair.localCandidateId);
+      out.local = `${local.address}:${local.port}`;
+      out.remote = stats.get(pair.remoteCandidateId).candidateType;
+    }
+    return out;
+  };
+
+  window.selectedPaths = async () => {
+    const out = [];
+    for (const pc of window.peerConnections.filter((c) => c.connectionState !== 'closed')) {
+      const stats = new Map();
+      (await pc.getStats()).forEach((s) => stats.set(s.id, s));
+      for (const s of stats.values()) {
+        if (s.type !== 'transport' || !s.selectedCandidatePairId) continue;
+        const pair = stats.get(s.selectedCandidatePairId);
+        out.push({ local: stats.get(pair.localCandidateId).candidateType,
+                   remote: stats.get(pair.remoteCandidateId).candidateType });
+      }
+    }
+    return out;
+  };
+
+  // Connections of rooms already left are closed and have nothing more to say.
+  window.mediaStats = async () => {
+    const out = [];
+    for (const pc of window.peerConnections.filter((c) => c.connectionState !== 'closed')) {
+      const inbound = { audio: 0, video: 0 };
+      (await pc.getStats()).forEach((s) => {
+        if (s.type === 'inbound-rtp') inbound[s.kind] += s.packetsReceived;
+      });
+      out.push({ ice: pc.iceConnectionState, inbound });
+    }
+    return out;
+  };
+</script>
+</body>
+</html>
