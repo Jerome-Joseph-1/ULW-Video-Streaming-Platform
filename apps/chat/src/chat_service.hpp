@@ -14,6 +14,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -261,6 +262,10 @@ private:
     ServiceLimits limits_;
     ServiceCounters counters_;
     std::uint64_t next_client_ = 1;
+    // The text delivered() makes of each message, kept between messages with the capacity of
+    // the largest: a new string per message would take and leave a block of tens of KiB in the
+    // heap for every message of that size.
+    std::string delivery_text_;
     std::unordered_map<std::uint64_t, Client> clients_;
     std::unordered_map<core::RoomId, std::unique_ptr<Room>> rooms_;
     std::unordered_map<core::UserId, TokenBucket> joins_;

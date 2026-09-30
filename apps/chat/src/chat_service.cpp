@@ -545,7 +545,10 @@ void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageK
 // One text for every client in the room. A client that cannot be given it (the text could not
 // be made) is closed if it asked never to miss a message; it resumes when it reconnects.
 void ChatService::delivered(Room& room, const rt::Message& message) noexcept {
-    std::string text;
+    // Nothing below calls back into delivered(): a push only queues bytes, and a client it
+    // abandons is closed later, from its timer.
+    std::string& text = delivery_text_;
+    text.clear();
     try {
         write_message(text, message);
     } catch (const std::bad_alloc&) {

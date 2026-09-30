@@ -27,7 +27,18 @@ constexpr std::size_t kCloseStatusBytes = 2;
 
 using MaskKey = std::array<std::byte, 4>;
 
-std::expected<std::size_t, EncodeError> payload_size(const Frame& frame) noexcept {
+// The largest header: two bytes, a 64-bit length and a mask key.
+constexpr std::size_t kMaxHeaderBytes = 2 + 8 + 4;
+
+// What encode_frame reads of a frame: a Frame's fields, or a payload the caller holds elsewhere.
+struct FrameView {
+    Opcode opcode;
+    bool fin;
+    std::span<const std::byte> payload;
+    CloseCode close_code;
+};
+
+std::expected<std::size_t, EncodeError> payload_size(const FrameView& frame) noexcept {
     std::size_t size = frame.payload.size();
     if (frame.opcode == Opcode::Close && frame.close_code != CloseCode::NoStatus) {
         if (!is_valid_on_wire(frame.close_code)) {
@@ -54,7 +65,7 @@ void append_big_endian(std::uint64_t value, std::size_t bytes, std::vector<std::
     }
 }
 
-void append_header(const Frame& frame, std::uint64_t size, const std::optional<MaskKey>& mask,
+void append_header(const FrameView& frame, std::uint64_t size, const std::optional<MaskKey>& mask,
                    std::vector<std::byte>& out) {
     const auto first = static_cast<std::uint8_t>((frame.fin ? kFin : 0U) |
                                                  static_cast<std::uint8_t>(frame.opcode));
@@ -74,7 +85,7 @@ void append_header(const Frame& frame, std::uint64_t size, const std::optional<M
     }
 }
 
-void append_payload(const Frame& frame, std::vector<std::byte>& out) {
+void append_payload(const FrameView& frame, std::vector<std::byte>& out) {
     if (frame.opcode == Opcode::Close && frame.close_code != CloseCode::NoStatus) {
         append_big_endian(frame.close_code.value, kCloseStatusBytes, out);
     }
@@ -82,10 +93,16 @@ void append_payload(const Frame& frame, std::vector<std::byte>& out) {
 }
 
 std::expected<void, EncodeError>
-encode_frame(const Frame& frame, const std::optional<MaskKey>& mask, std::vector<std::byte>& out) {
+encode_frame(const FrameView& frame, const std::optional<MaskKey>& mask,
+             std::vector<std::byte>& out) {
     const auto size = payload_size(frame);
     if (!size) {
         return std::unexpected(size.error());
+    }
+    // At most one growth for the frame, instead of one per header byte and one for the payload;
+    // still geometric, for a caller that appends frame after frame to one buffer.
+    if (const std::size_t need = out.size() + kMaxHeaderBytes + *size; need > out.capacity()) {
+        out.reserve(std::max(need, 2 * out.capacity()));
     }
     append_header(frame, *size, mask, out);
     const std::size_t start = out.size();
@@ -103,17 +120,31 @@ encode_frame(const Frame& frame, const std::optional<MaskKey>& mask, std::vector
     return {};
 }
 
+FrameView view_of(const Frame& frame) noexcept {
+    return {.opcode = frame.opcode,
+            .fin = frame.fin,
+            .payload = frame.payload,
+            .close_code = frame.close_code};
+}
+
 } // namespace
 
 std::expected<void, EncodeError> encode(const Frame& frame, std::vector<std::byte>& out) {
-    return encode_frame(frame, std::nullopt, out);
+    return encode_frame(view_of(frame), std::nullopt, out);
+}
+
+std::expected<void, EncodeError> encode(Opcode opcode, bool fin, std::span<const std::byte> payload,
+                                        std::vector<std::byte>& out) {
+    return encode_frame(
+        {.opcode = opcode, .fin = fin, .payload = payload, .close_code = CloseCode::NoStatus},
+        std::nullopt, out);
 }
 
 std::expected<void, EncodeError> ClientEncoder::encode(const Frame& frame,
                                                        std::vector<std::byte>& out) {
     MaskKey key{};
     keys_.fill(key);
-    return encode_frame(frame, key, out);
+    return encode_frame(view_of(frame), key, out);
 }
 
 } // namespace codec::ws
