@@ -175,4 +175,8 @@ that may still be reading.
   lets a client finish reading its last response, a drain just after a response, which
   answers nothing the client pipelined behind it, and a request read right behind one refused
   at its head while the refusal is still being sent, which the first version of this change
-  left unanswered until the header timeout (on io_uring over TLS, where the test reaches it).
+  left unanswered until the header timeout (on io_uring over TLS, where the test reaches it),
+  with or without a request the parser kept ahead of it. Another holds that refusal in the
+  kernel behind a window the client filled with earlier refusals: the next version answered
+  the held request but never ended the hold, so every later receive was held, unread, with
+  reading left on (under TLS on epoll, where the test reaches it).

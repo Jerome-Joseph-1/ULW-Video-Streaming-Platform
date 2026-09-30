@@ -64,6 +64,8 @@ public:
     [[nodiscard]] std::size_t queued_output() const noexcept {
         return transport_ ? transport_->pending_send_bytes() : 0;
     }
+    // Bytes of a new request read while the last response was held back, not parsed yet.
+    [[nodiscard]] std::size_t held_bytes() const noexcept { return held_.size(); }
     // Heap bytes held for the request: staged body and a buffered JSON body.
     [[nodiscard]] std::size_t buffered_bytes() const noexcept {
         return staging_.capacity() + req_.body.capacity();
@@ -162,7 +164,8 @@ private:
     }
 
     void begin_request() noexcept;
-    // Bytes of a request that is not held back: fed to the parser, which is told of them.
+    // Feeds a request's bytes to the parser. Skips the hold-back check: the caller has just
+    // made it.
     void parse(net::BorrowedBytes bytes) noexcept;
     void on_parse(http::ParseResult result) noexcept;
     void advance() noexcept;

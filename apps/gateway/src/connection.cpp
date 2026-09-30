@@ -1424,6 +1424,9 @@ bool Connection::hold_back_request() noexcept {
         return false;
     }
     awaiting_drain_ = true;
+    // The timer armed below replaces a zero-delay resume finish_request may have armed, so
+    // only the drain check or on_writable resumes, and each ends the hold first.
+    resume_pending_ = false;
     if (receiving_) {
         receiving_ = false;
         transport_->stop_receiving();
@@ -1603,6 +1606,7 @@ void Connection::read_next_request() noexcept {
     }
     const std::vector<std::byte> bytes = std::exchange(held_, {});
     if (resumed == http::ParseProgress::NeedMore && phase_ == Phase::Idle) {
+        // The request's header timeout counts from here, as it did when on_data replayed it.
         parse(bytes);
         return;
     }

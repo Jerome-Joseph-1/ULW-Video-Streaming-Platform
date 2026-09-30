@@ -322,6 +322,12 @@ std::size_t Gateway::queued_output() noexcept {
     return bytes;
 }
 
+std::size_t Gateway::held_bytes() noexcept {
+    std::size_t bytes = 0;
+    connections_.for_each_live([&](const Connection& conn) { bytes += conn.held_bytes(); });
+    return bytes;
+}
+
 std::string Gateway::render_metrics() {
     const Counters& c = counters_;
     const ViewCounters& v = views_.counters();

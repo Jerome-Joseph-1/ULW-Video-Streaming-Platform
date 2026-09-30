@@ -1,5 +1,6 @@
 #include "gateway_harness.hpp"
 #include "playback.hpp"
+#include "send_window.hpp"
 #include "support/eventually.hpp"
 #include "support/http_client.hpp"
 #include "support/socket_probe.hpp"
@@ -10,6 +11,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <format>
 #include <gtest/gtest.h>
 #include <optional>
@@ -599,7 +601,10 @@ void cork(HttpClient& c, bool on) {
 // refusal is still on its way, is held back until the refusal has gone, and is then answered.
 // The two requests reach the gateway in one segment, as a TLS record each, so the second is
 // read right behind the refusal, and on io_uring the refusal's send completes a turn later.
-// The gateway's clock is held, so only an answer, not the header timeout, ends the wait.
+// Only on io_uring over TLS does this reach that path: a plaintext receive carries both
+// requests at once, and on epoll the refusal leaves at once. The next test holds a refusal
+// back on epoll too. The gateway's clock is held, so only an answer, not the header timeout,
+// ends the wait.
 TEST_P(GatewayPlayback, ARequestHeldBackBehindARefusalFromTheParserIsAnswered) {
     GatewayOptions o = options();
     o.manual_clock = true;
@@ -624,6 +629,118 @@ TEST_P(GatewayPlayback, ARequestHeldBackBehindARefusalFromTheParserIsAnswered) {
     ASSERT_TRUE(answered);
     EXPECT_EQ(answered->status, 200);
     EXPECT_EQ(gw.counters().requests, 3U);
+    EXPECT_EQ(gw.counters().timeouts_header, 0U);
+}
+
+// As above, with a request the parser kept from the refusal's own receive: it is answered
+// first, then the one held behind it. On io_uring over TLS, the held request would otherwise be
+// fed to the parser while it still waited to resume.
+TEST_P(GatewayPlayback, ARequestTheParserKeptIsAnsweredBeforeTheOneHeldBehindIt) {
+    GatewayOptions o = options();
+    o.manual_clock = true;
+    GatewayUnderTest gw(o);
+    HttpClient c(gw.endpoint());
+    ASSERT_TRUE(c.connected());
+    const auto first = c.request("GET", "/healthz", "");
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->status, 200);
+
+    cork(c, true);
+    ASSERT_TRUE(c.send_raw("GET /no-such-route HTTP/1.1\r\nHost: test\r\n\r\n"
+                           "GET /readyz HTTP/1.1\r\nHost: test\r\n\r\n"));
+    ASSERT_TRUE(c.send_raw("GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n"));
+    cork(c, false);
+    const auto refused = c.read_response();
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 404);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().responses.at(1) == 3; }))
+        << "a request behind the refusal was never answered";
+    const auto ready = c.read_response();
+    ASSERT_TRUE(ready);
+    EXPECT_EQ(ready->status, 200);
+    EXPECT_EQ(ready->body, "ready\n");
+    const auto ok = c.read_response();
+    ASSERT_TRUE(ok);
+    EXPECT_EQ(ok->status, 200);
+    EXPECT_EQ(ok->body, "ok\n");
+    EXPECT_EQ(gw.counters().requests, 4U);
+    EXPECT_EQ(gw.counters().timeouts_header, 0U);
+}
+
+// A request held in the turn that refused the one before it, with the refusal held in the
+// gateway's kernel by the client's shut window, ends the hold once the refusal has gone: it is
+// answered, and so is the next request, and nothing is left held. Before, the resume the refusal
+// had queued read the held request without ending the hold, so every later receive was held
+// too, with reading left on and no bound. The client sends refusals it does not read until its
+// window has no room for another, so the next one is read with nothing unsent and then waits.
+// Under TLS the request behind it comes in a record of its own and is held, on either reactor;
+// over plaintext the two arrive in one receive and the parser keeps the second.
+TEST_P(GatewayPlayback, ARequestHeldInTheTurnOfARefusalEndsTheHold) {
+    GatewayOptions o = options();
+    o.manual_clock = true;
+    GatewayUnderTest gw(o);
+    HttpClient c(gw.endpoint(), kPlayerReceiveBuffer);
+    ASSERT_TRUE(c.connected());
+    const auto first = c.request("GET", "/healthz", "");
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->status, 200);
+    const auto client_port = ulw::test::tcp_port(c.fd(), false);
+    ASSERT_TRUE(client_port);
+    const auto window = [&] { return ulw::test::send_window_of(gw.port(), *client_port); };
+    // Everything answered so far has been sent and acknowledged.
+    const auto settled = [&](std::uint64_t refusals) {
+        const auto w = window();
+        return gw.counters().responses.at(3) == refusals && gw.queued_output() == 0 && w &&
+               w->unsent == 0 && w->in_flight == 0;
+    };
+
+    constexpr std::string_view kRefused = "GET /no-such-route HTTP/1.1\r\nHost: test\r\n\r\n";
+    std::uint64_t refusals = 0;
+    std::int64_t refusal_size = 0;
+    for (;;) {
+        const auto before = window();
+        ASSERT_TRUE(before) << "the kernel does not report the send window";
+        if (refusal_size > 0 && before->room < refusal_size) {
+            break;
+        }
+        ASSERT_LT(refusals, 1000U) << "the client's window never filled";
+        ASSERT_TRUE(c.send_raw(kRefused));
+        ++refusals;
+        ASSERT_TRUE(ulw::test::eventually([&] { return settled(refusals); }))
+            << "refusal " << refusals << " did not leave in full";
+        refusal_size = static_cast<std::int64_t>(window()->sent - before->sent);
+    }
+
+    cork(c, true);
+    ASSERT_TRUE(c.send_raw(kRefused));
+    ASSERT_TRUE(c.send_raw("GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n"));
+    cork(c, false);
+    ++refusals;
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().responses.at(3) == refusals; }));
+    if (GetParam() == gateway::Transport::Tls) {
+        ASSERT_TRUE(ulw::test::eventually([&] { return gw.held_bytes() > 0; }));
+    }
+    ASSERT_GT(window()->unsent, 0U);
+
+    // The client reads everything, which lets the refusal go; the next drain check sees it.
+    for (std::uint64_t k = 0; k < refusals; ++k) {
+        const auto r = c.read_response();
+        ASSERT_TRUE(r) << "refusal " << k;
+        ASSERT_EQ(r->status, 404);
+    }
+    ASSERT_TRUE(ulw::test::eventually([&] { return window()->unsent == 0; }));
+    gw.advance(core::Millis{100});
+    const auto held = c.read_response();
+    ASSERT_TRUE(held);
+    EXPECT_EQ(held->status, 200);
+
+    ASSERT_TRUE(c.send_request("GET", "/healthz", ""));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().responses.at(1) == 3; }))
+        << "the request after the hold was never answered; " << gw.held_bytes() << " bytes held";
+    const auto next = c.read_response();
+    ASSERT_TRUE(next);
+    EXPECT_EQ(next->status, 200);
+    EXPECT_EQ(gw.held_bytes(), 0U);
     EXPECT_EQ(gw.counters().timeouts_header, 0U);
 }
 
