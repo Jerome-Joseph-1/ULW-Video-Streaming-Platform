@@ -72,3 +72,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0066](0066-the-gateways-object-store-credentials.md) | What the gateway's object-store credentials may do | Accepted |
 | [0067](0067-chat-resume-is-a-join-with-after.md) | Chat resume is a `join` with `after`, and acks are `joined` and `sent` | Accepted |
 | [0068](0068-a-failed-job-fails-its-video.md) | A job that fails for good fails its video in the same statement | Accepted |
+| [0069](0069-chat-soak-flatness-per-command-delivery-and-connection.md) | Chat soak flatness judged per command, delivery and connection | Accepted |
