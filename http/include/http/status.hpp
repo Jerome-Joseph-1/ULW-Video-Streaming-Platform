@@ -16,6 +16,7 @@ enum class Status : std::uint16_t {
     MethodNotAllowed = 405,
     RequestTimeout = 408,
     Conflict = 409,
+    Gone = 410,
     LengthRequired = 411,
     ContentTooLarge = 413,
     TooManyRequests = 429,
@@ -53,6 +54,8 @@ enum class Status : std::uint16_t {
         return "Request Timeout";
     case Status::Conflict:
         return "Conflict";
+    case Status::Gone:
+        return "Gone";
     case Status::LengthRequired:
         return "Length Required";
     case Status::ContentTooLarge:

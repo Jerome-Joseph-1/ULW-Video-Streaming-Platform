@@ -89,6 +89,19 @@ std::string_view state_name(core::VideoState s) noexcept {
     return "unknown";
 }
 
+// An upload past its expires_at that was never committed takes nothing more: 410, as tus's
+// Expiration extension answers. The upload reaper aborts it later (ADR 0049), and until it does
+// the rows and the stored bytes are still there, so without this a PATCH or commit would go
+// through. A cancelled one answers the same, so the answer does not depend on whether the
+// reaper has run yet; a committed one keeps the answers it had.
+[[nodiscard]] bool expired(const core::UploadRecord& up, core::WallTime now) {
+    if (up.state == core::UploadState::Completed) {
+        return false;
+    }
+    const auto upload = core::Upload::rehydrate(up);
+    return upload && upload->is_expired(now);
+}
+
 } // namespace
 
 Connection::Connection(Handle handle, Gateway& gateway) : handle_(handle), gateway_(gateway) {}
@@ -613,6 +626,11 @@ void Connection::on_claimed(core::ports::CatalogResult<core::ports::StoredUpload
         return;
     }
     const core::UploadRecord& up = stored->upload;
+    if (expired(up, deps().clock.wall_now())) {
+        release_claim();
+        fail(Status::Gone);
+        return;
+    }
     if (up.state != core::UploadState::Active) {
         release_claim();
         fail(Status::Conflict, up.durable_offset);
@@ -789,6 +807,12 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     }
     req_.upload = std::move(*result);
     const core::UploadRecord& up = req_.upload->upload;
+    if (expired(up, deps().clock.wall_now()) &&
+        (req_.route == RouteId::AppendChunk || req_.route == RouteId::UploadOffset ||
+         req_.route == RouteId::CommitUpload)) {
+        fail(Status::Gone);
+        return;
+    }
     switch (*req_.route) {
     case RouteId::AppendChunk:
         // A concurrent append holds the upload.
