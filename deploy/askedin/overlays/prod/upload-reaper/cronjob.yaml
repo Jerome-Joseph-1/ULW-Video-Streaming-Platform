@@ -70,11 +70,13 @@ spec:
                       key: ULW_S3_SECRET_ACCESS_KEY
               # One libpq session and one libcurl handle, working through a batch of 100 rows
               # at a time.
+              # The CPU limit bounds a runaway pass beside the gateways on the same node.
               resources:
                 requests:
                   cpu: 50m
                   memory: 64Mi
                 limits:
+                  cpu: 500m
                   memory: 128Mi
               securityContext:
                 allowPrivilegeEscalation: false

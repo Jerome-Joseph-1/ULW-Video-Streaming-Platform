@@ -21,6 +21,7 @@
 #include "ops/async_log.hpp"
 #include "ops/log.hpp"
 #include "ops/notify.hpp"
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 #include "ops/settings.hpp"
 
@@ -350,6 +351,10 @@ int run(std::span<const std::string_view> args) {
     const os::SystemClock clock;
     ops::StdoutSink direct;
     ops::Logger boot(direct, clock, "gateway", ops::Level::Info);
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        return fail(boot, "disable core dumps", errno_text(r.error()));
+    }
 
     const auto cli = ops::parse_command_line(gateway::settings(), args);
     if (!cli) {

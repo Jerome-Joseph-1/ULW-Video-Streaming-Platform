@@ -44,7 +44,77 @@ using ulw::test::kReadyCheckPeriod;
 using ulw::test::Node;
 using ulw::test::Seen;
 
-class ChatClusterTest : public ulw::test::ChatCluster {};
+class ChatClusterTest : public ulw::test::ChatCluster {
+protected:
+    // How often a send answered `unavailable` goes again before the answer is taken as final.
+    static constexpr int kSendAttempts = 20;
+
+    // The last messages `client` was sent, by type, id, seq and reason (never a body), and what
+    // every node wrote: a failure then tells an answer the test did not expect from silence.
+    [[nodiscard]] std::string what_was_seen(const Client& client) const {
+        constexpr std::size_t kLast = 10;
+        const std::vector<Seen>& seen = client.seen();
+        const std::size_t shown = std::min(seen.size(), kLast);
+        std::string out = std::format("\n{} was sent {} messages; the last {}:", client.name(),
+                                      seen.size(), shown);
+        for (std::size_t i = seen.size() - shown; i < seen.size(); ++i) {
+            out += std::format("\n  {} id={} seq={} reason={}", seen[i].type, seen[i].id,
+                               seen[i].seq, seen[i].reason);
+        }
+        for (const Node& n : nodes_) {
+            // A resend answered from a node's memory counts as deduplicated; an `unavailable`
+            // that came from a forward, not the store, as a forward timeout.
+            const std::string metrics = ulw::test::http_get(n.port, "/metrics").body;
+            out += std::format("\n{}: messages_deduplicated_total {}, forward_timeouts_total {}; "
+                               "it wrote:\n{}",
+                               n.name, counter(metrics, "messages_deduplicated_total"),
+                               counter(metrics, "forward_timeouts_total"), n.process->output());
+        }
+        return out;
+    }
+
+    // A counter's value in a /metrics page, as text; "absent" when the page does not have it.
+    [[nodiscard]] static std::string counter(std::string_view metrics, std::string_view name) {
+        const std::string line = "\n" + std::string(name) + " ";
+        const std::size_t at = metrics.find(line);
+        if (at == std::string_view::npos) {
+            return "absent";
+        }
+        const std::size_t start = at + line.size();
+        return std::string(metrics.substr(start, metrics.find('\n', start) - start));
+    }
+
+    // Sends `body` under `id` as a client must (ADR-0043): `unavailable` leaves the send's fate
+    // unknown, so it goes again under the same id, each time once the last is answered. Returns
+    // the first other answer, or the last `unavailable` after kSendAttempts; nullopt when a send
+    // was not answered at all.
+    // Each resend goes out as soon as the last answer is in, with no pause between. A run of
+    // them that outpaces the sender's allowance is answered `rate_limited`, which is returned
+    // like any other answer: the caller's check for `sent` then fails loudly with that reason,
+    // never passes by mistake.
+    [[nodiscard]] std::optional<Seen> send_until_answered(Client& client, const std::string& body,
+                                                          const std::string& id) {
+        const auto is_answer = [&](const Seen& s) {
+            return (s.type == "sent" || s.type == "error") && s.id == id;
+        };
+        std::optional<Seen> answer;
+        for (int attempt = 0; attempt < kSendAttempts; ++attempt) {
+            const std::size_t answers = client.count(is_answer);
+            if (!client.send(send_command(room_, body, id))) {
+                ADD_FAILURE() << client.name() << " could not send " << id;
+                return std::nullopt;
+            }
+            if (!client.wait_for([&](const Seen&) { return client.count(is_answer) > answers; })) {
+                return std::nullopt;
+            }
+            answer = *std::ranges::find_last_if(client.seen(), is_answer).begin();
+            if (answer->type != "error" || answer->reason != "unavailable") {
+                return answer;
+            }
+        }
+        return answer;
+    }
+};
 
 TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeliveredNowhere) {
     auto alice = connect(nodes_[0], 0);
@@ -598,6 +668,7 @@ TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
     const auto ack =
         alice->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
     ASSERT_TRUE(ack);
+    const std::string owned_before = owner();
     alice.reset();
     // Every node's memory of recent keys goes with it, and the room gets a new owner.
     for (Node& n : nodes_) {
@@ -611,21 +682,43 @@ TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
     }
     ASSERT_NO_FATAL_FAILURE(wait_ready());
 
+    // The resends go to the room's owner, which answers them itself. A send forwarded from
+    // another node is answered `unavailable` when the forward times out (kForwardTimeout, while
+    // the node link is still coming up, say), yet may still reach the owner, which then
+    // remembers the key: the resend would be answered from that memory, not the store. The
+    // join through chat-2 resolved the room, so the owner since the restart is recorded by now.
     auto again = connect(nodes_[1], 0);
     ASSERT_TRUE(again);
     ASSERT_NO_FATAL_FAILURE(join(*again));
-    ASSERT_TRUE(again->send(send_command(room_, body, "kept-key")));
-    const auto repeat =
-        again->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
-    ASSERT_TRUE(repeat);
+    const std::string owned = owner();
+    const auto generation = [](std::string_view assignment) {
+        return core::parse_integer<std::uint64_t>(assignment.substr(assignment.find(' ') + 1))
+            .value_or(0);
+    };
+    ASSERT_GT(generation(owned), generation(owned_before))
+        << "no claim since the restart: " << owned_before << ", then " << owned;
+    const auto owner_node =
+        std::ranges::find(nodes_, owned.substr(0, owned.find(' ')), &Node::name);
+    ASSERT_NE(owner_node, nodes_.end()) << owned;
+    if (owner_node != nodes_.begin() + 1) {
+        again = connect(*owner_node, 0);
+        ASSERT_TRUE(again);
+        ASSERT_NO_FATAL_FAILURE(join(*again));
+    }
+    // Even a repeat is a commit in the store, which may take past the store's timeout under
+    // load: the node then answers `unavailable`, and the client sends again, as any would.
+    const auto repeat = send_until_answered(*again, body, "kept-key");
+    ASSERT_TRUE(repeat) << "the resend was not answered" << what_was_seen(*again);
+    ASSERT_EQ(repeat->type, "sent") << repeat->reason << what_was_seen(*again);
     EXPECT_EQ(repeat->seq, ack->seq);
-    ASSERT_TRUE(again->send(send_command(room_, "another body", "kept-key")));
-    const auto conflict =
-        again->wait_for([](const Seen& s) { return s.type == "error" && s.id == "kept-key"; });
-    ASSERT_TRUE(conflict);
-    EXPECT_EQ(conflict->reason, "conflict");
-    ASSERT_TRUE(again->send(send_command(room_, "after the resends", "marker")));
-    ASSERT_TRUE(again->message("after the resends"));
+    const auto conflict = send_until_answered(*again, "another body", "kept-key");
+    ASSERT_TRUE(conflict) << "another body was not answered" << what_was_seen(*again);
+    ASSERT_EQ(conflict->type, "error") << what_was_seen(*again);
+    EXPECT_EQ(conflict->reason, "conflict") << what_was_seen(*again);
+    const auto marker = send_until_answered(*again, "after the resends", "marker");
+    ASSERT_TRUE(marker) << "the marker was not answered" << what_was_seen(*again);
+    ASSERT_EQ(marker->type, "sent") << marker->reason << what_was_seen(*again);
+    ASSERT_TRUE(again->message("after the resends")) << what_was_seen(*again);
     // Never sequenced again: the marker is the next seq, and nothing arrived under the key
     // but the first message, under its own seq.
     EXPECT_EQ(last_seq(), std::to_string(ack->seq + 1));
@@ -637,7 +730,11 @@ TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
         EXPECT_EQ(metric(n, "messages_deduplicated_total"), 0U) << n.name << " answered it";
     }
     std::cout << "after every node restarted, the resend got seq " << repeat->seq
-              << " from the store, and another body under its id was a conflict\n";
+              << " from the store through its owner " << owned
+              << ", and another body under its id was a conflict; "
+              << again->count(
+                     [](const Seen& s) { return s.type == "error" && s.reason == "unavailable"; })
+              << " sends were answered unavailable and sent again\n";
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext({body, "another body"}, {"another body"}));
 }
 
@@ -714,6 +811,20 @@ constexpr bool kAddressSanitizer = __has_feature(address_sanitizer);
 #else
 constexpr bool kAddressSanitizer = false;
 #endif
+
+// A crash would otherwise write the database password, the node secret and live bearer tokens
+// to disk.
+TEST_P(ChatClusterTest, ANodeCanWriteNoCoreFile) {
+    const ulw::test::RaisedCoreLimit limit;
+    if (!limit.raised()) {
+        GTEST_SKIP() << "the hard core limit is 0 here; there is nothing to lower";
+    }
+    Node& node = nodes_[0];
+    node.process->signal(SIGTERM);
+    ASSERT_EQ(node.process->wait_exit(seconds(30)), 0) << node.process->output();
+    ASSERT_NO_FATAL_FAILURE(start(node, jwks_));
+    EXPECT_EQ(ulw::test::core_limit_of(node.process->pid()), std::optional<std::string>("0 0"));
+}
 
 // Resident memory, from /proc, the kernel's socket buffers aside. What the node allocates is
 // anonymous; pages of its binary and libraries (file) come in as code first runs and hold
@@ -1009,12 +1120,12 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
 TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePassword) {
     for (const std::string url :
          {"postgres://ulw:hunt%zzer2@db/ulw", "host=db password=hunt%zzer2 dbname='ulw"}) {
-        auto chat = ChildProcess::start({ULW_CHAT_BIN},
-                                        {"ULW_NODE_ID=chat-1", "ULW_NODE_ADDRESS=127.0.0.1:9201",
-                                         "ULW_NODE_SECRET=startup-test-node-secret-000000000000",
-                                         "ULW_DEV_LOOPBACK_NODES=1", "ULW_DATABASE_URL=" + url,
-                                         "ULW_DEV_JWKS_FILE=/nonexistent/jwks.json",
-                                         "JWT_ISSUER=https://issuer.test", "ULW_ALLOW_ROOT=1"});
+        auto chat = ChildProcess::start(
+            {ULW_CHAT_BIN},
+            {"ULW_NODE_ID=chat-1", "ULW_NODE_ADDRESS=127.0.0.1:9201",
+             "ULW_NODE_SECRET=startup-test-node-secret-000000000000", "ULW_DEV_LOOPBACK_NODES=1",
+             "ULW_DATABASE_URL=" + url, "ULW_DEV_JWKS_FILE=/nonexistent/jwks.json",
+             "ULW_DEV_MODE=1", "JWT_ISSUER=https://issuer.test", "ULW_ALLOW_ROOT=1"});
         ASSERT_NE(chat, nullptr);
         EXPECT_EQ(chat->wait_exit(seconds(30)), 2) << chat->output();
         EXPECT_NE(chat->output().find("ULW_DATABASE_URL"), std::string::npos) << chat->output();

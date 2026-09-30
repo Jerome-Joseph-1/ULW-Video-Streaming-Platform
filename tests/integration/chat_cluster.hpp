@@ -13,6 +13,7 @@
 #include "devtoken/dev_key.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
+#include "support/core_limit.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
@@ -238,7 +239,7 @@ protected:
         std::vector<std::string> env{
             "ULW_NODE_ID=" + node.name, "ULW_DEV_LOOPBACK_NODES=1",
             "ULW_NODE_SECRET=" + node_secret_, "ULW_DATABASE_URL=" + db_->conninfo(),
-            "ULW_DEV_JWKS_FILE=" + jwks, "JWT_ISSUER=" + std::string(kIssuer),
+            "ULW_DEV_JWKS_FILE=" + jwks, "ULW_DEV_MODE=1", "JWT_ISSUER=" + std::string(kIssuer),
             "ULW_PRESENCE_GRACE_MS=" + std::to_string(kGrace.count()),
             "ULW_REACTOR=" +
                 std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),

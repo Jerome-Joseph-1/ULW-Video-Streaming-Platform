@@ -24,6 +24,8 @@ block()
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
     FetchContent_MakeAvailable(llhttp)
 endblock()
+# Linked into the gateway and chat servers, so it is hardened like them (Warnings.cmake).
+target_compile_options(llhttp_static PRIVATE ${ulw_hardening_flags})
 
 if(ULW_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
@@ -58,4 +60,7 @@ if(ULW_BUILD_WORKER)
         set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
         FetchContent_MakeAvailable(srt)
     endblock()
+    # srt_static is built from srt_virtual's objects; both get the servers' hardening.
+    target_compile_options(srt_virtual PRIVATE ${ulw_hardening_flags})
+    target_compile_options(srt_static PRIVATE ${ulw_hardening_flags})
 endif()
