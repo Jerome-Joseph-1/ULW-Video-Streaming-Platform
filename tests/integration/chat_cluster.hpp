@@ -1,7 +1,7 @@
 // Three chat_server processes on a scratch Postgres, and clients of theirs: what the M16 to M19
 // acceptance (chat_cluster_test.cpp) and the E2EE checkpoint (chat_e2ee_test.cpp) run on.
 // ULW_CHAT_CLUSTER_PORTS=9101,9102,9103 pins the client ports (the CI job does); otherwise
-// free ones are taken.
+// ones outside the ephemeral range are reserved.
 #pragma once
 
 #include "core/util/json.hpp"
@@ -13,9 +13,8 @@
 #include "devtoken/dev_key.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
-#include "support/eventually.hpp"
-#include "support/free_port.hpp"
 #include "support/reactor_harness.hpp"
+#include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
 #include "support/ws_client.hpp"
 
@@ -37,8 +36,13 @@
 namespace ulw::test {
 
 inline constexpr std::string_view kIssuer = "https://auth.test.askedin.com";
+inline constexpr std::chrono::milliseconds kReadyCheckPeriod{250};
+inline constexpr std::array kUsers{"alice", "bob", "carol", "dave"};
+// Short, so that the presence tests wait seconds for a grace to run out, not the default ten.
+inline constexpr std::chrono::milliseconds kGrace{2'000};
 
-inline std::vector<std::uint16_t> client_ports() {
+// Empty when the ports are not pinned: each node then reserves its own.
+inline std::vector<std::uint16_t> pinned_client_ports() {
     std::vector<std::uint16_t> ports;
     // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
     const char* pinned = std::getenv("ULW_CHAT_CLUSTER_PORTS");
@@ -47,9 +51,6 @@ inline std::vector<std::uint16_t> client_ports() {
         const std::size_t comma = rest.find(',');
         ports.push_back(core::parse_integer<std::uint16_t>(rest.substr(0, comma)).value_or(0));
         rest = comma == std::string_view::npos ? "" : rest.substr(comma + 1);
-    }
-    while (ports.size() < 3) {
-        ports.push_back(free_port());
     }
     return ports;
 }
@@ -65,6 +66,8 @@ struct Seen {
     std::optional<std::uint64_t> retry_after_ms;
     // Of a history answer: how many messages came before it.
     std::uint64_t count = 0;
+    std::string user;
+    std::string status;
 };
 
 inline std::optional<Seen> parse_seen(const std::string& text) {
@@ -83,7 +86,9 @@ inline std::optional<Seen> parse_seen(const std::string& text) {
            .body = infra::auth::decode_base64url(string("body")).value_or("<not base64url>"),
            .reason = string("reason"),
            .retry_after_ms = std::nullopt,
-           .count = 0};
+           .count = 0,
+           .user = string("user"),
+           .status = string("status")};
     if (const core::json::Value* count = json->find("count")) {
         s.count = count->as_u64().value_or(0);
     }
@@ -173,6 +178,7 @@ inline std::array<std::string, 3> readable_forms(const std::string& text) {
 struct Node {
     std::string name;
     std::uint16_t port = 0;
+    bool port_pinned = false;
     std::uint16_t node_port = 0;
     std::unique_ptr<ChildProcess> process;
 };
@@ -198,7 +204,7 @@ protected:
         const auto jwks = files_.path() / "jwks.json";
         std::ofstream(jwks) << key->public_jwks();
         jwks_ = jwks.string();
-        for (const char* user : {"alice", "bob", "carol"}) {
+        for (const char* user : kUsers) {
             tokens_.push_back(*key->mint({.issuer = std::string(kIssuer),
                                           .audience = "askedin-platform",
                                           .subject = user,
@@ -206,48 +212,64 @@ protected:
                                           .ttl = std::chrono::seconds(600)},
                                          clock_.wall_now()));
         }
-        const auto ports = client_ports();
+        const auto pinned = pinned_client_ports();
         for (std::size_t i = 0; i < 3; ++i) {
             nodes_.push_back({.name = "chat-" + std::to_string(i + 1),
-                              .port = ports[i],
-                              .node_port = free_port(),
+                              .port = i < pinned.size() ? pinned[i] : std::uint16_t{0},
+                              .port_pinned = i < pinned.size(),
+                              .node_port = 0,
                               .process = nullptr});
-            ASSERT_NE(nodes_.back().port, 0);
             ASSERT_NO_FATAL_FAILURE(start(nodes_.back(), jwks_));
         }
         ASSERT_NO_FATAL_FAILURE(wait_ready());
     }
 
     void wait_ready() {
+        // Readiness is only visible over HTTP, so it is asked a few times a second rather than
+        // in a loop that would leave a connection in TIME_WAIT on every turn.
         for (const Node& n : nodes_) {
-            ASSERT_TRUE(eventually([&] { return http_get(n.port, "/readyz").status == 200; },
-                                   std::chrono::seconds(30)))
+            ASSERT_TRUE(
+                n.process->poll_until([&] { return http_get(n.port, "/readyz").status == 200; },
+                                      std::chrono::seconds(30), kReadyCheckPeriod))
                 << n.process->output();
         }
     }
 
     void start(Node& node, const std::string& jwks) {
         std::vector<std::string> env{
-            "ULW_NODE_ID=" + node.name,
-            "ULW_LISTEN_PORT=" + std::to_string(node.port),
-            "ULW_NODE_ADDRESS=127.0.0.1:" + std::to_string(node.node_port),
-            "ULW_DEV_LOOPBACK_NODES=1",
-            "ULW_NODE_SECRET=" + node_secret_,
-            "ULW_DATABASE_URL=" + db_->conninfo(),
-            "ULW_DEV_JWKS_FILE=" + jwks,
-            "JWT_ISSUER=" + std::string(kIssuer),
+            "ULW_NODE_ID=" + node.name, "ULW_DEV_LOOPBACK_NODES=1",
+            "ULW_NODE_SECRET=" + node_secret_, "ULW_DATABASE_URL=" + db_->conninfo(),
+            "ULW_DEV_JWKS_FILE=" + jwks, "JWT_ISSUER=" + std::string(kIssuer),
+            "ULW_PRESENCE_GRACE_MS=" + std::to_string(kGrace.count()),
             "ULW_REACTOR=" +
-                std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll")};
+                std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),
+            // Some runs start tests as root; this suite is not about that.
+            "ULW_ALLOW_ROOT=1"};
         for (const char* passed : {"ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"}) {
             // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
             if (const char* value = std::getenv(passed)) {
                 env.push_back(std::string(passed) + "=" + value);
             }
         }
-        node.process = ChildProcess::start({ULW_CHAT_BIN}, env);
-        ASSERT_NE(node.process, nullptr);
-        ASSERT_TRUE(node.process->wait_for_output(R"("msg":"listening")", std::chrono::seconds(30)))
-            << node.process->output();
+        auto started = start_until_listening(
+            [&] {
+                if (!node.port_pinned) {
+                    node.port = reserve_port();
+                }
+                node.node_port = reserve_port();
+                if (node.port == 0 || node.node_port == 0) {
+                    return std::unique_ptr<ChildProcess>();
+                }
+                auto with_ports = env;
+                with_ports.push_back("ULW_LISTEN_PORT=" + std::to_string(node.port));
+                with_ports.push_back("ULW_NODE_ADDRESS=127.0.0.1:" +
+                                     std::to_string(node.node_port));
+                return ChildProcess::start({ULW_CHAT_BIN}, with_ports);
+            },
+            R"("msg":"listening")", std::chrono::seconds(30));
+        node.process = std::move(started.process);
+        ASSERT_NE(node.process, nullptr) << "no port to listen on";
+        ASSERT_TRUE(started.ready) << node.process->output();
     }
 
     std::unique_ptr<Client> connect(const Node& node, std::size_t user) {
@@ -258,8 +280,7 @@ protected:
             ADD_FAILURE() << "upgrade refused: " << refusal;
             return nullptr;
         }
-        return std::make_unique<Client>(std::move(*ws),
-                                        std::array{"alice", "bob", "carol"}.at(user));
+        return std::make_unique<Client>(std::move(*ws), kUsers.at(user));
     }
 
     void join(Client& client, std::optional<std::uint64_t> after = std::nullopt) {
@@ -279,14 +300,33 @@ protected:
 
     static std::string ref(std::uint64_t n) { return "r" + std::to_string(n); }
 
-    // Lists members for a room, as the service's operators do.
+    // Lists members for a room, as the service's operators do (RUNBOOK section 3): the room is
+    // recorded closed first.
     void list_members(const std::string& room, const std::vector<std::string>& users) const {
         auto conn = db_->session();
+        ASSERT_TRUE(conn.exec("INSERT INTO chat_rooms (room_id, kind) "
+                              "VALUES ($1::text::uuid, 'group_chat') "
+                              "ON CONFLICT (room_id) DO NOTHING",
+                              infra::postgres::Params{}.add_text(room)));
         for (const std::string& user : users) {
             ASSERT_TRUE(
                 conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::text::uuid, $2)",
                           infra::postgres::Params{}.add_text(room).add_text(user)));
         }
+    }
+
+    // Records a room as a stream's live chat, as the server side does (RUNBOOK section 3); the
+    // kind it is then recorded as.
+    [[nodiscard]] std::string record_live(const std::string& room) const {
+        auto conn = db_->session();
+        return scalar(conn,
+                      "INSERT INTO chat_rooms (room_id, kind) "
+                      "SELECT $1::text::uuid, 'stream_live_chat' WHERE NOT EXISTS "
+                      "(SELECT 1 FROM chat_members WHERE room_id = $1::text::uuid) "
+                      "AND NOT EXISTS (SELECT 1 FROM room_state WHERE room_id = $1::text::uuid "
+                      "AND kind <> 'stream_live_chat') "
+                      "ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind RETURNING kind",
+                      infra::postgres::Params{}.add_text(room));
     }
 
     // A join of `room` with `fields` added; "joined", or the error's reason.

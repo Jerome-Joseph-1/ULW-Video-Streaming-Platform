@@ -117,26 +117,44 @@ public:
         done(std::vector<core::UserId>{});
     }
     void admits(const core::RoomId& /*room*/, const core::UserId& user, core::ports::RoomKind asked,
-                core::ports::MessageCallback<bool> done) override {
+                core::ports::MessageCallback<core::ports::Admission> done) override {
         kinds.push_back(asked);
-        const bool admitted = std::ranges::find(refused, user.view()) == refused.end();
+        auto answer = core::ports::Admission::Admitted;
+        if (std::ranges::find(refused, user.view()) != refused.end()) {
+            answer = core::ports::Admission::NotMember;
+        } else if (!live && core::ports::admits_anyone(asked)) {
+            answer = core::ports::Admission::NotLive;
+        }
         if (hold) {
-            held.emplace_back(std::move(done), admitted);
+            held.emplace_back(std::move(done), answer);
             return;
         }
-        done(admitted);
+        done(answer);
+    }
+    void record_live(const core::RoomId& /*room*/,
+                     core::ports::MessageCallback<void> done) override {
+        done({});
     }
 
-    void answer_admits(core::ports::MessageResult<bool> result) {
-        auto [done, admitted] = std::move(held.front());
+    // Answers the oldest held admits with what it would have answered, or with `result`'s error.
+    void answer_admits(core::ports::MessageResult<void> result) {
+        auto [done, answer] = std::move(held.front());
         held.erase(held.begin());
-        done(result ? core::ports::MessageResult<bool>{admitted} : result);
+        if (result) {
+            done(answer);
+        } else {
+            done(std::unexpected(result.error()));
+        }
     }
 
     std::vector<std::string> refused;
+    // Whether every room is recorded as live; otherwise a join that asks for live is NotLive.
+    bool live = true;
     std::vector<core::ports::RoomKind> kinds;
     bool hold = false;
-    std::vector<std::pair<core::ports::MessageCallback<bool>, bool>> held;
+    std::vector<
+        std::pair<core::ports::MessageCallback<core::ports::Admission>, core::ports::Admission>>
+        held;
     std::vector<core::ports::MessageCallback<std::vector<core::ports::StoredMessage>>> pages;
     std::vector<std::string> directions;
 };
@@ -309,6 +327,21 @@ TEST_F(ChatServiceTest, TheKindAJoinNamesIsWhatTheMemberCheckIsAskedFor) {
                                             core::ports::RoomKind::StreamLiveChat}));
 }
 
+TEST_F(ChatServiceTest, AJoinThatAsksForLiveInARoomNotRecordedLiveIsRefusedAsNotLive) {
+    messages_.live = false;
+    FakeClient alice;
+    const auto a = attach(alice);
+    service_->join(a, {.room = room_id(kOtherRoom),
+                       .after = std::nullopt,
+                       .delivery = chat::Delivery::Lossy,
+                       .kind = core::ports::RoomKind::StreamLiveChat});
+    EXPECT_TRUE(rooms_.joins.empty());
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_live");
+    // Not left half in the room: a join as a group chat asks again, and is let in.
+    join(a);
+    EXPECT_EQ(rooms_.joins.size(), 1U);
+}
+
 TEST_F(ChatServiceTest, AJoinWaitsForTheMemberListAndAskingAgainMeanwhileIsBusy) {
     messages_.hold = true;
     FakeClient alice;
@@ -317,7 +350,7 @@ TEST_F(ChatServiceTest, AJoinWaitsForTheMemberListAndAskingAgainMeanwhileIsBusy)
     join(a);
     EXPECT_TRUE(rooms_.joins.empty());
     EXPECT_EQ(seen(alice.take().at(0)).reason, "busy");
-    messages_.answer_admits(true);
+    messages_.answer_admits({});
     ASSERT_EQ(rooms_.joins.size(), 1U);
     rooms_.admit(7);
     const Seen joined = seen(alice.take().at(0));
@@ -344,7 +377,7 @@ TEST_F(ChatServiceTest, AnAnswerForAClientThatLeftMeanwhileIsDropped) {
     const auto a = attach(alice);
     join(a);
     service_->detach(a);
-    messages_.answer_admits(true);
+    messages_.answer_admits({});
     EXPECT_TRUE(rooms_.joins.empty());
     EXPECT_TRUE(alice.take().empty());
 }

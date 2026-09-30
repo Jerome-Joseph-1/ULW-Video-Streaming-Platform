@@ -144,8 +144,10 @@ export async function startStack() {
   const database = `ulw_e2e_${randomBytes(6).toString('hex')}`;
   const databaseUrl = withDatabase(config.postgres, database);
   psql(config.postgres, `CREATE DATABASE ${database}`);
+  // A developer's container may run the suite as root, which the services refuse unless told.
+  const rootAllowed = { ULW_ALLOW_ROOT: '1' };
   execFileSync(bin('apps/migrate/ulw_migrate'), [], {
-    env: { ...process.env, ULW_DATABASE_URL: databaseUrl }, stdio: 'pipe' });
+    env: { ...process.env, ULW_DATABASE_URL: databaseUrl, ...rootAllowed }, stdio: 'pipe' });
   await ensureBucket();
 
   const key = path.join(work, 'dev-key.json');
@@ -172,6 +174,9 @@ export async function startStack() {
     ULW_LISTEN_PORT: String(gatewayPort),
     ULW_DEV_JWKS_FILE: jwks,
     JWT_ISSUER: config.issuer,
+    // The per-client limits stay at their defaults: a real browser playing through them is
+    // part of what this suite shows.
+    ...rootAllowed,
   });
   const worker = new Service('transcode_worker', bin('apps/worker/transcode_worker'), {
     PATH: process.env.PATH,
@@ -179,6 +184,7 @@ export async function startStack() {
     ULW_NODE_ID: 'e2e-worker',
     ULW_SCRATCH_DIR: work,
     ULW_SANDBOX_BIN: bin('apps/worker/ulw_sandbox'),
+    ...rootAllowed,
   });
   await gateway.waitFor(`"port":${gatewayPort}`, 30_000);
 

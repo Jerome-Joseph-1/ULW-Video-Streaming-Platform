@@ -22,7 +22,7 @@ using infra::postgres::kUuidOid;
 using infra::postgres::Params;
 
 std::string bytes_of(const Params::Wire& wire, std::size_t i) {
-    return {wire.values[i], static_cast<std::size_t>(wire.lengths[i])};
+    return {wire.values.at(i), static_cast<std::size_t>(wire.lengths.at(i))};
 }
 
 TEST(Params, IntegersAreBigEndianInt8) {

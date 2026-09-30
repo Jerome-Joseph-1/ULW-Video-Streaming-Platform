@@ -1,7 +1,7 @@
 # Chat
 
-> **Draft until phase 2 is tagged.** Messages, acks, resume, history and member lists below are
-> what `main` does. M18 adds presence messages; nothing else here is expected to change before
+> **Draft until phase 2 is tagged.** Messages, acks, resume, history, member lists and
+> [presence](#presence) below are what `main` does. Nothing here is expected to change before
 > the tag, but it is not a compatibility promise until then.
 
 Chat is its own service, `chat_server`, separate from the video gateway (ADR-0019). Clients hold
@@ -34,7 +34,7 @@ listed origin. Native apps send the bearer header.
 
 ## Messages
 
-<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0052-messages-stored-with-their-seq.md -->
+<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0054-messages-stored-with-their-seq.md -->
 
 Every message is one JSON object in one text frame. Unknown `type`s and unknown fields are
 refused with an `error`, not ignored. Room ids are canonical lowercase UUIDs.
@@ -43,7 +43,7 @@ Client to server:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`) | Subscribe this connection to the room. Joining an unknown room creates it, as the `kind` it names (see [Member lists](#member-lists)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
+| `join` | `room`; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, `"direct"` or `"live"`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names; `"live"` joins only a room the server opened (see [Member lists](#member-lists)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 
@@ -100,17 +100,19 @@ delivered, and the `id` stays with the first message. Send the new message under
 
 ### Member lists
 
-<!-- apps/chat/src/chat_service.cpp (join, admitted), migrations/0005_chat_messages.sql (chat_members) -->
+<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms) -->
 
-Who may join a room depends on its kind, which the room's first join sets and nothing changes
-afterwards:
+Who may join a room depends on its kind, which is recorded once and never changes:
 
 - **Direct and group chats** (`"kind":"direct"` or `"group"`, the default) admit only their
   members. Anyone else's `join` is refused with `not_member`, so they can neither send to the
-  room nor read its history. A direct or group chat with no members admits nobody.
-- **A stream's live chat** (`"kind":"live"`) admits anyone. Later joins need not name the kind.
-  A room whose members were listed before its first join is a group chat, whatever that join
-  asks for.
+  room nor read its history. A direct or group chat with no members admits nobody. The first
+  join of a room with no kind recorded records the kind it names; so does listing its first
+  member (as a group chat).
+- **A stream's live chat** admits anyone. Only the server opens one, before anyone joins it; a
+  client cannot. A join that says `"kind":"live"` is admitted in a room the server opened, and
+  refused with `not_live` in any other, which it leaves as it was. Joins of a live room need
+  not name the kind.
 
 No client command changes a member list; they are set by the service's operators, and later by
 the product, in the database. A member removed from the list keeps receiving the room's
@@ -126,6 +128,7 @@ messages, and can read its history, until that connection closes; the next `join
 | `bad_id` | `id` is not a message id | Fix the client |
 | `bad_body` | `body` is not base64url | Fix the client |
 | `not_member` | The room has a member list without you | Do not retry |
+| `not_live` | `"kind":"live"` for a room the server has not opened as a stream's live chat | Do not retry; join without `kind` if it is a group chat you are a member of |
 | `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
 | `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |
 | `rate_limited` | Past the send allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered |
@@ -155,3 +158,66 @@ messages, and can read its history, until that connection closes; the next `join
 | Handshake | 10 s from accept to a complete upgrade request | Connection closed |
 | Idle | The server pings after 30 s of silence and closes after 75 s with nothing received | Answer pings (browsers do this themselves) |
 | Server drain | Close `1001`, then 5 s | Reconnect |
+
+## Presence
+
+<!-- apps/chat/src/presence.hpp (PresenceLimits), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), docs/adr/0056-presence-over-the-room-plane.md -->
+
+A client can watch other users and hear when they come online and go offline. A user is online
+while they have at least one open socket to any chat node, and for a grace of 10 s after their
+last one closes: a page reload or a reconnect, even through another node, within the grace is
+never reported. Nothing needs to be joined first.
+
+Client to server:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `watch` | `user` | Hear this user's presence on this connection. Watching the same user again is answered again. |
+| `unwatch` | `user` | Stop. Not answered; unwatching a user not watched does nothing. |
+
+Server to client:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `watching` | `user`, `status` (`online` or `offline`) | The answer to `watch`: what the node knows now. |
+| `presence` | `user`, `status` (`online` or `offline`) | The user's status changed. Sent once per change, to every connection watching them. |
+| `error` | `reason`, `user` | The watch was refused (below). |
+
+```json
+{"type":"watch","user":"user-42"}
+{"type":"watching","user":"user-42","status":"offline"}
+{"type":"presence","user":"user-42","status":"online"}
+{"type":"presence","user":"user-42","status":"offline"}
+```
+
+`user` is the watched user's id as it appears in `sender` ([auth.md](auth.md)). A `watching`
+that says `offline` may be followed within a round trip by `presence` `online`: the node had not
+yet heard from the node the user is connected through. Treat `watching` as the starting state
+and apply each `presence` in order.
+
+When a user goes offline:
+
+- after closing their last socket normally: 10 s later (the grace);
+- when their connection dies without a close: once the server notices, at most 75 s later (the
+  idle timeout in [Limits](#limits)), plus the grace;
+- when the node they were on stops (a crash, or a deploy draining it) and they do not reconnect:
+  up to 150 s later.
+
+Watches last as long as the connection. After a reconnect, watch again.
+
+Errors for `watch` and `unwatch`:
+
+| `reason` | Meaning | Client action |
+|---|---|---|
+| `malformed` | Missing `user`, or another field | Fix the client |
+| `bad_user` | `user` is not a user id | Fix the client |
+| `watching_self` | `user` is the connection's own user | Nothing to watch: the connection is online |
+| `too_many_watches` | This connection already watches 128 users | Unwatch some first |
+| `busy` | This node watches as many users as it takes, or this user started watching users no connection on this node was watching (unwatching and watching again counts each time) faster than 128 at once and then 1 a second | Back off and retry |
+
+Room ids of UUID version 8 (the third group starts with `8`) whose first byte is `02` (the id
+starts with `02`) are reserved for presence: `join`, `send` or `history` naming one is refused
+with `bad_room`. Presence events are never stored.
+
+Anyone signed in may watch anyone: there is no check of who may see whose presence yet. That is
+an open item before production ([ADR-0056](../adr/0056-presence-over-the-room-plane.md)).

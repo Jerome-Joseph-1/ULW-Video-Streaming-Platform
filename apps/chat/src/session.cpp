@@ -264,6 +264,7 @@ void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
     // Passed authentication, which sets the user; without one, commands close the socket.
     if (user_) {
         client_ = server_.chat().attach(*this, *user_);
+        presence_ = server_.presence().attach(*this, *user_);
     }
     phase_ = Phase::Open;
     ++server_.counters().upgrades;
@@ -347,7 +348,7 @@ void Session::command(const codec::ws::Frame& frame) {
         return;
     }
     // Set by the upgrade, which is the only way into the Open phase.
-    if (!client_) {
+    if (!client_ || !presence_) {
         close_with(kInternalError);
         return;
     }
@@ -360,7 +361,15 @@ void Session::command(const codec::ws::Frame& frame) {
         chat.history(*client_, *h);
         return;
     }
-    chat.send(*client_, std::move(std::get<Send>(*parsed)));
+    if (auto* s = std::get_if<Send>(&*parsed)) {
+        chat.send(*client_, std::move(*s));
+        return;
+    }
+    if (const auto* w = std::get_if<Watch>(&*parsed)) {
+        server_.presence().watch(*presence_, w->user);
+        return;
+    }
+    server_.presence().unwatch(*presence_, std::get<Unwatch>(*parsed).user);
 }
 
 bool Session::push(std::string_view text) noexcept {
@@ -503,6 +512,9 @@ void Session::close() noexcept {
     }
     if (client_) {
         server_.chat().detach(*client_);
+    }
+    if (presence_) {
+        server_.presence().detach(*presence_);
     }
     reactor.begin_close(conn_);
     server_.retire(handle_);

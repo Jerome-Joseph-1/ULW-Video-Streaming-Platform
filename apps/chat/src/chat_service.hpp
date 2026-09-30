@@ -160,7 +160,8 @@ private:
     [[nodiscard]] Client* find(ClientId id) noexcept;
     [[nodiscard]] Room* find(const core::RoomId& room) noexcept;
     [[nodiscard]] bool admit_join(const core::UserId& user);
-    void admitted(ClientId id, const Join& join, core::ports::MessageResult<bool> result) noexcept;
+    void admitted(ClientId id, const Join& join,
+                  core::ports::MessageResult<core::ports::Admission> result) noexcept;
     void enter(ClientId id, const Join& join);
     void joined(const core::RoomId& room,
                 std::expected<std::uint64_t, rt::RouteError> result) noexcept;

@@ -7,6 +7,7 @@
 #include "node_auth.hpp"
 #include "support/fake_random.hpp"
 #include "support/reactor_harness.hpp"
+#include "support/reserve_port.hpp"
 #include "wire.hpp"
 
 #include <arpa/inet.h>
@@ -368,6 +369,24 @@ TEST_P(RoomRouterTest, AJoinIsAnsweredWithTheRoomsHeadWhereverTheOwnerIs) {
     EXPECT_EQ(join(a, again), 2U);
 }
 
+TEST_P(RoomRouterTest, ANodeThatTakesOverARoomItNeverSawAnswersJoinsWithTheStoredHead) {
+    Node& a = start("chat-a");
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    for (const char* text : {"one", "two", "three"}) {
+        ASSERT_TRUE(send(a, alice, "alice", text));
+    }
+    a.store->reachable = false;
+    db_.make_stale(room_);
+    // chat-c delivered nothing and sequenced nothing: all it knows of the room is what its
+    // claim read from the store.
+    Node& c = start("chat-c");
+    Member carol;
+    EXPECT_EQ(join(c, carol), 3U);
+    EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-c"));
+    EXPECT_EQ(send(c, carol, "carol", "four"), 4U);
+}
+
 TEST_P(RoomRouterTest, AWriteUnderAGenerationThatMovedOnIsFencedAndDeliveredNowhere) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");
@@ -520,6 +539,29 @@ TEST_P(RoomRouterTest, AKeyResentWithAnotherBodyIsAConflictAndIsDeliveredNowhere
     EXPECT_EQ(db_.rooms.at(room_).last_seq, 1U);
 }
 
+TEST_P(RoomRouterTest, AMemberToldTheHeadAtItsJoinIsDeliveredNothingAtOrBelowIt) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    for (const std::string_view text : {"one", "two", "three"}) {
+        ASSERT_TRUE(send(a, alice, "alice", text));
+    }
+    ASSERT_EQ(join(b, bob), 3U);
+    // A message the store holds under a key no node remembers, as an earlier run left it.
+    db_.keys.emplace(std::make_tuple(room_, std::string("alice"), std::string("earlier")), 2);
+    // chat-b, which has a member, takes the room while knowing nothing of its head.
+    a.store->reachable = false;
+    db_.make_stale(room_);
+    ASSERT_TRUE(pump([&] { return db_.rooms.at(room_).owner == *core::NodeId::parse("chat-b"); }));
+    // Its repeat is answered with the stored seq, and bob, told of seq 3, gets no seq 2.
+    EXPECT_EQ(send(b, bob, "alice", "two", *rt::MessageKey::parse("earlier")), 2U);
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_TRUE(bob.got.empty());
+    EXPECT_EQ(db_.rooms.at(room_).last_seq, 3U);
+}
+
 TEST_P(RoomRouterTest, ARetryQueuedBehindItsFirstTryIsAnsweredByTheOwnerWithTheFirstSeq) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");
@@ -661,15 +703,14 @@ TEST_P(RoomRouterTest, AJoinFailsWhenTheOwnerCannotBeReachedAndThePeerIsReported
     ASSERT_TRUE(join(a, alice));
     Node& b = start("chat-b");
     // Where chat-a says it listens, nothing does.
-    std::uint16_t dead = 0;
-    {
-        auto probe = net::listen_tcp({.port = 0, .loopback_only = true});
-        ASSERT_TRUE(probe);
-        dead = *net::local_port(probe->get());
-    }
+    const std::uint16_t dead = ulw::test::reserve_port();
+    ASSERT_NE(dead, 0);
     db_.addresses["chat-a"] = "127.0.0.1:" + std::to_string(dead);
     Member bob;
     EXPECT_EQ(join(b, bob), std::unexpected(RouteError::Unavailable));
+    // The loss is reported when the connect is refused, which on a loaded host can come after
+    // the join has already given up on its forward timeout.
+    ASSERT_TRUE(pump([&] { return !b.events.lost.empty(); }));
     EXPECT_EQ(b.events.lost, std::vector<std::string>{"chat-a"});
     EXPECT_EQ(b.router->rooms_joined(), 0U);
 }

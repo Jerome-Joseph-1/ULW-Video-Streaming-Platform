@@ -1,6 +1,8 @@
 #include "core/version.hpp"
 #include "infra/ffmpeg/live_remux.hpp"
+#include "infra/ffmpeg/recording_remux.hpp"
 #include "infra/ffmpeg/transcoder.hpp"
+#include "infra/postgres/live_recordings.hpp"
 #include "infra/s3util/credentials.hpp"
 #include "infra/s3util/profile.hpp"
 #include "infra/srt/ingest.hpp"
@@ -12,6 +14,7 @@
 #include "config.hpp"
 #include "log.hpp"
 #include "publisher.hpp"
+#include "recorder.hpp"
 #include "stream_runner.hpp"
 
 #include <sys/prctl.h>
@@ -22,6 +25,7 @@
 #include <exception>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <print>
@@ -59,9 +63,54 @@ std::string_view to_string(live::StorageBackend backend) noexcept {
     return "r2";
 }
 
+class PgCatalog final : public live::IRecordingCatalog {
+public:
+    explicit PgCatalog(std::string conninfo) : db_(std::move(conninfo)) {}
+
+    std::expected<std::optional<infra::postgres::RecordingRow>,
+                  infra::postgres::RecordingStoreError>
+    find(std::string_view stream) override {
+        return db_.find(stream);
+    }
+    std::expected<infra::postgres::RecordingRow, infra::postgres::RecordingStoreError>
+    record(const infra::postgres::NewRecording& recording) override {
+        return db_.record(recording);
+    }
+    std::expected<infra::postgres::RecordingRow, infra::postgres::RecordingStoreError>
+    fail(std::string_view stream, std::string_view reason) override {
+        return db_.fail(stream, reason);
+    }
+
+private:
+    infra::postgres::PgLiveRecordings db_;
+};
+
+class SandboxedCopier final : public live::IRecordingCopier {
+public:
+    SandboxedCopier(infra::ffmpeg::RecordingRemuxConfig config, const core::ports::IClock& clock)
+        : remuxer_(std::move(config), clock) {}
+
+    std::expected<void, infra::ffmpeg::RemuxError>
+    run(const infra::ffmpeg::RecordingRemuxJob& job,
+        const std::function<void(std::string_view)>& on_output,
+        const std::stop_token& stop) override {
+        return remuxer_.run(job, on_output, stop);
+    }
+    std::expected<std::optional<infra::ffmpeg::AudioFormat>, infra::ffmpeg::RemuxError>
+    probe_audio(const fs::path& init, const fs::path& work_dir,
+                const std::stop_token& stop) override {
+        return remuxer_.probe_audio(init, work_dir, stop);
+    }
+
+private:
+    const infra::ffmpeg::RecordingRemuxer remuxer_;
+};
+
 struct Storage {
     std::unique_ptr<infra::s3util::EnvCredentialProvider> credentials;
     std::unique_ptr<core::ports::IObjectTransfer> transfer;
+    // The same adapter as `transfer`, for the recording.
+    core::ports::IObjectStreams* streams = nullptr;
 };
 
 std::expected<Storage, std::string> make_storage(const live::Config& config,
@@ -70,7 +119,9 @@ std::expected<Storage, std::string> make_storage(const live::Config& config,
     using live::StorageBackend;
     Storage storage;
     if (config.storage == StorageBackend::Filesystem) {
-        storage.transfer = std::make_unique<infra::storage::FsTransfer>(config.storage_location);
+        auto transfer = std::make_unique<infra::storage::FsTransfer>(config.storage_location);
+        storage.streams = transfer.get();
+        storage.transfer = std::move(transfer);
         return storage;
     }
     auto profile = config.storage == StorageBackend::R2
@@ -96,13 +147,44 @@ std::expected<Storage, std::string> make_storage(const live::Config& config,
     if (!transfer) {
         return std::unexpected("object store configuration refused");
     }
+    storage.streams = transfer->get();
     storage.transfer = std::move(*transfer);
     return storage;
 }
 
+// One line for how the recording went; only what may pass exits non-zero, for a restart to
+// try again.
+int report(const live::RecordResult& done) {
+    switch (done.outcome) {
+    case live::RecordOutcome::Recorded:
+        live::log("recording: queued as video {}",
+                  done.video ? done.video->to_string() : std::string());
+        return EXIT_SUCCESS;
+    case live::RecordOutcome::AlreadyRecorded:
+        if (done.video) {
+            live::log("recording: already video {}", done.video->to_string());
+        } else {
+            live::log("recording: already marked unrecordable: {}", done.detail);
+        }
+        return EXIT_SUCCESS;
+    case live::RecordOutcome::NothingToRecord:
+        live::log("recording: nothing to record");
+        return EXIT_SUCCESS;
+    case live::RecordOutcome::Superseded:
+    case live::RecordOutcome::Unrecordable:
+        live::log("recording: {}: {}", live::to_string(done.outcome), done.detail);
+        return EXIT_SUCCESS;
+    case live::RecordOutcome::Failed:
+        live::log("recording: failed: {}", done.detail);
+        return EXIT_FAILURE;
+    }
+    return EXIT_FAILURE;
+}
+
 // SIGTERM, SIGINT and SIGUSR1 are blocked in every thread and taken here, synchronously, so no
 // handler runs in the middle of a libcurl call. SIGTERM and SIGINT drain: the process goes and
-// the stream is left to be continued. SIGUSR1 ends the stream.
+// the stream is left to be continued. SIGUSR1 ends the stream, and a SIGTERM after it still
+// stops the recording that follows.
 void watch_signals(const std::stop_token& stop, std::stop_source& drain, std::stop_source& end,
                    sigset_t signals) {
     // Wakes this often only to notice that the packager finished on its own.
@@ -112,7 +194,7 @@ void watch_signals(const std::stop_token& stop, std::stop_source& drain, std::st
         if (sig == SIGUSR1) {
             live::log("signal {}: ending the stream", sig);
             end.request_stop();
-            return;
+            continue;
         }
         if (sig > 0) {
             live::log("signal {}: draining, the stream is left to be continued", sig);
@@ -169,8 +251,70 @@ int run() {
     if (!storage) {
         return fail("storage", storage.error());
     }
-    // Before the listener and after everything that holds an SRT socket: main's locals are
-    // destroyed in reverse, and libsrt's cleanup must come last.
+    std::stop_source drain;
+    std::stop_source end;
+    const std::jthread signal_thread([&drain, &end, signals](const std::stop_token& stop) {
+        watch_signals(stop, drain, end, signals);
+    });
+    const infra::ffmpeg::LiveRemuxConfig ffmpeg{
+        .sandbox = sandbox, .ffmpeg = config->ffmpeg, .search_path = config->search_path};
+    std::optional<PgCatalog> catalog;
+    std::optional<live::RecorderSettings> recorder;
+    if (const std::optional<live::RecordingTarget>& target = config->recording; target) {
+        catalog.emplace(target->database_url);
+        recorder.emplace(live::RecorderSettings{
+            .stream = config->stream,
+            .owner = target->owner,
+            .work_dir = config->scratch / "recording",
+            .wall = config->max_duration,
+            .max_bytes = live::recording_bound(config->max_kbps, config->max_duration),
+            .own_claim = std::nullopt});
+    }
+    SandboxedCopier copier({.sandbox = sandbox,
+                            .ffmpeg = config->ffmpeg,
+                            .ffprobe = config->ffprobe,
+                            .search_path = config->search_path},
+                           clock);
+    // A stream that has ended is recorded, never streamed again; the recording is repeated by
+    // every run that finds it not yet done, so one killed before the job was queued is made
+    // good by the next.
+    const auto record = [&]() -> int {
+        if (!recorder || !catalog) {
+            return EXIT_SUCCESS;
+        }
+        const auto done = live::record_stream({.store = *storage->transfer,
+                                               .streams = *storage->streams,
+                                               .copier = copier,
+                                               .catalog = *catalog,
+                                               .clock = clock,
+                                               .random = random},
+                                              *recorder, drain.get_token());
+        return report(done);
+    };
+
+    std::optional<std::uint32_t> claimed;
+    auto publisher = live::Publisher::open({.stream = config->stream,
+                                            .window = {.target_seconds = config->segment_seconds,
+                                                       .max_segments = config->window_segments},
+                                            .media_dir = media_dir,
+                                            .outbox = config->scratch / "outbox"},
+                                           *storage->transfer, clock, &claimed);
+    if (!publisher && publisher.error() == live::PublishError::AlreadyEnded && recorder) {
+        live::log("{} ({}) stream={} has ended; recording it", info.version, info.git_sha,
+                  config->stream.str());
+        recorder->own_claim = claimed;
+        return record();
+    }
+    if (!publisher) {
+        return fail("stream", live::to_string(publisher.error()));
+    }
+    // A run that ends the stream without publishing a segment of its own ends it above the
+    // last segment's epoch; its own claim must not fence its recording out.
+    if (recorder) {
+        recorder->own_claim = publisher->epoch();
+    }
+    // After everything that holds an SRT socket is declared: main's locals are destroyed in
+    // reverse, and libsrt's cleanup must come last.
     const auto srt = infra::srt::Runtime::start();
     if (!srt) {
         return fail("srt", srt.error());
@@ -182,27 +326,12 @@ int run() {
     if (!listener) {
         return fail("ingest", listener.error());
     }
-    const infra::ffmpeg::LiveRemuxer remuxer(
-        {.sandbox = sandbox, .ffmpeg = config->ffmpeg, .search_path = config->search_path}, clock);
-    auto publisher = live::Publisher::open({.stream = config->stream,
-                                            .window = {.target_seconds = config->segment_seconds,
-                                                       .max_segments = config->window_segments},
-                                            .media_dir = media_dir,
-                                            .outbox = config->scratch / "outbox"},
-                                           *storage->transfer, clock);
-    if (!publisher) {
-        return fail("stream", live::to_string(publisher.error()));
-    }
-
-    std::stop_source drain;
-    std::stop_source end;
-    const std::jthread signal_thread([&drain, &end, signals](const std::stop_token& stop) {
-        watch_signals(stop, drain, end, signals);
-    });
-    live::log("{} ({}) stream={} storage={} ingest={}:{} segment={}s window={} sandbox={}",
+    const infra::ffmpeg::LiveRemuxer remuxer(ffmpeg, clock);
+    live::log("{} ({}) stream={} storage={} ingest={}:{} segment={}s window={} sandbox={} "
+              "recording={}",
               info.version, info.git_sha, config->stream.str(), to_string(config->storage),
               config->ingest_host, listener->port(), config->segment_seconds,
-              config->window_segments, sandbox.string());
+              config->window_segments, sandbox.string(), recorder ? "on" : "off");
     if (publisher->resumed()) {
         live::log("continuing at segment {} as epoch {}", publisher->next_sequence(),
                   publisher->epoch());
@@ -216,7 +345,12 @@ int run() {
                           .max_duration = config->max_duration},
                          {.drain = drain.get_token(), .end = end.get_token()});
     live::log("stopped");
-    return outcome == live::Outcome::Ended ? EXIT_SUCCESS : EXIT_FAILURE;
+    const bool drained = drain.stop_requested() && !end.stop_requested();
+    // The stored playlist says whether the stream ended, whatever this run's outcome: a run
+    // that failed still ends it, and a superseded one leaves it to the newer.
+    const int recorded = drained ? EXIT_SUCCESS : record();
+    return outcome == live::Outcome::Ended && recorded == EXIT_SUCCESS ? EXIT_SUCCESS
+                                                                       : EXIT_FAILURE;
 }
 
 } // namespace

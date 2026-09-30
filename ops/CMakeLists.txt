@@ -4,6 +4,7 @@ ulw_add_library(ops
     src/metrics.cpp
     src/notify.cpp
     src/process.cpp
+    src/root.cpp
     src/settings.cpp
     src/toml.cpp)
 target_include_directories(ops PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)

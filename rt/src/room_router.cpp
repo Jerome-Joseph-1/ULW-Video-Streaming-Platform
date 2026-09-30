@@ -882,6 +882,11 @@ private:
         if (const auto o = owned_.find(room); o != owned_.end()) {
             latest = o->second.head;
         }
+        // Taken over, its head is where the store's count stood, not the 0 of a fresh queue:
+        // a member joining now must see what the old owner sequenced as behind it.
+        if (registry_.owned(room)) {
+            latest = std::max(latest, registry_.taken_at(room));
+        }
         if (const auto l = local_.find(room); l != local_.end()) {
             latest = std::max({latest, l->second.delivered, l->second.head});
         }
@@ -1115,6 +1120,9 @@ private:
             }
         }
         const std::uint64_t latest = head(room);
+        // Its members are told the head; a seq at or below it that arrives later (a repeat an
+        // owner that knows the room less well delivers again) is one they have or can fetch.
+        lr.delivered = std::max(lr.delivered, latest);
         for (Joining& j : joined) {
             j.done(latest);
         }
@@ -1243,9 +1251,10 @@ private:
         o.appending = false;
         if (!seq) {
             answer(write, std::unexpected(route_error(seq.error())));
-        } else if (*seq <= o.head) {
+        } else if (*seq <= std::max(o.head, registry_.taken_at(room))) {
             // A repeat the store recognised by its key: sequenced before, under this seq, and
-            // delivered then. It is remembered for the next repeat, and not delivered again.
+            // delivered then, by this node or by the owner it took the room from (whose count
+            // stood at taken_at). It is remembered for the next repeat, and not delivered again.
             recent_.remember(room, write.sender, write.key,
                              {.seq = *seq, .digest = RecentKeys::digest(write.body)}, clock_.now());
             answer(write, *seq);

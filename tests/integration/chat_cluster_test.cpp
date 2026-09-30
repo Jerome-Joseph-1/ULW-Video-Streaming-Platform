@@ -8,6 +8,9 @@
 // no readable form besides; history survives a restart of every node, in order; a client that
 // resumes through a node that kept nothing fills the gap from history; a room with members
 // refuses anyone else.
+// The M18 acceptance: a user who reconnects within the grace is no event to anyone watching; one
+// who does not is exactly one offline on every watching node; a user nobody watches costs no
+// presence message at all.
 
 #include "chat_cluster.hpp"
 
@@ -18,15 +21,20 @@
 #include <format>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
 
+using infra::postgres::Params;
 using std::chrono::seconds;
 using ulw::test::ChildProcess;
 using ulw::test::Client;
+using ulw::test::kGrace;
+using ulw::test::kReadyCheckPeriod;
 using ulw::test::Node;
 using ulw::test::Seen;
 
@@ -412,6 +420,115 @@ TEST_P(ChatClusterTest, AClientResumingThroughANodeThatKeptNothingFillsTheGapFro
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext(missed));
 }
 
+TEST_P(ChatClusterTest, AReconnectWithinTheGraceIsNoEventAndALeaveIsOneOfflineOnEveryNode) {
+    const auto presence = [](std::string_view status) {
+        return [status](const Seen& s) {
+            return s.type == "presence" && s.user == "alice" && s.status == status;
+        };
+    };
+    const auto is_presence = [](const Seen& s) { return s.type == "presence"; };
+    const auto is_presence_after_online = [](const Seen& s) {
+        return s.type == "presence" && s.status != "online";
+    };
+    // bob watches alice from every node before she connects.
+    std::vector<std::unique_ptr<Client>> watchers;
+    for (const Node& n : nodes_) {
+        watchers.push_back(connect(n, 1));
+        ASSERT_TRUE(watchers.back());
+        ASSERT_TRUE(watchers.back()->send(R"({"type":"watch","user":"alice"})"));
+        const auto answer = watchers.back()->wait_for(
+            [](const Seen& s) { return s.type == "watching" || s.type == "error"; });
+        ASSERT_TRUE(answer) << n.name;
+        EXPECT_EQ(answer->type, "watching") << answer->reason;
+        EXPECT_EQ(answer->status, "offline");
+    }
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    for (auto& w : watchers) {
+        ASSERT_TRUE(w->wait_for(presence("online")));
+    }
+
+    // alice drops off chat-1 and is back through chat-2 within the grace. chat-1 answers
+    // chat-2's announcement with an ack (bob watches there too) and, once its grace has run
+    // out, says she is offline there: two events, which change nothing for anyone watching.
+    const std::uint64_t before = metric(nodes_[0], "presence_events_sent_total");
+    alice.reset();
+    alice = connect(nodes_[1], 0);
+    ASSERT_TRUE(alice);
+    // Each check is a request: paced, as readiness is.
+    ASSERT_TRUE(nodes_[0].process->poll_until(
+        [&] { return metric(nodes_[0], "presence_events_sent_total") >= before + 2; }, seconds(30),
+        kReadyCheckPeriod));
+    // Everything chat-1 sent has had a grace's time to reach every node.
+    const auto quiet_until = [](std::chrono::steady_clock::time_point until) {
+        return std::max(std::chrono::duration_cast<std::chrono::milliseconds>(
+                            until - std::chrono::steady_clock::now()),
+                        std::chrono::milliseconds{1});
+    };
+    auto until = std::chrono::steady_clock::now() + kGrace;
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        EXPECT_FALSE(watchers[i]->wait_for(is_presence_after_online, quiet_until(until)))
+            << nodes_[i].name << " heard the reconnect";
+        EXPECT_EQ(watchers[i]->count(is_presence), 1U) << "online, and nothing since";
+    }
+
+    // Now she leaves for good.
+    alice.reset();
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        ASSERT_TRUE(watchers[i]->wait_for(presence("offline"))) << nodes_[i].name;
+    }
+    // Twice the grace more: long enough for a second offline from any node to arrive.
+    until = std::chrono::steady_clock::now() + (kGrace * 2);
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        EXPECT_FALSE(watchers[i]->wait_for([](const Seen&) { return false; }, quiet_until(until)));
+        EXPECT_EQ(watchers[i]->count(presence("offline")), 1U) << nodes_[i].name;
+        EXPECT_EQ(watchers[i]->count(is_presence), 2U) << nodes_[i].name;
+    }
+    // Sequenced like any room's, and kept nowhere.
+    auto conn = db_->session();
+    const std::string sequenced = ulw::test::scalar(
+        conn, "SELECT coalesce(sum(last_seq), 0) FROM room_state WHERE kind = 'presence'",
+        Params{});
+    EXPECT_NE(sequenced, "0");
+    EXPECT_EQ(
+        ulw::test::scalar(conn,
+                          "SELECT count(*) FROM chat_messages JOIN room_state USING (room_id) "
+                          "WHERE kind = 'presence'",
+                          Params{}),
+        "0");
+    std::cout << "presence rooms took " << sequenced << " seqs and stored no row\n";
+    std::cout << "alice reconnected through chat-2 within the " << kGrace.count()
+              << " ms grace: no event on any node; she left: one offline on each of "
+              << nodes_.size() << " nodes\n";
+}
+
+TEST_P(ChatClusterTest, AUserNobodyWatchesCostsNoPresenceMessage) {
+    const auto total = [&](std::string_view name) {
+        std::uint64_t sum = 0;
+        for (const Node& n : nodes_) {
+            sum += metric(n, name);
+        }
+        return sum;
+    };
+    const std::uint64_t sent = total("presence_events_sent_total");
+    const std::uint64_t received = total("presence_events_received_total");
+    const std::uint64_t forwards = total("forwards_total");
+    auto dave = connect(nodes_[0], 3);
+    ASSERT_TRUE(dave);
+    EXPECT_EQ(metric(nodes_[0], "presence_rooms"), 1U);
+    dave.reset();
+    // The grace runs out, and chat-1 leaves dave's room: nothing is left of him.
+    ASSERT_TRUE(nodes_[0].process->poll_until(
+        [&] { return metric(nodes_[0], "presence_rooms") == 0; }, seconds(30), kReadyCheckPeriod));
+    EXPECT_EQ(total("presence_events_sent_total"), sent);
+    EXPECT_EQ(total("presence_events_received_total"), received);
+    EXPECT_EQ(total("forwards_total"), forwards);
+    std::cout << "dave came and went with nobody watching: presence events sent "
+              << total("presence_events_sent_total") - sent << ", received "
+              << total("presence_events_received_total") - received << ", forwards "
+              << total("forwards_total") - forwards << " across " << nodes_.size() << " nodes\n";
+}
+
 TEST_P(ChatClusterTest, HistorySurvivesARestartOfEveryNodeInTheOrderItWasSent) {
     auto alice = connect(nodes_[0], 0);
     auto bob = connect(nodes_[1], 1);
@@ -541,12 +658,28 @@ TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedL
     auto bob = connect(nodes_[1], 1);
     ASSERT_TRUE(alice && bob);
     EXPECT_EQ(join_answer(*alice, nobody), "not_member");
-    // Its first join recorded it as a group chat; asking for live afterwards opens nothing.
-    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_member");
+    // Its first join recorded it as a group chat; asking for live afterwards opens nothing, and
+    // neither can the server.
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+    EXPECT_EQ(record_live(nobody), "group_chat");
+    EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "not_live");
+}
+
+TEST_P(ChatClusterTest, AJoinThatAsksForLiveCannotOpenARoomTheServerDidNot) {
+    const std::string room = core::RoomId::generate(clock_, random_).to_string();
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    EXPECT_EQ(join_answer(*alice, room, R"(,"kind":"live")"), "not_live");
+    auto conn = db_->session();
+    EXPECT_EQ(ulw::test::scalar(conn,
+                                "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
+                                Params{}.add_text(room)),
+              "0");
 }
 
 TEST_P(ChatClusterTest, ALiveRoomAdmitsAnyone) {
     const std::string live = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_EQ(record_live(live), "stream_live_chat");
     auto alice = connect(nodes_[0], 0);
     auto carol = connect(nodes_[2], 2);
     ASSERT_TRUE(alice && carol);
@@ -566,7 +699,7 @@ TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePasswor
                                          "ULW_NODE_SECRET=startup-test-node-secret-000000000000",
                                          "ULW_DEV_LOOPBACK_NODES=1", "ULW_DATABASE_URL=" + url,
                                          "ULW_DEV_JWKS_FILE=/nonexistent/jwks.json",
-                                         "JWT_ISSUER=https://issuer.test"});
+                                         "JWT_ISSUER=https://issuer.test", "ULW_ALLOW_ROOT=1"});
         ASSERT_NE(chat, nullptr);
         EXPECT_EQ(chat->wait_exit(seconds(30)), 2) << chat->output();
         EXPECT_NE(chat->output().find("ULW_DATABASE_URL"), std::string::npos) << chat->output();

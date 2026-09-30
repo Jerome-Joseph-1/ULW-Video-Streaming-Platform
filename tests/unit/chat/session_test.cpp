@@ -8,6 +8,7 @@
 
 #include "chat.hpp"
 #include "support/eventually.hpp"
+#include "support/fake_clock.hpp"
 #include "support/fake_verifier.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/ws_client.hpp"
@@ -33,9 +34,12 @@ constexpr std::string_view kAllowed = "https://app.askedin.test";
 // The test talks to it through sockets only.
 class Node {
 public:
-    explicit Node(net::ReactorKind kind, chat::Limits limits = {}) : limits_(limits) {
+    // With `manual_clock`, time on the node stands still until advance() moves it.
+    explicit Node(net::ReactorKind kind, chat::Limits limits = {}, bool manual_clock = false)
+        : limits_(limits), manual_clock_(manual_clock) {
         std::promise<std::uint16_t> port;
         auto ready = port.get_future();
+        healthy_ = healthy_promise_.get_future();
         thread_ = std::jthread([this, kind, port = std::move(port)]() mutable { run(kind, port); });
         port_ = ready.get();
     }
@@ -49,6 +53,25 @@ public:
     Node& operator=(Node&&) = delete;
 
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+    // Whether the room plane is reachable, the condition /readyz reports, without a request to
+    // poll it with: the node's loop says so once, and the wait ends then or at the limit.
+    [[nodiscard]] bool wait_healthy(std::chrono::milliseconds limit) const {
+        return healthy_.wait_for(limit) == std::future_status::ready;
+    }
+
+    // Returns once the node's loop has run the timers that came due: it applies the step before
+    // polling, and the extra turns let whatever those timers did reach its sockets.
+    void advance(core::Millis step) {
+        const auto want = requested_.fetch_add(step.count()) + step.count();
+        for (auto seen = applied_.load(); seen != want; seen = applied_.load()) {
+            applied_.wait(seen);
+        }
+        const auto turn = turns_.load();
+        for (auto seen = turns_.load(); seen < turn + 2; seen = turns_.load()) {
+            turns_.wait(seen);
+        }
+    }
     // While set, the room store answers nothing: every send stays in flight. `store_held`
     // follows once the node's thread has seen it.
     std::atomic<bool> hold_store = false;
@@ -57,7 +80,11 @@ public:
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
     void run(net::ReactorKind kind, std::promise<std::uint16_t>& port) {
-        os::SystemClock clock;
+        os::SystemClock system_clock;
+        ulw::test::FakeClock fake_clock;
+        core::ports::IClock& clock = manual_clock_
+                                         ? static_cast<core::ports::IClock&>(fake_clock)
+                                         : static_cast<core::ports::IClock&>(system_clock);
         auto reactor = net::make_reactor(kind, clock, 1024);
         auto clients = net::listen_tcp({.port = 0, .loopback_only = true});
         auto peers = net::listen_tcp({.port = 0, .loopback_only = true});
@@ -71,6 +98,17 @@ private:
         ulw::test::FakeVerifier verifier;
         auto store = std::make_unique<ulw::test::MemoryRoomStore>(**reactor, db);
         auto messages = std::make_unique<infra::messages::MemoryMessageStore>(**reactor);
+        // The rooms these tests join as live, recorded so as the server side does: a join alone
+        // cannot open a room.
+        for (const std::string_view room :
+             {kRoom, std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f901"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f902"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f903"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f904"},
+              std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f905"}}) {
+            messages->record_live(*core::RoomId::parse(room),
+                                  [](core::ports::MessageResult<void> /*recorded*/) noexcept {});
+        }
         chat::RoomLog log(*core::NodeId::parse("chat-1"));
         os::SystemRandom random;
         rt::RoomRouter router(**reactor, *store, clock, random,
@@ -83,7 +121,8 @@ private:
             return;
         }
         auto server = std::make_unique<chat::ChatServer>(
-            chat::Deps{.reactor = **reactor,
+            chat::Deps{.node = *core::NodeId::parse("chat-1"),
+                       .reactor = **reactor,
                        .router = router,
                        .messages = *messages,
                        .verifier = verifier,
@@ -95,7 +134,12 @@ private:
             return;
         }
         port.set_value(client_port);
+        bool healthy_told = false;
         while (!stop_) {
+            if (!healthy_told && router.healthy()) {
+                healthy_told = true;
+                healthy_promise_.set_value();
+            }
             if (hold_store != store->hold) {
                 if (hold_store) {
                     store->hold = true;
@@ -104,8 +148,15 @@ private:
                 }
                 store_held = store->hold;
             }
+            if (const auto want = requested_.load(); want != applied_.load()) {
+                fake_clock.advance(core::Millis{want - applied_.load()});
+                applied_ = want;
+                applied_.notify_all();
+            }
             (*reactor)->run_once(core::Millis{5});
             server->reap();
+            ++turns_;
+            turns_.notify_all();
         }
         messages.reset();
         server.reset();
@@ -113,6 +164,12 @@ private:
     }
 
     chat::Limits limits_;
+    bool manual_clock_;
+    std::promise<void> healthy_promise_;
+    std::future<void> healthy_;
+    std::atomic<std::int64_t> requested_ = 0;
+    std::atomic<std::int64_t> applied_ = 0;
+    std::atomic<std::uint64_t> turns_ = 0;
     std::atomic<bool> stop_ = false;
     std::uint16_t port_ = 0;
     std::jthread thread_;
@@ -145,8 +202,10 @@ protected:
 
 TEST_P(ChatSessionTest, ProbesAnswerAndUnknownPathsAreNotFound) {
     EXPECT_EQ(ulw::test::http_get(node_->port(), "/healthz").status, 200);
-    EXPECT_TRUE(ulw::test::eventually(
-        [&] { return ulw::test::http_get(node_->port(), "/readyz").status == 200; }));
+    // Ready follows the node's first heartbeat, about a second on. Waiting on that instead of
+    // requesting /readyz in a loop keeps the test to a handful of connections.
+    ASSERT_TRUE(node_->wait_healthy(seconds(10)));
+    EXPECT_EQ(ulw::test::http_get(node_->port(), "/readyz").status, 200);
     const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
     EXPECT_EQ(metrics.status, 200);
     EXPECT_NE(metrics.body.find("fenced_writes_total 0\n"), std::string::npos);
@@ -259,7 +318,8 @@ TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
 
 TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryConnection) {
     node_.reset();
-    node_ = std::make_unique<Node>(GetParam(), chat::Limits{.service = {.join_burst = 2}});
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.service = {.join_burst = 2}, .presence = {}});
     const auto join = [](WsClient& ws, std::string_view room) {
         EXPECT_TRUE(
             ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"(","kind":"live"})"));
@@ -308,26 +368,50 @@ TEST_P(ChatSessionTest, SendsInFlightAreBoundedInBytes) {
 
 TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPingLater) {
     node_.reset();
-    node_ = std::make_unique<Node>(GetParam(), chat::Limits{.ping_interval = core::Millis{1'000},
-                                                            .idle_timeout = core::Millis{1'100},
-                                                            .service = {}});
-    // Taken before the upgrade: the server counts quiet from the upgrade request, so a clock
-    // started after the handshake returns would miss however long that took on a loaded box.
-    const auto opened = std::chrono::steady_clock::now();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = core::Millis{1'000},
+                                                .idle_timeout = core::Millis{1'100},
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
     auto quiet = open_as("alice");
     ASSERT_TRUE(quiet);
-    // Read, never answer: the pings go unanswered.
-    int pings = 0;
+    // Read, never answer. The node's clock is the test's: it reaches the ping interval, then
+    // the idle timeout, at exactly those instants, however slowly the machine runs.
+    node_->advance(core::Millis{1'000});
+    const auto ping = quiet->next_frame(seconds(10));
+    ASSERT_TRUE(ping);
+    EXPECT_EQ(ping->first, codec::ws::Opcode::Ping);
+    node_->advance(core::Millis{100});
+    // Closing at the next ping instead would need another 900 ms of node time, which never
+    // comes, so a server that waits for it leaves the connection open until this read times out.
+    int later_pings = 0;
     while (const auto frame = quiet->next_frame(seconds(10))) {
-        pings += frame->first == codec::ws::Opcode::Ping ? 1 : 0;
+        later_pings += frame->first == codec::ws::Opcode::Ping ? 1 : 0;
     }
-    const auto lasted = std::chrono::steady_clock::now() - opened;
-    EXPECT_EQ(pings, 1);
-    // At the idle timeout, 1.1 s, rounded up by the timer wheel's 100 ms ticks. Closing at the
-    // next ping instead would take 2 s, so the bound sits just under that: 800 ms of slack for a
-    // loaded machine, on the real clock the reactor's timers run on.
-    EXPECT_GE(lasted, std::chrono::milliseconds(1'100));
-    EXPECT_LT(lasted, std::chrono::milliseconds(1'900));
+    EXPECT_EQ(later_pings, 0);
+    EXPECT_FALSE(quiet->connected());
+}
+
+TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {
+    node_.reset();
+    chat::Limits limits;
+    limits.presence.grace = core::Millis{200};
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    auto bob = open_as("bob");
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(bob->send_text(R"({"type":"watch","user":"alice"})"));
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"watching","user":"alice","status":"offline"})");
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"presence","user":"alice","status":"online"})");
+    alice.reset();
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"presence","user":"alice","status":"offline"})");
+    ASSERT_TRUE(bob->send_text(R"({"type":"watch","user":"not a user"})"));
+    EXPECT_EQ(bob->next_text(seconds(10)), R"({"type":"error","reason":"bad_user"})");
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

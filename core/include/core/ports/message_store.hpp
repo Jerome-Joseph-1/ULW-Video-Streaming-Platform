@@ -50,6 +50,55 @@ enum class RoomKind : std::uint8_t {
     return false;
 }
 
+// Rooms named by something else, their id derived from its name (ADR-0056): an RFC 9562
+// version 8 UUID whose first byte says what names it, the rest a digest of the name. Every other
+// room id is version 7 (ADR-0023), so no id is taken for another's.
+enum class NamedRoom : std::uint8_t {
+    // A live stream's chat, from the stream's name (M32).
+    StreamChat = 0x01,
+    // A user's presence room (M18).
+    Presence = 0x02,
+};
+
+// Whether the room's id was derived from a name of `kind`.
+[[nodiscard]] inline bool is_named_room(const RoomId& room, NamedRoom kind) noexcept {
+    // RFC 9562 section 4: the version is the high nibble of byte 6.
+    constexpr std::size_t kVersionByte = 6;
+    constexpr unsigned kVersion8 = 0x80U;
+    const auto bytes = room.uuid().bytes();
+    return (std::to_integer<unsigned>(bytes[kVersionByte]) & 0xF0U) == kVersion8 &&
+           std::to_integer<std::uint8_t>(bytes[0]) == static_cast<std::uint8_t>(kind);
+}
+
+// Whether the room is a stream's live chat, by its id alone: only such a room is ever recorded
+// as StreamLiveChat, so the id says which rooms get the live chat's bounds, on every node, with
+// no lookup.
+[[nodiscard]] inline bool is_stream_chat(const RoomId& room) noexcept {
+    return is_named_room(room, NamedRoom::StreamChat);
+}
+
+// What admits answers for a join.
+enum class Admission : std::uint8_t {
+    Admitted,
+    // The room is closed and the user is not among its members.
+    NotMember,
+    // The join asked for the open kind, and the room is not recorded as open.
+    NotLive,
+};
+
+// What a join that asked for `asked` is answered in a room recorded as `recorded`, of which the
+// user is a member or not. Asking for the open kind never opens a closed room.
+[[nodiscard]] constexpr Admission admission(RoomKind asked, RoomKind recorded,
+                                            bool member) noexcept {
+    if (admits_anyone(recorded)) {
+        return Admission::Admitted;
+    }
+    if (admits_anyone(asked)) {
+        return Admission::NotLive;
+    }
+    return member ? Admission::Admitted : Admission::NotMember;
+}
+
 enum class MessageStoreError : std::uint8_t {
     // Unreachable, timed out, or lost a race with a concurrent write; the call may be repeated.
     Unavailable,
@@ -82,7 +131,7 @@ struct StoredMessage {
 // Plaintext today and MLS ciphertext later are the same thing to the store.
 //
 // Messages are written by the room's owner, in the same fenced write that takes their seq
-// (ADR-0052), so no seq is ever taken without its message; this port has no writer of its own.
+// (ADR-0054), so no seq is ever taken without its message; this port has no writer of its own.
 class IMessageStore {
 public:
     virtual ~IMessageStore() = default;
@@ -102,7 +151,9 @@ public:
     // with none. A seq taken with its message is also the newest stored one.
     virtual void last_seq(const RoomId& room, MessageCallback<std::uint64_t> done) = 0;
 
-    // Both idempotent.
+    // Both idempotent. Adding a member to a room with no kind recorded records it as a group
+    // chat, so that the room is closed before it lists anyone and record_live, which waits for
+    // that record, cannot open it.
     virtual void add_member(const RoomId& room, const UserId& user, MessageCallback<void> done) = 0;
     virtual void remove_member(const RoomId& room, const UserId& user,
                                MessageCallback<void> done) = 0;
@@ -110,11 +161,18 @@ public:
     virtual void members(const RoomId& room, std::optional<UserId> after, std::size_t limit,
                          MessageCallback<std::vector<UserId>> done) = 0;
     // Whether `user` may be in the room, by the room's kind: a direct or group chat admits only
-    // its members, even while it has none; a stream's live chat admits anyone. A room's kind is
-    // recorded once, by the first join, as `asked`, except that a room that already lists
-    // members is never recorded as open.
+    // its members, even while it has none; a stream's live chat admits anyone. A join never widens
+    // who may be in a room: it records only a closed kind, on a room that has none recorded, and
+    // otherwise takes the recorded kind. It answers NotLive, and records nothing, when it asks for
+    // the open kind of a room that is not recorded as open; only record_live opens a room.
     virtual void admits(const RoomId& room, const UserId& user, RoomKind asked,
-                        MessageCallback<bool> done) = 0;
+                        MessageCallback<Admission> done) = 0;
+    // Records the room as a stream's live chat, which admits anyone: a server-side step (the
+    // stream's owner opening its chat), never a client's. Conflict, and nothing recorded, when the
+    // room lists members, is recorded as another kind, or was created on the room plane as
+    // another kind (whose kind and delivery are fixed when it is created); recording it again
+    // does nothing. The in-memory store keeps no room plane, so only the first two apply to it.
+    virtual void record_live(const RoomId& room, MessageCallback<void> done) = 0;
 };
 
 } // namespace core::ports

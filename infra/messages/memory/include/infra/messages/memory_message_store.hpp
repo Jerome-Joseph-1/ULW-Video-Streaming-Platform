@@ -3,6 +3,7 @@
 #include "core/ports/message_store.hpp"
 #include "net/reactor.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
@@ -30,7 +31,8 @@ public:
     // durable store does, a key the sender already used in the room is answered with that
     // message's seq when the body is the same, and is Conflict when it is not; nothing is
     // written either way. A seq already taken by another message is Conflict. Over
-    // kMaxMessageBody is TooLarge.
+    // kMaxMessageBody is TooLarge. An ephemeral room's
+    // (rt::is_ephemeral_room) message is not kept: only its seq counts, for last_seq.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
                 std::string key, std::vector<std::byte> body, core::WallTime sent_at,
                 core::ports::MessageCallback<std::uint64_t> done);
@@ -49,7 +51,8 @@ public:
     void members(const core::RoomId& room, std::optional<core::UserId> after, std::size_t limit,
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override;
     void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
-                core::ports::MessageCallback<bool> done) override;
+                core::ports::MessageCallback<core::ports::Admission> done) override;
+    void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
 
     void on_timeout() noexcept override;
 
@@ -63,6 +66,8 @@ private:
         std::map<std::uint64_t, core::ports::StoredMessage> messages;
         // (sender, key) of every stored message, and its seq.
         std::map<std::pair<std::string, std::string>, std::uint64_t> keys;
+        // The highest seq appended to an ephemeral room, which keeps no messages.
+        std::uint64_t last = 0;
     };
 
     void defer(std::move_only_function<void() noexcept> fn);
@@ -73,7 +78,7 @@ private:
     std::unordered_map<core::RoomId, Room> rooms_;
     // Ordered bytewise, as the durable store lists them.
     std::unordered_map<core::RoomId, std::set<core::UserId, ByteOrder>> members_;
-    // As recorded by each room's first join.
+    // As recorded by each room's first join or member, or by record_live.
     std::unordered_map<core::RoomId, core::ports::RoomKind> kinds_;
 };
 
