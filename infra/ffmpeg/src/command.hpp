@@ -59,6 +59,15 @@ parse_probe(std::string_view text, std::uint64_t source_bytes);
 
 [[nodiscard]] Args decode_args(const std::string& ffmpeg, const std::filesystem::path& master);
 
+// The master playlist with each variant's BANDWIDTH set from the ladder, as ffmpeg 6.1 wrote it
+// (the rung's video rate, plus the audio rate when there is audio, plus a tenth), and without
+// AVERAGE-BANDWIDTH. ffmpeg 7 rewrites the master when it finishes with the peak and average
+// bitrate it measured over the segments, which differ from run to run; everything but the
+// segments must be the same for every run of a job, since a rerun may overwrite some of another
+// run's keys. A variant whose URI names no rung is left as it is, for the check to report.
+[[nodiscard]] std::string
+settle_master_bandwidth(std::string_view text, std::span<const core::Rung> ladder, bool has_audio);
+
 // What is wrong with a playlist ffmpeg wrote, or nullopt when nothing is.
 [[nodiscard]] std::optional<std::string> check_media_playlist(std::string_view text);
 [[nodiscard]] std::optional<std::string> check_master_playlist(std::string_view text,

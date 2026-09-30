@@ -377,4 +377,47 @@ TEST(CheckPlaylists, TheMasterMustNameEveryRungWithCodecs) {
     EXPECT_TRUE(infra::ffmpeg::check_master_playlist(renamed, core::choose_ladder(720)));
 }
 
+// As ffmpeg 7.1 writes it once the run has ended: each variant's peak and average segment
+// bitrate as measured, which differ from one run of the same job to the next.
+constexpr std::string_view kMeasuredMaster =
+    "#EXTM3U\n"
+    "#EXT-X-VERSION:7\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=2945274,AVERAGE-BANDWIDTH=2912280,RESOLUTION=1280x720,"
+    "CODECS=\"avc1.4d4028,mp4a.40.2\"\n"
+    "720p/index.m3u8\n"
+    "\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=919500,AVERAGE-BANDWIDTH=906167,RESOLUTION=640x360,"
+    "CODECS=\"avc1.4d4028,mp4a.40.2\"\n"
+    "360p/index.m3u8\n";
+
+TEST(SettleMasterBandwidth, StatesTheLaddersRatesAsFfmpeg61Did) {
+    EXPECT_EQ(
+        infra::ffmpeg::settle_master_bandwidth(kMeasuredMaster, core::choose_ladder(720), true),
+        kMaster);
+}
+
+TEST(SettleMasterBandwidth, LeavesWhatItWouldWriteAsItIs) {
+    EXPECT_EQ(infra::ffmpeg::settle_master_bandwidth(kMaster, core::choose_ladder(720), true),
+              kMaster);
+}
+
+TEST(SettleMasterBandwidth, CountsAudioOnlyWhenThereIsAny) {
+    const std::string settled =
+        infra::ffmpeg::settle_master_bandwidth(kMeasuredMaster, core::choose_ladder(720), false);
+    EXPECT_NE(settled.find("BANDWIDTH=3080000,RESOLUTION=1280x720,"), std::string::npos) << settled;
+    EXPECT_NE(settled.find("BANDWIDTH=880000,RESOLUTION=640x360,"), std::string::npos) << settled;
+}
+
+TEST(SettleMasterBandwidth, LeavesAVariantThatNamesNoRungForTheCheck) {
+    std::string renamed(kMeasuredMaster);
+    renamed.replace(renamed.find("360p/"), 4, "240p");
+    const std::string settled =
+        infra::ffmpeg::settle_master_bandwidth(renamed, core::choose_ladder(720), true);
+    EXPECT_NE(settled.find("BANDWIDTH=919500,AVERAGE-BANDWIDTH=906167,RESOLUTION=640x360,"),
+              std::string::npos)
+        << settled;
+    EXPECT_NE(settled.find("BANDWIDTH=3220800,RESOLUTION=1280x720,"), std::string::npos) << settled;
+    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(settled, core::choose_ladder(720)));
+}
+
 } // namespace
