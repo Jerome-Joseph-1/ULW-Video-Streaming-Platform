@@ -61,3 +61,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0055](0055-a-live-recording-is-remuxed-from-the-stored-segments.md) | A live recording is remuxed from its stored segments into one object, and queued once per stream | Accepted |
 | [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
 | [0057](0057-the-probe-window-follows-the-configuration.md) | The packager's probe window follows its configuration | Accepted |
+| [0058](0058-group-calls-interfaces-now-implementation-deferred.md) | Group calls: interfaces now, implementation deferred | Accepted |
