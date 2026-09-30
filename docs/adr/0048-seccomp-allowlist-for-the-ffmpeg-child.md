@@ -88,11 +88,12 @@ and ffmpeg alike and cannot be tighter than the worker needs.
   and the program's instruction count and hash are pinned by a test, so a compiler or a library
   that built a different filter fails there instead of on a job's transcode.
 - The allowlist is judged against the images' ffmpeg and glibc, not the machine it was traced
-  on: the worker image pinned ffmpeg 7:6.1.1-3ubuntu5 on Ubuntu 24.04 (glibc 2.39), which CI's
-  runners install too. Since ADR-0074 it pins ffmpeg 7:7.1.5-0+deb13u1 on Debian 13 (glibc
-  2.41); the re-trace on that image found nothing outside the list. The kernel does not enter into it, since the filter sees only what user
+  on: the worker image pins ffmpeg 7:6.1.1-3ubuntu5 on Ubuntu 24.04 (glibc 2.39), which CI's
+  runners install too. The kernel does not enter into it, since the filter sees only what user
   space asks for; a different CPU can, through libraries' feature probes, which is what the
   re-trace on a bump and the tests under both users are for.
+- ADR-0074 moved the worker image to ffmpeg 7.1.5 on Debian 13 (glibc 2.41); its re-trace
+  found nothing outside the list.
 
 - A new ffmpeg or libc that calls something not on the list kills the transcode. The failure
   is `SyscallBlocked`, and the job's video fails after one rerun until the list is extended:

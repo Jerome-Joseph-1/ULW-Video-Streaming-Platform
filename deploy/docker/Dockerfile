@@ -79,7 +79,11 @@ ENV DEBIAN_SNAPSHOT=20260930T100000Z
 
 FROM debian-apt AS worker-build
 RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/local/sbin/apt-install-debian \
+    --mount=type=secret,id=ca-bundle,mode=0444 \
     apt-install-debian \
+        ca-certificates=20250419 \
+        openssl=3.5.7-1~deb13u3 \
+        libssl3t64=3.5.7-1~deb13u3 \
         g++-14=14.2.0-19 \
         cmake=3.31.6-2 \
         ninja-build=1.12.1-1 \
@@ -99,6 +103,7 @@ RUN CC=gcc-14 CXX=g++-14 cmake --preset release -DULW_BUILD_TESTS=OFF \
 
 FROM debian-apt AS worker
 RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/local/sbin/apt-install-debian \
+    --mount=type=secret,id=ca-bundle,mode=0444 \
     apt-install-debian \
         ca-certificates=20250419 \
         openssl=3.5.7-1~deb13u3 \

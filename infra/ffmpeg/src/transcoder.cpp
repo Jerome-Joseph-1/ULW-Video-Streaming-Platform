@@ -118,7 +118,8 @@ std::optional<std::string> read_text(const fs::path& p) {
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         out.write(text.data(), static_cast<std::streamsize>(text.size()));
-        out.flush();
+        // Closing flushes; a write that fails there (a full disk) shows only on the stream.
+        out.close();
         if (!out) {
             std::error_code ignored;
             fs::remove(tmp, ignored);
@@ -208,7 +209,7 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
     if (!master_text) {
         return std::unexpected(unverified("master playlist unreadable"));
     }
-    if (auto problem = check_master_playlist(*master_text, ladder)) {
+    if (auto problem = check_master_playlist(*master_text, ladder, media.has_audio)) {
         return std::unexpected(unverified(std::move(*problem)));
     }
     for (const core::Rung& rung : ladder) {

@@ -355,7 +355,7 @@ constexpr std::string_view kMaster =
 
 TEST(CheckPlaylists, AcceptWhatFfmpegWrites) {
     EXPECT_EQ(infra::ffmpeg::check_media_playlist(kMedia), std::nullopt);
-    EXPECT_EQ(infra::ffmpeg::check_master_playlist(kMaster, core::choose_ladder(720)),
+    EXPECT_EQ(infra::ffmpeg::check_master_playlist(kMaster, core::choose_ladder(720), true),
               std::nullopt);
 }
 
@@ -368,13 +368,13 @@ TEST(CheckPlaylists, AMediaPlaylistNeedsVersion7AMapAndAnEnd) {
 }
 
 TEST(CheckPlaylists, TheMasterMustNameEveryRungWithCodecs) {
-    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(kMaster, core::choose_ladder(1080)));
+    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(kMaster, core::choose_ladder(1080), true));
     std::string no_codecs(kMaster);
     no_codecs.erase(no_codecs.find("CODECS"), 6);
-    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(no_codecs, core::choose_ladder(720)));
+    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(no_codecs, core::choose_ladder(720), true));
     std::string renamed(kMaster);
     renamed.replace(renamed.find("360p/"), 4, "240p");
-    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(renamed, core::choose_ladder(720)));
+    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(renamed, core::choose_ladder(720), true));
 }
 
 // As ffmpeg 7.1 writes it once the run has ended: each variant's peak and average segment
@@ -417,7 +417,15 @@ TEST(SettleMasterBandwidth, LeavesAVariantThatNamesNoRungForTheCheck) {
               std::string::npos)
         << settled;
     EXPECT_NE(settled.find("BANDWIDTH=3220800,RESOLUTION=1280x720,"), std::string::npos) << settled;
-    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(settled, core::choose_ladder(720)));
+    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(settled, core::choose_ladder(720), true));
+}
+
+TEST(CheckPlaylists, TheMasterMustStateTheLaddersBandwidth) {
+    // What ffmpeg 7 leaves before the transcoder settles it.
+    EXPECT_TRUE(
+        infra::ffmpeg::check_master_playlist(kMeasuredMaster, core::choose_ladder(720), true));
+    // Rates counted with audio, for a source without any.
+    EXPECT_TRUE(infra::ffmpeg::check_master_playlist(kMaster, core::choose_ladder(720), false));
 }
 
 } // namespace

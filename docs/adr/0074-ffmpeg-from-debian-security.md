@@ -64,7 +64,17 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
   snapshot.debian.org timestamp (`DEBIAN_SNAPSHOT`), for both the main archive (`trixie`,
   `trixie-updates`) and the security archive (`trixie-security`), through
   `deploy/docker/apt-install-debian.sh`: apt checks each index against the snapshot's signed
-  Release file and the archive keys the base image ships.
+  Release file and the archive keys the base image ships. The snapshot is fetched over https:
+  its Release files are past their Valid-Until by design, so that check is off, and plain http
+  would let anyone on the path serve an older signed Release and roll back every unpinned
+  package with it. The base image has no CA bundle, so ca-certificates is bootstrapped from
+  the live archive (http, but signed and with Valid-Until checked) and then pinned back to the
+  snapshot's version; a build behind a TLS-inspecting proxy passes its CA as the `ca-bundle`
+  build secret instead.
+- The packages the base image already holds (libc6, util-linux, perl-base, ncurses,
+  libsystemd0 and the rest) are upgraded to the snapshot's versions before the pinned install,
+  since an install upgrades only what it names. A snapshot bump therefore moves them too, and
+  the base digest only decides where that upgrade starts.
 - Pinned at `DEBIAN_SNAPSHOT=20260930T100000Z`: `ffmpeg=7:7.1.5-0+deb13u1` (DSA-6361-1, in
   debian-security since 20260622T192543Z), `openssl` and `libssl3t64` `3.5.7-1~deb13u3` (in
   debian-security since 20260930T060347Z, which fixes the two OpenSSL HIGHs deb13u2 had),
@@ -86,16 +96,25 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
   updates in main. CI and the other e2e jobs keep the runner's Ubuntu ffmpeg; the e2e sandbox
   job builds and runs the Debian worker image.
 - The syscall allowlist (ADR-0048) needs nothing new: `tools/trace-ffmpeg-syscalls.sh`, now
-  also covering the worker's keyframe and decode checks and the live recording's remux, gave 39
-  names on 7.1.5 as root and as an ordinary user, all already allowed (glibc 2.41 still falls
-  back from `clone3` to `clone`). The ffmpeg suites and the worker's, live packager's and live
-  recording's integration suites pass on 7.1.5 under the filter.
+  also covering the worker's keyframe and decode checks, the live recording's remux, and the
+  probe and transcode of HEVC, VP9, AV1 and MPEG-2 sources beside H.264, traced only names
+  already allowed on 7.1.5, as root and as an ordinary user (glibc 2.41 still falls back from
+  `clone3` to `clone`, which the filter checks). The ffmpeg suites and the worker's, live
+  packager's and live recording's integration suites pass on 7.1.5 under the filter.
+- The trixie workflow keeps that true: on every pull request that touches the Dockerfile or
+  the code around ffmpeg, and nightly, it builds the `worker-build` stage, installs the image's
+  ffmpeg and runs those suites, the trace and `tools/ffmpeg-address-space.sh` there. ci.yml's
+  jobs run the runner's ffmpeg 6.1, on which `settle_master_bandwidth` changes nothing.
 - ffmpeg 7 rewrites the master playlist when a run ends, with each variant's measured peak and
   average segment bitrate (`AVERAGE-BANDWIDTH` is new). Those differ between two runs of a job,
   and everything but the segments must not (a rerun can overwrite some of another run's keys;
   `TranscoderTest.SegmentsOfTwoRunsMixIntoARenditionThatPlays`). The transcoder writes the
   master back with the ladder's declared rates plus a tenth and no `AVERAGE-BANDWIDTH`, exactly
-  what 6.1 wrote (`settle_master_bandwidth`).
+  what 6.1 wrote (`settle_master_bandwidth`). Verification requires it: a master whose
+  BANDWIDTH is not the ladder's fails `check_master_playlist`, so a future ffmpeg whose master
+  no longer settles fails the job instead of shipping a master that differs between runs.
+- The live remux and both stages of the live recording's remux run with `MALLOC_ARENA_MAX=2`
+  (below).
 - The other arguments behave as on 6.1: the transcode and the live remux produce the same
   playlists (version 7, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, fMP4 segments,
   `temp_file`'s renames), and `-analyzeduration`/`-probesize` still bound the live probe: the
@@ -103,37 +122,49 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
 
 ## Updates
 
-- A DSA for ffmpeg (or for any package in the worker image: glibc, OpenSSL, libcurl, libpq,
-  and ffmpeg's codec libraries) is picked up by moving `DEBIAN_SNAPSHOT` to a timestamp after
-  the DSA's upload reached snapshot.debian.org and bumping the pinned versions that changed
-  (RUNBOOK.md, "Updating the worker's ffmpeg"). The candidates at a timestamp are what
+- A DSA for ffmpeg, or for any package in the worker image (glibc, OpenSSL, libcurl, libpq,
+  ffmpeg's codec libraries, and the base image's own packages), is picked up by moving
+  `DEBIAN_SNAPSHOT` to a timestamp after the DSA's upload reached snapshot.debian.org and
+  bumping the pinned versions that changed; the base image's packages follow the snapshot on
+  their own, and a new point release's digest is taken with the same bump (RUNBOOK.md,
+  "Updating the worker's ffmpeg"). The candidates at a timestamp are what
   `apt-install-debian.sh --policy PACKAGE...` prints in a `debian:trixie-slim` container.
-- Who and how often: the platform's on-call engineer, who already owns the image pins. Every
-  Monday they read the debian-security-announce list (or the tracker's page for each pinned
-  source package) and bump within two working days of a DSA for ffmpeg, OpenSSL or glibc,
-  and at least monthly otherwise, so the other libraries follow. A bump that changes ffmpeg's
-  minor version re-runs `tools/trace-ffmpeg-syscalls.sh` in the image first (ADR-0048).
+- Who and how often: the platform's on-call engineer, who already owns the image pins. The
+  daily trigger is the nightly e2e run, whose Trivy gate fails as soon as a fixable HIGH or
+  CRITICAL reaches the worker image; every Monday they also read debian-security-announce for
+  what the gate does not rate HIGH. They bump within two working days of a DSA for ffmpeg,
+  OpenSSL or glibc, and at least monthly otherwise, so the other libraries follow.
+- A bump that changes ffmpeg's upstream version (7.1.5 to 7.1.6, not a `+deb13uN` patch)
+  re-runs `tools/trace-ffmpeg-syscalls.sh` and `tools/ffmpeg-address-space.sh` in the image
+  first (ADR-0048); the trixie workflow runs both on the pull request as well.
 
 ## Consequences
 
 - Two distributions ship: the gateway on Ubuntu, the worker on Debian. ADR-0030's rejection of
   a Debian runtime was for a second distribution no test had seen; the worker's is now built
   and exercised in CI (the e2e sandbox job builds this image and runs the VOD flow through
-  it), and its seccomp list was traced against it. Unit and integration jobs still run on the
-  runner's Ubuntu ffmpeg 6.1, so an ffmpeg behaviour change shows first in the sandbox job.
+  it, its release binaries' hardening and its Trivy gate), and the trixie workflow runs the
+  ffmpeg suites on it. ci.yml's unit and integration jobs still run on the runner's Ubuntu
+  ffmpeg 6.1.
 - ffmpeg moves from 6.1 to 7.1. The arguments the worker, the live packager and the
   recording remux pass behave the same (the checks are under Decision).
-- ffmpeg 7.1 on Debian maps more address space than 6.1 on Ubuntu (more threads, each with its
-  own malloc arena, and more libraries). Peak VmPeak on a 4-core runner, 6.1 then 7.1, against
-  the sandbox's limits: probe 273 then 249 MiB (1 GiB); live remux 496 then 492 MiB (1 GiB);
-  the live recording's remux with added silence 688 then 923 MiB (1 GiB); the 1080p three-rung
-  transcode with `-threads 4` about 1.7-1.9 GB then 2970 MiB (4 GiB); the decode check 1299 then
-  1722 MiB (4 GiB). All pass, but the recording remux now has a tenth of its budget left and is
-  the first to watch. An x264 encode at its default thread count went from 971 to 1491 MiB,
-  which is why the syscall filter test's source clip now gets 4 GiB; the remux it tests keeps
-  the packager's 1 GiB.
-- The image build depends on snapshot.debian.org as well as snapshot.ubuntu.com. It throttles
-  under load, which apt's retries absorb; its Release files are past their Valid-Until, so that
-  check is off and the pinned timestamp decides the archive state.
+- ffmpeg 7.1 on Debian maps more address space than 6.1 on Ubuntu: it runs every demuxer,
+  filter, encoder and muxer on a thread of its own, and glibc gives each thread that allocates
+  concurrently an arena reserving 64 MiB. Peak VmPeak on 4 cores, 6.1 then 7.1 with glibc's
+  default arenas, against the sandbox's limits: probe 273 then 249 MiB (1 GiB); live remux 496
+  then 492 MiB (1 GiB); the live recording's remux with added silence 688 then 811-923 MiB
+  (1 GiB); the 1080p three-rung transcode with `-threads 4` about 1.7-1.9 GB then 2970 MiB
+  (4 GiB); the decode check 1299 then 1722 MiB (4 GiB). The silence stage had a tenth of its
+  budget left, and a remux that runs out loses the recording for good (ADR-0055), so the
+  remuxes now run with `MALLOC_ARENA_MAX=2`: on 7.1.5 the silence stage peaks at 435 MiB and
+  the live remux at 412 MiB, at the same resident size, and the 1 GiB limit stays.
+  `tools/ffmpeg-address-space.sh` measures each command line under its limit and environment.
+- An x264 encode at its default thread count went from 971 to 1236-1491 MiB, which is why the
+  syscall filter test's source clip now gets 4 GiB; the remux it tests keeps the packager's
+  1 GiB and environment.
+- The image build depends on snapshot.debian.org as well as snapshot.ubuntu.com, and on
+  deb.debian.org for the bootstrap. snapshot.debian.org throttles under load, which apt's
+  retries absorb, and a failed index fetch fails the build rather than installing from what
+  apt had before.
 - Trixie's security support runs to mid-2028, then LTS to 2030. Moving to Debian 14 is a
   deliberate change like this one.

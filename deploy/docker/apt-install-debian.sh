@@ -5,16 +5,20 @@
 # The Debian counterpart of apt-install.sh (docs/adr/0074): installs exact versions from the
 # Debian archive and its security archive as they both stood at $DEBIAN_SNAPSHOT on
 # snapshot.debian.org, so a rebuild months later installs the same bytes. Every package named
-# must carry its version; what they depend on comes from the same snapshot. --policy prints
-# what the snapshot offers for each package instead of installing, which is how a bump finds
-# the versions to pin.
+# must carry its version; what they depend on comes from the same snapshot, and so does every
+# package the base image already holds (libc6, util-linux, perl-base and the rest), which are
+# upgraded to the snapshot's versions before the install. --policy prints what the snapshot
+# offers for each package instead of installing, which is how a bump finds the versions to pin.
 #
-# The image's own sources (deb.debian.org, the live archive) are replaced, not added to. The
-# snapshot is plain http because the base image has no CA bundle to check https with; apt
-# checks every index against the snapshot's Release file, signed by the archive keys the image
-# ships, and every package against the index. Those Release files carry a Valid-Until a week or
-# so after they were signed, which a snapshot is past by design, so that one check is off:
-# which archive state is installed is the pinned timestamp's choice, not the mirror's.
+# The image's own sources (deb.debian.org, the live archive) are replaced by the snapshot's,
+# over https. A snapshot's Release files are past the Valid-Until they were signed with, by
+# design, so apt's check of it is off, and TLS to snapshot.debian.org is what keeps an older
+# signed Release from being replayed on the way; which archive state is installed is the
+# pinned timestamp's choice. The base image has no CA bundle, so ca-certificates is
+# bootstrapped from the live archive first (plain http, but signed and with Valid-Until
+# checked), and the pinned install takes it, openssl and libssl3t64 back to the snapshot's
+# versions. A build behind a TLS-inspecting proxy hands its CA in as the build secret
+# `ca-bundle`, which the snapshot's https is checked against instead.
 set -eu
 : "${DEBIAN_SNAPSHOT:?}"
 
@@ -35,36 +39,63 @@ if ! $policy; then
     done
 fi
 
+ca=/etc/ssl/certs/ca-certificates.crt
+if [ -r /run/secrets/ca-bundle ]; then
+    ca=/run/secrets/ca-bundle
+elif [ ! -e "$ca" ]; then
+    if ! $policy; then
+        # The bootstrap brings ca-certificates, openssl and libssl3t64 at whatever the live
+        # archive has; the pinned install below must take all three back to the snapshot's.
+        for pkg in ca-certificates openssl libssl3t64; do
+            case " $* " in
+            *" $pkg="*) ;;
+            *)
+                echo "apt-install-debian: the first install in an image must pin" \
+                    "ca-certificates, openssl and libssl3t64" >&2
+                exit 1
+                ;;
+            esac
+        done
+    fi
+    apt-get -o Acquire::Retries=10 update -q
+    DEBIAN_FRONTEND=noninteractive apt-get install -qy --no-install-recommends ca-certificates
+fi
+
 # shellcheck disable=SC1091 # the image's, not the repository's
 . /etc/os-release
 suite=${VERSION_CODENAME:?}
 keyring=/usr/share/keyrings/debian-archive-keyring.pgp
 rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources
-cat >/etc/apt/sources.list.d/snapshot.sources <<EOF
+cat >/etc/apt/sources.list.d/snapshot.sources <<SOURCES
 Types: deb
-URIs: http://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT/
+URIs: https://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT/
 Suites: $suite $suite-updates
 Components: main
 Signed-By: $keyring
 Check-Valid-Until: no
 
 Types: deb
-URIs: http://snapshot.debian.org/archive/debian-security/$DEBIAN_SNAPSHOT/
+URIs: https://snapshot.debian.org/archive/debian-security/$DEBIAN_SNAPSHOT/
 Suites: $suite-security
 Components: main
 Signed-By: $keyring
 Check-Valid-Until: no
-EOF
+SOURCES
 
 apt() {
     # snapshot.debian.org throttles and answers 503 or resets now and then; a retry gets through.
-    apt-get -o Acquire::Retries=10 "$@"
+    apt-get -o Acquire::https::CAInfo="$ca" -o Acquire::Retries=10 "$@"
 }
-apt update -q
+apt update -q --error-on=any
 if $policy; then
     apt-cache policy "$@"
     exit 0
 fi
-DEBIAN_FRONTEND=noninteractive apt install -qy --no-install-recommends "$@"
+# The base image's own packages at the snapshot's versions: a pinned install upgrades only
+# what it names. Nothing new is installed here.
+DEBIAN_FRONTEND=noninteractive apt upgrade -qy --no-install-recommends --without-new-pkgs
+# Every package is pinned, so a downgrade can only be a pin undoing the bootstrap's packages
+# after the live archive moved past the snapshot.
+DEBIAN_FRONTEND=noninteractive apt install -qy --no-install-recommends --allow-downgrades "$@"
 apt-get clean
 rm -rf /var/lib/apt/lists/*

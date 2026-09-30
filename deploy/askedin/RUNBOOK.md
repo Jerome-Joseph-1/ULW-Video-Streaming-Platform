@@ -358,22 +358,31 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 The two images come from different distributions (docs/adr/0074): `video-gateway` is Ubuntu
 24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
 packages, ffmpeg among them, from snapshot.debian.org, and its binaries built on trixie too.
-Woodpecker's builder needs to reach both snapshot services (snapshot.debian.org over plain
-http, which apt checks against the archive's signatures) as well as Docker Hub for both base
-images. The pipeline itself is unchanged: `target: worker` still builds the worker image.
+Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org over
+http for the worker's bootstrap of ca-certificates (signed and checked for freshness), and
+Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes its CA as the
+build secret `ca-bundle`. The pipeline itself is unchanged: `target: worker` still builds the
+worker image.
 
 #### Updating the worker's ffmpeg
 
-The platform's on-call engineer owns this. Every Monday, check debian-security-announce (or
-https://security-tracker.debian.org/tracker/source-package/ffmpeg) for trixie DSAs against
-ffmpeg or the worker's other pinned packages (OpenSSL, libcurl, libpq, glibc). For a DSA against
-ffmpeg, OpenSSL or glibc, bump within two working days; otherwise bump at least monthly.
+The platform's on-call engineer owns this. The daily trigger is the nightly e2e run: its
+sandbox job's "Image vulnerabilities" step (tools/security/trivy-image.sh) fails as soon as a
+HIGH or CRITICAL with a fix in the archive affects the worker image, and that failure is the
+signal to bump. Every Monday, also read debian-security-announce (or
+https://security-tracker.debian.org/tracker/source-package/ffmpeg) for trixie DSAs the gate
+does not rate HIGH. For a DSA against ffmpeg, OpenSSL or glibc, bump within two working days;
+otherwise bump at least monthly.
 
 1. Pick a timestamp after the DSA's upload reached snapshot.debian.org: the `first_seen` of the
    `debian-security` archive in
-   `http://snapshot.debian.org/mr/package/ffmpeg/<version>/binfiles/ffmpeg/<version>?fileinfo=1`
+   `https://snapshot.debian.org/mr/package/ffmpeg/<version>/binfiles/ffmpeg/<version>?fileinfo=1`
    (the version URL-encoded, `7%3A7.1.5-0%2Bdeb13u1`).
-2. In a `debian:trixie-slim` container at the digest the Dockerfile names, with this checkout
+2. If Docker Hub has a newer `debian:trixie-slim` (a new 13.x point release), move the
+   Dockerfile's `DEBIAN` digest to it. The base image's own packages (libc6, util-linux,
+   perl-base, ncurses, libsystemd0 and the rest) are upgraded to the snapshot's versions at
+   every build whatever the digest, but a current base keeps that upgrade small.
+3. In a `debian:trixie-slim` container at the digest the Dockerfile names, with this checkout
    mounted, print the candidates at that timestamp:
 
    ```sh
@@ -382,14 +391,21 @@ ffmpeg, OpenSSL or glibc, bump within two working days; otherwise bump at least 
        g++-14 cmake ninja-build pkgconf libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev
    ```
 
-3. Set `DEBIAN_SNAPSHOT` in `deploy/docker/Dockerfile` to the timestamp and every pinned version
+4. Set `DEBIAN_SNAPSHOT` in `deploy/docker/Dockerfile` to the timestamp and every pinned version
    in the `worker-build` and `worker` stages to its candidate. A build fails if a pin is not
    what the snapshot holds, so nothing drifts silently.
-4. If ffmpeg's upstream version changed (not just its `+deb13uN`), run
-   `tools/trace-ffmpeg-syscalls.sh` in that container, as root and as an ordinary user, and
-   extend `infra/ffmpeg/src/seccomp_filter.hpp` with anything new (docs/adr/0048).
-5. Open the pull request; the e2e workflow's sandbox job builds the worker image and runs the
-   VOD flow through it. Deploy as usual (step 4).
+5. If ffmpeg's upstream version changed (the part before `-0+deb13u`, say 7.1.5 to 7.1.6; a
+   `+deb13uN` patch alone does not need it), run in that container, with ffmpeg and strace
+   installed, `tools/trace-ffmpeg-syscalls.sh` as root and as an ordinary user (setpriv, from
+   util-linux, when given a uid; `runuser -u <user> --` otherwise) and
+   `tools/ffmpeg-address-space.sh --full`. Extend `infra/ffmpeg/src/seccomp_filter.hpp` with
+   any new call, each with its reason (docs/adr/0048); a command line that nears its address
+   space limit is a finding for docs/adr/0074 before it is a bump. The trixie workflow runs both
+   on every pull request that touches the Dockerfile, so its log shows them too.
+6. Open the pull request, then dispatch the e2e workflow on its branch (Actions, e2e, "Run
+   workflow"): pull requests do not run it. Its sandbox job builds the worker image, runs the
+   VOD flow through it, checks the release binaries' hardening and runs the Trivy gate. Deploy
+   as usual (step 4).
 
 ## 5. Verify on stage (M14)
 

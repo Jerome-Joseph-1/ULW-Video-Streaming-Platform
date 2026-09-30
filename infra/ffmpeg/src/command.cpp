@@ -408,8 +408,8 @@ std::string settle_master_bandwidth(std::string_view text, std::span<const core:
     return out;
 }
 
-std::optional<std::string> check_master_playlist(std::string_view text,
-                                                 std::span<const core::Rung> ladder) {
+std::optional<std::string>
+check_master_playlist(std::string_view text, std::span<const core::Rung> ladder, bool has_audio) {
     if (!text.starts_with("#EXTM3U") || text.find("#EXT-X-VERSION:7") == std::string_view::npos) {
         return "master playlist lacks #EXT-X-VERSION:7";
     }
@@ -432,6 +432,9 @@ std::optional<std::string> check_master_playlist(std::string_view text,
         if (text.find("\n" + rung.name + "/index.m3u8") == std::string_view::npos) {
             return "master playlist does not reference " + rung.name;
         }
+    }
+    if (settle_master_bandwidth(text, ladder, has_audio) != text) {
+        return "master playlist BANDWIDTH is not the ladder's";
     }
     return std::nullopt;
 }

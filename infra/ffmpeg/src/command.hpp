@@ -70,7 +70,9 @@ settle_master_bandwidth(std::string_view text, std::span<const core::Rung> ladde
 
 // What is wrong with a playlist ffmpeg wrote, or nullopt when nothing is.
 [[nodiscard]] std::optional<std::string> check_media_playlist(std::string_view text);
-[[nodiscard]] std::optional<std::string> check_master_playlist(std::string_view text,
-                                                               std::span<const core::Rung> ladder);
+// A master must also state the ladder's rates, as settle_master_bandwidth writes them, so an
+// ffmpeg whose master that no longer settles fails verification rather than shipping.
+[[nodiscard]] std::optional<std::string>
+check_master_playlist(std::string_view text, std::span<const core::Rung> ladder, bool has_audio);
 
 } // namespace infra::ffmpeg
