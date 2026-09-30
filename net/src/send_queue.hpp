@@ -3,7 +3,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <span>
 #include <vector>
 
@@ -26,23 +25,34 @@ struct Chunk { // NOLINT(cppcoreguidelines-pro-type-member-init)
     std::array<std::byte, kChunkSize> data;
 };
 
-// Per-reactor free list. Chunks are only allocated while the pool grows to its working set;
-// after warm-up the data path recycles them.
+// Released chunks a pool keeps for reuse. A reactor's queues hold a few chunks between them
+// in steady traffic; a burst (a slow reader's backlog, a history page, the catch-up after a
+// stall) can hold hundreds, and only this many of those are kept once it drains.
+inline constexpr std::size_t kKeptChunks = 16;
+
+// Per-reactor free list. Each chunk is a mapping of its own: a chunk released while the pool
+// already keeps kKeptChunks is unmapped, so a burst's queues return their memory to the kernel
+// when they drain. Chunks kept for good would stay resident at the largest burst the process
+// ever queued, a high-water mark that rises, for hours, with each rarer burst; and chunks from
+// the heap, once freed, would leave holes that little else fits.
 class ChunkPool {
 public:
-    ChunkPool() = default;
+    explicit ChunkPool(std::size_t keep = kKeptChunks) noexcept : keep_(keep) {}
     ChunkPool(const ChunkPool&) = delete;
     ChunkPool& operator=(const ChunkPool&) = delete;
-    ~ChunkPool() = default;
+    ~ChunkPool();
 
+    // Throws std::bad_alloc when no chunk can be mapped.
     [[nodiscard]] Chunk* acquire();
     void release(Chunk* chunk) noexcept;
     [[nodiscard]] std::size_t bytes_in_use() const noexcept { return in_use_ * kChunkSize; }
+    [[nodiscard]] std::size_t kept_chunks() const noexcept { return kept_; }
 
 private:
-    std::vector<std::unique_ptr<Chunk>> owned_;
     Chunk* free_ = nullptr;
+    std::size_t kept_ = 0;
     std::size_t in_use_ = 0;
+    std::size_t keep_;
 };
 
 class ByteQueue {
