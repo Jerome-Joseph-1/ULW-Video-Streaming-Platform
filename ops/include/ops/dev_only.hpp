@@ -25,4 +25,17 @@ using DevLookup = std::function<std::optional<std::string>(std::string_view name
 [[nodiscard]] std::expected<void, DevOnlyRefusal> allow_dev_only(std::string_view variable,
                                                                  const DevLookup& env);
 
+// Where a server's token keys come from: exactly one of the two is set, the other empty.
+struct KeySource {
+    // JWKS_URL, always https://.
+    std::string url;
+    // ULW_DEV_JWKS_FILE, allowed by allow_dev_only.
+    std::string file;
+};
+
+// Reads JWKS_URL and ULW_DEV_JWKS_FILE, as the gateway and the chat server both take them.
+// Refused: both set, neither set, a URL that is not https, or a local key set where
+// allow_dev_only says no; the refusal names the variable at fault.
+[[nodiscard]] std::expected<KeySource, DevOnlyRefusal> key_source(const DevLookup& env);
+
 } // namespace ops

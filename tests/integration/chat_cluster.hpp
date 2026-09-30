@@ -13,6 +13,7 @@
 #include "devtoken/dev_key.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
+#include "support/core_limit.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"

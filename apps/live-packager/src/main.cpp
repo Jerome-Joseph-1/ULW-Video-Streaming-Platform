@@ -13,11 +13,10 @@
 
 #include "config.hpp"
 #include "log.hpp"
+#include "ops/process.hpp"
 #include "publisher.hpp"
 #include "recorder.hpp"
 #include "stream_runner.hpp"
-
-#include <sys/prctl.h>
 
 #include <csignal>
 #include <cstdio>
@@ -206,17 +205,18 @@ void watch_signals(const std::stop_token& stop, std::stop_source& drain, std::st
 
 int run() {
     const auto info = core::build_info();
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
+    // It also makes /proc/<pid>/environ, which holds the storage keys, unreadable to other
+    // processes of our user, the sandboxed ffmpeg included.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        return fail("disable core dumps", std::generic_category().message(r.error()));
+    }
     auto config = live::load_config(read_env);
     if (!config) {
         return fail(config.error().variable, config.error().reason);
     }
     // A write to a pipe whose reader is gone is an error to handle, not a signal.
     static_cast<void>(std::signal(SIGPIPE, SIG_IGN));
-    // Makes /proc/<pid>/environ, which holds the storage keys, unreadable to other processes
-    // of our user, the sandboxed ffmpeg included.
-    if (::prctl(PR_SET_DUMPABLE, 0) != 0) {
-        return fail("prctl", std::generic_category().message(errno));
-    }
     sigset_t signals;
     sigemptyset(&signals);
     sigaddset(&signals, SIGTERM);
