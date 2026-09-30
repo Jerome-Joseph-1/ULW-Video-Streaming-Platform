@@ -242,25 +242,12 @@ std::optional<std::string> read_key_set(const std::string& path) {
 }
 
 std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config) {
-    auto url = lookup(env, "JWKS_URL");
-    auto file = lookup(env, "ULW_DEV_JWKS_FILE");
-    if (url && file) {
-        return error("JWKS_URL", "set together with ULW_DEV_JWKS_FILE; choose one");
+    auto source = ops::key_source(env);
+    if (!source) {
+        return error(source.error().variable, source.error().reason);
     }
-    if (!url && !file) {
-        return error("JWKS_URL", "not set");
-    }
-    // Over plain HTTP anyone on the path could hand us their own keys and sign any identity.
-    if (url && !url->starts_with("https://")) {
-        return error("JWKS_URL", "must be an https URL");
-    }
-    // A local key set signs any identity its holder likes; in a real deployment it would be a
-    // way in, not a convenience.
-    if (auto r = ops::allow_dev_only("ULW_DEV_JWKS_FILE", env); !r) {
-        return error(r.error().variable, r.error().reason);
-    }
-    config.jwks_url = std::move(url).value_or("");
-    config.dev_jwks_file = std::move(file).value_or("");
+    config.jwks_url = std::move(source->url);
+    config.dev_jwks_file = std::move(source->file);
     // A week is past any outage anyone would wait out; an hour is short of a bad night.
     auto stale = number<std::uint32_t>(env, "ULW_JWKS_MAX_STALE_HOURS", 24, 1, 168);
     if (!stale) {

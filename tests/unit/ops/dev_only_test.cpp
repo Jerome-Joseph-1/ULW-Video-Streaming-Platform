@@ -59,4 +59,29 @@ TEST_F(DevOnlyTest, DevelopmentModeIsZeroOrOne) {
     }
 }
 
+// Both servers take their keys the same way: one source, https or a key set development allows.
+TEST_F(DevOnlyTest, KeysComeFromExactlyOneSource) {
+    const auto source = [this] {
+        return ops::key_source([this](std::string_view name) -> std::optional<std::string> {
+            const auto it = env.find(name);
+            return it == env.end() ? std::nullopt : std::optional(it->second);
+        });
+    };
+    EXPECT_EQ(source().error().variable, "JWKS_URL");
+    env["JWKS_URL"] = "http://auth.example.test/jwks.json";
+    EXPECT_EQ(source().error().variable, "JWKS_URL");
+    env["JWKS_URL"] = "https://auth.example.test/jwks.json";
+    ASSERT_TRUE(source());
+    EXPECT_EQ(source()->url, "https://auth.example.test/jwks.json");
+    EXPECT_TRUE(source()->file.empty());
+    env["ULW_DEV_JWKS_FILE"] = "/etc/ulw/dev-jwks.json";
+    EXPECT_EQ(source().error().variable, "JWKS_URL");
+    env["JWKS_URL"] = "";
+    EXPECT_EQ(source().error().variable, "ULW_DEV_JWKS_FILE");
+    env["ULW_DEV_MODE"] = "1";
+    ASSERT_TRUE(source());
+    EXPECT_EQ(source()->file, "/etc/ulw/dev-jwks.json");
+    EXPECT_TRUE(source()->url.empty());
+}
+
 } // namespace
