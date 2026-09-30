@@ -26,8 +26,9 @@ A request is refused with `401` when:
 Two `Authorization` headers, or two `Cookie` headers, are refused earlier, by the HTTP parser,
 with `400` and the connection closed.
 
-A `401` carries `WWW-Authenticate` (RFC 6750): `Bearer` when no token was found, and
-`Bearer error="invalid_token"` when one was found and refused. The body is empty.
+A gateway `401` carries `WWW-Authenticate` (RFC 6750): `Bearer` when no token was found, and
+`Bearer error="invalid_token"` when one was found and refused; chat's does not
+([Rejections](#rejections)). The body is empty.
 
 A valid token that has made more than 300 requests in a minute on one gateway instance gets
 `429` with `Retry-After` ([uploads.md](uploads.md#limits-and-admission)).
@@ -102,7 +103,7 @@ it before issuing tokens with it.
 
 | Case | Gateway (HTTP) | Chat (`GET /rt` upgrade) |
 |---|---|---|
-| No token, malformed header, duplicate token cookie | `401` with `WWW-Authenticate: Bearer` | `401` |
+| No token, malformed header, a token with characters outside `A-Z a-z 0-9 - _ .`, duplicate token cookie | `401` with `WWW-Authenticate: Bearer` | `401` |
 | Any verification failure: bad signature, unknown `kid`, expired, wrong `iss` or `aud`, missing or malformed subject | `401` with `WWW-Authenticate: Bearer error="invalid_token"` | `401` |
 | The key set cannot be fetched and no cached key fits the token | `503` with `Retry-After: 5` | `503` |
 | Cookie token on a socket whose `Origin` is not allowed (see [chat.md](chat.md)) | n/a | `403` |
