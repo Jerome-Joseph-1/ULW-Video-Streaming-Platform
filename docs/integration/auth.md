@@ -106,6 +106,7 @@ it before issuing tokens with it.
 | Any verification failure: bad signature, unknown `kid`, expired, wrong `iss` or `aud`, missing or malformed subject | `401` | `401` |
 | The key set cannot be fetched and no cached key fits the token | `503` with `Retry-After: 5` | `503` |
 | Cookie token on a socket whose `Origin` is not allowed (see [chat.md](chat.md)) | n/a | `403` |
+| Cookie token on `POST /api/v1/uploads` without `Content-Type: application/json` (see [uploads.md](uploads.md)) | `403` | n/a |
 
 Every rejection has an empty body (`Content-Length: 0`) and no `WWW-Authenticate` header. The
 gateway's responses carry `X-Request-Id`; quote it when reporting a problem. The reason for a

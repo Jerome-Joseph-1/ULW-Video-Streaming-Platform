@@ -40,7 +40,10 @@ Request body, JSON, with a `Content-Length` of 1 to 4096 bytes:
 | `size_bytes` | Integer, 1 to 53687091200 (50 GiB). The exact size of the file; the upload is complete when this many bytes are durable. |
 | `content_type` | A bare media type starting with `video/`, at most 127 characters, no parameters (`video/mp4; codecs=...` is refused), no wildcards. Case-insensitive. |
 
-Unknown fields are ignored. The request's own `Content-Type` header is not checked.
+Unknown fields are ignored. With a bearer token the request's own `Content-Type` header is not
+checked. With the cookie instead it must be `application/json` (parameters allowed), or the
+answer is `403`: another site's page can make the browser send the cookie with a body it wrote,
+but only under `text/plain` or a form's types.
 
 Response `201`, `application/json`:
 
@@ -187,6 +190,7 @@ the request and byte allowances in all.
 |---|---|---|---|
 | `400` | | Create: missing or invalid field, empty body, not JSON. `PATCH`: missing or malformed `Upload-Offset`, or a body longer than what remains. A body on `HEAD`, commit or `DELETE`. Malformed HTTP. | Fix the request; do not retry as is |
 | `401` | `WWW-Authenticate` | No token (`Bearer`), or it fails verification (`Bearer error="invalid_token"`) | Refresh the token, retry once |
+| `403` | | Create with the cookie and no `Content-Type: application/json` | Send the type |
 | `404` | | Unknown or malformed id, another user's upload, unknown path. `HEAD` on a cancelled upload. | Stop; start a new upload if needed |
 | `405` | `Allow` | Wrong method for the path | Fix the client |
 | `408` | | Body idle for 30 s, or slower than 8 KiB/s | Resume from `HEAD` |

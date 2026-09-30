@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <gtest/gtest.h>
 #include <iterator>
+#include <map>
 #include <openssl/evp.h>
 #include <string>
 #include <string_view>
@@ -170,8 +171,37 @@ TEST_P(GatewayUpload, TheAuthCookieStandsInForTheHeader) {
     const GatewayUnderTest gw(over_transport());
     HttpClient c(gw.endpoint());
     const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
-    const auto r = c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)),
-                             {{"cookie", "theme=dark; auth_token=user.alice"}});
+    const auto r = c.request(
+        "POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)),
+        {{"cookie", "theme=dark; auth_token=user.alice"}, {"content-type", "application/json"}});
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 201);
+}
+
+// Another site's page can have the browser POST with the cookie and a body of its choosing, but
+// only as text/plain or a form (a fetch in no-cors mode, or <form enctype="text/plain">, whose
+// field name can spell out the JSON). Without a JSON type the cookie creates nothing; a bearer
+// token, which no other site can make the browser send, still needs none.
+TEST_P(GatewayUpload, ACookieCreateMustDeclareJson) {
+    const GatewayUnderTest gw(over_transport());
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    const auto create = [&](const std::map<std::string, std::string>& headers) {
+        HttpClient c(gw.endpoint());
+        const auto r =
+            c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)), headers);
+        return r ? r->status : 0;
+    };
+    const std::string cookie = "auth_token=user.alice";
+    EXPECT_EQ(create({{"cookie", cookie}}), 403);
+    EXPECT_EQ(create({{"cookie", cookie}, {"content-type", "text/plain"}}), 403);
+    EXPECT_EQ(create({{"cookie", cookie}, {"content-type", "application/x-www-form-urlencoded"}}),
+              403);
+    EXPECT_EQ(create({{"cookie", cookie}, {"content-type", "application/jsonx"}}), 403);
+    EXPECT_EQ(create({{"cookie", cookie}, {"content-type", "Application/JSON; charset=utf-8"}}),
+              201);
+    HttpClient bearer(gw.endpoint());
+    const auto r =
+        bearer.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)));
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 201);
 }
