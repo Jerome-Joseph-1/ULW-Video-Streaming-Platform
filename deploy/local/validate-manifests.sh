@@ -33,11 +33,18 @@ trap 'rm -rf "$manifests"' EXIT
 
 # Every image by digest (check-image-pins.py): what Askedin runs and what the host runs
 # directly, and, for the sandbox's kustomizations as rendered, a tag images.sh pins to one.
-mapfile -t pinned_files < <(find "$root/deploy/askedin" \( -name '*.yaml' -o -name '*.yml' \) \
+# deploy/askedin holds no kustomization (its overlays are plain manifests applied as they are),
+# so its files are checked as written; one added there would need rendering here first.
+if find "$root/deploy/askedin" -name kustomization.yaml | grep -q .; then
+    echo "validate-manifests: deploy/askedin has a kustomization; render it for check-image-pins" >&2
+    exit 1
+fi
+mapfile -t askedin_files < <(find "$root/deploy/askedin" \( -name '*.yaml' -o -name '*.yml' \) \
     -print | sort)
-python3 "$here/check-image-pins.py" "$here/images.sh" \
-    --loaded "$manifests/sandbox.yaml" "$manifests/stunner.yaml" \
-    -- "${pinned_files[@]}" "$here/compose.yaml" "$here/kind.yaml"
+python3 "$here/check-image-pins.py" --images-sh "$here/images.sh" \
+    --askedin "${askedin_files[@]}" \
+    --host "$here/compose.yaml" "$here/kind.yaml" \
+    --sandbox "$manifests/sandbox.yaml" "$manifests/stunner.yaml"
 
 buildx=$(grep -om1 'woodpeckerci/plugin-docker-buildx:[^ ]*' "$root/deploy/askedin/woodpecker.yml")
 "$tools/woodpecker-cli" --disable-update-check lint --strict --plugins-privileged "$buildx" \

@@ -13,13 +13,15 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
+# The token goes to zizmor's process alone; nothing else this runs sees it.
+token=${GH_TOKEN:-}
+unset GH_TOKEN GITHUB_TOKEN ZIZMOR_GITHUB_TOKEN
 tools=$(tools/security/tools.sh actionlint zizmor)
 
 "$tools/actionlint" -no-color
-if [[ -n ${GH_TOKEN:-} ]]; then
-    mode=()
+if [[ -n $token ]]; then
+    GH_TOKEN=$token "$tools/zizmor" --no-progress --config .github/zizmor.yml .github
 else
     echo "lint-workflows: GH_TOKEN is not set; zizmor's online audits are skipped" >&2
-    mode=(--offline)
+    "$tools/zizmor" --offline --no-progress --config .github/zizmor.yml .github
 fi
-"$tools/zizmor" "${mode[@]}" --no-progress --config .github/zizmor.yml .github

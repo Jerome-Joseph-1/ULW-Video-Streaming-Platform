@@ -83,6 +83,8 @@ jobs:
           persist-credentials: false
       - run: sudo apt-get install -y -qq --no-install-recommends python3-yaml
       - run: tools/security/trivy-config.sh
+      # The allowlist, image-pin and image-report scripts' own tests.
+      - run: python3 tools/security/security_tools_test.py
 
   # actionlint, with the run steps through shellcheck, and zizmor (.github/zizmor.yml).
   workflows:
@@ -97,7 +99,7 @@ jobs:
       # Ubuntu 24.04's, exact, rather than whichever the runner image carries.
       - run: sudo apt-get install -y -qq --no-install-recommends shellcheck=0.9.0-1
       # The job's token, for zizmor's online audits of the pinned actions (they read public
-      # repositories only; contents: read is all it holds).
+      # repositories only; contents: read is all it holds). The script hands it to zizmor alone.
       - run: tools/security/lint-workflows.sh
         env:
           GH_TOKEN: ${{ github.token }}

@@ -64,9 +64,13 @@ permissions at the top; each job asks for `contents: read`, and CodeQL's alone a
 `ULW_BUILD_TESTS=OFF`: the tests would double the build, and nothing they contain ships.
 ccache is off for that build, because CodeQL sees only the compiler invocations that run, and
 the setup action neither restores nor saves a ccache for the job (`ccache: "false"`), so no
-empty cache is saved under its key. Its configuration file keeps `security-extended` and drops
-alerts under `build/`, where FetchContent unpacks llhttp and srt: those are upstream's, and the
-`dependencies` job tracks their advisories.
+empty cache is saved under its key. Its configuration file keeps `security-extended` and asks
+it to drop alerts under `build/`, where FetchContent unpacks llhttp and srt: those are
+upstream's, and the `dependencies` job tracks their advisories. GitHub's documentation says
+`paths-ignore` may not take effect for compiled languages such as C and C++, whose files are
+extracted as the build compiles them; whether it drops the alerts in `build/` is unverified
+until the first run. If it does not, the alerts there
+are upstream's and are dismissed as such, or the config moves to a `query-filters` exclusion.
 
 zizmor runs with the job's own token (`GH_TOKEN`, `contents: read`), which turns on its online
 audits of every pinned action: `impostor-commit` (the SHA is in that action's repository, not
@@ -102,12 +106,15 @@ and:
 So the gate cannot fail on ffmpeg today, and the summary is where it shows. An allowlist entry
 for an ffmpeg CVE, should one ever be needed (when Trivy rates it HIGH or CRITICAL and a fix
 exists that the image cannot take), names the CVE and the purls of the binary packages it
-waives, one per package, `pkg:deb/ubuntu/libavcodec60@6.1.1-3ubuntu5?arch=amd64&distro=ubuntu-24.04&epoch=7`
+waives, one per package and each with its version (Trivy reads a purl without one as every
+version), `pkg:deb/ubuntu/libavcodec60@6.1.1-3ubuntu5?arch=amd64&distro=ubuntu-24.04&epoch=7`
 and likewise `libavformat60`, `libavutil58`, `libswscale7`, `libavfilter9`, `libavdevice60`,
 `libswresample4`, `libpostproc57` and `ffmpeg`, never paths, and expires within 92 days. With the
 version in the purl, an upgraded package is no longer covered. Trivy matches a purl to that
 binary package only (checked with 0.74.0: an entry for `libavcodec60` leaves the other eight
-reported). `check-allowlists.py` enforces the purls and the 92 days.
+reported). `check-allowlists.py` enforces the purls, their versions (no wildcard) and the 92
+days. The summary marks a finding allowlisted only where Trivy would honour the entry: the
+same id, unexpired, and a purl naming that finding's package.
 
 The hardening check refuses a sanitizer build (by `ULW_SANITIZE` in the cache, or by
 `__asan_init`, `__tsan_init` or `__ubsan_handle_*` in the symbols): it ships nowhere, and ASan
@@ -133,8 +140,9 @@ generator expression's argument.
 The pins live in one place, `tools/security/tools.sh`, which fetches into
 `tools/security/.tools`, checks each SHA-256 before unpacking, and serves the same binaries to
 CI and to a developer's machine. Its stamp beside each binary holds the archive's pin and the
-unpacked binary's own SHA-256, checked on every use, so a binary changed after it was verified
-is fetched and verified again. The advisory data is not pinned, deliberately: osv-scanner
+unpacked binary's own SHA-256, checked on every use, so a binary that is corrupted or
+truncated after it was verified, or replaced by another version, is fetched and verified again.
+This is not tamper-proofing: whoever can rewrite the binary can rewrite its stamp beside it. The advisory data is not pinned, deliberately: osv-scanner
 asks api.osv.dev and Trivy downloads its database at scan time, since a scan against last
 month's advisories would miss what the check is for.
 
@@ -163,7 +171,7 @@ snapshot's versions; the image scan covers them. Rust's toolchain is pinned by
 |---|---|---|
 | `tools/security/osv-scanner.toml` | osv-scanner | `id`, `reason`, `ignoreUntil` |
 | `tools/security/trivyignore.yaml` | Trivy config and image | `id`, `statement`, `expired_at`, and `paths` (a misconfiguration: the one resource's file) or `purls` (a vulnerability: the binary packages', and within 92 days) |
-| `tools/security/trivy-data/registries.yaml` | Trivy KSV-0125 | the registries the manifests may name, each with why. docker.io is trusted whole only because `deploy/local/check-image-pins.py` (in `validate-manifests.sh`) fails any image not named by `@sha256` digest, apart from this repository's own builds, and any the sandbox loads into kind by tag whose tag `deploy/local/images.sh` does not pin to a digest |
+| `tools/security/trivy-data/registries.yaml` | Trivy KSV-0125 | the registries the manifests may name, each with why. docker.io is trusted whole only because `deploy/local/check-image-pins.py` (in `validate-manifests.sh`) fails any image not named by `@sha256` digest, and any the sandbox loads into kind by tag whose tag `deploy/local/images.sh` does not pin to a digest. Its exemptions hold only where they can occur: `git.askedin.com/askedin/askedin-monorepo/...` (this repository's builds, by branch name) under `deploy/askedin`, and `ulw/...` (the sandbox's builds, never pulled) in `compose.yaml`, `kind.yaml` and the sandbox's renderings. `deploy/askedin` holds no kustomization; `validate-manifests.sh` fails if one appears unrendered. `tools/security/security_tools_test.py` tests the checker, the allowlist rules and the report's matching |
 | `.github/zizmor.yml` | zizmor | a disabled audit, with why and when to revisit |
 
 `tools/security/check-allowlists.py` runs before each scan and fails an entry without a
@@ -184,6 +192,8 @@ can:
 
 - `codeql`, `dependencies`, `iac`, `workflows` (`security.yml`);
 - `build-test (gcc/ci)` and `build-test (clang/ci)` (`ci.yml`), which carry the hardening check;
+- `manifests` (`ci.yml`), which runs `validate-manifests.sh` and with it
+  `check-image-pins.py`: trusting docker.io whole in `registries.yaml` holds only while it does;
 - code scanning merge protection, so that a pull request introducing a CodeQL alert of high or
   critical security severity, or error severity, cannot merge until it is fixed or dismissed
   with a reason.

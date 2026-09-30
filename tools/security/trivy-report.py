@@ -2,20 +2,24 @@
 """Usage: trivy-report.py IGNOREFILE REPORT.json...
 
 Writes a Markdown summary of Trivy image reports (docs/adr/0072), one table per image, to
-$GITHUB_STEP_SUMMARY when set and to stdout otherwise. Each REPORT.json is `trivy image
---format json` with no severity filter, no --ignore-unfixed and no ignore file, so nothing is
-hidden from the summary.
+stdout, and appends the same to $GITHUB_STEP_SUMMARY when that is set. Each REPORT.json is
+`trivy image --format json` with no severity filter, no --ignore-unfixed and no ignore file,
+so nothing is hidden from the summary.
 
 A vulnerability is listed when either Trivy's severity or NVD's is HIGH or CRITICAL. The rating
 matters because for Ubuntu packages Trivy uses Ubuntu's priority, and Ubuntu rates most ffmpeg
 CVEs medium or low where NVD says high or critical. Unfixed ones are listed too: for ffmpeg in
 universe the only fixes are in Ubuntu Pro's ESM archive, which Trivy's data records as no fix
-("affected"), so --ignore-unfixed alone would drop them silently. An entry in the ignore file
-is marked, with its expiry, not left out.
+("affected"), so --ignore-unfixed alone would drop them silently. A finding an ignore-file
+entry covers is marked, with the entry's expiry, not left out: an entry covers it when the ids
+match, the entry has not expired, and one of its purls names the finding's package (the same
+type, namespace and name, the same version if the purl gives one, and the purl's qualifiers
+among the package's), as Trivy itself matches.
 
 Never fails on findings; trivy-image.sh's own Trivy run is the gate.
 """
 import collections
+import datetime
 import json
 import os
 import sys
@@ -26,20 +30,53 @@ NAME = {v: k for k, v in RANK.items()}
 MAX_ROWS = 150
 
 
-def allowlisted(ignorefile: Path) -> dict[str, str]:
-    """Vulnerability id -> expiry, from the ignore file's `vulnerabilities` entries."""
+def parse_purl(purl: str) -> tuple[str, str | None, dict[str, str]]:
+    """(type/namespace/name, version or None, qualifiers)."""
+    purl = purl.split("#", 1)[0]
+    purl, _, query = purl.partition("?")
+    base, _, version = purl.partition("@")
+    qualifiers = dict(q.split("=", 1) for q in query.split("&") if "=" in q)
+    return base.lower(), version or None, qualifiers
+
+
+def purl_covers(entry: str, package: str) -> bool:
+    e_base, e_version, e_quals = parse_purl(entry)
+    p_base, p_version, p_quals = parse_purl(package)
+    if e_base != p_base or (e_version is not None and e_version != p_version):
+        return False
+    return all(p_quals.get(k) == v for k, v in e_quals.items())
+
+
+def allowlist(ignorefile: Path) -> list[dict]:
+    """The ignore file's unexpired `vulnerabilities` entries."""
     if not ignorefile.is_file():
-        return {}
+        return []
     import yaml  # python3-yaml, which the jobs that run this already install.
 
     config = yaml.safe_load(ignorefile.read_text(encoding="utf-8")) or {}
-    return {
-        str(e.get("id")): str(e.get("expired_at", "?"))
-        for e in config.get("vulnerabilities") or []
-    }
+    today = datetime.date.today()
+    entries = []
+    for e in config.get("vulnerabilities") or []:
+        expiry = e.get("expired_at")
+        if isinstance(expiry, str):
+            expiry = datetime.date.fromisoformat(expiry[:10])
+        if isinstance(expiry, datetime.datetime):
+            expiry = expiry.date()
+        if isinstance(expiry, datetime.date) and expiry >= today:
+            entries.append({"id": str(e.get("id")), "purls": e.get("purls") or [], "until": expiry})
+    return entries
 
 
-def summarise(report: dict, allow: dict[str, str]) -> str:
+def covered_until(allow: list[dict], vid: str, purl: str) -> datetime.date | None:
+    dates = [
+        e["until"]
+        for e in allow
+        if e["id"] == vid and purl and any(purl_covers(p, purl) for p in e["purls"])
+    ]
+    return max(dates) if dates else None
+
+
+def summarise(report: dict, allow: list[dict]) -> str:
     image = report.get("ArtifactName", "?")
     os_info = report.get("Metadata", {}).get("OS") or {}
     rows: dict[str, dict] = {}
@@ -58,14 +95,26 @@ def summarise(report: dict, allow: dict[str, str]) -> str:
                     "installed": set(),
                     "fixed": set(),
                     "status": set(),
+                    "covered": {},
                     "title": (v.get("Title") or "").replace("|", "/")[:80],
                 },
             )
             row["packages"].add(v.get("PkgName", "?"))
+            purl = (v.get("PkgIdentifier") or {}).get("PURL", "")
+            until = covered_until(allow, v["VulnerabilityID"], purl)
+            if until:
+                row["covered"][v.get("PkgName", "?")] = until
             row["installed"].add(v.get("InstalledVersion", "?"))
             if v.get("FixedVersion"):
                 row["fixed"].add(v["FixedVersion"])
             row["status"].add(v.get("Status") or ("fixed" if v.get("FixedVersion") else "affected"))
+
+    def allowed(row) -> str:
+        if not row["covered"]:
+            return ""
+        until = min(row["covered"].values())
+        n, total = len(row["covered"]), len(row["packages"])
+        return f"until {until}" + ("" if n == total else f" ({n} of {total} packages)")
 
     def key(item):
         vid, row = item
@@ -97,7 +146,7 @@ def summarise(report: dict, allow: dict[str, str]) -> str:
                 shown,
                 ", ".join(sorted(row["installed"])),
                 ", ".join(sorted(row["fixed"])) or "no fix (" + "/".join(sorted(row["status"])) + ")",
-                f"until {allow[vid]}" if vid in allow else "",
+                allowed(row),
                 row["title"],
             )
         )
@@ -110,7 +159,7 @@ def main() -> int:
     if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
-    allow = allowlisted(Path(sys.argv[1]))
+    allow = allowlist(Path(sys.argv[1]))
     text = "\n".join(
         summarise(json.loads(Path(p).read_text(encoding="utf-8")), allow) for p in sys.argv[2:]
     )
