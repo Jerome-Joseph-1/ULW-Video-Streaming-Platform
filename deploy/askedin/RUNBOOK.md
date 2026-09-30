@@ -396,7 +396,8 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
      (cd "$overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
      (cd "$overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
      (cd "$overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
-     git commit -qam "deploy: video images $CI_COMMIT_SHA [skip ci]"
+     # Already pinned (a rerun, or the branch holds this digest): nothing to commit.
+     git diff --quiet || git commit -qam "deploy: video images $CI_COMMIT_SHA [skip ci]"
    }
    pin
    for attempt in 1 2 3; do
@@ -435,7 +436,11 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
    ones, and it redoes its three edits on the fetched tree, commits and pushes, up to three
    times. The edits are regenerated rather than replayed, so a shallow clone (Woodpecker's
    default) is enough: the fetch brings the commits after the clone's, and the check reads only
-   the range after `$CI_COMMIT_SHA`, which the clone has.
+   the range after `$CI_COMMIT_SHA`, which the clone has. The rule holds only while every commit
+   on the branch runs this pipeline: if the monorepo's pipeline filters on paths (`when: path:`),
+   a commit outside them never pins, so limit the check to the same paths
+   (`git rev-list ... "$CI_COMMIT_SHA..HEAD" -- <the video paths>`). The `exit`s end the step,
+   so the snippet is the step's last command.
    Drop the restricted kubeconfig then: the pipeline no longer touches the cluster.
 3. Rollback (section 6) becomes one of:
    - `kustomize edit set image` to the digest of `<good sha>`, committed with `[skip ci]`;
@@ -444,7 +449,9 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
      revert builds the branch's HEAD, the bad code, and the new digest step pins it again;
    - a revert of the bad code itself, which builds and pins a good image the normal way.
 
-   Any of these instead of a retag and a restart.
+   Any of these instead of a retag and a restart. Before a rollback by digest, cancel or wait
+   out any pipeline still running on the branch: one that finishes afterwards sees the rollback
+   as another build's digest commit and pins its own image over it.
 
 Until then, what a pod runs is at least recorded. This prints each pod's resolved digest, which
 must match `crane digest <image>:<sha>` of the commit you meant to deploy:
