@@ -757,10 +757,11 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     // kernel). Every 90 messages sequenced, once chat-2's lossy_drops_total shows they are
     // behind, each reads 64 KiB, a quarter of what those messages send it. None stops outright:
     // its node closes a connection that acknowledges nothing for 20 s (stall_timeout). A 64 KiB
-    // read frees half of a full buffer, which may not reopen the window yet, and the next read
-    // empties it, which does: the window opens at least every 180 messages, which take less
-    // than 20 s even under a sanitizer. The kernel's own count of a shut window
-    // (TCP_USER_TIMEOUT) ended such viewers, and is off on client connections (ADR-0057).
+    // read frees half of a full buffer, which may not reopen the window at once (the receiver's
+    // silly window avoidance), and the next read empties it, which does: the window opens at
+    // least every 180 messages, which take less than 20 s even under a sanitizer. The kernel's own
+    // count of a shut window (TCP_USER_TIMEOUT) ended such viewers, and is off on client
+    // connections (ADR-0057).
     std::vector<std::unique_ptr<Client>> senders;
     std::vector<std::unique_ptr<Client>> viewers;
     std::string live;

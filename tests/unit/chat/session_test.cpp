@@ -17,6 +17,7 @@
 #include "unit/rt/memory_room_store.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <format>
 #include <future>
 #include <gtest/gtest.h>
@@ -491,15 +492,16 @@ std::optional<std::uint64_t> metric(std::uint16_t port, std::string_view name) {
         std::string_view(body).substr(start, body.find('\n', start) - start));
 }
 
-// Both viewers fall behind a sender that never stops. One never reads again, and is closed once
-// it has acknowledged nothing for the stall timeout, here half a second; the other empties its
-// socket now and then, and keeps its connection however long it lags. Real time: the kernel's own
-// timers, which decide when a reader's acknowledgements reach the node, run on it.
+// Both viewers fall behind a sender that never stops. One never reads again, and is reset once it
+// has acknowledged nothing for the stall timeout, here 2.5 s; the other empties its socket now
+// and then, and keeps its connection however long it lags. Real time: the kernel's own timers,
+// which decide when a reader's acknowledgements reach the node, run on it, and a test thread
+// held up for less than the timeout does not count against the slow one.
 TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosedAndASlowOneIsNot) {
     node_.reset();
     node_ = std::make_unique<Node>(
-        GetParam(), chat::Limits{.stall_timeout = core::Millis{500},
-                                 .stall_check = core::Millis{100},
+        GetParam(), chat::Limits{.stall_timeout = core::Millis{2'500},
+                                 .stall_check = core::Millis{250},
                                  .service = {.send_burst = 1'000'000,
                                              .max_send_bytes_in_flight = std::size_t{1} << 20U},
                                  .presence = {}});
@@ -524,8 +526,14 @@ TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosed
     // the next; the slow viewer empties its socket after every tenth. The stopped one's socket
     // buffers and its 64 KiB of queue fill within the first hundred or so.
     const std::string body = infra::auth::encode_base64url(std::string(2'000, 'x'));
-    const auto empty = [](WsClient& ws) {
+    // Everything that has arrived, taken apart as it is read, which also answers the node's
+    // pings: the seq of the newest message among it.
+    std::uint64_t last = 0;
+    const auto empty = [&last](WsClient& ws) {
         while (ws.read_at_most(std::size_t{1} << 20U) > 0) {
+            while (const auto text = ws.next_text(std::chrono::milliseconds{0})) {
+                last = message_seq(*text).value_or(last);
+            }
         }
     };
     const auto deadline = std::chrono::steady_clock::now() + seconds(60);
@@ -550,8 +558,7 @@ TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosed
     ASSERT_EQ(stalled, 1U) << "after " << sent << " messages";
 
     // The slow one is still there, and is sent the newest message; the stopped one reads what
-    // was on its way to it, and then the end of the connection.
-    std::uint64_t last = 0;
+    // had reached it, and then a reset: the node kept nothing more for it.
     while (last < sent) {
         const auto text = slow->next_text(seconds(10));
         ASSERT_TRUE(text) << "the slow viewer stopped at " << last << " of " << sent;
@@ -560,6 +567,7 @@ TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosed
     while (stopped->next_frame(seconds(10))) {
     }
     EXPECT_FALSE(stopped->connected());
+    EXPECT_EQ(stopped->error(), ECONNRESET);
     EXPECT_EQ(metric(node_->port(), "stalled_readers_total"), 1U);
     std::cout << "the stopped viewer was closed after " << sent
               << " messages; the slow one got all it was owed up to seq " << last << "\n";

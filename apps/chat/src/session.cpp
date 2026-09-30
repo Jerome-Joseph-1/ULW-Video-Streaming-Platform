@@ -5,8 +5,11 @@
 #include "infra/auth/token_extractor.hpp"
 #include "net/socket.hpp"
 
+#include "log.hpp"
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <span>
 #include <utility>
@@ -447,6 +450,11 @@ void Session::watch_output() noexcept {
     }
     watching_ = true;
     progressed_ = now();
+    // What it had acknowledged when its output began to wait, so that a client that never
+    // acknowledges any of it is closed stall_timeout from here, not from a first look.
+    if (const auto progress = send_progress()) {
+        acked_ = progress->acked;
+    }
     const core::Millis check = server_.limits().stall_check;
     if (timer_due_ - progressed_ > check) {
         arm(check);
@@ -460,7 +468,7 @@ bool Session::stalled(core::MonoTime at) noexcept {
     if (!watching_) {
         return false;
     }
-    const auto progress = net::send_progress(conn_.fd);
+    const auto progress = send_progress();
     if (!progress) {
         watching_ = unsent_bytes() != 0;
         return false;
@@ -476,6 +484,29 @@ bool Session::stalled(core::MonoTime at) noexcept {
         return false;
     }
     return at - progressed_ >= server_.limits().stall_timeout;
+}
+
+// The connection's TCP_INFO. Where the kernel cannot give it, stalled clients go undetected,
+// which the log says once.
+std::optional<net::SendProgress> Session::send_progress() const noexcept {
+    const auto progress = net::send_progress(conn_.fd);
+    if (progress) {
+        return *progress;
+    }
+    static std::atomic_flag told;
+    if (!told.test_and_set()) {
+        log_event(
+            R"("level":"warn","msg":"no TCP_INFO: stalled clients are not closed","errno":{})",
+            progress.error());
+    }
+    return std::nullopt;
+}
+
+// A client given up on: the connection is reset, so that the kernel drops what it still holds
+// for it instead of keeping it, and a FIN, in an orphan for as long as it probes the peer.
+void Session::give_up() noexcept {
+    net::abort_on_close(conn_.fd);
+    close();
 }
 
 // Closes on the next iteration. This may be running inside the router's fan-out, which must
@@ -500,12 +531,12 @@ void Session::on_timeout() noexcept {
         return;
     case Phase::Open: {
         if (quiet >= limits.idle_timeout) {
-            close();
+            give_up();
             return;
         }
         if (stalled(at)) {
             ++server_.counters().stalled_readers;
-            close();
+            give_up();
             return;
         }
         // The next check is the idle deadline itself if it comes before another ping would.
@@ -533,7 +564,7 @@ void Session::on_timeout() noexcept {
         if (watching_) {
             next = std::min(next, at + limits.stall_check);
         }
-        arm(std::chrono::duration_cast<core::Millis>(next - at));
+        arm(std::chrono::ceil<core::Millis>(next - at));
         return;
     }
     }

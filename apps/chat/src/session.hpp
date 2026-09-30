@@ -8,6 +8,7 @@
 #include "http/request_parser.hpp"
 #include "net/reactor.hpp"
 #include "net/slab.hpp"
+#include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
@@ -85,6 +86,8 @@ private:
     void abandon() noexcept;
     void watch_output() noexcept;
     [[nodiscard]] bool stalled(core::MonoTime at) noexcept;
+    [[nodiscard]] std::optional<net::SendProgress> send_progress() const noexcept;
+    void give_up() noexcept;
     void arm(core::Millis delay) noexcept;
     [[nodiscard]] core::MonoTime now() const noexcept;
 

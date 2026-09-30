@@ -32,8 +32,9 @@ struct ListenOptions {
 // Clears the TCP_USER_TIMEOUT tune_connection sets, for a server that bounds how long a peer
 // may acknowledge nothing itself (send_progress). Linux counts a shut receive window against it
 // from the first window probe, and restarts the count only when the window opens wide enough
-// for all of the next segment queued: a peer that keeps reading, but frees its window a little
-// at a time, is ended as if it had vanished.
+// for the whole unsent head of its queue (with GSO, up to about half the peer's largest
+// window): a peer that keeps reading, but frees its window a little at a time, is ended as if
+// it had vanished.
 [[nodiscard]] std::expected<void, int> clear_user_timeout(int fd) noexcept;
 
 // How much of what was sent on a TCP connection its peer has acknowledged, and whether anything
@@ -48,6 +49,10 @@ struct SendProgress {
 // it: our side keeps no TIME_WAIT entry for it, which a flood of refusals would otherwise fill
 // the port range with, and the peer learns at once rather than after its request.
 void reset_connection(os::UniqueFd fd) noexcept;
+// Makes the coming close of a connection a reset, which drops what the kernel still holds to
+// send: for a peer given up on, whose unsent bytes and FIN would otherwise wait in an orphan
+// for as long as the kernel keeps probing it. Failing leaves an ordinary close.
+void abort_on_close(int fd) noexcept;
 
 // A numeric "ipv4:port" or "[ipv6]:port": what start_connect accepts. Names are refused, since
 // resolving one would block the loop.

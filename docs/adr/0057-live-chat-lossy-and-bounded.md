@@ -57,7 +57,7 @@ How a viewer that stopped reading is told from one that reads slowly:
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
-| `TCP_USER_TIMEOUT` (20 s, `net::tune_connection`): the kernel ends a connection whose receive window stays shut that long | Already set on every connection; nothing to run | Rejected: Linux restarts its count of a shut window only when the window opens wide enough for all of the next segment queued. A viewer that keeps reading, but frees its window a little at a time, is ended 20 s after it first fell behind. With the timeout at 3 s on loopback, a reader that emptied its 64 KiB receive buffer every second was ended 3.3 s in, having read four buffers of it. Under a sanitizer, the M32 test's slow viewers were ended this way: each saw a reset, and its node had closed nothing |
+| `TCP_USER_TIMEOUT` (20 s, `net::tune_connection`): the kernel ends a connection whose receive window stays shut that long | Already set on every connection; nothing to run | Rejected: Linux restarts its count of a shut window only when the window opens wide enough for the whole unsent head of the queue, a segment of up to about half the peer's largest window with GSO. A viewer that keeps reading, but frees its window a little at a time, is ended 20 s after it first fell behind. With the timeout at 3 s on loopback, a reader that emptied its 64 KiB receive buffer every second was ended 3.3 s in, having read four buffers of it. Under a sanitizer, the M32 test's slow viewers were ended this way: each saw a reset, and its node had closed nothing |
 | The service's own count: nothing acknowledged for 20 s while output waits | Counts exactly what tells the two apart, whatever window the peer opens | Accepted |
 
 How senders are limited in a room of thousands:
@@ -121,14 +121,25 @@ How senders are limited in a room of thousands:
   trips.
 - **Stalled connections.** A client connection whose output waits for it (queued by the
   service, or sent or queued in the kernel) and which acknowledges none of it for 20 s is
-  closed and counted in `stalled_readers_total` (`Limits::stall_timeout`). The session looks
-  at what the connection has acknowledged (`TCP_INFO`, `net::send_progress`) once a second
-  while output waits, on the timer that pings it, so a closed connection has had nothing
-  acknowledged for 20 to 21 s; a connection with nothing waiting costs no look.
-  `TCP_USER_TIMEOUT` is cleared on client connections (`net::clear_user_timeout`), so the
-  kernel no longer ends one on its own. A peer that vanished while output waited for it is
-  closed the same way, and one with nothing waiting 20 s after the next ping, which it never
-  acknowledges.
+  closed and counted in `stalled_readers_total` (`Limits::stall_timeout`). The session reads
+  what the connection has acknowledged (`TCP_INFO`, `net::send_progress`) when its output
+  begins to wait, and then once a second while it waits, on the timer that pings it: a
+  connection is closed 20 s after its last acknowledgement, detected within 20 to 22 s. A
+  connection with nothing waiting costs no look; one that is watched costs a `getsockopt` and
+  a timer re-arm a second, about 1300 a second on a node of 1280 viewers all behind. Where
+  the kernel gives no `TCP_INFO`, the log says so once and stalled clients are left to the
+  idle timeout. `TCP_USER_TIMEOUT` is cleared on client connections
+  (`net::clear_user_timeout`), so the kernel no longer ends one on its own. A peer that
+  vanished while output waited for it is closed the same way, and one with nothing waiting
+  20 s after the next ping, which it never acknowledges.
+- **Closing a client given up on.** A stalled client, and one closed at the idle timeout, is
+  reset (`SO_LINGER` of 0, `net::abort_on_close`), not sent a FIN. With `TCP_USER_TIMEOUT`
+  cleared, a FIN behind up to 64 KiB of unsent bytes would leave an orphan the kernel keeps
+  for as long as it probes a shut window, where the timeout used to end it at 20 s; a client
+  that stalled on purpose, again and again, would hold that kernel memory. Setting a short
+  `TCP_USER_TIMEOUT` again just before closing would bound the orphan too, but still keep it
+  for that long and still send the peer what it was not reading. The reset frees it at once
+  and tells the client at once, which reconnects and resumes as from any lost connection.
 - **Memory per viewer.** A lossy client costs its node at most 64 KiB of unsent output plus
   one message, 64 KiB of kernel buffer, and one seq; the messages it is owed are the room's,
   kept once, inside ADR-0043's 32 MiB. The node's budget (ADR-0036, ADR-0043) grows only by
@@ -169,8 +180,8 @@ How senders are limited in a room of thousands:
   20 s later. Its client reconnects and joins again; the node never held more than the bounds
   above for it. A slow reader keeps its connection as long as its reads open its window at
   least once in 20 s: each opening lets more through, and that counts however little it
-  opened. A read that frees less than about half of a full receive buffer opens nothing, since
-  Linux waits for more before it offers a window again.
+  opened. A read that frees only part of a full receive buffer may not reopen the window at
+  once: the receiver's silly window avoidance waits for more room before it offers any.
 - `lossy_drops_total` counts seqs lossy clients were moved past, including gaps of the room
   itself that a behind client was waiting across. A node whose count climbs has viewers that
   cannot keep up, not a fault of its own.

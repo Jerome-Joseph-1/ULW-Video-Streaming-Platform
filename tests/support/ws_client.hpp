@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -165,6 +166,9 @@ public:
     }
 
     [[nodiscard]] bool connected() const noexcept { return static_cast<bool>(fd_); }
+    // How the connection ended, once it has: 0 for the server's FIN, otherwise the errno of the
+    // read that found it gone (ECONNRESET for a reset).
+    [[nodiscard]] int error() const noexcept { return error_; }
 
 private:
     WsClient(std::uint16_t port, int receive_buffer) {
@@ -233,6 +237,7 @@ private:
         std::array<std::byte, 65536> buf{};
         const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), 0);
         if (n <= 0) {
+            error_ = n < 0 ? errno : 0;
             fd_.reset();
             return false;
         }
@@ -292,6 +297,7 @@ private:
 
     os::UniqueFd fd_;
     std::vector<std::byte> in_;
+    int error_ = 0;
     FakeRandom random_;
 };
 

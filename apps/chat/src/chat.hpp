@@ -55,7 +55,7 @@ struct Limits {
     core::Millis ping_interval{30'000};
     core::Millis idle_timeout{75'000};
     // A client whose connection has output waiting for it, and which acknowledges none of it for
-    // stall_timeout, has stopped reading or vanished: it is closed. Looked at every stall_check
+    // stall_timeout, has stopped reading or vanished: it is reset. Looked at every stall_check
     // while output waits. This is TCP_USER_TIMEOUT's 20 s, counted by the service, not the
     // kernel: Linux ends a reader that frees its window a little at a time as if it had stopped
     // (net::clear_user_timeout), while here any read that lets output through counts.
