@@ -231,15 +231,11 @@ jobs:
           cache-key: clang-lint
       - run: tools/check-boundaries.sh
       - run: tools/check-format.sh
-      # M22: end-to-end encryption changed neither the chat service nor the router, formatting
-      # aside, since phase 2 was tagged. Nothing to compare against until it is.
+      # M22: the E2EE phase changed neither the chat service nor the router, formatting aside:
+      # phase-2 against phase-3. Until a person pushes both tags, the script says it is waiting
+      # on them and succeeds.
       - name: E2EE diagnostic check
-        run: |
-          if git rev-parse --quiet --verify refs/tags/phase-2 >/dev/null; then
-            tools/e2ee_diagnostic_check.sh phase-2
-          else
-            echo "no phase-2 tag yet"
-          fi
+        run: tools/e2ee_diagnostic_check.sh
       - run: cmake --preset ci
       # Generated headers must exist before clang-tidy can parse the sources.
       - run: cmake --build --preset ci --target ulw_build_info
