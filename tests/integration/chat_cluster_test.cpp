@@ -62,17 +62,38 @@ protected:
                                seen[i].seq, seen[i].reason);
         }
         for (const Node& n : nodes_) {
-            out += std::format("\n{} wrote:\n{}", n.name, n.process->output());
+            // A resend answered from a node's memory counts as deduplicated; an `unavailable`
+            // that came from a forward, not the store, as a forward timeout.
+            const std::string metrics = ulw::test::http_get(n.port, "/metrics").body;
+            out += std::format("\n{}: messages_deduplicated_total {}, forward_timeouts_total {}; "
+                               "it wrote:\n{}",
+                               n.name, counter(metrics, "messages_deduplicated_total"),
+                               counter(metrics, "forward_timeouts_total"), n.process->output());
         }
         return out;
+    }
+
+    // A counter's value in a /metrics page, as text; "absent" when the page does not have it.
+    [[nodiscard]] static std::string counter(std::string_view metrics, std::string_view name) {
+        const std::string line = "\n" + std::string(name) + " ";
+        const std::size_t at = metrics.find(line);
+        if (at == std::string_view::npos) {
+            return "absent";
+        }
+        const std::size_t start = at + line.size();
+        return std::string(metrics.substr(start, metrics.find('\n', start) - start));
     }
 
     // Sends `body` under `id` as a client must (ADR-0043): `unavailable` leaves the send's fate
     // unknown, so it goes again under the same id, each time once the last is answered. Returns
     // the first other answer, or the last `unavailable` after kSendAttempts; nullopt when a send
     // was not answered at all.
-    std::optional<Seen> send_until_answered(Client& client, const std::string& body,
-                                            const std::string& id) {
+    // Each resend goes out as soon as the last answer is in, with no pause between. A run of
+    // them that outpaces the sender's allowance is answered `rate_limited`, which is returned
+    // like any other answer: the caller's check for `sent` then fails loudly with that reason,
+    // never passes by mistake.
+    [[nodiscard]] std::optional<Seen> send_until_answered(Client& client, const std::string& body,
+                                                          const std::string& id) {
         const auto is_answer = [&](const Seen& s) {
             return (s.type == "sent" || s.type == "error") && s.id == id;
         };
@@ -647,6 +668,7 @@ TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
     const auto ack =
         alice->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
     ASSERT_TRUE(ack);
+    const std::string owned_before = owner();
     alice.reset();
     // Every node's memory of recent keys goes with it, and the room gets a new owner.
     for (Node& n : nodes_) {
@@ -660,9 +682,29 @@ TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
     }
     ASSERT_NO_FATAL_FAILURE(wait_ready());
 
+    // The resends go to the room's owner, which answers them itself. A send forwarded from
+    // another node is answered `unavailable` when the forward times out (kForwardTimeout, while
+    // the node link is still coming up, say), yet may still reach the owner, which then
+    // remembers the key: the resend would be answered from that memory, not the store. The
+    // join through chat-2 resolved the room, so the owner since the restart is recorded by now.
     auto again = connect(nodes_[1], 0);
     ASSERT_TRUE(again);
     ASSERT_NO_FATAL_FAILURE(join(*again));
+    const std::string owned = owner();
+    const auto generation = [](std::string_view assignment) {
+        return core::parse_integer<std::uint64_t>(assignment.substr(assignment.find(' ') + 1))
+            .value_or(0);
+    };
+    ASSERT_GT(generation(owned), generation(owned_before))
+        << "no claim since the restart: " << owned_before << ", then " << owned;
+    const auto owner_node =
+        std::ranges::find(nodes_, owned.substr(0, owned.find(' ')), &Node::name);
+    ASSERT_NE(owner_node, nodes_.end()) << owned;
+    if (owner_node != nodes_.begin() + 1) {
+        again = connect(*owner_node, 0);
+        ASSERT_TRUE(again);
+        ASSERT_NO_FATAL_FAILURE(join(*again));
+    }
     // Even a repeat is a commit in the store, which may take past the store's timeout under
     // load: the node then answers `unavailable`, and the client sends again, as any would.
     const auto repeat = send_until_answered(*again, body, "kept-key");
@@ -688,7 +730,8 @@ TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
         EXPECT_EQ(metric(n, "messages_deduplicated_total"), 0U) << n.name << " answered it";
     }
     std::cout << "after every node restarted, the resend got seq " << repeat->seq
-              << " from the store, and another body under its id was a conflict; "
+              << " from the store through its owner " << owned
+              << ", and another body under its id was a conflict; "
               << again->count(
                      [](const Seen& s) { return s.type == "error" && s.reason == "unavailable"; })
               << " sends were answered unavailable and sent again\n";
