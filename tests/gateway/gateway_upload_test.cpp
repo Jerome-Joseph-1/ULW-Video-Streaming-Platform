@@ -278,6 +278,63 @@ TEST_P(GatewayUpload, ARepeatedCommitReportsTheVideosStateAsItIsNow) {
     EXPECT_EQ(gw.jobs().size(), 1U);
 }
 
+// Past expires_at an upload never committed is gone to PATCH, HEAD and commit, before the
+// reaper aborts it as after; a committed one still answers as committed.
+TEST_P(GatewayUpload, AnUploadPastItsExpiryIsGoneToPatchHeadAndCommit) {
+    GatewayOptions options = over_transport({.backend = Backend::Fake, .chunk = kMiB});
+    options.manual_clock = true;
+    options.limits.upload_ttl = std::chrono::hours(1);
+    GatewayUnderTest gw(options);
+    const auto data = ulw::test::pattern(2 * kMiB);
+    HttpClient c(gw.endpoint());
+    const auto partial = create_upload(c, data.size());
+    const auto whole = create_upload(c, data.size());
+    const auto committed = create_upload(c, data.size());
+    ASSERT_TRUE(partial && whole && committed);
+    ASSERT_EQ(patch(c, partial->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+    ASSERT_TRUE(upload_all(c, *whole, data));
+    ASSERT_TRUE(upload_all(c, *committed, data));
+    const auto commit = [](const Created& up) {
+        return "/api/v1/uploads/" + up.upload_id + "/commit";
+    };
+    const auto path = [](const Created& up) { return "/api/v1/uploads/" + up.upload_id; };
+    ASSERT_EQ(c.request("POST", commit(*committed), kAlice)->status, 200);
+
+    // One millisecond short of the hour, nothing has changed.
+    gw.advance(core::Millis{(60 * 60 * 1000) - 1});
+    HttpClient before(gw.endpoint());
+    EXPECT_EQ(before.request("HEAD", path(*partial), kAlice)->status, 204);
+
+    gw.advance(core::Millis{1});
+    HttpClient after(gw.endpoint());
+    const auto late_patch = patch(after, partial->upload_id, kMiB, std::span(data).subspan(kMiB));
+    ASSERT_TRUE(late_patch);
+    EXPECT_EQ(late_patch->status, 410);
+    EXPECT_FALSE(late_patch->upload_offset());
+    HttpClient head_client(gw.endpoint());
+    EXPECT_EQ(head_client.request("HEAD", path(*partial), kAlice)->status, 410);
+    EXPECT_EQ(head_client.request("HEAD", path(*whole), kAlice)->status, 410);
+    // Every byte is durable, so only the expiry stands in the way.
+    EXPECT_EQ(head_client.request("POST", commit(*whole), kAlice)->status, 410);
+    EXPECT_EQ(gw.jobs().size(), 1U);
+
+    const auto repeat = head_client.request("POST", commit(*committed), kAlice);
+    ASSERT_TRUE(repeat);
+    EXPECT_EQ(repeat->status, 200);
+    const auto head = head_client.request("HEAD", path(*committed), kAlice);
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->status, 204);
+    EXPECT_EQ(head->upload_offset(), data.size());
+    // Cancelling is still allowed, and changes none of the answers above: nor does the reaper's
+    // abort, whenever it comes.
+    EXPECT_EQ(head_client.request("DELETE", path(*partial), kAlice)->status, 204);
+    EXPECT_EQ(head_client.request("HEAD", path(*partial), kAlice)->status, 410);
+    EXPECT_EQ(head_client.request("POST", commit(*partial), kAlice)->status, 410);
+    HttpClient cancelled(gw.endpoint());
+    EXPECT_EQ(patch(cancelled, partial->upload_id, kMiB, std::span(data).subspan(kMiB))->status,
+              410);
+}
+
 TEST_P(GatewayUpload, CommitBeforeEveryByteArrivedIs409) {
     GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
     const auto data = ulw::test::pattern(2 * kMiB);
