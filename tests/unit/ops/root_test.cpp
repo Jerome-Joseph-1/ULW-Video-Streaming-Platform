@@ -1,5 +1,7 @@
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 
+#include <sys/prctl.h>
 #include <sys/wait.h>
 
 #include <cstdlib>
@@ -83,6 +85,23 @@ TEST_F(LeaveRootTest, ANamedUserIsBecomeAndAnUnknownOneRefused) {
                                  ::getuid() == uid && ::geteuid() == uid
                              ? 0
                              : 1;
+              }),
+              0);
+}
+
+// A change of uid sets the flag to fs.suid_dumpable, which a host may set to 1 or 2.
+TEST_F(LeaveRootTest, AProcessThatTurnedDumpsOffKeepsThemOffAfterTheDrop) {
+    if (::getpwnam("nobody") == nullptr) {
+        GTEST_SKIP() << "no nobody user on this host";
+    }
+    EXPECT_EQ(in_child([] {
+                  if (!ops::disable_core_dumps()) {
+                      return 1;
+                  }
+                  if (ops::leave_root("nobody", false) != ops::RootStep::Dropped) {
+                      return 2;
+                  }
+                  return ::prctl(PR_GET_DUMPABLE) == 0 ? 0 : 3;
               }),
               0);
 }
