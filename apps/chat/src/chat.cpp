@@ -90,7 +90,7 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
     // Gone already, or not an IP socket: nothing to serve either way.
     const auto peer = net::peer_address(conn.get());
     if (!peer) {
-        ++counters_.connections_rejected;
+        ++counters_.connections_unaddressed;
         return;
     }
     // A trusted proxy carries many clients; they are told apart at their upgrade requests.
@@ -245,6 +245,7 @@ std::string ChatServer::render_metrics() const {
     return std::format(
         "connections_accepted_total {}\n"
         "connections_rejected_total{{reason=\"capacity\"}} {}\n"
+        "connections_rejected_total{{reason=\"socket\"}} {}\n"
         "connections_rejected_total{{reason=\"ip_connections\"}} {}\n"
         "connections_rejected_total{{reason=\"ip_rate\"}} {}\n"
         "upgrades_limited_total{{limit=\"ip\"}} {}\n"
@@ -283,12 +284,13 @@ std::string ChatServer::render_metrics() const {
         "presence_notifications_total {}\n"
         "presence_expired_total {}\n"
         "presence_gaps_total {}\n",
-        c.connections_accepted, c.connections_rejected, c.rejected_ip_connections,
-        c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions, clients_.size(),
-        clients_.evictions(), sessions_.size(), c.upgrades, c.auth_failures, c.origin_rejections,
-        c.messages_received, chat.delivered, chat.rate_limited, router.duplicates, chat.lossy_drops,
-        chat.replayed, chat.history_messages, chat_.buffered_bytes(), c.protocol_errors,
-        c.control_floods, c.slow_consumers, c.stalled_readers,
+        c.connections_accepted, c.connections_rejected, c.connections_unaddressed,
+        c.rejected_ip_connections, c.rejected_ip_rate, c.limited_ip_upgrades,
+        c.limited_user_sessions, clients_.size(), clients_.evictions(), sessions_.size(),
+        c.upgrades, c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
+        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
+        chat.history_messages, chat_.buffered_bytes(), c.protocol_errors, c.control_floods,
+        c.slow_consumers, c.stalled_readers,
         c.allocation_failures + router.allocation_failures + chat.allocation_failures +
             presence.allocation_failures,
         deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,

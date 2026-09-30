@@ -113,6 +113,8 @@ struct Deps {
 struct Counters {
     std::uint64_t connections_accepted = 0;
     std::uint64_t connections_rejected = 0;
+    // Gone before it was served, or not an IP socket: its peer address could not be read.
+    std::uint64_t connections_unaddressed = 0;
     std::uint64_t upgrades = 0;
     std::uint64_t auth_failures = 0;
     std::uint64_t origin_rejections = 0;

@@ -239,6 +239,11 @@ TEST_P(ChatSessionTest, ProbesAnswerAndUnknownPathsAreNotFound) {
     const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
     EXPECT_EQ(metrics.status, 200);
     EXPECT_NE(metrics.body.find("fenced_writes_total 0\n"), std::string::npos);
+    // A socket whose peer address cannot be read is not a full node, and is counted apart.
+    EXPECT_NE(metrics.body.find("connections_rejected_total{reason=\"socket\"} 0\n"),
+              std::string::npos);
+    EXPECT_NE(metrics.body.find("connections_rejected_total{reason=\"capacity\"} 0\n"),
+              std::string::npos);
     EXPECT_EQ(ulw::test::http_get(node_->port(), "/api/v1/videos").status, 404);
 }
 

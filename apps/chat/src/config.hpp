@@ -69,4 +69,9 @@ using EnvLookup = std::function<std::optional<std::string>(std::string_view name
 // which Kubernetes sets to the pod's name.
 [[nodiscard]] std::expected<Config, ConfigError> load_config(const EnvLookup& env);
 
+// The prefix lengths of the trusted proxy blocks wider than an IPv4 /8 or an IPv6 /32, as the
+// gateway warns of: rarely one's own proxies, and they let many peers name any client. Started
+// with, and logged as a warning.
+[[nodiscard]] std::vector<unsigned> wide_trusted_proxies(const ClientLimits& limits);
+
 } // namespace chat

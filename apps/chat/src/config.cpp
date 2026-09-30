@@ -160,11 +160,29 @@ std::expected<ClientLimits, ConfigError> client_limits(const EnvLookup& env) {
     if (!hops) {
         return std::unexpected(hops.error());
     }
+    // As the gateway's: hops count proxies, and there are none to count.
+    if (hops->has_value() && out.trusted_proxies.empty()) {
+        return error("ULW_TRUSTED_PROXY_HOPS", "set, but ULW_TRUSTED_PROXIES is not");
+    }
     out.trusted_proxy_hops = hops->value_or(1);
     return out;
 }
 
 } // namespace
+
+std::vector<unsigned> wide_trusted_proxies(const ClientLimits& limits) {
+    // As the gateway's: a /8 of IPv4 is 16 million addresses, and a /32 of IPv6 a whole
+    // provider's allocation.
+    constexpr unsigned kWideV4Prefix = 8;
+    constexpr unsigned kWideV6Prefix = 32;
+    std::vector<unsigned> wide;
+    for (const net::IpNetwork& block : limits.trusted_proxies) {
+        if (block.prefix_length() < (block.is_v4() ? kWideV4Prefix : kWideV6Prefix)) {
+            wide.push_back(block.prefix_length());
+        }
+    }
+    return wide;
+}
 
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     const char* node_variable = "ULW_NODE_ID";

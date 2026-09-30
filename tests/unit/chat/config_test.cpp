@@ -196,6 +196,28 @@ TEST_F(ChatConfigTest, PerClientLimitsAreTheServicesUnlessSetAndProxiesAreCidrBl
     }
 }
 
+// As the gateway's: a hop count means nothing without the proxies it counts, and would
+// otherwise be taken as set while every peer's own address is used.
+TEST_F(ChatConfigTest, AProxyHopCountWithoutTrustedProxiesIsRefused) {
+    env["ULW_TRUSTED_PROXY_HOPS"] = "2";
+    EXPECT_EQ(refused_variable(), "ULW_TRUSTED_PROXY_HOPS");
+    env["ULW_TRUSTED_PROXIES"] = "10.42.0.0/16";
+    EXPECT_TRUE(load());
+}
+
+// As the gateway's: a block wider than an IPv4 /8 or an IPv6 /32 is rarely one's own proxies,
+// and lets many peers name any client, so it is started with but warned about.
+TEST_F(ChatConfigTest, ATrustedProxyBlockWiderThanASlash8OrASlash32IsWarnedAbout) {
+    env["ULW_TRUSTED_PROXIES"] = "10.0.0.0/8, 10.42.0.0/16, 2001:db8::/32";
+    const auto narrow = load();
+    ASSERT_TRUE(narrow);
+    EXPECT_TRUE(chat::wide_trusted_proxies(narrow->client_limits).empty());
+    env["ULW_TRUSTED_PROXIES"] = "10.0.0.0/7, 10.42.0.0/16, 2001:db8::/31";
+    const auto wide = load();
+    ASSERT_TRUE(wide);
+    EXPECT_EQ(chat::wide_trusted_proxies(wide->client_limits), (std::vector<unsigned>{7, 31}));
+}
+
 TEST_F(ChatConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
     env["ULW_ALLOWED_ORIGINS"] = "https://app.askedin.com,http://localhost:5173";
     const auto config = load();

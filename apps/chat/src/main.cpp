@@ -170,6 +170,11 @@ int run() {
     } else if (*step == ops::RootStep::Dropped) {
         chat::log_event(R"("level":"info","msg":"dropped root","user":"{}")", config->run_as_user);
     }
+    for (const unsigned prefix : chat::wide_trusted_proxies(config->client_limits)) {
+        chat::log_event(R"("level":"warn","msg":"a trusted proxy block this wide lets many peers )"
+                        R"(name any client","prefix_length":{})",
+                        prefix);
+    }
 
     Services s;
     auto choice = net::make_reactor_with_fallback(config->reactor, s.clock, limits->soft);
