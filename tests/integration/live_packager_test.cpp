@@ -259,6 +259,106 @@ TEST_F(LivePackagerTest, ItsLogHoldsNoSecretAndStaysShort) {
     EXPECT_LT(packager->output().size(), 2048U) << packager->output();
 }
 
+// The publisher joins its encoder mid-interval, so the first video keyframe can reach the
+// packager up to a segment length after the audio began. With 2 s segments, video that starts
+// 1.8 s after the audio: a 1 s probe window found no picture size in it, ffmpeg could not
+// write the init segment, and the stream ended with nothing published.
+TEST_F(LivePackagerTest, AStreamWhoseFirstKeyframeComesLateInTheSegmentIsStillPackaged) {
+    const std::string path = "PATH=" + env_or("PATH", "/usr/bin:/bin");
+    const TempDir dir("ulw-live-late-video");
+    const std::string late = (dir.path() / "late.ts").string();
+    const auto build = ChildProcess::start({"/usr/bin/env",
+                                            "ffmpeg",
+                                            "-nostdin",
+                                            "-hide_banner",
+                                            "-loglevel",
+                                            "error",
+                                            "-f",
+                                            "lavfi",
+                                            "-i",
+                                            "testsrc2=size=640x360:rate=30",
+                                            "-f",
+                                            "lavfi",
+                                            "-i",
+                                            "sine=frequency=440:sample_rate=48000",
+                                            "-filter_complex",
+                                            "[0:v]setpts=PTS+1.8/TB[v]",
+                                            "-map",
+                                            "[v]",
+                                            "-map",
+                                            "1:a",
+                                            "-c:v",
+                                            "libx264",
+                                            "-preset",
+                                            "ultrafast",
+                                            "-pix_fmt",
+                                            "yuv420p",
+                                            "-g",
+                                            "60",
+                                            "-keyint_min",
+                                            "60",
+                                            "-sc_threshold",
+                                            "0",
+                                            "-c:a",
+                                            "aac",
+                                            "-b:a",
+                                            "64k",
+                                            "-t",
+                                            "10",
+                                            "-muxdelay",
+                                            "0",
+                                            "-muxpreload",
+                                            "0",
+                                            "-f",
+                                            "mpegts",
+                                            late},
+                                           {path});
+    ASSERT_NE(build, nullptr);
+    ASSERT_EQ(build->wait_exit(kExitPatience), 0) << build->output();
+
+    const auto packager = start_packager();
+    const auto port = ingest_port(*packager);
+    ASSERT_TRUE(port) << packager->output();
+    // Sent in real time as the test publisher sends, the audio's first 1.8 s ahead of any video.
+    const auto publisher = ChildProcess::start(
+        {"/usr/bin/env",
+         "ffmpeg",
+         "-nostdin",
+         "-hide_banner",
+         "-loglevel",
+         "warning",
+         "-re",
+         "-i",
+         late,
+         "-map",
+         "0",
+         "-c",
+         "copy",
+         "-muxdelay",
+         "0",
+         "-muxpreload",
+         "0",
+         "-f",
+         "mpegts",
+         "srt://127.0.0.1:" + std::to_string(*port) + "?mode=caller&pkt_size=1316&passphrase=" +
+             std::string(kPassphrase) + "&streamid=" + stream_},
+        {path});
+    ASSERT_NE(publisher, nullptr);
+
+    watch(*publisher);
+    // The packager first: when it gives up, the publisher's own error says only that its
+    // connection broke.
+    ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
+    ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
+    EXPECT_EQ(packager->output().find("codec parameters"), std::string::npos) << packager->output();
+    const auto final = playlist();
+    ASSERT_TRUE(final) << packager->output();
+    EXPECT_TRUE(final->ended);
+    // 8.2 s of video in 2 s segments.
+    EXPECT_GE(final->media_sequence + final->segments.size(), 4U) << packager->output();
+    EXPECT_TRUE(stored("init_0.mp4"));
+}
+
 TEST_F(LivePackagerTest, ACrashedPackagerResumesTheSequenceWhereTheStoreLeftIt) {
     std::uint64_t before_next = 0;
     {
