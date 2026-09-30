@@ -102,7 +102,7 @@ function whipsink(ticket) {
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve(code ?? signal)));
-  const packager = {
+  return {
     output: () => output,
     // The session's resource, once the POST has been answered: whipsink logs its Location.
     resource: () => {
