@@ -1,3 +1,5 @@
+#include "core/util/json.hpp"
+#include "core/util/parse.hpp"
 #include "infra/auth/base64url.hpp"
 #include "infra/messages/memory_message_store.hpp"
 #include "net/reactor_factory.hpp"
@@ -17,8 +19,11 @@
 #include "unit/rt/memory_room_store.hpp"
 
 #include <atomic>
+#include <cerrno>
+#include <format>
 #include <future>
 #include <gtest/gtest.h>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <span>
@@ -112,16 +117,17 @@ private:
         ulw::test::FakeVerifier verifier;
         auto store = std::make_unique<ulw::test::MemoryRoomStore>(**reactor, db);
         auto messages = std::make_unique<infra::messages::MemoryMessageStore>(**reactor);
-        // The rooms these tests join as live, recorded so as the server side does: a join alone
-        // cannot open a room.
+        // The rooms these tests join are group chats of the users who join them.
         for (const std::string_view room :
              {kRoom, std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f901"},
               std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f902"},
               std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f903"},
               std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f904"},
               std::string_view{"01a0eb86-6cca-7dce-84cc-3bb47615f905"}}) {
-            messages->record_live(*core::RoomId::parse(room),
-                                  [](core::ports::MessageResult<void> /*recorded*/) noexcept {});
+            for (const std::string_view user : {"alice", "bob", "viewer", "reader", "sender"}) {
+                messages->add_member(*core::RoomId::parse(room), *core::UserId::parse(user),
+                                     [](core::ports::MessageResult<void> /*added*/) noexcept {});
+            }
         }
         chat::RoomLog log(*core::NodeId::parse("chat-1"));
         os::SystemRandom random;
@@ -273,8 +279,7 @@ TEST_P(ChatSessionTest, IdentityHeadersNeitherAuthenticateNorRenameTheSender) {
 TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
-                                 R"(","kind":"live"})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
     // base64url of `hi "there"`.
@@ -298,8 +303,7 @@ TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"not_json"})");
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":"not-a-room"})"));
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"bad_room"})");
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
-                                 R"(","kind":"live"})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
 }
@@ -364,8 +368,7 @@ TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryCo
     node_ = std::make_unique<Node>(GetParam(),
                                    chat::Limits{.service = {.join_burst = 2}, .presence = {}});
     const auto join = [](WsClient& ws, std::string_view room) {
-        EXPECT_TRUE(
-            ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"(","kind":"live"})"));
+        EXPECT_TRUE(ws.send_text(R"({"type":"join","room":")" + std::string(room) + R"("})"));
         const auto answer = ws.next_text(seconds(10));
         return answer.value_or("").find(R"("type":"joined")") != std::string::npos;
     };
@@ -384,8 +387,7 @@ TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryCo
 TEST_P(ChatSessionTest, SendsInFlightAreBoundedInBytes) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
-                                 R"(","kind":"live"})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     ASSERT_TRUE(alice->next_text(seconds(10)));
     // Three sends of 45 KiB while the store answers nothing: two fit the connection's 128 KiB,
     // the third does not, however few sends that is.
@@ -436,6 +438,184 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     EXPECT_FALSE(quiet->connected());
 }
 
+// The seq of a message frame, or nullopt for anything else.
+std::optional<std::uint64_t> message_seq(const std::string& text) {
+    const auto json = core::json::parse(text);
+    if (!json || json->find("type") == nullptr ||
+        json->find("type")->as_string() != std::optional<std::string_view>("message")) {
+        return std::nullopt;
+    }
+    return json->find("seq")->as_u64();
+}
+
+TEST_P(ChatSessionTest, AViewerThatStopsReadingSkipsToTheNewestWhileOthersMissNothing) {
+    node_.reset();
+    // One sender's burst stands in for a busy room's many senders.
+    node_ = std::make_unique<Node>(
+        GetParam(), chat::Limits{.service = {.send_burst = 1'000,
+                                             .max_send_bytes_in_flight = std::size_t{1} << 20U},
+                                 .presence = {}});
+    auto viewer = open_as("viewer");
+    auto reader = open_as("reader");
+    auto sender = open_as("sender");
+    ASSERT_TRUE(viewer && reader && sender);
+    const std::string room = std::string(kRoom);
+    ASSERT_TRUE(
+        viewer->send_text(R"({"type":"join","room":")" + room + R"(","delivery":"lossy"})"));
+    for (auto* ws : {&*reader, &*sender}) {
+        ASSERT_TRUE(ws->send_text(R"({"type":"join","room":")" + room + R"("})"));
+    }
+    for (auto* ws : {&*viewer, &*reader, &*sender}) {
+        ASSERT_EQ(ws->next_text(seconds(10)).value_or("").find(R"("type":"joined")"), 1U);
+    }
+
+    // The viewer reads nothing from here on. 400 messages of about 2.8 KiB on the wire are
+    // 1.1 MiB: past what its socket buffers take (64 KiB of send buffer and the client's
+    // receive window), the 64 KiB a lossy client may have queued, and the 64 it is owed.
+    constexpr std::uint64_t kMessages = 400;
+    const std::string body = infra::auth::encode_base64url(std::string(2'000, 'x'));
+    std::uint64_t heard = 0;
+    for (std::uint64_t i = 0; i < kMessages; i += 10) {
+        for (std::uint64_t k = i; k < i + 10; ++k) {
+            ASSERT_TRUE(sender->send_text(std::format(
+                R"({{"type":"send","room":"{}","id":"s{}","body":"{}"}})", room, k, body)));
+        }
+        // The durable reader keeps up, and gets every message in order. So does the sender,
+        // which would otherwise be closed for falling behind.
+        while (heard < i + 10) {
+            const auto text = reader->next_text(seconds(10));
+            ASSERT_TRUE(text);
+            if (const auto seq = message_seq(*text)) {
+                ASSERT_EQ(*seq, ++heard);
+            }
+        }
+        for (std::uint64_t own = 0; own < heard;) {
+            const auto text = sender->next_text(seconds(10));
+            ASSERT_TRUE(text);
+            own = message_seq(*text).value_or(own);
+        }
+    }
+
+    std::vector<std::uint64_t> seqs;
+    while (seqs.empty() || seqs.back() < kMessages) {
+        const auto text = viewer->next_text(seconds(10));
+        ASSERT_TRUE(text) << "the viewer stopped at " << (seqs.empty() ? 0 : seqs.back());
+        if (const auto seq = message_seq(*text)) {
+            seqs.push_back(*seq);
+        }
+    }
+    EXPECT_EQ(std::ranges::adjacent_find(seqs, std::ranges::greater_equal{}), seqs.end())
+        << "seqs rise, each once";
+    EXPECT_LT(seqs.size(), kMessages) << "a viewer that stopped reading was sent everything";
+    // What it missed is a gap it can see, and what it got last are the newest, without a hole.
+    ASSERT_GE(seqs.size(), 64U);
+    EXPECT_EQ(seqs[seqs.size() - 64], kMessages - 63);
+    const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
+    const std::string drops = "lossy_drops_total ";
+    const std::size_t at = metrics.body.find(drops);
+    ASSERT_NE(at, std::string::npos);
+    EXPECT_EQ(
+        metrics.body.substr(at + drops.size(), metrics.body.find('\n', at) - at - drops.size()),
+        std::to_string(kMessages - seqs.size()));
+    std::cout << "a viewer that stopped reading got " << seqs.size() << " of " << kMessages
+              << ", ending with seqs " << seqs[seqs.size() - 64] << ".." << seqs.back()
+              << "; the rest counted as dropped\n";
+}
+
+// A counter from the node's /metrics.
+std::optional<std::uint64_t> metric(std::uint16_t port, std::string_view name) {
+    const auto body = ulw::test::http_get(port, "/metrics").body;
+    const std::string line = std::string(name) + " ";
+    const std::size_t at = body.find(line);
+    if (at == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t start = at + line.size();
+    return core::parse_integer<std::uint64_t>(
+        std::string_view(body).substr(start, body.find('\n', start) - start));
+}
+
+// Both viewers fall behind a sender that never stops. One never reads again, and is reset once it
+// has acknowledged nothing for the stall timeout, here 2.5 s; the other empties its socket now
+// and then, and keeps its connection however long it lags. Real time: the kernel's own timers,
+// which decide when a reader's acknowledgements reach the node, run on it, and a test thread
+// held up for less than the timeout does not count against the slow one.
+TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosedAndASlowOneIsNot) {
+    node_.reset();
+    node_ = std::make_unique<Node>(
+        GetParam(), chat::Limits{.stall_timeout = core::Millis{2'500},
+                                 .stall_check = core::Millis{250},
+                                 .service = {.send_burst = 1'000'000,
+                                             .max_send_bytes_in_flight = std::size_t{1} << 20U},
+                                 .presence = {}});
+    // A fixed receive buffer: one the kernel tunes keeps growing, to megabytes, for a reader
+    // that never takes anything from it, and acknowledges everything it holds.
+    auto stopped = WsClient::connect(node_->port(), "/rt", "Authorization: Bearer user.viewer\r\n",
+                                     nullptr, 64 * 1024);
+    auto slow = open_as("reader");
+    auto sender = open_as("sender");
+    ASSERT_TRUE(stopped && slow && sender);
+    const std::string room = std::string(kRoom);
+    for (auto* ws : {&*stopped, &*slow}) {
+        ASSERT_TRUE(
+            ws->send_text(R"({"type":"join","room":")" + room + R"(","delivery":"lossy"})"));
+    }
+    ASSERT_TRUE(sender->send_text(R"({"type":"join","room":")" + room + R"("})"));
+    for (auto* ws : {&*stopped, &*slow, &*sender}) {
+        ASSERT_EQ(ws->next_text(seconds(10)).value_or("").find(R"("type":"joined")"), 1U);
+    }
+
+    // One message of about 2.8 KiB on the wire at a time, each heard back by the sender before
+    // the next; the slow viewer empties its socket after every tenth. The stopped one's socket
+    // buffers and its 64 KiB of queue fill within the first hundred or so.
+    const std::string body = infra::auth::encode_base64url(std::string(2'000, 'x'));
+    // Everything that has arrived, taken apart as it is read, which also answers the node's
+    // pings: the seq of the newest message among it.
+    std::uint64_t last = 0;
+    const auto empty = [&last](WsClient& ws) {
+        while (ws.read_at_most(std::size_t{1} << 20U) > 0) {
+            while (const auto text = ws.next_text(std::chrono::milliseconds{0})) {
+                last = message_seq(*text).value_or(last);
+            }
+        }
+    };
+    const auto deadline = std::chrono::steady_clock::now() + seconds(60);
+    std::uint64_t sent = 0;
+    std::optional<std::uint64_t> stalled = 0;
+    while (stalled == 0U && std::chrono::steady_clock::now() < deadline) {
+        ++sent;
+        ASSERT_TRUE(sender->send_text(std::format(
+            R"({{"type":"send","room":"{}","id":"s{}","body":"{}"}})", room, sent, body)));
+        for (std::uint64_t own = 0; own < sent;) {
+            const auto text = sender->next_text(seconds(10));
+            ASSERT_TRUE(text);
+            own = message_seq(*text).value_or(own);
+        }
+        if (sent % 10 == 0) {
+            empty(*slow);
+        }
+        if (sent % 50 == 0) {
+            stalled = metric(node_->port(), "stalled_readers_total");
+        }
+    }
+    ASSERT_EQ(stalled, 1U) << "after " << sent << " messages";
+
+    // The slow one is still there, and is sent the newest message; the stopped one reads what
+    // had reached it, and then a reset: the node kept nothing more for it.
+    while (last < sent) {
+        const auto text = slow->next_text(seconds(10));
+        ASSERT_TRUE(text) << "the slow viewer stopped at " << last << " of " << sent;
+        last = message_seq(*text).value_or(last);
+    }
+    while (stopped->next_frame(seconds(10))) {
+    }
+    EXPECT_FALSE(stopped->connected());
+    EXPECT_EQ(stopped->error(), ECONNRESET);
+    EXPECT_EQ(metric(node_->port(), "stalled_readers_total"), 1U);
+    std::cout << "the stopped viewer was closed after " << sent
+              << " messages; the slow one got all it was owed up to seq " << last << "\n";
+}
+
 TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {
     node_.reset();
     chat::Limits limits;
@@ -465,7 +645,7 @@ std::vector<std::byte> first_frames() {
     for (const auto& [opcode, payload] :
          {std::pair{codec::ws::Opcode::Ping, std::string{"early"}},
           std::pair{codec::ws::Opcode::Text,
-                    R"({"type":"join","room":")" + std::string(kRoom) + R"(","kind":"live"})"}}) {
+                    R"({"type":"join","room":")" + std::string(kRoom) + R"("})"}}) {
         const auto bytes = std::as_bytes(std::span{payload});
         EXPECT_TRUE(encoder.encode({.opcode = opcode,
                                     .fin = true,
@@ -507,8 +687,7 @@ TEST_P(ChatSessionTest, TheHttpParserIsFreedOnceTheRequestIsAnswered) {
     EXPECT_EQ(refusal("Authorization: Bearer forged\r\n"), "HTTP/1.1 401 Unauthorized");
     EXPECT_EQ(ulw::test::http_get(node_->port(), "/healthz").status, 200);
     EXPECT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 1; }));
-    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
-                                 R"(","kind":"live"})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
     EXPECT_EQ(node_->http_parsers, 1U);

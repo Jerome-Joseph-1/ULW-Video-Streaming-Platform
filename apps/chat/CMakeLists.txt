@@ -4,6 +4,7 @@ ulw_add_library(chat_lib
     src/config.cpp
     src/envelope.cpp
     src/key_fetcher.cpp
+    src/live_chat.cpp
     src/presence.cpp
     src/presence_room.cpp
     src/sha256.cpp

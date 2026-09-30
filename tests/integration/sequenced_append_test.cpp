@@ -301,6 +301,35 @@ TEST_F(SequencedAppendTest, AnInsertThatFailsGivesTheSeqBack) {
     EXPECT_EQ(last_seq(room), "0");
 }
 
+TEST_F(SequencedAppendTest, TheDatabaseNamesAStreamsRoomAsChatServerDoes) {
+    // The value tests/unit/chat/live_chat_test.cpp pins for chat_server's own derivation.
+    EXPECT_EQ(scalar(*conn_, "SELECT live_chat_room('show-1')"),
+              "011b9ed0-d6b6-88e6-ac34-32d7070ba83b");
+    EXPECT_FALSE(conn_->exec("SELECT live_chat_room('show/1')"));
+}
+
+// ADR-0070: a stream's chat keeps its newest 1000 messages, the append that stores one deleting
+// the one 1000 before it.
+TEST_F(SequencedAppendTest, ALiveChatKeepsItsNewestThousandMessages) {
+    const auto room = core::RoomId::parse(scalar(*conn_, "SELECT live_chat_room('show-1')"));
+    ASSERT_TRUE(room);
+    ASSERT_TRUE(ulw::test::ask<void>(
+        *reactor_, [&](auto done) { messages_->record_live(*room, std::move(done)); }));
+    const std::uint64_t generation = owned_by(*room, a_);
+    ASSERT_EQ(scalar(*conn_, "SELECT delivery FROM room_state WHERE room_id = $1",
+                     Params{}.add_uuid(room->uuid())),
+              "lossy");
+    for (std::uint64_t i = 1; i <= 1'005; ++i) {
+        ASSERT_EQ(send(*room, generation, std::format("line {}", i)), Seq{i});
+    }
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT count(*) || ' ' || min(seq) || ' ' || max(seq) FROM chat_messages "
+                     "WHERE room_id = $1",
+                     Params{}.add_uuid(room->uuid())),
+              "1000 6 1005");
+    EXPECT_EQ(last_seq(*room), "1005");
+}
+
 TEST_F(SequencedAppendTest, AnAppendIsOneRoundTripAndOneCommit) {
     // An owner writes a room's messages one at a time (ADR-0035), each before delivery: this is
     // what every message waits for. Reported, not asserted: it measures the host as much as the

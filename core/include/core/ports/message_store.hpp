@@ -50,13 +50,13 @@ enum class RoomKind : std::uint8_t {
     return false;
 }
 
-// Rooms named by something else, their id derived from its name (ADR-0056): an RFC 9562
-// version 8 UUID whose first byte says what names it, the rest a digest of the name. Every other
-// room id is version 7 (ADR-0023), so no id is taken for another's.
+// Rooms named by something else, their id derived from its name (ADR-0056, ADR-0070): an RFC
+// 9562 version 8 UUID whose first byte says what names it, the rest a digest of the name. Every
+// other room id is version 7 (ADR-0023), so no id is taken for another's.
 enum class NamedRoom : std::uint8_t {
-    // A live stream's chat, from the stream's name (M32).
+    // A live stream's chat, from the stream's name (apps/chat/src/live_chat.cpp).
     StreamChat = 0x01,
-    // A user's presence room (M18).
+    // A user's presence room, from the user's id (apps/chat/src/presence_room.cpp).
     Presence = 0x02,
 };
 
@@ -169,9 +169,10 @@ public:
                         MessageCallback<Admission> done) = 0;
     // Records the room as a stream's live chat, which admits anyone: a server-side step (the
     // stream's owner opening its chat), never a client's. Conflict, and nothing recorded, when the
-    // room lists members, is recorded as another kind, or was created on the room plane as
-    // another kind (whose kind and delivery are fixed when it is created); recording it again
-    // does nothing. The in-memory store keeps no room plane, so only the first two apply to it.
+    // room is not a stream's chat (is_stream_chat), lists members, is recorded as another kind,
+    // or was created on the room plane as another kind (whose kind and delivery are fixed when it
+    // is created); recording it again does nothing. The in-memory store keeps no room plane, so
+    // only the first three apply to it.
     virtual void record_live(const RoomId& room, MessageCallback<void> done) = 0;
 };
 

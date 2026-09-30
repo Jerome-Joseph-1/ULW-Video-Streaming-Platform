@@ -189,7 +189,7 @@ void MemoryMessageStore::record_live(const core::RoomId& room, MessageCallback<v
     bool open = false;
     if (recorded != kinds_.end()) {
         open = recorded->second == core::ports::RoomKind::StreamLiveChat;
-    } else if (!has_members) {
+    } else if (!has_members && core::ports::is_stream_chat(room)) {
         kinds_.emplace(room, core::ports::RoomKind::StreamLiveChat);
         open = true;
     }

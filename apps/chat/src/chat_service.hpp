@@ -68,10 +68,16 @@ struct ServiceLimits {
     // rest of it. They sit in an owner's queue or on the node channel meanwhile, so they are
     // part of the connection's memory: two of the largest messages, or dozens of ordinary ones.
     std::size_t max_send_bytes_in_flight = std::size_t{128} * 1024;
-    // A lossy client this far behind is skipped until it catches up. A quarter of the backlog
-    // that closes a connection (Limits::max_backlog), so one largest delivery on top still
-    // leaves a lossy client open.
+    // A lossy client this far behind is given nothing more until its connection has drained;
+    // then it is sent the messages it missed that are still owed, oldest first. A quarter of
+    // the backlog that closes a connection (Limits::max_backlog), so one largest delivery on
+    // top still leaves a lossy client open.
     std::size_t lossy_backlog = std::size_t{64} * 1024;
+    // What a lossy client that fell behind is owed at most: the newest this many of the room's
+    // messages, and only those the room still keeps. Older ones are dropped, oldest first, and
+    // counted. A phone shows 15 to 20 lines of chat; three screens of the newest is what a
+    // viewer who stalled wants to see again, and anything older is history (ADR-0070).
+    std::uint64_t lossy_depth = 64;
     // What a client's resumes may queue on its connection within one linger: half the backlog
     // that closes it, so that resuming cannot itself get the client closed. Messages past it
     // are left out, oldest first; the client sees the gap.
@@ -79,10 +85,24 @@ struct ServiceLimits {
     // Each room this node is in keeps its latest messages for clients that come back, each
     // counted as its body plus 256. 256 KiB is a few hundred ordinary messages: what a phone
     // that dropped off for a minute missed in a busy conversation. All rooms together keep at
-    // most 32 MiB, and 131072 messages (the order they are dropped in costs 24 bytes each).
+    // most 32 MiB, and 131072 messages (the order they are dropped in costs 24 bytes each, with
+    // room for a quarter more of messages their own room dropped first: 3.9 MiB at most).
     std::size_t room_buffer_bytes = std::size_t{256} * 1024;
     std::size_t buffer_bytes = std::size_t{32} << 20U;
     std::size_t buffer_messages = std::size_t{128} * 1024;
+    // A stream's live chat (ADR-0070). Its owner sequences about a thousand messages a second
+    // (ADR-0035) for every node's senders, and an audience of thousands, each within their own
+    // two a second, would ask for far more and have the owner turn everyone away as busy. So
+    // each node lets 20 a second into the room, 40 at once: three nodes make 60 a second, more
+    // than anyone reads and 18 KB/s to each viewer at 300 bytes a message, and the owner's
+    // ceiling holds up to sixteen nodes with room to spare.
+    std::uint32_t live_room_burst = 40;
+    std::uint32_t live_room_sends_per_second = 20;
+    // A live chat message is a line: 500 characters, what the large platforms allow, of up to
+    // four UTF-8 bytes each. Bounded so that a room's kept messages hold the lossy_depth a
+    // viewer is owed (64 x (2000 + 256) is 141 KiB of the 256) and a live room's stored
+    // messages stay small.
+    std::size_t live_body = 2'000;
     // How long a room stays joined, and its messages kept, after its last client here left:
     // a page reload, a network switch, or a slow reader's reconnect take seconds; a client's
     // backoff reaches half a minute after a few failures.
@@ -92,7 +112,7 @@ struct ServiceLimits {
 struct ServiceCounters {
     std::uint64_t delivered = 0;
     std::uint64_t rate_limited = 0;
-    // Deliveries skipped because a lossy client was behind.
+    // Messages a lossy client was moved past, never to be sent them, because it was behind.
     std::uint64_t lossy_drops = 0;
     // Messages sent again to a client resuming a room.
     std::uint64_t replayed = 0;
@@ -135,12 +155,18 @@ public:
     // A page of the room's stored messages, as message frames and then a history frame, for a
     // client in the room. Cut short to what the client can take while it is behind.
     void history(ClientId id, const History& history);
+    // The client's connection has sent everything it had queued: a lossy client that fell
+    // behind is sent what it is still owed.
+    void drained(ClientId id) noexcept;
     // Leaves the rooms no client here has used for `linger`. Cheap to call often.
     void sweep() noexcept;
 
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
     [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffered_bytes_; }
+    // Entries in the order kept messages are dropped in, those of messages already gone
+    // included: at most a quarter over buffer_messages.
+    [[nodiscard]] std::size_t kept_order_entries() const noexcept { return kept_order_.size(); }
 
 private:
     struct Room;
@@ -151,6 +177,8 @@ private:
         std::vector<core::RoomId> rooms;
         // Of `rooms`, those whose member list has not answered yet.
         std::vector<core::RoomId> admitting;
+        // Of `rooms`, those in which it is lossy and behind.
+        std::vector<core::RoomId> behind;
         std::size_t send_bytes_in_flight = 0;
         // What resumes queued since the window started.
         std::size_t replayed_bytes = 0;
@@ -172,7 +200,9 @@ private:
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
-    void replay(const Room& room, Client& c, std::uint64_t after);
+    void fell_behind(ClientId id, const core::RoomId& room) noexcept;
+    void catch_up(Room& room, ClientId id, Client& c);
+    std::uint64_t replay(const Room& room, Client& c, std::uint64_t after);
     void keep(Room& room, const rt::Message& message);
     void drop_oldest(Room& room) noexcept;
     void forget_oldest() noexcept;
@@ -193,6 +223,8 @@ private:
     // Every kept message, in the order kept, to drop the oldest of all rooms first.
     std::deque<std::pair<core::RoomId, std::uint64_t>> kept_order_;
     std::size_t buffered_bytes_ = 0;
+    // Messages kept across rooms; kept_order_ may also hold entries of messages already gone.
+    std::size_t kept_messages_ = 0;
     core::MonoTime next_sweep_;
 };
 

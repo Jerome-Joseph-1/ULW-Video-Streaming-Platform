@@ -8,6 +8,7 @@
 #include "http/request_parser.hpp"
 #include "net/reactor.hpp"
 #include "net/slab.hpp"
+#include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
@@ -45,7 +46,7 @@ public:
     [[nodiscard]] net::ConnId conn() const noexcept { return conn_; }
 
     void on_data(net::BorrowedBytes bytes) noexcept override;
-    void on_writable() noexcept override {}
+    void on_writable() noexcept override;
     void on_peer_eof() noexcept override;
     void on_error(int err) noexcept override;
     void on_timeout() noexcept override;
@@ -88,6 +89,10 @@ private:
     void send_frame(const codec::ws::Frame& frame);
     void close_with(codec::ws::CloseCode code);
     void abandon() noexcept;
+    void watch_output() noexcept;
+    [[nodiscard]] bool stalled(core::MonoTime at) noexcept;
+    [[nodiscard]] std::optional<net::SendProgress> send_progress() const noexcept;
+    void give_up() noexcept;
     void arm(core::Millis delay) noexcept;
     [[nodiscard]] core::MonoTime now() const noexcept;
 
@@ -95,8 +100,15 @@ private:
     ChatServer& server_;
     net::ConnId conn_;
     net::TimerId timer_;
+    core::MonoTime timer_due_;
     Phase phase_ = Phase::Request;
     core::MonoTime last_heard_;
+    core::MonoTime ping_due_;
+    // While output waits for the client: how much of it the client had acknowledged when last
+    // looked at, and when that last grew (Limits::stall_timeout).
+    bool watching_ = false;
+    std::uint64_t acked_ = 0;
+    core::MonoTime progressed_;
 
     // Until the request is answered. Its buffers are larger than everything else the session
     // holds while quiet, and after an upgrade it is never needed again.

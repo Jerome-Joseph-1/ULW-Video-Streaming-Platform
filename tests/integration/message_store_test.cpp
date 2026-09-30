@@ -158,6 +158,15 @@ protected:
     }
 
     core::RoomId new_room() { return core::RoomId::generate(clock_, random_); }
+    // A room with an id derived from a name (version 8) under the tag `tag`; 01, a stream's
+    // chat, is the only kind record_live opens.
+    core::RoomId named_room(std::string_view tag) {
+        std::string text = new_room().to_string();
+        text[14] = '8';
+        text.replace(0, 2, tag);
+        return *core::RoomId::parse(text);
+    }
+    core::RoomId stream_room() { return named_room("01"); }
 
     os::SystemClock clock_;
     os::SystemRandom random_;
@@ -176,7 +185,7 @@ protected:
 // server tries to open the room: the member's statement recorded the room closed first, so
 // record_live waits on that record and is refused.
 TEST_F(MessageStoreTest, AMemberInsertInFlightKeepsTheRoomClosedToRecordLive) {
-    const core::RoomId room = new_room();
+    const core::RoomId room = stream_room();
     auto adding = db_->session();
     ASSERT_TRUE(adding.exec("BEGIN"));
     ASSERT_TRUE(adding.exec(infra::postgres::message_sql::kAddMember,
@@ -240,7 +249,7 @@ TEST_F(MessageStoreTest, AMemberInsertInFlightAndAFirstJoinNeverLeaveTheRoomOpen
 // chat_rooms as well, as a first join would have. One opened before it was created is created
 // live, and opening it again still answers ok.
 TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
-    const core::RoomId closed = new_room();
+    const core::RoomId closed = stream_room();
     ASSERT_NE(own(closed), 0U);
     EXPECT_EQ(ask<void>([&](auto done) { store_->record_live(closed, std::move(done)); }),
               MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
@@ -253,7 +262,7 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
                      Params{}.add_uuid(closed.uuid())),
               "group_chat durable");
 
-    const core::RoomId live = new_room();
+    const core::RoomId live = stream_room();
     ASSERT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
     ASSERT_NE(own(live), 0U);
     EXPECT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
@@ -264,13 +273,31 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
               "stream_live_chat lossy");
 }
 
+// ADR-0070: the database itself refuses to record any other room live, so an operator's
+// statement cannot open a room whose id every node takes for a closed one.
+TEST_F(MessageStoreTest, OnlyAStreamsRoomCanBeRecordedLive) {
+    // A version 7 room, and a presence room (version 8, tag 02).
+    for (const core::RoomId& other : {new_room(), named_room("02")}) {
+        EXPECT_FALSE(
+            conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                        Params{}.add_uuid(other.uuid())));
+        EXPECT_EQ(ask<void>([&](auto done) { store_->record_live(other, std::move(done)); }),
+                  MessageResult<void>{std::unexpected(core::ports::MessageStoreError::Conflict)});
+    }
+    EXPECT_TRUE(
+        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'stream_live_chat')",
+                    Params{}.add_uuid(stream_room().uuid())));
+    EXPECT_TRUE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'group_chat')",
+                            Params{}.add_uuid(stream_room().uuid())));
+}
+
 // The server opening a room, its transaction not yet committed, when the room plane creates the
 // room with no join before it (as it creates presence rooms): the creation records the room in
 // chat_rooms in its own statement, so it waits on the open record and takes the live kind. Were
 // it to read chat_rooms instead, it would miss the record, create the room closed, and leave
 // chat_rooms saying live once the server's transaction committed.
 TEST_F(MessageStoreTest, ARoomCreatedWhileTheServerOpensItIsCreatedLive) {
-    const core::RoomId room = new_room();
+    const core::RoomId room = stream_room();
     auto opening = db_->session();
     ASSERT_TRUE(opening.exec("BEGIN"));
     ASSERT_EQ(

@@ -26,13 +26,21 @@ struct Limits {
     // 560 MiB at the very worst. The router adds its owner queues (64 MiB), node-channel
     // connections (32 x ~2.1 MiB) and recent message keys (10 MiB), and the chat service the
     // messages it keeps for resuming clients (32 MiB), presence its rooms and watch lists (11 MiB):
-    // about 740 MiB in all, inside a 1 GiB pod with room for the kernel's socket buffers (ADR-0036,
-    // ADR-0043, ADR-0056). A connection that is only listening costs a few KiB.
+    // about 740 MiB in all. The kernel's send buffers add 80 MiB (socket_send_buffer), 820 MiB
+    // inside a 1 GiB pod (ADR-0036, ADR-0043, ADR-0056, ADR-0070). A connection that is only
+    // listening costs a few KiB.
     std::size_t max_connections = 1280;
     // Output a client has not read yet. A delivery is at most 64 KiB, so this is four of the
     // largest, or thousands of ordinary ones: a reader that far behind is closed, and resumes
     // from its last seq when it reconnects.
     std::size_t max_backlog = std::size_t{256} * 1024;
+    // The kernel's send buffer of each client connection, which Linux doubles to 64 KiB.
+    // Autotuned, it grows to tcp_wmem's 4 MiB for a peer that stops reading: 5 GiB over 1280
+    // connections, charged to the pod although outside the process. Fixed, they hold 80 MiB at
+    // most, and a lossy client's lag is set by the service's limits, not by the kernel's
+    // megabytes ahead of them (ADR-0070). 64 KiB a round trip is 640 KB/s at 100 ms, a
+    // history page in four round trips.
+    int socket_send_buffer = 32 * 1024;
     // ADR-0029: a read of tiny control frames decodes into thousands of Frames. A client sends
     // a Pong per Ping and perhaps a Ping of its own now and then; 8 in one read, or more than
     // a burst of 20 refilling at 10 a second, is a flood, and closes the connection with 1008.
@@ -46,6 +54,13 @@ struct Limits {
     // 60 s and more.
     core::Millis ping_interval{30'000};
     core::Millis idle_timeout{75'000};
+    // A client whose connection has output waiting for it, and which acknowledges none of it for
+    // stall_timeout, has stopped reading or vanished: it is reset. Looked at every stall_check
+    // while output waits. This is TCP_USER_TIMEOUT's 20 s, counted by the service, not the
+    // kernel: Linux ends a reader that frees its window a little at a time as if it had stopped
+    // (net::clear_user_timeout), while here any read that lets output through counts.
+    core::Millis stall_timeout{20'000};
+    core::Millis stall_check{1'000};
     // Clients get a Close 1001 and this long to answer it before a drain cuts them off.
     core::Millis drain_deadline{5'000};
     ServiceLimits service;
@@ -77,6 +92,7 @@ struct Counters {
     std::uint64_t protocol_errors = 0;
     std::uint64_t control_floods = 0;
     std::uint64_t slow_consumers = 0;
+    std::uint64_t stalled_readers = 0;
     std::uint64_t allocation_failures = 0;
 };
 

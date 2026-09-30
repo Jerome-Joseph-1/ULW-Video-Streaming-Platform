@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -34,11 +35,19 @@ public:
     // Upgrades on `path` with the given extra header lines ("Name: value\r\n" each). nullopt
     // with the response status line in `refusal` when the server says anything but 101.
     // `pipelined` goes out in the same write, right behind the request, as if the client sent
-    // its first frames without waiting for the 101.
+    // its first frames without waiting for the 101. A `receive_buffer` fixes the socket's (Linux
+    // doubles it), for a reader whose kernel should hold a known amount of what it has not read.
     static std::optional<WsClient> connect(std::uint16_t port, std::string_view path,
                                            std::string_view headers, std::string* refusal,
-                                           std::span<const std::byte> pipelined = {}) {
-        WsClient c(port);
+                                           int receive_buffer) {
+        return connect(port, path, headers, refusal, {}, receive_buffer);
+    }
+
+    static std::optional<WsClient> connect(std::uint16_t port, std::string_view path,
+                                           std::string_view headers, std::string* refusal,
+                                           std::span<const std::byte> pipelined = {},
+                                           int receive_buffer = 0) {
+        WsClient c(port, receive_buffer);
         if (!c.fd_) {
             return std::nullopt;
         }
@@ -156,16 +165,39 @@ public:
         }
     }
 
+    // Reads at most `most` bytes of whatever has arrived, without waiting, and keeps them for
+    // the calls above: a reader far slower than what it is sent. Returns how many it read.
+    std::size_t read_at_most(std::size_t most) {
+        std::vector<std::byte> buf(most);
+        const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), MSG_DONTWAIT);
+        if (n <= 0) {
+            return 0;
+        }
+        in_.insert(in_.end(), buf.begin(), buf.begin() + n);
+        return static_cast<std::size_t>(n);
+    }
+
     [[nodiscard]] bool connected() const noexcept { return static_cast<bool>(fd_); }
+    // How the connection ended, once it has: 0 for the server's FIN, otherwise the errno of the
+    // read that found it gone (ECONNRESET for a reset).
+    [[nodiscard]] int error() const noexcept { return error_; }
 
 private:
-    explicit WsClient(std::uint16_t port) {
+    WsClient(std::uint16_t port, int receive_buffer) {
         fd_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
         if (!fd_) {
             return;
         }
         const int one = 1;
         ::setsockopt(fd_.get(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        // Before connect(): the window scale is agreed in the handshake.
+        // A buffer that could not be fixed leaves no socket: the caller's connect fails, rather
+        // than a test running on a buffer it did not ask for.
+        if (receive_buffer > 0 && ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &receive_buffer,
+                                               sizeof receive_buffer) != 0) {
+            fd_.reset();
+            return;
+        }
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
@@ -217,6 +249,7 @@ private:
         std::array<std::byte, 65536> buf{};
         const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), 0);
         if (n <= 0) {
+            error_ = n < 0 ? errno : 0;
             fd_.reset();
             return false;
         }
@@ -276,6 +309,7 @@ private:
 
     os::UniqueFd fd_;
     std::vector<std::byte> in_;
+    int error_ = 0;
     FakeRandom random_;
 };
 

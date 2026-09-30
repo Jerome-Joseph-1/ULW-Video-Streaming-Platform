@@ -1,5 +1,5 @@
 // Three chat_server processes on a scratch Postgres, and clients of theirs: what the M16 to M19
-// acceptance (chat_cluster_test.cpp) and the E2EE checkpoint (chat_e2ee_test.cpp) run on.
+// and M32 acceptance (chat_cluster_test.cpp) and the E2EE checkpoint (chat_e2ee_test.cpp) run on.
 // ULW_CHAT_CLUSTER_PORTS=9101,9102,9103 pins the client ports (the CI job does); otherwise
 // ones outside the ephemeral range are reserved.
 #pragma once
@@ -58,6 +58,7 @@ inline std::vector<std::uint16_t> pinned_client_ports() {
 // A server message, the fields the test looks at. The body is decoded: what the sender sent.
 struct Seen {
     std::string type;
+    std::string room;
     std::uint64_t seq = 0;
     std::string sender;
     std::string id;
@@ -80,6 +81,7 @@ inline std::optional<Seen> parse_seen(const std::string& text) {
         return std::string(v == nullptr ? "" : v->as_string().value_or(""));
     };
     Seen s{.type = string("type"),
+           .room = string("room"),
            .seq = 0,
            .sender = string("sender"),
            .id = string("id"),
@@ -110,6 +112,7 @@ public:
     [[nodiscard]] const std::vector<Seen>& seen() const noexcept { return seen_; }
 
     bool send(const std::string& json) { return ws_.send_text(json); }
+    std::size_t trickle(std::size_t bytes) { return ws_.read_at_most(bytes); }
 
     // Reads until a message matching `pred` arrives, keeping everything read.
     template <class Pred>
@@ -201,16 +204,12 @@ protected:
         }
         auto key = devtoken::DevKey::generate();
         ASSERT_TRUE(key);
+        key_.emplace(std::move(*key));
         const auto jwks = files_.path() / "jwks.json";
-        std::ofstream(jwks) << key->public_jwks();
+        std::ofstream(jwks) << key_->public_jwks();
         jwks_ = jwks.string();
         for (const char* user : kUsers) {
-            tokens_.push_back(*key->mint({.issuer = std::string(kIssuer),
-                                          .audience = "askedin-platform",
-                                          .subject = user,
-                                          .email = {},
-                                          .ttl = std::chrono::seconds(600)},
-                                         clock_.wall_now()));
+            tokens_.push_back(mint(user));
         }
         const auto pinned = pinned_client_ports();
         for (std::size_t i = 0; i < 3; ++i) {
@@ -272,6 +271,30 @@ protected:
         ASSERT_TRUE(started.ready) << node.process->output();
     }
 
+    [[nodiscard]] std::string mint(const std::string& user) const {
+        return key_
+            ->mint({.issuer = std::string(kIssuer),
+                    .audience = "askedin-platform",
+                    .subject = user,
+                    .email = {},
+                    .ttl = std::chrono::seconds(600)},
+                   clock_.wall_now())
+            .value_or("");
+    }
+
+    std::unique_ptr<Client> connect_as(const Node& node, const std::string& user,
+                                       int receive_buffer = 0) {
+        std::string refusal;
+        auto ws =
+            WsClient::connect(node.port, "/rt", "Authorization: Bearer " + mint(user) + "\r\n",
+                              &refusal, receive_buffer);
+        if (!ws) {
+            ADD_FAILURE() << "upgrade refused: " << refusal;
+            return nullptr;
+        }
+        return std::make_unique<Client>(std::move(*ws), user);
+    }
+
     std::unique_ptr<Client> connect(const Node& node, std::size_t user) {
         std::string refusal;
         auto ws = WsClient::connect(node.port, "/rt",
@@ -315,18 +338,31 @@ protected:
         }
     }
 
-    // Records a room as a stream's live chat, as the server side does (RUNBOOK section 3); the
-    // kind it is then recorded as.
-    [[nodiscard]] std::string record_live(const std::string& room) const {
+    // Opens a stream's live chat, as the server side does (RUNBOOK section 3); the kind its
+    // room is then recorded as.
+    [[nodiscard]] std::string record_live(const std::string& stream) const {
         auto conn = db_->session();
         return scalar(conn,
                       "INSERT INTO chat_rooms (room_id, kind) "
-                      "SELECT $1::text::uuid, 'stream_live_chat' WHERE NOT EXISTS "
-                      "(SELECT 1 FROM chat_members WHERE room_id = $1::text::uuid) "
-                      "AND NOT EXISTS (SELECT 1 FROM room_state WHERE room_id = $1::text::uuid "
+                      "SELECT live_chat_room($1), 'stream_live_chat' WHERE NOT EXISTS "
+                      "(SELECT 1 FROM chat_members WHERE room_id = live_chat_room($1)) "
+                      "AND NOT EXISTS (SELECT 1 FROM room_state WHERE room_id = live_chat_room($1) "
                       "AND kind <> 'stream_live_chat') "
                       "ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind RETURNING kind",
-                      infra::postgres::Params{}.add_text(room));
+                      infra::postgres::Params{}.add_text(stream));
+    }
+
+    // A join of a stream's live chat; "joined", or the error's reason.
+    static std::string stream_join_answer(Client& client, const std::string& stream) {
+        if (!client.send(R"({"type":"join","stream":")" + stream + R"("})")) {
+            return "not sent";
+        }
+        const auto answer =
+            client.wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
+        if (!answer) {
+            return "no answer";
+        }
+        return answer->type == "joined" ? "joined" : answer->reason;
     }
 
     // A join of `room` with `fields` added; "joined", or the error's reason.
@@ -478,6 +514,7 @@ SELECT string_agg(concat_ws(' ', room_id, seq, sender, msg_key, sent_at, octet_l
 
     os::SystemClock clock_;
     os::SystemRandom random_;
+    std::optional<devtoken::DevKey> key_;
     std::unique_ptr<ScratchDatabase> db_;
     TempDir files_{"ulw-chat-cluster"};
     std::vector<std::string> tokens_;

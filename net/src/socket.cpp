@@ -221,9 +221,13 @@ std::expected<std::uint16_t, int> local_port(int fd) noexcept {
 }
 
 void reset_connection(os::UniqueFd fd) noexcept {
-    const linger abortive{.l_onoff = 1, .l_linger = 0};
     // Failing leaves an ordinary close, which refuses the connection all the same.
-    static_cast<void>(::setsockopt(fd.get(), SOL_SOCKET, SO_LINGER, &abortive, sizeof abortive));
+    abort_on_close(fd.get());
+}
+
+void abort_on_close(int fd) noexcept {
+    const linger abortive{.l_onoff = 1, .l_linger = 0};
+    static_cast<void>(::setsockopt(fd, SOL_SOCKET, SO_LINGER, &abortive, sizeof abortive));
 }
 
 std::expected<void, int> tune_connection(int fd) noexcept {
@@ -253,6 +257,14 @@ std::expected<void, int> tune_connection(int fd) noexcept {
         }
     }
     return {};
+}
+
+std::expected<void, int> cap_send_buffer(int fd, int bytes) noexcept {
+    return set_int(fd, SOL_SOCKET, SO_SNDBUF, bytes);
+}
+
+std::expected<void, int> clear_user_timeout(int fd) noexcept {
+    return set_int(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, 0);
 }
 
 std::expected<os::UniqueFd, int> bind_udp(const SocketAddr& local) {

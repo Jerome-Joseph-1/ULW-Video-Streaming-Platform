@@ -17,15 +17,17 @@
 
 // The JSON a client and chat_server exchange in WebSocket text frames (ADR-0036, ADR-0043).
 // Client to server:
-//   {"type":"join","room":"<uuid>"}
+//   {"type":"join","room":"<uuid>"}   or, for a live stream's chat, "stream":"<name>" instead
+//       of "room": the stream's name as its playback URL carries it. Joined names the room, whose
+//       id is what sends to it carry. A stream's chat is always lossy.
 //       "after":<seq>        optional: also send what this node still holds after that seq
 //       "delivery":"lossy"   optional: skip messages while this connection is behind, rather
 //                            than be closed for it ("durable", the default)
-//       "kind":"live"        optional: what the room is. "direct" or "group" (the default)
+//       "kind":"direct"      optional: what the room is. "direct" or "group" (the default)
 //                            admit only members, and the first join of a room with no kind
-//                            recorded records it; "live" admits anyone, but only in a room
-//                            the server recorded as live, and is refused with not_live
-//                            elsewhere
+//                            recorded records it. A stream's live chat, which admits anyone
+//                            once the server has opened it, is joined by "stream" alone, and
+//                            is refused with not_live until then
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
 //   {"type":"history","room":"<uuid>"}   the room's stored messages, from the store, not this
 //       "before":<seq>       optional: those below it, newest first (the default: the newest)
@@ -107,6 +109,10 @@ enum class EnvelopeError : std::uint8_t {
     BadId,
     // Not base64url.
     BadBody,
+    // Not a live stream's name.
+    BadStream,
+    // The command could not be read for want of memory; it may be sent again.
+    Unavailable,
     // Not a user id.
     BadUser,
 };

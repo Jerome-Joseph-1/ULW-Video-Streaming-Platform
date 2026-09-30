@@ -400,6 +400,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
     unit/chat/envelope_test.cpp
+    unit/chat/live_chat_test.cpp
     unit/chat/presence_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)

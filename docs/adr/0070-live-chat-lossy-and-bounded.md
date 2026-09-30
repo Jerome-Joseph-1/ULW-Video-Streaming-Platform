@@ -1,0 +1,207 @@
+# 0070. A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere
+
+Status: Accepted
+Date: 2026-09-29
+
+## Context
+
+Section 8.15 names four room kinds; `StreamLiveChat` is the chat beside a live stream (M30,
+M31). It differs from the others in scale and in what a reader wants: thousands of viewers, any
+of whom may be on a phone that stalls, and a chat whose value is in its last few seconds. M32
+asks for a profile in which delivered messages stay in order, a slow consumer drops past a
+bounded depth while the node's memory stays flat, and the other viewers are unaffected.
+
+What was there: ADR-0043's lossy delivery skipped every new message while a client had more
+than 64 KiB unsent, so a viewer that stalled read the oldest of its backlog first and lost
+whatever came while it was stalled. Nothing tied a room to a stream. ADR-0054 (M19) records a
+room's kind, lets only the server open a room to anyone (`record_live`), and stores every
+message of every room before delivery. Below
+the process, the kernel autotuned each connection's send buffer up to `tcp_wmem`'s 4 MiB, so a
+viewer that stopped reading held megabytes of the pod's memory before the service noticed it
+was behind at all.
+
+## Options
+
+How a viewer that fell behind is dropped:
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| Drop the newest: skip while behind (ADR-0043) | No state; already there | Rejected: after a stall the viewer reads stale messages first and never sees what came during it |
+| Drop the oldest from a queue per viewer | What live chat wants: the newest survive | Rejected: a copy of every message per viewer, thousands of times over, bounded only by count times size |
+| Drop the oldest through a cursor per viewer into the room's kept messages | The messages are kept once per room already (for resume); a viewer costs one seq | Accepted |
+
+How a viewer learns it missed messages:
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| A frame saying how many were dropped | Explicit | Rejected: a new message kind for what the seqs already say; seqs rise by one per message, so a jump is the count |
+| The gap in seqs, filled from history if the client cares | No new envelope; the same rule as every other gap (ADR-0043) | Accepted |
+
+How a live chat is tied to its stream:
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| A room id the product hands out with each stream, joined as `"kind":"live"` | ADR-0054 already has it | Rejected as the only way: every viewer needs the id from somewhere, and nothing says which rooms are streams' |
+| A table from stream to room, written when the stream starts | Any room can be a stream's | Rejected: one more table and lookup per join, for a mapping a hash gives |
+| The room id derived from the stream's name, as a version 8 UUID, joined by the name and opened by the server side | No table; every node, client and SQL statement computes the same room; the id says the kind | Accepted |
+
+Whether live chat is stored (ADR-0054):
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| Store nothing for lossy rooms | No database cost for a large audience's chatter | Rejected: the seq and the message are one statement (ADR-0054), a seq-only path would come back for one kind, and a viewer who arrives late has no context |
+| Store every message, as for other rooms | One path | Rejected: a popular stream writes tens of messages a second for hours, kept forever |
+| Store every message, keeping the room's newest 1000 | Late viewers page back through the last few minutes; storage per live room is bounded | Accepted |
+
+How a viewer that stopped reading is told from one that reads slowly:
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| `TCP_USER_TIMEOUT` (20 s, `net::tune_connection`): the kernel ends a connection whose receive window stays shut that long | Already set on every connection; nothing to run | Rejected: Linux restarts its count of a shut window only when the window opens wide enough for the whole unsent head of the queue, a segment of up to about half the peer's largest window with GSO. A viewer that keeps reading, but frees its window a little at a time, is ended 20 s after it first fell behind. With the timeout at 3 s on loopback, a reader that emptied its 64 KiB receive buffer every second was ended 3.3 s in, having read four buffers of it. Under a sanitizer, the M32 test's slow viewers were ended this way: each saw a reset, and its node had closed nothing |
+| The service's own count: nothing acknowledged for 20 s while output waits | Counts exactly what tells the two apart, whatever window the peer opens | Accepted |
+
+How senders are limited in a room of thousands:
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| Each user's own bucket only (ADR-0043) | Already there | Rejected: 3000 viewers at 2 a second ask for 6000 a second of a room whose owner sequences about 1000 (ADR-0035); every sender gets `busy` |
+| A bucket per room at the owner | One exact limit | Rejected: the router would change for a policy that belongs to the chat service, and the refusal would cost a forward first |
+| A bucket per room on each node, beside the user's | Refused where the send arrives; the router is untouched | Accepted |
+
+## Decision
+
+- **Joining.** `{"type":"join","stream":"<name>"}`, with the stream's name as the live
+  packager takes it (1 to 64 of `[A-Za-z0-9_-]`, `apps/live-packager/src/stream_id.hpp`). The
+  room is a version 8 UUID whose first byte is the stream-chat tag, 0x01, and whose other
+  bytes are the first 15 of SHA-256 over `ulw-live-chat:` and the name, with the version and
+  RFC 9562 variant bits set (`apps/chat/src/live_chat.cpp`, and the same in SQL as
+  `live_chat_room(stream)`, migration 0008); `joined` names it, and sends and history use it
+  like any room id. A join that names a stream's room id as `room` is refused `bad_room`, so
+  nobody can create a stream's room ahead of it as a closed room.
+- **Rooms named by something else.** Any room whose id is derived from a name is version 8,
+  every other room id is version 7 (ADR-0023), and the first byte says what the name was
+  (`core::ports::NamedRoom`), so derived ids of different kinds never collide:
+
+  | First byte | Named by | Derived in |
+  |---|---|---|
+  | `0x01` | a live stream (its chat) | `live_chat_room`, here |
+  | `0x02` | a user (their presence room, M18) | reserved for presence |
+
+  The digest fills the other bytes except the version and variant bits: 117 bits, as far from
+  a collision as any id needs.
+- **Opening.** A stream join asks for the live kind, so under ADR-0054 it is admitted only once
+  the server side has recorded the room live (`record_live`, or the runbook's statement with
+  `live_chat_room`), and refused `not_live` before. Whatever starts a stream opens its chat;
+  until the product does that, operators do it by the stream's name. Opened, it admits anyone
+  signed in.
+- **One source of truth: the id.** Every node tells a live chat by its id alone
+  (`core::ports::is_stream_chat`), with no recorded kind to look up per message, and the
+  recorded kind can never disagree with it: `record_live` refuses any room whose id is not
+  version 8, the database refuses to record one live (`chat_rooms_live_is_a_stream`, migration
+  0008), and a join cannot name the live kind for a room id (ADR-0054's `"kind":"live"` is
+  gone; a stream is joined by its name). So a room gets every bound below exactly when it is
+  open to anyone.
+- **Delivery.** Every viewer of a live chat is lossy, whatever its join asked; a stalled
+  viewer is never closed for it. Every lossy client, in any room, is served the same way: while
+  it has 64 KiB or less unsent it is pushed each message as the room gets it; past that it gets
+  nothing new and keeps a cursor, the first seq it has not been sent. It is owed at most the
+  room's newest 64 messages: as the room moves on, and as the room's kept messages (256 KiB)
+  age out, the cursor moves past what it can no longer be sent, and each seq it moves past is
+  counted in `lossy_drops_total` at once, whether or not the client ever reads again; so is
+  what it is still owed when it joins again or leaves, and any seq it is moved past that the
+  room never kept (a message that could not be kept, or a gap of the room's own). When
+  its connection's queue drains (the reactor's `on_writable`), it is sent the kept messages
+  from the cursor, oldest first, until it is 64 KiB behind again or has caught up; only then
+  do new messages reach it directly again, so it never sees them out of order. 64 is three
+  screens of a phone's chat: what a viewer returning from a stall wants, and older is history.
+- **Kernel buffers.** Every client connection's send buffer is fixed at 32 KiB, which Linux
+  doubles to 64 KiB (`Limits::socket_send_buffer`). A stalled viewer holds at most that in the
+  kernel instead of 4 MiB: 80 MiB over 1280 connections instead of 5 GiB. 64 KiB a round trip is
+  640 KB/s at 100 ms, far above chat's traffic, and a history page's 256 KiB in four round
+  trips.
+- **Stalled connections.** A client connection whose output waits for it (queued by the
+  service, or sent or queued in the kernel) and which acknowledges none of it for 20 s is
+  closed and counted in `stalled_readers_total` (`Limits::stall_timeout`). The session reads
+  what the connection has acknowledged (`TCP_INFO`, `net::send_progress`) when its output
+  begins to wait, and then once a second while it waits, on the timer that pings it: a
+  connection is closed 20 s after its last acknowledgement, detected within 20 to 22 s. A
+  connection with nothing waiting costs no look; one that is watched costs a `getsockopt` and
+  a timer re-arm a second, about 1300 a second on a node of 1280 viewers all behind. Where
+  the kernel gives no `TCP_INFO`, the log says so once and stalled clients are left to the
+  idle timeout. `TCP_USER_TIMEOUT` is cleared on client connections
+  (`net::clear_user_timeout`), so the kernel no longer ends one on its own. A peer that
+  vanished while output waited for it is closed the same way, and one with nothing waiting
+  20 s after the next ping, which it never acknowledges.
+- **Closing a client given up on.** A stalled client, and one closed at the idle timeout, is
+  reset (`SO_LINGER` of 0, `net::abort_on_close`), not sent a FIN. With `TCP_USER_TIMEOUT`
+  cleared, a FIN behind up to 64 KiB of unsent bytes would leave an orphan the kernel keeps
+  for as long as it probes a shut window, where the timeout used to end it at 20 s; a client
+  that stalled on purpose, again and again, would hold that kernel memory. Setting a short
+  `TCP_USER_TIMEOUT` again just before closing would bound the orphan too, but still keep it
+  for that long and still send the peer what it was not reading. The reset frees it at once
+  and tells the client at once, which reconnects and resumes as from any lost connection.
+- **Memory per viewer.** A lossy client costs its node at most 64 KiB of unsent output plus
+  one message, 64 KiB of kernel buffer, and one seq; the messages it is owed are the room's,
+  kept once, inside ADR-0043's 32 MiB. The node's budget (ADR-0036, ADR-0043) grows only by
+  the kernel's 80 MiB, to 820 MiB in a 1 GiB pod, and does not grow with the audience or with
+  how long a viewer stalls.
+- **Senders.** A live chat message is at most 2000 bytes (500 characters of up to four UTF-8
+  bytes; `too_large` beyond). Besides each user's bucket (10, then 2 a second), each node lets
+  40 messages into a live chat at once and then 20 a second, from all its senders together;
+  past it the send is `rate_limited` with `retry_after_ms`, and the sender keeps the token its
+  own bucket gave. Three nodes make 60 a second, more than anyone reads and 18 KB/s to each
+  viewer at 300 bytes a message; the owner's ceiling of about 1000 a second holds for sixteen
+  nodes with room to spare. The node's allowance is shared, so ten accounts each within their
+  own two a second take all of a node's twenty, and everyone else on that node is turned away
+  until they slow down; `retry_after_ms` tells each when the next token comes, so the refused
+  retry together. Accepted for now: per-user fairness inside the room's allowance (a smaller
+  share per user as the room gets busier) is the next step if abuse shows up, and a random
+  spread on `retry_after_ms` would take an injected random source for little gain.
+- **Fan-out.** Unchanged from ADR-0035 and ADR-0043: the owner sequences once and sends one
+  `Deliver` to each node with viewers; each node encodes each message once and hands it to its
+  viewers. Thousands of viewers cost the owner one frame per node, and a node one copy per
+  viewer into the socket, for the viewers that are keeping up.
+- **Storage.** Live chat messages are stored like any other (ADR-0054), before delivery, and
+  the room keeps its newest 1000: the append that stores seq N of a lossy room deletes seq
+  N - 1000 in the same statement, one more primary key write. 1000 messages of at most 2000
+  bytes are about 2 MiB a room; at the 60 a second of three nodes that is 17 s of the busiest
+  chat, and minutes of an ordinary one, which is as far back as a late viewer pages. History
+  below seq N - 1000 is empty: a page asked for there answers a count of 0, as at the start of
+  the room. A message's key (`msg_key`) goes with its row, so a resend of it after 1000 newer
+  messages is stored and delivered again under a new seq; ADR-0043's resend window is a minute,
+  which a room reaches 1000 messages within only past 17 a second.
+
+## Consequences
+
+- A viewer that stalls sees, when it reads again, what was already in its socket, then a jump
+  in seqs, then the newest 64. It never sees a message twice or out of order, and it can fill
+  the gap from history, as far back as the room still stores.
+- A viewer that stops reading altogether acknowledges nothing more, and its node closes it
+  20 s later. Its client reconnects and joins again; the node never held more than the bounds
+  above for it. A slow reader keeps its connection as long as its reads open its window at
+  least once in 20 s: each opening lets more through, and that counts however little it
+  opened. A read that frees only part of a full receive buffer may not reopen the window at
+  once: the receiver's silly window avoidance waits for more room before it offers any.
+- `lossy_drops_total` counts seqs lossy clients were moved past, including gaps of the room
+  itself that a behind client was waiting across. A node whose count climbs has viewers that
+  cannot keep up, not a fault of its own.
+- A stream's chat exists from when it is opened, and stays open after the stream ends. Every
+  such room is bounded in storage, but rooms of ended streams keep their last 1000 messages.
+  Reopen with a retention job when the table shows them.
+- Only a stream's room can be open to anyone. A product that wants an open room of its own
+  names a stream for it.
+- Stale entries in the node's order of kept messages (each busy live chat drops its own oldest
+  with every message) no longer count against the 131072 messages kept across rooms; they are
+  cleared out whenever the order is a quarter over the bound, so it holds at most 163840
+  entries (3.9 MiB) and a quiet group chat keeps what it resumes from however busy the live
+  chats beside it. Clearing looks at five entries for each one it removes.
+- Each node's allowance is its own, so the room's total is 60 a second on three nodes and grows
+  with nodes. The owner's ceiling is far above it; if chat ever runs on dozens of nodes, move
+  the limit to the owner.
+- A client cannot choose to be durable in a live chat: one too far behind would be closed and
+  resume from the node's kept messages, which is worse than skipping for a chat nobody reads
+  back. Clients that need every message read history.
+- Fixing the kernel's send buffer applies to every chat connection. A client that reads fast
+  but is far away is held to 64 KiB a round trip, which chat's traffic never approaches.
+- The change to lossy delivery is in `apps/chat/src/chat_service.cpp`; `rt/src/room_router.cpp`
+  is unchanged.

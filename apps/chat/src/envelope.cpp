@@ -3,6 +3,7 @@
 #include "core/util/json.hpp"
 #include "infra/auth/base64url.hpp"
 
+#include "live_chat.hpp"
 #include "presence_room.hpp"
 
 #include <algorithm>
@@ -42,18 +43,43 @@ std::optional<std::string_view> string_of(const core::json::Value& message, std:
     return v == nullptr ? std::nullopt : v->as_string();
 }
 
-std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "after", "delivery", "kind"})) {
+// A stream's live chat is joined by the stream's name, never by its room's id: the name is what
+// makes the room a live chat, and a live chat is the only room an id of its kind names.
+std::expected<core::RoomId, EnvelopeError> joined_room_of(const core::json::Value& message) {
+    if (message.find("stream") == nullptr) {
+        auto room = room_of(message);
+        if (room && core::ports::is_stream_chat(*room)) {
+            return std::unexpected(EnvelopeError::BadRoom);
+        }
+        return room;
+    }
+    const auto stream = string_of(message, "stream");
+    if (message.find("room") != nullptr || message.find("kind") != nullptr || !stream) {
         return std::unexpected(EnvelopeError::Malformed);
     }
-    auto room = room_of(message);
+    if (!is_stream_name(*stream)) {
+        return std::unexpected(EnvelopeError::BadStream);
+    }
+    const auto room = live_chat_room(*stream);
+    if (!room) {
+        return std::unexpected(EnvelopeError::Unavailable);
+    }
+    return *room;
+}
+
+std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "stream", "after", "delivery", "kind"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = joined_room_of(message);
     if (!room) {
         return std::unexpected(room.error());
     }
     Join join{.room = *room,
               .after = std::nullopt,
               .delivery = Delivery::Durable,
-              .kind = core::ports::RoomKind::GroupChat};
+              .kind = core::ports::is_stream_chat(*room) ? core::ports::RoomKind::StreamLiveChat
+                                                         : core::ports::RoomKind::GroupChat};
     if (const core::json::Value* after = message.find("after")) {
         join.after = after->as_u64();
         if (!join.after) {
@@ -72,8 +98,6 @@ std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) 
         const auto kind = string_of(message, "kind");
         if (kind == "direct") {
             join.kind = core::ports::RoomKind::DirectChat;
-        } else if (kind == "live") {
-            join.kind = core::ports::RoomKind::StreamLiveChat;
         } else if (kind != "group") {
             return std::unexpected(EnvelopeError::Malformed);
         }
@@ -296,6 +320,10 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "bad_id";
     case EnvelopeError::BadBody:
         return "bad_body";
+    case EnvelopeError::BadStream:
+        return "bad_stream";
+    case EnvelopeError::Unavailable:
+        return "unavailable";
     case EnvelopeError::BadUser:
         return "bad_user";
     }
