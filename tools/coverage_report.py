@@ -12,6 +12,9 @@ import sys
 from pathlib import PurePosixPath
 
 
+BELOW_FLOOR = 3
+
+
 def component(rel: PurePosixPath) -> str:
     """The directory a file belongs to: everything before its first src/ or include/, so
     apps/gateway/src/x.cpp is apps/gateway and infra/storage/s3/include/... infra/storage/s3."""
@@ -114,7 +117,9 @@ def main() -> int:
                                   for k, v in parts.items()}}, f, indent=1, sort_keys=True)
     for failure in failures:
         print(f"coverage: {failure}", file=sys.stderr)
-    return 1 if failures else 0
+    # 3, not 1: coverage.sh reports a floor miss without failing when COVERAGE_ENFORCE=0, and
+    # must not mistake an error in this script for one.
+    return BELOW_FLOOR if failures else 0
 
 
 if __name__ == "__main__":

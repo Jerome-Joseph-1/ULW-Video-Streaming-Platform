@@ -49,23 +49,43 @@ What is held, and how:
 ## Decision
 
 - The `coverage` preset is clang-19, `Debug` at `-O0` without debug information, with
-  `ULW_COVERAGE=ON` (`cmake/Coverage.cmake`): the counters go on every first-party target
-  through `ulw_sanitize`, which each links, so llhttp, googletest and srt are not instrumented.
+  `ULW_COVERAGE=ON` (`cmake/Coverage.cmake`): the counters go on every target that links
+  `ulw_sanitize`, which is every first-party target and also llhttp (`http/CMakeLists.txt` links
+  it for the sanitizers). googletest and srt are not instrumented. llhttp's sources are under the
+  build tree, which the report leaves out, so its counters are collected but never reported.
   Each binary writes to `<build>/coverage/profiles/ulw-%8m.profraw`, at most eight files per
   binary however many processes a suite starts.
-- `tools/coverage.sh <build> [label...]` runs the labels (unit with all cores, integration one
-  test at a time, as the integration job does), merges the profiles, and reports on every
-  instrumented binary in the tree, test suites and servers alike; a source file that only a
-  binary no test ran is counted at zero. `tests/`, `third_party/` and the build tree's generated
-  sources (build info, the bundled migrations) are left out. It writes the HTML report,
-  `summary.json` and `summary.md`, and fails when a test fails or a directory is below its floor.
-- The `coverage` job in `ci.yml` runs it on pull requests and on pushes to main, against the
-  same Postgres and MinIO as the integration job, with `llvm-19` pinned to the version of the
-  installed `clang-19`. The table goes to the step summary and the HTML report is an artifact.
-  It has a ccache key of its own (instrumented objects never match another job's), which pull
-  requests restore from main's last run.
-- The floors are in `tools/coverage-floors.txt`, measured on `f2fb1d4` (unit and integration
-  labels, io_uring reactor, not root):
+- `tools/coverage.sh <build> [label...]` runs the labels one test at a time, with the ci test
+  preset's 600 s limit per test, as CI's other jobs run them: several suites time servers and the
+  database, and parallel runs would change what they see. It merges the profiles and reports on
+  every instrumented binary in the tree, test suites and servers alike; a source file that only
+  a binary no test ran is counted at zero. `tests/`, `third_party/` and the build tree (generated
+  sources, llhttp) are left out. It writes the HTML report, `summary.json` and `summary.md`, and
+  fails when a test fails. A directory below its floor fails it too, unless
+  `COVERAGE_ENFORCE=0`, which prints the comparison as a warning and exits with the tests'
+  status alone.
+- The `coverage` job in `ci.yml` runs against the same Postgres and MinIO as the integration job,
+  with `llvm-19` pinned to the version of the installed `clang-19`. CI capacity is the
+  bottleneck, so it does not run on every pull request:
+
+| Trigger | Runs | Floors |
+|---|---|---|
+| Nightly schedule, manual dispatch | yes | enforced |
+| Push to main | yes | reported only |
+| Pull request labelled `coverage` | yes, from the next push or re-run after labelling | reported only |
+| Any other pull request | no | |
+
+  The table goes to the step summary and the HTML report is an artifact. The job has a ccache
+  key of its own (instrumented objects never match another job's), which pull requests restore
+  from main's last run. Its 90-minute timeout is unmeasured and will be set from the first run's
+  duration.
+- The floors are in `tools/coverage-floors.txt`. **They are provisional until the first CI run.**
+  They were measured locally on `f2fb1d4` (unit and integration labels, io_uring reactor), which
+  is not how CI runs: locally the unit label ran two tests at a time, as root, without the
+  tests that pause the Postgres container, and on a host whose ffmpeg and io_uring timings differ
+  from the runner's. CI runs as `runner`, serially, with the pausing tests. After the first CI
+  run the floors are set to that run's values rounded down to a whole percent. That does not
+  loosen anything, because the check is new. The local values:
 
 | Directory | Lines | Line floor | Branches | Branch floor |
 |---|---:|---:|---:|---:|
@@ -83,13 +103,17 @@ What is held, and how:
 ## Consequences
 
 - A floor is raised by hand when a change lifts its directory past the next whole percent, and
-  never lowered; a pull request that drops a directory below its floor fails until it adds the
-  tests or the change is reconsidered.
+  never lowered. A change that drops a directory below its floor fails the nightly run, and
+  shows as a warning on a labelled pull request and on main.
 - A new top-level directory is reported without a floor until one is added for it.
 - `os` reads low because its privilege tests need root, which only `build-test`'s separate root
   step has; that step is not measured.
 - The conformance label, the cluster, ingest and Autobahn jobs, the fuzzers and the soaks are not
   measured; code only they exercise reads as uncovered here.
+- A process that ends in `_exit` or `_Exit` never runs the profile runtime's writer and leaves no
+  profile. The ffmpeg sandbox helper (`infra/ffmpeg/src/sandbox_main.cpp`) ends every path in
+  `_Exit`, so it writes none, and neither does a forked child that does not exec. What only those
+  processes run reads as uncovered.
 - Not measured either: code that only runs where a test cannot reach it without failing an
   allocation (`bad_alloc` handlers), which accounts for much of what `apps/chat` leaves
   uncovered.

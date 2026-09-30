@@ -3,11 +3,12 @@
 # In a tree built with the coverage preset: runs the ctest labels (unit, then integration, by
 # default), merges the profiles every test process and every server it started wrote, and
 # writes <build-dir>/coverage/ with html/, summary.json and summary.md. Tests, third-party and
-# generated code are left out. Fails when a test fails or a top-level directory falls below its
-# floor in tools/coverage-floors.txt (ADR-0074).
+# generated code are left out. Fails when a test fails and, unless COVERAGE_ENFORCE=0, when a
+# top-level directory falls below its floor in tools/coverage-floors.txt (ADR-0074). With
+# COVERAGE_ENFORCE=0 the floor comparison is printed as a warning and only the tests decide.
 #
-# The unit label runs with CTEST_PARALLEL_LEVEL jobs; every other label runs one test at a
-# time, as the integration job runs it.
+# Every label runs one test at a time, as CI's other jobs run them: several suites time servers
+# and the database, and a busy runner would change what they measure.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 root=$PWD
@@ -25,11 +26,13 @@ mkdir -p "$out/profiles"
 # servers the tests start write theirs.
 export LLVM_PROFILE_FILE=$out/profiles/ulw-%8m.profraw
 
+enforce=${COVERAGE_ENFORCE:-1}
+[[ $enforce == 0 || $enforce == 1 ]] || { echo "coverage: COVERAGE_ENFORCE is 0 or 1" >&2; exit 2; }
+
 failed=0
 for label in "${labels[@]}"; do
-    jobs=1
-    [[ $label == unit ]] && jobs=${CTEST_PARALLEL_LEVEL:-$(nproc)}
-    ctest --test-dir "$build_dir" -L "^${label}\$" -j "$jobs" --no-tests=error \
+    # The same per-test limit as the ci test preset.
+    ctest --test-dir "$build_dir" -L "^${label}\$" -j 1 --timeout 600 --no-tests=error \
         --output-on-failure || failed=1
 done
 
@@ -65,6 +68,13 @@ python3 tools/coverage_report.py "$root" "$out/export.json" tools/coverage-floor
 [[ -n ${GITHUB_STEP_SUMMARY:-} ]] && cat "$out/summary.md" >>"$GITHUB_STEP_SUMMARY"
 cat "$out/summary.md"
 
+# 3 is a directory below its floor; anything else is the report failing.
+if [[ $report_status -eq 3 && $enforce == 0 ]]; then
+    msg="a directory is below its floor (COVERAGE_ENFORCE=0: reported, not enforced)"
+    echo "coverage: warning: $msg" >&2
+    [[ -n ${GITHUB_ACTIONS:-} ]] && echo "::warning title=coverage::$msg"
+    report_status=0
+fi
 if [[ $failed -ne 0 ]]; then
     echo "coverage: a test failed; the numbers above are not a measurement" >&2
     exit 1
