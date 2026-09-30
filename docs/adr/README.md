@@ -63,3 +63,12 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0057](0057-the-probe-window-follows-the-configuration.md) | The packager's probe window follows its configuration | Accepted |
 | [0058](0058-group-calls-interfaces-now-implementation-deferred.md) | Group calls: interfaces now, implementation deferred | Accepted |
 | [0059](0059-live-playlists-through-a-single-flight-cache.md) | Live playlists are served from a single-flight cache, to any signed-in viewer | Accepted |
+| [0060](0060-pump-staging-is-appended-to-and-bounded.md) | Pump staging is appended to, bounded, and overflow is 413 | Accepted |
+| [0061](0061-cmake-3-28-presets-v6-and-the-ci-test-preset.md) | CMake 3.28, presets version 6, and a `ci` test preset | Accepted |
+| [0062](0062-ulw-sanitize-is-the-one-sanitizer-target.md) | `ulw_sanitize` is the one sanitizer interface target | Accepted |
+| [0063](0063-gateway-memory-high-600m-max-700m.md) | The gateway's memory: high at 600 MB, max at 700 MB | Accepted |
+| [0064](0064-the-first-accepted-patch-starts-the-upload.md) | The first accepted PATCH moves a video from `init` to `uploading` | Accepted |
+| [0065](0065-concurrent-patches-serialised-by-a-per-upload-advisory-lock.md) | Concurrent PATCHes are serialised by a per-upload advisory lock | Accepted |
+| [0066](0066-the-gateways-object-store-credentials.md) | What the gateway's object-store credentials may do | Accepted |
+| [0067](0067-chat-resume-is-a-join-with-after.md) | Chat resume is a `join` with `after`, and acks are `joined` and `sent` | Accepted |
+| [0068](0068-a-failed-job-fails-its-video.md) | A job that fails for good fails its video in the same statement | Accepted |
