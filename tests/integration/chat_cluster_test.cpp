@@ -44,7 +44,56 @@ using ulw::test::kReadyCheckPeriod;
 using ulw::test::Node;
 using ulw::test::Seen;
 
-class ChatClusterTest : public ulw::test::ChatCluster {};
+class ChatClusterTest : public ulw::test::ChatCluster {
+protected:
+    // How often a send answered `unavailable` goes again before the answer is taken as final.
+    static constexpr int kSendAttempts = 20;
+
+    // The last messages `client` was sent, by type, id, seq and reason (never a body), and what
+    // every node wrote: a failure then tells an answer the test did not expect from silence.
+    [[nodiscard]] std::string what_was_seen(const Client& client) const {
+        constexpr std::size_t kLast = 10;
+        const std::vector<Seen>& seen = client.seen();
+        const std::size_t shown = std::min(seen.size(), kLast);
+        std::string out = std::format("\n{} was sent {} messages; the last {}:", client.name(),
+                                      seen.size(), shown);
+        for (std::size_t i = seen.size() - shown; i < seen.size(); ++i) {
+            out += std::format("\n  {} id={} seq={} reason={}", seen[i].type, seen[i].id,
+                               seen[i].seq, seen[i].reason);
+        }
+        for (const Node& n : nodes_) {
+            out += std::format("\n{} wrote:\n{}", n.name, n.process->output());
+        }
+        return out;
+    }
+
+    // Sends `body` under `id` as a client must (ADR-0043): `unavailable` leaves the send's fate
+    // unknown, so it goes again under the same id, each time once the last is answered. Returns
+    // the first other answer, or the last `unavailable` after kSendAttempts; nullopt when a send
+    // was not answered at all.
+    std::optional<Seen> send_until_answered(Client& client, const std::string& body,
+                                            const std::string& id) {
+        const auto is_answer = [&](const Seen& s) {
+            return (s.type == "sent" || s.type == "error") && s.id == id;
+        };
+        std::optional<Seen> answer;
+        for (int attempt = 0; attempt < kSendAttempts; ++attempt) {
+            const std::size_t answers = client.count(is_answer);
+            if (!client.send(send_command(room_, body, id))) {
+                ADD_FAILURE() << client.name() << " could not send " << id;
+                return std::nullopt;
+            }
+            if (!client.wait_for([&](const Seen&) { return client.count(is_answer) > answers; })) {
+                return std::nullopt;
+            }
+            answer = *std::ranges::find_last_if(client.seen(), is_answer).begin();
+            if (answer->type != "error" || answer->reason != "unavailable") {
+                return answer;
+            }
+        }
+        return answer;
+    }
+};
 
 TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeliveredNowhere) {
     auto alice = connect(nodes_[0], 0);
@@ -614,18 +663,20 @@ TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
     auto again = connect(nodes_[1], 0);
     ASSERT_TRUE(again);
     ASSERT_NO_FATAL_FAILURE(join(*again));
-    ASSERT_TRUE(again->send(send_command(room_, body, "kept-key")));
-    const auto repeat =
-        again->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "kept-key"; });
-    ASSERT_TRUE(repeat);
+    // Even a repeat is a commit in the store, which may take past the store's timeout under
+    // load: the node then answers `unavailable`, and the client sends again, as any would.
+    const auto repeat = send_until_answered(*again, body, "kept-key");
+    ASSERT_TRUE(repeat) << "the resend was not answered" << what_was_seen(*again);
+    ASSERT_EQ(repeat->type, "sent") << repeat->reason << what_was_seen(*again);
     EXPECT_EQ(repeat->seq, ack->seq);
-    ASSERT_TRUE(again->send(send_command(room_, "another body", "kept-key")));
-    const auto conflict =
-        again->wait_for([](const Seen& s) { return s.type == "error" && s.id == "kept-key"; });
-    ASSERT_TRUE(conflict);
-    EXPECT_EQ(conflict->reason, "conflict");
-    ASSERT_TRUE(again->send(send_command(room_, "after the resends", "marker")));
-    ASSERT_TRUE(again->message("after the resends"));
+    const auto conflict = send_until_answered(*again, "another body", "kept-key");
+    ASSERT_TRUE(conflict) << "another body was not answered" << what_was_seen(*again);
+    ASSERT_EQ(conflict->type, "error") << what_was_seen(*again);
+    EXPECT_EQ(conflict->reason, "conflict") << what_was_seen(*again);
+    const auto marker = send_until_answered(*again, "after the resends", "marker");
+    ASSERT_TRUE(marker) << "the marker was not answered" << what_was_seen(*again);
+    ASSERT_EQ(marker->type, "sent") << marker->reason << what_was_seen(*again);
+    ASSERT_TRUE(again->message("after the resends")) << what_was_seen(*again);
     // Never sequenced again: the marker is the next seq, and nothing arrived under the key
     // but the first message, under its own seq.
     EXPECT_EQ(last_seq(), std::to_string(ack->seq + 1));
@@ -637,7 +688,10 @@ TEST_P(ChatClusterTest, AResendAfterEveryNodeRestartedIsKnownToTheStoreAlone) {
         EXPECT_EQ(metric(n, "messages_deduplicated_total"), 0U) << n.name << " answered it";
     }
     std::cout << "after every node restarted, the resend got seq " << repeat->seq
-              << " from the store, and another body under its id was a conflict\n";
+              << " from the store, and another body under its id was a conflict; "
+              << again->count(
+                     [](const Seen& s) { return s.type == "error" && s.reason == "unavailable"; })
+              << " sends were answered unavailable and sent again\n";
     ASSERT_NO_FATAL_FAILURE(expect_no_plaintext({body, "another body"}, {"another body"}));
 }
 
