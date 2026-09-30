@@ -363,6 +363,14 @@ public:
                       });
     }
 
+    void participants(core::ports::ParticipantsDone done) override {
+        // Through the service so the callback runs later, never inside this call.
+        service_.fail(MediaError::NotImplemented,
+                      [done = std::move(done)](Answer r) mutable noexcept {
+                          done(std::unexpected(r.error()));
+                      });
+    }
+
     void relay(const core::UserId& user, const core::DeviceId& device,
                const core::ports::MediaRelay& target, core::ports::RelayDone done) override {
         const auto refuse = [&](MediaError error) {

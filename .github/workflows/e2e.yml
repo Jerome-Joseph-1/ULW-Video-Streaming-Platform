@@ -221,3 +221,28 @@ jobs:
           if-no-files-found: warn
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
+
+  # Brief section 14's call capacity: the pinned LiveKit carrying 1:1 calls from SDK clients on
+  # this runner, its egress per call and CPU per call against the derivation (brief 8.1,
+  # ADR-0012). Independent of the sandbox cluster; the SFU runs in a container of its own.
+  call-capacity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the SDK the clients use
+        run: |
+          python3 -m venv "$RUNNER_TEMP/callcap"
+          "$RUNNER_TEMP/callcap/bin/pip" install -q --require-hashes --only-binary :all: \
+            -r tests/load/call_capacity/requirements.txt
+      # Root reads the SFU container's interface counters from /proc/<pid>/net/dev.
+      - run: >-
+          sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
+          --calls 4 --seconds 60 --out call-capacity
+        timeout-minutes: 10
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: call-capacity
+          path: call-capacity
+          if-no-files-found: warn

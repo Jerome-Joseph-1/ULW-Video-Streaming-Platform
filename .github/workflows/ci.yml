@@ -147,8 +147,9 @@ jobs:
   # The M16 and M17 acceptance: three chat_server processes on ports 9101-9103 over one
   # Postgres. Their room's owner stopped until a survivor takes over, then resumed to be fenced
   # out; clients on every node seeing one order, rate limits, retries, resume, and no body in any
-  # log or table. The tests are parameterised over both reactors, so one run covers io_uring and
-  # epoll.
+  # log or table. M22's on the same cluster: 1000 MLS messages stored as ciphertext gzip cannot
+  # shrink, and no plaintext anywhere. The tests are parameterised over both reactors, so one
+  # run covers io_uring and epoll.
   cluster:
     runs-on: ubuntu-24.04
     services:
@@ -172,8 +173,8 @@ jobs:
         with:
           cache-key: gcc-ci
       - run: cmake --preset ci
-      - run: cmake --build --preset ci --target chat_server chat_cluster_tests
-      - run: ctest --test-dir build/ci -R '^Reactors/ChatClusterTest\.' --output-on-failure
+      - run: cmake --build --preset ci --target chat_server chat_cluster_tests chat_e2ee_tests
+      - run: ctest --test-dir build/ci -R '^Reactors/Chat(Cluster|E2ee)Test\.' --output-on-failure
 
   # M30's acceptance (tests/call/ingest.spec.mjs, ADR-0053): WHIP publishers, GStreamer's
   # whipsink among them, against the LiveKit, Redis and egress of deploy/local/compose.yaml, and a
@@ -218,6 +219,8 @@ jobs:
   lint:
     name: boundaries + format + tidy
     runs-on: ubuntu-24.04
+    # The full-tree tidy on main took 59-88 min (runner speed varies); well past that is a hang.
+    timeout-minutes: 150
     env:
       CC: clang-19
       CXX: clang++-19
@@ -230,6 +233,11 @@ jobs:
           cache-key: clang-lint
       - run: tools/check-boundaries.sh
       - run: tools/check-format.sh
+      # M22: the E2EE phase changed neither the chat service nor the router, formatting aside:
+      # phase-2 against phase-3. Until a person pushes both tags, the script says it is waiting
+      # on them and succeeds.
+      - name: E2EE diagnostic check
+        run: tools/e2ee_diagnostic_check.sh
       - run: cmake --preset ci
       # Generated headers must exist before clang-tidy can parse the sources.
       - run: cmake --build --preset ci --target ulw_build_info
@@ -357,7 +365,7 @@ jobs:
           fetch-depth: 0
       - name: Install gitleaks
         run: |
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$RUNNER_TEMP/gitleaks.tar.gz" \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "$GITLEAKS_SHA256  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks

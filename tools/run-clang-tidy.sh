@@ -22,4 +22,5 @@ else
 fi
 
 [[ ${#files[@]} -eq 0 ]] && { echo "clang-tidy: nothing to check"; exit 0; }
-printf '%s\n' "${files[@]}" | xargs -P "$(nproc)" -n 4 "$tidy" -p "$build_dir" --quiet
+# One file per process: batches of four left workers idle while the last batches ran.
+printf '%s\n' "${files[@]}" | xargs -P "$(nproc)" -n 1 "$tidy" -p "$build_dir" --quiet

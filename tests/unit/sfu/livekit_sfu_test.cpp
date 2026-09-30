@@ -19,6 +19,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -560,6 +561,20 @@ TEST_P(LiveKitSfuTest, NoTicketIssuesForARoomThatCannotBeReopened) {
     const auto ticket = join(**room, "alice");
     ASSERT_FALSE(ticket);
     EXPECT_EQ(ticket.error(), MediaError::Unavailable);
+}
+
+TEST_P(LiveKitSfuTest, ListingParticipantsIsNotImplementedAndTouchesNoServer) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    std::optional<std::expected<std::vector<core::ports::MediaParticipant>, MediaError>> got;
+    (*room)->participants([&](auto r) noexcept { got = std::move(r); });
+    EXPECT_FALSE(got.has_value()) << "callback ran inside participants()";
+    ASSERT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
+    ASSERT_FALSE(*got);
+    EXPECT_EQ(got->error(), MediaError::NotImplemented);
+    EXPECT_EQ(server.requests().size(), 1U) << "only the CreateRoom of open()";
 }
 
 TEST_P(LiveKitSfuTest, AClosedRoomIssuesNoTicketAndIsNotRecreated) {

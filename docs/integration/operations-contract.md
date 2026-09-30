@@ -124,6 +124,10 @@ uploads (row above) and the upload reaper's sweep collect a copy that died midwa
 prefix needs an expiry of days, not hours: the recording is read back from the segments after
 the stream ends.
 
+At the start of each run the live ffmpeg holds its probe window in memory, a segment length
+and a second at the publisher's bitrate: 7.5 MB for 3 s at the 20 Mbit/s default ceiling and
+about 137 MB at worst, 11 s at 100 Mbit/s (ADR-0057).
+
 ## Probes and metrics
 
 <!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (advance, readiness_body), apps/gateway/src/health.hpp, apps/gateway/src/health.cpp, apps/gateway/src/gateway.cpp (render_metrics) -->

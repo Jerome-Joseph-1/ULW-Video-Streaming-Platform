@@ -15,6 +15,7 @@
 #include <expected>
 #include <llhttp.h>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -131,8 +132,6 @@ public:
     explicit Impl(IRequestSink& sink) : sink_(sink) {
         llhttp_init(&parser_, HTTP_REQUEST, &settings());
         parser_.data = this;
-        // Held bytes never exceed this, so holding more never allocates on the data path.
-        unparsed_.reserve(kMaxRetainedBytes);
         // Strict llhttp fails "HTTP/1.2" with the error it also uses for "HTTP/1.1x" or a bare
         // LF, so a 505 could not be told from a 400. Leniently it parses any digit.digit and
         // on_headers_complete() refuses the ones that are not 1.0 or 1.1.
@@ -151,8 +150,8 @@ public:
         case State::PausedInBody:
         case State::AwaitingReset:
         case State::AwaitingResume:
-            if (!retain(bytes)) {
-                return fail(fatal(Status::ContentTooLarge));
+            if (const auto kept = retain(bytes); !kept) {
+                return fail(fatal(kept.error()));
             }
             return ParseProgress::Paused;
         case State::Closed:
@@ -210,6 +209,8 @@ public:
         // otherwise enforce by failing on any byte after a non-keep-alive request.
         state_ = keep_alive_ ? State::AwaitingResume : State::Closed;
     }
+
+    [[nodiscard]] std::span<const std::byte> unparsed() const noexcept { return held(); }
 
 private:
     static Impl& self(llhttp_t* parser) noexcept { return *static_cast<Impl*>(parser->data); }
@@ -284,8 +285,8 @@ private:
         const auto consumed = static_cast<std::size_t>(llhttp_get_error_pos(&parser_) - begin);
         if (from_tail) {
             held_from_ += consumed;
-        } else if (!retain(input.subspan(consumed))) {
-            return fail(fatal(Status::ContentTooLarge));
+        } else if (const auto kept = retain(input.subspan(consumed)); !kept) {
+            return fail(fatal(kept.error()));
         }
         if (state_ == State::PausedInBody) {
             return ParseProgress::Paused;
@@ -320,9 +321,9 @@ private:
         held_from_ = 0;
     }
 
-    bool retain(std::span<const std::byte> bytes) noexcept {
+    [[nodiscard]] std::expected<void, Status> retain(std::span<const std::byte> bytes) noexcept {
         if (bytes.size() > kMaxRetainedBytes - held().size()) {
-            return false;
+            return std::unexpected(Status::ContentTooLarge);
         }
         // Parsing held bytes only moves held_from_, and the parsed prefix is dropped here rather
         // than after every request, so a burst of pipelined requests costs one pass, not one
@@ -330,8 +331,20 @@ private:
         unparsed_.erase(unparsed_.begin(),
                         unparsed_.begin() + static_cast<std::ptrdiff_t>(held_from_));
         held_from_ = 0;
+        const std::size_t needed = unparsed_.size() + bytes.size();
+        if (needed > unparsed_.capacity()) {
+            // Grown as needed, doubling but never past the limit, rather than reserved up front:
+            // most connections never hold a byte, and a reservation of the limit on each would
+            // be address space the per-connection budget does not count (ADR-0036).
+            try {
+                unparsed_.reserve(
+                    std::min(std::max(needed, 2 * unparsed_.capacity()), kMaxRetainedBytes));
+            } catch (const std::bad_alloc&) {
+                return std::unexpected(Status::ServiceUnavailable);
+            }
+        }
         unparsed_.insert(unparsed_.end(), bytes.begin(), bytes.end());
-        return true;
+        return {};
     }
 
     int reject(Status status) noexcept {
@@ -524,6 +537,10 @@ ParseResult RequestParser::resume() noexcept {
 
 void RequestParser::reset_for_next_request() noexcept {
     impl_->reset_for_next_request();
+}
+
+std::span<const std::byte> RequestParser::unparsed() const noexcept {
+    return impl_->unparsed();
 }
 
 } // namespace http

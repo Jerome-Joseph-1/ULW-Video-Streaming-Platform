@@ -129,6 +129,44 @@ TEST(RequestParser, BytesHeldWhileStoppedAreBounded) {
     EXPECT_EQ(parser.feed(bytes_of("x")), fatal(Status::ContentTooLarge));
 }
 
+TEST(RequestParser, BytesHeldInSmallPiecesAreBoundedTheSame) {
+    RecordingSink sink;
+    RequestParser parser{sink};
+    ASSERT_EQ(parser.feed(bytes_of(kGet)), ParseProgress::MessageComplete);
+
+    // The buffer grows as they arrive, up to the same limit and no further.
+    const std::string piece(1000, 'x');
+    std::size_t held = 0;
+    for (; held + piece.size() <= RequestParser::kMaxRetainedBytes; held += piece.size()) {
+        ASSERT_EQ(parser.feed(bytes_of(piece)), ParseProgress::Paused);
+    }
+    const std::string rest(RequestParser::kMaxRetainedBytes - held, 'x');
+    EXPECT_EQ(parser.feed(bytes_of(rest)), ParseProgress::Paused);
+    EXPECT_EQ(parser.unparsed().size(), RequestParser::kMaxRetainedBytes);
+    EXPECT_EQ(parser.feed(bytes_of("x")), fatal(Status::ContentTooLarge));
+}
+
+TEST(RequestParser, BytesBehindAFinishedRequestAreLeftUnparsedInOrder) {
+    RecordingSink sink;
+    RequestParser parser{sink};
+    EXPECT_TRUE(parser.unparsed().empty());
+    const auto text = [&parser] {
+        std::string out;
+        for (const std::byte b : parser.unparsed()) {
+            out += static_cast<char>(b);
+        }
+        return out;
+    };
+
+    // The start of a WebSocket frame, as a client that did not wait for its 101 sends it.
+    const std::string frame = std::string{"\x81\x85"} + "first";
+    ASSERT_EQ(parser.feed(bytes_of(std::string{kGet} + frame)), ParseProgress::MessageComplete);
+    EXPECT_EQ(text(), frame);
+    EXPECT_EQ(parser.feed(bytes_of("second")), ParseProgress::Paused);
+    EXPECT_EQ(text(), frame + "second");
+    ASSERT_EQ(sink.requests().size(), 1U);
+}
+
 TEST(RequestParser, OnlyBytesNotYetParsedCountAsHeld) {
     RecordingSink sink;
     RequestParser parser{sink};

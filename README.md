@@ -20,6 +20,7 @@ tools/check-boundaries.sh   # layering rules
 tools/check-format.sh       # clang-format; --fix to apply
 tools/run-clang-tidy.sh build/dev [files...]
 python3 tools/check-docs.py # ADR numbering and sections, route/doc coverage
+tools/e2ee_diagnostic_check.sh [<base> <head>]  # chat service and router unchanged, phase-2..phase-3
 ```
 
 ## Run locally
