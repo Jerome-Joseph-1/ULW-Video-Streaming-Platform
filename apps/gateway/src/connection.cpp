@@ -4,6 +4,7 @@
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
 #include "infra/auth/token_extractor.hpp"
+#include "net/socket.hpp"
 
 #include <algorithm>
 #include <array>
@@ -94,9 +95,10 @@ Connection::~Connection() {
     release_client_holds();
 }
 
-void Connection::start(std::unique_ptr<net::ITransport> transport, const net::IpAddress& peer,
-                       std::optional<ClientHold> hold) noexcept {
+void Connection::start(std::unique_ptr<net::ITransport> transport, int fd,
+                       const net::IpAddress& peer, std::optional<ClientHold> hold) noexcept {
     transport_ = std::move(transport);
+    fd_ = fd;
     peer_ = peer;
     connection_hold_ = hold;
     last_activity_ = now();
@@ -1428,8 +1430,25 @@ void Connection::close() noexcept {
     }
     deps().reactor.cancel_timer(timer_);
     timer_ = {};
+    // Every close with output still waiting gives up on a peer that has not read it: a timer
+    // ran out, the peer left or failed, or the drain deadline passed. What the transport holds
+    // is dropped either way; a reset drops what the kernel holds too, at once, where a FIN
+    // behind it would leave an orphan the kernel keeps for as long as the peer answers its
+    // probes of a shut window (ADR-0071).
+    if (output_waiting()) {
+        net::abort_on_close(fd_);
+    }
     transport_->begin_close();
     gw().retire(handle_);
+}
+
+bool Connection::output_waiting() const noexcept {
+    if (transport_->pending_send_bytes() > 0) {
+        return true;
+    }
+    // Without TCP_INFO the kernel's user timeout was left in place, and bounds the orphan.
+    const auto progress = net::send_progress(fd_);
+    return progress && progress->waiting;
 }
 
 void Connection::on_writable() noexcept {}

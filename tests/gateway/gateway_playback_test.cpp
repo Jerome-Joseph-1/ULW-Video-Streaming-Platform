@@ -3,7 +3,10 @@
 #include "support/eventually.hpp"
 #include "support/http_client.hpp"
 
+#include <chrono>
+#include <format>
 #include <gtest/gtest.h>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -364,6 +367,92 @@ TEST_P(GatewayPlayback, AViewFromARequestFinishingDuringADrainIsWrittenAtOnce) {
     ASSERT_EQ(r->status, 200);
     // No time passes: the view must not wait out the batch interval.
     EXPECT_TRUE(ulw::test::eventually([&] { return gw.views().size() == 1; }));
+}
+
+// A media playlist of 1300 segments: about 130 KB once every segment URL is signed, many times
+// what a small receive buffer holds.
+std::string long_media_playlist() {
+    std::string text = "#EXTM3U\n"
+                       "#EXT-X-VERSION:7\n"
+                       "#EXT-X-TARGETDURATION:4\n"
+                       "#EXT-X-PLAYLIST-TYPE:VOD\n"
+                       "#EXT-X-MAP:URI=\"init_0.mp4\"\n";
+    for (int k = 0; k < 1300; ++k) {
+        text += std::format("#EXTINF:4.000000,\nseg_{:05}.m4s\n", k);
+    }
+    text += "#EXT-X-ENDLIST\n";
+    return text;
+}
+
+// A player's receive buffer, fixed small, which Linux doubles: the gateway's side of the
+// connection sees its window shut after 16 KiB unread, and open again a read at a time.
+constexpr int kPlayerReceiveBuffer = 8 * 1024;
+
+// A player that frees its window a little at a time keeps its connection for as long as it
+// reads. The kernel's own count of a shut window (TCP_USER_TIMEOUT) restarts only when the
+// window opens wide enough for the whole unsent head of its queue, so it ended such a reader
+// a fixed time after its window first shut, reading or not (ADR-0071): with that timeout at
+// 1.5 s, this reader was reset about 2 s in. The gateway's clock is held, so nothing but the
+// kernel can end this connection while the read goes on for some four seconds.
+TEST_P(GatewayPlayback, APlayerReadingAPlaylistALittleAtATimeKeepsItsConnection) {
+    GatewayOptions o = options();
+    o.manual_clock = true;
+    GatewayUnderTest gw(o);
+    publish(gw);
+    gw.put_object(key("720p/index.m3u8"), long_media_playlist());
+    HttpClient c(gw.endpoint(), kPlayerReceiveBuffer);
+    ASSERT_TRUE(c.connected());
+    ASSERT_TRUE(c.send_request("GET", path("720p/index.m3u8"), kAlice));
+    ASSERT_TRUE(c.readable());
+
+    // 8 KiB, then a pause of 250 ms, long enough for the gateway's side to probe the shut
+    // window, which ends early only if the connection breaks.
+    constexpr std::size_t kStep = std::size_t{8} * 1024;
+    constexpr std::chrono::milliseconds kPause{250};
+    const auto began = std::chrono::steady_clock::now();
+    std::optional<ulw::test::HttpResponse> r;
+    while (!r) {
+        const auto n = c.read_some(kStep);
+        ASSERT_TRUE(n) << "the connection ended after "
+                       << std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - began)
+                              .count()
+                       << " ms, " << c.buffered() << " bytes read";
+        r = c.take_response();
+        if (!r) {
+            ASSERT_FALSE(c.broken_within(kPause)) << "the connection broke";
+        }
+    }
+    EXPECT_GE(std::chrono::steady_clock::now() - began, std::chrono::seconds(3));
+    ASSERT_EQ(r->status, 200);
+    EXPECT_GT(r->body.size(), std::size_t{100'000});
+    EXPECT_TRUE(r->body.ends_with("#EXT-X-ENDLIST\n"));
+
+    // Still open, and still served.
+    const auto again = c.request("GET", "/healthz", "");
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->status, 200);
+    EXPECT_EQ(gw.counters().timeouts_header, 0U);
+}
+
+// A player that stops reading is still ended by the header timeout, as an idle connection with
+// its response unread, and ended with a reset: the kernel drops what it still held for it at
+// once, instead of keeping it for a peer that no longer reads.
+TEST_P(GatewayPlayback, APlayerThatStopsReadingIsResetAtTheHeaderTimeout) {
+    GatewayOptions o = options();
+    o.manual_clock = true;
+    GatewayUnderTest gw(o);
+    publish(gw);
+    gw.put_object(key("720p/index.m3u8"), long_media_playlist());
+    HttpClient c(gw.endpoint(), kPlayerReceiveBuffer);
+    ASSERT_TRUE(c.connected());
+    ASSERT_TRUE(c.send_request("GET", path("720p/index.m3u8"), kAlice));
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().responses.at(1) == 1; }));
+
+    gw.advance(o.limits.header_timeout);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 0; }));
+    EXPECT_EQ(gw.counters().timeouts_header, 1U);
+    EXPECT_TRUE(c.reset_by_peer());
 }
 
 INSTANTIATE_TEST_SUITE_P(Transports, GatewayPlayback,

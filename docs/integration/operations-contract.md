@@ -189,7 +189,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `part_upload_duration_seconds` | histogram | From a chunk's first byte handed to the store to all of it durable |
 | `backend_write_stall_seconds` | histogram | Each wait of a chunk body on a store that took nothing more, observed when it ends: the store takes bytes again, fails the part (`503`), or the request ends (backstop, client gone). Buckets to 300 s; a store taking nothing is failed at about 60 s (ADR-0045) |
 | `buffer_bytes_in_use` | gauge | Bytes held in connections' staging and body buffers |
-| `timeouts_total{kind="header"}` | counter | Request head not complete within 10 s, or an idle keep-alive closed |
+| `timeouts_total{kind="header"}` | counter | Request head not complete within 10 s, or an idle keep-alive closed; reset if its last response is still unread (ADR-0071) |
 | `timeouts_total{kind="body"}` | counter | Body idle 30 s (`408`) |
 | `timeouts_total{kind="body_rate"}` | counter | Body under 8 KiB/s over a 30 s window (`408`) |
 | `timeouts_total{kind="backstop"}` | counter | Request older than 6 h, closed |
@@ -267,6 +267,10 @@ node repeated what it had said there). Chat is a draft ([chat.md](chat.md)).
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at
 64 KiB, so chat's pod memory is bounded at about 820 MiB of its 1 GiB, kernel buffers included.
+`slow_peers_total` counts node-channel connections reset because the other node stopped
+reading: about 1 MiB queued for it, or 20 s with output waiting and none of it acknowledged, which
+a node that vanished also shows (ADR-0071). A node that is only busy, reading a little at a time,
+keeps its link.
 
 ## Shutdown
 

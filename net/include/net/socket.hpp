@@ -23,7 +23,8 @@ struct ListenOptions {
 [[nodiscard]] std::expected<std::uint16_t, int> local_port(int fd) noexcept;
 
 // TCP_NODELAY, keepalive 60/10/3, TCP_USER_TIMEOUT 20 s. Buffer sizes are deliberately left
-// alone: setting SO_RCVBUF or SO_SNDBUF switches off the kernel's autotuning.
+// alone: setting SO_RCVBUF or SO_SNDBUF switches off the kernel's autotuning. Chat, the gateway
+// and the node channel clear the user timeout again (clear_user_timeout, ADR-0071).
 [[nodiscard]] std::expected<void, int> tune_connection(int fd) noexcept;
 // Fixes the kernel's send buffer at `bytes` (Linux doubles it for its own bookkeeping), for a
 // server whose connections carry little and must not each hold megabytes for a peer that

@@ -48,8 +48,9 @@ public:
     Connection& operator=(Connection&&) = delete;
 
     // `hold` is the peer's own count, nullopt for a trusted proxy, whose clients are counted a
-    // request at a time.
-    void start(std::unique_ptr<net::ITransport> transport, const net::IpAddress& peer,
+    // request at a time. `fd` is the socket under the transport, for what the kernel says of
+    // it; the transport owns it.
+    void start(std::unique_ptr<net::ITransport> transport, int fd, const net::IpAddress& peer,
                std::optional<ClientHold> hold) noexcept;
     // The gateway is shutting down: finish the request in flight, then close.
     void drain() noexcept;
@@ -203,6 +204,8 @@ private:
     [[nodiscard]] bool admit_forwarded(const http::RequestHead& head) noexcept;
     void linger() noexcept;
     void close() noexcept;
+    // Output the peer has not acknowledged: queued in the transport, or held by the kernel.
+    [[nodiscard]] bool output_waiting() const noexcept;
     void arm_timer(core::Millis delay) noexcept;
     void restart_rate_window() noexcept;
     // Ends a chunk body that fell below the minimum rate, or returns how long until the
@@ -214,6 +217,7 @@ private:
     Gateway& gateway_;
     // Set by start(); plaintext either way, whatever the socket carries.
     std::unique_ptr<net::ITransport> transport_;
+    int fd_ = -1;
     http::RequestParser parser_{*this};
     Phase phase_ = Phase::Idle;
     Request req_;

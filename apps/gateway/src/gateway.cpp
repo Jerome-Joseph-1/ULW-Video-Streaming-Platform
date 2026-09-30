@@ -119,8 +119,13 @@ void Gateway::on_accept(os::UniqueFd conn) noexcept {
             release_client(*hold);
         }
     };
-    // A socket that refuses its options is already broken.
-    if (!net::tune_connection(conn.get())) {
+    // A socket that refuses its options is already broken. The kernel's user timeout is
+    // cleared: it ended a player that reads its response a little at a time, and the
+    // gateway's own timers bound every connection with output waiting (ADR-0071). Where the
+    // kernel gives no TCP_INFO, close() cannot tell whether it still holds output for the
+    // peer, and the timeout stays to bound what it keeps after the close.
+    const int fd = conn.get();
+    if (!net::tune_connection(fd) || (net::send_progress(fd) && !net::clear_user_timeout(fd))) {
         refuse(counters_.rejected_socket);
         return;
     }
@@ -137,7 +142,7 @@ void Gateway::on_accept(os::UniqueFd conn) noexcept {
         return;
     }
     ++counters_.connections_accepted;
-    c->start(std::move(*transport), *peer, hold);
+    c->start(std::move(*transport), fd, *peer, hold);
 }
 
 void Gateway::refund_upload_bytes(const core::UserId& user, std::uint64_t bytes) noexcept {
