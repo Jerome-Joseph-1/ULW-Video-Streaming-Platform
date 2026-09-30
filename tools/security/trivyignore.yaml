@@ -1,0 +1,87 @@
+# Trivy findings that do not fail the build (docs/adr/0072), for `trivy config`
+# (tools/security/trivy-config.sh) and `trivy image` (tools/security/trivy-image.sh). Each entry
+# is one check on the named files only, says why, and expires; past expired_at the finding
+# fails its job again until someone looks at it afresh. tools/security/check-allowlists.py
+# enforces all of that. Paths are as trivy-config.sh stages them: deploy/... as in the
+# repository, rendered/<kustomization>/<kind>-<namespace>-<name>.yaml for the sandbox's.
+
+misconfigurations:
+  # The worker's ffmpeg runs in user, pid and mount namespaces of its own and mounts a /proc
+  # for its pid namespace (docs/adr/0025, 0032). The kubelet's masked /proc paths would stop
+  # that mount; Unmasked only takes effect inside the pod's own user namespace
+  # (hostUsers: false), so no host /proc path is exposed.
+  - id: KSV-0027
+    paths:
+      - deploy/askedin/overlays/prod/video-worker/deployment.yaml
+      - deploy/askedin/overlays/stage/video-worker/deployment.yaml
+      - rendered/deploy-local-cluster/deployment-apps-stage-video-worker.yaml
+    statement: >-
+      The worker sandbox mounts /proc for its own pid namespace inside the pod's user namespace
+      (hostUsers: false), which needs procMount Unmasked; ADR-0025 and ADR-0032.
+    expired_at: 2027-09-01
+
+  # The STUNner gateway operator's RBAC, as its Helm chart ships it (operator.yaml's header):
+  # it reads the TURN credentials' Secrets and writes the stunnerd Deployments, Services and
+  # ConfigMaps it renders from Gateways. Narrowing it is STUNner's to do.
+  - id: KSV-0041
+    paths: &stunner-operator-rbac
+      - deploy/askedin/stunner/operator.yaml
+      - rendered/deploy-stunner/clusterrole-cluster-stunner-gateway-operator-manager-role.yaml
+      - rendered/deploy-stunner/role-stunner-system-stunner-gateway-operator-leader-election-role.yaml
+    statement: &stunner-operator-statement >-
+      Upstream STUNner operator RBAC (stunner-helm v1.2.1): it reads Secrets (get, list, watch
+      only) for TURN credentials and manages the dataplane Deployments, Services and ConfigMaps
+      and its leader-election ConfigMap.
+    expired_at: 2027-09-01
+  - id: KSV-0048
+    paths: *stunner-operator-rbac
+    statement: *stunner-operator-statement
+    expired_at: 2027-09-01
+  - id: KSV-0049
+    paths: *stunner-operator-rbac
+    statement: *stunner-operator-statement
+    expired_at: 2027-09-01
+  - id: KSV-0056
+    paths: *stunner-operator-rbac
+    statement: *stunner-operator-statement
+    expired_at: 2027-09-01
+
+  # Kubernetes runs the images and ignores HEALTHCHECK; the manifests' startup, readiness and
+  # liveness probes are the health checks.
+  - id: DS-0026
+    paths:
+      - deploy/docker/Dockerfile
+      - deploy/local/mock-auth/Dockerfile
+    statement: >-
+      Kubernetes ignores HEALTHCHECK; the Deployments' probes (/api/v1/healthz, /api/v1/readyz,
+      the worker's heartbeat file) are the health checks.
+    expired_at: 2027-09-01
+
+  # kube-router is the sandbox cluster's NetworkPolicy enforcer and nothing else: it programs
+  # the kind node's iptables and ipsets from the host network, as root, privileged, with host
+  # paths mounted, in kube-system, like any CNI's node daemon. It never ships; Askedin's cluster
+  # enforces policy with its own CNI (RUNBOOK.md).
+  - id: KSV-0001
+    paths: &kube-router [rendered/deploy-local-cluster/daemonset-kube-system-kube-router.yaml]
+    statement: &kube-router-statement >-
+      Sandbox-only NetworkPolicy enforcer: programs the kind node's iptables from the host
+      network, which needs a privileged root container with host paths; it never ships.
+    expired_at: 2027-09-01
+  - {id: KSV-0003, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0004, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0009, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0011, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0012, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0014, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0015, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0016, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0017, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0018, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0020, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0021, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0023, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0030, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0037, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0104, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0106, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  - {id: KSV-0118, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}

@@ -74,3 +74,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0068](0068-a-failed-job-fails-its-video.md) | A job that fails for good fails its video in the same statement | Accepted |
 | [0069](0069-chat-soak-flatness-per-command-delivery-and-connection.md) | Chat soak flatness judged per command, delivery and connection | Accepted |
 | [0070](0070-live-chat-lossy-and-bounded.md) | A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere | Accepted |
+| [0072](0072-security-analysis-in-ci.md) | Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check | Accepted |

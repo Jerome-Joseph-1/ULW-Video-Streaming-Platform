@@ -38,6 +38,8 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # What the sandbox scripts and checks call on the runner: ffmpeg for the test clips and
       # PyYAML for vod_flow's kubeconfig guard. Docker, kind's prerequisites, curl and openssl
       # ship with the image; the images build inside Docker.
@@ -79,6 +81,7 @@ jobs:
           sudo systemctl restart docker
           sudo iptables -I DOCKER-USER -s 198.18.0.0/24 -m conntrack --ctstate DNAT -j ACCEPT
       - run: make e2e-up
+        id: up
         timeout-minutes: 45
       # kubeconform, then kubectl apply --dry-run=server of the Askedin overlays and STUNner's
       # manifests against this cluster's API server and installed CRDs.
@@ -91,6 +94,23 @@ jobs:
         timeout-minutes: 10
       - run: make e2e-load
         timeout-minutes: 15
+      # The release build's binaries, as the images carry them (docs/adr/0072).
+      - name: Release binaries hardened
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        run: |
+          for image in ulw/video-gateway:e2e ulw/video-worker:e2e; do
+            dir=release-bin/${image//[:\/]/-}
+            mkdir -p "$dir"
+            container=$(docker create "$image")
+            docker cp "$container:/usr/local/bin/." "$dir"
+            docker rm "$container" >/dev/null
+          done
+          tools/check-hardening.sh release-bin/*/*
+      # The two images Askedin runs, for OS and library vulnerabilities; HIGH and CRITICAL with
+      # a fix available fail (tools/security/trivy-image.sh). mock-auth is the sandbox's own.
+      - name: Image vulnerabilities
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        run: tools/security/trivy-image.sh ulw/video-gateway:e2e ulw/video-worker:e2e
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -133,6 +153,8 @@ jobs:
       CXX: g++-14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-14-ci-browser
@@ -141,6 +163,9 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.21.0"
+          # Nothing here is installed through npm's cache, and a cache a pull request could
+          # write is one a later run would restore.
+          package-manager-cache: false
       # stack.mjs creates and drops its scratch database with psql.
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO
@@ -179,6 +204,8 @@ jobs:
       ULW_LIVE_LATENCY_FILE: ${{ github.workspace }}/live-report/live-latency.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The toolchain, ffmpeg (with SRT, for the test publisher) and the user namespaces the
       # packager's sandboxed ffmpeg needs.
       - uses: ./.github/actions/setup
@@ -188,6 +215,9 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.21.0"
+          # Nothing here is installed through npm's cache, and a cache a pull request could
+          # write is one a later run would restore.
+          package-manager-cache: false
       # stack.mjs creates and drops its scratch database with psql.
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO
@@ -230,6 +260,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install the SDK the clients use
         run: |
           python3 -m venv "$RUNNER_TEMP/callcap"

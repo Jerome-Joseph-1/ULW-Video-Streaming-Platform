@@ -1,0 +1,14 @@
+# The registries the manifests may name, for Trivy's KSV-0125 (docs/adr/0072), in place of its
+# default list of cloud providers' registries:
+#   git.askedin.com  Askedin's registry, where Woodpecker pushes the images this repository
+#                    builds (deploy/askedin/woodpecker.yml);
+#   docker.io        the upstream images: STUNner, LiveKit, Envoy, kube-router, each pinned by
+#                    digest (deploy/local/images.sh);
+#   ulw              the sandbox's own builds, loaded into the kind node and never pulled
+#                    (deploy/local/e2e-up.sh); the check reads the first path segment as a
+#                    registry.
+ksv0125:
+  trusted_registries:
+    - git.askedin.com
+    - docker.io
+    - ulw

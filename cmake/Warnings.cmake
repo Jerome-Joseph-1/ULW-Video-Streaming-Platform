@@ -17,10 +17,16 @@ endif()
 target_compile_options(ulw_warnings INTERFACE
     "$<$<COMPILE_LANGUAGE:CXX>:${ulw_cxx_warnings}>")
 
-# Hardening applies to C as well: llhttp is linked into the same binary.
-target_compile_options(ulw_warnings INTERFACE
+# Hardening, apart from the warnings so the vendored C and C++ that is linked into the same
+# binaries (llhttp, srt) gets it too without taking on this project's -Werror (Dependencies.cmake).
+# Clang, unlike Ubuntu's GCC, enables none of it by default: one object without -fcf-protection
+# drops the binary's IBT and SHSTK markings (tools/check-hardening.sh, docs/adr/0072).
+# A list, not a target: llhttp and srt install(EXPORT) their targets, which may not name one of
+# ours.
+set(ulw_hardening_flags
     -fstack-protector-strong -fstack-clash-protection -fcf-protection
     # _FORTIFY_SOURCE needs optimisation to do anything and warns at -O0.
     "$<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=3>")
+target_compile_options(ulw_warnings INTERFACE ${ulw_hardening_flags})
 target_link_options(ulw_warnings INTERFACE
     -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack)
