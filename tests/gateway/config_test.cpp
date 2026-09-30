@@ -33,6 +33,26 @@ protected:
         return config ? std::string() : config.error().variable;
     }
 
+    // What log_effective writes for `config`, with the settings layered from `env`.
+    [[nodiscard]] std::string effective_log(const Config& config) const {
+        const auto layers = ops::Settings::layer(
+            gateway::settings(), nullptr,
+            [this](std::string_view name) -> std::optional<std::string> {
+                const auto it = env.find(std::string(name));
+                return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
+            },
+            ops::CommandLine{});
+        EXPECT_TRUE(layers);
+        if (!layers) {
+            return {};
+        }
+        const os::SystemClock clock;
+        ulw::test::MemoryLog lines;
+        ops::Logger log(lines, clock, "gateway", ops::Level::Info);
+        gateway::log_effective(config, *layers, log);
+        return lines.all();
+    }
+
     std::map<std::string, std::string, std::less<>> env{
         {"ULW_R2_ACCOUNT_ID", "0123456789abcdef0123456789abcdef"},
         {"ULW_BUCKET", "ulw-media"},
@@ -453,19 +473,7 @@ TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {
     env["ULW_LISTEN_PORT"] = "9000";
     const auto config = load();
     ASSERT_TRUE(config);
-    const auto layers = ops::Settings::layer(
-        gateway::settings(), nullptr,
-        [this](std::string_view name) -> std::optional<std::string> {
-            const auto it = env.find(std::string(name));
-            return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
-        },
-        ops::CommandLine{});
-    ASSERT_TRUE(layers);
-    const os::SystemClock clock;
-    ulw::test::MemoryLog lines;
-    ops::Logger log(lines, clock, "gateway", ops::Level::Info);
-    gateway::log_effective(*config, *layers, log);
-    const std::string all = lines.all();
+    const std::string all = effective_log(*config);
     EXPECT_EQ(all.find("hunter2"), std::string::npos);
     EXPECT_NE(all.find(R"("name":"ULW_DATABASE_URL","value":"<redacted>","from":"env")"),
               std::string::npos)
@@ -474,6 +482,23 @@ TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {
               std::string::npos);
     EXPECT_NE(all.find(R"("name":"ULW_MAX_CONNECTIONS","value":"448","from":"default")"),
               std::string::npos);
+}
+
+// A development run says so beside the key set it trusts, and where the switch came from.
+TEST_F(ConfigTest, DevelopmentModeIsLoggedWithTheLocalKeySet) {
+    const KeySetFile file(kKeySet);
+    env.erase("JWKS_URL");
+    env["ULW_DEV_JWKS_FILE"] = file.path();
+    env["ULW_DEV_MODE"] = "1";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().reason;
+    const std::string all = effective_log(*config);
+    const auto keys = all.find(R"("name":"ULW_DEV_JWKS_FILE")");
+    const auto mode = all.find(R"("name":"ULW_DEV_MODE","value":"1","from":"env")");
+    ASSERT_NE(keys, std::string::npos) << all;
+    ASSERT_NE(mode, std::string::npos) << all;
+    // The line after it.
+    EXPECT_EQ(all.find('\n', keys), all.rfind('\n', mode)) << all;
 }
 
 } // namespace
