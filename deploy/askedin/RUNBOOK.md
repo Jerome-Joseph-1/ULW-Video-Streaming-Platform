@@ -376,27 +376,63 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
    `kustomize` in an image pinned by tag and digest like every other step:
 
    ```sh
+   overlays=<path to overlays/ in the monorepo>   # fill in: the directory holding stage and prod
    gw=git.askedin.com/askedin/askedin-monorepo/video-gateway
    wk=git.askedin.com/askedin/askedin-monorepo/video-worker
    gw_digest=$(crane digest "$gw:$CI_COMMIT_SHA")
    wk_digest=$(crane digest "$wk:$CI_COMMIT_SHA")
-   (cd "overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
-   (cd "overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
-   (cd "overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
-   git commit -am "deploy: video images $CI_COMMIT_SHA [skip ci]" && git push
+   (cd "$overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
+   (cd "$overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
+   (cd "$overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
+   git config user.name "<pipeline commit name>"      # fill in
+   git config user.email "<pipeline commit email>"    # fill in
+   git commit -am "deploy: video images $CI_COMMIT_SHA [skip ci]"
+   # The token is read from the environment on each call, never written to .git/config.
+   git remote add deploy https://git.askedin.com/askedin/askedin-monorepo.git
+   git config credential.helper \
+     '!f() { echo "username=<push user>"; echo "password=$DEPLOY_PUSH_TOKEN"; }; f'
+   pushed=
+   for attempt in 1 2 3; do
+     if git push deploy "HEAD:$CI_COMMIT_BRANCH"; then pushed=1; break; fi
+     # Non-fast-forward: another commit landed since the clone. Replay this one on top.
+     git fetch deploy "$CI_COMMIT_BRANCH" && git rebase FETCH_HEAD || exit 1
+   done
+   [ -n "$pushed" ]
    ```
 
-   `$env` is `stage` on `development` and `prod` on `master`. The commit carries `[skip ci]`, so
-   it does not build again; ArgoCD sees the new digest and rolls the deployments itself, the
-   gateway's init container migrating first as today. Drop the restricted kubeconfig then: the
-   pipeline no longer touches the cluster.
-3. Rollback (section 6) becomes a revert of that commit, or `kustomize edit set image` to the
-   digest of `<good sha>`, instead of a retag and a restart.
+   Fill in `overlays` for the monorepo's layout, and the commit identity and push user. The
+   token comes from a Woodpecker secret, named in the step and never written into the file:
 
-Until then, what a pod runs is at least recorded: `kubectl -n apps-stage get pods -o
-jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'`
-prints each pod's resolved digest, which must match `crane digest <image>:<sha>` of the commit
-you meant to deploy.
+   ```yaml
+   environment:
+     DEPLOY_PUSH_TOKEN:
+       from_secret: deploy_push_token
+   ```
+
+   Woodpecker checks out the commit as a detached HEAD, so the push names the branch,
+   `HEAD:$CI_COMMIT_BRANCH`; a bare `git push` has no branch to push. `$env` is `stage` on
+   `development` and `prod` on `master`. The commit carries `[skip ci]`, so it does not build
+   again; ArgoCD sees the new digest and rolls the deployments itself, the gateway's init
+   container migrating first as today. If another build's digest commit landed in between, the
+   rebase conflicts on the same lines and the step fails; rerun the pipeline of the commit that
+   should be deployed.
+   Drop the restricted kubeconfig then: the pipeline no longer touches the cluster.
+3. Rollback (section 6) becomes one of:
+   - `kustomize edit set image` to the digest of `<good sha>`, committed with `[skip ci]`;
+   - a revert of the digest commit, whose message must also carry `[skip ci]`
+     (`git revert --no-edit <commit>`, then `git commit --amend` to add it). Without it the
+     revert builds the branch's HEAD, the bad code, and the new digest step pins it again;
+   - a revert of the bad code itself, which builds and pins a good image the normal way.
+
+   Any of these instead of a retag and a restart.
+
+Until then, what a pod runs is at least recorded. This prints each pod's resolved digest, which
+must match `crane digest <image>:<sha>` of the commit you meant to deploy:
+
+```sh
+kubectl -n apps-stage get pods -o \
+  jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'
+```
 
 ## 5. Verify on stage (M14)
 
