@@ -262,10 +262,13 @@ TEST(RequestParser, SecondCopyOfAFieldReadAsSingleValuedIsABadRequest) {
                              "Authorization: Bearer t\r\n"
                              "Cookie: s=1\r\n"
                              "Upload-Offset: 0\r\n"
-                             "Content-Type: application/offset+octet-stream\r\n";
+                             "Content-Type: application/offset+octet-stream\r\n"
+                             "Origin: https://app.example\r\n"
+                             "Sec-Fetch-Site: same-origin\r\n";
     for (const std::string_view repeat :
          {"Host: a", "HOST: b", "authorization: Bearer u", "Cookie: s=2", "Upload-Offset: 5",
-          "Content-type: text/plain"}) {
+          "Content-type: text/plain", "origin: https://evil.example",
+          "Sec-Fetch-Site: cross-site"}) {
         RecordingSink sink;
         RequestParser parser{sink};
         const std::string request = head + std::string{repeat} + "\r\n\r\n";

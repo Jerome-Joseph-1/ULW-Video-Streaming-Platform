@@ -123,6 +123,7 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         {"uploads_in_flight", "gauge"},
         {"admission_rejections_total", "counter"},
         {"rate_limited_total", "counter"},
+        {"cross_site_rejections_total", "counter"},
         {"rate_limit_entries", "gauge"},
         {"rate_limit_evictions_total", "counter"},
         {"bytes_ingested_total", "counter"},

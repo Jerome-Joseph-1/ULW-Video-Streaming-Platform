@@ -69,6 +69,8 @@ TEST_F(ConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->bucket, "ulw-media");
     EXPECT_EQ(config->jwt_audience, "askedin-platform");
     EXPECT_EQ(config->limits.auth_cookie, "auth_token");
+    EXPECT_TRUE(config->limits.allowed_origins.empty());
+    EXPECT_FALSE(config->limits.allow_same_site);
     EXPECT_TRUE(config->dev_jwks_file.empty());
     EXPECT_EQ(config->transport, gateway::Transport::Plain);
 }
@@ -235,6 +237,27 @@ TEST_F(ConfigTest, OverridesAreTakenAsGiven) {
     EXPECT_EQ(config->offload_threads, 8U);
     EXPECT_EQ(config->jwt_audience, "ulw");
     EXPECT_EQ(config->limits.auth_cookie, "auth_token_stage");
+}
+
+// The same list, parsed the same way, as chat's (http::parse_origin_list).
+TEST_F(ConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
+    env["ULW_ALLOWED_ORIGINS"] = "https://app.askedin.com,http://localhost:5173";
+    env["ULW_ALLOW_SAME_SITE"] = "1";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->limits.allowed_origins,
+              (std::vector<std::string>{"https://app.askedin.com", "http://localhost:5173"}));
+    EXPECT_TRUE(config->limits.allow_same_site);
+    for (const char* bad : {"app.askedin.com", "https://app.askedin.com/", "https://App.test",
+                            "https://a.test,,https://b.test", "https://", "*"}) {
+        env["ULW_ALLOWED_ORIGINS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
+    }
+    env.erase("ULW_ALLOWED_ORIGINS");
+    for (const char* bad : {"yes", "true", "2"}) {
+        env["ULW_ALLOW_SAME_SITE"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_ALLOW_SAME_SITE") << bad;
+    }
 }
 
 TEST_F(ConfigTest, TheFilesystemBackendTakesAFileServerForSegmentUrls) {

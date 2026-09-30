@@ -1,5 +1,7 @@
 #include "rate_limit.hpp"
 
+#include "http/ascii.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -9,15 +11,6 @@
 namespace gateway {
 
 namespace {
-
-bool iequals(std::string_view a, std::string_view b) noexcept {
-    return std::ranges::equal(a, b, [](char x, char y) {
-        const auto lower = [](char c) {
-            return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
-        };
-        return lower(x) == lower(y);
-    });
-}
 
 std::string_view trim(std::string_view s) noexcept {
     const std::size_t first = s.find_first_not_of(" \t");
@@ -62,7 +55,7 @@ net::IpAddress forwarded_client(const net::IpAddress& peer,
     // one before appending its own entry, so behind it there is one field; a peer that sends
     // several is read the same way.
     for (const http::HeaderField& field : std::views::reverse(headers)) {
-        if (!iequals(field.name, "x-forwarded-for")) {
+        if (!http::iequals(field.name, "x-forwarded-for")) {
             continue;
         }
         std::string_view rest = field.value;

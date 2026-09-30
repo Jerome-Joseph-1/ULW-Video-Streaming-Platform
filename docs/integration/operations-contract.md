@@ -63,6 +63,8 @@ effective configuration, secrets as `<redacted>`.
 | `JWT_ISSUER` | required | never set | required | Secret by convention |
 | `JWT_AUDIENCE` | default `askedin-platform` | | same | |
 | `ULW_AUTH_COOKIE` | default `auth_token` | | same | `auth_token_stage` on stage |
+| `ULW_ALLOWED_ORIGINS` | comma-separated `scheme://host[:port]`, default none | | same | Pages whose requests may carry the cookie. Gateway: required in `Origin` for a cookie `POST`, `PATCH` or `DELETE`; with none set, the cookie serves only same-origin `GET` and `HEAD`. Chat: required for a cookie socket. Set it to the web app's origin before the cookie is used for uploads ([auth.md](auth.md#cookies-and-other-sites)). |
+| `ULW_ALLOW_SAME_SITE` | `0` (default) or `1` | | | `1` lets pages on a sibling subdomain (`Sec-Fetch-Site: same-site`) send the cookie: set it only when the web app is served from one. |
 | `ULW_LISTEN_PORT` | default 8080 | | default 9101 | |
 | `ULW_TRANSPORT` | `plain` (default) or `tls` | | | `tls` needs `ULW_TLS_CERT_FILE` and `ULW_TLS_KEY_FILE` |
 | `ULW_REACTOR` | `io_uring` (default) or `epoll` | | same | Falls back to epoll when io_uring is unavailable |
@@ -84,7 +86,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
 | `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | |
-| `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET`, `ULW_ALLOWED_ORIGINS` | | | required, required (32+ bytes), optional | Chat has no Askedin overlay yet |
+| `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | Chat has no Askedin overlay yet |
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
 
@@ -183,6 +185,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `rate_limited_total{limit="ip_requests"}` | counter | `429`: a client behind the proxy had `ULW_MAX_CONNECTIONS_PER_IP` unauthenticated requests in flight |
 | `rate_limited_total{limit="user_requests"}` | counter | `429`: a user over `ULW_REQUESTS_PER_USER_PER_MINUTE` |
 | `rate_limited_total{limit="user_bytes"}` | counter | `429`: a `PATCH` over the user's `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` |
+| `cross_site_rejections_total` | counter | `403` before the token was checked: a request with the cookie from a page not in `ULW_ALLOWED_ORIGINS` or another site, or a cookie create without `Content-Type: application/json` ([auth.md](auth.md#cookies-and-other-sites)) |
 | `rate_limit_entries{table="client"}`, `{table="user"}` | gauge | Client addresses and users the limits remember; at most 16384 each (more clients when `ULW_MAX_CONNECTIONS` is higher) |
 | `rate_limit_evictions_total{table="client"}`, `{table="user"}` | counter | Entries forgotten to make room: the least recently seen, never one with a connection or request open. A forgotten user starts over with full allowances. |
 | `bytes_ingested_total` | counter | Chunk body bytes received |

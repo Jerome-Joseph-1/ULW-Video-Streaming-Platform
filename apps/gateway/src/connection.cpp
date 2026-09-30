@@ -3,6 +3,8 @@
 #include "core/util/hls.hpp"
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
+#include "http/ascii.hpp"
+#include "http/origin.hpp"
 #include "infra/auth/token_extractor.hpp"
 
 #include <algorithm>
@@ -87,8 +89,7 @@ std::string_view state_name(core::VideoState s) noexcept {
 
 // A cross-site page can make a browser send a POST that carries the auth cookie, with a body of
 // its choosing, only under a CORS-safelisted Content-Type (text/plain, a form's two types);
-// application/json needs a preflight, which this gateway never answers. A JSON body read from a
-// cookie-authenticated request is therefore only believed under that type.
+// application/json needs a preflight, which this gateway never answers.
 bool declares_json(std::span<const http::HeaderField> headers) noexcept {
     const auto type = http::find_header(headers, "content-type");
     if (!type) {
@@ -98,10 +99,40 @@ bool declares_json(std::span<const http::HeaderField> headers) noexcept {
     while (!media.empty() && (media.back() == ' ' || media.back() == '\t')) {
         media.remove_suffix(1);
     }
-    constexpr std::string_view kJson = "application/json";
-    return std::ranges::equal(media, kJson, [](char a, char b) {
-        return (a >= 'A' && a <= 'Z' ? static_cast<char>(a - 'A' + 'a') : a) == b;
-    });
+    return http::iequals(media, "application/json");
+}
+
+// A browser attaches the cookie to requests any page makes: an <img> or a no-cors fetch from
+// another site reaches the gateway with the user's token. Whether the page is one the gateway
+// trusts it learns from two headers no page can set (Fetch "forbidden" names):
+//   Sec-Fetch-Site  where the page stands. Present, it must be same-origin, none (the user typed
+//                   the URL) or, if the deployment says so, same-site. Browsers before 2023 omit
+//                   it.
+//   Origin          the page itself. Every browser sends it on a POST, PATCH or DELETE, same-origin
+//                   ones included, and on a cross-origin GET; not on a same-origin GET, nor from
+//                   <video> or <img>. When sent it must be allowed; a method that changes anything
+//                   must send it.
+bool cookie_request_trusted(const http::RequestHead& head, std::optional<RouteId> route,
+                            const Limits& limits) noexcept {
+    if (const auto site = http::find_header(head.headers, "sec-fetch-site")) {
+        const bool trusted = *site == "same-origin" || *site == "none" ||
+                             (limits.allow_same_site && *site == "same-site");
+        if (!trusted) {
+            return false;
+        }
+    }
+    const auto origin = http::find_header(head.headers, "origin");
+    if (origin && !http::origin_allowed(limits.allowed_origins, *origin)) {
+        return false;
+    }
+    const bool safe = head.method == http::Method::Get || head.method == http::Method::Head ||
+                      head.method == http::Method::Options;
+    if (!safe && !origin) {
+        return false;
+    }
+    // A second layer for the one route that reads a body as JSON: even from an allowed page,
+    // a body is believed only under the type no other page can send without a preflight.
+    return route != RouteId::CreateUpload || declares_json(head.headers);
 }
 
 } // namespace
@@ -314,10 +345,12 @@ http::HeadVerdict Connection::authenticate_head(const http::RequestHead& head) n
     if (!token) {
         return http::HeadVerdict::reject(Status::Unauthorized);
     }
-    // Authorization wins over the cookie, so without one the token is the cookie, which the
-    // browser attaches to requests other sites make.
-    if (req_.route == RouteId::CreateUpload && !http::find_header(head.headers, "authorization") &&
-        !declares_json(head.headers)) {
+    // Authorization wins over the cookie, so without one the token is the cookie. Checked before
+    // the token is verified: a request some other page made is refused whatever it carries, and
+    // charges none of the user's quota.
+    if (!http::find_header(head.headers, "authorization") &&
+        !cookie_request_trusted(head, req_.route, gw().limits())) {
+        ++gw().counters().cross_site_rejections;
         return http::HeadVerdict::reject(Status::Forbidden);
     }
     req_.token = *token;

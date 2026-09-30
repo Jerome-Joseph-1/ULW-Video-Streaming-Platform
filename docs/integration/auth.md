@@ -36,6 +36,42 @@ A valid token that has made more than 300 requests in a minute on one gateway in
 neither grant nor change an identity. There is no header a client or an in-cluster caller can
 set to act as a user.
 
+## Cookies and other sites
+
+<!-- apps/gateway/src/connection.cpp (cookie_request_trusted, authenticate_head), apps/gateway/src/config.cpp, http/src/origin.cpp, docs/adr/0073-the-cookie-is-believed-only-from-trusted-pages.md -->
+
+A browser attaches the cookie to requests that any page makes, including pages on other sites:
+an `<img>`, a form, a `fetch` in `no-cors` mode. So the gateway accepts a cookie token only
+from pages it trusts, and it tells them apart by two headers that no page can set. A request
+with an `Authorization` header is not checked: other sites cannot make the browser send one.
+
+| Request with the cookie and no `Authorization` | Answer |
+|---|---|
+| `Sec-Fetch-Site` present and not `same-origin` or `none` (or `same-site` with `ULW_ALLOW_SAME_SITE=1`) | `403` |
+| `Origin` present and not listed exactly in `ULW_ALLOWED_ORIGINS` | `403` |
+| `POST`, `PATCH`, `DELETE` or any other method except `GET`, `HEAD` and `OPTIONS`, with no `Origin` | `403` |
+| `POST /api/v1/uploads` without `Content-Type: application/json` (parameters allowed) | `403` |
+
+- Browsers send `Origin` on every `POST`, `PATCH` and `DELETE`, same-origin ones included. The
+  web app's own origin must therefore be in `ULW_ALLOWED_ORIGINS` for it to upload with the
+  cookie. With no list set, the cookie works only for `GET` and `HEAD` from the gateway's own
+  origin.
+- A same-origin `GET`, `<video>` and hls.js send no `Origin`, and playback needs none.
+- Browsers released before 2023 send no `Sec-Fetch-Site`. From them, a cross-site `GET` or
+  `HEAD` with the cookie is still answered.
+- These checks run before the token is verified. A refused request gets `403` even when its
+  token is invalid, and it charges none of the user's quota.
+- Two `Origin` or two `Sec-Fetch-Site` headers are refused by the HTTP parser with `400`.
+
+**CORS.** The gateway sends no CORS headers. If something in front of it adds them (for the
+setup in [videos-and-playback.md](videos-and-playback.md)), it must name each allowed origin
+explicitly. It must never echo the request's `Origin` back in
+`Access-Control-Allow-Origin` together with `Access-Control-Allow-Credentials: true`: that would
+let any site read the user's responses.
+
+These rules took effect as a security fix on an endpoint marked Stable
+([versioning.md](versioning.md), [changelog.md](changelog.md)).
+
 ## What a token must be
 
 <!-- infra/auth/src/jws.cpp, infra/auth/src/jws.hpp, infra/auth/src/jwk.cpp, infra/auth/src/claims.cpp, infra/auth/src/claims.hpp -->
@@ -106,7 +142,7 @@ it before issuing tokens with it.
 | Any verification failure: bad signature, unknown `kid`, expired, wrong `iss` or `aud`, missing or malformed subject | `401` | `401` |
 | The key set cannot be fetched and no cached key fits the token | `503` with `Retry-After: 5` | `503` |
 | Cookie token on a socket whose `Origin` is not allowed (see [chat.md](chat.md)) | n/a | `403` |
-| Cookie token on `POST /api/v1/uploads` without `Content-Type: application/json` (see [uploads.md](uploads.md)) | `403` | n/a |
+| Cookie token from a page not trusted, or a cookie create without `Content-Type: application/json` ([Cookies and other sites](#cookies-and-other-sites)). Checked before the token, so `403` rather than `401` | `403` | n/a |
 
 Every rejection has an empty body (`Content-Length: 0`) and no `WWW-Authenticate` header. The
 gateway's responses carry `X-Request-Id`; quote it when reporting a problem. The reason for a

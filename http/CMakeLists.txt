@@ -1,4 +1,5 @@
 ulw_add_library(http_lib
+    src/origin.cpp
     src/request.cpp
     src/request_parser.cpp
     src/response.cpp
