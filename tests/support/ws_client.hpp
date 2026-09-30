@@ -168,6 +168,10 @@ public:
     // Reads at most `most` bytes of whatever has arrived, without waiting, and keeps them for
     // the calls above: a reader far slower than what it is sent. Returns how many it read.
     std::size_t read_at_most(std::size_t most) {
+        // Already ended: error() keeps reporting what ended it.
+        if (!fd_) {
+            return 0;
+        }
         std::vector<std::byte> buf(most);
         const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), MSG_DONTWAIT);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
