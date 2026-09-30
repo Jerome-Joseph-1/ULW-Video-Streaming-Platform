@@ -1,0 +1,9 @@
+# zizmor's configuration (docs/adr/0072); tools/security/lint-workflows.sh runs it.
+rules:
+  # zizmor 1.30 asks for GitHub's `uses: $/...` form of a same-repository action (July 2026)
+  # in place of `./...`. actionlint 1.7.12, the newest release, rejects that form as an action
+  # reference without a ref, and both linters gate the build. The `./` form stays until
+  # actionlint accepts `$/`; revisit with each actionlint upgrade, and by 2027-03-31 at the
+  # latest.
+  self-repository:
+    disable: true
