@@ -26,14 +26,21 @@ def allowed_roots() -> list[Path]:
     return roots
 
 
+def root_for(resolved: Path) -> Path:
+    """The allowed root holding the resolved path, or the repository when none does."""
+    for root in allowed_roots():
+        if resolved.is_relative_to(root):
+            return root
+    return REPOSITORY
+
+
 def inside(path: str | os.PathLike) -> Path:
     """The resolved path, or exit 2 when it lies outside every allowed root."""
-    resolved = Path(os.path.realpath(path))
-    roots = allowed_roots()
-    for root in roots:
-        if resolved.is_relative_to(root):
-            return resolved
-    prog = os.path.basename(sys.argv[0]) or "pathguard"
-    print(f"{prog}: {os.fspath(path)!r} resolves outside the repository and the temporary "
-          f"directories ({', '.join(map(str, roots))}); refused", file=sys.stderr)
-    sys.exit(2)
+    resolved = Path(path).resolve(strict=False)
+    if not resolved.is_relative_to(root_for(resolved)):
+        prog = os.path.basename(sys.argv[0]) or "pathguard"
+        roots = ", ".join(map(str, allowed_roots()))
+        print(f"{prog}: {os.fspath(path)!r} resolves outside the repository and the temporary "
+              f"directories ({roots}); refused", file=sys.stderr)
+        sys.exit(2)
+    return resolved
