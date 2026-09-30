@@ -280,3 +280,16 @@ finish for up to 30 s, then cuts off what remains. A client whose chunk was cut 
 `HEAD` ([uploads.md](uploads.md#resuming)). Give the pod a termination grace period above 30 s
 (the shipped Deployment uses 45 s): the drain's 30 s, the health probe finishing (it stops when
 the drain begins) and the 2 s log flush fit inside it.
+
+## Core dumps
+
+The gateway, chat server, reaper, worker, live packager and `ulw_migrate` write no core file and
+are not dumpable: each sets `RLIMIT_CORE` to 0 (soft and hard) and `PR_SET_DUMPABLE` to 0 before
+it reads its configuration, and keeps the flag off across its drop from root. Their memory holds
+the database password, the store keys and live bearer tokens. A crash is diagnosed from the log;
+`/proc/<pid>/environ` and ptrace are closed to other processes of the same user, root aside.
+When `kernel.core_pattern` is a pipe (`|/usr/lib/systemd/systemd-coredump ...`, apport), the
+kernel ignores an `RLIMIT_CORE` of 0 and hands the core to the helper anyway; the services are
+still covered, because a process that is not dumpable is not dumped through a pipe either.
+The ffmpeg sandbox sets its own `RLIMIT_CORE` 0 as before, and exec resets the dumpable flag for
+the sandboxed child, whose seccomp filter is unchanged.

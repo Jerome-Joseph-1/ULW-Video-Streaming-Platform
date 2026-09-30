@@ -812,6 +812,20 @@ constexpr bool kAddressSanitizer = __has_feature(address_sanitizer);
 constexpr bool kAddressSanitizer = false;
 #endif
 
+// A crash would otherwise write the database password, the node secret and live bearer tokens
+// to disk.
+TEST_P(ChatClusterTest, ANodeCanWriteNoCoreFile) {
+    const ulw::test::RaisedCoreLimit limit;
+    if (!limit.raised()) {
+        GTEST_SKIP() << "the hard core limit is 0 here; there is nothing to lower";
+    }
+    Node& node = nodes_[0];
+    node.process->signal(SIGTERM);
+    ASSERT_EQ(node.process->wait_exit(seconds(30)), 0) << node.process->output();
+    ASSERT_NO_FATAL_FAILURE(start(node, jwks_));
+    EXPECT_EQ(ulw::test::core_limit_of(node.process->pid()), std::optional<std::string>("0 0"));
+}
+
 // Resident memory, from /proc, the kernel's socket buffers aside. What the node allocates is
 // anonymous; pages of its binary and libraries (file) come in as code first runs and hold
 // nothing for a client.

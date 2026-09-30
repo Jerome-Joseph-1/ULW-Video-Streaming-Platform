@@ -17,6 +17,7 @@
 #include "config.hpp"
 #include "key_fetcher.hpp"
 #include "log.hpp"
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 
 #include <array>
@@ -138,6 +139,10 @@ std::expected<void, std::string> make_verifier(const chat::Config& config, Servi
 
 int run() {
     const auto info = core::build_info();
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        return fail("disable core dumps", errno_text(r.error()));
+    }
     auto config = chat::load_config(read_env);
     if (!config) {
         return fail(config.error().variable, config.error().reason, kBadConfig);
