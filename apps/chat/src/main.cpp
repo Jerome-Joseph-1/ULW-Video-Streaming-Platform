@@ -3,6 +3,7 @@
 #include "infra/auth/jwks_verifier.hpp"
 #include "infra/auth/local_verifier.hpp"
 #include "infra/curl/multi.hpp"
+#include "infra/postgres/message_store.hpp"
 #include "infra/postgres/room_store.hpp"
 #include "net/offload_pool.hpp"
 #include "net/signals.hpp"
@@ -16,6 +17,7 @@
 #include "config.hpp"
 #include "key_fetcher.hpp"
 #include "log.hpp"
+#include "ops/root.hpp"
 
 #include <array>
 #include <cstdio>
@@ -23,6 +25,7 @@
 #include <exception>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <print>
 #include <string>
 #include <system_error>
@@ -82,6 +85,7 @@ struct Services {
     std::unique_ptr<net::IReactor> reactor;
     std::unique_ptr<net::OffloadPool> offload;
     std::unique_ptr<infra::postgres::PgRoomStore> store;
+    std::unique_ptr<infra::postgres::PgMessageStore> messages;
     std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<chat::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
@@ -95,10 +99,12 @@ struct Services {
     Services& operator=(const Services&) = delete;
 
     ~Services() {
-        // A lookup running on the pool points into the store; the store's answers point into
-        // the router; the server's sessions leave their rooms through the router.
+        // A lookup running on the pool points into the stores; the room store's answers point
+        // into the router, and the message store's into the chat service, which the server
+        // holds; the server's sessions leave their rooms through the router.
         offload.reset();
         signals.reset();
+        messages.reset();
         server.reset();
         store.reset();
     }
@@ -143,6 +149,27 @@ int run() {
     if (!limits) {
         return fail("raise RLIMIT_NOFILE", errno_text(limits.error()));
     }
+    // Both bound while still root, if started so: a port under 1024 needs the privilege the
+    // drop gives up. Only the address other nodes dial, never every interface (ADR-0035).
+    auto node_listener = net::listen_on(config->node_address);
+    if (!node_listener) {
+        return fail("listen on the node port", errno_text(node_listener.error()));
+    }
+    auto listener = net::listen_tcp({.port = config->port});
+    if (!listener) {
+        return fail("listen", errno_text(listener.error()));
+    }
+    // Before any thread exists: glibc then has no other thread to carry the change to.
+    const auto step = ops::leave_root(config->run_as_user, config->allow_root);
+    if (!step) {
+        return fail(step.error().source, step.error().reason,
+                    step.error().configuration ? kBadConfig : EXIT_FAILURE);
+    }
+    if (*step == ops::RootStep::StayedRoot) {
+        chat::log_event(R"("level":"warn","msg":"running as root, as ULW_ALLOW_ROOT=1 allows")");
+    } else if (*step == ops::RootStep::Dropped) {
+        chat::log_event(R"("level":"info","msg":"dropped root","user":"{}")", config->run_as_user);
+    }
 
     Services s;
     auto choice = net::make_reactor_with_fallback(config->reactor, s.clock, limits->soft);
@@ -162,6 +189,12 @@ int run() {
         return fail("ULW_DATABASE_URL", "not a connection string this server can use", kBadConfig);
     }
     s.store = std::move(*store);
+    auto messages = infra::postgres::PgMessageStore::create(*s.reactor, *s.offload,
+                                                            {.conninfo = config->database_url});
+    if (!messages) {
+        return fail("ULW_DATABASE_URL", "not a connection string this server can use", kBadConfig);
+    }
+    s.messages = std::move(*messages);
     if (auto r = make_verifier(*config, s); !r) {
         return fail("auth", r.error());
     }
@@ -172,29 +205,28 @@ int run() {
                                                                  .advertise = config->node_address,
                                                                  .secret = config->node_secret},
                                                 *s.room_log);
-    // Only the address other nodes dial, never every interface (ADR-0035).
-    auto node_listener = net::listen_on(config->node_address);
-    if (!node_listener) {
-        return fail("listen on the node port", errno_text(node_listener.error()));
-    }
     if (auto r = s.router->start(std::move(*node_listener)); !r) {
         return fail("register the node listener", errno_text(r.error()));
     }
 
+    chat::Limits chat_limits;
+    if (const std::optional<core::Millis> grace = config->presence_grace) {
+        chat_limits.presence.grace = *grace;
+    }
     s.server = std::make_unique<chat::ChatServer>(
-        chat::Deps{
-            .reactor = *s.reactor, .router = *s.router, .verifier = *s.verifier, .clock = s.clock},
+        chat::Deps{.node = config->node,
+                   .reactor = *s.reactor,
+                   .router = *s.router,
+                   .messages = *s.messages,
+                   .verifier = *s.verifier,
+                   .clock = s.clock},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},
-        chat::Limits{});
+        chat_limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.server);
     if (!signals) {
         return fail("signalfd", errno_text(signals.error()));
     }
     s.signals = std::move(*signals);
-    auto listener = net::listen_tcp({.port = config->port});
-    if (!listener) {
-        return fail("listen", errno_text(listener.error()));
-    }
     if (auto r = s.reactor->listen(std::move(*listener), *s.server); !r) {
         return fail("register listener", errno_text(r.error()));
     }

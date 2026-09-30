@@ -6,6 +6,7 @@
 #include "support/eventually.hpp"
 #include "support/http_test_server.hpp"
 #include "support/reactor_harness.hpp"
+#include "support/reserve_port.hpp"
 #include "support/stalled_resolver.hpp"
 
 #include <sys/socket.h>
@@ -76,15 +77,6 @@ std::string text(std::span<const std::byte> bytes) {
     std::string out(bytes.size(), '\0');
     std::ranges::transform(bytes, out.begin(), [](std::byte b) { return static_cast<char>(b); });
     return out;
-}
-
-std::uint16_t unused_port() {
-    // The listener closes as this returns, so a connect to its port is refused.
-    const auto listener = net::listen_tcp({.port = 0, .loopback_only = true, .reuse_port = false});
-    if (!listener) {
-        return 0;
-    }
-    return net::local_port(listener->get()).value_or(0);
 }
 
 class MultiTest : public ::testing::TestWithParam<net::ReactorKind> {
@@ -169,7 +161,8 @@ TEST_P(MultiTest, SuccessBodyOverTheLimitFailsInsteadOfArrivingTruncated) {
 
 TEST_P(MultiTest, RefusedConnectionIsAConnectFailure) {
     Outcome outcome;
-    const auto transfer = get("http://127.0.0.1:" + std::to_string(unused_port()) + "/", outcome);
+    const auto transfer =
+        get("http://127.0.0.1:" + std::to_string(ulw::test::reserve_port()) + "/", outcome);
     ASSERT_TRUE(settle(outcome));
     ASSERT_FALSE(outcome.result->has_value());
     EXPECT_EQ(outcome.result->error().kind, FailureKind::Connect);

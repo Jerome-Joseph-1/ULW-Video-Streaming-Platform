@@ -9,7 +9,7 @@
 # packager's listener checks), ULW_TESTSOURCE_SEGMENT (keyframe interval in seconds, default 2,
 # which must be the packager's segment length), ULW_TESTSOURCE_FPS (default 30),
 # ULW_TESTSOURCE_SIZE (default 640x360), ULW_TESTSOURCE_KBPS (video bitrate, default 1500),
-# ULW_FFMPEG.
+# ULW_TESTSOURCE_AUDIO (0 for a stream without audio, default 1), ULW_FFMPEG.
 #
 # Two overlays. The top-left strip is 24 cells of 16 px, most significant bit last, black for
 # 0 and white for 1: the low 24 bits of the frame's creation time in milliseconds since the
@@ -23,6 +23,7 @@ segment=${ULW_TESTSOURCE_SEGMENT:-2}
 fps=${ULW_TESTSOURCE_FPS:-30}
 size=${ULW_TESTSOURCE_SIZE:-640x360}
 kbps=${ULW_TESTSOURCE_KBPS:-1500}
+audio=${ULW_TESTSOURCE_AUDIO:-1}
 ffmpeg=${ULW_FFMPEG:-ffmpeg}
 passphrase=${ULW_TESTSOURCE_PASSPHRASE:?ULW_TESTSOURCE_PASSPHRASE is required}
 streamid=${ULW_TESTSOURCE_STREAMID:?ULW_TESTSOURCE_STREAMID is required}
@@ -44,13 +45,15 @@ args=(-nostdin -hide_banner -loglevel warning -nostats
     -re -f lavfi -i "testsrc2=size=${size}:rate=${fps}"
     -re -f lavfi -i "sine=frequency=440:sample_rate=48000"
     -filter_complex "[0:v]${filter}[v]"
-    -map "[v]" -map 1:a
+    -map "[v]"
     -fps_mode cfr -r "${fps}"
     -c:v libx264 -preset ultrafast -tune zerolatency -profile:v main -pix_fmt yuv420p
     -b:v "${kbps}k" -maxrate "${kbps}k" -bufsize "${kbps}k"
     -g "${gop}" -keyint_min "${gop}" -sc_threshold 0
-    -c:a aac -b:a 64k -ac 2
     -muxdelay 0 -muxpreload 0 -flush_packets 1)
+if [[ $audio != 0 ]]; then
+    args+=(-map 1:a -c:a aac -b:a 64k -ac 2)
+fi
 if [[ -n $seconds ]]; then
     args+=(-t "$seconds")
 fi

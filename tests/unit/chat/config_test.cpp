@@ -47,6 +47,21 @@ TEST_F(ChatConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_TRUE(config->allowed_origins.empty());
 }
 
+TEST_F(ChatConfigTest, StayingRootIsAnExplicitChoiceAndTheUserToBecomeOptional) {
+    const auto defaults = load();
+    ASSERT_TRUE(defaults);
+    EXPECT_FALSE(defaults->allow_root);
+    EXPECT_TRUE(defaults->run_as_user.empty());
+    env["ULW_RUN_AS_USER"] = "ulw";
+    env["ULW_ALLOW_ROOT"] = "1";
+    const auto set = load();
+    ASSERT_TRUE(set);
+    EXPECT_EQ(set->run_as_user, "ulw");
+    EXPECT_TRUE(set->allow_root);
+    env["ULW_ALLOW_ROOT"] = "yes";
+    EXPECT_EQ(refused_variable(), "ULW_ALLOW_ROOT");
+}
+
 TEST_F(ChatConfigTest, AnExplicitNodeIdWinsOverTheHostname) {
     env["ULW_NODE_ID"] = "chat-1";
     const auto config = load();
@@ -123,6 +138,16 @@ TEST_F(ChatConfigTest, OutOfRangeAndMalformedValuesAreRefused) {
         } else {
             env.erase(name);
         }
+    }
+}
+
+TEST_F(ChatConfigTest, ThePresenceGraceIsTheServicesUnlessSetInMilliseconds) {
+    EXPECT_FALSE(load()->presence_grace);
+    env["ULW_PRESENCE_GRACE_MS"] = "2500";
+    EXPECT_EQ(load()->presence_grace, core::Millis{2'500});
+    for (const char* bad : {"-1", "2.5", "600001", "10s"}) {
+        env["ULW_PRESENCE_GRACE_MS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_PRESENCE_GRACE_MS") << bad;
     }
 }
 

@@ -79,6 +79,51 @@ elsewhere, change the second `from` in the same files:
 kubectl get pods -A -l app.kubernetes.io/name=prometheus -o custom-columns=NS:.metadata.namespace
 ```
 
+The gateway limits each client address (20 connections, or 20 requests in flight before they
+are authenticated, and 10 new connections a second) and each user (300 requests a minute, 100
+GiB of uploads a day), per replica. Behind Envoy every connection comes from Envoy's pods, so
+the gateway takes the client address from `X-Forwarded-For`, from peers in `ULW_TRUSTED_PROXIES`
+only, and only the entry the `ULW_TRUSTED_PROXY_HOPS` proxies in front appended: with Envoy
+alone, the last one. The overlays set K3s's default pod network, `10.42.0.0/16`, and one hop.
+Confirm Envoy's pods are in that block, and that Envoy sees clients' own addresses rather than
+a node's: its Service must have `externalTrafficPolicy: Local`, or kube-proxy and ServiceLB
+rewrite every client to a node address before Envoy appends it.
+
+```sh
+kubectl get pods -n envoy-gateway-system -l app.kubernetes.io/component=proxy \
+  -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}'    # a /24 inside the cluster's block
+kubectl get svc -n envoy-gateway-system -l app.kubernetes.io/component=proxy \
+  -o custom-columns=NAME:.metadata.name,POLICY:.spec.externalTrafficPolicy   # Local
+```
+
+If the pods are elsewhere, set `ULW_TRUSTED_PROXIES` in both
+`overlays/*/video-gateway/deployment.yaml` to the block that holds them before the first apply.
+With the wrong block every client counts as Envoy: the gateway resets Envoy's connections past
+20 and `connections_rejected_total{reason="ip_connections"}` climbs. With a proxy more or fewer
+in front than `ULW_TRUSTED_PROXY_HOPS` says, clients are counted as the wrong address; step 5.4
+checks which one the gateway sees.
+
+The NetworkPolicy admits Envoy's pods and every pod in the `monitoring` namespace, both from
+inside the trusted block. A monitoring pod can therefore send any `X-Forwarded-For` it likes; all
+that buys it is choosing which address its own unauthenticated requests are counted against,
+and it holds no token to do more.
+
+The other limits are environment variables in the same files (`ULW_MAX_CONNECTIONS_PER_IP`,
+`ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND`, `ULW_REQUESTS_PER_USER_PER_MINUTE`,
+`ULW_UPLOAD_BYTES_PER_USER_PER_DAY`), listed with their ranges in
+`docs/integration/operations-contract.md`; the defaults and their derivations are in
+docs/adr/0052. Each applies per replica, so with two replicas a user may reach twice a per-user
+limit. The byte quota is best effort: it lives in each replica's memory, is forgotten on a
+restart, and a user unseen while 16,384 others were active starts over.
+
+The pods start as user 10001 and have nothing to drop. A process started as root (a
+hand-started binary, a supervisor that stays root) must be given `ULW_RUN_AS_USER`, which it
+becomes after binding its port and before it serves, or it refuses to start with exit 2;
+`ULW_ALLOW_ROOT=1` lets it stay root, for development only. After the drop it reads the TLS
+certificate and key (at start, and again on every SIGHUP), so with `ULW_TRANSPORT=tls` both
+files must be readable by that user.
+
 Check the node has room. Both environments run on k8s-prod's 8 vCPU / 24 GB, and the new
 requests are, per environment, 2 x 500m CPU and 2 x 600Mi for the gateways plus the worker's
 2Gi, and 1 CPU / 10Gi of scratch (stage) or 2 CPU / 30Gi (prod) for the worker: 5 CPU, 6.4Gi of
@@ -164,6 +209,69 @@ CREATE DATABASE ulw_stage OWNER ulw_stage;
 The role owns its database, which gives the migrations their DDL rights (docs/adr/0031).
 `VIDEO_DATABASE_URL` is then `postgresql://ulw_stage:<password>@<host>:5432/ulw_stage`, with the
 password percent-encoded.
+
+Chat message bodies travel as bound parameters, which the server writes to its log whenever it
+logs a statement with its parameters or an error in one (docs/adr/0054). Keep them out, on the
+same database, as the same superuser, whatever statement logging is on now or later:
+
+```sql
+ALTER DATABASE ulw_stage SET log_parameter_max_length = 0;
+ALTER DATABASE ulw_stage SET log_parameter_max_length_on_error = 0;
+-- Only where auto_explain is loaded:
+ALTER DATABASE ulw_stage SET auto_explain.log_parameter_max_length = 0;
+```
+
+`SHOW log_parameter_max_length;` and `SHOW log_parameter_max_length_on_error;` in a new session
+as `ulw_stage` then print `0`.
+
+Chat rooms other than a stream's live chat admit only their listed members (docs/adr/0054).
+Until the product manages the lists, they are rows in `chat_members`, set as the service's role.
+Record the room as closed in the same transaction, before its first member, as the service's own
+statement does, so that it can never be recorded live while it lists anyone:
+
+```sql
+BEGIN;
+INSERT INTO chat_rooms (room_id, kind) VALUES ('<room uuid>', 'group_chat')
+ON CONFLICT (room_id) DO NOTHING;
+INSERT INTO chat_members (room_id, user_id) VALUES ('<room uuid>', '<user sub>')
+ON CONFLICT (room_id, user_id) DO NOTHING;
+COMMIT;
+
+DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user sub>';
+```
+
+A member removed this way keeps receiving the room's messages, and can read its history, until
+their connection closes; their next join is refused. To cut them off at once, also restart the
+chat pods.
+
+A stream's live chat admits anyone, and only the server side opens one: a client's join can
+record a room only as closed, and a join that asks for `"kind":"live"` anywhere else is refused
+with `not_live`. Until the product calls `IMessageStore::record_live`, record a stream's chat
+room live, before anyone joins it, as the service's role:
+
+```sql
+INSERT INTO chat_rooms (room_id, kind)
+SELECT '<room uuid>', 'stream_live_chat'
+ WHERE NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = '<room uuid>')
+   AND NOT EXISTS (SELECT 1 FROM room_state
+                    WHERE room_id = '<room uuid>' AND kind <> 'stream_live_chat')
+ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind
+RETURNING kind;
+```
+
+It must print `stream_live_chat`. Anything else (`group_chat`, `direct_chat`, or no row, when the
+room lists members or was already created closed) means the room is closed, and stays so: a
+recorded kind never changes, so a room that was joined, listed or created before it was opened,
+including every room from before M19 (migration 0006), needs a new room id.
+
+The chat nodes speak a versioned channel to each other (docs/adr/0043), and a node refuses a
+peer of another version. A release that changes the version (M19 moves it from 2 to 3) splits a
+rolling update in two: until the last old pod is gone, old and new nodes cannot reach each
+other, rooms owned across the split are unreachable from the other side, and their joins and
+sends fail as `unavailable` (clients retry them). Roll such a release out with the chat
+Deployment's strategy set to `Recreate` (`spec.strategy: {type: Recreate}`), which stops every
+old pod before starting the new ones: a short full outage instead of a split one. Releases
+that keep the version roll as usual.
 
 ### 3a. Lifecycle rule and upload reaper
 
@@ -282,7 +390,30 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 
    Every run must still end `ok`: a chunk cut off by the drain is resumed from `HEAD`'s offset.
    Stop the loop with Ctrl-C.
-4. Memory under load, in the sandbox only: `make e2e-load` (with `make e2e-up` run first)
+4. The client address the gateway sees. From a machine outside the cluster, note its public
+   address (`curl -s https://ifconfig.me`), turn on debug logging, make a few requests through
+   the route (Envoy spreads them over both replicas), and read both replicas' logs. They must
+   show that address:
+
+   ```sh
+   kubectl -n apps-stage set env deploy/video-gateway ULW_LOG_LEVEL=debug
+   kubectl -n apps-stage rollout status deploy/video-gateway
+   for i in 1 2 3 4; do
+     curl -s -o /dev/null https://<stage host>/api/v1/videos/00000000-0000-7000-8000-000000000000
+   done
+   kubectl -n apps-stage logs -l app.kubernetes.io/name=video-gateway -c gateway --prefix \
+     | grep '"forwarded client"' | tail -4
+   kubectl -n apps-stage set env deploy/video-gateway ULW_LOG_LEVEL-
+   ```
+
+   `kubectl set env` changes the pod template, so each change rolls both pods (uploads in
+   flight resume, as in step 3), and ArgoCD shows the Deployment OutOfSync until the second
+   one undoes the first; with auto-sync on, ArgoCD may revert it before you have read the logs,
+   so pause auto-sync for the check or run it in a quiet window.
+
+   A `10.42.x.x` address, or a node's, means Envoy's Service is not `externalTrafficPolicy:
+   Local` or another proxy stands in front: fix that, or `ULW_TRUSTED_PROXY_HOPS`, before prod.
+5. Memory under load, in the sandbox only: `make e2e-load` (with `make e2e-up` run first)
    installs metrics-server, uploads through the route with 500 uploads in flight, samples
    `kubectl top pods --containers` every 10 s, and fails if a gateway or worker container goes
    over the limits in `overlays/*/video-gateway/deployment.yaml` and `video-worker/deployment.yaml`

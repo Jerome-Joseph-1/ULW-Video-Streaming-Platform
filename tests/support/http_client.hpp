@@ -57,12 +57,17 @@ struct Endpoint {
 };
 
 // A blocking HTTP/1.1 client for tests: one connection, requests in sequence.
+//
+// Every socket wait here has a timeout (SO_RCVTIMEO, SO_SNDTIMEO), and such a wait ends in EINTR
+// when the process is stopped and continued, even with no signal handler installed (signal(7)):
+// a debugger or tracer attaching, SIGSTOP and SIGCONT, a frozen cgroup. That is not the server
+// failing, so an interrupted call is made again; a timeout is EAGAIN and still ends it.
 class HttpClient {
 public:
     explicit HttpClient(Endpoint endpoint) {
         const std::uint16_t port = endpoint.port;
         fd_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
-        timeval tv{.tv_sec = 30, .tv_usec = 0};
+        timeval tv{.tv_sec = kSocketTimeout.count(), .tv_usec = 0};
         ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
         ::setsockopt(fd_.get(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
         const int one = 1;
@@ -73,7 +78,8 @@ public:
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         // connect() takes every address family through the generic sockaddr header.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-        if (::connect(fd_.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+        if (::connect(fd_.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0 &&
+            (errno != EINTR || !finish_connect())) {
             fd_.reset();
         }
         if (fd_ && endpoint.tls != nullptr && !start_tls(endpoint.tls)) {
@@ -95,9 +101,16 @@ public:
     std::size_t send_some(std::span<const std::byte> bytes) {
         if (ssl_) {
             std::size_t n = 0;
-            return SSL_write_ex(ssl_.get(), bytes.data(), bytes.size(), &n) == 1 ? n : 0;
+            return ssl_retrying([&] {
+                       return SSL_write_ex(ssl_.get(), bytes.data(), bytes.size(), &n);
+                   }) == 1
+                       ? n
+                       : 0;
         }
-        const ssize_t n = ::send(fd_.get(), bytes.data(), bytes.size(), MSG_NOSIGNAL);
+        ssize_t n = 0;
+        do {
+            n = ::send(fd_.get(), bytes.data(), bytes.size(), MSG_NOSIGNAL);
+        } while (n < 0 && errno == EINTR);
         return n > 0 ? static_cast<std::size_t>(n) : 0;
     }
 
@@ -170,7 +183,8 @@ public:
         errno = 0;
         if (ssl_) {
             std::size_t n = 0;
-            if (SSL_read_ex(ssl_.get(), b.data(), b.size(), &n) == 1) {
+            if (ssl_retrying([&] { return SSL_read_ex(ssl_.get(), b.data(), b.size(), &n); }) ==
+                1) {
                 return false;
             }
             const int code = SSL_get_error(ssl_.get(), 0);
@@ -178,18 +192,58 @@ public:
             return code == SSL_ERROR_ZERO_RETURN || code == SSL_ERROR_SSL ||
                    (code == SSL_ERROR_SYSCALL && errno != EAGAIN && errno != EWOULDBLOCK);
         }
-        const ssize_t n = ::recv(fd_.get(), b.data(), b.size(), 0);
+        ssize_t n = 0;
+        do {
+            n = ::recv(fd_.get(), b.data(), b.size(), 0);
+        } while (n < 0 && errno == EINTR);
         return n == 0 || (n < 0 && (errno == ECONNRESET || errno == EPIPE));
     }
 
 private:
+    static constexpr std::chrono::seconds kSocketTimeout{30};
+
+    // An interrupted connect() leaves the handshake running in the kernel; it is waited out
+    // with the send timeout that bounded the call, poll() being restarted across a stop.
+    bool finish_connect() {
+        pollfd p{.fd = fd_.get(), .events = POLLOUT, .revents = 0};
+        const auto limit = std::chrono::duration_cast<std::chrono::milliseconds>(kSocketTimeout);
+        if (::poll(&p, 1, static_cast<int>(limit.count())) != 1) {
+            return false;
+        }
+        int err = 0;
+        socklen_t len = sizeof err;
+        return ::getsockopt(fd_.get(), SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0;
+    }
+
+    // Makes an OpenSSL call again while it ends only because its socket wait was interrupted,
+    // which OpenSSL reports as a retry, like a timeout, but with errno EINTR.
+    template <class Call> int ssl_retrying(Call call) {
+        for (;;) {
+            errno = 0;
+            const int rc = call();
+            if (rc == 1 || errno != EINTR) {
+                return rc;
+            }
+            const int code = SSL_get_error(ssl_.get(), rc);
+            if (code != SSL_ERROR_WANT_READ && code != SSL_ERROR_WANT_WRITE) {
+                return rc;
+            }
+        }
+    }
+
     // 0 on end of stream, error or timeout, whether the stream is TLS or not.
     std::size_t receive(std::span<char> into) {
         if (ssl_) {
             std::size_t n = 0;
-            return SSL_read_ex(ssl_.get(), into.data(), into.size(), &n) == 1 ? n : 0;
+            return ssl_retrying(
+                       [&] { return SSL_read_ex(ssl_.get(), into.data(), into.size(), &n); }) == 1
+                       ? n
+                       : 0;
         }
-        const ssize_t n = ::recv(fd_.get(), into.data(), into.size(), 0);
+        ssize_t n = 0;
+        do {
+            n = ::recv(fd_.get(), into.data(), into.size(), 0);
+        } while (n < 0 && errno == EINTR);
         return n > 0 ? static_cast<std::size_t>(n) : 0;
     }
 
@@ -198,7 +252,8 @@ private:
         // closed first would kill the test process instead of failing the write.
         static_cast<void>(std::signal(SIGPIPE, SIG_IGN));
         ssl_.reset(SSL_new(ctx));
-        if (!ssl_ || SSL_set_fd(ssl_.get(), fd_.get()) != 1 || SSL_connect(ssl_.get()) != 1) {
+        if (!ssl_ || SSL_set_fd(ssl_.get(), fd_.get()) != 1 ||
+            ssl_retrying([&] { return SSL_connect(ssl_.get()); }) != 1) {
             return false;
         }
         return SSL_version(ssl_.get()) != TLS1_3_VERSION || await_ticket();

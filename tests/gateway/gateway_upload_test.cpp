@@ -6,9 +6,11 @@
 #include "support/reactor_harness.hpp"
 
 #include <array>
+#include <charconv>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <openssl/evp.h>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -98,16 +100,22 @@ TEST_P(GatewayUpload, HealthAndReadinessNeedNoToken) {
     EXPECT_EQ(c.request("GET", "/api/v1/uploads", "")->status, 405);
 }
 
-TEST_P(GatewayUpload, UploadRoutesRefuseMissingAndBadTokens) {
+TEST_P(GatewayUpload, UploadRoutesRefuseMissingAndBadTokensWithABearerChallenge) {
     const GatewayUnderTest gw(over_transport());
     HttpClient c(gw.endpoint());
     const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
-    EXPECT_EQ(c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)))->status,
-              401);
+    const auto missing = c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)));
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 401);
+    // No credentials, so no error code (RFC 6750 section 3.1).
+    EXPECT_EQ(missing->header("www-authenticate"), "Bearer");
     HttpClient d(gw.endpoint());
-    EXPECT_EQ(
-        d.request("POST", "/api/v1/uploads", "forged", std::as_bytes(std::span(body)))->status,
-        401);
+    const auto forged =
+        d.request("POST", "/api/v1/uploads", "forged", std::as_bytes(std::span(body)));
+    ASSERT_TRUE(forged);
+    EXPECT_EQ(forged->status, 401);
+    EXPECT_EQ(forged->header("www-authenticate"), R"(Bearer error="invalid_token")");
+    EXPECT_EQ(forged->body, "");
 }
 
 TEST_P(GatewayUpload, InboundUserHeadersAreIgnored) {
@@ -210,6 +218,38 @@ TEST_P(GatewayUpload, CommitBeforeEveryByteArrivedIs409) {
     const auto r = c.request("POST", "/api/v1/uploads/" + up->upload_id + "/commit", kAlice);
     EXPECT_EQ(r->status, 409);
     EXPECT_TRUE(gw.jobs().empty());
+}
+
+TEST_P(GatewayUpload, OnlyTheFirstAcceptedPatchMovesTheVideoFromInitToUploading) {
+    const GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(3 * kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    struct Seen {
+        std::string state;
+        std::uint64_t version = 0;
+        bool operator==(const Seen&) const = default;
+    };
+    const auto video = [&]() -> std::optional<Seen> {
+        const auto r = c.request("GET", "/api/v1/videos/" + up->video_id, kAlice);
+        if (!r || r->status != 200) {
+            return std::nullopt;
+        }
+        const auto doc = core::json::parse(r->body);
+        if (!doc) {
+            return std::nullopt;
+        }
+        return Seen{.state = std::string(*doc->find("state")->as_string()),
+                    .version = *doc->find("version")->as_u64()};
+    };
+    EXPECT_EQ(video(), (Seen{"init", 0}));
+
+    ASSERT_EQ(patch(c, up->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+    EXPECT_EQ(video(), (Seen{"uploading", 1}));
+
+    ASSERT_EQ(patch(c, up->upload_id, kMiB, std::span(data).subspan(kMiB, kMiB))->status, 204);
+    EXPECT_EQ(video(), (Seen{"uploading", 1}));
 }
 
 TEST_P(GatewayUpload, ClientKilledMidChunkResumesFromHead) {
@@ -395,6 +435,23 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     const auto ingested = gw.counters().bytes_ingested;
     EXPECT_LE(ingested, (std::uint64_t{256} * 1024) + (std::uint64_t{64} * 1024));
 
+    // The staging bound (4 x 64 KiB) plus the vector's growth slack. The upload is 8 MiB, so a
+    // gateway that queued what the client keeps sending would leave this bound far behind.
+    constexpr std::uint64_t kHeldBound = std::uint64_t{1} << 20;
+    const auto buffered = [&gw] {
+        const std::string m = gw.metrics();
+        constexpr std::string_view kKey = "\nbuffer_bytes_in_use ";
+        const std::size_t at = m.find(kKey);
+        std::uint64_t value = kHeldBound + 1;
+        if (at != std::string::npos) {
+            std::from_chars(m.data() + at + kKey.size(), m.data() + m.size(), value);
+        }
+        return value;
+    };
+    const std::uint64_t held_once_stalled = buffered();
+    EXPECT_GT(held_once_stalled, 0U);
+    EXPECT_LE(held_once_stalled, kHeldBound);
+
     // A store that holds the body up is busy as far as the gateway can tell: a store slow to
     // take a part looks exactly like this. Only the store, or the request backstop, ends it.
     const gateway::Limits limits;
@@ -402,7 +459,13 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     constexpr int kBodyTimeouts = 10;
     for (int i = 0; i < kBodyTimeouts; ++i) {
         gw.advance(limits.body_idle_timeout);
+        // The client keeps pushing into a full socket; nothing more may land in the gateway.
+        if (i == 0 || i == kBodyTimeouts - 1) {
+            EXPECT_EQ(uploader.send_some(std::span(data).subspan(sent, 1024)), 0U);
+        }
+        EXPECT_EQ(buffered(), held_once_stalled);
     }
+    EXPECT_EQ(gw.counters().bytes_ingested, ingested);
     const gateway::Counters held = gw.counters();
     EXPECT_EQ(held.timeouts_body + held.timeouts_body_rate + held.timeouts_backstop, 0U);
     EXPECT_EQ(gw.claims(), 1U);
@@ -455,9 +518,17 @@ TEST_P(GatewayUpload, PipelinedRequestsAreAnsweredInOrder) {
     ASSERT_TRUE(c.send_raw("GET /api/v1/healthz HTTP/1.1\r\nHost: t\r\n\r\n"
                            "GET /api/v1/readyz HTTP/1.1\r\nHost: t\r\n\r\n"
                            "GET /api/v1/nowhere HTTP/1.1\r\nHost: t\r\n\r\n"));
-    EXPECT_EQ(c.read_response()->body, "ok\n");
-    EXPECT_EQ(c.read_response()->body, "ready\n");
-    EXPECT_EQ(c.read_response()->status, 404);
+    // Each checked before use: a response that never came is a failure, not an empty optional
+    // read as a string.
+    const auto health = c.read_response();
+    ASSERT_TRUE(health);
+    EXPECT_EQ(health->body, "ok\n");
+    const auto ready = c.read_response();
+    ASSERT_TRUE(ready);
+    EXPECT_EQ(ready->body, "ready\n");
+    const auto missing = c.read_response();
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 404);
 }
 
 TEST_P(GatewayUpload, BadCreateRequestsAre400) {

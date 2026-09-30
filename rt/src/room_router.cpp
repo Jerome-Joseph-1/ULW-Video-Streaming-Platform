@@ -71,12 +71,26 @@ constexpr std::size_t kRecentKeys = 32'768;
 
 using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq) noexcept>;
 
+RouteError route_error(AppendError error) noexcept {
+    switch (error) {
+    case AppendError::Fenced:
+        return RouteError::Fenced;
+    case AppendError::Conflict:
+        return RouteError::Conflict;
+    case AppendError::Unavailable:
+        return RouteError::Unavailable;
+    }
+    return RouteError::Unavailable;
+}
+
 RouteError route_error(wire::Status status) noexcept {
     switch (status) {
     case wire::Status::Fenced:
         return RouteError::Fenced;
     case wire::Status::Busy:
         return RouteError::Busy;
+    case wire::Status::Conflict:
+        return RouteError::Conflict;
     case wire::Status::Ok:
     case wire::Status::NotOwner:
     case wire::Status::Unavailable:
@@ -91,6 +105,8 @@ wire::Status wire_status(RouteError error) noexcept {
         return wire::Status::Fenced;
     case RouteError::Busy:
         return wire::Status::Busy;
+    case RouteError::Conflict:
+        return wire::Status::Conflict;
     case RouteError::NotJoined:
     case RouteError::Unavailable:
         return wire::Status::Unavailable;
@@ -615,10 +631,15 @@ public:
             done(std::unexpected(RouteError::NotJoined));
             return;
         }
-        // Delivered here already: whoever owns the room now, it was sequenced.
-        if (const auto seq = recent_.find(room, sender, key)) {
+        // Delivered here already: whoever owns the room now, it was sequenced. Under another
+        // body the key is spent, and nothing is sent.
+        if (const auto seen = recent_.find(room, sender, key)) {
+            if (seen->digest != RecentKeys::digest(body)) {
+                done(std::unexpected(RouteError::Conflict));
+                return;
+            }
             ++counters_.duplicates;
-            done(*seq);
+            done(seen->seq);
             return;
         }
         // Owning comes first, whatever the cache says: a write under a generation that has
@@ -861,6 +882,11 @@ private:
         if (const auto o = owned_.find(room); o != owned_.end()) {
             latest = o->second.head;
         }
+        // Taken over, its head is where the store's count stood, not the 0 of a fresh queue:
+        // a member joining now must see what the old owner sequenced as behind it.
+        if (registry_.owned(room)) {
+            latest = std::max(latest, registry_.taken_at(room));
+        }
         if (const auto l = local_.find(room); l != local_.end()) {
             latest = std::max({latest, l->second.delivered, l->second.head});
         }
@@ -1094,6 +1120,9 @@ private:
             }
         }
         const std::uint64_t latest = head(room);
+        // Its members are told the head; a seq at or below it that arrives later (a repeat an
+        // owner that knows the room less well delivers again) is one they have or can fetch.
+        lr.delivered = std::max(lr.delivered, latest);
         for (Joining& j : joined) {
             j.done(latest);
         }
@@ -1174,16 +1203,20 @@ private:
         auto it = owned_.find(room);
         while (it != owned_.end() && !it->second.appending && !it->second.writes.empty()) {
             OwnedRoomState& o = it->second;
-            const auto seq = recent_.find(room, o.writes.front().sender, o.writes.front().key);
-            if (!seq) {
+            const auto seen = recent_.find(room, o.writes.front().sender, o.writes.front().key);
+            if (!seen) {
                 break;
             }
             Write retry = std::move(o.writes.front());
             o.writes.pop_front();
             o.queued_bytes -= cost(retry);
             queued_bytes_ -= cost(retry);
-            ++counters_.duplicates;
-            answer(retry, *seq);
+            if (seen->digest != RecentKeys::digest(retry.body)) {
+                answer(retry, std::unexpected(RouteError::Conflict));
+            } else {
+                ++counters_.duplicates;
+                answer(retry, seen->seq);
+            }
             it = owned_.find(room);
         }
         if (it == owned_.end() || it->second.appending || it->second.writes.empty()) {
@@ -1217,11 +1250,16 @@ private:
         queued_bytes_ -= cost(write);
         o.appending = false;
         if (!seq) {
-            answer(write,
-                   std::unexpected(seq.error() == AppendError::Fenced ? RouteError::Fenced
-                                                                      : RouteError::Unavailable));
+            answer(write, std::unexpected(route_error(seq.error())));
+        } else if (*seq <= std::max(o.head, registry_.taken_at(room))) {
+            // A repeat the store recognised by its key: sequenced before, under this seq, and
+            // delivered then, by this node or by the owner it took the room from (whose count
+            // stood at taken_at). It is remembered for the next repeat, and not delivered again.
+            recent_.remember(room, write.sender, write.key,
+                             {.seq = *seq, .digest = RecentKeys::digest(write.body)}, clock_.now());
+            answer(write, *seq);
         } else {
-            o.head = std::max(o.head, *seq);
+            o.head = *seq;
             fan_out(room, o, *seq, write);
             answer(write, *seq);
         }
@@ -1230,7 +1268,8 @@ private:
 
     void fan_out(const core::RoomId& room, OwnedRoomState& o, std::uint64_t seq,
                  const Write& write) {
-        recent_.remember(room, write.sender, write.key, seq, clock_.now());
+        recent_.remember(room, write.sender, write.key,
+                         {.seq = seq, .digest = RecentKeys::digest(write.body)}, clock_.now());
         deliver_here(Message{.room = room,
                              .seq = seq,
                              .sender = write.sender,
@@ -1401,7 +1440,9 @@ private:
     // seq check drops what a resubscription repeats. Its key is remembered for whichever node
     // owns the room when the sender tries again through this one.
     void on_deliver(const Message& message) {
-        recent_.remember(message.room, message.sender, message.key, message.seq, clock_.now());
+        recent_.remember(message.room, message.sender, message.key,
+                         {.seq = message.seq, .digest = RecentKeys::digest(message.body)},
+                         clock_.now());
         deliver_here(message);
     }
 

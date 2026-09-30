@@ -2,16 +2,14 @@
 // reach ICE connected, and receive each other's RTP for 10 s; then one peer's network vanishes
 // and the other sees it leave, within a measured bound, with its own call intact. And a
 // participant put out of a call stays out, whatever credential it kept.
-import { chromium, expect, test } from '@playwright/test';
-import { spawn } from 'node:child_process';
+import { expect, test } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:http';
 import path from 'node:path';
-import { createInterface } from 'node:readline';
+
+import { launchPeer, outsideChrome, servePage, startSignalling } from './peers.mjs';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
-const harness = process.env.ULW_CALL_HARNESS;
 
 // The acceptance window for media flow.
 const kFlowMs = 10_000;
@@ -22,48 +20,6 @@ const kFlowMs = 10_000;
 // milliseconds on loopback. That is 22.1 s at worst; 25 s leaves about 3 s for a loaded machine.
 // Measured: 20.0 to 22.0 s over thirteen runs.
 const kDropBoundMs = 25_000;
-
-// The call handler's stand-in: one harness process for the whole test, holding the rooms it
-// opened as the handler would, driven one command line at a time.
-function startSignalling() {
-  const child = spawn(harness, [], { stdio: ['pipe', 'pipe', 'inherit'] });
-  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
-  const send = async (...words) => {
-    child.stdin.write(`${words.join(' ')}\n`);
-    const { value, done } = await lines.next();
-    if (done) throw new Error(`harness exited during: ${words.join(' ')}`);
-    if (value.startsWith('error')) throw new Error(`${words.join(' ')}: ${value}`);
-    return value;
-  };
-  return {
-    open: (room, generation) => send('open', room, generation, 2),
-    ticket: async (room, generation, user, device, role = 'member') =>
-      JSON.parse(await send('join', room, generation, user, device, role)),
-    close: (room, generation) => send('close', room, generation),
-    stop: () => child.stdin.end(),
-  };
-}
-
-function servePage() {
-  const files = {
-    '/': ['call.html', 'text/html'],
-    '/livekit-client.umd.js': ['node_modules/livekit-client/dist/livekit-client.umd.js',
-      'text/javascript'],
-  };
-  const server = createServer((req, res) => {
-    const file = files[req.url];
-    if (!file) {
-      res.writeHead(404).end();
-      return;
-    }
-    res.writeHead(200, { 'content-type': file[1] }).end(readFileSync(path.join(here, file[0])));
-  });
-  // Outside mode (run.sh) forwards a fixed port from the outside peer's loopback to this host,
-  // so the page server listens there on every address; otherwise any loopback port will do.
-  const port = Number(process.env.ULW_CALL_PAGE_PORT ?? 0);
-  const address = port === 0 ? '127.0.0.1' : '0.0.0.0';
-  return new Promise((resolve) => server.listen(port, address, () => resolve(server)));
-}
 
 // Every process of one browser: the browser itself and everything it started.
 function processTree(root) {
@@ -84,21 +40,6 @@ function processTree(root) {
     for (const [pid, ppid] of parents) if (ppid === tree[i]) tree.push(pid);
   }
   return tree;
-}
-
-// A browser server rather than a plain launch: only the server exposes its process, which the
-// drop below has to freeze. An outside peer runs through run.sh's wrapper, in another network
-// namespace.
-const outsideChrome = process.env.ULW_CALL_OUTSIDE_CHROME;
-
-async function launchPeer({ outside = false } = {}) {
-  const server = await chromium.launchServer({
-    headless: true,
-    executablePath: outside ? outsideChrome : process.env.ULW_E2E_CHROME,
-    args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
-  });
-  const browser = await chromium.connect(server.wsEndpoint());
-  return { server, browser };
 }
 
 async function received(page) {
@@ -349,45 +290,27 @@ test('a join through a handle whose room went idle opens the room again', async 
   }
 });
 
-// M30's way in: a publish-only ticket, used for WHIP with no SDK at all, reaches a call member.
-test('a publisher ticket ingests over WHIP and members receive it', async () => {
-  const room = randomUUID();
-  const metrics = { room };
-  const pageServer = await servePage();
-  const pageUrl = `http://127.0.0.1:${pageServer.address().port}/`;
-  const browsers = [];
+// A room's kind decides its tickets (ADR-0053): a publisher ticket for a call's generation
+// could bring it back after it was closed to put someone out, since LiveKit's WHIP POST
+// re-creates the room it names; and members never join a stream's room. Publishing into a
+// stream's room is the ingest suite's (ingest.spec.mjs).
+test("a room issues only its kind's tickets", async () => {
+  const call = randomUUID();
+  const stream = randomUUID();
   const sfu = startSignalling();
   try {
-    await sfu.open(room, 1);
-    const pages = [];
-    for (let i = 0; i < 2; ++i) {
-      const { server, browser } = await launchPeer();
-      browsers.push(server);
-      const page = await browser.newPage();
-      await page.goto(pageUrl);
-      pages.push(page);
-    }
-    const [viewer, source] = pages;
-    await viewer.evaluate((t) => window.join(t),
-      await sfu.ticket(room, 1, 'alice', randomUUID()));
-    const publisher = await sfu.ticket(room, 1, 'streamer', randomUUID(), 'publisher');
-    expect(publisher.url).toBe(`${process.env.LIVEKIT_API_URL}/whip/v1`);
-    metrics.whipStatus = await source.evaluate((t) => window.whipPublish(t), publisher);
-    expect(metrics.whipStatus).toBe(201);
-
-    await expect.poll(() => viewer.evaluate(() => window.events
-      .filter((e) => e.type === 'track-subscribed' && e.who.startsWith('streamer/'))
-      .map((e) => e.kind).sort()), { timeout: 20_000 }).toEqual(['audio', 'video']);
-    const before = await received(viewer);
-    await expect.poll(async () => {
-      const now = await received(viewer);
-      return now.audio > before.audio && now.video > before.video;
-    }, { timeout: 10_000 }).toBe(true);
-    await sfu.close(room, 1);
+    await sfu.open(call, 1);
+    await sfu.open(stream, 1, 0, 'stream');
+    await expect(sfu.ticket(call, 1, 'streamer', randomUUID(), 'publisher'))
+      .rejects.toThrow(/refused/);
+    await expect(sfu.ticket(stream, 1, 'alice', randomUUID())).rejects.toThrow(/refused/);
+    expect((await sfu.ticket(call, 1, 'alice', randomUUID())).url)
+      .toBe(process.env.LIVEKIT_CLIENT_URL);
+    expect((await sfu.ticket(stream, 1, 'streamer', randomUUID(), 'publisher')).url)
+      .toBe(`${process.env.LIVEKIT_API_URL}/whip/v1`);
+    await sfu.close(call, 1);
+    await sfu.close(stream, 1);
   } finally {
     sfu.stop();
-    for (const browser of browsers) await browser.close().catch(() => {});
-    pageServer.close();
-    console.log(JSON.stringify(metrics));
   }
 });
