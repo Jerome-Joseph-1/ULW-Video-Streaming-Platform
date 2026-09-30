@@ -119,7 +119,7 @@ messages, and can read its history, until that connection closes; the next `join
 
 ### A stream's live chat
 
-<!-- apps/chat/src/live_chat.cpp, apps/chat/src/envelope.cpp (joined_room_of), apps/chat/src/chat_service.cpp (subscribe, send, delivered, catch_up), migrations/0008_live_chat_room.sql, infra/postgres/src/room_store.cpp (kAppendMessage), docs/adr/0057-live-chat-lossy-and-bounded.md -->
+<!-- apps/chat/src/live_chat.cpp, apps/chat/src/envelope.cpp (joined_room_of), apps/chat/src/chat_service.cpp (subscribe, send, delivered, catch_up), migrations/0008_live_chat_room.sql, infra/postgres/src/room_store.cpp (kAppendMessage), docs/adr/0070-live-chat-lossy-and-bounded.md -->
 
 - **Joining.** `{"type":"join","stream":"show-1"}`, with the stream's name as the live packager
   and the playback URL (`live/<stream>/`) have it: 1 to 64 of `A-Z a-z 0-9 _ -`, else

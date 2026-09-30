@@ -21,6 +21,7 @@ namespace {
 // RFC 6455 section 7.4.1.
 constexpr codec::ws::CloseCode kUnsupportedData{1003};
 constexpr codec::ws::CloseCode kPolicyViolation{1008};
+constexpr codec::ws::CloseCode kMessageTooBig{1009};
 constexpr codec::ws::CloseCode kInternalError{1011};
 
 std::span<const std::byte> bytes_of(std::string_view text) noexcept {
@@ -36,7 +37,7 @@ std::string_view text_of(std::span<const std::byte> bytes) noexcept {
 } // namespace
 
 Session::Session(Handle handle, ChatServer& server)
-    : handle_(handle), server_(server), parser_(*this),
+    : handle_(handle), server_(server), parser_(std::in_place, *this),
       control_tokens_(server.limits().control_burst) {}
 
 core::MonoTime Session::now() const noexcept {
@@ -64,10 +65,14 @@ void Session::on_data(net::BorrowedBytes bytes) noexcept {
     try {
         switch (phase_) {
         case Phase::Request: {
-            const http::ParseResult r = parser_.feed(bytes);
-            if (!r) {
-                respond(http::fixed_response(r.error().status, http::Connection::Close));
+            if (!parser_) {
+                return;
             }
+            const http::ParseResult r = parser_->feed(bytes);
+            if (!r) {
+                parse_failed(r.error());
+            }
+            leave_http();
             return;
         }
         case Phase::Open:
@@ -163,7 +168,9 @@ void Session::authenticate() noexcept {
 }
 
 void Session::on_keys_refreshed() noexcept {
-    if (closed_ || auth_ != Auth::Waiting) {
+    // Past the request phase the request has had its answer, an error or an abandonment, and
+    // must not get a second one.
+    if (closed_ || auth_ != Auth::Waiting || phase_ != Phase::Request) {
         return;
     }
     authenticate();
@@ -172,8 +179,36 @@ void Session::on_keys_refreshed() noexcept {
     }
     try {
         answer_request();
+        leave_http();
     } catch (const std::bad_alloc&) {
         allocation_failed();
+    }
+}
+
+// The parser's one allocation is the buffer for bytes behind a request, and it reports failing to
+// grow it as 503. That can happen in the very feed() that accepted an upgrade: the 101 is out, and
+// only WebSocket may follow it.
+// Not covered by a test: the one way in is std::bad_alloc from growing a std::vector, and injecting
+// that means replacing the global operator new in chat_unit_tests, which the ASan and TSan unit
+// runs replace themselves.
+void Session::parse_failed(const http::ParseError& error) {
+    const bool out_of_memory = error.status == http::Status::ServiceUnavailable;
+    switch (phase_) {
+    case Phase::Request:
+        if (out_of_memory) {
+            ++server_.counters().allocation_failures;
+        }
+        respond(http::fixed_response(error.status, http::Connection::Close));
+        return;
+    case Phase::Open:
+        if (out_of_memory) {
+            allocation_failed();
+            return;
+        }
+        close_with(kMessageTooBig);
+        return;
+    case Phase::Closing:
+        return;
     }
 }
 
@@ -278,6 +313,24 @@ void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
         reactor.start_receiving(conn_);
     }
     arm(server_.limits().ping_interval);
+}
+
+// Once the request is answered the connection never parses HTTP again, so the parser goes, with
+// its buffers. Called after the parser has returned, never from inside one of its callbacks.
+// Whatever the client sent behind an accepted upgrade request is the start of its WebSocket
+// stream, and reaches the decoder before anything read later.
+void Session::leave_http() {
+    if (phase_ == Phase::Request || !parser_) {
+        return;
+    }
+    if (phase_ == Phase::Open) {
+        const std::span<const std::byte> pipelined = parser_->unparsed();
+        if (!pipelined.empty()) {
+            read_frames(pipelined);
+        }
+    }
+    token_ = {};
+    parser_.reset();
 }
 
 // ---- the WebSocket
@@ -603,6 +656,8 @@ void Session::close() noexcept {
     }
     closed_ = true;
     phase_ = Phase::Closing;
+    token_ = {};
+    parser_.reset();
     net::IReactor& reactor = server_.deps().reactor;
     reactor.cancel_timer(timer_);
     if (auth_ == Auth::Waiting) {

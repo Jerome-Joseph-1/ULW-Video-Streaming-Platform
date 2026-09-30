@@ -92,3 +92,75 @@ Binaries from ee075b6, the current soak load (eight clients on TLS, about 30 req
 with slow clients, saturation, store faults and SIGHUPs) and criterion.
 
 Run 3 (full load) in progress; recorded when it ends at about 16:41 UTC.
+
+## Chat
+
+`tests/soak/chat_soak.py` runs three `chat_server` nodes on one Postgres, the M16 cluster, for
+hours under a mixed WebSocket load through all three, samples each node's RSS, open descriptors
+and `/metrics` every minute into `samples.csv`, and judges every node by ADR-0042's method on
+chat's units of work: per command, per delivery and per connection, against ceilings of 3840,
+25,600 and 42.7 a second per node and the pod's 1 GiB. The units, ceilings and why are
+ADR-0053; the load is listed in the script's docstring. It needs Postgres only, and sets
+`ULW_ALLOW_ROOT=1` for what it starts, as the gateway soak does.
+
+```
+docker compose -f deploy/local/compose.yaml up -d --wait postgres
+cmake --preset ci && cmake --build --preset ci --target chat_server ulw_migrate ulw_devtoken
+tests/soak/chat_soak.py --self-test --out /tmp/chat-soak-selftest            # 12 minutes
+tests/soak/chat_soak.py --build build/ci --hours 6 --out /tmp/chat-soak-6h    # the run
+tests/soak/chat_soak.py --rejudge /tmp/chat-soak-6h/samples.csv --clients 64
+```
+
+`ULW_TEST_DATABASE_URL` names the Postgres server (the compose one by default); the run creates
+its own database there and drops it at the end. Client ports are 19101 to 19103 and node ports
+100 above (`--port`). `ULW_REACTOR=epoll` runs the nodes on the fallback reactor.
+
+- **The mix follows the server.** Where the database has member lists (M19), the soak lists
+  its users as members of the rooms they use, as an operator would. At the start it tries
+  `history` and `watch`; a `malformed` answer means that server predates them (M19, M18), and
+  the summary names what it left out. Run the 6 h soak on a `main` that has M18 and M19, so
+  that history pages, stored messages and presence are part of what is judged.
+- **Verdict.** A run passes when every node is flat, every path of the mix ran (the summary's
+  "paths exercised" list: owner takeovers and fenced writes, rate limits, deduplication,
+  resumes, lossy skips, slow consumers, refused upgrades, bad commands, SIGHUP, and history and
+  presence where present), nothing in the soak itself raised, and every node exited 0 on
+  SIGTERM.
+- **Warm-up prefill.** The first 13 minutes also fill io_uring's receive pool and each node's
+  order of kept messages to their fixed sizes, which the load alone reaches only after the
+  warm-up; the nodes run without transparent huge pages. Why, and what a leak still looks like
+  after it, is ADR-0069. The summary's "warm-up prefill ran" says it did.
+- **Self-test.** 12 minutes, 15 s samples, a 3 minute warm-up, owner changes every 150 s and
+  shorter client sessions. It proves the harness: it passes on coverage and clean exits, and
+  prints its flatness without judging by it, since nine minutes cannot resolve bounds set for
+  six hours. `tests/soak/chat_soak_test.py` (ctest `chat_soak_judge`) checks the verdict on
+  synthetic samples.
+- **Storage.** On a server that stores messages (M19) 6 h leave about 1.5 million of them, some
+  0.8 GB of rows with the slow consumers' firehose, until the database is dropped at the end.
+- **Owner changes stall clients.** Each stop holds one node for 8 s: its clients' sends go
+  unanswered, some connects to it time out, and those count as `transport_errors` in the
+  totals, not as failures.
+
+### Runs
+
+No 6 h run yet; it belongs on a `main` with M18 and M19, and is recorded here when it ends.
+
+#### 45 min, 2026-09-29 21:20 to 22:05 UTC, with the prefill
+
+Main at 76a8a17 (without M18 and M19), io_uring, 64 clients; conntrack stayed under 7,500
+entries. Every path of the mix ran, and every node exited 0 on SIGTERM. 30 samples judged, over
+0.48 h after the warm-up. RSS in MiB:
+
+| minute | 0 | 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 44 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chat-1 | 17.7 | 46.3 | 49.2 | 51.3 | 52.0 | 52.4 | 52.3 | 52.4 | 52.7 | 53.0 |
+| chat-2 | 18.7 | 45.6 | 47.7 | 48.6 | 48.1 | 48.8 | 49.0 | 49.6 | 50.0 | 50.1 |
+| chat-3 | 19.0 | 46.0 | 48.0 | 48.6 | 49.1 | 49.2 | 49.5 | 49.5 | 49.5 | 49.5 |
+
+- The receive pool held 17.9 MB from minute 5 on, and each node's kept-message order was at
+  131,072 entries by minute 30 (read from the processes).
+- The slopes' upper ends were +3.2, +5.5 and +2.2 MB an hour, against 13 to 23 before the
+  prefill: 33, 66 and 23 bytes a command against 0.10. **Not shown flat.** Half an hour cannot
+  resolve a bound of about 9 KB an hour, and the heap still rose by 0.5 to 1.4 MB between
+  minutes 15 and 40, most on chat-2; the 6 h run decides whether that settles.
+- An epoll run beside it (30 min, 15 samples judged) was alike: upper ends of +2.1 to +6.7 MB
+  an hour, heap +0.4 to +1.1 MB after the warm-up and slowing.

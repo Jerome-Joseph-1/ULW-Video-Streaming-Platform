@@ -4,6 +4,8 @@
 #include "process.hpp"
 
 #include <chrono>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace infra::ffmpeg {
@@ -56,18 +58,24 @@ std::expected<LiveRemuxResult, std::string> LiveRemuxer::run(const LiveRemuxJob&
                         .cpu = core::Seconds{job.max_duration.count() / kWallPerCpu},
                         .wall = std::chrono::duration_cast<core::Millis>(job.max_duration),
                         .file_size_bytes = live_max_file_bytes(job.max_kbps, job.segment_seconds)};
+    const LiveProbe probe = live_probe(job.max_kbps, job.segment_seconds);
     const auto child = run_sandboxed(
-        sandbox, limits, live_remux_args(config_.ffmpeg, job), clock_, [](std::string_view) {},
-        stop, job.input);
+        sandbox, limits, live_remux_args(config_.ffmpeg, job, probe), clock_,
+        [](std::string_view) {}, stop, job.input);
     if (!child) {
         return std::unexpected(child.error());
     }
-    return LiveRemuxResult{.end = end_of(*child),
+    const LiveEnd end = end_of(*child);
+    return LiveRemuxResult{.end = end,
                            .exit_code = child->exit_code,
                            .signal = child->signal,
                            .wall = child->wall,
                            .peak_rss_kib = child->peak_rss_kib,
-                           .detail = last_line(child->stderr_tail)};
+                           .detail = last_line(child->stderr_tail),
+                           .probe = probe,
+                           // ffmpeg's last line is then only "Error opening output files".
+                           .video_unprobed =
+                               end == LiveEnd::Failed && video_unprobed(child->stderr_tail)};
 }
 
 } // namespace infra::ffmpeg

@@ -17,12 +17,13 @@ enum class RouteId : std::uint8_t {
     GetVideo,
     MasterPlaylist,
     MediaPlaylist,
+    LivePlaylist,
     Healthz,
     Readyz,
     Metrics,
 };
 
-inline constexpr std::array<http::Route<RouteId>, 13> kRoutes{{
+inline constexpr std::array<http::Route<RouteId>, 14> kRoutes{{
     {.method = http::Method::Post, .pattern = "/api/v1/uploads", .id = RouteId::CreateUpload},
     {.method = http::Method::Patch, .pattern = "/api/v1/uploads/{id}", .id = RouteId::AppendChunk},
     {.method = http::Method::Head, .pattern = "/api/v1/uploads/{id}", .id = RouteId::UploadOffset},
@@ -39,6 +40,9 @@ inline constexpr std::array<http::Route<RouteId>, 13> kRoutes{{
     {.method = http::Method::Get,
      .pattern = "/api/v1/videos/{id}/{rendition}/index.m3u8",
      .id = RouteId::MediaPlaylist},
+    {.method = http::Method::Get,
+     .pattern = "/api/v1/live/{id}/index.m3u8",
+     .id = RouteId::LivePlaylist},
     {.method = http::Method::Get, .pattern = "/api/v1/healthz", .id = RouteId::Healthz},
     {.method = http::Method::Get, .pattern = "/api/v1/readyz", .id = RouteId::Readyz},
     // The names a kubelet or a load balancer probes by default, outside the API prefix.
@@ -68,6 +72,8 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "master_playlist";
     case RouteId::MediaPlaylist:
         return "media_playlist";
+    case RouteId::LivePlaylist:
+        return "live_playlist";
     case RouteId::Healthz:
         return "healthz";
     case RouteId::Readyz:
@@ -92,6 +98,7 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::GetVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
+    case RouteId::LivePlaylist:
         return true;
     }
     return true;

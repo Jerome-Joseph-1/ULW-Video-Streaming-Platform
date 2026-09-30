@@ -197,6 +197,11 @@ add_test(NAME cluster_guard
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/cluster/guard_test.py)
 set_tests_properties(cluster_guard PROPERTIES LABELS unit)
 
+# The chat soak's verdict on synthetic samples: tests/soak.
+add_test(NAME chat_soak_judge
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/soak/chat_soak_test.py)
+set_tests_properties(chat_soak_judge PROPERTIES LABELS unit)
+
 ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
 target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
 add_test(NAME ws_fuzz_corpus COMMAND ws_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/ws)
@@ -236,6 +241,7 @@ ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
     gateway/gateway_harness.cpp
     gateway/gateway_limits_test.cpp
+    gateway/gateway_live_test.cpp
     gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
     gateway/gateway_store_stall_test.cpp
@@ -243,6 +249,7 @@ ulw_add_test_suite(gateway_tests unit
     gateway/gateway_upload_test.cpp
     gateway/health_test.cpp
     gateway/key_fetcher_test.cpp
+    gateway/live_manifest_cache_test.cpp
     gateway/rate_limit_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server

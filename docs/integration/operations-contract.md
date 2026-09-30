@@ -124,6 +124,10 @@ uploads (row above) and the upload reaper's sweep collect a copy that died midwa
 prefix needs an expiry of days, not hours: the recording is read back from the segments after
 the stream ends.
 
+At the start of each run the live ffmpeg holds its probe window in memory, a segment length
+and a second at the publisher's bitrate: 7.5 MB for 3 s at the 20 Mbit/s default ceiling and
+about 137 MB at worst, 11 s at 100 Mbit/s (ADR-0057).
+
 ## Probes and metrics
 
 <!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (advance, readiness_body), apps/gateway/src/health.hpp, apps/gateway/src/health.cpp, apps/gateway/src/gateway.cpp (render_metrics) -->
@@ -192,7 +196,13 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `tls_handshakes_in_flight` | gauge | Only with `ULW_TRANSPORT=tls` |
 | `tls_handshake_failures_total` | counter | |
 | `certificate_reloads_total`, `certificate_reload_failures_total` | counter | SIGHUP certificate reloads |
-| `playlist_requests_total{kind="master"}`, `{kind="media"}` | counter | |
+| `playlist_requests_total{kind="master"}`, `{kind="media"}`, `{kind="live"}` | counter | |
+| `live_playlist_cache_hits_total` | counter | Live playlist requests answered from the cache: a fresh copy, or a stream remembered as absent for 1 s (ADR-0059) |
+| `live_playlist_cache_misses_total` | counter | Live playlist requests that found no fresh copy; each started a store read or joined one |
+| `live_playlist_fetches_total` | counter | Live playlists read from the store. At most one per stream per half target duration, whatever the audience |
+| `live_playlist_single_flight_joins_total` | counter | Misses that waited on a store read another request had started instead of starting one |
+| `live_playlist_cache_evictions_total` | counter | Fresh copies dropped for the bounds (512 streams, 4 MiB) |
+| `live_playlist_cache_entries`, `live_playlist_cache_bytes` | gauge | Streams and bytes held |
 | `playlists_rejected_total` | counter | A stored playlist broke a rewriting rule (a worker bug); the viewer got `500` |
 | `presign_failures_total` | counter | A segment URL could not be signed; the viewer got `500` |
 | `view_events_recorded_total`, `view_events_dropped_total`, `view_batches_failed_total` | counter | Master-playlist fetches recorded as views |
@@ -210,7 +220,10 @@ retrying will not fix it); `admission_rejections_total` rising steadily;
 `log_messages_dropped_total` rising; `connections_rejected_total{reason="ip_connections"}` or
 `{reason="ip_rate"}` rising steadily behind Envoy (`ULW_TRUSTED_PROXIES` does not cover Envoy's
 pods, so every client is being counted as Envoy); `rate_limit_evictions_total{table="user"}`
-rising (more active users than the table remembers, so allowances are being reset).
+rising (more active users than the table remembers, so allowances are being reset);
+`live_playlist_fetches_total` rising faster than two per live stream per target duration (the
+cache is not absorbing reloads: check `live_playlist_cache_evictions_total` for a budget too
+small for the streams being watched).
 
 ### Logs
 
@@ -251,7 +264,7 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
 node repeated what it had said there). Chat is a draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
-moved past because they were behind (ADR-0057): a node whose count climbs has viewers that
+moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at
 64 KiB, so chat's pod memory is bounded at about 820 MiB of its 1 GiB, kernel buffers included.
 

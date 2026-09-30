@@ -69,7 +69,7 @@ for pin in "${pins[@]}"; do
         continue
     fi
     echo "fetching $name $version" >&2
-    curl -fsSL --retry 3 -o "$file.part" "$url"
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$file.part" "$url"
     if ! verified "$file.part" "$sum"; then
         rm -f "$file.part"
         echo "$name $version: SHA-256 mismatch, expected $sum" >&2

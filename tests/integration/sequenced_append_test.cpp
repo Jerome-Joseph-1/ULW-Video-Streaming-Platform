@@ -308,7 +308,7 @@ TEST_F(SequencedAppendTest, TheDatabaseNamesAStreamsRoomAsChatServerDoes) {
     EXPECT_FALSE(conn_->exec("SELECT live_chat_room('show/1')"));
 }
 
-// ADR-0057: a stream's chat keeps its newest 1000 messages, the append that stores one deleting
+// ADR-0070: a stream's chat keeps its newest 1000 messages, the append that stores one deleting
 // the one 1000 before it.
 TEST_F(SequencedAppendTest, ALiveChatKeepsItsNewestThousandMessages) {
     const auto room = core::RoomId::parse(scalar(*conn_, "SELECT live_chat_room('show-1')"));

@@ -4,6 +4,7 @@
 #include "core/ports/storage.hpp"
 #include "net/reactor.hpp"
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -76,6 +77,11 @@ public:
     reap_abandoned(core::WallTime older_than) override;
 
     void set_plan(const FaultPlan& plan);
+    // While held, every fetch_small waits inside the store, as a slow read would, so a test
+    // can act while one is in flight. Releasing lets them all finish.
+    void hold_fetches(bool held);
+    // fetch_small calls currently waiting on the hold.
+    [[nodiscard]] std::size_t held_fetches() const;
     // Chunk upload attempts so far, retries included.
     [[nodiscard]] std::size_t chunk_attempts() const;
 
@@ -103,6 +109,11 @@ private:
     net::IReactor& reactor_;
     const core::ports::IClock& clock_;
     const std::uint64_t chunk_size_;
+
+    mutable std::mutex hold_mutex_;
+    std::condition_variable hold_released_;
+    bool hold_ = false;
+    std::size_t held_ = 0;
 
     mutable std::mutex mutex_;
     FaultPlan plan_;

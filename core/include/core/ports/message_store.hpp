@@ -50,7 +50,7 @@ enum class RoomKind : std::uint8_t {
     return false;
 }
 
-// Rooms named by something else, their id derived from its name (ADR-0056, ADR-0057): an RFC
+// Rooms named by something else, their id derived from its name (ADR-0056, ADR-0070): an RFC
 // 9562 version 8 UUID whose first byte says what names it, the rest a digest of the name. Every
 // other room id is version 7 (ADR-0023), so no id is taken for another's.
 enum class NamedRoom : std::uint8_t {

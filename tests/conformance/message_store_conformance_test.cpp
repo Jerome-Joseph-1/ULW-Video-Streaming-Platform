@@ -613,7 +613,7 @@ TEST_P(MessageStoreConformance, AJoinCannotOpenARoomRecordedClosed) {
     EXPECT_EQ(admits(listed, core::ports::RoomKind::GroupChat), Admission::NotMember);
 }
 
-// ADR-0057: the id says which rooms get a live chat's bounds, so only a stream's room is opened.
+// ADR-0070: the id says which rooms get a live chat's bounds, so only a stream's room is opened.
 TEST_P(MessageStoreConformance, RecordLiveRefusesARoomThatIsNotAStreamsChat) {
     // A presence room is named too (version 8), under its own tag.
     std::string presence = unopened_room().to_string();

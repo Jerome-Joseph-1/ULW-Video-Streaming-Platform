@@ -40,7 +40,7 @@ std::optional<core::RoomId> live_chat_room(std::string_view stream) {
         written != digest.size()) {
         return std::nullopt;
     }
-    // The tag of a stream's chat, then the digest's first 15 bytes (ADR-0057).
+    // The tag of a stream's chat, then the digest's first 15 bytes (ADR-0070).
     std::array<unsigned char, core::Uuid::kByteLength> id{};
     id[0] = static_cast<unsigned char>(core::ports::NamedRoom::StreamChat);
     std::ranges::copy(std::span(digest).first<core::Uuid::kByteLength - 1>(),

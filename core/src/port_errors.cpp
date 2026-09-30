@@ -75,6 +75,8 @@ std::string_view to_string(MediaError e) noexcept {
         return "media server refused the request";
     case MediaError::Closed:
         return "media room closed";
+    case MediaError::NotImplemented:
+        return "media operation not implemented";
     }
     return "unknown media error";
 }

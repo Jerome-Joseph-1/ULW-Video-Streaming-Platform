@@ -1,4 +1,4 @@
-# 0057. A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere
+# 0070. A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere
 
 Status: Accepted
 Date: 2026-09-29

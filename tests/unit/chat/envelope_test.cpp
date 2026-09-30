@@ -46,7 +46,7 @@ TEST(Envelope, AJoinNamesItsRoomAndMayAskToResumeAndToBeLossy) {
         ASSERT_TRUE(named) << text;
         EXPECT_EQ(std::get<chat::Join>(*named).kind, kind) << text;
     }
-    // A live chat is joined by its stream (ADR-0057), so a room id cannot ask to be one.
+    // A live chat is joined by its stream (ADR-0070), so a room id cannot ask to be one.
     for (const char* text : {"open", "live"}) {
         EXPECT_EQ(
             chat::parse_command(

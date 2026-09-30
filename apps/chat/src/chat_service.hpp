@@ -76,7 +76,7 @@ struct ServiceLimits {
     // What a lossy client that fell behind is owed at most: the newest this many of the room's
     // messages, and only those the room still keeps. Older ones are dropped, oldest first, and
     // counted. A phone shows 15 to 20 lines of chat; three screens of the newest is what a
-    // viewer who stalled wants to see again, and anything older is history (ADR-0057).
+    // viewer who stalled wants to see again, and anything older is history (ADR-0070).
     std::uint64_t lossy_depth = 64;
     // What a client's resumes may queue on its connection within one linger: half the backlog
     // that closes it, so that resuming cannot itself get the client closed. Messages past it
@@ -90,7 +90,7 @@ struct ServiceLimits {
     std::size_t room_buffer_bytes = std::size_t{256} * 1024;
     std::size_t buffer_bytes = std::size_t{32} << 20U;
     std::size_t buffer_messages = std::size_t{128} * 1024;
-    // A stream's live chat (ADR-0057). Its owner sequences about a thousand messages a second
+    // A stream's live chat (ADR-0070). Its owner sequences about a thousand messages a second
     // (ADR-0035) for every node's senders, and an audience of thousands, each within their own
     // two a second, would ask for far more and have the owner turn everyone away as busy. So
     // each node lets 20 a second into the room, 40 at once: three nodes make 60 a second, more

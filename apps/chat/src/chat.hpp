@@ -27,7 +27,7 @@ struct Limits {
     // connections (32 x ~2.1 MiB) and recent message keys (10 MiB), and the chat service the
     // messages it keeps for resuming clients (32 MiB), presence its rooms and watch lists (11 MiB):
     // about 740 MiB in all. The kernel's send buffers add 80 MiB (socket_send_buffer), 820 MiB
-    // inside a 1 GiB pod (ADR-0036, ADR-0043, ADR-0056, ADR-0057). A connection that is only
+    // inside a 1 GiB pod (ADR-0036, ADR-0043, ADR-0056, ADR-0070). A connection that is only
     // listening costs a few KiB.
     std::size_t max_connections = 1280;
     // Output a client has not read yet. A delivery is at most 64 KiB, so this is four of the
@@ -38,7 +38,7 @@ struct Limits {
     // Autotuned, it grows to tcp_wmem's 4 MiB for a peer that stops reading: 5 GiB over 1280
     // connections, charged to the pod although outside the process. Fixed, they hold 80 MiB at
     // most, and a lossy client's lag is set by the service's limits, not by the kernel's
-    // megabytes ahead of them (ADR-0057). 64 KiB a round trip is 640 KB/s at 100 ms, a
+    // megabytes ahead of them (ADR-0070). 64 KiB a round trip is 640 KB/s at 100 ms, a
     // history page in four round trips.
     int socket_send_buffer = 32 * 1024;
     // ADR-0029: a read of tiny control frames decodes into thousands of Frames. A client sends
@@ -164,6 +164,10 @@ public:
     // /readyz: not draining, and the room plane reaches the database.
     [[nodiscard]] bool ready() const noexcept { return !draining_ && deps_.router.healthy(); }
     [[nodiscard]] std::size_t connections() const noexcept { return sessions_.size(); }
+    // Sessions still holding an HTTP parser: those whose request has not been answered yet.
+    [[nodiscard]] std::size_t http_parsers() const noexcept;
+    // Every session not yet retired, for a test that acts on one from the reactor thread.
+    template <class Fn> void for_each_session(Fn fn) { sessions_.for_each_live(fn); }
     [[nodiscard]] std::string render_metrics() const;
 
     [[nodiscard]] const Deps& deps() const noexcept { return deps_; }

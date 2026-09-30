@@ -121,7 +121,7 @@ RETURNING room_assignments.room_id)sql";
 // A concurrent repeat of the same key that commits first makes this one fail on the key's
 // unique index, whole, seq included; run again, it finds the stored row. A lossy room (a
 // stream's live chat) keeps its newest 1000: storing seq N deletes seq N - 1000, one more
-// primary key write, so a live room's rows stay about 2 MiB however long the stream (ADR-0057).
+// primary key write, so a live room's rows stay about 2 MiB however long the stream (ADR-0070).
 constexpr Sql kAppendMessage = R"sql(
 WITH prior AS (
     SELECT seq, body = $5 AS same

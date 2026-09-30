@@ -273,7 +273,7 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
               "stream_live_chat lossy");
 }
 
-// ADR-0057: the database itself refuses to record any other room live, so an operator's
+// ADR-0070: the database itself refuses to record any other room live, so an operator's
 // statement cannot open a room whose id every node takes for a closed one.
 TEST_F(MessageStoreTest, OnlyAStreamsRoomCanBeRecordedLive) {
     // A version 7 room, and a presence room (version 8, tag 02).

@@ -52,7 +52,8 @@ public:
     // 16 MiB so a dropped connection costs at most that much re-upload.
     static constexpr std::uint64_t kMaxContentLength = std::uint64_t{16} * 1024 * 1024;
     // Bytes that arrive while paused: the rest of the 64 KiB receive buffer that paused us,
-    // plus up to three more receives already in flight when the reactor is told to stop.
+    // plus up to three more receives already in flight when the reactor is told to stop. The
+    // buffer grows to this as bytes are held, so a connection that never has any holds none.
     static constexpr std::size_t kMaxRetainedBytes = std::size_t{4} * 64 * 1024;
 
     explicit RequestParser(IRequestSink& sink);
@@ -68,6 +69,9 @@ public:
     // Only acts after MessageComplete or a rejection that left the connection usable;
     // anywhere else it is ignored, so a stray call can never splice a body into a new request.
     void reset_for_next_request() noexcept;
+    // The bytes fed behind a finished request and not parsed yet. A connection that stops
+    // speaking HTTP after this request (an upgrade) takes them as the start of the new protocol.
+    [[nodiscard]] std::span<const std::byte> unparsed() const noexcept;
 
 private:
     class Impl;

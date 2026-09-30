@@ -153,6 +153,13 @@ Outcome conclude(Publisher& publisher, const StopRequests& stops, Verdict verdic
         log("remuxer: {}", result.error());
         failed = true;
     } else {
+        if (result->video_unprobed) {
+            // ffmpeg's own last line says only that it could not open its output.
+            log("ffmpeg found no video codec parameters in the first {} ms ({} bytes) of the "
+                "stream, which must hold a keyframe: the publisher is to send one every "
+                "segment length",
+                result->probe.window.count(), result->probe.bytes);
+        }
         log("{}, ffmpeg exited {} after {} ms, peak {} KiB{}{}", describe(result->end),
             result->signal != 0 ? 128 + result->signal : result->exit_code, result->wall.count(),
             result->peak_rss_kib, result->detail.empty() ? "" : ": ", result->detail);

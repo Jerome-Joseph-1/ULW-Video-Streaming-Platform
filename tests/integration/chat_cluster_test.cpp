@@ -665,7 +665,7 @@ TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedL
     ASSERT_TRUE(alice && bob);
     EXPECT_EQ(join_answer(*alice, nobody), "not_member");
     // Its first join recorded it as a group chat. A room id cannot ask to be a live chat (only a
-    // stream's room is one, ADR-0057), and the database refuses to record it as one.
+    // stream's room is one, ADR-0070), and the database refuses to record it as one.
     EXPECT_EQ(join_answer(*bob, nobody, R"(,"kind":"live")"), "malformed");
     auto conn = db_->session();
     EXPECT_FALSE(
@@ -761,7 +761,7 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     // silly window avoidance), and the next read empties it, which does: the window opens at
     // least every 180 messages, which take less than 20 s even under a sanitizer. The kernel's own
     // count of a shut window (TCP_USER_TIMEOUT) ended such viewers, and is off on client
-    // connections (ADR-0057).
+    // connections (ADR-0070).
     std::vector<std::unique_ptr<Client>> senders;
     std::vector<std::unique_ptr<Client>> viewers;
     std::string live;

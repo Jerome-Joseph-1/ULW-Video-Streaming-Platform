@@ -77,7 +77,7 @@ SELECT coalesce((SELECT kind FROM recorded), (SELECT kind FROM created)),
        EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
 
 // Records the room as open unless its id is not a stream's (version 8, tagged 0x01 in its first
-// byte, ADR-0057), it lists
+// byte, ADR-0070), it lists
 // members, or the room plane already created it as another kind, and answers with the kind it is
 // recorded as: 'stream_live_chat' when it is open, another kind or no row when it is not.
 // room_state's kind and delivery are copied when the room is created and never change, so opening a
