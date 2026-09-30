@@ -18,8 +18,14 @@
 #include "support/ws_client.hpp"
 #include "unit/rt/memory_room_store.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 #include <atomic>
 #include <cerrno>
+#include <filesystem>
 #include <format>
 #include <future>
 #include <gtest/gtest.h>
@@ -614,6 +620,46 @@ TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosed
     EXPECT_EQ(metric(node_->port(), "stalled_readers_total"), 1U);
     std::cout << "the stopped viewer was closed after " << sent
               << " messages; the slow one got all it was owed up to seq " << last << "\n";
+}
+
+// The node's own ends of its accepted client connections: sockets in this process whose local
+// port is the node's client port and which have a peer. The listener has none.
+std::vector<int> accepted_ends(std::uint16_t port) {
+    std::vector<int> out;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+        const auto fd = core::parse_integer<int>(entry.path().filename().string());
+        if (!fd) {
+            continue;
+        }
+        sockaddr_in local{};
+        sockaddr_in peer{};
+        socklen_t local_len = sizeof local;
+        socklen_t peer_len = sizeof peer;
+        // Both take every address family through the generic sockaddr header.
+        // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+        if (::getsockname(*fd, reinterpret_cast<sockaddr*>(&local), &local_len) == 0 &&
+            local.sin_family == AF_INET && ntohs(local.sin_port) == port &&
+            ::getpeername(*fd, reinterpret_cast<sockaddr*>(&peer), &peer_len) == 0) {
+            out.push_back(*fd);
+        }
+        // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+    }
+    return out;
+}
+
+// Linux counts a shut receive window against TCP_USER_TIMEOUT from the first window probe, so a
+// viewer that reads, but frees its window a little at a time, would be ended by the kernel as if
+// it had vanished. The session bounds a stall itself (the test above); the kernel's timer stays
+// off on a client's connection.
+TEST_P(ChatSessionTest, AClientConnectionIsNotEndedByTheKernelsUserTimeout) {
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    const auto ends = accepted_ends(node_->port());
+    ASSERT_EQ(ends.size(), 1U);
+    int timeout = -1;
+    socklen_t len = sizeof timeout;
+    ASSERT_EQ(::getsockopt(ends.front(), IPPROTO_TCP, TCP_USER_TIMEOUT, &timeout, &len), 0);
+    EXPECT_EQ(timeout, 0);
 }
 
 TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {
