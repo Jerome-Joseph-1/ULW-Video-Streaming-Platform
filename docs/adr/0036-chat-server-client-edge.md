@@ -27,6 +27,12 @@ sequenced messages, and M17 owns the rest (acks, resume, rate limits).
     output and 128 KiB of sends not yet answered (each counted as its body plus 256 bytes,
     wherever it waits: an owner's queue or the node channel), 448 KiB in all; 1280
     connections are 560 MiB;
+  - until its one HTTP request is answered, a client connection also holds the request
+    parser: about 28 KiB of fixed buffers for the head, plus the bytes that arrive behind it,
+    at most 256 KiB, in a buffer grown only as they arrive. The session frees the parser as it
+    answers (bytes behind an accepted upgrade go to the frame decoder first), so an open socket
+    holds none of it, and the connections still in their handshake are bounded by the
+    handshake timeout;
   - an owner's queues of writes awaiting their sequence numbers hold at most 1 MiB per room and
     64 MiB across rooms, again body plus 256 bytes a write; past either, the write is `busy`;
   - at most 32 node-channel connections, each holding one frame (64 KiB) being decoded, 1 MiB
@@ -64,6 +70,32 @@ sequenced messages, and M17 owns the rest (acks, resume, rate limits).
   node's address is published and its owner heartbeat reaches the database) and `/metrics`.
 - **Transport.** Plain TCP: Envoy terminates TLS in front of chat as it does for the gateway
   (ADR-0001). `TlsTransport` can be put in front of the sessions without changing them.
+
+## Measurement: the parser kept after the upgrade
+
+At first every parser reserved its 256 KiB up front and each session kept its parser for the
+life of the socket. Each reservation was written only a few hundred bytes, glibc's dynamic mmap
+threshold (raised past 256 KiB once one such block is freed) put it in the brk heap, and the
+heap's extent followed the peak number of
+concurrent sessions x 256 KiB. The reservations freed as sessions ended left untouched space in
+the heap that later allocations faulted in page by page, so resident memory crept up for hours
+(8 to 12 MB of never-touched heap per node on the chat soak), and 1280 connections reserved 320
+MiB of address space outside the budget above. With the mmap threshold pinned at 128 KiB, so that
+each reservation was mapped and unmapped on its own, the heap stayed flat after the warm-up,
+which confirmed the mechanism.
+
+Freeing the parser at the answer, with its buffer grown only as bytes are held, was measured on
+a 15-minute chat soak (`--hours 0.25`) run twice side by side, three nodes each, reading `[heap]` in
+`/proc/<pid>/smaps`:
+
+| | heap extent, minute 5 | minute 15 | heap Rss, minute 15 | extent never touched, minute 15 |
+|---|---|---|---|---|
+| parser kept, 256 KiB reserved | 25.3 to 26.5 MB | 27.5 to 30.7 MB | 16.6 to 21.2 MB | 9.5 to 11.9 MB |
+| parser freed at the answer | 12.5 to 12.9 MB | 14.5 to 17.2 MB | 14.3 to 17.0 MB | 0.2 to 0.3 MB |
+
+The extent halves and the untouched part the creep came from is gone. Both still grow between
+minutes 5 and 15, which the soak counts as warm-up (its pools fill then), so flatness after it is
+for a full soak to show.
 
 ## Consequences
 
