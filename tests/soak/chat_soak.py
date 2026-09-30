@@ -432,6 +432,7 @@ class Stack:
                    "ULW_NODE_SECRET": self.secret,
                    "ULW_DATABASE_URL": self.database_url,
                    "ULW_DEV_JWKS_FILE": str(self.out / "jwks.json"),
+                   "ULW_DEV_MODE": "1",
                    "JWT_ISSUER": ISSUER,
                    # The soak may run as root on a development host.
                    "ULW_ALLOW_ROOT": "1"}

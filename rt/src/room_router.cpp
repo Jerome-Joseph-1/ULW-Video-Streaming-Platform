@@ -71,6 +71,50 @@ constexpr std::size_t kRecentKeys = 32'768;
 
 using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq) noexcept>;
 
+// Whether a node-channel connection's output is getting through to the other node (ADR-0071).
+// It stands in for the kernel's user timeout, which Linux counts from the first probe of a shut
+// window and restarts only when the window opens wide enough for the whole unsent head of the
+// queue: it ended a busy node that kept reading, a little at a time, as if it had vanished.
+// Here any acknowledgement counts, however little it lets through.
+class StallWatch {
+public:
+    // Clears the kernel's user timeout where TCP_INFO can stand in for it. Where it cannot,
+    // the connection keeps the timeout and is never found stalled here.
+    void take_over(int fd) noexcept {
+        active_ = net::send_progress(fd).has_value() && net::clear_user_timeout(fd).has_value();
+    }
+
+    // True once output has waited `limit` for the other node with none of it acknowledged.
+    // `queued` is what the reactor still holds for the connection; the kernel says the rest.
+    [[nodiscard]] bool stalled(int fd, std::size_t queued, core::MonoTime now,
+                               core::Millis limit) noexcept {
+        if (!active_) {
+            return false;
+        }
+        const auto progress = net::send_progress(fd);
+        if (!progress) {
+            return false;
+        }
+        if (queued == 0 && !progress->waiting) {
+            watching_ = false;
+            return false;
+        }
+        if (!watching_ || progress->acked != acked_) {
+            watching_ = true;
+            acked_ = progress->acked;
+            since_ = now;
+            return false;
+        }
+        return now - since_ >= limit;
+    }
+
+private:
+    core::MonoTime since_;
+    std::uint64_t acked_ = 0;
+    bool active_ = false;
+    bool watching_ = false;
+};
+
 RouteError route_error(AppendError error) noexcept {
     switch (error) {
     case AppendError::Fenced:
@@ -134,6 +178,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
         void start(net::ConnId conn) noexcept {
             conn_ = conn;
             accepted_ = router_.clock_.now();
+            stall_.take_over(conn_.fd);
             router_.reactor_.start_receiving(conn_);
         }
 
@@ -146,12 +191,29 @@ class RoomRouter::Impl final : public IRegistryObserver,
             }
             router_.reactor_.send(conn_, frame);
             if (router_.reactor_.pending_send_bytes(conn_) > kMaxPeerBacklog) {
-                ++router_.counters_.slow_peers;
-                close();
+                cut_off();
             }
         }
 
         [[nodiscard]] bool authenticated() const noexcept { return state_ == State::Authenticated; }
+
+        // Output has waited `limit` for the dialer, which acknowledged none of it.
+        [[nodiscard]] bool stalled(core::MonoTime now, core::Millis limit) noexcept {
+            return !closed_ && state_ == State::Authenticated &&
+                   stall_.stalled(conn_.fd, router_.reactor_.pending_send_bytes(conn_), now, limit);
+        }
+
+        // Closes a dialer that stopped reading, with a reset: the kernel drops what it still
+        // holds for it at once, instead of keeping it for a peer that no longer reads.
+        void cut_off() noexcept {
+            if (closed_) {
+                return;
+            }
+            ++router_.counters_.slow_peers;
+            net::abort_on_close(conn_.fd);
+            close();
+        }
+
         [[nodiscard]] core::MonoTime accepted() const noexcept { return accepted_; }
 
         [[nodiscard]] bool handshake_overdue(core::MonoTime now) const noexcept {
@@ -282,6 +344,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
         std::optional<core::NodeId> dialer_;
         wire::Nonce dialer_nonce_{};
         wire::Nonce own_nonce_{};
+        StallWatch stall_;
         bool closed_ = false;
     };
 
@@ -330,8 +393,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
             if (state_ == State::Open) {
                 router_.reactor_.send(conn_, frame);
                 if (router_.reactor_.pending_send_bytes(conn_) > kMaxPeerBacklog) {
-                    ++router_.counters_.slow_peers;
-                    broken_ = true;
+                    cut_off();
                 }
                 return;
             }
@@ -368,9 +430,26 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 connecting_.reset();
             }
             if (state_ == State::Handshaking || state_ == State::Open) {
+                if (reset_) {
+                    net::abort_on_close(conn_.fd);
+                }
                 router_.reactor_.begin_close(conn_);
             }
             state_ = State::Closed;
+        }
+
+        // Output has waited `limit` for the owner, which acknowledged none of it.
+        [[nodiscard]] bool stalled(core::MonoTime now, core::Millis limit) noexcept {
+            return state_ == State::Open && !broken_ &&
+                   stall_.stalled(conn_.fd, router_.reactor_.pending_send_bytes(conn_), now, limit);
+        }
+
+        // Marks an owner that stopped reading: the tick takes the link down, and closes it
+        // with a reset, which drops what the kernel still holds for it at once.
+        void cut_off() noexcept {
+            ++router_.counters_.slow_peers;
+            broken_ = true;
+            reset_ = true;
         }
 
         // Broken by a send, or still not open past the handshake timeout.
@@ -393,6 +472,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 return;
             }
             [[maybe_unused]] const auto tuned = net::tune_connection(connecting_.get());
+            stall_.take_over(connecting_.get());
             auto id = router_.reactor_.attach(std::move(connecting_), *this);
             if (!id) {
                 state_ = State::Closed;
@@ -538,6 +618,8 @@ class RoomRouter::Impl final : public IRegistryObserver,
         std::uint64_t id_;
         core::MonoTime created_;
         bool broken_ = false;
+        // Closed with a reset: the owner stopped reading.
+        bool reset_ = false;
         wire::Nonce own_nonce_{};
         State state_ = State::Locating;
         os::UniqueFd connecting_;
@@ -546,6 +628,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
         std::vector<std::byte> unsent_;
         std::vector<Pending> pending_;
         wire::Decoder decoder_;
+        StallWatch stall_;
     };
 
 public:
@@ -899,13 +982,18 @@ private:
 
     void tick() {
         const core::MonoTime now = clock_.now();
-        inbound_.for_each_live([now](Inbound& in) {
+        inbound_.for_each_live([&](Inbound& in) {
             if (in.handshake_overdue(now)) {
                 in.close();
+            } else if (in.stalled(now, config_.peer_stall_timeout)) {
+                in.cut_off();
             }
         });
         std::vector<Outbound*> stuck;
         for (auto& [node, link] : outbound_) {
+            if (link->stalled(now, config_.peer_stall_timeout)) {
+                link->cut_off();
+            }
             if (link->due_down(now)) {
                 stuck.push_back(link.get());
             }

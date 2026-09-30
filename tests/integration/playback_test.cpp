@@ -188,6 +188,7 @@ protected:
             "ULW_S3_SECRET_ACCESS_KEY=" + env_or("ULW_MINIO_SECRET_KEY", "ulw-dev-secret"),
             "ULW_DATABASE_URL=" + db_->conninfo(),
             "ULW_DEV_JWKS_FILE=" + jwks.string(),
+            "ULW_DEV_MODE=1",
             "JWT_ISSUER=" + std::string(kIssuer)};
         // Every request here is a connection of its own from 127.0.0.1, several a second.
         env.emplace_back("ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND=1000");
