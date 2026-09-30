@@ -3,6 +3,7 @@
 #include "codec/ws/encoder.hpp"
 #include "http/response.hpp"
 #include "infra/auth/token_extractor.hpp"
+#include "net/socket.hpp"
 
 #include <algorithm>
 #include <array>
@@ -50,6 +51,7 @@ void Session::arm(core::Millis delay) noexcept {
     net::IReactor& reactor = server_.deps().reactor;
     reactor.cancel_timer(timer_);
     timer_ = reactor.arm_timer(delay, *this);
+    timer_due_ = now() + delay;
 }
 
 // ---- the request
@@ -412,6 +414,7 @@ void Session::send_frame(const codec::ws::Frame& frame) {
     }
     net::IReactor& reactor = server_.deps().reactor;
     reactor.send(conn_, out);
+    watch_output();
     if (reactor.pending_send_bytes(conn_) > server_.limits().max_backlog) {
         ++server_.counters().slow_consumers;
         abandon();
@@ -436,6 +439,45 @@ void Session::allocation_failed() noexcept {
     abandon();
 }
 
+// Output now waits for the client: from here it has stall_timeout to acknowledge some of it.
+// Looking costs a system call, so it is done on the timer, not for every frame.
+void Session::watch_output() noexcept {
+    if (watching_) {
+        return;
+    }
+    watching_ = true;
+    progressed_ = now();
+    const core::Millis check = server_.limits().stall_check;
+    if (timer_due_ - progressed_ > check) {
+        arm(check);
+    }
+}
+
+// Whether the client has acknowledged nothing of its waiting output for stall_timeout. Without
+// TCP_INFO to tell, it is never counted as stalled; the idle timeout still ends a client that
+// answers nothing.
+bool Session::stalled(core::MonoTime at) noexcept {
+    if (!watching_) {
+        return false;
+    }
+    const auto progress = net::send_progress(conn_.fd);
+    if (!progress) {
+        watching_ = unsent_bytes() != 0;
+        return false;
+    }
+    if (!progress->waiting && unsent_bytes() == 0) {
+        watching_ = false;
+        acked_ = progress->acked;
+        return false;
+    }
+    if (progress->acked != acked_) {
+        acked_ = progress->acked;
+        progressed_ = at;
+        return false;
+    }
+    return at - progressed_ >= server_.limits().stall_timeout;
+}
+
 // Closes on the next iteration. This may be running inside the router's fan-out, which must
 // not see its members change under it; until then nothing more is sent or delivered.
 void Session::abandon() noexcept {
@@ -448,34 +490,52 @@ void Session::abandon() noexcept {
 void Session::on_timeout() noexcept {
     timer_ = {};
     const Limits& limits = server_.limits();
-    const auto quiet = std::chrono::duration_cast<core::Millis>(now() - last_heard_);
+    const core::MonoTime at = now();
+    const auto quiet = std::chrono::duration_cast<core::Millis>(at - last_heard_);
     // Past a handshake that took too long, a lingering close, or an abandoned connection.
     switch (phase_) {
     case Phase::Request:
     case Phase::Closing:
         close();
         return;
-    case Phase::Open:
+    case Phase::Open: {
         if (quiet >= limits.idle_timeout) {
             close();
             return;
         }
-        if (quiet < limits.ping_interval) {
-            arm(limits.ping_interval - quiet);
-            return;
-        }
-        try {
-            send_frame({.opcode = codec::ws::Opcode::Ping,
-                        .fin = true,
-                        .payload = {},
-                        .close_code = codec::ws::CloseCode::NoStatus});
-        } catch (const std::bad_alloc&) {
-            allocation_failed();
+        if (stalled(at)) {
+            ++server_.counters().stalled_readers;
+            close();
             return;
         }
         // The next check is the idle deadline itself if it comes before another ping would.
-        arm(std::min(limits.ping_interval, limits.idle_timeout - quiet));
+        core::MonoTime next = last_heard_ + limits.idle_timeout;
+        if (quiet < limits.ping_interval) {
+            next = std::min(next, last_heard_ + limits.ping_interval);
+        } else {
+            if (at >= ping_due_) {
+                try {
+                    send_frame({.opcode = codec::ws::Opcode::Ping,
+                                .fin = true,
+                                .payload = {},
+                                .close_code = codec::ws::CloseCode::NoStatus});
+                } catch (const std::bad_alloc&) {
+                    allocation_failed();
+                    return;
+                }
+                if (phase_ != Phase::Open) {
+                    return;
+                }
+                ping_due_ = at + limits.ping_interval;
+            }
+            next = std::min(next, ping_due_);
+        }
+        if (watching_) {
+            next = std::min(next, at + limits.stall_check);
+        }
+        arm(std::chrono::duration_cast<core::Millis>(next - at));
         return;
+    }
     }
 }
 

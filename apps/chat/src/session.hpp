@@ -83,6 +83,8 @@ private:
     void send_frame(const codec::ws::Frame& frame);
     void close_with(codec::ws::CloseCode code);
     void abandon() noexcept;
+    void watch_output() noexcept;
+    [[nodiscard]] bool stalled(core::MonoTime at) noexcept;
     void arm(core::Millis delay) noexcept;
     [[nodiscard]] core::MonoTime now() const noexcept;
 
@@ -90,8 +92,15 @@ private:
     ChatServer& server_;
     net::ConnId conn_;
     net::TimerId timer_;
+    core::MonoTime timer_due_;
     Phase phase_ = Phase::Request;
     core::MonoTime last_heard_;
+    core::MonoTime ping_due_;
+    // While output waits for the client: how much of it the client had acknowledged when last
+    // looked at, and when that last grew (Limits::stall_timeout).
+    bool watching_ = false;
+    std::uint64_t acked_ = 0;
+    core::MonoTime progressed_;
 
     http::RequestParser parser_;
     Route route_ = Route::NotFound;

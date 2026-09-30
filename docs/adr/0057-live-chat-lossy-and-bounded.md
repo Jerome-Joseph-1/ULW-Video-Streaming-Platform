@@ -53,6 +53,13 @@ Whether live chat is stored (ADR-0054):
 | Store every message, as for other rooms | One path | Rejected: a popular stream writes tens of messages a second for hours, kept forever |
 | Store every message, keeping the room's newest 1000 | Late viewers page back through the last few minutes; storage per live room is bounded | Accepted |
 
+How a viewer that stopped reading is told from one that reads slowly:
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| `TCP_USER_TIMEOUT` (20 s, `net::tune_connection`): the kernel ends a connection whose receive window stays shut that long | Already set on every connection; nothing to run | Rejected: Linux restarts its count of a shut window only when the window opens wide enough for all of the next segment queued. A viewer that keeps reading, but frees its window a little at a time, is ended 20 s after it first fell behind. With the timeout at 3 s on loopback, a reader that emptied its 64 KiB receive buffer every second was ended 3.3 s in, having read four buffers of it. Under a sanitizer, the M32 test's slow viewers were ended this way: each saw a reset, and its node had closed nothing |
+| The service's own count: nothing acknowledged for 20 s while output waits | Counts exactly what tells the two apart, whatever window the peer opens | Accepted |
+
 How senders are limited in a room of thousands:
 
 | Option | Why it was tempting | Verdict |
@@ -112,6 +119,16 @@ How senders are limited in a room of thousands:
   kernel instead of 4 MiB: 80 MiB over 1280 connections instead of 5 GiB. 64 KiB a round trip is
   640 KB/s at 100 ms, far above chat's traffic, and a history page's 256 KiB in four round
   trips.
+- **Stalled connections.** A client connection whose output waits for it (queued by the
+  service, or sent or queued in the kernel) and which acknowledges none of it for 20 s is
+  closed and counted in `stalled_readers_total` (`Limits::stall_timeout`). The session looks
+  at what the connection has acknowledged (`TCP_INFO`, `net::send_progress`) once a second
+  while output waits, on the timer that pings it, so a closed connection has had nothing
+  acknowledged for 20 to 21 s; a connection with nothing waiting costs no look.
+  `TCP_USER_TIMEOUT` is cleared on client connections (`net::clear_user_timeout`), so the
+  kernel no longer ends one on its own. A peer that vanished while output waited for it is
+  closed the same way, and one with nothing waiting 20 s after the next ping, which it never
+  acknowledges.
 - **Memory per viewer.** A lossy client costs its node at most 64 KiB of unsent output plus
   one message, 64 KiB of kernel buffer, and one seq; the messages it is owed are the room's,
   kept once, inside ADR-0043's 32 MiB. The node's budget (ADR-0036, ADR-0043) grows only by
@@ -148,10 +165,12 @@ How senders are limited in a room of thousands:
 - A viewer that stalls sees, when it reads again, what was already in its socket, then a jump
   in seqs, then the newest 64. It never sees a message twice or out of order, and it can fill
   the gap from history, as far back as the room still stores.
-- A viewer that stops reading altogether shuts its receive window, and the kernel ends the
-  connection once it has stayed shut for `TCP_USER_TIMEOUT` (20 s, `net::tune_connection`).
-  Its client reconnects and joins again; the node never held more than the bounds above for
-  it. A slow reader keeps its connection.
+- A viewer that stops reading altogether acknowledges nothing more, and its node closes it
+  20 s later. Its client reconnects and joins again; the node never held more than the bounds
+  above for it. A slow reader keeps its connection as long as its reads open its window at
+  least once in 20 s: each opening lets more through, and that counts however little it
+  opened. A read that frees less than about half of a full receive buffer opens nothing, since
+  Linux waits for more before it offers a window again.
 - `lossy_drops_total` counts seqs lossy clients were moved past, including gaps of the room
   itself that a behind client was waiting across. A node whose count climbs has viewers that
   cannot keep up, not a fault of its own.

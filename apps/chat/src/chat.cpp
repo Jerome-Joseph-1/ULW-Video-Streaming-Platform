@@ -70,7 +70,7 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
     if (draining_) {
         return;
     }
-    if (!net::tune_connection(conn.get()) ||
+    if (!net::tune_connection(conn.get()) || !net::clear_user_timeout(conn.get()) ||
         !net::cap_send_buffer(conn.get(), limits_.socket_send_buffer)) {
         ++counters_.connections_rejected;
         return;
@@ -157,6 +157,7 @@ std::string ChatServer::render_metrics() const {
                        "protocol_errors_total {}\n"
                        "control_floods_total {}\n"
                        "slow_consumers_total {}\n"
+                       "stalled_readers_total {}\n"
                        "allocation_failures_total {}\n"
                        "rooms_active {}\n"
                        "rooms_joined {}\n"
@@ -177,7 +178,7 @@ std::string ChatServer::render_metrics() const {
                        c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
                        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
                        chat.history_messages, chat_.buffered_bytes(), c.protocol_errors,
-                       c.control_floods, c.slow_consumers,
+                       c.control_floods, c.slow_consumers, c.stalled_readers,
                        c.allocation_failures + router.allocation_failures +
                            chat.allocation_failures + presence.allocation_failures,
                        deps_.router.rooms_owned(), deps_.router.rooms_joined(),

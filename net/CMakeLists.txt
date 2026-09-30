@@ -10,6 +10,7 @@ ulw_add_library(net_lib
     src/signals.cpp
     src/sockaddr.cpp
     src/socket.cpp
+    src/tcp_progress.cpp
     src/timing_wheel.cpp
     src/transport_plain.cpp
     src/transport_tls.cpp

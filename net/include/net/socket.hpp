@@ -29,6 +29,20 @@ struct ListenOptions {
 // server whose connections carry little and must not each hold megabytes for a peer that
 // stopped reading. Autotuning is off for that socket from then on.
 [[nodiscard]] std::expected<void, int> cap_send_buffer(int fd, int bytes) noexcept;
+// Clears the TCP_USER_TIMEOUT tune_connection sets, for a server that bounds how long a peer
+// may acknowledge nothing itself (send_progress). Linux counts a shut receive window against it
+// from the first window probe, and restarts the count only when the window opens wide enough
+// for all of the next segment queued: a peer that keeps reading, but frees its window a little
+// at a time, is ended as if it had vanished.
+[[nodiscard]] std::expected<void, int> clear_user_timeout(int fd) noexcept;
+
+// How much of what was sent on a TCP connection its peer has acknowledged, and whether anything
+// sent, or queued in the kernel to send, still waits for it (TCP_INFO).
+struct SendProgress {
+    std::uint64_t acked = 0;
+    bool waiting = false;
+};
+[[nodiscard]] std::expected<SendProgress, int> send_progress(int fd) noexcept;
 
 // Closes with a reset instead of a FIN, for a connection refused before anything was read from
 // it: our side keeps no TIME_WAIT entry for it, which a flood of refusals would otherwise fill

@@ -259,6 +259,10 @@ std::expected<void, int> cap_send_buffer(int fd, int bytes) noexcept {
     return set_int(fd, SOL_SOCKET, SO_SNDBUF, bytes);
 }
 
+std::expected<void, int> clear_user_timeout(int fd) noexcept {
+    return set_int(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, 0);
+}
+
 std::expected<os::UniqueFd, int> bind_udp(const SocketAddr& local) {
     const bool v6 = local.family == AddrFamily::V6;
     os::UniqueFd fd{

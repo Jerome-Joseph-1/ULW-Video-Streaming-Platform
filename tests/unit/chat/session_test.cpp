@@ -1,4 +1,5 @@
 #include "core/util/json.hpp"
+#include "core/util/parse.hpp"
 #include "infra/auth/base64url.hpp"
 #include "infra/messages/memory_message_store.hpp"
 #include "net/reactor_factory.hpp"
@@ -475,6 +476,93 @@ TEST_P(ChatSessionTest, AViewerThatStopsReadingSkipsToTheNewestWhileOthersMissNo
     std::cout << "a viewer that stopped reading got " << seqs.size() << " of " << kMessages
               << ", ending with seqs " << seqs[seqs.size() - 64] << ".." << seqs.back()
               << "; the rest counted as dropped\n";
+}
+
+// A counter from the node's /metrics.
+std::optional<std::uint64_t> metric(std::uint16_t port, std::string_view name) {
+    const auto body = ulw::test::http_get(port, "/metrics").body;
+    const std::string line = std::string(name) + " ";
+    const std::size_t at = body.find(line);
+    if (at == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t start = at + line.size();
+    return core::parse_integer<std::uint64_t>(
+        std::string_view(body).substr(start, body.find('\n', start) - start));
+}
+
+// Both viewers fall behind a sender that never stops. One never reads again, and is closed once
+// it has acknowledged nothing for the stall timeout, here half a second; the other empties its
+// socket now and then, and keeps its connection however long it lags. Real time: the kernel's own
+// timers, which decide when a reader's acknowledgements reach the node, run on it.
+TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosedAndASlowOneIsNot) {
+    node_.reset();
+    node_ = std::make_unique<Node>(
+        GetParam(), chat::Limits{.stall_timeout = core::Millis{500},
+                                 .stall_check = core::Millis{100},
+                                 .service = {.send_burst = 1'000'000,
+                                             .max_send_bytes_in_flight = std::size_t{1} << 20U},
+                                 .presence = {}});
+    // A fixed receive buffer: one the kernel tunes keeps growing, to megabytes, for a reader
+    // that never takes anything from it, and acknowledges everything it holds.
+    auto stopped = WsClient::connect(node_->port(), "/rt", "Authorization: Bearer user.viewer\r\n",
+                                     nullptr, 64 * 1024);
+    auto slow = open_as("reader");
+    auto sender = open_as("sender");
+    ASSERT_TRUE(stopped && slow && sender);
+    const std::string room = std::string(kRoom);
+    for (auto* ws : {&*stopped, &*slow}) {
+        ASSERT_TRUE(
+            ws->send_text(R"({"type":"join","room":")" + room + R"(","delivery":"lossy"})"));
+    }
+    ASSERT_TRUE(sender->send_text(R"({"type":"join","room":")" + room + R"("})"));
+    for (auto* ws : {&*stopped, &*slow, &*sender}) {
+        ASSERT_EQ(ws->next_text(seconds(10)).value_or("").find(R"("type":"joined")"), 1U);
+    }
+
+    // One message of about 2.8 KiB on the wire at a time, each heard back by the sender before
+    // the next; the slow viewer empties its socket after every tenth. The stopped one's socket
+    // buffers and its 64 KiB of queue fill within the first hundred or so.
+    const std::string body = infra::auth::encode_base64url(std::string(2'000, 'x'));
+    const auto empty = [](WsClient& ws) {
+        while (ws.read_at_most(std::size_t{1} << 20U) > 0) {
+        }
+    };
+    const auto deadline = std::chrono::steady_clock::now() + seconds(60);
+    std::uint64_t sent = 0;
+    std::optional<std::uint64_t> stalled = 0;
+    while (stalled == 0U && std::chrono::steady_clock::now() < deadline) {
+        ++sent;
+        ASSERT_TRUE(sender->send_text(std::format(
+            R"({{"type":"send","room":"{}","id":"s{}","body":"{}"}})", room, sent, body)));
+        for (std::uint64_t own = 0; own < sent;) {
+            const auto text = sender->next_text(seconds(10));
+            ASSERT_TRUE(text);
+            own = message_seq(*text).value_or(own);
+        }
+        if (sent % 10 == 0) {
+            empty(*slow);
+        }
+        if (sent % 50 == 0) {
+            stalled = metric(node_->port(), "stalled_readers_total");
+        }
+    }
+    ASSERT_EQ(stalled, 1U) << "after " << sent << " messages";
+
+    // The slow one is still there, and is sent the newest message; the stopped one reads what
+    // was on its way to it, and then the end of the connection.
+    std::uint64_t last = 0;
+    while (last < sent) {
+        const auto text = slow->next_text(seconds(10));
+        ASSERT_TRUE(text) << "the slow viewer stopped at " << last << " of " << sent;
+        last = message_seq(*text).value_or(last);
+    }
+    while (stopped->next_frame(seconds(10))) {
+    }
+    EXPECT_FALSE(stopped->connected());
+    EXPECT_EQ(metric(node_->port(), "stalled_readers_total"), 1U);
+    std::cout << "the stopped viewer was closed after " << sent
+              << " messages; the slow one got all it was owed up to seq " << last << "\n";
 }
 
 TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {

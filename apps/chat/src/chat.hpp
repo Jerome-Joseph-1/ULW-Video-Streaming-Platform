@@ -54,6 +54,13 @@ struct Limits {
     // 60 s and more.
     core::Millis ping_interval{30'000};
     core::Millis idle_timeout{75'000};
+    // A client whose connection has output waiting for it, and which acknowledges none of it for
+    // stall_timeout, has stopped reading or vanished: it is closed. Looked at every stall_check
+    // while output waits. This is TCP_USER_TIMEOUT's 20 s, counted by the service, not the
+    // kernel: Linux ends a reader that frees its window a little at a time as if it had stopped
+    // (net::clear_user_timeout), while here any read that lets output through counts.
+    core::Millis stall_timeout{20'000};
+    core::Millis stall_check{1'000};
     // Clients get a Close 1001 and this long to answer it before a drain cuts them off.
     core::Millis drain_deadline{5'000};
     ServiceLimits service;
@@ -85,6 +92,7 @@ struct Counters {
     std::uint64_t protocol_errors = 0;
     std::uint64_t control_floods = 0;
     std::uint64_t slow_consumers = 0;
+    std::uint64_t stalled_readers = 0;
     std::uint64_t allocation_failures = 0;
 };
 
