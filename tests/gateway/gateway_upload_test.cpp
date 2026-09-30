@@ -237,8 +237,9 @@ TEST_P(GatewayUpload, CommitIsIdempotentAndQueuesOneJob) {
     EXPECT_EQ(jobs[0].source_key.str(), "videos/" + up->video_id + "/raw");
 }
 
-// Past expires_at an upload never committed is gone to PATCH, HEAD and commit, before the
-// reaper aborts it as after; a committed one still answers as committed.
+// Past expires_at, PATCH, HEAD and commit answer 410 for an upload that was never committed,
+// with the same answer before the reaper aborts it as after. A committed upload still answers
+// as committed.
 TEST_P(GatewayUpload, AnUploadPastItsExpiryIsGoneToPatchHeadAndCommit) {
     GatewayOptions options = over_transport({.backend = Backend::Fake, .chunk = kMiB});
     options.manual_clock = true;

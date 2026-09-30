@@ -127,8 +127,8 @@ A `409` on `PATCH` carries the authoritative `Upload-Offset` too, so a client ca
 Only one `PATCH` per upload runs at a time. A second one while the first is in flight gets
 `409` with the current offset; do not upload one file over parallel connections.
 
-Upload lifetime: an upload must be committed within 6 days of its creation (its `expires_at`).
-From that moment `PATCH`, `HEAD` and commit answer `410 Gone`, as the tus protocol's expiration
+Upload lifetime: an upload must be committed within 6 days of its create, to within the clock
+skew between the gateway's hosts. From that moment `PATCH`, `HEAD` and commit answer `410 Gone`, as the tus protocol's expiration
 extension does, even with every byte durable, and the upload has to start again with a new
 create. The answer is the same before and after the upload reaper aborts the upload and fails its
 video, and for an upload that was cancelled. `DELETE` is still allowed. A committed upload never
