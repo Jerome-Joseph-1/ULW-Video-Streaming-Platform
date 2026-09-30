@@ -5,11 +5,19 @@ name: e2e
 # the same job with the same steps. Everything happens inside this runner's kind cluster; the
 # workflow has no credentials and reaches nothing of Askedin's.
 #
-# The hls.js playback spec and the SDP round-trip spec (tests/e2e) are a second job: each starts
-# its own services from a build tree and serves its own page, so neither can be pointed at the
-# sandbox route. vod_flow's playback scenario covers the same route in the sandbox job.
+# Beside it, two jobs run on a build tree, with no cluster, each starting its own services from
+# it and serving its own page, so neither can be pointed at the sandbox route. browser runs the
+# hls.js playback spec and the SDP round-trip spec (tests/e2e/run.sh); vod_flow's playback
+# scenario covers the same route in the sandbox job. live-playback runs M31's live check
+# (tests/e2e/live-run.sh) and records its measured glass-to-glass latency in the run's summary.
+# A manual run with sandbox=false skips the cluster job.
 on:
   workflow_dispatch:
+    inputs:
+      sandbox:
+        description: Also run the sandbox cluster job (false runs the build-tree jobs alone)
+        type: boolean
+        default: true
   schedule:
     - cron: "43 3 * * *"
   push:
@@ -24,6 +32,7 @@ concurrency:
 
 jobs:
   sandbox:
+    if: github.event_name != 'workflow_dispatch' || inputs.sandbox
     runs-on: ubuntu-24.04
     # Cold image builds dominate; the rest is minutes.
     timeout-minutes: 75
@@ -143,6 +152,73 @@ jobs:
           ulw_sdp_roundtrip
       - run: tests/e2e/run.sh build/ci
         timeout-minutes: 30
+      - if: failure()
+        run: docker compose -f deploy/local/compose.yaml logs minio
+
+  # hls.js in Chrome for Testing plays a stream the test publisher sends live_packager over SRT,
+  # its playlist through the gateway's live route and LiveManifestCache, its segments from
+  # MinIO on the URLs the gateway signed; the media sequence only grows; the stream's end
+  # reaches the player as EXT-X-ENDLIST and playback ends cleanly (tests/e2e/live.e2e.mjs).
+  live-playback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+      ULW_LIVE_LATENCY_FILE: ${{ github.workspace }}/live-report/live-latency.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The toolchain, ffmpeg (with SRT, for the test publisher) and the user namespaces the
+      # packager's sandboxed ffmpeg needs.
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-14-ci-live-e2e
+      # live-run.sh needs Node 20 or later: the same exact release as the browser job.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      # stack.mjs creates and drops its scratch database with psql.
+      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
+      - name: Start MinIO
+        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      - run: cmake --preset ci
+      - run: cmake --build --preset ci --target gateway_server live_packager ulw_devtoken ulw_migrate
+      - run: mkdir -p live-report
+      - run: tests/e2e/live-run.sh build/ci
+        timeout-minutes: 15
+      - name: Record the measured latency
+        if: always()
+        run: |
+          report=live-report/live-latency.json
+          if [[ -f $report ]]; then
+            {
+              echo "### Live playback: glass-to-glass latency"
+              echo
+              jq -r '"Median \(.glassToGlassMs.median) ms, p95 \(.glassToGlassMs.p95) ms (picture clock, \(.samples) samples); program date time median \(.programDateTimeMs.median) ms; target duration \(.segmentSeconds) s; \(.stalls) stalls; gateway: \(.gateway.livePlaylistRequests) playlist requests, \(.gateway.storeReads) store reads."' "$report"
+              echo
+              echo '```json'
+              cat "$report"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat "$report"
+          fi
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-latency
+          path: live-report
+          if-no-files-found: warn
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
 

@@ -319,6 +319,12 @@ FakeStore::grant_read(const core::StorageKey& key, core::Seconds ttl) {
 
 std::expected<std::vector<std::byte>, StorageError>
 FakeStore::fetch_small(const core::StorageKey& key, std::size_t max) {
+    {
+        std::unique_lock hold(hold_mutex_);
+        ++held_;
+        hold_released_.wait(hold, [this] { return !hold_; });
+        --held_;
+    }
     const std::scoped_lock lock(mutex_);
     if (plan_.fail_fetch) {
         return std::unexpected(*plan_.fail_fetch);
@@ -331,6 +337,19 @@ FakeStore::fetch_small(const core::StorageKey& key, std::size_t max) {
         return std::unexpected(StorageError::Permanent);
     }
     return it->second;
+}
+
+void FakeStore::hold_fetches(bool held) {
+    {
+        const std::scoped_lock lock(hold_mutex_);
+        hold_ = held;
+    }
+    hold_released_.notify_all();
+}
+
+std::size_t FakeStore::held_fetches() const {
+    const std::scoped_lock lock(hold_mutex_);
+    return hold_ ? held_ : 0;
 }
 
 std::expected<void, StorageError> FakeStore::put(const core::StorageKey& key,

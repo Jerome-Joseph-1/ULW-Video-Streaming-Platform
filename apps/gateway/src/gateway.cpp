@@ -81,6 +81,11 @@ Gateway::Gateway(Deps deps, Limits limits)
       users_(kUserEntries, UserHash{SeededHash(seed(deps_.random))}),
       connections_(limits_.max_connections),
       views_(deps_.reactor, deps_.views, limits_.view_batch, limits_.view_interval),
+      live_({.pool = deps_.pool,
+             .reader = deps_.reader,
+             .clock = deps_.clock,
+             .local_read_url = limits_.local_read_url},
+            limits_.live_cache),
       part_upload_(kPartUploadBuckets), write_stall_(kStallBuckets) {}
 
 Gateway::~Gateway() {
@@ -257,6 +262,7 @@ void Gateway::on_timeout() noexcept {
 void Gateway::reap() noexcept {
     connections_.reap([](Connection& c) { return c.quiescent(); });
     std::erase_if(discards_, [](const auto& d) { return d->done(); });
+    live_.reap();
 }
 
 Admission Gateway::acquire_upload_slot(const core::UserId& user) noexcept {
@@ -400,6 +406,23 @@ std::string Gateway::render_metrics() {
     e.family("playlist_requests_total", "Playlist requests, by kind.", MetricType::Counter);
     e.sample("playlist_requests_total", {{.name = "kind", .value = "master"}}, c.playlists_master);
     e.sample("playlist_requests_total", {{.name = "kind", .value = "media"}}, c.playlists_media);
+    e.sample("playlist_requests_total", {{.name = "kind", .value = "live"}}, c.playlists_live);
+    const LiveCacheCounters& lc = live_.counters();
+    e.counter("live_playlist_cache_hits_total",
+              "Live playlist requests answered from a fresh copy, or a remembered absence.",
+              lc.hits);
+    e.counter("live_playlist_cache_misses_total",
+              "Live playlist requests that found no fresh copy.", lc.misses);
+    e.counter("live_playlist_fetches_total",
+              "Live playlists read from the store: one per miss with no read in flight.",
+              lc.fetches);
+    e.counter("live_playlist_single_flight_joins_total",
+              "Live playlist misses that waited on a read already in flight.", lc.joins);
+    e.counter("live_playlist_cache_evictions_total",
+              "Live playlists dropped for the entry or byte bound before they went stale.",
+              lc.evictions);
+    e.gauge("live_playlist_cache_entries", "Live playlists held.", live_.entries());
+    e.gauge("live_playlist_cache_bytes", "Bytes of live playlists held.", live_.bytes());
     e.counter("playlists_rejected_total", "Stored playlists that broke a rewriting rule.",
               c.playlists_rejected);
     e.counter("presign_failures_total", "Segment URLs the store could not sign.",

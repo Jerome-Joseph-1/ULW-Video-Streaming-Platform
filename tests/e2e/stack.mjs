@@ -1,6 +1,6 @@
 // The services one E2E run needs, started from the build tree: a scratch database on the
-// local Postgres, a bucket on the local MinIO, gateway_server and transcode_worker, and a page
-// server that stands in for the Askedin route putting /api on the app's own origin.
+// local Postgres, a bucket on the local MinIO, gateway_server and (for VOD) transcode_worker,
+// and a page server that stands in for the Askedin route putting /api on the app's own origin.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -69,12 +69,12 @@ function signedBucketRequest(method, bucket) {
   return { url: `${endpoint.origin}/${bucket}`, init: { method, headers } };
 }
 
-async function ensureBucket() {
-  const { url, init } = signedBucketRequest('PUT', config.bucket);
+async function ensureBucket(bucket) {
+  const { url, init } = signedBucketRequest('PUT', bucket);
   const r = await fetch(url, init);
   const body = await r.text();
   if (!r.ok && !body.includes('BucketAlreadyOwnedByYou')) {
-    throw new Error(`cannot create bucket ${config.bucket}: ${r.status} ${body}`);
+    throw new Error(`cannot create bucket ${bucket}: ${r.status} ${body}`);
   }
 }
 
@@ -110,9 +110,9 @@ class Service {
 
 // Serves the player page and hls.js from node_modules, and passes /api through to the gateway,
 // noting every path it passed. Nothing else is served, so a segment asked of this origin fails.
-function pageServer(gatewayPort, proxied) {
+function pageServer(gatewayPort, proxied, player) {
   const files = {
-    '/': ['text/html', path.join(here, 'player.html')],
+    '/': ['text/html', path.join(here, player)],
     '/hls.js': ['text/javascript', path.join(here, 'node_modules/hls.js/dist/hls.min.js')],
   };
   return http.createServer((req, res) => {
@@ -139,7 +139,10 @@ function pageServer(gatewayPort, proxied) {
   });
 }
 
-export async function startStack() {
+// `player` is the page served at /; the live run plays with its own page and bucket, and
+// needs no worker.
+export async function startStack({ player = 'player.html', bucket = config.bucket,
+  worker: withWorker = true } = {}) {
   const work = mkdtempSync(path.join(tmpdir(), 'ulw-e2e-'));
   const database = `ulw_e2e_${randomBytes(6).toString('hex')}`;
   const databaseUrl = withDatabase(config.postgres, database);
@@ -148,7 +151,7 @@ export async function startStack() {
   const rootAllowed = { ULW_ALLOW_ROOT: '1' };
   execFileSync(bin('apps/migrate/ulw_migrate'), [], {
     env: { ...process.env, ULW_DATABASE_URL: databaseUrl, ...rootAllowed }, stdio: 'pipe' });
-  await ensureBucket();
+  await ensureBucket(bucket);
 
   const key = path.join(work, 'dev-key.json');
   execFileSync(bin('tools/devtoken/ulw_devtoken'), ['keygen', key]);
@@ -161,7 +164,7 @@ export async function startStack() {
   const storage = {
     ULW_STORAGE: 'minio',
     ULW_S3_ENDPOINT: config.minio,
-    ULW_BUCKET: config.bucket,
+    ULW_BUCKET: bucket,
     ULW_S3_ACCESS_KEY_ID: config.accessKey,
     ULW_S3_SECRET_ACCESS_KEY: config.secretKey,
     ULW_DATABASE_URL: databaseUrl,
@@ -178,18 +181,18 @@ export async function startStack() {
     // part of what this suite shows.
     ...rootAllowed,
   });
-  const worker = new Service('transcode_worker', bin('apps/worker/transcode_worker'), {
+  const worker = withWorker ? new Service('transcode_worker', bin('apps/worker/transcode_worker'), {
     PATH: process.env.PATH,
     ...storage,
     ULW_NODE_ID: 'e2e-worker',
     ULW_SCRATCH_DIR: work,
     ULW_SANDBOX_BIN: bin('apps/worker/ulw_sandbox'),
     ...rootAllowed,
-  });
+  }) : null;
   await gateway.waitFor(`"port":${gatewayPort}`, 30_000);
 
   const proxied = [];
-  const page = pageServer(gatewayPort, proxied);
+  const page = pageServer(gatewayPort, proxied, player);
   await new Promise((resolve) => page.listen(0, '127.0.0.1', resolve));
 
   return {
@@ -199,15 +202,17 @@ export async function startStack() {
     origin: `http://127.0.0.1:${page.address().port}`,
     storageOrigin: new URL(config.minio).origin,
     proxied,
+    // What gateway_server has logged so far, for a failure report.
+    gatewayOutput: () => gateway.output,
     work,
     async stop() {
       await new Promise((resolve) => page.close(resolve));
-      const codes = [await gateway.stop(), await worker.stop()];
+      const codes = [await gateway.stop(), worker ? await worker.stop() : 0];
       psql(config.postgres, `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
       rmSync(work, { recursive: true, force: true });
       if (codes.some((c) => c !== 0)) {
         throw new Error(`a service exited uncleanly (${codes}):\n${gateway.output}\n` +
-          worker.output);
+          (worker ? worker.output : ''));
       }
     },
   };

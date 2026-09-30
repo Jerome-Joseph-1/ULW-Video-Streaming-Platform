@@ -15,6 +15,7 @@
 
 #include "bounded_table.hpp"
 #include "health.hpp"
+#include "live_manifest_cache.hpp"
 #include "ops/log.hpp"
 #include "ops/metrics.hpp"
 #include "rate_limit.hpp"
@@ -110,6 +111,7 @@ struct Limits {
     // one shard before any is dropped.
     std::size_t view_batch = 1024;
     core::Millis view_interval{5'000};
+    LiveCacheLimits live_cache{};
 };
 
 struct Counters {
@@ -140,6 +142,7 @@ struct Counters {
     std::uint64_t certificate_reload_failures = 0;
     std::uint64_t playlists_master = 0;
     std::uint64_t playlists_media = 0;
+    std::uint64_t playlists_live = 0;
     // A stored playlist broke a rewriting rule: the worker wrote something wrong.
     std::uint64_t playlists_rejected = 0;
     std::uint64_t presign_failures = 0;
@@ -188,6 +191,7 @@ public:
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
     [[nodiscard]] std::size_t upload_slots_in_use() const noexcept { return upload_slots_; }
     [[nodiscard]] ViewRecorder& views() noexcept { return views_; }
+    [[nodiscard]] LiveManifestCache& live() noexcept { return live_; }
     // From a chunk's first byte handed to the store to the store holding all of it durably.
     [[nodiscard]] ops::Histogram& part_upload_duration() noexcept { return part_upload_; }
     // Each stretch a chunk's body waited because the store took nothing more.
@@ -245,6 +249,7 @@ private:
     net::TimerId drain_timer_;
     std::vector<std::unique_ptr<Discard>> discards_;
     ViewRecorder views_;
+    LiveManifestCache live_;
     ops::Histogram part_upload_;
     ops::Histogram write_stall_;
 };
