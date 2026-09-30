@@ -148,6 +148,8 @@ public:
     // /readyz: not draining, and the room plane reaches the database.
     [[nodiscard]] bool ready() const noexcept { return !draining_ && deps_.router.healthy(); }
     [[nodiscard]] std::size_t connections() const noexcept { return sessions_.size(); }
+    // Sessions still holding an HTTP parser: those whose request has not been answered yet.
+    [[nodiscard]] std::size_t http_parsers() noexcept;
     [[nodiscard]] std::string render_metrics() const;
 
     [[nodiscard]] const Deps& deps() const noexcept { return deps_; }

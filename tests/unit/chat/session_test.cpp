@@ -9,6 +9,7 @@
 #include "chat.hpp"
 #include "support/eventually.hpp"
 #include "support/fake_clock.hpp"
+#include "support/fake_random.hpp"
 #include "support/fake_verifier.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/ws_client.hpp"
@@ -19,8 +20,11 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -76,6 +80,12 @@ public:
     // follows once the node's thread has seen it.
     std::atomic<bool> hold_store = false;
     std::atomic<bool> store_held = false;
+    // Sessions holding an HTTP parser, as of the node's last turn.
+    std::atomic<std::size_t> http_parsers = 0;
+    // Upgrades waiting on the verifier's keys ("slow." tokens), as of the node's last turn;
+    // setting refresh_keys lets them go on.
+    std::atomic<std::size_t> key_waiters = 0;
+    std::atomic<bool> refresh_keys = false;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -155,6 +165,11 @@ private:
             }
             (*reactor)->run_once(core::Millis{5});
             server->reap();
+            if (refresh_keys.exchange(false)) {
+                verifier.refresh_keys();
+            }
+            key_waiters = verifier.waiting();
+            http_parsers = server->http_parsers();
             ++turns_;
             turns_.notify_all();
         }
@@ -412,6 +427,86 @@ TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {
               R"({"type":"presence","user":"alice","status":"offline"})");
     ASSERT_TRUE(bob->send_text(R"({"type":"watch","user":"not a user"})"));
     EXPECT_EQ(bob->next_text(seconds(10)), R"({"type":"error","reason":"bad_user"})");
+}
+
+// A Ping and a join, masked, as a client would send them right behind its upgrade request.
+std::vector<std::byte> first_frames() {
+    ulw::test::FakeRandom random;
+    codec::ws::ClientEncoder encoder(random);
+    std::vector<std::byte> out;
+    for (const auto& [opcode, payload] :
+         {std::pair{codec::ws::Opcode::Ping, std::string{"early"}},
+          std::pair{codec::ws::Opcode::Text,
+                    R"({"type":"join","room":")" + std::string(kRoom) + R"(","kind":"live"})"}}) {
+        const auto bytes = std::as_bytes(std::span{payload});
+        EXPECT_TRUE(encoder.encode({.opcode = opcode,
+                                    .fin = true,
+                                    .payload = {bytes.begin(), bytes.end()},
+                                    .close_code = codec::ws::CloseCode::NoStatus},
+                                   out));
+    }
+    return out;
+}
+
+void expect_first_frames_answered(WsClient& ws) {
+    const auto pong = ws.next_frame(seconds(10));
+    ASSERT_TRUE(pong);
+    EXPECT_EQ(pong->first, codec::ws::Opcode::Pong);
+    EXPECT_EQ(pong->second, "early");
+    EXPECT_EQ(ws.next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+}
+
+TEST_P(ChatSessionTest, TheHttpParserIsFreedOnceTheRequestIsAnswered) {
+    // A request still arriving keeps its parser...
+    const os::UniqueFd partial{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+    ASSERT_TRUE(partial);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(node_->port());
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    // connect() takes every address family through the generic sockaddr header.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    ASSERT_EQ(::connect(partial.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr), 0);
+    const std::string_view line = "GET /rt HTTP/1.1\r\n";
+    ASSERT_EQ(::send(partial.get(), line.data(), line.size(), MSG_NOSIGNAL),
+              static_cast<ssize_t>(line.size()));
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 1; }));
+    // ...and one answered, upgraded or refused, holds none, whatever it goes on to do.
+    auto alice = open_as("alice");
+    auto bob = open_as("bob");
+    ASSERT_TRUE(alice && bob);
+    EXPECT_EQ(refusal("Authorization: Bearer forged\r\n"), "HTTP/1.1 401 Unauthorized");
+    EXPECT_EQ(ulw::test::http_get(node_->port(), "/healthz").status, 200);
+    EXPECT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 1; }));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) +
+                                 R"(","kind":"live"})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+    EXPECT_EQ(node_->http_parsers, 1U);
+}
+
+TEST_P(ChatSessionTest, FramesSentRightBehindTheUpgradeRequestAreRead) {
+    const auto frames = first_frames();
+    auto alice = WsClient::connect(node_->port(), "/rt", "Authorization: Bearer user.alice\r\n",
+                                   nullptr, frames);
+    ASSERT_TRUE(alice);
+    expect_first_frames_answered(*alice);
+    EXPECT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 0; }));
+}
+
+TEST_P(ChatSessionTest, FramesSentBehindAnUpgradeWaitingOnKeysAreReadOnceItIsAccepted) {
+    const auto frames = first_frames();
+    auto upgrade = std::async(std::launch::async, [&] {
+        return WsClient::connect(node_->port(), "/rt", "Authorization: Bearer slow.alice\r\n",
+                                 nullptr, frames);
+    });
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->key_waiters == 1; }));
+    node_->refresh_keys = true;
+    auto alice = upgrade.get();
+    ASSERT_TRUE(alice);
+    expect_first_frames_answered(*alice);
+    EXPECT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 0; }));
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

@@ -32,7 +32,7 @@ std::string_view text_of(std::span<const std::byte> bytes) noexcept {
 } // namespace
 
 Session::Session(Handle handle, ChatServer& server)
-    : handle_(handle), server_(server), parser_(*this),
+    : handle_(handle), server_(server), parser_(std::in_place, *this),
       control_tokens_(server.limits().control_burst) {}
 
 core::MonoTime Session::now() const noexcept {
@@ -59,10 +59,14 @@ void Session::on_data(net::BorrowedBytes bytes) noexcept {
     try {
         switch (phase_) {
         case Phase::Request: {
-            const http::ParseResult r = parser_.feed(bytes);
+            if (!parser_) {
+                return;
+            }
+            const http::ParseResult r = parser_->feed(bytes);
             if (!r) {
                 respond(http::fixed_response(r.error().status, http::Connection::Close));
             }
+            leave_http();
             return;
         }
         case Phase::Open:
@@ -167,6 +171,7 @@ void Session::on_keys_refreshed() noexcept {
     }
     try {
         answer_request();
+        leave_http();
     } catch (const std::bad_alloc&) {
         allocation_failed();
     }
@@ -273,6 +278,24 @@ void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
         reactor.start_receiving(conn_);
     }
     arm(server_.limits().ping_interval);
+}
+
+// Once the request is answered the connection never parses HTTP again, so the parser goes, with
+// its buffers. Called after the parser has returned, never from inside one of its callbacks.
+// Whatever the client sent behind an accepted upgrade request is the start of its WebSocket
+// stream, and reaches the decoder before anything read later.
+void Session::leave_http() {
+    if (phase_ == Phase::Request || !parser_) {
+        return;
+    }
+    if (phase_ == Phase::Open) {
+        const std::span<const std::byte> pipelined = parser_->unparsed();
+        if (!pipelined.empty()) {
+            read_frames(pipelined);
+        }
+    }
+    token_ = {};
+    parser_.reset();
 }
 
 // ---- the WebSocket
@@ -505,6 +528,8 @@ void Session::close() noexcept {
     }
     closed_ = true;
     phase_ = Phase::Closing;
+    token_ = {};
+    parser_.reset();
     net::IReactor& reactor = server_.deps().reactor;
     reactor.cancel_timer(timer_);
     if (auth_ == Auth::Waiting) {
