@@ -42,6 +42,33 @@ TEST(TokenExtractorTest, RefusesAnythingButOneBearerToken) {
     }
 }
 
+TEST(TokenExtractorTest, TakesEveryCharacterOfTheTokenAlphabetAndNoOther) {
+    constexpr std::string_view kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.";
+    const std::string all = "Bearer " + std::string(kAlphabet);
+    EXPECT_EQ(extract({{"Authorization", all}}), kAlphabet);
+    for (char c = 0x21; c < 0x7F; ++c) {
+        if (kAlphabet.contains(c)) {
+            continue;
+        }
+        const std::string value = "Bearer aa" + std::string(1, c) + "bb";
+        EXPECT_EQ(extract({{"Authorization", value}}), refused(TokenSourceError::Malformed))
+            << value;
+    }
+}
+
+// Only spaces and tabs are trimmed; any other control character is part of the value.
+TEST(TokenExtractorTest, ControlCharactersAroundTheTokenAreNotTrimmed) {
+    for (const std::string_view value : {"Bearer aa.bb.cc\x01",
+                                         "\x01"
+                                         "Bearer aa.bb.cc",
+                                         "Bearer aa.bb.cc\x1f",
+                                         "\x0b"
+                                         "Bearer aa.bb.cc"}) {
+        EXPECT_EQ(extract({{"Authorization", value}}), refused(TokenSourceError::Malformed));
+    }
+}
+
 TEST(TokenExtractorTest, TwoAuthorizationHeadersAreAmbiguous) {
     EXPECT_EQ(extract({{"Authorization", "Bearer aa.bb.cc"}, {"authorization", "Bearer dd.ee.ff"}}),
               refused(TokenSourceError::Ambiguous));
