@@ -31,7 +31,8 @@ void Health::record(bool database_up, bool store_up, core::MonoTime at) noexcept
     store_up_.store(store_up, std::memory_order_relaxed);
     count(database_misses_, database_up);
     count(store_misses_, store_up);
-    probed_at_ms_.store(millis(at), std::memory_order_relaxed);
+    // Last, with release: a reader that sees this time sees the counts above with it.
+    probed_at_ms_.store(millis(at), std::memory_order_release);
 }
 
 void Health::set_oldest_queued(std::optional<core::Seconds> age) noexcept {
@@ -50,7 +51,9 @@ void Health::set_process(std::optional<std::uint64_t> fds,
 }
 
 Readiness Health::readiness(core::MonoTime now) const noexcept {
-    const std::int64_t at = probed_at_ms_.load(std::memory_order_relaxed);
+    // First, with acquire: pairs with record()'s release, so the counts read below are at
+    // least as new as this probe time.
+    const std::int64_t at = probed_at_ms_.load(std::memory_order_acquire);
     if (at == 0) {
         return Readiness::Starting;
     }

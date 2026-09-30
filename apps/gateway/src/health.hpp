@@ -39,8 +39,11 @@ inline constexpr core::Millis kProbeStale{30'000};
 // connect + 2 s statement), about 36 s when the probe runs to its 13 s worst case.
 inline constexpr std::uint32_t kMissesBeforeUnready = 2;
 
-// What the probe thread last learned, for the loop to read. Every field stands alone, so
-// relaxed atomics suffice; none of them publishes anything else.
+// What the probe thread last learned, for the loop to read. The gauges stand alone, so their
+// loads and stores are relaxed. probed_at_ms_ does not: readiness() takes a nonzero probe time
+// to mean the miss counts are a probe's, not their initial kNeverUp, so it is stored with
+// release after them and loaded with acquire before them. Relaxed, the loop could see the first
+// probe's time with the counts still at kNeverUp and call a healthy database down.
 class Health {
 public:
     void record(bool database_up, bool store_up, core::MonoTime at) noexcept;
@@ -88,7 +91,7 @@ private:
     std::atomic<bool> store_up_{false};
     std::atomic<std::uint32_t> database_misses_{kNeverUp};
     std::atomic<std::uint32_t> store_misses_{kNeverUp};
-    // Steady-clock milliseconds; zero until the first probe finishes.
+    // Steady-clock milliseconds; zero until the first probe finishes. Publishes the miss counts.
     std::atomic<std::int64_t> probed_at_ms_{0};
     // -1 until the database has answered, and again whenever it does not.
     std::atomic<std::int64_t> oldest_queued_{-1};
