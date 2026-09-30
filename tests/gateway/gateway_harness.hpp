@@ -106,6 +106,8 @@ public:
     void put_object(std::string_view key, std::string_view bytes);
     [[nodiscard]] std::vector<core::ports::ViewEvent> views();
     void fail_views(std::optional<core::ports::CatalogError> error);
+    // Every upload and video call to the catalog fails with `error` from now on; nullopt stops it.
+    void fail_catalog(std::optional<core::ports::CatalogError> error);
 
 private:
     struct Loop;

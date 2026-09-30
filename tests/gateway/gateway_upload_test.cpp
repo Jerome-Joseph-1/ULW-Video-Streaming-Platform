@@ -949,6 +949,53 @@ TEST_P(GatewayUpload, OnlyTheOwnerCancelsAndACancelledUploadTakesNothingMore) {
     EXPECT_TRUE(gw.jobs().empty());
 }
 
+// A catalog that is down is a 503 on every route that needs it, so clients retry; a row it
+// cannot read is a 500, which they must not. Nothing an outage refused is half done after it.
+TEST_P(GatewayUpload, ACatalogOutageIsA503AndAnUnreadableRowA500OnEveryRoute) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fs, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    const std::string path = "/api/v1/uploads/" + up->upload_id;
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    // A connection per request: a refusal may close its connection.
+    const auto statuses = [&] {
+        std::vector<int> out;
+        const auto status = [&](auto&& send) {
+            HttpClient client(gw.endpoint());
+            const auto r = send(client);
+            out.push_back(r ? r->status : 0);
+        };
+        status([&](HttpClient& h) {
+            return h.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)));
+        });
+        status([&](HttpClient& h) { return h.request("HEAD", path, kAlice); });
+        status([&](HttpClient& h) { return patch(h, up->upload_id, 0, data); });
+        status([&](HttpClient& h) { return h.request("POST", path + "/commit", kAlice); });
+        status([&](HttpClient& h) { return h.request("DELETE", path, kAlice); });
+        status([&](HttpClient& h) {
+            return h.request("GET", "/api/v1/videos/" + up->video_id, kAlice);
+        });
+        return out;
+    };
+    gw.fail_catalog(core::ports::CatalogError::Unavailable);
+    EXPECT_EQ(statuses(), (std::vector<int>{503, 503, 503, 503, 503, 503}));
+    gw.fail_catalog(core::ports::CatalogError::Corrupt);
+    EXPECT_EQ(statuses(), (std::vector<int>{500, 500, 500, 500, 500, 500}));
+    EXPECT_EQ(gw.claims(), 0U);
+    EXPECT_TRUE(gw.jobs().empty());
+
+    gw.fail_catalog(std::nullopt);
+    const auto head = c.request("HEAD", path, kAlice);
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->status, 204);
+    EXPECT_EQ(head->upload_offset(), 0U);
+    ASSERT_TRUE(upload_all(c, *up, data));
+    HttpClient d(gw.endpoint());
+    EXPECT_EQ(d.request("POST", path + "/commit", kAlice)->status, 200);
+}
+
 TEST_P(GatewayUpload, AResumeFromHeadIsAcceptedAfterAMultiChunkPatchWasCutOff) {
     GatewayUnderTest gw(over_transport({.backend = Backend::Fs, .chunk = kMiB}));
     const auto data = ulw::test::pattern(3 * kMiB, 9);
