@@ -14,7 +14,8 @@ mock auth-service, as a browser's would through askedin-gateway:
               client asks HEAD for the durable offset, finishes against the pods left, and the
               video reaches ready
   netpol      a pod beside the gateway cannot open a connection to it (x-user-id forgery has
-              nothing to reach), while it can reach the auth-service
+              nothing to reach), while it can reach the auth-service; the worker reaches the
+              store but neither the gateway nor the auth-service
 
     tests/cluster/vod_flow.py [--allow-skip] [SCENARIO...]     all of them when none is named
 
@@ -395,6 +396,31 @@ def scenario_netpol():
               f"a forged x-user-id got past the gateway: {result.stdout!r}")
         raise Failure("a pod outside Envoy reached the gateway despite the NetworkPolicy; "
                       "is kube-router running in kube-system?")
+    check_worker_egress(pods)
+
+
+def check_worker_egress(gateway_ip):
+    """From inside the worker, which runs ffmpeg on hostile input: the store it needs is reached,
+    and what its egress policy denies is not. Nothing fences mock-auth's pods for ingress, and
+    the probe pod above reaches its port 80, so only the worker's own policy keeps the worker off
+    it. The gateway's ingress policy refuses the worker too, so that target is a second fence.
+    Each connect is bounded by timeout(1): a denied one is dropped or refused, never answered."""
+    auth = "mock-auth.auth.svc.cluster.local"
+    denied = [f"{gateway_ip}:8080", f"{auth}:80"]
+    probe = ("reach() { if timeout 5 bash -c \"exec 3<>/dev/tcp/$1/$2\" 2>/dev/null; "
+             "then echo \"reached $1:$2\"; else echo \"refused $1:$2\"; fi; }; "
+             f"getent hosts {auth} >/dev/null && echo resolved; "
+             f"reach minio 9000; reach {gateway_ip} 8080; reach {auth} 80")
+    result = kubectl("-n", NAMESPACE, "exec", "deploy/video-worker", "-c", "worker", "--",
+                     "bash", "-c", probe)
+    lines = set(result.stdout.splitlines())
+    check("resolved" in lines, f"the worker cannot resolve {auth}: {result.stdout!r}")
+    check("reached minio:9000" in lines,
+          f"the worker cannot reach the store it needs: {result.stdout!r}")
+    reached = [target for target in denied if f"refused {target}" not in lines]
+    check(not reached, f"the worker reached {', '.join(reached)} despite its egress "
+                       f"NetworkPolicy: {result.stdout!r}")
+    print(f"  the worker reaches the store and is refused {', '.join(denied)}")
 
 
 def fetch_from_store(url, origin):

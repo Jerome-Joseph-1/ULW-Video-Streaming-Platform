@@ -13,6 +13,7 @@
 #include "support/http_client.hpp"
 #include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
+#include "support/user_id.hpp"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -26,7 +27,6 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
-#include <pwd.h>
 #include <string>
 #include <vector>
 
@@ -171,9 +171,9 @@ constexpr bool kBuiltWithAsan =
 #endif
 
 TEST_F(GatewayAsRoot, BindsAPrivilegedPortThenServesAsTheUserItNames) {
-    const passwd* nobody = ::getpwnam("nobody");
+    const std::optional<uid_t> nobody = ulw::test::user_id("nobody");
     const auto port = free_privileged_port();
-    if (nobody == nullptr || !port) {
+    if (!nobody || !port) {
         GTEST_SKIP() << "no nobody user, or no free port under 1024";
     }
     auto env = env_without_allow_root();
@@ -201,7 +201,7 @@ TEST_F(GatewayAsRoot, BindsAPrivilegedPortThenServesAsTheUserItNames) {
     std::string line;
     while (std::getline(status, line) && !line.starts_with("Uid:")) {
     }
-    const std::string uid = std::to_string(nobody->pw_uid);
+    const std::string uid = std::to_string(*nobody);
     EXPECT_EQ(line, "Uid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid);
     HttpClient c({.port = *port, .tls = nullptr});
     const auto r = c.request("GET", "/healthz", "");

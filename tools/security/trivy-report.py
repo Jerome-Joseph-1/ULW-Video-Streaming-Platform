@@ -25,6 +25,11 @@ import os
 import sys
 from pathlib import Path
 
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pathguard import inside  # noqa: E402
+
 RANK = {"UNKNOWN": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 NAME = {v: k for k, v in RANK.items()}
 MAX_ROWS = 150
@@ -159,9 +164,10 @@ def main() -> int:
     if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
-    allow = allowlist(Path(sys.argv[1]))
+    allow = allowlist(inside(sys.argv[1]))
+    reports = [inside(p) for p in sys.argv[2:]]
     text = "\n".join(
-        summarise(json.loads(Path(p).read_text(encoding="utf-8")), allow) for p in sys.argv[2:]
+        summarise(json.loads(p.read_text(encoding="utf-8")), allow) for p in reports
     )
     target = os.environ.get("GITHUB_STEP_SUMMARY")
     if target:

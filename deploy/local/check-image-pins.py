@@ -27,6 +27,11 @@ from pathlib import Path
 
 import yaml
 
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tools"))
+from pathguard import inside  # noqa: E402
+
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 MONOREPO = "git.askedin.com/askedin/askedin-monorepo/"
 SANDBOX_BUILD = "ulw/"
@@ -84,10 +89,14 @@ def main(argv: list[str]) -> int:
     for group in ("askedin", "host", "sandbox"):
         parser.add_argument(f"--{group}", type=Path, nargs="+", required=True)
     args = parser.parse_args(argv)  # an unknown option or a missing file list exits 2
-    for path in [args.images_sh, *args.askedin, *args.host, *args.sandbox]:
+    images_sh = inside(args.images_sh)
+    askedin = [inside(p) for p in args.askedin]
+    host = [inside(p) for p in args.host]
+    sandbox = [inside(p) for p in args.sandbox]
+    for path in [images_sh, *askedin, *host, *sandbox]:
         if not path.is_file():
             parser.error(f"{path}: no such file")
-    errors = check(args.askedin, args.host, args.sandbox, pinned_tags(args.images_sh))
+    errors = check(askedin, host, sandbox, pinned_tags(images_sh))
     for e in errors:
         print(f"check-image-pins: {e}", file=sys.stderr)
     return 1 if errors else 0

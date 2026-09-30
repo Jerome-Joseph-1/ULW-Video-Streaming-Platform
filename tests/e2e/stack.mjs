@@ -32,6 +32,12 @@ function withDatabase(url, name) {
   return u.toString();
 }
 
+// SigV4 sorts header and query names by their bytes (AWS's signing spec), not by locale:
+// localeCompare can order '-', '_' and '~' against letters and digits differently, and the
+// signature would then not match. The names are ASCII, whose UTF-16 code units compare as the
+// bytes do.
+export const byCodePoint = (a, b) => Number(a > b) - Number(a < b);
+
 function psql(url, sql) {
   execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-q', '-d', url, '-c', sql], { stdio: 'pipe' });
 }
@@ -53,7 +59,7 @@ function signedBucketRequest(method, bucket) {
   const region = 'us-east-1';
   const payload = createHash('sha256').update('').digest('hex');
   const headers = { host: endpoint.host, 'x-amz-content-sha256': payload, 'x-amz-date': now };
-  const signed = Object.keys(headers).sort();
+  const signed = Object.keys(headers).sort(byCodePoint);
   const canonicalHeaders = signed.map((h) => `${h}:${headers[h]}\n`).join('');
   const canonical = `${method}\n/${bucket}\n\n${canonicalHeaders}\n${signed.join(';')}\n${payload}`;
   const scope = `${date}/${region}/s3/aws4_request`;

@@ -362,6 +362,83 @@ TEST_P(ChatSessionTest, PingsAreAnsweredUntilTheBurstRunsOutThenTheStreamIsCut) 
               1008U);
 }
 
+// A socket must not outlive the token it was opened with: a user whose tokens stopped being
+// issued (signed out, banned) would otherwise go on receiving for as long as it answers pings.
+TEST_P(ChatSessionTest, ASocketClosesWhenItsTokenExpiresWithTheCodeThatSaysReconnect) {
+    node_.reset();
+    // Pings and the idle timeout far off, so that only the token can end the socket.
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    // The token expires an hour after it was checked (FakeVerifier), and a check accepts it for
+    // the clock skew past that.
+    node_->advance(std::chrono::hours(1) + core::ports::kTokenClockSkew - seconds(1));
+    std::vector<std::byte> join;
+    ASSERT_TRUE(alice->append(join, codec::ws::Opcode::Text,
+                              R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_raw(join));
+    const auto answer = alice->next_frame(seconds(10));
+    ASSERT_TRUE(answer);
+    EXPECT_EQ(answer->first, codec::ws::Opcode::Text) << "closed before its token expired";
+
+    node_->advance(seconds(1));
+    std::optional<std::string> close;
+    while (const auto frame = alice->next_frame(seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Close) {
+            close = frame->second;
+            break;
+        }
+    }
+    ASSERT_TRUE(close) << "still open after its token expired";
+    ASSERT_GE(close->size(), 2U);
+    EXPECT_EQ((static_cast<unsigned char>((*close)[0]) << 8U) |
+                  static_cast<unsigned char>((*close)[1]),
+              4001U);
+}
+
+// A token may name any exp the wall clock can hold: its deadline plus the skew must not run past
+// the clock's range (signed overflow, caught by UBSan), and such a socket lives on.
+TEST_P(ChatSessionTest, ATokenThatExpiresAtTheEndOfTimeKeepsItsSocketOpen) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto alice = open("Authorization: Bearer forever.alice\r\n");
+    ASSERT_TRUE(alice);
+    node_->advance(std::chrono::hours(2));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+}
+
+// The same without UBSan: the deadline of a token at the end of time is the end of the
+// monotonic clock, not a sum that wrapped past it.
+TEST(TokenDeadline, IsExpPlusTheSkewOnTheMonotonicClockAndNeverWraps) {
+    const core::MonoTime now{std::chrono::hours(1000)};
+    const core::WallTime wall{std::chrono::seconds(1767225600)};
+    EXPECT_EQ(chat::token_deadline(now, wall, wall + std::chrono::hours(1)),
+              now + std::chrono::hours(1) + core::ports::kTokenClockSkew);
+    EXPECT_EQ(chat::token_deadline(now, wall, wall - seconds(30)), now + seconds(30));
+    EXPECT_EQ(chat::token_deadline(now, wall, wall - seconds(90)), now);
+    constexpr auto kLast =
+        std::chrono::floor<std::chrono::seconds>(core::WallTime::duration::max()) - seconds(1);
+    EXPECT_EQ(chat::token_deadline(now, wall, core::WallTime{kLast}),
+              now + (core::WallTime{kLast} - wall) + core::ports::kTokenClockSkew);
+    // Past what the monotonic clock can count from where it stands: never, not a wrapped sum.
+    const core::MonoTime late = core::MonoTime::max() - std::chrono::hours(1);
+    EXPECT_EQ(chat::token_deadline(late, wall, wall + std::chrono::hours(2)),
+              core::MonoTime::max());
+    EXPECT_EQ(chat::token_deadline(late, wall, core::WallTime{kLast}), core::MonoTime::max());
+}
+
 TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);

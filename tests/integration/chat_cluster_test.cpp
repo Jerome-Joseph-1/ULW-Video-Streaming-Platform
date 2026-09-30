@@ -755,6 +755,42 @@ TEST_P(ChatClusterTest, ARoomWithMembersRefusesEveryoneElse) {
     EXPECT_FALSE(carol->ever_saw("members only"));
 }
 
+// Members are taken off a list in the database, by the product or an operator. Every node hears
+// of it and stops delivering the room to that user's sockets at once (ADR-0073), wherever the
+// room is owned.
+TEST_P(ChatClusterTest, AMemberDeletedInTheDatabaseStopsReceivingOnEveryNode) {
+    const std::string members_only = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(members_only, {"alice", "bob", "carol"}));
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    auto carol = connect(nodes_[1], 2);
+    ASSERT_TRUE(alice && bob && carol);
+    for (Client* c : {alice.get(), bob.get(), carol.get()}) {
+        ASSERT_EQ(join_answer(*c, members_only), "joined");
+    }
+    ASSERT_TRUE(alice->send(send_command(members_only, "before", "m1")));
+    ASSERT_TRUE(bob->message("before"));
+
+    auto conn = db_->session();
+    ASSERT_TRUE(conn.exec("DELETE FROM chat_members WHERE room_id = $1::text::uuid AND user_id = "
+                          "'bob'",
+                          Params{}.add_text(members_only)));
+    const auto removed = bob->wait_for([&](const Seen& s) {
+        return s.type == "error" && s.room == members_only && s.reason == "not_member";
+    });
+    ASSERT_TRUE(removed) << "bob was never told";
+
+    ASSERT_TRUE(alice->send(send_command(members_only, "after", "m2")));
+    // Carol shares bob's node, so its fan-out of "after" reached both sockets together; bob's
+    // answer to a command sent once carol has it comes behind anything that fan-out sent him.
+    ASSERT_TRUE(carol->message("after"));
+    ASSERT_TRUE(bob->send(send_command(members_only, "let me back", "m3")));
+    const auto refused = bob->wait_for([](const Seen& s) { return s.id == "m3"; });
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->reason, "not_joined");
+    EXPECT_FALSE(bob->ever_saw("after"));
+}
+
 TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedLater) {
     const std::string nobody = core::RoomId::generate(clock_, random_).to_string();
     auto alice = connect(nodes_[0], 0);
@@ -866,13 +902,17 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     // Ten senders on each node, each a viewer too, and two viewers that only read. Eight slow
     // viewers are on chat-2, each with its receive buffer fixed at 64 KiB (128 KiB in the
     // kernel). Every 90 messages sequenced, once chat-2's lossy_drops_total shows they are
-    // behind, each reads 64 KiB, a quarter of what those messages send it. None stops outright:
-    // its node closes a connection that acknowledges nothing for 20 s (stall_timeout). A 64 KiB
-    // read frees half of a full buffer, which may not reopen the window at once (the receiver's
-    // silly window avoidance), and the next read empties it, which does: the window opens at
-    // least every 180 messages, which take less than 20 s even under a sanitizer. The kernel's own
-    // count of a shut window (TCP_USER_TIMEOUT) ended such viewers, and is off on client
-    // connections (ADR-0070).
+    // behind, each empties its receive buffer, at most half of what those messages send it
+    // (246 KiB), and takes in what it read, answering its node's pings as any reader does.
+    // None stops outright: its node closes a connection that acknowledges nothing for 20 s
+    // (stall_timeout), or from which nothing has come for 75 s (idle_timeout), which this test
+    // can outlast on a loaded machine. A read that empties the buffer reopens the window at once,
+    // so each acknowledges some at every read. One of part of a full buffer may not (the receiver's
+    // silly window avoidance): reading 64 KiB, half the buffer, the window opened only every other
+    // read, 180 messages apart, which took up to 14 s under ASan on a developer's machine and past
+    // 20 s on CI runners, where the node rightly closed such viewers as stalled. The kernel's own
+    // count of a shut window (TCP_USER_TIMEOUT) ended them too, and is off on client connections
+    // (ADR-0070).
     std::vector<std::unique_ptr<Client>> senders;
     std::vector<std::unique_ptr<Client>> viewers;
     std::string live;
@@ -890,7 +930,8 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     }
     constexpr int kSlowReceiveBuffer = 64 * 1024;
     constexpr std::size_t kReadEvery = 90;
-    constexpr std::size_t kSlowRead = std::size_t{64} * 1024;
+    // More than the kernel ever holds for a 128 KiB buffer: one read empties it.
+    constexpr std::size_t kSlowRead = std::size_t{256} * 1024;
     Node& slow_node = nodes_[1];
     std::vector<std::unique_ptr<Client>> slow;
     for (int k = 0; k < 8; ++k) {
@@ -999,6 +1040,11 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
         }
     }
     samples.push_back(resident(slow_node.process->pid()));
+    // Slow, not stopped: none was closed as stalled or idle while it trickled.
+    for (auto& c : slow) {
+        EXPECT_EQ(c->ending(), "open") << c->name();
+    }
+    EXPECT_EQ(metric(slow_node, "stalled_readers_total"), 0U);
 
     // Everyone who kept reading got every message, once, in the room's order.
     for (auto* group : {&senders, &viewers}) {
@@ -1084,7 +1130,10 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
             return seen.type == "message" && seen.seq == kMessages;
         })) << c->name()
             << " stopped after " << c->messages().size() << " messages, at seq "
-            << (c->messages().empty() ? 0 : c->messages().back().seq);
+            << (c->messages().empty() ? 0 : c->messages().back().seq) << "; its connection "
+            << c->ending() << "; its node closed " << metric(slow_node, "stalled_readers_total")
+            << " as stalled and " << metric(slow_node, "slow_consumers_total")
+            << " as slow consumers";
         const std::vector<Seen> got = c->messages();
         for (std::size_t k = 1; k < got.size(); ++k) {
             ASSERT_LT(got[k - 1].seq, got[k].seq) << c->name();
@@ -1114,6 +1163,11 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
               << " KiB, allowed " << step_kib << ") it grew " << rest_kib << " KiB, allowed "
               << allowed_kib << ", having sent them " << owed_kib << " KiB more; "
               << attempts - kMessages << " sends were turned away or unanswered and tried again\n";
+    for (std::size_t k = 0; k < slow.size(); ++k) {
+        std::cout << slow[k]->name() << " read " << read_bytes[k]
+                  << " bytes while it trickled and got " << slow[k]->messages().size() << " of "
+                  << kMessages << " messages\n";
+    }
 }
 
 // No database is reached: the connection string is refused before any connection is tried.

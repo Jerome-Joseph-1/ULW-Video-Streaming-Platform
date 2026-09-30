@@ -253,7 +253,8 @@ ulw_add_test_suite(gateway_tests unit
     gateway/health_test.cpp
     gateway/key_fetcher_test.cpp
     gateway/live_manifest_cache_test.cpp
-    gateway/rate_limit_test.cpp)
+    gateway/rate_limit_test.cpp
+    gateway/send_window.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
     ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)

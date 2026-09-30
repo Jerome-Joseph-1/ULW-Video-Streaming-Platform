@@ -126,6 +126,18 @@ struct StoredMessage {
     friend bool operator==(const StoredMessage&, const StoredMessage&) = default;
 };
 
+// Told when a member list shrinks, on the reactor thread, never from inside a store call.
+class IMemberListener {
+public:
+    virtual ~IMemberListener() = default;
+    // `user` is no longer on the member list of `room`, whoever changed it and however: an
+    // operator's DELETE in the database counts as much as remove_member.
+    virtual void on_member_removed(const RoomId& room, const UserId& user) noexcept = 0;
+    // Removals may have gone unannounced (the store lost its way to hear them): whatever relies
+    // on them must check the member lists it cares about again.
+    virtual void on_members_resync() noexcept = 0;
+};
+
 // Where a room's sequenced messages are read back, and its members kept. Bodies are opaque
 // bytes, end to end: they are stored and returned exactly, and never parsed, logged or indexed.
 // Plaintext today and MLS ciphertext later are the same thing to the store.
@@ -174,6 +186,9 @@ public:
     // is created); recording it again does nothing. The in-memory store keeps no room plane, so
     // only the first three apply to it.
     virtual void record_live(const RoomId& room, MessageCallback<void> done) = 0;
+    // Where removals from any room's member list are told from now on; nullptr stops them. One
+    // listener at a time.
+    virtual void watch_members(IMemberListener* listener) noexcept = 0;
 };
 
 } // namespace core::ports
