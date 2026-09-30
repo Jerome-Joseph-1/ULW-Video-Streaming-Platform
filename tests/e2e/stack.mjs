@@ -176,6 +176,7 @@ export async function startStack({ player = 'player.html', bucket = config.bucke
     ...(process.env.ULW_REACTOR ? { ULW_REACTOR: process.env.ULW_REACTOR } : {}),
     ULW_LISTEN_PORT: String(gatewayPort),
     ULW_DEV_JWKS_FILE: jwks,
+    ULW_DEV_MODE: "1",
     JWT_ISSUER: config.issuer,
     // The per-client limits stay at their defaults: a real browser playing through them is
     // part of what this suite shows.

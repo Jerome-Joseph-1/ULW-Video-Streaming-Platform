@@ -40,8 +40,9 @@ systemd units do not restart on it. `gateway_server --check-config` and
 `transcode_worker --check-config` run the same checks and exit `0` or `2` without starting
 anything. Beyond each value's own range, they check what would otherwise fail only at start: the
 connection string parses; the R2 account id or MinIO endpoint forms a store profile; the store
-keys are set and the key id is 1 to 128 of `A-Z a-z 0-9 - . _ ~`; the development key set reads
-and holds a usable key; TLS certificate and key load and match;
+keys are set and the key id is 1 to 128 of `A-Z a-z 0-9 - . _ ~`; the development key set is
+allowed (`ULW_DEV_MODE=1`, and not in a Kubernetes pod), reads and holds a usable key; TLS
+certificate and key load and match;
 `ULW_MAX_UPLOAD_SLOTS <= ULW_MAX_CONNECTIONS`,
 `ULW_MAX_UPLOADS_PER_USER <= ULW_MAX_UPLOAD_SLOTS`,
 `ULW_MAX_CONNECTIONS_PER_IP <= ULW_MAX_CONNECTIONS`; `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` at
