@@ -29,6 +29,8 @@ tools/mutate.py ... --only http/src/request_parser.cpp:202:del:0  # chosen mutan
 spreads the mutants over the files in proportion to how many each has. Each mutant rebuilds one
 object and relinks one binary; mutants build with `CCACHE_READONLY`, so they do not fill the
 cache, and the restored source hits it. Run it from its own worktree: it edits sources in place.
+It restores the file when stopped by SIGINT, SIGTERM or SIGHUP, and kills a timed-out build or
+test with its whole process group; after a SIGKILL, `git checkout` the file it was mutating.
 
 A survivor is either a missing test or an equivalent mutant, one no test can tell apart:
 `x == npos` read as `x >= npos`, `n == 0` as `n <= 0` for an unsigned `n`, a buffer grown by

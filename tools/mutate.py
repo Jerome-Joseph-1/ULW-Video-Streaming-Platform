@@ -21,8 +21,10 @@ Mutations, applied one at a time on formatted source (binary operators are space
 
 A mutant that fails to compile is recorded as `unbuildable` and left out of the score. One that
 builds is `killed` if the tests fail, `timeout` if they outlast --timeout, and `survived` if they
-pass. The file is restored after every mutant, even on interrupt, and the target rebuilt at the
-end. Each mutant's id is file:line:operator:index, stable for a given source.
+pass. The file is restored, byte for byte, after every mutant and when the run is stopped by
+SIGINT, SIGTERM or SIGHUP, and the target is rebuilt at the end; SIGKILL leaves the mutant in
+place (`git checkout` the file). A build or test that outlasts its timeout is killed with its
+whole process group. Each mutant's id is file:line:operator:index, stable for a given source.
 
 Mutants build with CCACHE_READONLY so they do not fill the cache; the restored source hits it.
 """
@@ -31,6 +33,7 @@ import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -101,7 +104,7 @@ def balanced_end(text, start):
 
 def mutants_for(path, root):
     rel = str(Path(path).resolve().relative_to(root))
-    src = Path(path).read_text(encoding="utf-8").split("\n")
+    src = read_source(path).split("\n")
     masked = mask(src)
     found = []
 
@@ -164,8 +167,17 @@ def mutants_for(path, root):
     return found
 
 
+def read_source(path):
+    # Bytes, not text mode, so that "\r\n" line endings survive the round trip.
+    return Path(path).read_bytes().decode("utf-8")
+
+
+def write_source(path, text):
+    Path(path).write_bytes(text.encode("utf-8"))
+
+
 def apply(path, mutant):
-    text = Path(path).read_text(encoding="utf-8")
+    text = read_source(path)
     lines = text.split("\n")
     line = lines[mutant["line"] - 1]
     col, old = mutant["col"], mutant["old"]
@@ -175,14 +187,37 @@ def apply(path, mutant):
     return text, "\n".join(lines)
 
 
-def run(cmd, timeout, env=None, cwd=None):
-    start = time.monotonic()
+class Stopped(Exception):
+    """SIGTERM or SIGHUP, raised so that the file is restored on the way out."""
+
+
+def on_stop_signal(signum, _frame):
+    raise Stopped(signal.Signals(signum).name)
+
+
+def kill_group(p):
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
-                           env=env, cwd=cwd, start_new_session=True)
-        return p.returncode, p.stdout.decode(errors="replace"), time.monotonic() - start
-    except subprocess.TimeoutExpired as e:
-        return None, (e.stdout or b"").decode(errors="replace"), time.monotonic() - start
+        os.killpg(p.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def run(cmd, timeout, env=None, cwd=None):
+    """Runs `cmd` in a process group of its own, which a timeout or a stop kills whole."""
+    start = time.monotonic()
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=cwd,
+                         start_new_session=True)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return p.returncode, out.decode(errors="replace"), time.monotonic() - start
+    except subprocess.TimeoutExpired:
+        kill_group(p)
+        out, _ = p.communicate()
+        return None, out.decode(errors="replace"), time.monotonic() - start
+    except BaseException:
+        kill_group(p)
+        p.wait()
+        raise
 
 
 def main():
@@ -254,6 +289,9 @@ def main():
         sys.exit(f"the unmutated tests do not pass:\n{out[-3000:]}")
     print(f"baseline: {base:.1f}s, {len(chosen)} mutants", file=sys.stderr, flush=True)
 
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, on_stop_signal)
+    stop_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
     out_f = open(a.out, "a", encoding="utf-8") if a.out else None
     counts = {}
     started = time.monotonic()
@@ -264,7 +302,7 @@ def main():
                 break
             original, mutated = apply(m["file"], m)
             try:
-                Path(m["file"]).write_text(mutated, encoding="utf-8")
+                write_source(m["file"], mutated)
                 rc, bout, bt = run(build, a.build_timeout, env=env)
                 if rc != 0:
                     status, tt, tail = "unbuildable", 0.0, ""
@@ -274,7 +312,10 @@ def main():
                     failed = re.findall(r"\[  FAILED  \] (\S+)", tout)
                     tail = ",".join(sorted(set(failed))[:5]) if failed else tout[-300:]
             finally:
-                Path(m["file"]).write_text(original, encoding="utf-8")
+                # No stop signal may cut the restore short.
+                signal.pthread_sigmask(signal.SIG_BLOCK, stop_signals)
+                write_source(m["file"], original)
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, stop_signals)
             counts[status] = counts.get(status, 0) + 1
             rec = dict(m, status=status, build_s=round(bt, 1), test_s=round(tt, 1),
                        evidence=tail if status == "killed" else "")
@@ -283,6 +324,7 @@ def main():
                 out_f.write(json.dumps(rec) + "\n")
                 out_f.flush()
     finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, stop_signals)
         run(build, a.build_timeout)
         if out_f:
             out_f.close()
@@ -293,4 +335,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Stopped as stopped:
+        sys.exit(f"stopped by {stopped}; the source is restored")
