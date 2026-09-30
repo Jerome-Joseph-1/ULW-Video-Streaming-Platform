@@ -42,7 +42,7 @@ The load (--clients and --pause scale it):
               and reloads nothing today (it serves plain WebSocket behind the edge's TLS)
   prefill     in the warm-up only: large frames that fill io_uring's receive pool, and 60
               more senders in the pool rooms that bring each node's order of kept messages to
-              its cap (PREFILL_FRAME, PREFILL_SENDERS, ADR-0055)
+              its cap (PREFILL_FRAME, PREFILL_SENDERS, ADR-0069)
 Where the database has member lists (M19), every user of the soak is listed in the pool rooms,
 and the visitors in the rooms they open, as an operator would list them: a group chat admits
 only its members. Commands the running chat_server does not know are found at the start by
@@ -146,7 +146,7 @@ SLOW_READ = 8 * 1024
 SLOW_RCVBUF = 16 * 1024
 HOSE_BODY = 32 * 1024
 HOSE_MESSAGES = 32
-# The warm-up prefill (ADR-0055). Two structures of each node grow to a fixed size more slowly
+# The warm-up prefill (ADR-0069). Two structures of each node grow to a fixed size more slowly
 # than the warm-up lasts at this load, and a line fitted after the warm-up would read their
 # last climb as a leak:
 #  - io_uring's receive pool, 256 buffers of 64 KiB whose pages count in RSS once the kernel has

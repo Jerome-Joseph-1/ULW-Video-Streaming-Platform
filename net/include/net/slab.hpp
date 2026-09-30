@@ -90,6 +90,13 @@ public:
             }
         }
     }
+    template <class Fn> void for_each_live(Fn fn) const {
+        for (const Slot& s : slots_) {
+            if (s.live && !s.retired && s.value.has_value()) {
+                fn(*s.value);
+            }
+        }
+    }
 
     [[nodiscard]] std::size_t size() const noexcept { return live_; }
     [[nodiscard]] std::size_t capacity() const noexcept { return slots_.size(); }

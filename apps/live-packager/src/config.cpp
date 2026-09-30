@@ -1,6 +1,7 @@
 #include "config.hpp"
 
 #include "core/util/parse.hpp"
+#include "infra/ffmpeg/live_remux.hpp"
 #include "infra/srt/ingest.hpp"
 
 #include <utility>
@@ -17,7 +18,7 @@ constexpr std::string_view kDefaultIngestHost = "127.0.0.1";
 // (ADR-0014), so a segment must last more than a second. Past 10 s the stream is not live to
 // its viewers: they sit three target durations behind the edge.
 constexpr std::uint32_t kMinSegmentSeconds = 2;
-constexpr std::uint32_t kMaxSegmentSeconds = 10;
+constexpr std::uint32_t kMaxSegmentSeconds = infra::ffmpeg::kLiveMaxSegmentSeconds;
 constexpr std::uint32_t kDefaultSegmentSeconds = 2;
 // RFC 8216 section 6.2.2: a live playlist holds at least three target durations. Ten segments
 // at the default 2 s keep 20 s, room for a viewer's stall or a slow reload. 64 keeps
@@ -32,7 +33,7 @@ constexpr std::uint64_t kMaxHours = 12;
 // well above it, and past 100 the pipe, not the packager, is the limit.
 constexpr std::uint32_t kMinKbps = 500;
 constexpr std::uint32_t kDefaultKbps = 20'000;
-constexpr std::uint32_t kMaxKbps = 100'000;
+constexpr std::uint32_t kMaxKbps = infra::ffmpeg::kLiveMaxKbps;
 
 std::unexpected<ConfigError> error(std::string_view variable, std::string_view reason) {
     return std::unexpected(

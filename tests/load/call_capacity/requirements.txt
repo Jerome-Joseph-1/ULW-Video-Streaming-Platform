@@ -1,0 +1,7 @@
+# The LiveKit Python SDK and what it pulls in, wheels for CPython 3.11 and 3.12 on x86_64.
+# pip install --require-hashes --only-binary :all: -r requirements.txt
+livekit==1.1.20 --hash=sha256:83c0ea54d7ff505e92c3e88943e050e54825b0bf0f7e90652fb126eb447b3d76
+numpy==2.2.6 --hash=sha256:ba10f8411898fc418a521833e014a77d3ca01c15b0c6cdcce6a0d2897e6dbbdf --hash=sha256:fd83c01228a688733f1ded5201c678f0c53ecc1006ffbc404db9f7a899ac6249
+protobuf==6.32.1 --hash=sha256:b1864818300c297265c83a4982fd3169f97122c299f56a56e2445c3698d34710 --hash=sha256:2601b779fc7d32a866c6b4404f9d42a3f67c5b9f3f15b4db3cccabe06b95c346
+types-protobuf==6.30.2.20250914 --hash=sha256:cfc24977c0f38cf2896d918a59faed7650eb983be6070343a6204ac8ac0a297e
+aiofiles==24.1.0 --hash=sha256:b4ec55f4195e3eb5d7abd1bf7e061763e864dd4954231fb8539a0ef8bb8260e5

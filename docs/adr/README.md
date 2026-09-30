@@ -49,7 +49,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0043](0043-chat-service-policy-between-edge-and-rooms.md) | The chat service: policy between the client edge and the room plane | Accepted |
 | [0044](0044-openmls-behind-a-narrow-c-api.md) | OpenMLS behind a narrow C API, pinned by Cargo.lock | Accepted |
 | [0045](0045-one-store-connection-per-admitted-upload.md) | One store connection per admitted upload, and a held body is the store's to end | Accepted |
-| [0046](0046-live-media-reaches-the-packager-over-srt.md) | Live media reaches the packager over SRT, which it terminates itself | Accepted |
+| [0046](0046-live-media-reaches-the-packager-over-srt.md) | Live media reaches the packager over SRT, which it terminates itself | Accepted, probe window amended by 0057 |
 | [0047](0047-live-playlist-window-and-restart.md) | The live playlist is a window the packager owns, and it continues across a restart | Accepted |
 | [0048](0048-seccomp-allowlist-for-the-ffmpeg-child.md) | The ffmpeg child runs under a syscall allowlist | Accepted |
 | [0049](0049-upload-reaper-as-a-cron-job.md) | Abandoned uploads are reaped by a CronJob | Accepted |
@@ -60,4 +60,16 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted |
 | [0055](0055-a-live-recording-is-remuxed-from-the-stored-segments.md) | A live recording is remuxed from its stored segments into one object, and queued once per stream | Accepted |
 | [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
-| [0055](0055-chat-soak-flatness-per-command-delivery-and-connection.md) | Chat soak flatness judged per command, delivery and connection | Accepted |
+| [0057](0057-the-probe-window-follows-the-configuration.md) | The packager's probe window follows its configuration | Accepted |
+| [0058](0058-group-calls-interfaces-now-implementation-deferred.md) | Group calls: interfaces now, implementation deferred | Accepted |
+| [0059](0059-live-playlists-through-a-single-flight-cache.md) | Live playlists are served from a single-flight cache, to any signed-in viewer | Accepted |
+| [0060](0060-pump-staging-is-appended-to-and-bounded.md) | Pump staging is appended to, bounded, and overflow is 413 | Accepted |
+| [0061](0061-cmake-3-28-presets-v6-and-the-ci-test-preset.md) | CMake 3.28, presets version 6, and a `ci` test preset | Accepted |
+| [0062](0062-ulw-sanitize-is-the-one-sanitizer-target.md) | `ulw_sanitize` is the one sanitizer interface target | Accepted |
+| [0063](0063-gateway-memory-high-600m-max-700m.md) | The gateway's memory: high at 600 MB, max at 700 MB | Accepted |
+| [0064](0064-the-first-accepted-patch-starts-the-upload.md) | The first accepted PATCH moves a video from `init` to `uploading` | Accepted |
+| [0065](0065-concurrent-patches-serialised-by-a-per-upload-advisory-lock.md) | Concurrent PATCHes are serialised by a per-upload advisory lock | Accepted |
+| [0066](0066-the-gateways-object-store-credentials.md) | What the gateway's object-store credentials may do | Accepted |
+| [0067](0067-chat-resume-is-a-join-with-after.md) | Chat resume is a `join` with `after`, and acks are `joined` and `sent` | Accepted |
+| [0068](0068-a-failed-job-fails-its-video.md) | A job that fails for good fails its video in the same statement | Accepted |
+| [0069](0069-chat-soak-flatness-per-command-delivery-and-connection.md) | Chat soak flatness judged per command, delivery and connection | Accepted |

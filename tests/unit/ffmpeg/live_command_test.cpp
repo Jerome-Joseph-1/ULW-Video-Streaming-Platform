@@ -1,6 +1,7 @@
 #include "live_command.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -21,6 +22,12 @@ LiveRemuxJob job() {
             .max_duration = core::Seconds{3600}};
 }
 
+// The command line as the remuxer builds it, with the probe its configuration gives.
+Args args_for(const LiveRemuxJob& j) {
+    return infra::ffmpeg::live_remux_args("ffmpeg", j,
+                                          infra::ffmpeg::live_probe(j.max_kbps, j.segment_seconds));
+}
+
 std::string after(const Args& args, std::string_view flag) {
     const auto it = std::ranges::find(args, flag);
     return it == args.end() || it + 1 == args.end() ? std::string() : *(it + 1);
@@ -31,7 +38,7 @@ bool has(const Args& args, std::string_view flag) {
 }
 
 TEST(LiveRemuxArgs, CopyTheStreamsWithoutDecodingThem) {
-    const Args args = infra::ffmpeg::live_remux_args("ffmpeg", job());
+    const Args args = args_for(job());
     EXPECT_EQ(after(args, "-c"), "copy");
     EXPECT_FALSE(has(args, "libx264"));
     EXPECT_FALSE(has(args, "-filter_complex"));
@@ -39,21 +46,21 @@ TEST(LiveRemuxArgs, CopyTheStreamsWithoutDecodingThem) {
 }
 
 TEST(LiveRemuxArgs, ReadStdinAsMpegtsAndNothingElse) {
-    const Args args = infra::ffmpeg::live_remux_args("ffmpeg", job());
+    const Args args = args_for(job());
     EXPECT_EQ(after(args, "-i"), "pipe:0");
     EXPECT_EQ(after(args, "-f"), "mpegts");
     EXPECT_TRUE(has(args, "-nostdin"));
 }
 
 TEST(LiveRemuxArgs, CutSegmentsAtTheTargetDurationIntoFragmentedMp4) {
-    const Args args = infra::ffmpeg::live_remux_args("ffmpeg", job());
+    const Args args = args_for(job());
     EXPECT_EQ(after(args, "-hls_time"), "2");
     EXPECT_EQ(after(args, "-hls_segment_type"), "fmp4");
     EXPECT_EQ(after(args, "-hls_list_size"), "20");
 }
 
 TEST(LiveRemuxArgs, ContinueTheNumberingAndNameTheInitSegmentForItsEpoch) {
-    const Args args = infra::ffmpeg::live_remux_args("ffmpeg", job());
+    const Args args = args_for(job());
     EXPECT_EQ(after(args, "-start_number"), "41");
     EXPECT_EQ(after(args, "-hls_fmp4_init_filename"), "init_3.mp4");
     EXPECT_EQ(args.back(), "/scratch/media/index.m3u8");
@@ -71,8 +78,7 @@ TEST(LiveMaxFileBytes, IsTwiceTheLongestSegmentTheContractAllowsAtTheMaximumBitr
 }
 
 TEST(LiveRemuxArgs, TheSegmentPatternProducesTheNamesTheTrackerExpects) {
-    const std::string pattern =
-        after(infra::ffmpeg::live_remux_args("ffmpeg", job()), "-hls_segment_filename");
+    const std::string pattern = after(args_for(job()), "-hls_segment_filename");
     const std::string prefix = "/scratch/media/";
     ASSERT_TRUE(pattern.starts_with(prefix));
     std::string expected = pattern.substr(prefix.size());
@@ -81,21 +87,85 @@ TEST(LiveRemuxArgs, TheSegmentPatternProducesTheNamesTheTrackerExpects) {
 }
 
 TEST(LiveRemuxArgs, WriteSegmentsUnderATemporaryNameUntilTheyAreClosed) {
-    const std::string flags = after(infra::ffmpeg::live_remux_args("ffmpeg", job()), "-hls_flags");
+    const std::string flags = after(args_for(job()), "-hls_flags");
     EXPECT_NE(flags.find("temp_file"), std::string::npos);
     EXPECT_NE(flags.find("independent_segments"), std::string::npos);
 }
 
 TEST(LiveRemuxArgs, ConvertAdtsAudioAndKeepAStreamThatHasNone) {
-    const Args args = infra::ffmpeg::live_remux_args("ffmpeg", job());
+    const Args args = args_for(job());
     EXPECT_EQ(after(args, "-bsf:a"), "aac_adtstoasc");
     EXPECT_TRUE(has(args, "0:a:0?"));
 }
 
-TEST(LiveRemuxArgs, ProbeForOneSecondNotTheDefaultFive) {
-    const Args args = infra::ffmpeg::live_remux_args("ffmpeg", job());
-    EXPECT_EQ(after(args, "-analyzeduration"), "1000000");
-    EXPECT_EQ(after(args, "-probesize"), "1000000");
+TEST(LiveRemuxArgs, ProbeForASegmentLengthAndASecondAtTheMaximumBitrate) {
+    // 2 s segments: 3 s, and 3 s at 20 Mbit/s is 7.5 MB, twice.
+    const Args args = args_for(job());
+    EXPECT_EQ(after(args, "-analyzeduration"), "3000000");
+    EXPECT_EQ(after(args, "-probesize"), "15000000");
+
+    // The window follows the segment length and the bytes the bitrate: 11 s at 1 Mbit/s.
+    LiveRemuxJob slow = job();
+    slow.segment_seconds = 10;
+    slow.max_kbps = 1'000;
+    const Args slow_args = args_for(slow);
+    EXPECT_EQ(after(slow_args, "-analyzeduration"), "11000000");
+    EXPECT_EQ(after(slow_args, "-probesize"), "2750000");
+}
+
+TEST(LiveRemuxArgs, ProbeWithWhatItIsGiven) {
+    const Args args = infra::ffmpeg::live_remux_args(
+        "ffmpeg", job(), {.window = core::Millis{4'500}, .bytes = 123'456});
+    EXPECT_EQ(after(args, "-analyzeduration"), "4500000");
+    EXPECT_EQ(after(args, "-probesize"), "123456");
+}
+
+TEST(LiveProbe, CoversAKeyframeIntervalWhateverTheSegmentLength) {
+    for (std::uint32_t segment = 2; segment <= 10; ++segment) {
+        const auto probe = infra::ffmpeg::live_probe(20'000, segment);
+        EXPECT_EQ(probe.window, core::Seconds{segment} + core::Seconds{1}) << segment;
+        EXPECT_EQ(probe.bytes, std::uint64_t{20'000} * 125 * (segment + 1) * 2) << segment;
+    }
+}
+
+TEST(LiveProbe, StaysBoundedWhateverTheConfiguration) {
+    const auto most = infra::ffmpeg::live_probe(UINT32_MAX, UINT32_MAX);
+    EXPECT_EQ(most.window, core::Seconds{11});
+    EXPECT_EQ(most.bytes, 275'000'000U);
+    // Never below the megabyte it probed before, nor a window shorter than the slack.
+    const auto least = infra::ffmpeg::live_probe(0, 0);
+    EXPECT_EQ(least.window, core::Seconds{1});
+    EXPECT_EQ(least.bytes, 1'000'000U);
+    EXPECT_EQ(infra::ffmpeg::live_probe(500, 2).bytes, 1'000'000U);
+}
+
+TEST(VideoUnprobed, FindsTheVideoStreamFfmpegGaveUpOn) {
+    EXPECT_TRUE(infra::ffmpeg::video_unprobed(
+        "[mpegts @ 0x56174500b000] Could not find codec parameters for stream 0 (Video: h264 "
+        "([27][0][0][0] / 0x001B), none): unspecified size\n"
+        "Consider increasing the value for the 'analyzeduration' (1000000) and 'probesize' "
+        "(1000000) options\n"
+        "[mp4 @ 0x561745054080] dimensions not set\n"
+        "Error opening output files: Invalid argument\n"));
+    // The line may be the last, without its newline, in a tail cut short.
+    EXPECT_TRUE(infra::ffmpeg::video_unprobed(
+        "Could not find codec parameters for stream 1 (Video: h264, none): unspecified size"));
+}
+
+TEST(VideoUnprobed, IgnoresOtherStreamsAndOtherLines) {
+    // An unmapped SCTE-35 stream, which a healthy run reports too.
+    EXPECT_FALSE(infra::ffmpeg::video_unprobed(
+        "[mpegts @ 0x5601] Could not find codec parameters for stream 2 (Unknown: none "
+        "([6][0][0][0] / 0x0006)): unknown codec\n"
+        "Consider increasing the value for the 'analyzeduration' and 'probesize' options\n"));
+    EXPECT_FALSE(infra::ffmpeg::video_unprobed(
+        "Could not find codec parameters for stream 1 (Audio: aac, 0 channels): "
+        "unspecified sample format\n"));
+    // The two halves on different lines are not the video line.
+    EXPECT_FALSE(
+        infra::ffmpeg::video_unprobed("Could not find codec parameters for stream 2 (Data: none)\n"
+                                      "Stream #0:0: (Video: h264)\n"));
+    EXPECT_FALSE(infra::ffmpeg::video_unprobed(""));
 }
 
 TEST(LiveInitName, RoundTripsTheEpoch) {

@@ -525,7 +525,10 @@ TEST_F(SyscallFilterTest, ALiveRemuxFromAPipeStillRuns) {
                                           .epoch = 7,
                                           .max_kbps = 8000,
                                           .max_duration = core::Seconds{30}};
-    const auto child = run(infra::ffmpeg::live_remux_args("ffmpeg", job), {}, {}, read_end.get());
+    const auto child =
+        run(infra::ffmpeg::live_remux_args(
+                "ffmpeg", job, infra::ffmpeg::live_probe(job.max_kbps, job.segment_seconds)),
+            {}, {}, read_end.get());
     // An ffmpeg that died early leaves the writer blocked on a full pipe until no reader is left.
     read_end.reset();
     publisher.join();

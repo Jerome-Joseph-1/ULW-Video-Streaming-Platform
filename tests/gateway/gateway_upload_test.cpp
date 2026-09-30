@@ -7,11 +7,14 @@
 
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <openssl/evp.h>
+#include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -125,6 +128,32 @@ TEST_P(GatewayUpload, InboundUserHeadersAreIgnored) {
     const auto r = c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)),
                              {{"x-user-id", "alice"}, {"x-user-email", "a@example.com"}});
     EXPECT_EQ(r->status, 401);
+}
+
+// A gateway that let an identity header win over the token's subject would file bob's upload
+// under alice, and let alice read bob's by naming him.
+TEST_P(GatewayUpload, AUserHeaderBesideAValidTokenDoesNotChangeWhoIsAsking) {
+    const GatewayUnderTest gw(over_transport());
+    HttpClient c(gw.endpoint());
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    const auto created = c.request("POST", "/api/v1/uploads", kBob, std::as_bytes(std::span(body)),
+                                   {{"x-user-id", "alice"}, {"x-user-email", "alice@example.com"}});
+    ASSERT_TRUE(created);
+    ASSERT_EQ(created->status, 201);
+    const auto doc = core::json::parse(created->body);
+    ASSERT_TRUE(doc);
+    const std::string upload =
+        "/api/v1/uploads/" + std::string(*doc->find("upload_id")->as_string());
+    const std::string video = "/api/v1/videos/" + std::string(*doc->find("video_id")->as_string());
+
+    HttpClient alice(gw.endpoint());
+    EXPECT_EQ(alice.request("HEAD", upload, kAlice)->status, 404);
+    EXPECT_EQ(alice.request("GET", video, kAlice)->status, 404);
+    HttpClient alice_naming_bob(gw.endpoint());
+    EXPECT_EQ(alice_naming_bob.request("HEAD", upload, kAlice, {}, {{"x-user-id", "bob"}})->status,
+              404);
+    HttpClient bob(gw.endpoint());
+    EXPECT_EQ(bob.request("HEAD", upload, kBob)->status, 204);
 }
 
 TEST_P(GatewayUpload, AKeyServerOutageIsARetryNotASignOut) {
@@ -416,21 +445,35 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     HttpClient uploader(gw.endpoint());
     timeval tv{.tv_sec = 0, .tv_usec = 200'000};
     ::setsockopt(uploader.fd(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    // A fixed send buffer, so the client stalls at the same point on every host. Left to
+    // autotune, it grows towards tcp_wmem's maximum while a send is already waiting on it, and
+    // that send times out although the socket has room again.
+    const int send_buffer = 256 * 1024;
+    ASSERT_EQ(::setsockopt(uploader.fd(), SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof send_buffer),
+              0);
     const std::string head = "PATCH /api/v1/uploads/" + up->upload_id +
                              " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice\r\n"
                              "Upload-Offset: 0\r\nContent-Length: " +
                              std::to_string(data.size()) + "\r\n\r\n";
     ASSERT_TRUE(uploader.send_raw(head));
+    // Writes the body until a send has taken nothing for its whole timeout. That is the
+    // kernel's state at that moment, not for good: a late window update can still open room, so
+    // every push goes on until the socket refuses again. Each send asks for the rest of the body
+    // from `sent`, the same bytes every time, as a TLS write that did not complete must be
+    // retried.
+    std::size_t sent = 0;
+    const auto push_until_refused = [&] {
+        while (sent < data.size()) {
+            const std::size_t n = uploader.send_some(std::span(data).subspan(sent));
+            if (n == 0) {
+                return;
+            }
+            sent += n;
+        }
+    };
     // With nothing drained, the client's writes must stall once the kernel buffers on both
     // sides are full; the gateway itself holds at most its staging bound.
-    std::size_t sent = 0;
-    while (sent < data.size()) {
-        const std::size_t n = uploader.send_some(std::span(data).subspan(sent));
-        if (n == 0) {
-            break;
-        }
-        sent += n;
-    }
+    push_until_refused();
     EXPECT_LT(sent, data.size());
     const auto ingested = gw.counters().bytes_ingested;
     EXPECT_LE(ingested, (std::uint64_t{256} * 1024) + (std::uint64_t{64} * 1024));
@@ -459,13 +502,13 @@ TEST_P(GatewayUpload, StoreHoldingTheBodyUpThrottlesTheClientWithoutTimingItOut)
     constexpr int kBodyTimeouts = 10;
     for (int i = 0; i < kBodyTimeouts; ++i) {
         gw.advance(limits.body_idle_timeout);
-        // The client keeps pushing into a full socket; nothing more may land in the gateway.
-        if (i == 0 || i == kBodyTimeouts - 1) {
-            EXPECT_EQ(uploader.send_some(std::span(data).subspan(sent, 1024)), 0U);
-        }
-        EXPECT_EQ(buffered(), held_once_stalled);
+        // The client keeps pushing whatever its socket takes; nothing more may land in the
+        // gateway.
+        push_until_refused();
+        EXPECT_LT(sent, data.size()) << "at body timeout " << i;
+        EXPECT_EQ(buffered(), held_once_stalled) << "at body timeout " << i;
+        EXPECT_EQ(gw.counters().bytes_ingested, ingested) << "at body timeout " << i;
     }
-    EXPECT_EQ(gw.counters().bytes_ingested, ingested);
     const gateway::Counters held = gw.counters();
     EXPECT_EQ(held.timeouts_body + held.timeouts_body_rate + held.timeouts_backstop, 0U);
     EXPECT_EQ(gw.claims(), 1U);
@@ -529,6 +572,41 @@ TEST_P(GatewayUpload, PipelinedRequestsAreAnsweredInOrder) {
     const auto missing = c.read_response();
     ASSERT_TRUE(missing);
     EXPECT_EQ(missing->status, 404);
+}
+
+// The parser's buffer for bytes behind a request grows as they arrive: a few bytes behind the
+// first burst, then a burst larger than one 64 KiB receive, which needs it again and larger.
+TEST_P(GatewayUpload, APipelinedBurstLargerThanAReceiveIsAnsweredInOrder) {
+    const GatewayUnderTest gw(over_transport());
+    HttpClient c(gw.endpoint());
+    // Padded so that the burst stays inside the 1000 requests a connection may carry.
+    const std::string pad = "X-Pad: " + std::string(200, 'x') + "\r\n";
+    const std::string health = "GET /api/v1/healthz HTTP/1.1\r\nHost: t\r\n" + pad + "\r\n";
+    const std::string ready = "GET /api/v1/readyz HTTP/1.1\r\nHost: t\r\n" + pad + "\r\n";
+    // At least `bytes` of requests, alternating, and how many.
+    const auto burst = [&](std::size_t bytes) {
+        std::string out;
+        std::size_t requests = 0;
+        for (; out.size() < bytes; ++requests) {
+            out += requests % 2 == 0 ? health : ready;
+        }
+        return std::pair{out, requests};
+    };
+    const auto answered_in_order = [&](std::size_t requests) {
+        for (std::size_t i = 0; i < requests; ++i) {
+            const auto r = c.read_response();
+            if (!r || r->body != (i % 2 == 0 ? "ok\n" : "ready\n")) {
+                ADD_FAILURE() << "response " << i << " of " << requests;
+                return;
+            }
+        }
+    };
+    const auto [small, few] = burst(3 * health.size());
+    ASSERT_TRUE(c.send_raw(small));
+    answered_in_order(few);
+    const auto [large, many] = burst(std::size_t{80} * 1024);
+    ASSERT_TRUE(c.send_raw(large));
+    answered_in_order(many);
 }
 
 TEST_P(GatewayUpload, BadCreateRequestsAre400) {

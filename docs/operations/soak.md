@@ -128,7 +128,7 @@ its own database there and drops it at the end. Client ports are 19101 to 19103 
 - **Warm-up prefill.** The first 13 minutes also fill io_uring's receive pool and each node's
   order of kept messages to their fixed sizes, which the load alone reaches only after the
   warm-up; the nodes run without transparent huge pages. Why, and what a leak still looks like
-  after it, is ADR-0055. The summary's "warm-up prefill ran" says it did.
+  after it, is ADR-0069. The summary's "warm-up prefill ran" says it did.
 - **Self-test.** 12 minutes, 15 s samples, a 3 minute warm-up, owner changes every 150 s and
   shorter client sessions. It proves the harness: it passes on coverage and clean exits, and
   prints its flatness without judging by it, since nine minutes cannot resolve bounds set for
