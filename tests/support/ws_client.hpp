@@ -174,7 +174,8 @@ public:
         }
         std::vector<std::byte> buf(most);
         const ssize_t n = ::recv(fd_.get(), buf.data(), buf.size(), MSG_DONTWAIT);
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+        // EWOULDBLOCK is EAGAIN on Linux.
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
             return 0;
         }
         if (n <= 0) {
