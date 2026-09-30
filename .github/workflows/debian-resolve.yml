@@ -1,6 +1,6 @@
 name: debian-resolve
 
-# Temporary: what snapshot.debian.org offers for the worker image's packages.
+# Temporary: the Debian worker image's checks, run before the pull request exists.
 on:
   push:
     branches: [fix/ffmpeg-on-debian]
@@ -10,30 +10,137 @@ permissions:
   contents: read
 
 jobs:
-  resolve:
+  # The worker's and the live packager's ffmpeg suites and the syscall trace, on trixie with the
+  # image's ffmpeg, from the worker-build stage (same snapshot, same toolchain).
+  trixie-tests:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    container:
-      image: debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
-    env:
-      DEBIAN_SNAPSHOT: 20260929T000000Z
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: When the security release reached the snapshot archive
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      - run: docker build -f deploy/docker/Dockerfile --target worker-build -t ulw-worker-build .
+      - name: Suites, trace and probe window on trixie
         run: |
-          for v in '7%3A7.1.5-0%2Bdeb13u1'; do
-            /usr/lib/apt/apt-helper download-file \
-              "http://snapshot.debian.org/mr/package/ffmpeg/$v/binfiles/ffmpeg/$v?fileinfo=1" /tmp/mr.json
-            cat /tmp/mr.json; echo
+          docker run --rm --privileged --network host -v "$PWD:/w" -w /w \
+            -e ULW_TEST_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:55432/postgres \
+            ulw-worker-build bash -euo pipefail -c '
+            deploy/docker/apt-install-debian.sh ffmpeg=7:7.1.5-0+deb13u1 strace=6.13+ds-1
+            ffmpeg -version | head -1
+            useradd -u "$(stat -c %u /w)" -m tester
+            as_tester() { runuser -u tester -- env ULW_TEST_DATABASE_URL="$ULW_TEST_DATABASE_URL" "$@"; }
+            as_tester bash -c "CC=gcc-14 CXX=g++-14 cmake --preset ci -DULW_BUILD_MLS=OFF -DULW_CONFORMANCE_LIVE=ON >/dev/null"
+            as_tester cmake --build --preset ci -j4 --target ffmpeg_unit_tests worker_integration_tests \
+              live_packager_integration_tests live_recording_integration_tests
+            status=0
+            for t in ffmpeg_unit_tests worker_integration_tests live_packager_integration_tests \
+                live_recording_integration_tests; do
+              echo "::group::$t as an ordinary user"
+              as_tester build/ci/tests/$t --gtest_brief=1 || { echo "FAILED: $t (user)"; status=1; }
+              echo "::endgroup::"
+            done
+            echo "::group::ffmpeg_unit_tests as root"
+            build/ci/tests/ffmpeg_unit_tests --gtest_brief=1 || { echo "FAILED: ffmpeg_unit_tests (root)"; status=1; }
+            echo "::endgroup::"
+            grep -oE "SYS_[a-z_0-9]+" infra/ffmpeg/src/seccomp_filter.hpp | sed "s/^SYS_//" | sort -u >/tmp/allowed
+            tools/trace-ffmpeg-syscalls.sh >/tmp/trace-root
+            runuser -u tester -- tools/trace-ffmpeg-syscalls.sh >/tmp/trace-user
+            echo "traced as root: $(wc -l </tmp/trace-root), as a user: $(wc -l </tmp/trace-user)"
+            echo "not on the allowlist, root:"; comm -23 /tmp/trace-root /tmp/allowed
+            echo "not on the allowlist, user:"; comm -23 /tmp/trace-user /tmp/allowed
+            echo "all traced (user):"; tr "\n" " " </tmp/trace-user; echo
+            # ADR-0057 measured the probe window with 6.1: 1 s packages video 0.8 s late and not
+            # 1.0 s; 3 s packages 2.8 s and not 3.0 s.
+            cd /tmp
+            for window in 1 3; do
+              for late in $(awk -v w=$window "BEGIN{print w-0.2, w}"); do
+                ffmpeg -nostdin -v error -y -f lavfi -i sine=frequency=440:sample_rate=48000 \
+                  -itsoffset "$late" -f lavfi -i testsrc2=size=640x360:rate=30 -map 1:v -map 0:a \
+                  -t 8 -c:v libx264 -preset ultrafast -g 60 -keyint_min 60 -sc_threshold 0 \
+                  -pix_fmt yuv420p -c:a aac -f mpegts late.ts
+                rm -rf out; mkdir out
+                # A probe size well past the window, so the window is the bound.
+                bytes=50000000
+                if ffmpeg -nostdin -hide_banner -loglevel warning -nostats \
+                    -analyzeduration $((window * 1000000)) -probesize "$bytes" -f mpegts -i pipe:0 \
+                    -map 0:v:0 -map "0:a:0?" -c copy -bsf:a aac_adtstoasc -f hls -hls_time 2 \
+                    -hls_list_size 2 -hls_segment_type fmp4 -hls_fmp4_init_filename init_0.mp4 \
+                    -hls_segment_filename out/seg_0_%d.m4s -start_number 0 \
+                    -hls_flags independent_segments+temp_file out/index.m3u8 <late.ts 2>err.txt; then
+                  echo "window ${window}s, video ${late}s late: packaged, $(ls out | grep -c m4s) segments"
+                else
+                  echo "window ${window}s, video ${late}s late: failed: $(grep -m1 "Could not find codec" err.txt || tail -1 err.txt)"
+                fi
+              done
+            done
+            cat out/index.m3u8 || true
+            exit $status
+          '
+
+  # The images, and Trivy on the worker image before (main) and after (this branch).
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: before
+      - run: docker build -f deploy/docker/Dockerfile --target worker -t worker:after .
+      - run: docker build -f deploy/docker/Dockerfile --target gateway -t gateway:after .
+      - run: docker build -f deploy/docker/Dockerfile --target worker -t worker:before .
+        working-directory: before
+      - name: Smoke
+        run: |
+          docker image ls
+          for img in worker:before worker:after; do
+            docker run --rm --entrypoint sh "$img" -c \
+              'id; ffmpeg -version | head -1; ldd /usr/local/bin/transcode_worker /usr/local/bin/ulw_sandbox | grep "not found" && exit 1; cat /etc/os-release | head -1; ls -ld /var/tmp/ulw-worker'
           done
-      - name: Candidates
+          docker run --rm --entrypoint sh gateway:after -c 'id; ldd /usr/local/bin/gateway_server | grep "not found" && exit 1; head -1 /etc/os-release'
+      - name: Trivy (0.74.0, as pinned by tools/security/tools.sh on ci/security-analysis)
         run: |
-          deploy/docker/apt-install-debian.sh --policy \
-            ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 liburing2 \
-            g++-14 gcc-14 cmake ninja-build pkgconf libssl-dev libcurl4-openssl-dev libpq-dev \
-            liburing-dev zlib1g-dev strace setpriv libc6 libstdc++6 libavcodec61 libx264-164
-      - name: What ffmpeg pulls in
-        run: |
-          apt-get -o Acquire::Retries=10 update -q
-          apt-get install -s --no-install-recommends ffmpeg | grep '^Inst' | wc -l
-          apt-get install -s --no-install-recommends ffmpeg | grep '^Inst'
+          curl -fsSL --retry 5 -o trivy.tgz https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
+          echo "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  trivy.tgz" | sha256sum --check
+          tar -xzf trivy.tgz trivy
+          for img in worker:before worker:after; do
+            ./trivy image --quiet --scanners vuln --format json --output "${img/:/-}.json" "$img"
+          done
+          python3 - <<'PY'
+          import json
+          for name in ("worker-before", "worker-after"):
+              d = json.load(open(name + ".json"))
+              vulns = [v for r in d.get("Results", []) for v in r.get("Vulnerabilities") or []]
+              def nvd(v):
+                  return {1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}.get(
+                      v.get("VendorSeverity", {}).get("nvd"), "-")
+              def count(pred):
+                  return sum(1 for v in vulns if pred(v))
+              def uniq(pred):
+                  return len({v["VulnerabilityID"] for v in vulns if pred(v)})
+              print(f"== {name}: {len(vulns)} findings, {uniq(lambda v: True)} distinct CVEs")
+              for sev in ("CRITICAL", "HIGH"):
+                  print(f"  trivy {sev}: {count(lambda v: v['Severity'] == sev)} findings,"
+                        f" {uniq(lambda v: v['Severity'] == sev)} CVEs,"
+                        f" fixed available {uniq(lambda v: v['Severity'] == sev and v.get('FixedVersion'))}")
+                  print(f"  nvd {sev}: {count(lambda v: nvd(v) == sev)} findings,"
+                        f" {uniq(lambda v: nvd(v) == sev)} CVEs")
+              ff = lambda v: v.get("PkgName", "").startswith(("ffmpeg", "libav", "libsw", "libpostproc"))
+              print(f"  ffmpeg packages: {uniq(ff)} CVEs; trivy HIGH/CRIT"
+                    f" {uniq(lambda v: ff(v) and v['Severity'] in ('HIGH', 'CRITICAL'))};"
+                    f" nvd HIGH/CRIT {uniq(lambda v: ff(v) and nvd(v) in ('HIGH', 'CRITICAL'))}")
+              for v in sorted(vulns, key=lambda v: (v["Severity"], v["VulnerabilityID"])):
+                  if v["Severity"] in ("HIGH", "CRITICAL") or nvd(v) in ("HIGH", "CRITICAL"):
+                      print(f"    {v['VulnerabilityID']} {v['PkgName']} {v['InstalledVersion']}"
+                            f" trivy={v['Severity']} nvd={nvd(v)} fixed={v.get('FixedVersion', '')}")
+          PY
