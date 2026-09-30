@@ -147,6 +147,8 @@ std::string_view fixed_response(Status status, Connection connection) noexcept {
         return fixed<Status::RequestTimeout>(connection);
     case Status::Conflict:
         return fixed<Status::Conflict>(connection);
+    case Status::Gone:
+        return fixed<Status::Gone>(connection);
     case Status::LengthRequired:
         return fixed<Status::LengthRequired>(connection);
     case Status::ContentTooLarge:
