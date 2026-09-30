@@ -708,7 +708,9 @@ TEST_P(GatewayPlayback, ARequestHeldInTheTurnOfARefusalEndsTheHold) {
         ++refusals;
         ASSERT_TRUE(ulw::test::eventually([&] { return settled(refusals); }))
             << "refusal " << refusals << " did not leave in full";
-        refusal_size = static_cast<std::int64_t>(window()->sent - before->sent);
+        const auto after = window();
+        ASSERT_TRUE(after);
+        refusal_size = static_cast<std::int64_t>(after->sent - before->sent);
     }
 
     cork(c, true);
@@ -720,7 +722,9 @@ TEST_P(GatewayPlayback, ARequestHeldInTheTurnOfARefusalEndsTheHold) {
     if (GetParam() == gateway::Transport::Tls) {
         ASSERT_TRUE(ulw::test::eventually([&] { return gw.held_bytes() > 0; }));
     }
-    ASSERT_GT(window()->unsent, 0U);
+    const auto stuck = window();
+    ASSERT_TRUE(stuck);
+    ASSERT_GT(stuck->unsent, 0U);
 
     // The client reads everything, which lets the refusal go; the next drain check sees it.
     for (std::uint64_t k = 0; k < refusals; ++k) {
@@ -728,7 +732,10 @@ TEST_P(GatewayPlayback, ARequestHeldInTheTurnOfARefusalEndsTheHold) {
         ASSERT_TRUE(r) << "refusal " << k;
         ASSERT_EQ(r->status, 404);
     }
-    ASSERT_TRUE(ulw::test::eventually([&] { return window()->unsent == 0; }));
+    ASSERT_TRUE(ulw::test::eventually([&] {
+        const auto w = window();
+        return w && w->unsent == 0;
+    }));
     gw.advance(core::Millis{100});
     const auto held = c.read_response();
     ASSERT_TRUE(held);
