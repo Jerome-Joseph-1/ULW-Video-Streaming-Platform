@@ -197,7 +197,8 @@ std::string ChatServer::render_metrics() const {
                        "presence_gaps_total {}\n"
                        "token_expiries_total {}\n"
                        "member_removals_total {}\n"
-                       "member_check_failures_total {}\n",
+                       "member_check_failures_total {}\n"
+                       "jwks_keys_expired {}\n",
                        c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
                        c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
                        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
@@ -210,7 +211,7 @@ std::string ChatServer::render_metrics() const {
                        router.forward_timeouts, router.peers_lost, router.peers_refused,
                        router.slow_peers, presence_.rooms(), presence.sent, presence.received,
                        presence.notified, presence.expired, presence.gaps, c.token_expiries,
-                       chat.removals, chat.failed_rechecks);
+                       chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0);
 }
 
 } // namespace chat

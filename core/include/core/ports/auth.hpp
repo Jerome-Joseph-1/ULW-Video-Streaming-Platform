@@ -56,6 +56,9 @@ public:
                                                              IKeyWaiter& waiter) = 0;
     // For a waiter about to be destroyed before its refresh ends.
     virtual void cancel_wait(IKeyWaiter& waiter) noexcept = 0;
+    // Whether the keys it had were dropped for going too long without a successful refresh,
+    // so that every token is refused until one succeeds. A fixed key set never is.
+    [[nodiscard]] virtual bool keys_expired() const noexcept { return false; }
 };
 
 } // namespace core::ports

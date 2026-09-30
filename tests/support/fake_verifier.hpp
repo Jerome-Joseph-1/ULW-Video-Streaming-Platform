@@ -49,6 +49,10 @@ public:
 
     [[nodiscard]] std::size_t waiting() const noexcept { return waiters_.size(); }
 
+    // What keys_expired() reports; verify() is unchanged by it.
+    bool expired = false;
+    [[nodiscard]] bool keys_expired() const noexcept override { return expired; }
+
     void refresh_keys() {
         refreshed_ = true;
         // Taken out first, leaving the member empty and usable: a waiter that registers again

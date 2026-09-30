@@ -173,18 +173,25 @@ std::expected<SslCtxPtr, std::string> make_context(const TlsFiles& files) {
 // The keys that seal session tickets. A ticket holds the session's master secret, so whoever
 // holds the key it was sealed with can decrypt every session resumed from it: a TLS 1.2
 // resumption has no forward secrecy of its own. The key that seals new tickets is replaced
-// every kTicketKeyInterval, and the one before it still opens tickets for one more interval, so
-// a ticket resumes for 12 to 24 hours and a key, once replaced, is wiped within a day. The keys
-// are drawn at random in memory, never written anywhere, and shared by every context a reload
-// makes, so tickets issued before a reload keep resuming after it. Rotation is lazy: a key is
-// replaced by the first handshake that finds it due, so an idle server needs no timer.
-class TicketKeys {
+// every kInterval, and the one before it still opens tickets for one more interval, so a ticket
+// resumes for 12 to 24 hours and a key, once replaced, is wiped within a day of being made. A
+// reactor timer does the replacing, so the schedule holds on a server no handshake reaches; a
+// handshake that finds the key due first replaces it itself. The keys are drawn at random in
+// memory, never written anywhere, and shared by every context a reload makes, so tickets issued
+// before a reload keep resuming after it.
+class TicketKeys final : public ITimerHandler {
 public:
     // Past a day a ticket's session is old enough to deserve a full handshake anyway.
     static constexpr core::Millis kInterval = std::chrono::hours(12);
 
-    explicit TicketKeys(IReactor& reactor) noexcept : reactor_(reactor) {}
-    ~TicketKeys() {
+    // On the reactor's thread, which the timer it arms belongs to.
+    explicit TicketKeys(IReactor& reactor) : reactor_(reactor) {
+        const core::MonoTime now = reactor_.now();
+        static_cast<void>(rotate(now));
+        schedule(now);
+    }
+    ~TicketKeys() override {
+        reactor_.cancel_timer(timer_);
         OPENSSL_cleanse(&current_, sizeof current_);
         OPENSSL_cleanse(&previous_, sizeof previous_);
     }
@@ -193,18 +200,26 @@ public:
     TicketKeys(TicketKeys&&) = delete;
     TicketKeys& operator=(TicketKeys&&) = delete;
 
-    // SSL_CTX_set_tlsext_ticket_key_evp_cb's contract: sealing returns 1, or -1 on failure;
-    // opening returns 0 for a ticket no key here opens (a full handshake follows), 1 for one
-    // sealed with the current key, and 2 for one sealed with the previous key, which asks for a
-    // ticket sealed with the current one.
+    void on_timeout() noexcept override {
+        const core::MonoTime now = reactor_.now();
+        static_cast<void>(rotate(now));
+        schedule(now);
+    }
+
+    // SSL_CTX_set_tlsext_ticket_key_evp_cb's contract: sealing returns 1, or 0 for no ticket
+    // (the handshake goes on without one; -1 would abort it, and a missing ticket costs the
+    // client only a full handshake next time); opening returns 0 for a ticket no key here opens
+    // (a full handshake follows), 1 for one sealed with the current key, and 2 for one sealed
+    // with the previous key, which asks for a ticket sealed with the current one.
     int seal_or_open(std::span<unsigned char, 16> name, unsigned char* iv, EVP_CIPHER_CTX* cipher,
                      EVP_MAC_CTX* mac, bool seal) noexcept {
         if (!rotate(reactor_.now())) {
-            return seal ? -1 : 0;
+            return 0;
         }
         if (seal) {
             if (RAND_bytes(iv, kIvBytes) != 1 || !use(current_, iv, cipher, mac, true)) {
-                return -1;
+                ERR_clear_error();
+                return 0;
             }
             std::ranges::copy(current_.name, name.begin());
             return 1;
@@ -220,6 +235,8 @@ public:
 
 private:
     static constexpr int kIvBytes = 16;
+    // How soon a key that could not be drawn is tried for again.
+    static constexpr core::Millis kRetry = std::chrono::minutes(1);
 
     struct Key {
         std::array<unsigned char, 16> name{};
@@ -228,21 +245,27 @@ private:
         bool live = false;
     };
 
-    // False when no key could be drawn; the keys in hand then stay as they were.
+    // False when there is no key to seal with. A key is wiped once it is two intervals old
+    // whether or not a new one could be drawn: the previous key the moment the current one is
+    // due, and the current one an interval later.
     bool rotate(core::MonoTime now) noexcept {
         if (current_.live && now - made_ < kInterval) {
             return true;
         }
+        // Made two intervals ago at the least: it opens nothing any more.
+        OPENSSL_cleanse(&previous_, sizeof previous_);
         Key next;
         if (RAND_bytes(next.name.data(), next.name.size()) != 1 ||
             RAND_bytes(next.hmac.data(), next.hmac.size()) != 1 ||
             RAND_bytes(next.aes.data(), next.aes.size()) != 1) {
             OPENSSL_cleanse(&next, sizeof next);
+            ERR_clear_error();
+            if (current_.live && now - made_ >= 2 * kInterval) {
+                OPENSSL_cleanse(&current_, sizeof current_);
+            }
             return current_.live;
         }
         next.live = true;
-        // A key two intervals old opens nothing: it was replaced an interval ago.
-        OPENSSL_cleanse(&previous_, sizeof previous_);
         if (current_.live && now - made_ < 2 * kInterval) {
             previous_ = current_;
         }
@@ -250,6 +273,15 @@ private:
         OPENSSL_cleanse(&next, sizeof next);
         made_ = now;
         return true;
+    }
+
+    // Wakes when the current key is due, or soon again when none could be drawn.
+    void schedule(core::MonoTime now) noexcept {
+        const core::Millis delay =
+            current_.live && now - made_ < kInterval
+                ? std::chrono::duration_cast<core::Millis>(made_ + kInterval - now)
+                : kRetry;
+        timer_ = reactor_.arm_timer(delay, *this);
     }
 
     static bool use(Key& key, unsigned char* iv, EVP_CIPHER_CTX* cipher, EVP_MAC_CTX* mac,
@@ -272,6 +304,8 @@ private:
     Key current_;
     Key previous_;
     core::MonoTime made_;
+    // Always armed: each firing arms the next.
+    TimerId timer_;
 };
 
 // Every context's tickets are sealed and opened by the factory's TicketKeys, found through the
@@ -280,7 +314,7 @@ int ticket_key_callback(SSL* ssl, unsigned char* name, unsigned char* iv, EVP_CI
                         EVP_MAC_CTX* mac, int enc) noexcept {
     auto* keys = static_cast<TicketKeys*>(SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl)));
     if (keys == nullptr) {
-        return enc == 1 ? -1 : 0;
+        return 0;
     }
     return keys->seal_or_open(std::span<unsigned char, 16>(name, 16), iv, cipher, mac, enc == 1);
 }
@@ -643,7 +677,8 @@ private:
 
 class TlsTransports final : public ITransportFactory, public IOffloadJob {
 public:
-    TlsTransports(IReactor& reactor, TlsFiles files, SslCtxPtr ctx) noexcept
+    // On the reactor's thread, and destroyed there before the reactor.
+    TlsTransports(IReactor& reactor, TlsFiles files, SslCtxPtr ctx)
         : reactor_(reactor), files_(std::move(files)), ctx_(std::move(ctx)), tickets_(reactor) {
         use_ticket_keys(ctx_.get(), tickets_);
     }
