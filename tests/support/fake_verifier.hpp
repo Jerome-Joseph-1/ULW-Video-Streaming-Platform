@@ -3,6 +3,7 @@
 #include "core/ports/auth.hpp"
 
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ulw::test {
@@ -42,8 +43,10 @@ public:
 
     void refresh_keys() {
         refreshed_ = true;
-        auto waiters = std::move(waiters_);
-        for (auto* w : waiters) {
+        // Taken out first, leaving the member empty and usable: a waiter that registers again
+        // from its callback waits for the next refresh.
+        const auto pending = std::exchange(waiters_, {});
+        for (auto* w : pending) {
             w->on_keys_refreshed();
         }
     }
