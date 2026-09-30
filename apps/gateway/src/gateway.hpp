@@ -185,6 +185,8 @@ public:
     [[nodiscard]] std::size_t connections() const noexcept { return connections_.size(); }
     // Connections a drain lets finish: some of a request read, and not yet closed.
     [[nodiscard]] std::size_t busy_connections() noexcept;
+    // Response bytes the connections hold that the kernel has not taken yet.
+    [[nodiscard]] std::size_t queued_output() noexcept;
 
     [[nodiscard]] const Deps& deps() const noexcept { return deps_; }
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }

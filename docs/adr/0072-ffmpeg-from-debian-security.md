@@ -1,4 +1,4 @@
-# 0071. The worker's ffmpeg comes from Debian 13's security archive
+# 0072. The worker's ffmpeg comes from Debian 13's security archive
 
 Status: Accepted
 Date: 2026-09-30

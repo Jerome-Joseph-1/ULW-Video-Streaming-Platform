@@ -2,7 +2,7 @@
 # apt-install-debian PACKAGE=VERSION...
 # apt-install-debian --policy PACKAGE...
 #
-# The Debian counterpart of apt-install.sh (docs/adr/0071): installs exact versions from the
+# The Debian counterpart of apt-install.sh (docs/adr/0072): installs exact versions from the
 # Debian archive and its security archive as they both stood at $DEBIAN_SNAPSHOT on
 # snapshot.debian.org, so a rebuild months later installs the same bytes. Every package named
 # must carry its version; what they depend on comes from the same snapshot. --policy prints

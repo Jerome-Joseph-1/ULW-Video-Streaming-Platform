@@ -355,7 +355,7 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 
 ### Image builds and the worker's ffmpeg
 
-The two images come from different distributions (docs/adr/0071): `video-gateway` is Ubuntu
+The two images come from different distributions (docs/adr/0072): `video-gateway` is Ubuntu
 24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
 packages, ffmpeg among them, from snapshot.debian.org, and its binaries built on trixie too.
 Woodpecker's builder needs to reach both snapshot services (snapshot.debian.org over plain
