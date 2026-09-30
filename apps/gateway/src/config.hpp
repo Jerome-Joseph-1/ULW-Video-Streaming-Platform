@@ -26,6 +26,8 @@ struct Config {
     std::uint16_t port = 8080;
     net::ReactorKind reactor = net::ReactorKind::IoUring;
     Transport transport = Transport::Plain;
+    // ULW_JWKS_MAX_STALE_HOURS: how long keys stay trusted while every refetch fails.
+    std::uint32_t jwks_max_stale_hours = 24;
     // Only with Transport::Tls, and then both.
     std::string tls_certificate_chain;
     std::string tls_private_key;

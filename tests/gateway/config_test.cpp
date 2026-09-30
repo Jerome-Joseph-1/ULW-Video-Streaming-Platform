@@ -166,6 +166,16 @@ TEST_F(ConfigTest, AnAccessKeyIdTheSignerWouldRefuseIsRefusedAtTheCheck) {
     EXPECT_TRUE(load());
 }
 
+TEST_F(ConfigTest, KeysStayTrustedADayWithoutARefreshUnlessSetInHours) {
+    EXPECT_EQ(load()->jwks_max_stale_hours, 24U);
+    env["ULW_JWKS_MAX_STALE_HOURS"] = "6";
+    EXPECT_EQ(load()->jwks_max_stale_hours, 6U);
+    for (const char* bad : {"0", "169", "1.5", "24h"}) {
+        env["ULW_JWKS_MAX_STALE_HOURS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_JWKS_MAX_STALE_HOURS") << bad;
+    }
+}
+
 TEST_F(ConfigTest, BothKeySourcesAtOnceAreRefused) {
     const KeySetFile file(kKeySet);
     env["ULW_DEV_JWKS_FILE"] = file.path();

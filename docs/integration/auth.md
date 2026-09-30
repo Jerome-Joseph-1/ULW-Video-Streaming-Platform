@@ -80,6 +80,7 @@ it is compared byte for byte. Two tokens with different subjects are two differe
 | `JWT_ISSUER` | Required. |
 | `JWT_AUDIENCE` | Optional, default `askedin-platform`. |
 | `ULW_AUTH_COOKIE` | Optional, default `auth_token`. |
+| `ULW_JWKS_MAX_STALE_HOURS` | Optional, 1 to 168, default 24: how long keys stay trusted while every refetch fails (below). |
 | `ULW_DEV_JWKS_FILE` | Development only: a local Ed25519 key set instead of `JWKS_URL`. Setting both is a startup error. It is refused (exit 2) unless `ULW_DEV_MODE=1`, and refused regardless inside a Kubernetes pod (`KUBERNETES_SERVICE_HOST` set, as the kubelet does in every container), so a key set left in a real deployment's configuration stops the process instead of being trusted. The gateway and chat server both apply this. The first log line prints `keys=DEVELOPMENT <file>` so it cannot go unnoticed. |
 | `ULW_DEV_MODE` | `0` or `1`, default `0`. `1` says this is a development run, which development-only settings such as `ULW_DEV_JWKS_FILE` need. |
 
@@ -87,6 +88,15 @@ Caching and refresh:
 
 - The key set is fetched in the background and refetched every 15 minutes. A key withdrawn from
   the set keeps verifying until the next successful refetch.
+- Keys are trusted for at most `ULW_JWKS_MAX_STALE_HOURS` (1 to 168, default 24) after the last
+  successful fetch. Past that, while every refetch fails, the keys and every cached verdict are
+  dropped and each token is refused as if the key set were unavailable, until a fetch succeeds:
+  a key Askedin withdraws while its JWKS cannot be reached stops verifying within a day. The
+  process logs `jwks keys expired` at error level once, and the `jwks_keys_expired` gauge (gateway
+  and chat `/metrics`) reads 1 while it lasts; alert on it. The default is a day because refetches
+  are 15 minutes apart and retried every minute, so an outage that long has had 1,440 retries and
+  a night for someone to notice, while ADR-0018 accepts cached keys only for riding out outages,
+  not indefinitely.
 - A failed fetch is retried with backoff from 1 s, doubling, up to 1 minute.
 - A token whose `kid` is not in the cached set waits for one refetch, shared by every request
   that arrives meanwhile. If the key is still missing afterwards, the token is refused, and that
