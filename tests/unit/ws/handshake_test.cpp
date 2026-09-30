@@ -80,6 +80,35 @@ TEST(WsHandshake, ComputesTheAcceptKeyOfRfc6455) {
     EXPECT_EQ(std::string_view(key->data(), key->size()), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
 }
 
+// accept_key() takes any string, not only a key the handshake has already checked.
+TEST(WsHandshake, RefusesToComputeAnAcceptKeyForAnOverlongKey) {
+    // 28 characters plus the GUID fill the buffer exactly; one more does not fit.
+    EXPECT_TRUE(codec::ws::accept_key(std::string(28, 'A')));
+    EXPECT_FALSE(codec::ws::accept_key(std::string(29, 'A')));
+    EXPECT_FALSE(codec::ws::accept_key(std::string(4096, 'A')));
+}
+
+TEST(WsHandshake, AcceptsKeysUsingEachEndOfTheBase64Alphabet) {
+    for (const std::string_view key : {
+             "AAAAAAAAAAAAAAAAAAAAAA==", // all zero bytes
+             "ZZZZZZZZZZZZZZZZZZZZZQ==",
+             "aaaaaaaaaaaaaaaaaaaaag==",
+             "zzzzzzzzzzzzzzzzzzzzzw==",
+             "000000000000000000000A==",
+             "999999999999999999999Q==",
+             "+++++++++++++++++++++g==",
+             "/////////////////////w==",
+         }) {
+        EXPECT_TRUE(judge(replace(kRfcRequest, "dGhlIHNhbXBsZSBub25jZQ==", key))) << key;
+    }
+}
+
+TEST(WsHandshake, FindsATokenWithSpaceBeforeItsComma) {
+    EXPECT_TRUE(
+        judge(replace(kRfcRequest, "Connection: Upgrade", "Connection: Upgrade ,keep-alive")));
+    EXPECT_TRUE(judge(replace(kRfcRequest, "Upgrade: websocket", "Upgrade: websocket\t, h2c")));
+}
+
 TEST(WsHandshake, AnswersTheOpeningHandshakeOfRfc6455) {
     const Verdict v = judge(kRfcRequest);
 
