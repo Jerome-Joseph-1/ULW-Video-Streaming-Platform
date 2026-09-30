@@ -377,31 +377,44 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
 
    ```sh
    overlays=<path to overlays/ in the monorepo>   # fill in: the directory holding stage and prod
+   case "$CI_COMMIT_BRANCH" in
+     master) env=prod ;;
+     development) env=stage ;;
+   esac
    gw=git.askedin.com/askedin/askedin-monorepo/video-gateway
    wk=git.askedin.com/askedin/askedin-monorepo/video-worker
    gw_digest=$(crane digest "$gw:$CI_COMMIT_SHA")
    wk_digest=$(crane digest "$wk:$CI_COMMIT_SHA")
-   (cd "$overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
-   (cd "$overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
-   (cd "$overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
    git config user.name "<pipeline commit name>"      # fill in
    git config user.email "<pipeline commit email>"    # fill in
-   git commit -am "deploy: video images $CI_COMMIT_SHA [skip ci]"
-   # The token is read from the environment on each call, never written to .git/config.
+   # The monorepo's clone URL, assumed from the registry path: confirm it. The token is read
+   # from the environment on each call, never written to .git/config.
    git remote add deploy https://git.askedin.com/askedin/askedin-monorepo.git
    git config credential.helper \
      '!f() { echo "username=<push user>"; echo "password=$DEPLOY_PUSH_TOKEN"; }; f'
-   pushed=
+   pin() {
+     (cd "$overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
+     (cd "$overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
+     (cd "$overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
+     git commit -qam "deploy: video images $CI_COMMIT_SHA [skip ci]"
+   }
+   pin
    for attempt in 1 2 3; do
-     if git push deploy "HEAD:$CI_COMMIT_BRANCH"; then pushed=1; break; fi
-     # Non-fast-forward: another commit landed since the clone. Replay this one on top.
-     git fetch deploy "$CI_COMMIT_BRANCH" && git rebase FETCH_HEAD || exit 1
+     git push deploy "HEAD:$CI_COMMIT_BRANCH" && exit 0
+     # Non-fast-forward: start again from the branch as it is now, not from a rebase.
+     git fetch deploy "$CI_COMMIT_BRANCH" && git checkout -q FETCH_HEAD || exit 1
+     # A code commit after this one builds and pins its own digest; leave it to that build.
+     newer=$(git rev-list -1 --fixed-strings --invert-grep --grep='[skip ci]' \
+       "$CI_COMMIT_SHA..HEAD")
+     [ -z "$newer" ] || exit 0
+     pin
    done
-   [ -n "$pushed" ]
+   exit 1
    ```
 
-   Fill in `overlays` for the monorepo's layout, and the commit identity and push user. The
-   token comes from a Woodpecker secret, named in the step and never written into the file:
+   Fill in `overlays` for the monorepo's layout, the commit identity and push user, and confirm
+   the remote URL. The token comes from a Woodpecker secret, named in the step and never written
+   into the file:
 
    ```yaml
    environment:
@@ -410,12 +423,19 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
    ```
 
    Woodpecker checks out the commit as a detached HEAD, so the push names the branch,
-   `HEAD:$CI_COMMIT_BRANCH`; a bare `git push` has no branch to push. `$env` is `stage` on
-   `development` and `prod` on `master`. The commit carries `[skip ci]`, so it does not build
-   again; ArgoCD sees the new digest and rolls the deployments itself, the gateway's init
-   container migrating first as today. If another build's digest commit landed in between, the
-   rebase conflicts on the same lines and the step fails; rerun the pipeline of the commit that
-   should be deployed.
+   `HEAD:$CI_COMMIT_BRANCH`; a bare `git push` has no branch to push. The commit carries
+   `[skip ci]`, so it does not build again; ArgoCD sees the new digest and rolls the deployments
+   itself, the gateway's init container migrating first as today.
+
+   When the push is refused because the branch moved, a rebase would always conflict if the
+   commit that landed is another build's digest commit: both edit the same `digest:` lines from
+   the same base. So the step fetches the branch, and if a code commit (one whose message lacks
+   `[skip ci]`) has landed after `$CI_COMMIT_SHA`, it stops without pinning, because that newer
+   build pins itself. Otherwise only digest commits landed, from builds of this commit or older
+   ones, and it redoes its three edits on the fetched tree, commits and pushes, up to three
+   times. The edits are regenerated rather than replayed, so a shallow clone (Woodpecker's
+   default) is enough: the fetch brings the commits after the clone's, and the check reads only
+   the range after `$CI_COMMIT_SHA`, which the clone has.
    Drop the restricted kubeconfig then: the pipeline no longer touches the cluster.
 3. Rollback (section 6) becomes one of:
    - `kustomize edit set image` to the digest of `<good sha>`, committed with `[skip ci]`;
