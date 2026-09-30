@@ -124,13 +124,15 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     const auto set = [&ok](CURLcode rc) { ok = ok && rc == CURLE_OK; };
     set(curl_easy_setopt(e, CURLOPT_URL, request.url.c_str()));
     set(curl_easy_setopt(e, CURLOPT_PROTOCOLS_STR, "http,https"));
-    // TLS 1.2 at least, whatever the host's OpenSSL configuration allows: libcurl's own default
-    // floor is TLS 1.0, and only a distribution's openssl.cnf (Ubuntu's among them) raises it.
-    // The maximum is libcurl's default (the newest the TLS library offers), named so the
-    // option reads as the documented pair. The option is read as a long. libcurl 8.5 declares
-    // the two values in separate enums, where or-ing them is a deprecated conversion, and 8.14
-    // as longs, where a cast would be useless: each is converted implicitly, then combined.
-    constexpr long kTlsMin = CURL_SSLVERSION_TLSv1_2;
+    // TLS 1.3 at least, whatever the host's OpenSSL configuration allows: libcurl's own default
+    // floor is TLS 1.0, and a distribution's openssl.cnf raises it to 1.2 at most. Every host
+    // the services call over https (Askedin's JWKS, R2, an https MinIO) must speak TLS 1.3
+    // (docs/integration/operations-contract.md): it drops TLS 1.2's static-RSA and CBC suites
+    // and renegotiation, and encrypts the certificate. The maximum is libcurl's default, the
+    // newest the TLS library offers. The option is read as a long; libcurl 8.5 declares the two
+    // values in separate enums, where or-ing them is a deprecated conversion, and 8.14 as
+    // longs, where a cast would be useless, so each is converted implicitly, then combined.
+    constexpr long kTlsMin = CURL_SSLVERSION_TLSv1_3;
     constexpr long kTlsMax = CURL_SSLVERSION_MAX_DEFAULT;
     constexpr long kTlsVersions = kTlsMin | kTlsMax;
     set(curl_easy_setopt(e, CURLOPT_SSLVERSION, kTlsVersions));

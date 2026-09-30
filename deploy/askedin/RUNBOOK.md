@@ -137,6 +137,19 @@ df -h /var/lib/kubelet                 # the scratch emptyDirs live here
 If the node cannot take it, lower the prod worker's CPU request before the first prod apply;
 the gateways' memory requests are the budget of docs/adr/0027 and should not move.
 
+Check that the JWKS host speaks TLS 1.3. The gateway, the worker and chat refuse any https
+server that does not (docs/integration/operations-contract.md), so a JWKS host stuck on TLS
+1.2 leaves every request `503` until it is fixed. From any machine:
+
+```sh
+openssl s_client -tls1_3 -connect auth.askedin.com:443 -servername auth.askedin.com </dev/null \
+    2>&1 | grep -E '^ *Protocol *:|New, TLSv1.3'
+```
+
+It must print TLSv1.3; a handshake failure means the host has to enable TLS 1.3 before this
+deploys. Use the host of the real `JWKS_URL` if it is not auth.askedin.com. R2 needs no check:
+Cloudflare serves TLS 1.3.
+
 ## 2. Install the worker's seccomp profile on k8s-prod
 
 Once per node, and again whenever `seccomp/ulw-worker.json` changes:
@@ -160,7 +173,7 @@ VIDEO_GATEWAY_R2_ACCESS_KEY_ID        R2 token for the gateway: object read and 
 VIDEO_GATEWAY_R2_SECRET_ACCESS_KEY
 VIDEO_WORKER_R2_ACCESS_KEY_ID         R2 token for the worker: object read and write on the bucket
 VIDEO_WORKER_R2_SECRET_ACCESS_KEY
-VIDEO_JWKS_URL                        https://… Askedin's JWKS; must be https
+VIDEO_JWKS_URL                        https://… Askedin's JWKS; must be https, over TLS 1.3 (step 1)
 VIDEO_JWT_ISSUER                      the iss Askedin's auth-service puts in its tokens
 ```
 

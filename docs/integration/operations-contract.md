@@ -13,7 +13,7 @@ page does not repeat it.
 | Postgres log settings | chat | Bound parameters stay out of the server log: `log_parameter_max_length_on_error = 0` (the default), and `log_parameter_max_length = 0` whenever statement logging is on (`log_statement` `mod` or `all`, `log_min_duration_statement`, `log_min_duration_sample`, `log_transaction_sample_rate`), with `auto_explain.log_parameter_max_length = 0` if auto_explain is loaded. Otherwise chat message bodies, plaintext or ciphertext, are written to the log (ADR-0054). RUNBOOK step 3 sets them on the database. |
 | R2 bucket | gateway, worker | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
 | R2 API tokens | gateway, worker | One per component (ADR-0066). The gateway's token must allow, on `videos/<video id>/raw` and `videos/<video id>/hls/...`: CreateMultipartUpload, UploadPart, ListParts, CompleteMultipartUpload, AbortMultipartUpload (which must be permitted), HeadObject, GetObject (playlists it rewrites, and presigned GET for segments and init) and PutObject. The upload reaper runs with the gateway's secret and additionally needs ListMultipartUploads (bucket level), ListObjectsV2 and DeleteObject. |
-| Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS (`JWKS_URL` must be `https://`). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
+| Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS with TLS 1.3 (`JWKS_URL` must be `https://`; a server offering only TLS 1.2 or older is refused, see below). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
 | DNS and TLS | Envoy | TLS terminates at Askedin's Envoy Gateway; the service speaks plain HTTP behind it (ADR-0001). The HTTPRoute sends `/api/v1/uploads` and `/api/v1/videos` to the gateway. |
 | Envoy route timeout | Envoy | None (`request: 0s`). A chunk may take up to 1024 s at the gateway's minimum rate, and the gateway enforces its own timeouts. Upstream idle timeout below the gateway's 10 s keep-alive timeout (5 s in the shipped `BackendTrafficPolicy`). |
 | Seccomp profile | worker nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
@@ -57,7 +57,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_DATABASE_URL` | required | required | required | Secret |
 | `ULW_STORAGE` | `r2` (default), `minio`, `fs` | same | | |
 | `ULW_R2_ACCOUNT_ID` | with `r2` | with `r2` | | Secret |
-| `ULW_S3_ENDPOINT` | with `minio` | with `minio` | | `https://` anywhere the network between them is not the host's own. `http://` is accepted for the sandbox's MinIO or one on the same host: requests are signed, so the keys never cross, but the objects and signed URLs do, in the clear. `r2` is always `https://` |
+| `ULW_S3_ENDPOINT` | with `minio` | with `minio` | | `https://` anywhere the network between them is not the host's own. `http://` is accepted for the sandbox's MinIO or one on the same host: requests are signed, so the keys never cross, but the objects and signed URLs do, in the clear. An `https://` endpoint must speak TLS 1.3. `r2` is always `https://`, and Cloudflare serves TLS 1.3 |
 | `ULW_BUCKET` | with `r2`/`minio` | same | | Secret |
 | `ULW_S3_ACCESS_KEY_ID`, `ULW_S3_SECRET_ACCESS_KEY` | with `r2`/`minio` | same | | Secret, separate tokens per component |
 | `JWKS_URL` | required (or `ULW_DEV_JWKS_FILE`) | never set | required (or `ULW_DEV_JWKS_FILE`) | Secret by convention |
@@ -90,6 +90,15 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET`, `ULW_ALLOWED_ORIGINS` | | | required, required (32+ bytes), optional | Chat has no Askedin overlay yet |
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
+
+<!-- infra/curl/src/exchange.cpp -->
+
+Every https request the services make goes through libcurl with TLS 1.3 as the minimum: the
+JWKS fetch, R2 or a MinIO given an `https://` endpoint, and LiveKit's API when it is `https://`.
+A server that offers only TLS 1.2 or older fails the handshake, logged as a network error,
+whatever the host's OpenSSL configuration allows. Askedin checks its JWKS host before deploying
+(RUNBOOK step 1); Cloudflare serves R2 over TLS 1.3. The database connection is libpq's, not
+libcurl's, and keeps its own `sslmode` settings.
 
 <!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
 
