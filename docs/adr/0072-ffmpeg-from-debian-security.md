@@ -123,6 +123,15 @@ CVEs drop from 57 to 31, none CRITICAL, and the ones left get fixed for free as 
   runner's Ubuntu ffmpeg 6.1, so an ffmpeg behaviour change shows first in the sandbox job.
 - ffmpeg moves from 6.1 to 7.1. The arguments the worker, the live packager and the
   recording remux pass behave the same (the checks are under Decision).
+- ffmpeg 7.1 on Debian maps more address space than 6.1 on Ubuntu (more threads, each with its
+  own malloc arena, and more libraries). Peak VmPeak on a 4-core runner, 6.1 then 7.1, against
+  the sandbox's limits: probe 273 then 249 MiB (1 GiB); live remux 496 then 492 MiB (1 GiB);
+  the live recording's remux with added silence 688 then 923 MiB (1 GiB); the 1080p three-rung
+  transcode with `-threads 4` about 1.7-1.9 GB then 2970 MiB (4 GiB); the decode check 1299 then
+  1722 MiB (4 GiB). All pass, but the recording remux now has a tenth of its budget left and is
+  the first to watch. An x264 encode at its default thread count went from 971 to 1491 MiB,
+  which is why the syscall filter test's source clip now gets 4 GiB; the remux it tests keeps
+  the packager's 1 GiB.
 - The image build depends on snapshot.debian.org as well as snapshot.ubuntu.com. It throttles
   under load, which apt's retries absorb; its Release files are past their Valid-Until, so that
   check is off and the pinned timestamp decides the archive state.
