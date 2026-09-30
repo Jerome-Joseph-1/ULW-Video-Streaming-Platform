@@ -151,8 +151,11 @@ HOSE_MESSAGES = 32
 # last climb as a leak:
 #  - io_uring's receive pool, 256 buffers of 64 KiB whose pages count in RSS once the kernel has
 #    written into them: PREFILL_FRAMES frames of PREFILL_FRAME bytes that are not JSON (answered
-#    not_json, never sequenced or stored), sent back to back over loopback's 64 KiB MSS, fill
-#    whole buffers and go round the ring about four times;
+#    not_json, never sequenced or stored), over loopback's 64 KiB MSS. They go in writes of
+#    PREFILL_BATCH frames (480 KiB), so the socket holds more than a buffer whenever the node
+#    reads and every read but a write's last fills a whole 64 KiB buffer; about 1,900 of them go
+#    round the ring more than seven times. Frames one at a time, answered between, left a read
+#    to find less than a buffer waiting, and some pages untouched until after the warm-up;
 #  - the chat service's order of kept messages, 131,072 entries (about 3 MB) at its cap, of which
 #    the soak's own ~60 messages a second into each node fill about half in the warm-up:
 #    PREFILL_SENDERS more, two messages a second each (the send limit), into the pool rooms that
@@ -161,7 +164,8 @@ HOSE_MESSAGES = 32
 #    made that would later free its memory, and the bodies are drawn as the clients' are.
 # Both stop PREFILL_MARGIN_MINUTES before the warm-up ends.
 PREFILL_FRAME = 60 * 1024
-PREFILL_FRAMES = 1024
+PREFILL_FRAMES = 2048
+PREFILL_BATCH = 8
 PREFILL_SENDERS = 60
 PREFILL_MARGIN_MINUTES = 2
 # Longer than rt::kOwnerStaleAfter (5 s), so another node claims the stopped node's rooms.
@@ -264,6 +268,10 @@ class Ws:
             raise
 
     def send(self, opcode, payload):
+        self.sock.sendall(self.frame_bytes(opcode, payload))
+
+    @staticmethod
+    def frame_bytes(opcode, payload):
         n = len(payload)
         head = bytes([0x80 | opcode])
         if n < 126:
@@ -278,7 +286,7 @@ class Ws:
             key = (mask * (n // 4 + 1))[:n]
             masked = (int.from_bytes(payload, "big") ^ int.from_bytes(key, "big")).to_bytes(
                 n, "big")
-        self.sock.sendall(head + mask + masked)
+        return head + mask + masked
 
     def send_json(self, obj):
         self.send(0x1, json.dumps(obj, separators=(",", ":")).encode())
@@ -925,13 +933,14 @@ class Prefill(Actor):
     def fill_pool(self, node):
         ws = Ws.connect(self.stack.ports[node], self.stack.tokens["fill"], mss=None)
         try:
-            junk = b"x" * PREFILL_FRAME
-            for i in range(PREFILL_FRAMES):
-                ws.send(0x1, junk)
-                self.counts.add("prefill_frames")
-                if i % 16 == 15:
-                    while ws.recv(0.05) is not None:
-                        pass
+            batch = Ws.frame_bytes(0x1, b"x" * PREFILL_FRAME) * PREFILL_BATCH
+            for _ in range(PREFILL_FRAMES // PREFILL_BATCH):
+                # recv() below leaves the socket's timeout at what it had left.
+                ws.sock.settimeout(15)
+                ws.sock.sendall(batch)
+                self.counts.add("prefill_frames", PREFILL_BATCH)
+                while ws.recv(0.05) is not None:
+                    pass
         finally:
             ws.close(clean=True)
 

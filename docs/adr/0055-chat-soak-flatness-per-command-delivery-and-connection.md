@@ -56,9 +56,14 @@ a run too short or too quiet to resolve a bound fails.
 
 - The warm-up does work of its own before the window opens, stopping two minutes before it
   ends:
-  - 1,024 frames of 60 KiB that are not JSON to each node, over loopback's 64 KiB MSS: each
-    receive fills a whole buffer, and the ring goes round about four times. They are refused as
-    `not_json` and never sequenced or stored.
+  - 2,048 frames of 60 KiB that are not JSON to each node, over loopback's 64 KiB MSS, in
+    writes of eight (480 KiB): the socket holds more than a buffer whenever the node reads, so
+    every read but a write's last fills a whole 64 KiB buffer, and the ring goes round more than
+    seven times. They are refused as `not_json` and never sequenced or stored. Sent one at a
+    time and answered between, as a first version did, reads found less than a buffer waiting
+    and the pool still gained 0.2 to 0.4 MB after the warm-up; batched, its mapping held 18,028
+    KiB on every node from the first minute and did not move (the rest of the mapping is the
+    datagram ring, which TCP never uses).
   - 60 more senders in the soak's pool rooms, two messages a second each (the send limit),
     with bodies drawn as the clients' are: together with the soak's own traffic, each node's
     kept-message order reaches 131,072 entries within the warm-up. The pool rooms are at their
@@ -66,6 +71,7 @@ a run too short or too quiet to resolve a bound fails.
     prefill rooms of its own; they held about 15 MB of kept messages that the order's cap then
     dropped during the window, freeing heap that growth elsewhere would have filled unseen in
     RSS, so it was not used.
+  The soak runs the allocator as production does: no glibc tunable is set on the nodes.
   This loosens nothing: the bounds, the fit and the window are unchanged, and both structures
   would reach the same size in production within hours of a start. After it, the pool's RSS
   cannot grow and the order stays at its cap, so a leak shows as it did before: a slope whose
@@ -100,3 +106,53 @@ a run too short or too quiet to resolve a bound fails.
   ceiling assumes; its soak belongs with M32's live chat.
 - Not driven: node restarts (a new process starts a new series; SIGSTOP drives the ownership
   changes instead), the JWKS fetch path and database outages.
+
+## What the prefill left, measured
+
+Runs of 40 minutes on M32 (fe1cbca and 965badd), which includes M18 and M19, with the prefill,
+found no allocation that grows without a bound, and three that each finish after the warm-up.
+heaptrack attached to one node at minute 17 showed the live heap of new allocations level at 14
+to 15 MB after three minutes and nothing leaked at exit; ChatService's maps (clients, rooms, the
+per-user buckets, whose bucket counts stayed at 59), the router's remembered keys (about 3,400,
+a minute's worth) and its room maps held steady between minutes 17 and 38.
+
+1. **The order of kept messages.** Since M32's fix of stale entries (they no longer count
+   against the kept messages), the order is compacted only when it holds twice the bound,
+   262,144 entries (about 6.3 MB): it went from 150,000 to 221,000 entries on every node between
+   minutes 17 and 38. Fix, in M32: compact at 1.25 times the bound (about 164,000 entries,
+   3.9 MB), which the warm-up reaches.
+2. **Heap pages never written until after the warm-up.** Each session reserves 256 KiB for
+   parsing its upgrade request and keeps it for the connection's life. glibc raises its mmap
+   threshold when a large mapped chunk is freed, so these reservations come from the brk heap.
+   The heap grows to the peak of concurrent sessions times 256 KiB, mostly never written, and
+   RSS creeps into it as later allocations land there. A trace of one node (brk, mmap, munmap,
+   madvise) showed the heap only growing, no call at all from minute 12.5 to shutdown, and no
+   munmap while about 1,000 sessions came and went; so nothing was trimmed and faulted back.
+   `[heap]` from `/proc/<pid>/smaps` (Rss, Private_Dirty and Anonymous equal throughout), in MB:
+
+   | node | size, min 17 and 38 | Rss min 17 | Rss min 38 | never written, min 38 |
+   |---|---|---|---|---|
+   | chat-1 | 29.4 | 20.9 | 21.1 | 8.3 |
+   | chat-2 | 29.3 | 17.5 | 18.8 | 10.5 |
+   | chat-3 | 27.5 | 17.1 | 18.8 | 8.7 |
+
+   RSS went from 51.5, 48.5 and 47.3 MiB at minute 15 to 52.2, 50.5 and 49.6 MiB at minute 40;
+   the slopes' upper ends were +1.7, +5.6 and +6.5 MB an hour. As a diagnostic only, the same
+   run with the threshold fixed (`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072`), so the
+   reservations stay mapped and are unmapped with their session:
+
+   | node | heap size | Rss min 17 | Rss min 38 | never written | RSS min 15 / 20 / 40 (MiB) |
+   |---|---|---|---|---|---|
+   | chat-1 | 18.4 | 18.22 | 18.22 | 0.2 | 49.9 / 50.0 / 50.0 |
+   | chat-2 | 16.1 | 15.90 | 15.90 | 0.2 | 47.0 / 47.1 / 47.3 |
+   | chat-3 | 16.0 | 15.46 | 15.76 | 0.2 | 47.0 / 47.1 / 47.4 |
+
+   with upper ends of +0.23, +1.5 and +1.5 MB an hour. Fix, in the product: release the
+   upgrade parser once the handshake is done, and reserve its buffer as input arrives. The
+   256 KiB per connection was also missing from ADR-0036's budget.
+3. **The receive pool's last pages**, left by prefill frames sent one at a time: fixed in the
+   soak by writing them in batches (above).
+
+The next verification runs once the parser fix and M32's compaction are on `main`. What remains
+after those three is the steady state: a slope whose upper end stays above a bound per command,
+per delivery or per connection for the whole window is a leak.
