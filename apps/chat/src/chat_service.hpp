@@ -57,6 +57,15 @@ struct ServiceLimits {
     // than a script filling the table would like.
     std::uint32_t join_burst = 64;
     std::uint32_t joins_per_second = 1;
+    // Joins per user refused because the user is not a member, on this node. A join of a room
+    // with no kind recorded records one, a row kept until the upload reaper forgets a room that
+    // was never used, a day on (ADR-0054); every such join is refused, since a room nobody has
+    // recorded lists nobody. Past this allowance a join is answered the same and records
+    // nothing, so a user makes at most 20 and then one a minute: 1,460 rows a day per node,
+    // gone a day later, where the join limit alone let one user leave 86,400 a day for good. A
+    // person is refused a join when a link is stale or they were removed, a handful a day.
+    std::uint32_t record_burst = 20;
+    core::Millis record_interval{60'000};
     // Messages per user, across all their connections on this node. Someone typing sends a
     // message every few seconds; a burst is a pasted paragraph split in lines or a quick run of
     // replies, rarely past five. 10 covers that twice over. Sustained, 2 a second is 120 a
@@ -119,6 +128,9 @@ struct ServiceCounters {
     // Messages sent to clients from history.
     std::uint64_t history_messages = 0;
     std::uint64_t allocation_failures = 0;
+    // Joins of a room with no kind recorded that recorded nothing, the user having used up
+    // ServiceLimits::record_burst.
+    std::uint64_t unrecorded_joins = 0;
 };
 
 // Identifies an attached client; never reused while the service lives.
@@ -188,7 +200,9 @@ private:
     [[nodiscard]] Client* find(ClientId id) noexcept;
     [[nodiscard]] Room* find(const core::RoomId& room) noexcept;
     [[nodiscard]] bool admit_join(const core::UserId& user);
-    void admitted(ClientId id, const Join& join,
+    [[nodiscard]] core::ports::Recording may_record(const core::UserId& user) const noexcept;
+    void charge_refusal(const core::UserId& user);
+    void admitted(ClientId id, const Join& join, core::ports::Recording recording,
                   core::ports::MessageResult<core::ports::Admission> result) noexcept;
     void enter(ClientId id, const Join& join);
     void joined(const core::RoomId& room,
@@ -220,6 +234,8 @@ private:
     std::unordered_map<core::RoomId, std::unique_ptr<Room>> rooms_;
     std::unordered_map<core::UserId, TokenBucket> joins_;
     std::unordered_map<core::UserId, TokenBucket> sends_;
+    // Refused joins, which may each have recorded a room.
+    std::unordered_map<core::UserId, PacedBucket> refusals_;
     // Every kept message, in the order kept, to drop the oldest of all rooms first.
     std::deque<std::pair<core::RoomId, std::uint64_t>> kept_order_;
     std::size_t buffered_bytes_ = 0;

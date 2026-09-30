@@ -164,9 +164,10 @@ void MemoryMessageStore::members(const core::RoomId& room, std::optional<core::U
 }
 
 void MemoryMessageStore::admits(const core::RoomId& room, const core::UserId& user,
-                                core::ports::RoomKind asked,
+                                core::ports::RoomKind asked, core::ports::Recording recording,
                                 MessageCallback<core::ports::Admission> done) {
     auto recorded = kinds_.find(room);
+    core::ports::RoomKind kind = asked;
     if (recorded == kinds_.end()) {
         if (core::ports::admits_anyone(asked)) {
             defer([done = std::move(done)]() mutable noexcept {
@@ -174,11 +175,15 @@ void MemoryMessageStore::admits(const core::RoomId& room, const core::UserId& us
             });
             return;
         }
-        recorded = kinds_.emplace(room, asked).first;
+        if (recording == core::ports::Recording::Allowed) {
+            kinds_.emplace(room, asked);
+        }
+    } else {
+        kind = recorded->second;
     }
     const auto listed = members_.find(room);
     const bool member = listed != members_.end() && listed->second.contains(user);
-    const auto answer = core::ports::admission(asked, recorded->second, member);
+    const auto answer = core::ports::admission(asked, kind, member);
     defer([done = std::move(done), answer]() mutable noexcept { done(answer); });
 }
 

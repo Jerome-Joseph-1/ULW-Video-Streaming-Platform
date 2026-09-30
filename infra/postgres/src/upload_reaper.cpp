@@ -50,6 +50,26 @@ failed AS (
      WHERE id IN (SELECT video_id FROM expired) AND state IN ('init', 'uploading'))
 SELECT count(*) FROM expired)sql";
 
+// A room some join recorded and nothing used: no member, and never resolved on the room plane
+// (room_assignments), which is where every message's seq comes from; chat_messages is asked too,
+// for a room whose plane rows an operator removed. Rows another statement holds are skipped for
+// the next pass. Only the last week is walked, oldest first, so a pass costs what a week of
+// rooms does, not every room there ever was. A member added between the check and the delete
+// is left in a room with no kind recorded, which admits only members and is recorded closed by
+// the next join, as any room with members is.
+constexpr Sql kForgetUnused = R"sql(
+WITH unused AS (
+    SELECT room_id FROM chat_rooms r
+     WHERE recorded_at <= timestamptz 'epoch' + $1 * interval '1 microsecond'
+       AND recorded_at > timestamptz 'epoch' + $1 * interval '1 microsecond' - interval '7 days'
+       AND NOT EXISTS (SELECT 1 FROM chat_members m WHERE m.room_id = r.room_id)
+       AND NOT EXISTS (SELECT 1 FROM room_assignments a WHERE a.room_id = r.room_id)
+       AND NOT EXISTS (SELECT 1 FROM chat_messages c WHERE c.room_id = r.room_id)
+     ORDER BY recorded_at
+     LIMIT $2
+       FOR UPDATE SKIP LOCKED)
+DELETE FROM chat_rooms WHERE room_id IN (SELECT room_id FROM unused))sql";
+
 CatalogError to_catalog_error(DbError e) noexcept {
     switch (e) {
     case DbError::Duplicate:
@@ -149,6 +169,21 @@ std::expected<std::vector<ExpiredUpload>, CatalogError> PgUploadReaper::expire(c
         }
     }
     return expired;
+}
+
+std::expected<std::size_t, CatalogError>
+PgUploadReaper::forget_unused(core::WallTime recorded_before, std::size_t limit) {
+    auto conn = impl_->session();
+    if (!conn) {
+        return std::unexpected(conn.error());
+    }
+    auto done = (*conn)->exec(kForgetUnused, Params{}
+                                                 .add_int(micros_since_epoch(recorded_before))
+                                                 .add_int(static_cast<std::int64_t>(limit)));
+    if (!done) {
+        return failure(done.error());
+    }
+    return done->affected();
 }
 
 } // namespace infra::postgres

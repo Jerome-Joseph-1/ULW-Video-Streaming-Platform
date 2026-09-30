@@ -36,6 +36,25 @@ public:
     std::deque<std::expected<std::vector<ExpiredUpload>, CatalogError>> replies;
 };
 
+class FakeRooms final : public core::ports::IUnusedRooms {
+public:
+    [[nodiscard]] std::expected<std::size_t, CatalogError>
+    forget_unused(core::WallTime recorded_before, std::size_t limit) override {
+        cutoffs.push_back(recorded_before);
+        limits.push_back(limit);
+        if (replies.empty()) {
+            return std::size_t{0};
+        }
+        const auto reply = replies.front();
+        replies.pop_front();
+        return reply;
+    }
+
+    std::vector<core::WallTime> cutoffs;
+    std::vector<std::size_t> limits;
+    std::deque<std::expected<std::size_t, CatalogError>> replies;
+};
+
 class FakeStore final : public core::ports::IIngestStore, public core::ports::IObjectAdmin {
 public:
     [[nodiscard]] std::expected<core::ports::IngestId, StorageError>
@@ -105,7 +124,7 @@ protected:
     }
 
     [[nodiscard]] reaper::Report run(std::size_t batch = 3) {
-        return reaper::run_once(catalog, store, store, clock,
+        return reaper::run_once(catalog, store, store, rooms, clock,
                                 {.batch = batch, .orphan_after = std::chrono::hours(7 * 24)});
     }
 
@@ -113,6 +132,7 @@ protected:
     ulw::test::FakeRandom random;
     FakeCatalog catalog;
     FakeStore store;
+    FakeRooms rooms;
 
 private:
     int next_ = 0;
@@ -198,7 +218,9 @@ TEST_F(ReaperTest, CountsTheSessionsTheSweepAborted) {
               "# TYPE reaper_uploads_expired_last_run gauge\nreaper_uploads_expired_last_run 0\n"
               "# TYPE reaper_uploads_release_failed_last_run gauge\n"
               "reaper_uploads_release_failed_last_run 0\n"
-              "# TYPE reaper_parts_orphaned_last_run gauge\nreaper_parts_orphaned_last_run 4\n");
+              "# TYPE reaper_parts_orphaned_last_run gauge\nreaper_parts_orphaned_last_run 4\n"
+              "# TYPE reaper_chat_rooms_forgotten_last_run gauge\n"
+              "reaper_chat_rooms_forgotten_last_run 0\n");
 }
 
 TEST_F(ReaperTest, ACatalogFailureIsReportedAndTheSweepStillRuns) {
@@ -228,6 +250,30 @@ TEST_F(ReaperTest, UploadsAbortedBeforeAFailureKeepTheirReleasedSessions) {
     EXPECT_EQ(report.uploads_expired, 3U);
     EXPECT_EQ(store.discarded.size(), 3U);
     EXPECT_EQ(report.problems.size(), 1U);
+}
+
+// A refused join of a room nobody recorded records it (ADR-0054); nothing else ever removes the
+// row, so the reaper forgets those a day old that nothing used, a batch at a time.
+TEST_F(ReaperTest, ForgetsChatRoomsADayOldThatNothingUsedInBatchesUntilAShortOne) {
+    rooms.replies = {3, 3, 1};
+    const auto report = run();
+    EXPECT_EQ(report.rooms_forgotten, 7U);
+    ASSERT_EQ(rooms.cutoffs.size(), 3U);
+    EXPECT_EQ(rooms.cutoffs.front(), clock.wall_now() - std::chrono::hours(24));
+    EXPECT_EQ(rooms.limits.front(), 3U);
+    EXPECT_TRUE(report.problems.empty());
+    EXPECT_NE(reaper::metrics_text(report).find("reaper_chat_rooms_forgotten_last_run 7\n"),
+              std::string::npos);
+}
+
+TEST_F(ReaperTest, AFailureToForgetRoomsIsReportedAndTheUploadsStillCount) {
+    catalog.replies.emplace_back(uploads(1));
+    rooms.replies = {std::unexpected(CatalogError::Unavailable)};
+    const auto report = run();
+    EXPECT_EQ(report.uploads_expired, 1U);
+    EXPECT_EQ(report.rooms_forgotten, 0U);
+    ASSERT_EQ(report.problems.size(), 1U);
+    EXPECT_NE(report.problems.front().find("chat rooms"), std::string::npos);
 }
 
 } // namespace

@@ -316,8 +316,10 @@ build the gateways run), and a NetworkPolicy that lets it reach cluster DNS, Pos
 the store (443) and nothing else. It aborts uploads past their `expires_at`, fails their videos
 with "upload expired", releases their storage sessions, removes any object a finished commit
 left at their key, and aborts sessions older than the uploads' lifetime that no upload owns
-(docs/adr/0049). Each pass prints `reaper_uploads_expired_last_run`,
-`reaper_uploads_release_failed_last_run` and `reaper_parts_orphaned_last_run` on stdout, as
+(docs/adr/0049). It also forgets chat rooms that a refused join recorded more than a day ago and
+nothing used since (no members, never on the room plane). Each pass prints
+`reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run`,
+`reaper_parts_orphaned_last_run` and `reaper_chat_rooms_forgotten_last_run` on stdout, as
 gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
 confirmed, and the Job's log says which.
 

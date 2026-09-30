@@ -136,13 +136,13 @@ int run() {
     }
     infra::postgres::PgUploadReaper uploads(config->database_url);
     const reaper::Report report =
-        reaper::run_once(uploads, *services.ingest, *services.admin, services.clock,
+        reaper::run_once(uploads, *services.ingest, *services.admin, uploads, services.clock,
                          {.batch = 100, .orphan_after = config->orphan_after});
     std::println(stderr,
                  "ulw_reaper: {} ({}) expired {} uploads, {} not released, aborted {} orphaned "
-                 "sessions",
+                 "sessions, forgot {} unused chat rooms",
                  info.version, info.git_sha, report.uploads_expired, report.uploads_release_failed,
-                 report.parts_orphaned);
+                 report.parts_orphaned, report.rooms_forgotten);
     for (const std::string& problem : report.problems) {
         std::println(stderr, "ulw_reaper: {}", problem);
     }

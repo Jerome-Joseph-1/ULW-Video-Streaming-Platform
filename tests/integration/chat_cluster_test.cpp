@@ -676,6 +676,36 @@ TEST_P(ChatClusterTest, AGroupRoomWithNoMembersRefusesEveryoneAndCannotBeOpenedL
               "group_chat");
 }
 
+// Every join of a room nobody recorded is refused and records the room (ADR-0054); past a
+// user's allowance, 20 at once, the joins are refused the same and record nothing, so one user
+// cannot fill the table.
+TEST_P(ChatClusterTest, RefusedJoinsRecordAtMostTheUsersAllowanceOfRooms) {
+    constexpr std::size_t kAllowance = 20;
+    constexpr std::size_t kJoins = kAllowance + 5;
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    std::vector<std::string> rooms;
+    for (std::size_t i = 0; i < kJoins; ++i) {
+        rooms.push_back(core::RoomId::generate(clock_, random_).to_string());
+        ASSERT_TRUE(alice->send(R"({"type":"join","room":")" + rooms.back() + R"("})"));
+        const auto answer = alice->wait_for([&](const Seen& s) {
+            return s.type == "error" && s.room == rooms.back() && s.reason != "not_joined";
+        });
+        ASSERT_TRUE(answer) << i;
+        EXPECT_EQ(answer->reason, "not_member") << i;
+    }
+    auto conn = db_->session();
+    std::string list = "{";
+    for (const std::string& room : rooms) {
+        list += (list.size() > 1 ? "," : "") + room;
+    }
+    list += "}";
+    EXPECT_EQ(ulw::test::scalar(conn,
+                                "SELECT count(*) FROM chat_rooms WHERE room_id = ANY($1::uuid[])",
+                                Params{}.add_text(list)),
+              std::to_string(kAllowance));
+}
+
 TEST_P(ChatClusterTest, AStreamsChatRefusesViewersUntilTheServerOpensItAndRecordsNothing) {
     const std::string stream = "unopened-" + room_.substr(0, 8);
     auto alice = connect(nodes_[0], 0);

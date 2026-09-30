@@ -271,4 +271,54 @@ TEST_F(UploadReaperTest, AnUnreachableDatabaseIsUnavailable) {
     EXPECT_EQ(expired.error(), CatalogError::Unavailable);
 }
 
+// What a refused join leaves (ADR-0054's kind record, migration 0009) goes once it is a day old;
+// a room anything uses stays, however old.
+TEST_F(UploadReaperTest, ForgetsOnlyChatRoomsNothingUsedRecordedInTheWeekBeforeTheCutoff) {
+    auto conn = db->session();
+    const auto room = [&](std::string_view id, std::string_view age) {
+        ASSERT_TRUE(conn.exec("INSERT INTO chat_rooms (room_id, kind, recorded_at) "
+                              "VALUES ($1::text::uuid, 'group_chat', now() - $2::text::interval)",
+                              Params{}.add_text(id).add_text(age)));
+    };
+    constexpr std::string_view kUnused = "01a0eb86-6cca-7dce-84cc-000000000001";
+    constexpr std::string_view kFresh = "01a0eb86-6cca-7dce-84cc-000000000002";
+    constexpr std::string_view kListed = "01a0eb86-6cca-7dce-84cc-000000000003";
+    constexpr std::string_view kResolved = "01a0eb86-6cca-7dce-84cc-000000000004";
+    constexpr std::string_view kAncient = "01a0eb86-6cca-7dce-84cc-000000000005";
+    constexpr std::string_view kUnused2 = "01a0eb86-6cca-7dce-84cc-000000000006";
+    room(kUnused, "2 days");
+    room(kUnused2, "3 days");
+    room(kFresh, "1 hour");
+    room(kListed, "2 days");
+    room(kResolved, "2 days");
+    room(kAncient, "30 days");
+    ASSERT_TRUE(
+        conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::text::uuid, 'alice')",
+                  Params{}.add_text(kListed)));
+    ASSERT_TRUE(conn.exec("INSERT INTO room_assignments (room_id, owner_node) "
+                          "VALUES ($1::text::uuid, 'chat-1')",
+                          Params{}.add_text(kResolved)));
+
+    const auto cutoff = clock.wall_now() - std::chrono::hours(24);
+    // Oldest first, a batch at a time.
+    const auto first = reaper->forget_unused(cutoff, 1);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(*first, 1U);
+    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
+                     Params{}.add_text(kUnused2)),
+              "0");
+    const auto rest = reaper->forget_unused(cutoff, 10);
+    ASSERT_TRUE(rest);
+    EXPECT_EQ(*rest, 1U);
+    const auto again = reaper->forget_unused(cutoff, 10);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(*again, 0U);
+    for (const std::string_view kept : {kFresh, kListed, kResolved, kAncient}) {
+        EXPECT_EQ(scalar(conn, "SELECT count(*) FROM chat_rooms WHERE room_id = $1::text::uuid",
+                         Params{}.add_text(kept)),
+                  "1")
+            << kept;
+    }
+}
+
 } // namespace
