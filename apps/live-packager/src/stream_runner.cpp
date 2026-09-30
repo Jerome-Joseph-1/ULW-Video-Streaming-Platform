@@ -147,18 +147,18 @@ Outcome end_without_media(Publisher& publisher, const StopRequests& stops, bool 
 // open (a drain, which still uploads what ffmpeg finished) or ends its playlist.
 Outcome conclude(Publisher& publisher, const StopRequests& stops, Verdict verdict,
                  const std::expected<infra::ffmpeg::LiveRemuxResult, std::string>& result,
-                 std::string_view final_playlist, const infra::ffmpeg::LiveRemuxJob& job) {
+                 std::string_view final_playlist) {
     bool failed = verdict != Verdict::Healthy;
     if (!result) {
         log("remuxer: {}", result.error());
         failed = true;
     } else {
-        if (result->unprobed) {
+        if (result->video_unprobed) {
             // ffmpeg's own last line says only that it could not open its output.
-            log("ffmpeg found no codec parameters in the first {} ms of the stream, which must "
-                "hold a video keyframe: the publisher is to send one every {} s",
-                infra::ffmpeg::live_probe(job.max_kbps, job.segment_seconds).window.count(),
-                job.segment_seconds);
+            log("ffmpeg found no video codec parameters in the first {} ms ({} bytes) of the "
+                "stream, which must hold a keyframe: the publisher is to send one every "
+                "segment length",
+                result->probe.window.count(), result->probe.bytes);
         }
         log("{}, ffmpeg exited {} after {} ms, peak {} KiB{}{}", describe(result->end),
             result->signal != 0 ? 128 + result->signal : result->exit_code, result->wall.count(),
@@ -295,7 +295,7 @@ Outcome run_stream(Publisher& publisher, infra::srt::IngestListener& listener,
     const auto last = read_playlist(playlist_file);
     return conclude(publisher, stops, verdict,
                     std::move(run.result).value_or(std::unexpected("remuxer did not report")),
-                    last ? std::string_view(*last) : std::string_view{}, job);
+                    last ? std::string_view(*last) : std::string_view{});
 }
 
 } // namespace live

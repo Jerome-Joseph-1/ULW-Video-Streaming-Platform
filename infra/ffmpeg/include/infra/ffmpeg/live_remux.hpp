@@ -35,12 +35,18 @@ inline constexpr core::Millis kSegmentDriftAllowance{500};
 [[nodiscard]] std::uint64_t live_max_file_bytes(std::uint32_t max_kbps,
                                                 std::uint32_t segment_seconds) noexcept;
 
-// How much of the stream ffmpeg reads before it writes the init segment. It needs a video
-// keyframe to learn the picture's size, and the publisher sends one every segment length
+// The longest segment and the highest bitrate a live stream may be configured with: the
+// packager's configuration refuses more, and live_probe caps its arguments at them.
+inline constexpr std::uint32_t kLiveMaxSegmentSeconds = 10;
+inline constexpr std::uint32_t kLiveMaxKbps = 100'000;
+
+// How much of the stream ffmpeg reads before it writes the init segment (ADR-0057). It needs a
+// video keyframe to learn the picture's size, and the publisher sends one every segment length
 // (ADR-0046) from wherever it joined, so the window is a segment length plus a second of
 // slack for the relay's start and a late keyframe: a shorter window fails a stream whose first
-// keyframe comes late, with "dimensions not set". `bytes` is the window at `max_kbps`, twice.
-// Both are bounded whatever the arguments.
+// keyframe comes late, with "dimensions not set". `bytes` is the window at `max_kbps`, twice,
+// and never under 1 MB. The arguments are capped at kLiveMaxSegmentSeconds and kLiveMaxKbps,
+// so both stay bounded.
 struct LiveProbe {
     core::Millis window{};
     std::uint64_t bytes = 0;
@@ -97,9 +103,12 @@ struct LiveRemuxResult {
     std::uint64_t peak_rss_kib = 0;
     // The last line ffmpeg printed to stderr.
     std::string detail;
-    // ffmpeg gave up on a stream it found no codec parameters for in the probe window, which
-    // for video means that no keyframe came within it.
-    bool unprobed = false;
+    // The probe ffmpeg was given.
+    LiveProbe probe;
+    // The run failed, and ffmpeg had found no codec parameters for the video in the probe
+    // window: no keyframe came within it. Not set for a stream ffmpeg merely could not probe,
+    // such as a data stream it leaves unmapped, on a run that went on.
+    bool video_unprobed = false;
 };
 
 // Copies the video and audio of an MPEG-TS stream into fMP4 HLS segments without decoding

@@ -346,7 +346,10 @@ TEST_F(LivePackagerTest, AStreamWhoseFirstKeyframeComesLateInTheSegmentIsStillPa
     ASSERT_NE(publisher, nullptr);
 
     watch(*publisher);
+    // The packager first: when it gives up, the publisher's own error says only that its
+    // connection broke.
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
+    ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
     EXPECT_EQ(packager->output().find("codec parameters"), std::string::npos) << packager->output();
     const auto final = playlist();
     ASSERT_TRUE(final) << packager->output();

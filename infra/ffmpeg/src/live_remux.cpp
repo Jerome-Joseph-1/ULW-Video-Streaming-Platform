@@ -21,9 +21,6 @@ constexpr std::uint64_t kRemuxAddressSpace = kGiB;
 // A twentieth of the run's length in CPU seconds: fifteen times the measured cost, so a stream
 // at a bitrate several times the test source's still fits.
 constexpr std::int64_t kWallPerCpu = 20;
-// What ffmpeg 6 prints when the probe window ends before a stream's parameters are known; the
-// last line is only the "Error opening output files" that follows it.
-constexpr std::string_view kUnprobed = "Could not find codec parameters";
 
 std::string last_line(std::string_view text) {
     while (text.ends_with('\n') || text.ends_with('\r')) {
@@ -61,19 +58,24 @@ std::expected<LiveRemuxResult, std::string> LiveRemuxer::run(const LiveRemuxJob&
                         .cpu = core::Seconds{job.max_duration.count() / kWallPerCpu},
                         .wall = std::chrono::duration_cast<core::Millis>(job.max_duration),
                         .file_size_bytes = live_max_file_bytes(job.max_kbps, job.segment_seconds)};
+    const LiveProbe probe = live_probe(job.max_kbps, job.segment_seconds);
     const auto child = run_sandboxed(
-        sandbox, limits, live_remux_args(config_.ffmpeg, job), clock_, [](std::string_view) {},
-        stop, job.input);
+        sandbox, limits, live_remux_args(config_.ffmpeg, job, probe), clock_,
+        [](std::string_view) {}, stop, job.input);
     if (!child) {
         return std::unexpected(child.error());
     }
-    return LiveRemuxResult{.end = end_of(*child),
+    const LiveEnd end = end_of(*child);
+    return LiveRemuxResult{.end = end,
                            .exit_code = child->exit_code,
                            .signal = child->signal,
                            .wall = child->wall,
                            .peak_rss_kib = child->peak_rss_kib,
                            .detail = last_line(child->stderr_tail),
-                           .unprobed = child->stderr_tail.find(kUnprobed) != std::string::npos};
+                           .probe = probe,
+                           // ffmpeg's last line is then only "Error opening output files".
+                           .video_unprobed =
+                               end == LiveEnd::Failed && video_unprobed(child->stderr_tail)};
 }
 
 } // namespace infra::ffmpeg

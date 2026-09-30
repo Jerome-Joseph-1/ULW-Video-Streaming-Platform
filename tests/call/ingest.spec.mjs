@@ -358,7 +358,7 @@ test.afterEach(async ({}, testInfo) => { // eslint-disable-line no-empty-pattern
   const packagers = startedPackagers.splice(0);
   if (testInfo.status === testInfo.expectedStatus) return;
   for (const packager of packagers) {
-    console.log(`live_packager output (${testInfo.title}):\n${packager.output()}`);
+    await testInfo.attach('live_packager', { body: packager.output(), contentType: 'text/plain' });
   }
 });
 

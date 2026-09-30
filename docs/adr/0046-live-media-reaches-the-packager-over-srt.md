@@ -49,15 +49,8 @@ listen for an RTMP publisher nor connect to an SRT peer.
   packager never reads the bytes. When the caller is gone the pipe is closed, which is ffmpeg's
   end of input.
 - ffmpeg runs `-f mpegts -i pipe:0 -map 0:v:0 -map 0:a:0? -c copy -bsf:a aac_adtstoasc -f hls
-  -hls_segment_type fmp4 -hls_time <T>`. The segment length T is fixed by configuration (2 to
-  10 s, default 2 s).
-- **The probe window follows the configuration.** ffmpeg writes nothing until it knows every
-  stream's parameters, and for H.264 that takes a keyframe. The publisher joins mid-interval, so
-  its first keyframe can come up to T after its first audio. `-analyzeduration` is therefore
-  T + 1 s (the keyframe interval plus a second for the relay's start and a late keyframe), and
-  `-probesize` is that window at `ULW_LIVE_MAX_KBPS`, twice, never under 1 MB
-  (`infra::ffmpeg::live_probe`). Both are clamped to the configuration's bounds, 11 s and 11 s
-  at 100 Mbit/s twice (275 MB), whatever they are given. At the defaults: 3 s and 15 MB.
+  -hls_segment_type fmp4 -hls_time <T>`, probing for 1 s rather than the default 5 s. The
+  segment length T is fixed by configuration (2 to 10 s, default 2 s).
 - A copy cuts at keyframes, so the source's keyframe interval must equal T. A segment that
   breaks the target duration ends the stream (ADR-0047).
 - The sandbox limits the size of a file ffmpeg writes (`RLIMIT_FSIZE`, ADR-0025 gains a flag,
@@ -81,21 +74,6 @@ listen for an RTMP publisher nor connect to an SRT peer.
   6.3.3, plus the segment being cut and uploaded); a viewer who joins with the first segment,
   before the window is full, starts nearer the beginning and sees about 3.3 s. ADR-0014 accepts
   this class of latency.
-- The probe window was a fixed 1 s until a WHIP publish in CI produced no segment: its first
-  video keyframe came after the first second of audio, ffmpeg found no picture size ("Could not
-  find codec parameters ... unspecified size", then "[mp4] dimensions not set"), could not write
-  the init segment and exited 234, which ended the SRT session and the egress with it. Measured
-  with ffmpeg 6.1.1 by piping an MPEG-TS whose audio starts at 0 (640x360, a keyframe every
-  2 s) into the packager's command: the window is the bound. With 1 s, video starting 0.8 s in
-  was packaged and 1.0 s in was not; with 3 s, 2.8 s in was and 3.0 s was not. The integration
-  test `AStreamWhoseFirstKeyframeComesLateInTheSegmentIsStillPackaged` sends video 1.8 s behind
-  its audio over SRT, and fails with the 1 s window. The
-  price is the first segment only: on a real-time 2 s-keyframe feed it was listed 2.0 s after
-  the first byte with 1 s of probe and 2.8 s with 3 s; later segments are not delayed. When
-  ffmpeg still gives up for want of codec parameters, the packager says so in its log, with the
-  window it had, since ffmpeg's own last line is only "Error opening output files". It is not
-  restarted: the window already holds a keyframe interval, so a publisher it fails is one that
-  breaks the keyframe contract, and a second ffmpeg would probe the same stream the same way.
 - The packager needs the same host features as the worker (user namespaces, ADR-0032), and runs
   in the same kind of pod, plus a UDP port.
 - A publisher that disconnects ends the stream (ADR-0047). A network blip between egress and
