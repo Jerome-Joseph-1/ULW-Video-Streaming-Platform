@@ -96,14 +96,15 @@ spec:
                   auto_create: false
                 logging:
                   level: info
-          # A participant publishes and receives ~250 packets/s each way (2.5 Mbit/s of audio
-          # and 720p video), and the SFU decrypts, inspects and re-encrypts each: at an assumed
-          # 20 us per packet (SRTP both ways plus RTP handling, unmeasured) that is 1% of a
-          # core, so 500m carries ~50 participants and the 2-core limit ~200. Memory is ~100 MB
-          # of server plus each track's retransmission cache, ~500 packets x 1.5 KB = 750 KB,
-          # for ~4 tracks per participant in a 1:1 call (audio and video, sent and received):
-          # ~3 MB each. 256 MiB then holds ~50 participants and 1 GiB ~300. The call capacity
-          # script replaces the 20 us and the 3 MB with measurements.
+          # CPU binds before bandwidth. tests/load/call_capacity measured 0.0158 cores per 1:1
+          # call (two participants, each publishing and receiving ~250 packets/s of audio and
+          # 720p video), so 500m carries ~31 calls and the 2-core limit ~126 (e2e run
+          # 36589275099, PR #42). The same run measured 1.504 Mbit/s per call in each direction
+          # against the 1.4 of ADR-0012, so 385 calls by bandwidth still stands as the ceiling
+          # on a 600 Mbit/s port. Memory is ~100 MB of server plus each track's retransmission
+          # cache, ~500 packets x 1.5 KB = 750 KB, for ~4 tracks per participant in a 1:1 call
+          # (audio and video, sent and received): ~3 MB each. 256 MiB then holds ~50
+          # participants and 1 GiB ~300; the 3 MB is still an estimate.
           resources:
             requests:
               cpu: 500m

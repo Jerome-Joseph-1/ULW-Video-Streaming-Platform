@@ -5,9 +5,9 @@ name: e2e
 # the same job with the same steps. Everything happens inside this runner's kind cluster; the
 # workflow has no credentials and reaches nothing of Askedin's.
 #
-# The hls.js playback spec (tests/e2e) is not part of it: it starts its own gateway and worker
-# from a build tree and serves its own page, so it cannot be pointed at the sandbox route, and
-# ci.yml does not run it either. vod_flow's playback scenario covers the same route here.
+# The hls.js playback spec and the SDP round-trip spec (tests/e2e) are a second job: each starts
+# its own services from a build tree and serves its own page, so neither can be pointed at the
+# sandbox route. vod_flow's playback scenario covers the same route in the sandbox job.
 on:
   workflow_dispatch:
   schedule:
@@ -101,3 +101,47 @@ jobs:
           if-no-files-found: warn
       - if: always()
         run: make e2e-down
+
+  # The M11 and M24 acceptance in Chrome for Testing: hls.js plays the worker's output through
+  # the gateway, switches rendition on demand without a stall and reads segments from the store's
+  # host; Chrome's offers go through codec/sdp and back byte for byte. run.sh starts its own
+  # gateway_server and transcode_worker on a scratch database and bucket.
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-14-ci-browser
+      # run.sh needs Node 20 or later and nothing in tests/e2e pins one, so this is the current
+      # LTS, exact, rather than whatever the runner image ships.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      # stack.mjs creates and drops its scratch database with psql.
+      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
+      - name: Start MinIO
+        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      - run: cmake --preset ci
+      - run: >-
+          cmake --build --preset ci
+          --target gateway_server transcode_worker ulw_migrate ulw_devtoken
+          ulw_sdp_roundtrip
+      - run: tests/e2e/run.sh build/ci
+        timeout-minutes: 30
+      - if: failure()
+        run: docker compose -f deploy/local/compose.yaml logs minio
