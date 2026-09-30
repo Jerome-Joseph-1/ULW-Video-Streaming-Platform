@@ -348,10 +348,26 @@ build the gateways run), and a NetworkPolicy that lets it reach cluster DNS, Pos
 the store (443) and nothing else. It aborts uploads past their `expires_at`, fails their videos
 with "upload expired", releases their storage sessions, removes any object a finished commit
 left at their key, and aborts sessions older than the uploads' lifetime that no upload owns
-(docs/adr/0049). Each pass prints `reaper_uploads_expired_last_run`,
-`reaper_uploads_release_failed_last_run` and `reaper_parts_orphaned_last_run` on stdout, as
+(docs/adr/0049). It also forgets direct and group chat rooms that a refused join recorded more
+than a day ago and nothing used since (no members, never on the room plane), however old; a
+stream's live chat is never forgotten. It looks at 10,000 rooms a pass at most, from where the
+last pass stopped, and starts over from the oldest once it reaches the cutoff
+(`chat_rooms_forget_cursor`, docs/adr/0075). Each pass prints
+`reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run`,
+`reaper_parts_orphaned_last_run` and `reaper_chat_rooms_forgotten_last_run` on stdout, as
 gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
 confirmed, and the Job's log says which.
+
+**Deploy the release that carries migration 0010 off-peak.** Migrations run inside a
+transaction, so its index on `chat_rooms (recorded_at, room_id)` is built without
+`CONCURRENTLY`: until the gateway's migrate container commits it, every chat join of a closed
+room, every member listing and every live chat opened waits (the column it adds is a catalog
+change, with no rewrite). The build sorts every row of `chat_rooms`, a uuid, a text and a
+timestamp each: a few seconds per million rooms, so check first with
+`SELECT count(*) FROM chat_rooms;`. Taking its locks waits at most 5 s for traffic before the
+migration gives up and the init container runs it again (`lock_timeout`, docs/adr/0031). A join
+that waits past the chat service's request timeout is answered `unavailable`, and the client
+retries it.
 
 The NetworkPolicy allows ports, not addresses, because Postgres runs on the node's host and R2
 is on the internet. If the host's address is stable, add it as an `ipBlock` to the 5432 rule.
@@ -492,6 +508,64 @@ must match `crane digest <image>:<sha>` of the commit you meant to deploy:
 kubectl -n apps-stage get pods -o \
   jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'
 ```
+
+### Image builds and the worker's ffmpeg
+
+The two images come from different distributions (docs/adr/0074): `video-gateway` is Ubuntu
+24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
+packages, ffmpeg among them, from snapshot.debian.org; both images' binaries are built on
+Ubuntu, since only Ubuntu's glibc lets them carry the CET marks the hardening check requires.
+On the worker those marks are a static property only: Debian's own `libc.so.6` is unmarked, so
+the kernel does not enable a shadow stack for the worker's processes. And because the worker's
+binaries run on trixie's libraries, the Ubuntu release they are built on must not have a newer
+glibc or libstdc++ than trixie; the trixie workflow fails if they stop loading there.
+Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org over
+http for the worker's bootstrap of ca-certificates (signed and checked for freshness), and
+Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes its CA as the
+build secret `ca-bundle`. The pipeline itself is unchanged: `target: worker` still builds the
+worker image.
+
+#### Updating the worker's ffmpeg
+
+The platform's on-call engineer owns this. The daily trigger is the nightly e2e run: its
+sandbox job's "Image vulnerabilities" step (tools/security/trivy-image.sh) fails as soon as a
+HIGH or CRITICAL with a fix in the archive affects the worker image, and that failure is the
+signal to bump. Every Monday, also read debian-security-announce (or
+https://security-tracker.debian.org/tracker/source-package/ffmpeg) for trixie DSAs the gate
+does not rate HIGH. For a DSA against ffmpeg, OpenSSL or glibc, bump within two working days;
+otherwise bump at least monthly.
+
+1. Pick a timestamp after the DSA's upload reached snapshot.debian.org: the `first_seen` of the
+   `debian-security` archive in
+   `https://snapshot.debian.org/mr/package/ffmpeg/<version>/binfiles/ffmpeg/<version>?fileinfo=1`
+   (the version URL-encoded, `7%3A7.1.5-0%2Bdeb13u1`).
+2. If Docker Hub has a newer `debian:trixie-slim` (a new 13.x point release), move the
+   Dockerfile's `DEBIAN` digest to it. The base image's own packages (libc6, util-linux,
+   perl-base, ncurses, libsystemd0 and the rest) are upgraded to the snapshot's versions at
+   every build whatever the digest, but a current base keeps that upgrade small.
+3. In a `debian:trixie-slim` container at the digest the Dockerfile names, with this checkout
+   mounted, print the candidates at that timestamp:
+
+   ```sh
+   DEBIAN_SNAPSHOT=<timestamp> deploy/docker/apt-install-debian.sh --policy \
+       ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 openssl-provider-legacy
+   ```
+
+4. Set `DEBIAN_SNAPSHOT` in `deploy/docker/Dockerfile` to the timestamp and every pinned version
+   in the `worker` stage to its candidate. A build fails if a pin is not
+   what the snapshot holds, so nothing drifts silently.
+5. If ffmpeg's upstream version changed (the part before `-0+deb13u`, say 7.1.5 to 7.1.6; a
+   `+deb13uN` patch alone does not need it), run in that container, with ffmpeg and strace
+   installed, `tools/trace-ffmpeg-syscalls.sh` as root and as an ordinary user (setpriv, from
+   util-linux, when given a uid; `runuser -u <user> --` otherwise) and
+   `tools/ffmpeg-address-space.sh --full`. Extend `infra/ffmpeg/src/seccomp_filter.hpp` with
+   any new call, each with its reason (docs/adr/0048); a command line that nears its address
+   space limit is a finding for docs/adr/0074 before it is a bump. The trixie workflow runs both
+   on every pull request that touches the Dockerfile, so its log shows them too.
+6. Open the pull request, then dispatch the e2e workflow on its branch (Actions, e2e, "Run
+   workflow"): pull requests do not run it. Its sandbox job builds the worker image, runs the
+   VOD flow through it, checks the release binaries' hardening and runs the Trivy gate. Deploy
+   as usual (step 4).
 
 ## 5. Verify on stage (M14)
 

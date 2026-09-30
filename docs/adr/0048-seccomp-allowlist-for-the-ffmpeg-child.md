@@ -92,6 +92,8 @@ and ffmpeg alike and cannot be tighter than the worker needs.
   runners install too. The kernel does not enter into it, since the filter sees only what user
   space asks for; a different CPU can, through libraries' feature probes, which is what the
   re-trace on a bump and the tests under both users are for.
+- ADR-0074 moved the worker image to ffmpeg 7.1.5 on Debian 13 (glibc 2.41); its re-trace
+  found nothing outside the list.
 
 - A new ffmpeg or libc that calls something not on the list kills the transcode. The failure
   is `SyscallBlocked`, and the job's video fails after one rerun until the list is extended:

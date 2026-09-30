@@ -301,7 +301,8 @@ std::string ChatServer::render_metrics() const {
         "token_expiries_total {}\n"
         "member_removals_total {}\n"
         "member_check_failures_total {}\n"
-        "jwks_keys_expired {}\n",
+        "jwks_keys_expired {}\n"
+        "unrecorded_joins_total {}\n",
         c.connections_accepted, c.connections_rejected, c.connections_unaddressed,
         c.rejected_ip_connections, c.rejected_ip_rate, c.limited_ip_upgrades,
         c.limited_user_sessions, clients_.size(), clients_.evictions(), sessions_.size(),
@@ -315,7 +316,8 @@ std::string ChatServer::render_metrics() const {
         registry.fenced_writes, router.forwarded, router.forward_timeouts, router.peers_lost,
         router.peers_refused, router.slow_peers, presence_.rooms(), presence.sent,
         presence.received, presence.notified, presence.expired, presence.gaps, c.token_expiries,
-        chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0);
+        chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0,
+        chat.unrecorded_joins);
 }
 
 } // namespace chat

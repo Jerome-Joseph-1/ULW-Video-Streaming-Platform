@@ -99,6 +99,10 @@ enum class Admission : std::uint8_t {
     return member ? Admission::Admitted : Admission::NotMember;
 }
 
+// Whether a join of a room with no kind recorded may record one. Skipped answers exactly as
+// Allowed would, and writes nothing: how the chat service bounds the rows a user's joins create.
+enum class Recording : std::uint8_t { Allowed, Skipped };
+
 enum class MessageStoreError : std::uint8_t {
     // Unreachable, timed out, or lost a race with a concurrent write; the call may be repeated.
     Unavailable,
@@ -176,9 +180,15 @@ public:
     // its members, even while it has none; a stream's live chat admits anyone. A join never widens
     // who may be in a room: it records only a closed kind, on a room that has none recorded, and
     // otherwise takes the recorded kind. It answers NotLive, and records nothing, when it asks for
-    // the open kind of a room that is not recorded as open; only record_live opens a room.
-    virtual void admits(const RoomId& room, const UserId& user, RoomKind asked,
+    // the open kind of a room that is not recorded as open; only record_live opens a room. With
+    // Recording::Skipped, a room with no kind recorded is answered as if `asked` were recorded,
+    // and stays unrecorded.
+    virtual void admits(const RoomId& room, const UserId& user, RoomKind asked, Recording recording,
                         MessageCallback<Admission> done) = 0;
+    void admits(const RoomId& room, const UserId& user, RoomKind asked,
+                MessageCallback<Admission> done) {
+        admits(room, user, asked, Recording::Allowed, std::move(done));
+    }
     // Records the room as a stream's live chat, which admits anyone: a server-side step (the
     // stream's owner opening its chat), never a client's. Conflict, and nothing recorded, when the
     // room is not a stream's chat (is_stream_chat), lists members, is recorded as another kind,
