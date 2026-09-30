@@ -21,6 +21,8 @@ namespace net {
 namespace {
 
 constexpr int kBacklog = 1024;
+// tune_connection's TCP_USER_TIMEOUT, which restore_user_timeout sets again.
+constexpr int kUserTimeoutMs = 20'000;
 
 std::expected<void, int> set_int(int fd, int level, int name, int value) noexcept {
     if (::setsockopt(fd, level, name, &value, sizeof value) != 0) {
@@ -237,7 +239,6 @@ std::expected<void, int> tune_connection(int fd) noexcept {
     constexpr int kKeepIdle = 60;
     constexpr int kKeepIntvl = 10;
     constexpr int kKeepCnt = 3;
-    constexpr int kUserTimeoutMs = 20'000;
     struct Option {
         int level;
         int name;
@@ -265,6 +266,10 @@ std::expected<void, int> cap_send_buffer(int fd, int bytes) noexcept {
 
 std::expected<void, int> clear_user_timeout(int fd) noexcept {
     return set_int(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, 0);
+}
+
+std::expected<void, int> restore_user_timeout(int fd) noexcept {
+    return set_int(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, kUserTimeoutMs);
 }
 
 std::expected<os::UniqueFd, int> bind_udp(const SocketAddr& local) {
