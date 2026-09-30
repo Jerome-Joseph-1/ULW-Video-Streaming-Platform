@@ -1288,6 +1288,8 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     std::uint64_t head = 0;
     std::uint64_t settled_kib = 0;
     std::uint64_t settled_seq = 0;
+    std::size_t sampled = 0;
+    std::vector<std::uint64_t> resident;
     while (acked < kMessages) {
         // A node that turned one send away turns away the rest of the round's too: they are
         // not tried, which keeps the retrying down to a few sends a round.
@@ -1353,12 +1355,17 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
                 }
             }
         }
-        if (settled_kib == 0 && acked >= kSettled) {
-            settled_kib = resident_kib(slow_node.process->pid());
-            settled_seq = head;
+        if (acked >= kSettled && acked / kReadEvery > sampled) {
+            sampled = acked / kReadEvery;
+            resident.push_back(resident_kib(slow_node.process->pid()));
+            if (settled_kib == 0) {
+                settled_kib = resident.back();
+                settled_seq = head;
+            }
         }
     }
     const std::uint64_t final_kib = resident_kib(slow_node.process->pid());
+    resident.push_back(final_kib);
 
     // Everyone who kept reading got every message, once, in the room's order.
     for (auto* group : {&senders, &viewers}) {
@@ -1370,20 +1377,30 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
             }
         }
     }
-    // What the slow viewers' node held for them did not grow with what they were sent. Past
-    // the settled point each can be queued at most lossy_backlog and one message (67 KiB); the
-    // room's kept messages (256 KiB) were full long before; each message sequenced adds one
-    // remembered key (ADR-0043), about 300 bytes; and the allocator gets 1 MiB for arenas and
-    // fragments of its own. Nothing there grows with how far behind a viewer is, where an
-    // unbounded queue would hold each one's 1.3 MiB more. AddressSanitizer keeps freed memory in
-    // its quarantine instead of returning it, so its resident memory grows with every free,
-    // bounded or not: under it the numbers are only reported.
-    const std::uint64_t allowed_kib =
-        (slow.size() * 67) + ((kMessages - settled_seq) * 300 / 1024) + 1024;
+    // What the slow viewers' node held for them did not grow with what they were sent. It is
+    // sampled every 90 messages past the settled point. In each stretch the queues can grow at
+    // most to their bound, lossy_backlog and one message for each slow viewer (67 KiB), 90
+    // remembered keys (ADR-0043) add about 26 KiB, and the allocator gets 256 KiB of its own;
+    // an unbounded queue would add each slow viewer's 90 messages, 1.9 MiB for the eight, in
+    // every stretch. The median stretch is held to that bound: a step the allocator takes once
+    // (a new arena, a trim it did not make) moves one stretch, where a queue that grows with
+    // what it is sent moves them all. AddressSanitizer keeps freed memory in its quarantine
+    // instead of returning it, so its resident memory grows with every free, bounded or not:
+    // under it the numbers are only reported.
+    const std::uint64_t allowed_kib = (slow.size() * 67) + (kReadEvery * 300 / 1024) + 256;
     const std::uint64_t owed_kib = slow.size() * (kMessages - settled_seq) * 2'700 / 1024;
-    EXPECT_TRUE(kAddressSanitizer || final_kib - std::min(final_kib, settled_kib) < allowed_kib)
+    std::vector<std::uint64_t> growth;
+    for (std::size_t k = 1; k < resident.size(); ++k) {
+        growth.push_back(resident[k] - std::min(resident[k], resident[k - 1]));
+    }
+    ASSERT_GE(growth.size(), 3U);
+    std::vector<std::uint64_t> sorted = growth;
+    std::ranges::sort(sorted);
+    const std::uint64_t median_kib = sorted[sorted.size() / 2];
+    EXPECT_TRUE(kAddressSanitizer || median_kib < allowed_kib)
         << "resident " << settled_kib << " KiB at seq " << settled_seq << ", " << final_kib
-        << " KiB at seq " << kMessages << ", allowed " << allowed_kib << " KiB more";
+        << " KiB at seq " << kMessages << "; the median of every 90 messages' growth, "
+        << median_kib << " KiB, is not under " << allowed_kib << " KiB";
 
     // Reading in full, each slow viewer gets the rest of what it was owed, in order, up to the
     // last message, after gaps where it dropped the rest, which its node counted exactly.
@@ -1421,8 +1438,9 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
               << " nodes got all " << kMessages << " messages in order; " << slow.size()
               << " slow ones got as few as " << fewest << ", and their node dropped " << missed
               << " for them; it was resident at " << settled_kib << " KiB at seq " << settled_seq
-              << " and " << final_kib << " KiB at the end (allowed " << allowed_kib
-              << " more), having sent them " << owed_kib << " KiB more; " << attempts - kMessages
+              << " and " << final_kib << " KiB at the end (a median of " << median_kib
+              << " KiB every 90 messages, allowed " << allowed_kib << "), having sent them "
+              << owed_kib << " KiB more; " << attempts - kMessages
               << " sends were turned away or unanswered and tried again\n";
 }
 
