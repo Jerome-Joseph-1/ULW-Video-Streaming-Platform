@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """The allowlist checker refuses what would waive too much, check-image-pins.py refuses an
 unpinned image and a misused exemption, trivy-report.py marks a finding allowlisted only
-where Trivy would honour the entry (docs/adr/0072), and split-resources.py writes nothing
-outside its directory."""
+where Trivy would honour the entry (docs/adr/0072), split-resources.py writes nothing
+outside its directory, and tools/pathguard.py refuses a command-line path that resolves outside
+the repository and the temporary directories."""
 import datetime
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -28,6 +31,7 @@ allowlists = load("check_allowlists", HERE / "check-allowlists.py")
 pins = load("check_image_pins", ROOT / "deploy" / "local" / "check-image-pins.py")
 report = load("trivy_report", HERE / "trivy-report.py")
 split = load("split_resources", HERE / "split-resources.py")
+pathguard = load("pathguard", ROOT / "tools" / "pathguard.py")
 
 SOON = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
 PAST = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
@@ -242,6 +246,102 @@ class SplitResourcesTest(unittest.TestCase):
                 self.assertEqual(rc, 1)
                 self.assertEqual(list(self.out.iterdir()), [])
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["in.yaml", "out"])
+
+
+class PathGuardTest(unittest.TestCase):
+    """The roots are the repository, $RUNNER_TEMP and the temporary directory; each is set to a
+    directory of its own under one scratch directory, so "elsewhere" beside them is outside."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        base = pathlib.Path(os.path.realpath(self.dir.name))
+        self.repo, self.runner, self.tmp, self.elsewhere = (
+            base / "repo", base / "runner", base / "tmp", base / "elsewhere")
+        for d in (self.repo, self.runner, self.tmp, self.elsewhere):
+            d.mkdir()
+        for patch in (mock.patch.object(pathguard, "REPOSITORY", self.repo),
+                      mock.patch.dict(os.environ, {"RUNNER_TEMP": str(self.runner)}),
+                      mock.patch.object(tempfile, "tempdir", str(self.tmp))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def refused(self, path) -> str:
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as raised:
+            pathguard.inside(path)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("refused", err.getvalue())
+        return err.getvalue()
+
+    def test_paths_inside_the_roots_are_accepted(self):
+        for path in (self.repo / "deploy" / "x.yaml", self.repo,
+                     self.runner / "trivy-image" / "a.json",
+                     self.tmp / "tmp.abc" / "cpp-deps.json", self.repo / "a" / ".." / "b"):
+            with self.subTest(path=path):
+                self.assertEqual(pathguard.inside(path), pathlib.Path(os.path.realpath(path)))
+                self.assertEqual(pathguard.inside(str(path)), pathlib.Path(os.path.realpath(path)))
+
+    def test_a_dot_dot_escape_is_refused(self):
+        for path in (self.repo / ".." / "elsewhere" / "x", self.tmp / ".." / "elsewhere",
+                     f"{self.runner}/../../elsewhere", self.repo / "..",
+                     self.repo / ".." / "repo2"):
+            with self.subTest(path=path):
+                self.refused(path)
+
+    def test_an_absolute_path_outside_the_roots_is_refused(self):
+        for path in (self.elsewhere / "x.json", "/", "/etc/passwd"):
+            with self.subTest(path=path):
+                self.refused(path)
+
+    def test_a_symlink_inside_a_root_pointing_outside_is_refused(self):
+        (self.repo / "link").symlink_to(self.elsewhere, target_is_directory=True)
+        (self.tmp / "file-link").symlink_to(self.elsewhere / "f.json")
+        self.refused(self.repo / "link")
+        self.refused(self.repo / "link" / "out.json")
+        self.refused(self.tmp / "file-link")
+
+    def test_a_symlink_within_the_roots_is_accepted(self):
+        (self.repo / "link").symlink_to(self.tmp, target_is_directory=True)
+        self.assertEqual(pathguard.inside(self.repo / "link" / "x"), self.tmp / "x")
+
+    def test_without_runner_temp_only_the_repository_and_the_temporary_directory(self):
+        with mock.patch.dict(os.environ):
+            del os.environ["RUNNER_TEMP"]
+            self.refused(self.runner / "a.json")
+            self.assertEqual(pathguard.inside(self.tmp / "a"), self.tmp / "a")
+
+    def test_split_resources_writes_nothing_outside(self):
+        source = self.tmp / "in.yaml"
+        source.write_text("kind: Service\nmetadata:\n  name: api\n", encoding="utf-8")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            split.main([str(self.elsewhere / "out"), str(source)])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(list(self.elsewhere.iterdir()), [])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            split.main([str(self.tmp / "out"), str(self.elsewhere / "in.yaml")])
+        self.assertFalse((self.tmp / "out").exists())
+
+    def test_trivy_report_reads_nothing_outside(self):
+        (self.elsewhere / "r.json").write_text("{}", encoding="utf-8")
+        with mock.patch.object(sys, "argv", ["trivy-report.py", str(self.tmp / "ignore.yaml"),
+                                             str(self.elsewhere / "r.json")]), \
+                redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            report.main()
+        self.assertEqual(raised.exception.code, 2)
+
+
+class PathGuardRootsTest(unittest.TestCase):
+    def test_the_repository_is_found_from_the_module_and_is_a_root(self):
+        self.assertEqual(pathguard.REPOSITORY, ROOT)
+        images_sh = ROOT / "deploy" / "local" / "images.sh"
+        self.assertEqual(pathguard.inside(images_sh), images_sh)
+        self.assertEqual(pathguard.inside(os.path.relpath(images_sh)), images_sh)
+
+    def test_the_temporary_directory_is_a_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(pathguard.inside(pathlib.Path(d) / "x"),
+                             pathlib.Path(os.path.realpath(d)) / "x")
 
 
 if __name__ == "__main__":

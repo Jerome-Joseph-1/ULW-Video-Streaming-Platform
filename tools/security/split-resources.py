@@ -13,15 +13,21 @@ rather than written outside OUTDIR (RBAC names may hold ':', which is allowed).
 import os
 import re
 import sys
+from pathlib import Path
 
 import yaml
+
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pathguard import inside  # noqa: E402
 
 FILE_NAME = re.compile(r"[a-z0-9][a-z0-9.:_-]*")
 
 
 def main(argv: list[str]) -> int:
-    out = argv[0]
-    source = open(argv[1], encoding="utf-8") if len(argv) > 1 else sys.stdin
+    out = inside(argv[0])
+    source = open(inside(argv[1]), encoding="utf-8") if len(argv) > 1 else sys.stdin
     os.makedirs(out, exist_ok=True)
     with source:
         for doc in yaml.safe_load_all(source):

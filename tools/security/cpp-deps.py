@@ -15,6 +15,11 @@ import re
 import sys
 from pathlib import Path
 
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pathguard import inside  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 DEPENDENCIES = ROOT / "cmake" / "Dependencies.cmake"
 
@@ -44,6 +49,7 @@ def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
+    out = inside(sys.argv[1])
     declared = DECLARED.findall(DEPENDENCIES.read_text(encoding="utf-8"))
     if not declared:
         print(f"{DEPENDENCIES}: no URL/URL_HASH pairs found; update DECLARED", file=sys.stderr)
@@ -66,7 +72,7 @@ def main() -> int:
         return 1
     lockfile = {"results": [{"source": {"path": "cmake/Dependencies.cmake", "type": "lockfile"},
                              "packages": packages}]}
-    Path(sys.argv[1]).write_text(json.dumps(lockfile, indent=2) + "\n", encoding="utf-8")
+    out.write_text(json.dumps(lockfile, indent=2) + "\n", encoding="utf-8")
     return 0
 
 
