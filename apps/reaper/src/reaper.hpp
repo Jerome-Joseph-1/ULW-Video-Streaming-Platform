@@ -24,7 +24,7 @@ struct Options {
     core::Seconds unused_room_after{std::chrono::hours(24)};
     // Chat rooms looked at per pass, `batch` per statement, from where the last pass stopped: a
     // pass costs the same however many rooms there are, and a lap over a million takes a day of
-    // passes each 15 minutes (ADR-0077).
+    // passes each 15 minutes (ADR-0075).
     std::size_t rooms_per_pass = 10'000;
 };
 

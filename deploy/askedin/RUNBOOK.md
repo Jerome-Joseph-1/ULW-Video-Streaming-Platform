@@ -341,7 +341,7 @@ left at their key, and aborts sessions older than the uploads' lifetime that no 
 than a day ago and nothing used since (no members, never on the room plane), however old; a
 stream's live chat is never forgotten. It looks at 10,000 rooms a pass at most, from where the
 last pass stopped, and starts over from the oldest once it reaches the cutoff
-(`chat_rooms_forget_cursor`, docs/adr/0077). Each pass prints
+(`chat_rooms_forget_cursor`, docs/adr/0075). Each pass prints
 `reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run`,
 `reaper_parts_orphaned_last_run` and `reaper_chat_rooms_forgotten_last_run` on stdout, as
 gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not

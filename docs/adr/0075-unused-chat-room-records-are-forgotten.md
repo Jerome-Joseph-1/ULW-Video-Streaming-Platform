@@ -1,4 +1,4 @@
-# 0077. A chat room's record that nothing used is forgotten
+# 0075. A chat room's record that nothing used is forgotten
 
 Status: Accepted
 Date: 2026-09-30

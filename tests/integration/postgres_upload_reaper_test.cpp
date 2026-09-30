@@ -272,7 +272,7 @@ TEST_F(UploadReaperTest, AnUnreachableDatabaseIsUnavailable) {
 }
 
 // What a refused join leaves (ADR-0054's kind record, migration 0010) goes once it is a day old,
-// however old; a room anything uses stays (ADR-0077). Each call looks at a batch of rooms, oldest
+// however old; a room anything uses stays (ADR-0075). Each call looks at a batch of rooms, oldest
 // first, from where the last one stopped, and starts over once it reaches the cutoff.
 TEST_F(UploadReaperTest, ForgetsEveryChatRoomNothingUsedADayOnWalkingABatchAtATime) {
     auto conn = db->session();

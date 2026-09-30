@@ -925,7 +925,7 @@ void ChatService::ask_rechecks() noexcept {
         ++rechecks_in_flight_;
         try {
             // The check records nothing: the join that let the client in recorded the room's
-            // kind, and a room the reaper has since forgotten (ADR-0077) stays forgotten.
+            // kind, and a room the reaper has since forgotten (ADR-0075) stays forgotten.
             messages_.admits(pair.first, pair.second, core::ports::RoomKind::GroupChat,
                              core::ports::Recording::Skipped,
                              [this, pair, generation = recheck_generation_](

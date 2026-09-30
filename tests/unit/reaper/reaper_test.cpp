@@ -257,7 +257,7 @@ TEST_F(ReaperTest, UploadsAbortedBeforeAFailureKeepTheirReleasedSessions) {
 
 // A refused join of a room nobody recorded records it (ADR-0054); nothing else ever removes the
 // row, so the reaper forgets those a day old that nothing used, a batch at a time, until the walk
-// reaches the cutoff (ADR-0077).
+// reaches the cutoff (ADR-0075).
 TEST_F(ReaperTest, ForgetsChatRoomsADayOldThatNothingUsedInBatchesUntilTheWalkEnds) {
     rooms.replies = {core::ports::UnusedRoomsScan{.forgotten = 3, .finished = false},
                      core::ports::UnusedRoomsScan{.forgotten = 0, .finished = false},
