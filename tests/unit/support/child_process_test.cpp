@@ -39,8 +39,11 @@ TEST(ChildProcess, PollUntilAsksAtMostOncePerPeriod) {
 // page mid-run (a 1,528 KiB step failed the 1-byte bound on a runner). The soak turns THP off for
 // itself before it allocates anything.
 TEST(DatagramSoak, RunsWithTransparentHugePagesOff) {
-    const auto soak = ulw::test::ChildProcess::start(
-        {ULW_DATAGRAM_SOAK_BIN, "--peers", "4", "--duration-s", "60", "--sample-s", "30"}, {});
+    // Epoll, so that a host without io_uring runs it as far as the check.
+    const auto soak =
+        ulw::test::ChildProcess::start({ULW_DATAGRAM_SOAK_BIN, "--reactor", "epoll", "--peers", "4",
+                                        "--duration-s", "60", "--sample-s", "30"},
+                                       {});
     ASSERT_TRUE(soak);
     const auto thp_enabled = [pid = soak->pid()]() -> std::string {
         std::ifstream status("/proc/" + std::to_string(pid) + "/status");

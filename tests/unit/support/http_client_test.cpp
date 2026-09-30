@@ -58,10 +58,18 @@ std::optional<Listener> listen_on_loopback() {
 
 // Whether thread `tid` of this process is blocked in system call `number`: the first field of
 // its /proc syscall file, which reads "running" while it is not in one.
-bool blocked_in(pid_t tid, long number) {
+// nullopt when the file cannot be read, as where /proc is restricted or the kernel lacks it.
+std::optional<long> current_syscall(pid_t tid) {
     std::ifstream in("/proc/self/task/" + std::to_string(tid) + "/syscall");
     long current = -1;
-    return static_cast<bool>(in >> current) && current == number;
+    if (!(in >> current)) {
+        return std::nullopt;
+    }
+    return current;
+}
+
+bool blocked_in(pid_t tid, long number) {
+    return current_syscall(tid) == number;
 }
 
 // Installs a handler for SIGUSR1 while alive, and puts the one before it back.
@@ -90,6 +98,11 @@ private:
 // by a debugger, a tracer or a frozen cgroup, with no handler at all. The client makes the call
 // again; before it did, it took the interruption for the server closing the connection.
 TEST(HttpClient, AReadInterruptedByASignalIsMadeAgain) {
+    // The wait for the reader to block is read from /proc; without it there is no telling
+    // when to interrupt it.
+    if (!current_syscall(static_cast<pid_t>(::syscall(SYS_gettid)))) {
+        GTEST_SKIP() << "cannot read /proc/self/task/<tid>/syscall";
+    }
     const InterruptionHandler handler;
     ASSERT_TRUE(handler.installed());
     auto listener = listen_on_loopback();

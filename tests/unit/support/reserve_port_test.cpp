@@ -14,7 +14,14 @@ TEST(ReservePort, NeverHandsOutAPortFromTheEphemeralRange) {
     std::uint32_t low = 0;
     std::uint32_t high = 0;
     std::ifstream range("/proc/sys/net/ipv4/ip_local_port_range");
-    ASSERT_TRUE(range >> low >> high);
+    if (!(range >> low >> high)) {
+        GTEST_SKIP() << "cannot read /proc/sys/net/ipv4/ip_local_port_range";
+    }
+    // A range from 21000 or below up to 65535 leaves reserve_port() nothing outside it.
+    if (const auto window = ulw::test::detail::port_window(); window.first >= window.end) {
+        GTEST_SKIP() << "the ephemeral range " << low << "-" << high
+                     << " leaves no port outside it";
+    }
     std::set<std::uint16_t> seen;
     constexpr int kReservations = 64;
     for (int i = 0; i < kReservations; ++i) {
