@@ -51,6 +51,15 @@ constexpr auto kObserved = std::chrono::milliseconds(2500);
 // The wheel rounds a deadline up to the tick after next, so a timer re-armed every 100 ms
 // fires every 200 ms: 12 times in 2.5 s. One stall as long as kTimeout would cost 5 of them.
 constexpr int kMinimumTicks = 10;
+// The request timeout of the tests that are not about timeouts: none of them asserts on it, so
+// it only has to outlast the slowest answer a loaded host gives. Measured on a 4-core host at
+// load average 8-12 (ci preset, both reactors, ULW_TEST_DATABASE_URL server), from submit() to
+// the answer: a first request, which also opens the session, took p99.9 250 ms over 1000 pools
+// (111 ms over 3000 on a second run); one on an open session, p99.9 10 ms over 20000. 1 s is
+// four of those, and loaded hosts have exceeded it. 5 s is 20 times the worst, covering ASan's
+// slowdown with room to spare, and stays under pump_until's 10 s, so a request that really
+// hangs still ends as a Timeout answer rather than "no answer".
+constexpr core::Millis kAnswerWithin{5000};
 
 // Re-arms itself every tick; it keeps counting only while nothing blocks the loop.
 class Ticker final : public net::ITimerHandler {
@@ -204,7 +213,7 @@ TEST_P(PoolTest, AnswersOnALaterIterationNeverInsideSubmit) {
     if (IsSkipped() || HasFatalFailure()) {
         return;
     }
-    ASSERT_NO_FATAL_FAILURE(start(db->conninfo()));
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 4, kAnswerWithin));
     std::optional<Answer> answer;
     pool->submit(query(Statement{.sql = "SELECT 6 * 7", .params = {}}, answer));
     EXPECT_FALSE(answer);
@@ -238,7 +247,7 @@ TEST_P(PoolTest, StartsOperationsInSubmissionOrder) {
     if (IsSkipped() || HasFatalFailure()) {
         return;
     }
-    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1, kAnswerWithin));
     constexpr std::size_t kQueries = 5;
     std::vector<std::string> order;
     for (std::size_t i = 0; i < kQueries; ++i) {
@@ -260,7 +269,7 @@ TEST_P(PoolTest, RollsBackATransactionAnOperationLeftOpen) {
     }
     auto conn = db->session();
     ASSERT_TRUE(conn.exec("CREATE TABLE probe (x integer)"));
-    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1, kAnswerWithin));
     bool finished = false;
     pool->submit(std::make_unique<LeavesTransactionOpen>(finished));
     ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return finished; }));
@@ -286,7 +295,7 @@ TEST_P(PoolTest, RerunsAnOperationThatLostASerializationRace) {
             END IF;
             RETURN n;
         END $$;)sql"));
-    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1, kAnswerWithin));
     EXPECT_EQ(ask("SELECT flaky($1)", Params{}.add_int(3)), Answer{"3"});
 
     ASSERT_TRUE(conn.exec("SELECT setval('tries', 1, false)"));
@@ -360,7 +369,7 @@ TEST_P(PoolTest, ReconnectsAfterTheServerEndsItsSessions) {
     if (IsSkipped() || HasFatalFailure()) {
         return;
     }
-    ASSERT_NO_FATAL_FAILURE(start(db->conninfo()));
+    ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 4, kAnswerWithin));
     ASSERT_EQ(ask("SELECT 1"), Answer{"1"});
     auto conn = db->session();
     ASSERT_NE(scalar(conn, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
