@@ -484,7 +484,7 @@ TEST_F(SyscallFilterTest, ATranscodeWithThreadsStillRuns) {
 TEST_F(SyscallFilterTest, ALiveRemuxFromAPipeStillRuns) {
     // The source is an encode, which the packager never runs: x264 at its default thread count
     // peaked at 0.95 GiB of address space under ffmpeg 6.1 and passes 1 GiB under 7.1 (the
-    // worker image's, docs/adr/0072). The remux below keeps the default 1 GiB, the packager's.
+    // worker image's, docs/adr/0074). The remux below keeps the default 1 GiB, the packager's.
     Limits encode;
     encode.address_space_bytes = 4 * kGiB;
     const auto source =

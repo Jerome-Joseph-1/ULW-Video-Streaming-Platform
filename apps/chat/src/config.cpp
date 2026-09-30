@@ -4,6 +4,7 @@
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
+#include "ops/dev_only.hpp"
 #include "ops/root.hpp"
 
 #include <algorithm>
@@ -176,6 +177,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     // Over plain HTTP anyone on the path could hand us their own keys and sign any identity.
     if (url && !url->starts_with("https://")) {
         return error("JWKS_URL", "must be an https URL");
+    }
+    // A local key set signs any identity its holder likes; in a real deployment it would be a
+    // way in, not a convenience.
+    if (auto r = ops::allow_dev_only("ULW_DEV_JWKS_FILE", env); !r) {
+        return error(r.error().variable, r.error().reason);
     }
     auto issuer = lookup(env, "JWT_ISSUER");
     if (!issuer) {

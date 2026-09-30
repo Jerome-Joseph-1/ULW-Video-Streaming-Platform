@@ -65,7 +65,7 @@ protected:
     [[nodiscard]] std::vector<std::string> base_env() const {
         return {"ULW_STORAGE=fs", "ULW_FS_ROOT=" + (files_.path() / "store").string(),
                 "ULW_DATABASE_URL=postgresql://ulw:hunter2@127.0.0.1:1/ulw",
-                "ULW_DEV_JWKS_FILE=" + jwks_.string(), "JWT_ISSUER=ulw-test",
+                "ULW_DEV_JWKS_FILE=" + jwks_.string(), "ULW_DEV_MODE=1", "JWT_ISSUER=ulw-test",
                 // Developers and some runners start tests as root; the refusal has tests below.
                 "ULW_ALLOW_ROOT=1"};
     }

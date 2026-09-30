@@ -6,7 +6,7 @@
 #     a kube-rbac-proxy sidecar this release no longer runs (its metrics bind to 127.0.0.1),
 #     and the manager ConfigMap, which nothing mounts;
 #   - the container runs with a read-only root filesystem, no capabilities and the runtime's
-#     seccomp profile, as every ULW pod does.
+#     seccomp profile, as every ULW pod does, and as the image's user, 65532, by number.
 # Its CRDs come from the same chart (RUNBOOK.md step 7); the Gateway API CRDs are Envoy
 # Gateway's, already on the cluster.
 apiVersion: v1
@@ -141,8 +141,11 @@ spec:
       terminationGracePeriodSeconds: 10
       nodeSelector:
         kubernetes.io/os: linux
+      # The image's own user (distroless nonroot), named so it is not left to the image.
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:

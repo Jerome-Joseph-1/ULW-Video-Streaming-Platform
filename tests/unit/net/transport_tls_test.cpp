@@ -706,6 +706,58 @@ TEST_P(TlsTransportTest, ATicketIssuedBeforeAReloadResumesAfterIt) {
     }
 }
 
+// A ticket holds its session's master secret, so a key that sealed tickets for good would open
+// every resumed session ever made under it. The sealing key is replaced every 12 hours and the
+// one before it opens tickets for 12 more; past that a ticket buys a full handshake.
+TEST_P(TlsTransportTest, TicketKeysRotateAndATicketStopsResumingOnceItsKeyIsGone) {
+    for (const int version : {TLS1_2_VERSION, TLS1_3_VERSION}) {
+        SCOPED_TRACE(version);
+        const auto ctx = TestPki::shared().client_context(version);
+        // A connection that takes a ticket and keeps it; the handler outlives the connection.
+        struct Held {
+            Upper upper;
+            std::unique_ptr<TlsPeer> peer;
+        };
+        std::vector<std::unique_ptr<Held>> held;
+        const auto connect_with = [&](SSL_SESSION* session) -> TlsPeer* {
+            auto h = std::make_unique<Held>();
+            h->peer = connect(h->upper, ctx.get());
+            if (session != nullptr) {
+                EXPECT_EQ(SSL_set_session(h->peer->ssl(), session), 1);
+            }
+            EXPECT_TRUE(handshake(*h->peer));
+            std::vector<std::byte> none;
+            EXPECT_TRUE(pump_until(*reactor, [&] {
+                h->peer->read(none);
+                return SSL_SESSION_is_resumable(SSL_get0_session(h->peer->ssl())) == 1;
+            }));
+            held.push_back(std::move(h));
+            return held.back()->peer.get();
+        };
+
+        TlsPeer* first = connect_with(nullptr);
+        SSL_SESSION* ticket = SSL_get0_session(first->ssl());
+
+        // One interval on, a newer key seals, and the old one still opens.
+        clock.advance(std::chrono::hours(12) + std::chrono::seconds(1));
+        TlsPeer* later = connect_with(ticket);
+        EXPECT_EQ(SSL_session_reused(later->ssl()), 1);
+        SSL_SESSION* fresh = SSL_get0_session(later->ssl());
+
+        // Another interval on, the key that sealed the first ticket is gone; the ticket the
+        // second connection was given, sealed with the key after it, still resumes.
+        clock.advance(std::chrono::hours(12) + std::chrono::seconds(1));
+        TlsPeer* refused = connect_with(ticket);
+        EXPECT_EQ(SSL_session_reused(refused->ssl()), 0);
+        TlsPeer* renewed = connect_with(fresh);
+        EXPECT_EQ(SSL_session_reused(renewed->ssl()), 1);
+        for (const auto& h : held) {
+            h->upper.transport->begin_close();
+        }
+        pump_pending(*reactor);
+    }
+}
+
 TEST_P(TlsTransportTest, AKeyThatDoesNotMatchTheCertificateIsRefused) {
     const auto one = TestPki::shared().issue("mismatch-a", "localhost");
     const auto two = TestPki::shared().issue("mismatch-b", "localhost");

@@ -11,7 +11,7 @@
 #
 # gateway is Ubuntu and worker is Debian. The worker's ffmpeg comes from Debian 13's security
 # archive, which Ubuntu's ffmpeg (universe, fixed only in the paid ESM archive) is not
-# (docs/adr/0072); the gateway has no ffmpeg and stays on the Ubuntu release CI and the dev
+# (docs/adr/0074); the gateway has no ffmpeg and stays on the Ubuntu release CI and the dev
 # machines build on. Each image's binaries are built on its own release, so the shared
 # libraries they link (glibc, libstdc++, OpenSSL, libcurl, libpq, liburing) are the ones they
 # were compiled against (docs/adr/0030).

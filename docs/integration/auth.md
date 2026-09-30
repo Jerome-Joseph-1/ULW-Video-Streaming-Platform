@@ -80,7 +80,8 @@ it is compared byte for byte. Two tokens with different subjects are two differe
 | `JWT_ISSUER` | Required. |
 | `JWT_AUDIENCE` | Optional, default `askedin-platform`. |
 | `ULW_AUTH_COOKIE` | Optional, default `auth_token`. |
-| `ULW_DEV_JWKS_FILE` | Development only: a local Ed25519 key set instead of `JWKS_URL`. Setting both is a startup error. The first log line prints `keys=DEVELOPMENT <file>` so it cannot go unnoticed. |
+| `ULW_DEV_JWKS_FILE` | Development only: a local Ed25519 key set instead of `JWKS_URL`. Setting both is a startup error. It is refused (exit 2) unless `ULW_DEV_MODE=1`, and refused regardless inside a Kubernetes pod (`KUBERNETES_SERVICE_HOST` set, as the kubelet does in every container), so a key set left in a real deployment's configuration stops the process instead of being trusted. The gateway and chat server both apply this. The first log line prints `keys=DEVELOPMENT <file>` so it cannot go unnoticed. |
+| `ULW_DEV_MODE` | `0` or `1`, default `0`. `1` says this is a development run, which development-only settings such as `ULW_DEV_JWKS_FILE` need. |
 
 Caching and refresh:
 
