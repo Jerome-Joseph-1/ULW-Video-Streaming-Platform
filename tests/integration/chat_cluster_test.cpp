@@ -1204,20 +1204,31 @@ constexpr bool kAddressSanitizer = __has_feature(address_sanitizer);
 constexpr bool kAddressSanitizer = false;
 #endif
 
-// Resident memory, from /proc: what the node holds, the kernel's socket buffers aside.
-std::uint64_t resident_kib(pid_t pid) {
+// Resident memory, from /proc, the kernel's socket buffers aside. What the node allocates is
+// anonymous; pages of its binary and libraries (file) come in as code first runs and hold
+// nothing for a client.
+struct Resident {
+    std::uint64_t anon_kib = 0;
+    std::uint64_t file_kib = 0;
+};
+
+Resident resident(pid_t pid) {
     std::ifstream status("/proc/" + std::to_string(pid) + "/status");
     std::string line;
+    Resident r;
+    const auto kib = [](std::string_view rest) {
+        const std::size_t digits = rest.find_first_of("0123456789");
+        const std::size_t end = rest.find(' ', digits);
+        return core::parse_integer<std::uint64_t>(rest.substr(digits, end - digits)).value_or(0);
+    };
     while (std::getline(status, line)) {
-        if (line.starts_with("VmRSS:")) {
-            const std::string_view rest = std::string_view(line).substr(6);
-            const std::size_t digits = rest.find_first_of("0123456789");
-            const std::size_t end = rest.find(' ', digits);
-            return core::parse_integer<std::uint64_t>(rest.substr(digits, end - digits))
-                .value_or(0);
+        if (line.starts_with("RssAnon:")) {
+            r.anon_kib = kib(std::string_view(line).substr(8));
+        } else if (line.starts_with("RssFile:")) {
+            r.file_kib = kib(std::string_view(line).substr(8));
         }
     }
-    return 0;
+    return r;
 }
 
 TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
@@ -1286,10 +1297,9 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     std::uint64_t drops_at_read = 0;
     std::vector<std::size_t> read_bytes(slow.size());
     std::uint64_t head = 0;
-    std::uint64_t settled_kib = 0;
     std::uint64_t settled_seq = 0;
     std::size_t sampled = 0;
-    std::vector<std::uint64_t> resident;
+    std::vector<Resident> samples;
     while (acked < kMessages) {
         // A node that turned one send away turns away the rest of the round's too: they are
         // not tried, which keeps the retrying down to a few sends a round.
@@ -1357,15 +1367,13 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
         }
         if (acked >= kSettled && acked / kReadEvery > sampled) {
             sampled = acked / kReadEvery;
-            resident.push_back(resident_kib(slow_node.process->pid()));
-            if (settled_kib == 0) {
-                settled_kib = resident.back();
+            samples.push_back(resident(slow_node.process->pid()));
+            if (samples.size() == 1) {
                 settled_seq = head;
             }
         }
     }
-    const std::uint64_t final_kib = resident_kib(slow_node.process->pid());
-    resident.push_back(final_kib);
+    samples.push_back(resident(slow_node.process->pid()));
 
     // Everyone who kept reading got every message, once, in the room's order.
     for (auto* group : {&senders, &viewers}) {
@@ -1377,30 +1385,70 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
             }
         }
     }
-    // What the slow viewers' node held for them did not grow with what they were sent. It is
-    // sampled every 90 messages past the settled point. In each stretch the queues can grow at
-    // most to their bound, lossy_backlog and one message for each slow viewer (67 KiB), 90
-    // remembered keys (ADR-0043) add about 26 KiB, and the allocator gets 256 KiB of its own;
-    // an unbounded queue would add each slow viewer's 90 messages, 1.9 MiB for the eight, in
-    // every stretch. The median stretch is held to that bound: a step the allocator takes once
-    // (a new arena, a trim it did not make) moves one stretch, where a queue that grows with
-    // what it is sent moves them all. AddressSanitizer keeps freed memory in its quarantine
-    // instead of returning it, so its resident memory grows with every free, bounded or not:
-    // under it the numbers are only reported.
-    const std::uint64_t allowed_kib = (slow.size() * 67) + (kReadEvery * 300 / 1024) + 256;
+    // What the slow viewers' node held for them did not grow with what they were sent. Past
+    // the settled point each can be queued at most lossy_backlog and one message (67 KiB); the
+    // room's kept messages (256 KiB) were full long before; each message sequenced adds one
+    // remembered key (ADR-0043), about 300 bytes; and the allocator gets 1 MiB of its own.
+    // Nothing there grows with how far behind a viewer is, where an unbounded queue would hold
+    // each one's 1.3 MiB more.
+    //
+    // That bound holds for the growth from the settled point to the end without its largest
+    // stretch of 90 messages, which is held apart to a bound of its own: the most the node can
+    // take on at once without holding anything more for anyone.
+    // - Send queues take 16 KiB chunks from a pool that never gives them back (send_queue.hpp),
+    //   so the pool steps up to a new high-water mark whenever more of the node's queues are
+    //   full at once than ever before. Each of its 20 connections (10 senders, 2 viewers and
+    //   8 slow viewers) is lossy and queues at most lossy_backlog and one message, 68523 bytes,
+    //   which spans at most 6 chunks when its first is part read: 20 x 96 KiB = 1920 KiB.
+    //   Its 4 node-channel connections (it dials the other two nodes and each dials it) hold
+    //   at most kMaxPeerBacklog (16 frames of 65792 bytes) and the frame sent before that is
+    //   checked, 1118464 bytes, at most 70 chunks: 4 x 1120 KiB = 4480 KiB.
+    // - glibc gives a thread that finds its arena locked a new one, and that thread's working
+    //   set is allocated there again while the old arena keeps what was freed in it: the room's
+    //   kept messages (256 KiB) and the arena's top pad (M_TOP_PAD, 128 KiB).
+    // Every allocation here is far below the mmap threshold (128 KiB, rising only after a larger
+    // mmapped block is freed), so no trim threshold is raised to leave more behind.
+    // A leak gains nothing from the split: it grows every stretch, and all but one count
+    // against the same bound as the whole did.
+    //
+    // Only anonymous memory counts; file pages are reported. AddressSanitizer keeps freed
+    // memory in its quarantine instead of returning it, so its resident memory grows with every
+    // free, bounded or not: under it the numbers are only reported.
+    ASSERT_GE(samples.size(), 3U);
+    const std::uint64_t allowed_kib =
+        (slow.size() * 67) + ((kMessages - settled_seq) * 300 / 1024) + 1024;
+    constexpr std::uint64_t kClients = 20;
+    constexpr std::uint64_t kClientQueueKib = 6 * 16;
+    constexpr std::uint64_t kPeers = 4;
+    constexpr std::uint64_t kPeerQueueKib = 70 * 16;
+    constexpr std::uint64_t kKeptKib = 256;
+    constexpr std::uint64_t kTopPadKib = 128;
+    const std::uint64_t step_kib =
+        (kClients * kClientQueueKib) + (kPeers * kPeerQueueKib) + kKeptKib + kTopPadKib;
     const std::uint64_t owed_kib = slow.size() * (kMessages - settled_seq) * 2'700 / 1024;
-    std::vector<std::uint64_t> growth;
-    for (std::size_t k = 1; k < resident.size(); ++k) {
-        growth.push_back(resident[k] - std::min(resident[k], resident[k - 1]));
+    const auto grew = [](std::uint64_t from, std::uint64_t to) { return to - std::min(to, from); };
+    std::uint64_t largest_kib = 0;
+    std::string stretches;
+    for (std::size_t k = 1; k < samples.size(); ++k) {
+        const std::uint64_t anon = grew(samples[k - 1].anon_kib, samples[k].anon_kib);
+        largest_kib = std::max(largest_kib, anon);
+        stretches +=
+            std::format(" {}/{}", anon, grew(samples[k - 1].file_kib, samples[k].file_kib));
     }
-    ASSERT_GE(growth.size(), 3U);
-    std::vector<std::uint64_t> sorted = growth;
-    std::ranges::sort(sorted);
-    const std::uint64_t median_kib = sorted[sorted.size() / 2];
-    EXPECT_TRUE(kAddressSanitizer || median_kib < allowed_kib)
-        << "resident " << settled_kib << " KiB at seq " << settled_seq << ", " << final_kib
-        << " KiB at seq " << kMessages << "; the median of every 90 messages' growth, "
-        << median_kib << " KiB, is not under " << allowed_kib << " KiB";
+    const Resident& settled = samples.front();
+    const Resident& last = samples.back();
+    const std::uint64_t total_kib = grew(settled.anon_kib, last.anon_kib);
+    const std::uint64_t rest_kib = total_kib - std::min(total_kib, largest_kib);
+    const std::string memory = std::format(
+        "anonymous memory {} KiB at seq {}, {} KiB at seq {} (file {} to {} KiB); growth per 90 "
+        "messages, anonymous/file KiB:{}",
+        settled.anon_kib, settled_seq, last.anon_kib, kMessages, settled.file_kib, last.file_kib,
+        stretches);
+    EXPECT_TRUE(kAddressSanitizer || rest_kib < allowed_kib)
+        << memory << "; without its largest stretch it grew " << rest_kib << " KiB, allowed "
+        << allowed_kib;
+    EXPECT_TRUE(kAddressSanitizer || largest_kib < step_kib)
+        << memory << "; its largest stretch grew " << largest_kib << " KiB, allowed " << step_kib;
 
     // Reading in full, each slow viewer gets the rest of what it was owed, in order, up to the
     // last message, after gaps where it dropped the rest, which its node counted exactly.
@@ -1437,11 +1485,10 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     std::cout << senders.size() + viewers.size() << " viewers on " << nodes_.size()
               << " nodes got all " << kMessages << " messages in order; " << slow.size()
               << " slow ones got as few as " << fewest << ", and their node dropped " << missed
-              << " for them; it was resident at " << settled_kib << " KiB at seq " << settled_seq
-              << " and " << final_kib << " KiB at the end (a median of " << median_kib
-              << " KiB every 90 messages, allowed " << allowed_kib << "), having sent them "
-              << owed_kib << " KiB more; " << attempts - kMessages
-              << " sends were turned away or unanswered and tried again\n";
+              << " for them; " << memory << "; without the largest stretch (" << largest_kib
+              << " KiB, allowed " << step_kib << ") it grew " << rest_kib << " KiB, allowed "
+              << allowed_kib << ", having sent them " << owed_kib << " KiB more; "
+              << attempts - kMessages << " sends were turned away or unanswered and tried again\n";
 }
 
 // No database is reached: the connection string is refused before any connection is tried.
