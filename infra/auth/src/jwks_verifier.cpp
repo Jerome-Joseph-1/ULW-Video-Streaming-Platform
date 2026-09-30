@@ -87,6 +87,7 @@ public:
             return VerifyResult{std::unexpected(AuthError::Malformed)};
         }
         const core::MonoTime mono = reactor_.now();
+        expire_stale_keys(mono);
         const std::optional<detail::TokenDigest> digest = detail::digest_token(token);
         if (digest) {
             if (std::optional<core::ports::Claims> hit = verdicts_.find(*digest, mono, now)) {
@@ -108,6 +109,8 @@ public:
         return result;
     }
 
+    [[nodiscard]] bool keys_expired() const noexcept { return expired_; }
+
     void cancel_wait(IKeyWaiter& waiter) noexcept {
         std::erase(waiters_, &waiter);
         std::ranges::replace(notifying_, &waiter, nullptr);
@@ -127,9 +130,12 @@ public:
         if (set && !set->keys.empty()) {
             install(std::move(*set), now);
             failed_fetches_ = 0;
+            fetched_at_ = now;
+            expired_ = false;
             schedule_refetch(kKeyLifetime);
         } else {
             ++failed_fetches_;
+            expire_stale_keys(now);
             schedule_refetch(retry_delay(failed_fetches_));
         }
         sought_kids_.clear();
@@ -145,6 +151,20 @@ private:
         std::string kid;
         core::MonoTime until;
     };
+
+    // The keys and every verdict they produced go once the last successful fetch is
+    // max_key_age old; what is left refuses every token until a fetch succeeds.
+    void expire_stale_keys(core::MonoTime now) noexcept {
+        if (expired_ || !fetched_at_ || now - *fetched_at_ < config_.max_key_age) {
+            return;
+        }
+        expired_ = true;
+        keys_ = detail::KeySet{};
+        verdicts_.clear();
+        if (config_.on_keys_expired) {
+            config_.on_keys_expired(std::chrono::duration_cast<core::Millis>(now - *fetched_at_));
+        }
+    }
 
     std::optional<VerifyResult> on_unseen_kid(std::string_view kid, IKeyWaiter& waiter,
                                               core::MonoTime now) {
@@ -263,6 +283,9 @@ private:
     bool fetching_ = false;
     std::uint32_t failed_fetches_ = 0;
     std::optional<core::MonoTime> last_fetch_end_;
+    // The end of the last fetch that brought keys, and whether they have since been dropped.
+    std::optional<core::MonoTime> fetched_at_;
+    bool expired_ = false;
 
     std::vector<IKeyWaiter*> waiters_;
     std::vector<IKeyWaiter*> notifying_;
@@ -288,6 +311,10 @@ std::optional<VerifyResult> JwksVerifier::verify(std::string_view token, core::W
 
 void JwksVerifier::cancel_wait(IKeyWaiter& waiter) noexcept {
     state_->cancel_wait(waiter);
+}
+
+bool JwksVerifier::keys_expired() const noexcept {
+    return state_->keys_expired();
 }
 
 } // namespace infra::auth

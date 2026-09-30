@@ -40,8 +40,9 @@ systemd units do not restart on it. `gateway_server --check-config` and
 `transcode_worker --check-config` run the same checks and exit `0` or `2` without starting
 anything. Beyond each value's own range, they check what would otherwise fail only at start: the
 connection string parses; the R2 account id or MinIO endpoint forms a store profile; the store
-keys are set and the key id is 1 to 128 of `A-Z a-z 0-9 - . _ ~`; the development key set reads
-and holds a usable key; TLS certificate and key load and match;
+keys are set and the key id is 1 to 128 of `A-Z a-z 0-9 - . _ ~`; the development key set is
+allowed (`ULW_DEV_MODE=1`, and not in a Kubernetes pod), reads and holds a usable key; TLS
+certificate and key load and match;
 `ULW_MAX_UPLOAD_SLOTS <= ULW_MAX_CONNECTIONS`,
 `ULW_MAX_UPLOADS_PER_USER <= ULW_MAX_UPLOAD_SLOTS`,
 `ULW_MAX_CONNECTIONS_PER_IP <= ULW_MAX_CONNECTIONS`; `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` at
@@ -63,8 +64,10 @@ effective configuration, secrets as `<redacted>`.
 | `JWT_ISSUER` | required | never set | required | Secret by convention |
 | `JWT_AUDIENCE` | default `askedin-platform` | | same | |
 | `ULW_AUTH_COOKIE` | default `auth_token` | | same | `auth_token_stage` on stage |
+| `ULW_JWKS_MAX_STALE_HOURS` | 1 to 168, default 24 | | same | How long the keys stay trusted while every JWKS refetch fails; past it every token is refused and `jwks_keys_expired` is `1` ([auth.md](auth.md)) |
+| `ULW_DEV_MODE` | `0` (default) or `1` | | same | `1` marks a development run, which `ULW_DEV_JWKS_FILE` needs; that file is refused in a Kubernetes pod whatever this says. Never set in stage or production |
 | `ULW_LISTEN_PORT` | default 8080 | | default 9101 | |
-| `ULW_TRANSPORT` | `plain` (default) or `tls` | | | `tls` needs `ULW_TLS_CERT_FILE` and `ULW_TLS_KEY_FILE` |
+| `ULW_TRANSPORT` | `plain` (default) or `tls` | | | `tls` needs `ULW_TLS_CERT_FILE` and `ULW_TLS_KEY_FILE`. Session tickets are sealed with a random in-memory key replaced every 12 h, on a timer, so also on a server no client reaches; the key before it still opens tickets for 12 h more and is then wiped, so a ticket resumes for 12 to 24 h, across certificate reloads, and a leaked key opens at most a day of resumed sessions. Nothing to configure; replicas do not share keys, so a client resumes only on the replica that issued its ticket |
 | `ULW_REACTOR` | `io_uring` (default) or `epoll` | | same | Falls back to epoll when io_uring is unavailable |
 | `ULW_OFFLOAD_THREADS` | 1 to 64, default 4 | | | |
 | `ULW_MAX_CONNECTIONS` | 1 to 65536, default 448 | | | Past this, a new connection is closed at accept |
@@ -207,12 +210,14 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `presign_failures_total` | counter | A segment URL could not be signed; the viewer got `500` |
 | `view_events_recorded_total`, `view_events_dropped_total`, `view_batches_failed_total` | counter | Master-playlist fetches recorded as views |
 | `jobs_oldest_queued_seconds` | gauge | How long the oldest transcode job due to run has waited; `0` when none waits, `NaN` while the database does not answer |
+| `jwks_keys_expired` | gauge | `1` while every token is refused because the JWKS went unrefreshed for `ULW_JWKS_MAX_STALE_HOURS` ([auth.md](auth.md)) |
 | `store_paging_errors_total` | counter | Store failures only a fix on our side cures: signature, credentials, bucket |
 | `log_messages_dropped_total` | counter | Log lines dropped because the log reader fell behind |
 | `open_fds` | gauge | Descriptors open in the process |
 | `resident_memory_bytes` | gauge | Resident set size of the process |
 
-Worth alerting on: `readyz` failing outside a rollout; any rise in `playlists_rejected_total`,
+Worth alerting on: `readyz` failing outside a rollout; `jwks_keys_expired` at `1` (page: no
+token verifies until Askedin's JWKS is reachable again); any rise in `playlists_rejected_total`,
 `presign_failures_total`, `view_batches_failed_total` or `store_paging_errors_total` (page:
 retrying will not fix it); `admission_rejections_total` rising steadily;
 `backend_write_stall_seconds` observations at 30 s and above rising (the bucket is slow);
@@ -262,7 +267,7 @@ draining, node address published, owner heartbeat reaching the database), `GET /
 `presence_events_received_total`, `presence_notifications_total`, `presence_expired_total`
 (announcements and watching nodes dropped because they stopped being renewed, normally a node
 that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
-node repeated what it had said there). Chat is a draft ([chat.md](chat.md)).
+node repeated what it had said there), `jwks_keys_expired` (as the gateway's). Chat is a draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at
@@ -279,3 +284,16 @@ finish for up to 30 s, then cuts off what remains. A client whose chunk was cut 
 `HEAD` ([uploads.md](uploads.md#resuming)). Give the pod a termination grace period above 30 s
 (the shipped Deployment uses 45 s): the drain's 30 s, the health probe finishing (it stops when
 the drain begins) and the 2 s log flush fit inside it.
+
+## Core dumps
+
+The gateway, chat server, reaper, worker, live packager and `ulw_migrate` write no core file and
+are not dumpable: each sets `RLIMIT_CORE` to 0 (soft and hard) and `PR_SET_DUMPABLE` to 0 before
+it reads its configuration, and keeps the flag off across its drop from root. Their memory holds
+the database password, the store keys and live bearer tokens. A crash is diagnosed from the log;
+`/proc/<pid>/environ` and ptrace are closed to other processes of the same user, root aside.
+When `kernel.core_pattern` is a pipe (`|/usr/lib/systemd/systemd-coredump ...`, apport), the
+kernel ignores an `RLIMIT_CORE` of 0 and hands the core to the helper anyway; the services are
+still covered, because a process that is not dumpable is not dumped through a pipe either.
+The ffmpeg sandbox sets its own `RLIMIT_CORE` 0 as before, and exec resets the dumpable flag for
+the sandboxed child, whose seccomp filter is unchanged.

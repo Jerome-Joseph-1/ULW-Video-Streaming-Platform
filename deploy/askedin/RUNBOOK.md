@@ -353,6 +353,114 @@ The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 `askedin-gateway`. If the video plane gets a hostname of its own, add `hostnames:` to both
 `httproute.yaml` files.
 
+### 4a. Deploying by digest
+
+The overlays name the images by branch tag (`:development`, `:master`) with
+`imagePullPolicy: Always`. A tag is mutable: whoever can push to the registry can change what
+the next restart, reschedule or node drain runs, and two gateway pods started a minute apart can
+run different builds. LiveKit, which is not built here, is already pinned by digest. Ours cannot
+be written into the manifests at commit time, because the digest only exists once the pipeline
+has built that very commit. So the pipeline has to write it, and ArgoCD, which owns the
+manifests, then deploys exactly that digest. Nothing in `woodpecker.yml` does this yet: it needs
+two things only you can set up, a Woodpecker secret allowed to push to the monorepo branch
+ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist:
+
+1. Put a `kustomization.yaml` in each of `overlays/{stage,prod}/video-gateway`, `video-worker`
+   and `upload-reaper`, listing that directory's manifests under `resources:` and the image under
+   `images:`. ArgoCD renders a directory with a `kustomization.yaml` through kustomize on its
+   own. Change `imagePullPolicy: Always` to `IfNotPresent`: a digest never changes, so there is
+   nothing to pull again.
+2. Add a step to `woodpecker.yml` after both image steps, in place of `rollout-restart`: resolve
+   the digest of the tag just pushed under the commit's SHA (not the branch tag, which a
+   concurrent build may have moved), write it with kustomize, and commit it. With `crane` and
+   `kustomize` in an image pinned by tag and digest like every other step:
+
+   ```sh
+   overlays=<path to overlays/ in the monorepo>   # fill in: the directory holding stage and prod
+   case "$CI_COMMIT_BRANCH" in
+     master) env=prod ;;
+     development) env=stage ;;
+   esac
+   gw=git.askedin.com/askedin/askedin-monorepo/video-gateway
+   wk=git.askedin.com/askedin/askedin-monorepo/video-worker
+   gw_digest=$(crane digest "$gw:$CI_COMMIT_SHA")
+   wk_digest=$(crane digest "$wk:$CI_COMMIT_SHA")
+   git config user.name "<pipeline commit name>"      # fill in
+   git config user.email "<pipeline commit email>"    # fill in
+   # The monorepo's clone URL, assumed from the registry path: confirm it. The token is read
+   # from the environment on each call, never written to .git/config.
+   git remote add deploy https://git.askedin.com/askedin/askedin-monorepo.git
+   git config credential.helper \
+     '!f() { echo "username=<push user>"; echo "password=$DEPLOY_PUSH_TOKEN"; }; f'
+   pin() {
+     (cd "$overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
+     (cd "$overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
+     (cd "$overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
+     # Already pinned (a rerun, or the branch holds this digest): nothing to commit.
+     git diff --quiet || git commit -qam "deploy: video images $CI_COMMIT_SHA [skip ci]"
+   }
+   pin
+   for attempt in 1 2 3; do
+     git push deploy "HEAD:$CI_COMMIT_BRANCH" && exit 0
+     # Non-fast-forward: start again from the branch as it is now, not from a rebase.
+     git fetch deploy "$CI_COMMIT_BRANCH" && git checkout -q FETCH_HEAD || exit 1
+     # A code commit after this one builds and pins its own digest; leave it to that build.
+     newer=$(git rev-list -1 --fixed-strings --invert-grep --grep='[skip ci]' \
+       "$CI_COMMIT_SHA..HEAD")
+     [ -z "$newer" ] || exit 0
+     pin
+   done
+   exit 1
+   ```
+
+   Fill in `overlays` for the monorepo's layout, the commit identity and push user, and confirm
+   the remote URL. The token comes from a Woodpecker secret, named in the step and never written
+   into the file:
+
+   ```yaml
+   environment:
+     DEPLOY_PUSH_TOKEN:
+       from_secret: deploy_push_token
+   ```
+
+   Woodpecker checks out the commit as a detached HEAD, so the push names the branch,
+   `HEAD:$CI_COMMIT_BRANCH`; a bare `git push` has no branch to push. The commit carries
+   `[skip ci]`, so it does not build again; ArgoCD sees the new digest and rolls the deployments
+   itself, the gateway's init container migrating first as today.
+
+   When the push is refused because the branch moved, a rebase would always conflict if the
+   commit that landed is another build's digest commit: both edit the same `digest:` lines from
+   the same base. So the step fetches the branch, and if a code commit (one whose message lacks
+   `[skip ci]`) has landed after `$CI_COMMIT_SHA`, it stops without pinning, because that newer
+   build pins itself. Otherwise only digest commits landed, from builds of this commit or older
+   ones, and it redoes its three edits on the fetched tree, commits and pushes, up to three
+   times. The edits are regenerated rather than replayed, so a shallow clone (Woodpecker's
+   default) is enough: the fetch brings the commits after the clone's, and the check reads only
+   the range after `$CI_COMMIT_SHA`, which the clone has. The rule holds only while every commit
+   on the branch runs this pipeline: if the monorepo's pipeline filters on paths (`when: path:`),
+   a commit outside them never pins, so limit the check to the same paths
+   (`git rev-list ... "$CI_COMMIT_SHA..HEAD" -- <the video paths>`). The `exit`s end the step,
+   so the snippet is the step's last command.
+   Drop the restricted kubeconfig then: the pipeline no longer touches the cluster.
+3. Rollback (section 6) becomes one of:
+   - `kustomize edit set image` to the digest of `<good sha>`, committed with `[skip ci]`;
+   - a revert of the digest commit, whose message must also carry `[skip ci]`
+     (`git revert --no-edit <commit>`, then `git commit --amend` to add it). Without it the
+     revert builds the branch's HEAD, the bad code, and the new digest step pins it again;
+   - a revert of the bad code itself, which builds and pins a good image the normal way.
+
+   Any of these instead of a retag and a restart. Before a rollback by digest, cancel or wait
+   out any pipeline still running on the branch: one that finishes afterwards sees the rollback
+   as another build's digest commit and pins its own image over it.
+
+Until then, what a pod runs is at least recorded. This prints each pod's resolved digest, which
+must match `crane digest <image>:<sha>` of the commit you meant to deploy:
+
+```sh
+kubectl -n apps-stage get pods -o \
+  jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'
+```
+
 ## 5. Verify on stage (M14)
 
 1. ArgoCD shows the stage application Synced and Healthy; then:
