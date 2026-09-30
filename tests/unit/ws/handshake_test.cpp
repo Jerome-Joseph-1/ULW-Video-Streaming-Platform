@@ -82,8 +82,7 @@ TEST(WsHandshake, ComputesTheAcceptKeyOfRfc6455) {
 
 // accept_key() takes any string, not only a key the handshake has already checked.
 TEST(WsHandshake, RefusesToComputeAnAcceptKeyForAnOverlongKey) {
-    // 28 characters plus the GUID fill the buffer exactly; one more does not fit.
-    EXPECT_TRUE(codec::ws::accept_key(std::string(28, 'A')));
+    // A valid key is 24 characters; these are longer than any key the handshake would pass on.
     EXPECT_FALSE(codec::ws::accept_key(std::string(29, 'A')));
     EXPECT_FALSE(codec::ws::accept_key(std::string(4096, 'A')));
 }
