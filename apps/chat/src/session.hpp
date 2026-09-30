@@ -28,6 +28,16 @@ namespace chat {
 // One client connection: an HTTP request (a probe, or the upgrade to a WebSocket), then, once
 // upgraded and authenticated, JSON commands in text frames, which the chat service carries
 // out. Retired through the server, never destroyed from inside its own callbacks.
+// Close code for a socket whose token expired: reconnect with a fresh token
+// (docs/integration/chat.md). In the range RFC 6455 section 7.4.2 leaves to applications.
+inline constexpr codec::ws::CloseCode kTokenExpired{4001};
+
+// When a socket opened at `now` (monotonic) with a token that expires at `expires_at` stops
+// being accepted: exp plus kTokenClockSkew, on the monotonic clock. A token that outlives what
+// the monotonic clock can count gets MonoTime::max(); one already past gets `now`.
+[[nodiscard]] core::MonoTime token_deadline(core::MonoTime now, core::WallTime wall_now,
+                                            core::WallTime expires_at) noexcept;
+
 class Session final : public net::IStreamHandler,
                       public net::ITimerHandler,
                       public http::IRequestSink,
@@ -98,6 +108,7 @@ private:
     [[nodiscard]] bool stalled(core::MonoTime at) noexcept;
     [[nodiscard]] std::optional<net::SendProgress> send_progress() const noexcept;
     void give_up() noexcept;
+    [[nodiscard]] bool closed_for_expiry(core::MonoTime at) noexcept;
     void arm(core::Millis delay) noexcept;
     [[nodiscard]] core::MonoTime now() const noexcept;
 
@@ -136,6 +147,9 @@ private:
     std::optional<ChatServer::Hold> user_hold_;
     // Seconds to put in a 429's Retry-After.
     std::chrono::seconds retry_after_{1};
+    // When the token the socket was opened with stops being accepted: its exp plus the clock
+    // skew any check allows. The socket is closed then, with kTokenExpired (ADR-0073).
+    std::optional<core::MonoTime> expires_;
     // Set by the upgrade.
     std::optional<ClientId> client_;
     std::optional<PresenceClientId> presence_;

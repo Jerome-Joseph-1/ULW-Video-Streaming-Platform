@@ -14,7 +14,8 @@ namespace infra::postgres {
 struct MessageStoreConfig {
     std::string conninfo;
     // Mostly history pages, each one statement by primary key. Four, as the room store's: a
-    // chat node then holds 4 + 5 sessions, and three nodes 27 of Postgres' default 100.
+    // chat node then holds 4 + 1 (listening for member removals) + 5 sessions, and three nodes
+    // 30 of Postgres' default 100.
     std::size_t connections = 4;
     core::Millis connect_timeout{5000};
     // Every statement reads or writes by primary key, at most kMaxHistoryRows rows of at most
@@ -24,9 +25,9 @@ struct MessageStoreConfig {
 };
 
 // IMessageStore on Postgres (migrations/0005_chat_messages.sql), driven by the reactor: no call
-// blocks the loop. It only reads messages; PgRoomStore::append writes them. Bodies come
-// back in bytea's hex text form, and neither they nor anything derived from them reaches a log
-// or an error.
+// blocks the loop. One more session LISTENs for member removals (migrations/0009). It only reads
+// messages; PgRoomStore::append writes them. Bodies come back in bytea's hex text form, and neither
+// they nor anything derived from them reaches a log or an error.
 //
 // The offload pool resolves host names and must be stopped before this is destroyed. Calls
 // outstanding at destruction are dropped unanswered.
@@ -67,6 +68,7 @@ public:
     void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
                 core::ports::MessageCallback<core::ports::Admission> done) override;
     void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
+    void watch_members(core::ports::IMemberListener* listener) noexcept override;
 
 private:
     std::unique_ptr<Impl> impl_;

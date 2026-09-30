@@ -5,9 +5,11 @@
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
+#include "ops/dev_only.hpp"
 #include "ops/root.hpp"
 
 #include <algorithm>
+#include <string>
 #include <utility>
 
 namespace chat {
@@ -110,6 +112,19 @@ std::expected<std::optional<core::Millis>, ConfigError> presence_grace(const Env
         return error("ULW_PRESENCE_GRACE_MS", "expected milliseconds, 0 to 600000");
     }
     return core::Millis{*value};
+}
+
+std::expected<std::uint32_t, ConfigError> jwks_max_stale_hours(const EnvLookup& env) {
+    const auto text = lookup(env, "ULW_JWKS_MAX_STALE_HOURS");
+    if (!text) {
+        return 24;
+    }
+    // A week is past any outage anyone would wait out; an hour is short of a bad night.
+    const auto value = core::parse_integer<std::uint32_t>(*text);
+    if (!value || *value < 1 || *value > 168) {
+        return error("ULW_JWKS_MAX_STALE_HOURS", "expected hours, 1 to 168");
+    }
+    return *value;
 }
 
 template <class T>
@@ -236,17 +251,13 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
         return error("ULW_DATABASE_URL", "not set");
     }
 
-    auto url = lookup(env, "JWKS_URL");
-    auto file = lookup(env, "ULW_DEV_JWKS_FILE");
-    if (url && file) {
-        return error("JWKS_URL", "set together with ULW_DEV_JWKS_FILE; choose one");
+    auto keys = ops::key_source(env);
+    if (!keys) {
+        return error(keys.error().variable, keys.error().reason);
     }
-    if (!url && !file) {
-        return error("JWKS_URL", "not set");
-    }
-    // Over plain HTTP anyone on the path could hand us their own keys and sign any identity.
-    if (url && !url->starts_with("https://")) {
-        return error("JWKS_URL", "must be an https URL");
+    const auto max_stale_hours = jwks_max_stale_hours(env);
+    if (!max_stale_hours) {
+        return std::unexpected(max_stale_hours.error());
     }
     auto issuer = lookup(env, "JWT_ISSUER");
     if (!issuer) {
@@ -275,8 +286,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .node_secret = std::move(*node_secret),
                   .reactor = reactor,
                   .database_url = std::move(*database),
-                  .jwks_url = std::move(url).value_or(""),
-                  .dev_jwks_file = std::move(file).value_or(""),
+                  .jwks_url = std::move(keys->url),
+                  .jwks_max_stale_hours = *max_stale_hours,
+                  .dev_jwks_file = std::move(keys->file),
                   .jwt_issuer = std::move(*issuer),
                   .jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform"),
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),

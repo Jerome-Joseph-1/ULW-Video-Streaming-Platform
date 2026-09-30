@@ -67,9 +67,20 @@ void RoomLog::on_node_taken() noexcept {
               self_.view());
 }
 
+namespace {
+
+// The service's limits, with the clients it may hold: the server's connections.
+ServiceLimits service_limits(const Limits& limits) noexcept {
+    ServiceLimits service = limits.service;
+    service.max_clients = limits.max_connections;
+    return service;
+}
+
+} // namespace
+
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(std::move(limits)), rooms_(deps.router),
-      chat_(rooms_, deps.messages, deps.clock, limits_.service),
+      chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
       presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
@@ -78,6 +89,9 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       sessions_(limits_.max_connections) {}
 
 ChatServer::~ChatServer() {
+    // The message store is destroyed first (Services in main.cpp), and reap() below sweeps the
+    // service, which would otherwise ask it what a resync still owes.
+    chat_.stop();
     deps_.reactor.cancel_timer(drain_timer_);
     sessions_.for_each_live([](Session& s) { s.close(); });
     reap();
@@ -283,7 +297,11 @@ std::string ChatServer::render_metrics() const {
         "presence_events_received_total {}\n"
         "presence_notifications_total {}\n"
         "presence_expired_total {}\n"
-        "presence_gaps_total {}\n",
+        "presence_gaps_total {}\n"
+        "token_expiries_total {}\n"
+        "member_removals_total {}\n"
+        "member_check_failures_total {}\n"
+        "jwks_keys_expired {}\n",
         c.connections_accepted, c.connections_rejected, c.connections_unaddressed,
         c.rejected_ip_connections, c.rejected_ip_rate, c.limited_ip_upgrades,
         c.limited_user_sessions, clients_.size(), clients_.evictions(), sessions_.size(),
@@ -296,7 +314,8 @@ std::string ChatServer::render_metrics() const {
         deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,
         registry.fenced_writes, router.forwarded, router.forward_timeouts, router.peers_lost,
         router.peers_refused, router.slow_peers, presence_.rooms(), presence.sent,
-        presence.received, presence.notified, presence.expired, presence.gaps);
+        presence.received, presence.notified, presence.expired, presence.gaps, c.token_expiries,
+        chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0);
 }
 
 } // namespace chat

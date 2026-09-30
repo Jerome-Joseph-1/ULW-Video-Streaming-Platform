@@ -153,12 +153,38 @@ TEST_F(ChatConfigTest, ThePresenceGraceIsTheServicesUnlessSetInMilliseconds) {
 
 TEST_F(ChatConfigTest, ADevelopmentKeySetReplacesTheJwksUrlButNotBoth) {
     env["ULW_DEV_JWKS_FILE"] = "/etc/ulw/dev-jwks.json";
+    env["ULW_DEV_MODE"] = "1";
     EXPECT_EQ(refused_variable(), "JWKS_URL");
     env.erase("JWKS_URL");
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_EQ(config->dev_jwks_file, "/etc/ulw/dev-jwks.json");
     EXPECT_TRUE(config->jwks_url.empty());
+}
+
+TEST_F(ChatConfigTest, KeysStayTrustedADayWithoutARefreshUnlessSetInHours) {
+    EXPECT_EQ(load()->jwks_max_stale_hours, 24U);
+    env["ULW_JWKS_MAX_STALE_HOURS"] = "6";
+    EXPECT_EQ(load()->jwks_max_stale_hours, 6U);
+    for (const char* bad : {"0", "169", "1.5", "24h"}) {
+        env["ULW_JWKS_MAX_STALE_HOURS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_JWKS_MAX_STALE_HOURS") << bad;
+    }
+}
+
+// Whoever can set it signs any identity they like, so it takes development mode said outright,
+// and never in a Kubernetes pod, where every real deployment runs.
+TEST_F(ChatConfigTest, ADevelopmentKeySetIsRefusedOutsideDevelopmentModeAndInAnyPod) {
+    env.erase("JWKS_URL");
+    env["ULW_DEV_JWKS_FILE"] = "/etc/ulw/dev-jwks.json";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env["ULW_DEV_MODE"] = "0";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env["ULW_DEV_MODE"] = "1";
+    env["KUBERNETES_SERVICE_HOST"] = "10.43.0.1";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env.erase("KUBERNETES_SERVICE_HOST");
+    EXPECT_TRUE(load());
 }
 
 TEST_F(ChatConfigTest, PerClientLimitsAreTheServicesUnlessSetAndProxiesAreCidrBlocks) {

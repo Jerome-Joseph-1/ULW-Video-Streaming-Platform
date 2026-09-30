@@ -123,6 +123,8 @@ struct Counters {
     std::uint64_t control_floods = 0;
     std::uint64_t slow_consumers = 0;
     std::uint64_t stalled_readers = 0;
+    // Sockets closed with kTokenExpired because the token they were opened with ran out.
+    std::uint64_t token_expiries = 0;
     std::uint64_t allocation_failures = 0;
     // Reset at accept: the peer's address had max_connections_per_ip open, or opened
     // new_connections_per_ip_per_second too many.

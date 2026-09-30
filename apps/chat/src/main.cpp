@@ -17,6 +17,7 @@
 #include "config.hpp"
 #include "key_fetcher.hpp"
 #include "log.hpp"
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 
 #include <array>
@@ -132,12 +133,24 @@ std::expected<void, std::string> make_verifier(const chat::Config& config, Servi
     s.key_fetcher = std::make_unique<chat::KeySetFetcher>(*s.key_multi);
     s.verifier = std::make_unique<infra::auth::JwksVerifier>(
         *s.reactor, *s.key_fetcher,
-        infra::auth::JwksConfig{.url = config.jwks_url, .claims = std::move(rules)});
+        infra::auth::JwksConfig{
+            .url = config.jwks_url,
+            .claims = std::move(rules),
+            .max_key_age = std::chrono::hours(config.jwks_max_stale_hours),
+            .on_keys_expired = [](core::Millis age) noexcept {
+                chat::log_event(
+                    R"("level":"error","msg":"jwks keys expired","hours_without_refresh":{})",
+                    std::chrono::duration_cast<std::chrono::hours>(age).count());
+            }});
     return {};
 }
 
 int run() {
     const auto info = core::build_info();
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        return fail("disable core dumps", errno_text(r.error()));
+    }
     auto config = chat::load_config(read_env);
     if (!config) {
         return fail(config.error().variable, config.error().reason, kBadConfig);

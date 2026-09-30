@@ -13,6 +13,7 @@
 #include "devtoken/dev_key.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
+#include "support/core_limit.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
@@ -112,7 +113,25 @@ public:
     [[nodiscard]] const std::vector<Seen>& seen() const noexcept { return seen_; }
 
     bool send(const std::string& json) { return ws_.send_text(json); }
-    std::size_t trickle(std::size_t bytes) { return ws_.read_at_most(bytes); }
+    // Reads at most `bytes` of what has arrived, without waiting, and takes in every whole
+    // message among it, answering pings as any client that reads them does: a slow reader, not
+    // one that stopped. Returns how many bytes it read.
+    std::size_t trickle(std::size_t bytes) {
+        const std::size_t read = ws_.read_at_most(bytes);
+        while (const auto text = ws_.next_text(std::chrono::milliseconds{0})) {
+            if (!keep(*text)) {
+                break;
+            }
+        }
+        return read;
+    }
+    // How its connection ended, for a failure's message: "open" while it has not.
+    [[nodiscard]] std::string ending() const {
+        if (ws_.connected()) {
+            return "open";
+        }
+        return ws_.error() == 0 ? "closed" : std::format("ended, errno {}", ws_.error());
+    }
 
     // Reads until a message matching `pred` arrives, keeping everything read.
     template <class Pred>
@@ -131,14 +150,11 @@ public:
             if (!text) {
                 return std::nullopt;
             }
-            auto s = parse_seen(*text);
-            if (!s) {
-                ADD_FAILURE() << name_ << " got something that is not JSON: " << *text;
+            if (!keep(*text)) {
                 return std::nullopt;
             }
-            seen_.push_back(*s);
-            if (pred(*s)) {
-                return s;
+            if (pred(seen_.back())) {
+                return seen_.back();
             }
         }
         return std::nullopt;
@@ -164,6 +180,17 @@ public:
     }
 
 private:
+    // Keeps a server message; false, after a failure, for anything that is not JSON.
+    bool keep(const std::string& text) {
+        auto s = parse_seen(text);
+        if (!s) {
+            ADD_FAILURE() << name_ << " got something that is not JSON: " << text;
+            return false;
+        }
+        seen_.push_back(std::move(*s));
+        return true;
+    }
+
     WsClient ws_;
     std::string name_;
     std::vector<Seen> seen_;
@@ -238,7 +265,7 @@ protected:
         std::vector<std::string> env{
             "ULW_NODE_ID=" + node.name, "ULW_DEV_LOOPBACK_NODES=1",
             "ULW_NODE_SECRET=" + node_secret_, "ULW_DATABASE_URL=" + db_->conninfo(),
-            "ULW_DEV_JWKS_FILE=" + jwks, "JWT_ISSUER=" + std::string(kIssuer),
+            "ULW_DEV_JWKS_FILE=" + jwks, "ULW_DEV_MODE=1", "JWT_ISSUER=" + std::string(kIssuer),
             "ULW_PRESENCE_GRACE_MS=" + std::to_string(kGrace.count()),
             "ULW_REACTOR=" +
                 std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),

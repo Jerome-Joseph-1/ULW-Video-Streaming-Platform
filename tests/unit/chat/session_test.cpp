@@ -95,6 +95,10 @@ public:
     // Every session fails as if out of memory, and the keys arrive in the same turn, before the
     // failed sessions have closed.
     std::atomic<bool> fail_then_refresh_keys = false;
+    // What the verifier says of keys_expired(); `keys_expired` follows once the node's thread has
+    // seen it.
+    std::atomic<bool> expire_keys = false;
+    std::atomic<bool> keys_expired = false;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -182,6 +186,10 @@ private:
             if (fail_then_refresh_keys.exchange(false)) {
                 server->for_each_session([](chat::Session& s) noexcept { s.allocation_failed(); });
                 verifier.refresh_keys();
+            }
+            if (expire_keys != verifier.expired) {
+                verifier.expired = expire_keys;
+                keys_expired = verifier.expired;
             }
             key_waiters = verifier.waiting();
             http_parsers = server->http_parsers();
@@ -358,6 +366,83 @@ TEST_P(ChatSessionTest, PingsAreAnsweredUntilTheBurstRunsOutThenTheStreamIsCut) 
     EXPECT_EQ((static_cast<unsigned char>((*close)[0]) << 8U) |
                   static_cast<unsigned char>((*close)[1]),
               1008U);
+}
+
+// A socket must not outlive the token it was opened with: a user whose tokens stopped being
+// issued (signed out, banned) would otherwise go on receiving for as long as it answers pings.
+TEST_P(ChatSessionTest, ASocketClosesWhenItsTokenExpiresWithTheCodeThatSaysReconnect) {
+    node_.reset();
+    // Pings and the idle timeout far off, so that only the token can end the socket.
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    // The token expires an hour after it was checked (FakeVerifier), and a check accepts it for
+    // the clock skew past that.
+    node_->advance(std::chrono::hours(1) + core::ports::kTokenClockSkew - seconds(1));
+    std::vector<std::byte> join;
+    ASSERT_TRUE(alice->append(join, codec::ws::Opcode::Text,
+                              R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_raw(join));
+    const auto answer = alice->next_frame(seconds(10));
+    ASSERT_TRUE(answer);
+    EXPECT_EQ(answer->first, codec::ws::Opcode::Text) << "closed before its token expired";
+
+    node_->advance(seconds(1));
+    std::optional<std::string> close;
+    while (const auto frame = alice->next_frame(seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Close) {
+            close = frame->second;
+            break;
+        }
+    }
+    ASSERT_TRUE(close) << "still open after its token expired";
+    ASSERT_GE(close->size(), 2U);
+    EXPECT_EQ((static_cast<unsigned char>((*close)[0]) << 8U) |
+                  static_cast<unsigned char>((*close)[1]),
+              4001U);
+}
+
+// A token may name any exp the wall clock can hold: its deadline plus the skew must not run past
+// the clock's range (signed overflow, caught by UBSan), and such a socket lives on.
+TEST_P(ChatSessionTest, ATokenThatExpiresAtTheEndOfTimeKeepsItsSocketOpen) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto alice = open("Authorization: Bearer forever.alice\r\n");
+    ASSERT_TRUE(alice);
+    node_->advance(std::chrono::hours(2));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+}
+
+// The same without UBSan: the deadline of a token at the end of time is the end of the
+// monotonic clock, not a sum that wrapped past it.
+TEST(TokenDeadline, IsExpPlusTheSkewOnTheMonotonicClockAndNeverWraps) {
+    const core::MonoTime now{std::chrono::hours(1000)};
+    const core::WallTime wall{std::chrono::seconds(1767225600)};
+    EXPECT_EQ(chat::token_deadline(now, wall, wall + std::chrono::hours(1)),
+              now + std::chrono::hours(1) + core::ports::kTokenClockSkew);
+    EXPECT_EQ(chat::token_deadline(now, wall, wall - seconds(30)), now + seconds(30));
+    EXPECT_EQ(chat::token_deadline(now, wall, wall - seconds(90)), now);
+    constexpr auto kLast =
+        std::chrono::floor<std::chrono::seconds>(core::WallTime::duration::max()) - seconds(1);
+    EXPECT_EQ(chat::token_deadline(now, wall, core::WallTime{kLast}),
+              now + (core::WallTime{kLast} - wall) + core::ports::kTokenClockSkew);
+    // Past what the monotonic clock can count from where it stands: never, not a wrapped sum.
+    const core::MonoTime late = core::MonoTime::max() - std::chrono::hours(1);
+    EXPECT_EQ(chat::token_deadline(late, wall, wall + std::chrono::hours(2)),
+              core::MonoTime::max());
+    EXPECT_EQ(chat::token_deadline(late, wall, core::WallTime{kLast}), core::MonoTime::max());
 }
 
 TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
@@ -539,6 +624,18 @@ std::optional<std::uint64_t> metric(std::uint16_t port, std::string_view name) {
     const std::size_t start = at + line.size();
     return core::parse_integer<std::uint64_t>(
         std::string_view(body).substr(start, body.find('\n', start) - start));
+}
+
+// Once the keys go unrefreshed too long every token is refused, so the gauge an alert watches
+// says so while it lasts.
+TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
+    node_->expire_keys = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->keys_expired.load(); }));
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 1U);
+    node_->expire_keys = false;
+    ASSERT_TRUE(ulw::test::eventually([&] { return !node_->keys_expired.load(); }));
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
 }
 
 // Both viewers fall behind a sender that never stops. One never reads again, and is reset once it

@@ -322,6 +322,12 @@ std::size_t Gateway::queued_output() noexcept {
     return bytes;
 }
 
+std::size_t Gateway::held_bytes() noexcept {
+    std::size_t bytes = 0;
+    connections_.for_each_live([&](const Connection& conn) { bytes += conn.held_bytes(); });
+    return bytes;
+}
+
 std::string Gateway::render_metrics() {
     const Counters& c = counters_;
     const ViewCounters& v = views_.counters();
@@ -449,6 +455,10 @@ std::string Gateway::render_metrics() {
             "How long the oldest transcode job due to run has waited; 0 when none waits, NaN "
             "when the database did not answer.",
             oldest ? static_cast<double>(*oldest) : std::numeric_limits<double>::quiet_NaN());
+    e.gauge("jwks_keys_expired",
+            "1 while every token is refused because the JWKS went unrefreshed for "
+            "ULW_JWKS_MAX_STALE_HOURS.",
+            std::uint64_t{deps_.verifier.keys_expired()});
     e.counter("store_paging_errors_total",
               "Store failures only a fix on our side cures: signature, credentials, bucket.",
               h.store_paging_errors());
