@@ -226,6 +226,23 @@ protected:
         return held.back()->peer.get();
     }
 
+    // Closes what connect_for_ticket kept and, once the reactor is done with them, lets the
+    // transports and their handlers go.
+    void release_held() {
+        for (const auto& h : held) {
+            h->upper.transport->begin_close();
+        }
+        ASSERT_TRUE(pump_until(*reactor, [&] {
+            return std::ranges::all_of(
+                held, [](const auto& h) { return h->upper.transport->is_quiescent(); });
+        }));
+        std::erase_if(owned, [&](const auto& t) {
+            return std::ranges::any_of(
+                held, [&](const auto& h) { return h->upper.transport == t.get(); });
+        });
+        held.clear();
+    }
+
     // The client's session, ticket included, for as long as the test keeps it.
     static ulw::test::SslSessionPtr ticket_of(TlsPeer& peer) {
         return ulw::test::SslSessionPtr{SSL_get1_session(peer.ssl())};
@@ -763,10 +780,7 @@ TEST_P(TlsTransportTest, TicketKeysRotateAndATicketStopsResumingOnceItsKeyIsGone
         EXPECT_EQ(SSL_session_reused(refused->ssl()), 0);
         TlsPeer* renewed = connect_for_ticket(ctx.get(), fresh.get());
         EXPECT_EQ(SSL_session_reused(renewed->ssl()), 1);
-        for (const auto& h : held) {
-            h->upper.transport->begin_close();
-        }
-        pump_pending(*reactor);
+        release_held();
     }
 }
 
@@ -790,10 +804,7 @@ TEST_P(TlsTransportTest, TicketKeysRotateOnScheduleOnAnIdleServer) {
         idle_for(std::chrono::hours(12) + std::chrono::seconds(1));
         TlsPeer* late = connect_for_ticket(ctx.get(), sealed.get());
         EXPECT_EQ(SSL_session_reused(late->ssl()), 0);
-        for (const auto& h : held) {
-            h->upper.transport->begin_close();
-        }
-        pump_pending(*reactor);
+        release_held();
     }
 }
 
