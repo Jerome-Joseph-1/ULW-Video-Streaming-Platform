@@ -57,7 +57,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_DATABASE_URL` | required | required | required | Secret |
 | `ULW_STORAGE` | `r2` (default), `minio`, `fs` | same | | |
 | `ULW_R2_ACCOUNT_ID` | with `r2` | with `r2` | | Secret |
-| `ULW_S3_ENDPOINT` | with `minio` | with `minio` | | |
+| `ULW_S3_ENDPOINT` | with `minio` | with `minio` | | `https://` anywhere the network between them is not the host's own. `http://` is accepted for the sandbox's MinIO or one on the same host: requests are signed, so the keys never cross, but the objects and signed URLs do, in the clear. `r2` is always `https://` |
 | `ULW_BUCKET` | with `r2`/`minio` | same | | Secret |
 | `ULW_S3_ACCESS_KEY_ID`, `ULW_S3_SECRET_ACCESS_KEY` | with `r2`/`minio` | same | | Secret, separate tokens per component |
 | `JWKS_URL` | required (or `ULW_DEV_JWKS_FILE`) | never set | required (or `ULW_DEV_JWKS_FILE`) | Secret by convention |
@@ -86,7 +86,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_CONFIG` | optional TOML file | same | | See above |
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
-| `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | |
+| `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/tmp/ulw-worker`. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made mode 0700 (so is any missing parent), and startup stops if that name is a symbolic link, not a directory, or another user's |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET`, `ULW_ALLOWED_ORIGINS` | | | required, required (32+ bytes), optional | Chat has no Askedin overlay yet |
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
@@ -94,8 +94,9 @@ The Kubernetes secret names and the lines that create them are in the RUNBOOK, s
 <!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
 
 The live packager (one process per stream, environment only, no Askedin overlay yet) takes
-`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR`, `ULW_FFMPEG` and
-`ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
+`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (default
+`/var/tmp/ulw-live`; the stream's directory in it is made 0700, as the worker's is), `ULW_FFMPEG`
+and `ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |

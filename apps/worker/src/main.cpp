@@ -5,6 +5,7 @@
 #include "infra/s3util/profile.hpp"
 #include "infra/storage/fs_transfer.hpp"
 #include "infra/storage/s3_transfer.hpp"
+#include "os/private_dir.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
@@ -210,11 +211,12 @@ int run(std::span<const std::string_view> args) {
         return fail(log, "block signals", std::generic_category().message(rc));
     }
 
-    std::error_code ec;
-    fs::create_directories(config->scratch, ec);
-    if (ec) {
-        return fail(log, "ULW_SCRATCH_DIR", ec.message());
+    // Owner-only, and refused if someone else made it first: it holds every job's source and
+    // renditions, and its default is under the shared /var/tmp.
+    if (auto scratch = os::make_private_dir(config->scratch); !scratch) {
+        return fail(log, "ULW_SCRATCH_DIR", scratch.error());
     }
+    std::error_code ec;
     if (const std::size_t swept = worker::sweep_workspaces(config->scratch); swept > 0) {
         log.info("removed workspaces left by an earlier run", {{"count", swept}});
     }

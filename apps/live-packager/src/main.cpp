@@ -8,6 +8,7 @@
 #include "infra/srt/ingest.hpp"
 #include "infra/storage/fs_transfer.hpp"
 #include "infra/storage/s3_transfer.hpp"
+#include "os/private_dir.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
@@ -33,6 +34,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -48,6 +50,23 @@ std::optional<std::string> read_env(std::string_view name) {
 int fail(std::string_view what, std::string_view why) {
     std::println(stderr, "live_packager: {}: {}", what, why);
     return EXIT_FAILURE;
+}
+
+// The stream's scratch directory, emptied, and the media directory in it. What an earlier run
+// left is not needed: the store has the stream's state. Owner-only, and refused if someone else
+// made it first, since its default is under the shared /var/tmp.
+std::expected<fs::path, std::string> fresh_scratch(const fs::path& scratch) {
+    std::error_code ec;
+    fs::remove_all(scratch, ec);
+    if (auto made = os::make_private_dir(scratch); !made) {
+        return std::unexpected(std::move(made.error()));
+    }
+    fs::path media_dir = scratch / "media";
+    fs::create_directories(media_dir, ec);
+    if (ec) {
+        return std::unexpected(ec.message());
+    }
+    return media_dir;
 }
 
 std::string_view to_string(live::StorageBackend backend) noexcept {
@@ -226,14 +245,12 @@ int run() {
         return fail("block signals", std::generic_category().message(rc));
     }
 
-    // What an earlier run left is not needed: the store has the stream's state.
-    std::error_code ec;
-    fs::remove_all(config->scratch, ec);
-    const fs::path media_dir = config->scratch / "media";
-    fs::create_directories(media_dir, ec);
-    if (ec) {
-        return fail("ULW_SCRATCH_DIR", ec.message());
+    const auto media = fresh_scratch(config->scratch);
+    if (!media) {
+        return fail("ULW_SCRATCH_DIR", media.error());
     }
+    const fs::path& media_dir = *media;
+    std::error_code ec;
     fs::path sandbox = config->sandbox;
     if (sandbox.empty()) {
         sandbox = fs::read_symlink("/proc/self/exe", ec).parent_path() / "ulw_sandbox";
