@@ -41,9 +41,10 @@ inline constexpr std::uint32_t kMissesBeforeUnready = 2;
 
 // What the probe thread last learned, for the loop to read. The gauges stand alone, so their
 // loads and stores are relaxed. probed_at_ms_ does not: readiness() takes a nonzero probe time
-// to mean the miss counts are a probe's, not their initial kNeverUp, so it is stored with
-// release after them and loaded with acquire before them. Relaxed, the loop could see the first
-// probe's time with the counts still at kNeverUp and call a healthy database down.
+// to mean the miss counts are a probe's, not their initial kNeverUp, so it is stored after them
+// and loaded before them, sequentially consistent (release and acquire are all it needs; it
+// changes once per probe, so the stronger order costs nothing). Relaxed, the loop could see the
+// first probe's time with the counts still at kNeverUp and call a healthy database down.
 class Health {
 public:
     void record(bool database_up, bool store_up, core::MonoTime at) noexcept;

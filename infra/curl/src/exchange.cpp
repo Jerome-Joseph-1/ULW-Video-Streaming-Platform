@@ -126,7 +126,10 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     set(curl_easy_setopt(e, CURLOPT_PROTOCOLS_STR, "http,https"));
     // TLS 1.2 at least, whatever the host's OpenSSL configuration allows: libcurl's own default
     // floor is TLS 1.0, and only a distribution's openssl.cnf (Ubuntu's among them) raises it.
-    set(curl_easy_setopt(e, CURLOPT_SSLVERSION, static_cast<long>(CURL_SSLVERSION_TLSv1_2)));
+    // The option is read as a long. libcurl 8.5 declares the value in an enum and 8.14 as a
+    // long, so it is converted implicitly: a cast would be useless on one of them.
+    constexpr long kTlsFloor = CURL_SSLVERSION_TLSv1_2;
+    set(curl_easy_setopt(e, CURLOPT_SSLVERSION, kTlsFloor));
     // Otherwise libcurl swaps signal handlers around every call, which races between threads;
     // with it, sends use MSG_NOSIGNAL instead.
     set(curl_easy_setopt(e, CURLOPT_NOSIGNAL, 1L));
