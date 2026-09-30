@@ -46,7 +46,7 @@ class Node {
 public:
     // With `manual_clock`, time on the node stands still until advance() moves it.
     explicit Node(net::ReactorKind kind, chat::Limits limits = {}, bool manual_clock = false)
-        : limits_(limits), manual_clock_(manual_clock) {
+        : limits_(std::move(limits)), manual_clock_(manual_clock) {
         std::promise<std::uint16_t> port;
         auto ready = port.get_future();
         healthy_ = healthy_promise_.get_future();
@@ -146,7 +146,8 @@ private:
                        .router = router,
                        .messages = *messages,
                        .verifier = verifier,
-                       .clock = clock},
+                       .clock = clock,
+                       .random = random},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
             limits_);
         if (!(*reactor)->listen(std::move(*clients), *server)) {
@@ -545,6 +546,9 @@ TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosed
     node_ = std::make_unique<Node>(
         GetParam(), chat::Limits{.stall_timeout = core::Millis{2'500},
                                  .stall_check = core::Millis{250},
+                                 // It reads the metrics on a new connection every 50 messages,
+                                 // from the one address every client here shares.
+                                 .new_connections_per_ip_per_second = 1'000,
                                  .service = {.send_burst = 1'000'000,
                                              .max_send_bytes_in_flight = std::size_t{1} << 20U},
                                  .presence = {}});
@@ -730,6 +734,87 @@ TEST_P(ChatSessionTest, AnUpgradeThatFailedWhileWaitingOnKeysIsNotAcceptedWhenTh
     // Closed without a response: no 101 after the failure.
     EXPECT_FALSE(opened);
     EXPECT_EQ(status, "");
+}
+
+// ADR-0076: one address that connects directly holds at most max_connections_per_ip sockets,
+// counted from accept, and is reset before a byte is read past that.
+TEST_P(ChatSessionTest, ADirectPeerHoldsAtMostItsAddressesConnections) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 3;
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    std::vector<WsClient> open_ones;
+    for (const char* user : {"alice", "bob", "carol"}) {
+        auto ws = open_as(user);
+        ASSERT_TRUE(ws) << user;
+        open_ones.push_back(std::move(*ws));
+    }
+    // Reset at accept: no status line, and no token looked at.
+    EXPECT_EQ(refusal("Authorization: Bearer user.dave\r\n"), "");
+    // Closing one gives its place back.
+    open_ones.pop_back();
+    EXPECT_TRUE(ulw::test::eventually([&] { return open_as("dave").has_value(); }));
+}
+
+TEST_P(ChatSessionTest, ADirectPeerOpensAtMostItsNewConnectionsASecond) {
+    node_.reset();
+    chat::Limits limits;
+    limits.new_connections_per_ip_per_second = 2;
+    node_ = std::make_unique<Node>(GetParam(), limits, true);
+    auto one = open_as("alice");
+    auto two = open_as("bob");
+    ASSERT_TRUE(one && two);
+    EXPECT_EQ(refusal("Authorization: Bearer user.carol\r\n"), "");
+    // One more every half second.
+    node_->advance(core::Millis{500});
+    EXPECT_TRUE(open_as("carol"));
+    EXPECT_EQ(refusal("Authorization: Bearer user.dave\r\n"), "");
+}
+
+// One valid token must not take the node's every socket.
+TEST_P(ChatSessionTest, AUserHoldsAtMostItsSessionsAndIsToldWhenToComeBack) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_sessions_per_user = 2;
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    auto first = open_as("alice");
+    auto second = open_as("alice");
+    ASSERT_TRUE(first && second);
+    EXPECT_EQ(refusal("Authorization: Bearer user.alice\r\n"), "HTTP/1.1 429 Too Many Requests");
+    // Another user is not held to alice's count.
+    EXPECT_TRUE(open_as("bob"));
+    first.reset();
+    EXPECT_TRUE(ulw::test::eventually([&] { return open_as("alice").has_value(); }));
+}
+
+// Behind a trusted proxy every connection comes from the proxy; the address it names is held to
+// max_connections_per_ip for its upgrades not yet answered, and no longer: a socket that is open
+// is its user's to count.
+TEST_P(ChatSessionTest, BehindATrustedProxyTheForwardedAddressIsHeldOnlyUntilItsUpgradeIsAnswered) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 2;
+    limits.trusted_proxies = {*net::IpNetwork::parse("127.0.0.0/8")};
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    const std::string from_a = "X-Forwarded-For: 203.0.113.7\r\n";
+    // Two upgrades from one forwarded address, both waiting on the keys.
+    auto first = std::async(std::launch::async,
+                            [&] { return open(from_a + "Authorization: Bearer slow.alice\r\n"); });
+    auto second = std::async(std::launch::async,
+                             [&] { return open(from_a + "Authorization: Bearer slow.bob\r\n"); });
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->key_waiters == 2; }));
+    EXPECT_EQ(refusal(from_a + "Authorization: Bearer user.carol\r\n"),
+              "HTTP/1.1 429 Too Many Requests");
+    // Another address, through the same proxy, is not.
+    EXPECT_TRUE(open("X-Forwarded-For: 198.51.100.9\r\nAuthorization: Bearer user.carol\r\n"));
+    node_->refresh_keys = true;
+    auto alice = first.get();
+    auto bob = second.get();
+    ASSERT_TRUE(alice && bob);
+    // Both open, and the address free again for its next upgrades.
+    auto carol = open(from_a + "Authorization: Bearer user.carol\r\n");
+    auto dave = open(from_a + "Authorization: Bearer user.dave\r\n");
+    EXPECT_TRUE(carol && dave);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

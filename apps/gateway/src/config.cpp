@@ -2,6 +2,7 @@
 
 #include "core/models/upload.hpp"
 #include "core/util/parse.hpp"
+#include "http/client_limits.hpp"
 #include "http/request_parser.hpp"
 #include "infra/auth/local_verifier.hpp"
 #include "infra/postgres/connection_string.hpp"
@@ -70,8 +71,6 @@ constexpr std::uint64_t kMaxChunk = std::uint64_t{5} << 30U;
 // 50 GiB / 10,000 is 5.12 MiB, just above the store's own minimum.
 constexpr std::uint64_t kMaxParts = 10'000;
 constexpr std::uint64_t kDescriptorReserve = 64;
-// Every trusted block is tried against every accepted peer; a deployment names one or two.
-constexpr std::size_t kMaxTrustedProxies = 16;
 // Past a CDN, a load balancer and Envoy there is no chain worth trusting.
 constexpr std::size_t kMaxProxyHops = 16;
 // Blocks wider than these are rarely one's own proxies: a /8 of IPv4 is 16 million addresses,
@@ -274,33 +273,11 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
 }
 
 std::expected<std::vector<net::IpNetwork>, ConfigError> parse_proxies(std::string_view text) {
-    std::vector<net::IpNetwork> out;
-    while (!text.empty()) {
-        const std::size_t comma = text.find(',');
-        std::string_view item = text.substr(0, comma);
-        text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
-        while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) {
-            item.remove_prefix(1);
-        }
-        while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) {
-            item.remove_suffix(1);
-        }
-        const auto network = net::IpNetwork::parse(item);
-        if (!network) {
-            return error("ULW_TRUSTED_PROXIES",
-                         "expected comma-separated CIDR blocks, such as 10.42.0.0/16, with no "
-                         "bits set past the prefix");
-        }
-        // Every address on the internet could then name any client it liked.
-        if (network->prefix_length() == 0) {
-            return error("ULW_TRUSTED_PROXIES", "a /0 block trusts every peer");
-        }
-        out.push_back(*network);
+    auto proxies = http::parse_trusted_proxies(text);
+    if (!proxies) {
+        return error("ULW_TRUSTED_PROXIES", proxies.error());
     }
-    if (out.size() > kMaxTrustedProxies) {
-        return error("ULW_TRUSTED_PROXIES", "more than 16 blocks");
-    }
-    return out;
+    return std::move(*proxies);
 }
 
 std::expected<void, ConfigError> load_client_limits(const EnvLookup& env, Limits& limits) {

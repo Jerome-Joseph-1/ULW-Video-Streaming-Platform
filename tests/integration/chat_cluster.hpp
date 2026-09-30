@@ -243,7 +243,10 @@ protected:
             "ULW_REACTOR=" +
                 std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),
             // Some runs start tests as root; this suite is not about that.
-            "ULW_ALLOW_ROOT=1"};
+            "ULW_ALLOW_ROOT=1",
+            // Every client here, and every readiness poll, comes from 127.0.0.1; the per-address
+            // limits have tests of their own (tests/unit/chat/session_test.cpp).
+            "ULW_MAX_CONNECTIONS_PER_IP=1280", "ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND=65536"};
         for (const char* passed : {"ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"}) {
             // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
             if (const char* value = std::getenv(passed)) {

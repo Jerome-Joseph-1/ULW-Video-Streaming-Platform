@@ -434,7 +434,10 @@ class Stack:
                    "ULW_DEV_JWKS_FILE": str(self.out / "jwks.json"),
                    "JWT_ISSUER": ISSUER,
                    # The soak may run as root on a development host.
-                   "ULW_ALLOW_ROOT": "1"}
+                   "ULW_ALLOW_ROOT": "1",
+                   # Every client comes from this host's one address (ADR-0076's limits).
+                   "ULW_MAX_CONNECTIONS_PER_IP": "1280",
+                   "ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND": "65536"}
             if os.environ.get("ULW_REACTOR"):
                 env["ULW_REACTOR"] = os.environ["ULW_REACTOR"]
             out = open(self.out / f"{node}.log", "ab")

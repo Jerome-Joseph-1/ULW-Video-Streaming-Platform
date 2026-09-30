@@ -1,6 +1,7 @@
 #include "config.hpp"
 
 #include "core/util/parse.hpp"
+#include "http/client_limits.hpp"
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
@@ -111,6 +112,58 @@ std::expected<std::optional<core::Millis>, ConfigError> presence_grace(const Env
     return core::Millis{*value};
 }
 
+template <class T>
+std::expected<std::optional<T>, ConfigError> bounded(const EnvLookup& env, std::string_view name,
+                                                     T min, T max) {
+    const auto text = lookup(env, name);
+    if (!text) {
+        return std::nullopt;
+    }
+    const auto value = core::parse_integer<T>(*text);
+    if (!value || *value < min || *value > max) {
+        return error(name, "not an integer in range");
+    }
+    return *value;
+}
+
+std::expected<ClientLimits, ConfigError> client_limits(const EnvLookup& env) {
+    // No more than the node's 1280 connections (chat::Limits): past it a per-client limit would
+    // never be reached.
+    constexpr std::size_t kMaxConnections = 1280;
+    constexpr std::size_t kMaxProxyHops = 16;
+    ClientLimits out;
+    const auto per_ip = bounded<std::size_t>(env, "ULW_MAX_CONNECTIONS_PER_IP", 1, kMaxConnections);
+    if (!per_ip) {
+        return std::unexpected(per_ip.error());
+    }
+    out.max_connections_per_ip = *per_ip;
+    const auto rate =
+        bounded<std::uint32_t>(env, "ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND", 1, 65'536);
+    if (!rate) {
+        return std::unexpected(rate.error());
+    }
+    out.new_connections_per_ip_per_second = *rate;
+    const auto per_user =
+        bounded<std::size_t>(env, "ULW_MAX_SESSIONS_PER_USER", 1, kMaxConnections);
+    if (!per_user) {
+        return std::unexpected(per_user.error());
+    }
+    out.max_sessions_per_user = *per_user;
+    if (const auto text = lookup(env, "ULW_TRUSTED_PROXIES")) {
+        auto proxies = http::parse_trusted_proxies(*text);
+        if (!proxies) {
+            return error("ULW_TRUSTED_PROXIES", proxies.error());
+        }
+        out.trusted_proxies = std::move(*proxies);
+    }
+    const auto hops = bounded<std::size_t>(env, "ULW_TRUSTED_PROXY_HOPS", 1, kMaxProxyHops);
+    if (!hops) {
+        return std::unexpected(hops.error());
+    }
+    out.trusted_proxy_hops = hops->value_or(1);
+    return out;
+}
+
 } // namespace
 
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
@@ -189,6 +242,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!grace) {
         return std::unexpected(std::move(grace.error()));
     }
+    auto limits = client_limits(env);
+    if (!limits) {
+        return std::unexpected(std::move(limits.error()));
+    }
     const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
     if (!allow_root) {
         return error("ULW_ALLOW_ROOT", "expected 0 or 1");
@@ -207,6 +264,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
                   .allowed_origins = std::move(*allowed),
                   .presence_grace = *grace,
+                  .client_limits = std::move(*limits),
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
                   .allow_root = *allow_root};
 }
