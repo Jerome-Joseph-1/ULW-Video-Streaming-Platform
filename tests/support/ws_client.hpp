@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <optional>
 #include <poll.h>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -32,8 +33,11 @@ class WsClient {
 public:
     // Upgrades on `path` with the given extra header lines ("Name: value\r\n" each). nullopt
     // with the response status line in `refusal` when the server says anything but 101.
+    // `pipelined` goes out in the same write, right behind the request, as if the client sent
+    // its first frames without waiting for the 101.
     static std::optional<WsClient> connect(std::uint16_t port, std::string_view path,
-                                           std::string_view headers, std::string* refusal) {
+                                           std::string_view headers, std::string* refusal,
+                                           std::span<const std::byte> pipelined = {}) {
         WsClient c(port);
         if (!c.fd_) {
             return std::nullopt;
@@ -44,7 +48,10 @@ public:
             "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
             "Sec-WebSocket-Version: 13\r\n" +
             std::string(headers) + "\r\n";
-        if (!c.write_all(as_bytes(request))) {
+        const auto head_out = as_bytes(request);
+        std::vector<std::byte> out(head_out.begin(), head_out.end());
+        out.insert(out.end(), pipelined.begin(), pipelined.end());
+        if (!c.write_all(out)) {
             return std::nullopt;
         }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);

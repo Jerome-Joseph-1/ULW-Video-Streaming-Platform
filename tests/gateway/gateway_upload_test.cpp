@@ -7,11 +7,14 @@
 
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <gtest/gtest.h>
 #include <iterator>
 #include <openssl/evp.h>
+#include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -555,6 +558,41 @@ TEST_P(GatewayUpload, PipelinedRequestsAreAnsweredInOrder) {
     const auto missing = c.read_response();
     ASSERT_TRUE(missing);
     EXPECT_EQ(missing->status, 404);
+}
+
+// The parser's buffer for bytes behind a request grows as they arrive: a few bytes behind the
+// first burst, then a burst larger than one 64 KiB receive, which needs it again and larger.
+TEST_P(GatewayUpload, APipelinedBurstLargerThanAReceiveIsAnsweredInOrder) {
+    const GatewayUnderTest gw(over_transport());
+    HttpClient c(gw.endpoint());
+    // Padded so that the burst stays inside the 1000 requests a connection may carry.
+    const std::string pad = "X-Pad: " + std::string(200, 'x') + "\r\n";
+    const std::string health = "GET /api/v1/healthz HTTP/1.1\r\nHost: t\r\n" + pad + "\r\n";
+    const std::string ready = "GET /api/v1/readyz HTTP/1.1\r\nHost: t\r\n" + pad + "\r\n";
+    // At least `bytes` of requests, alternating, and how many.
+    const auto burst = [&](std::size_t bytes) {
+        std::string out;
+        std::size_t requests = 0;
+        for (; out.size() < bytes; ++requests) {
+            out += requests % 2 == 0 ? health : ready;
+        }
+        return std::pair{out, requests};
+    };
+    const auto answered_in_order = [&](std::size_t requests) {
+        for (std::size_t i = 0; i < requests; ++i) {
+            const auto r = c.read_response();
+            if (!r || r->body != (i % 2 == 0 ? "ok\n" : "ready\n")) {
+                ADD_FAILURE() << "response " << i << " of " << requests;
+                return;
+            }
+        }
+    };
+    const auto [small, few] = burst(3 * health.size());
+    ASSERT_TRUE(c.send_raw(small));
+    answered_in_order(few);
+    const auto [large, many] = burst(std::size_t{80} * 1024);
+    ASSERT_TRUE(c.send_raw(large));
+    answered_in_order(many);
 }
 
 TEST_P(GatewayUpload, BadCreateRequestsAre400) {

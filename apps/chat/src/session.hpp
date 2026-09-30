@@ -63,6 +63,9 @@ public:
     // Close 1001 to an open WebSocket; anything else is closed at once.
     void drain() noexcept;
     void close() noexcept;
+    // Whether this session still holds its HTTP parser, which it frees once the request is
+    // answered.
+    [[nodiscard]] bool parsing_http() const noexcept { return parser_.has_value(); }
 
 private:
     enum class Phase : std::uint8_t { Request, Open, Closing };
@@ -71,9 +74,11 @@ private:
 
     void route(const http::RequestHead& head) noexcept;
     void authenticate() noexcept;
+    void parse_failed(const http::ParseError& error);
     void answer_request();
     void respond(std::string_view bytes);
     void accept_upgrade(const codec::ws::UpgradeResponse& response);
+    void leave_http();
 
     void read_frames(net::BorrowedBytes bytes);
     [[nodiscard]] bool within_control_budget(std::size_t in_this_read) noexcept;
@@ -93,11 +98,14 @@ private:
     Phase phase_ = Phase::Request;
     core::MonoTime last_heard_;
 
-    http::RequestParser parser_;
+    // Until the request is answered. Its buffers are larger than everything else the session
+    // holds while quiet, and after an upgrade it is never needed again.
+    std::optional<http::RequestParser> parser_;
     Route route_ = Route::NotFound;
     std::optional<http::Status> refusal_;
     std::optional<std::expected<codec::ws::UpgradeResponse, codec::ws::HandshakeError>> upgrade_;
-    // Views the parser's buffer, which is never reset: one request per connection.
+    // Views the parser's buffer, which is never reset: one request per connection. Cleared
+    // with the parser.
     std::string_view token_;
     Auth auth_ = Auth::Pending;
     bool request_complete_ = false;
