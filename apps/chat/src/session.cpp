@@ -45,7 +45,7 @@ core::MonoTime Session::now() const noexcept {
 }
 
 void Session::start(net::ConnId conn, const net::IpAddress& peer,
-                    std::optional<ChatServer::Hold> hold) noexcept {
+                    std::optional<ChatServer::PeerHold> hold) noexcept {
     conn_ = conn;
     peer_ = peer;
     peer_hold_ = hold;
@@ -771,7 +771,7 @@ void Session::close() noexcept {
     }
     release_request_hold();
     if (peer_hold_) {
-        server_.release_client(*peer_hold_);
+        server_.release_peer(*peer_hold_);
         peer_hold_.reset();
     }
     if (user_hold_) {

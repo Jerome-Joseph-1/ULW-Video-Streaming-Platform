@@ -53,9 +53,10 @@ public:
     Session(Session&&) = delete;
     Session& operator=(Session&&) = delete;
 
-    // `hold` counts a direct peer's connection against its address until the session closes.
+    // `hold` counts a direct peer's connection against its address (and IPv6 /48) until the
+    // session closes.
     void start(net::ConnId conn, const net::IpAddress& peer,
-               std::optional<ChatServer::Hold> hold) noexcept;
+               std::optional<ChatServer::PeerHold> hold) noexcept;
     [[nodiscard]] net::ConnId conn() const noexcept { return conn_; }
 
     void on_data(net::BorrowedBytes bytes) noexcept override;
@@ -142,7 +143,7 @@ private:
     net::IpAddress peer_;
     // ADR-0076: the direct peer's connection, for the socket's life; a forwarded client's
     // upgrade, until it is answered; and the user's open socket, from the upgrade on.
-    std::optional<ChatServer::Hold> peer_hold_;
+    std::optional<ChatServer::PeerHold> peer_hold_;
     std::optional<ChatServer::Hold> request_hold_;
     std::optional<ChatServer::Hold> user_hold_;
     // Seconds to put in a 429's Retry-After.

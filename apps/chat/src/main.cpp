@@ -234,6 +234,10 @@ int run() {
     const chat::ClientLimits& per_client = config->client_limits;
     chat_limits.max_connections_per_ip =
         per_client.max_connections_per_ip.value_or(chat_limits.max_connections_per_ip);
+    // Four /64s' worth, whatever the per-address cap was set to (ADR-0076).
+    constexpr std::size_t kSlash64sPerBlock = 4;
+    chat_limits.max_connections_per_ip_block = per_client.max_connections_per_ip_block.value_or(
+        kSlash64sPerBlock * chat_limits.max_connections_per_ip);
     chat_limits.new_connections_per_ip_per_second =
         per_client.new_connections_per_ip_per_second.value_or(
             chat_limits.new_connections_per_ip_per_second);

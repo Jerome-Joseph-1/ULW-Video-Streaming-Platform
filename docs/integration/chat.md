@@ -190,7 +190,7 @@ list never said no: join again.
 | Message size | 64 KiB per message (after reassembly) | Close `1009` |
 | Binary frames | Not accepted | Close `1003` |
 | Control frames | 8 per read; token bucket of 20, refilling 10/s | Close `1008` |
-| Connections per address | 20 open at once from one address (IPv6: one /64) connecting directly; 10 new ones a second, 10 saved | Connection reset before the upgrade is read; back off and reconnect |
+| Connections per address | 20 open at once from one address (IPv6: one /64) connecting directly, and 80 from all the /64s of one IPv6 /48 together; 10 new ones a second, 10 saved | Connection reset before the upgrade is read; back off and reconnect |
 | Sockets per user | 16 open at once on a node | Upgrade answered `429`, `Retry-After: 5` |
 | Rooms per connection | 64 | `error` `too_many_rooms` |
 | New-room joins per user | Burst 64, then 1/s, across all the user's connections on a node | `error` `busy` |

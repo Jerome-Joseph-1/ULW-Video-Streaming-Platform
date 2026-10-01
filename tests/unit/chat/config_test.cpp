@@ -191,11 +191,13 @@ TEST_F(ChatConfigTest, PerClientLimitsAreTheServicesUnlessSetAndProxiesAreCidrBl
     const auto defaults = load();
     ASSERT_TRUE(defaults);
     EXPECT_FALSE(defaults->client_limits.max_connections_per_ip);
+    EXPECT_FALSE(defaults->client_limits.max_connections_per_ip_block);
     EXPECT_FALSE(defaults->client_limits.new_connections_per_ip_per_second);
     EXPECT_FALSE(defaults->client_limits.max_sessions_per_user);
     EXPECT_TRUE(defaults->client_limits.trusted_proxies.empty());
     EXPECT_EQ(defaults->client_limits.trusted_proxy_hops, 1U);
     env["ULW_MAX_CONNECTIONS_PER_IP"] = "40";
+    env["ULW_MAX_CONNECTIONS_PER_IP_BLOCK"] = "200";
     env["ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND"] = "5";
     env["ULW_MAX_SESSIONS_PER_USER"] = "8";
     env["ULW_TRUSTED_PROXIES"] = "10.42.0.0/16, 10.43.0.0/16";
@@ -203,6 +205,7 @@ TEST_F(ChatConfigTest, PerClientLimitsAreTheServicesUnlessSetAndProxiesAreCidrBl
     const auto set = load();
     ASSERT_TRUE(set) << set.error().variable;
     EXPECT_EQ(set->client_limits.max_connections_per_ip, 40U);
+    EXPECT_EQ(set->client_limits.max_connections_per_ip_block, 200U);
     EXPECT_EQ(set->client_limits.new_connections_per_ip_per_second, 5U);
     EXPECT_EQ(set->client_limits.max_sessions_per_user, 8U);
     EXPECT_EQ(set->client_limits.trusted_proxies.size(), 2U);
@@ -210,6 +213,9 @@ TEST_F(ChatConfigTest, PerClientLimitsAreTheServicesUnlessSetAndProxiesAreCidrBl
     for (const auto& [name, bad] : std::vector<std::pair<std::string, std::string>>{
              {"ULW_MAX_CONNECTIONS_PER_IP", "0"},
              {"ULW_MAX_CONNECTIONS_PER_IP", "1281"},
+             {"ULW_MAX_CONNECTIONS_PER_IP_BLOCK", "0"},
+             {"ULW_MAX_CONNECTIONS_PER_IP_BLOCK", "1281"},
+             {"ULW_MAX_CONNECTIONS_PER_IP_BLOCK", "eighty"},
              {"ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND", "0"},
              {"ULW_MAX_SESSIONS_PER_USER", "1281"},
              {"ULW_TRUSTED_PROXIES", "0.0.0.0/0"},

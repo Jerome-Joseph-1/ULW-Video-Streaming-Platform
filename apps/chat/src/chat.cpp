@@ -86,6 +86,8 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
                http::AddressHash{http::SeededHash(seed(deps_.random))}),
       users_(limits_.max_connections + 1, http::ViewHash{http::SeededHash(seed(deps_.random))}),
+      // A block entry holds nothing but its count, so only open connections need one.
+      blocks_(limits_.max_connections + 1, http::AddressHash{http::SeededHash(seed(deps_.random))}),
       sessions_(limits_.max_connections) {}
 
 ChatServer::~ChatServer() {
@@ -107,10 +109,14 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
         ++counters_.rejected_socket;
         return;
     }
+    accept_from(std::move(conn), *peer);
+}
+
+void ChatServer::accept_from(os::UniqueFd conn, const net::IpAddress& peer) noexcept {
     // A trusted proxy carries many clients; they are told apart at their upgrade requests.
-    std::optional<Hold> hold;
-    if (!trusted_proxy(*peer)) {
-        hold = admit_peer(*peer);
+    std::optional<PeerHold> hold;
+    if (!trusted_proxy(peer)) {
+        hold = admit_peer(peer);
         if (!hold) {
             // Before a byte is read: no parser, no token check, and no TIME_WAIT (ADR-0052).
             net::reset_connection(std::move(conn));
@@ -122,7 +128,7 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
     const auto refuse = [&](std::uint64_t& counter) {
         ++counter;
         if (hold) {
-            release_client(*hold);
+            release_peer(*hold);
         }
     };
     if (!net::tune_connection(conn.get()) || !net::clear_user_timeout(conn.get()) ||
@@ -143,14 +149,14 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
         return;
     }
     ++counters_.connections_accepted;
-    s->start(*id, *peer, hold);
+    s->start(*id, peer, hold);
 }
 
 bool ChatServer::trusted_proxy(const net::IpAddress& peer) const noexcept {
     return http::is_trusted_proxy(limits_.trusted_proxies, peer);
 }
 
-std::optional<ChatServer::Hold> ChatServer::admit_peer(const net::IpAddress& peer) noexcept {
+std::optional<ChatServer::PeerHold> ChatServer::admit_peer(const net::IpAddress& peer) noexcept {
     const core::MonoTime now = deps_.reactor.now();
     const auto slot = clients_.acquire(http::client_key(peer), [&] {
         return ClientEntry{.new_connections =
@@ -161,12 +167,24 @@ std::optional<ChatServer::Hold> ChatServer::admit_peer(const net::IpAddress& pee
         ++counters_.rejected_ip_connections;
         return std::nullopt;
     }
+    // Before the rate is charged: a connection refused for its block costs its /64 nothing.
+    std::optional<Hold> block;
+    if (const auto key = http::client_block(peer)) {
+        block = blocks_.acquire(*key, [] { return BlockEntry{}; });
+        if (!block || blocks_.pins(*block) >= limits_.max_connections_per_ip_block) {
+            ++counters_.rejected_ip_block;
+            return std::nullopt;
+        }
+    }
     if (!clients_.at(*slot).new_connections.take(now)) {
         ++counters_.rejected_ip_rate;
         return std::nullopt;
     }
     clients_.pin(*slot);
-    return slot;
+    if (block) {
+        blocks_.pin(*block);
+    }
+    return PeerHold{.address = *slot, .block = block};
 }
 
 std::optional<ChatServer::Hold> ChatServer::hold_client(const net::IpAddress& client) noexcept {
@@ -186,6 +204,13 @@ std::optional<ChatServer::Hold> ChatServer::hold_client(const net::IpAddress& cl
 
 void ChatServer::release_client(Hold hold) noexcept {
     clients_.unpin(hold);
+}
+
+void ChatServer::release_peer(PeerHold hold) noexcept {
+    clients_.unpin(hold.address);
+    if (hold.block) {
+        blocks_.unpin(*hold.block);
+    }
 }
 
 std::optional<ChatServer::Hold> ChatServer::hold_user(const core::UserId& user) noexcept {
@@ -263,11 +288,13 @@ std::string ChatServer::render_metrics() const {
         "connections_rejected_total{{reason=\"capacity\"}} {}\n"
         "connections_rejected_total{{reason=\"socket\"}} {}\n"
         "connections_rejected_total{{reason=\"ip_connections\"}} {}\n"
+        "connections_rejected_total{{reason=\"ip_block\"}} {}\n"
         "connections_rejected_total{{reason=\"ip_rate\"}} {}\n"
         "upgrades_limited_total{{limit=\"ip\"}} {}\n"
         "upgrades_limited_total{{limit=\"user_sessions\"}} {}\n"
         "rate_limit_entries{{table=\"client\"}} {}\n"
         "rate_limit_entries{{table=\"user\"}} {}\n"
+        "rate_limit_entries{{table=\"ip_block\"}} {}\n"
         "rate_limit_evictions_total{{table=\"client\"}} {}\n"
         "connections_current {}\n"
         "websocket_upgrades_total {}\n"
@@ -307,12 +334,12 @@ std::string ChatServer::render_metrics() const {
         "jwks_keys_expired {}\n"
         "unrecorded_joins_total {}\n",
         c.connections_accepted, c.rejected_capacity, c.rejected_socket, c.rejected_ip_connections,
-        c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions, clients_.size(),
-        users_.size(), clients_.evictions(), sessions_.size(), c.upgrades, c.auth_failures,
-        c.origin_rejections, c.messages_received, chat.delivered, chat.rate_limited,
-        router.duplicates, chat.lossy_drops, chat.replayed, chat.history_messages,
-        chat_.buffered_bytes(), c.protocol_errors, c.control_floods, c.slow_consumers,
-        c.stalled_readers,
+        c.rejected_ip_block, c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions,
+        clients_.size(), users_.size(), blocks_.size(), clients_.evictions(), sessions_.size(),
+        c.upgrades, c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
+        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
+        chat.history_messages, chat_.buffered_bytes(), c.protocol_errors, c.control_floods,
+        c.slow_consumers, c.stalled_readers,
         c.allocation_failures + router.allocation_failures + chat.allocation_failures +
             presence.allocation_failures,
         deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,

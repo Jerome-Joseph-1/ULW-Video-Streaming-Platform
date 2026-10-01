@@ -2,10 +2,12 @@
 #include "core/util/parse.hpp"
 #include "infra/auth/base64url.hpp"
 #include "infra/messages/memory_message_store.hpp"
+#include "net/ip_address.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
+#include "os/unique_fd.hpp"
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
@@ -25,6 +27,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -39,6 +42,33 @@ using ulw::test::WsClient;
 
 constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
 constexpr std::string_view kAllowed = "https://app.askedin.test";
+
+// Hands the server each connection as if it came from the peer `named` holds, while it holds
+// one: the loopback interface offers only 127.0.0.1, and on some hosts not even ::1.
+class NamedPeers final : public net::IAcceptHandler {
+public:
+    NamedPeers(chat::ChatServer& server, std::mutex& lock,
+               const std::optional<net::IpAddress>& named) noexcept
+        : server_(server), lock_(lock), named_(named) {}
+
+    void on_accept(os::UniqueFd conn) noexcept override {
+        std::optional<net::IpAddress> peer;
+        {
+            const std::scoped_lock held(lock_);
+            peer = named_;
+        }
+        if (peer) {
+            server_.accept_from(std::move(conn), *peer);
+        } else {
+            server_.on_accept(std::move(conn));
+        }
+    }
+
+private:
+    chat::ChatServer& server_;
+    std::mutex& lock_;
+    const std::optional<net::IpAddress>& named_;
+};
 
 // One chat node on a thread of its own, as chat_server runs it, over an in-memory room store.
 // The test talks to it through sockets only.
@@ -63,6 +93,12 @@ public:
     Node& operator=(Node&&) = delete;
 
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+    // The peer the node takes the next connections to come from; nullopt for their own.
+    void name_peer(std::optional<net::IpAddress> peer) {
+        const std::scoped_lock held(peer_lock_);
+        named_peer_ = peer;
+    }
 
     // Whether the room plane is reachable, the condition /readyz reports, without a request to
     // poll it with: the node's loop says so once, and the wait ends then or at the limit.
@@ -154,7 +190,8 @@ private:
                        .random = random},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
             limits_);
-        if (!(*reactor)->listen(std::move(*clients), *server)) {
+        NamedPeers accept(*server, peer_lock_, named_peer_);
+        if (!(*reactor)->listen(std::move(*clients), accept)) {
             port.set_value(0);
             return;
         }
@@ -203,6 +240,8 @@ private:
 
     chat::Limits limits_;
     bool manual_clock_;
+    std::mutex peer_lock_;
+    std::optional<net::IpAddress> named_peer_;
     std::promise<void> healthy_promise_;
     std::future<void> healthy_;
     std::atomic<std::int64_t> requested_ = 0;
@@ -233,6 +272,22 @@ protected:
         std::string line;
         EXPECT_FALSE(open(headers, &line));
         return line;
+    }
+
+    // A counter from the node's /metrics, asked from an address no test connects from, so that
+    // the limits a test has filled neither refuse the request nor count it.
+    std::optional<std::uint64_t> counter(std::string_view name) {
+        node_->name_peer(net::IpAddress::parse("192.0.2.250"));
+        const auto body = ulw::test::http_get(node_->port(), "/metrics").body;
+        node_->name_peer(std::nullopt);
+        const std::string line = std::string(name) + " ";
+        const std::size_t at = body.find(line);
+        if (at == std::string::npos) {
+            return std::nullopt;
+        }
+        const std::size_t start = at + line.size();
+        return core::parse_integer<std::uint64_t>(
+            std::string_view(body).substr(start, body.find('\n', start) - start));
     }
 
     std::unique_ptr<Node> node_;
@@ -857,6 +912,38 @@ TEST_P(ChatSessionTest, ADirectPeerHoldsAtMostItsAddressesConnections) {
     // Closing one gives its place back.
     open_ones.pop_back();
     EXPECT_TRUE(ulw::test::eventually([&] { return open_as("dave").has_value(); }));
+}
+
+// A customer handed a /56 or a /48 has hundreds of /64s, each of which max_connections_per_ip
+// counts afresh: the /64s of one /48 are held to max_connections_per_ip_block together.
+TEST_P(ChatSessionTest, TheSlash64sOfOneIpv6Slash48TogetherHoldAtMostItsBlocksConnections) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 2;
+    limits.max_connections_per_ip_block = 3;
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    std::vector<WsClient> open_ones;
+    for (const char* peer : {"2001:db8:1:1::1", "2001:db8:1:2::1", "2001:db8:1:3::1"}) {
+        node_->name_peer(net::IpAddress::parse(peer));
+        auto ws = open_as("alice");
+        ASSERT_TRUE(ws) << peer;
+        open_ones.push_back(std::move(*ws));
+    }
+    // A fourth /64 of the block, with none of its own open, is reset at accept.
+    const auto fourth = net::IpAddress::parse("2001:db8:1:ff::1");
+    node_->name_peer(fourth);
+    EXPECT_EQ(refusal("Authorization: Bearer user.bob\r\n"), "");
+    // Another /48 is not held to it.
+    node_->name_peer(net::IpAddress::parse("2001:db8:2:1::1"));
+    auto elsewhere = open_as("bob");
+    EXPECT_TRUE(elsewhere);
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_block"})"), 1U);
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 0U);
+    EXPECT_EQ(counter(R"(rate_limit_entries{table="ip_block"})"), 2U);
+    // Closing one gives the block its place back.
+    open_ones.pop_back();
+    node_->name_peer(fourth);
+    EXPECT_TRUE(ulw::test::eventually([&] { return open_as("bob").has_value(); }));
 }
 
 TEST_P(ChatSessionTest, ADirectPeerOpensAtMostItsNewConnectionsASecond) {

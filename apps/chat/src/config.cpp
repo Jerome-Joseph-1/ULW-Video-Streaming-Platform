@@ -152,6 +152,14 @@ std::expected<ClientLimits, ConfigError> client_limits(const EnvLookup& env) {
         return std::unexpected(per_ip.error());
     }
     out.max_connections_per_ip = *per_ip;
+    // The /48 of IPv6 direct peers (ADR-0076). Below the per-address cap it caps a single /64
+    // too, which a deployment may want; the range is all that is checked.
+    const auto per_block =
+        bounded<std::size_t>(env, "ULW_MAX_CONNECTIONS_PER_IP_BLOCK", 1, kMaxConnections);
+    if (!per_block) {
+        return std::unexpected(per_block.error());
+    }
+    out.max_connections_per_ip_block = *per_block;
     const auto rate =
         bounded<std::uint32_t>(env, "ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND", 1, 65'536);
     if (!rate) {

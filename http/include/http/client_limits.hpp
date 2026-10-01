@@ -55,6 +55,18 @@ struct ViewHash {
     return address.is_v4() ? address : address.prefix(kIpv6Site);
 }
 
+// The IPv6 block a client's /64 lies in, for a cap on all of one customer's /64s together: a
+// provider may delegate a /56 or a /48 to one site (RFC 6177), and client_key counts each /64 in
+// it afresh. nullopt for IPv4, whose one address is the client already.
+[[nodiscard]] inline std::optional<net::IpAddress>
+client_block(const net::IpAddress& address) noexcept {
+    constexpr unsigned kIpv6Block = 48;
+    if (address.is_v4()) {
+        return std::nullopt;
+    }
+    return address.prefix(kIpv6Block);
+}
+
 // The client behind a request a trusted proxy relayed: the `hops`-th X-Forwarded-For entry from
 // the right, `hops` being the proxies in front of us, each of which appends the address it was
 // reached from. Entries further left are whatever the client sent. Skipping every entry that

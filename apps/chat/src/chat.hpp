@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -75,6 +76,12 @@ struct Limits {
     // when it comes directly: through the proxy a carrier-grade NAT puts hundreds of users on one
     // address, and once a token is verified the user's own cap governs.
     std::size_t max_connections_per_ip = 20;
+    // The direct peers' open connections from one IPv6 /48 together (http::client_block): a
+    // provider may delegate a /56 or a /48 to one customer, each /64 of which
+    // max_connections_per_ip counts afresh, and a /56's 256 of them at 20 each are more than the
+    // node's 1280. 80, four /64s' worth, unless ULW_MAX_CONNECTIONS_PER_IP_BLOCK says otherwise;
+    // chat_server makes it four times its max_connections_per_ip when that is set and this is not.
+    std::size_t max_connections_per_ip_block = 80;
     // New connections a second per direct peer, 10 saved: each is a handshake, a token check
     // and a parser; a client that reconnects in a loop is slowed, not the node.
     std::uint32_t new_connections_per_ip_per_second = 10;
@@ -128,9 +135,11 @@ struct Counters {
     // Sockets closed with kTokenExpired because the token they were opened with ran out.
     std::uint64_t token_expiries = 0;
     std::uint64_t allocation_failures = 0;
-    // Reset at accept: the peer's address had max_connections_per_ip open, or opened
-    // new_connections_per_ip_per_second too many.
+    // Reset at accept: the peer's address had max_connections_per_ip open, its IPv6 /48
+    // max_connections_per_ip_block, or the address opened new_connections_per_ip_per_second too
+    // many.
     std::uint64_t rejected_ip_connections = 0;
+    std::uint64_t rejected_ip_block = 0;
     std::uint64_t rejected_ip_rate = 0;
     // Upgrades answered 429: a forwarded address with max_connections_per_ip unanswered, or a
     // user with max_sessions_per_user open.
@@ -190,6 +199,9 @@ public:
     ChatServer& operator=(ChatServer&&) = delete;
 
     void on_accept(os::UniqueFd conn) noexcept override;
+    // on_accept once the peer's address is read; public for a test to name a peer the loopback
+    // interface cannot be, such as an IPv6 address outside ::1.
+    void accept_from(os::UniqueFd conn, const net::IpAddress& peer) noexcept;
     void on_signal(net::Signal signal) noexcept override;
     // The drain deadline.
     void on_timeout() noexcept override;
@@ -223,11 +235,18 @@ public:
 
     // A slot counted against an address or a user, held until given back.
     using Hold = std::uint32_t;
+    // A direct peer's connection, counted from accept to close against its address and, for
+    // IPv6, against the /48 the address lies in.
+    struct PeerHold {
+        Hold address = 0;
+        std::optional<Hold> block;
+    };
     [[nodiscard]] bool trusted_proxy(const net::IpAddress& peer) const noexcept;
     // Counts one more connection against a forwarded client's address; nullopt when it has
     // max_connections_per_ip already.
     [[nodiscard]] std::optional<Hold> hold_client(const net::IpAddress& client) noexcept;
     void release_client(Hold hold) noexcept;
+    void release_peer(PeerHold hold) noexcept;
     // Counts one more open socket against the user; nullopt at max_sessions_per_user.
     [[nodiscard]] std::optional<Hold> hold_user(const core::UserId& user) noexcept;
     void release_user(Hold hold) noexcept;
@@ -237,9 +256,10 @@ private:
         TokenBucket new_connections;
     };
     struct UserEntry {};
+    struct BlockEntry {};
 
-    // A direct peer's connection: its address's count and its rate, at accept.
-    [[nodiscard]] std::optional<Hold> admit_peer(const net::IpAddress& peer) noexcept;
+    // A direct peer's connection: its address's count, its /48's and its rate, at accept.
+    [[nodiscard]] std::optional<PeerHold> admit_peer(const net::IpAddress& peer) noexcept;
 
     Deps deps_;
     Access access_;
@@ -251,6 +271,7 @@ private:
     Presence presence_;
     http::BoundedTable<net::IpAddress, ClientEntry, http::AddressHash> clients_;
     http::BoundedTable<core::UserId, UserEntry, http::ViewHash> users_;
+    http::BoundedTable<net::IpAddress, BlockEntry, http::AddressHash> blocks_;
     net::Slab<Session> sessions_;
     bool draining_ = false;
     bool released_ = false;

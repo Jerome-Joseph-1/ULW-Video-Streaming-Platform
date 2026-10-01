@@ -18,6 +18,8 @@ namespace chat {
 // ADR-0076's per-client limits, each unset meaning the service's default (chat::Limits).
 struct ClientLimits {
     std::optional<std::size_t> max_connections_per_ip;
+    // Unset: four times the per-address cap.
+    std::optional<std::size_t> max_connections_per_ip_block;
     std::optional<std::uint32_t> new_connections_per_ip_per_second;
     std::optional<std::size_t> max_sessions_per_user;
     // ULW_TRUSTED_PROXIES and ULW_TRUSTED_PROXY_HOPS, as the gateway's.
