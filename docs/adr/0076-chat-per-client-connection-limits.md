@@ -77,6 +77,8 @@ the node. The gateway had the same exposure and closed it with per-address and p
   customer, however many /64s it is delegated, holds at most a /48's 80 sockets.
 - Clients reaching chat directly behind one NAT share its 20 sockets. Through Envoy they share
   only the handshakes in flight.
+- Clients behind the trusted proxy get no new-connections-per-second limit here, since every
+  connection is the proxy's; Envoy is expected to rate-limit their new connections.
 - Unrelated customers whose provider puts them in one /48 share its 80 direct sockets; a
   provider that delegates /64s from a shared /48 to many sites makes them one client here.
   `ULW_MAX_CONNECTIONS_PER_IP_BLOCK` raises the share where that matters.
