@@ -26,6 +26,7 @@ Upgrade refusals (the connection is closed after the response, and the body is e
 | `426` with `Upgrade: websocket` | `GET /rt` that is not an upgrade, or a WebSocket version other than 13 |
 | `401` | No usable token, or the token fails verification |
 | `403` | Cookie token without an allowed `Origin` |
+| `429` with `Retry-After` | Behind a trusted proxy, the forwarded address already has `ULW_MAX_CONNECTIONS_PER_IP` (20) upgrades waiting for an answer (`Retry-After: 1`); or the user already has `ULW_MAX_SESSIONS_PER_USER` (16) sockets open on this node (`Retry-After: 5`). Retry after that long, or close a socket you no longer use |
 | `404` | Any path other than `/rt`, `/healthz`, `/readyz`, `/metrics`, or any method other than `GET` |
 | `503` | The key set cannot be fetched; retry |
 
@@ -189,6 +190,8 @@ list never said no: join again.
 | Message size | 64 KiB per message (after reassembly) | Close `1009` |
 | Binary frames | Not accepted | Close `1003` |
 | Control frames | 8 per read; token bucket of 20, refilling 10/s | Close `1008` |
+| Connections per address | 20 open at once from one address (IPv6: one /64) connecting directly, and 80 from all the /64s of one IPv6 /48 together; 10 new ones a second, 10 saved | Connection reset before the upgrade is read; back off and reconnect |
+| Sockets per user | 16 open at once on a node | Upgrade answered `429`, `Retry-After: 5` |
 | Rooms per connection | 64 | `error` `too_many_rooms` |
 | New-room joins per user | Burst 64, then 1/s, across all the user's connections on a node | `error` `busy` |
 | Sends | Burst 10, then 2/s, per user across the user's connections on a node | `error` `rate_limited` with `retry_after_ms` |

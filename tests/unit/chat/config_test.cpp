@@ -187,6 +187,69 @@ TEST_F(ChatConfigTest, ADevelopmentKeySetIsRefusedOutsideDevelopmentModeAndInAny
     EXPECT_TRUE(load());
 }
 
+TEST_F(ChatConfigTest, PerClientLimitsAreTheServicesUnlessSetAndProxiesAreCidrBlocks) {
+    const auto defaults = load();
+    ASSERT_TRUE(defaults);
+    EXPECT_FALSE(defaults->client_limits.max_connections_per_ip);
+    EXPECT_FALSE(defaults->client_limits.max_connections_per_ip_block);
+    EXPECT_FALSE(defaults->client_limits.new_connections_per_ip_per_second);
+    EXPECT_FALSE(defaults->client_limits.max_sessions_per_user);
+    EXPECT_TRUE(defaults->client_limits.trusted_proxies.empty());
+    EXPECT_EQ(defaults->client_limits.trusted_proxy_hops, 1U);
+    env["ULW_MAX_CONNECTIONS_PER_IP"] = "40";
+    env["ULW_MAX_CONNECTIONS_PER_IP_BLOCK"] = "200";
+    env["ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND"] = "5";
+    env["ULW_MAX_SESSIONS_PER_USER"] = "8";
+    env["ULW_TRUSTED_PROXIES"] = "10.42.0.0/16, 10.43.0.0/16";
+    env["ULW_TRUSTED_PROXY_HOPS"] = "2";
+    const auto set = load();
+    ASSERT_TRUE(set) << set.error().variable;
+    EXPECT_EQ(set->client_limits.max_connections_per_ip, 40U);
+    EXPECT_EQ(set->client_limits.max_connections_per_ip_block, 200U);
+    EXPECT_EQ(set->client_limits.new_connections_per_ip_per_second, 5U);
+    EXPECT_EQ(set->client_limits.max_sessions_per_user, 8U);
+    EXPECT_EQ(set->client_limits.trusted_proxies.size(), 2U);
+    EXPECT_EQ(set->client_limits.trusted_proxy_hops, 2U);
+    for (const auto& [name, bad] : std::vector<std::pair<std::string, std::string>>{
+             {"ULW_MAX_CONNECTIONS_PER_IP", "0"},
+             {"ULW_MAX_CONNECTIONS_PER_IP", "1281"},
+             {"ULW_MAX_CONNECTIONS_PER_IP_BLOCK", "0"},
+             {"ULW_MAX_CONNECTIONS_PER_IP_BLOCK", "1281"},
+             {"ULW_MAX_CONNECTIONS_PER_IP_BLOCK", "eighty"},
+             {"ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND", "0"},
+             {"ULW_MAX_SESSIONS_PER_USER", "1281"},
+             {"ULW_TRUSTED_PROXIES", "0.0.0.0/0"},
+             {"ULW_TRUSTED_PROXIES", "10.42.0.1/16"},
+             {"ULW_TRUSTED_PROXY_HOPS", "0"}}) {
+        auto changed = env;
+        env[name] = bad;
+        EXPECT_EQ(refused_variable(), name) << bad;
+        env = changed;
+    }
+}
+
+// As the gateway's: a hop count means nothing without the proxies it counts, and would
+// otherwise be taken as set while every peer's own address is used.
+TEST_F(ChatConfigTest, AProxyHopCountWithoutTrustedProxiesIsRefused) {
+    env["ULW_TRUSTED_PROXY_HOPS"] = "2";
+    EXPECT_EQ(refused_variable(), "ULW_TRUSTED_PROXY_HOPS");
+    env["ULW_TRUSTED_PROXIES"] = "10.42.0.0/16";
+    EXPECT_TRUE(load());
+}
+
+// As the gateway's: a block wider than an IPv4 /8 or an IPv6 /32 is rarely one's own proxies,
+// and lets many peers name any client, so it is started with but warned about.
+TEST_F(ChatConfigTest, ATrustedProxyBlockWiderThanASlash8OrASlash32IsWarnedAbout) {
+    env["ULW_TRUSTED_PROXIES"] = "10.0.0.0/8, 10.42.0.0/16, 2001:db8::/32";
+    const auto narrow = load();
+    ASSERT_TRUE(narrow);
+    EXPECT_TRUE(chat::wide_trusted_proxies(narrow->client_limits).empty());
+    env["ULW_TRUSTED_PROXIES"] = "10.0.0.0/7, 10.42.0.0/16, 2001:db8::/31";
+    const auto wide = load();
+    ASSERT_TRUE(wide);
+    EXPECT_EQ(chat::wide_trusted_proxies(wide->client_limits), (std::vector<unsigned>{7, 31}));
+}
+
 TEST_F(ChatConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
     env["ULW_ALLOWED_ORIGINS"] = "https://app.askedin.com,http://localhost:5173";
     const auto config = load();

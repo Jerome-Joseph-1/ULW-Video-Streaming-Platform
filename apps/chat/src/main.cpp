@@ -20,6 +20,7 @@
 #include "ops/process.hpp"
 #include "ops/root.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -183,6 +184,11 @@ int run() {
     } else if (*step == ops::RootStep::Dropped) {
         chat::log_event(R"("level":"info","msg":"dropped root","user":"{}")", config->run_as_user);
     }
+    for (const unsigned prefix : chat::wide_trusted_proxies(config->client_limits)) {
+        chat::log_event(R"("level":"warn","msg":"a trusted proxy block this wide lets many peers )"
+                        R"(name any client","prefix_length":{})",
+                        prefix);
+    }
 
     Services s;
     auto choice = net::make_reactor_with_fallback(config->reactor, s.clock, limits->soft);
@@ -226,13 +232,30 @@ int run() {
     if (const std::optional<core::Millis> grace = config->presence_grace) {
         chat_limits.presence.grace = *grace;
     }
+    const chat::ClientLimits& per_client = config->client_limits;
+    chat_limits.max_connections_per_ip =
+        per_client.max_connections_per_ip.value_or(chat_limits.max_connections_per_ip);
+    // Four /64s' worth, whatever the per-address cap was set to, and never past the node's own
+    // cap, the most the variable may be set to (ADR-0076).
+    constexpr std::size_t kSlash64sPerBlock = 4;
+    chat_limits.max_connections_per_ip_block =
+        per_client.max_connections_per_ip_block.value_or(std::min(
+            kSlash64sPerBlock * chat_limits.max_connections_per_ip, chat_limits.max_connections));
+    chat_limits.new_connections_per_ip_per_second =
+        per_client.new_connections_per_ip_per_second.value_or(
+            chat_limits.new_connections_per_ip_per_second);
+    chat_limits.max_sessions_per_user =
+        per_client.max_sessions_per_user.value_or(chat_limits.max_sessions_per_user);
+    chat_limits.trusted_proxies = per_client.trusted_proxies;
+    chat_limits.trusted_proxy_hops = per_client.trusted_proxy_hops;
     s.server = std::make_unique<chat::ChatServer>(
         chat::Deps{.node = config->node,
                    .reactor = *s.reactor,
                    .router = *s.router,
                    .messages = *s.messages,
                    .verifier = *s.verifier,
-                   .clock = s.clock},
+                   .clock = s.clock,
+                   .random = s.random},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},
         chat_limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.server);

@@ -6,6 +6,7 @@
 #include "core/ports/auth.hpp"
 #include "http/request.hpp"
 #include "http/request_parser.hpp"
+#include "net/ip_address.hpp"
 #include "net/reactor.hpp"
 #include "net/slab.hpp"
 #include "net/socket.hpp"
@@ -52,7 +53,10 @@ public:
     Session(Session&&) = delete;
     Session& operator=(Session&&) = delete;
 
-    void start(net::ConnId conn) noexcept;
+    // `hold` counts a direct peer's connection against its address (and IPv6 /48) until the
+    // session closes.
+    void start(net::ConnId conn, const net::IpAddress& peer,
+               std::optional<ChatServer::PeerHold> hold) noexcept;
     [[nodiscard]] net::ConnId conn() const noexcept { return conn_; }
 
     void on_data(net::BorrowedBytes bytes) noexcept override;
@@ -88,8 +92,10 @@ private:
     void parse_failed(const http::ParseError& error);
     void answer_request();
     void respond(std::string_view bytes);
+    void refuse_for_now();
     void accept_upgrade(const codec::ws::UpgradeResponse& response);
     void leave_http();
+    void release_request_hold() noexcept;
 
     void read_frames(net::BorrowedBytes bytes);
     [[nodiscard]] bool within_control_budget(std::size_t in_this_read) noexcept;
@@ -134,6 +140,14 @@ private:
     bool request_complete_ = false;
     bool paused_ = false;
     std::optional<core::UserId> user_;
+    net::IpAddress peer_;
+    // ADR-0076: the direct peer's connection, for the socket's life; a forwarded client's
+    // upgrade, until it is answered; and the user's open socket, from the upgrade on.
+    std::optional<ChatServer::PeerHold> peer_hold_;
+    std::optional<ChatServer::Hold> request_hold_;
+    std::optional<ChatServer::Hold> user_hold_;
+    // Seconds to put in a 429's Retry-After.
+    std::chrono::seconds retry_after_{1};
     // When the token the socket was opened with stops being accepted: its exp plus the clock
     // skew any check allows. The socket is closed then, with kTokenExpired (ADR-0073).
     std::optional<core::MonoTime> expires_;

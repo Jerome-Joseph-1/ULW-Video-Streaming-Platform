@@ -1,5 +1,6 @@
-// The gateway over the S3 store and a live MinIO, with the store's connections made few, so that
-// uploads queue behind them as they queue behind the 64 of production under load.
+// The gateway over the S3 store and a live MinIO, with the store's connections made fewer than the
+// uploads it admits, so that uploads wait for one. Production caps the store at its upload slots
+// and never waits there (ADR-0045); this holds the gateway to its timers if a store ever does.
 #include "core/util/json.hpp"
 
 #include "gateway_harness.hpp"

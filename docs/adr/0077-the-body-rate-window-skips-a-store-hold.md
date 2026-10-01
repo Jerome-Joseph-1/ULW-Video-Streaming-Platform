@@ -1,4 +1,4 @@
-# 0076. The body rate window skips a store's hold and keeps the bytes it counted
+# 0077. The body rate window skips a store's hold and keeps the bytes it counted
 
 Status: Accepted
 Date: 2026-10-01

@@ -44,8 +44,11 @@ core::MonoTime Session::now() const noexcept {
     return server_.deps().reactor.now();
 }
 
-void Session::start(net::ConnId conn) noexcept {
+void Session::start(net::ConnId conn, const net::IpAddress& peer,
+                    std::optional<ChatServer::PeerHold> hold) noexcept {
     conn_ = conn;
+    peer_ = peer;
+    peer_hold_ = hold;
     last_heard_ = control_refilled_ = now();
     arm(server_.limits().handshake_timeout);
     server_.deps().reactor.start_receiving(conn_);
@@ -121,6 +124,18 @@ void Session::route(const http::RequestHead& head) noexcept {
     upgrade_ = codec::ws::accept_handshake(head);
     if (!*upgrade_) {
         return;
+    }
+    // Behind a trusted proxy the client is the one it names, held to its address's limit until
+    // this upgrade is answered, as the gateway holds a request until it is authenticated
+    // (ADR-0052): after that the user's own cap governs.
+    if (!peer_hold_ && server_.trusted_proxy(peer_)) {
+        request_hold_ = server_.hold_client(
+            http::forwarded_client(peer_, head.headers, server_.limits().trusted_proxy_hops));
+        if (!request_hold_) {
+            refusal_ = http::Status::TooManyRequests;
+            retry_after_ = std::chrono::seconds{1};
+            return;
+        }
     }
     const Access& access = server_.access();
     infra::auth::TokenExtractor extractor(access.cookie);
@@ -252,7 +267,16 @@ void Session::on_message_complete() noexcept {
     }
 }
 
+void Session::release_request_hold() noexcept {
+    if (request_hold_) {
+        server_.release_client(*request_hold_);
+        request_hold_.reset();
+    }
+}
+
 void Session::answer_request() {
+    // Answered either way from here: the forwarded address's count is for upgrades in flight.
+    release_request_hold();
     switch (route_) {
     case Route::Healthz:
         respond(http::fixed_response(http::Status::Ok, http::Connection::Close));
@@ -291,12 +315,26 @@ void Session::answer_request() {
         respond(codec::ws::rejection_response(error));
         return;
     }
+    if (refusal_ == http::Status::TooManyRequests) {
+        refuse_for_now();
+        return;
+    }
     if (refusal_) {
         respond(http::fixed_response(*refusal_, http::Connection::Close));
         return;
     }
     switch (auth_) {
     case Auth::Passed:
+        // Checked here, not at the token: a socket counts once it is open.
+        if (user_ && !user_hold_) {
+            user_hold_ = server_.hold_user(*user_);
+            if (!user_hold_) {
+                // A socket of the user's closing frees a place; a few seconds is enough.
+                retry_after_ = std::chrono::seconds{5};
+                refuse_for_now();
+                return;
+            }
+        }
         accept_upgrade(**upgrade_);
         return;
     case Auth::KeysDown:
@@ -308,6 +346,21 @@ void Session::answer_request() {
         respond(http::fixed_response(http::Status::Unauthorized, http::Connection::Close));
         return;
     }
+}
+
+// 429 with Retry-After: a per-client limit (ADR-0076), for the client to come back later.
+void Session::refuse_for_now() {
+    std::array<char, 256> head{};
+    const auto written = http::write_response_head({.status = http::Status::TooManyRequests,
+                                                    .content_length = 0,
+                                                    .connection = http::Connection::Close,
+                                                    .retry_after = retry_after_},
+                                                   head);
+    if (!written) {
+        respond(http::fixed_response(http::Status::TooManyRequests, http::Connection::Close));
+        return;
+    }
+    respond({head.data(), *written});
 }
 
 // The response, then FIN; the connection closes once the client has closed its side.
@@ -715,6 +768,15 @@ void Session::close() noexcept {
     }
     if (presence_) {
         server_.presence().detach(*presence_);
+    }
+    release_request_hold();
+    if (peer_hold_) {
+        server_.release_peer(*peer_hold_);
+        peer_hold_.reset();
+    }
+    if (user_hold_) {
+        server_.release_user(*user_hold_);
+        user_hold_.reset();
     }
     reactor.begin_close(conn_);
     server_.retire(handle_);
