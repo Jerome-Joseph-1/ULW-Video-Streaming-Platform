@@ -27,6 +27,18 @@ three runs here predate the column, so for them `--rejudge` reports the per-chun
 judged, and a leak on each chunk shows only through the per-session line, since every chunk
 belongs to a session.
 
+## On a hosted runner
+
+`.github/workflows/soak-experiment.yml` runs either soak, or both on two runners, on GitHub's
+hosted runners at any ref, for experiments on memory that should not hold a shared host for
+hours. Dispatch it from the Actions tab, or with
+`gh workflow run soak-experiment.yml --ref <branch> -f kind=chat -f hours=1.5`; `kind` is
+`chat`, `gateway` or `both`, `hours` at most 5.5, and `clients` empty for the scripts' own (64
+and 8). It builds the `ci` preset at that ref, runs against the Postgres and MinIO of
+`deploy/local/compose.yaml`, and uploads `samples.csv`, the summary and the logs as an artifact
+whatever the verdict, for `--rejudge` or a closer look. A hosted job ends at 6 h, build included,
+so the 6 h acceptance soak still runs on a host.
+
 ## Runs
 
 The first two runs used the load and criterion of the soak's first version: four clients on
