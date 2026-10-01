@@ -20,6 +20,11 @@
 #include "support/ws_client.hpp"
 #include "unit/rt/memory_room_store.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <format>
@@ -29,6 +34,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <poll.h>
 #include <span>
 #include <string>
 #include <thread>
@@ -251,6 +257,49 @@ private:
     std::uint16_t port_ = 0;
     std::jthread thread_;
 };
+
+// An upgrade request on a connection the test keeps open, and the head of the answer.
+struct Asked {
+    os::UniqueFd conn;
+    std::string head;
+};
+
+Asked ask_upgrade(std::uint16_t port, const std::string& headers) {
+    Asked out{.conn = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)}, .head = {}};
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (!out.conn) {
+        return out;
+    }
+    // connect() takes every address family through the generic sockaddr header.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    if (::connect(out.conn.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+        return out;
+    }
+    const std::string request = "GET /rt HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n"
+                                "Connection: Upgrade\r\n"
+                                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                "Sec-WebSocket-Version: 13\r\n" +
+                                headers + "\r\n";
+    if (::send(out.conn.get(), request.data(), request.size(), MSG_NOSIGNAL) !=
+        static_cast<ssize_t>(request.size())) {
+        return out;
+    }
+    std::string in;
+    std::array<char, 4096> buf{};
+    pollfd pfd{.fd = out.conn.get(), .events = POLLIN, .revents = 0};
+    while (in.find("\r\n\r\n") == std::string::npos && ::poll(&pfd, 1, 10'000) > 0) {
+        const ssize_t n = ::recv(out.conn.get(), buf.data(), buf.size(), 0);
+        if (n <= 0) {
+            break;
+        }
+        in.append(buf.data(), static_cast<std::size_t>(n));
+    }
+    out.head = in.substr(0, in.find("\r\n\r\n"));
+    return out;
+}
 
 class ChatSessionTest : public ::testing::TestWithParam<net::ReactorKind> {
 protected:
@@ -909,9 +958,26 @@ TEST_P(ChatSessionTest, ADirectPeerHoldsAtMostItsAddressesConnections) {
     }
     // Reset at accept: no status line, and no token looked at.
     EXPECT_EQ(refusal("Authorization: Bearer user.dave\r\n"), "");
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 1U);
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_rate"})"), 0U);
     // Closing one gives its place back.
     open_ones.pop_back();
     EXPECT_TRUE(ulw::test::eventually([&] { return open_as("dave").has_value(); }));
+}
+
+// X-Forwarded-For is believed from a trusted proxy only: a direct peer that sends one is still
+// counted as its own address, or it could name a fresh one for every connection.
+TEST_P(ChatSessionTest, ADirectPeerIsCountedAsItsOwnAddressWhateverItsXForwardedForSays) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 2;
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    auto first = open("X-Forwarded-For: 203.0.113.1\r\nAuthorization: Bearer user.alice\r\n");
+    auto second = open("X-Forwarded-For: 203.0.113.2\r\nAuthorization: Bearer user.bob\r\n");
+    ASSERT_TRUE(first && second);
+    EXPECT_EQ(refusal("X-Forwarded-For: 203.0.113.3\r\nAuthorization: Bearer user.carol\r\n"), "");
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 1U);
+    EXPECT_EQ(counter(R"(upgrades_limited_total{limit="ip"})"), 0U);
 }
 
 // A customer handed a /56 or a /48 has hundreds of /64s, each of which max_connections_per_ip
@@ -959,6 +1025,8 @@ TEST_P(ChatSessionTest, ADirectPeerOpensAtMostItsNewConnectionsASecond) {
     node_->advance(core::Millis{500});
     EXPECT_TRUE(open_as("carol"));
     EXPECT_EQ(refusal("Authorization: Bearer user.dave\r\n"), "");
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_rate"})"), 2U);
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 0U);
 }
 
 // One valid token must not take the node's every socket.
@@ -970,9 +1038,54 @@ TEST_P(ChatSessionTest, AUserHoldsAtMostItsSessionsAndIsToldWhenToComeBack) {
     auto first = open_as("alice");
     auto second = open_as("alice");
     ASSERT_TRUE(first && second);
-    EXPECT_EQ(refusal("Authorization: Bearer user.alice\r\n"), "HTTP/1.1 429 Too Many Requests");
+    // A socket of the user's closing frees a place; a few seconds is enough.
+    const auto third = ask_upgrade(node_->port(), "Authorization: Bearer user.alice\r\n");
+    EXPECT_TRUE(third.head.starts_with("HTTP/1.1 429 Too Many Requests\r\n")) << third.head;
+    EXPECT_NE(third.head.find("\r\nRetry-After: 5"), std::string::npos) << third.head;
     // Another user is not held to alice's count.
     EXPECT_TRUE(open_as("bob"));
+    EXPECT_EQ(counter(R"(upgrades_limited_total{limit="user_sessions"})"), 1U);
+    EXPECT_EQ(counter(R"(rate_limit_entries{table="user"})"), 2U);
+    first.reset();
+    EXPECT_TRUE(ulw::test::eventually([&] { return open_as("alice").has_value(); }));
+}
+
+// A socket closed because its token ran out (4001) gives its user's place back, so the client
+// that reconnects with a fresh token, as the code tells it to, is not refused for its own
+// expired socket.
+TEST_P(ChatSessionTest, ASocketClosedForAnExpiredTokenGivesItsUsersPlaceBack) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                // Time stands still: the reconnects below
+                                                // would otherwise run the bucket dry.
+                                                .new_connections_per_ip_per_second = 1'000,
+                                                .max_sessions_per_user = 2,
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto first = open_as("alice");
+    ASSERT_TRUE(first);
+    node_->advance(std::chrono::minutes(30));
+    auto second = open_as("alice");
+    ASSERT_TRUE(second);
+    EXPECT_EQ(refusal("Authorization: Bearer user.alice\r\n"), "HTTP/1.1 429 Too Many Requests");
+    // The first token expires an hour after it was checked (FakeVerifier), plus the clock skew;
+    // the second half an hour later.
+    node_->advance(std::chrono::minutes(30) + core::ports::kTokenClockSkew);
+    std::optional<std::string> close;
+    while (const auto frame = first->next_frame(seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Close) {
+            close = frame->second;
+            break;
+        }
+    }
+    ASSERT_TRUE(close) << "still open after its token expired";
+    ASSERT_GE(close->size(), 2U);
+    EXPECT_EQ((static_cast<unsigned char>((*close)[0]) << 8U) |
+                  static_cast<unsigned char>((*close)[1]),
+              4001U);
     first.reset();
     EXPECT_TRUE(ulw::test::eventually([&] { return open_as("alice").has_value(); }));
 }
@@ -993,8 +1106,11 @@ TEST_P(ChatSessionTest, BehindATrustedProxyTheForwardedAddressIsHeldOnlyUntilIts
     auto second = std::async(std::launch::async,
                              [&] { return open(from_a + "Authorization: Bearer slow.bob\r\n"); });
     ASSERT_TRUE(ulw::test::eventually([&] { return node_->key_waiters == 2; }));
-    EXPECT_EQ(refusal(from_a + "Authorization: Bearer user.carol\r\n"),
-              "HTTP/1.1 429 Too Many Requests");
+    // Told to come back as soon as an upgrade in flight is likely answered.
+    const auto third = ask_upgrade(node_->port(), from_a + "Authorization: Bearer user.carol\r\n");
+    EXPECT_TRUE(third.head.starts_with("HTTP/1.1 429 Too Many Requests\r\n")) << third.head;
+    EXPECT_NE(third.head.find("\r\nRetry-After: 1"), std::string::npos) << third.head;
+    EXPECT_EQ(counter(R"(upgrades_limited_total{limit="ip"})"), 1U);
     // Another address, through the same proxy, is not.
     EXPECT_TRUE(open("X-Forwarded-For: 198.51.100.9\r\nAuthorization: Bearer user.carol\r\n"));
     node_->refresh_keys = true;
@@ -1005,6 +1121,33 @@ TEST_P(ChatSessionTest, BehindATrustedProxyTheForwardedAddressIsHeldOnlyUntilIts
     auto carol = open(from_a + "Authorization: Bearer user.carol\r\n");
     auto dave = open(from_a + "Authorization: Bearer user.dave\r\n");
     EXPECT_TRUE(carol && dave);
+    // The direct peer, the proxy, was never counted as a client.
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 0U);
+}
+
+// An upgrade refused for its token or its origin is answered, and so gives its forwarded
+// address's place back at once, though the client keeps the connection open.
+TEST_P(ChatSessionTest, BehindATrustedProxyAnUpgradeAnswered401Or403GivesItsAddressPlaceBack) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 1;
+    limits.trusted_proxies = {*net::IpNetwork::parse("127.0.0.0/8")};
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    const std::string from_a = "X-Forwarded-For: 203.0.113.7\r\n";
+    std::vector<Asked> refused;
+    for (const auto& [headers, status] : std::vector<std::pair<std::string, std::string>>{
+             {from_a, "HTTP/1.1 401 Unauthorized"},
+             {from_a + "Authorization: Bearer forged\r\n", "HTTP/1.1 401 Unauthorized"},
+             {from_a + "Cookie: auth_token=user.alice\r\n", "HTTP/1.1 403 Forbidden"},
+             {from_a + "Cookie: auth_token=user.alice\r\nOrigin: https://evil.test\r\n",
+              "HTTP/1.1 403 Forbidden"}}) {
+        refused.push_back(ask_upgrade(node_->port(), headers));
+        EXPECT_TRUE(refused.back().head.starts_with(status + "\r\n")) << refused.back().head;
+    }
+    // Every refused connection still open: an address held until its connections close would
+    // have been answered 429 from the second on, and would be now.
+    EXPECT_TRUE(open(from_a + "Authorization: Bearer user.alice\r\n"));
+    EXPECT_EQ(counter(R"(upgrades_limited_total{limit="ip"})"), 0U);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,
