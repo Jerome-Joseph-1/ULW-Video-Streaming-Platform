@@ -131,7 +131,10 @@ jobs:
           if [[ -n $CLIENTS ]]; then
             args+=(--clients "$CLIENTS")
           fi
-          "$SCRIPT" "${args[@]}"
+          # As root, as the soaks run on a host: the services make themselves undumpable
+          # (ops::disable_core_dumps), which leaves their /proc/<pid>/fd, sampled every minute,
+          # to root alone, and the scripts start them with ULW_ALLOW_ROOT for that reason.
+          sudo --preserve-env=ULW_TEST_DATABASE_URL "$SCRIPT" "${args[@]}"
       - name: Summary
         if: ${{ !cancelled() }}
         env:
