@@ -154,7 +154,7 @@ expires: a repeated commit and `HEAD` answer as before.
 | Request target | 8 KiB | `400`, connection closed |
 | Header fields | 16 KiB in all, at most 100 | `431`, connection closed |
 | Body idle | Nothing received for 30 s | `408`, connection closed |
-| Body rate | Under 8 KiB/s averaged over a 30 s window | `408`, connection closed |
+| Body rate | Under 8 KiB/s averaged over a 30 s window of reading; time the gateway stops reading while the store catches up does not count | `408`, connection closed |
 | Store stalled | The store accepted nothing for 30 s | `503`, `Retry-After: 5` |
 | Request lifetime | 6 h | Connection closed |
 | Keep-alive | Idle connection closed after 10 s; at most 1000 requests per connection | Reconnect |

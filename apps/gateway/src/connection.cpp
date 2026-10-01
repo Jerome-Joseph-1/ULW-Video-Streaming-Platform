@@ -235,6 +235,9 @@ void Connection::on_parse(http::ParseResult result) noexcept {
         }
         break;
     case http::ParseProgress::Paused:
+        if (!parser_paused_) {
+            parser_paused_at_ = now();
+        }
         parser_paused_ = true;
         if (receiving_) {
             receiving_ = false;
@@ -709,8 +712,11 @@ void Connection::drain_staging() noexcept {
     end_stall();
     if (parser_paused_ && !req_.message_complete) {
         parser_paused_ = false;
-        // The time the store held the body up is not the client's to answer for.
-        restart_rate_window();
+        // The time the store held the body up is not the client's to answer for, but the
+        // bytes the client sent before it are: the window skips the hold and keeps them.
+        // Restarting it here instead dropped them, and a client that sent fast, was held for
+        // a moment, then slowed to a legal rate was judged on its slow part alone.
+        rate_window_start_ += now() - parser_paused_at_;
         on_parse(parser_.resume());
     }
 }
@@ -1670,8 +1676,8 @@ void Connection::on_timeout() noexcept {
             return;
         }
         core::Millis next = limits.body_idle_timeout - idle;
-        // While the parser is paused the store is what holds the body up, and reading
-        // restarts the window when it resumes.
+        // While the parser is paused the store is what holds the body up, and the window
+        // skips that time when reading resumes.
         if (req_.route == RouteId::AppendChunk && !parser_paused_) {
             const auto window_left = check_body_rate(t);
             if (!window_left) {
