@@ -118,9 +118,12 @@ public:
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override {
         done(std::vector<core::UserId>{});
     }
+    using core::ports::IMessageStore::admits;
     void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
+                core::ports::Recording recording,
                 core::ports::MessageCallback<core::ports::Admission> done) override {
         kinds.push_back(asked);
+        recordings.push_back(recording);
         asked_rooms.push_back(room);
         auto answer = core::ports::Admission::Admitted;
         if (std::ranges::find(refused, user.view()) != refused.end()) {
@@ -158,6 +161,7 @@ public:
     // Whether every room is recorded as live; otherwise a join that asks for live is NotLive.
     bool live = true;
     std::vector<core::ports::RoomKind> kinds;
+    std::vector<core::ports::Recording> recordings;
     std::vector<core::RoomId> asked_rooms;
     bool hold = false;
     std::vector<
@@ -324,6 +328,48 @@ TEST_F(ChatServiceTest, AJoinOfARoomThatDoesNotAdmitTheUserIsRefusedAndNeverReac
     send(m, "try");
     EXPECT_TRUE(rooms_.sends.empty());
     EXPECT_EQ(seen(mallory.take().at(0)).reason, "not_joined");
+}
+
+// Each refused join may have recorded a room that nobody uses (ADR-0054's kind record): past the
+// user's allowance a join is answered the same and records nothing, until the allowance refills.
+TEST_F(ChatServiceTest, RefusedJoinsRecordRoomsOnlyWithinTheUsersAllowance) {
+    messages_.refused = {"mallory"};
+    FakeClient mallory;
+    const auto m = attach(mallory, "mallory");
+    const chat::ServiceLimits limits;
+    const auto join_room = [&](std::uint32_t n) {
+        const std::string room = std::format("01a0eb86-6cca-7dce-84cc-{:012x}", n);
+        join(m, std::nullopt, chat::Delivery::Durable, room);
+        return seen(mallory.take().at(0)).reason;
+    };
+    std::uint32_t n = 0;
+    for (; n < limits.record_burst; ++n) {
+        EXPECT_EQ(join_room(n), "not_member");
+        // One a second: within the join limit, and so that joins are never what refuses them.
+        clock_.advance(std::chrono::seconds(1));
+    }
+    EXPECT_EQ(std::ranges::count(messages_.recordings, core::ports::Recording::Allowed),
+              limits.record_burst);
+    // Answered as before, but nothing recorded.
+    EXPECT_EQ(join_room(n++), "not_member");
+    EXPECT_EQ(messages_.recordings.back(), core::ports::Recording::Skipped);
+    EXPECT_EQ(service_->counters().unrecorded_joins, 1U);
+    // One more a record_interval.
+    clock_.advance(limits.record_interval);
+    EXPECT_EQ(join_room(n++), "not_member");
+    EXPECT_EQ(messages_.recordings.back(), core::ports::Recording::Allowed);
+    EXPECT_EQ(join_room(n++), "not_member");
+    EXPECT_EQ(messages_.recordings.back(), core::ports::Recording::Skipped);
+
+    // Another user's joins, admitted, are never charged.
+    FakeClient alice;
+    const auto a = attach(alice);
+    for (std::uint32_t i = 0; i < limits.record_burst + 5; ++i) {
+        join(a, std::nullopt, chat::Delivery::Durable,
+             std::format("01a0eb86-6cca-7dce-84cd-{:012x}", i));
+        clock_.advance(std::chrono::seconds(1));
+    }
+    EXPECT_EQ(messages_.recordings.back(), core::ports::Recording::Allowed);
 }
 
 // Membership is checked at the join; a user taken off the list afterwards must stop hearing the

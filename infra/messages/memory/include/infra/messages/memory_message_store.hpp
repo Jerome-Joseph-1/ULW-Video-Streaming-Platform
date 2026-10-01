@@ -50,7 +50,9 @@ public:
                        core::ports::MessageCallback<void> done) override;
     void members(const core::RoomId& room, std::optional<core::UserId> after, std::size_t limit,
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override;
+    using core::ports::IMessageStore::admits;
     void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
+                core::ports::Recording recording,
                 core::ports::MessageCallback<core::ports::Admission> done) override;
     void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
     // Told of remove_member's removals only: nothing else changes this store's lists.
