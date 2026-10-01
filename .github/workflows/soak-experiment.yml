@@ -5,8 +5,9 @@ name: soak-experiment
 # processes' logs are uploaded whatever the verdict.
 #
 # Hosted jobs are cut off at 6 h, build included, so the 6 h acceptance soak (ADR-0042) cannot
-# run here; it still runs on a host. `hours` stops at 5.5, and near that the build has to come
-# from a warm ccache to fit.
+# run here; it still runs on a host. `hours` stops at 4.9, the most that leaves the job its 45
+# minutes for setup and the build under the 355 it is given. It starts at 0.5: the judges skip
+# the first 15 minutes and need ten samples after them.
 
 on:
   workflow_dispatch:
@@ -17,11 +18,11 @@ on:
         options: [chat, gateway, both]
         default: chat
       hours:
-        description: Hours of load, more than 0 and at most 5.5.
+        description: Hours of load, from 0.5 to 4.9.
         type: number
         default: 1.5
       clients:
-        description: Client threads; empty keeps the script's own (chat 64, gateway 8).
+        description: Client threads, 1 to 1024; empty keeps the script's own (chat 64, gateway 8).
         type: string
         default: ""
 
@@ -46,12 +47,13 @@ jobs:
           HOURS: ${{ inputs.hours }}
           CLIENTS: ${{ inputs.clients }}
         run: |
-          if ! awk -v h="$HOURS" 'BEGIN { exit !(h ~ /^[0-9]*\.?[0-9]+$/ && h > 0 && h <= 5.5) }'; then
-            echo "::error::hours must be a number more than 0 and at most 5.5, not '$HOURS'"
+          if ! awk -v h="$HOURS" 'BEGIN { exit !(h ~ /^[0-9]*\.?[0-9]+$/ && h >= 0.5 && h <= 4.9) }'; then
+            echo "::error::hours must be a number from 0.5 to 4.9, not '$HOURS'"
             exit 1
           fi
-          if [[ -n $CLIENTS && ! $CLIENTS =~ ^[1-9][0-9]{0,3}$ ]]; then
-            echo "::error::clients must be empty or a whole number from 1 to 9999, not '$CLIENTS'"
+          # The chat server takes 1,280 connections; more clients would measure refusals.
+          if [[ -n $CLIENTS && ! ( $CLIENTS =~ ^[1-9][0-9]{0,3}$ && $CLIENTS -le 1024 ) ]]; then
+            echo "::error::clients must be empty or a whole number from 1 to 1024, not '$CLIENTS'"
             exit 1
           fi
           chat='{"kind":"chat","script":"tests/soak/chat_soak.py","out":"soak-chat","targets":"chat_server ulw_migrate ulw_devtoken"}'
@@ -63,9 +65,10 @@ jobs:
             *) echo "::error::unknown kind '$KIND'"; exit 1 ;;
           esac
           # The soak itself: its hours, plus 15 minutes to start, stop its threads and judge.
-          # The job: those hours plus an hour for setup and the build, under the hosted 360.
+          # The job: that plus 45 minutes for setup and the build; at most 4.9 hours keeps it
+          # under 355, short of the hosted 360.
           soak=$(awk -v h="$HOURS" 'BEGIN { m = h * 60; printf "%d", (m == int(m) ? m : int(m) + 1) + 15 }')
-          job=$((soak + 45 > 355 ? 355 : soak + 45))
+          job=$((soak + 45))
           {
             echo "matrix={\"include\":$include}"
             echo "soak-minutes=$soak"
