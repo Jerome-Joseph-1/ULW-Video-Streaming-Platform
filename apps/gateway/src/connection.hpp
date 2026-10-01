@@ -246,9 +246,12 @@ private:
     core::MonoTime last_progress_;
     core::MonoTime request_started_;
     // The stretch of a chunk body over which the minimum rate is judged, and the client bytes
-    // it has brought. Restarted whenever reading resumes after the store held the body up.
+    // it has brought. When reading resumes after the store held the body up, the start moves
+    // on by the time held, so the window spans reading time only and keeps the bytes it has.
     core::MonoTime rate_window_start_;
     std::uint64_t rate_window_bytes_ = 0;
+    // When the parser last paused: the start of the store's hold, if the body resumes.
+    core::MonoTime parser_paused_at_;
     std::size_t requests_ = 0;
     // Numbers each request on this connection, so late completions can tell whose they are.
     std::uint64_t request_seq_ = 0;
