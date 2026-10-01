@@ -104,7 +104,7 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
     // Gone already, or not an IP socket: nothing to serve either way.
     const auto peer = net::peer_address(conn.get());
     if (!peer) {
-        ++counters_.connections_unaddressed;
+        ++counters_.rejected_socket;
         return;
     }
     // A trusted proxy carries many clients; they are told apart at their upgrade requests.
@@ -117,26 +117,28 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
             return;
         }
     }
-    const auto refuse = [&] {
-        ++counters_.connections_rejected;
+    // As the gateway's: a socket that refuses its options, or that the reactor will not take,
+    // is the socket's fault; a full slab is the node's.
+    const auto refuse = [&](std::uint64_t& counter) {
+        ++counter;
         if (hold) {
             release_client(*hold);
         }
     };
     if (!net::tune_connection(conn.get()) || !net::clear_user_timeout(conn.get()) ||
         !net::cap_send_buffer(conn.get(), limits_.socket_send_buffer)) {
-        refuse();
+        refuse(counters_.rejected_socket);
         return;
     }
     const auto handle = sessions_.emplace(*this);
     if (!handle) {
-        refuse();
+        refuse(counters_.rejected_capacity);
         return;
     }
     Session* s = sessions_.get(*handle);
     auto id = deps_.reactor.attach(std::move(conn), *s);
     if (!id) {
-        refuse();
+        refuse(counters_.rejected_socket);
         sessions_.retire(*handle);
         return;
     }
@@ -265,6 +267,7 @@ std::string ChatServer::render_metrics() const {
         "upgrades_limited_total{{limit=\"ip\"}} {}\n"
         "upgrades_limited_total{{limit=\"user_sessions\"}} {}\n"
         "rate_limit_entries{{table=\"client\"}} {}\n"
+        "rate_limit_entries{{table=\"user\"}} {}\n"
         "rate_limit_evictions_total{{table=\"client\"}} {}\n"
         "connections_current {}\n"
         "websocket_upgrades_total {}\n"
@@ -303,13 +306,13 @@ std::string ChatServer::render_metrics() const {
         "member_check_failures_total {}\n"
         "jwks_keys_expired {}\n"
         "unrecorded_joins_total {}\n",
-        c.connections_accepted, c.connections_rejected, c.connections_unaddressed,
-        c.rejected_ip_connections, c.rejected_ip_rate, c.limited_ip_upgrades,
-        c.limited_user_sessions, clients_.size(), clients_.evictions(), sessions_.size(),
-        c.upgrades, c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
-        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
-        chat.history_messages, chat_.buffered_bytes(), c.protocol_errors, c.control_floods,
-        c.slow_consumers, c.stalled_readers,
+        c.connections_accepted, c.rejected_capacity, c.rejected_socket, c.rejected_ip_connections,
+        c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions, clients_.size(),
+        users_.size(), clients_.evictions(), sessions_.size(), c.upgrades, c.auth_failures,
+        c.origin_rejections, c.messages_received, chat.delivered, chat.rate_limited,
+        router.duplicates, chat.lossy_drops, chat.replayed, chat.history_messages,
+        chat_.buffered_bytes(), c.protocol_errors, c.control_floods, c.slow_consumers,
+        c.stalled_readers,
         c.allocation_failures + router.allocation_failures + chat.allocation_failures +
             presence.allocation_failures,
         deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,

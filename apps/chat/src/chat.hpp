@@ -112,9 +112,11 @@ struct Deps {
 
 struct Counters {
     std::uint64_t connections_accepted = 0;
-    std::uint64_t connections_rejected = 0;
-    // Gone before it was served, or not an IP socket: its peer address could not be read.
-    std::uint64_t connections_unaddressed = 0;
+    // Closed at accept: max_connections sessions were open.
+    std::uint64_t rejected_capacity = 0;
+    // Closed at accept: its peer address could not be read (gone already, or not an IP socket),
+    // or the socket refused its options or the reactor would not take it.
+    std::uint64_t rejected_socket = 0;
     std::uint64_t upgrades = 0;
     std::uint64_t auth_failures = 0;
     std::uint64_t origin_rejections = 0;

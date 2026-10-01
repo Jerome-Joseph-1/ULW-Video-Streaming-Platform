@@ -256,12 +256,13 @@ touch. The worker exposes no metrics yet.
 
 Chat, on its client port (default 9101): `GET /healthz` (loop alive), `GET /readyz` (not
 draining, node address published, owner heartbeat reaching the database), `GET /metrics`, with
-`connections_accepted_total`, `connections_rejected_total{reason="capacity"}`,
-`connections_rejected_total{reason="socket"}` (closed at accept: its peer address could not be
-read, a socket already gone or not an IP one),
+`connections_accepted_total`, `connections_rejected_total{reason="capacity"}` (closed at accept:
+1280 sessions were open), `connections_rejected_total{reason="socket"}` (closed at accept, as the
+gateway counts it: the peer address could not be read, a socket already gone or not an IP one,
+or the socket refused its options or the reactor would not take it),
 `connections_rejected_total{reason="ip_connections"}` and `{reason="ip_rate"}` (direct peers
 reset at accept), `upgrades_limited_total{limit="ip"}` and `{limit="user_sessions"}` (upgrades
-answered `429`), `rate_limit_entries{table="client"}`,
+answered `429`), `rate_limit_entries{table="client"}` and `{table="user"}`,
 `rate_limit_evictions_total{table="client"}` (ADR-0076),
 `connections_current`, `websocket_upgrades_total`, `auth_failures_total`,
 `origin_rejections_total`, `messages_received_total`, `messages_delivered_total`,
