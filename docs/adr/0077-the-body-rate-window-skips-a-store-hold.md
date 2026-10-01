@@ -36,8 +36,9 @@ the 240 KiB due.
 
 - The connection records when its parser pauses. When the store takes the staged bytes and
   reading resumes, the rate window's start moves forward by the time since then; its byte count
-  stays. The window therefore spans only time the gateway spent reading, as `gateway.hpp`
-  states, and counts every byte the client sent in it.
+  stays. The same holds for the pause before the store session opens (a catalog lookup or a key
+  refresh), which the window skipped before too. The window therefore spans only time the
+  gateway spent reading, as `gateway.hpp` states, and counts every byte the client sent in it.
 - The idle timer still starts afresh on resume, as ADR-0045 has it: idleness is about the time
   since the last progress, which the store's taking bytes is.
 - This amends ADR-0045's "both start afresh" for the rate window only.
@@ -52,3 +53,9 @@ the 240 KiB due.
   each resume used to restart its window and put the check off for another 30 s.
 - The in-memory store gains `wake_writers()`, so a test can end a hold it began with
   `accept_zero`.
+- `GatewayStoreQueue` no longer assumes libcurl hands freed connections to waiting transfers in
+  the order they queued, which libcurl 8.5 does not promise. In production a part does not wait
+  for a store connection behind other parts, since the store is capped at `max_upload_slots`
+  connections, one per admitted upload. The same capped multi also carries the S3 store's other
+  requests (create and complete multipart, aborts, small reads), so a part can still wait briefly
+  behind one of those.
