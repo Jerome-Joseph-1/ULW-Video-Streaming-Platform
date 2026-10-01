@@ -20,6 +20,7 @@
 #include "ops/process.hpp"
 #include "ops/root.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -234,10 +235,12 @@ int run() {
     const chat::ClientLimits& per_client = config->client_limits;
     chat_limits.max_connections_per_ip =
         per_client.max_connections_per_ip.value_or(chat_limits.max_connections_per_ip);
-    // Four /64s' worth, whatever the per-address cap was set to (ADR-0076).
+    // Four /64s' worth, whatever the per-address cap was set to, and never past the node's own
+    // cap, the most the variable may be set to (ADR-0076).
     constexpr std::size_t kSlash64sPerBlock = 4;
-    chat_limits.max_connections_per_ip_block = per_client.max_connections_per_ip_block.value_or(
-        kSlash64sPerBlock * chat_limits.max_connections_per_ip);
+    chat_limits.max_connections_per_ip_block =
+        per_client.max_connections_per_ip_block.value_or(std::min(
+            kSlash64sPerBlock * chat_limits.max_connections_per_ip, chat_limits.max_connections));
     chat_limits.new_connections_per_ip_per_second =
         per_client.new_connections_per_ip_per_second.value_or(
             chat_limits.new_connections_per_ip_per_second);

@@ -37,6 +37,7 @@
 #include <poll.h>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -263,6 +264,19 @@ struct Asked {
     os::UniqueFd conn;
     std::string head;
 };
+
+// The value of a header in an answer's head, whole: "5" for "Retry-After: 5", never the "5" of
+// "Retry-After: 50". Empty when the head has no such header.
+std::string header_value(const std::string& head, std::string_view name) {
+    const std::string key = "\r\n" + std::string(name) + ": ";
+    const auto at = head.find(key);
+    if (at == std::string::npos) {
+        return {};
+    }
+    const auto from = at + key.size();
+    const auto end = head.find("\r\n", from);
+    return head.substr(from, end == std::string::npos ? std::string::npos : end - from);
+}
 
 Asked ask_upgrade(std::uint16_t port, const std::string& headers) {
     Asked out{.conn = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)}, .head = {}};
@@ -1041,7 +1055,7 @@ TEST_P(ChatSessionTest, AUserHoldsAtMostItsSessionsAndIsToldWhenToComeBack) {
     // A socket of the user's closing frees a place; a few seconds is enough.
     const auto third = ask_upgrade(node_->port(), "Authorization: Bearer user.alice\r\n");
     EXPECT_TRUE(third.head.starts_with("HTTP/1.1 429 Too Many Requests\r\n")) << third.head;
-    EXPECT_NE(third.head.find("\r\nRetry-After: 5"), std::string::npos) << third.head;
+    EXPECT_EQ(header_value(third.head, "Retry-After"), "5") << third.head;
     // Another user is not held to alice's count.
     EXPECT_TRUE(open_as("bob"));
     EXPECT_EQ(counter(R"(upgrades_limited_total{limit="user_sessions"})"), 1U);
@@ -1109,7 +1123,7 @@ TEST_P(ChatSessionTest, BehindATrustedProxyTheForwardedAddressIsHeldOnlyUntilIts
     // Told to come back as soon as an upgrade in flight is likely answered.
     const auto third = ask_upgrade(node_->port(), from_a + "Authorization: Bearer user.carol\r\n");
     EXPECT_TRUE(third.head.starts_with("HTTP/1.1 429 Too Many Requests\r\n")) << third.head;
-    EXPECT_NE(third.head.find("\r\nRetry-After: 1"), std::string::npos) << third.head;
+    EXPECT_EQ(header_value(third.head, "Retry-After"), "1") << third.head;
     EXPECT_EQ(counter(R"(upgrades_limited_total{limit="ip"})"), 1U);
     // Another address, through the same proxy, is not.
     EXPECT_TRUE(open("X-Forwarded-For: 198.51.100.9\r\nAuthorization: Bearer user.carol\r\n"));

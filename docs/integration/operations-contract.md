@@ -74,7 +74,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_MAX_UPLOAD_SLOTS` | default 448, at most `ULW_MAX_CONNECTIONS` | | | Chunk uploads in flight at once |
 | `ULW_MAX_UPLOADS_PER_USER` | default 3, at most `ULW_MAX_UPLOAD_SLOTS` | | | |
 | `ULW_MAX_CONNECTIONS_PER_IP` | default 20, at most `ULW_MAX_CONNECTIONS` | | 1 to 1280, default 20 | Per client address (IPv6: per /64): open connections, or behind a trusted proxy requests (chat: upgrades) in flight until they are authenticated (chat: answered) |
-| `ULW_MAX_CONNECTIONS_PER_IP_BLOCK` | | | 1 to 1280, default 4 × `ULW_MAX_CONNECTIONS_PER_IP` (80) | Direct IPv6 peers' open connections per /48, all its /64s together: a customer delegated a /56 or a /48 cannot fill the node from fresh /64s. Past it a new connection is reset at accept (`connections_rejected_total{reason="ip_block"}`, ADR-0076). Below `ULW_MAX_CONNECTIONS_PER_IP` it caps a single /64 too |
+| `ULW_MAX_CONNECTIONS_PER_IP_BLOCK` | | | 1 to 1280, default 4 × `ULW_MAX_CONNECTIONS_PER_IP` (80), at most 1280 | Direct IPv6 peers' open connections per /48, all its /64s together: a customer delegated a /56 or a /48 cannot fill the node from fresh /64s. Past it a new connection is reset at accept (`connections_rejected_total{reason="ip_block"}`, ADR-0076). Below `ULW_MAX_CONNECTIONS_PER_IP` it caps a single /64 too |
 | `ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND` | default 10 | | 1 to 65536, default 10 | Direct peers only; burst of the same size |
 | `ULW_MAX_SESSIONS_PER_USER` | | | 1 to 1280, default 16 | Open chat sockets per user on a node; past it an upgrade is answered `429` with `Retry-After: 5` (ADR-0076) |
 | `ULW_REQUESTS_PER_USER_PER_MINUTE` | default 300 | | | Authenticated requests, burst of the same size |
