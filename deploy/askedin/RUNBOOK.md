@@ -120,6 +120,18 @@ With the wrong block every client counts as Envoy: the gateway resets Envoy's co
 in front than `ULW_TRUSTED_PROXY_HOPS` says, clients are counted as the wrong address; step 5.4
 checks which one the gateway sees.
 
+`chat_server` holds each client address to a share of its connections too (20 open sockets, 80
+from one IPv6 /48, 10 new ones a second, and 16 sockets per user; docs/adr/0076), and reads the
+same `ULW_TRUSTED_PROXIES` and `ULW_TRUSTED_PROXY_HOPS`. When chat is served behind Envoy, set
+both on its Deployment exactly as on the gateway's. Without them every WebSocket arrives from
+Envoy's pods, so all clients together share Envoy's 20 sockets per address: the 21st client
+through an Envoy pod is reset at accept, and
+`connections_rejected_total{reason="ip_connections"}` on the chat node climbs while its
+`connections_current` is nowhere near 1280, the node's fixed cap. With the proxies set, the chat
+node tells clients apart by `X-Forwarded-For` at their upgrade requests, and it refuses
+`ULW_TRUSTED_PROXY_HOPS` without `ULW_TRUSTED_PROXIES` and warns of a block wider than /8 (IPv6
+/32), as the gateway does.
+
 The NetworkPolicy admits Envoy's pods and every pod in the `monitoring` namespace, both from
 inside the trusted block. A monitoring pod can therefore send any `X-Forwarded-For` it likes; all
 that buys it is choosing which address its own unauthenticated requests are counted against,

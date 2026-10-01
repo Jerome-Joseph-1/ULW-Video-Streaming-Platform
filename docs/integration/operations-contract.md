@@ -73,12 +73,14 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_MAX_CONNECTIONS` | 1 to 65536, default 448 | | | Past this, a new connection is closed at accept |
 | `ULW_MAX_UPLOAD_SLOTS` | default 448, at most `ULW_MAX_CONNECTIONS` | | | Chunk uploads in flight at once |
 | `ULW_MAX_UPLOADS_PER_USER` | default 3, at most `ULW_MAX_UPLOAD_SLOTS` | | | |
-| `ULW_MAX_CONNECTIONS_PER_IP` | default 20, at most `ULW_MAX_CONNECTIONS` | | | Per client address (IPv6: per /64): open connections, or behind a trusted proxy requests in flight until they are authenticated |
-| `ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND` | default 10 | | | Direct peers only; burst of the same size |
+| `ULW_MAX_CONNECTIONS_PER_IP` | default 20, at most `ULW_MAX_CONNECTIONS` | | 1 to 1280, default 20 | Per client address (IPv6: per /64): open connections, or behind a trusted proxy requests (chat: upgrades) in flight until they are authenticated (chat: answered) |
+| `ULW_MAX_CONNECTIONS_PER_IP_BLOCK` | | | 1 to 1280, default 4 × `ULW_MAX_CONNECTIONS_PER_IP` (80), at most 1280 | Direct IPv6 peers' open connections per /48, all its /64s together: a customer delegated a /56 or a /48 cannot fill the node from fresh /64s. Past it a new connection is reset at accept (`connections_rejected_total{reason="ip_block"}`, ADR-0076). Below `ULW_MAX_CONNECTIONS_PER_IP` it caps a single /64 too |
+| `ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND` | default 10 | | 1 to 65536, default 10 | Direct peers only; burst of the same size |
+| `ULW_MAX_SESSIONS_PER_USER` | | | 1 to 1280, default 16 | Open chat sockets per user on a node; past it an upgrade is answered `429` with `Retry-After: 5` (ADR-0076) |
 | `ULW_REQUESTS_PER_USER_PER_MINUTE` | default 300 | | | Authenticated requests, burst of the same size |
 | `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` | bytes, default 107374182400 (100 GiB), at least 16777216 | | | Charged by each `PATCH`'s `Content-Length`, the part never sent given back; best effort: per replica, in memory, forgotten on restart |
-| `ULW_TRUSTED_PROXIES` | comma-separated CIDR blocks, default none | | | Peers whose `X-Forwarded-For` is believed. Set to the pod network Envoy's data plane runs in (K3s default `10.42.0.0/16`); RUNBOOK step 1. A block shorter than /8 (IPv4) or /32 (IPv6) is logged as a warning. |
-| `ULW_TRUSTED_PROXY_HOPS` | 1 to 16, default 1, only with `ULW_TRUSTED_PROXIES` | | | Proxies in front, each appending one entry: the client is that many entries from the right. Fewer entries, or a malformed one, count the request against the proxy itself. |
+| `ULW_TRUSTED_PROXIES` | comma-separated CIDR blocks, default none | | same | Peers whose `X-Forwarded-For` is believed. Set to the pod network Envoy's data plane runs in (K3s default `10.42.0.0/16`); RUNBOOK step 1. A block shorter than /8 (IPv4) or /32 (IPv6) is logged as a warning. |
+| `ULW_TRUSTED_PROXY_HOPS` | 1 to 16, default 1, only with `ULW_TRUSTED_PROXIES` | | same | Proxies in front, each appending one entry: the client is that many entries from the right. Fewer entries, or a malformed one, count the request against the proxy itself. |
 | `ULW_RUN_AS_USER` | user name, default none | same | same | Also read by `ulw_reaper` and `ulw_migrate`. Used only when started as root: the process binds its ports and raises its descriptor limit, then becomes this user before it serves, takes a job or dials the database. With `ULW_TRANSPORT=tls` the certificate and key are read after that, at start and on every SIGHUP, so this user must be able to read them. |
 | `ULW_ALLOW_ROOT` | `0` (default) or `1` | same | same | Also read by `ulw_reaper` and `ulw_migrate`. Root with no `ULW_RUN_AS_USER` exits `2` unless this is `1`: for development and test harnesses only. |
 | `ULW_CHUNK_SIZE` | bytes, default 8388608 (8 MiB) | | | 5 MiB to 5 GiB, and a 50 GiB upload in at most 10,000 chunks |
@@ -255,7 +257,16 @@ touch. The worker exposes no metrics yet.
 
 Chat, on its client port (default 9101): `GET /healthz` (loop alive), `GET /readyz` (not
 draining, node address published, owner heartbeat reaching the database), `GET /metrics`, with
-`connections_accepted_total`, `connections_rejected_total{reason="capacity"}`,
+`connections_accepted_total`, `connections_rejected_total{reason="capacity"}` (closed at accept:
+1280 sessions were open), `connections_rejected_total{reason="socket"}` (closed at accept, as the
+gateway counts it: the peer address could not be read, a socket already gone or not an IP one,
+or the socket refused its options or the reactor would not take it),
+`connections_rejected_total{reason="ip_connections"}`, `{reason="ip_block"}` and
+`{reason="ip_rate"}` (direct peers reset at accept: the address's open connections, its IPv6
+/48's, or its new connections a second), `upgrades_limited_total{limit="ip"}` and
+`{limit="user_sessions"}` (upgrades answered `429`), `rate_limit_entries{table="client"}`,
+`{table="user"}` and `{table="ip_block"}`, `rate_limit_evictions_total{table="client"}`
+(ADR-0076),
 `connections_current`, `websocket_upgrades_total`, `auth_failures_total`,
 `origin_rejections_total`, `messages_received_total`, `messages_delivered_total`,
 `messages_rate_limited_total`, `messages_deduplicated_total`, `lossy_drops_total`,

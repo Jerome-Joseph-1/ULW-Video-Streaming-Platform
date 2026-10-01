@@ -1,6 +1,7 @@
 #include "config.hpp"
 
 #include "core/util/parse.hpp"
+#include "http/client_limits.hpp"
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
@@ -126,7 +127,85 @@ std::expected<std::uint32_t, ConfigError> jwks_max_stale_hours(const EnvLookup& 
     return *value;
 }
 
+template <class T>
+std::expected<std::optional<T>, ConfigError> bounded(const EnvLookup& env, std::string_view name,
+                                                     T min, T max) {
+    const auto text = lookup(env, name);
+    if (!text) {
+        return std::nullopt;
+    }
+    const auto value = core::parse_integer<T>(*text);
+    if (!value || *value < min || *value > max) {
+        return error(name, "not an integer in range");
+    }
+    return *value;
+}
+
+std::expected<ClientLimits, ConfigError> client_limits(const EnvLookup& env) {
+    // No more than the node's 1280 connections (chat::Limits): past it a per-client limit would
+    // never be reached.
+    constexpr std::size_t kMaxConnections = 1280;
+    constexpr std::size_t kMaxProxyHops = 16;
+    ClientLimits out;
+    const auto per_ip = bounded<std::size_t>(env, "ULW_MAX_CONNECTIONS_PER_IP", 1, kMaxConnections);
+    if (!per_ip) {
+        return std::unexpected(per_ip.error());
+    }
+    out.max_connections_per_ip = *per_ip;
+    // The /48 of IPv6 direct peers (ADR-0076). Below the per-address cap it caps a single /64
+    // too, which a deployment may want; the range is all that is checked.
+    const auto per_block =
+        bounded<std::size_t>(env, "ULW_MAX_CONNECTIONS_PER_IP_BLOCK", 1, kMaxConnections);
+    if (!per_block) {
+        return std::unexpected(per_block.error());
+    }
+    out.max_connections_per_ip_block = *per_block;
+    const auto rate =
+        bounded<std::uint32_t>(env, "ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND", 1, 65'536);
+    if (!rate) {
+        return std::unexpected(rate.error());
+    }
+    out.new_connections_per_ip_per_second = *rate;
+    const auto per_user =
+        bounded<std::size_t>(env, "ULW_MAX_SESSIONS_PER_USER", 1, kMaxConnections);
+    if (!per_user) {
+        return std::unexpected(per_user.error());
+    }
+    out.max_sessions_per_user = *per_user;
+    if (const auto text = lookup(env, "ULW_TRUSTED_PROXIES")) {
+        auto proxies = http::parse_trusted_proxies(*text);
+        if (!proxies) {
+            return error("ULW_TRUSTED_PROXIES", proxies.error());
+        }
+        out.trusted_proxies = std::move(*proxies);
+    }
+    const auto hops = bounded<std::size_t>(env, "ULW_TRUSTED_PROXY_HOPS", 1, kMaxProxyHops);
+    if (!hops) {
+        return std::unexpected(hops.error());
+    }
+    // As the gateway's: hops count proxies, and there are none to count.
+    if (hops->has_value() && out.trusted_proxies.empty()) {
+        return error("ULW_TRUSTED_PROXY_HOPS", "set, but ULW_TRUSTED_PROXIES is not");
+    }
+    out.trusted_proxy_hops = hops->value_or(1);
+    return out;
+}
+
 } // namespace
+
+std::vector<unsigned> wide_trusted_proxies(const ClientLimits& limits) {
+    // As the gateway's: a /8 of IPv4 is 16 million addresses, and a /32 of IPv6 a whole
+    // provider's allocation.
+    constexpr unsigned kWideV4Prefix = 8;
+    constexpr unsigned kWideV6Prefix = 32;
+    std::vector<unsigned> wide;
+    for (const net::IpNetwork& block : limits.trusted_proxies) {
+        if (block.prefix_length() < (block.is_v4() ? kWideV4Prefix : kWideV6Prefix)) {
+            wide.push_back(block.prefix_length());
+        }
+    }
+    return wide;
+}
 
 std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     const char* node_variable = "ULW_NODE_ID";
@@ -200,6 +279,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!grace) {
         return std::unexpected(std::move(grace.error()));
     }
+    auto limits = client_limits(env);
+    if (!limits) {
+        return std::unexpected(std::move(limits.error()));
+    }
     const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
     if (!allow_root) {
         return error("ULW_ALLOW_ROOT", "expected 0 or 1");
@@ -219,6 +302,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
                   .allowed_origins = std::move(*allowed),
                   .presence_grace = *grace,
+                  .client_limits = std::move(*limits),
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
                   .allow_root = *allow_root};
 }

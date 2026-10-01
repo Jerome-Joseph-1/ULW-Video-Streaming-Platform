@@ -79,3 +79,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0073](0073-a-chat-socket-ends-with-its-token-and-its-membership.md) | A chat socket ends with its token, and a room with its membership | Accepted |
 | [0074](0074-ffmpeg-from-debian-security.md) | The worker's ffmpeg comes from Debian 13's security archive | Accepted |
 | [0075](0075-unused-chat-room-records-are-forgotten.md) | A chat room's record that nothing used is forgotten | Accepted |
+| [0076](0076-chat-per-client-connection-limits.md) | chat_server holds each address and each user to a share of its connections | Accepted |
