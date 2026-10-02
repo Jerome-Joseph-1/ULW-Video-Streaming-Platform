@@ -1,5 +1,6 @@
 #include "infra/postgres/migrator.hpp"
 
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace {
 
@@ -58,6 +60,13 @@ int apply(infra::postgres::Migrator& migrator) {
 }
 
 int run(std::span<char*> args) {
+    // First, before the environment and the DDL role's credentials are read: see
+    // ops::disable_core_dumps.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        std::println(stderr, "ulw_migrate: disable core dumps: {}",
+                     std::generic_category().message(r.error()));
+        return kFailed;
+    }
     bool status = false;
     if (args.size() == 2 && std::string_view{args[1]} == "--status") {
         status = true;

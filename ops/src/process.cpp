@@ -3,7 +3,11 @@
 #include "core/util/parse.hpp"
 #include "os/unique_fd.hpp"
 
+#include <sys/prctl.h>
+#include <sys/resource.h>
+
 #include <array>
+#include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
 #include <memory>
@@ -60,6 +64,17 @@ std::optional<std::uint64_t> resident_bytes() noexcept {
         return std::nullopt;
     }
     return *pages * static_cast<std::uint64_t>(page);
+}
+
+std::expected<void, int> disable_core_dumps() noexcept {
+    const rlimit none{.rlim_cur = 0, .rlim_max = 0};
+    if (::setrlimit(RLIMIT_CORE, &none) != 0) {
+        return std::unexpected(errno);
+    }
+    if (::prctl(PR_SET_DUMPABLE, 0) != 0) {
+        return std::unexpected(errno);
+    }
+    return {};
 }
 
 } // namespace ops

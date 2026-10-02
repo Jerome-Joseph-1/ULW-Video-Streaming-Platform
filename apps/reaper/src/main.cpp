@@ -13,6 +13,7 @@
 #include "os/system_random.hpp"
 
 #include "config.hpp"
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 #include "reaper.hpp"
 
@@ -116,6 +117,10 @@ std::expected<void, std::string> make_store(const reaper::Config& config, Servic
 
 int run() {
     const auto info = core::build_info();
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        return fail("disable core dumps", std::generic_category().message(r.error()));
+    }
     const auto config = reaper::load_config(read_env);
     if (!config) {
         return fail(config.error().variable, config.error().reason);
@@ -136,13 +141,13 @@ int run() {
     }
     infra::postgres::PgUploadReaper uploads(config->database_url);
     const reaper::Report report =
-        reaper::run_once(uploads, *services.ingest, *services.admin, services.clock,
+        reaper::run_once(uploads, *services.ingest, *services.admin, uploads, services.clock,
                          {.batch = 100, .orphan_after = config->orphan_after});
     std::println(stderr,
                  "ulw_reaper: {} ({}) expired {} uploads, {} not released, aborted {} orphaned "
-                 "sessions",
+                 "sessions, forgot {} unused chat rooms",
                  info.version, info.git_sha, report.uploads_expired, report.uploads_release_failed,
-                 report.parts_orphaned);
+                 report.parts_orphaned, report.rooms_forgotten);
     for (const std::string& problem : report.problems) {
         std::println(stderr, "ulw_reaper: {}", problem);
     }
