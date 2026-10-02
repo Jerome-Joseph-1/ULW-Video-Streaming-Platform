@@ -78,7 +78,7 @@ jobs:
   soak:
     name: soak (${{ matrix.kind }})
     needs: plan
-    runs-on: ubuntu-24.04
+    runs-on: self-hosted
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.job-minutes) }}
     strategy:
       fail-fast: false
@@ -104,6 +104,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # What a hosted image has and a bare Ubuntu 24.04 host does not.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends cmake rustup docker-compose-v2 build-essential
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-ci
@@ -131,7 +133,10 @@ jobs:
           if [[ -n $CLIENTS ]]; then
             args+=(--clients "$CLIENTS")
           fi
-          "$SCRIPT" "${args[@]}"
+          # As root, as the soaks run on a host: the services make themselves undumpable
+          # (ops::disable_core_dumps), which leaves their /proc/<pid>/fd, sampled every minute,
+          # to root alone, and the scripts start them with ULW_ALLOW_ROOT for that reason.
+          sudo --preserve-env=ULW_TEST_DATABASE_URL "$SCRIPT" "${args[@]}"
       - name: Summary
         if: ${{ !cancelled() }}
         env:
@@ -156,3 +161,10 @@ jobs:
           retention-days: 30
       - if: failure() && matrix.kind == 'gateway'
         run: docker compose -f deploy/local/compose.yaml logs minio
+      # The soak ran as root; a host keeps its workspace, so nothing root-owned may stay.
+      - if: always()
+        env:
+          OUT: ${{ runner.temp }}/${{ matrix.out }}
+        run: |
+          sudo rm -rf "$OUT"
+          docker compose -f deploy/local/compose.yaml down || true
