@@ -24,7 +24,8 @@ builds is `killed` if the tests fail, `timeout` if they outlast --timeout, and `
 pass. The file is restored, byte for byte, after every mutant and when the run is stopped by
 SIGINT, SIGTERM or SIGHUP, and the target is rebuilt at the end (a further stop signal cuts
 that rebuild short); SIGKILL leaves the mutant in place (`git checkout` the file). A build or
-test that outlasts its timeout is killed with its whole process group. Each mutant's id is file:line:operator:index, stable for a given source.
+test that outlasts its timeout is killed with its whole process group. Each mutant's id is
+file:line:operator:index, stable for a given source.
 
 Mutants build with CCACHE_READONLY so they do not fill the cache; the restored source hits it.
 """
