@@ -222,14 +222,14 @@ TEST_F(LivePackagerTest, ASlidingWindowKeepsAMonotonicSequenceAndEndsWithEndlist
     watch(*publisher);
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
 
-    const auto final = playlist();
-    ASSERT_TRUE(final);
-    EXPECT_TRUE(final->ended);
-    EXPECT_EQ(final->target_seconds, 2U);
+    const auto ended_playlist = playlist();
+    ASSERT_TRUE(ended_playlist);
+    EXPECT_TRUE(ended_playlist->ended);
+    EXPECT_EQ(ended_playlist->target_seconds, 2U);
     // 24 s in 2 s segments, and a window of 3: the window slid about nine times.
-    EXPECT_GE(final->media_sequence, 6U);
-    EXPECT_EQ(final->segments.size(), 3U);
-    EXPECT_FALSE(final->segments.front().discontinuity);
+    EXPECT_GE(ended_playlist->media_sequence, 6U);
+    EXPECT_EQ(ended_playlist->segments.size(), 3U);
+    EXPECT_FALSE(ended_playlist->segments.front().discontinuity);
     EXPECT_GE(samples_, 20U);
     EXPECT_GE(seen_.size(), 10U);
     EXPECT_TRUE(stored("init_0.mp4"));
@@ -237,12 +237,12 @@ TEST_F(LivePackagerTest, ASlidingWindowKeepsAMonotonicSequenceAndEndsWithEndlist
     // Segments that slid out of the playlist stay in the store for a lifecycle rule to expire.
     EXPECT_TRUE(stored("seg_0_0.m4s"));
     // Wall-clock times that run on by each segment's duration.
-    for (std::size_t i = 1; i < final->segments.size(); ++i) {
-        ASSERT_TRUE(final->segments[i].program_date_time);
-        EXPECT_EQ(*final->segments[i].program_date_time,
-                  *final->segments[i - 1].program_date_time +
+    for (std::size_t i = 1; i < ended_playlist->segments.size(); ++i) {
+        ASSERT_TRUE(ended_playlist->segments[i].program_date_time);
+        EXPECT_EQ(*ended_playlist->segments[i].program_date_time,
+                  *ended_playlist->segments[i - 1].program_date_time +
                       std::chrono::duration_cast<core::WallTime::duration>(
-                          final->segments[i - 1].duration));
+                          ended_playlist->segments[i - 1].duration));
     }
 }
 
@@ -351,11 +351,12 @@ TEST_F(LivePackagerTest, AStreamWhoseFirstKeyframeComesLateInTheSegmentIsStillPa
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
     ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
     EXPECT_EQ(packager->output().find("codec parameters"), std::string::npos) << packager->output();
-    const auto final = playlist();
-    ASSERT_TRUE(final) << packager->output();
-    EXPECT_TRUE(final->ended);
+    const auto ended_playlist = playlist();
+    ASSERT_TRUE(ended_playlist) << packager->output();
+    EXPECT_TRUE(ended_playlist->ended);
     // 8.2 s of video in 2 s segments.
-    EXPECT_GE(final->media_sequence + final->segments.size(), 4U) << packager->output();
+    EXPECT_GE(ended_playlist->media_sequence + ended_playlist->segments.size(), 4U)
+        << packager->output();
     EXPECT_TRUE(stored("init_0.mp4"));
 }
 
@@ -387,19 +388,20 @@ TEST_F(LivePackagerTest, ACrashedPackagerResumesTheSequenceWhereTheStoreLeftIt) 
     watch(*publisher);
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
 
-    const auto final = playlist();
-    ASSERT_TRUE(final);
-    EXPECT_TRUE(final->ended);
-    EXPECT_GE(final->media_sequence + final->segments.size(), before_next + 4);
+    const auto ended_playlist = playlist();
+    ASSERT_TRUE(ended_playlist);
+    EXPECT_TRUE(ended_playlist->ended);
+    EXPECT_GE(ended_playlist->media_sequence + ended_playlist->segments.size(), before_next + 4);
     // The timeline broke exactly where the new run began, with an init segment of its own.
-    const auto first_new = std::ranges::find_if(final->segments, [&](const live::Segment& s) {
-        return s.uri == infra::ffmpeg::live_segment_name(1, before_next);
-    });
-    ASSERT_NE(first_new, final->segments.end());
+    const auto first_new =
+        std::ranges::find_if(ended_playlist->segments, [&](const live::Segment& s) {
+            return s.uri == infra::ffmpeg::live_segment_name(1, before_next);
+        });
+    ASSERT_NE(first_new, ended_playlist->segments.end());
     EXPECT_TRUE(first_new->discontinuity);
     EXPECT_EQ(first_new->init, "init_1.mp4");
     EXPECT_TRUE(stored("init_1.mp4"));
-    EXPECT_EQ(std::ranges::count_if(final->segments,
+    EXPECT_EQ(std::ranges::count_if(ended_playlist->segments,
                                     [](const live::Segment& s) { return s.discontinuity; }),
               1);
 }
@@ -447,10 +449,10 @@ TEST_F(LivePackagerTest, SigusrEndsTheStreamWithEndlistAndExitsCleanly) {
 
     packager->signal(SIGUSR1);
     EXPECT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
-    const auto final = playlist();
-    ASSERT_TRUE(final);
-    EXPECT_TRUE(final->ended);
-    EXPECT_GE(final->segments.size(), 2U);
+    const auto ended_playlist = playlist();
+    ASSERT_TRUE(ended_playlist);
+    EXPECT_TRUE(ended_playlist->ended);
+    EXPECT_GE(ended_playlist->segments.size(), 2U);
     EXPECT_NE(packager->output().find("stream ended"), std::string::npos);
 }
 
@@ -506,10 +508,10 @@ TEST_F(LivePackagerTest,
     }
     const auto publisher = start_publisher(*port, 6);
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
-    const auto final = playlist();
-    ASSERT_TRUE(final);
-    EXPECT_TRUE(final->ended);
-    EXPECT_GE(final->segments.size(), 2U);
+    const auto ended_playlist = playlist();
+    ASSERT_TRUE(ended_playlist);
+    EXPECT_TRUE(ended_playlist->ended);
+    EXPECT_GE(ended_playlist->segments.size(), 2U);
 }
 
 TEST_F(LivePackagerTest, AnAuthenticatedInputThatIsNotMpegtsIsGivenUpOnAndPublishesNothing) {
@@ -582,12 +584,12 @@ TEST_F(LivePackagerTest, AStoreOutageShorterThanThePatienceDoesNotEndTheStream) 
     EXPECT_EQ(packager->output().find("giving up"), std::string::npos) << packager->output();
     EXPECT_EQ(packager->output().find("no segment finished"), std::string::npos)
         << packager->output();
-    const auto final = playlist();
-    ASSERT_TRUE(final);
-    EXPECT_TRUE(final->ended);
+    const auto ended_playlist = playlist();
+    ASSERT_TRUE(ended_playlist);
+    EXPECT_TRUE(ended_playlist->ended);
     // Every segment ffmpeg cut of the 50 s, the ones of the outage included, was published:
     // 25 of them, less at most one for the partial one at either end.
-    EXPECT_GE(final->media_sequence + final->segments.size(), 24U);
+    EXPECT_GE(ended_playlist->media_sequence + ended_playlist->segments.size(), 24U);
 }
 
 TEST_F(LivePackagerTest, AStoreOutageLongerThanThePatienceEndsTheStreamAndNamesTheStore) {
@@ -632,13 +634,13 @@ TEST_F(LivePackagerTest, ASecondPackagerOnTheStreamSupersedesTheFirstWithoutOver
     const auto newer_publisher = start_publisher(*newer_port, 10);
     watch(*newer_publisher);
     ASSERT_EQ(newer->wait_exit(kExitPatience), 0) << newer->output();
-    const auto final = playlist();
-    ASSERT_TRUE(final);
-    EXPECT_TRUE(final->ended);
+    const auto ended_playlist = playlist();
+    ASSERT_TRUE(ended_playlist);
+    EXPECT_TRUE(ended_playlist->ended);
     // The stream goes on from what the older one had published, in the newer one's epoch.
-    EXPECT_TRUE(std::ranges::any_of(final->segments,
+    EXPECT_TRUE(std::ranges::any_of(ended_playlist->segments,
                                     [](const live::Segment& s) { return s.init == "init_1.mp4"; }));
-    EXPECT_GE(final->media_sequence + final->segments.size(), last_sequence_);
+    EXPECT_GE(ended_playlist->media_sequence + ended_playlist->segments.size(), last_sequence_);
 }
 
 } // namespace

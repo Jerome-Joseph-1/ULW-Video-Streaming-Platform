@@ -71,6 +71,9 @@ public:
     // Thread-safe reads of committed objects.
     [[nodiscard]] core::ports::IObjectReader& reader() { return *reader_; }
     void set_plan(const infra::storage::FaultPlan& plan);
+    // Sets the plan and tells every writer the store refused to try again: a store that
+    // takes bytes again after holding a body up. Returns once the plan is in place.
+    void resume_store(const infra::storage::FaultPlan& plan);
     // Fake backend only: store reads wait while held (FakeStore::hold_fetches).
     void hold_fetches(bool held);
     [[nodiscard]] std::size_t held_fetches() const;
@@ -91,6 +94,13 @@ public:
     void advance(core::Millis d);
     // Lets every connection waiting on an unknown signing key ("slow." tokens) continue.
     void refresh_keys();
+    // Both in one turn of the loop: a response the key refresh lets through is sent, and the
+    // drain begins, before the loop does anything else.
+    void refresh_keys_then_drain();
+    // Response bytes the gateway holds that its kernel has not taken yet.
+    [[nodiscard]] std::size_t queued_output();
+    // Bytes of new requests the gateway holds unparsed behind a held-back response.
+    [[nodiscard]] std::size_t held_bytes();
     [[nodiscard]] std::size_t key_waiters();
     // What SIGHUP does: reread the certificate and key. Returns once the reload has finished.
     void reload_certificate();

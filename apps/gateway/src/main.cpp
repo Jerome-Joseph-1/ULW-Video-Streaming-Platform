@@ -21,6 +21,7 @@
 #include "ops/async_log.hpp"
 #include "ops/log.hpp"
 #include "ops/notify.hpp"
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 #include "ops/settings.hpp"
 
@@ -109,8 +110,9 @@ struct Services {
     std::unique_ptr<net::ITransportFactory> transports;
     std::unique_ptr<net::OffloadPool> pool;
     std::unique_ptr<infra::curl::Multi> multi;
-    // Key set fetches get a multi of their own: the store's is capped at 64 connections, and
-    // slow uploads holding all of them would otherwise queue a key refresh behind them.
+    // Key set fetches get a multi of their own: the store's is capped at max_upload_slots
+    // connections, and slow uploads holding all of them would otherwise queue a key refresh
+    // behind them.
     std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<infra::s3util::EnvCredentialProvider> credentials;
     std::unique_ptr<core::ports::IIngestStore> store;
@@ -219,9 +221,18 @@ std::expected<void, std::string> make_verifier(const gateway::Config& config, Se
     }
     s.key_multi = std::move(*key_multi);
     s.key_fetcher = std::make_unique<gateway::KeySetFetcher>(*s.key_multi, s.log);
+    ops::Logger& log = s.log;
     s.verifier = std::make_unique<infra::auth::JwksVerifier>(
         *s.reactor, *s.key_fetcher,
-        infra::auth::JwksConfig{.url = config.jwks_url, .claims = std::move(rules)});
+        infra::auth::JwksConfig{
+            .url = config.jwks_url,
+            .claims = std::move(rules),
+            .max_key_age = std::chrono::hours(config.jwks_max_stale_hours),
+            .on_keys_expired = [&log](core::Millis age) noexcept {
+                log.error("jwks keys expired",
+                          {{"hours_without_refresh",
+                            std::chrono::duration_cast<std::chrono::hours>(age).count()}});
+            }});
     return {};
 }
 
@@ -350,6 +361,10 @@ int run(std::span<const std::string_view> args) {
     const os::SystemClock clock;
     ops::StdoutSink direct;
     ops::Logger boot(direct, clock, "gateway", ops::Level::Info);
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        return fail(boot, "disable core dumps", errno_text(r.error()));
+    }
 
     const auto cli = ops::parse_command_line(gateway::settings(), args);
     if (!cli) {

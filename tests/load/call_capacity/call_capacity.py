@@ -77,8 +77,27 @@ def token(identity, room):
 
 
 def docker(*args, capture=True):
-    return subprocess.run(["docker", *args], check=True, text=True,
-                          capture_output=capture).stdout.strip()
+    try:
+        return subprocess.run(["docker", *args], check=True, text=True,
+                              capture_output=capture).stdout.strip()
+    except subprocess.CalledProcessError as e:
+        # Docker's own reason (a registry refusal, a name in use) is on its stderr.
+        if e.stderr:
+            sys.stderr.write(e.stderr)
+        raise
+
+
+def pull(attempts=5):
+    """The image, before anything is measured: a registry that refuses a pull now and then
+    (a rate limit, a reset) is retried, and one that keeps refusing fails here, not mid-test."""
+    for attempt in range(attempts):
+        try:
+            docker("pull", "-q", IMAGE)
+            return
+        except subprocess.CalledProcessError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(2 ** attempt)
 
 
 class Sfu:
@@ -239,6 +258,7 @@ def main():
 
     name = f"ulw-callcap-{os.getpid()}"
     try:
+        pull()
         sfu = Sfu(name)
         sfu.wait_ready()
         first, last = asyncio.run(drive(sfu, args.calls, args.seconds))

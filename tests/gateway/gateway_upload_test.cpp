@@ -24,6 +24,7 @@ using ulw::test::GatewayOptions;
 using ulw::test::GatewayUnderTest;
 using ulw::test::HttpClient;
 using ulw::test::HttpResponse;
+using ulw::test::kKiB;
 using ulw::test::kMiB;
 
 constexpr std::string_view kAlice = "user.alice";
@@ -792,6 +793,85 @@ TEST_P(GatewayUpload, AChunkSentAtExactlyTheMinimumRateIsAccepted) {
     EXPECT_EQ(r->status, 204);
     EXPECT_EQ(r->upload_offset(), kMiB);
     EXPECT_EQ(gw.counters().timeouts_body_rate, 0U);
+}
+
+TEST_P(GatewayUpload, BytesSentBeforeTheStoreHeldTheBodyUpCountTowardTheMinimumRate) {
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true};
+    // Each write takes at most this much, so every read leaves bytes staged: the store holds
+    // the body up after each one, for no time at all, until the next loop turn takes the rest.
+    options.plan.accept_per_call = kKiB;
+    GatewayUnderTest gw(over_transport(options));
+    const gateway::Limits limits;
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, kMiB);
+    ASSERT_TRUE(up);
+    const auto data = ulw::test::pattern(kMiB);
+    ASSERT_TRUE(c.send_raw(patch_head(up->upload_id, data.size())));
+    std::uint64_t sent = 0;
+    const auto send = [&](std::uint64_t n) {
+        const bool ok = c.send_raw(std::span(data).subspan(sent, n));
+        sent += n;
+        return ok && ulw::test::eventually([&] { return gw.counters().bytes_ingested == sent; });
+    };
+
+    // A start that alone meets the floor for the whole window, then a tail far below it: 260
+    // KiB in 30 s is 8.7 KiB/s, above the 8 KiB/s floor.
+    ASSERT_TRUE(send(floor_over(limits, limits.body_rate_window)));
+    // A turn after the one that read the last bytes: by then the store has taken them and
+    // reading has resumed, all at the same instant.
+    gw.on_loop([] {});
+    gw.set_plan({});
+    const core::Millis step = limits.body_rate_window / 3;
+    for (int i = 0; i < 2; ++i) {
+        gw.advance(step);
+        ASSERT_TRUE(send(10 * kKiB));
+    }
+    // The window closes here. Restarting it whenever reading resumed left it only the tail.
+    gw.advance(step);
+    EXPECT_EQ(gw.counters().timeouts_body_rate, 0U);
+    ASSERT_TRUE(c.send_raw(std::span(data).subspan(sent)));
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 204);
+    EXPECT_EQ(r->upload_offset(), kMiB);
+    EXPECT_EQ(gw.counters().timeouts_body_rate, 0U);
+}
+
+TEST_P(GatewayUpload, TimeTheStoreHeldTheBodyUpDoesNotCountTowardTheMinimumRate) {
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true};
+    options.plan.accept_zero = true;
+    GatewayUnderTest gw(over_transport(options));
+    const gateway::Limits limits;
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, kMiB);
+    ASSERT_TRUE(up);
+    const auto data = ulw::test::pattern(kMiB);
+    ASSERT_TRUE(c.send_raw(patch_head(up->upload_id, data.size())));
+    std::uint64_t sent = 0;
+    const auto send = [&](std::uint64_t n) {
+        const bool ok = c.send_raw(std::span(data).subspan(sent, n));
+        sent += n;
+        return ok && ulw::test::eventually([&] { return gw.counters().bytes_ingested == sent; });
+    };
+
+    // The store takes nothing and holds the body up for most of a window.
+    ASSERT_TRUE(send(kKiB));
+    const core::Millis step = limits.body_rate_window / 3;
+    gw.advance(limits.body_rate_window - (step / 2));
+    gw.resume_store({});
+    // Then exactly the floor, over a whole window of reading after the hold. Were the hold
+    // counted, the first check, 10 s into reading, would find 81 KiB where 280 KiB were due.
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(send(floor_over(limits, step)));
+        gw.advance(step);
+    }
+    EXPECT_EQ(gw.counters().timeouts_body_rate, 0U);
+    ASSERT_TRUE(c.send_raw(std::span(data).subspan(sent)));
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 204);
+    EXPECT_EQ(r->upload_offset(), kMiB);
+    EXPECT_EQ(gw.counters().timeouts_body_rate + gw.counters().timeouts_body, 0U);
 }
 
 TEST_P(GatewayUpload, DrainClosesIdleConnectionsAndAnswersTheRequestInFlight) {

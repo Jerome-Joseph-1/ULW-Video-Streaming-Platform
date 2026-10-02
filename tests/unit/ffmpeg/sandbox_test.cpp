@@ -482,13 +482,19 @@ TEST_F(SyscallFilterTest, ATranscodeWithThreadsStillRuns) {
 // The live packager's command line, fed MPEG-TS over a pipe as the packager feeds it. It renames
 // each segment into place, which the worker's transcode never does.
 TEST_F(SyscallFilterTest, ALiveRemuxFromAPipeStillRuns) {
+    // The source is an encode, which the packager never runs: x264 at its default thread count
+    // peaked at 0.95 GiB of address space under ffmpeg 6.1 and passes 1 GiB under 7.1 (the
+    // worker image's, docs/adr/0074). The remux below keeps the default 1 GiB, the packager's.
+    Limits encode;
+    encode.address_space_bytes = 4 * kGiB;
     const auto source =
         run({"ffmpeg", "-nostdin", "-v",       "error",
              "-f",     "lavfi",    "-i",       "testsrc2=size=320x180:rate=25",
              "-f",     "lavfi",    "-i",       "sine=frequency=440:sample_rate=48000",
              "-t",     "3",        "-c:v",     "libx264",
              "-g",     "25",       "-c:a",     "aac",
-             "-f",     "mpegts",   "source.ts"});
+             "-f",     "mpegts",   "source.ts"},
+            encode);
     if (source.exit_code == infra::ffmpeg::kProgramNotFound) {
         GTEST_SKIP() << "no ffmpeg on this host";
     }
