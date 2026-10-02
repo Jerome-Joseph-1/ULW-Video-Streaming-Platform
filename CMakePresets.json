@@ -59,6 +59,19 @@
       }
     },
     {
+      "name": "coverage",
+      "displayName": "Debug + source-based coverage (clang)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang-19",
+        "CMAKE_CXX_COMPILER": "clang++-19",
+        "CMAKE_C_FLAGS_DEBUG": "-O0",
+        "CMAKE_CXX_FLAGS_DEBUG": "-O0",
+        "ULW_COVERAGE": "ON"
+      }
+    },
+    {
       "name": "release",
       "displayName": "Release + LTO",
       "inherits": "base",
@@ -100,6 +113,10 @@
     {
       "name": "ci",
       "configurePreset": "ci"
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage"
     },
     {
       "name": "release",

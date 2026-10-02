@@ -1,0 +1,159 @@
+name: sonar
+
+# SonarQube Cloud analysis in CI, Free plan for public repositories (docs/adr/0079). The C++
+# is built with the coverage preset (clang-19, source-based coverage), its unit and integration
+# tests run, and the analysis reads that build's compile database and the llvm-cov report, so
+# the analyser sees the same flags, system headers and generated headers as the compiler and
+# the quality gate sees measured coverage. The Python checks' unit tests run under coverage.py
+# for the Python report. Automatic Analysis must be off in the project's settings: while it is
+# on, SonarQube Cloud refuses this scan. Advisory: the quality gate is reported on the
+# dashboard and the pull request, never waited on here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonar-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyse:
+    runs-on: ubuntu-24.04
+    # Estimated, not yet measured: the instrumented build (5-10 min, less with a warm ccache),
+    # the unit and integration labels one test at a time (ci.yml takes about 7 and 18 min for
+    # them optimised; -O0 with counters is slower, so 30-40 min), then the reports and the
+    # analysis (about 3 min). 90 is ci.yml's coverage job's limit for the same work; a stuck
+    # scan should not hold a runner for 6 h.
+    timeout-minutes: 90
+    # The integration label's Postgres, as ci.yml's integration and coverage jobs. Started even
+    # when the job then skips itself: a job's services cannot depend on a secret.
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
+    env:
+      CC: clang-19
+      CXX: clang++-19
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+      # Ubuntu 24.04's coverage.py, by version and the .deb's SHA-256 (the archive's Packages
+      # index for noble/universe lists the same hash).
+      PYTHON_COVERAGE_VERSION: 7.4.4+dfsg1-0ubuntu2
+      PYTHON_COVERAGE_SHA256: 259a4bb007428b0ac613cf2784153fe6e26c225e86b8be29583e6f52fecd370b
+      SONAR_SCANNER_VERSION: 8.1.0.6389
+      # The linux-x64 zip's SHA-256: the scan action's own sonar-scanner-version file at the
+      # pinned commit, Maven Central's .sha256, and a local download all agree. The action's
+      # default scannerVersion at that commit is this version too.
+      SONAR_SCANNER_SHA256: bb8f709f9cb73352f8d1260a3b3c506c0f41146754bc630762c126d795499d0b
+    steps:
+      # Until the owner adds SONAR_TOKEN, and on pull requests from forks, which get no
+      # secrets, every later step is skipped and the job passes. Only whether the secret is set
+      # reaches this step, never its value; the value is in the scan step's env alone.
+      - name: Check for SONAR_TOKEN
+        id: token
+        env:
+          HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
+        run: |
+          if [ "${HAS_SONAR_TOKEN:-}" = "true" ]; then
+            echo "present=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "present=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::SONAR_TOKEN is not set; skipping SonarQube Cloud analysis"
+          fi
+      # Full history for blame and for new-code detection.
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The ccache key ci.yml's coverage job uses: the same preset, so the same objects.
+      - if: steps.token.outputs.present == 'true'
+        uses: ./.github/actions/setup
+        with:
+          cache-key: clang-coverage
+      # llvm-profdata and llvm-cov from the same llvm-toolchain-19 build as the clang-19 the
+      # setup installed: a profile is only readable by the version that wrote it.
+      - name: Install llvm-19, pinned to the installed clang-19
+        if: steps.token.outputs.present == 'true'
+        run: |
+          version=$(dpkg-query -W -f='${Version}' clang-19)
+          sudo apt-get install -y -qq --no-install-recommends "llvm-19=$version"
+      - name: Install coverage.py, pinned
+        if: steps.token.outputs.present == 'true'
+        run: |
+          cd "$RUNNER_TEMP"
+          apt-get download "python3-coverage=$PYTHON_COVERAGE_VERSION"
+          deb=python3-coverage_${PYTHON_COVERAGE_VERSION}_amd64.deb
+          echo "$PYTHON_COVERAGE_SHA256  $deb" | sha256sum --check --strict
+          sudo apt-get install -y -qq --no-install-recommends "./$deb"
+      - name: Start MinIO
+        if: steps.token.outputs.present == 'true'
+        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      # The whole coverage build, so generated headers and sources exist and
+      # build/coverage/compile_commands.json matches what was compiled and measured.
+      - if: steps.token.outputs.present == 'true'
+        run: cmake --preset coverage -DULW_CONFORMANCE_LIVE=ON
+      - if: steps.token.outputs.present == 'true'
+        id: build
+        run: cmake --build --preset coverage
+      # Unit and integration labels, one test at a time, as ci.yml's coverage job (ADR-0080);
+      # writes build/coverage/coverage/llvm-cov-show.txt. The floors are reported, not
+      # enforced; a failing test fails the job, after the scan below has run.
+      - name: C++ coverage
+        if: steps.token.outputs.present == 'true'
+        run: tools/coverage.sh build/coverage unit integration
+        env:
+          ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          COVERAGE_ENFORCE: "0"
+          COVERAGE_SONAR: "1"
+      # Every *_test.py under coverage.py; writes build/coverage-python.xml.
+      - name: Python coverage
+        if: ${{ !cancelled() && steps.token.outputs.present == 'true' }}
+        run: tools/coverage-python.sh build/coverage-python.xml
+      # The scanner is fetched here, checked against its SHA-256, and placed where the scan
+      # action's tool cache looks (sonar-scanner-cli/<version as semver>/linux-x64 plus a
+      # .complete marker), so the action never downloads it. The action is told to fetch from
+      # an address that cannot resolve: if its cache layout ever stops matching this, the step
+      # fails instead of downloading something unchecked.
+      - name: Install the pinned SonarScanner CLI
+        if: steps.token.outputs.present == 'true'
+        run: |
+          zip=$RUNNER_TEMP/sonar-scanner.zip
+          curl -fsSL --proto '=https' --proto-redir '=https' --retry 5 --retry-all-errors \
+            --retry-delay 2 -o "$zip" \
+            "https://repo1.maven.org/maven2/org/sonarsource/scanner/cli/sonar-scanner-cli/${SONAR_SCANNER_VERSION}/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip"
+          echo "$SONAR_SCANNER_SHA256  $zip" | sha256sum --check --strict
+          IFS=. read -r major minor patch build <<<"$SONAR_SCANNER_VERSION"
+          cache=$RUNNER_TOOL_CACHE/sonar-scanner-cli/$major.$minor.$patch-build.$build
+          rm -rf "$cache"
+          mkdir -p "$cache"
+          unzip -q "$zip" -d "$RUNNER_TEMP/sonar-scanner"
+          mv "$RUNNER_TEMP/sonar-scanner/sonar-scanner-${SONAR_SCANNER_VERSION}-linux-x64" "$cache/linux-x64"
+          touch "$cache/linux-x64.complete"
+          rm -f "$zip"
+      # Branch and pull request parameters (sonar.branch.name, sonar.pullrequest.*) are not set
+      # here: the scanner reads them from the GitHub Actions environment and event.
+      # Runs whenever the build did, so a failing test still leaves the analysis on the
+      # dashboard; coverage from a run with a failed test is lower than the truth.
+      - name: SonarQube Cloud scan
+        if: ${{ !cancelled() && steps.token.outputs.present == 'true' && steps.build.outcome == 'success' }}
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          scannerVersion: ${{ env.SONAR_SCANNER_VERSION }}
+          scannerBinariesUrl: https://scanner-download-disabled.invalid
+      - if: ${{ !cancelled() && steps.token.outputs.present == 'true' }}
+        run: ccache --show-stats
+      - if: ${{ failure() && steps.token.outputs.present == 'true' }}
+        run: docker compose -f deploy/local/compose.yaml logs minio

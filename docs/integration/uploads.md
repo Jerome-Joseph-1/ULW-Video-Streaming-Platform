@@ -40,7 +40,11 @@ Request body, JSON, with a `Content-Length` of 1 to 4096 bytes:
 | `size_bytes` | Integer, 1 to 53687091200 (50 GiB). The exact size of the file; the upload is complete when this many bytes are durable. |
 | `content_type` | A bare media type starting with `video/`, at most 127 characters, no parameters (`video/mp4; codecs=...` is refused), no wildcards. Case-insensitive. |
 
-Unknown fields are ignored. The request's own `Content-Type` header is not checked.
+Unknown fields are ignored. With a bearer token the request's own `Content-Type` header is not
+checked. With the cookie, the request must carry `Content-Type: application/json` (parameters
+allowed) and an `Origin` listed in `ULW_ALLOWED_ORIGINS`, or the answer is `403`
+([auth.md](auth.md#cookies-and-other-sites)). Another site's page can make the browser send
+the cookie with a body it wrote, but only under `text/plain` or a form's types.
 
 Response `201`, `application/json`:
 
@@ -130,12 +134,16 @@ A `409` on `PATCH` carries the authoritative `Upload-Offset` too, so a client ca
 Only one `PATCH` per upload runs at a time. A second one while the first is in flight gets
 `409` with the current offset; do not upload one file over parallel connections.
 
-Upload lifetime: an upload must be committed within 6 days of its creation (its `expires_at`).
-From that moment `PATCH`, `HEAD` and commit answer `410 Gone`, as the tus protocol's expiration
-extension does, even with every byte durable, and the upload has to start again with a new
-create. The answer is the same before and after the upload reaper aborts the upload and fails its
-video, and for an upload that was cancelled. `DELETE` is still allowed. A committed upload never
-expires: a repeated commit and `HEAD` answer as before.
+Upload lifetime: an upload must be committed within 6 days of its create request. From that
+moment `PATCH`, `HEAD` and commit answer `410 Gone`, as the tus protocol's expiration extension
+does, even with every byte durable, and the upload has to start again with a new create. The
+answer is the same before and after the upload reaper aborts the upload and fails its video, and
+for an upload that was cancelled. `DELETE` is still allowed. A committed upload never expires: a
+repeated commit and `HEAD` answer as before.
+
+The moment holds to within the clock skew between the hosts that judge it: the gateway
+instances, and the reaper's. A gateway whose clock is behind the reaper's can, for that skew,
+answer `409` for an upload the reaper has already aborted.
 
 ## Limits and admission
 
@@ -194,11 +202,12 @@ the request and byte allowances in all.
 |---|---|---|---|
 | `400` | | Create: missing or invalid field, empty body, not JSON. `PATCH`: missing or malformed `Upload-Offset`, or a body longer than what remains. A body on `HEAD`, commit or `DELETE`. Malformed HTTP. | Fix the request; do not retry as is |
 | `401` | `WWW-Authenticate` | No token (`Bearer`), or it fails verification (`Bearer error="invalid_token"`) | Refresh the token, retry once |
+| `403` | | With the cookie and no `Authorization`: a page not trusted (`Origin` not in `ULW_ALLOWED_ORIGINS`, none on a `POST`, `PATCH` or `DELETE`, or `Sec-Fetch-Site` from another site), or a create without `Content-Type: application/json`. Checked before the token, so a bad token here is `403`, not `401` ([auth.md](auth.md#cookies-and-other-sites)). | Fix the client or the gateway's `ULW_ALLOWED_ORIGINS`; do not retry as is |
 | `404` | | Unknown or malformed id, another user's upload, unknown path. `HEAD` on a cancelled upload. | Stop; start a new upload if needed |
 | `405` | `Allow` | Wrong method for the path | Fix the client |
 | `408` | | Body idle for 30 s, or slower than 8 KiB/s | Resume from `HEAD` |
 | `409` | `Upload-Offset` | `PATCH`: offset is not the durable offset, another `PATCH` on this upload is running, or the upload is committed or cancelled. Commit: not all bytes durable yet, or cancelled. `DELETE`: already committed. | Resume from the returned offset; commit once it equals `size_bytes`. If the upload is committed or cancelled, stop. |
-| `410` | | `PATCH`, `HEAD` or commit on an upload past its expiry, 6 days after its create, unless it was committed | Stop; start a new upload |
+| `410` | | `PATCH`, `HEAD` or commit on an upload past its expiry, 6 days after its create request, unless it was committed | Stop; start a new upload |
 | `411` | | `Transfer-Encoding` on a create or `PATCH` | Send `Content-Length` |
 | `413` | | Create body over 4 KiB, or `PATCH` body over 16 MiB | Send smaller chunks |
 | `429` | `Retry-After` | This user already has 3 chunk uploads running on this instance (`Retry-After: 5`); this user is over 300 requests a minute or 100 GiB a day; this client address has 20 requests in flight (`Retry-After: 1`) | Wait `Retry-After` seconds, then retry the same request |

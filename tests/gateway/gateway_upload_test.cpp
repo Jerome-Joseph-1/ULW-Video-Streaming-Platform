@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <gtest/gtest.h>
 #include <iterator>
+#include <map>
 #include <openssl/evp.h>
 #include <string>
 #include <string_view>
@@ -24,6 +25,7 @@ using ulw::test::GatewayOptions;
 using ulw::test::GatewayUnderTest;
 using ulw::test::HttpClient;
 using ulw::test::HttpResponse;
+using ulw::test::kAllowedOrigin;
 using ulw::test::kKiB;
 using ulw::test::kMiB;
 
@@ -172,9 +174,159 @@ TEST_P(GatewayUpload, TheAuthCookieStandsInForTheHeader) {
     HttpClient c(gw.endpoint());
     const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
     const auto r = c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)),
-                             {{"cookie", "theme=dark; auth_token=user.alice"}});
+                             {{"cookie", "theme=dark; auth_token=user.alice"},
+                              {"content-type", "application/json"},
+                              {"origin", std::string(kAllowedOrigin)},
+                              {"sec-fetch-site", "same-origin"}});
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 201);
+}
+
+// Another site's page can have the browser POST with the cookie and a body of its choosing, but
+// only as text/plain or a form (a fetch in no-cors mode, or <form enctype="text/plain">, whose
+// field name can spell out the JSON). Even from an allowed page, a cookie create needs the JSON
+// type; a bearer token, which no other site can make the browser send, needs neither.
+TEST_P(GatewayUpload, ACookieCreateMustDeclareJson) {
+    const GatewayUnderTest gw(over_transport());
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    const auto create = [&](std::string_view type) {
+        std::map<std::string, std::string> headers{{"cookie", "auth_token=user.alice"},
+                                                   {"origin", std::string(kAllowedOrigin)}};
+        if (!type.empty()) {
+            headers.emplace("content-type", type);
+        }
+        HttpClient c(gw.endpoint());
+        const auto r =
+            c.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(body)), headers);
+        return r ? r->status : 0;
+    };
+    EXPECT_EQ(create(""), 403);
+    EXPECT_EQ(create("text/plain"), 403);
+    EXPECT_EQ(create("application/x-www-form-urlencoded"), 403);
+    EXPECT_EQ(create("multipart/form-data; boundary=x"), 403);
+    EXPECT_EQ(create("application/jsonx"), 403);
+    EXPECT_EQ(create("Application/JSON; charset=utf-8"), 201);
+    HttpClient bearer(gw.endpoint());
+    const auto r =
+        bearer.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)));
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 201);
+}
+
+// A commit has no body, so a cross-site page can send one without a preflight:
+// fetch(url, {method: "POST", mode: "no-cors", credentials: "include"}). With the cookie, a
+// method that changes anything must name an allowed page in Origin, which every browser sends
+// on a POST and no page can forge.
+TEST_P(GatewayUpload, ACookieCommitFromAPageNotAllowedCommitsNothing) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    ASSERT_TRUE(upload_all(c, *up, data));
+    const std::string commit = "/api/v1/uploads/" + up->upload_id + "/commit";
+    const std::pair<std::string, std::string> cookie{"cookie", "auth_token=user.alice"};
+    const auto send = [&](const std::map<std::string, std::string>& headers) {
+        HttpClient page(gw.endpoint());
+        const auto r = page.request("POST", commit, "", {}, headers);
+        return r ? r->status : 0;
+    };
+    EXPECT_EQ(send({cookie}), 403);
+    EXPECT_EQ(send({cookie, {"origin", "https://evil.example"}}), 403);
+    EXPECT_EQ(send({cookie, {"origin", "null"}}), 403);
+    EXPECT_EQ(send({cookie, {"origin", std::string(kAllowedOrigin) + ".evil.example"}}), 403);
+    EXPECT_EQ(
+        send({cookie, {"origin", std::string(kAllowedOrigin)}, {"sec-fetch-site", "cross-site"}}),
+        403);
+    // A refusal comes before the token is verified: a bad token from a bad page is 403, not 401.
+    EXPECT_EQ(send({{"cookie", "auth_token=forged.sig"}, {"origin", "https://evil.example"}}), 403);
+    EXPECT_EQ(gw.counters().cross_site_rejections, 6U);
+
+    EXPECT_TRUE(gw.jobs().empty());
+    const auto head = c.request("HEAD", "/api/v1/uploads/" + up->upload_id, kAlice);
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->status, 204);
+    EXPECT_EQ(head->upload_offset(), data.size());
+    const auto video = c.request("GET", "/api/v1/videos/" + up->video_id, kAlice);
+    ASSERT_TRUE(video);
+    EXPECT_EQ(core::json::parse(video->body)->find("state")->as_string(), "uploading");
+
+    EXPECT_EQ(
+        send({cookie, {"origin", std::string(kAllowedOrigin)}, {"sec-fetch-site", "same-origin"}}),
+        200);
+    EXPECT_EQ(gw.jobs().size(), 1U);
+}
+
+// Cookie GETs: a same-origin page, <video> and hls.js send no Origin and are served. A request
+// the browser marks as another site's, or whose Origin is not allowed, is refused.
+TEST_P(GatewayUpload, ACookieGetFromAnotherSiteIsRefused) {
+    const GatewayUnderTest gw(over_transport());
+    const std::string video = "/api/v1/videos/01a0ece4-69d0-781f-822e-f9f2e975cd5f";
+    const std::pair<std::string, std::string> cookie{"cookie", "auth_token=user.alice"};
+    const auto get = [&](const std::map<std::string, std::string>& headers) {
+        HttpClient c(gw.endpoint());
+        const auto r = c.request("GET", video, "", {}, headers);
+        return r ? r->status : 0;
+    };
+    EXPECT_EQ(get({cookie}), 404);
+    EXPECT_EQ(get({cookie, {"sec-fetch-site", "same-origin"}}), 404);
+    EXPECT_EQ(get({cookie, {"sec-fetch-site", "none"}}), 404);
+    EXPECT_EQ(get({cookie, {"origin", std::string(kAllowedOrigin)}}), 404);
+    EXPECT_EQ(get({cookie, {"sec-fetch-site", "cross-site"}}), 403);
+    EXPECT_EQ(get({cookie, {"sec-fetch-site", "same-site"}}), 403);
+    EXPECT_EQ(get({cookie, {"sec-fetch-site", "Same-Origin"}}), 403);
+    EXPECT_EQ(get({cookie, {"origin", "https://evil.example"}}), 403);
+    // A bearer token is never checked: no other page can make the browser send one.
+    HttpClient bearer(gw.endpoint());
+    EXPECT_EQ(bearer.request("GET", video, kAlice, {}, {{"sec-fetch-site", "cross-site"}})->status,
+              404);
+}
+
+// PATCH and DELETE change the upload as a commit does: with the cookie, no Origin is refused. A
+// HEAD from another site is refused like a GET, and an Origin that names the default port is
+// not the allowed one, as no browser writes it so.
+TEST_P(GatewayUpload, ACookieRequestFromAPageNotAllowedIsRefusedOnEveryMethod) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    const std::string path = "/api/v1/uploads/" + up->upload_id;
+    const std::pair<std::string, std::string> cookie{"cookie", "auth_token=user.alice"};
+    const auto send = [&](std::string_view method, std::span<const std::byte> body,
+                          const std::map<std::string, std::string>& headers) {
+        HttpClient page(gw.endpoint());
+        const auto r = page.request(method, path, "", body, headers);
+        return r ? r->status : 0;
+    };
+    EXPECT_EQ(send("PATCH", std::span(data).first(16), {cookie, {"Upload-Offset", "0"}}), 403);
+    EXPECT_EQ(send("DELETE", {}, {cookie}), 403);
+    EXPECT_EQ(send("HEAD", {}, {cookie, {"sec-fetch-site", "cross-site"}}), 403);
+    EXPECT_EQ(send("DELETE", {}, {cookie, {"origin", std::string(kAllowedOrigin) + ":443"}}), 403);
+    EXPECT_EQ(gw.counters().cross_site_rejections, 4U);
+
+    const auto head = c.request("HEAD", path, kAlice);
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->status, 204);
+    EXPECT_EQ(head->upload_offset(), 0U);
+}
+
+// A web app on a sibling subdomain (app.example.com calling video.example.com) is same-site,
+// trusted only when the deployment says so.
+TEST_P(GatewayUpload, ASameSitePageIsTrustedOnlyWhenConfigured) {
+    GatewayOptions options = over_transport();
+    options.limits.allow_same_site = true;
+    const GatewayUnderTest gw(options);
+    HttpClient c(gw.endpoint());
+    EXPECT_EQ(c.request("GET", "/api/v1/videos/01a0ece4-69d0-781f-822e-f9f2e975cd5f", "", {},
+                        {{"cookie", "auth_token=user.alice"}, {"sec-fetch-site", "same-site"}})
+                  ->status,
+              404);
+    HttpClient d(gw.endpoint());
+    EXPECT_EQ(d.request("GET", "/api/v1/videos/01a0ece4-69d0-781f-822e-f9f2e975cd5f", "", {},
+                        {{"cookie", "auth_token=user.alice"}, {"sec-fetch-site", "cross-site"}})
+                  ->status,
+              403);
 }
 
 TEST_P(GatewayUpload, TwoCandidateTokensAreRefusedRatherThanGuessed) {
@@ -301,8 +453,9 @@ TEST_P(GatewayUpload, ACommitThatWentThroughIsAnsweredWhateverAVideoLookupWouldS
     EXPECT_EQ(gw.jobs().size(), 1U);
 }
 
-// Past expires_at an upload never committed is gone to PATCH, HEAD and commit, before the
-// reaper aborts it as after; a committed one still answers as committed.
+// Past expires_at, PATCH, HEAD and commit answer 410 for an upload that was never committed,
+// with the same answer before the reaper aborts it as after. A committed upload still answers
+// as committed.
 TEST_P(GatewayUpload, AnUploadPastItsExpiryIsGoneToPatchHeadAndCommit) {
     GatewayOptions options = over_transport({.backend = Backend::Fake, .chunk = kMiB});
     options.manual_clock = true;
@@ -858,6 +1011,53 @@ TEST_P(GatewayUpload, AChunkSentAtExactlyTheMinimumRateIsAccepted) {
     EXPECT_EQ(gw.counters().timeouts_body_rate, 0U);
 }
 
+// Each window is judged on its own bytes: a fast start does not pay for a trickle after it.
+TEST_P(GatewayUpload, AFastStartDoesNotCoverALaterTrickle) {
+    GatewayUnderTest gw(
+        over_transport({.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true}));
+    const gateway::Limits limits;
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, kMiB);
+    ASSERT_TRUE(up);
+    const auto data = ulw::test::pattern(kMiB);
+    ASSERT_TRUE(c.send_raw(patch_head(up->upload_id, data.size())));
+    const core::Millis step = limits.body_rate_window / 10;
+    // Three times the floor through the first window, then half of it.
+    const std::uint64_t fast = 3 * floor_over(limits, step);
+    const std::uint64_t first_window = 10 * fast;
+    trickle(gw, c, std::span(data).first(first_window), fast, step, 10);
+    ASSERT_EQ(gw.counters().timeouts_body_rate, 0U);
+    trickle(gw, c, std::span(data).subspan(first_window), floor_over(limits, step) / 2, step, 10);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().timeouts_body_rate == 1; }));
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 408);
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_EQ(gw.counters().timeouts_body, 0U);
+}
+
+TEST_P(GatewayUpload, AnIdleConnectionWhoseTimerFiresLateIsStillClosed) {
+    GatewayUnderTest gw(over_transport({.manual_clock = true}));
+    HttpClient c(gw.endpoint());
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 1; }));
+    // The clock jumps well past the deadline before the timer gets to run.
+    gw.advance(3 * gateway::Limits{}.header_timeout);
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_EQ(gw.counters().timeouts_header, 1U);
+}
+
+TEST_P(GatewayUpload, DrainStopsAcceptingNewConnections) {
+    GatewayUnderTest gw(over_transport());
+    gw.drain();
+    // The listening socket is closed, so a new client is refused by the kernel rather than
+    // accepted and dropped.
+    EXPECT_TRUE(ulw::test::eventually([&] {
+        const HttpClient late(gw.endpoint());
+        return !late.connected();
+    }));
+    EXPECT_EQ(gw.counters().rejected_draining, 0U);
+}
+
 TEST_P(GatewayUpload, BytesSentBeforeTheStoreHeldTheBodyUpCountTowardTheMinimumRate) {
     GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true};
     // Each write takes at most this much, so every read leaves bytes staged: the store holds
@@ -1090,6 +1290,53 @@ TEST_P(GatewayUpload, OnlyTheOwnerCancelsAndACancelledUploadTakesNothingMore) {
     HttpClient d(gw.endpoint());
     EXPECT_EQ(d.request("POST", path + "/commit", kAlice)->status, 409);
     EXPECT_TRUE(gw.jobs().empty());
+}
+
+// A catalog that is down is a 503 on every route that needs it, so clients retry; a row it
+// cannot read is a 500, which they must not. Nothing an outage refused is half done after it.
+TEST_P(GatewayUpload, ACatalogOutageIsA503AndAnUnreadableRowA500OnEveryRoute) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fs, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    const std::string path = "/api/v1/uploads/" + up->upload_id;
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    // A connection per request: a refusal may close its connection.
+    const auto statuses = [&] {
+        std::vector<int> out;
+        const auto status = [&](auto&& send) {
+            HttpClient client(gw.endpoint());
+            const auto r = send(client);
+            out.push_back(r ? r->status : 0);
+        };
+        status([&](HttpClient& h) {
+            return h.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)));
+        });
+        status([&](HttpClient& h) { return h.request("HEAD", path, kAlice); });
+        status([&](HttpClient& h) { return patch(h, up->upload_id, 0, data); });
+        status([&](HttpClient& h) { return h.request("POST", path + "/commit", kAlice); });
+        status([&](HttpClient& h) { return h.request("DELETE", path, kAlice); });
+        status([&](HttpClient& h) {
+            return h.request("GET", "/api/v1/videos/" + up->video_id, kAlice);
+        });
+        return out;
+    };
+    gw.fail_catalog(core::ports::CatalogError::Unavailable);
+    EXPECT_EQ(statuses(), (std::vector<int>{503, 503, 503, 503, 503, 503}));
+    gw.fail_catalog(core::ports::CatalogError::Corrupt);
+    EXPECT_EQ(statuses(), (std::vector<int>{500, 500, 500, 500, 500, 500}));
+    EXPECT_EQ(gw.claims(), 0U);
+    EXPECT_TRUE(gw.jobs().empty());
+
+    gw.fail_catalog(std::nullopt);
+    const auto head = c.request("HEAD", path, kAlice);
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->status, 204);
+    EXPECT_EQ(head->upload_offset(), 0U);
+    ASSERT_TRUE(upload_all(c, *up, data));
+    HttpClient d(gw.endpoint());
+    EXPECT_EQ(d.request("POST", path + "/commit", kAlice)->status, 200);
 }
 
 TEST_P(GatewayUpload, AResumeFromHeadIsAcceptedAfterAMultiChunkPatchWasCutOff) {

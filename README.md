@@ -33,6 +33,15 @@ tools/security/trivy-image.sh IMAGE...   # HIGH/CRITICAL fixable CVEs in a built
 tools/security/lint-workflows.sh         # actionlint and zizmor over .github/
 ```
 
+SonarQube Cloud analyses the repository in CI (`.github/workflows/sonar.yml`, ADR-0079) on the
+Free plan, with the `coverage` preset's compile database and measured coverage: `llvm-cov` over
+the unit and integration labels (`COVERAGE_SONAR=1 tools/coverage.sh build/coverage unit
+integration`) and coverage.py over the Python unit tests (`tools/coverage-python.sh
+build/coverage-python.xml`); settings are in `sonar-project.properties`.
+It is advisory, and needs the `SONAR_TOKEN` secret and Automatic Analysis turned off in the
+project's settings. Pull requests from forks get no secrets, so no analysis. If the repository ever becomes private, delete `SONAR_TOKEN` to stay free:
+the job then skips itself.
+
 ## Run locally
 
 ```sh

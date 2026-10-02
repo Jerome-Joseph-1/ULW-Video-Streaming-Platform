@@ -130,14 +130,17 @@ jobs:
         image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
         env:
           POSTGRES_PASSWORD: testtest123
-        ports: ["55432:5432"]
+        # Below 32768, outside the ports the runner's own outgoing connections are given
+        # (ip_local_port_range 32768-60999): a fixed port inside that range is sometimes taken
+        # by one, and the service then fails to start.
+        ports: ["15432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:15432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -160,6 +163,66 @@ jobs:
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
 
+  # Line and branch coverage of the unit and integration labels, each top-level directory
+  # compared with its floor in tools/coverage-floors.txt (ADR-0080). The table is the step
+  # summary; the HTML report is an artifact. Its own ccache key: the instrumented objects never
+  # match another job's, and pull requests restore what main's last run left. Off pull requests
+  # unless labelled `coverage`: a serial run of both labels is the longest job here.
+  coverage:
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      contains(github.event.pull_request.labels.*.name, 'coverage')
+    runs-on: ubuntu-24.04
+    # Unmeasured: set from the first run's duration (ADR-0080).
+    timeout-minutes: 90
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
+    env:
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: clang-coverage
+      # llvm-profdata and llvm-cov from the same llvm-toolchain-19 build as the clang-19 the
+      # setup installed: a profile is only readable by the version that wrote it.
+      - name: Install llvm-19, pinned to the installed clang-19
+        run: |
+          version=$(dpkg-query -W -f='${Version}' clang-19)
+          sudo apt-get install -y -qq --no-install-recommends "llvm-19=$version"
+      - name: Start MinIO
+        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      - run: cmake --preset coverage -DULW_CONFORMANCE_LIVE=ON
+      - run: cmake --build --preset coverage
+      - run: tools/coverage.sh build/coverage unit integration
+        env:
+          ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          # Report-only on every trigger until the floors are set from a CI run (ADR-0080).
+          COVERAGE_ENFORCE: "0"
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-html
+          path: |
+            build/coverage/coverage/html
+            build/coverage/coverage/summary.json
+            build/coverage/coverage/summary.md
+          if-no-files-found: warn
+      - run: ccache --show-stats
+      - if: failure()
+        run: docker compose -f deploy/local/compose.yaml logs minio
+
   # The M16 and M17 acceptance: three chat_server processes on ports 9101-9103 over one
   # Postgres. Their room's owner stopped until a survivor takes over, then resumed to be fenced
   # out; clients on every node seeing one order, rate limits, retries, resume, and no body in any
@@ -174,14 +237,14 @@ jobs:
         image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
         env:
           POSTGRES_PASSWORD: testtest123
-        ports: ["55432:5432"]
+        ports: ["15432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
     env:
       CC: gcc-14
       CXX: g++-14
-      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:15432/postgres
       ULW_CHAT_CLUSTER_PORTS: 9101,9102,9103
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
