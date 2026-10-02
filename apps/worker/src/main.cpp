@@ -12,12 +12,11 @@
 #include "job_runner.hpp"
 #include "ops/log.hpp"
 #include "ops/notify.hpp"
+#include "ops/process.hpp"
 #include "ops/root.hpp"
 #include "ops/settings.hpp"
 #include "worker.hpp"
 #include "workspace.hpp"
-
-#include <sys/prctl.h>
 
 #include <csignal>
 #include <cstdio>
@@ -165,6 +164,12 @@ int run(std::span<const std::string_view> args) {
     const os::SystemClock clock;
     ops::StdoutSink sink;
     ops::Logger log(sink, clock, "worker", ops::Level::Info);
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
+    // It also makes /proc/<pid>/environ, which holds the database password and storage keys,
+    // unreadable to other processes of our user, the sandboxed children included.
+    if (auto r = ops::disable_core_dumps(); !r) {
+        return fail(log, "disable core dumps", std::generic_category().message(r.error()));
+    }
 
     const auto cli = ops::parse_command_line(worker::settings(), args);
     if (!cli) {
@@ -196,11 +201,6 @@ int run(std::span<const std::string_view> args) {
     auto notifier = ops::Notifier::from_env(read_env, ::getpid());
     if (!notifier) {
         return refuse(log, "NOTIFY_SOCKET", std::generic_category().message(notifier.error()));
-    }
-    // Makes /proc/<pid>/environ, which holds the database password and storage keys,
-    // unreadable to other processes of our user, the sandboxed children included.
-    if (::prctl(PR_SET_DUMPABLE, 0) != 0) {
-        return fail(log, "prctl", std::generic_category().message(errno));
     }
     sigset_t signals;
     sigemptyset(&signals);

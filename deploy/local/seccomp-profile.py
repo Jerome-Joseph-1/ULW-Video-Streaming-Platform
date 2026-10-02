@@ -17,6 +17,12 @@ beyond the default.
 """
 import json
 import sys
+from pathlib import Path
+
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tools"))
+from pathguard import inside  # noqa: E402
 
 ARCH = "SCMP_ARCH_X86_64"
 # The Go architecture names Docker's conditions use for ARCH.
@@ -37,6 +43,8 @@ def applies(rule):
 
 
 def main(source, target):
+    source = inside(source)
+    target = inside(target)
     with open(source, encoding="utf-8") as f:
         moby = json.load(f)
     arches = next(a for a in moby["archMap"] if a["architecture"] == ARCH)

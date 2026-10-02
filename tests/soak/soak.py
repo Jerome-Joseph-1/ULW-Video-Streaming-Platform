@@ -205,7 +205,8 @@ class Stack:
 
     def start(self):
         gateway_env = {**self.common_env(), "ULW_LISTEN_PORT": str(self.port),
-                       "ULW_DEV_JWKS_FILE": str(self.out / "jwks.json"), "JWT_ISSUER": ISSUER,
+                       "ULW_DEV_JWKS_FILE": str(self.out / "jwks.json"), "ULW_DEV_MODE": "1",
+                       "JWT_ISSUER": ISSUER,
                        "ULW_TRANSPORT": "tls", "ULW_TLS_CERT_FILE": str(self.out / "cert.pem"),
                        "ULW_TLS_KEY_FILE": str(self.out / "key.pem"),
                        "ULW_MAX_UPLOAD_SLOTS": str(UPLOAD_SLOTS),

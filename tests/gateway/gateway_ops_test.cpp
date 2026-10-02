@@ -148,6 +148,7 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         {"view_events_dropped_total", "counter"},
         {"view_batches_failed_total", "counter"},
         {"jobs_oldest_queued_seconds", "gauge"},
+        {"jwks_keys_expired", "gauge"},
         {"store_paging_errors_total", "counter"},
         {"log_messages_dropped_total", "counter"},
         {"open_fds", "gauge"},

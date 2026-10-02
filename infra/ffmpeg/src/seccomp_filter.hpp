@@ -14,6 +14,13 @@
 // met, and tgkill and tkill for SIGABRT alone. Anything else kills the whole process: ptrace,
 // mount, keyctl, bpf, io_uring_setup, socket, unshare, setns, fork, kill and the rest of the
 // kernel's surface a decoder exploit would reach for.
+//
+// Re-traced for the worker image's move to ffmpeg 7.1.5 on Debian 13, glibc 2.41
+// (docs/adr/0074), with tools/trace-ffmpeg-syscalls.sh, which also runs the worker's output
+// checks, the live recording's remux, and the probe and transcode over HEVC, VP9, AV1 and
+// MPEG-2 sources: every name it traced as root and as an ordinary user was already here, so
+// nothing was added. The ffmpeg suites and the worker's, the live packager's and the live
+// recording's integration suites pass under this filter on that image's ffmpeg.
 #pragma once
 
 #include <linux/audit.h>

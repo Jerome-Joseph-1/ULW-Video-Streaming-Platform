@@ -14,10 +14,22 @@ class FakeStore::Session final : public core::ports::IIngestSession, public net:
 public:
     Session(FakeStore& store, IngestId id, std::uint64_t offset,
             core::ports::IIngestObserver& observer)
-        : store_(store), id_(std::move(id)), observer_(observer), durable_(offset), next_(offset) {}
+        : store_(store), id_(std::move(id)), observer_(observer), durable_(offset), next_(offset) {
+        store_.sessions_.insert(this);
+    }
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
-    ~Session() override { abort(); }
+    ~Session() override {
+        abort();
+        store_.sessions_.erase(this);
+    }
+
+    // The writer hears from the store one loop turn later, as it would after any progress.
+    void wake() noexcept {
+        if (state_ == IngestState::Open) {
+            schedule();
+        }
+    }
 
     std::size_t write(std::span<const std::byte> bytes) noexcept override {
         if (state_ != IngestState::Open) {
@@ -388,6 +400,12 @@ void FakeStore::set_plan(const FaultPlan& plan) {
     const std::scoped_lock lock(mutex_);
     plan_ = plan;
     throttled_ = 0;
+}
+
+void FakeStore::wake_writers() noexcept {
+    for (Session* const session : sessions_) {
+        session->wake();
+    }
 }
 
 std::size_t FakeStore::chunk_attempts() const {
