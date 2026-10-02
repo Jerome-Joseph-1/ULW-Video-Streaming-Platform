@@ -19,7 +19,7 @@ target_link_libraries(live_packager_lib PUBLIC
 # sandboxed ffmpeg and blocking object transfer, and none of the reactor.
 ulw_add_executable(live_packager src/main.cpp)
 target_link_libraries(live_packager PRIVATE
-    ulw::live_packager_lib ulw::os ulw::storage_fs_transfer ulw::storage_s3 ulw::s3util)
+    ulw::live_packager_lib ulw::ops ulw::os ulw::storage_fs_transfer ulw::storage_s3 ulw::s3util)
 # Like the worker, it looks for the sandbox helper beside its own executable.
 add_custom_command(TARGET live_packager POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ulw_sandbox>

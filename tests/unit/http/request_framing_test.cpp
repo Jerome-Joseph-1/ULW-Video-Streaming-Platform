@@ -60,6 +60,15 @@ TEST(RequestFraming, TransferCodingOnAMethodWithoutABodyIsABadRequest) {
     EXPECT_EQ(o.heads, 0U);
 }
 
+TEST(RequestFraming, TransferCodingOnEveryOtherMethodIsABadRequest) {
+    for (const std::string_view method : {"GET", "HEAD", "DELETE", "OPTIONS", "TRACE"}) {
+        const Outcome o = parse(std::format(
+            "{} / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", method));
+        EXPECT_EQ(o.result, fatal(Status::BadRequest)) << method;
+        EXPECT_EQ(o.heads, 0U) << method;
+    }
+}
+
 TEST(RequestFraming, ContentLengthWithTransferEncodingIsABadRequestInEitherOrder) {
     for (const std::string_view request :
          {"PATCH /a HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"

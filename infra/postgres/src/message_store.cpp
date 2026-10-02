@@ -198,14 +198,16 @@ private:
 class Admits final : public Operation {
 public:
     Admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
-           MessageCallback<core::ports::Admission> done)
-        : room_(room), user_(user), asked_(asked), done_(std::move(done)) {}
+           core::ports::Recording recording, MessageCallback<core::ports::Admission> done)
+        : room_(room), user_(user), asked_(asked), recording_(recording), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
-        return Statement{
-            .sql = message_sql::kAdmits,
-            .params =
-                Params{}.add_uuid(room_.uuid()).add_text(user_.view()).add_text(kind_text(asked_))};
+        return Statement{.sql = message_sql::kAdmits,
+                         .params = Params{}
+                                       .add_uuid(room_.uuid())
+                                       .add_text(user_.view())
+                                       .add_text(kind_text(asked_))
+                                       .add_bool(recording_ == core::ports::Recording::Allowed)};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -219,9 +221,12 @@ public:
             done_(std::unexpected(MessageStoreError::Corrupt));
             return std::nullopt;
         }
-        // No kind: the join asked for the open kind of a room with none recorded.
+        // No kind: the join asked for the open kind of a room with none recorded, or for a closed
+        // kind it was not to record, which it is answered as.
         if (!text) {
-            done_(core::ports::Admission::NotLive);
+            done_(core::ports::admits_anyone(asked_)
+                      ? core::ports::Admission::NotLive
+                      : core::ports::admission(asked_, asked_, *member));
             return std::nullopt;
         }
         const auto kind = kind_of(*text);
@@ -241,6 +246,7 @@ private:
     core::RoomId room_;
     core::UserId user_;
     core::ports::RoomKind asked_;
+    core::ports::Recording recording_;
     MessageCallback<core::ports::Admission> done_;
 };
 
@@ -286,14 +292,58 @@ private:
 
 } // namespace
 
-class PgMessageStore::Impl {
+namespace {
+
+// "<room> <user>", as notify_chat_member_removed() writes it.
+std::optional<std::pair<core::RoomId, core::UserId>> parse_removal(std::string_view payload) {
+    const std::size_t space = payload.find(' ');
+    if (space == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto room = core::RoomId::parse(payload.substr(0, space));
+    const auto user = core::UserId::parse(payload.substr(space + 1));
+    if (!room || !user) {
+        return std::nullopt;
+    }
+    return std::pair{*room, *user};
+}
+
+} // namespace
+
+class PgMessageStore::Impl final : public INotificationSink {
 public:
     explicit Impl(std::unique_ptr<Pool> pool) noexcept : pool_(std::move(pool)) {}
 
+    // The listening pool is made after this, since it points here.
+    void listen_on(std::unique_ptr<Pool> listening) noexcept { listening_ = std::move(listening); }
     [[nodiscard]] Pool& pool() noexcept { return *pool_; }
+    void watch(core::ports::IMemberListener* listener) noexcept { listener_ = listener; }
+
+    void on_listening() noexcept override {
+        if (listener_ != nullptr) {
+            listener_->on_members_resync();
+        }
+    }
+
+    void on_notification(std::string_view payload) noexcept override {
+        if (listener_ == nullptr) {
+            return;
+        }
+        // Only the trigger writes to the channel; what it cannot have written leaves every
+        // list in doubt.
+        const auto removal = parse_removal(payload);
+        if (!removal) {
+            listener_->on_members_resync();
+            return;
+        }
+        listener_->on_member_removed(removal->first, removal->second);
+    }
 
 private:
+    core::ports::IMemberListener* listener_ = nullptr;
     std::unique_ptr<Pool> pool_;
+    // Last: it calls into this object, and must stop before the members above go.
+    std::unique_ptr<Pool> listening_;
 };
 
 std::expected<std::unique_ptr<PgMessageStore>, std::string>
@@ -308,7 +358,20 @@ PgMessageStore::create(net::IReactor& reactor, net::OffloadPool& offload,
     if (!pool) {
         return std::unexpected(std::move(pool.error()));
     }
-    return std::make_unique<PgMessageStore>(Token{}, std::make_unique<Impl>(std::move(*pool)));
+    auto impl = std::make_unique<Impl>(std::move(*pool));
+    auto listening = Pool::create(reactor, offload,
+                                  PoolConfig{.conninfo = config.conninfo,
+                                             .application_name = "ulw-messages-listen",
+                                             .connections = 1,
+                                             .connect_timeout = config.connect_timeout,
+                                             .request_timeout = config.request_timeout,
+                                             .listen = "LISTEN chat_member_removed",
+                                             .notifications = impl.get()});
+    if (!listening) {
+        return std::unexpected(std::move(listening.error()));
+    }
+    impl->listen_on(std::move(*listening));
+    return std::make_unique<PgMessageStore>(Token{}, std::move(impl));
 }
 
 PgMessageStore::PgMessageStore(Token /*token*/, std::unique_ptr<Impl> impl) noexcept
@@ -366,13 +429,17 @@ void PgMessageStore::members(const core::RoomId& room, std::optional<core::UserI
 }
 
 void PgMessageStore::admits(const core::RoomId& room, const core::UserId& user,
-                            core::ports::RoomKind asked,
+                            core::ports::RoomKind asked, core::ports::Recording recording,
                             MessageCallback<core::ports::Admission> done) {
-    impl_->pool().submit(std::make_unique<Admits>(room, user, asked, std::move(done)));
+    impl_->pool().submit(std::make_unique<Admits>(room, user, asked, recording, std::move(done)));
 }
 
 void PgMessageStore::record_live(const core::RoomId& room, MessageCallback<void> done) {
     impl_->pool().submit(std::make_unique<RecordLive>(room, std::move(done)));
+}
+
+void PgMessageStore::watch_members(core::ports::IMemberListener* listener) noexcept {
+    impl_->watch(listener);
 }
 
 } // namespace infra::postgres
