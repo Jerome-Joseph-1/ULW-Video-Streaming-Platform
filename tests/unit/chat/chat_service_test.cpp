@@ -5,6 +5,7 @@
 #include "support/fake_clock.hpp"
 
 #include <algorithm>
+#include <array>
 #include <format>
 #include <gtest/gtest.h>
 #include <memory>
@@ -903,6 +904,26 @@ TEST_F(ChatServiceTest, ASendTurnedAwayAsBusyCostsTheClientNoToken) {
     EXPECT_EQ(service_->counters().rate_limited, 1U);
 }
 
+// Only the owner's load gives a token back. A send that failed for any other reason reached the
+// owner, so it spent the token as a sent one would.
+TEST_F(ChatServiceTest, ASendThatFailsForAnyReasonButLoadStillCostsItsToken) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    const std::array failures{RouteError::NotJoined, RouteError::Fenced, RouteError::Unavailable,
+                              RouteError::Conflict};
+    for (std::size_t i = 0; i < 10; ++i) {
+        send(a, "m" + std::to_string(i));
+        rooms_.sends.back().done(std::unexpected(failures.at(i % failures.size())));
+    }
+    alice.take();
+    send(a, "one-too-many");
+    EXPECT_EQ(rooms_.sends.size(), 10U);
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "rate_limited");
+    EXPECT_EQ(service_->counters().rate_limited, 1U);
+}
+
 TEST_F(ChatServiceTest, AFailedJoinIsReportedAndTheNextJoinAsksAgain) {
     FakeClient alice;
     const auto a = attach(alice);
@@ -1448,6 +1469,32 @@ TEST_F(FewMessages, MessagesARoomAlreadyDroppedDoNotCountAgainstEveryRoomsLimit)
     alice.take();
     join(a, 0);
     EXPECT_EQ(seqs(alice.take()), std::vector<std::uint64_t>{1});
+}
+
+class TwoMessages : public ChatServiceTest {
+protected:
+    // Two ordinary messages per room, and two across rooms.
+    TwoMessages() : ChatServiceTest({.room_buffer_bytes = 600, .buffer_messages = 2}) {}
+};
+
+TEST_F(TwoMessages, PastTheLimitAcrossRoomsTheOldestMessageAnywhereGoesFirst) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    join(a, std::nullopt, chat::Delivery::Durable, kOtherRoom);
+    rt::IMember& first = rooms_.admit();
+    rt::IMember& second = rooms_.admit();
+    deliver(first, 1);
+    deliver(second, 1, "hi", "bob", kOtherRoom);
+    deliver(second, 2, "hi", "bob", kOtherRoom);
+    // Each room is within its own limit; together they are one over, and the first room's
+    // message is the oldest.
+    EXPECT_EQ(service_->buffered_bytes(), 2 * (2 + 256U));
+    alice.take();
+    join(a, 0);
+    EXPECT_TRUE(seqs(alice.take()).empty());
+    join(a, 0, chat::Delivery::Durable, kOtherRoom);
+    EXPECT_EQ(seqs(alice.take()), (std::vector<std::uint64_t>{1, 2}));
 }
 
 TEST_F(ChatServiceTest, ADetachedClientIsToldNothingMoreEvenOfItsOwnSends) {
