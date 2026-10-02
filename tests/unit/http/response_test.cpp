@@ -30,6 +30,7 @@ constexpr std::array kAllStatuses{
     Status::MethodNotAllowed,
     Status::RequestTimeout,
     Status::Conflict,
+    Status::Gone,
     Status::LengthRequired,
     Status::ContentTooLarge,
     Status::RequestHeaderFieldsTooLarge,

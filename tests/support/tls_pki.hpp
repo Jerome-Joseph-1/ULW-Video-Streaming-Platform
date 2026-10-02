@@ -16,6 +16,12 @@ struct SslCtxFree {
 };
 using SslCtxPtr = std::unique_ptr<SSL_CTX, SslCtxFree>;
 
+struct SslSessionFree {
+    void operator()(SSL_SESSION* session) const noexcept { SSL_SESSION_free(session); }
+};
+// A session held by reference, from SSL_get1_session.
+using SslSessionPtr = std::unique_ptr<SSL_SESSION, SslSessionFree>;
+
 struct SslFree {
     void operator()(SSL* ssl) const noexcept { SSL_free(ssl); }
 };
