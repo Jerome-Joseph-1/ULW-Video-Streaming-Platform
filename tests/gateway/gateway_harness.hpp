@@ -15,12 +15,15 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace ulw::test {
 
 // S3 is the store the gateway runs in production, on the MinIO of deploy/local/compose.yaml.
 enum class Backend { Fake, Fs, S3 };
+
+inline constexpr std::string_view kAllowedOrigin = "https://app.example";
 
 // Production limits but the per-client ones, lifted: every test connects from 127.0.0.1, most as
 // one user, and under a manual clock a bucket never refills. Tests of those limits set them.
@@ -30,6 +33,8 @@ enum class Backend { Fake, Fs, S3 };
     limits.new_connections_per_ip_per_second = 1'000'000;
     limits.requests_per_user_per_minute = 1'000'000;
     limits.upload_bytes_per_user_per_day = std::uint64_t{1} << 50U;
+    // The page the tests' cookie requests come from, as a browser's Origin names it.
+    limits.allowed_origins = {std::string(kAllowedOrigin)};
     return limits;
 }
 
@@ -116,6 +121,9 @@ public:
     void put_object(std::string_view key, std::string_view bytes);
     [[nodiscard]] std::vector<core::ports::ViewEvent> views();
     void fail_views(std::optional<core::ports::CatalogError> error);
+    // Every upload and video call to the catalog fails with `error` from now on; nullopt stops it.
+    void fail_catalog(std::optional<core::ports::CatalogError> error);
+    void fail_find_video(std::optional<core::ports::CatalogError> error);
 
 private:
     struct Loop;

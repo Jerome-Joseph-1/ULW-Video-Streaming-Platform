@@ -1,9 +1,9 @@
-# Coverage floors per top-level directory (ADR-0078): <directory> <line %> <branch %>.
+# Coverage floors per top-level directory (ADR-0080): <directory> <line %> <branch %>.
 # Each is the measured value rounded down to a whole percent. Raise one when coverage rises;
 # never lower one. Provisional: measured locally, so not enforced anywhere (ci.yml sets
 # COVERAGE_ENFORCE=0 on every trigger). To enforce: set each floor from a CI run's step summary
 # table, rounded down, then set COVERAGE_ENFORCE to 1 for schedule and workflow_dispatch in
-# ci.yml (ADR-0078).
+# ci.yml (ADR-0080).
 apps 86 79
 codec 95 85
 core 91 83

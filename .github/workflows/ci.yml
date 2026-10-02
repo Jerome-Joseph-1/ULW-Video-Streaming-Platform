@@ -161,7 +161,7 @@ jobs:
         run: docker compose -f deploy/local/compose.yaml logs minio
 
   # Line and branch coverage of the unit and integration labels, each top-level directory
-  # compared with its floor in tools/coverage-floors.txt (ADR-0078). The table is the step
+  # compared with its floor in tools/coverage-floors.txt (ADR-0080). The table is the step
   # summary; the HTML report is an artifact. Its own ccache key: the instrumented objects never
   # match another job's, and pull requests restore what main's last run left. Off pull requests
   # unless labelled `coverage`: a serial run of both labels is the longest job here.
@@ -171,7 +171,7 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       contains(github.event.pull_request.labels.*.name, 'coverage')
     runs-on: ubuntu-24.04
-    # Unmeasured: set from the first run's duration (ADR-0078).
+    # Unmeasured: set from the first run's duration (ADR-0080).
     timeout-minutes: 90
     services:
       postgres:
@@ -205,7 +205,7 @@ jobs:
       - run: tools/coverage.sh build/coverage unit integration
         env:
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
-          # Report-only on every trigger until the floors are set from a CI run (ADR-0078).
+          # Report-only on every trigger until the floors are set from a CI run (ADR-0080).
           COVERAGE_ENFORCE: "0"
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

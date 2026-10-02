@@ -4,7 +4,7 @@
 # default), merges the profiles every test process and every server it started wrote, and
 # writes <build-dir>/coverage/ with html/, summary.json and summary.md. Tests, third-party and
 # generated code are left out. Fails when a test fails and, unless COVERAGE_ENFORCE=0, when a
-# top-level directory falls below its floor in tools/coverage-floors.txt (ADR-0078). With
+# top-level directory falls below its floor in tools/coverage-floors.txt (ADR-0080). With
 # COVERAGE_ENFORCE=0 the floor comparison is printed as a warning and only the tests decide.
 #
 # Every label runs one test at a time, as CI's other jobs run them: several suites time servers

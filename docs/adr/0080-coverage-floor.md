@@ -1,4 +1,4 @@
-# 0078. Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory
+# 0080. Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory
 
 Status: Accepted
 Date: 2026-09-30

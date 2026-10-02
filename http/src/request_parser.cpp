@@ -1,10 +1,9 @@
 #include "http/request_parser.hpp"
 
+#include "http/ascii.hpp"
 #include "http/method.hpp"
 #include "http/request.hpp"
 #include "http/status.hpp"
-
-#include "ascii.hpp"
 
 #include <algorithm>
 #include <array>
@@ -101,15 +100,17 @@ std::optional<std::uint64_t> parse_content_length(std::string_view text) noexcep
 //   cookie         the session token when there is no bearer; RFC 6265 5.4 allows one field.
 //   upload-offset  where an upload chunk lands.
 //   content-type   a singleton (RFC 9110 8.3) that says how a body is to be read.
+//   origin         which page sent a cookie-authenticated request (RFC 6454 7.1).
+//   sec-fetch-site where that page stands relative to this server (Fetch Metadata).
 // Content-Length is not listed because llhttp refuses a second one itself.
-constexpr std::array<std::string_view, 5> kSingleValued{"host", "authorization", "cookie",
-                                                        "upload-offset", "content-type"};
+constexpr std::array<std::string_view, 7> kSingleValued{
+    "host", "authorization", "cookie", "upload-offset", "content-type", "origin", "sec-fetch-site"};
 constexpr std::size_t kHostField = 0;
 static_assert(kSingleValued[kHostField] == "host");
 
 std::optional<std::size_t> single_valued_index(std::string_view name) noexcept {
     const auto* const it = std::ranges::find_if(
-        kSingleValued, [name](std::string_view field) { return detail::iequals(field, name); });
+        kSingleValued, [name](std::string_view field) { return iequals(field, name); });
     if (it == kSingleValued.end()) {
         return std::nullopt;
     }
@@ -401,7 +402,7 @@ private:
             }
             single_valued_seen_.set(*index);
         }
-        if (detail::iequals(field.name, "content-length")) {
+        if (iequals(field.name, "content-length")) {
             const auto length = parse_content_length(field.value);
             if (!length) {
                 return reject(Status::BadRequest);
@@ -410,7 +411,7 @@ private:
                 return reject(Status::ContentTooLarge);
             }
             content_length_ = *length;
-        } else if (detail::iequals(field.name, "transfer-encoding")) {
+        } else if (iequals(field.name, "transfer-encoding")) {
             transfer_coded_ = true;
         }
         return 0;

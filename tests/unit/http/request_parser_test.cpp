@@ -8,10 +8,26 @@
 #include <cstddef>
 #include <format>
 #include <gtest/gtest.h>
+#include <malloc.h>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+// Under a sanitizer its own allocator serves the heap, and mallinfo2 sees none of it.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define ULW_SANITIZER_HEAP 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define ULW_SANITIZER_HEAP 1
+#endif
+#endif
+#ifdef ULW_SANITIZER_HEAP
+// The sanitizer runtimes of both compilers export it; only clang ships the header declaring it.
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+extern "C" std::size_t __sanitizer_get_current_allocated_bytes();
+#endif
 
 namespace {
 
@@ -26,6 +42,16 @@ using ulw::test::Headers;
 using ulw::test::RecordedRequest;
 using ulw::test::RecordingSink;
 using ulw::test::recoverable;
+
+// Bytes the process's heap has handed out and not had back, blocks served by mmap included.
+std::size_t heap_in_use() {
+#ifdef ULW_SANITIZER_HEAP
+    return __sanitizer_get_current_allocated_bytes();
+#else
+    const struct mallinfo2 info = ::mallinfo2();
+    return info.uordblks + info.hblkhd;
+#endif
+}
 
 constexpr std::string_view kGet = "GET /api/v1/videos/v1/master.m3u8?t=9 HTTP/1.1\r\n"
                                   "Host: cdn.example\r\n"
@@ -144,6 +170,25 @@ TEST(RequestParser, BytesHeldInSmallPiecesAreBoundedTheSame) {
     EXPECT_EQ(parser.feed(bytes_of(rest)), ParseProgress::Paused);
     EXPECT_EQ(parser.unparsed().size(), RequestParser::kMaxRetainedBytes);
     EXPECT_EQ(parser.feed(bytes_of("x")), fatal(Status::ContentTooLarge));
+}
+
+// The buffer for bytes held behind a request grows as they arrive (ADR-0036). Reserved up front,
+// it would be kMaxRetainedBytes on every connection, most of which never hold a byte: a chat
+// node's quiet sockets, a gateway's keep-alive ones.
+TEST(RequestParser, AParserHoldsNoBufferForBytesItWasNeverGiven) {
+    RecordingSink sink;
+    constexpr std::size_t kParsers = 16;
+    std::vector<std::unique_ptr<RequestParser>> parsers;
+    parsers.reserve(kParsers);
+    const std::size_t before = heap_in_use();
+    for (std::size_t i = 0; i < kParsers; ++i) {
+        parsers.push_back(std::make_unique<RequestParser>(sink));
+    }
+    const std::size_t after = heap_in_use();
+    ASSERT_GE(after, before);
+    // A parser's fixed arrays for the head come to about 28 KiB; the held bytes' limit is 256.
+    EXPECT_LT((after - before) / kParsers, RequestParser::kMaxRetainedBytes / 4)
+        << "bytes per parser";
 }
 
 TEST(RequestParser, BytesBehindAFinishedRequestAreLeftUnparsedInOrder) {
@@ -307,10 +352,13 @@ TEST(RequestParser, SecondCopyOfAFieldReadAsSingleValuedIsABadRequest) {
                              "Authorization: Bearer t\r\n"
                              "Cookie: s=1\r\n"
                              "Upload-Offset: 0\r\n"
-                             "Content-Type: application/offset+octet-stream\r\n";
+                             "Content-Type: application/offset+octet-stream\r\n"
+                             "Origin: https://app.example\r\n"
+                             "Sec-Fetch-Site: same-origin\r\n";
     for (const std::string_view repeat :
          {"Host: a", "HOST: b", "authorization: Bearer u", "Cookie: s=2", "Upload-Offset: 5",
-          "Content-type: text/plain"}) {
+          "Content-type: text/plain", "origin: https://evil.example",
+          "Sec-Fetch-Site: cross-site"}) {
         RecordingSink sink;
         RequestParser parser{sink};
         const std::string request = head + std::string{repeat} + "\r\n\r\n";
