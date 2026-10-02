@@ -896,6 +896,12 @@ void Connection::on_video(core::ports::CatalogResult<core::VideoRecord> result) 
     json +=
         std::format(R"(,"state":"{}","version":{},"duration_ms":)", state_name(v.state), v.version);
     json += v.duration ? std::to_string(v.duration->count()) : "null";
+    // Only a failed video has one, and it is written for its owner (the worker's public_reason,
+    // the reaper's "upload expired"); the details stay in the logs.
+    if (v.state == core::VideoState::Failed && v.error_reason) {
+        json += R"(,"error_reason":)";
+        core::json::append_string(json, *v.error_reason);
+    }
     json += "}";
     respond_json(Status::Ok, json);
 }
