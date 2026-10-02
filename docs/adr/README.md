@@ -81,4 +81,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0075](0075-unused-chat-room-records-are-forgotten.md) | A chat room's record that nothing used is forgotten | Accepted |
 | [0076](0076-chat-per-client-connection-limits.md) | chat_server holds each address and each user to a share of its connections | Accepted |
 | [0077](0077-the-body-rate-window-skips-a-store-hold.md) | The body rate window skips a store's hold and keeps the bytes it counted | Accepted |
-| [0078](0078-sonarqube-cloud-analysis-in-ci.md) | SonarQube Cloud analysis in CI, with the compile database, on the Free plan | Accepted |
+| [0078](0078-the-cookie-is-believed-only-from-trusted-pages.md) | The gateway believes the auth cookie only from pages it trusts | Accepted |
+| [0079](0079-sonarqube-cloud-analysis-in-ci.md) | SonarQube Cloud analysis in CI, with the compile database, on the Free plan | Accepted |

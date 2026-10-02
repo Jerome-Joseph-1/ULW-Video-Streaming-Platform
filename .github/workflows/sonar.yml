@@ -1,6 +1,6 @@
 name: sonar
 
-# SonarQube Cloud analysis in CI, Free plan for public repositories (docs/adr/0078). The C++
+# SonarQube Cloud analysis in CI, Free plan for public repositories (docs/adr/0079). The C++
 # is analysed with the ci preset's compile database, so the analyser sees the same flags,
 # system headers and generated headers as the compiler. Automatic Analysis must be off in the
 # project's settings: while it is on, SonarQube Cloud refuses this scan. Advisory: the quality

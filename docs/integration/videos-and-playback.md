@@ -193,7 +193,9 @@ if (Hls.isSupported()) {
 
 A same-origin request carries the cookie even without `withCredentials`; the setting above
 matters when the app is served from a different origin than the gateway, which then also needs
-CORS on the gateway route. For a bearer token instead of a cookie, set the header for gateway
+CORS on the gateway route, `ULW_ALLOWED_ORIGINS` listing the app, and `ULW_ALLOW_SAME_SITE=1` if
+the app is on a sibling subdomain. The CORS layer must list the app's origin explicitly: never
+echo `Origin` with credentials allowed ([auth.md](auth.md#cookies-and-other-sites)). For a bearer token instead of a cookie, set the header for gateway
 URLs only:
 
 ```js

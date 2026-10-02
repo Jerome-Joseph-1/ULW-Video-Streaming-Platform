@@ -1,4 +1,4 @@
-# 0078. SonarQube Cloud analysis in CI, with the compile database, on the Free plan
+# 0079. SonarQube Cloud analysis in CI, with the compile database, on the Free plan
 
 Status: Accepted
 Date: 2026-10-02

@@ -57,6 +57,11 @@ public:
     void fail_views(std::optional<core::ports::CatalogError> error) noexcept {
         views_error_ = error;
     }
+    // Fails every upload and video call from now on with `error`, or none with nullopt; the
+    // catalog's state is left as it was.
+    void fail_calls(std::optional<core::ports::CatalogError> error) noexcept {
+        calls_error_ = error;
+    }
     // Fails every find_video from now on with `error`, or none with nullopt.
     void fail_find_video(std::optional<core::ports::CatalogError> error) noexcept {
         find_video_error_ = error;
@@ -70,6 +75,8 @@ public:
 
 private:
     void defer(std::move_only_function<void() noexcept> fn);
+    // True, and `done` answered with calls_error_ on a later iteration, when calls fail.
+    template <class T> [[nodiscard]] bool refused(core::ports::CatalogCallback<T>& done);
 
     net::IReactor& reactor_;
     net::TimerId timer_;
@@ -80,6 +87,7 @@ private:
     std::vector<Job> jobs_;
     std::vector<core::ports::ViewEvent> views_;
     std::optional<core::ports::CatalogError> views_error_;
+    std::optional<core::ports::CatalogError> calls_error_;
     std::optional<core::ports::CatalogError> find_video_error_;
 };
 
