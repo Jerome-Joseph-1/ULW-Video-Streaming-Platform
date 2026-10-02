@@ -386,7 +386,7 @@ int run(std::span<const std::string_view> args) {
     const std::string_view jemalloc = ops::jemalloc_version();
     boot.info("starting", {{"version", info.version},
                            {"git_sha", info.git_sha},
-                           {"allocator", jemalloc.empty() ? "glibc" : "jemalloc"},
+                           {"allocator", jemalloc.empty() ? "default" : "jemalloc"},
                            {"allocator_version", jemalloc}});
     gateway::log_effective(*config, *layers, boot);
     // Before any thread exists, so every thread inherits the mask.

@@ -278,7 +278,7 @@ int run() {
         R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}")",
         info.version, info.git_sha, config->node.view(), config->port, config->node_address,
         net::to_string(choice->kind), choice->fell_back_from_io_uring ? " (fallback)" : "", keys,
-        jemalloc.empty() ? "glibc" : "jemalloc ", jemalloc);
+        jemalloc.empty() ? "default" : "jemalloc ", jemalloc);
 
     while (!s.server->finished()) {
         s.reactor->run_once(kLoopTick);

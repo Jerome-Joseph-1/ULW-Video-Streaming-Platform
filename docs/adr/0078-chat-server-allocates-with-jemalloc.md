@@ -8,9 +8,9 @@ Date: 2026-10-02
 The soaks (ADR-0042, ADR-0069) hold each service's resident memory to a per-unit bound after a
 15 minute warm-up. Every chat and gateway run since 2026-09-30 failed it while doing nothing
 wrong: no transport errors, flat descriptors, and memory that climbs fast at first and then ever
-more slowly. On main a81c25b chat grew about 3 MB/h over minutes 15–90, 0.2–0.7 MB/h over
-minutes 90–160 and 0.1–0.2 MB/h over minutes 160–240, against a bound near 10 KB/h; the gateway
-went 180, 82 and 40 KB/h (`docs/operations/soak.md`).
+more slowly. In a four-hour run of both soaks on main a81c25b (2026-10-01, on a development host) chat grew
+about 3 MB/h over minutes 15–90, 0.2–0.7 MB/h over minutes 90–160 and 0.1–0.2 MB/h over
+minutes 160–240, against a bound near 10 KB/h; the gateway went 180, 82 and 40 KB/h.
 
 The live heap does not grow with it. Sampled with `malloc_info`, a chat node's in-use bytes fell
 from 13.3 to about 10 MB after the warm-up while the heap glibc held rose from 14.1 to 15.3 MB,
@@ -22,7 +22,8 @@ Two commits beside this one take what they can out of the delivery path: send ch
 mappings of their own, kept for the recent peak and unmapped after it (`net/src/send_queue.cpp`),
 and chat grows its message texts and frames once into buffers it reuses. They lowered the climb
 but did not end it. The allocator was then compared directly, on the self-hosted soak host, all
-from one build of that branch, side by side, two hours each, judged after the warm-up:
+from one build of that branch, side by side, two hours each, judged after the warm-up (the
+soak-experiment workflow's runs 37023997323 and 37039160488):
 
 | Allocator | chat-1 | chat-2 | chat-3 | Verdict |
 |---|---|---|---|---|
@@ -32,8 +33,8 @@ from one build of that branch, side by side, two hours each, judged after the wa
 | jemalloc 5.3.0 | −1049 KB/h | −1055 KB/h | −804 KB/h | pass |
 | jemalloc 5.3.0, again | −1280 KB/h | −822 KB/h | −902 KB/h | pass |
 
-The gateway, measured the same way, grew about as fast on either allocator: +112 KB/h on glibc
-and +146 KB/h on jemalloc (95% upper ends +136 and +360), against a bound near 30 KB/h at the
+The gateway, measured the same way in the second run, grew about as fast on either allocator:
++112 KB/h on glibc and +146 KB/h on jemalloc (95% upper ends +136 and +360), against a bound near 30 KB/h at the
 soak's load. Its growth is not the allocator's, and is traced separately.
 
 ## Options
@@ -61,7 +62,8 @@ soak's load. Its growth is not the allocator's, and is traced separately.
   on the allocator.
 - Never under a sanitizer, whose own allocator jemalloc would replace: the `asan` and `tsan`
   presets build the services with glibc's malloc.
-- chat_server and gateway_server log the allocator they got at startup (`"allocator"`, with
+- chat_server and gateway_server log the allocator they got at startup (`"allocator"`:
+  `"jemalloc"` or `"default"`, glibc's or a sanitizer's, with
   jemalloc's version through `ops::jemalloc_version()`, which finds its `mallctl` at run time),
   and `ChatClusterTest.EveryNodeAllocatesWithTheAllocatorTheBuildLinked` fails when the build
   says jemalloc and a node runs without it.
