@@ -101,6 +101,9 @@ jobs:
       CXX: g++-14
       ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
     steps:
+      # A host keeps its workspace between jobs; anything an earlier soak left as root would
+      # stop the checkout from cleaning it.
+      - run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -150,7 +153,7 @@ jobs:
           # As root, as the soaks run on a host: the services make themselves undumpable
           # (ops::disable_core_dumps), which leaves their /proc/<pid>/fd, sampled every minute,
           # to root alone, and the scripts start them with ULW_ALLOW_ROOT for that reason.
-          sudo --preserve-env=ULW_TEST_DATABASE_URL "$SCRIPT" "${args[@]}"
+          sudo --preserve-env=ULW_TEST_DATABASE_URL PYTHONDONTWRITEBYTECODE=1 "$SCRIPT" "${args[@]}"
       - name: Summary
         if: ${{ !cancelled() }}
         env:
@@ -181,4 +184,5 @@ jobs:
           OUT: ${{ runner.temp }}/${{ matrix.out }}
         run: |
           sudo rm -rf "$OUT"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
           docker compose -f deploy/local/compose.yaml down || true
