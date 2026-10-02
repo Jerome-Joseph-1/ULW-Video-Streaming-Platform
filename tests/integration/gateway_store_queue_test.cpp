@@ -1,5 +1,6 @@
-// The gateway over the S3 store and a live MinIO, with the store's connections made few, so that
-// uploads queue behind them as they queue behind the 64 of production under load.
+// The gateway over the S3 store and a live MinIO, with the store's connections made fewer than the
+// uploads it admits, so that uploads wait for one. Production caps the store at its upload slots
+// and never waits there (ADR-0045); this holds the gateway to its timers if a store ever does.
 #include "core/util/json.hpp"
 
 #include "gateway_harness.hpp"
@@ -12,9 +13,11 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <memory>
+#include <optional>
 #include <poll.h>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -23,6 +26,7 @@ using ulw::test::Backend;
 using ulw::test::GatewayOptions;
 using ulw::test::GatewayUnderTest;
 using ulw::test::HttpClient;
+using ulw::test::HttpResponse;
 using ulw::test::kKiB;
 using ulw::test::kMiB;
 
@@ -82,11 +86,15 @@ protected:
         return std::string(*doc->find("upload_id")->as_string());
     }
 
+    void run(const std::vector<std::size_t>& queue_order);
+
     ulw::test::LiveS3 target_ = ulw::test::minio_from_env();
     std::vector<std::string> videos_;
 };
 
-TEST_F(GatewayStoreQueue, UploadsWaitingForAStoreConnectionAreHeldBackNotFailed) {
+// The leaders take the store's connections, the rest queue behind them in `queue_order`, a
+// body timeout passes, and then every upload finishes.
+void GatewayStoreQueue::run(const std::vector<std::size_t>& queue_order) {
     GatewayOptions options{
         .backend = Backend::S3, .store_connections = kConnections, .manual_clock = true};
     options.limits.max_uploads_per_user = kUploads;
@@ -115,12 +123,16 @@ TEST_F(GatewayStoreQueue, UploadsWaitingForAStoreConnectionAreHeldBackNotFailed)
         ingested += kLeadBytes;
     }
     ASSERT_TRUE(settled());
-    for (std::size_t i = kConnections; i < kUploads; ++i) {
+    for (const std::size_t i : queue_order) {
         ASSERT_TRUE(clients[i]->send_raw(patch_head(uploads[i])));
         ASSERT_TRUE(send(i, 0, kQueuedBytes));
         ingested += kQueuedBytes;
+        ASSERT_TRUE(settled());
+        // Two turns on, the upload's part has joined libcurl's queue (the turn that read its
+        // bytes opened the session, the next ran libcurl), so the next one queues behind it.
+        gw.on_loop([] {});
+        gw.on_loop([] {});
     }
-    ASSERT_TRUE(settled());
 
     // A body timeout passes with the queued uploads held up by the store, while the uploads
     // holding its connections keep above the minimum rate: 100 KiB per 10 s against 80 KiB.
@@ -144,14 +156,41 @@ TEST_F(GatewayStoreQueue, UploadsWaitingForAStoreConnectionAreHeldBackNotFailed)
     const gateway::Counters mid = gw.counters();
     EXPECT_EQ(mid.timeouts_body + mid.timeouts_body_rate, 0U);
 
-    // The leaders finish and give their connections up; the queued uploads take them in turn.
-    for (std::size_t i = 0; i < kUploads; ++i) {
-        ASSERT_TRUE(send(i, i < kConnections ? lead : kQueuedBytes, kUploadBytes)) << i;
-        const auto r = clients[i]->read_response();
-        ASSERT_TRUE(r) << i;
-        EXPECT_EQ(r->status, 204) << i;
-        EXPECT_EQ(r->upload_offset(), kUploadBytes) << i;
+    // The leaders finish and give their connections up, and the queued uploads take them in
+    // whatever order libcurl hands them out. It promises none (ADR-0045), and a transfer that
+    // loses the race for a freed connection goes to the back of its queue. So every client
+    // sends the rest of its body at once, as independent clients would: sent one after the
+    // other, the next upload in line may be one the store has not reached, and it would wait
+    // for the connections held by uploads whose clients have not sent their rest yet.
+    std::vector<std::optional<HttpResponse>> responses(kUploads);
+    {
+        std::vector<std::jthread> clients_sending;
+        clients_sending.reserve(kUploads);
+        for (std::size_t i = 0; i < kUploads; ++i) {
+            clients_sending.emplace_back([&, i] {
+                if (send(i, i < kConnections ? lead : kQueuedBytes, kUploadBytes)) {
+                    responses[i] = clients[i]->read_response();
+                }
+            });
+        }
     }
+    for (std::size_t i = 0; i < kUploads; ++i) {
+        ASSERT_TRUE(responses[i]) << i;
+        EXPECT_EQ(responses[i]->status, 204) << i;
+        EXPECT_EQ(responses[i]->upload_offset(), kUploadBytes) << i;
+    }
+}
+
+TEST_F(GatewayStoreQueue, UploadsWaitingForAStoreConnectionAreHeldBackNotFailed) {
+    run({2, 3, 4, 5});
+}
+
+// libcurl's queue is 5, 4, 3, 2: the first freed connection goes to upload 5, the second to
+// upload 2, and the next to upload 4. A test that finished the uploads in their numbered order
+// would wait on upload 3, whose turn cannot come while uploads 4 and 5 hold the connections
+// waiting for bytes their clients have not sent yet.
+TEST_F(GatewayStoreQueue, QueuedUploadsFinishInWhicheverOrderTheStoreTakesThem) {
+    run({5, 4, 3, 2});
 }
 
 } // namespace

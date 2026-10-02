@@ -50,6 +50,50 @@ failed AS (
      WHERE id IN (SELECT video_id FROM expired) AND state IN ('init', 'uploading'))
 SELECT count(*) FROM expired)sql";
 
+// A room some join recorded and nothing used: a direct or group chat (the only kinds a join
+// records; a stream's live chat is opened by the server and lists nobody) with no member, never
+// resolved on the room plane (room_assignments), which is where every message's seq comes from;
+// chat_messages is asked too, for a room whose plane rows an operator removed. Each call walks at
+// most $2 rooms recorded before the cutoff, in (recorded_at, room_id) order from the cursor the
+// last call left, so a call costs the same however many rooms there are and every room is looked
+// at again once a lap ends; the cursor starts over when a call finds fewer than $2. Rows another
+// statement holds are skipped until the next lap. A member added between the check and the
+// delete is left in a room with no kind recorded, which admits only members and is recorded
+// closed by the next join, as any room with members is. Answers the rooms forgotten and whether
+// the lap ended.
+constexpr Sql kForgetUnused = R"sql(
+WITH cursor AS (
+    SELECT recorded_at, room_id FROM chat_rooms_forget_cursor FOR UPDATE),
+walked AS (
+    SELECT r.room_id, r.recorded_at FROM chat_rooms r, cursor c
+     WHERE r.recorded_at <= timestamptz 'epoch' + $1 * interval '1 microsecond'
+       AND (r.recorded_at, r.room_id) > (c.recorded_at, c.room_id)
+     ORDER BY r.recorded_at, r.room_id
+     LIMIT $2),
+unused AS (
+    SELECT room_id FROM chat_rooms r
+     WHERE room_id IN (SELECT room_id FROM walked)
+       AND kind IN ('direct_chat', 'group_chat')
+       AND NOT EXISTS (SELECT 1 FROM chat_members m WHERE m.room_id = r.room_id)
+       AND NOT EXISTS (SELECT 1 FROM room_assignments a WHERE a.room_id = r.room_id)
+       AND NOT EXISTS (SELECT 1 FROM chat_messages c WHERE c.room_id = r.room_id)
+       FOR UPDATE SKIP LOCKED),
+gone AS (
+    DELETE FROM chat_rooms WHERE room_id IN (SELECT room_id FROM unused) RETURNING 1),
+last AS (
+    SELECT recorded_at, room_id FROM walked ORDER BY recorded_at DESC, room_id DESC LIMIT 1),
+lap AS (
+    SELECT count(*) < $2 AS finished FROM walked),
+moved AS (
+    UPDATE chat_rooms_forget_cursor
+       SET (recorded_at, room_id) =
+           (SELECT CASE WHEN lap.finished THEN timestamptz '-infinity' ELSE last.recorded_at END,
+                   CASE WHEN lap.finished THEN uuid '00000000-0000-0000-0000-000000000000'
+                        ELSE last.room_id END
+              FROM lap LEFT JOIN last ON true)
+    RETURNING 1)
+SELECT (SELECT count(*) FROM gone), (SELECT finished FROM lap), (SELECT count(*) FROM moved))sql";
+
 CatalogError to_catalog_error(DbError e) noexcept {
     switch (e) {
     case DbError::Duplicate:
@@ -149,6 +193,28 @@ std::expected<std::vector<ExpiredUpload>, CatalogError> PgUploadReaper::expire(c
         }
     }
     return expired;
+}
+
+std::expected<core::ports::UnusedRoomsScan, CatalogError>
+PgUploadReaper::forget_unused(core::WallTime recorded_before, std::size_t limit) {
+    auto conn = impl_->session();
+    if (!conn) {
+        return std::unexpected(conn.error());
+    }
+    auto done = (*conn)->exec(kForgetUnused, Params{}
+                                                 .add_int(micros_since_epoch(recorded_before))
+                                                 .add_int(static_cast<std::int64_t>(limit)));
+    if (!done) {
+        return failure(done.error());
+    }
+    const auto forgotten = done->get(0, 0).and_then(parse_uint64);
+    const auto finished = done->get(0, 1);
+    // The cursor's row is made by the migration, and nothing deletes it.
+    if (!forgotten || !finished || done->get(0, 2) != "1") {
+        return std::unexpected(CatalogError::Corrupt);
+    }
+    return core::ports::UnusedRoomsScan{.forgotten = static_cast<std::size_t>(*forgotten),
+                                        .finished = *finished == "t"};
 }
 
 } // namespace infra::postgres

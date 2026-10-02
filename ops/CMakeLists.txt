@@ -1,5 +1,6 @@
 ulw_add_library(ops
     src/async_log.cpp
+    src/dev_only.cpp
     src/log.cpp
     src/metrics.cpp
     src/notify.cpp

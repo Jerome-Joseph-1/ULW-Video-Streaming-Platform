@@ -21,3 +21,4 @@ __pycache__/
 /load-report/
 /diagnostics/
 /tests/call/.whipsink/
+/tools/security/.tools/
