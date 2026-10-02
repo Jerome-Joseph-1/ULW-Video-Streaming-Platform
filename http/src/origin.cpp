@@ -63,6 +63,12 @@ bool is_origin(std::string_view origin) noexcept {
         if (close == std::string_view::npos || close == 1) {
             return false;
         }
+        // An IPv6 literal (with an embedded IPv4 tail) holds hex digits, ':' and '.' only.
+        if (!std::ranges::all_of(rest.substr(1, close - 1), [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == ':' || c == '.';
+            })) {
+            return false;
+        }
         host_end = close + 1;
     }
     host_end = std::min(host_end, rest.size());
