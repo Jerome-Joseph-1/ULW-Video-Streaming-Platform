@@ -1,12 +1,13 @@
 // mock-auth stands in for Askedin's auth-service inside the sandbox cluster. It signs tokens
 // the way the real service does (the claims our verifier reads, the stage cookie) and publishes
 // its keys at /.well-known/jwks.json, which the gateway fetches over https exactly as it would
-// fetch Askedin's. It holds an RS256, an ES256 and an Ed25519 key, so every algorithm the
-// verifier accepts is exercised through the cluster, and rotates all three on demand.
+// fetch Askedin's. It holds a PS256, an ES256 and an Ed25519 key, so each kind of key the
+// verifier accepts is exercised through the cluster, and rotates all three on demand. RSA signs
+// with PSS, not RS256's PKCS #1 v1.5 padding, which the verifier's unit tests cover instead.
 //
 //	GET  /.well-known/jwks.json   current keys and the generation before them
 //	POST /token?sub=&email=&alg=&ttl=
-//	                              {"token":...} plus the cookie; alg is RS256, ES256 or EdDSA
+//	                              {"token":...} plus the cookie; alg is PS256, ES256 or EdDSA
 //	POST /rotate                  new keys; tokens signed before stay valid for one rotation
 //	GET  /healthz
 //	GET  /whoami                  the x-user-* headers it was sent, as JSON; the sandbox routes
@@ -65,10 +66,12 @@ func newRSA() (signingKey, error) {
 	kid := thumbprint(`{"e":"` + e + `","kty":"RSA","n":"` + n + `"}`)
 	return signingKey{
 		kid: kid,
-		alg: "RS256",
+		alg: "PS256",
 		jwk: map[string]string{"kty": "RSA", "n": n, "e": e},
 		sign: func(digest, _ []byte) ([]byte, error) {
-			return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest)
+			// RFC 7518 section 3.5: the salt is as long as the hash.
+			options := rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash}
+			return rsa.SignPSS(rand.Reader, key, crypto.SHA256, digest, &options)
 		},
 	}, nil
 }
@@ -174,7 +177,7 @@ func (i *issuer) mint(alg, subject, email string, ttl time.Duration) (string, er
 	key, ok := i.current[alg]
 	i.mu.Unlock()
 	if !ok {
-		return "", errors.New("alg must be RS256, ES256 or EdDSA")
+		return "", errors.New("alg must be PS256, ES256 or EdDSA")
 	}
 	header, err := json.Marshal(map[string]string{"alg": key.alg, "typ": "JWT", "kid": key.kid})
 	if err != nil {
