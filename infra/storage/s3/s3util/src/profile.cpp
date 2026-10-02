@@ -16,6 +16,7 @@ namespace {
 
 constexpr std::uint16_t kHttpPort = 80;
 constexpr std::uint16_t kHttpsPort = 443;
+constexpr std::string_view kHttps = "https";
 constexpr std::string_view kSchemeEnd = "://";
 
 bool is_lower_alnum(char c) noexcept {
@@ -59,16 +60,6 @@ bool is_r2_account_id(std::string_view s) noexcept {
 
 } // namespace
 
-std::string_view to_string(Scheme scheme) noexcept {
-    switch (scheme) {
-    case Scheme::Http:
-        return "http";
-    case Scheme::Https:
-        return "https";
-    }
-    return "https";
-}
-
 std::expected<Endpoint, ProfileError> parse_endpoint(std::string_view url) {
     Endpoint e;
     const std::size_t scheme_end = url.find(kSchemeEnd);
@@ -76,15 +67,14 @@ std::expected<Endpoint, ProfileError> parse_endpoint(std::string_view url) {
         return std::unexpected(ProfileError::InvalidEndpoint);
     }
     const std::string_view scheme = url.substr(0, scheme_end);
-    if (scheme == to_string(Scheme::Https)) {
-        e.scheme = Scheme::Https;
+    if (scheme == kHttps) {
         e.port = kHttpsPort;
-    } else if (scheme == to_string(Scheme::Http)) {
-        e.scheme = Scheme::Http;
+    } else if (scheme == "http") {
         e.port = kHttpPort;
     } else {
         return std::unexpected(ProfileError::InvalidEndpoint);
     }
+    e.scheme = std::string(scheme);
     url.remove_prefix(scheme_end + kSchemeEnd.size());
     const std::size_t colon = url.find(':');
     const std::string_view host = url.substr(0, colon);
@@ -103,7 +93,7 @@ std::expected<Endpoint, ProfileError> parse_endpoint(std::string_view url) {
 }
 
 std::string authority(const Endpoint& endpoint) {
-    const std::uint16_t default_port = endpoint.scheme == Scheme::Https ? kHttpsPort : kHttpPort;
+    const std::uint16_t default_port = endpoint.scheme == kHttps ? kHttpsPort : kHttpPort;
     if (endpoint.port == default_port) {
         return endpoint.host;
     }
@@ -132,7 +122,7 @@ std::expected<S3Profile, ProfileError> S3Profile::r2(std::string_view account_id
         return std::unexpected(ProfileError::InvalidAccountId);
     }
     S3Profile p;
-    p.endpoint = Endpoint{.scheme = Scheme::Https,
+    p.endpoint = Endpoint{.scheme = std::string(kHttps),
                           .host = std::string(account_id) + ".r2.cloudflarestorage.com",
                           .port = kHttpsPort};
     p.region = "auto";

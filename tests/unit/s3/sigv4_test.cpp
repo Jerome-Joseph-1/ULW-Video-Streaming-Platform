@@ -33,7 +33,6 @@ using infra::s3util::payload_sha256;
 using infra::s3util::PresignError;
 using infra::s3util::QueryParam;
 using infra::s3util::RequestTarget;
-using infra::s3util::Scheme;
 using infra::s3util::SecretString;
 using infra::s3util::sha256;
 using infra::s3util::Signer;
@@ -65,7 +64,7 @@ Credentials credentials_with_token() {
 }
 
 RequestTarget example_target(std::string path = "/test.txt", std::vector<QueryParam> query = {}) {
-    return RequestTarget{.scheme = Scheme::Https,
+    return RequestTarget{.scheme = "https",
                          .host = std::string(kExampleHost),
                          .path = std::move(path),
                          .query = std::move(query)};
@@ -241,7 +240,7 @@ TEST(SigV4, CanonicalHeadersAreLoweredTrimmedCollapsedSortedAndFolded) {
                              Header{.name = "Host", .value = "h"},
                              Header{.name = "x-amz-meta-tag", .value = "d"},
                              Header{.name = "Content-Type", .value = "video/mp4"}};
-    const RequestTarget target{.scheme = Scheme::Https, .host = "h", .path = "/k", .query = {}};
+    const RequestTarget target{.scheme = "https", .host = "h", .path = "/k", .query = {}};
     EXPECT_EQ(canonical_request("PUT", target, headers, kUnsignedPayload),
               "PUT\n/k\n\n"
               "content-type:video/mp4\n"
@@ -319,7 +318,7 @@ TEST(Presign, SignsTheSessionTokenAndTheCallersOwnParameters) {
 
     const Signer r2("auto");
     const RequestTarget playlist{
-        .scheme = Scheme::Https,
+        .scheme = "https",
         .host = "0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
         .path = "/media/hls/v1/master.m3u8",
         .query = {{.name = "response-content-type", .value = "application/vnd.apple.mpegurl"}}};
