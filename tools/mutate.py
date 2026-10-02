@@ -28,8 +28,9 @@ test that outlasts its timeout is killed with its whole process group. Each muta
 file:line:operator:index, stable for a given source.
 
 The test command is a test binary inside the repository or the build tree, given only
-googletest flags, or ctest with the options in CTEST_VALUED and CTEST_FLAGS; anything else is
-refused with exit 2. --sample takes the mutants whose sha256 of seed and id sorts first.
+googletest flags (passed to it as the GTEST_* variables googletest reads in their place), or
+ctest with the options in CTEST_FLAGS, run in the build tree; anything else is refused with
+exit 2. --sample takes the mutants whose sha256 of seed and id sorts first.
 
 Mutants build with CCACHE_READONLY so they do not fill the cache; the restored source hits it.
 """
@@ -63,14 +64,14 @@ QUIET = re.compile(r"\b(log|LOG|ulw_log|logger|trace|debug)\w*\s*[.(]|static_ass
 # The characters of a declaration's type and name, and what may follow the name.
 DECL_HEAD = re.compile(r"[\w:<>,\s*&]*")
 DECL_END = ("=", "(", "{", ";")
-# A googletest flag, the only option a test binary is given.
-GTEST_FLAG = re.compile(r"--gtest_[a-z_]+(=.*)?", re.DOTALL)
-# The ctest options a test command may use: those that take a value, then those that do not.
-CTEST_VALUED = {"--test-dir", "-R", "--tests-regex", "-E", "--exclude-regex", "-L", "--label-regex",
-                "-LE", "--label-exclude", "-j", "--parallel", "--timeout", "-C", "--build-config",
-                "--repeat"}
-CTEST_FLAGS = {"--output-on-failure", "--stop-on-failure", "-Q", "--quiet", "-V", "--verbose",
-               "--no-tests=error", "--schedule-random"}
+# A googletest flag, the only argument a test binary is given; it reaches the binary as the
+# GTEST_* environment variable googletest reads in its place, so the command line holds only
+# the program.
+GTEST_FLAG = re.compile(r"--gtest_([a-z_]+)(?:=(.*))?", re.DOTALL)
+# The ctest options a test command may use, none of which takes a value; ctest runs in the
+# build tree (--test-dir).
+CTEST_FLAGS = ("--output-on-failure", "--stop-on-failure", "-Q", "--quiet", "-V", "--verbose",
+               "--no-tests=error", "--schedule-random")
 
 
 def mask(lines):
@@ -134,26 +135,18 @@ def refuse(message):
 
 
 def test_command(cmd, build_dir):
-    """The test command, checked: ctest with the options in CTEST_VALUED and CTEST_FLAGS, or an
-    executable inside the repository or the build tree given only googletest flags. Anything
-    else exits 2, so no argument reaches a program as an option it was not meant to take."""
+    """The test command as the program and its arguments, and the environment variables it
+    adds: ctest in the build tree with options from CTEST_FLAGS, or an executable inside the
+    repository or the build tree with googletest flags, which become GTEST_* variables.
+    Anything else exits 2, so no argument reaches a program as an option it was not meant to
+    take."""
     if cmd[0] == "ctest":
-        checked, value_next = ["ctest"], False
+        argv = ["ctest", "--test-dir", str(build_dir)]
         for arg in cmd[1:]:
-            if value_next:
-                value_next = False
-                if checked[-1] == "--test-dir":
-                    arg = str(inside(arg))
-                elif arg.startswith("-"):
-                    refuse(f"{checked[-1]} takes a value, not {arg!r}")
-            elif arg in CTEST_VALUED:
-                value_next = True
-            elif arg not in CTEST_FLAGS:
-                refuse(f"ctest option {arg!r} is not one a test command uses")
-            checked.append(arg)
-        if value_next:
-            refuse(f"{checked[-1]} takes a value")
-        return checked
+            if arg not in CTEST_FLAGS:
+                refuse(f"ctest option {arg!r} is not one of {', '.join(CTEST_FLAGS)}")
+            argv.append(CTEST_FLAGS[CTEST_FLAGS.index(arg)])
+        return argv, {}
     if os.sep not in cmd[0]:
         refuse(f"the test program {cmd[0]!r} is neither ctest nor a path")
     program = inside(cmd[0])
@@ -161,10 +154,14 @@ def test_command(cmd, build_dir):
         refuse(f"the test program {cmd[0]!r} is not ctest or inside the repository or the build tree")
     if not (program.is_file() and os.access(program, os.X_OK)):
         refuse(f"the test program {cmd[0]!r} is not an executable file")
+    flags = {}
     for arg in cmd[1:]:
-        if arg.startswith("-") and not GTEST_FLAG.fullmatch(arg):
+        flag = GTEST_FLAG.fullmatch(arg)
+        if not flag:
             refuse(f"{arg!r} is not a googletest flag")
-    return [str(program)] + cmd[1:]
+        # A flag without a value is a boolean one set, as googletest reads it.
+        flags["GTEST_" + flag.group(1).upper()] = "1" if flag.group(2) is None else flag.group(2)
+    return [str(program)], flags
 
 
 def sample_order(seed, key):
@@ -383,14 +380,15 @@ def main():
     if not TARGET.fullmatch(a.target):
         sys.exit(f"--target {a.target!r} is not a ninja target name")
     build_dir = inside(a.build_dir)
-    cmd = test_command(cmd, build_dir)
+    cmd, test_flags = test_command(cmd, build_dir)
+    test_env = dict(os.environ, **test_flags)
 
     build = ["ninja", "-C", str(build_dir), "-j1", a.target]
     env = dict(os.environ, CCACHE_READONLY="1")
     rc, out, _ = run(build, a.build_timeout)
     if rc != 0:
         sys.exit(f"the unmutated target does not build:\n{out[-3000:]}")
-    rc, out, base = run(cmd, a.timeout)
+    rc, out, base = run(cmd, a.timeout, env=test_env)
     if rc != 0:
         sys.exit(f"the unmutated tests do not pass:\n{out[-3000:]}")
     print(f"baseline: {base:.1f}s, {len(chosen)} mutants", file=sys.stderr, flush=True)
@@ -417,7 +415,7 @@ def main():
                 if rc != 0:
                     status, tt, tail = "unbuildable", 0.0, ""
                 else:
-                    rc, tout, tt = run(cmd, a.timeout)
+                    rc, tout, tt = run(cmd, a.timeout, env=test_env)
                     status = "timeout" if rc is None else ("survived" if rc == 0 else "killed")
                     failed = re.findall(r"\[  FAILED  \] (\S+)", tout)
                     tail = ",".join(sorted(set(failed))[:5]) if failed else tout[-300:]
