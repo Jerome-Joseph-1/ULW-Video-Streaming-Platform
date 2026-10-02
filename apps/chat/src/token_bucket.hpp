@@ -32,4 +32,24 @@ private:
     core::MonoTime refilled_;
 };
 
+// `burst` at once, then one each `interval`: for allowances counted in minutes, which a
+// per-second rate cannot express. Kept as the time the next one is due when the bucket is used
+// up (a generic cell rate algorithm), so it is one time point and no arithmetic on fractions.
+class PacedBucket {
+public:
+    PacedBucket(std::uint32_t burst, core::Millis interval, core::MonoTime now) noexcept
+        : burst_(burst), interval_(interval), due_(now) {}
+
+    // Whether take() would succeed at `now`, without taking.
+    [[nodiscard]] bool available(core::MonoTime now) const noexcept;
+    void take(core::MonoTime now) noexcept;
+    [[nodiscard]] bool full(core::MonoTime now) const noexcept { return due_ <= now; }
+
+private:
+    std::uint32_t burst_;
+    core::Millis interval_;
+    // When the bucket is full again: every take moves it an interval on from `now` at the least.
+    core::MonoTime due_;
+};
+
 } // namespace chat

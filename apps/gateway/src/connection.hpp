@@ -48,8 +48,9 @@ public:
     Connection& operator=(Connection&&) = delete;
 
     // `hold` is the peer's own count, nullopt for a trusted proxy, whose clients are counted a
-    // request at a time.
-    void start(std::unique_ptr<net::ITransport> transport, const net::IpAddress& peer,
+    // request at a time. `fd` is the socket under the transport, for what the kernel says of
+    // it; the transport owns it.
+    void start(std::unique_ptr<net::ITransport> transport, int fd, const net::IpAddress& peer,
                std::optional<ClientHold> hold) noexcept;
     // The gateway is shutting down: finish the request in flight, then close.
     void drain() noexcept;
@@ -59,6 +60,12 @@ public:
     [[nodiscard]] bool idle() const noexcept { return phase_ == Phase::Idle; }
     // Nothing (the kernel, the catalog, the pool, the verifier) can still reach this object.
     [[nodiscard]] bool quiescent() const noexcept;
+    // Bytes sent to the client that the kernel has not taken yet.
+    [[nodiscard]] std::size_t queued_output() const noexcept {
+        return transport_ ? transport_->pending_send_bytes() : 0;
+    }
+    // Bytes of a new request read while the last response was held back, not parsed yet.
+    [[nodiscard]] std::size_t held_bytes() const noexcept { return held_.size(); }
     // Heap bytes held for the request: staged body and a buffered JSON body.
     [[nodiscard]] std::size_t buffered_bytes() const noexcept {
         return staging_.capacity() + req_.body.capacity();
@@ -157,6 +164,9 @@ private:
     }
 
     void begin_request() noexcept;
+    // Feeds a request's bytes to the parser. Skips the hold-back check: the caller has just
+    // made it.
+    void parse(net::BorrowedBytes bytes) noexcept;
     void on_parse(http::ParseResult result) noexcept;
     void advance() noexcept;
     [[nodiscard]] http::HeadVerdict authenticate_head(const http::RequestHead& head) noexcept;
@@ -203,7 +213,19 @@ private:
     [[nodiscard]] bool admit_forwarded(const http::RequestHead& head) noexcept;
     void linger() noexcept;
     void close() noexcept;
+    // Reads what the client pipelined, from the loop.
+    void resume() noexcept;
+    // What resume() does once the loop comes round: the next request, unless held back.
+    void read_next_request() noexcept;
+    // Output the peer has not acknowledged: queued in the transport, or held by the kernel.
+    [[nodiscard]] bool output_waiting() const noexcept;
+    // Output the peer's window holds back: queued in the transport, or unsent in the kernel.
+    [[nodiscard]] bool response_held_back() const noexcept;
+    // Stops reading until a held-back response has gone; false when none is held back.
+    [[nodiscard]] bool hold_back_request() noexcept;
     void arm_timer(core::Millis delay) noexcept;
+    // Between requests: the header timeout, and a look at a held-back response.
+    void on_idle_timeout(core::MonoTime t) noexcept;
     void restart_rate_window() noexcept;
     // Ends a chunk body that fell below the minimum rate, or returns how long until the
     // current window closes.
@@ -214,6 +236,7 @@ private:
     Gateway& gateway_;
     // Set by start(); plaintext either way, whatever the socket carries.
     std::unique_ptr<net::ITransport> transport_;
+    int fd_ = -1;
     http::RequestParser parser_{*this};
     Phase phase_ = Phase::Idle;
     Request req_;
@@ -223,15 +246,22 @@ private:
     core::MonoTime last_progress_;
     core::MonoTime request_started_;
     // The stretch of a chunk body over which the minimum rate is judged, and the client bytes
-    // it has brought. Restarted whenever reading resumes after the store held the body up.
+    // it has brought. When reading resumes after the store held the body up, the start moves
+    // on by the time held, so the window spans reading time only and keeps the bytes it has.
     core::MonoTime rate_window_start_;
     std::uint64_t rate_window_bytes_ = 0;
+    // When the parser last paused: the start of the store's hold, if the body resumes.
+    core::MonoTime parser_paused_at_;
     std::size_t requests_ = 0;
     // Numbers each request on this connection, so late completions can tell whose they are.
     std::uint64_t request_seq_ = 0;
     bool receiving_ = false;
     bool parser_paused_ = false;
     bool resume_pending_ = false;
+    // A keep-alive response still waits in the transport; reading resumes once it has gone.
+    bool awaiting_drain_ = false;
+    // A new request's first bytes, read while the last response was held back.
+    std::vector<std::byte> held_;
     bool draining_ = false;
     bool peer_eof_ = false;
     // Outstanding catalog callbacks, offload jobs and key waits: all hold `this`.

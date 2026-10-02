@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { config, startStack } from './stack.mjs';
+import { byCodePoint, config, startStack } from './stack.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
@@ -32,8 +32,8 @@ async function s3(method, pathname, { query = {}, body = '' } = {}) {
   const region = 'us-east-1';
   const payload = createHash('sha256').update(body).digest('hex');
   const headers = { host: endpoint.host, 'x-amz-content-sha256': payload, 'x-amz-date': now };
-  const signed = Object.keys(headers).sort();
-  const canonicalQuery = Object.keys(query).sort()
+  const signed = Object.keys(headers).sort(byCodePoint);
+  const canonicalQuery = Object.keys(query).sort(byCodePoint)
     .map((k) => `${encode(k)}=${encode(query[k])}`).join('&');
   const canonicalHeaders = signed.map((h) => `${h}:${headers[h]}\n`).join('');
   const canonical = [method, pathname, canonicalQuery, canonicalHeaders, signed.join(';'),

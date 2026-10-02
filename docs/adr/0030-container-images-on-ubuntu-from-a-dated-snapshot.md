@@ -41,3 +41,6 @@ by version and hash. CI and the development machines build on Ubuntu 24.04 with 
   pinned source and build.
 - The snapshot service is a build-time dependency; it answers 503 under load, which the apt
   retries absorb. Reopen if it becomes unreliable, or if the platform moves off Ubuntu.
+- The worker image's runtime moved to Debian 13 with ffmpeg from Debian's security archive,
+  pinned the same way from snapshot.debian.org (ADR-0074). Its binaries are still built here,
+  on Ubuntu 24.04, for their CET marks; the gateway image stays as above.
