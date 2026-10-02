@@ -26,6 +26,8 @@ struct Config {
     std::uint16_t port = 8080;
     net::ReactorKind reactor = net::ReactorKind::IoUring;
     Transport transport = Transport::Plain;
+    // ULW_JWKS_MAX_STALE_HOURS: how long keys stay trusted while every refetch fails.
+    std::uint32_t jwks_max_stale_hours = 24;
     // Only with Transport::Tls, and then both.
     std::string tls_certificate_chain;
     std::string tls_private_key;
@@ -51,6 +53,8 @@ struct Config {
     std::string run_as_user;
     // Stay root when started as root with no run_as_user; otherwise that is refused.
     bool allow_root = false;
+    // ULW_DEV_MODE=1: a development run, which dev_jwks_file needs.
+    bool dev_mode = false;
     Limits limits;
 };
 

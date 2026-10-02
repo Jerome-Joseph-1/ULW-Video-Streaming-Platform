@@ -8,10 +8,12 @@
 #include "devtoken/dev_key.hpp"
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
+#include "support/core_limit.hpp"
 #include "support/fake_notify.hpp"
 #include "support/http_client.hpp"
 #include "support/reserve_port.hpp"
 #include "support/temp_dir.hpp"
+#include "support/user_id.hpp"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -25,7 +27,6 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
-#include <pwd.h>
 #include <string>
 #include <vector>
 
@@ -65,7 +66,7 @@ protected:
     [[nodiscard]] std::vector<std::string> base_env() const {
         return {"ULW_STORAGE=fs", "ULW_FS_ROOT=" + (files_.path() / "store").string(),
                 "ULW_DATABASE_URL=postgresql://ulw:hunter2@127.0.0.1:1/ulw",
-                "ULW_DEV_JWKS_FILE=" + jwks_.string(), "JWT_ISSUER=ulw-test",
+                "ULW_DEV_JWKS_FILE=" + jwks_.string(), "ULW_DEV_MODE=1", "JWT_ISSUER=ulw-test",
                 // Developers and some runners start tests as root; the refusal has tests below.
                 "ULW_ALLOW_ROOT=1"};
     }
@@ -170,9 +171,9 @@ constexpr bool kBuiltWithAsan =
 #endif
 
 TEST_F(GatewayAsRoot, BindsAPrivilegedPortThenServesAsTheUserItNames) {
-    const passwd* nobody = ::getpwnam("nobody");
+    const std::optional<uid_t> nobody = ulw::test::user_id("nobody");
     const auto port = free_privileged_port();
-    if (nobody == nullptr || !port) {
+    if (!nobody || !port) {
         GTEST_SKIP() << "no nobody user, or no free port under 1024";
     }
     auto env = env_without_allow_root();
@@ -200,12 +201,34 @@ TEST_F(GatewayAsRoot, BindsAPrivilegedPortThenServesAsTheUserItNames) {
     std::string line;
     while (std::getline(status, line) && !line.starts_with("Uid:")) {
     }
-    const std::string uid = std::to_string(nobody->pw_uid);
+    const std::string uid = std::to_string(*nobody);
     EXPECT_EQ(line, "Uid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid);
     HttpClient c({.port = *port, .tls = nullptr});
     const auto r = c.request("GET", "/healthz", "");
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 200);
+    gateway->signal(SIGTERM);
+    EXPECT_EQ(gateway->wait_exit(kPatience), 0) << gateway->output();
+}
+
+// A crash would otherwise write the database password, the store keys and live bearer tokens to
+// disk.
+TEST_F(GatewayConfigTest, TheServerCanWriteNoCoreFile) {
+    const ulw::test::RaisedCoreLimit limit;
+    if (!limit.raised()) {
+        GTEST_SKIP() << "the hard core limit is 0 here; there is nothing to lower";
+    }
+    auto started = ulw::test::start_until_listening(
+        [&] {
+            auto env = base_env();
+            env.push_back("ULW_LISTEN_PORT=" + std::to_string(ulw::test::reserve_port()));
+            return ChildProcess::start({ULW_GATEWAY_BIN}, env);
+        },
+        R"("event":"listening")", kPatience);
+    const auto gateway = std::move(started.process);
+    ASSERT_NE(gateway, nullptr);
+    ASSERT_TRUE(started.ready) << gateway->output();
+    EXPECT_EQ(ulw::test::core_limit_of(gateway->pid()), std::optional<std::string>("0 0"));
     gateway->signal(SIGTERM);
     EXPECT_EQ(gateway->wait_exit(kPatience), 0) << gateway->output();
 }
