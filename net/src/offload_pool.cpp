@@ -6,6 +6,7 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <stop_token>
 #include <unistd.h>
 
 namespace net {
@@ -47,6 +48,8 @@ void OffloadPool::submit(IOffloadJob& job) {
 }
 
 void OffloadPool::worker(const std::stop_token& stop) noexcept {
+    // Once per thread, for as long as it pops: a stop wakes every waiting worker.
+    const std::stop_callback wake_on_stop(stop, [this] { queue_->wake_all(); });
     while (IOffloadJob* job = queue_->pop(stop)) {
         job->run();
         {
