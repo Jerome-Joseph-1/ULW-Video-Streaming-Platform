@@ -71,7 +71,7 @@ public:
                          core::ports::CatalogCallback<void> done) override;
     void commit_upload(const core::UploadId& id, const core::VideoId& video,
                        const std::string& request_id,
-                       core::ports::CatalogCallback<void> done) override;
+                       core::ports::CatalogCallback<core::VideoState> done) override;
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
     void find_video(const core::VideoId& id,
                     core::ports::CatalogCallback<core::VideoRecord> done) override;

@@ -3,7 +3,10 @@
 #include "support/fake_clock.hpp"
 #include "support/temp_dir.hpp"
 
+#include <sys/resource.h>
+
 #include <algorithm>
+#include <csignal>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <string>
@@ -487,6 +490,63 @@ TEST_F(PublisherTest, TheRunThatEndsTheStreamWritesItsEpochDownBeforeTheEnd) {
     const auto marked = std::ranges::find(store.uploads, "ended_by");
     ASSERT_NE(marked, store.uploads.end());
     EXPECT_EQ(std::find(marked, store.uploads.end(), "index.m3u8"), store.uploads.end() - 1);
+}
+
+// While alive, no file this process writes may grow past `bytes`: a write past it fails with
+// EFBIG instead of raising SIGXFSZ, which would end the test.
+class FileSizeLimit {
+public:
+    explicit FileSizeLimit(rlim_t bytes) : signal_before_(std::signal(SIGXFSZ, SIG_IGN)) {
+        if (::getrlimit(RLIMIT_FSIZE, &before_) != 0) {
+            return;
+        }
+        const rlimit limited{.rlim_cur = bytes, .rlim_max = before_.rlim_max};
+        applied_ = ::setrlimit(RLIMIT_FSIZE, &limited) == 0;
+    }
+    ~FileSizeLimit() {
+        if (applied_) {
+            ::setrlimit(RLIMIT_FSIZE, &before_);
+        }
+        static_cast<void>(std::signal(SIGXFSZ, signal_before_));
+    }
+    FileSizeLimit(const FileSizeLimit&) = delete;
+    FileSizeLimit& operator=(const FileSizeLimit&) = delete;
+    FileSizeLimit(FileSizeLimit&&) = delete;
+    FileSizeLimit& operator=(FileSizeLimit&&) = delete;
+    [[nodiscard]] bool applied() const noexcept { return applied_; }
+
+private:
+    void (*signal_before_)(int);
+    rlimit before_{};
+    bool applied_ = false;
+};
+
+// ended_by is what tells a restart the ender's claim from a newer packager's, so a write of it
+// that the disk refused must not be uploaded as if it had gone through. The refusal shows only
+// when the stream's buffer goes out, at close: with files limited to one byte, the epoch's "1\n"
+// is cut to "1", which, uploaded, would read as an ended_by without its newline.
+TEST_F(PublisherTest, AnEndedByTheDiskRefusedIsNeitherUploadedNorFollowedByTheEnd) {
+    {
+        auto publisher = open();
+        ASSERT_TRUE(publisher);
+        publisher->begin_epoch(kFirstMedia);
+        segments(0, 0, 2);
+        ASSERT_TRUE(publisher->pump(ffmpeg_playlist(0, 0, 2, init(0))));
+    }
+    auto publisher = open();
+    ASSERT_TRUE(publisher);
+    ASSERT_EQ(publisher->epoch(), 1U);
+
+    live::FinishResult finished;
+    {
+        const FileSizeLimit one_byte(1);
+        ASSERT_TRUE(one_byte.applied());
+        finished = publisher->finish({});
+    }
+    EXPECT_FALSE(finished.ended);
+    EXPECT_EQ(finished.problem, PublishError::UploadFailed);
+    EXPECT_FALSE(fs::exists(stored_path("ended_by")));
+    EXPECT_FALSE(stored_playlist().ended);
 }
 
 TEST_F(PublisherTest, AStaleRunCannotOverwriteTheNewerEndersEpoch) {

@@ -90,6 +90,19 @@ ulw_add_library(test_tls support/tls_pki.cpp)
 target_include_directories(test_tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(test_tls PUBLIC ulw::net_lib OpenSSL::SSL)
 
+# The test harness itself: the client, the port reservations and the child processes other
+# suites rely on, and the soak's own setup.
+ulw_add_test_suite(test_support_tests unit
+    support/child_process.cpp
+    unit/support/child_process_test.cpp
+    unit/support/http_client_test.cpp
+    unit/support/reserve_port_test.cpp)
+target_link_libraries(test_support_tests PRIVATE ulw::os ulw::test_tls OpenSSL::SSL)
+target_include_directories(test_support_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+target_compile_definitions(test_support_tests PRIVATE
+    ULW_DATAGRAM_SOAK_BIN="$<TARGET_FILE:ulw_datagram_soak>")
+add_dependencies(test_support_tests ulw_datagram_soak)
+
 ulw_add_test_suite(net_unit_tests unit
     unit/net/byte_queue_test.cpp
     unit/net/connect_test.cpp
@@ -405,11 +418,13 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
     unit/chat/envelope_test.cpp
+    unit/chat/key_fetcher_test.cpp
     unit/chat/live_chat_test.cpp
     unit/chat/presence_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
-target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os)
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os
+    ulw::test_http_server)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 # The M16 acceptance: three chat_server processes on the Postgres the suites above use.
@@ -446,15 +461,19 @@ endif()
 # gateway_server as its service manager runs it, against a scratch database.
 ulw_add_test_suite(gateway_process_tests integration
     integration/gateway_process_test.cpp
+    integration/gateway_store_connections_test.cpp
     integration/postgres_harness.cpp
     support/child_process.cpp
     PROPERTIES RESOURCE_LOCK postgres)
 target_link_libraries(gateway_process_tests PRIVATE
-    ulw::pg_store ulw::devtoken ulw::os ulw::test_tls PkgConfig::LIBPQ)
+    ulw::pg_store ulw::devtoken ulw::os ulw::test_tls ulw::test_live_s3 PkgConfig::LIBPQ)
 target_include_directories(gateway_process_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 target_compile_definitions(gateway_process_tests PRIVATE
     ULW_GATEWAY_BIN="$<TARGET_FILE:gateway_server>")
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(gateway_process_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 add_dependencies(gateway_process_tests gateway_server)
 
 # The directory contract runs against the in-memory directory here and against Postgres in

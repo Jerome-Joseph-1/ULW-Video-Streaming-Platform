@@ -1,4 +1,5 @@
 #include "core/ports/clock.hpp"
+#include "core/ports/random.hpp"
 #include "core/util/time.hpp"
 #include "core/util/uuid.hpp"
 
@@ -7,11 +8,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <gtest/gtest.h>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -181,6 +184,99 @@ TEST(UuidV7, LaterIdsSortAfterEarlierOnes) {
     const Uuid second = Uuid::v7(clock, random);
     EXPECT_EQ(timestamp_ms(second), timestamp_ms(first) + 1);
     EXPECT_LT(first, second);
+}
+
+// Every byte `fill`, and with `bit` set as well, counting bits from the first byte handed out.
+class FixedRandom final : public core::ports::IRandom {
+public:
+    explicit FixedRandom(std::byte fill, std::optional<std::size_t> bit = std::nullopt)
+        : fill_(fill), bit_(bit) {}
+
+    void fill(std::span<std::byte> out) noexcept override {
+        for (std::byte& b : out) {
+            b = fill_;
+            if (bit_ && *bit_ / 8 == handed_out_) {
+                b |= std::byte{1} << (*bit_ % 8);
+            }
+            ++handed_out_;
+        }
+    }
+
+private:
+    std::byte fill_;
+    std::optional<std::size_t> bit_;
+    std::size_t handed_out_ = 0;
+};
+
+// RFC 9562 section 5.7: the version and variant bits, and the 74 random bits around them.
+constexpr std::size_t kVersionByte = 6;
+constexpr std::size_t kVariantByte = 8;
+
+unsigned tail_byte(const Uuid& id, std::size_t at) {
+    return std::to_integer<unsigned>(id.bytes()[at]);
+}
+
+// The random bits of the id: bytes 6 to 15 without the version and variant bits.
+unsigned random_bits_of(const Uuid& id, std::size_t at) {
+    const unsigned b = tail_byte(id, at);
+    if (at == kVersionByte) {
+        return b & 0x0FU;
+    }
+    if (at == kVariantByte) {
+        return b & 0x3FU;
+    }
+    return b;
+}
+
+void expect_version_and_variant(const Uuid& id) {
+    EXPECT_EQ(tail_byte(id, kVersionByte) >> 4U, 7U);
+    EXPECT_EQ(tail_byte(id, kVariantByte) >> 6U, 0b10U);
+}
+
+TEST(UuidV7, RandomBitsAllSetFillEveryRandomPositionAndNothingElse) {
+    const FakeClock clock;
+    FixedRandom ones(std::byte{0xFF});
+    const Uuid id = Uuid::v7(clock, ones);
+    expect_version_and_variant(id);
+    const std::array<unsigned, 3> kRandomMask{0x0F, 0xFF, 0x3F};
+    for (std::size_t at = kVersionByte; at < Uuid::kByteLength; ++at) {
+        const unsigned mask = at <= kVariantByte ? kRandomMask.at(at - kVersionByte) : 0xFFU;
+        EXPECT_EQ(random_bits_of(id, at), mask) << "byte " << at;
+    }
+}
+
+TEST(UuidV7, RandomBitsAllClearLeaveOnlyTheVersionAndVariant) {
+    const FakeClock clock;
+    FixedRandom zeros(std::byte{0x00});
+    const Uuid id = Uuid::v7(clock, zeros);
+    expect_version_and_variant(id);
+    for (std::size_t at = kVersionByte; at < Uuid::kByteLength; ++at) {
+        EXPECT_EQ(random_bits_of(id, at), 0U) << "byte " << at;
+    }
+}
+
+// Each random bit the source hands out lands in at most one bit of the id, no two in the same
+// one, and 74 of them land: the id carries 74 independent random bits.
+TEST(UuidV7, EachRandomBitReachesItsOwnPositionAndSeventyFourReachOne) {
+    const FakeClock clock;
+    FixedRandom zeros(std::byte{0x00});
+    const Uuid base = Uuid::v7(clock, zeros);
+    std::array<unsigned, Uuid::kByteLength> reached{};
+    std::size_t landed = 0;
+    for (std::size_t bit = 0; bit < 8 * (Uuid::kByteLength - kVersionByte); ++bit) {
+        FixedRandom one(std::byte{0x00}, bit);
+        const Uuid id = Uuid::v7(clock, one);
+        std::size_t changed = 0;
+        for (std::size_t at = 0; at < Uuid::kByteLength; ++at) {
+            const unsigned diff = tail_byte(id, at) ^ tail_byte(base, at);
+            changed += static_cast<std::size_t>(std::popcount(diff));
+            EXPECT_EQ(reached.at(at) & diff, 0U) << "bit " << bit << " landed on another's";
+            reached.at(at) |= diff;
+        }
+        EXPECT_LE(changed, 1U) << "bit " << bit;
+        landed += changed;
+    }
+    EXPECT_EQ(landed, 74U);
 }
 
 TEST(UuidV7, IsReproducibleFromTheClockAndSeed) {

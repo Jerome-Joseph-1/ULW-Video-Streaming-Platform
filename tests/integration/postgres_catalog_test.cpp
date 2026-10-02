@@ -115,8 +115,8 @@ protected:
             catalog->record_progress(u.upload.id, u.video.id, offset, std::move(done));
         });
     }
-    CatalogResult<void> commit(PgUploadCatalog& c, const NewUpload& u) {
-        return call<void>(
+    CatalogResult<core::VideoState> commit(PgUploadCatalog& c, const NewUpload& u) {
+        return call<core::VideoState>(
             [&](auto done) { c.commit_upload(u.upload.id, u.video.id, "req-1", std::move(done)); });
     }
     CatalogResult<void> abort(const NewUpload& u) {
@@ -210,6 +210,41 @@ TEST_P(CatalogTest, StoredRowBreakingADomainRuleReadsAsCorrupt) {
     EXPECT_EQ(upload(u.upload.id).error(), CatalogError::Corrupt);
 }
 
+// Playback reads what the worker leaves: a ready video with its duration, a failed one with its
+// reason.
+TEST_P(CatalogTest, AReadyOrFailedVideoReadsBackWithItsDurationOrReason) {
+    const NewUpload ready = new_upload();
+    const NewUpload failed = new_upload();
+    ASSERT_TRUE(create(*catalog, ready));
+    ASSERT_TRUE(create(*catalog, failed));
+    auto conn = db->session();
+    ASSERT_TRUE(conn.exec("UPDATE videos SET state = 'ready', duration_ms = 83456, version = 3 "
+                          "WHERE id = $1",
+                          Params{}.add_uuid(ready.video.id.uuid())));
+    ASSERT_TRUE(conn.exec("UPDATE videos SET state = 'failed', error_reason = 'not a video', "
+                          "version = 2 WHERE id = $1",
+                          Params{}.add_uuid(failed.video.id.uuid())));
+
+    const auto r = video(ready.video.id);
+    ASSERT_TRUE(r) << core::ports::to_string(r.error());
+    EXPECT_EQ(r->state, core::VideoState::Ready);
+    EXPECT_EQ(r->version, 3U);
+    EXPECT_EQ(r->duration, core::Millis{83456});
+    EXPECT_EQ(r->error_reason, std::nullopt);
+
+    const auto f = video(failed.video.id);
+    ASSERT_TRUE(f) << core::ports::to_string(f.error());
+    EXPECT_EQ(f->state, core::VideoState::Failed);
+    EXPECT_EQ(f->version, 2U);
+    EXPECT_EQ(f->error_reason, "not a video");
+    EXPECT_EQ(f->duration, std::nullopt);
+
+    // The column takes any integer; a negative duration never reaches a player.
+    ASSERT_TRUE(conn.exec("UPDATE videos SET duration_ms = -1 WHERE id = $1",
+                          Params{}.add_uuid(ready.video.id.uuid())));
+    EXPECT_EQ(video(ready.video.id).error(), CatalogError::Corrupt);
+}
+
 TEST_P(CatalogTest, FirstProgressStartsTheVideoAndOffsetsNeverMoveBack) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
@@ -272,15 +307,22 @@ TEST_P(CatalogTest, RepeatedCommitSucceedsWithoutASecondJob) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
     fill(u);
-    ASSERT_TRUE(commit(*catalog, u));
-    ASSERT_TRUE(commit(*catalog, u));
+    EXPECT_EQ(commit(*catalog, u), core::VideoState::Processing);
+    EXPECT_EQ(commit(*catalog, u), core::VideoState::Processing);
     EXPECT_EQ(jobs_for(u), "1");
 
-    // Once the job is finished no live job blocks an insert; the commit must not reach it.
+    // Once the job is finished no live job blocks an insert; the commit must not reach it. A
+    // repeat answers the state the worker left.
     auto conn = db->session();
     ASSERT_TRUE(conn.exec("UPDATE jobs SET state = 'done' WHERE video_id = $1",
                           Params{}.add_uuid(u.video.id.uuid())));
-    EXPECT_TRUE(commit(*catalog, u));
+    ASSERT_TRUE(conn.exec("UPDATE videos SET state = 'ready', duration_ms = 5000 WHERE id = $1",
+                          Params{}.add_uuid(u.video.id.uuid())));
+    EXPECT_EQ(commit(*catalog, u), core::VideoState::Ready);
+    ASSERT_TRUE(conn.exec("UPDATE videos SET state = 'failed', duration_ms = NULL, "
+                          "error_reason = 'rejected' WHERE id = $1",
+                          Params{}.add_uuid(u.video.id.uuid())));
+    EXPECT_EQ(commit(*catalog, u), core::VideoState::Failed);
     EXPECT_EQ(jobs_for(u), "1");
 }
 
@@ -290,12 +332,12 @@ TEST_P(CatalogTest, ConcurrentCommitsFromTwoGatewaysQueueOneJob) {
     fill(u);
     other = make_catalog();
     ASSERT_TRUE(other);
-    Reply<void> first;
-    Reply<void> second;
+    Reply<core::VideoState> first;
+    Reply<core::VideoState> second;
     catalog->commit_upload(u.upload.id, u.video.id, "req-1", first.callback());
     other->commit_upload(u.upload.id, u.video.id, "req-2", second.callback());
-    EXPECT_TRUE(ulw::test::wait(*reactor, first));
-    EXPECT_TRUE(ulw::test::wait(*reactor, second));
+    EXPECT_EQ(ulw::test::wait(*reactor, first), core::VideoState::Processing);
+    EXPECT_EQ(ulw::test::wait(*reactor, second), core::VideoState::Processing);
     EXPECT_EQ(jobs_for(u), "1");
 }
 
