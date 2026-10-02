@@ -210,6 +210,41 @@ TEST_P(CatalogTest, StoredRowBreakingADomainRuleReadsAsCorrupt) {
     EXPECT_EQ(upload(u.upload.id).error(), CatalogError::Corrupt);
 }
 
+// Playback reads what the worker leaves: a ready video with its duration, a failed one with its
+// reason.
+TEST_P(CatalogTest, AReadyOrFailedVideoReadsBackWithItsDurationOrReason) {
+    const NewUpload ready = new_upload();
+    const NewUpload failed = new_upload();
+    ASSERT_TRUE(create(*catalog, ready));
+    ASSERT_TRUE(create(*catalog, failed));
+    auto conn = db->session();
+    ASSERT_TRUE(conn.exec("UPDATE videos SET state = 'ready', duration_ms = 83456, version = 3 "
+                          "WHERE id = $1",
+                          Params{}.add_uuid(ready.video.id.uuid())));
+    ASSERT_TRUE(conn.exec("UPDATE videos SET state = 'failed', error_reason = 'not a video', "
+                          "version = 2 WHERE id = $1",
+                          Params{}.add_uuid(failed.video.id.uuid())));
+
+    const auto r = video(ready.video.id);
+    ASSERT_TRUE(r) << core::ports::to_string(r.error());
+    EXPECT_EQ(r->state, core::VideoState::Ready);
+    EXPECT_EQ(r->version, 3U);
+    EXPECT_EQ(r->duration, core::Millis{83456});
+    EXPECT_EQ(r->error_reason, std::nullopt);
+
+    const auto f = video(failed.video.id);
+    ASSERT_TRUE(f) << core::ports::to_string(f.error());
+    EXPECT_EQ(f->state, core::VideoState::Failed);
+    EXPECT_EQ(f->version, 2U);
+    EXPECT_EQ(f->error_reason, "not a video");
+    EXPECT_EQ(f->duration, std::nullopt);
+
+    // The column takes any integer; a negative duration never reaches a player.
+    ASSERT_TRUE(conn.exec("UPDATE videos SET duration_ms = -1 WHERE id = $1",
+                          Params{}.add_uuid(ready.video.id.uuid())));
+    EXPECT_EQ(video(ready.video.id).error(), CatalogError::Corrupt);
+}
+
 TEST_P(CatalogTest, FirstProgressStartsTheVideoAndOffsetsNeverMoveBack) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
