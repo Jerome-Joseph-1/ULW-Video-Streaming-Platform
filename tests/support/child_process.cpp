@@ -27,10 +27,17 @@ std::vector<char*> c_strings(std::vector<std::string>& strings) {
     return out;
 }
 
-int remaining_ms(std::chrono::steady_clock::time_point deadline) {
-    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline - std::chrono::steady_clock::now());
-    return static_cast<int>(std::max<std::chrono::milliseconds::rep>(left.count(), 0));
+enum class Round : std::uint8_t { Down, Up };
+
+// Milliseconds left until `deadline`, never negative. Rounded up for a wait that must not end
+// short of it: cut to whole milliseconds, it would, and a caller looping until the deadline
+// would spin through the fraction left.
+int remaining_ms(std::chrono::steady_clock::time_point deadline, Round round = Round::Down) {
+    const auto left = deadline - std::chrono::steady_clock::now();
+    const auto ms = round == Round::Up
+                        ? std::chrono::ceil<std::chrono::milliseconds>(left)
+                        : std::chrono::duration_cast<std::chrono::milliseconds>(left);
+    return static_cast<int>(std::max<std::chrono::milliseconds::rep>(ms.count(), 0));
 }
 
 } // namespace
@@ -114,7 +121,8 @@ bool ChildProcess::poll_until(const std::function<bool()>& ready, std::chrono::m
             return false;
         }
         const auto next = std::min(deadline, now + period);
-        for (int left = remaining_ms(next); left > 0; left = remaining_ms(next)) {
+        for (int left = remaining_ms(next, Round::Up); left > 0;
+             left = remaining_ms(next, Round::Up)) {
             if (!read_some(std::chrono::milliseconds(left))) {
                 return false;
             }
