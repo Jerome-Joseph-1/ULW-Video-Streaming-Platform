@@ -71,7 +71,8 @@ jobs:
         if: steps.token.outputs.present == 'true'
         run: |
           zip=$RUNNER_TEMP/sonar-scanner.zip
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$zip" \
+          curl -fsSL --proto '=https' --proto-redir '=https' --retry 5 --retry-all-errors \
+            --retry-delay 2 -o "$zip" \
             "https://repo1.maven.org/maven2/org/sonarsource/scanner/cli/sonar-scanner-cli/${SONAR_SCANNER_VERSION}/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip"
           echo "$SONAR_SCANNER_SHA256  $zip" | sha256sum --check --strict
           IFS=. read -r major minor patch build <<<"$SONAR_SCANNER_VERSION"
