@@ -26,6 +26,7 @@ Upgrade refusals (the connection is closed after the response, and the body is e
 | `426` with `Upgrade: websocket` | `GET /rt` that is not an upgrade, or a WebSocket version other than 13 |
 | `401` | No usable token, or the token fails verification |
 | `403` | Cookie token without an allowed `Origin` |
+| `429` with `Retry-After` | Behind a trusted proxy, the forwarded address already has `ULW_MAX_CONNECTIONS_PER_IP` (20) upgrades waiting for an answer (`Retry-After: 1`); or the user already has `ULW_MAX_SESSIONS_PER_USER` (16) sockets open on this node (`Retry-After: 5`). Retry after that long, or close a socket you no longer use |
 | `404` | Any path other than `/rt`, `/healthz`, `/readyz`, `/metrics`, or any method other than `GET` |
 | `503` | The key set cannot be fetched; retry |
 
@@ -100,22 +101,34 @@ delivered, and the `id` stays with the first message. Send the new message under
 
 ### Member lists
 
-<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms) -->
+<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms), migrations/0010_chat_rooms_recorded_at.sql, infra/postgres/src/upload_reaper.cpp (kForgetUnused) -->
 
-Who may join a room depends on its kind, which is recorded once and never changes:
+Who may join a room depends on its kind, which is recorded once and never changes while the
+room is in use (a room nothing used may be forgotten, below):
 
 - **Direct and group chats** (`"kind":"direct"` or `"group"`, the default) admit only their
   members. Anyone else's `join` is refused with `not_member`, so they can neither send to the
   room nor read its history. A direct or group chat with no members admits nobody. The first
   join of a room with no kind recorded records the kind it names; so does listing its first
-  member (as a group chat).
+  member (as a group chat). Such a join is refused with `not_member`, since the room lists
+  nobody yet. Each user's refused joins record at most 20 rooms at once and then one a minute,
+  per chat node; past that a join is refused the same and records nothing. A direct or group
+  chat recorded more than a day ago and never used (no members, never on the room plane) is
+  forgotten, at the latest within a few reaper passes; the next join of it records it again, as
+  the kind that join names, which may be the other closed kind. A stream's live chat is never
+  forgotten.
 - **A stream's live chat** admits anyone. Only the server opens one, and only a stream's room
   can be one; a client cannot. It is joined by the stream's name (see
   [A stream's live chat](#a-streams-live-chat)), and refused with `not_live` until it is open.
 
 No client command changes a member list; they are set by the service's operators, and later by
-the product, in the database. A member removed from the list keeps receiving the room's
-messages, and can read its history, until that connection closes; the next `join` is refused.
+the product, in the database. A member removed from the list is taken out of the room at once
+on every socket they have, on every node (ADR-0073): each gets an `error` with `not_member` for
+the room, unasked, and receives nothing more from it; `send` and `history` there answer
+`not_joined`, and the next `join` is refused. After a node lost track of removals for a while it
+checks every member list its sockets rely on again; a list it cannot read for a reason other
+than an outage takes the socket out of the room the same way, but with `unavailable`, since the
+list never said no: join again.
 
 ### A stream's live chat
 
@@ -143,8 +156,9 @@ messages, and can read its history, until that connection closes; the next `join
 - **History** keeps the chat's newest 1000 messages; older ones are deleted as new ones are
   stored, and a page below them is empty. A resend under an `id` whose message is already that
   old is stored again, as a new message.
-- A viewer whose client stops reading altogether for 20 s is disconnected by the server's
-  kernel (TCP user timeout). Reconnect and join the stream again.
+- A viewer whose connection acknowledges nothing the server sent it for 20 s is disconnected
+  by the server, with a reset (counted in `stalled_readers_total`). A client that keeps
+  reading, however slowly, is not. Reconnect and join the stream again.
 
 ### Errors
 
@@ -156,14 +170,14 @@ messages, and can read its history, until that connection closes; the next `join
 | `bad_id` | `id` is not a message id | Fix the client |
 | `bad_body` | `body` is not base64url | Fix the client |
 | `bad_stream` | `stream` is not a stream name | Fix the client |
-| `not_member` | The room has a member list without you | Do not retry |
+| `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |
 | `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
 | `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |
 | `rate_limited` | Past the send allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered |
 | `busy` | Join or history allowance exceeded, too many sends awaiting answers, the room's owner queue is full, or too much unread output for a history page | Back off and retry |
-| `unavailable` | The room's owner or the store could not be reached, or the server could not take the command just then | Retry; resend a `send` with the same `id` |
+| `unavailable` | The room's owner or the store could not be reached, or the server could not take the command just then; also sent unasked, with `room`, when the server could not confirm your membership of a room you are in (below), which you then no longer receive | Retry; resend a `send` with the same `id`; `join` a room it was sent unasked for again |
 | `fenced` | The room changed owners while the write was in flight | Retry with the same `id` |
 | `conflict` | This `id` was already used for a different message in the room | Send it under a new `id` |
 
@@ -176,6 +190,8 @@ messages, and can read its history, until that connection closes; the next `join
 | Message size | 64 KiB per message (after reassembly) | Close `1009` |
 | Binary frames | Not accepted | Close `1003` |
 | Control frames | 8 per read; token bucket of 20, refilling 10/s | Close `1008` |
+| Connections per address | 20 open at once from one address (IPv6: one /64) connecting directly, and 80 from all the /64s of one IPv6 /48 together; 10 new ones a second, 10 saved | Connection reset before the upgrade is read; back off and reconnect |
+| Sockets per user | 16 open at once on a node | Upgrade answered `429`, `Retry-After: 5` |
 | Rooms per connection | 64 | `error` `too_many_rooms` |
 | New-room joins per user | Burst 64, then 1/s, across all the user's connections on a node | `error` `busy` |
 | Sends | Burst 10, then 2/s, per user across the user's connections on a node | `error` `rate_limited` with `retry_after_ms` |
@@ -191,6 +207,7 @@ messages, and can read its history, until that connection closes; the next `join
 | Handshake | 10 s from accept to a complete upgrade request | Connection closed |
 | Idle | The server pings after 30 s of silence and closes after 75 s with nothing received | Answer pings (browsers do this themselves) |
 | Server drain | Close `1001`, then 5 s | Reconnect |
+| Token lifetime | The socket is closed when the token it was opened with expires: at its `exp` plus 60 s | Close `4001`: get a fresh token, reconnect, and `join` each room with `after` to resume |
 
 ## Presence
 

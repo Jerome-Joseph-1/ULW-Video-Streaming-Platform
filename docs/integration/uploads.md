@@ -105,12 +105,13 @@ job. The `state` in this answer is always `processing`, even on a repeat after t
 
 Discards the bytes stored so far and marks the upload aborted. `204`, and `204` again on a repeat.
 A committed upload cannot be cancelled (`409`). Afterwards `HEAD` answers `404` and `PATCH` and
-commit answer `409`. The video stays in the state it had (`init` or `uploading`) and is never
+commit answer `409`, until the upload's expiry, when all three answer `410`
+([Resuming](#resuming)). The video stays in the state it had (`init` or `uploading`) and is never
 playable.
 
 ## Resuming
 
-<!-- apps/gateway/src/connection.cpp (on_claimed, on_offset), core/include/core/models/upload.hpp -->
+<!-- apps/gateway/src/connection.cpp (on_claimed, on_found, on_offset, expired), core/include/core/models/upload.hpp (is_expired) -->
 
 The durable offset never moves backwards, and every offset the server has reported is a safe
 place to continue. After any failure (network error, timeout, `408`, `409`, `5xx`, a crash of
@@ -126,9 +127,12 @@ A `409` on `PATCH` carries the authoritative `Upload-Offset` too, so a client ca
 Only one `PATCH` per upload runs at a time. A second one while the first is in flight gets
 `409` with the current offset; do not upload one file over parallel connections.
 
-Upload lifetime: an upload must be committed within 6 days of its creation. The bucket drops
-incomplete uploads after 7 days, after which `PATCH`, `HEAD` and commit fail and the upload has
-to start again with a new create.
+Upload lifetime: an upload must be committed within 6 days of its creation (its `expires_at`).
+From that moment `PATCH`, `HEAD` and commit answer `410 Gone`, as the tus protocol's expiration
+extension does, even with every byte durable, and the upload has to start again with a new
+create. The answer is the same before and after the upload reaper aborts the upload and fails its
+video, and for an upload that was cancelled. `DELETE` is still allowed. A committed upload never
+expires: a repeated commit and `HEAD` answer as before.
 
 ## Limits and admission
 
@@ -150,8 +154,8 @@ to start again with a new create.
 | Request target | 8 KiB | `400`, connection closed |
 | Header fields | 16 KiB in all, at most 100 | `431`, connection closed |
 | Body idle | Nothing received for 30 s | `408`, connection closed |
-| Body rate | Under 8 KiB/s averaged over a 30 s window | `408`, connection closed |
-| Store stalled | The store accepted nothing for 30 s | `503`, `Retry-After: 5` |
+| Body rate | Under 8 KiB/s averaged over a 30 s window of reading; time the gateway is not reading, waiting on the store or the catalog, does not count | `408`, connection closed |
+| Store stalled | The store took under 1 byte a second for 60 s, or no connection to it was made within 3 s (ADR-0045) | `503`, `Retry-After: 5` |
 | Request lifetime | 6 h | Connection closed |
 | Keep-alive | Idle connection closed after 10 s; at most 1000 requests per connection | Reconnect |
 
@@ -191,6 +195,7 @@ the request and byte allowances in all.
 | `405` | `Allow` | Wrong method for the path | Fix the client |
 | `408` | | Body idle for 30 s, or slower than 8 KiB/s | Resume from `HEAD` |
 | `409` | `Upload-Offset` | `PATCH`: offset is not the durable offset, another `PATCH` on this upload is running, or the upload is committed or cancelled. Commit: not all bytes durable yet, or cancelled. `DELETE`: already committed. | Resume from the returned offset; commit once it equals `size_bytes`. If the upload is committed or cancelled, stop. |
+| `410` | | `PATCH`, `HEAD` or commit on an upload past its expiry, 6 days after its create, unless it was committed | Stop; start a new upload |
 | `411` | | `Transfer-Encoding` on a create or `PATCH` | Send `Content-Length` |
 | `413` | | Create body over 4 KiB, or `PATCH` body over 16 MiB | Send smaller chunks |
 | `429` | `Retry-After` | This user already has 3 chunk uploads running on this instance (`Retry-After: 5`); this user is over 300 requests a minute or 100 GiB a day; this client address has 20 requests in flight (`Retry-After: 1`) | Wait `Retry-After` seconds, then retry the same request |

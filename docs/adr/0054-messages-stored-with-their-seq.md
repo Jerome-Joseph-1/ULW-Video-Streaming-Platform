@@ -1,6 +1,6 @@
 # 0054. A message is stored with its seq, in one statement, before it is delivered
 
-Status: Accepted
+Status: Accepted, amended by 0075 (a record nothing used may be forgotten)
 Date: 2026-09-29
 
 ## Context

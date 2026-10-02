@@ -1,7 +1,12 @@
 # Only Envoy's data plane may open connections to the gateway, and Prometheus in namespace
-# monitoring, for /metrics. The gateway never trusts
-# x-user-* headers anyway (it verifies the token itself), but nothing else in the cluster has
-# a reason to reach it past the Gateway's TLS and routing.
+# monitoring, for /metrics. Out of the pod it reaches cluster DNS, Postgres (5432) and, over
+# 443, the object store and Askedin's JWKS, and nothing else: a compromised gateway cannot
+# reach other namespaces' services or the node's other ports. Ports, not addresses, as for the
+# upload reaper: Postgres runs on the node's host and R2 is on the internet (RUNBOOK.md, 3a). If
+# JWKS_URL names an in-cluster Service whose pods listen on a port other than 443, that target
+# port must be added here, or every token is refused once the cached keys expire. The gateway
+# never trusts x-user-* headers anyway (it verifies the token itself), but nothing else in the
+# cluster has a reason to reach it past the Gateway's TLS and routing.
 #
 # Assumes Envoy Gateway's default layout: data-plane pods in envoy-gateway-system, labelled
 # app.kubernetes.io/component=proxy. Confirm on the cluster before the first apply (RUNBOOK.md);
@@ -18,7 +23,7 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: video-gateway
-  policyTypes: ["Ingress"]
+  policyTypes: ["Ingress", "Egress"]
   ingress:
     - from:
         - namespaceSelector:
@@ -35,3 +40,18 @@ spec:
               kubernetes.io/metadata.name: monitoring
       ports:
         - port: http
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 5432
+          protocol: TCP
+        - port: 443
+          protocol: TCP
