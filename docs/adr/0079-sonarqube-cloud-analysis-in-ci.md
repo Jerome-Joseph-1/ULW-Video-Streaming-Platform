@@ -31,14 +31,14 @@ Where the analysis runs:
 |---|---|---|
 | Keep Automatic Analysis | Nothing to add to CI | Rejected: no compile flags, system or generated headers, so C++ findings are guesses and some cannot be cleared |
 | A step in `ci.yml` | One workflow | Rejected: `ci.yml` is already heavy, and this job must be free to skip or fail without touching it |
-| A new workflow, `sonar.yml`, with its own build of the `ci` preset | Independent; reuses the setup action and the `gcc-ci` ccache | Accepted |
+| A new workflow, `sonar.yml`, with its own build | Independent; reuses the setup action and a ccache | Accepted |
 
 How C++ is analysed:
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
 | The build wrapper | SonarSource's older default | Rejected: another binary to download and pin, for what CMake already writes |
-| The compile database, `build/ci/compile_commands.json` (`sonar.cfamily.compile-commands`) | The `ci` preset writes it (`CMAKE_EXPORT_COMPILE_COMMANDS`); the same file clang-tidy reads | Accepted |
+| The compile database (`sonar.cfamily.compile-commands`) | Every preset writes it (`CMAKE_EXPORT_COMPILE_COMMANDS`) | Accepted: the coverage preset's, `build/coverage/compile_commands.json` (see Coverage) |
 
 How the scanner is fetched:
 
@@ -64,9 +64,9 @@ GitHub App, so the job needs no `pull-requests` scope.
   in its env, not the value), and every later step is conditional on it. On pull requests from
   forks and Dependabot, which get no secrets, the job passes with a notice and does nothing else.
 - **Checkout.** `fetch-depth: 0` for blame and new-code detection, `persist-credentials: false`.
-- **Build.** The repository's setup action, `CC=gcc-14`, cache key `gcc-ci` (shared with
-  reactor-matrix), `cmake --preset ci` and a full `cmake --build --preset ci`, so every
-  generated header and source the compile database names exists.
+- **Build.** The repository's setup action, `CC=clang-19`, cache key `clang-coverage` (shared
+  with ci.yml's coverage job), `cmake --preset coverage` and a full build of it, so every
+  generated header and source the compile database names exists. See Coverage.
 - **Scanner.** SonarScanner CLI 8.1.0.6389, linux-x64, from Maven Central, checked against
   SHA-256 `bb8f709f…795499d0b`. That hash is in the action's own `sonar-scanner-version` file at
   the pinned commit and in Maven Central's `.sha256`, and was recomputed from a download. The zip
@@ -83,12 +83,43 @@ GitHub App, so the job needs no `pull-requests` scope.
   `.sonarcloud.properties` had: `tests/**` and `**/*_test.py` as tests and the rest as sources.
   `build/` and the vendored tarballs in `third_party/` are left out; files git ignores are left
   out by the scanner. The compile database, whose `-std=c++23` sets the analysed standard; C and
-  C++ files the `ci` preset does not compile (the fuzz targets, `tools/io_uring_probe.c`) are not
-  analysed. `sonar.qualitygate.wait=false`. No thread count: the
-  analyser uses every core by default. A marked block names the coverage properties for when a
-  coverage job exists.
+  C++ files the coverage preset does not compile (the fuzz targets, `tools/io_uring_probe.c`) are
+  not analysed. The two coverage reports. `sonar.qualitygate.wait=false`. No thread count: the
+  analyser uses every core by default.
 - **`.sonarcloud.properties` is removed.** Only Automatic Analysis reads it; with CI analysis it
   would be a second, ignored copy of the settings.
+
+### Coverage
+
+The default quality gate holds new code to 80 % coverage. Automatic Analysis skipped that
+condition for lack of a report; a CI scan without one reports 0 % and fails it on every pull
+request that touches C++ or Python. The gate is the owner's and stays as it is; the scan sends
+measured coverage instead.
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| gcc `--coverage` and `gcovr --sonarqube` (`sonar.coverageReportPaths`) | Keeps the gcc build | Rejected: a second coverage mechanism beside ADR-0080's, and gcovr is one more download to pin |
+| clang source-based coverage, `llvm-cov show` text (`sonar.cfamily.llvm-cov.reportPath`) | ADR-0080's preset and `tools/coverage.sh` already produce the profiles; SonarSource's CFamily example uses exactly `llvm-cov show --show-branches=count` | Accepted |
+| Download ci.yml's coverage artifact | No second test run | Rejected: ci.yml's job is off unlabelled pull requests, and taking another workflow's artifact means waiting on that run (a `workflow_run` trigger) and an `actions: read` token |
+
+- **C++.** The job builds the `coverage` preset (ADR-0080) with `-DULW_CONFORMANCE_LIVE=ON`,
+  starts the Postgres service and MinIO as ci.yml's coverage job does, and runs
+  `tools/coverage.sh build/coverage unit integration` with `COVERAGE_ENFORCE=0` (floors are
+  ADR-0080's business) and `COVERAGE_SONAR=1`, which adds `llvm-cov show -format=text
+  -show-branches=count -show-instantiations=false` over every instrumented binary to
+  `build/coverage/coverage/llvm-cov-show.txt`. The compile database is that build's, so the
+  analysis and the measurement are one build. The analysed configuration is now clang Debug
+  rather than gcc RelWithDebInfo: assertions are compiled in, and gcc-only paths are not seen
+  by the analyser (clang-tidy and the gcc jobs still build them).
+- **Python.** `tools/coverage-python.sh` runs every tracked `*_test.py` under coverage.py
+  (`tools/coverage-python.rc`: branch coverage, the repository root as the one source,
+  `tests/`, `build/`, `third_party/` and test files omitted, `relative_files`) and writes
+  `build/coverage-python.xml` (`sonar.python.coverage.reportPaths`). coverage.py is Ubuntu
+  24.04's `python3-coverage` 7.4.4+dfsg1-0ubuntu2, fetched with `apt-get download` and checked
+  against the .deb's SHA-256 before it is installed. `llvm-19` is pinned to the installed
+  clang-19's version, as in ci.yml.
+- **A failing test** fails the job, but the scan still runs (it needs only the build), so the
+  dashboard keeps its analysis; coverage from such a run is lower than the truth.
 
 Only Free plan features are used: C and C++ analysis, main branch and pull request analysis of a
 public repository, the default quality gate, and the properties above.
@@ -106,8 +137,14 @@ Information page against `sonar-project.properties`.
 
 - C++ findings are made with the real flags and headers; findings that only stood because the
   analyser could not see a system header can now be cleared by the next analysis.
-- The job rebuilds the `ci` preset, about as long as a reactor-matrix build with a warm ccache,
-  then analyses some 400 translation units, which adds minutes; it is limited to 90.
+- The job builds the coverage preset and runs the unit and integration labels one test at a
+  time before it analyses some 460 translation units: an estimated 40-50 minutes against the
+  3 it took without coverage, in parallel with ci.yml, whose integration jobs take about 25.
+  It is limited to 90. If that is too slow, dropping `integration` from the coverage step
+  halves it, at the price of reporting the catalog, queue and S3 code as uncovered.
+- Code that only the soak, cluster, e2e or fuzz runs exercise, and Python with no unit test
+  (`tools/check-docs.py`, `tools/coverage_report.py`, some of `deploy/local/`), counts as
+  uncovered: new code there needs a unit test to pass the gate.
 - Pull requests from forks get no analysis; their results arrive with main's after they merge.
 - The scanner is pinned; the scanner engine and analysers it downloads from SonarQube Cloud at
   run time are chosen by the service and cannot be pinned here.

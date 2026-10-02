@@ -6,6 +6,8 @@
 # generated code are left out. Fails when a test fails and, unless COVERAGE_ENFORCE=0, when a
 # top-level directory falls below its floor in tools/coverage-floors.txt (ADR-0080). With
 # COVERAGE_ENFORCE=0 the floor comparison is printed as a warning and only the tests decide.
+# With COVERAGE_SONAR=1 it also writes <build-dir>/coverage/llvm-cov-show.txt, the `llvm-cov
+# show` text report SonarQube Cloud reads (sonar.cfamily.llvm-cov.reportPath, ADR-0079).
 #
 # Every label runs one test at a time, as CI's other jobs run them: several suites time servers
 # and the database, and a busy runner would change what they measure.
@@ -28,6 +30,8 @@ export LLVM_PROFILE_FILE=$out/profiles/ulw-%8m.profraw
 
 enforce=${COVERAGE_ENFORCE:-1}
 [[ $enforce == 0 || $enforce == 1 ]] || { echo "coverage: COVERAGE_ENFORCE is 0 or 1" >&2; exit 2; }
+sonar=${COVERAGE_SONAR:-0}
+[[ $sonar == 0 || $sonar == 1 ]] || { echo "coverage: COVERAGE_SONAR is 0 or 1" >&2; exit 2; }
 
 failed=0
 for label in "${labels[@]}"; do
@@ -61,6 +65,14 @@ ignore="^$root/(tests|third_party|build)/"
 "llvm-cov$llvm" show -format=html -show-branches=count -show-line-counts-or-regions \
     -ignore-filename-regex="$ignore" -output-dir="$out/html" -project-title=ulw \
     "${cov_args[@]}" "${sources[@]}"
+# The form SonarSource's CFamily coverage example uses: `llvm-cov show --show-branches=count`,
+# plain text, every object. Absolute paths, which the scanner maps onto the checkout.
+# Instantiations are folded into each line's count, which is what a line's coverage is.
+if [[ $sonar == 1 ]]; then
+    "llvm-cov$llvm" show -format=text -show-branches=count -show-instantiations=false \
+        -ignore-filename-regex="$ignore" "${cov_args[@]}" "${sources[@]}" \
+        >"$out/llvm-cov-show.txt"
+fi
 
 report_status=0
 python3 tools/coverage_report.py "$root" "$out/export.json" tools/coverage-floors.txt \
