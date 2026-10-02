@@ -22,9 +22,9 @@ Mutations, applied one at a time on formatted source (binary operators are space
 A mutant that fails to compile is recorded as `unbuildable` and left out of the score. One that
 builds is `killed` if the tests fail, `timeout` if they outlast --timeout, and `survived` if they
 pass. The file is restored, byte for byte, after every mutant and when the run is stopped by
-SIGINT, SIGTERM or SIGHUP, and the target is rebuilt at the end; SIGKILL leaves the mutant in
-place (`git checkout` the file). A build or test that outlasts its timeout is killed with its
-whole process group. Each mutant's id is file:line:operator:index, stable for a given source.
+SIGINT, SIGTERM or SIGHUP, and the target is rebuilt at the end (a further stop signal cuts
+that rebuild short); SIGKILL leaves the mutant in place (`git checkout` the file). A build or
+test that outlasts its timeout is killed with its whole process group. Each mutant's id is file:line:operator:index, stable for a given source.
 
 Mutants build with CCACHE_READONLY so they do not fill the cache; the restored source hits it.
 """
@@ -203,6 +203,24 @@ def on_stop_signal(signum, _frame):
     raise Stopped(signal.Signals(signum).name)
 
 
+def restore(path, text, stop_signals):
+    """Writes `text` back to `path` with the stop signals blocked, and returns the Stopped or
+    KeyboardInterrupt that interrupted it, if any, for the caller to raise once it is safe.
+
+    A signal handled before the block takes effect, or one already pending that fires as the
+    block call returns, raises wherever the interpreter is; the write is then retried until it
+    completes, so the source is never left mutated.
+    """
+    pending = None
+    while True:
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, stop_signals)
+            write_source(path, text)
+            return pending
+        except (Stopped, KeyboardInterrupt) as e:
+            pending = e
+
+
 def kill_group(p):
     try:
         os.killpg(p.pid, signal.SIGKILL)
@@ -310,12 +328,16 @@ def main():
     out_f = open(inside(a.out), "a", encoding="utf-8") if a.out else None
     counts = {}
     started = time.monotonic()
+    # The file and original text of the mutant in progress, which the outer `finally` writes
+    # again in case a stop signal landed before the per-mutant restore could start.
+    in_progress = None
     try:
         for i, m in enumerate(chosen):
             if a.budget_s and time.monotonic() - started > a.budget_s:
                 print("budget spent", file=sys.stderr)
                 break
             original, mutated = apply(m["file"], m)
+            in_progress = (m["file"], original)
             try:
                 write_source(m["file"], mutated)
                 rc, bout, bt = run(build, a.build_timeout, env=env)
@@ -328,9 +350,11 @@ def main():
                     tail = ",".join(sorted(set(failed))[:5]) if failed else tout[-300:]
             finally:
                 # No stop signal may cut the restore short.
-                signal.pthread_sigmask(signal.SIG_BLOCK, stop_signals)
-                write_source(m["file"], original)
+                pending = restore(m["file"], original, stop_signals)
+                in_progress = None
                 signal.pthread_sigmask(signal.SIG_UNBLOCK, stop_signals)
+                if pending:
+                    raise pending
             counts[status] = counts.get(status, 0) + 1
             rec = dict(m, status=status, build_s=round(bt, 1), test_s=round(tt, 1),
                        evidence=tail if status == "killed" else "")
@@ -339,10 +363,16 @@ def main():
                 out_f.write(json.dumps(rec) + "\n")
                 out_f.flush()
     finally:
-        signal.pthread_sigmask(signal.SIG_BLOCK, stop_signals)
-        run(build, a.build_timeout)
+        pending = restore(*in_progress, stop_signals) if in_progress else None
         if out_f:
             out_f.close()
+        # Unblocked before the rebuild: blocked, neither this process nor the children that
+        # inherit the mask would answer Ctrl-C or SIGTERM until --build-timeout. The source is
+        # restored, so a stop signal may now cut the rebuild short.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, stop_signals)
+        run(build, a.build_timeout)
+        if pending:
+            raise pending
     scored = counts.get("killed", 0) + counts.get("timeout", 0) + counts.get("survived", 0)
     score = (counts.get("killed", 0) + counts.get("timeout", 0)) / scored if scored else 0
     print(f"summary: {counts} score={score:.1%}", flush=True)
