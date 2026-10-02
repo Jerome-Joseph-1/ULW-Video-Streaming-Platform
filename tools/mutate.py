@@ -39,6 +39,11 @@ import sys
 import time
 from pathlib import Path
 
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pathguard import inside  # noqa: E402
+
 REL_OPS = ["<", "<=", ">", ">=", "==", "!="]
 REL = re.compile(r"(?<=\s)(<=|>=|==|!=|<|>)(?=\s)")
 LOGIC = re.compile(r"(?<=\s)(&&|\|\|)(?=\s)")
@@ -46,6 +51,8 @@ INT = re.compile(r"(?<![\w.'])(\d+)([uU]?[lL]{0,2}z?|[uU]?z)?(?![\w.'])")
 MINMAX = re.compile(r"\bstd::(ranges::)?(min|max)\b")
 COND = re.compile(r"\b(if|while)\s*\(")
 RET_BOOL = re.compile(r"\breturn (true|false);")
+# A ninja target name; never a leading '-', which ninja would read as an option.
+TARGET = re.compile(r"\w[\w.+/-]*")
 # Statements whose deletion mostly changes logging or metrics wording, not behaviour.
 QUIET = re.compile(r"\b(log|LOG|ulw_log|logger|trace|debug)\w*\s*[.(]|static_assert")
 
@@ -103,8 +110,9 @@ def balanced_end(text, start):
 
 
 def mutants_for(path, root):
-    rel = str(Path(path).resolve().relative_to(root))
-    src = read_source(path).split("\n")
+    resolved = inside(path)
+    rel = str(resolved.relative_to(root))
+    src = read_source(resolved).split("\n")
     masked = mask(src)
     found = []
 
@@ -169,11 +177,11 @@ def mutants_for(path, root):
 
 def read_source(path):
     # Bytes, not text mode, so that "\r\n" line endings survive the round trip.
-    return Path(path).read_bytes().decode("utf-8")
+    return inside(path).read_bytes().decode("utf-8")
 
 
 def write_source(path, text):
-    Path(path).write_bytes(text.encode("utf-8"))
+    inside(path).write_bytes(text.encode("utf-8"))
 
 
 def apply(path, mutant):
@@ -278,8 +286,15 @@ def main():
     cmd = a.cmd[1:] if a.cmd and a.cmd[0] == "--" else a.cmd
     if not (a.build_dir and a.target and cmd):
         sys.exit("--build-dir, --target and a test command are required unless --list")
+    # A target is a name ninja knows, never one of its options.
+    if not TARGET.fullmatch(a.target):
+        sys.exit(f"--target {a.target!r} is not a ninja target name")
+    # A test program named by path runs from inside the repository or a temporary directory;
+    # a bare name is looked up on PATH, as before.
+    if os.sep in cmd[0]:
+        cmd = [str(inside(cmd[0]))] + cmd[1:]
 
-    build = ["ninja", "-C", a.build_dir, "-j1", a.target]
+    build = ["ninja", "-C", str(inside(a.build_dir)), "-j1", a.target]
     env = dict(os.environ, CCACHE_READONLY="1")
     rc, out, _ = run(build, a.build_timeout)
     if rc != 0:
@@ -292,7 +307,7 @@ def main():
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, on_stop_signal)
     stop_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
-    out_f = open(a.out, "a", encoding="utf-8") if a.out else None
+    out_f = open(inside(a.out), "a", encoding="utf-8") if a.out else None
     counts = {}
     started = time.monotonic()
     try:
