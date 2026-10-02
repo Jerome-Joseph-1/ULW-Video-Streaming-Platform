@@ -130,14 +130,17 @@ jobs:
         image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
         env:
           POSTGRES_PASSWORD: testtest123
-        ports: ["55432:5432"]
+        # Below 32768, outside the ports the runner's own outgoing connections are given
+        # (ip_local_port_range 32768-60999): a fixed port inside that range is sometimes taken
+        # by one, and the service then fails to start.
+        ports: ["15432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:15432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -174,14 +177,14 @@ jobs:
         image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
         env:
           POSTGRES_PASSWORD: testtest123
-        ports: ["55432:5432"]
+        ports: ["15432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
     env:
       CC: gcc-14
       CXX: g++-14
-      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:15432/postgres
       ULW_CHAT_CLUSTER_PORTS: 9101,9102,9103
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
