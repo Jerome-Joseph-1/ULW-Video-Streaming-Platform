@@ -116,6 +116,7 @@ public:
     void put_object(std::string_view key, std::string_view bytes);
     [[nodiscard]] std::vector<core::ports::ViewEvent> views();
     void fail_views(std::optional<core::ports::CatalogError> error);
+    void fail_find_video(std::optional<core::ports::CatalogError> error);
 
 private:
     struct Loop;

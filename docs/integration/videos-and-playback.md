@@ -55,8 +55,13 @@ The video object:
 | `state` | string | One of the states above |
 | `version` | integer | Rises by one on every state change. Use it to tell two answers apart, not as a count of anything. |
 | `duration_ms` | integer or `null` | Set once `ready` |
+| `error_reason` | string, only when `failed` | Why, in a short English phrase meant for the video's owner, such as `the file could not be decoded as video`, `transcoding exceeded its time budget` or `upload expired`. Show it or log it; do not parse it, as the wording may change. Absent in every other state. |
 
-A failed video's reason is recorded server side but not returned in this version.
+A failed video:
+
+```json
+{"id":"0199950c-...","title":"clip.mp4","state":"failed","version":3,"duration_ms":null,"error_reason":"the file could not be decoded as video"}
+```
 
 ### Playlists
 

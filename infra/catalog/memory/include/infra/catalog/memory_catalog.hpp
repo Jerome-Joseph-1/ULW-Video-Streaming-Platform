@@ -42,7 +42,7 @@ public:
                          core::ports::CatalogCallback<void> done) override;
     void commit_upload(const core::UploadId& id, const core::VideoId& video,
                        const std::string& request_id,
-                       core::ports::CatalogCallback<void> done) override;
+                       core::ports::CatalogCallback<core::VideoState> done) override;
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
     void find_video(const core::VideoId& id,
                     core::ports::CatalogCallback<core::VideoRecord> done) override;
@@ -56,6 +56,10 @@ public:
     // Fails every record_views from now on with `error`, or none with nullopt.
     void fail_views(std::optional<core::ports::CatalogError> error) noexcept {
         views_error_ = error;
+    }
+    // Fails every find_video from now on with `error`, or none with nullopt.
+    void fail_find_video(std::optional<core::ports::CatalogError> error) noexcept {
+        find_video_error_ = error;
     }
 
     [[nodiscard]] const std::vector<Job>& jobs() const noexcept { return jobs_; }
@@ -76,6 +80,7 @@ private:
     std::vector<Job> jobs_;
     std::vector<core::ports::ViewEvent> views_;
     std::optional<core::ports::CatalogError> views_error_;
+    std::optional<core::ports::CatalogError> find_video_error_;
 };
 
 } // namespace infra::catalog

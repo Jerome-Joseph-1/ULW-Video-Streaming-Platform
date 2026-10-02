@@ -90,8 +90,8 @@ protected:
         return u;
     }
 
-    template <class Start> core::ports::CatalogResult<void> call(Start start) {
-        Reply<void> reply;
+    template <class T = void, class Start> core::ports::CatalogResult<T> call(Start start) {
+        Reply<T> reply;
         start(reply.callback());
         return ulw::test::wait(*reactor, reply);
     }
@@ -181,7 +181,7 @@ TEST_F(UploadReaperTest, IgnoresUploadsThatCompletedOrWereAbortedByTheirOwner) {
         catalog->record_progress(committed.upload.id, committed.video.id, 3 * kChunk,
                                  std::move(done));
     }));
-    ASSERT_TRUE(call([&](auto done) {
+    ASSERT_TRUE(call<core::VideoState>([&](auto done) {
         catalog->commit_upload(committed.upload.id, committed.video.id, "req-1", std::move(done));
     }));
     ASSERT_TRUE(
@@ -255,7 +255,7 @@ TEST_F(UploadReaperTest, AnUploadCommittedWhileTheReaperWaitedForItsRowIsLeftAlo
 TEST_F(UploadReaperTest, ACommitAfterTheReaperIsRefusedNotLost) {
     const NewUpload u = created();
     ASSERT_TRUE(reaper->expire(after_ttl(), 10));
-    const auto committed = call([&](auto done) {
+    const auto committed = call<core::VideoState>([&](auto done) {
         catalog->commit_upload(u.upload.id, u.video.id, "req-1", std::move(done));
     });
     ASSERT_FALSE(committed);
