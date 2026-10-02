@@ -95,8 +95,9 @@ The Kubernetes secret names and the lines that create them are in the RUNBOOK, s
 
 <!-- infra/curl/src/exchange.cpp -->
 
-Every https request the services make goes through libcurl with TLS 1.3 as the minimum: the
-JWKS fetch, R2 or a MinIO given an `https://` endpoint, and LiveKit's API when it is `https://`.
+Every https request the services make goes through libcurl with TLS 1.3 only (minimum and
+maximum); a later TLS version needs a code change. That covers the JWKS fetch, R2 or a MinIO
+given an `https://` endpoint, and LiveKit's API when it is `https://`.
 A server that offers only TLS 1.2 or older fails the handshake, logged as a network error,
 whatever the host's OpenSSL configuration allows. Askedin checks its JWKS host before deploying
 (RUNBOOK step 1); Cloudflare serves R2 over TLS 1.3. The database connection is libpq's, not
