@@ -54,9 +54,7 @@ public:
     [[nodiscard]] std::uint64_t close() noexcept;
 
     void write(std::string_view line) noexcept override;
-    [[nodiscard]] std::uint64_t dropped() const noexcept override {
-        return dropped_.load(std::memory_order_relaxed);
-    }
+    [[nodiscard]] std::uint64_t dropped() const noexcept override { return dropped_.load(); }
 
 private:
     void drain(const std::stop_token& stop);

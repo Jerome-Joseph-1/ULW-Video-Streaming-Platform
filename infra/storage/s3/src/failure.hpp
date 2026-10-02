@@ -27,12 +27,10 @@ class PageCount {
 public:
     void note(const Failed& failure) noexcept {
         if (failure.page) {
-            count_.fetch_add(1, std::memory_order_relaxed);
+            count_.fetch_add(1);
         }
     }
-    [[nodiscard]] std::uint64_t value() const noexcept {
-        return count_.load(std::memory_order_relaxed);
-    }
+    [[nodiscard]] std::uint64_t value() const noexcept { return count_.load(); }
 
 private:
     std::atomic<std::uint64_t> count_{0};
