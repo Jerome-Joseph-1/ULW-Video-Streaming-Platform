@@ -1,0 +1,57 @@
+# What the sandbox changes in the stage egress policies, and why: MinIO stands in for R2 on port
+# 9000, and the mock auth-service's pods serve the JWKS on 8443 behind its Service's 443. Policies
+# match a pod's own port, after the Service has translated it, so both ports are added; kind's
+# pod network is 10.244.0.0/16, not K3s's 10.42.0.0/16. Everything else is as it ships.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: video-gateway
+  namespace: apps-stage
+spec:
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 5432
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+        - port: 9000
+          protocol: TCP
+        - port: 8443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: video-worker
+  namespace: apps-stage
+spec:
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.244.0.0/16"]
+      ports:
+        - port: 5432
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+        - port: 9000
+          protocol: TCP

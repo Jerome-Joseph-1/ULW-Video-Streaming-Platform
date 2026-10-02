@@ -29,3 +29,4 @@ images:
 patches:
   - path: gateway-patch.yaml
   - path: worker-patch.yaml
+  - path: networkpolicy-patch.yaml

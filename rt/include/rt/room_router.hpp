@@ -104,6 +104,11 @@ struct RouterConfig {
     // How long a room can stay routed to an owner that let it go, if the notification saying so
     // was lost: all such rooms' owners are read again this often, in one statement.
     core::Millis revalidate_every{10'000};
+    // A node-channel connection whose output waits for the other node, which acknowledges none
+    // of it for this long, is closed as a slow peer (ADR-0071). The kernel's user timeout,
+    // which this replaces, was the same 20 s, but also ended a node that kept reading a little
+    // at a time.
+    core::Millis peer_stall_timeout{20'000};
 };
 
 struct RouterCounters {
@@ -117,7 +122,9 @@ struct RouterCounters {
     std::uint64_t peers_refused = 0;
     // Unfinished node-channel handshakes dropped to make room for a newer one.
     std::uint64_t handshakes_evicted = 0;
-    // Node-channel connections closed because the other end stopped reading.
+    // Node-channel connections closed because the other end stopped reading: sixteen of the
+    // largest frames unsent, or output waiting peer_stall_timeout with none of it acknowledged.
+    // Reset, not closed with a FIN.
     std::uint64_t slow_peers = 0;
     // Sends answered with the seq their key already had, instead of being sequenced again.
     std::uint64_t duplicates = 0;

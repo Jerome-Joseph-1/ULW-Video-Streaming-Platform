@@ -160,7 +160,7 @@ protected:
     }
 
     [[nodiscard]] reaper::Report run(const core::ports::IClock& clock) {
-        return reaper::run_once(*reaper_, *store_, *store_, clock,
+        return reaper::run_once(*reaper_, *store_, *store_, *reaper_, clock,
                                 {.batch = 10, .orphan_after = kOrphanAfter});
     }
 

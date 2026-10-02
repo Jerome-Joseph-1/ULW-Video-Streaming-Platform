@@ -23,6 +23,16 @@ python3 tools/check-docs.py # ADR numbering and sections, route/doc coverage
 tools/e2ee_diagnostic_check.sh [<base> <head>]  # chat service and router unchanged, phase-2..phase-3
 ```
 
+Security checks (ADR-0072; the scanners are fetched, pinned, into `tools/security/.tools`):
+
+```sh
+tools/check-hardening.sh build/ci        # PIE, full RELRO, NX, stack protector, CET, FORTIFY
+tools/security/osv-scan.sh               # lock files and vendored C/C++ against OSV
+tools/security/trivy-config.sh           # deploy/ manifests, kustomizations, Dockerfiles
+tools/security/trivy-image.sh IMAGE...   # HIGH/CRITICAL fixable CVEs in a built image
+tools/security/lint-workflows.sh         # actionlint and zizmor over .github/
+```
+
 ## Run locally
 
 ```sh

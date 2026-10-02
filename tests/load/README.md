@@ -106,5 +106,5 @@ Build the gateway and its helpers, start a scratch Postgres database and MinIO b
 dev JWKS, then run `gateway_server` pointed at them (`tests/e2e/stack.mjs` does the same thing
 for the Playwright suite and is the reference for the environment variables involved:
 `ULW_STORAGE`, `ULW_S3_ENDPOINT`, `ULW_BUCKET`, `ULW_S3_ACCESS_KEY_ID`, `ULW_S3_SECRET_ACCESS_KEY`,
-`ULW_DATABASE_URL`, `ULW_LISTEN_PORT`, `ULW_DEV_JWKS_FILE`, `JWT_ISSUER`). Once it is listening on
+`ULW_DATABASE_URL`, `ULW_LISTEN_PORT`, `ULW_DEV_JWKS_FILE` with `ULW_DEV_MODE=1`, `JWT_ISSUER`). Once it is listening on
 `127.0.0.1`, any of the three scripts above can point `--url` at it.
