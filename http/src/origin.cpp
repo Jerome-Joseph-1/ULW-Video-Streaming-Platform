@@ -33,14 +33,18 @@ namespace {
 } // namespace
 
 bool is_origin(std::string_view origin) noexcept {
-    std::string_view rest;
+    // The scheme is the token before the first "://"; only https, and http for loopback, are taken.
+    const std::size_t separator = origin.find("://");
+    if (separator == std::string_view::npos) {
+        return false;
+    }
+    const std::string_view scheme = origin.substr(0, separator);
+    const std::string_view rest = origin.substr(separator + 3);
     unsigned default_port = 0;
     bool plain = false;
-    if (origin.starts_with("https://")) {
-        rest = origin.substr(8);
+    if (scheme == "https") {
         default_port = 443;
-    } else if (origin.starts_with("http://")) {
-        rest = origin.substr(7);
+    } else if (scheme == "http") {
         default_port = 80;
         plain = true;
     } else {
