@@ -282,6 +282,35 @@ TEST_P(GatewayUpload, ACookieGetFromAnotherSiteIsRefused) {
               404);
 }
 
+// PATCH and DELETE change the upload as a commit does: with the cookie, no Origin is refused. A
+// HEAD from another site is refused like a GET, and an Origin that names the default port is
+// not the allowed one, as no browser writes it so.
+TEST_P(GatewayUpload, ACookieRequestFromAPageNotAllowedIsRefusedOnEveryMethod) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    const std::string path = "/api/v1/uploads/" + up->upload_id;
+    const std::pair<std::string, std::string> cookie{"cookie", "auth_token=user.alice"};
+    const auto send = [&](std::string_view method, std::span<const std::byte> body,
+                          const std::map<std::string, std::string>& headers) {
+        HttpClient page(gw.endpoint());
+        const auto r = page.request(method, path, "", body, headers);
+        return r ? r->status : 0;
+    };
+    EXPECT_EQ(send("PATCH", std::span(data).first(16), {cookie, {"Upload-Offset", "0"}}), 403);
+    EXPECT_EQ(send("DELETE", {}, {cookie}), 403);
+    EXPECT_EQ(send("HEAD", {}, {cookie, {"sec-fetch-site", "cross-site"}}), 403);
+    EXPECT_EQ(send("DELETE", {}, {cookie, {"origin", std::string(kAllowedOrigin) + ":443"}}), 403);
+    EXPECT_EQ(gw.counters().cross_site_rejections, 4U);
+
+    const auto head = c.request("HEAD", path, kAlice);
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->status, 204);
+    EXPECT_EQ(head->upload_offset(), 0U);
+}
+
 // A web app on a sibling subdomain (app.example.com calling video.example.com) is same-site,
 // trusted only when the deployment says so.
 TEST_P(GatewayUpload, ASameSitePageIsTrustedOnlyWhenConfigured) {

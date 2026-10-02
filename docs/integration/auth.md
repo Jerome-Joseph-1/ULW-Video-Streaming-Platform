@@ -56,6 +56,14 @@ with an `Authorization` header is not checked: other sites cannot make the brows
   web app's own origin must therefore be in `ULW_ALLOWED_ORIGINS` for it to upload with the
   cookie. With no list set, the cookie works only for `GET` and `HEAD` from the gateway's own
   origin.
+- `ULW_ALLOWED_ORIGINS` entries are `scheme://host[:port]`, lowercase, exactly as a browser
+  writes `Origin`. `http://` is accepted only for `localhost`, `127.0.0.1` and `[::1]` (a dev
+  server); any other `http://` entry stops the gateway at startup. An entry naming the scheme's
+  default port (`https://app.example:443`, `http://localhost:80`) is refused too: browsers leave
+  it out of `Origin`, so it could never match.
+- `Sec-Fetch-Site` is checked first, so the list admits only same-origin pages, and same-site
+  ones with `ULW_ALLOW_SAME_SITE=1`. Listing a page on another site does not let it use the
+  cookie from a current browser.
 - A same-origin `GET`, `<video>` and hls.js send no `Origin`, and playback needs none.
 - Browsers released before 2023 send no `Sec-Fetch-Site`. From them, a cross-site `GET` or
   `HEAD` with the cookie is still answered.

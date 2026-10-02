@@ -18,6 +18,7 @@ clients are not affected.
 | `POST`, `PATCH` and `DELETE` needed only the cookie | They must also send an `Origin` listed in `ULW_ALLOWED_ORIGINS` |
 | `POST /api/v1/uploads` read any `Content-Type` | With the cookie it needs `Content-Type: application/json` |
 | Cross-site `GET`s with the cookie were served and counted against the user's quota | Refused when the browser says `Sec-Fetch-Site: cross-site` (or `same-site` unless `ULW_ALLOW_SAME_SITE=1`) |
+| A repeated `Origin` or `Sec-Fetch-Site` header was taken | `400` from the HTTP parser, for every client, bearer ones included |
 
 What to do:
 
@@ -27,3 +28,7 @@ What to do:
   deploying, and set `ULW_ALLOW_SAME_SITE=1` if the app is served from a sibling subdomain.
   Without these, cookie uploads are refused. Watch `cross_site_rejections_total` after the
   rollout.
+  `ULW_ALLOWED_ORIGINS` takes `http://` only for `localhost`, `127.0.0.1` or `[::1]`, and no
+  entry may name the default port (`:443`, `:80`); either stops the service at startup. The list
+  admits only the gateway's own origin and, with `ULW_ALLOW_SAME_SITE=1`, sibling subdomains:
+  a page on another site is refused by `Sec-Fetch-Site` whatever the list says.

@@ -308,6 +308,23 @@ TEST_F(ConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
     }
 }
 
+// Plain http would carry the cookie in the clear, so it names only a dev server on this machine.
+// A browser leaves the scheme's own port out of Origin, so an entry naming it could never match.
+TEST_F(ConfigTest, PlainHttpOriginsAreLoopbackOnlyAndDefaultPortsAreRefused) {
+    env["ULW_ALLOWED_ORIGINS"] = "http://localhost:5173,http://127.0.0.1:8080,http://[::1]:3000";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->limits.allowed_origins,
+              (std::vector<std::string>{"http://localhost:5173", "http://127.0.0.1:8080",
+                                        "http://[::1]:3000"}));
+    for (const char* bad : {"http://app.example", "http://app.example:8080", "http://10.0.0.1",
+                            "https://app.example:443", "http://localhost:80", "https://:443",
+                            "https://app.example:", "http://[::1"}) {
+        env["ULW_ALLOWED_ORIGINS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
+    }
+}
+
 TEST_F(ConfigTest, TheFilesystemBackendTakesAFileServerForSegmentUrls) {
     env["ULW_STORAGE"] = "fs";
     env["ULW_FS_ROOT"] = "/var/lib/ulw";

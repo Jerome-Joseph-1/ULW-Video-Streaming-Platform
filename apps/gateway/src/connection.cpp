@@ -94,7 +94,7 @@ std::string_view state_name(core::VideoState s) noexcept {
 // A cross-site page can make a browser send a POST that carries the auth cookie, with a body of
 // its choosing, only under a CORS-safelisted Content-Type (text/plain, a form's two types);
 // application/json needs a preflight, which this gateway never answers.
-bool declares_json(std::span<const http::HeaderField> headers) noexcept {
+[[nodiscard]] bool declares_json(std::span<const http::HeaderField> headers) noexcept {
     const auto type = http::find_header(headers, "content-type");
     if (!type) {
         return false;
@@ -116,8 +116,9 @@ bool declares_json(std::span<const http::HeaderField> headers) noexcept {
 //                   ones included, and on a cross-origin GET; not on a same-origin GET, nor from
 //                   <video> or <img>. When sent it must be allowed; a method that changes anything
 //                   must send it.
-bool cookie_request_trusted(const http::RequestHead& head, std::optional<RouteId> route,
-                            const Limits& limits) noexcept {
+[[nodiscard]] bool cookie_request_trusted(const http::RequestHead& head,
+                                          std::optional<RouteId> route,
+                                          const Limits& limits) noexcept {
     if (const auto site = http::find_header(head.headers, "sec-fetch-site")) {
         const bool trusted = *site == "same-origin" || *site == "none" ||
                              (limits.allow_same_site && *site == "same-site");
