@@ -441,6 +441,9 @@ class Stack:
                    "ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND": "65536"}
             if os.environ.get("ULW_REACTOR"):
                 env["ULW_REACTOR"] = os.environ["ULW_REACTOR"]
+            # Experiments only: an allocator to put in front of glibc's.
+            if os.environ.get("ULW_SOAK_PRELOAD"):
+                env["LD_PRELOAD"] = os.environ["ULW_SOAK_PRELOAD"]
             out = open(self.out / f"{node}.log", "ab")
             self.procs[node] = subprocess.Popen([self.bin / "chat_server"], env=env, stdout=out,
                                                 stderr=subprocess.STDOUT,

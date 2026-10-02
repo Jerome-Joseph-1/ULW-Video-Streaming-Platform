@@ -218,6 +218,9 @@ class Stack:
                        "ULW_REQUESTS_PER_USER_PER_MINUTE": "1000000"}
         if os.environ.get("ULW_REACTOR"):
             gateway_env["ULW_REACTOR"] = os.environ["ULW_REACTOR"]
+        # Experiments only: an allocator to put in front of glibc's.
+        if os.environ.get("ULW_SOAK_PRELOAD"):
+            gateway_env["LD_PRELOAD"] = os.environ["ULW_SOAK_PRELOAD"]
         scratch = self.out / "scratch"
         scratch.mkdir(exist_ok=True)
         worker_env = {**self.common_env(), "ULW_NODE_ID": "soak-worker",
