@@ -57,4 +57,14 @@ bool TokenBucket::full(core::MonoTime now) const noexcept {
     return level(now) == capacity_;
 }
 
+bool PacedBucket::available(core::MonoTime now) const noexcept {
+    // Full at `now` holds burst; each whole interval still to go before full is one fewer, and
+    // the last is taken when burst - 1 are still owed.
+    return burst_ > 0 && due_ <= now + (interval_ * (burst_ - 1));
+}
+
+void PacedBucket::take(core::MonoTime now) noexcept {
+    due_ = std::max(due_, now) + interval_;
+}
+
 } // namespace chat
