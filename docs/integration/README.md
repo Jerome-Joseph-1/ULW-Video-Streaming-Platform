@@ -45,8 +45,8 @@ The ops team fills these in.
 | Segment host (R2) | `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` | same form, prod bucket |
 | Chat (`wss://<CHAT_HOST>/rt`) | not deployed yet | not deployed yet |
 | Token cookie | `auth_token_stage` | `auth_token` |
-| `JWT_ISSUER` | `<STAGE_ISSUER>` | `<PROD_ISSUER>` |
-| `JWKS_URL` | `<STAGE_JWKS_URL>` | `<PROD_JWKS_URL>` |
+| `JWT_ISSUER` | `https://auth-stage.askedin.com/auth`, unconfirmed ([auth.md](auth.md#askedin)) | `https://auth.askedin.com` |
+| `JWKS_URL` | `https://auth-stage.askedin.com/.well-known/jwks.json` | `https://auth.askedin.com/.well-known/jwks.json` |
 | `JWT_AUDIENCE` | `askedin-platform` | `askedin-platform` |
 
 The video API is routed on Askedin's shared Envoy Gateway by path prefix, so it answers on every
