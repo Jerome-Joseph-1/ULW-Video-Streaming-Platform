@@ -1,14 +1,18 @@
 // S3Transfer's streams: their part size, and against a scripted S3 peer, a completion whose
-// answer was lost.
+// answer was lost. Against the same peer, the transfer's refusals: a source behind a link, a
+// create-only upload onto an existing object, a delete, and a part answered without its ETag.
 #include "infra/s3util/credentials.hpp"
 #include "infra/storage/s3_transfer.hpp"
 
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
 #include "support/http_test_server.hpp"
+#include "support/temp_dir.hpp"
 
 #include <cstdint>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <span>
@@ -118,6 +122,98 @@ TEST_F(S3StreamTest, AnUploadGoneWithoutItsObjectIsNotTakenForCommitted) {
     ASSERT_TRUE(stream);
     ASSERT_TRUE((*stream)->write(std::as_bytes(std::span(bytes))));
     EXPECT_EQ((*stream)->commit().error(), core::ports::StorageError::NotFound);
+}
+
+const core::ContentType& segment_type() {
+    static const auto type = *core::ContentType::parse("video/mp2t");
+    return type;
+}
+
+std::filesystem::path file_with(const std::filesystem::path& path, std::string_view bytes) {
+    std::ofstream(path, std::ios::binary) << bytes;
+    return path;
+}
+
+// The worker uploads what a sandboxed ffmpeg wrote; a link planted there could name any file the
+// worker can read, so the upload refuses it before a byte leaves.
+TEST_F(S3StreamTest, AnUploadFromALinkIsRefusedBeforeAnyRequest) {
+    const auto store = transfer();
+    ASSERT_NE(store, nullptr);
+    const ulw::test::TempDir dir("ulw-s3-link");
+    const auto secret = file_with(dir.path() / "secret", "not for the bucket");
+    const auto link = dir.path() / "segment.ts";
+    std::filesystem::create_symlink(secret, link);
+    const auto key = *core::StorageKey::parse("videos/v/hls/segment.ts");
+
+    EXPECT_EQ(store->upload(link, key, segment_type()).error(),
+              core::ports::StorageError::Permanent);
+    EXPECT_EQ(store->upload_new(link, key, segment_type()).error(),
+              core::ports::StorageError::Permanent);
+    EXPECT_EQ(store->upload(dir.path() / "missing", key, segment_type()).error(),
+              core::ports::StorageError::Permanent);
+    EXPECT_EQ(server.request_count(), 0U);
+}
+
+TEST_F(S3StreamTest, ACreateOnlyUploadOntoAnExistingObjectIsAlreadyExistsAndNotRetried) {
+    const auto store = transfer();
+    ASSERT_NE(store, nullptr);
+    const ulw::test::TempDir dir("ulw-s3-new");
+    const auto source = file_with(dir.path() / "epoch_1", "claimed\n");
+    const auto key = *core::StorageKey::parse("live/show/epoch_1");
+    then({reply(412, "<Error><Code>PreconditionFailed</Code></Error>")});
+
+    EXPECT_EQ(store->upload_new(source, key, segment_type()).error(),
+              core::ports::StorageError::AlreadyExists);
+    const auto requests = server.requests();
+    ASSERT_EQ(requests.size(), 1U);
+    EXPECT_EQ(requests[0].method, "PUT");
+    EXPECT_EQ(requests[0].header("if-none-match"), "*");
+    EXPECT_EQ(requests[0].body, "claimed\n");
+
+    // A plain upload overwrites: it carries no condition.
+    then({reply(200, "")});
+    EXPECT_TRUE(store->upload(source, key, segment_type()));
+    const auto after = server.requests();
+    ASSERT_EQ(after.size(), 2U);
+    EXPECT_EQ(after[1].header("if-none-match"), std::nullopt);
+}
+
+TEST_F(S3StreamTest, RemovingAnObjectAlreadyGoneSucceedsAndARefusalIsNotRetried) {
+    const auto store = transfer();
+    ASSERT_NE(store, nullptr);
+    const auto key = *core::StorageKey::parse("videos/v/raw");
+    then({reply(404, "<Error><Code>NoSuchKey</Code></Error>")});
+    EXPECT_TRUE(store->remove(key));
+
+    then({reply(403, "<Error><Code>AccessDenied</Code></Error>")});
+    EXPECT_EQ(store->remove(key).error(), core::ports::StorageError::Unauthorized);
+
+    // A server error is retried.
+    then({reply(500, "<Error><Code>InternalError</Code></Error>"), reply(204, "")});
+    EXPECT_TRUE(store->remove(key));
+
+    const auto requests = server.requests();
+    ASSERT_EQ(requests.size(), 4U);
+    for (const auto& r : requests) {
+        EXPECT_EQ(r.method, "DELETE");
+        EXPECT_EQ(r.path(), "/media/videos/v/raw");
+    }
+}
+
+TEST_F(S3StreamTest, APartAnsweredWithoutItsEtagIsCorruptAndTheUploadIsNeverCompleted) {
+    const auto store = transfer();
+    ASSERT_NE(store, nullptr);
+    const auto key = *core::StorageKey::parse("videos/v/raw");
+    const std::string bytes(1000, 'x');
+    then({reply(200, kInitiate), reply(200, "")});
+    auto stream = store->begin(key, segment_type(), 1U << 20U);
+    ASSERT_TRUE(stream);
+    ASSERT_TRUE((*stream)->write(std::as_bytes(std::span(bytes))));
+    EXPECT_EQ((*stream)->commit().error(), core::ports::StorageError::Corrupt);
+    for (const auto& r : server.requests()) {
+        // Only the initiation is a POST without an upload id; a completion carries one.
+        EXPECT_FALSE(r.method == "POST" && r.query("uploadId")) << r.target;
+    }
 }
 
 } // namespace
