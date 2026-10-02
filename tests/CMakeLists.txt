@@ -458,15 +458,19 @@ endif()
 # gateway_server as its service manager runs it, against a scratch database.
 ulw_add_test_suite(gateway_process_tests integration
     integration/gateway_process_test.cpp
+    integration/gateway_store_connections_test.cpp
     integration/postgres_harness.cpp
     support/child_process.cpp
     PROPERTIES RESOURCE_LOCK postgres)
 target_link_libraries(gateway_process_tests PRIVATE
-    ulw::pg_store ulw::devtoken ulw::os ulw::test_tls PkgConfig::LIBPQ)
+    ulw::pg_store ulw::devtoken ulw::os ulw::test_tls ulw::test_live_s3 PkgConfig::LIBPQ)
 target_include_directories(gateway_process_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 target_compile_definitions(gateway_process_tests PRIVATE
     ULW_GATEWAY_BIN="$<TARGET_FILE:gateway_server>")
+if(ULW_CONFORMANCE_LIVE)
+    target_compile_definitions(gateway_process_tests PRIVATE ULW_CONFORMANCE_LIVE)
+endif()
 add_dependencies(gateway_process_tests gateway_server)
 
 # The directory contract runs against the in-memory directory here and against Postgres in
