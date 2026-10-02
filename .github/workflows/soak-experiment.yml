@@ -1,158 +1,31 @@
 name: soak-experiment
 
-# A soak run on a hosted runner, dispatched by hand at any ref, for experiments on the soaks'
-# memory (docs/operations/soak.md). The data is the point: samples.csv, the summary and the
-# processes' logs are uploaded whatever the verdict.
-#
-# Hosted jobs are cut off at 6 h, build included, so the 6 h acceptance soak (ADR-0042) cannot
-# run here; it still runs on a host. `hours` stops at 4.9, the most that leaves the job its 45
-# minutes for setup and the build under the 355 it is given. It starts at 0.5: the judges skip
-# the first 15 minutes and need ten samples after them.
+# One-off cleanup on the self-hosted runner: services left running by a cancelled soak.
 
 on:
   workflow_dispatch:
-    inputs:
-      kind:
-        description: Which soak to run.
-        type: choice
-        options: [chat, gateway, both]
-        default: chat
-      hours:
-        description: Hours of load, from 0.5 to 4.9.
-        type: number
-        default: 1.5
-      clients:
-        description: Client threads, 1 to 1024; empty keeps the script's own (chat 64, gateway 8).
-        type: string
-        default: ""
 
 permissions:
   contents: read
 
 jobs:
-  # Checks the inputs and turns them into the soak job's matrix and timeouts, which expressions
-  # alone cannot compute.
-  plan:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      job-minutes: ${{ steps.plan.outputs.job-minutes }}
-      soak-minutes: ${{ steps.plan.outputs.soak-minutes }}
+  cleanup:
+    runs-on: self-hosted
+    timeout-minutes: 10
     steps:
-      - id: plan
-        # Through the environment, not spliced into the script: inputs are the dispatcher's text.
-        env:
-          KIND: ${{ inputs.kind }}
-          HOURS: ${{ inputs.hours }}
-          CLIENTS: ${{ inputs.clients }}
+      - name: Find and stop leftover services
         run: |
-          if ! awk -v h="$HOURS" 'BEGIN { exit !(h ~ /^[0-9]*\.?[0-9]+$/ && h >= 0.5 && h <= 4.9) }'; then
-            echo "::error::hours must be a number from 0.5 to 4.9, not '$HOURS'"
-            exit 1
-          fi
-          # The chat server takes 1,280 connections; more clients would measure refusals.
-          if [[ -n $CLIENTS && ! ( $CLIENTS =~ ^[1-9][0-9]{0,3}$ && $CLIENTS -le 1024 ) ]]; then
-            echo "::error::clients must be empty or a whole number from 1 to 1024, not '$CLIENTS'"
-            exit 1
-          fi
-          chat='{"kind":"chat","script":"tests/soak/chat_soak.py","out":"soak-chat","targets":"chat_server ulw_migrate ulw_devtoken"}'
-          gateway='{"kind":"gateway","script":"tests/soak/soak.py","out":"soak-gw","targets":"gateway_server transcode_worker ulw_sandbox ulw_migrate ulw_devtoken"}'
-          case $KIND in
-            chat) include="[$chat]" ;;
-            gateway) include="[$gateway]" ;;
-            both) include="[$chat,$gateway]" ;;
-            *) echo "::error::unknown kind '$KIND'"; exit 1 ;;
-          esac
-          # The soak itself: its hours, plus 15 minutes to start, stop its threads and judge.
-          # The job: that plus 45 minutes for setup and the build; at most 4.9 hours keeps it
-          # under 355, short of the hosted 360.
-          soak=$(awk -v h="$HOURS" 'BEGIN { m = h * 60; printf "%d", (m == int(m) ? m : int(m) + 1) + 15 }')
-          job=$((soak + 45))
-          {
-            echo "matrix={\"include\":$include}"
-            echo "soak-minutes=$soak"
-            echo "job-minutes=$job"
-          } >>"$GITHUB_OUTPUT"
-
-  soak:
-    name: soak (${{ matrix.kind }})
-    needs: plan
-    runs-on: ubuntu-24.04
-    timeout-minutes: ${{ fromJSON(needs.plan.outputs.job-minutes) }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    # As ci.yml's integration job: the digest of deploy/local/compose.yaml, on the port and
-    # password the soaks' default ULW_TEST_DATABASE_URL names. The chat soak needs Postgres
-    # only; the gateway soak also starts MinIO below.
-    services:
-      postgres:
-        # Same digest as deploy/local/compose.yaml.
-        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
-        env:
-          POSTGRES_PASSWORD: testtest123
-        ports: ["55432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
-          --health-retries 15
-    env:
-      CC: gcc-14
-      CXX: g++-14
-      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-        with:
-          cache-key: gcc-ci
-      # The soaks create and drop their database with psql.
-      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
-      # The gateway soak's store, on the address and keys its defaults name.
-      - name: Start MinIO
-        if: matrix.kind == 'gateway'
-        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
-      - run: cmake --preset ci
-      - env:
-          TARGETS: ${{ matrix.targets }}
-        run: |
-          read -ra targets <<<"$TARGETS"
-          cmake --build --preset ci --target "${targets[@]}"
-      - name: Soak
-        timeout-minutes: ${{ fromJSON(needs.plan.outputs.soak-minutes) }}
-        env:
-          SCRIPT: ${{ matrix.script }}
-          OUT: ${{ runner.temp }}/${{ matrix.out }}
-          HOURS: ${{ inputs.hours }}
-          CLIENTS: ${{ inputs.clients }}
-        run: |
-          args=(--build build/ci --hours "$HOURS" --out "$OUT")
-          if [[ -n $CLIENTS ]]; then
-            args+=(--clients "$CLIENTS")
-          fi
-          "$SCRIPT" "${args[@]}"
-      - name: Summary
-        if: ${{ !cancelled() }}
-        env:
-          OUT: ${{ runner.temp }}/${{ matrix.out }}
-        run: |
-          if [[ -f $OUT/summary.txt ]]; then
-            { echo '```'; cat "$OUT/summary.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
-          fi
-      # The samples and logs whatever the verdict; not the copied binaries, the keys or the
-      # gateway's scratch.
-      - name: Upload the samples and logs
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: soak-${{ matrix.kind }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/${{ matrix.out }}/samples.csv
-            ${{ runner.temp }}/${{ matrix.out }}/summary.txt
-            ${{ runner.temp }}/${{ matrix.out }}/pids.json
-            ${{ runner.temp }}/${{ matrix.out }}/*.log
-          if-no-files-found: warn
-          retention-days: 30
-      - if: failure() && matrix.kind == 'gateway'
-        run: docker compose -f deploy/local/compose.yaml logs minio
+          echo "== before"
+          ps -eo pid,user,etimes,args | awk 'NR==1 || /(chat_server|gateway_server|transcode_worker|soak\.py|chat_soak\.py)( |$)/' | grep -v awk || true
+          sudo ss -ltnp | grep -E ':(18180|18190|19101|19111|19121|19201|19211|19221|55432|9000) ' || true
+          for program in chat_server gateway_server transcode_worker; do
+            sudo pkill -f "^[^ ]*/${program}( |\$)" || true
+          done
+          sleep 5
+          for program in chat_server gateway_server transcode_worker; do
+            sudo pkill -KILL -f "^[^ ]*/${program}( |\$)" || true
+          done
+          echo "== after"
+          ps -eo pid,user,etimes,args | awk 'NR==1 || /(chat_server|gateway_server|transcode_worker)( |$)/' | grep -v awk || true
+          sudo ss -ltnp | grep -E ':(18180|18190|19101|19111|19121) ' || echo "soak ports free"
+          docker ps --format '{{.Names}} {{.Ports}}'
