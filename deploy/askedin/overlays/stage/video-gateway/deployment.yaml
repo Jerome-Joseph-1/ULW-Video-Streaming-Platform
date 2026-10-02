@@ -51,13 +51,19 @@ spec:
                 secretKeyRef:
                   name: video-gateway-secrets
                   key: ULW_DATABASE_URL
-          # One libpq connection running a handful of DDL statements.
+          # One libpq connection running a handful of DDL statements. The CPU limit only
+          # bounds a runaway: it is the pod's init phase, so it takes nothing from the gateway.
+          # Disk: its log only (read-only root filesystem, no volume), sized as the gateway's
+          # below.
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
+              ephemeral-storage: 64Mi
             limits:
+              cpu: 500m
               memory: 128Mi
+              ephemeral-storage: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -141,13 +147,19 @@ spec:
           # four offload threads (ULW_OFFLOAD_THREADS) that mostly wait on sockets and Postgres,
           # so the request reserves half a core and the limit lets all five threads run at
           # once; kubectl top under 500 concurrent uploads is the number to replace it with.
+          # Disk: its log and nothing else, as the root filesystem is read-only and no volume
+          # is mounted. The kubelet keeps at most 5 x 10 MiB of a container's log
+          # (containerLogMaxFiles and containerLogMaxSize at their defaults), which the request
+          # covers; the limit leaves room above that before the pod is evicted.
           resources:
             requests:
               cpu: 500m
               memory: 600Mi
+              ephemeral-storage: 64Mi
             limits:
               cpu: "2"
               memory: 700Mi
+              ephemeral-storage: 256Mi
           startupProbe:
             httpGet:
               path: /api/v1/healthz

@@ -64,13 +64,15 @@ inline constexpr Sql kRemoveMember = "DELETE FROM chat_members WHERE room_id = $
 // is written, and only with a closed kind ($3): a join that asks for 'stream_live_chat' records
 // nothing and reads a null kind. The update that does nothing on a conflict waits for a
 // concurrent first join and returns the kind it recorded, rather than missing it in this
-// statement's snapshot. Each probe is one primary-key lookup.
+// statement's snapshot. Each probe is one primary-key lookup. $4 is false when the room is not to
+// be recorded (Recording::Skipped): the kind comes back null, and the join is answered by the
+// kind it asked for.
 inline constexpr Sql kAdmits = R"sql(
 WITH recorded AS (SELECT kind FROM chat_rooms WHERE room_id = $1),
 created AS (
     INSERT INTO chat_rooms (room_id, kind)
     SELECT $1, $3
-     WHERE $3 <> 'stream_live_chat' AND NOT EXISTS (SELECT 1 FROM recorded)
+     WHERE $3 <> 'stream_live_chat' AND $4 AND NOT EXISTS (SELECT 1 FROM recorded)
     ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind
     RETURNING kind)
 SELECT coalesce((SELECT kind FROM recorded), (SELECT kind FROM created)),

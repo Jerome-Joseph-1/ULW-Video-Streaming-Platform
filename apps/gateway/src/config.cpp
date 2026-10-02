@@ -2,6 +2,7 @@
 
 #include "core/models/upload.hpp"
 #include "core/util/parse.hpp"
+#include "http/client_limits.hpp"
 #include "http/request_parser.hpp"
 #include "infra/auth/local_verifier.hpp"
 #include "infra/postgres/connection_string.hpp"
@@ -10,6 +11,7 @@
 #include "net/ip_address.hpp"
 #include "net/transport.hpp"
 
+#include "ops/dev_only.hpp"
 #include "ops/root.hpp"
 
 #include <algorithm>
@@ -54,6 +56,11 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_DATABASE_URL", .key = "database.url", .secret = true},
     ops::Setting{.env = "JWKS_URL", .key = "auth.jwks_url"},
     ops::Setting{.env = "ULW_DEV_JWKS_FILE", .key = "auth.dev_jwks_file"},
+    ops::Setting{.env = "ULW_JWKS_MAX_STALE_HOURS", .key = "auth.jwks_max_stale_hours"},
+    ops::Setting{.env = "ULW_DEV_MODE", .key = "dev.mode"},
+    // Not a setting: the kubelet sets it in every container, and it is read only to refuse
+    // development settings there.
+    ops::Setting{.env = "KUBERNETES_SERVICE_HOST", .key = ""},
     ops::Setting{.env = "JWT_ISSUER", .key = "auth.issuer"},
     ops::Setting{.env = "JWT_AUDIENCE", .key = "auth.audience"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
@@ -70,8 +77,6 @@ constexpr std::uint64_t kMaxChunk = std::uint64_t{5} << 30U;
 // 50 GiB / 10,000 is 5.12 MiB, just above the store's own minimum.
 constexpr std::uint64_t kMaxParts = 10'000;
 constexpr std::uint64_t kDescriptorReserve = 64;
-// Every trusted block is tried against every accepted peer; a deployment names one or two.
-constexpr std::size_t kMaxTrustedProxies = 16;
 // Past a CDN, a load balancer and Envoy there is no chain worth trusting.
 constexpr std::size_t kMaxProxyHops = 16;
 // Blocks wider than these are rarely one's own proxies: a /8 of IPv4 is 16 million addresses,
@@ -236,20 +241,20 @@ std::optional<std::string> read_key_set(const std::string& path) {
 }
 
 std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config) {
-    auto url = lookup(env, "JWKS_URL");
-    auto file = lookup(env, "ULW_DEV_JWKS_FILE");
-    if (url && file) {
-        return error("JWKS_URL", "set together with ULW_DEV_JWKS_FILE; choose one");
+    auto source = ops::key_source(env);
+    if (!source) {
+        return error(source.error().variable, source.error().reason);
     }
-    if (!url && !file) {
-        return error("JWKS_URL", "not set");
+    config.jwks_url = std::move(source->url);
+    config.dev_jwks_file = std::move(source->file);
+    // A week is past any outage anyone would wait out; an hour is short of a bad night.
+    auto stale = number<std::uint32_t>(env, "ULW_JWKS_MAX_STALE_HOURS", 24, 1, 168);
+    if (!stale) {
+        return std::unexpected(std::move(stale.error()));
     }
-    // Over plain HTTP anyone on the path could hand us their own keys and sign any identity.
-    if (url && !url->starts_with("https://")) {
-        return error("JWKS_URL", "must be an https URL");
-    }
-    config.jwks_url = std::move(url).value_or("");
-    config.dev_jwks_file = std::move(file).value_or("");
+    config.jwks_max_stale_hours = *stale;
+    // key_source has refused anything but "0", "1" or empty.
+    config.dev_mode = lookup(env, "ULW_DEV_MODE") == "1";
     auto issuer = required(env, "JWT_ISSUER");
     if (!issuer) {
         return std::unexpected(std::move(issuer.error()));
@@ -274,33 +279,11 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
 }
 
 std::expected<std::vector<net::IpNetwork>, ConfigError> parse_proxies(std::string_view text) {
-    std::vector<net::IpNetwork> out;
-    while (!text.empty()) {
-        const std::size_t comma = text.find(',');
-        std::string_view item = text.substr(0, comma);
-        text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
-        while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) {
-            item.remove_prefix(1);
-        }
-        while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) {
-            item.remove_suffix(1);
-        }
-        const auto network = net::IpNetwork::parse(item);
-        if (!network) {
-            return error("ULW_TRUSTED_PROXIES",
-                         "expected comma-separated CIDR blocks, such as 10.42.0.0/16, with no "
-                         "bits set past the prefix");
-        }
-        // Every address on the internet could then name any client it liked.
-        if (network->prefix_length() == 0) {
-            return error("ULW_TRUSTED_PROXIES", "a /0 block trusts every peer");
-        }
-        out.push_back(*network);
+    auto proxies = http::parse_trusted_proxies(text);
+    if (!proxies) {
+        return error("ULW_TRUSTED_PROXIES", proxies.error());
     }
-    if (out.size() > kMaxTrustedProxies) {
-        return error("ULW_TRUSTED_PROXIES", "more than 16 blocks");
-    }
-    return out;
+    return std::move(*proxies);
 }
 
 std::expected<void, ConfigError> load_client_limits(const EnvLookup& env, Limits& limits) {
@@ -491,7 +474,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     // Checked as given; the blocks themselves hold no text to print back.
     const std::string proxies =
         config.limits.trusted_proxies.empty() ? "" : layers.get("ULW_TRUSTED_PROXIES").value_or("");
-    const std::array<std::pair<std::string_view, std::string>, 30> values{{
+    const std::array<std::pair<std::string_view, std::string>, 31> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -520,7 +503,10 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_CHUNK_SIZE", std::to_string(config.chunk_size)},
         {"ULW_DATABASE_URL", config.database_url},
         {"JWKS_URL", config.jwks_url},
+        {"ULW_JWKS_MAX_STALE_HOURS",
+         config.jwks_url.empty() ? "" : std::to_string(config.jwks_max_stale_hours)},
         {"ULW_DEV_JWKS_FILE", config.dev_jwks_file},
+        {"ULW_DEV_MODE", config.dev_mode ? "1" : ""},
         {"JWT_ISSUER", config.jwt_issuer},
         {"JWT_AUDIENCE", config.jwt_audience},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},

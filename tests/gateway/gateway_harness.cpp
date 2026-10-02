@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <mutex>
@@ -98,7 +99,16 @@ GatewayUnderTest::GatewayUnderTest(GatewayOptions options) : loop_(std::make_uni
 GatewayUnderTest::~GatewayUnderTest() {
     // Set from the loop itself: flipping it from here could let the loop exit before running
     // the task that is supposed to wake it, and this would wait forever.
-    on_loop([this] { loop_->stop = true; });
+    try {
+        on_loop([this] { loop_->stop = true; });
+    } catch (const std::exception& e) {
+        // The task could not be posted or its promise broke, so nothing is waited on: the flag
+        // set from here ends the loop within one turn (run_once's 50 ms), and a destructor
+        // that let this escape would terminate the whole test binary instead.
+        static_cast<void>(
+            std::fprintf(stderr, "gateway harness: stopping the loop: %s\n", e.what()));
+        loop_->stop = true;
+    }
     thread_.join();
 }
 
@@ -239,6 +249,13 @@ void GatewayUnderTest::set_plan(const infra::storage::FaultPlan& plan) {
     fake_->set_plan(plan);
 }
 
+void GatewayUnderTest::resume_store(const infra::storage::FaultPlan& plan) {
+    on_loop([&] {
+        fake_->set_plan(plan);
+        fake_->wake_writers();
+    });
+}
+
 void GatewayUnderTest::hold_fetches(bool held) {
     fake_->hold_fetches(held);
 }
@@ -298,6 +315,25 @@ void GatewayUnderTest::advance(core::Millis d) {
 
 void GatewayUnderTest::refresh_keys() {
     on_loop([&] { loop_->verifier.refresh_keys(); });
+}
+
+std::size_t GatewayUnderTest::queued_output() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->gateway->queued_output(); });
+    return out;
+}
+
+std::size_t GatewayUnderTest::held_bytes() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->gateway->held_bytes(); });
+    return out;
+}
+
+void GatewayUnderTest::refresh_keys_then_drain() {
+    on_loop([&] {
+        loop_->verifier.refresh_keys();
+        loop_->gateway->begin_drain();
+    });
 }
 
 std::size_t GatewayUnderTest::key_waiters() {

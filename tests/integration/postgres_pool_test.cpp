@@ -56,9 +56,9 @@ constexpr int kMinimumTicks = 10;
 // load average 8-12 (ci preset, both reactors, ULW_TEST_DATABASE_URL server), from submit() to
 // the answer: a first request, which also opens the session, took p99.9 250 ms over 1000 pools
 // (111 ms over 3000 on a second run); one on an open session, p99.9 10 ms over 20000. 1 s is
-// four of those, and loaded hosts have exceeded it. 5 s is 20 times the worst, covering ASan's
-// slowdown with room to spare, and stays under pump_until's 10 s, so a request that really
-// hangs still ends as a Timeout answer rather than "no answer".
+// four of those, and loaded hosts have exceeded it. 5 s is 20 times the worst, and stays under
+// pump_until's 10 s, so a request that really hangs still ends as a Timeout answer rather than
+// "no answer". Not measured under a sanitizer.
 constexpr core::Millis kAnswerWithin{5000};
 
 // Re-arms itself every tick; it keeps counting only while nothing blocks the loop.
@@ -187,6 +187,20 @@ protected:
         return *answer;
     }
 
+    // SELECT 1 until it answers, for the tests that must keep kTimeout: a first request also
+    // opens its session, and on a loaded host that has outlasted 1 s. Each try that times out
+    // leaves the connect going, so a later one finds the session open.
+    Answer warm_up() {
+        Answer answer = std::unexpected(DbError::Timeout);
+        if (!ulw::test::pump_until(*reactor, [&] {
+                answer = ask("SELECT 1");
+                return answer.has_value();
+            })) {
+            ADD_FAILURE() << "no session opened";
+        }
+        return answer;
+    }
+
     // Drives the loop for `span`, returning the longest single iteration.
     Clock::duration pump_measuring(std::chrono::milliseconds span) {
         Clock::duration longest{};
@@ -310,7 +324,7 @@ TEST_P(PoolTest, ServerStatementTimeoutEndsAStatementButKeepsTheSession) {
     }
     ASSERT_NO_FATAL_FAILURE(start(db->conninfo(), 1));
     // Connected first: time spent queued for a session would eat into the server's head start.
-    ASSERT_EQ(ask("SELECT 1"), Answer{"1"});
+    ASSERT_EQ(warm_up(), Answer{"1"});
     EXPECT_EQ(ask("SELECT pg_sleep(30)"), std::unexpected(DbError::Timeout));
     EXPECT_EQ(ask("SELECT 1"), Answer{"1"});
     EXPECT_EQ(pool->sessions_lost(), 0U);
@@ -329,7 +343,7 @@ TEST_P(PoolTest, ResolvesHostNamesOnTheOffloadPool) {
     // deadline. Had libpq resolved the name itself, on the loop, the query would have answered.
     EXPECT_EQ(ask("SELECT 1"), std::unexpected(DbError::Timeout));
     blocker.release();
-    EXPECT_EQ(ask("SELECT 1"), Answer{"1"});
+    EXPECT_EQ(warm_up(), Answer{"1"});
 }
 
 TEST_P(PoolTest, ServerThatNeverAnswersNeverStallsTheLoop) {
@@ -439,7 +453,7 @@ TEST_P(PoolTest, PausedDatabaseNeverStallsTheLoop) {
         GTEST_SKIP() << "docker cannot pause the Postgres container (set ULW_TEST_PG_CONTAINER)";
     }
     ASSERT_NO_FATAL_FAILURE(start(db->conninfo()));
-    ASSERT_EQ(ask("SELECT 1"), Answer{"1"});
+    ASSERT_EQ(warm_up(), Answer{"1"});
     {
         const ulw::test::PausedServer paused(*container);
         ASSERT_TRUE(paused.paused());
