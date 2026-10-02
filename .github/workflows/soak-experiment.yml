@@ -1,158 +1,49 @@
 name: soak-experiment
 
-# A soak run on a hosted runner, dispatched by hand at any ref, for experiments on the soaks'
-# memory (docs/operations/soak.md). The data is the point: samples.csv, the summary and the
-# processes' logs are uploaded whatever the verdict.
-#
-# Hosted jobs are cut off at 6 h, build included, so the 6 h acceptance soak (ADR-0042) cannot
-# run here; it still runs on a host. `hours` stops at 4.9, the most that leaves the job its 45
-# minutes for setup and the build under the 355 it is given. It starts at 0.5: the judges skip
-# the first 15 minutes and need ten samples after them.
+# Runner check: the self-hosted soak runner's identity, access and capacity.
 
 on:
   workflow_dispatch:
-    inputs:
-      kind:
-        description: Which soak to run.
-        type: choice
-        options: [chat, gateway, both]
-        default: chat
-      hours:
-        description: Hours of load, from 0.5 to 4.9.
-        type: number
-        default: 1.5
-      clients:
-        description: Client threads, 1 to 1024; empty keeps the script's own (chat 64, gateway 8).
-        type: string
-        default: ""
 
 permissions:
   contents: read
 
 jobs:
-  # Checks the inputs and turns them into the soak job's matrix and timeouts, which expressions
-  # alone cannot compute.
-  plan:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      job-minutes: ${{ steps.plan.outputs.job-minutes }}
-      soak-minutes: ${{ steps.plan.outputs.soak-minutes }}
+  check:
+    runs-on: [self-hosted, ulw-soak]
+    timeout-minutes: 20
     steps:
-      - id: plan
-        # Through the environment, not spliced into the script: inputs are the dispatcher's text.
-        env:
-          KIND: ${{ inputs.kind }}
-          HOURS: ${{ inputs.hours }}
-          CLIENTS: ${{ inputs.clients }}
+      - name: Identity and access
         run: |
-          if ! awk -v h="$HOURS" 'BEGIN { exit !(h ~ /^[0-9]*\.?[0-9]+$/ && h >= 0.5 && h <= 4.9) }'; then
-            echo "::error::hours must be a number from 0.5 to 4.9, not '$HOURS'"
-            exit 1
-          fi
-          # The chat server takes 1,280 connections; more clients would measure refusals.
-          if [[ -n $CLIENTS && ! ( $CLIENTS =~ ^[1-9][0-9]{0,3}$ && $CLIENTS -le 1024 ) ]]; then
-            echo "::error::clients must be empty or a whole number from 1 to 1024, not '$CLIENTS'"
-            exit 1
-          fi
-          chat='{"kind":"chat","script":"tests/soak/chat_soak.py","out":"soak-chat","targets":"chat_server ulw_migrate ulw_devtoken"}'
-          gateway='{"kind":"gateway","script":"tests/soak/soak.py","out":"soak-gw","targets":"gateway_server transcode_worker ulw_sandbox ulw_migrate ulw_devtoken"}'
-          case $KIND in
-            chat) include="[$chat]" ;;
-            gateway) include="[$gateway]" ;;
-            both) include="[$chat,$gateway]" ;;
-            *) echo "::error::unknown kind '$KIND'"; exit 1 ;;
-          esac
-          # The soak itself: its hours, plus 15 minutes to start, stop its threads and judge.
-          # The job: that plus 45 minutes for setup and the build; at most 4.9 hours keeps it
-          # under 355, short of the hosted 360.
-          soak=$(awk -v h="$HOURS" 'BEGIN { m = h * 60; printf "%d", (m == int(m) ? m : int(m) + 1) + 15 }')
-          job=$((soak + 45))
-          {
-            echo "matrix={\"include\":$include}"
-            echo "soak-minutes=$soak"
-            echo "job-minutes=$job"
-          } >>"$GITHUB_OUTPUT"
-
-  soak:
-    name: soak (${{ matrix.kind }})
-    needs: plan
-    runs-on: ubuntu-24.04
-    timeout-minutes: ${{ fromJSON(needs.plan.outputs.job-minutes) }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    # As ci.yml's integration job: the digest of deploy/local/compose.yaml, on the port and
-    # password the soaks' default ULW_TEST_DATABASE_URL names. The chat soak needs Postgres
-    # only; the gateway soak also starts MinIO below.
-    services:
-      postgres:
-        # Same digest as deploy/local/compose.yaml.
-        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
-        env:
-          POSTGRES_PASSWORD: testtest123
-        ports: ["55432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
-          --health-retries 15
-    env:
-      CC: gcc-14
-      CXX: g++-14
-      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-        with:
-          cache-key: gcc-ci
-      # The soaks create and drop their database with psql.
-      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
-      # The gateway soak's store, on the address and keys its defaults name.
-      - name: Start MinIO
-        if: matrix.kind == 'gateway'
-        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
-      - run: cmake --preset ci
-      - env:
-          TARGETS: ${{ matrix.targets }}
+          set -x
+          id; uname -a; . /etc/os-release; echo "$PRETTY_NAME"
+          nproc; free -h; df -h / "$RUNNER_TEMP"; swapon --show
+          sudo -n true && echo "sudo: ok"
+          docker info --format 'docker {{.ServerVersion}}, live-restore {{.LiveRestoreEnabled}}'
+          docker run --rm hello-world >/dev/null 2>&1 && echo "docker run: ok" || echo "docker run: FAILED"
+          sudo ufw status | head -5
+          for p in 55432 9000 18180 19101; do ss -ltn "sport = :$p" | tail -n +2 | grep -q . && echo "port $p: TAKEN" || echo "port $p: free"; done
+          command -v gcc-14 clang-19 cmake ninja ccache psql python3 || true
+      - name: Capacity
         run: |
-          read -ra targets <<<"$TARGETS"
-          cmake --build --preset ci --target "${targets[@]}"
-      - name: Soak
-        timeout-minutes: ${{ fromJSON(needs.plan.outputs.soak-minutes) }}
-        env:
-          SCRIPT: ${{ matrix.script }}
-          OUT: ${{ runner.temp }}/${{ matrix.out }}
-          HOURS: ${{ inputs.hours }}
-          CLIENTS: ${{ inputs.clients }}
-        run: |
-          args=(--build build/ci --hours "$HOURS" --out "$OUT")
-          if [[ -n $CLIENTS ]]; then
-            args+=(--clients "$CLIENTS")
-          fi
-          "$SCRIPT" "${args[@]}"
-      - name: Summary
-        if: ${{ !cancelled() }}
-        env:
-          OUT: ${{ runner.temp }}/${{ matrix.out }}
-        run: |
-          if [[ -f $OUT/summary.txt ]]; then
-            { echo '```'; cat "$OUT/summary.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
-          fi
-      # The samples and logs whatever the verdict; not the copied binaries, the keys or the
-      # gateway's scratch.
-      - name: Upload the samples and logs
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: soak-${{ matrix.kind }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/${{ matrix.out }}/samples.csv
-            ${{ runner.temp }}/${{ matrix.out }}/summary.txt
-            ${{ runner.temp }}/${{ matrix.out }}/pids.json
-            ${{ runner.temp }}/${{ matrix.out }}/*.log
-          if-no-files-found: warn
-          retention-days: 30
-      - if: failure() && matrix.kind == 'gateway'
-        run: docker compose -f deploy/local/compose.yaml logs minio
+          cpu() { awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $9}' /proc/stat; }
+          steal_during() { read -r t0 s0 < <(cpu); "$@"; read -r t1 s1 < <(cpu)
+            awk -v t=$((t1 - t0 + s1 - s0)) -v s=$((s1 - s0)) 'BEGIN{printf "%.1f%%", t ? 100*s/t : 0}'; }
+          hash() { head -c "$1" /dev/zero | sha256sum >/dev/null; }
+          secs() { local a b; a=$(date +%s.%N); "$@"; b=$(date +%s.%N); awk -v a=$a -v b=$b 'BEGIN{printf "%.2f", b-a}'; }
+          N=$(nproc); echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
+          echo "steal idle 30 s: $(steal_during sleep 30)"
+          printf 'one core 1 GiB: '; for i in 1 2 3 4 5; do printf '%s ' "$(secs hash 1G)"; done; echo
+          allc() { for _ in $(seq "$N"); do hash 8G & done; wait; }
+          a=$(date +%s.%N); s=$(steal_during allc); b=$(date +%s.%N)
+          awk -v a=$a -v b=$b -v n=$N 'BEGIN{printf "all %d cores 8 GiB each: %.2f s, ", n, b-a}'; echo "steal $s"
+          python3 -c '
+          import time
+          d=[]; end=time.monotonic()+20
+          while time.monotonic()<end:
+              t=time.monotonic(); time.sleep(0.01); d.append((time.monotonic()-t-0.01)*1000)
+          d.sort(); print(f"timer overshoot ms p50 {d[len(d)//2]:.2f} p99 {d[int(len(d)*0.99)]:.2f} max {d[-1]:.2f}")'
+          D=$(mktemp -d "$RUNNER_TEMP/io.XXXX")
+          echo "seq write: $(dd if=/dev/zero of="$D/f" bs=1M count=1024 conv=fdatasync 2>&1 | tail -1 | awk -F, '{print $NF}' | xargs)"
+          echo "2000 synced 4K writes: $(secs dd if=/dev/zero of="$D/g" bs=4k count=2000 oflag=dsync status=none) s"
+          rm -rf "$D"
