@@ -1,4 +1,4 @@
-# 0078. Coverage is measured on every pull request and held to a floor per top-level directory
+# 0078. Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory
 
 Status: Accepted
 Date: 2026-09-30
@@ -70,10 +70,14 @@ What is held, and how:
 
 | Trigger | Runs | Floors |
 |---|---|---|
-| Nightly schedule, manual dispatch | yes | enforced |
+| Nightly schedule, manual dispatch | yes | reported only, until enforced (below) |
 | Push to main | yes | reported only |
-| Pull request labelled `coverage` | yes, from the next push or re-run after labelling | reported only |
+| Pull request labelled `coverage` | yes, from the next push after labelling | reported only |
 | Any other pull request | no | |
+
+  Labelling alone starts nothing: the `pull_request` trigger takes its default activity types,
+  which do not include `labeled`, and a re-run of an earlier run reuses that run's event, whose
+  labels predate the new one.
 
   The table goes to the step summary and the HTML report is an artifact. The job has a ccache
   key of its own (instrumented objects never match another job's), which pull requests restore
@@ -85,7 +89,12 @@ What is held, and how:
   tests that pause the Postgres container, and on a host whose ffmpeg and io_uring timings differ
   from the runner's. CI runs as `runner`, serially, with the pausing tests. After the first CI
   run the floors are set to that run's values rounded down to a whole percent. That does not
-  loosen anything, because the check is new. The local values:
+  loosen anything, because the check is new. Until then `COVERAGE_ENFORCE` is `0` on every
+  trigger, the nightly and manual runs included, so a floor measured on another host fails
+  nothing. To turn enforcement on: set each floor in `tools/coverage-floors.txt` from the
+  directory table of a CI run's step summary (or its `summary.json`), rounded down, and in the
+  same change set `COVERAGE_ENFORCE` in `ci.yml` to `1` for the `schedule` and
+  `workflow_dispatch` events. The local values:
 
 | Directory | Lines | Line floor | Branches | Branch floor |
 |---|---:|---:|---:|---:|
@@ -103,8 +112,9 @@ What is held, and how:
 ## Consequences
 
 - A floor is raised by hand when a change lifts its directory past the next whole percent, and
-  never lowered. A change that drops a directory below its floor fails the nightly run, and
-  shows as a warning on a labelled pull request and on main.
+  never lowered. Once enforcement is on, a change that drops a directory below its floor fails
+  the nightly run; until then, and always on a labelled pull request and on main, it shows as a
+  warning.
 - A new top-level directory is reported without a floor until one is added for it.
 - `os` reads low because its privilege tests need root, which only `build-test`'s separate root
   step has; that step is not measured.
