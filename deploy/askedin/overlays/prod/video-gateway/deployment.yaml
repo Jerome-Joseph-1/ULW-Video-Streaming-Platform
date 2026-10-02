@@ -92,6 +92,14 @@ spec:
               value: askedin-platform
             - name: ULW_AUTH_COOKIE
               value: auth_token
+            # Askedin's auth-service JWK set; not askedin.com's own /.well-known/jwks.json, which
+            # is an HTML page, and not its in-cluster http:// URL, which ULW refuses.
+            - name: JWKS_URL
+              value: https://auth.askedin.com/.well-known/jwks.json
+            # Exactly the iss Askedin's auth-service signs, compared byte for byte: no path, no
+            # trailing slash (confirmed 2026-10-03, docs/integration/auth.md, Askedin).
+            - name: JWT_ISSUER
+              value: https://auth.askedin.com
             # Every connection comes from Envoy's data plane, so the per-client limits count the
             # address Envoy appends to X-Forwarded-For, believed only from peers in this block:
             # K3s's default pod network (RUNBOOK step 1 checks it). One proxy, Envoy, stands in
@@ -125,16 +133,6 @@ spec:
                 secretKeyRef:
                   name: video-gateway-secrets
                   key: ULW_S3_SECRET_ACCESS_KEY
-            - name: JWKS_URL
-              valueFrom:
-                secretKeyRef:
-                  name: video-gateway-secrets
-                  key: JWKS_URL
-            - name: JWT_ISSUER
-              valueFrom:
-                secretKeyRef:
-                  name: video-gateway-secrets
-                  key: JWT_ISSUER
           # Sized from the 1 GB gateway box (brief 8.1, docs/adr/0027). One upload connection
           # costs ~428 KB: ~180 KB in the process, 128 KiB + 16 KiB of socket buffers and a
           # ~100 KB backend socket, all charged to the pod's memory cgroup. At the 448 uploads
