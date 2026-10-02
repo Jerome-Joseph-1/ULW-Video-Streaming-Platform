@@ -681,6 +681,24 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     EXPECT_FALSE(quiet->connected());
 }
 
+// The timer that should send the ping runs late: the node's clock has already passed the ping
+// interval, not reached it exactly.
+TEST_P(ChatSessionTest, AQuietClientIsPingedEvenWhenTheTimerRunsLate) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = core::Millis{1'000},
+                                                .idle_timeout = core::Millis{5'000},
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto quiet = open_as("alice");
+    ASSERT_TRUE(quiet);
+    node_->advance(core::Millis{1'500});
+    const auto ping = quiet->next_frame(seconds(10));
+    ASSERT_TRUE(ping);
+    EXPECT_EQ(ping->first, codec::ws::Opcode::Ping);
+}
+
 // The seq of a message frame, or nullopt for anything else.
 std::optional<std::uint64_t> message_seq(const std::string& text) {
     const auto json = core::json::parse(text);
@@ -776,6 +794,40 @@ std::optional<std::uint64_t> metric(std::uint16_t port, std::string_view name) {
     const std::size_t start = at + line.size();
     return core::parse_integer<std::uint64_t>(
         std::string_view(body).substr(start, body.find('\n', start) - start));
+}
+
+// A member that asked never to miss a message and stops reading is closed once its unread output
+// passes max_backlog, and resumes from its last seq when it comes back.
+TEST_P(ChatSessionTest, AMemberThatStopsReadingIsClosedAsASlowConsumer) {
+    node_.reset();
+    node_ = std::make_unique<Node>(
+        GetParam(), chat::Limits{.service = {.send_burst = 1'000,
+                                             .max_send_bytes_in_flight = std::size_t{1} << 20U},
+                                 .presence = {}});
+    auto stopped = WsClient::connect(node_->port(), "/rt", "Authorization: Bearer user.reader\r\n",
+                                     nullptr, 16 * 1024);
+    auto sender = open_as("sender");
+    ASSERT_TRUE(stopped && sender);
+    const std::string room = std::string(kRoom);
+    for (auto* ws : {&*stopped, &*sender}) {
+        ASSERT_TRUE(ws->send_text(R"({"type":"join","room":")" + room + R"("})"));
+        ASSERT_EQ(ws->next_text(seconds(10)).value_or("").find(R"("type":"joined")"), 1U);
+    }
+    // About 2.8 KiB a message on the wire: 200 of them are twice max_backlog, past the socket
+    // buffers too. The sender reads its own, so only the stopped member falls behind.
+    const std::string body = infra::auth::encode_base64url(std::string(2'000, 'x'));
+    std::uint64_t heard = 0;
+    for (std::uint64_t k = 1; k <= 200; ++k) {
+        ASSERT_TRUE(sender->send_text(
+            std::format(R"({{"type":"send","room":"{}","id":"s{}","body":"{}"}})", room, k, body)));
+        while (heard < k) {
+            const auto text = sender->next_text(seconds(10));
+            ASSERT_TRUE(text);
+            heard = message_seq(*text).value_or(heard);
+        }
+    }
+    EXPECT_TRUE(ulw::test::eventually(
+        [&] { return metric(node_->port(), "slow_consumers_total") == std::uint64_t{1}; }));
 }
 
 // Once the keys go unrefreshed too long every token is refused, so the gauge an alert watches
@@ -1012,6 +1064,21 @@ TEST_P(ChatSessionTest, FramesSentBehindAnUpgradeWaitingOnKeysAreReadOnceItIsAcc
     ASSERT_TRUE(alice);
     expect_first_frames_answered(*alice);
     EXPECT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 0; }));
+}
+
+// Reading stops while the upgrade waits on keys; it starts again once the upgrade is accepted.
+TEST_P(ChatSessionTest, FramesSentAfterAnUpgradeThatWaitedOnKeysAreRead) {
+    auto upgrade = std::async(std::launch::async, [&] {
+        return WsClient::connect(node_->port(), "/rt", "Authorization: Bearer slow.alice\r\n",
+                                 nullptr);
+    });
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->key_waiters == 1; }));
+    node_->refresh_keys = true;
+    auto alice = upgrade.get();
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
 }
 
 TEST_P(ChatSessionTest, AnUpgradeThatFailedWhileWaitingOnKeysIsNotAcceptedWhenTheyArrive) {

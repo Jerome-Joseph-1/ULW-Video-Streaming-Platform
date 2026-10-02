@@ -1,0 +1,20 @@
+# coverage.py settings for tools/coverage-python.sh (ADR-0079).
+[run]
+branch = True
+# The Python that sonar-project.properties counts as source: everything outside tests/, build/
+# and third_party/ that is not a *_test.py. One source, the repository root, so each path in the
+# report is the file's path from the root.
+source = .
+omit =
+    tests/*
+    build/*
+    third_party/*
+    */*_test.py
+# Report paths relative to the repository root, which is where the scanner resolves them.
+relative_files = True
+# Tests under tests/ import only tests/ code, which is not measured.
+disable_warnings = no-data-collected
+
+[report]
+show_missing = False
+skip_empty = True
