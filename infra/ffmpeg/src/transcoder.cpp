@@ -111,6 +111,26 @@ std::optional<std::string> read_text(const fs::path& p) {
     return text;
 }
 
+// Replaces a file's contents by renaming a complete copy over it.
+[[nodiscard]] bool replace_text(const fs::path& p, std::string_view text) {
+    fs::path tmp = p;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        // Closing flushes; a write that fails there (a full disk) shows only on the stream.
+        out.close();
+        if (!out) {
+            std::error_code ignored;
+            fs::remove(tmp, ignored);
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::rename(tmp, p, ec);
+    return !ec;
+}
+
 } // namespace
 
 FfmpegTranscoder::FfmpegTranscoder(TranscoderConfig config, const core::ports::IClock& clock)
@@ -172,6 +192,13 @@ FfmpegTranscoder::run(const fs::path& input, const fs::path& out_dir, const Medi
     if (const auto failure = classify(child->exit_code, child->signal, child->ending)) {
         return std::unexpected(error_of(*failure, *child, "ffmpeg"));
     }
+    // The rates ffmpeg 7 puts in the master differ from run to run (settle_master_bandwidth).
+    // A master that is missing or unreadable is left for verify to report.
+    const fs::path master = out_dir / "master.m3u8";
+    if (const auto text = read_text(master);
+        text && !replace_text(master, settle_master_bandwidth(*text, ladder, media.has_audio))) {
+        return std::unexpected(unverified("master playlist could not be rewritten"));
+    }
     return core::ports::TranscodeStats{.wall = child->wall, .peak_rss_kib = child->peak_rss_kib};
 }
 
@@ -182,7 +209,7 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
     if (!master_text) {
         return std::unexpected(unverified("master playlist unreadable"));
     }
-    if (auto problem = check_master_playlist(*master_text, ladder)) {
+    if (auto problem = check_master_playlist(*master_text, ladder, media.has_audio)) {
         return std::unexpected(unverified(std::move(*problem)));
     }
     for (const core::Rung& rung : ladder) {

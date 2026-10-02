@@ -8,20 +8,24 @@
 #include "support/fake_random.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/reserve_port.hpp"
+#include "support/socket_probe.hpp"
 #include "wire.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -90,10 +94,13 @@ class RawPeer {
 public:
     // A receive buffer as small as the kernel allows makes the node's queue fill first.
     RawPeer(net::IReactor& reactor, std::uint16_t port, bool tiny_window = false)
+        : RawPeer(reactor, port, tiny_window ? 4096 : 0) {}
+
+    // `receive_buffer` bytes of receive buffer, which Linux doubles; 0 leaves the default.
+    RawPeer(net::IReactor& reactor, std::uint16_t port, int receive_buffer)
         : reactor_(reactor), fd_(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) {
-        if (tiny_window) {
-            const int bytes = 4096;
-            ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes);
+        if (receive_buffer > 0) {
+            ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof receive_buffer);
         }
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -163,6 +170,49 @@ public:
     // Reads until the node hangs up; false if it answers anything first.
     bool hung_up() { return !next() && closed_; }
 
+    // Reads at most `max` bytes of what has arrived and decodes the frames they complete: a
+    // node that frees its receive window a little at a time. nullopt once the connection has
+    // ended; reset() then says whether it ended in a reset.
+    std::optional<std::size_t> read_some(std::size_t max) {
+        std::array<std::byte, 16384> buf{};
+        const ssize_t n = ::recv(fd_.get(), buf.data(), std::min(max, buf.size()), MSG_DONTWAIT);
+        // EWOULDBLOCK is EAGAIN on Linux.
+        if (n < 0 && errno == EAGAIN) {
+            return 0;
+        }
+        if (n <= 0) {
+            closed_ = true;
+            reset_ = n < 0 && errno == ECONNRESET;
+            return std::nullopt;
+        }
+        decoder_.feed(std::span{buf}.first(static_cast<std::size_t>(n)));
+        for (auto decoded = decoder_.next(); decoded && *decoded; decoded = decoder_.next()) {
+            frames_.push_back(**decoded);
+        }
+        return static_cast<std::size_t>(n);
+    }
+
+    // Frames read_some decoded, oldest first; taking them empties the list.
+    std::vector<wire::Frame> take_frames() { return std::exchange(frames_, {}); }
+
+    // Reads, as fast as the node sends, until the connection ends: true if it ended in a reset.
+    bool reset_by_node() {
+        const bool ended = ulw::test::pump_until(reactor_, [&] {
+            while (true) {
+                const auto n = read_some(kReadAll);
+                if (!n) {
+                    return true;
+                }
+                if (*n == 0) {
+                    return false;
+                }
+            }
+        });
+        return ended && reset_;
+    }
+
+    [[nodiscard]] int fd() const noexcept { return fd_.get(); }
+
     // A connection the test accepted, as the node's peer at the other end.
     RawPeer(net::IReactor& reactor, os::UniqueFd accepted)
         : reactor_(reactor), fd_(std::move(accepted)) {}
@@ -170,19 +220,21 @@ public:
 private:
     net::IReactor& reactor_;
     os::UniqueFd fd_;
+    static constexpr std::size_t kReadAll = 16384;
     wire::Decoder decoder_;
     std::vector<std::byte> sent_;
+    std::vector<wire::Frame> frames_;
     bool closed_ = false;
+    bool reset_ = false;
 };
 
 // Listens where a node is advertised, to play that node: the router under test dials it.
 class RawOwner {
 public:
-    explicit RawOwner(net::IReactor& reactor) : reactor_(reactor) {
+    explicit RawOwner(net::IReactor& reactor, int receive_buffer = 4096) : reactor_(reactor) {
         fd_ = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)};
         // Inherited by the accepted socket, so a peer that stops reading fills up quickly.
-        const int bytes = 4096;
-        ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes);
+        ::setsockopt(fd_.get(), SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof receive_buffer);
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -220,6 +272,7 @@ struct Tuning {
     std::optional<core::Millis> idle_release = std::nullopt;
     std::optional<std::size_t> max_rooms = std::nullopt;
     std::optional<core::Millis> revalidate_every = std::nullopt;
+    std::optional<core::Millis> peer_stall_timeout = std::nullopt;
     // The store refuses to record the node, which then never becomes ready.
     bool refuse_advertise = false;
 };
@@ -255,6 +308,7 @@ protected:
         config.idle_release = tuning.idle_release.value_or(config.idle_release);
         config.max_rooms = tuning.max_rooms.value_or(config.max_rooms);
         config.revalidate_every = tuning.revalidate_every.value_or(config.revalidate_every);
+        config.peer_stall_timeout = tuning.peer_stall_timeout.value_or(config.peer_stall_timeout);
         node->router = std::make_unique<rt::RoomRouter>(*reactor_, *node->store, clock_, random_,
                                                         std::move(config), node->events);
         EXPECT_TRUE(node->router->start(std::move(*listener)));
@@ -983,6 +1037,151 @@ TEST_P(RoomRouterTest, ALinkBrokenInsideASendIsTakenDownAfterwardsNotInsideIt) {
     ASSERT_TRUE(pump([&] { return !b.events.lost.empty(); }));
     EXPECT_EQ(b.events.lost, std::vector<std::string>{"chat-a"});
     EXPECT_TRUE(pump([&] { return answered > 0; }));
+}
+
+// A node that reads a little at a time: 8 KiB of receive buffer, which Linux doubles, read
+// 8 KiB at a time with a wall-clock pause of 250 ms between reads (the reactor pumped
+// meanwhile), long enough for the other side to probe the shut window. The kernel's own count
+// of a shut window (TCP_USER_TIMEOUT) restarts only when the window opens wide enough for the
+// whole unsent head of its queue, so it ended such a link a fixed time after the window first
+// shut, reading or not (ADR-0071): with that timeout at 1.5 s, these links were reset about
+// 2 s in. The node's socket has no user timeout, which is what guards the fix; the links are
+// then read for some five seconds, twice the node's own stall timeout, which lets them be.
+constexpr int kSlowNodeBuffer = 8 * 1024;
+constexpr std::size_t kSlowNodeRead = std::size_t{8} * 1024;
+constexpr std::chrono::milliseconds kSlowNodePause{250};
+constexpr core::Millis kTestStallTimeout{2'500};
+
+TEST_P(RoomRouterTest, ASubscriberReadingALittleAtATimeKeepsItsLinkAndIsResetOnceItStops) {
+    Node& a = start("chat-a", kSecret, {.peer_stall_timeout = kTestStallTimeout});
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    RawPeer peer(*reactor_, a.port, kSlowNodeBuffer);
+    ASSERT_TRUE(peer.authenticate(kSecret, *core::NodeId::parse("chat-x"),
+                                  *core::NodeId::parse("chat-a"), random_));
+    std::vector<std::byte> subscribe;
+    wire::encode_subscribe(subscribe, 1, room_);
+    peer.send(subscribe);
+    const auto reply = peer.next();
+    ASSERT_TRUE(reply && std::holds_alternative<wire::Reply>(*reply));
+    const auto peer_port = ulw::test::tcp_port(peer.fd(), false);
+    ASSERT_TRUE(peer_port);
+    EXPECT_EQ(ulw::test::user_timeout_of(a.port, *peer_port), 0);
+
+    // Eight deliveries of 16 KiB, far below what the node queues for a peer before it calls
+    // the peer slow.
+    const std::string body(std::size_t{16} * 1024, 'm');
+    constexpr std::size_t kMessages = 8;
+    for (std::size_t i = 0; i < kMessages; ++i) {
+        ASSERT_TRUE(send(a, alice, "alice", body));
+    }
+    const auto began = std::chrono::steady_clock::now();
+    std::size_t delivered = 0;
+    while (delivered < kMessages) {
+        const auto n = peer.read_some(kSlowNodeRead);
+        ASSERT_TRUE(n) << "the link ended after "
+                       << std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - began)
+                              .count()
+                       << " ms, " << delivered << " deliveries read";
+        for (const wire::Frame& f : peer.take_frames()) {
+            if (std::holds_alternative<wire::Deliver>(f)) {
+                ++delivered;
+            }
+        }
+        if (delivered < kMessages) {
+            ulw::test::pump_for(*reactor_, kSlowNodePause);
+        }
+    }
+    EXPECT_GE(std::chrono::steady_clock::now() - began, 2 * kTestStallTimeout);
+    EXPECT_EQ(a.router->counters().slow_peers, 0U);
+
+    // It stops reading. Its window shuts on the next deliveries, the rest wait in the node,
+    // and a stall timeout after the last acknowledgement the node gives up on it with a reset.
+    for (std::size_t i = 0; i < kMessages; ++i) {
+        ASSERT_TRUE(send(a, alice, "alice", body));
+    }
+    ASSERT_TRUE(pump([&] { return a.router->counters().slow_peers == 1; }));
+    EXPECT_TRUE(peer.reset_by_node());
+    // Its own members are still served.
+    EXPECT_TRUE(send(a, alice, "alice", "still here"));
+}
+
+TEST_P(RoomRouterTest, AnOwnerReadingALittleAtATimeKeepsItsLinkAndIsResetOnceItStops) {
+    RawOwner owner(*reactor_, kSlowNodeBuffer);
+    db_.addresses["chat-a"] = owner.address();
+    db_.rooms.emplace(room_, ulw::test::MemoryRooms::Room{.owner = *core::NodeId::parse("chat-a")});
+    Node& b = start("chat-b", kSecret, {.peer_stall_timeout = kTestStallTimeout});
+    Member bob;
+    std::optional<std::expected<std::uint64_t, RouteError>> joined;
+    b.router->join(room_, bob, [&](auto r) noexcept { joined = r; });
+    auto conn =
+        play_owner(owner, *core::NodeId::parse("chat-b"), *core::NodeId::parse("chat-a"), random_);
+    ASSERT_TRUE(conn);
+    std::optional<wire::Frame> subscribe = conn->next();
+    while (subscribe && !std::holds_alternative<wire::Subscribe>(*subscribe)) {
+        subscribe = conn->next();
+    }
+    ASSERT_TRUE(subscribe);
+    std::vector<std::byte> ok;
+    wire::encode_reply(ok, std::get<wire::Subscribe>(*subscribe).request, wire::Status::Ok, 0);
+    conn->send(ok);
+    ASSERT_TRUE(pump([&] { return joined.has_value(); }));
+    ASSERT_TRUE(*joined);
+    const auto node_port = ulw::test::tcp_port(conn->fd(), true);
+    const auto owner_port = ulw::test::tcp_port(conn->fd(), false);
+    ASSERT_TRUE(node_port && owner_port);
+    EXPECT_EQ(ulw::test::user_timeout_of(*node_port, *owner_port), 0);
+
+    // Bob forwards eight writes of 16 KiB; "chat-a" reads them a little at a time and
+    // sequences each as it reads it. Those it reads after their forward timeout are answered
+    // unavailable by then, which is the owner's lateness and no fault of the link.
+    const std::string big(std::size_t{16} * 1024, 'f');
+    const auto body = std::as_bytes(std::span{big});
+    constexpr std::size_t kWrites = 8;
+    std::size_t answered = 0;
+    for (std::size_t i = 0; i < kWrites; ++i) {
+        b.router->send(room_, bob, *core::UserId::parse("bob"), next_key(),
+                       {body.begin(), body.end()}, [&](auto) noexcept { ++answered; });
+    }
+    const auto began = std::chrono::steady_clock::now();
+    std::size_t read = 0;
+    std::uint64_t seq = 0;
+    while (read < kWrites) {
+        const auto n = conn->read_some(kSlowNodeRead);
+        ASSERT_TRUE(n) << "the link ended after "
+                       << std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - began)
+                              .count()
+                       << " ms, " << read << " writes read";
+        for (const wire::Frame& f : conn->take_frames()) {
+            if (const auto* w = std::get_if<wire::Send>(&f)) {
+                ++read;
+                std::vector<std::byte> sequenced;
+                wire::encode_reply(sequenced, w->request, wire::Status::Ok, ++seq);
+                conn->send(sequenced);
+            }
+        }
+        if (read < kWrites) {
+            ulw::test::pump_for(*reactor_, kSlowNodePause);
+        }
+    }
+    EXPECT_GE(std::chrono::steady_clock::now() - began, 2 * kTestStallTimeout);
+    ASSERT_TRUE(pump([&] { return answered == kWrites; }));
+    EXPECT_EQ(b.router->counters().slow_peers, 0U);
+    EXPECT_TRUE(b.events.lost.empty());
+
+    // It stops reading: a stall timeout after its last acknowledgement the link is taken down, as
+    // for any lost peer, and reset.
+    for (std::size_t i = 0; i < kWrites; ++i) {
+        b.router->send(room_, bob, *core::UserId::parse("bob"), next_key(),
+                       {body.begin(), body.end()}, [&](auto) noexcept { ++answered; });
+    }
+    ASSERT_TRUE(pump([&] { return !b.events.lost.empty(); }));
+    EXPECT_EQ(b.router->counters().slow_peers, 1U);
+    EXPECT_EQ(b.events.lost, std::vector<std::string>{"chat-a"});
+    EXPECT_TRUE(conn->reset_by_node());
+    EXPECT_TRUE(pump([&] { return answered == 2 * kWrites; }));
 }
 
 // Both sides at once, since each waits out the same five seconds.
