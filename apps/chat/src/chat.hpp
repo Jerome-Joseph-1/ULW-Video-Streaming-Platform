@@ -2,6 +2,9 @@
 
 #include "core/ports/auth.hpp"
 #include "core/ports/clock.hpp"
+#include "core/ports/random.hpp"
+#include "http/client_limits.hpp"
+#include "net/ip_address.hpp"
 #include "net/reactor.hpp"
 #include "net/signals.hpp"
 #include "net/slab.hpp"
@@ -9,9 +12,11 @@
 
 #include "chat_service.hpp"
 #include "presence.hpp"
+#include "token_bucket.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -63,6 +68,34 @@ struct Limits {
     core::Millis stall_check{1'000};
     // Clients get a Close 1001 and this long to answer it before a drain cuts them off.
     core::Millis drain_deadline{5'000};
+    // Per client, as the gateway's (ADR-0052, ADR-0076), so that one address or one account
+    // cannot take the node's max_connections from everyone else. A peer's connections, from
+    // accept to close, while it connects directly; behind a trusted proxy, the upgrades from one
+    // forwarded address that have not been answered yet. 20: a household behind one NAT, each
+    // person with a phone and a few tabs. A socket counts against its address for its life only
+    // when it comes directly: through the proxy a carrier-grade NAT puts hundreds of users on one
+    // address, and once a token is verified the user's own cap governs.
+    std::size_t max_connections_per_ip = 20;
+    // The direct peers' open connections from one IPv6 /48 together (http::client_block): a
+    // provider may delegate a /56 or a /48 to one customer, each /64 of which
+    // max_connections_per_ip counts afresh, and a /56's 256 of them at 20 each are more than the
+    // node's 1280. 80, four /64s' worth, unless ULW_MAX_CONNECTIONS_PER_IP_BLOCK says otherwise;
+    // chat_server makes it four times its max_connections_per_ip when that is set and this is not.
+    std::size_t max_connections_per_ip_block = 80;
+    // New connections a second per direct peer, 10 saved: each is a handshake, a token check
+    // and a parser; a client that reconnects in a loop is slowed, not the node.
+    std::uint32_t new_connections_per_ip_per_second = 10;
+    // Open sockets per user on this node. A person has a phone, a laptop and a few tabs, each
+    // with a socket; 16 covers that twice over, so it takes 80 users to fill the node's 1280,
+    // not one token.
+    std::size_t max_sessions_per_user = 16;
+    // Peers whose X-Forwarded-For names the client (ULW_TRUSTED_PROXIES), and how many proxies
+    // stand in front: the client is that many entries from the right (ADR-0052).
+    // Initialised so that a designated initializer may leave it out; GCC's
+    // -Wmissing-field-initializers flags it otherwise.
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    std::vector<net::IpNetwork> trusted_proxies = {};
+    std::size_t trusted_proxy_hops = 1;
     ServiceLimits service;
     PresenceLimits presence;
 };
@@ -80,11 +113,17 @@ struct Deps {
     core::ports::IMessageStore& messages;
     core::ports::IJwtVerifier& verifier;
     const core::ports::IClock& clock;
+    // Seeds the per-client tables' hashes, which clients choose the keys of.
+    core::ports::IRandom& random;
 };
 
 struct Counters {
     std::uint64_t connections_accepted = 0;
-    std::uint64_t connections_rejected = 0;
+    // Closed at accept: max_connections sessions were open.
+    std::uint64_t rejected_capacity = 0;
+    // Closed at accept: its peer address could not be read (gone already, or not an IP socket),
+    // or the socket refused its options or the reactor would not take it.
+    std::uint64_t rejected_socket = 0;
     std::uint64_t upgrades = 0;
     std::uint64_t auth_failures = 0;
     std::uint64_t origin_rejections = 0;
@@ -93,7 +132,19 @@ struct Counters {
     std::uint64_t control_floods = 0;
     std::uint64_t slow_consumers = 0;
     std::uint64_t stalled_readers = 0;
+    // Sockets closed with kTokenExpired because the token they were opened with ran out.
+    std::uint64_t token_expiries = 0;
     std::uint64_t allocation_failures = 0;
+    // Reset at accept: the peer's address had max_connections_per_ip open, its IPv6 /48
+    // max_connections_per_ip_block, or the address opened new_connections_per_ip_per_second too
+    // many.
+    std::uint64_t rejected_ip_connections = 0;
+    std::uint64_t rejected_ip_block = 0;
+    std::uint64_t rejected_ip_rate = 0;
+    // Upgrades answered 429: a forwarded address with max_connections_per_ip unanswered, or a
+    // user with max_sessions_per_user open.
+    std::uint64_t limited_ip_upgrades = 0;
+    std::uint64_t limited_user_sessions = 0;
 };
 
 // What the room plane reports, written as log lines and kept as counters. Message bodies never
@@ -148,6 +199,9 @@ public:
     ChatServer& operator=(ChatServer&&) = delete;
 
     void on_accept(os::UniqueFd conn) noexcept override;
+    // on_accept once the peer's address is read; public for a test to name a peer the loopback
+    // interface cannot be, such as an IPv6 address outside ::1.
+    void accept_from(os::UniqueFd conn, const net::IpAddress& peer) noexcept;
     void on_signal(net::Signal signal) noexcept override;
     // The drain deadline.
     void on_timeout() noexcept override;
@@ -179,7 +233,34 @@ public:
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
     void retire(net::Slab<Session>::Handle handle) noexcept;
 
+    // A slot counted against an address or a user, held until given back.
+    using Hold = std::uint32_t;
+    // A direct peer's connection, counted from accept to close against its address and, for
+    // IPv6, against the /48 the address lies in.
+    struct PeerHold {
+        Hold address = 0;
+        std::optional<Hold> block;
+    };
+    [[nodiscard]] bool trusted_proxy(const net::IpAddress& peer) const noexcept;
+    // Counts one more connection against a forwarded client's address; nullopt when it has
+    // max_connections_per_ip already.
+    [[nodiscard]] std::optional<Hold> hold_client(const net::IpAddress& client) noexcept;
+    void release_client(Hold hold) noexcept;
+    void release_peer(PeerHold hold) noexcept;
+    // Counts one more open socket against the user; nullopt at max_sessions_per_user.
+    [[nodiscard]] std::optional<Hold> hold_user(const core::UserId& user) noexcept;
+    void release_user(Hold hold) noexcept;
+
 private:
+    struct ClientEntry {
+        TokenBucket new_connections;
+    };
+    struct UserEntry {};
+    struct BlockEntry {};
+
+    // A direct peer's connection: its address's count, its /48's and its rate, at accept.
+    [[nodiscard]] std::optional<PeerHold> admit_peer(const net::IpAddress& peer) noexcept;
+
     Deps deps_;
     Access access_;
     Limits limits_;
@@ -188,6 +269,9 @@ private:
     // Sessions detach from both as they close, so they outlive them.
     ChatService chat_;
     Presence presence_;
+    http::BoundedTable<net::IpAddress, ClientEntry, http::AddressHash> clients_;
+    http::BoundedTable<core::UserId, UserEntry, http::ViewHash> users_;
+    http::BoundedTable<net::IpAddress, BlockEntry, http::AddressHash> blocks_;
     net::Slab<Session> sessions_;
     bool draining_ = false;
     bool released_ = false;

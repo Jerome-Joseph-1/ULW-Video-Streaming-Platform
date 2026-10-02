@@ -244,6 +244,51 @@ TEST(RequestParser, APipelinedBurstIsParsedWholeAndInOrder) {
     }
 }
 
+TEST(RequestParser, ARequestCutShortBehindAnotherIsFinishedByLaterBytes) {
+    RecordingSink sink;
+    RequestParser parser{sink};
+    const auto text = [&parser] {
+        std::string out;
+        for (const std::byte b : parser.unparsed()) {
+            out += static_cast<char>(b);
+        }
+        return out;
+    };
+    // Two whole requests, then the start of a third, in one receive.
+    const std::string burst = std::string{kGet} + std::string{kGet} + "GET /c HTTP/1.1\r\nHo";
+    ASSERT_EQ(parser.feed(bytes_of(burst)), ParseProgress::MessageComplete);
+    parser.reset_for_next_request();
+    ASSERT_EQ(parser.resume(), ParseProgress::MessageComplete);
+    parser.reset_for_next_request();
+    // The held start of the third is parsed and nothing is held any more.
+    ASSERT_EQ(parser.resume(), ParseProgress::NeedMore);
+    EXPECT_EQ(text(), "");
+
+    // The rest of it goes straight to the parser, and what follows it is held again.
+    ASSERT_EQ(parser.feed(bytes_of("st: a\r\n\r\n" + std::string{kPatch})),
+              ParseProgress::MessageComplete);
+    ASSERT_EQ(sink.requests().size(), 3U);
+    EXPECT_EQ(sink.requests()[2].target, "/c");
+    EXPECT_EQ(sink.requests()[2].headers, (Headers{{"Host", "a"}}));
+    EXPECT_EQ(text(), kPatch);
+
+    parser.reset_for_next_request();
+    ASSERT_EQ(parser.resume(), ParseProgress::MessageComplete);
+    ASSERT_EQ(sink.requests().size(), 4U);
+    EXPECT_EQ(sink.requests()[3], parse_in_chunks(kPatch, kPatch.size()).front());
+    EXPECT_EQ(text(), "");
+}
+
+TEST(RequestParser, AFailedParserHoldsNothing) {
+    RecordingSink sink;
+    RequestParser parser{sink};
+    ASSERT_EQ(parser.feed(bytes_of(std::string{kGet} + "GET / HTTP/1.1\r\nNo-Colon\r\n\r\n")),
+              ParseProgress::MessageComplete);
+    parser.reset_for_next_request();
+    EXPECT_EQ(parser.resume(), fatal(Status::BadRequest));
+    EXPECT_TRUE(parser.unparsed().empty());
+}
+
 TEST(RequestParser, HeaderLookupIgnoresCaseAndSurroundingWhitespace) {
     RecordingSink sink;
     sink.look_up({"x-request-id", "X-EMPTY", "host", "absent"});
@@ -418,6 +463,20 @@ TEST(RequestParser, RejectedRequestWithABodyEndsTheConnection) {
     EXPECT_EQ(parser.resume(), expected);
     ASSERT_EQ(sink.requests().size(), 1U);
     EXPECT_EQ(sink.requests()[0].body, "");
+}
+
+// Any declared body, even of one byte, leaves no request boundary behind a rejected head.
+TEST(RequestParser, RejectedRequestWithAOneByteBodyEndsTheConnection) {
+    RecordingSink sink;
+    sink.reject("/u", Status::Forbidden);
+    RequestParser parser{sink};
+    const std::string input =
+        "PATCH /u HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\n\r\nG" + std::string{kGet};
+
+    EXPECT_EQ(parser.feed(bytes_of(input)), fatal(Status::Forbidden));
+    parser.reset_for_next_request();
+    EXPECT_EQ(parser.resume(), fatal(Status::Forbidden));
+    EXPECT_EQ(sink.requests().size(), 1U);
 }
 
 TEST(RequestParser, RejectedRequestOnAClosingConnectionEndsIt) {
