@@ -9,7 +9,12 @@ without a line is reported and not held to anything, so a new one is visible fro
 """
 import json
 import sys
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pathguard import inside  # noqa: E402
 
 
 BELOW_FLOOR = 3
@@ -31,7 +36,7 @@ def pct(covered: int, count: int) -> float:
 
 def read_floors(path: str) -> dict[str, tuple[int, int]]:
     floors = {}
-    with open(path, encoding="utf-8") as f:
+    with open(inside(path), encoding="utf-8") as f:
         for n, line in enumerate(f, start=1):
             line = line.split("#", 1)[0].strip()
             if not line:
@@ -46,6 +51,9 @@ def read_floors(path: str) -> dict[str, tuple[int, int]]:
 def main() -> int:
     root, export, floors_path, summary_json, summary_md = sys.argv[1:6]
     root_path = PurePosixPath(root)
+    export = inside(export)
+    summary_json = inside(summary_json)
+    summary_md = inside(summary_md)
     with open(export, encoding="utf-8") as f:
         data = json.load(f)
 
