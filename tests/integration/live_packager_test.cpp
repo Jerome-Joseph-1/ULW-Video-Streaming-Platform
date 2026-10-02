@@ -223,7 +223,11 @@ TEST_F(LivePackagerTest, ASlidingWindowKeepsAMonotonicSequenceAndEndsWithEndlist
     // The packager ends only once a publisher has come and gone: one that never connected (an
     // SRT handshake that timed out) leaves it listening, so the publisher's own end comes first.
     ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
-    ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
+    // The segments ffmpeg was still cutting when its input ended are published after the
+    // publisher has gone, and then the ended playlist: the samples go on to the packager's end.
+    const auto deadline = std::chrono::steady_clock::now() + kExitPatience;
+    watch(*packager, [&] { return std::chrono::steady_clock::now() > deadline; });
+    ASSERT_EQ(packager->wait_exit(milliseconds(0)), 0) << packager->output();
 
     const auto ended_playlist = playlist();
     ASSERT_TRUE(ended_playlist);
@@ -234,11 +238,20 @@ TEST_F(LivePackagerTest, ASlidingWindowKeepsAMonotonicSequenceAndEndsWithEndlist
     EXPECT_EQ(ended_playlist->segments.size(), 3U);
     EXPECT_FALSE(ended_playlist->segments.front().discontinuity);
     EXPECT_GE(samples_, 20U);
-    EXPECT_GE(seen_.size(), 10U);
+    // The samples watched the window slide, not only the end of it.
+    EXPECT_GT(seen_.size(), ended_playlist->segments.size());
     EXPECT_TRUE(stored("init_0.mp4"));
     EXPECT_TRUE(stored("epoch_0"));
-    // Segments that slid out of the playlist stay in the store for a lifecycle rule to expire.
-    EXPECT_TRUE(stored("seg_0_0.m4s"));
+    // Every segment of the 24 s, less at most a partial one at the end, is in the store with no
+    // gap, those that slid out of the playlist kept for a lifecycle rule to expire. Not every one
+    // was listed: a packager that falls behind (a store that stalls, say) publishes what piled
+    // up in one playlist write, and a backlog longer than the window moves it past the oldest.
+    const std::uint64_t end = ended_playlist->media_sequence + ended_playlist->segments.size();
+    EXPECT_GE(end, 11U);
+    for (std::uint64_t sequence = 0; sequence < end; ++sequence) {
+        const std::string name = infra::ffmpeg::live_segment_name(0, sequence);
+        EXPECT_TRUE(stored(name)) << name << " is missing from the store";
+    }
     // Wall-clock times that run on by each segment's duration.
     for (std::size_t i = 1; i < ended_playlist->segments.size(); ++i) {
         ASSERT_TRUE(ended_playlist->segments[i].program_date_time);
