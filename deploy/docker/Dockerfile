@@ -92,7 +92,7 @@ RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/loc
         openssl-provider-legacy=3.5.7-1~deb13u3 \
         ffmpeg=7:7.1.5-0+deb13u1 \
  && useradd --system --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin ulw \
- && install -d -o 10001 -g 10001 -m 0700 /var/tmp/ulw-worker
+ && install -d -o 10001 -g 10001 -m 0700 /var/cache/ulw-worker
 COPY --from=build /out/worker/ /usr/local/bin/
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/transcode_worker"]
