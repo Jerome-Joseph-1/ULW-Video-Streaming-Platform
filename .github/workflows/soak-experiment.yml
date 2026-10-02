@@ -103,9 +103,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    # As ci.yml's integration job: the digest of deploy/local/compose.yaml, on the port and
-    # password the soaks' default ULW_TEST_DATABASE_URL names. The chat soak needs Postgres
-    # only; the gateway soak also starts MinIO below.
+    # As ci.yml's integration job: the digest of deploy/local/compose.yaml and its password,
+    # on 15432, below the ephemeral port range (ci.yml says why), which ULW_TEST_DATABASE_URL
+    # below names. The chat soak needs Postgres only; the gateway soak also starts MinIO below.
     services:
       postgres:
         # Same digest as deploy/local/compose.yaml.
