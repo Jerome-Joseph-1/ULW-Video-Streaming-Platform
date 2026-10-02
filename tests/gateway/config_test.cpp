@@ -33,6 +33,26 @@ protected:
         return config ? std::string() : config.error().variable;
     }
 
+    // What log_effective writes for `config`, with the settings layered from `env`.
+    [[nodiscard]] std::string effective_log(const Config& config) const {
+        const auto layers = ops::Settings::layer(
+            gateway::settings(), nullptr,
+            [this](std::string_view name) -> std::optional<std::string> {
+                const auto it = env.find(std::string(name));
+                return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
+            },
+            ops::CommandLine{});
+        EXPECT_TRUE(layers);
+        if (!layers) {
+            return {};
+        }
+        const os::SystemClock clock;
+        ulw::test::MemoryLog lines;
+        ops::Logger log(lines, clock, "gateway", ops::Level::Info);
+        gateway::log_effective(config, *layers, log);
+        return lines.all();
+    }
+
     std::map<std::string, std::string, std::less<>> env{
         {"ULW_R2_ACCOUNT_ID", "0123456789abcdef0123456789abcdef"},
         {"ULW_BUCKET", "ulw-media"},
@@ -99,6 +119,7 @@ TEST_F(ConfigTest, ALocalKeySetReplacesTheJwksUrl) {
     const KeySetFile file(kKeySet);
     env.erase("JWKS_URL");
     env["ULW_DEV_JWKS_FILE"] = file.path();
+    env["ULW_DEV_MODE"] = "1";
     const auto config = load();
     ASSERT_TRUE(config) << config.error().reason;
     EXPECT_EQ(config->dev_jwks_file, file.path());
@@ -106,8 +127,25 @@ TEST_F(ConfigTest, ALocalKeySetReplacesTheJwksUrl) {
     EXPECT_TRUE(config->jwks_url.empty());
 }
 
+// Whoever can set it signs any identity they like, so it takes development mode said outright,
+// and never in a Kubernetes pod, where every real deployment runs.
+TEST_F(ConfigTest, ALocalKeySetIsRefusedOutsideDevelopmentModeAndInAnyPod) {
+    const KeySetFile file(kKeySet);
+    env.erase("JWKS_URL");
+    env["ULW_DEV_JWKS_FILE"] = file.path();
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env["ULW_DEV_MODE"] = "0";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env["ULW_DEV_MODE"] = "1";
+    env["KUBERNETES_SERVICE_HOST"] = "10.43.0.1";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
+    env.erase("KUBERNETES_SERVICE_HOST");
+    EXPECT_TRUE(load());
+}
+
 TEST_F(ConfigTest, ALocalKeySetThatCannotBeReadOrUsedIsRefused) {
     env.erase("JWKS_URL");
+    env["ULW_DEV_MODE"] = "1";
     env["ULW_DEV_JWKS_FILE"] = "/nonexistent/jwks.json";
     EXPECT_EQ(refused_variable(), "ULW_DEV_JWKS_FILE");
     const KeySetFile garbage(R"({"keys":[{"kty":"RSA"}]})");
@@ -148,6 +186,16 @@ TEST_F(ConfigTest, AnAccessKeyIdTheSignerWouldRefuseIsRefusedAtTheCheck) {
     }
     env["ULW_S3_ACCESS_KEY_ID"] = std::string(128, 'A');
     EXPECT_TRUE(load());
+}
+
+TEST_F(ConfigTest, KeysStayTrustedADayWithoutARefreshUnlessSetInHours) {
+    EXPECT_EQ(load()->jwks_max_stale_hours, 24U);
+    env["ULW_JWKS_MAX_STALE_HOURS"] = "6";
+    EXPECT_EQ(load()->jwks_max_stale_hours, 6U);
+    for (const char* bad : {"0", "169", "1.5", "24h"}) {
+        env["ULW_JWKS_MAX_STALE_HOURS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_JWKS_MAX_STALE_HOURS") << bad;
+    }
 }
 
 TEST_F(ConfigTest, BothKeySourcesAtOnceAreRefused) {
@@ -437,7 +485,8 @@ TEST_F(ConfigTest, OnlyTheConnectionStringAndTheStoreKeysAreSecretAndTheKeysEnvO
     for (const ops::Setting& s : gateway::settings()) {
         const bool store_key =
             s.env == "ULW_S3_ACCESS_KEY_ID" || s.env == "ULW_S3_SECRET_ACCESS_KEY";
-        EXPECT_EQ(s.key.empty(), store_key) << s.env;
+        // The kubelet's, read to know the process runs in a pod; nobody configures it.
+        EXPECT_EQ(s.key.empty(), store_key || s.env == "KUBERNETES_SERVICE_HOST") << s.env;
         EXPECT_EQ(s.secret, store_key || s.env == "ULW_DATABASE_URL") << s.env;
     }
 }
@@ -447,19 +496,7 @@ TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {
     env["ULW_LISTEN_PORT"] = "9000";
     const auto config = load();
     ASSERT_TRUE(config);
-    const auto layers = ops::Settings::layer(
-        gateway::settings(), nullptr,
-        [this](std::string_view name) -> std::optional<std::string> {
-            const auto it = env.find(std::string(name));
-            return it == env.end() ? std::nullopt : std::optional<std::string>(it->second);
-        },
-        ops::CommandLine{});
-    ASSERT_TRUE(layers);
-    const os::SystemClock clock;
-    ulw::test::MemoryLog lines;
-    ops::Logger log(lines, clock, "gateway", ops::Level::Info);
-    gateway::log_effective(*config, *layers, log);
-    const std::string all = lines.all();
+    const std::string all = effective_log(*config);
     EXPECT_EQ(all.find("hunter2"), std::string::npos);
     EXPECT_NE(all.find(R"("name":"ULW_DATABASE_URL","value":"<redacted>","from":"env")"),
               std::string::npos)
@@ -468,6 +505,23 @@ TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {
               std::string::npos);
     EXPECT_NE(all.find(R"("name":"ULW_MAX_CONNECTIONS","value":"448","from":"default")"),
               std::string::npos);
+}
+
+// A development run says so beside the key set it trusts, and where the switch came from.
+TEST_F(ConfigTest, DevelopmentModeIsLoggedWithTheLocalKeySet) {
+    const KeySetFile file(kKeySet);
+    env.erase("JWKS_URL");
+    env["ULW_DEV_JWKS_FILE"] = file.path();
+    env["ULW_DEV_MODE"] = "1";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().reason;
+    const std::string all = effective_log(*config);
+    const auto keys = all.find(R"("name":"ULW_DEV_JWKS_FILE")");
+    const auto mode = all.find(R"("name":"ULW_DEV_MODE","value":"1","from":"env")");
+    ASSERT_NE(keys, std::string::npos) << all;
+    ASSERT_NE(mode, std::string::npos) << all;
+    // The line after it.
+    EXPECT_EQ(all.find('\n', keys), all.rfind('\n', mode)) << all;
 }
 
 } // namespace

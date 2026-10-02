@@ -14,6 +14,11 @@ import sys
 
 import yaml
 
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "tools"))
+from pathguard import inside  # noqa: E402
+
 
 def strict(node):
     if isinstance(node, list):
@@ -34,8 +39,9 @@ def strict(node):
 
 
 def main(out_dir, paths):
+    out_dir = inside(out_dir)
     written = 0
-    for path in paths:
+    for path in map(inside, paths):
         with open(path, encoding="utf-8") as f:
             for doc in yaml.safe_load_all(f):
                 if not doc or doc.get("kind") != "CustomResourceDefinition":

@@ -22,7 +22,8 @@ std::expected<SendProgress, int> send_progress(int fd) noexcept {
         return std::unexpected(ENOPROTOOPT);
     }
     return SendProgress{.acked = info.tcpi_bytes_acked,
-                        .waiting = info.tcpi_unacked != 0 || info.tcpi_notsent_bytes != 0};
+                        .waiting = info.tcpi_unacked != 0 || info.tcpi_notsent_bytes != 0,
+                        .unsent = info.tcpi_notsent_bytes != 0};
 }
 
 } // namespace net

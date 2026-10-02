@@ -77,6 +77,10 @@ public:
     reap_abandoned(core::WallTime older_than) override;
 
     void set_plan(const FaultPlan& plan);
+    // Tells the writer of every open session to try again, as a backend that takes bytes
+    // again after a stall does: a plan that stops refusing them is not enough on its own, since
+    // a writer the store refused waits to hear from it. On the reactor thread.
+    void wake_writers() noexcept;
     // While held, every fetch_small waits inside the store, as a slow read would, so a test
     // can act while one is in flight. Releasing lets them all finish.
     void hold_fetches(bool held);
@@ -114,6 +118,9 @@ private:
     std::condition_variable hold_released_;
     bool hold_ = false;
     std::size_t held_ = 0;
+
+    // Open sessions, touched on the reactor thread only.
+    std::set<Session*> sessions_;
 
     mutable std::mutex mutex_;
     FaultPlan plan_;
