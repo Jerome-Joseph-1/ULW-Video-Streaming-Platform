@@ -57,6 +57,9 @@ public:
     // infra/auth's to test, with keys.
     std::size_t drops = 0;
     void drop_caches() noexcept override { ++drops; }
+    // What drop_pending() reports.
+    bool drop_requested = false;
+    [[nodiscard]] bool drop_pending() const noexcept override { return drop_requested; }
 
     void refresh_keys() {
         refreshed_ = true;

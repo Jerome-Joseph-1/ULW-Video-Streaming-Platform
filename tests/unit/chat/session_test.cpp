@@ -148,6 +148,9 @@ public:
     // Delivers SIGHUP to the server on the node's next turn; `verifier_drops` then counts the
     // verifier's drop_caches() calls.
     std::atomic<bool> sighup = false;
+    // What the verifier reports as drop_pending(), applied on the node's next turn.
+    std::atomic<bool> drop_pending = false;
+    std::atomic<bool> drop_pending_seen = false;
     std::atomic<std::size_t> verifier_drops = 0;
 
 private:
@@ -246,6 +249,8 @@ private:
                 server->on_signal(net::Signal::Reload);
             }
             verifier_drops = verifier.drops;
+            verifier.drop_requested = drop_pending;
+            drop_pending_seen = verifier.drop_requested;
             key_waiters = verifier.waiting();
             http_parsers = server->http_parsers();
             ++turns_;
@@ -799,13 +804,21 @@ TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
     EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
 }
 
-// SIGHUP is how Askedin's key rotation reaches chat_server (ADR-0079): the verifier forgets its
-// keys and verdicts, and /metrics counts it.
-TEST_P(ChatSessionTest, SighupDropsTheAuthCaches) {
+// SIGHUP is how Askedin's key rotation reaches chat_server (ADR-0079): the verifier is asked to
+// drop its keys and verdicts, /metrics counts it, and the gauge follows the verifier's pending
+// drop.
+TEST_P(ChatSessionTest, SighupRequestsAnAuthCacheDrop) {
     EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 0U);
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 0U);
     node_->sighup = true;
     ASSERT_TRUE(ulw::test::eventually([&] { return node_->verifier_drops.load() == 1; }));
     EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 1U);
+    node_->drop_pending = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->drop_pending_seen.load(); }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 1U);
+    node_->drop_pending = false;
+    ASSERT_TRUE(ulw::test::eventually([&] { return !node_->drop_pending_seen.load(); }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 0U);
 }
 
 // Both viewers fall behind a sender that never stops. One never reads again, and is reset once it

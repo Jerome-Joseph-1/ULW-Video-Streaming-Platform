@@ -133,12 +133,16 @@ std::string token_with_kid(std::string_view kid) {
 // of alg, kid and typ only; aud an array of one; sub a lowercase UUID, repeated as uid; jti equal
 // to the kid; tid, perms and sid besides; no nbf; exp an hour after iat. Its 2FA challenge and
 // PAT swap tokens are the same but for `aud` and a `typ` claim.
+constexpr std::string_view kAskedinUser = "0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b";
+
 std::string askedin_token(const TestKey& key, const std::string& aud = R"(["askedin-platform"])",
-                          std::optional<std::string> typ = std::nullopt) {
+                          std::optional<std::string> typ = std::nullopt,
+                          std::string_view sub = kAskedinUser) {
+    const std::string quoted_sub = '"' + std::string(sub) + '"';
     const std::string header = R"({"alg":"RS256","kid":")" + key.kid() + R"(","typ":"JWT"})";
     const std::string payload = test_payload({{"aud", aud},
-                                              {"sub", R"("0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b")"},
-                                              {"uid", R"("0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b")"},
+                                              {"sub", quoted_sub},
+                                              {"uid", quoted_sub},
                                               {"iat", ulw::test::numeric_date(0)},
                                               {"jti", '"' + key.kid() + '"'},
                                               {"tid", R"("t-1")"},
@@ -624,35 +628,62 @@ TEST_F(JwksVerifierTest, AWithdrawnKeyGoesOnVerifyingUntilTheNextRefetchWithoutA
     EXPECT_EQ(verify(old_token), refused(AuthError::UnknownKey));
 }
 
-// What SIGHUP does: the keys and every remembered verdict go, a fetch starts at once, and a
-// token whose key left the set is refused as soon as it lands.
+// Askedin's jti is its kid, the same for every token under a key: two users' tokens with one jti
+// are answered each as itself, from the signature and from the cache alike.
+TEST_F(JwksVerifierTest, TokensSharingAJtiAreAnsweredEachAsItsOwnUser) {
+    constexpr std::string_view kOther = "7d0c6a52-3b9e-4f1d-8a2c-5e6f7a8b9c0d";
+    const std::string first = askedin_token(rsa_key());
+    const std::string second =
+        askedin_token(rsa_key(), R"(["askedin-platform"])", std::nullopt, kOther);
+    const auto subject = [&](const std::string& token) {
+        const VerifyResult r = verify(token).value_or(refused(AuthError::KeysUnavailable));
+        return r ? std::string(r->subject.view()) : std::string("refused");
+    };
+    const VerifyResult verified = verify_through_fetch(first, key_set({rsa_key().jwk()}));
+    ASSERT_TRUE(verified.has_value());
+    EXPECT_EQ(verified->subject.view(), kAskedinUser);
+    EXPECT_EQ(subject(second), kOther);
+    // Both answered from the cache now.
+    EXPECT_EQ(subject(first), kAskedinUser);
+    EXPECT_EQ(subject(second), kOther);
+    EXPECT_EQ(fetcher_.requests, 1);
+}
+
+// What SIGHUP does: a fetch starts at once, the cached keys and verdicts keep answering while it
+// runs, and when it lands a token whose key left the set is refused.
 TEST_F(JwksVerifierTest, DroppingTheCachesRefusesATokenWhoseKeyLeftTheSet) {
     const std::string old_token = askedin_token(rsa_key());
     EXPECT_TRUE(verify_through_fetch(old_token, key_set({rsa_key().jwk()})));
-    EXPECT_TRUE(verify(old_token).value_or(refused(AuthError::KeysUnavailable)));
     ASSERT_EQ(fetcher_.requests, 1);
+    EXPECT_FALSE(verifier_->drop_pending());
 
     verifier_->drop_caches();
     EXPECT_EQ(fetcher_.requests, 2) << "no fetch started by the drop";
     ASSERT_TRUE(fetcher_.in_flight());
-    CountingWaiter waiter;
-    EXPECT_FALSE(verify(old_token, waiter).has_value()) << "answered from a dropped cache";
+    EXPECT_TRUE(verifier_->drop_pending());
+    const std::optional<VerifyResult> during = verify(old_token);
+    ASSERT_TRUE(during.has_value()) << "waited on the drop's fetch";
+    EXPECT_TRUE(during->has_value());
+
     fetcher_.respond(key_set({next_rsa_key().jwk()}));
-    pump();
-    EXPECT_EQ(waiter.calls, 1);
-    EXPECT_EQ(verify(old_token, waiter), refused(AuthError::UnknownKey));
+    EXPECT_FALSE(verifier_->drop_pending());
+    EXPECT_EQ(verify(old_token), refused(AuthError::UnknownKey));
     // The new key came with that fetch.
     EXPECT_TRUE(
         verify(askedin_token(next_rsa_key())).value_or(refused(AuthError::KeysUnavailable)));
     EXPECT_EQ(fetcher_.requests, 2);
 }
 
-// A token whose key is still published verifies again after the drop's fetch, signature and all.
+// The drop forgets every verdict even when the key stayed, so the next answer is a signature
+// check again, and still a pass.
 TEST_F(JwksVerifierTest, AfterADropATokenStillPublishedVerifiesAgain) {
     const std::string token = askedin_token(rsa_key());
     EXPECT_TRUE(verify_through_fetch(token, key_set({rsa_key().jwk()})));
     verifier_->drop_caches();
-    EXPECT_TRUE(verify_through_fetch(token, key_set({rsa_key().jwk()})));
+    EXPECT_TRUE(verify(token).value_or(refused(AuthError::KeysUnavailable)));
+    fetcher_.respond(key_set({rsa_key().jwk()}));
+    EXPECT_FALSE(verifier_->drop_pending());
+    EXPECT_TRUE(verify(token).value_or(refused(AuthError::KeysUnavailable)));
     EXPECT_EQ(fetcher_.requests, 2);
 }
 
@@ -665,36 +696,64 @@ TEST_F(JwksVerifierTest, ADropDuringAFetchCancelsItAndStartsAnother) {
     EXPECT_EQ(fetcher_.cancels, 1);
     EXPECT_EQ(fetcher_.requests, 2);
     fetcher_.respond(key_set({rsa_key().jwk()}));
+    EXPECT_FALSE(verifier_->drop_pending());
     pump();
     EXPECT_EQ(waiter.calls, 1);
     EXPECT_TRUE(
         verify(askedin_token(rsa_key()), waiter).value_or(refused(AuthError::KeysUnavailable)));
 }
 
-// A kid remembered as unknown is forgotten too: after the drop it waits for the fetch instead of
-// being refused at once.
-TEST_F(JwksVerifierTest, ADropForgetsUnknownKids) {
-    const std::string next = askedin_token(next_rsa_key());
-    EXPECT_EQ(verify_through_fetch(next, key_set({rsa_key().jwk()})),
+// The drop's fetch forgets the kids remembered as unknown before it, so one may be looked up
+// again; a kid sought during that fetch and missing from it is still remembered.
+TEST_F(JwksVerifierTest, ADropForgetsUnknownKidsButRemembersTheOnesItsFetchMissed) {
+    const std::string remembered = askedin_token(next_rsa_key());
+    EXPECT_EQ(verify_through_fetch(remembered, key_set({rsa_key().jwk()})),
               refused(AuthError::UnknownKey));
-    EXPECT_EQ(verify(next), refused(AuthError::UnknownKey));
     verifier_->drop_caches();
-    EXPECT_TRUE(verify_through_fetch(next, key_set({next_rsa_key().jwk()})));
+    // Still remembered while the drop's fetch runs: answered at once.
+    EXPECT_EQ(verify(remembered), refused(AuthError::UnknownKey));
+    CountingWaiter waiter;
+    EXPECT_FALSE(verify(token_with_kid("sought"), waiter).has_value());
+    fetcher_.respond(key_set({rsa_key().jwk()}));
+    pump();
+    EXPECT_EQ(waiter.calls, 1);
+    advance(seconds(11));
+    EXPECT_EQ(verify(token_with_kid("sought")), refused(AuthError::UnknownKey));
+    EXPECT_EQ(fetcher_.requests, 2);
+    // Inside the minute it was remembered for, but forgotten with the drop: it gets a fetch.
+    EXPECT_FALSE(verify(remembered).has_value());
+    EXPECT_EQ(fetcher_.requests, 3);
 }
 
-// With the endpoint down a drop leaves nothing to verify with: every token is refused as
-// KeysUnavailable (503) until a retry lands. Fail closed, as after max_key_age.
-TEST_F(JwksVerifierTest, ADropWhileTheKeySetIsUnreachableRefusesUntilAFetchLands) {
-    const std::string token = askedin_token(rsa_key());
-    EXPECT_TRUE(verify_through_fetch(token, key_set({rsa_key().jwk()})));
-    verifier_->drop_caches();
-    EXPECT_EQ(verify_through_fetch(token, "<html>not a key set</html>"),
-              refused(AuthError::KeysUnavailable));
-    EXPECT_FALSE(verifier_->keys_expired());
+// With the endpoint down the drop waits: the keys in hand go on answering, the old key's tokens
+// included, and the drop completes with the first retry that succeeds. The retries back off from
+// 1 s again, however many failures came before the drop.
+TEST_F(JwksVerifierTest, ADropWhoseFetchFailsKeepsTheKeysUntilARetryCompletesIt) {
+    const std::string old_token = askedin_token(rsa_key());
+    EXPECT_TRUE(verify_through_fetch(old_token, key_set({rsa_key().jwk()})));
+    // Three failed refetches: the next retry would be 4 s away.
+    advance(minutes(15) + milliseconds(200));
+    ASSERT_EQ(fetcher_.requests, 2);
+    fetcher_.respond(std::nullopt);
     advance(seconds(1) + milliseconds(200));
-    ASSERT_EQ(fetcher_.requests, 3);
-    fetcher_.respond(key_set({rsa_key().jwk()}));
-    EXPECT_TRUE(verify(token).value_or(refused(AuthError::KeysUnavailable)));
+    fetcher_.respond(std::nullopt);
+    advance(seconds(2) + milliseconds(200));
+    fetcher_.respond(std::nullopt);
+    ASSERT_EQ(fetcher_.requests, 4);
+
+    verifier_->drop_caches();
+    ASSERT_EQ(fetcher_.requests, 5);
+    fetcher_.respond("<html>not a key set</html>");
+    EXPECT_TRUE(verifier_->drop_pending());
+    EXPECT_TRUE(verify(old_token).value_or(refused(AuthError::KeysUnavailable)))
+        << "the keys in hand went with a failed fetch";
+    EXPECT_FALSE(verifier_->keys_expired());
+
+    advance(seconds(1) + milliseconds(200));
+    ASSERT_EQ(fetcher_.requests, 6) << "the retry did not back off from 1 s";
+    fetcher_.respond(key_set({next_rsa_key().jwk()}));
+    EXPECT_FALSE(verifier_->drop_pending());
+    EXPECT_EQ(verify(old_token), refused(AuthError::UnknownKey));
 }
 
 } // namespace

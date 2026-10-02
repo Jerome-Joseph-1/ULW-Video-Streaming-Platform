@@ -151,16 +151,21 @@ Caching and refresh:
 - A key withdrawn from the set therefore goes on verifying, and the tokens it verified go on
   being accepted, until the next successful refetch: up to 15 minutes, or sooner if a token with
   an unseen `kid` triggers a fetch first.
-- SIGHUP drops the cached key set, every remembered verified token and every remembered unknown
-  `kid` (gateway and chat; ADR-0079). A fetch starts at once, replacing one in flight, and
-  requests that arrive meanwhile wait on it as on an unseen `kid`; a token whose key left the set
-  is then refused with `401`. Each drop logs `auth caches dropped` at info level and counts in
-  `auth_cache_drops_total` on `/metrics`. If the key set cannot be fetched then, every token is
-  answered `503` until a retry succeeds (from 1 s, as above), so do not send SIGHUP while the
-  JWKS is down. Chat sockets already open are not closed; they run to their token's `exp`.
+- SIGHUP requests a drop of the auth caches (gateway and chat; ADR-0079): a fetch starts at
+  once, replacing one in flight, with the retry backoff counted from 1 s again. Refetch first,
+  then swap: while it runs, the cached keys and remembered tokens go on answering as before, and
+  when it succeeds it replaces the key set and forgets every remembered verified token and
+  unknown `kid` in one step, so a token whose key left the set is refused with `401` from then
+  on. Each request logs `auth cache drop requested; completes on the next successful key fetch`
+  at info level and counts in `auth_cache_drops_total`; the `auth_cache_drop_pending` gauge
+  reads 1 from the SIGHUP until a fetch completes the drop. If the key set cannot be fetched,
+  nothing is dropped: the cached keys, the old key's included, keep working until a fetch
+  succeeds, and the drop stays pending through the retries. Chat sockets already open are not
+  closed; they run to their token's `exp`.
 
 So a newly rotated-in key is accepted within one fetch of first use, provided Askedin publishes
-it before issuing tokens with it, and a withdrawn key stops verifying at the next SIGHUP.
+it before issuing tokens with it, and a withdrawn key stops verifying once the fetch after a
+SIGHUP succeeds.
 
 ## Askedin
 
@@ -238,9 +243,9 @@ verified tokens (Caching and refresh, above).
 
 So Askedin's rotation runbook, which restarts the services that verify its tokens, must also
 reach ULW once the rotation has committed, in the rotated environment: SIGHUP every
-`gateway_server` and `chat_server` process (deploy/askedin/RUNBOOK.md, "Signing key rotation"),
-or restart them. Afterwards each pod's `auth_cache_drops_total` has gone up by one, and a token
-under the old key gets `401`.
+`gateway_server` and `chat_server` process (deploy/askedin/RUNBOOK.md, "8. Askedin signing key
+rotation"), or restart them. Afterwards each pod's `auth_cache_drops_total` has gone up by one
+and its `auth_cache_drop_pending` is back to 0, and a token under the old key gets `401`.
 
 ## Rejections
 

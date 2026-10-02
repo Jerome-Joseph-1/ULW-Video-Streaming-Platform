@@ -853,8 +853,8 @@ Askedin's auth-service rotates its RSA signing key with no overlap: one transact
 new key and deactivates the old one, and the old `kid` leaves the JWKS at once. The gateway (and
 chat, once deployed) caches the key set and remembers verified tokens for up to 15 minutes each,
 so left alone it accepts tokens under the old key for up to 15 minutes after a rotation
-(docs/integration/auth.md, Key rotation). SIGHUP drops both caches and refetches the key set at
-once (docs/adr/0079).
+(docs/integration/auth.md, Key rotation). SIGHUP refetches the key set at once and, when that
+fetch succeeds, replaces the keys and forgets every remembered token (docs/adr/0079).
 
 Askedin's rotation runbook restarts the services that verify its tokens. Add ULW to it: once the
 rotation has committed, in the same environment (`apps-stage` for stage, `apps` for prod):
@@ -867,11 +867,12 @@ done
 ```
 
 `gateway_server` is PID 1 in its container, and the image's `sh` has `kill` built in. Then check
-that every pod took it: each logs `auth caches dropped` once, and its `auth_cache_drops_total`
-on `/metrics` went up by one.
+that every pod took it: each logs `auth cache drop requested` once, its `auth_cache_drops_total`
+on `/metrics` went up by one, and its `auth_cache_drop_pending` is back to 0 (the fetch that
+completes the drop normally lands well under a second later).
 
 ```sh
-kubectl -n "$NS" logs -l app.kubernetes.io/name=video-gateway -c gateway --since=5m | grep 'auth caches dropped'
+kubectl -n "$NS" logs -l app.kubernetes.io/name=video-gateway -c gateway --since=5m | grep 'auth cache drop requested'
 ```
 
 A pod that did not log it still accepts old tokens until its next refetch; signal it again, or
@@ -879,6 +880,9 @@ restart the deployment instead (`kubectl -n "$NS" rollout restart deployment/vid
 which also clears both caches but drains every connection and takes longer. Do the same for
 `chat_server` once chat has an overlay: it handles SIGHUP the same way.
 
-Do not send SIGHUP while Askedin's JWKS cannot be reached: the keys are gone until a fetch
-succeeds, and every request answers `503` meanwhile. Requests during the refetch itself wait on
-it, normally well under a second.
+If Askedin's JWKS cannot be reached, the SIGHUP drops nothing yet: `auth_cache_drop_pending`
+stays at 1 and tokens under the old key keep working until a fetch succeeds, which then
+completes the drop. That is the right trade for a routine rotation. For a suspected key
+compromise during a JWKS outage, use `kubectl -n "$NS" rollout restart deployment/video-gateway`
+instead: new pods start with no keys and refuse every token (`503`) until a fetch succeeds,
+which fails closed.

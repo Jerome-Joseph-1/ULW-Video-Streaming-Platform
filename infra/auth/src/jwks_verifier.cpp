@@ -111,14 +111,17 @@ public:
 
     [[nodiscard]] bool keys_expired() const noexcept { return expired_; }
 
-    // Everything learned from the key set goes, and a fetch starts now rather than at the next
-    // unseen kid: tokens wait on it as on any fetch, so none is answered from what was dropped.
-    // A fetch already in flight is replaced, since its answer may predate the rotation that
-    // prompted the drop. fetch() only queues the request, so nothing here blocks the loop.
+    [[nodiscard]] bool drop_pending() const noexcept { return drop_pending_; }
+
+    // Refetch first, then swap: the keys and verdicts in hand keep answering until a fetch
+    // succeeds, and that fetch replaces the keys and forgets every verdict and unknown kid at
+    // once (ADR-0079). So a drop never leaves the process without keys: a JWKS outage during
+    // one changes nothing until it ends. A fetch already in flight is replaced, since its answer
+    // may predate the rotation that prompted the drop, and the backoff starts again from its
+    // first step. fetch() only queues the request, so nothing here blocks the loop.
     void drop_caches() noexcept {
-        keys_ = detail::KeySet{};
-        verdicts_.clear();
-        unknown_kids_.clear();
+        drop_pending_ = true;
+        failed_fetches_ = 0;
         if (fetching_) {
             fetcher_.cancel(*this);
         }
@@ -142,7 +145,14 @@ public:
         // A set without one usable key is likelier a publishing mistake than the withdrawal
         // of every key, so it counts as a failed fetch and the keys in hand stay.
         if (set && !set->keys.empty()) {
+            if (drop_pending_) {
+                // Before install(), so that the kids this fetch was sought for and lacks are
+                // remembered afresh.
+                verdicts_.clear();
+                unknown_kids_.clear();
+            }
             install(std::move(*set), now);
+            drop_pending_ = false;
             failed_fetches_ = 0;
             fetched_at_ = now;
             expired_ = false;
@@ -300,6 +310,8 @@ private:
     // The end of the last fetch that brought keys, and whether they have since been dropped.
     std::optional<core::MonoTime> fetched_at_;
     bool expired_ = false;
+    // drop_caches() was called and no fetch has succeeded since.
+    bool drop_pending_ = false;
 
     std::vector<IKeyWaiter*> waiters_;
     std::vector<IKeyWaiter*> notifying_;
@@ -333,6 +345,10 @@ bool JwksVerifier::keys_expired() const noexcept {
 
 void JwksVerifier::drop_caches() noexcept {
     state_->drop_caches();
+}
+
+bool JwksVerifier::drop_pending() const noexcept {
+    return state_->drop_pending();
 }
 
 } // namespace infra::auth

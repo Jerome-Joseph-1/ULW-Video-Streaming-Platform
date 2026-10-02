@@ -113,6 +113,8 @@ public:
     void sighup();
     // How often the gateway told its verifier to drop its caches.
     [[nodiscard]] std::size_t verifier_drops();
+    // What the verifier reports as drop_pending() from now on.
+    void set_drop_pending(bool pending);
     [[nodiscard]] std::string metrics();
     // What the probe finds from the next loop turn on; nullopt stops it probing at all.
     void set_health(std::optional<bool> database_up, std::optional<bool> store_up);

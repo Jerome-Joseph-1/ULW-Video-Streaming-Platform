@@ -145,7 +145,8 @@ struct Counters {
     // user with max_sessions_per_user open.
     std::uint64_t limited_ip_upgrades = 0;
     std::uint64_t limited_user_sessions = 0;
-    // SIGHUPs that dropped the cached JWKS keys and every remembered verified token (ADR-0079).
+    // SIGHUPs that requested a drop of the cached JWKS keys and remembered verified tokens;
+    // each completes on the next successful key fetch (ADR-0079).
     std::uint64_t auth_cache_drops = 0;
 };
 
@@ -260,7 +261,8 @@ private:
     struct UserEntry {};
     struct BlockEntry {};
 
-    // SIGHUP: forgets the JWKS keys and every remembered verified token, and refetches.
+    // SIGHUP: refetches the JWKS, and asks the verifier to forget its keys and every
+    // remembered verified token once that fetch succeeds.
     void drop_auth_caches() noexcept;
 
     // A direct peer's connection: its address's count, its /48's and its rate, at accept.
