@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   check:
-    runs-on: [self-hosted, ulw-soak]
+    runs-on: self-hosted
     timeout-minutes: 20
     steps:
       - name: Identity and access
