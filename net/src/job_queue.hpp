@@ -20,7 +20,7 @@ public:
     [[nodiscard]] IOffloadJob* pop(const std::stop_token& stop);
     // Wakes every pop() so each checks its stop token again. It takes the mutex before
     // notifying, so a stop cannot land between a pop's check of its token and its sleep.
-    void wake_all();
+    void wake_all() noexcept;
 
 private:
     std::mutex mutex_;

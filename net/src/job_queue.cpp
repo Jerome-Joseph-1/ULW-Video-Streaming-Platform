@@ -12,7 +12,7 @@ void JobQueue::push(IOffloadJob& job) {
     ready_.notify_one();
 }
 
-void JobQueue::wake_all() {
+void JobQueue::wake_all() noexcept {
     { const std::scoped_lock lock(mutex_); }
     ready_.notify_all();
 }
