@@ -93,13 +93,10 @@ std::string_view state_name(core::VideoState s) noexcept {
 // Expiration extension answers. The upload reaper aborts it later (ADR 0049), and until it does
 // the rows and the stored bytes are still there, so without this a PATCH or commit would go
 // through. A cancelled one answers the same, so the answer does not depend on whether the
-// reaper has run yet; a committed one keeps the answers it had.
-[[nodiscard]] bool expired(const core::UploadRecord& up, core::WallTime now) {
-    if (up.state == core::UploadState::Completed) {
-        return false;
-    }
-    const auto upload = core::Upload::rehydrate(up);
-    return upload && upload->is_expired(now);
+// reaper has run yet; a committed one keeps the answers it had. The same test as
+// Upload::is_expired.
+[[nodiscard]] bool expired(const core::UploadRecord& up, core::WallTime now) noexcept {
+    return up.state != core::UploadState::Completed && now >= up.expires_at;
 }
 
 } // namespace
