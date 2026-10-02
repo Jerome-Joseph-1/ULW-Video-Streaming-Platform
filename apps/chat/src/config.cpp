@@ -2,6 +2,7 @@
 
 #include "core/util/parse.hpp"
 #include "http/client_limits.hpp"
+#include "http/origin.hpp"
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
@@ -29,38 +30,16 @@ std::optional<std::string> lookup(const EnvLookup& env, std::string_view name) {
     return value;
 }
 
-// A browser sends Origin as scheme://host[:port], lowercase, with no path; anything else could
-// never match one.
-bool is_origin(std::string_view origin) {
-    std::string_view rest;
-    if (origin.starts_with("https://")) {
-        rest = origin.substr(8);
-    } else if (origin.starts_with("http://")) {
-        rest = origin.substr(7);
-    } else {
-        return false;
-    }
-    return !rest.empty() && rest.find_first_of("/?#@ ") == std::string_view::npos &&
-           std::ranges::none_of(rest, [](char c) { return c >= 'A' && c <= 'Z'; });
-}
-
 std::expected<std::vector<std::string>, ConfigError> origins(const EnvLookup& env) {
-    std::vector<std::string> out;
     const auto list = lookup(env, "ULW_ALLOWED_ORIGINS");
     if (!list) {
-        return out;
+        return std::vector<std::string>{};
     }
-    std::string_view rest = *list;
-    while (!rest.empty()) {
-        const std::size_t comma = rest.find(',');
-        const std::string_view origin = rest.substr(0, comma);
-        if (!is_origin(origin)) {
-            return error("ULW_ALLOWED_ORIGINS", "expected comma-separated scheme://host[:port]");
-        }
-        out.emplace_back(origin);
-        rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+    auto out = http::parse_origin_list(*list);
+    if (!out) {
+        return error("ULW_ALLOWED_ORIGINS", "expected comma-separated scheme://host[:port]");
     }
-    return out;
+    return std::move(*out);
 }
 
 std::expected<std::string, ConfigError> checked_node_address(const EnvLookup& env,

@@ -100,6 +100,14 @@ struct Limits {
     core::Millis drain_deadline{30'000};
     std::size_t max_requests_per_connection = 1000;
     std::string auth_cookie = "auth_token";
+    // The pages whose requests may carry the cookie, as scheme://host[:port]. A request with the
+    // cookie and no Authorization must name one of them in Origin if its method changes
+    // anything, and must not name another if it sends Origin at all. Empty: the cookie works
+    // for GET and HEAD from this server's own origin only.
+    std::vector<std::string> allowed_origins;
+    // Whether a page on a sibling subdomain (Sec-Fetch-Site: same-site) may send the cookie.
+    // Off, only this server's own origin may: a sibling can be a different, less trusted app.
+    bool allow_same_site = false;
     // Our reaper aborts abandoned uploads before the bucket's 7-day lifecycle rule does, so the
     // catalog never points at an ingest the store has already dropped.
     std::chrono::hours upload_ttl{6 * 24};
@@ -131,6 +139,9 @@ struct Counters {
     std::uint64_t limited_ip_requests = 0;
     std::uint64_t limited_user_requests = 0;
     std::uint64_t limited_user_bytes = 0;
+    // Answered 403 before the token was checked: a request with the cookie from a page the
+    // gateway does not trust, or a create with the cookie that did not declare JSON.
+    std::uint64_t cross_site_rejections = 0;
     std::uint64_t admission_rejections = 0;
     std::uint64_t timeouts_header = 0;
     std::uint64_t timeouts_body = 0;
