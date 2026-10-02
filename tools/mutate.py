@@ -255,12 +255,15 @@ def mutants_for(path, root):
 
 
 def read_source(path):
-    # Bytes, not text mode, so that "\r\n" line endings survive the round trip.
-    return inside(path).read_bytes().decode("utf-8")
+    # Bytes, not text mode, so that "\r\n" line endings survive the round trip. Each path is
+    # checked by pathguard here, where it is opened, whichever caller it came from.
+    with open(inside(path), "rb") as f:
+        return f.read().decode("utf-8")
 
 
 def write_source(path, text):
-    inside(path).write_bytes(text.encode("utf-8"))
+    with open(inside(path), "wb") as f:
+        f.write(text.encode("utf-8"))
 
 
 def apply(path, mutant):
