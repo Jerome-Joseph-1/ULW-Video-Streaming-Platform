@@ -7,7 +7,9 @@ name: soak-experiment
 # `runner` picks a GitHub-hosted runner or the project's self-hosted one. Hosted jobs are cut
 # off at 6 h, build included, so there `hours` stops at 4.9, the most that leaves the job its
 # 45 minutes for setup and the build under the 355 it is given; on the self-hosted runner it
-# goes to 24. It starts at 0.5: the judges skip the first 15 minutes and need ten samples after
+# goes to 22, which keeps the job under the 24 h its token lives (the artifact upload at the end
+# needs it) and the second job of `both`, queued behind the first, under the 24 h a queued job
+# waits. It starts at 0.5: the judges skip the first 15 minutes and need ten samples after
 # them.
 
 on:
@@ -24,7 +26,7 @@ on:
         options: [chat, gateway, both]
         default: chat
       hours:
-        description: Hours of load, from 0.5 to 4.9 hosted or 24 self-hosted.
+        description: Hours of load, from 0.5 to 4.9 hosted or 22 self-hosted.
         type: number
         default: 1.5
       clients:
@@ -56,7 +58,7 @@ jobs:
         run: |
           case $RUNNER in
             hosted) most=4.9 ;;
-            self-hosted) most=24 ;;
+            self-hosted) most=22 ;;
             *) echo "::error::unknown runner '$RUNNER'"; exit 1 ;;
           esac
           if ! awk -v h="$HOURS" -v m="$most" 'BEGIN { exit !(h ~ /^[0-9]*\.?[0-9]+$/ && h >= 0.5 && h <= m) }'; then
@@ -104,7 +106,8 @@ jobs:
         image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
         env:
           POSTGRES_PASSWORD: testtest123
-        ports: ["55432:5432"]
+        # Loopback only: a published port bypasses the host's firewall.
+        ports: ["127.0.0.1:55432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
@@ -116,7 +119,7 @@ jobs:
       # A self-hosted runner keeps its workspace between jobs; the soak runs as root (below), so
       # anything an earlier one left there would stop the checkout from cleaning it.
       - if: inputs.runner == 'self-hosted'
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -192,11 +195,15 @@ jobs:
           retention-days: 30
       - if: failure() && matrix.kind == 'gateway'
         run: docker compose -f deploy/local/compose.yaml logs minio
-      # A self-hosted runner keeps what a job leaves: the root-owned soak output and MinIO.
+      # A self-hosted runner keeps what a job leaves: services a cancelled soak did not stop
+      # (root's, on fixed ports), the root-owned soak output, and MinIO.
       - if: always() && inputs.runner == 'self-hosted'
         env:
           OUT: ${{ runner.temp }}/${{ matrix.out }}
         run: |
+          sudo pkill -x chat_server || true
+          sudo pkill -x gateway_server || true
+          sudo pkill -x transcode_worker || true
           sudo rm -rf "$OUT"
           docker compose -f deploy/local/compose.yaml down || true
           sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
