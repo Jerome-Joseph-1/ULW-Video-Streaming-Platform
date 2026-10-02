@@ -36,7 +36,7 @@ tools/security/lint-workflows.sh         # actionlint and zizmor over .github/
 SonarQube Cloud analyses the repository in CI (`.github/workflows/sonar.yml`, ADR-0078) on the
 Free plan, with the `ci` preset's compile database; settings are in `sonar-project.properties`.
 It is advisory, and needs the `SONAR_TOKEN` secret and Automatic Analysis turned off in the
-project's settings. If the repository ever becomes private, delete `SONAR_TOKEN` to stay free:
+project's settings. Pull requests from forks get no secrets, so no analysis. If the repository ever becomes private, delete `SONAR_TOKEN` to stay free:
 the job then skips itself.
 
 ## Run locally

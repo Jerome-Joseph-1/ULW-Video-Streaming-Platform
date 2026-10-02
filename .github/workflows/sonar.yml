@@ -21,6 +21,8 @@ concurrency:
 jobs:
   analyse:
     runs-on: ubuntu-24.04
+    # A cold build plus the C++ analysis; a stuck scan should not hold a runner for 6 h.
+    timeout-minutes: 90
     env:
       CC: gcc-14
       CXX: g++-14

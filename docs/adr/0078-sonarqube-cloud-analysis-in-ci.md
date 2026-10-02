@@ -80,10 +80,11 @@ GitHub App, so the job needs no `pull-requests` scope.
   environment and event.
 - **`sonar-project.properties`.** Organisation `jerome-joseph-1`, project key
   `Jerome-Joseph-1_ULW-Video-Streaming-Platform`. The source and test split is the one
-  `.sonarcloud.properties` had: everything is analysed, `tests/**` and `**/*_test.py` as tests
-  and the rest as sources. `build/` and the vendored tarballs in `third_party/` are left out;
-  files git ignores are left out by the scanner. The compile database;
-  `reportingCppStandardOverride=c++23`; `sonar.qualitygate.wait=false`. No thread count: the
+  `.sonarcloud.properties` had: `tests/**` and `**/*_test.py` as tests and the rest as sources.
+  `build/` and the vendored tarballs in `third_party/` are left out; files git ignores are left
+  out by the scanner. The compile database, whose `-std=c++23` sets the analysed standard; C and
+  C++ files the `ci` preset does not compile (the fuzz targets, `tools/io_uring_probe.c`) are not
+  analysed. `sonar.qualitygate.wait=false`. No thread count: the
   analyser uses every core by default. A marked block names the coverage properties for when a
   coverage job exists.
 - **`.sonarcloud.properties` is removed.** Only Automatic Analysis reads it; with CI analysis it
@@ -105,7 +106,8 @@ Information page against `sonar-project.properties`.
 
 - C++ findings are made with the real flags and headers; findings that only stood because the
   analyser could not see a system header can now be cleared by the next analysis.
-- The job rebuilds the `ci` preset, about as long as a reactor-matrix build with a warm ccache.
+- The job rebuilds the `ci` preset, about as long as a reactor-matrix build with a warm ccache,
+  then analyses some 400 translation units, which adds minutes; it is limited to 90.
 - Pull requests from forks get no analysis; their results arrive with main's after they merge.
 - The scanner is pinned; the scanner engine and analysers it downloads from SonarQube Cloud at
   run time are chosen by the service and cannot be pinned here.
