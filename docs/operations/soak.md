@@ -27,17 +27,24 @@ three runs here predate the column, so for them `--rejudge` reports the per-chun
 judged, and a leak on each chunk shows only through the per-session line, since every chunk
 belongs to a session.
 
-## On a hosted runner
+## On a runner
 
-`.github/workflows/soak-experiment.yml` runs either soak, or both on two runners, on GitHub's
-hosted runners at any ref, for experiments on memory that should not hold a shared host for
-hours. Dispatch it from the Actions tab, or with
-`gh workflow run soak-experiment.yml --ref <branch> -f kind=chat -f hours=1.5`; `kind` is
-`chat`, `gateway` or `both`, `hours` from 0.5 to 4.9, and `clients` empty for the scripts' own
-(64 and 8) or up to 1024. It builds the `ci` preset at that ref, runs against a Postgres on the
-same image as `deploy/local/compose.yaml` and that file's MinIO, and uploads `samples.csv`, the summary and the logs as an artifact
-whatever the verdict, for `--rejudge` or a closer look. A hosted job ends at 6 h, build included,
-so the 6 h acceptance soak still runs on a host.
+`.github/workflows/soak-experiment.yml` runs either soak, or both one after the other, at any
+ref. Dispatch it from the Actions tab, or with
+`gh workflow run soak-experiment.yml --ref <branch> -f runner=self-hosted -f kind=chat -f hours=6`;
+`runner` is `hosted` (GitHub's) or `self-hosted` (the project's own host), `kind` is `chat`,
+`gateway` or `both`, `hours` from 0.5 to 4.9 on a hosted runner and to 24 on the self-hosted
+one, and `clients` empty for the scripts' own (64 and 8) or up to 1024. It builds the `ci`
+preset at that ref, runs against a Postgres on the same image as `deploy/local/compose.yaml` and
+that file's MinIO, and uploads `samples.csv`, the summary and the logs as an artifact whatever
+the verdict, for `--rejudge` or a closer look. A hosted job ends at 6 h, build included, so the
+6 h acceptance soak runs on the self-hosted runner.
+
+The soak runs as root on either: the services are undumpable (`ops::disable_core_dumps`), so
+only root reads the `/proc/<pid>/fd` it samples. The self-hosted runner is a dedicated Ubuntu
+24.04 host whose runner user has Docker and password-less sudo; the job installs what a hosted
+image has and the host lacks (cmake, docker compose, rustup 1.29.1 by digest), and leaves
+nothing root-owned in its workspace.
 
 ## Runs
 

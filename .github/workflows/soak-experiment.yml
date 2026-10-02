@@ -1,24 +1,30 @@
 name: soak-experiment
 
-# A soak run on a hosted runner, dispatched by hand at any ref, for experiments on the soaks'
-# memory (docs/operations/soak.md). The data is the point: samples.csv, the summary and the
-# processes' logs are uploaded whatever the verdict.
+# A soak run dispatched by hand at any ref, for experiments on the soaks' memory and for the
+# 6 h acceptance soak (ADR-0042, docs/operations/soak.md). The data is the point: samples.csv,
+# the summary and the processes' logs are uploaded whatever the verdict.
 #
-# Hosted jobs are cut off at 6 h, build included, so the 6 h acceptance soak (ADR-0042) cannot
-# run here; it still runs on a host. `hours` stops at 4.9, the most that leaves the job its 45
-# minutes for setup and the build under the 355 it is given. It starts at 0.5: the judges skip
-# the first 15 minutes and need ten samples after them.
+# `runner` picks a GitHub-hosted runner or the project's self-hosted one. Hosted jobs are cut
+# off at 6 h, build included, so there `hours` stops at 4.9, the most that leaves the job its
+# 45 minutes for setup and the build under the 355 it is given; on the self-hosted runner it
+# goes to 24. It starts at 0.5: the judges skip the first 15 minutes and need ten samples after
+# them.
 
 on:
   workflow_dispatch:
     inputs:
+      runner:
+        description: Where to run.
+        type: choice
+        options: [hosted, self-hosted]
+        default: hosted
       kind:
         description: Which soak to run.
         type: choice
         options: [chat, gateway, both]
         default: chat
       hours:
-        description: Hours of load, from 0.5 to 4.9.
+        description: Hours of load, from 0.5 to 4.9 hosted or 24 self-hosted.
         type: number
         default: 1.5
       clients:
@@ -43,12 +49,18 @@ jobs:
       - id: plan
         # Through the environment, not spliced into the script: inputs are the dispatcher's text.
         env:
+          RUNNER: ${{ inputs.runner }}
           KIND: ${{ inputs.kind }}
           HOURS: ${{ inputs.hours }}
           CLIENTS: ${{ inputs.clients }}
         run: |
-          if ! awk -v h="$HOURS" 'BEGIN { exit !(h ~ /^[0-9]*\.?[0-9]+$/ && h >= 0.5 && h <= 4.9) }'; then
-            echo "::error::hours must be a number from 0.5 to 4.9, not '$HOURS'"
+          case $RUNNER in
+            hosted) most=4.9 ;;
+            self-hosted) most=24 ;;
+            *) echo "::error::unknown runner '$RUNNER'"; exit 1 ;;
+          esac
+          if ! awk -v h="$HOURS" -v m="$most" 'BEGIN { exit !(h ~ /^[0-9]*\.?[0-9]+$/ && h >= 0.5 && h <= m) }'; then
+            echo "::error::hours must be a number from 0.5 to $most on a $RUNNER runner, not '$HOURS'"
             exit 1
           fi
           # The chat server takes 1,280 connections; more clients would measure refusals.
@@ -65,8 +77,8 @@ jobs:
             *) echo "::error::unknown kind '$KIND'"; exit 1 ;;
           esac
           # The soak itself: its hours, plus 15 minutes to start, stop its threads and judge.
-          # The job: that plus 45 minutes for setup and the build; at most 4.9 hours keeps it
-          # under 355, short of the hosted 360.
+          # The job: that plus 45 minutes for setup and the build; at most 4.9 hours keeps a
+          # hosted job under 355, short of its 360.
           soak=$(awk -v h="$HOURS" 'BEGIN { m = h * 60; printf "%d", (m == int(m) ? m : int(m) + 1) + 15 }')
           job=$((soak + 45))
           {
@@ -78,7 +90,7 @@ jobs:
   soak:
     name: soak (${{ matrix.kind }})
     needs: plan
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner == 'self-hosted' && 'self-hosted' || 'ubuntu-24.04' }}
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.job-minutes) }}
     strategy:
       fail-fast: false
@@ -101,9 +113,29 @@ jobs:
       CXX: g++-14
       ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
     steps:
+      # A self-hosted runner keeps its workspace between jobs; the soak runs as root (below), so
+      # anything an earlier one left there would stop the checkout from cleaning it.
+      - if: inputs.runner == 'self-hosted'
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # What a hosted image carries and a bare Ubuntu 24.04 host does not. Ubuntu's rustup
+      # (1.26) cannot install the toolchain rust-toolchain.toml names without being told it
+      # again, so rustup 1.29.1 is fetched, pinned by digest.
+      - name: Install what the hosted image has
+        if: inputs.runner == 'self-hosted'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends cmake docker-compose-v2 build-essential
+          if [[ ! -x ~/.cargo/bin/rustup ]]; then
+            curl -sSfo "$RUNNER_TEMP/rustup-init" https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init
+            echo "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+            chmod +x "$RUNNER_TEMP/rustup-init"
+            "$RUNNER_TEMP/rustup-init" -y --no-modify-path --default-toolchain none --profile minimal
+            rm -f "$RUNNER_TEMP/rustup-init"
+          fi
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-ci
@@ -131,7 +163,11 @@ jobs:
           if [[ -n $CLIENTS ]]; then
             args+=(--clients "$CLIENTS")
           fi
-          "$SCRIPT" "${args[@]}"
+          # As root, as the soaks run on a host: the services make themselves undumpable
+          # (ops::disable_core_dumps), which leaves their /proc/<pid>/fd, sampled every minute,
+          # to root alone, and the scripts start them with ULW_ALLOW_ROOT for that reason. No
+          # bytecode: root's __pycache__ would outlive the job on a self-hosted runner.
+          sudo --preserve-env=ULW_TEST_DATABASE_URL PYTHONDONTWRITEBYTECODE=1 "$SCRIPT" "${args[@]}"
       - name: Summary
         if: ${{ !cancelled() }}
         env:
@@ -156,3 +192,11 @@ jobs:
           retention-days: 30
       - if: failure() && matrix.kind == 'gateway'
         run: docker compose -f deploy/local/compose.yaml logs minio
+      # A self-hosted runner keeps what a job leaves: the root-owned soak output and MinIO.
+      - if: always() && inputs.runner == 'self-hosted'
+        env:
+          OUT: ${{ runner.temp }}/${{ matrix.out }}
+        run: |
+          sudo rm -rf "$OUT"
+          docker compose -f deploy/local/compose.yaml down || true
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
