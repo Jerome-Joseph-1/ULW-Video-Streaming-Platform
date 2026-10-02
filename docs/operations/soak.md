@@ -48,7 +48,8 @@ nothing root-owned in its workspace and no service running. The runner user's su
 `ALL`, since the job passes environment to sudo. The setup action's two sysctls (unprivileged
 user namespaces allowed, 28 bits of mmap randomisation) stay set on that host until it reboots;
 it runs nothing else. Postgres is published on loopback only: a published port would bypass the
-host's firewall.
+host's firewall. Anyone who can dispatch a workflow at any ref runs that ref's code as root on
+the host, so it holds nothing else; one soak runs there at a time.
 
 ## Runs
 

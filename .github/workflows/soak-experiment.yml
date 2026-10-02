@@ -37,6 +37,12 @@ on:
 permissions:
   contents: read
 
+# One soak at a time per runner kind: a second on the self-hosted host would collide on its
+# fixed ports (Postgres 55432, MinIO, the soaks' own).
+concurrency:
+  group: soak-experiment-${{ inputs.runner }}
+  cancel-in-progress: false
+
 jobs:
   # Checks the inputs and turns them into the soak job's matrix and timeouts, which expressions
   # alone cannot compute.
@@ -201,9 +207,12 @@ jobs:
         env:
           OUT: ${{ runner.temp }}/${{ matrix.out }}
         run: |
-          sudo pkill -x chat_server || true
-          sudo pkill -x gateway_server || true
-          sudo pkill -x transcode_worker || true
+          # By the command line's first word: pkill -x sees only a name's first 15 characters,
+          # and transcode_worker has 16; anchored, the pattern matches no other command line
+          # that merely mentions the program.
+          for program in chat_server gateway_server transcode_worker; do
+            sudo pkill -f "^[^ ]*/${program}( |\$)" || true
+          done
           sudo rm -rf "$OUT"
           docker compose -f deploy/local/compose.yaml down || true
           sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
