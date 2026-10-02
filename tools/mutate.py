@@ -28,9 +28,10 @@ test that outlasts its timeout is killed with its whole process group. Each muta
 file:line:operator:index, stable for a given source.
 
 The test command is a test binary inside the repository or the build tree, given only
-googletest flags (passed to it as the GTEST_* variables googletest reads in their place), or
-ctest with the options in CTEST_FLAGS, run in the build tree; anything else is refused with
-exit 2. --sample takes the mutants whose sha256 of seed and id sorts first.
+googletest flags (passed to it as the GTEST_* variables googletest reads in their place) other
+than --gtest_list_tests and --gtest_output, or ctest with the options in CTEST_FLAGS, run in
+the build tree; anything else, and a --files path outside the working directory, is refused
+with exit 2. --sample takes the mutants whose sha256 of seed and id sorts first.
 
 Mutants build with CCACHE_READONLY so they do not fill the cache; the restored source hits it.
 """
@@ -159,6 +160,10 @@ def test_command(cmd, build_dir):
         flag = GTEST_FLAG.fullmatch(arg)
         if not flag:
             refuse(f"{arg!r} is not a googletest flag")
+        # Listing runs no test, so every mutant would survive; an output file is a path
+        # written outside pathguard's reach.
+        if flag.group(1) in ("list_tests", "output"):
+            refuse(f"{arg!r} lists the tests or writes a file")
         # A flag without a value is a boolean one set, as googletest reads it.
         flags["GTEST_" + flag.group(1).upper()] = "1" if flag.group(2) is None else flag.group(2)
     return [str(program)], flags
@@ -183,6 +188,8 @@ def balanced_end(text, start):
 
 def mutants_for(path, root):
     resolved = inside(path)
+    if not resolved.is_relative_to(root):
+        refuse(f"--files {path!r} is not under the working directory {str(root)!r}")
     rel = str(resolved.relative_to(root))
     src = read_source(resolved).split("\n")
     masked = mask(src)
@@ -271,26 +278,38 @@ class Stopped(Exception):
     """SIGTERM or SIGHUP, raised so that the file is restored on the way out."""
 
 
+class Hold:
+    """While `on`, a stop signal is recorded in `signals` instead of raised. The caller sets it
+    as the first statement of a `finally`, where the interpreter runs no signal handler, so a
+    stop that arrives later, or one already pending, cannot land between there and the end of
+    the restore's write."""
+    on = False
+    signals = []
+
+
+def stop_exception(signum):
+    return KeyboardInterrupt() if signum == signal.SIGINT else Stopped(signal.Signals(signum).name)
+
+
 def on_stop_signal(signum, _frame):
-    raise Stopped(signal.Signals(signum).name)
+    if Hold.on:
+        Hold.signals.append(signum)
+        return
+    raise stop_exception(signum)
 
 
-def restore(path, text, stop_signals):
-    """Writes `text` back to `path` with the stop signals blocked, and returns the Stopped or
-    KeyboardInterrupt that interrupted it, if any, for the caller to raise once it is safe.
-
-    A signal handled before the block takes effect, or one already pending that fires as the
-    block call returns, raises wherever the interpreter is; the write is then retried until it
-    completes, so the source is never left mutated.
+def restore(in_progress):
+    """Writes the original text back to the file of `in_progress`, a (path, text) pair or None,
+    with Hold.on set by the caller, then releases the hold and returns the Stopped or
+    KeyboardInterrupt of the first stop signal held meanwhile, if any, for the caller to raise.
     """
-    pending = None
-    while True:
-        try:
-            signal.pthread_sigmask(signal.SIG_BLOCK, stop_signals)
-            write_source(path, text)
-            return pending
-        except (Stopped, KeyboardInterrupt) as e:
-            pending = e
+    try:
+        if in_progress:
+            write_source(*in_progress)
+    finally:
+        Hold.on = False
+    held, Hold.signals = Hold.signals, []
+    return stop_exception(held[0]) if held else None
 
 
 def kill_group(p):
@@ -393,9 +412,8 @@ def main():
         sys.exit(f"the unmutated tests do not pass:\n{out[-3000:]}")
     print(f"baseline: {base:.1f}s, {len(chosen)} mutants", file=sys.stderr, flush=True)
 
-    for signum in (signal.SIGTERM, signal.SIGHUP):
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, on_stop_signal)
-    stop_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
     out_f = open(inside(a.out), "a", encoding="utf-8") if a.out else None
     counts = {}
     started = time.monotonic()
@@ -420,10 +438,10 @@ def main():
                     failed = re.findall(r"\[  FAILED  \] (\S+)", tout)
                     tail = ",".join(sorted(set(failed))[:5]) if failed else tout[-300:]
             finally:
-                # No stop signal may cut the restore short.
-                pending = restore(m["file"], original, stop_signals)
+                # First, before any call: no stop signal may cut the restore short.
+                Hold.on = True
+                pending = restore(in_progress)
                 in_progress = None
-                signal.pthread_sigmask(signal.SIG_UNBLOCK, stop_signals)
                 if pending:
                     raise pending
             counts[status] = counts.get(status, 0) + 1
@@ -434,13 +452,12 @@ def main():
                 out_f.write(json.dumps(rec) + "\n")
                 out_f.flush()
     finally:
-        pending = restore(*in_progress, stop_signals) if in_progress else None
+        Hold.on = True
+        pending = restore(in_progress)
         if out_f:
             out_f.close()
-        # Unblocked before the rebuild: blocked, neither this process nor the children that
-        # inherit the mask would answer Ctrl-C or SIGTERM until --build-timeout. The source is
-        # restored, so a stop signal may now cut the rebuild short.
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, stop_signals)
+        # The source is restored and the hold released, so a stop signal may now cut the
+        # rebuild short.
         run(build, a.build_timeout)
         if pending:
             raise pending

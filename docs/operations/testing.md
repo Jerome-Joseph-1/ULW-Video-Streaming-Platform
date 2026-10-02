@@ -27,9 +27,11 @@ tools/mutate.py ... --only http/src/request_parser.cpp:202:del:0  # chosen mutan
 
 The test command after `--` is either a test binary inside the repository or the build tree,
 given only googletest flags (`--gtest_*`, passed to it as the `GTEST_*` environment variables
-googletest reads in their place), or `ctest`, run in the build tree, with options that take no
-value (`--output-on-failure`, `--stop-on-failure`, `--no-tests=error`, `-Q`, `-V` and the like);
-anything else is refused with exit 2.
+googletest reads in their place; `--gtest_list_tests` and `--gtest_output` are refused), or
+`ctest`, run in the build tree, with exactly these options, none of which takes a value:
+`--output-on-failure`, `--stop-on-failure`, `--no-tests=error`, `--schedule-random`, `-Q`,
+`--quiet`, `-V` and `--verbose`. Anything else is refused with exit 2, as is a `--files` path
+outside the directory it runs from.
 
 `--lines path:10-80,120-200` restricts a file to the functions under study, and `--sample`
 spreads the mutants over the files in proportion to how many each has; the sample is the mutants
