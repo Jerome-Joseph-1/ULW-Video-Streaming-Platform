@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## 2026-09-30: the cookie is accepted only from trusted pages (security fix)
 
-<!-- apps/gateway/src/connection.cpp (cookie_request_trusted), docs/adr/0073-the-cookie-is-believed-only-from-trusted-pages.md -->
+<!-- apps/gateway/src/connection.cpp (cookie_request_trusted), docs/adr/0078-the-cookie-is-believed-only-from-trusted-pages.md -->
 
 A breaking change to the upload, video and playback endpoints. It ships under the security-fix
 exception in [versioning.md](versioning.md) (item 3): no `/api/v2`, and no 30-day notice. It

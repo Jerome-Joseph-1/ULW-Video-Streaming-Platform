@@ -1,4 +1,4 @@
-# 0073. The gateway believes the auth cookie only from pages it trusts
+# 0078. The gateway believes the auth cookie only from pages it trusts
 
 Status: Accepted
 Date: 2026-09-30

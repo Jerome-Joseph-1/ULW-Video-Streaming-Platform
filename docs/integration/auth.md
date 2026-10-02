@@ -38,7 +38,7 @@ set to act as a user.
 
 ## Cookies and other sites
 
-<!-- apps/gateway/src/connection.cpp (cookie_request_trusted, authenticate_head), apps/gateway/src/config.cpp, http/src/origin.cpp, docs/adr/0073-the-cookie-is-believed-only-from-trusted-pages.md -->
+<!-- apps/gateway/src/connection.cpp (cookie_request_trusted, authenticate_head), apps/gateway/src/config.cpp, http/src/origin.cpp, docs/adr/0078-the-cookie-is-believed-only-from-trusted-pages.md -->
 
 A browser attaches the cookie to requests that any page makes, including pages on other sites:
 an `<img>`, a form, a `fetch` in `no-cors` mode. So the gateway accepts a cookie token only
