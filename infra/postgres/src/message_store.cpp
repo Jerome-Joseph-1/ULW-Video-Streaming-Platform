@@ -198,14 +198,16 @@ private:
 class Admits final : public Operation {
 public:
     Admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
-           MessageCallback<core::ports::Admission> done)
-        : room_(room), user_(user), asked_(asked), done_(std::move(done)) {}
+           core::ports::Recording recording, MessageCallback<core::ports::Admission> done)
+        : room_(room), user_(user), asked_(asked), recording_(recording), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
-        return Statement{
-            .sql = message_sql::kAdmits,
-            .params =
-                Params{}.add_uuid(room_.uuid()).add_text(user_.view()).add_text(kind_text(asked_))};
+        return Statement{.sql = message_sql::kAdmits,
+                         .params = Params{}
+                                       .add_uuid(room_.uuid())
+                                       .add_text(user_.view())
+                                       .add_text(kind_text(asked_))
+                                       .add_bool(recording_ == core::ports::Recording::Allowed)};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -219,9 +221,12 @@ public:
             done_(std::unexpected(MessageStoreError::Corrupt));
             return std::nullopt;
         }
-        // No kind: the join asked for the open kind of a room with none recorded.
+        // No kind: the join asked for the open kind of a room with none recorded, or for a closed
+        // kind it was not to record, which it is answered as.
         if (!text) {
-            done_(core::ports::Admission::NotLive);
+            done_(core::ports::admits_anyone(asked_)
+                      ? core::ports::Admission::NotLive
+                      : core::ports::admission(asked_, asked_, *member));
             return std::nullopt;
         }
         const auto kind = kind_of(*text);
@@ -241,6 +246,7 @@ private:
     core::RoomId room_;
     core::UserId user_;
     core::ports::RoomKind asked_;
+    core::ports::Recording recording_;
     MessageCallback<core::ports::Admission> done_;
 };
 
@@ -423,9 +429,9 @@ void PgMessageStore::members(const core::RoomId& room, std::optional<core::UserI
 }
 
 void PgMessageStore::admits(const core::RoomId& room, const core::UserId& user,
-                            core::ports::RoomKind asked,
+                            core::ports::RoomKind asked, core::ports::Recording recording,
                             MessageCallback<core::ports::Admission> done) {
-    impl_->pool().submit(std::make_unique<Admits>(room, user, asked, std::move(done)));
+    impl_->pool().submit(std::make_unique<Admits>(room, user, asked, recording, std::move(done)));
 }
 
 void PgMessageStore::record_live(const core::RoomId& room, MessageCallback<void> done) {

@@ -249,6 +249,13 @@ void GatewayUnderTest::set_plan(const infra::storage::FaultPlan& plan) {
     fake_->set_plan(plan);
 }
 
+void GatewayUnderTest::resume_store(const infra::storage::FaultPlan& plan) {
+    on_loop([&] {
+        fake_->set_plan(plan);
+        fake_->wake_writers();
+    });
+}
+
 void GatewayUnderTest::hold_fetches(bool held) {
     fake_->hold_fetches(held);
 }

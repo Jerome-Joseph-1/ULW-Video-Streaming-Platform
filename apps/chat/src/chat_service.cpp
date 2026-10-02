@@ -158,6 +158,19 @@ bool ChatService::admit_join(const core::UserId& user) {
     return it->second.take(now).has_value();
 }
 
+core::ports::Recording ChatService::may_record(const core::UserId& user) const noexcept {
+    const auto it = refusals_.find(user);
+    return it == refusals_.end() || it->second.available(clock_.now())
+               ? core::ports::Recording::Allowed
+               : core::ports::Recording::Skipped;
+}
+
+void ChatService::charge_refusal(const core::UserId& user) {
+    const core::MonoTime now = clock_.now();
+    refusals_.try_emplace(user, limits_.record_burst, limits_.record_interval, now)
+        .first->second.take(now);
+}
+
 void ChatService::join(ClientId id, const Join& join) {
     Client* c = find(id);
     if (c == nullptr) {
@@ -190,12 +203,18 @@ void ChatService::join(ClientId id, const Join& join) {
         // the call; a call that could not be made leaves nothing behind.
         c->rooms.push_back(join.room);
         c->admitting.push_back(join.room);
+        // Several joins may be asked before the first refusal is charged: a connection's rooms
+        // bound how far past the allowance that goes.
+        const core::ports::Recording recording = may_record(c->user);
+        if (recording == core::ports::Recording::Skipped) {
+            ++counters_.unrecorded_joins;
+        }
         try {
             messages_.admits(
-                join.room, c->user, join.kind,
-                [this, id,
-                 join](core::ports::MessageResult<core::ports::Admission> result) noexcept {
-                    admitted(id, join, result);
+                join.room, c->user, join.kind, recording,
+                [this, id, join,
+                 recording](core::ports::MessageResult<core::ports::Admission> result) noexcept {
+                    admitted(id, join, recording, result);
                 });
         } catch (...) {
             std::erase(c->admitting, join.room);
@@ -207,7 +226,7 @@ void ChatService::join(ClientId id, const Join& join) {
     enter(id, join);
 }
 
-void ChatService::admitted(ClientId id, const Join& join,
+void ChatService::admitted(ClientId id, const Join& join, core::ports::Recording recording,
                            core::ports::MessageResult<core::ports::Admission> result) noexcept {
     Client* c = find(id);
     if (c == nullptr) {
@@ -220,6 +239,16 @@ void ChatService::admitted(ClientId id, const Join& join,
     const bool unchecked = std::erase(c->unchecked, join.room) != 0;
     if (!result || *result != core::ports::Admission::Admitted) {
         std::erase(c->rooms, join.room);
+        // Only NotMember can have recorded a room: NotLive never records, a join that was not to
+        // record did not, and an error may not have reached the database.
+        if (recording == core::ports::Recording::Allowed && result &&
+            *result == core::ports::Admission::NotMember) {
+            try {
+                charge_refusal(c->user);
+            } catch (const std::bad_alloc&) {
+                ++counters_.allocation_failures;
+            }
+        }
         answer(*c->client, refusal(result), join.room);
         return;
     }
@@ -760,6 +789,7 @@ void ChatService::sweep() noexcept {
     // A full bucket is the same as none.
     std::erase_if(joins_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(sends_, [now](const auto& entry) { return entry.second.full(now); });
+    std::erase_if(refusals_, [now](const auto& entry) { return entry.second.full(now); });
 }
 
 void ChatService::leave(ClientId id, Client& c, const core::RoomId& room) noexcept {
@@ -894,9 +924,10 @@ void ChatService::ask_rechecks() noexcept {
         rechecks_queued_.erase(pair);
         ++rechecks_in_flight_;
         try {
-            // A recorded room, so the check records nothing: its kind was recorded by the join
-            // that let the client in.
+            // The check records nothing: the join that let the client in recorded the room's
+            // kind, and a room the reaper has since forgotten (ADR-0075) stays forgotten.
             messages_.admits(pair.first, pair.second, core::ports::RoomKind::GroupChat,
+                             core::ports::Recording::Skipped,
                              [this, pair, generation = recheck_generation_](
                                  core::ports::MessageResult<core::ports::Admission> r) noexcept {
                                  rechecked(pair, generation, r);

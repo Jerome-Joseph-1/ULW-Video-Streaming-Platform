@@ -86,13 +86,13 @@ struct Limits {
     core::Millis header_timeout{10'000};
     core::Millis body_idle_timeout{30'000};
     // A chunk body must average at least this rate over each window the gateway spends reading
-    // it, or it is answered 408; time the store holds the body up does not count. Every upload
-    // part holds one of the store's 64 connections until its last byte, so without a floor a
-    // few dozen clients sending a byte now and then would hold them all for the six-hour
-    // backstop. At 8 KiB/s an 8 MiB part lets its connection go within 8 MiB / 8 KiB/s =
-    // 1024 s. The floor is half of what each of a user's 3 concurrent uploads gets from a
-    // 384 kbit/s (UMTS) uplink: 48,000 B/s / 3 = 16,000 B/s, halved for a link running at
-    // half its nominal rate.
+    // it, or it is answered 408; time the gateway is not reading, waiting on the store or the
+    // catalog, does not count. Every upload part holds one of the store's connections (as many
+    // as max_upload_slots) until its last byte, so without a floor clients sending a byte now
+    // and then would hold them all for the six-hour backstop. At 8 KiB/s an 8 MiB part lets its
+    // connection go within 8 MiB / 8 KiB/s = 1024 s. The floor is half of what each of a user's 3
+    // concurrent uploads gets from a 384 kbit/s (UMTS) uplink: 48,000 B/s / 3 = 16,000 B/s, halved
+    // for a link running at half its nominal rate.
     std::uint64_t min_body_bytes_per_second = std::uint64_t{8} * 1024;
     // Long enough to average out a mobile link's stalls and the slow start after each one.
     core::Millis body_rate_window{30'000};

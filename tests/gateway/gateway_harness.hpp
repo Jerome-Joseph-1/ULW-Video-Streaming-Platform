@@ -71,6 +71,9 @@ public:
     // Thread-safe reads of committed objects.
     [[nodiscard]] core::ports::IObjectReader& reader() { return *reader_; }
     void set_plan(const infra::storage::FaultPlan& plan);
+    // Sets the plan and tells every writer the store refused to try again: a store that
+    // takes bytes again after holding a body up. Returns once the plan is in place.
+    void resume_store(const infra::storage::FaultPlan& plan);
     // Fake backend only: store reads wait while held (FakeStore::hold_fetches).
     void hold_fetches(bool held);
     [[nodiscard]] std::size_t held_fetches() const;

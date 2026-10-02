@@ -26,6 +26,7 @@ Upgrade refusals (the connection is closed after the response, and the body is e
 | `426` with `Upgrade: websocket` | `GET /rt` that is not an upgrade, or a WebSocket version other than 13 |
 | `401` | No usable token, or the token fails verification |
 | `403` | Cookie token without an allowed `Origin` |
+| `429` with `Retry-After` | Behind a trusted proxy, the forwarded address already has `ULW_MAX_CONNECTIONS_PER_IP` (20) upgrades waiting for an answer (`Retry-After: 1`); or the user already has `ULW_MAX_SESSIONS_PER_USER` (16) sockets open on this node (`Retry-After: 5`). Retry after that long, or close a socket you no longer use |
 | `404` | Any path other than `/rt`, `/healthz`, `/readyz`, `/metrics`, or any method other than `GET` |
 | `503` | The key set cannot be fetched; retry |
 
@@ -100,15 +101,22 @@ delivered, and the `id` stays with the first message. Send the new message under
 
 ### Member lists
 
-<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms) -->
+<!-- apps/chat/src/chat_service.cpp (join, admitted), infra/postgres/src/message_sql.hpp (kAdmits, kRecordLive), migrations/0005_chat_messages.sql (chat_members, chat_rooms), migrations/0010_chat_rooms_recorded_at.sql, infra/postgres/src/upload_reaper.cpp (kForgetUnused) -->
 
-Who may join a room depends on its kind, which is recorded once and never changes:
+Who may join a room depends on its kind, which is recorded once and never changes while the
+room is in use (a room nothing used may be forgotten, below):
 
 - **Direct and group chats** (`"kind":"direct"` or `"group"`, the default) admit only their
   members. Anyone else's `join` is refused with `not_member`, so they can neither send to the
   room nor read its history. A direct or group chat with no members admits nobody. The first
   join of a room with no kind recorded records the kind it names; so does listing its first
-  member (as a group chat).
+  member (as a group chat). Such a join is refused with `not_member`, since the room lists
+  nobody yet. Each user's refused joins record at most 20 rooms at once and then one a minute,
+  per chat node; past that a join is refused the same and records nothing. A direct or group
+  chat recorded more than a day ago and never used (no members, never on the room plane) is
+  forgotten, at the latest within a few reaper passes; the next join of it records it again, as
+  the kind that join names, which may be the other closed kind. A stream's live chat is never
+  forgotten.
 - **A stream's live chat** admits anyone. Only the server opens one, and only a stream's room
   can be one; a client cannot. It is joined by the stream's name (see
   [A stream's live chat](#a-streams-live-chat)), and refused with `not_live` until it is open.
@@ -182,6 +190,8 @@ list never said no: join again.
 | Message size | 64 KiB per message (after reassembly) | Close `1009` |
 | Binary frames | Not accepted | Close `1003` |
 | Control frames | 8 per read; token bucket of 20, refilling 10/s | Close `1008` |
+| Connections per address | 20 open at once from one address (IPv6: one /64) connecting directly, and 80 from all the /64s of one IPv6 /48 together; 10 new ones a second, 10 saved | Connection reset before the upgrade is read; back off and reconnect |
+| Sockets per user | 16 open at once on a node | Upgrade answered `429`, `Retry-After: 5` |
 | Rooms per connection | 64 | `error` `too_many_rooms` |
 | New-room joins per user | Burst 64, then 1/s, across all the user's connections on a node | `error` `busy` |
 | Sends | Burst 10, then 2/s, per user across the user's connections on a node | `error` `rate_limited` with `retry_after_ms` |

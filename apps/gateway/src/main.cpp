@@ -110,8 +110,9 @@ struct Services {
     std::unique_ptr<net::ITransportFactory> transports;
     std::unique_ptr<net::OffloadPool> pool;
     std::unique_ptr<infra::curl::Multi> multi;
-    // Key set fetches get a multi of their own: the store's is capped at 64 connections, and
-    // slow uploads holding all of them would otherwise queue a key refresh behind them.
+    // Key set fetches get a multi of their own: the store's is capped at max_upload_slots
+    // connections, and slow uploads holding all of them would otherwise queue a key refresh
+    // behind them.
     std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<infra::s3util::EnvCredentialProvider> credentials;
     std::unique_ptr<core::ports::IIngestStore> store;

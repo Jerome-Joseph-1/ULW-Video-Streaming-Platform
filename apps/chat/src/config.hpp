@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 #include "core/util/time.hpp"
+#include "net/ip_address.hpp"
 #include "net/reactor_factory.hpp"
 
 #include <cstdint>
@@ -13,6 +14,18 @@
 #include <vector>
 
 namespace chat {
+
+// ADR-0076's per-client limits, each unset meaning the service's default (chat::Limits).
+struct ClientLimits {
+    std::optional<std::size_t> max_connections_per_ip;
+    // Unset: four times the per-address cap.
+    std::optional<std::size_t> max_connections_per_ip_block;
+    std::optional<std::uint32_t> new_connections_per_ip_per_second;
+    std::optional<std::size_t> max_sessions_per_user;
+    // ULW_TRUSTED_PROXIES and ULW_TRUSTED_PROXY_HOPS, as the gateway's.
+    std::vector<net::IpNetwork> trusted_proxies;
+    std::size_t trusted_proxy_hops = 1;
+};
 
 struct Config {
     core::NodeId node;
@@ -41,6 +54,7 @@ struct Config {
     // ULW_PRESENCE_GRACE_MS: how long a user whose last connection closed still shows online.
     // Unset: PresenceLimits::grace.
     std::optional<core::Millis> presence_grace;
+    ClientLimits client_limits;
     // Who to become when started as root.
     std::string run_as_user;
     // Stay root when started as root with no run_as_user; otherwise that is refused.
@@ -58,5 +72,10 @@ using EnvLookup = std::function<std::optional<std::string>(std::string_view name
 // Everything comes from the environment. The node's name is ULW_NODE_ID, or else HOSTNAME,
 // which Kubernetes sets to the pod's name.
 [[nodiscard]] std::expected<Config, ConfigError> load_config(const EnvLookup& env);
+
+// The prefix lengths of the trusted proxy blocks wider than an IPv4 /8 or an IPv6 /32, as the
+// gateway warns of: rarely one's own proxies, and they let many peers name any client. Started
+// with, and logged as a warning.
+[[nodiscard]] std::vector<unsigned> wide_trusted_proxies(const ClientLimits& limits);
 
 } // namespace chat

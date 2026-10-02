@@ -5,12 +5,25 @@
 #include "log.hpp"
 #include "session.hpp"
 
+#include <algorithm>
+#include <array>
+#include <bit>
 #include <format>
 #include <utility>
 
 namespace chat {
 
 namespace {
+
+// Addresses of the last second or so: a direct peer's bucket is full again that long after its
+// last connection, and a full bucket is worth nothing (ADR-0052's arithmetic).
+constexpr std::size_t kClientEntries = 16'384;
+
+std::uint64_t seed(core::ports::IRandom& random) {
+    std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+    random.fill(bytes);
+    return std::bit_cast<std::uint64_t>(bytes);
+}
 
 std::string_view write_name(rt::OwnerWrite write) noexcept {
     switch (write) {
@@ -66,9 +79,15 @@ ServiceLimits service_limits(const Limits& limits) noexcept {
 } // namespace
 
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
-    : deps_(deps), access_(std::move(access)), limits_(limits), rooms_(deps.router),
+    : deps_(deps), access_(std::move(access)), limits_(std::move(limits)), rooms_(deps.router),
       chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
       presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
+      // One more than the connections that can pin an entry, so a new client always finds one.
+      clients_(std::max(kClientEntries, limits_.max_connections + 1),
+               http::AddressHash{http::SeededHash(seed(deps_.random))}),
+      users_(limits_.max_connections + 1, http::ViewHash{http::SeededHash(seed(deps_.random))}),
+      // A block entry holds nothing but its count, so only open connections need one.
+      blocks_(limits_.max_connections + 1, http::AddressHash{http::SeededHash(seed(deps_.random))}),
       sessions_(limits_.max_connections) {}
 
 ChatServer::~ChatServer() {
@@ -84,25 +103,128 @@ void ChatServer::on_accept(os::UniqueFd conn) noexcept {
     if (draining_) {
         return;
     }
+    // Gone already, or not an IP socket: nothing to serve either way.
+    const auto peer = net::peer_address(conn.get());
+    if (!peer) {
+        ++counters_.rejected_socket;
+        return;
+    }
+    accept_from(std::move(conn), *peer);
+}
+
+void ChatServer::accept_from(os::UniqueFd conn, const net::IpAddress& peer) noexcept {
+    // A trusted proxy carries many clients; they are told apart at their upgrade requests.
+    std::optional<PeerHold> hold;
+    if (!trusted_proxy(peer)) {
+        hold = admit_peer(peer);
+        if (!hold) {
+            // Before a byte is read: no parser, no token check, and no TIME_WAIT (ADR-0052).
+            net::reset_connection(std::move(conn));
+            return;
+        }
+    }
+    // As the gateway's: a socket that refuses its options, or that the reactor will not take,
+    // is the socket's fault; a full slab is the node's.
+    const auto refuse = [&](std::uint64_t& counter) {
+        ++counter;
+        if (hold) {
+            release_peer(*hold);
+        }
+    };
     if (!net::tune_connection(conn.get()) || !net::clear_user_timeout(conn.get()) ||
         !net::cap_send_buffer(conn.get(), limits_.socket_send_buffer)) {
-        ++counters_.connections_rejected;
+        refuse(counters_.rejected_socket);
         return;
     }
     const auto handle = sessions_.emplace(*this);
     if (!handle) {
-        ++counters_.connections_rejected;
+        refuse(counters_.rejected_capacity);
         return;
     }
     Session* s = sessions_.get(*handle);
     auto id = deps_.reactor.attach(std::move(conn), *s);
     if (!id) {
-        ++counters_.connections_rejected;
+        refuse(counters_.rejected_socket);
         sessions_.retire(*handle);
         return;
     }
     ++counters_.connections_accepted;
-    s->start(*id);
+    s->start(*id, peer, hold);
+}
+
+bool ChatServer::trusted_proxy(const net::IpAddress& peer) const noexcept {
+    return http::is_trusted_proxy(limits_.trusted_proxies, peer);
+}
+
+std::optional<ChatServer::PeerHold> ChatServer::admit_peer(const net::IpAddress& peer) noexcept {
+    const core::MonoTime now = deps_.reactor.now();
+    const auto slot = clients_.acquire(http::client_key(peer), [&] {
+        return ClientEntry{.new_connections =
+                               TokenBucket(limits_.new_connections_per_ip_per_second,
+                                           limits_.new_connections_per_ip_per_second, now)};
+    });
+    if (!slot || clients_.pins(*slot) >= limits_.max_connections_per_ip) {
+        ++counters_.rejected_ip_connections;
+        return std::nullopt;
+    }
+    // Before the rate is charged: a connection refused for its block costs its /64 nothing.
+    std::optional<Hold> block;
+    if (const auto key = http::client_block(peer)) {
+        block = blocks_.acquire(*key, [] { return BlockEntry{}; });
+        if (!block || blocks_.pins(*block) >= limits_.max_connections_per_ip_block) {
+            ++counters_.rejected_ip_block;
+            return std::nullopt;
+        }
+    }
+    if (!clients_.at(*slot).new_connections.take(now)) {
+        ++counters_.rejected_ip_rate;
+        return std::nullopt;
+    }
+    clients_.pin(*slot);
+    if (block) {
+        blocks_.pin(*block);
+    }
+    return PeerHold{.address = *slot, .block = block};
+}
+
+std::optional<ChatServer::Hold> ChatServer::hold_client(const net::IpAddress& client) noexcept {
+    const core::MonoTime now = deps_.reactor.now();
+    const auto slot = clients_.acquire(http::client_key(client), [&] {
+        return ClientEntry{.new_connections =
+                               TokenBucket(limits_.new_connections_per_ip_per_second,
+                                           limits_.new_connections_per_ip_per_second, now)};
+    });
+    if (!slot || clients_.pins(*slot) >= limits_.max_connections_per_ip) {
+        ++counters_.limited_ip_upgrades;
+        return std::nullopt;
+    }
+    clients_.pin(*slot);
+    return slot;
+}
+
+void ChatServer::release_client(Hold hold) noexcept {
+    clients_.unpin(hold);
+}
+
+void ChatServer::release_peer(PeerHold hold) noexcept {
+    clients_.unpin(hold.address);
+    if (hold.block) {
+        blocks_.unpin(*hold.block);
+    }
+}
+
+std::optional<ChatServer::Hold> ChatServer::hold_user(const core::UserId& user) noexcept {
+    const auto slot = users_.acquire(user, [] { return UserEntry{}; });
+    if (!slot || users_.pins(*slot) >= limits_.max_sessions_per_user) {
+        ++counters_.limited_user_sessions;
+        return std::nullopt;
+    }
+    users_.pin(*slot);
+    return slot;
+}
+
+void ChatServer::release_user(Hold hold) noexcept {
+    users_.unpin(hold);
 }
 
 void ChatServer::on_signal(net::Signal signal) noexcept {
@@ -161,57 +283,71 @@ std::string ChatServer::render_metrics() const {
     const rt::RouterCounters& router = deps_.router.counters();
     const ServiceCounters& chat = chat_.counters();
     const PresenceCounters& presence = presence_.counters();
-    return std::format("connections_accepted_total {}\n"
-                       "connections_rejected_total{{reason=\"capacity\"}} {}\n"
-                       "connections_current {}\n"
-                       "websocket_upgrades_total {}\n"
-                       "auth_failures_total {}\n"
-                       "origin_rejections_total {}\n"
-                       "messages_received_total {}\n"
-                       "messages_delivered_total {}\n"
-                       "messages_rate_limited_total {}\n"
-                       "messages_deduplicated_total {}\n"
-                       "lossy_drops_total {}\n"
-                       "messages_replayed_total {}\n"
-                       "history_messages_total {}\n"
-                       "messages_kept_bytes {}\n"
-                       "protocol_errors_total {}\n"
-                       "control_floods_total {}\n"
-                       "slow_consumers_total {}\n"
-                       "stalled_readers_total {}\n"
-                       "allocation_failures_total {}\n"
-                       "rooms_active {}\n"
-                       "rooms_joined {}\n"
-                       "room_reassignments_total {}\n"
-                       "fenced_writes_total {}\n"
-                       "forwards_total {}\n"
-                       "forward_timeouts_total {}\n"
-                       "peers_lost_total {}\n"
-                       "peers_refused_total {}\n"
-                       "slow_peers_total {}\n"
-                       "presence_rooms {}\n"
-                       "presence_events_sent_total {}\n"
-                       "presence_events_received_total {}\n"
-                       "presence_notifications_total {}\n"
-                       "presence_expired_total {}\n"
-                       "presence_gaps_total {}\n"
-                       "token_expiries_total {}\n"
-                       "member_removals_total {}\n"
-                       "member_check_failures_total {}\n"
-                       "jwks_keys_expired {}\n",
-                       c.connections_accepted, c.connections_rejected, sessions_.size(), c.upgrades,
-                       c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
-                       chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
-                       chat.history_messages, chat_.buffered_bytes(), c.protocol_errors,
-                       c.control_floods, c.slow_consumers, c.stalled_readers,
-                       c.allocation_failures + router.allocation_failures +
-                           chat.allocation_failures + presence.allocation_failures,
-                       deps_.router.rooms_owned(), deps_.router.rooms_joined(),
-                       registry.reassignments, registry.fenced_writes, router.forwarded,
-                       router.forward_timeouts, router.peers_lost, router.peers_refused,
-                       router.slow_peers, presence_.rooms(), presence.sent, presence.received,
-                       presence.notified, presence.expired, presence.gaps, c.token_expiries,
-                       chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0);
+    return std::format(
+        "connections_accepted_total {}\n"
+        "connections_rejected_total{{reason=\"capacity\"}} {}\n"
+        "connections_rejected_total{{reason=\"socket\"}} {}\n"
+        "connections_rejected_total{{reason=\"ip_connections\"}} {}\n"
+        "connections_rejected_total{{reason=\"ip_block\"}} {}\n"
+        "connections_rejected_total{{reason=\"ip_rate\"}} {}\n"
+        "upgrades_limited_total{{limit=\"ip\"}} {}\n"
+        "upgrades_limited_total{{limit=\"user_sessions\"}} {}\n"
+        "rate_limit_entries{{table=\"client\"}} {}\n"
+        "rate_limit_entries{{table=\"user\"}} {}\n"
+        "rate_limit_entries{{table=\"ip_block\"}} {}\n"
+        "rate_limit_evictions_total{{table=\"client\"}} {}\n"
+        "connections_current {}\n"
+        "websocket_upgrades_total {}\n"
+        "auth_failures_total {}\n"
+        "origin_rejections_total {}\n"
+        "messages_received_total {}\n"
+        "messages_delivered_total {}\n"
+        "messages_rate_limited_total {}\n"
+        "messages_deduplicated_total {}\n"
+        "lossy_drops_total {}\n"
+        "messages_replayed_total {}\n"
+        "history_messages_total {}\n"
+        "messages_kept_bytes {}\n"
+        "protocol_errors_total {}\n"
+        "control_floods_total {}\n"
+        "slow_consumers_total {}\n"
+        "stalled_readers_total {}\n"
+        "allocation_failures_total {}\n"
+        "rooms_active {}\n"
+        "rooms_joined {}\n"
+        "room_reassignments_total {}\n"
+        "fenced_writes_total {}\n"
+        "forwards_total {}\n"
+        "forward_timeouts_total {}\n"
+        "peers_lost_total {}\n"
+        "peers_refused_total {}\n"
+        "slow_peers_total {}\n"
+        "presence_rooms {}\n"
+        "presence_events_sent_total {}\n"
+        "presence_events_received_total {}\n"
+        "presence_notifications_total {}\n"
+        "presence_expired_total {}\n"
+        "presence_gaps_total {}\n"
+        "token_expiries_total {}\n"
+        "member_removals_total {}\n"
+        "member_check_failures_total {}\n"
+        "jwks_keys_expired {}\n"
+        "unrecorded_joins_total {}\n",
+        c.connections_accepted, c.rejected_capacity, c.rejected_socket, c.rejected_ip_connections,
+        c.rejected_ip_block, c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions,
+        clients_.size(), users_.size(), blocks_.size(), clients_.evictions(), sessions_.size(),
+        c.upgrades, c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
+        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
+        chat.history_messages, chat_.buffered_bytes(), c.protocol_errors, c.control_floods,
+        c.slow_consumers, c.stalled_readers,
+        c.allocation_failures + router.allocation_failures + chat.allocation_failures +
+            presence.allocation_failures,
+        deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,
+        registry.fenced_writes, router.forwarded, router.forward_timeouts, router.peers_lost,
+        router.peers_refused, router.slow_peers, presence_.rooms(), presence.sent,
+        presence.received, presence.notified, presence.expired, presence.gaps, c.token_expiries,
+        chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0,
+        chat.unrecorded_joins);
 }
 
 } // namespace chat

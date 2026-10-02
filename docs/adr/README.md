@@ -48,7 +48,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0042](0042-soak-flatness-from-the-memory-limit-and-requests-in-flight.md) | Soak flatness judged per unit of work against the memory limit | Accepted |
 | [0043](0043-chat-service-policy-between-edge-and-rooms.md) | The chat service: policy between the client edge and the room plane | Accepted |
 | [0044](0044-openmls-behind-a-narrow-c-api.md) | OpenMLS behind a narrow C API, pinned by Cargo.lock | Accepted |
-| [0045](0045-one-store-connection-per-admitted-upload.md) | One store connection per admitted upload, and a held body is the store's to end | Accepted |
+| [0045](0045-one-store-connection-per-admitted-upload.md) | One store connection per admitted upload, and a held body is the store's to end | Accepted, rate window amended by 0077 |
 | [0046](0046-live-media-reaches-the-packager-over-srt.md) | Live media reaches the packager over SRT, which it terminates itself | Accepted, probe window amended by 0057 |
 | [0047](0047-live-playlist-window-and-restart.md) | The live playlist is a window the packager owns, and it continues across a restart | Accepted |
 | [0048](0048-seccomp-allowlist-for-the-ffmpeg-child.md) | The ffmpeg child runs under a syscall allowlist | Accepted |
@@ -57,7 +57,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
 | [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted |
 | [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted |
-| [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted |
+| [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted, amended by 0075 |
 | [0055](0055-a-live-recording-is-remuxed-from-the-stored-segments.md) | A live recording is remuxed from its stored segments into one object, and queued once per stream | Accepted |
 | [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
 | [0057](0057-the-probe-window-follows-the-configuration.md) | The packager's probe window follows its configuration | Accepted |
@@ -77,3 +77,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0071](0071-slow-readers-are-not-reset-by-the-kernel.md) | Slow readers are not reset by the kernel: the gateway and the node channel bound their own peers | Accepted |
 | [0072](0072-security-analysis-in-ci.md) | Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check | Accepted |
 | [0073](0073-a-chat-socket-ends-with-its-token-and-its-membership.md) | A chat socket ends with its token, and a room with its membership | Accepted |
+| [0074](0074-ffmpeg-from-debian-security.md) | The worker's ffmpeg comes from Debian 13's security archive | Accepted |
+| [0075](0075-unused-chat-room-records-are-forgotten.md) | A chat room's record that nothing used is forgotten | Accepted |
+| [0076](0076-chat-per-client-connection-limits.md) | chat_server holds each address and each user to a share of its connections | Accepted |
+| [0077](0077-the-body-rate-window-skips-a-store-hold.md) | The body rate window skips a store's hold and keeps the bytes it counted | Accepted |
