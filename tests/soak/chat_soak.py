@@ -1141,7 +1141,13 @@ def main():
     stack.prepare(users)
     stack.grant(rooms.pool + [rooms.firehose, rooms.probe], users)
     stack.grant(rooms.fresh, [u for u in users if u.startswith("v")])
-    stack.start()
+    # Whatever start() launched before it failed is stopped: the soak may run as root, where
+    # nothing else would stop it.
+    try:
+        stack.start()
+    except BaseException:
+        stack.stop()
+        raise
     stack.detect("probe", "hose", rooms.probe)
     pids = stack.pids()
     (out / "pids.json").write_text(json.dumps({**pids, "soak": os.getpid()}))

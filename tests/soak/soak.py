@@ -853,7 +853,13 @@ def main():
                     "testsrc2=size=320x240:rate=25", "-f", "lavfi", "-i", "sine=frequency=440",
                     "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
                     "-shortest", clip], check=True)
-    stack.start()
+    # Whatever start() launched before it failed is stopped: the soak may run as root, where
+    # nothing else would stop it.
+    try:
+        stack.start()
+    except BaseException:
+        stack.stop()
+        raise
     pids = stack.pids()
     (out / "pids.json").write_text(json.dumps({**pids, "soak": os.getpid()}))
     log(f"started: gateway pid {pids['gateway']}, worker pid {pids['worker']}, "
