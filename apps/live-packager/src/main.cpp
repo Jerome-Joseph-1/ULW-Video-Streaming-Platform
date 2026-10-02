@@ -50,6 +50,25 @@ int fail(std::string_view what, std::string_view why) {
     return EXIT_FAILURE;
 }
 
+// Empties this stream's scratch directory and makes its media directory, or says why not.
+std::optional<std::string> clear_scratch(const fs::path& scratch) {
+    // The scratch root is the deployment's to make, owned by the packager's user and 0700. Made
+    // here, it would be made by a process that cannot write to /var/cache, or in a directory
+    // where someone else could have made it first.
+    std::error_code ec;
+    if (const fs::path root = scratch.parent_path(); !fs::is_directory(root, ec)) {
+        return root.string() + " is not a directory: make it, owned by the user the packager "
+                               "runs as with mode 0700, or name another";
+    }
+    // What an earlier run left is not needed: the store has the stream's state.
+    fs::remove_all(scratch, ec);
+    fs::create_directories(scratch / "media", ec);
+    if (ec) {
+        return ec.message();
+    }
+    return std::nullopt;
+}
+
 std::string_view to_string(live::StorageBackend backend) noexcept {
     switch (backend) {
     case live::StorageBackend::R2:
@@ -226,14 +245,11 @@ int run() {
         return fail("block signals", std::generic_category().message(rc));
     }
 
-    // What an earlier run left is not needed: the store has the stream's state.
-    std::error_code ec;
-    fs::remove_all(config->scratch, ec);
-    const fs::path media_dir = config->scratch / "media";
-    fs::create_directories(media_dir, ec);
-    if (ec) {
-        return fail("ULW_SCRATCH_DIR", ec.message());
+    if (const auto refused = clear_scratch(config->scratch)) {
+        return fail("ULW_SCRATCH_DIR", *refused);
     }
+    const fs::path media_dir = config->scratch / "media";
+    std::error_code ec;
     fs::path sandbox = config->sandbox;
     if (sandbox.empty()) {
         sandbox = fs::read_symlink("/proc/self/exe", ec).parent_path() / "ulw_sandbox";

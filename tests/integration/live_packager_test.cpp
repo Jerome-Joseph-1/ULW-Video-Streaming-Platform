@@ -91,7 +91,9 @@ protected:
 
     void TearDown() override { ulw::test::remove_objects(minio_, "live/" + stream_ + "/"); }
 
-    std::unique_ptr<ChildProcess> start_packager(const PackagerOptions& options = {}) {
+    // `scratch` is ULW_SCRATCH_DIR; a fresh directory when empty.
+    std::unique_ptr<ChildProcess> start_packager(const PackagerOptions& options = {},
+                                                 const std::string& scratch = {}) {
         scratch_dirs_.push_back(std::make_unique<TempDir>("ulw-live-scratch"));
         auto packager = ChildProcess::start(
             {ULW_LIVE_PACKAGER_BIN},
@@ -101,7 +103,8 @@ protected:
              "ULW_LIVE_SEGMENT_SECONDS=" + std::to_string(options.segment), "ULW_STORAGE=minio",
              "ULW_S3_ENDPOINT=" + options.endpoint, "ULW_BUCKET=" + minio_.bucket,
              "ULW_S3_ACCESS_KEY_ID=" + kAccessKey, "ULW_S3_SECRET_ACCESS_KEY=" + kSecretKey,
-             "ULW_SCRATCH_DIR=" + scratch_dirs_.back()->path().string(),
+             "ULW_SCRATCH_DIR=" +
+                 (scratch.empty() ? scratch_dirs_.back()->path().string() : scratch),
              std::string("ULW_SANDBOX_BIN=") + ULW_SANDBOX_BIN});
         EXPECT_NE(packager, nullptr);
         return packager;
@@ -454,6 +457,20 @@ TEST_F(LivePackagerTest, SigusrEndsTheStreamWithEndlistAndExitsCleanly) {
     EXPECT_TRUE(ended_playlist->ended);
     EXPECT_GE(ended_playlist->segments.size(), 2U);
     EXPECT_NE(packager->output().find("stream ended"), std::string::npos);
+}
+
+// The scratch root is the deployment's to make (the operations contract); the packager does
+// not make it, and names what is missing.
+TEST_F(LivePackagerTest, AMissingScratchRootStopsTheStartAndIsNamed) {
+    const TempDir parent("ulw-live-scratch");
+    const std::string missing = (parent.path() / "absent").string();
+    auto packager = start_packager({}, missing);
+    ASSERT_NE(packager, nullptr);
+    EXPECT_EQ(packager->wait_exit(kExitPatience), 1) << packager->output();
+    EXPECT_NE(packager->output().find("ULW_SCRATCH_DIR: " + missing + " is not a directory"),
+              std::string::npos)
+        << packager->output();
+    EXPECT_FALSE(std::filesystem::exists(missing));
 }
 
 TEST_F(LivePackagerTest, SigtermBeforeAnyPublisherLeavesNothingToEnd) {
