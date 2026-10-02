@@ -22,11 +22,13 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <filesystem>
 #include <format>
 #include <future>
 #include <gtest/gtest.h>
@@ -573,6 +575,37 @@ TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
     EXPECT_EQ(alice->close_status(seconds(10)), 1003);
 }
 
+// A valid token does not carry a request that is not a WebSocket handshake.
+TEST_P(ChatSessionTest, AnUpgradeThatBreaksTheHandshakeIsRefusedWhateverItsToken) {
+    const std::string token = "Authorization: Bearer user.alice\r\n";
+    // WsClient sends one of each already; a second is a handshake error, even one that is
+    // well formed on its own (16 zero bytes in base64).
+    const std::string second_key = "Sec-WebSocket-Key: " + std::string(22, 'A') + "==\r\n";
+    EXPECT_EQ(refusal(token + second_key), "HTTP/1.1 400 Bad Request");
+    EXPECT_EQ(refusal(token + "Sec-WebSocket-Version: 13\r\n"), "HTTP/1.1 426 Upgrade Required");
+    // Nothing here takes a body.
+    EXPECT_EQ(refusal(token + "Content-Length: 5\r\n"), "HTTP/1.1 400 Bad Request");
+    EXPECT_TRUE(open_as("alice"));
+}
+
+// RFC 6455 section 5: a client's frame unmasked, with an opcode no one defined, or with a
+// reserved bit no extension negotiated, fails the connection with 1002, and the node counts it.
+TEST_P(ChatSessionTest, AFrameThatBreaksTheProtocolClosesWith1002AndIsCounted) {
+    const std::vector<std::vector<unsigned char>> frames{
+        {0x81, 0x02, 'h', 'i'},
+        {0x83, 0x80, 0x01, 0x02, 0x03, 0x04},
+        {0xC1, 0x80, 0x01, 0x02, 0x03, 0x04},
+    };
+    for (const auto& frame : frames) {
+        auto alice = open_as("alice");
+        ASSERT_TRUE(alice);
+        ASSERT_TRUE(alice->send_raw(std::as_bytes(std::span(frame))));
+        EXPECT_EQ(alice->close_status(seconds(10)), 1002) << static_cast<int>(frame[0]);
+    }
+    const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
+    EXPECT_NE(metrics.body.find("protocol_errors_total 3\n"), std::string::npos) << metrics.body;
+}
+
 TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryConnection) {
     node_.reset();
     node_ = std::make_unique<Node>(GetParam(),
@@ -839,6 +872,46 @@ TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosed
     EXPECT_EQ(metric(node_->port(), "stalled_readers_total"), 1U);
     std::cout << "the stopped viewer was closed after " << sent
               << " messages; the slow one got all it was owed up to seq " << last << "\n";
+}
+
+// The node's own ends of its accepted client connections: sockets in this process whose local
+// port is the node's client port and which have a peer. The listener has none.
+std::vector<int> accepted_ends(std::uint16_t port) {
+    std::vector<int> out;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+        const auto fd = core::parse_integer<int>(entry.path().filename().string());
+        if (!fd) {
+            continue;
+        }
+        sockaddr_in local{};
+        sockaddr_in peer{};
+        socklen_t local_len = sizeof local;
+        socklen_t peer_len = sizeof peer;
+        // Both take every address family through the generic sockaddr header.
+        // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+        if (::getsockname(*fd, reinterpret_cast<sockaddr*>(&local), &local_len) == 0 &&
+            local.sin_family == AF_INET && ntohs(local.sin_port) == port &&
+            ::getpeername(*fd, reinterpret_cast<sockaddr*>(&peer), &peer_len) == 0) {
+            out.push_back(*fd);
+        }
+        // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+    }
+    return out;
+}
+
+// Linux counts a shut receive window against TCP_USER_TIMEOUT from the first window probe, so a
+// viewer that reads, but frees its window a little at a time, would be ended by the kernel as if
+// it had vanished. The session bounds a stall itself (the test above); the kernel's timer stays
+// off on a client's connection.
+TEST_P(ChatSessionTest, AClientConnectionIsNotEndedByTheKernelsUserTimeout) {
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    const auto ends = accepted_ends(node_->port());
+    ASSERT_EQ(ends.size(), 1U);
+    int timeout = -1;
+    socklen_t len = sizeof timeout;
+    ASSERT_EQ(::getsockopt(ends.front(), IPPROTO_TCP, TCP_USER_TIMEOUT, &timeout, &len), 0);
+    EXPECT_EQ(timeout, 0);
 }
 
 TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {

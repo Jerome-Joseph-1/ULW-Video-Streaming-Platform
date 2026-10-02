@@ -572,6 +572,41 @@ TEST_F(RecorderTest, AFeedThatFailsStopsTheJoiningStageRatherThanEndingItsInput)
     EXPECT_TRUE(catalog.rows.empty());
 }
 
+TEST_F(RecorderTest, AStoredPlaylistTheStoreCannotReadLeavesTheStreamForTheNextRun) {
+    run_of(0, 0, 3);
+    playlist(3, 2, [](std::uint64_t) { return 0U; });
+    store.download_error_for = "index.m3u8";
+    const auto done = record();
+    EXPECT_EQ(done.outcome, RecordOutcome::Failed) << done.detail;
+    EXPECT_NE(done.detail.find("playlist unreadable"), std::string::npos) << done.detail;
+    EXPECT_TRUE(copier.jobs.empty());
+    EXPECT_TRUE(catalog.rows.empty());
+    EXPECT_EQ(stored_videos(), 0U);
+
+    // Once the store answers, the same stream is recorded.
+    store.download_error_for.clear();
+    EXPECT_EQ(record().outcome, RecordOutcome::Recorded);
+}
+
+// Past its bound or unparsable, a stored playlist is not one this packager wrote; nothing is
+// copied, and with no end known, nothing is marked either.
+TEST_F(RecorderTest, AStoredPlaylistPastItsBoundOrUnparsableIsUnrecordableAndMarksNothing) {
+    run_of(0, 0, 3);
+    ulw::test::write_file(live_dir() / "index.m3u8", std::string((1U << 20U) + 1, '#'));
+    const auto large = record();
+    EXPECT_EQ(large.outcome, RecordOutcome::Unrecordable) << large.detail;
+    EXPECT_NE(large.detail.find("too large"), std::string::npos) << large.detail;
+
+    ulw::test::write_file(live_dir() / "index.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:x\n");
+    const auto invalid = record();
+    EXPECT_EQ(invalid.outcome, RecordOutcome::Unrecordable) << invalid.detail;
+    EXPECT_NE(invalid.detail.find("invalid"), std::string::npos) << invalid.detail;
+
+    EXPECT_TRUE(copier.jobs.empty());
+    EXPECT_TRUE(catalog.rows.empty());
+    EXPECT_EQ(stored_videos(), 0U);
+}
+
 TEST(RecordingBound, TheLongestStreamAtTheHighestBitrateWithAnEighthForTheContainer) {
     // 100 Mbit/s for 12 hours is 540 GB.
     EXPECT_EQ(live::recording_bound(100'000, core::Seconds{12 * 3600}), 607'500'000'000U);

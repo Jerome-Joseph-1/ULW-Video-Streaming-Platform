@@ -16,7 +16,7 @@ one WebSocket to it and send JSON messages in text frames.
 | Endpoint | `GET /rt` with a WebSocket upgrade (RFC 6455, version 13) on the chat host: `wss://<CHAT_HOST>/rt` |
 | Subprotocols, extensions | None. `permessage-deflate` is not offered. |
 | Auth | The Askedin token, as for the gateway ([auth.md](auth.md)): `Authorization: Bearer <token>`, or the `ULW_AUTH_COOKIE` cookie |
-| Cookie and `Origin` | A cookie token is accepted only when the request's `Origin` is listed exactly in `ULW_ALLOWED_ORIGINS` (`scheme://host[:port]`, comma separated). With no list configured, cookies are refused. A bearer token is accepted from any origin. |
+| Cookie and `Origin` | A cookie token is accepted only when the request's `Origin` is listed exactly in `ULW_ALLOWED_ORIGINS` (`scheme://host[:port]`, comma separated; `http://` only for `localhost`, `127.0.0.1` or `[::1]`, and no explicit default port such as `:443`). With no list configured, cookies are refused. A bearer token is accepted from any origin. |
 
 Upgrade refusals (the connection is closed after the response, and the body is empty):
 

@@ -10,8 +10,10 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -190,6 +192,34 @@ TEST(GatewayUserLimits, AUserPastTheRequestRateGets429WithTheWaitInRetryAfter) {
     HttpClient again(gw.endpoint());
     EXPECT_EQ(again.request("GET", kNoVideo, kAlice)->status, 404);
     EXPECT_EQ(again.request("GET", kNoVideo, kAlice)->status, 429);
+}
+
+// An <img> loop on another site sends the user's cookie as often as it likes. Refused before the
+// token is verified, those requests charge nothing, so the user's own requests still get in.
+TEST(GatewayUserLimits, CookieRequestsFromAnotherSiteChargeNoQuota) {
+    GatewayOptions options{.manual_clock = true};
+    options.limits.requests_per_user_per_minute = 2;
+    GatewayUnderTest gw(options);
+    const std::pair<std::string, std::string> cookie{"cookie", "auth_token=user.alice"};
+    const std::string_view kCreate =
+        R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    for (int i = 0; i < 5; ++i) {
+        HttpClient page(gw.endpoint());
+        EXPECT_EQ(page.request("GET", kNoVideo, "", {}, {cookie, {"sec-fetch-site", "cross-site"}})
+                      ->status,
+                  403);
+        HttpClient form(gw.endpoint());
+        EXPECT_EQ(form.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(kCreate)),
+                               {cookie, {"origin", "https://evil.example"}})
+                      ->status,
+                  403);
+    }
+    EXPECT_EQ(gw.counters().cross_site_rejections, 10U);
+    EXPECT_EQ(gw.counters().limited_user_requests, 0U);
+    HttpClient alice(gw.endpoint());
+    EXPECT_EQ(alice.request("GET", kNoVideo, kAlice)->status, 404);
+    EXPECT_EQ(alice.request("GET", kNoVideo, kAlice)->status, 404);
+    EXPECT_EQ(alice.request("GET", kNoVideo, kAlice)->status, 429);
 }
 
 TEST(GatewayUserLimits, APatchPastTheDailyByteQuotaGets429AndTakesNoSlot) {

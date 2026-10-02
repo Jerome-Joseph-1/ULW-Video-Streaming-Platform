@@ -193,4 +193,79 @@ TEST(Json, EscapedStringsRoundTrip) {
     EXPECT_EQ(parse(out)->as_string(), raw);
 }
 
+TEST(Json, DecodesEscapedCodePointsOfEveryLength) {
+    const auto v = parse(R"("\u0041\u00e9\u00E9\u07ff\u0800\u20ac\uffff\ud83d\ude00\uDBFF\uDFFF")");
+    ASSERT_TRUE(v);
+    EXPECT_EQ(v->as_string(), "A\xc3\xa9\xc3\xa9\xdf\xbf\xe0\xa0\x80\xe2\x82\xac\xef\xbf\xbf"
+                              "\xf0\x9f\x98\x80\xf4\x8f\xbf\xbf");
+}
+
+TEST(Json, NamesATruncatedEscapeApartFromAnInvalidOne) {
+    const auto truncated = parse(R"("\u12")");
+    ASSERT_FALSE(truncated);
+    EXPECT_EQ(truncated.error().reason, "truncated escape");
+    const auto invalid = parse(R"("\u123")");
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().reason, "invalid escape");
+    // Four digits at the very end are a whole escape, in a string that never ends.
+    const auto unterminated = parse(R"("\u1234)");
+    ASSERT_FALSE(unterminated);
+    EXPECT_EQ(unterminated.error().reason, "unterminated string");
+}
+
+TEST(Json, ReadsWhitespaceAroundEveryToken) {
+    const auto v =
+        parse(" \t{ \"a\" :\n[ 1 ,\r2 ] , \"b\" : { } , \"c\" : [ ] ,\"d\":{\"e\":1 } } \n");
+    ASSERT_TRUE(v);
+    EXPECT_EQ(v->find("a")->as_array()->size(), 2U);
+    EXPECT_TRUE(v->find("b")->as_object()->empty());
+    EXPECT_TRUE(v->find("c")->as_array()->empty());
+    EXPECT_EQ(v->find("d")->find("e")->as_u64(), 1U);
+    EXPECT_TRUE(parse("{}"));
+    EXPECT_TRUE(parse("[]"));
+}
+
+TEST(Json, OnlySpaceTabAndLineBreaksAreWhitespace) {
+    for (const std::string_view s : {"[1,\x01 2]", "\x0b[]", "[]\x0c", "{\"a\":\x1f 1}"}) {
+        EXPECT_FALSE(parse(s)) << s;
+    }
+}
+
+TEST(Json, ReadsSignedExponents) {
+    for (const std::string_view s : {"1e+5", "1E-5", "-0.5e+10", "2e5"}) {
+        const auto v = parse(s);
+        ASSERT_TRUE(v) << s;
+        EXPECT_EQ(v->kind(), Kind::Number) << s;
+    }
+}
+
+TEST(Json, RejectsAStrayCharacterWhereAContainerCouldEnd) {
+    for (const std::string_view s : {"{~", "{|", R"({"a":1~)", R"({"a":1|)", "[1~", "[~"}) {
+        EXPECT_FALSE(parse(s)) << s;
+    }
+}
+
+TEST(Json, RejectsBytesNoUtf8SequenceStartsWithOrContinuesWith) {
+    for (const std::string_view s :
+         {"\"\x80\"", "\"\xbf\"", "\"\xc1\xbf\"", "\"\xf5\x80\x80\x80\"", "\"\xff\"",
+          "\"\xe1\x80\xc0\"", "\"\xf1\x80\x80\xc0\"", "\"\xf1\x80\xc0\x80\""}) {
+        EXPECT_FALSE(parse(s)) << s;
+    }
+    for (const std::string_view s : {"\"\xe1\x80\x80\"", "\"\xee\x80\x80\"", "\"\xef\xbf\xbf\"",
+                                     "\"\xf1\x80\x80\x80\"", "\"\xf3\xbf\xbf\xbf\""}) {
+        EXPECT_TRUE(parse(s)) << s;
+    }
+}
+
+TEST(Json, EachAccessorAnswersOnlyForItsOwnKind) {
+    for (const std::string_view s : {"null", "true", "1", "\"s\"", "[]", "{}"}) {
+        const auto v = parse(s);
+        ASSERT_TRUE(v) << s;
+        EXPECT_EQ(v->as_array() != nullptr, v->kind() == Kind::Array) << s;
+        EXPECT_EQ(v->as_object() != nullptr, v->kind() == Kind::Object) << s;
+        EXPECT_EQ(v->as_string().has_value(), v->kind() == Kind::String) << s;
+        EXPECT_EQ(v->as_bool().has_value(), v->kind() == Kind::Bool) << s;
+    }
+}
+
 } // namespace

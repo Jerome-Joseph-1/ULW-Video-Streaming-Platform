@@ -310,6 +310,55 @@ TEST_F(JwksVerifierTest, ARotatedKeyIsPickedUpWithoutARestart) {
     EXPECT_EQ(fetcher_.requests, 2);
 }
 
+// A kid republished with other key material is a withdrawal of the old key, and the verdicts it
+// produced go with it.
+TEST_F(JwksVerifierTest, AKeyReplacedUnderItsKidTakesItsVerdictsWithIt) {
+    const std::string old_token = signed_token(ed_key(), "EdDSA", test_payload());
+    EXPECT_TRUE(verify_through_fetch(old_token, key_set({ed_key().jwk()})));
+    advance(seconds(11));
+
+    static const TestKey impostor = TestKey::ed25519(ed_key().kid());
+    const std::string new_token = signed_token(next_ed_key(), "EdDSA", test_payload());
+    EXPECT_TRUE(verify_through_fetch(new_token, key_set({impostor.jwk(), next_ed_key().jwk()})));
+    EXPECT_EQ(verify(old_token), refused(AuthError::BadSignature));
+}
+
+// A remembered unknown kid refuses that kid only; another unseen kid still gets its fetch.
+TEST_F(JwksVerifierTest, ARememberedUnknownKidRefusesOnlyItself) {
+    const std::string jwks = key_set({ed_key().jwk()});
+    EXPECT_TRUE(verify_through_fetch(signed_token(ed_key(), "EdDSA", test_payload()), jwks));
+    advance(seconds(11));
+    // Sorts after every kid below, so no ordering of kids can stand in for equality.
+    EXPECT_EQ(verify_through_fetch(token_with_kid("zz-stranger"), jwks),
+              refused(AuthError::UnknownKey));
+    advance(seconds(11));
+    EXPECT_TRUE(verify_through_fetch(signed_token(next_ed_key(), "EdDSA", test_payload()),
+                                     key_set({ed_key().jwk(), next_ed_key().jwk()})));
+    EXPECT_EQ(fetcher_.requests, 3);
+}
+
+// Unknown kids are remembered 64 at a time: the 65th pushes out the oldest, which may then be
+// looked up again.
+TEST_F(JwksVerifierTest, TheMemoryOfUnknownKidsIsBounded) {
+    const std::string jwks = key_set({ed_key().jwk()});
+    CountingWaiter waiter;
+    for (int i = 0; i < 64; ++i) {
+        EXPECT_FALSE(verify(token_with_kid("junk-" + std::to_string(i)), waiter).has_value()) << i;
+    }
+    EXPECT_EQ(fetcher_.requests, 1);
+    fetcher_.respond(jwks);
+    pump();
+    EXPECT_EQ(verify(token_with_kid("junk-0")), refused(AuthError::UnknownKey));
+    advance(seconds(11));
+    EXPECT_EQ(verify_through_fetch(token_with_kid("junk-64"), jwks),
+              refused(AuthError::UnknownKey));
+    EXPECT_EQ(verify(token_with_kid("junk-1")), refused(AuthError::UnknownKey));
+    advance(seconds(11));
+    // Still inside the minute it would have been remembered for, but forgotten to make room.
+    EXPECT_FALSE(verify(token_with_kid("junk-0")).has_value());
+    EXPECT_EQ(fetcher_.requests, 3);
+}
+
 TEST_F(JwksVerifierTest, KeysAreRefetchedEvery15MinutesAndServeUntilTheRefetchLands) {
     EXPECT_TRUE(verify_through_fetch(signed_token(ed_key(), "EdDSA", test_payload()),
                                      key_set({ed_key().jwk()})));

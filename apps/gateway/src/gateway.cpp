@@ -385,6 +385,9 @@ std::string Gateway::render_metrics() {
              c.limited_user_requests);
     e.sample("rate_limited_total", {{.name = "limit", .value = "user_bytes"}},
              c.limited_user_bytes);
+    e.counter("cross_site_rejections_total",
+              "Requests with the cookie answered 403 as coming from a page not trusted.",
+              c.cross_site_rejections);
     e.family("rate_limit_entries", "Clients and users the rate limits remember.",
              MetricType::Gauge);
     e.sample("rate_limit_entries", {{.name = "table", .value = "client"}}, clients_.size());
