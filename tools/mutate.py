@@ -8,7 +8,8 @@ Usage:
       -- build/mut/tests/http_unit_tests --gtest_brief=1
   tools/mutate.py --list --files http/src/request_parser.cpp      # print the mutants only
   tools/mutate.py ... --lines apps/gateway/src/connection.cpp:97-461  # part of a file
-  tools/mutate.py ... --only 'http/src/request_parser.cpp:120:ror:3'  # re-run chosen mutants
+  tools/mutate.py ... --files http/src/request_parser.cpp \
+      --only 'http/src/request_parser.cpp:120:ror:3'  # re-run chosen mutants of that file
 
 Mutations, applied one at a time on formatted source (binary operators are spaced):
   ror    a relational operator (< <= > >= == !=) replaced by each of the others

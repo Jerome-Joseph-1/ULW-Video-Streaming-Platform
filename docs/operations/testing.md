@@ -22,7 +22,7 @@ nice -n 19 tools/mutate.py --build-dir build/mut --target http_unit_tests \
     --files http/src/request_parser.cpp --sample 200 --budget-s 1500 --timeout 30 \
     --out /tmp/http.jsonl -- build/mut/tests/http_unit_tests --gtest_brief=1 --gtest_fail_fast
 tools/mutate.py --list --files http/src/request_parser.cpp        # the mutants, not run
-tools/mutate.py ... --only http/src/request_parser.cpp:202:del:0  # chosen mutants again
+tools/mutate.py ... --files http/src/request_parser.cpp --only http/src/request_parser.cpp:202:del:0  # chosen mutants again; --files names each id's file
 ```
 
 The test command after `--` is either a test binary inside the repository or the build tree,
