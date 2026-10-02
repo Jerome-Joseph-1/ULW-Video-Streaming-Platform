@@ -1,7 +1,7 @@
 name: soak-experiment
 
-# Allocator experiment on the self-hosted runner: one build, five soaks side by side.
-#   chat-glibc, chat-mimalloc, chat-jemalloc, gateway-glibc, gateway-mimalloc
+# Allocator experiment on the self-hosted runner, second round: one build, three soaks side
+# by side: gateway-glibc, gateway-jemalloc, chat-jemalloc (a repeat).
 
 on:
   workflow_dispatch:
@@ -69,11 +69,9 @@ jobs:
               >"$O/$1.console" 2>&1 && rc=0 || rc=$?
             echo "$rc" >"$O/$1.rc"
           }
-          run chat-glibc     ""    tests/soak/chat_soak.py 19101 &
-          run chat-mimalloc  "$MI" tests/soak/chat_soak.py 19111 &
           run chat-jemalloc  "$JE" tests/soak/chat_soak.py 19121 &
           run gw-glibc       ""    tests/soak/soak.py      18180 &
-          run gw-mimalloc    "$MI" tests/soak/soak.py      18190 &
+          run gw-jemalloc    "$JE" tests/soak/soak.py      18190 &
           # Proof the preloads took: the allocators mapped into the services.
           sleep 180
           for p in $(pgrep -x chat_server; pgrep -x gateway_server); do
@@ -84,7 +82,7 @@ jobs:
             sleep 600
           done
           wait
-          for n in chat-glibc chat-mimalloc chat-jemalloc gw-glibc gw-mimalloc; do
+          for n in chat-jemalloc gw-glibc gw-jemalloc; do
             echo "=================== $n: exit $(cat "$O/$n.rc")"
             sed -n '/^window:/,$p' "$O/$n/summary.txt" 2>/dev/null || tail -30 "$O/$n.console"
             { echo "### $n (exit $(cat "$O/$n.rc"))"; echo '```'; sed -n '/^window:/,$p' "$O/$n/summary.txt" 2>/dev/null || true; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
@@ -103,7 +101,10 @@ jobs:
           retention-days: 30
       - if: always()
         run: |
-          sudo pkill -f 'tests/soak/(chat_soak|soak)\.py' || true
+          sudo pkill -f '^[^ ]*python3? [^ ]*tests/soak/(chat_soak|soak)\.py' || true
+          for program in chat_server gateway_server transcode_worker; do
+            sudo pkill -f "^[^ ]*/${program}( |\$)" || true
+          done
           sudo rm -rf "$RUNNER_TEMP/soaks"
           docker rm -f soak-pg || true
           docker compose -f deploy/local/compose.yaml down || true
