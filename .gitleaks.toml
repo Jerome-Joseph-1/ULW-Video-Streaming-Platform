@@ -24,6 +24,7 @@ description = "WebSocket handshake nonces"
 targetRules = ["generic-api-key"]
 paths = [
     '''^tests/support/ws_client\.hpp$''',
+    '''^tests/unit/chat/session_test\.cpp$''',
     '''^tests/unit/ws/handshake_test\.cpp$''',
     '''^tests/unit/ws/ws_echo_server_test\.cpp$''',
 ]

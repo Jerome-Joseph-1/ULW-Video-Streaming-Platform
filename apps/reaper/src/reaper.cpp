@@ -58,11 +58,30 @@ void expire_uploads(core::ports::IUploadExpiry& uploads, core::ports::IIngestSto
     }
 }
 
+void forget_rooms(core::ports::IUnusedRooms& rooms, const core::ports::IClock& clock,
+                  const Options& options, Report& report) {
+    const core::WallTime before = clock.wall_now() - options.unused_room_after;
+    // A batch of rooms looked at per statement, from where the last pass stopped, until the walk
+    // reaches the cutoff or the pass has looked at its share.
+    for (std::size_t walked = 0; walked < options.rooms_per_pass; walked += options.batch) {
+        const auto scan = rooms.forget_unused(before, options.batch);
+        if (!scan) {
+            report.problems.push_back(
+                std::format("forget unused chat rooms: {}", core::ports::to_string(scan.error())));
+            return;
+        }
+        report.rooms_forgotten += scan->forgotten;
+        if (scan->finished) {
+            return;
+        }
+    }
+}
+
 } // namespace
 
 Report run_once(core::ports::IUploadExpiry& uploads, core::ports::IIngestStore& store,
-                core::ports::IObjectAdmin& admin, const core::ports::IClock& clock,
-                const Options& options) {
+                core::ports::IObjectAdmin& admin, core::ports::IUnusedRooms& rooms,
+                const core::ports::IClock& clock, const Options& options) {
     Report report;
     expire_uploads(uploads, store, admin, clock, options, report);
     const auto swept = admin.reap_abandoned(clock.wall_now() - options.orphan_after);
@@ -72,6 +91,7 @@ Report run_once(core::ports::IUploadExpiry& uploads, core::ports::IIngestStore& 
         report.problems.push_back(
             std::format("sweep orphaned uploads: {}", core::ports::to_string(swept.error())));
     }
+    forget_rooms(rooms, clock, options, report);
     return report;
 }
 
@@ -81,9 +101,11 @@ std::string metrics_text(const Report& report) {
                        "# TYPE reaper_uploads_release_failed_last_run gauge\n"
                        "reaper_uploads_release_failed_last_run {}\n"
                        "# TYPE reaper_parts_orphaned_last_run gauge\n"
-                       "reaper_parts_orphaned_last_run {}\n",
-                       report.uploads_expired, report.uploads_release_failed,
-                       report.parts_orphaned);
+                       "reaper_parts_orphaned_last_run {}\n"
+                       "# TYPE reaper_chat_rooms_forgotten_last_run gauge\n"
+                       "reaper_chat_rooms_forgotten_last_run {}\n",
+                       report.uploads_expired, report.uploads_release_failed, report.parts_orphaned,
+                       report.rooms_forgotten);
 }
 
 } // namespace reaper
