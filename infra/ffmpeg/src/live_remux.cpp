@@ -51,8 +51,9 @@ LiveRemuxer::LiveRemuxer(LiveRemuxConfig config, const core::ports::IClock& cloc
 
 std::expected<LiveRemuxResult, std::string> LiveRemuxer::run(const LiveRemuxJob& job,
                                                              const std::stop_token& stop) const {
-    const Sandbox sandbox{.helper = config_.sandbox,
-                          .environment = {"PATH=" + config_.search_path}};
+    const Sandbox sandbox{
+        .helper = config_.sandbox,
+        .environment = {"PATH=" + config_.search_path, std::string(kTwoMallocArenas)}};
     const Limits limits{.writable = job.out_dir,
                         .address_space_bytes = kRemuxAddressSpace,
                         .cpu = core::Seconds{job.max_duration.count() / kWallPerCpu},

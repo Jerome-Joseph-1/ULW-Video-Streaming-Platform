@@ -44,6 +44,9 @@ private:
     std::vector<Member> members_;
 };
 
+// `offset` is where parsing stopped: for a duplicate key, the end of the key that repeats an
+// earlier one in the same object. Duplicates are looked for when the object closes, so another
+// error later in that object (a bad value, a missing '}') is the one reported.
 struct ParseError {
     std::size_t offset;
     std::string_view reason;

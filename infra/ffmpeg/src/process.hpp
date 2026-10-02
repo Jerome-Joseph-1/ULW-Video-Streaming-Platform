@@ -28,6 +28,13 @@ struct Sandbox {
     bool syscall_filter = true;
 };
 
+// For the copies that run under 1 GiB of address space (the live remux and the recording's two
+// stages). glibc gives each thread that allocates concurrently an arena of its own, reserving
+// 64 MiB of address space each, and ffmpeg 7 runs every demuxer, filter, encoder and muxer on a
+// thread of its own: the recording's silence stage mapped 811-923 MiB of its 1 GiB on 7.1 with
+// the default arenas and 451 MiB with two, at the same resident size (docs/adr/0074).
+inline constexpr std::string_view kTwoMallocArenas = "MALLOC_ARENA_MAX=2";
+
 struct Limits {
     // The only directory the child may write.
     std::filesystem::path writable;

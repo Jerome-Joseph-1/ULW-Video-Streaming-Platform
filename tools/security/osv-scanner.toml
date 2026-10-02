@@ -1,0 +1,21 @@
+# Known vulnerabilities osv-scanner may report without failing the build (docs/adr/0072). Every
+# entry names the advisory, why it does not apply or cannot be fixed yet, and an ignoreUntil at
+# most a year out; past that date the advisory fails the build again until someone looks at it
+# afresh. tools/security/check-allowlists.py enforces all three.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-03-31T00:00:00Z
+reason = """paste 1.0.15 is unmaintained (an informational advisory, no vulnerability). It is a \
+build-time proc macro in gst-plugins-rs's dependency tree (tests/call/whipsink/Cargo.lock), \
+which builds the test publisher and ships nowhere. Revisit when whipsink moves to a release \
+without it."""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+ignoreUntil = 2027-03-31T00:00:00Z
+reason = """proc-macro-error2 2.0.1 is unmaintained (an informational advisory, no \
+vulnerability). It is a build-time proc macro reached through hax-lib-macros, libcrux-sha3, \
+hpke-rs and openmls_rust_crypto in the OpenMLS bridge (infra/e2ee/mls_ffi_bridge), which the \
+test and client harnesses link and no server does (ADR-0044). Revisit when OpenMLS's crypto \
+provider moves off it."""
