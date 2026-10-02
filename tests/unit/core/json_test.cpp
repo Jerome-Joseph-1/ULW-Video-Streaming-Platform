@@ -1,8 +1,10 @@
 #include "core/util/json.hpp"
 
+#include <chrono>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -60,6 +62,95 @@ TEST(Json, RejectsDuplicateKeys) {
     const auto v = parse(R"({"sub":"alice","sub":"mallory"})");
     ASSERT_FALSE(v);
     EXPECT_EQ(v.error().reason, "duplicate key");
+    EXPECT_EQ(v.error().offset, 20U); // just past the second "sub"
+}
+
+// Keys are compared after unescaping, so spelling one differently does not make it a new key.
+TEST(Json, RejectsDuplicatesSpelledWithEscapes) {
+    for (const std::string_view s :
+         {R"({"a":1,"a":2})", R"({"/":1,"\/":2})", R"({"a":1,"\u0061":2})"}) {
+        const auto v = parse(s);
+        ASSERT_FALSE(v) << s;
+        EXPECT_EQ(v.error().reason, "duplicate key") << s;
+        EXPECT_EQ(v.error().offset, s.find(":2")) << s;
+    }
+}
+
+// Where a key repeats more than once, the error is at the first repeat in the text, as it was
+// when each key was looked up on arrival.
+TEST(Json, ReportsTheFirstRepeatInTextOrder) {
+    const std::string_view s = R"({"b":1,"a":2,"a":3,"b":4})";
+    const auto v = parse(s);
+    ASSERT_FALSE(v);
+    EXPECT_EQ(v.error().offset, s.find(":3"));
+}
+
+// Duplicates are looked for when the object closes, so a later syntax error in the same object
+// is the one reported.
+TEST(Json, ASyntaxErrorAfterADuplicateIsReportedFirst) {
+    const auto v = parse(R"({"a":1,"a":2,"b":})");
+    ASSERT_FALSE(v);
+    EXPECT_NE(v.error().reason, "duplicate key");
+}
+
+TEST(Json, KeepsMembersInTextOrder) {
+    const auto v = parse(R"({"z":1,"a":2,"m":3})");
+    ASSERT_TRUE(v);
+    const auto* members = v->as_object();
+    ASSERT_NE(members, nullptr);
+    ASSERT_EQ(members->size(), 3U);
+    EXPECT_EQ((*members)[0].first, "z");
+    EXPECT_EQ((*members)[1].first, "a");
+    EXPECT_EQ((*members)[2].first, "m");
+    for (const auto& [key, want] : {std::pair{"z", 1}, {"a", 2}, {"m", 3}}) {
+        const auto* found = v->find(key);
+        ASSERT_NE(found, nullptr) << key;
+        EXPECT_EQ(found->as_i64(), want) << key;
+    }
+}
+
+TEST(Json, AcceptsSiblingObjectsThatShareAKey) {
+    const auto v = parse(R"({"a":{"x":1},"b":{"x":2}})");
+    ASSERT_TRUE(v);
+    EXPECT_EQ(v->find("a")->find("x")->as_i64(), 1);
+    EXPECT_EQ(v->find("b")->find("x")->as_i64(), 2);
+}
+
+TEST(Json, RejectsADuplicateKeyFarFromItsTwin) {
+    std::string doc = "{\"dup\":0";
+    for (int i = 0; i < 1000; ++i) {
+        doc += ",\"k" + std::to_string(i) + "\":0";
+    }
+    const auto clean = parse(doc + "}");
+    ASSERT_TRUE(clean);
+    EXPECT_EQ(clean->as_object()->size(), 1001U);
+    const auto twice = parse(doc + ",\"dup\":1}");
+    ASSERT_FALSE(twice);
+    EXPECT_EQ(twice.error().reason, "duplicate key");
+    EXPECT_EQ(twice.error().offset, doc.size() + 6); // just past the second "dup"
+    const auto nested = parse(R"({"a":{"x":1,"y":2,"x":3},"b":0})");
+    ASSERT_FALSE(nested);
+    EXPECT_EQ(nested.error().reason, "duplicate key");
+    EXPECT_EQ(nested.error().offset, 21U); // just past the inner second "x"
+}
+
+// The duplicate check must not be quadratic: a peer chooses how many keys an object holds, and
+// every parse runs on a reactor thread. A megabyte of distinct keys (about 110,000) took 40 s
+// when each key was looked up among those before it; sorted, it is milliseconds, and at most
+// about 2.5 s under the sanitizers.
+TEST(Json, ManyKeysCostNoMoreThanASort) {
+    constexpr std::size_t kBytes = std::size_t{1} << 20U;
+    std::string doc = "{";
+    for (int i = 0; doc.size() < kBytes - 16; ++i) {
+        doc += (i == 0 ? "\"" : ",\"") + std::to_string(i) + "\":0";
+    }
+    doc += "}";
+    const auto started = std::chrono::steady_clock::now();
+    const auto v = parse(doc, {.max_depth = 32, .max_bytes = kBytes});
+    const auto took = std::chrono::steady_clock::now() - started;
+    ASSERT_TRUE(v);
+    EXPECT_GT(v->as_object()->size(), 100'000U);
+    EXPECT_LT(took, std::chrono::seconds(10));
 }
 
 TEST(Json, RejectsTrailingDataAndUnterminatedInput) {

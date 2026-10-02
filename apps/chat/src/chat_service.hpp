@@ -16,6 +16,7 @@
 #include <optional>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -51,12 +52,24 @@ struct ServiceLimits {
     // A client shows a handful of conversations at once; 64 bounds what one socket makes this
     // node track and subscribe to.
     std::size_t max_rooms_per_client = 64;
+    // The clients the node may hold at once: its connections (chat::Limits::max_connections,
+    // which the server copies here). With max_rooms_per_client, bounds what a resync may queue.
+    std::size_t max_clients = 1280;
     // Joins of new rooms per user, across all their connections: a join may create the room,
     // a row that outlives everyone in it. A fresh user may fill one connection's rooms at once;
     // after that one a second, far faster than a person opens conversations and far slower
     // than a script filling the table would like.
     std::uint32_t join_burst = 64;
     std::uint32_t joins_per_second = 1;
+    // Joins per user refused because the user is not a member, on this node. A join of a room
+    // with no kind recorded records one, a row kept until the upload reaper forgets a room that
+    // was never used, a day on (ADR-0054); every such join is refused, since a room nobody has
+    // recorded lists nobody. Past this allowance a join is answered the same and records
+    // nothing, so a user makes at most 20 and then one a minute: 1,460 rows a day per node,
+    // gone a day later, where the join limit alone let one user leave 86,400 a day for good. A
+    // person is refused a join when a link is stale or they were removed, a handful a day.
+    std::uint32_t record_burst = 20;
+    core::Millis record_interval{60'000};
     // Messages per user, across all their connections on this node. Someone typing sends a
     // message every few seconds; a burst is a pasted paragraph split in lines or a quick run of
     // replies, rarely past five. 10 covers that twice over. Sustained, 2 a second is 120 a
@@ -119,6 +132,14 @@ struct ServiceCounters {
     // Messages sent to clients from history.
     std::uint64_t history_messages = 0;
     std::uint64_t allocation_failures = 0;
+    // A client taken out of a room because its user left the room's member list.
+    std::uint64_t removals = 0;
+    // A resync's member check that failed other than for an unreachable store, settled by
+    // taking the user's clients out of the room, told `unavailable` (counted in removals too).
+    std::uint64_t failed_rechecks = 0;
+    // Joins of a room with no kind recorded that recorded nothing, the user having used up
+    // ServiceLimits::record_burst.
+    std::uint64_t unrecorded_joins = 0;
 };
 
 // Identifies an attached client; never reused while the service lives.
@@ -133,15 +154,16 @@ struct ClientId {
 // room's latest messages, and hands each message to every client in the room. Bodies are
 // opaque bytes here: carried, kept and passed on, never read. Everything runs on the reactor
 // thread.
-class ChatService {
+class ChatService final : public core::ports::IMemberListener {
 public:
-    // `messages` answers whether a room admits a user. Its answers must never reach a destroyed
-    // service: destroy the store first, which drops what it still owes.
+    // `messages` answers whether a room admits a user, and tells the service of removals from
+    // member lists from construction on. Neither its answers nor its removals may reach a
+    // destroyed service: destroy the store first, which drops what it still owes.
     ChatService(IRooms& rooms, core::ports::IMessageStore& messages,
                 const core::ports::IClock& clock, ServiceLimits limits);
     // Leaves every room, which also drops what the room plane owes for sends still in flight:
     // nothing calls back into a destroyed service. The room plane must outlive it.
-    ~ChatService();
+    ~ChatService() override;
     ChatService(const ChatService&) = delete;
     ChatService& operator=(const ChatService&) = delete;
     ChatService(ChatService&&) = delete;
@@ -160,6 +182,19 @@ public:
     void drained(ClientId id) noexcept;
     // Leaves the rooms no client here has used for `linger`. Cheap to call often.
     void sweep() noexcept;
+    // From here on the message store is never called again: what a resync still owes is
+    // dropped, and resyncs are ignored. For shutdown, where the store goes first.
+    void stop() noexcept;
+
+    // The user's clients here leave the room, and are told `not_member`; a join of it still
+    // waiting for the member list is refused when the answer comes (ADR-0073). A stream's live
+    // chat admits anyone, list or not, and is left alone.
+    void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
+    // Every client's closed rooms are checked against the member lists again: each room and user
+    // once, a few at a time, and a check that fails is asked again a second later, so that a
+    // store that is still down loses no removal. A join still waiting for its member list is
+    // checked again once it is let in, since the list it was let in by may predate the removal.
+    void on_members_resync() noexcept override;
 
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
@@ -177,6 +212,11 @@ private:
         std::vector<core::RoomId> rooms;
         // Of `rooms`, those whose member list has not answered yet.
         std::vector<core::RoomId> admitting;
+        // Of `admitting`, those whose user has since left the member list: refused whatever the
+        // answer, which may have been read before the removal.
+        std::vector<core::RoomId> revoked;
+        // Of `admitting`, those a resync came during: checked again once let in.
+        std::vector<core::RoomId> unchecked;
         // Of `rooms`, those in which it is lossy and behind.
         std::vector<core::RoomId> behind;
         std::size_t send_bytes_in_flight = 0;
@@ -188,7 +228,9 @@ private:
     [[nodiscard]] Client* find(ClientId id) noexcept;
     [[nodiscard]] Room* find(const core::RoomId& room) noexcept;
     [[nodiscard]] bool admit_join(const core::UserId& user);
-    void admitted(ClientId id, const Join& join,
+    [[nodiscard]] core::ports::Recording may_record(const core::UserId& user) const noexcept;
+    void charge_refusal(const core::UserId& user);
+    void admitted(ClientId id, const Join& join, core::ports::Recording recording,
                   core::ports::MessageResult<core::ports::Admission> result) noexcept;
     void enter(ClientId id, const Join& join);
     void joined(const core::RoomId& room,
@@ -207,6 +249,23 @@ private:
     void drop_oldest(Room& room) noexcept;
     void forget_oldest() noexcept;
     void erase(const core::RoomId& room) noexcept;
+    // Takes the client out of one room: its subscription, its place in the queue for the room
+    // plane, and whatever it was still owed.
+    void leave(ClientId id, Client& c, const core::RoomId& room) noexcept;
+    // The user's clients leave a room whose member list could not be read after a resync, and
+    // are told `unavailable`: the list never said no, and a join reads it again.
+    void unconfirmed(const core::RoomId& room, const core::UserId& user) noexcept;
+    // A room and a user a resync still has to check against the member list.
+    using Recheck = std::pair<core::RoomId, core::UserId>;
+    struct RecheckHash {
+        [[nodiscard]] std::size_t operator()(const Recheck& r) const noexcept;
+    };
+    // Queues a check unless it is queued already; false when the queue is full.
+    [[nodiscard]] bool recheck(const core::RoomId& room, const core::UserId& user);
+    // Asks the queued checks, up to kRechecksInFlight at once, unless a failure paused them.
+    void ask_rechecks() noexcept;
+    void rechecked(const Recheck& pair, std::uint64_t generation,
+                   core::ports::MessageResult<core::ports::Admission> result) noexcept;
     void answer(IClient& client, std::string_view reason, const core::RoomId& room,
                 const std::optional<rt::MessageKey>& id = std::nullopt) noexcept;
 
@@ -220,12 +279,28 @@ private:
     std::unordered_map<core::RoomId, std::unique_ptr<Room>> rooms_;
     std::unordered_map<core::UserId, TokenBucket> joins_;
     std::unordered_map<core::UserId, TokenBucket> sends_;
+    // Refused joins, which may each have recorded a room.
+    std::unordered_map<core::UserId, PacedBucket> refusals_;
     // Every kept message, in the order kept, to drop the oldest of all rooms first.
     std::deque<std::pair<core::RoomId, std::uint64_t>> kept_order_;
     std::size_t buffered_bytes_ = 0;
     // Messages kept across rooms; kept_order_ may also hold entries of messages already gone.
     std::size_t kept_messages_ = 0;
     core::MonoTime next_sweep_;
+    // The checks a resync still owes, oldest first, each once (rechecks_queued_). At most one per
+    // room of each client here (max_clients x max_rooms_per_client: 81920 by default); a check
+    // past that is not queued, and another resync runs once the queue empties.
+    std::deque<Recheck> rechecks_;
+    std::unordered_set<Recheck, RecheckHash> rechecks_queued_;
+    std::size_t rechecks_in_flight_ = 0;
+    // Bumped by each resync: what an earlier one failed to check, the later one asks anew.
+    std::uint64_t recheck_generation_ = 0;
+    // No check is asked before this: the last one failed, and the store is given a second.
+    core::MonoTime rechecks_resume_;
+    bool asking_rechecks_ = false;
+    // stop(): the store is never called again.
+    bool stopped_ = false;
+    bool resync_owed_ = false;
 };
 
 } // namespace chat

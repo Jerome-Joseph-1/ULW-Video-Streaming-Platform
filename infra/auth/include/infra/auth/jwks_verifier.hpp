@@ -5,6 +5,8 @@
 #include "infra/auth/claim_rules.hpp"
 #include "net/reactor.hpp"
 
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -31,10 +33,22 @@ public:
     virtual void cancel(IKeySetReceiver& receiver) noexcept = 0;
 };
 
+// How long keys stay trusted without a successful refetch (ULW_JWKS_MAX_STALE_HOURS). A day:
+// refetches are 15 minutes apart and retried every minute, so a day is an outage long past any
+// that would go unnoticed overnight, and a key Askedin withdrew during one stops verifying
+// within a day instead of never.
+inline constexpr core::Millis kDefaultMaxKeyAge = std::chrono::hours(24);
+
 struct JwksConfig {
     // JWKS_URL
     std::string url;
     ClaimRules claims;
+    core::Millis max_key_age = kDefaultMaxKeyAge;
+    // Called on the reactor thread when the keys are dropped for their age, with the time since
+    // the last successful fetch; for a log line, since every token is refused from then on.
+    // noexcept: it runs inside the verifier's noexcept expiry path, where a throw would end the
+    // process.
+    std::move_only_function<void(core::Millis age) const noexcept> on_keys_expired = nullptr;
 };
 
 // Verifies tokens against the JWK set at a URL, fetched on the reactor thread and cached:
@@ -45,6 +59,9 @@ struct JwksConfig {
 //    and fetches for unseen kids are 10 s apart at the least, so junk kids cannot drive
 //    fetches.
 //  - A verified token is remembered by its digest for 15 minutes, never past its expiry.
+//  - Keys not refreshed for max_key_age are dropped, with every remembered verdict: tokens are
+//    refused (KeysUnavailable) until a fetch succeeds. Fail closed: a key withdrawn during a
+//    long outage, or while the endpoint is blocked, does not verify forever.
 // Every member must be called on the reactor thread.
 class JwksVerifier final : public core::ports::IJwtVerifier {
 public:
@@ -59,6 +76,7 @@ public:
     [[nodiscard]] std::optional<core::ports::VerifyResult>
     verify(std::string_view token, core::WallTime now, core::ports::IKeyWaiter& waiter) override;
     void cancel_wait(core::ports::IKeyWaiter& waiter) noexcept override;
+    [[nodiscard]] bool keys_expired() const noexcept override;
 
 private:
     class State;
