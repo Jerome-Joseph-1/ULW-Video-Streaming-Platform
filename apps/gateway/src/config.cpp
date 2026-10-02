@@ -3,6 +3,7 @@
 #include "core/models/upload.hpp"
 #include "core/util/parse.hpp"
 #include "http/client_limits.hpp"
+#include "http/origin.hpp"
 #include "http/request_parser.hpp"
 #include "infra/auth/local_verifier.hpp"
 #include "infra/postgres/connection_string.hpp"
@@ -64,6 +65,8 @@ constexpr std::array kSettings{
     ops::Setting{.env = "JWT_ISSUER", .key = "auth.issuer"},
     ops::Setting{.env = "JWT_AUDIENCE", .key = "auth.audience"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
+    ops::Setting{.env = "ULW_ALLOWED_ORIGINS", .key = "auth.allowed_origins"},
+    ops::Setting{.env = "ULW_ALLOW_SAME_SITE", .key = "auth.allow_same_site"},
     ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
     // Read by the store's credential provider; here only to be checked for.
     ops::Setting{.env = "ULW_S3_ACCESS_KEY_ID", .key = "", .secret = true},
@@ -262,6 +265,19 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
     config.jwt_issuer = std::move(*issuer);
     config.jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform");
     config.limits.auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token");
+    if (const auto list = lookup(env, "ULW_ALLOWED_ORIGINS")) {
+        auto origins = http::parse_origin_list(*list);
+        if (!origins) {
+            return error("ULW_ALLOWED_ORIGINS", "expected comma-separated scheme://host[:port]");
+        }
+        config.limits.allowed_origins = std::move(*origins);
+    }
+    if (const auto same_site = lookup(env, "ULW_ALLOW_SAME_SITE")) {
+        if (*same_site != "0" && *same_site != "1") {
+            return error("ULW_ALLOW_SAME_SITE", "expected 0 or 1");
+        }
+        config.limits.allow_same_site = *same_site == "1";
+    }
     if (config.dev_jwks_file.empty()) {
         return {};
     }
@@ -474,7 +490,11 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     // Checked as given; the blocks themselves hold no text to print back.
     const std::string proxies =
         config.limits.trusted_proxies.empty() ? "" : layers.get("ULW_TRUSTED_PROXIES").value_or("");
-    const std::array<std::pair<std::string_view, std::string>, 31> values{{
+    std::string origins;
+    for (const std::string& origin : config.limits.allowed_origins) {
+        origins += (origins.empty() ? "" : ",") + origin;
+    }
+    const std::array<std::pair<std::string_view, std::string>, 33> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -510,6 +530,8 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"JWT_ISSUER", config.jwt_issuer},
         {"JWT_AUDIENCE", config.jwt_audience},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},
+        {"ULW_ALLOWED_ORIGINS", origins},
+        {"ULW_ALLOW_SAME_SITE", config.limits.allow_same_site ? "1" : ""},
         {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
     }};
     for (const auto& [variable, value] : values) {

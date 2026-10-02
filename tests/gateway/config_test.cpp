@@ -89,6 +89,8 @@ TEST_F(ConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->bucket, "ulw-media");
     EXPECT_EQ(config->jwt_audience, "askedin-platform");
     EXPECT_EQ(config->limits.auth_cookie, "auth_token");
+    EXPECT_TRUE(config->limits.allowed_origins.empty());
+    EXPECT_FALSE(config->limits.allow_same_site);
     EXPECT_TRUE(config->dev_jwks_file.empty());
     EXPECT_EQ(config->transport, gateway::Transport::Plain);
 }
@@ -283,6 +285,78 @@ TEST_F(ConfigTest, OverridesAreTakenAsGiven) {
     EXPECT_EQ(config->offload_threads, 8U);
     EXPECT_EQ(config->jwt_audience, "ulw");
     EXPECT_EQ(config->limits.auth_cookie, "auth_token_stage");
+}
+
+// The same list, parsed the same way, as chat's (http::parse_origin_list).
+TEST_F(ConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
+    env["ULW_ALLOWED_ORIGINS"] = "https://app.askedin.com,http://localhost:5173";
+    env["ULW_ALLOW_SAME_SITE"] = "1";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->limits.allowed_origins,
+              (std::vector<std::string>{"https://app.askedin.com", "http://localhost:5173"}));
+    EXPECT_TRUE(config->limits.allow_same_site);
+    for (const char* bad : {"app.askedin.com", "https://app.askedin.com/", "https://App.test",
+                            "https://a.test,,https://b.test", "https://", "*"}) {
+        env["ULW_ALLOWED_ORIGINS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
+    }
+    env.erase("ULW_ALLOWED_ORIGINS");
+    for (const char* bad : {"yes", "true", "2"}) {
+        env["ULW_ALLOW_SAME_SITE"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_ALLOW_SAME_SITE") << bad;
+    }
+}
+
+// Plain http would carry the cookie in the clear, so it names only a dev server on this machine.
+// A browser leaves the scheme's own port out of Origin, so an entry naming it could never match.
+TEST_F(ConfigTest, PlainHttpOriginsAreLoopbackOnlyAndDefaultPortsAreRefused) {
+    env["ULW_ALLOWED_ORIGINS"] = "http://localhost:5173,http://127.0.0.1:8080,http://[::1]:3000";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->limits.allowed_origins,
+              (std::vector<std::string>{"http://localhost:5173", "http://127.0.0.1:8080",
+                                        "http://[::1]:3000"}));
+    for (const char* bad : {"http://app.example", "http://app.example:8080", "http://10.0.0.1",
+                            "https://app.example:443", "http://localhost:80", "https://:443",
+                            "https://app.example:", "http://[::1"}) {
+        env["ULW_ALLOWED_ORIGINS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
+    }
+}
+
+// Only a port, host and bytes a browser could write in Origin: the default port is caught by
+// value, and no prefix or userinfo dresses another host up as loopback.
+TEST_F(ConfigTest, OriginsNoBrowserSendsAreRefused) {
+    env["ULW_ALLOWED_ORIGINS"] = "https://a.example:1,https://a.example:65535,https://[::1]";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->limits.allowed_origins.size(), 3U);
+    for (const char* bad :
+         {"https://a.example:abc", "http://localhost:abc", "https://a:b:c",
+          "http://localhost:3000:4000", "http://[::1]:x", "https://a.example:0",
+          "https://a.example:65536", "https://a.example:123456", "http://localhost:0080",
+          "https://a.example:0443", "https://a.example\x01", "https://caf\xc3\xa9.example",
+          "https://a.example\t", "https://[]", "https://[]:443", "http://localhost.evil.example",
+          "http://localhost@evil.example", "http://127.0.0.1.evil.example"}) {
+        env["ULW_ALLOWED_ORIGINS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
+    }
+}
+
+// The scheme is matched exactly, the authority follows a single "://", and an IPv6 literal holds
+// only hex digits, ':' and '.'.
+TEST_F(ConfigTest, OriginsWithAMalformedSchemeOrIpv6LiteralAreRefused) {
+    env["ULW_ALLOWED_ORIGINS"] = "https://[2001:db8::1],https://[::ffff:192.0.2.1]:8443";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->limits.allowed_origins.size(), 2U);
+    for (const char* bad : {"HTTPS://a.example", "://a.example", "https:/a.example", "https:///a",
+                            "https://https://a", "https://[zz]", "https://[zz]:8443",
+                            "https://[::1%eth0]", "https://[a.example]"}) {
+        env["ULW_ALLOWED_ORIGINS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
+    }
 }
 
 TEST_F(ConfigTest, TheFilesystemBackendTakesAFileServerForSegmentUrls) {

@@ -19,6 +19,11 @@ TEST(Utf8, AcceptsEachSequenceLengthUpToTheLastCodePoint) {
     EXPECT_TRUE(is_valid_utf8(text("plain ascii")));
     EXPECT_TRUE(is_valid_utf8(bytes({0xC2, 0x80})));             // U+0080
     EXPECT_TRUE(is_valid_utf8(bytes({0xE0, 0xA0, 0x80})));       // U+0800
+    EXPECT_TRUE(is_valid_utf8(bytes({0xE1, 0x80, 0x80})));       // U+1000
+    EXPECT_TRUE(is_valid_utf8(bytes({0xEC, 0xBF, 0xBF})));       // U+CFFF
+    EXPECT_TRUE(is_valid_utf8(bytes({0xEF, 0xBF, 0xBF})));       // U+FFFF
+    EXPECT_TRUE(is_valid_utf8(bytes({0xF1, 0x80, 0x80, 0x80}))); // U+40000
+    EXPECT_TRUE(is_valid_utf8(bytes({0xF3, 0xBF, 0xBF, 0xBF}))); // U+FFFFF
     EXPECT_TRUE(is_valid_utf8(bytes({0xED, 0x9F, 0xBF})));       // U+D7FF
     EXPECT_TRUE(is_valid_utf8(bytes({0xEE, 0x80, 0x80})));       // U+E000
     EXPECT_TRUE(is_valid_utf8(bytes({0xF0, 0x90, 0x80, 0x80}))); // U+10000

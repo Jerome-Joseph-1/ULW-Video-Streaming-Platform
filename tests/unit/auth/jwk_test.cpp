@@ -119,6 +119,52 @@ TEST_F(JwkSetTest, SkipsUnknownKeyTypesAndCurves) {
     EXPECT_EQ(set.skipped, 5U);
 }
 
+// Each curve belongs to one key type; a key naming another is skipped, whatever its material.
+TEST_F(JwkSetTest, SkipsKeysWhoseTypeAndCurveAreNotAPairItKnows) {
+    const auto with_kty = [](std::string jwk, std::string_view from, std::string_view to) {
+        const std::size_t at = jwk.find(from);
+        EXPECT_NE(at, std::string::npos) << jwk;
+        return jwk.replace(at, from.size(), to);
+    };
+    const std::string p256 = p256_key().jwk();
+    const std::string ed = ed_key().jwk();
+    const KeySet set = parse(key_set({
+        with_kty(p256, R"("kty":"EC")", R"("kty":"OKP")"),
+        with_kty(p256, R"("kty":"EC")", R"("kty":"E")"),
+        with_kty(p256, R"("kty":"EC")", R"("kty":"RS")"),
+        with_kty(ed, R"("kty":"OKP")", R"("kty":"EC")"),
+        with_kty(ed, R"("kty":"OKP")", R"("kty":"OK")"),
+        // Curve names that are prefixes of the right ones.
+        with_kty(ed, R"("crv":"Ed25519")", R"("crv":"Ed2551")"),
+        with_kty(p256, R"("crv":"P-256")", R"("crv":"P-25")"),
+    }));
+    EXPECT_TRUE(set.keys.empty());
+    EXPECT_EQ(set.skipped, 7U);
+}
+
+TEST_F(JwkSetTest, SkipsRsaKeysMissingTheModulusOrTheExponent) {
+    const auto without = [](std::string jwk, std::string_view member) {
+        const std::size_t at = jwk.find(R"(,")" + std::string(member) + R"(":")");
+        EXPECT_NE(at, std::string::npos) << jwk;
+        return jwk.erase(at, jwk.find('"', jwk.find(':', at) + 2) + 1 - at);
+    };
+    const KeySet set =
+        parse(key_set({without(rsa_key().jwk(), "e"), without(rsa_key().jwk(), "n")}));
+    EXPECT_TRUE(set.keys.empty());
+    EXPECT_EQ(set.skipped, 2U);
+}
+
+TEST_F(JwkSetTest, TheKidMayBeUpTo256Bytes) {
+    std::string at_limit = ed_key().jwk();
+    at_limit.replace(at_limit.find(ed_key().kid()), ed_key().kid().size(), std::string(256, 'k'));
+    std::string over = ed_key().jwk();
+    over.replace(over.find(ed_key().kid()), ed_key().kid().size(), std::string(257, 'k'));
+    EXPECT_EQ(parse(key_set({at_limit})).keys.size(), 1U);
+    const KeySet refused = parse(key_set({over}));
+    EXPECT_TRUE(refused.keys.empty());
+    EXPECT_EQ(refused.skipped, 1U);
+}
+
 TEST_F(JwkSetTest, SkipsKeysNotPublishedForVerification) {
     const KeySet set = parse(key_set({
         rsa_key().jwk(R"(,"use":"enc")"),
@@ -183,6 +229,18 @@ std::string rsa_jwk_with_modulus(std::size_t bytes, char last) {
     n.back() = last;
     return R"({"kty":"RSA","kid":"odd-shape","n":")" + infra::auth::encode_base64url(n) +
            R"(","e":"AQAB"})";
+}
+
+TEST_F(JwkSetTest, SkipsRsaKeysWhoseExponentIsNotBelowTheModulus) {
+    const std::string jwk = rsa_jwk_with_modulus(256, '\x03');
+    const std::size_t n = jwk.find(R"("n":")") + 5;
+    const std::string modulus = jwk.substr(n, jwk.find('"', n) - n);
+    std::string e_is_n = jwk;
+    const std::size_t e = e_is_n.find(R"("e":")") + 5;
+    e_is_n.replace(e, e_is_n.find('"', e) - e, modulus);
+    const KeySet set = parse(key_set({e_is_n}));
+    EXPECT_TRUE(set.keys.empty());
+    EXPECT_EQ(set.skipped, 1U);
 }
 
 TEST_F(JwkSetTest, SkipsRsaKeysWithAnEvenModulus) {
