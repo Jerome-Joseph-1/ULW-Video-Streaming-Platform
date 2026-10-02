@@ -77,8 +77,8 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0071](0071-slow-readers-are-not-reset-by-the-kernel.md) | Slow readers are not reset by the kernel: the gateway and the node channel bound their own peers | Accepted |
 | [0072](0072-security-analysis-in-ci.md) | Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check | Accepted |
 | [0073](0073-a-chat-socket-ends-with-its-token-and-its-membership.md) | A chat socket ends with its token, and a room with its membership | Accepted |
-| [0074](0074-coverage-floor.md) | Coverage is measured on every pull request and held to a floor per top-level directory | Accepted |
 | [0074](0074-ffmpeg-from-debian-security.md) | The worker's ffmpeg comes from Debian 13's security archive | Accepted |
 | [0075](0075-unused-chat-room-records-are-forgotten.md) | A chat room's record that nothing used is forgotten | Accepted |
 | [0076](0076-chat-per-client-connection-limits.md) | chat_server holds each address and each user to a share of its connections | Accepted |
 | [0077](0077-the-body-rate-window-skips-a-store-hold.md) | The body rate window skips a store's hold and keeps the bytes it counted | Accepted |
+| [0078](0078-coverage-floor.md) | Coverage is measured on every pull request and held to a floor per top-level directory | Accepted |

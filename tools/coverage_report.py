@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Sums `llvm-cov export -summary-only` by directory and holds each top-level directory to its
-floor (ADR-0074).
+floor (ADR-0078).
 
 Usage: coverage_report.py <repo-root> <export.json> <floors.txt> <summary.json> <summary.md>
 
@@ -72,7 +72,7 @@ def main() -> int:
     summary = {}
     lines = ["## Coverage", "",
              "Unit and integration labels; tests, third-party and generated code excluded. "
-             "Floors: ADR-0074, tools/coverage-floors.txt.", "",
+             "Floors: ADR-0078, tools/coverage-floors.txt.", "",
              "| Directory | Lines | Line % | Branches | Branch % | Floor (line / branch) |",
              "|---|---:|---:|---:|---:|---|"]
     total = [0, 0, 0, 0]

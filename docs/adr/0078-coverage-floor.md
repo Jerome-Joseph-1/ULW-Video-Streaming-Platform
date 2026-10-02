@@ -1,4 +1,4 @@
-# 0074. Coverage is measured on every pull request and held to a floor per top-level directory
+# 0078. Coverage is measured on every pull request and held to a floor per top-level directory
 
 Status: Accepted
 Date: 2026-09-30
