@@ -21,8 +21,7 @@ struct QueryParam {
 // Everything needed to put a request on the wire and to sign it. `path` is raw; it is encoded
 // once, by the same function, for both the request line and the canonical request.
 struct RequestTarget {
-    // As Endpoint::scheme holds it.
-    std::string scheme = "https";
+    Scheme scheme = Scheme::Https;
     std::string host;
     std::string path;
     std::vector<QueryParam> query;
@@ -50,11 +49,10 @@ public:
                                        std::vector<QueryParam> query = {}) const;
 
 private:
-    Bucket(std::string scheme, std::string host, std::string path_prefix)
-        : scheme_(std::move(scheme)), host_(std::move(host)), path_prefix_(std::move(path_prefix)) {
-    }
+    Bucket(Scheme scheme, std::string host, std::string path_prefix)
+        : scheme_(scheme), host_(std::move(host)), path_prefix_(std::move(path_prefix)) {}
 
-    std::string scheme_;
+    Scheme scheme_;
     std::string host_;
     // "/<bucket>" for path-style, empty for virtual-hosted.
     std::string path_prefix_;

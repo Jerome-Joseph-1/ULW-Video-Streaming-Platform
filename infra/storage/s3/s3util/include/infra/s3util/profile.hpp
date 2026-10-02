@@ -9,6 +9,11 @@
 
 namespace infra::s3util {
 
+enum class Scheme : std::uint8_t { Http, Https };
+
+// The scheme's name, as a URL spells it before "://". Plain HTTP is for a local MinIO only.
+[[nodiscard]] std::string_view to_string(Scheme scheme) noexcept;
+
 enum class Addressing : std::uint8_t { PathStyle, VirtualHosted };
 
 enum class ProfileError : std::uint8_t {
@@ -18,9 +23,7 @@ enum class ProfileError : std::uint8_t {
 };
 
 struct Endpoint {
-    // "https", or "http" for a local MinIO only. Plain HTTP is never chosen here: it is the
-    // configured endpoint's own spelling, copied from it, so it is only ever an operator's.
-    std::string scheme = "https";
+    Scheme scheme = Scheme::Https;
     std::string host;
     std::uint16_t port = 443;
 };

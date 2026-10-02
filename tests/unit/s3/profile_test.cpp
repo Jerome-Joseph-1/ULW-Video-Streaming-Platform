@@ -11,11 +11,12 @@ using infra::s3util::authority;
 using infra::s3util::parse_endpoint;
 using infra::s3util::ProfileError;
 using infra::s3util::S3Profile;
+using infra::s3util::Scheme;
 
 TEST(S3Profile, MinioIsPathStyleInTheDefaultRegionOnTheGivenEndpoint) {
     const auto p = S3Profile::minio("http://minio.internal:9000");
     ASSERT_TRUE(p.has_value());
-    EXPECT_EQ(p->endpoint.scheme, "http");
+    EXPECT_EQ(p->endpoint.scheme, Scheme::Http);
     EXPECT_EQ(p->endpoint.host, "minio.internal");
     EXPECT_EQ(p->endpoint.port, 9000);
     EXPECT_EQ(authority(p->endpoint), "minio.internal:9000");
@@ -33,7 +34,7 @@ TEST(S3Profile, R2SignsForRegionAutoAndRequiresUniformParts) {
     const auto p = S3Profile::r2("0123456789abcdef0123456789abcdef");
     ASSERT_TRUE(p.has_value());
     EXPECT_EQ(authority(p->endpoint), "0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com");
-    EXPECT_EQ(p->endpoint.scheme, "https");
+    EXPECT_EQ(p->endpoint.scheme, Scheme::Https);
     EXPECT_EQ(p->region, "auto");
     EXPECT_EQ(p->addressing, Addressing::PathStyle);
     EXPECT_TRUE(p->uniform_parts_required);
