@@ -2,10 +2,12 @@
 #include "core/util/parse.hpp"
 #include "infra/auth/base64url.hpp"
 #include "infra/messages/memory_message_store.hpp"
+#include "net/ip_address.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
+#include "os/unique_fd.hpp"
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
@@ -18,6 +20,11 @@
 #include "support/ws_client.hpp"
 #include "unit/rt/memory_room_store.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <format>
@@ -25,9 +32,12 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <poll.h>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -40,13 +50,40 @@ using ulw::test::WsClient;
 constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
 constexpr std::string_view kAllowed = "https://app.askedin.test";
 
+// Hands the server each connection as if it came from the peer `named` holds, while it holds
+// one: the loopback interface offers only 127.0.0.1, and on some hosts not even ::1.
+class NamedPeers final : public net::IAcceptHandler {
+public:
+    NamedPeers(chat::ChatServer& server, std::mutex& lock,
+               const std::optional<net::IpAddress>& named) noexcept
+        : server_(server), lock_(lock), named_(named) {}
+
+    void on_accept(os::UniqueFd conn) noexcept override {
+        std::optional<net::IpAddress> peer;
+        {
+            const std::scoped_lock held(lock_);
+            peer = named_;
+        }
+        if (peer) {
+            server_.accept_from(std::move(conn), *peer);
+        } else {
+            server_.on_accept(std::move(conn));
+        }
+    }
+
+private:
+    chat::ChatServer& server_;
+    std::mutex& lock_;
+    const std::optional<net::IpAddress>& named_;
+};
+
 // One chat node on a thread of its own, as chat_server runs it, over an in-memory room store.
 // The test talks to it through sockets only.
 class Node {
 public:
     // With `manual_clock`, time on the node stands still until advance() moves it.
     explicit Node(net::ReactorKind kind, chat::Limits limits = {}, bool manual_clock = false)
-        : limits_(limits), manual_clock_(manual_clock) {
+        : limits_(std::move(limits)), manual_clock_(manual_clock) {
         std::promise<std::uint16_t> port;
         auto ready = port.get_future();
         healthy_ = healthy_promise_.get_future();
@@ -63,6 +100,12 @@ public:
     Node& operator=(Node&&) = delete;
 
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+    // The peer the node takes the next connections to come from; nullopt for their own.
+    void name_peer(std::optional<net::IpAddress> peer) {
+        const std::scoped_lock held(peer_lock_);
+        named_peer_ = peer;
+    }
 
     // Whether the room plane is reachable, the condition /readyz reports, without a request to
     // poll it with: the node's loop says so once, and the wait ends then or at the limit.
@@ -95,6 +138,10 @@ public:
     // Every session fails as if out of memory, and the keys arrive in the same turn, before the
     // failed sessions have closed.
     std::atomic<bool> fail_then_refresh_keys = false;
+    // What the verifier says of keys_expired(); `keys_expired` follows once the node's thread has
+    // seen it.
+    std::atomic<bool> expire_keys = false;
+    std::atomic<bool> keys_expired = false;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -146,10 +193,12 @@ private:
                        .router = router,
                        .messages = *messages,
                        .verifier = verifier,
-                       .clock = clock},
+                       .clock = clock,
+                       .random = random},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
             limits_);
-        if (!(*reactor)->listen(std::move(*clients), *server)) {
+        NamedPeers accept(*server, peer_lock_, named_peer_);
+        if (!(*reactor)->listen(std::move(*clients), accept)) {
             port.set_value(0);
             return;
         }
@@ -182,6 +231,10 @@ private:
                 server->for_each_session([](chat::Session& s) noexcept { s.allocation_failed(); });
                 verifier.refresh_keys();
             }
+            if (expire_keys != verifier.expired) {
+                verifier.expired = expire_keys;
+                keys_expired = verifier.expired;
+            }
             key_waiters = verifier.waiting();
             http_parsers = server->http_parsers();
             ++turns_;
@@ -194,6 +247,8 @@ private:
 
     chat::Limits limits_;
     bool manual_clock_;
+    std::mutex peer_lock_;
+    std::optional<net::IpAddress> named_peer_;
     std::promise<void> healthy_promise_;
     std::future<void> healthy_;
     std::atomic<std::int64_t> requested_ = 0;
@@ -203,6 +258,62 @@ private:
     std::uint16_t port_ = 0;
     std::jthread thread_;
 };
+
+// An upgrade request on a connection the test keeps open, and the head of the answer.
+struct Asked {
+    os::UniqueFd conn;
+    std::string head;
+};
+
+// The value of a header in an answer's head, whole: "5" for "Retry-After: 5", never the "5" of
+// "Retry-After: 50". Empty when the head has no such header.
+std::string header_value(const std::string& head, std::string_view name) {
+    const std::string key = "\r\n" + std::string(name) + ": ";
+    const auto at = head.find(key);
+    if (at == std::string::npos) {
+        return {};
+    }
+    const auto from = at + key.size();
+    const auto end = head.find("\r\n", from);
+    return head.substr(from, end == std::string::npos ? std::string::npos : end - from);
+}
+
+Asked ask_upgrade(std::uint16_t port, const std::string& headers) {
+    Asked out{.conn = os::UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)}, .head = {}};
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (!out.conn) {
+        return out;
+    }
+    // connect() takes every address family through the generic sockaddr header.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    if (::connect(out.conn.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+        return out;
+    }
+    const std::string request = "GET /rt HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n"
+                                "Connection: Upgrade\r\n"
+                                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                "Sec-WebSocket-Version: 13\r\n" +
+                                headers + "\r\n";
+    if (::send(out.conn.get(), request.data(), request.size(), MSG_NOSIGNAL) !=
+        static_cast<ssize_t>(request.size())) {
+        return out;
+    }
+    std::string in;
+    std::array<char, 4096> buf{};
+    pollfd pfd{.fd = out.conn.get(), .events = POLLIN, .revents = 0};
+    while (in.find("\r\n\r\n") == std::string::npos && ::poll(&pfd, 1, 10'000) > 0) {
+        const ssize_t n = ::recv(out.conn.get(), buf.data(), buf.size(), 0);
+        if (n <= 0) {
+            break;
+        }
+        in.append(buf.data(), static_cast<std::size_t>(n));
+    }
+    out.head = in.substr(0, in.find("\r\n\r\n"));
+    return out;
+}
 
 class ChatSessionTest : public ::testing::TestWithParam<net::ReactorKind> {
 protected:
@@ -226,6 +337,22 @@ protected:
         return line;
     }
 
+    // A counter from the node's /metrics, asked from an address no test connects from, so that
+    // the limits a test has filled neither refuse the request nor count it.
+    std::optional<std::uint64_t> counter(std::string_view name) {
+        node_->name_peer(net::IpAddress::parse("192.0.2.250"));
+        const auto body = ulw::test::http_get(node_->port(), "/metrics").body;
+        node_->name_peer(std::nullopt);
+        const std::string line = std::string(name) + " ";
+        const std::size_t at = body.find(line);
+        if (at == std::string::npos) {
+            return std::nullopt;
+        }
+        const std::size_t start = at + line.size();
+        return core::parse_integer<std::uint64_t>(
+            std::string_view(body).substr(start, body.find('\n', start) - start));
+    }
+
     std::unique_ptr<Node> node_;
 };
 
@@ -238,6 +365,12 @@ TEST_P(ChatSessionTest, ProbesAnswerAndUnknownPathsAreNotFound) {
     const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
     EXPECT_EQ(metrics.status, 200);
     EXPECT_NE(metrics.body.find("fenced_writes_total 0\n"), std::string::npos);
+    // A socket the kernel or the reactor would not take is not a full node, and is counted
+    // apart, as the gateway counts it.
+    EXPECT_NE(metrics.body.find("connections_rejected_total{reason=\"socket\"} 0\n"),
+              std::string::npos);
+    EXPECT_NE(metrics.body.find("connections_rejected_total{reason=\"capacity\"} 0\n"),
+              std::string::npos);
     EXPECT_EQ(ulw::test::http_get(node_->port(), "/api/v1/videos").status, 404);
 }
 
@@ -352,6 +485,83 @@ TEST_P(ChatSessionTest, PingsAreAnsweredUntilTheBurstRunsOutThenTheStreamIsCut) 
     EXPECT_EQ((static_cast<unsigned char>((*close)[0]) << 8U) |
                   static_cast<unsigned char>((*close)[1]),
               1008U);
+}
+
+// A socket must not outlive the token it was opened with: a user whose tokens stopped being
+// issued (signed out, banned) would otherwise go on receiving for as long as it answers pings.
+TEST_P(ChatSessionTest, ASocketClosesWhenItsTokenExpiresWithTheCodeThatSaysReconnect) {
+    node_.reset();
+    // Pings and the idle timeout far off, so that only the token can end the socket.
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    // The token expires an hour after it was checked (FakeVerifier), and a check accepts it for
+    // the clock skew past that.
+    node_->advance(std::chrono::hours(1) + core::ports::kTokenClockSkew - seconds(1));
+    std::vector<std::byte> join;
+    ASSERT_TRUE(alice->append(join, codec::ws::Opcode::Text,
+                              R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    ASSERT_TRUE(alice->send_raw(join));
+    const auto answer = alice->next_frame(seconds(10));
+    ASSERT_TRUE(answer);
+    EXPECT_EQ(answer->first, codec::ws::Opcode::Text) << "closed before its token expired";
+
+    node_->advance(seconds(1));
+    std::optional<std::string> close;
+    while (const auto frame = alice->next_frame(seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Close) {
+            close = frame->second;
+            break;
+        }
+    }
+    ASSERT_TRUE(close) << "still open after its token expired";
+    ASSERT_GE(close->size(), 2U);
+    EXPECT_EQ((static_cast<unsigned char>((*close)[0]) << 8U) |
+                  static_cast<unsigned char>((*close)[1]),
+              4001U);
+}
+
+// A token may name any exp the wall clock can hold: its deadline plus the skew must not run past
+// the clock's range (signed overflow, caught by UBSan), and such a socket lives on.
+TEST_P(ChatSessionTest, ATokenThatExpiresAtTheEndOfTimeKeepsItsSocketOpen) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto alice = open("Authorization: Bearer forever.alice\r\n");
+    ASSERT_TRUE(alice);
+    node_->advance(std::chrono::hours(2));
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+}
+
+// The same without UBSan: the deadline of a token at the end of time is the end of the
+// monotonic clock, not a sum that wrapped past it.
+TEST(TokenDeadline, IsExpPlusTheSkewOnTheMonotonicClockAndNeverWraps) {
+    const core::MonoTime now{std::chrono::hours(1000)};
+    const core::WallTime wall{std::chrono::seconds(1767225600)};
+    EXPECT_EQ(chat::token_deadline(now, wall, wall + std::chrono::hours(1)),
+              now + std::chrono::hours(1) + core::ports::kTokenClockSkew);
+    EXPECT_EQ(chat::token_deadline(now, wall, wall - seconds(30)), now + seconds(30));
+    EXPECT_EQ(chat::token_deadline(now, wall, wall - seconds(90)), now);
+    constexpr auto kLast =
+        std::chrono::floor<std::chrono::seconds>(core::WallTime::duration::max()) - seconds(1);
+    EXPECT_EQ(chat::token_deadline(now, wall, core::WallTime{kLast}),
+              now + (core::WallTime{kLast} - wall) + core::ports::kTokenClockSkew);
+    // Past what the monotonic clock can count from where it stands: never, not a wrapped sum.
+    const core::MonoTime late = core::MonoTime::max() - std::chrono::hours(1);
+    EXPECT_EQ(chat::token_deadline(late, wall, wall + std::chrono::hours(2)),
+              core::MonoTime::max());
+    EXPECT_EQ(chat::token_deadline(late, wall, core::WallTime{kLast}), core::MonoTime::max());
 }
 
 TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
@@ -587,6 +797,18 @@ TEST_P(ChatSessionTest, AMemberThatStopsReadingIsClosedAsASlowConsumer) {
         [&] { return metric(node_->port(), "slow_consumers_total") == std::uint64_t{1}; }));
 }
 
+// Once the keys go unrefreshed too long every token is refused, so the gauge an alert watches
+// says so while it lasts.
+TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
+    node_->expire_keys = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->keys_expired.load(); }));
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 1U);
+    node_->expire_keys = false;
+    ASSERT_TRUE(ulw::test::eventually([&] { return !node_->keys_expired.load(); }));
+    EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
+}
+
 // Both viewers fall behind a sender that never stops. One never reads again, and is reset once it
 // has acknowledged nothing for the stall timeout, here 2.5 s; the other empties its socket now
 // and then, and keeps its connection however long it lags. Real time: the kernel's own timers,
@@ -597,6 +819,9 @@ TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosed
     node_ = std::make_unique<Node>(
         GetParam(), chat::Limits{.stall_timeout = core::Millis{2'500},
                                  .stall_check = core::Millis{250},
+                                 // It reads the metrics on a new connection every 50 messages,
+                                 // from the one address every client here shares.
+                                 .new_connections_per_ip_per_second = 1'000,
                                  .service = {.send_burst = 1'000'000,
                                              .max_send_bytes_in_flight = std::size_t{1} << 20U},
                                  .presence = {}});
@@ -797,6 +1022,213 @@ TEST_P(ChatSessionTest, AnUpgradeThatFailedWhileWaitingOnKeysIsNotAcceptedWhenTh
     // Closed without a response: no 101 after the failure.
     EXPECT_FALSE(opened);
     EXPECT_EQ(status, "");
+}
+
+// ADR-0076: one address that connects directly holds at most max_connections_per_ip sockets,
+// counted from accept, and is reset before a byte is read past that.
+TEST_P(ChatSessionTest, ADirectPeerHoldsAtMostItsAddressesConnections) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 3;
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    std::vector<WsClient> open_ones;
+    for (const char* user : {"alice", "bob", "carol"}) {
+        auto ws = open_as(user);
+        ASSERT_TRUE(ws) << user;
+        open_ones.push_back(std::move(*ws));
+    }
+    // Reset at accept: no status line, and no token looked at.
+    EXPECT_EQ(refusal("Authorization: Bearer user.dave\r\n"), "");
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 1U);
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_rate"})"), 0U);
+    // Closing one gives its place back.
+    open_ones.pop_back();
+    EXPECT_TRUE(ulw::test::eventually([&] { return open_as("dave").has_value(); }));
+}
+
+// X-Forwarded-For is believed from a trusted proxy only: a direct peer that sends one is still
+// counted as its own address, or it could name a fresh one for every connection.
+TEST_P(ChatSessionTest, ADirectPeerIsCountedAsItsOwnAddressWhateverItsXForwardedForSays) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 2;
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    auto first = open("X-Forwarded-For: 203.0.113.1\r\nAuthorization: Bearer user.alice\r\n");
+    auto second = open("X-Forwarded-For: 203.0.113.2\r\nAuthorization: Bearer user.bob\r\n");
+    ASSERT_TRUE(first && second);
+    EXPECT_EQ(refusal("X-Forwarded-For: 203.0.113.3\r\nAuthorization: Bearer user.carol\r\n"), "");
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 1U);
+    EXPECT_EQ(counter(R"(upgrades_limited_total{limit="ip"})"), 0U);
+}
+
+// A customer handed a /56 or a /48 has hundreds of /64s, each of which max_connections_per_ip
+// counts afresh: the /64s of one /48 are held to max_connections_per_ip_block together.
+TEST_P(ChatSessionTest, TheSlash64sOfOneIpv6Slash48TogetherHoldAtMostItsBlocksConnections) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 2;
+    limits.max_connections_per_ip_block = 3;
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    std::vector<WsClient> open_ones;
+    for (const char* peer : {"2001:db8:1:1::1", "2001:db8:1:2::1", "2001:db8:1:3::1"}) {
+        node_->name_peer(net::IpAddress::parse(peer));
+        auto ws = open_as("alice");
+        ASSERT_TRUE(ws) << peer;
+        open_ones.push_back(std::move(*ws));
+    }
+    // A fourth /64 of the block, with none of its own open, is reset at accept.
+    const auto fourth = net::IpAddress::parse("2001:db8:1:ff::1");
+    node_->name_peer(fourth);
+    EXPECT_EQ(refusal("Authorization: Bearer user.bob\r\n"), "");
+    // Another /48 is not held to it.
+    node_->name_peer(net::IpAddress::parse("2001:db8:2:1::1"));
+    auto elsewhere = open_as("bob");
+    EXPECT_TRUE(elsewhere);
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_block"})"), 1U);
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 0U);
+    EXPECT_EQ(counter(R"(rate_limit_entries{table="ip_block"})"), 2U);
+    // Closing one gives the block its place back.
+    open_ones.pop_back();
+    node_->name_peer(fourth);
+    EXPECT_TRUE(ulw::test::eventually([&] { return open_as("bob").has_value(); }));
+}
+
+TEST_P(ChatSessionTest, ADirectPeerOpensAtMostItsNewConnectionsASecond) {
+    node_.reset();
+    chat::Limits limits;
+    limits.new_connections_per_ip_per_second = 2;
+    node_ = std::make_unique<Node>(GetParam(), limits, true);
+    auto one = open_as("alice");
+    auto two = open_as("bob");
+    ASSERT_TRUE(one && two);
+    EXPECT_EQ(refusal("Authorization: Bearer user.carol\r\n"), "");
+    // One more every half second.
+    node_->advance(core::Millis{500});
+    EXPECT_TRUE(open_as("carol"));
+    EXPECT_EQ(refusal("Authorization: Bearer user.dave\r\n"), "");
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_rate"})"), 2U);
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 0U);
+}
+
+// One valid token must not take the node's every socket.
+TEST_P(ChatSessionTest, AUserHoldsAtMostItsSessionsAndIsToldWhenToComeBack) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_sessions_per_user = 2;
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    auto first = open_as("alice");
+    auto second = open_as("alice");
+    ASSERT_TRUE(first && second);
+    // A socket of the user's closing frees a place; a few seconds is enough.
+    const auto third = ask_upgrade(node_->port(), "Authorization: Bearer user.alice\r\n");
+    EXPECT_TRUE(third.head.starts_with("HTTP/1.1 429 Too Many Requests\r\n")) << third.head;
+    EXPECT_EQ(header_value(third.head, "Retry-After"), "5") << third.head;
+    // Another user is not held to alice's count.
+    EXPECT_TRUE(open_as("bob"));
+    EXPECT_EQ(counter(R"(upgrades_limited_total{limit="user_sessions"})"), 1U);
+    EXPECT_EQ(counter(R"(rate_limit_entries{table="user"})"), 2U);
+    first.reset();
+    EXPECT_TRUE(ulw::test::eventually([&] { return open_as("alice").has_value(); }));
+}
+
+// A socket closed because its token ran out (4001) gives its user's place back, so the client
+// that reconnects with a fresh token, as the code tells it to, is not refused for its own
+// expired socket.
+TEST_P(ChatSessionTest, ASocketClosedForAnExpiredTokenGivesItsUsersPlaceBack) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = std::chrono::hours(3),
+                                                .idle_timeout = std::chrono::hours(4),
+                                                // Time stands still: the reconnects below
+                                                // would otherwise run the bucket dry.
+                                                .new_connections_per_ip_per_second = 1'000,
+                                                .max_sessions_per_user = 2,
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto first = open_as("alice");
+    ASSERT_TRUE(first);
+    node_->advance(std::chrono::minutes(30));
+    auto second = open_as("alice");
+    ASSERT_TRUE(second);
+    EXPECT_EQ(refusal("Authorization: Bearer user.alice\r\n"), "HTTP/1.1 429 Too Many Requests");
+    // The first token expires an hour after it was checked (FakeVerifier), plus the clock skew;
+    // the second half an hour later.
+    node_->advance(std::chrono::minutes(30) + core::ports::kTokenClockSkew);
+    std::optional<std::string> close;
+    while (const auto frame = first->next_frame(seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Close) {
+            close = frame->second;
+            break;
+        }
+    }
+    ASSERT_TRUE(close) << "still open after its token expired";
+    ASSERT_GE(close->size(), 2U);
+    EXPECT_EQ((static_cast<unsigned char>((*close)[0]) << 8U) |
+                  static_cast<unsigned char>((*close)[1]),
+              4001U);
+    first.reset();
+    EXPECT_TRUE(ulw::test::eventually([&] { return open_as("alice").has_value(); }));
+}
+
+// Behind a trusted proxy every connection comes from the proxy; the address it names is held to
+// max_connections_per_ip for its upgrades not yet answered, and no longer: a socket that is open
+// is its user's to count.
+TEST_P(ChatSessionTest, BehindATrustedProxyTheForwardedAddressIsHeldOnlyUntilItsUpgradeIsAnswered) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 2;
+    limits.trusted_proxies = {*net::IpNetwork::parse("127.0.0.0/8")};
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    const std::string from_a = "X-Forwarded-For: 203.0.113.7\r\n";
+    // Two upgrades from one forwarded address, both waiting on the keys.
+    auto first = std::async(std::launch::async,
+                            [&] { return open(from_a + "Authorization: Bearer slow.alice\r\n"); });
+    auto second = std::async(std::launch::async,
+                             [&] { return open(from_a + "Authorization: Bearer slow.bob\r\n"); });
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->key_waiters == 2; }));
+    // Told to come back as soon as an upgrade in flight is likely answered.
+    const auto third = ask_upgrade(node_->port(), from_a + "Authorization: Bearer user.carol\r\n");
+    EXPECT_TRUE(third.head.starts_with("HTTP/1.1 429 Too Many Requests\r\n")) << third.head;
+    EXPECT_EQ(header_value(third.head, "Retry-After"), "1") << third.head;
+    EXPECT_EQ(counter(R"(upgrades_limited_total{limit="ip"})"), 1U);
+    // Another address, through the same proxy, is not.
+    EXPECT_TRUE(open("X-Forwarded-For: 198.51.100.9\r\nAuthorization: Bearer user.carol\r\n"));
+    node_->refresh_keys = true;
+    auto alice = first.get();
+    auto bob = second.get();
+    ASSERT_TRUE(alice && bob);
+    // Both open, and the address free again for its next upgrades.
+    auto carol = open(from_a + "Authorization: Bearer user.carol\r\n");
+    auto dave = open(from_a + "Authorization: Bearer user.dave\r\n");
+    EXPECT_TRUE(carol && dave);
+    // The direct peer, the proxy, was never counted as a client.
+    EXPECT_EQ(counter(R"(connections_rejected_total{reason="ip_connections"})"), 0U);
+}
+
+// An upgrade refused for its token or its origin is answered, and so gives its forwarded
+// address's place back at once, though the client keeps the connection open.
+TEST_P(ChatSessionTest, BehindATrustedProxyAnUpgradeAnswered401Or403GivesItsAddressPlaceBack) {
+    node_.reset();
+    chat::Limits limits;
+    limits.max_connections_per_ip = 1;
+    limits.trusted_proxies = {*net::IpNetwork::parse("127.0.0.0/8")};
+    node_ = std::make_unique<Node>(GetParam(), limits);
+    const std::string from_a = "X-Forwarded-For: 203.0.113.7\r\n";
+    std::vector<Asked> refused;
+    for (const auto& [headers, status] : std::vector<std::pair<std::string, std::string>>{
+             {from_a, "HTTP/1.1 401 Unauthorized"},
+             {from_a + "Authorization: Bearer forged\r\n", "HTTP/1.1 401 Unauthorized"},
+             {from_a + "Cookie: auth_token=user.alice\r\n", "HTTP/1.1 403 Forbidden"},
+             {from_a + "Cookie: auth_token=user.alice\r\nOrigin: https://evil.test\r\n",
+              "HTTP/1.1 403 Forbidden"}}) {
+        refused.push_back(ask_upgrade(node_->port(), headers));
+        EXPECT_TRUE(refused.back().head.starts_with(status + "\r\n")) << refused.back().head;
+    }
+    // Every refused connection still open: an address held until its connections close would
+    // have been answered 429 from the second on, and would be now.
+    EXPECT_TRUE(open(from_a + "Authorization: Bearer user.alice\r\n"));
+    EXPECT_EQ(counter(R"(upgrades_limited_total{limit="ip"})"), 0U);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

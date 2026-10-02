@@ -1,0 +1,8 @@
+# CodeQL's configuration for security.yml's codeql job (docs/adr/0072).
+name: ulw
+queries:
+  - uses: security-extended
+# The build tree holds the vendored sources FetchContent unpacks (llhttp, srt) and generated
+# files; alerts there are upstream's, and the dependencies job tracks their advisories.
+paths-ignore:
+  - build/**

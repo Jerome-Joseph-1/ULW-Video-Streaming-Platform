@@ -10,7 +10,8 @@ namespace ulw::test {
 
 // "user.<sub>" verifies as <sub>; anything else is a bad signature. "slow.<sub>" behaves like
 // a token whose key is not cached yet: the first attempt waits for refresh_keys(). "down.<sub>"
-// fails as if the key server were unreachable. Dots, not
+// fails as if the key server were unreachable. "forever.<sub>" expires at the latest instant a
+// token's exp can name (the wall clock's last whole second but one). Dots, not
 // colons, so the tokens pass the gateway's check that a token looks like a compact JWS.
 class FakeVerifier final : public core::ports::IJwtVerifier {
 public:
@@ -31,6 +32,13 @@ public:
         if (!user) {
             return std::unexpected(core::ports::AuthError::MissingSubject);
         }
+        if (token.starts_with("forever.")) {
+            constexpr auto kLast =
+                std::chrono::floor<std::chrono::seconds>(core::WallTime::duration::max()) -
+                std::chrono::seconds(1);
+            return core::ports::Claims{
+                .subject = *user, .email = {}, .expires_at = core::WallTime{kLast}};
+        }
         return core::ports::Claims{
             .subject = *user, .email = {}, .expires_at = now + std::chrono::hours(1)};
     }
@@ -40,6 +48,10 @@ public:
     }
 
     [[nodiscard]] std::size_t waiting() const noexcept { return waiters_.size(); }
+
+    // What keys_expired() reports; verify() is unchanged by it.
+    bool expired = false;
+    [[nodiscard]] bool keys_expired() const noexcept override { return expired; }
 
     void refresh_keys() {
         refreshed_ = true;

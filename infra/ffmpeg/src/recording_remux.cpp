@@ -7,6 +7,7 @@
 #include "recording_verdict.hpp"
 
 #include <chrono>
+#include <string>
 #include <utility>
 
 namespace infra::ffmpeg {
@@ -86,8 +87,9 @@ std::expected<void, RemuxError>
 RecordingRemuxer::run(const RecordingRemuxJob& job,
                       const std::function<void(std::string_view)>& on_output,
                       const std::stop_token& stop) const {
-    const Sandbox sandbox{.helper = config_.sandbox,
-                          .environment = {"PATH=" + config_.search_path}};
+    const Sandbox sandbox{
+        .helper = config_.sandbox,
+        .environment = {"PATH=" + config_.search_path, std::string(kTwoMallocArenas)}};
     const Limits limits{.writable = job.work_dir,
                         .address_space_bytes = kCopyAddressSpace,
                         .cpu = job.cpu,
@@ -106,8 +108,9 @@ std::expected<std::optional<AudioFormat>, RemuxError>
 RecordingRemuxer::probe_audio(const std::filesystem::path& init,
                               const std::filesystem::path& work_dir,
                               const std::stop_token& stop) const {
-    const Sandbox sandbox{.helper = config_.sandbox,
-                          .environment = {"PATH=" + config_.search_path}};
+    const Sandbox sandbox{
+        .helper = config_.sandbox,
+        .environment = {"PATH=" + config_.search_path, std::string(kTwoMallocArenas)}};
     const Limits limits{.writable = work_dir,
                         .address_space_bytes = kCopyAddressSpace,
                         .cpu = kProbeBudget,
