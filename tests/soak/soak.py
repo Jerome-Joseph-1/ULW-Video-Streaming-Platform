@@ -221,6 +221,8 @@ class Stack:
         # Experiments only: an allocator to put in front of glibc's.
         if os.environ.get("ULW_SOAK_PRELOAD"):
             gateway_env["LD_PRELOAD"] = os.environ["ULW_SOAK_PRELOAD"]
+        if os.environ.get("ULW_SOAK_MALLOC_CONF"):
+            gateway_env["MALLOC_CONF"] = os.environ["ULW_SOAK_MALLOC_CONF"]
         scratch = self.out / "scratch"
         scratch.mkdir(exist_ok=True)
         worker_env = {**self.common_env(), "ULW_NODE_ID": "soak-worker",

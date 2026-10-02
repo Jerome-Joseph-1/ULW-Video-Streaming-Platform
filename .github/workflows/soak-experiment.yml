@@ -1,7 +1,7 @@
 name: soak-experiment
 
-# Allocator experiment on the self-hosted runner, second round: one build, three soaks side
-# by side: gateway-glibc, gateway-jemalloc, chat-jemalloc (a repeat).
+# Gateway heap profile on the self-hosted runner: one gateway soak under jemalloc with heap
+# profiling, a dump every GiB allocated, uploaded with the binary for jeprof.
 
 on:
   workflow_dispatch:
@@ -63,15 +63,15 @@ jobs:
           JE=$(dpkg -L libjemalloc2 | grep -E '/libjemalloc\.so\.2$' | head -1)
           echo "mimalloc: $MI"; echo "jemalloc: $JE"; test -f "$MI"; test -f "$JE"
           O=$RUNNER_TEMP/soaks; mkdir -p "$O"
+          mkdir -p "$O/prof"; sudo chmod 777 "$O/prof"
           run() {  # run NAME PRELOAD SCRIPT PORT
             sudo env ULW_TEST_DATABASE_URL="$ULW_TEST_DATABASE_URL" PYTHONDONTWRITEBYTECODE=1 \
+              ULW_SOAK_MALLOC_CONF="prof:true,prof_prefix:$O/prof/gw,lg_prof_interval:30" \
               ULW_SOAK_PRELOAD="$2" "$3" --build build/ci --hours "$HOURS" --port "$4" --out "$O/$1" \
               >"$O/$1.console" 2>&1 && rc=0 || rc=$?
             echo "$rc" >"$O/$1.rc"
           }
-          run chat-jemalloc  "$JE" tests/soak/chat_soak.py 19121 &
-          run gw-glibc       ""    tests/soak/soak.py      18180 &
-          run gw-jemalloc    "$JE" tests/soak/soak.py      18190 &
+          run gw-jeprof      "$JE" tests/soak/soak.py      18190 &
           # Proof the preloads took: the allocators mapped into the services.
           sleep 180
           for p in $(pgrep -x chat_server; pgrep -x gateway_server); do
@@ -82,7 +82,7 @@ jobs:
             sleep 600
           done
           wait
-          for n in chat-jemalloc gw-glibc gw-jemalloc; do
+          for n in gw-jeprof; do
             echo "=================== $n: exit $(cat "$O/$n.rc")"
             sed -n '/^window:/,$p' "$O/$n/summary.txt" 2>/dev/null || tail -30 "$O/$n.console"
             { echo "### $n (exit $(cat "$O/$n.rc"))"; echo '```'; sed -n '/^window:/,$p' "$O/$n/summary.txt" 2>/dev/null || true; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
@@ -97,6 +97,8 @@ jobs:
             ${{ runner.temp }}/soaks/*/summary.txt
             ${{ runner.temp }}/soaks/*/*.log
             ${{ runner.temp }}/soaks/*.console
+            ${{ runner.temp }}/soaks/prof/*.heap
+            build/ci/apps/gateway/gateway_server
           if-no-files-found: warn
           retention-days: 30
       - if: always()
