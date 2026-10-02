@@ -1011,6 +1011,53 @@ TEST_P(GatewayUpload, AChunkSentAtExactlyTheMinimumRateIsAccepted) {
     EXPECT_EQ(gw.counters().timeouts_body_rate, 0U);
 }
 
+// Each window is judged on its own bytes: a fast start does not pay for a trickle after it.
+TEST_P(GatewayUpload, AFastStartDoesNotCoverALaterTrickle) {
+    GatewayUnderTest gw(
+        over_transport({.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true}));
+    const gateway::Limits limits;
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, kMiB);
+    ASSERT_TRUE(up);
+    const auto data = ulw::test::pattern(kMiB);
+    ASSERT_TRUE(c.send_raw(patch_head(up->upload_id, data.size())));
+    const core::Millis step = limits.body_rate_window / 10;
+    // Three times the floor through the first window, then half of it.
+    const std::uint64_t fast = 3 * floor_over(limits, step);
+    const std::uint64_t first_window = 10 * fast;
+    trickle(gw, c, std::span(data).first(first_window), fast, step, 10);
+    ASSERT_EQ(gw.counters().timeouts_body_rate, 0U);
+    trickle(gw, c, std::span(data).subspan(first_window), floor_over(limits, step) / 2, step, 10);
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.counters().timeouts_body_rate == 1; }));
+    const auto r = c.read_response();
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 408);
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_EQ(gw.counters().timeouts_body, 0U);
+}
+
+TEST_P(GatewayUpload, AnIdleConnectionWhoseTimerFiresLateIsStillClosed) {
+    GatewayUnderTest gw(over_transport({.manual_clock = true}));
+    HttpClient c(gw.endpoint());
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.connections() == 1; }));
+    // The clock jumps well past the deadline before the timer gets to run.
+    gw.advance(3 * gateway::Limits{}.header_timeout);
+    EXPECT_TRUE(c.closed_by_peer());
+    EXPECT_EQ(gw.counters().timeouts_header, 1U);
+}
+
+TEST_P(GatewayUpload, DrainStopsAcceptingNewConnections) {
+    GatewayUnderTest gw(over_transport());
+    gw.drain();
+    // The listening socket is closed, so a new client is refused by the kernel rather than
+    // accepted and dropped.
+    EXPECT_TRUE(ulw::test::eventually([&] {
+        const HttpClient late(gw.endpoint());
+        return !late.connected();
+    }));
+    EXPECT_EQ(gw.counters().rejected_draining, 0U);
+}
+
 TEST_P(GatewayUpload, BytesSentBeforeTheStoreHeldTheBodyUpCountTowardTheMinimumRate) {
     GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true};
     // Each write takes at most this much, so every read leaves bytes staged: the store holds
