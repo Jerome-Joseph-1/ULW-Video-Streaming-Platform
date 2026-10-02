@@ -24,6 +24,7 @@ against in HTML comments, for maintainers.
 | [videos-and-playback.md](videos-and-playback.md) | Video states, playlists, presigned segments, CORS, players | Stable |
 | [operations-contract.md](operations-contract.md) | What the platform provides; health, readiness, metrics | Stable |
 | [versioning.md](versioning.md) | Compatibility and how changes are announced | Stable (policy is a proposal) |
+| [changelog.md](changelog.md) | Changes to the Stable pages a client may have to act on | Stable |
 | [chat.md](chat.md) | WebSocket endpoint, envelope, resume, history and member lists | Draft until phase 2 |
 | [calls.md](calls.md) | 1:1 calls; group calls are planned, not available | Draft until M26 |
 | [live.md](live.md) | Live streams | Draft until M33 |

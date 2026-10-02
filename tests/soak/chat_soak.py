@@ -391,6 +391,8 @@ class Stack:
         self.node_ports = {n: args.port + 100 + i for i, n in enumerate(NODES)}
         self.secret = secrets.token_hex(32)
         self.procs = {}
+        # The exit codes once stop() has run; a later stop() returns them again.
+        self.codes = None
         self.tokens = {}
         self.features = Features()
 
@@ -532,6 +534,8 @@ class Stack:
             p.send_signal(sig)
 
     def stop(self):
+        if self.codes is not None:
+            return self.codes
         codes = {}
         for p in self.procs.values():
             if p.poll() is None:
@@ -543,6 +547,7 @@ class Stack:
             except subprocess.TimeoutExpired:
                 p.kill()
                 codes[n] = "killed"
+        self.codes = codes
         return codes
 
     def cleanup(self):
@@ -1138,67 +1143,74 @@ def main():
     stack.prepare(users)
     stack.grant(rooms.pool + [rooms.firehose, rooms.probe], users)
     stack.grant(rooms.fresh, [u for u in users if u.startswith("v")])
-    stack.start()
-    stack.detect("probe", "hose", rooms.probe)
-    pids = stack.pids()
-    (out / "pids.json").write_text(json.dumps({**pids, "soak": os.getpid()}))
-    absent = stack.features.absent()
-    log(f"started: {pids}, database {stack.name}; not on this server: "
-        f"{', '.join(absent) if absent else 'nothing'}")
-
+    # From start() to the last stop(), whatever fails (start itself, the feature probe, the
+    # sampling loop) still stops the servers: the soak may run as root, where nothing else
+    # would stop them. stop() is idempotent, so the finally's call after a run is a no-op.
     stop = threading.Event()
-    counts = Counts()
-    client_users = users[:args.clients]
-    threads = [Client(stack, counts, stop, rooms, i, client_users, args.pause, scale)
-               for i in range(args.clients)]
-    threads += [Visitors(stack, counts, stop, rooms), Burst(stack, counts, stop, rooms),
-                Slow(stack, counts, stop, rooms), Signals(stack, counts, stop, every),
-                Prefill(stack, counts, stop, rooms,
-                        time.time() + (warmup - PREFILL_MARGIN_MINUTES) * 60)]
-    for t in threads:
-        t.start()
+    try:
+        stack.start()
+        stack.detect("probe", "hose", rooms.probe)
+        pids = stack.pids()
+        (out / "pids.json").write_text(json.dumps({**pids, "soak": os.getpid()}))
+        absent = stack.features.absent()
+        log(f"started: {pids}, database {stack.name}; not on this server: "
+            f"{', '.join(absent) if absent else 'nothing'}")
 
-    fields = ["time", "elapsed_min"]
-    for node in NODES:
-        fields += [f"{column(node)}_{k}" for k in ["rss_kb", "fds", *METRICS]]
-    fields += DRIVER
-    rows = []
-    last_metrics = {n: {} for n in NODES}
-    started = time.time()
-    end = started + args.hours * 3600
-    failure = None
-    with open(out / "samples.csv", "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        next_sample = started
-        while time.time() < end:
-            if not stack.alive():
-                failure = "a node exited during the run"
-                break
-            if time.time() >= next_sample:
-                row = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                       "elapsed_min": round((time.time() - started) / 60, 2)}
-                for node in NODES:
-                    c = column(node)
-                    row[f"{c}_rss_kb"], row[f"{c}_fds"] = proc_sample(pids[node])
-                    # A stopped node cannot answer; its counters only ever rise, so the last
-                    # ones it gave stand in.
-                    m = stack.metrics(node) or last_metrics[node]
-                    last_metrics[node] = m
-                    for k, name in METRICS.items():
-                        row[f"{c}_{k}"] = m.get(name, 0)
-                snapshot = counts.snapshot()
-                row.update({k: snapshot.get(k, 0) for k in DRIVER})
-                writer.writerow(row)
-                f.flush()
-                rows.append(row)
-                next_sample += args.interval
-            time.sleep(min(5.0, max(0.0, next_sample - time.time())))
+        counts = Counts()
+        client_users = users[:args.clients]
+        threads = [Client(stack, counts, stop, rooms, i, client_users, args.pause, scale)
+                   for i in range(args.clients)]
+        threads += [Visitors(stack, counts, stop, rooms), Burst(stack, counts, stop, rooms),
+                    Slow(stack, counts, stop, rooms), Signals(stack, counts, stop, every),
+                    Prefill(stack, counts, stop, rooms,
+                            time.time() + (warmup - PREFILL_MARGIN_MINUTES) * 60)]
+        for t in threads:
+            t.start()
 
-    stop.set()
-    for t in threads:
-        t.join(timeout=30)
-    codes = stack.stop()
+        fields = ["time", "elapsed_min"]
+        for node in NODES:
+            fields += [f"{column(node)}_{k}" for k in ["rss_kb", "fds", *METRICS]]
+        fields += DRIVER
+        rows = []
+        last_metrics = {n: {} for n in NODES}
+        started = time.time()
+        end = started + args.hours * 3600
+        failure = None
+        with open(out / "samples.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            next_sample = started
+            while time.time() < end:
+                if not stack.alive():
+                    failure = "a node exited during the run"
+                    break
+                if time.time() >= next_sample:
+                    row = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                           "elapsed_min": round((time.time() - started) / 60, 2)}
+                    for node in NODES:
+                        c = column(node)
+                        row[f"{c}_rss_kb"], row[f"{c}_fds"] = proc_sample(pids[node])
+                        # A stopped node cannot answer; its counters only ever rise, so the last
+                        # ones it gave stand in.
+                        m = stack.metrics(node) or last_metrics[node]
+                        last_metrics[node] = m
+                        for k, name in METRICS.items():
+                            row[f"{c}_{k}"] = m.get(name, 0)
+                    snapshot = counts.snapshot()
+                    row.update({k: snapshot.get(k, 0) for k in DRIVER})
+                    writer.writerow(row)
+                    f.flush()
+                    rows.append(row)
+                    next_sample += args.interval
+                time.sleep(min(5.0, max(0.0, next_sample - time.time())))
+
+        stop.set()
+        for t in threads:
+            t.join(timeout=30)
+        codes = stack.stop()
+    finally:
+        stop.set()
+        stack.stop()
     stack.cleanup()
     totals = counts.snapshot()
     flat, report = judge(rows, args.clients, warmup)

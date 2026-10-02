@@ -8,9 +8,13 @@
 #include <chrono>
 #include <gtest/gtest.h>
 #include <map>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -190,6 +194,34 @@ TEST(GatewayUserLimits, AUserPastTheRequestRateGets429WithTheWaitInRetryAfter) {
     EXPECT_EQ(again.request("GET", kNoVideo, kAlice)->status, 429);
 }
 
+// An <img> loop on another site sends the user's cookie as often as it likes. Refused before the
+// token is verified, those requests charge nothing, so the user's own requests still get in.
+TEST(GatewayUserLimits, CookieRequestsFromAnotherSiteChargeNoQuota) {
+    GatewayOptions options{.manual_clock = true};
+    options.limits.requests_per_user_per_minute = 2;
+    GatewayUnderTest gw(options);
+    const std::pair<std::string, std::string> cookie{"cookie", "auth_token=user.alice"};
+    const std::string_view kCreate =
+        R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    for (int i = 0; i < 5; ++i) {
+        HttpClient page(gw.endpoint());
+        EXPECT_EQ(page.request("GET", kNoVideo, "", {}, {cookie, {"sec-fetch-site", "cross-site"}})
+                      ->status,
+                  403);
+        HttpClient form(gw.endpoint());
+        EXPECT_EQ(form.request("POST", "/api/v1/uploads", "", std::as_bytes(std::span(kCreate)),
+                               {cookie, {"origin", "https://evil.example"}})
+                      ->status,
+                  403);
+    }
+    EXPECT_EQ(gw.counters().cross_site_rejections, 10U);
+    EXPECT_EQ(gw.counters().limited_user_requests, 0U);
+    HttpClient alice(gw.endpoint());
+    EXPECT_EQ(alice.request("GET", kNoVideo, kAlice)->status, 404);
+    EXPECT_EQ(alice.request("GET", kNoVideo, kAlice)->status, 404);
+    EXPECT_EQ(alice.request("GET", kNoVideo, kAlice)->status, 429);
+}
+
 TEST(GatewayUserLimits, APatchPastTheDailyByteQuotaGets429AndTakesNoSlot) {
     // Time stands still, so the wait below is exact: at 2 MiB a day, a byte comes back every 41 ms.
     GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB, .manual_clock = true};
@@ -218,6 +250,63 @@ TEST(GatewayUserLimits, APatchPastTheDailyByteQuotaGets429AndTakesNoSlot) {
     const auto metrics = probe.request("GET", "/metrics", "");
     ASSERT_TRUE(metrics);
     EXPECT_NE(metrics->body.find("\nuploads_in_flight 0\n"), std::string::npos);
+}
+
+// A PATCH that declares `length` bytes, sends none of them, and holds its upload slot until
+// the client goes away.
+std::unique_ptr<HttpClient> hold_slot(GatewayUnderTest& gw, const std::string& upload,
+                                      std::size_t claims) {
+    auto c = std::make_unique<HttpClient>(gw.endpoint());
+    EXPECT_TRUE(c->send_raw("PATCH /api/v1/uploads/" + upload +
+                            " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer user.alice"
+                            "\r\nUpload-Offset: 0\r\nContent-Length: 1048576\r\n\r\n"));
+    EXPECT_TRUE(ulw::test::eventually([&] { return gw.claims() == claims; }));
+    return c;
+}
+
+TEST(GatewayUserLimits, AUserAtTheUploadLimitIsRefusedEveryTimeUntilOneEnds) {
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB};
+    options.limits.max_uploads_per_user = 1;
+    GatewayUnderTest gw(options);
+    HttpClient alice(gw.endpoint());
+    const auto held = create_upload(alice, kMiB, kAlice);
+    const auto other = create_upload(alice, kMiB, kAlice);
+    ASSERT_TRUE(held && other);
+    auto holder = hold_slot(gw, *held, 1);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        HttpClient c(gw.endpoint());
+        const auto r = patch(c, *other, 0, kMiB, kAlice);
+        ASSERT_TRUE(r) << attempt;
+        EXPECT_EQ(r->status, 429) << attempt;
+    }
+    EXPECT_EQ(gw.counters().admission_rejections, 3U);
+    holder.reset();
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 0; }));
+    HttpClient c(gw.endpoint());
+    EXPECT_EQ(patch(c, *other, 0, kMiB, kAlice)->status, 204);
+}
+
+TEST(GatewayUserLimits, AnUploadEndingLeavesTheUsersOtherUploadsCounted) {
+    GatewayOptions options{.backend = Backend::Fake, .chunk = kMiB};
+    options.limits.max_uploads_per_user = 2;
+    GatewayUnderTest gw(options);
+    HttpClient alice(gw.endpoint());
+    std::vector<std::string> uploads;
+    for (int i = 0; i < 4; ++i) {
+        const auto up = create_upload(alice, kMiB, kAlice);
+        ASSERT_TRUE(up);
+        uploads.push_back(*up);
+    }
+    auto first = hold_slot(gw, uploads[0], 1);
+    auto second = hold_slot(gw, uploads[1], 2);
+    first.reset();
+    ASSERT_TRUE(ulw::test::eventually([&] { return gw.claims() == 1; }));
+    // One slot is free again, and only one: the second upload still holds the other.
+    auto third = hold_slot(gw, uploads[2], 2);
+    HttpClient c(gw.endpoint());
+    const auto r = patch(c, uploads[3], 0, kMiB, kAlice);
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 429);
 }
 
 TEST(GatewayUserLimits, BytesChargedForABodyThatNeverCameAreGivenBack) {

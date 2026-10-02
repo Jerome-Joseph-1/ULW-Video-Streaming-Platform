@@ -42,7 +42,7 @@ teams agree to it.*
 3. **Announcement.** A breaking change is announced to Askedin's app and backend teams at least
    30 days before `v2` reaches prod, with a changelog entry in this directory listing every
    difference and the date `v1` goes away. Security fixes may shorten this; they are announced
-   as soon as they ship.
+   as soon as they ship, in [changelog.md](changelog.md).
 4. **Chat envelope.** From M17 on, the envelope is versioned by the WebSocket path: `/rt` is
    version 1 of the final envelope, and a breaking change moves to `/rt/v2` with the same notice
    period. Adding a message `type` or an optional field is additive, but because the server

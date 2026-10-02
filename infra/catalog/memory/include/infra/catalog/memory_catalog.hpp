@@ -42,7 +42,7 @@ public:
                          core::ports::CatalogCallback<void> done) override;
     void commit_upload(const core::UploadId& id, const core::VideoId& video,
                        const std::string& request_id,
-                       core::ports::CatalogCallback<void> done) override;
+                       core::ports::CatalogCallback<core::VideoState> done) override;
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
     void find_video(const core::VideoId& id,
                     core::ports::CatalogCallback<core::VideoRecord> done) override;
@@ -57,6 +57,15 @@ public:
     void fail_views(std::optional<core::ports::CatalogError> error) noexcept {
         views_error_ = error;
     }
+    // Fails every upload and video call from now on with `error`, or none with nullopt; the
+    // catalog's state is left as it was.
+    void fail_calls(std::optional<core::ports::CatalogError> error) noexcept {
+        calls_error_ = error;
+    }
+    // Fails every find_video from now on with `error`, or none with nullopt.
+    void fail_find_video(std::optional<core::ports::CatalogError> error) noexcept {
+        find_video_error_ = error;
+    }
 
     [[nodiscard]] const std::vector<Job>& jobs() const noexcept { return jobs_; }
     [[nodiscard]] std::size_t claims() const noexcept { return claimed_.size(); }
@@ -66,6 +75,8 @@ public:
 
 private:
     void defer(std::move_only_function<void() noexcept> fn);
+    // True, and `done` answered with calls_error_ on a later iteration, when calls fail.
+    template <class T> [[nodiscard]] bool refused(core::ports::CatalogCallback<T>& done);
 
     net::IReactor& reactor_;
     net::TimerId timer_;
@@ -76,6 +87,8 @@ private:
     std::vector<Job> jobs_;
     std::vector<core::ports::ViewEvent> views_;
     std::optional<core::ports::CatalogError> views_error_;
+    std::optional<core::ports::CatalogError> calls_error_;
+    std::optional<core::ports::CatalogError> find_video_error_;
 };
 
 } // namespace infra::catalog

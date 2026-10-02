@@ -1,5 +1,7 @@
 #include "http/client_limits.hpp"
 
+#include "http/ascii.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <ranges>
@@ -7,15 +9,6 @@
 namespace http {
 
 namespace {
-
-bool iequals(std::string_view a, std::string_view b) noexcept {
-    return std::ranges::equal(a, b, [](char x, char y) {
-        const auto lower = [](char c) {
-            return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
-        };
-        return lower(x) == lower(y);
-    });
-}
 
 std::string_view trim(std::string_view s) noexcept {
     const std::size_t first = s.find_first_not_of(" \t");
