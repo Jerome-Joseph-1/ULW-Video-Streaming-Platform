@@ -98,7 +98,7 @@ protected:
             "ULW_S3_ACCESS_KEY_ID=" + env_or("ULW_MINIO_ACCESS_KEY", "ulw-dev"),
             "ULW_S3_SECRET_ACCESS_KEY=" + env_or("ULW_MINIO_SECRET_KEY", "ulw-dev-secret"),
             "ULW_DATABASE_URL=" + db_->conninfo(), "ULW_DEV_JWKS_FILE=" + jwks.string(),
-            "JWT_ISSUER=" + std::string(kIssuer),
+            "ULW_DEV_MODE=1", "JWT_ISSUER=" + std::string(kIssuer),
             // One user holds every upload here.
             "ULW_MAX_UPLOADS_PER_USER=" + std::to_string(kUploads),
             // Some runs start tests as root; this suite is not about that.
