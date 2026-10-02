@@ -4,6 +4,7 @@
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
 #include "infra/auth/token_extractor.hpp"
+#include "net/socket.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,9 @@ constexpr std::size_t kMaxJsonBody = std::size_t{4} * 1024;
 constexpr std::size_t kMaxStaging = std::size_t{4} * 64 * 1024;
 // Long enough for a client to read an error response before the socket goes away.
 constexpr core::Millis kLinger{2'000};
+// How often a connection that stopped reading behind a held-back response looks whether the
+// client has taken it: a request the client sends once it has waits at most this long.
+constexpr core::Millis kDrainCheck{100};
 constexpr std::size_t kResponseHead = 1024;
 constexpr std::chrono::seconds kRetryAfter{5};
 
@@ -85,6 +89,19 @@ std::string_view state_name(core::VideoState s) noexcept {
     return "unknown";
 }
 
+// An upload past its expires_at that was never committed takes nothing more: 410, as tus's
+// Expiration extension answers. The upload reaper aborts it later (ADR 0049), and until it does
+// the rows and the stored bytes are still there, so without this a PATCH or commit would go
+// through. A cancelled one answers the same, so the answer does not depend on whether the
+// reaper has run yet; a committed one keeps the answers it had.
+[[nodiscard]] bool expired(const core::UploadRecord& up, core::WallTime now) {
+    if (up.state == core::UploadState::Completed) {
+        return false;
+    }
+    const auto upload = core::Upload::rehydrate(up);
+    return upload && upload->is_expired(now);
+}
+
 } // namespace
 
 Connection::Connection(Handle handle, Gateway& gateway) : handle_(handle), gateway_(gateway) {}
@@ -94,9 +111,10 @@ Connection::~Connection() {
     release_client_holds();
 }
 
-void Connection::start(std::unique_ptr<net::ITransport> transport, const net::IpAddress& peer,
-                       std::optional<ClientHold> hold) noexcept {
+void Connection::start(std::unique_ptr<net::ITransport> transport, int fd,
+                       const net::IpAddress& peer, std::optional<ClientHold> hold) noexcept {
     transport_ = std::move(transport);
+    fd_ = fd;
     peer_ = peer;
     connection_hold_ = hold;
     last_activity_ = now();
@@ -112,9 +130,16 @@ bool Connection::quiescent() const noexcept {
 
 void Connection::drain() noexcept {
     draining_ = true;
-    if (phase_ == Phase::Idle) {
-        close();
+    if (phase_ != Phase::Idle) {
+        return;
     }
+    // A client still reading its last response is given the linger to finish it, as after a
+    // response that closes; one with nothing waiting is closed at once.
+    if (output_waiting()) {
+        linger();
+        return;
+    }
+    close();
 }
 
 void Connection::abort() noexcept {
@@ -158,10 +183,21 @@ void Connection::begin_request() noexcept {
 }
 
 void Connection::on_data(net::BorrowedBytes bytes) noexcept {
-    last_activity_ = now();
     if (phase_ == Phase::Lingering) {
+        last_activity_ = now();
         return;
     }
+    // The first bytes of a new request, while the last response is held back: kept until it
+    // has gone, at most the one receive that brought them, since reading stops here.
+    if (phase_ == Phase::Idle && (awaiting_drain_ || hold_back_request())) {
+        held_.insert(held_.end(), bytes.begin(), bytes.end());
+        return;
+    }
+    parse(bytes);
+}
+
+void Connection::parse(net::BorrowedBytes bytes) noexcept {
+    last_activity_ = now();
     if (phase_ == Phase::Idle) {
         begin_request();
     }
@@ -199,6 +235,9 @@ void Connection::on_parse(http::ParseResult result) noexcept {
         }
         break;
     case http::ParseProgress::Paused:
+        if (!parser_paused_) {
+            parser_paused_at_ = now();
+        }
         parser_paused_ = true;
         if (receiving_) {
             receiving_ = false;
@@ -601,6 +640,11 @@ void Connection::on_claimed(core::ports::CatalogResult<core::ports::StoredUpload
         return;
     }
     const core::UploadRecord& up = stored->upload;
+    if (expired(up, deps().clock.wall_now())) {
+        release_claim();
+        fail(Status::Gone);
+        return;
+    }
     if (up.state != core::UploadState::Active) {
         release_claim();
         fail(Status::Conflict, up.durable_offset);
@@ -668,8 +712,11 @@ void Connection::drain_staging() noexcept {
     end_stall();
     if (parser_paused_ && !req_.message_complete) {
         parser_paused_ = false;
-        // The time the store held the body up is not the client's to answer for.
-        restart_rate_window();
+        // The time the store held the body up is not the client's to answer for, but the
+        // bytes the client sent before it are: the window skips the hold and keeps them.
+        // Restarting it here instead dropped them, and a client that sent fast, was held for
+        // a moment, then slowed to a legal rate was judged on its slow part alone.
+        rate_window_start_ += now() - parser_paused_at_;
         on_parse(parser_.resume());
     }
 }
@@ -777,6 +824,12 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     }
     req_.upload = std::move(*result);
     const core::UploadRecord& up = req_.upload->upload;
+    if (expired(up, deps().clock.wall_now()) &&
+        (req_.route == RouteId::AppendChunk || req_.route == RouteId::UploadOffset ||
+         req_.route == RouteId::CommitUpload)) {
+        fail(Status::Gone);
+        return;
+    }
     switch (*req_.route) {
     case RouteId::AppendChunk:
         // A concurrent append holds the upload.
@@ -1356,6 +1409,46 @@ void Connection::finish_request() noexcept {
         close();
         return;
     }
+    resume();
+}
+
+bool Connection::response_held_back() const noexcept {
+    // An io_uring send still in flight counts here as held back; its completion drains the
+    // queue and on_writable resumes at once.
+    if (transport_->pending_send_bytes() > 0) {
+        return true;
+    }
+    // Without TCP_INFO (or a kernel that fills in too little of it) only the transport is
+    // looked at; such a connection kept the kernel's user timeout, which still bounds it.
+    const auto progress = net::send_progress(fd_);
+    return progress && progress->unsent;
+}
+
+bool Connection::hold_back_request() noexcept {
+    // A new request is not read while the last response is held back, in the transport or in
+    // the kernel behind a shut window: a client that keeps asking and never reads would
+    // otherwise queue responses without end, each request restarting the header timeout.
+    // The request waits, and the header timeout keeps counting from that response, so a
+    // client that does not take it within the timeout is closed (ADR-0071). A client whose
+    // response has gone when it asks again, as any client that reads it has, does not wait
+    // for a drain check; on io_uring a send not yet completed holds it until the next turn.
+    if (!response_held_back()) {
+        return false;
+    }
+    awaiting_drain_ = true;
+    // The timer armed below replaces a zero-delay resume finish_request may have armed, so
+    // only the drain check or on_writable resumes, and each ends the hold first.
+    resume_pending_ = false;
+    if (receiving_) {
+        receiving_ = false;
+        transport_->stop_receiving();
+    }
+    const auto idle = std::chrono::duration_cast<core::Millis>(now() - last_activity_);
+    arm_timer(std::clamp(gw().limits().header_timeout - idle, core::Millis{0}, kDrainCheck));
+    return true;
+}
+
+void Connection::resume() noexcept {
     // Parse whatever the client pipelined from the loop rather than from inside this response.
     resume_pending_ = true;
     arm_timer(core::Millis{0});
@@ -1402,6 +1495,10 @@ void Connection::release_claim() noexcept {
 
 void Connection::linger() noexcept {
     phase_ = Phase::Lingering;
+    // Whatever the client asked next goes unanswered: nothing is parsed from here on.
+    resume_pending_ = false;
+    awaiting_drain_ = false;
+    held_.clear();
     release_claim();
     // FIN after the response, then read and discard until the client closes or the linger
     // ends: closing with unread input would send RST and could destroy the response.
@@ -1434,11 +1531,36 @@ void Connection::close() noexcept {
     }
     deps().reactor.cancel_timer(timer_);
     timer_ = {};
+    // A response the transport still holds part of is cut off whatever happens, so the close
+    // is a reset, which drops what the kernel holds too, at once. One the kernel holds all of
+    // is finished by the kernel after a FIN, as before the user timeout was cleared, and the
+    // timeout is set again to bound that orphan: without it the kernel keeps one for as long
+    // as the peer answers its probes of a shut window (ADR-0071).
+    // An io_uring send still in flight counts as held by the transport, so such a close errs
+    // toward a reset.
+    if (transport_->pending_send_bytes() > 0 ||
+        (output_waiting() && !net::restore_user_timeout(fd_))) {
+        net::abort_on_close(fd_);
+    }
     transport_->begin_close();
     gw().retire(handle_);
 }
 
-void Connection::on_writable() noexcept {}
+bool Connection::output_waiting() const noexcept {
+    if (transport_->pending_send_bytes() > 0) {
+        return true;
+    }
+    // Without TCP_INFO the kernel's user timeout was left in place, and bounds the orphan.
+    const auto progress = net::send_progress(fd_);
+    return progress && progress->waiting;
+}
+
+void Connection::on_writable() noexcept {
+    if (awaiting_drain_ && phase_ == Phase::Idle && !response_held_back()) {
+        awaiting_drain_ = false;
+        resume();
+    }
+}
 
 void Connection::on_peer_eof() noexcept {
     peer_eof_ = true;
@@ -1455,31 +1577,77 @@ void Connection::on_error(int /*err*/) noexcept {
     close();
 }
 
+void Connection::on_idle_timeout(core::MonoTime t) noexcept {
+    const core::Millis header_timeout = gw().limits().header_timeout;
+    const auto idle = std::chrono::duration_cast<core::Millis>(t - last_activity_);
+    if (idle >= header_timeout) {
+        ++gw().counters().timeouts_header;
+        close();
+        return;
+    }
+    // The kernel says nothing when a shut window lets the rest of a response go, so a
+    // held-back response is looked at again every kDrainCheck.
+    if (awaiting_drain_) {
+        if (!response_held_back()) {
+            awaiting_drain_ = false;
+            resume();
+            return;
+        }
+        arm_timer(std::min(kDrainCheck, header_timeout - idle));
+        return;
+    }
+    arm_timer(header_timeout - idle);
+}
+
+void Connection::read_next_request() noexcept {
+    // A request the client pipelined behind a response still held back waits too.
+    if (phase_ == Phase::Idle && (!held_.empty() || !parser_.unparsed().empty()) &&
+        hold_back_request()) {
+        return;
+    }
+    // Counted from the end of the last response, however long the client took to read it.
+    const auto idle = std::chrono::duration_cast<core::Millis>(now() - last_activity_);
+    arm_timer(std::max(gw().limits().header_timeout - idle, core::Millis{0}));
+    // The parser resumes first: after a request it refused at the head, reading went on, so
+    // bytes may have been held while it still waited to resume, and fed to it before then
+    // they would only be kept, with nothing left to resume it. What it kept came first.
+    const http::ParseResult resumed = parser_.resume();
+    if (held_.empty()) {
+        on_parse(resumed);
+        return;
+    }
+    const std::vector<std::byte> bytes = std::exchange(held_, {});
+    if (resumed == http::ParseProgress::NeedMore && phase_ == Phase::Idle) {
+        // The request's header timeout counts from here, as it did when on_data replayed it.
+        parse(bytes);
+        return;
+    }
+    // A request it kept goes first, and the held bytes queue behind it: in the parser, or held
+    // again if its response is held back in turn.
+    on_parse(resumed);
+    if (phase_ == Phase::Idle || phase_ == Phase::Request) {
+        on_data(bytes);
+    }
+}
+
 void Connection::on_timeout() noexcept {
     timer_ = {};
     if (phase_ == Phase::Closed) {
-        return;
-    }
-    if (resume_pending_) {
-        resume_pending_ = false;
-        arm_timer(gw().limits().header_timeout);
-        on_parse(parser_.resume());
         return;
     }
     if (phase_ == Phase::Lingering) {
         close();
         return;
     }
+    if (resume_pending_) {
+        resume_pending_ = false;
+        read_next_request();
+        return;
+    }
     const core::MonoTime t = now();
     const Limits& limits = gw().limits();
     if (phase_ == Phase::Idle) {
-        const auto idle = std::chrono::duration_cast<core::Millis>(t - last_activity_);
-        if (idle >= limits.header_timeout) {
-            ++gw().counters().timeouts_header;
-            close();
-            return;
-        }
-        arm_timer(limits.header_timeout - idle);
+        on_idle_timeout(t);
         return;
     }
     const auto age = std::chrono::duration_cast<core::Millis>(t - request_started_);
@@ -1514,8 +1682,8 @@ void Connection::on_timeout() noexcept {
             return;
         }
         core::Millis next = limits.body_idle_timeout - idle;
-        // While the parser is paused the store is what holds the body up, and reading
-        // restarts the window when it resumes.
+        // While the parser is paused the store is what holds the body up, and the window
+        // skips that time when reading resumes.
         if (req_.route == RouteId::AppendChunk && !parser_paused_) {
             const auto window_left = check_body_rate(t);
             if (!window_left) {

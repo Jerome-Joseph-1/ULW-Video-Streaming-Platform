@@ -156,6 +156,66 @@ std::string patch_with_length(std::string_view length) {
     return std::format("PATCH /u HTTP/1.1\r\nHost: a\r\nContent-Length: {}\r\n\r\n", length);
 }
 
+// The same budgets, for a request that follows another on a kept-alive connection: every
+// request starts with the whole of each, and nothing about the first carries over.
+constexpr std::string_view kFirst = "GET /first HTTP/1.1\r\nHost: a\r\nX-First: b\r\n\r\n";
+
+http::ParseResult drive_after_a_request(RecordingSink& sink, std::string_view second,
+                                        std::size_t chunk) {
+    RequestParser parser{sink};
+    return drive(parser, std::string{kFirst} + std::string{second}, chunk);
+}
+
+TEST(RequestLimits, ASecondRequestGetsTheWholeHeadBudgetAndNoMore) {
+    for (const std::size_t chunk : {std::size_t{4096}, std::size_t{1} << 20}) {
+        RecordingSink fits;
+        EXPECT_EQ(drive_after_a_request(fits, get_padded_to(RequestParser::kMaxHeadBytes), chunk),
+                  ParseProgress::NeedMore)
+            << chunk;
+        EXPECT_EQ(fits.requests().size(), 2U) << chunk;
+
+        RecordingSink over;
+        EXPECT_EQ(
+            drive_after_a_request(over, get_padded_to(RequestParser::kMaxHeadBytes + 1), chunk),
+            kTooLarge)
+            << chunk;
+        EXPECT_EQ(over.requests().size(), 1U) << chunk;
+    }
+}
+
+TEST(RequestLimits, ASecondRequestGetsTheWholeHeaderBudget) {
+    const std::string value(RequestParser::kMaxHeaderBytes - 5 - 6, 'a');
+    const std::string second = "GET / HTTP/1.1\r\nHost: a\r\nX-Fill: " + value + "\r\n\r\n";
+    RecordingSink sink;
+    ASSERT_EQ(drive_after_a_request(sink, second, 4096), ParseProgress::NeedMore);
+    ASSERT_EQ(sink.requests().size(), 2U);
+    EXPECT_EQ(sink.requests()[1].headers, (ulw::test::Headers{{"Host", "a"}, {"X-Fill", value}}));
+}
+
+TEST(RequestLimits, BlankLinesBeforeASecondRequestAreABadRequestNotOversizedHeaders) {
+    // The first request had fields; the second has none yet, so it is not a header overflow.
+    std::string second;
+    while (second.size() < RequestParser::kMaxHeadBytes) {
+        second += "\r\n";
+    }
+    RecordingSink sink;
+    EXPECT_EQ(drive_after_a_request(sink, second, second.size()), fatal(Status::BadRequest));
+    EXPECT_EQ(sink.requests().size(), 1U);
+}
+
+TEST(RequestLimits, ABodyLongerThanTheHeadBudgetIsNotCountedAgainstIt) {
+    const std::string body(RequestParser::kMaxHeadBytes * 3, 'b');
+    const std::string input = patch_with_length(std::to_string(body.size())) + body;
+    for (const std::size_t chunk : {std::size_t{1000}, std::size_t{4096}}) {
+        RecordingSink sink;
+        RequestParser parser{sink};
+        EXPECT_EQ(drive(parser, input, chunk), ParseProgress::NeedMore) << chunk;
+        ASSERT_EQ(sink.requests().size(), 1U) << chunk;
+        EXPECT_EQ(sink.requests()[0].body, body) << chunk;
+        EXPECT_TRUE(sink.requests()[0].complete) << chunk;
+    }
+}
+
 TEST(RequestLimits, ContentLengthAtTheLimitIsAccepted) {
     RecordingSink sink;
     RequestParser parser{sink};
@@ -191,7 +251,8 @@ TEST(RequestLimits, DuplicateContentLengthIsABadRequest) {
 TEST(RequestLimits, VersionsOtherThanHttp1AreNotSupported) {
     for (const std::string_view request :
          {"GET / HTTP/1.2\r\n\r\n", "GET / HTTP/2.0\r\n\r\n", "GET / HTTP/0.9\r\n\r\n",
-          "GET / HTTP/9.9\r\n\r\n", "GET /\r\n\r\n"}) {
+          "GET / HTTP/0.1\r\n\r\n", "GET / HTTP/0.0\r\n\r\n", "GET / HTTP/9.9\r\n\r\n",
+          "GET /\r\n\r\n"}) {
         const Outcome o = parse(request);
         EXPECT_EQ(o.result, fatal(Status::HttpVersionNotSupported)) << request;
         EXPECT_EQ(o.heads, 0U) << request;
@@ -208,6 +269,17 @@ TEST(RequestLimits, MalformedVersionIsABadRequest) {
         EXPECT_EQ(o.result, fatal(Status::BadRequest)) << request;
         EXPECT_EQ(o.heads, 0U) << request;
     }
+}
+
+TEST(RequestLimits, AnUnsupportedVersionFailsForGood) {
+    RecordingSink sink;
+    RequestParser parser{sink};
+    const auto expected = fatal(Status::HttpVersionNotSupported);
+    EXPECT_EQ(parser.feed(bytes_of("GET / HTTP/2.0\r\n\r\n")), expected);
+    EXPECT_EQ(parser.feed(bytes_of("GET / HTTP/1.1\r\nHost: a\r\n\r\n")), expected);
+    parser.reset_for_next_request();
+    EXPECT_EQ(parser.resume(), expected);
+    EXPECT_TRUE(sink.requests().empty());
 }
 
 TEST(RequestLimits, GarbledProtocolNameIsABadRequest) {

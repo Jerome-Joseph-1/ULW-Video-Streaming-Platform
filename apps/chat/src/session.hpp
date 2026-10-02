@@ -6,6 +6,7 @@
 #include "core/ports/auth.hpp"
 #include "http/request.hpp"
 #include "http/request_parser.hpp"
+#include "net/ip_address.hpp"
 #include "net/reactor.hpp"
 #include "net/slab.hpp"
 #include "net/socket.hpp"
@@ -27,6 +28,16 @@ namespace chat {
 // One client connection: an HTTP request (a probe, or the upgrade to a WebSocket), then, once
 // upgraded and authenticated, JSON commands in text frames, which the chat service carries
 // out. Retired through the server, never destroyed from inside its own callbacks.
+// Close code for a socket whose token expired: reconnect with a fresh token
+// (docs/integration/chat.md). In the range RFC 6455 section 7.4.2 leaves to applications.
+inline constexpr codec::ws::CloseCode kTokenExpired{4001};
+
+// When a socket opened at `now` (monotonic) with a token that expires at `expires_at` stops
+// being accepted: exp plus kTokenClockSkew, on the monotonic clock. A token that outlives what
+// the monotonic clock can count gets MonoTime::max(); one already past gets `now`.
+[[nodiscard]] core::MonoTime token_deadline(core::MonoTime now, core::WallTime wall_now,
+                                            core::WallTime expires_at) noexcept;
+
 class Session final : public net::IStreamHandler,
                       public net::ITimerHandler,
                       public http::IRequestSink,
@@ -42,7 +53,10 @@ public:
     Session(Session&&) = delete;
     Session& operator=(Session&&) = delete;
 
-    void start(net::ConnId conn) noexcept;
+    // `hold` counts a direct peer's connection against its address (and IPv6 /48) until the
+    // session closes.
+    void start(net::ConnId conn, const net::IpAddress& peer,
+               std::optional<ChatServer::PeerHold> hold) noexcept;
     [[nodiscard]] net::ConnId conn() const noexcept { return conn_; }
 
     void on_data(net::BorrowedBytes bytes) noexcept override;
@@ -78,8 +92,10 @@ private:
     void parse_failed(const http::ParseError& error);
     void answer_request();
     void respond(std::string_view bytes);
+    void refuse_for_now();
     void accept_upgrade(const codec::ws::UpgradeResponse& response);
     void leave_http();
+    void release_request_hold() noexcept;
 
     void read_frames(net::BorrowedBytes bytes);
     [[nodiscard]] bool within_control_budget(std::size_t in_this_read) noexcept;
@@ -93,6 +109,7 @@ private:
     [[nodiscard]] bool stalled(core::MonoTime at) noexcept;
     [[nodiscard]] std::optional<net::SendProgress> send_progress() const noexcept;
     void give_up() noexcept;
+    [[nodiscard]] bool closed_for_expiry(core::MonoTime at) noexcept;
     void arm(core::Millis delay) noexcept;
     [[nodiscard]] core::MonoTime now() const noexcept;
 
@@ -123,6 +140,17 @@ private:
     bool request_complete_ = false;
     bool paused_ = false;
     std::optional<core::UserId> user_;
+    net::IpAddress peer_;
+    // ADR-0076: the direct peer's connection, for the socket's life; a forwarded client's
+    // upgrade, until it is answered; and the user's open socket, from the upgrade on.
+    std::optional<ChatServer::PeerHold> peer_hold_;
+    std::optional<ChatServer::Hold> request_hold_;
+    std::optional<ChatServer::Hold> user_hold_;
+    // Seconds to put in a 429's Retry-After.
+    std::chrono::seconds retry_after_{1};
+    // When the token the socket was opened with stops being accepted: its exp plus the clock
+    // skew any check allows. The socket is closed then, with kTokenExpired (ADR-0073).
+    std::optional<core::MonoTime> expires_;
     // Set by the upgrade.
     std::optional<ClientId> client_;
     std::optional<PresenceClientId> presence_;

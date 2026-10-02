@@ -36,6 +36,25 @@ public:
     std::deque<std::expected<std::vector<ExpiredUpload>, CatalogError>> replies;
 };
 
+class FakeRooms final : public core::ports::IUnusedRooms {
+public:
+    [[nodiscard]] std::expected<core::ports::UnusedRoomsScan, CatalogError>
+    forget_unused(core::WallTime recorded_before, std::size_t limit) override {
+        cutoffs.push_back(recorded_before);
+        limits.push_back(limit);
+        if (replies.empty()) {
+            return core::ports::UnusedRoomsScan{.forgotten = 0, .finished = true};
+        }
+        const auto reply = replies.front();
+        replies.pop_front();
+        return reply;
+    }
+
+    std::vector<core::WallTime> cutoffs;
+    std::vector<std::size_t> limits;
+    std::deque<std::expected<core::ports::UnusedRoomsScan, CatalogError>> replies;
+};
+
 class FakeStore final : public core::ports::IIngestStore, public core::ports::IObjectAdmin {
 public:
     [[nodiscard]] std::expected<core::ports::IngestId, StorageError>
@@ -104,15 +123,19 @@ protected:
         return out;
     }
 
-    [[nodiscard]] reaper::Report run(std::size_t batch = 3) {
-        return reaper::run_once(catalog, store, store, clock,
-                                {.batch = batch, .orphan_after = std::chrono::hours(7 * 24)});
+    [[nodiscard]] reaper::Report run(std::size_t batch = 3, std::size_t rooms_per_pass = 10'000) {
+        return reaper::run_once(catalog, store, store, rooms, clock,
+                                {.batch = batch,
+                                 .orphan_after = std::chrono::hours(7 * 24),
+                                 .unused_room_after = std::chrono::hours(24),
+                                 .rooms_per_pass = rooms_per_pass});
     }
 
     ulw::test::FakeClock clock;
     ulw::test::FakeRandom random;
     FakeCatalog catalog;
     FakeStore store;
+    FakeRooms rooms;
 
 private:
     int next_ = 0;
@@ -198,7 +221,9 @@ TEST_F(ReaperTest, CountsTheSessionsTheSweepAborted) {
               "# TYPE reaper_uploads_expired_last_run gauge\nreaper_uploads_expired_last_run 0\n"
               "# TYPE reaper_uploads_release_failed_last_run gauge\n"
               "reaper_uploads_release_failed_last_run 0\n"
-              "# TYPE reaper_parts_orphaned_last_run gauge\nreaper_parts_orphaned_last_run 4\n");
+              "# TYPE reaper_parts_orphaned_last_run gauge\nreaper_parts_orphaned_last_run 4\n"
+              "# TYPE reaper_chat_rooms_forgotten_last_run gauge\n"
+              "reaper_chat_rooms_forgotten_last_run 0\n");
 }
 
 TEST_F(ReaperTest, ACatalogFailureIsReportedAndTheSweepStillRuns) {
@@ -228,6 +253,45 @@ TEST_F(ReaperTest, UploadsAbortedBeforeAFailureKeepTheirReleasedSessions) {
     EXPECT_EQ(report.uploads_expired, 3U);
     EXPECT_EQ(store.discarded.size(), 3U);
     EXPECT_EQ(report.problems.size(), 1U);
+}
+
+// A refused join of a room nobody recorded records it (ADR-0054); nothing else ever removes the
+// row, so the reaper forgets those a day old that nothing used, a batch at a time, until the walk
+// reaches the cutoff (ADR-0075).
+TEST_F(ReaperTest, ForgetsChatRoomsADayOldThatNothingUsedInBatchesUntilTheWalkEnds) {
+    rooms.replies = {core::ports::UnusedRoomsScan{.forgotten = 3, .finished = false},
+                     core::ports::UnusedRoomsScan{.forgotten = 0, .finished = false},
+                     core::ports::UnusedRoomsScan{.forgotten = 4, .finished = true}};
+    const auto report = run();
+    EXPECT_EQ(report.rooms_forgotten, 7U);
+    ASSERT_EQ(rooms.cutoffs.size(), 3U);
+    EXPECT_EQ(rooms.cutoffs.front(), clock.wall_now() - std::chrono::hours(24));
+    EXPECT_EQ(rooms.limits.front(), 3U);
+    EXPECT_TRUE(report.problems.empty());
+    EXPECT_NE(reaper::metrics_text(report).find("reaper_chat_rooms_forgotten_last_run 7\n"),
+              std::string::npos);
+}
+
+TEST_F(ReaperTest, AFailureToForgetRoomsIsReportedAndTheUploadsStillCount) {
+    catalog.replies.emplace_back(uploads(1));
+    rooms.replies = {std::unexpected(CatalogError::Unavailable)};
+    const auto report = run();
+    EXPECT_EQ(report.uploads_expired, 1U);
+    EXPECT_EQ(report.rooms_forgotten, 0U);
+    ASSERT_EQ(report.problems.size(), 1U);
+    EXPECT_NE(report.problems.front().find("chat rooms"), std::string::npos);
+}
+
+// A pass looks at a bounded share of the rooms, however many there are: the walk goes on from
+// there in the next pass.
+TEST_F(ReaperTest, APassLooksAtNoMoreRoomsThanItsShare) {
+    for (int i = 0; i < 10; ++i) {
+        rooms.replies.emplace_back(core::ports::UnusedRoomsScan{.forgotten = 1, .finished = false});
+    }
+    const auto report = run(3, 9);
+    EXPECT_EQ(rooms.limits.size(), 3U);
+    EXPECT_EQ(report.rooms_forgotten, 3U);
+    EXPECT_TRUE(report.problems.empty());
 }
 
 } // namespace

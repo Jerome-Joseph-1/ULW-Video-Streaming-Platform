@@ -2,6 +2,11 @@
 
 #include "os/privileges.hpp"
 
+#include <sys/prctl.h>
+
+#include <cerrno>
+#include <system_error>
+
 namespace ops {
 
 std::optional<bool> parse_allow_root(std::optional<std::string_view> text) noexcept {
@@ -32,9 +37,17 @@ std::expected<RootStep, RootRefusal> leave_root(std::string_view user, bool allo
         return std::unexpected(RootRefusal{
             .configuration = true, .source = "ULW_RUN_AS_USER", .reason = identity.error()});
     }
+    // A change of uid sets the dumpable flag to fs.suid_dumpable, which may be 1 or 2; a process
+    // that had turned it off (ops::disable_core_dumps) keeps it off.
+    const bool was_dumpable = ::prctl(PR_GET_DUMPABLE) != 0;
     if (auto r = os::drop_privileges(*identity); !r) {
         return std::unexpected(
             RootRefusal{.configuration = false, .source = "drop privileges", .reason = r.error()});
+    }
+    if (!was_dumpable && ::prctl(PR_SET_DUMPABLE, 0) != 0) {
+        return std::unexpected(RootRefusal{.configuration = false,
+                                           .source = "PR_SET_DUMPABLE",
+                                           .reason = std::generic_category().message(errno)});
     }
     return RootStep::Dropped;
 }
