@@ -138,13 +138,14 @@ Information page against `sonar-project.properties`.
 - C++ findings are made with the real flags and headers; findings that only stood because the
   analyser could not see a system header can now be cleared by the next analysis.
 - The job builds the coverage preset and runs the unit and integration labels one test at a
-  time before it analyses some 460 translation units: an estimated 40-50 minutes against the
-  3 it took without coverage, in parallel with ci.yml, whose integration jobs take about 25.
-  It is limited to 90. If that is too slow, dropping `integration` from the coverage step
+  time before it analyses the compile database's translation units: estimated at 40-50 minutes
+  against the 3 it took without coverage (to be replaced by the first runs' measured time), in
+  parallel with ci.yml, whose integration jobs take about 25. It is limited to 90. If that is too slow, dropping `integration` from the coverage step
   halves it, at the price of reporting the catalog, queue and S3 code as uncovered.
 - Code that only the soak, cluster, e2e or fuzz runs exercise, and Python with no unit test
-  (`tools/check-docs.py`, `tools/coverage_report.py`, some of `deploy/local/`), counts as
-  uncovered: new code there needs a unit test to pass the gate.
+  (`tools/check-docs.py`, `tools/security/cpp-deps.py`, `deploy/local/crd-schemas.py`,
+  `deploy/local/seccomp-profile.py`), counts as uncovered: new code there needs a unit test to
+  pass the gate.
 - Pull requests from forks get no analysis; their results arrive with main's after they merge.
 - The scanner is pinned; the scanner engine and analysers it downloads from SonarQube Cloud at
   run time are chosen by the service and cannot be pinned here.
