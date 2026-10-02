@@ -191,6 +191,30 @@ jobs:
             done
           ) &
           sudo --preserve-env=ULW_TEST_DATABASE_URL PYTHONDONTWRITEBYTECODE=1 "$SCRIPT" "${args[@]}"
+      # In the log as well as the artifact: the slope of each kind of resident page, in KB/h,
+      # by least squares over the run, then every sample.
+      - name: Print the resident memory split
+        if: ${{ !cancelled() }}
+        run: |
+          split=$RUNNER_TEMP/rss-split.csv
+          [[ -f $split ]] || exit 0
+          python3 - "$split" <<'PY'
+          import csv, sys
+          rows = list(csv.DictReader(open(sys.argv[1])))
+          rows = [r for r in rows if all(v not in (None, "") for v in r.values())]
+          def secs(t):
+              h, m, s = map(int, t.split(":"))
+              return h * 3600 + m * 60 + s
+          t0 = secs(rows[0]["time"])
+          xs = [((secs(r["time"]) - t0) % 86400) / 3600 for r in rows]
+          for col in list(rows[0])[1:]:
+              ys = [float(r[col]) for r in rows]
+              n, mx, my = len(xs), sum(xs) / len(xs), sum(ys) / len(ys)
+              sxx = sum((x - mx) ** 2 for x in xs)
+              slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx else 0.0
+              print(f"RSS-SPLIT {col:14} first {ys[0]:>8.0f} last {ys[-1]:>8.0f} KB  slope {slope:+8.1f} KB/h  n={n}")
+          PY
+          sed 's/^/RSS-ROW /' "$split"
       - name: Summary
         if: ${{ !cancelled() }}
         env:
