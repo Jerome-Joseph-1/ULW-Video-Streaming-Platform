@@ -138,6 +138,8 @@ class Stack:
         self.bucket = self.name.replace("_", "-")
         self.port = args.port
         self.procs = {}
+        # The exit codes once stop() has run; a later stop() returns them again.
+        self.codes = None
         self.tls = None
         self.tokens = {}
 
@@ -246,6 +248,8 @@ class Stack:
         return all(p.poll() is None for p in self.procs.values())
 
     def stop(self):
+        if self.codes is not None:
+            return self.codes
         codes = {}
         for p in self.procs.values():
             if p.poll() is None:
@@ -256,6 +260,7 @@ class Stack:
             except subprocess.TimeoutExpired:
                 p.kill()
                 codes[name] = "killed"
+        self.codes = codes
         return codes
 
     def cleanup(self):
@@ -850,83 +855,84 @@ def main():
                     "testsrc2=size=320x240:rate=25", "-f", "lavfi", "-i", "sine=frequency=440",
                     "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
                     "-shortest", clip], check=True)
-    # Whatever start() launched before it failed is stopped: the soak may run as root, where
-    # nothing else would stop it.
+    # From start() to the last stop(), whatever fails (start itself, the sampling loop) still
+    # stops the services: the soak may run as root, where nothing else would stop them.
+    # stop() is idempotent, so the finally's call after a run is a no-op.
+    stop = threading.Event()
     try:
         stack.start()
-    except BaseException:
+        pids = stack.pids()
+        (out / "pids.json").write_text(json.dumps({**pids, "soak": os.getpid()}))
+        log(f"started: gateway pid {pids['gateway']}, worker pid {pids['worker']}, "
+            f"database {stack.name}, bucket {stack.bucket}")
+
+        counts = Counts()
+        ready = ReadyVideos()
+        threads = [Client(stack, counts, stop, ready, i) for i in range(args.clients)]
+        threads += [Uploads(stack, counts, stop, ready, clip.read_bytes()),
+                    Slow(stack, counts, stop, ready), Saturation(stack, counts, stop, ready),
+                    StoreFaults(stack, counts, stop, ready)]
+        for t in threads:
+            t.start()
+        poller = Worker(stack, Counts(), stop, ready, 99)
+
+        rows = []
+        fields = ["time", "elapsed_min", "gateway_rss_kb", "gateway_fds", "worker_rss_kb",
+                  "worker_fds", "requests", "status_2xx", "status_4xx", "status_5xx",
+                  "transport_errors", "chunks", "upload_sessions", "uploads_committed",
+                  "videos_ready",
+                  "resumes_completed", "cancels", "playlists", "sighups"]
+        started = time.time()
+        end = started + args.hours * 3600
+        next_sighup = started + 600
+        sighups = 0
+        failure = None
+        with open(out / "samples.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            next_sample = started
+            while time.time() < end:
+                ready.poll(poller)
+                if not stack.alive():
+                    failure = "a process exited during the run"
+                    break
+                if time.time() >= next_sighup:
+                    stack.procs["gateway"].send_signal(signal.SIGHUP)
+                    sighups += 1
+                    next_sighup += 600
+                if time.time() >= next_sample:
+                    g = proc_sample(pids["gateway"])
+                    w = proc_sample(pids["worker"])
+                    c = counts.snapshot()
+                    statuses = {k: c.get(k, 0) for k in ["status_2xx", "status_4xx", "status_5xx"]}
+                    row = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                           "elapsed_min": round((time.time() - started) / 60, 2),
+                           "gateway_rss_kb": g[0], "gateway_fds": g[1],
+                           "worker_rss_kb": w[0], "worker_fds": w[1],
+                           "requests": sum(statuses.values()), **statuses,
+                           "transport_errors": c.get("transport_errors", 0),
+                           "chunks": c.get("chunks", 0),
+                           "upload_sessions": c.get("upload_sessions", 0),
+                           "uploads_committed": c.get("uploads_committed", 0),
+                           # Capped at the working set of 200.
+                           "videos_ready": len(ready.done),
+                           "resumes_completed": c.get("resumes_completed", 0),
+                           "cancels": c.get("cancels", 0),
+                           "playlists": c.get("playlists", 0),
+                           "sighups": sighups}
+                    writer.writerow(row)
+                    f.flush()
+                    rows.append(row)
+                    next_sample += args.interval
+                time.sleep(min(5.0, max(0.0, next_sample - time.time())))
+
+        stop.set()
+        for t in threads:
+            t.join(timeout=120)
+        codes = stack.stop()
+    finally:
+        stop.set()
         stack.stop()
-        raise
-    pids = stack.pids()
-    (out / "pids.json").write_text(json.dumps({**pids, "soak": os.getpid()}))
-    log(f"started: gateway pid {pids['gateway']}, worker pid {pids['worker']}, "
-        f"database {stack.name}, bucket {stack.bucket}")
-
-    stop = threading.Event()
-    counts = Counts()
-    ready = ReadyVideos()
-    threads = [Client(stack, counts, stop, ready, i) for i in range(args.clients)]
-    threads += [Uploads(stack, counts, stop, ready, clip.read_bytes()),
-                Slow(stack, counts, stop, ready), Saturation(stack, counts, stop, ready),
-                StoreFaults(stack, counts, stop, ready)]
-    for t in threads:
-        t.start()
-    poller = Worker(stack, Counts(), stop, ready, 99)
-
-    rows = []
-    fields = ["time", "elapsed_min", "gateway_rss_kb", "gateway_fds", "worker_rss_kb",
-              "worker_fds", "requests", "status_2xx", "status_4xx", "status_5xx",
-              "transport_errors", "chunks", "upload_sessions", "uploads_committed",
-              "videos_ready",
-              "resumes_completed", "cancels", "playlists", "sighups"]
-    started = time.time()
-    end = started + args.hours * 3600
-    next_sighup = started + 600
-    sighups = 0
-    failure = None
-    with open(out / "samples.csv", "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        next_sample = started
-        while time.time() < end:
-            ready.poll(poller)
-            if not stack.alive():
-                failure = "a process exited during the run"
-                break
-            if time.time() >= next_sighup:
-                stack.procs["gateway"].send_signal(signal.SIGHUP)
-                sighups += 1
-                next_sighup += 600
-            if time.time() >= next_sample:
-                g = proc_sample(pids["gateway"])
-                w = proc_sample(pids["worker"])
-                c = counts.snapshot()
-                statuses = {k: c.get(k, 0) for k in ["status_2xx", "status_4xx", "status_5xx"]}
-                row = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                       "elapsed_min": round((time.time() - started) / 60, 2),
-                       "gateway_rss_kb": g[0], "gateway_fds": g[1],
-                       "worker_rss_kb": w[0], "worker_fds": w[1],
-                       "requests": sum(statuses.values()), **statuses,
-                       "transport_errors": c.get("transport_errors", 0),
-                       "chunks": c.get("chunks", 0),
-                       "upload_sessions": c.get("upload_sessions", 0),
-                       "uploads_committed": c.get("uploads_committed", 0),
-                       # Capped at the working set of 200.
-                       "videos_ready": len(ready.done),
-                       "resumes_completed": c.get("resumes_completed", 0),
-                       "cancels": c.get("cancels", 0),
-                       "playlists": c.get("playlists", 0),
-                       "sighups": sighups}
-                writer.writerow(row)
-                f.flush()
-                rows.append(row)
-                next_sample += args.interval
-            time.sleep(min(5.0, max(0.0, next_sample - time.time())))
-
-    stop.set()
-    for t in threads:
-        t.join(timeout=120)
-    codes = stack.stop()
     stack.cleanup()
     passed, report = judge(rows, args.clients)
     summary = [f"soak: {args.hours} h requested, {len(rows)} samples, {args.clients} clients",
