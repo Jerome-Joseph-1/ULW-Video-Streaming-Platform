@@ -118,6 +118,7 @@ public:
     void fail_views(std::optional<core::ports::CatalogError> error);
     // Every upload and video call to the catalog fails with `error` from now on; nullopt stops it.
     void fail_catalog(std::optional<core::ports::CatalogError> error);
+    void fail_find_video(std::optional<core::ports::CatalogError> error);
 
 private:
     struct Loop;

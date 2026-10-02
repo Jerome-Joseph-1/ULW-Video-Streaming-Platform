@@ -896,6 +896,12 @@ void Connection::on_video(core::ports::CatalogResult<core::VideoRecord> result) 
     json +=
         std::format(R"(,"state":"{}","version":{},"duration_ms":)", state_name(v.state), v.version);
     json += v.duration ? std::to_string(v.duration->count()) : "null";
+    // Only a failed video has one, and it is written for its owner (the worker's public_reason,
+    // the reaper's "upload expired"); the details stay in the logs.
+    if (v.state == core::VideoState::Failed && v.error_reason) {
+        json += R"(,"error_reason":)";
+        core::json::append_string(json, *v.error_reason);
+    }
     json += "}";
     respond_json(Status::Ok, json);
 }
@@ -1245,7 +1251,7 @@ void Connection::on_committed(ControlJob job) noexcept {
     ++pending_;
     deps().catalog.commit_upload(
         *id, video, std::string(request_id()),
-        [this, video](core::ports::CatalogResult<void> result) noexcept {
+        [this, video](core::ports::CatalogResult<core::VideoState> result) noexcept {
             --pending_;
             if (phase_ != Phase::Request) {
                 return;
@@ -1254,8 +1260,11 @@ void Connection::on_committed(ControlJob job) noexcept {
                 fail_catalog(result.error());
                 return;
             }
-            respond_json(Status::Ok, std::format(R"({{"video_id":"{}","state":"processing"}})",
-                                                 video.to_string()));
+            // Read in the commit's own transaction, so a commit that went through is never
+            // answered with an error: processing the first time, and on a repeat whatever the
+            // worker has made of the video since.
+            respond_json(Status::Ok, std::format(R"({{"video_id":"{}","state":"{}"}})",
+                                                 video.to_string(), state_name(*result)));
         });
 }
 

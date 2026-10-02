@@ -121,11 +121,12 @@ void MemoryCatalog::record_progress(const core::UploadId& id, const core::VideoI
 }
 
 void MemoryCatalog::commit_upload(const core::UploadId& id, const core::VideoId& video,
-                                  const std::string& request_id, CatalogCallback<void> done) {
+                                  const std::string& request_id,
+                                  CatalogCallback<core::VideoState> done) {
     if (refused(done)) {
         return;
     }
-    core::ports::CatalogResult<void> result{};
+    core::ports::CatalogResult<core::VideoState> result;
     const auto it = uploads_.find(id);
     const auto v = videos_.find(video);
     if (it == uploads_.end() || v == videos_.end()) {
@@ -145,6 +146,7 @@ void MemoryCatalog::commit_upload(const core::UploadId& id, const core::VideoId&
             jobs_.push_back(
                 Job{.video = video, .source_key = it->second.object_key, .request_id = request_id});
         }
+        result = v->second.state;
     }
     defer([done = std::move(done), result]() mutable noexcept { done(result); });
 }
@@ -170,6 +172,9 @@ void MemoryCatalog::find_video(const core::VideoId& id, CatalogCallback<core::Vi
     core::ports::CatalogResult<core::VideoRecord> result =
         it == videos_.end() ? std::unexpected(CatalogError::NotFound)
                             : core::ports::CatalogResult<core::VideoRecord>(it->second);
+    if (find_video_error_) {
+        result = std::unexpected(*find_video_error_);
+    }
     defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
         done(std::move(result));
     });
