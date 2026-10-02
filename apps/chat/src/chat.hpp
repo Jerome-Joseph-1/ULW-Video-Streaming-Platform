@@ -145,6 +145,8 @@ struct Counters {
     // user with max_sessions_per_user open.
     std::uint64_t limited_ip_upgrades = 0;
     std::uint64_t limited_user_sessions = 0;
+    // SIGHUPs that dropped the cached JWKS keys and every remembered verified token (ADR-0079).
+    std::uint64_t auth_cache_drops = 0;
 };
 
 // What the room plane reports, written as log lines and kept as counters. Message bodies never
@@ -257,6 +259,9 @@ private:
     };
     struct UserEntry {};
     struct BlockEntry {};
+
+    // SIGHUP: forgets the JWKS keys and every remembered verified token, and refetches.
+    void drop_auth_caches() noexcept;
 
     // A direct peer's connection: its address's count, its /48's and its rate, at accept.
     [[nodiscard]] std::optional<PeerHold> admit_peer(const net::IpAddress& peer) noexcept;

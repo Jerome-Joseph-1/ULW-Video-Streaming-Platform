@@ -59,6 +59,8 @@ struct JwksConfig {
 //    and fetches for unseen kids are 10 s apart at the least, so junk kids cannot drive
 //    fetches.
 //  - A verified token is remembered by its digest for 15 minutes, never past its expiry.
+//  - drop_caches() forgets the keys and every remembered verdict and refetches at once, for an
+//    issuer that withdraws a key without overlap (ADR-0079).
 //  - Keys not refreshed for max_key_age are dropped, with every remembered verdict: tokens are
 //    refused (KeysUnavailable) until a fetch succeeds. Fail closed: a key withdrawn during a
 //    long outage, or while the endpoint is blocked, does not verify forever.
@@ -77,6 +79,9 @@ public:
     verify(std::string_view token, core::WallTime now, core::ports::IKeyWaiter& waiter) override;
     void cancel_wait(core::ports::IKeyWaiter& waiter) noexcept override;
     [[nodiscard]] bool keys_expired() const noexcept override;
+    // Drops the keys, every remembered verdict and every remembered unknown kid, cancels the
+    // fetch in flight and starts another; waiters already pending hear back when it ends.
+    void drop_caches() noexcept override;
 
 private:
     class State;

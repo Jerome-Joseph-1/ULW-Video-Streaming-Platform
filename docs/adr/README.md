@@ -82,3 +82,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0076](0076-chat-per-client-connection-limits.md) | chat_server holds each address and each user to a share of its connections | Accepted |
 | [0077](0077-the-body-rate-window-skips-a-store-hold.md) | The body rate window skips a store's hold and keeps the bytes it counted | Accepted |
 | [0078](0078-the-cookie-is-believed-only-from-trusted-pages.md) | The gateway believes the auth cookie only from pages it trusts | Accepted |
+| [0079](0079-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted |

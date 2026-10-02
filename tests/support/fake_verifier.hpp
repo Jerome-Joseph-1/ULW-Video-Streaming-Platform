@@ -53,6 +53,11 @@ public:
     bool expired = false;
     [[nodiscard]] bool keys_expired() const noexcept override { return expired; }
 
+    // Calls to drop_caches(), which changes nothing else here: what a drop does to tokens is
+    // infra/auth's to test, with keys.
+    std::size_t drops = 0;
+    void drop_caches() noexcept override { ++drops; }
+
     void refresh_keys() {
         refreshed_ = true;
         // Taken out first, leaving the member empty and usable: a waiter that registers again

@@ -135,6 +135,7 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         {"tls_handshake_failures_total", "counter"},
         {"certificate_reloads_total", "counter"},
         {"certificate_reload_failures_total", "counter"},
+        {"auth_cache_drops_total", "counter"},
         {"playlist_requests_total", "counter"},
         {"playlists_rejected_total", "counter"},
         {"presign_failures_total", "counter"},
@@ -168,6 +169,22 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         }
     }
     EXPECT_TRUE(extra.empty()) << "families nobody documented: " << *extra.begin();
+}
+
+// SIGHUP is how Askedin's key rotation reaches the gateway (ADR-0079): the verifier forgets its
+// keys and verdicts, and the drop is counted and logged where an operator checks for it.
+TEST(GatewayMetrics, SighupDropsTheAuthCachesAndSaysSo) {
+    GatewayUnderTest gw(GatewayOptions{});
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drops_total"), 0);
+    gw.sighup();
+    EXPECT_EQ(gw.verifier_drops(), 1U);
+    EXPECT_EQ(gw.counters().auth_cache_drops, 1U);
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drops_total"), 1);
+    EXPECT_TRUE(
+        ulw::test::eventually([&] { return gw.log().events("auth caches dropped").size() == 1; }));
+    gw.sighup();
+    EXPECT_EQ(gw.verifier_drops(), 2U);
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drops_total"), 2);
 }
 
 TEST(GatewayMetrics, CountersFollowTheTrafficTheyCount) {

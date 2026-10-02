@@ -4,6 +4,7 @@
 #include "infra/messages/memory_message_store.hpp"
 #include "net/ip_address.hpp"
 #include "net/reactor_factory.hpp"
+#include "net/signals.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
@@ -144,6 +145,10 @@ public:
     // seen it.
     std::atomic<bool> expire_keys = false;
     std::atomic<bool> keys_expired = false;
+    // Delivers SIGHUP to the server on the node's next turn; `verifier_drops` then counts the
+    // verifier's drop_caches() calls.
+    std::atomic<bool> sighup = false;
+    std::atomic<std::size_t> verifier_drops = 0;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -237,6 +242,10 @@ private:
                 verifier.expired = expire_keys;
                 keys_expired = verifier.expired;
             }
+            if (sighup.exchange(false)) {
+                server->on_signal(net::Signal::Reload);
+            }
+            verifier_drops = verifier.drops;
             key_waiters = verifier.waiting();
             http_parsers = server->http_parsers();
             ++turns_;
@@ -788,6 +797,15 @@ TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
     node_->expire_keys = false;
     ASSERT_TRUE(ulw::test::eventually([&] { return !node_->keys_expired.load(); }));
     EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
+}
+
+// SIGHUP is how Askedin's key rotation reaches chat_server (ADR-0079): the verifier forgets its
+// keys and verdicts, and /metrics counts it.
+TEST_P(ChatSessionTest, SighupDropsTheAuthCaches) {
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 0U);
+    node_->sighup = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->verifier_drops.load() == 1; }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 1U);
 }
 
 // Both viewers fall behind a sender that never stops. One never reads again, and is reset once it

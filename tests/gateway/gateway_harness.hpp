@@ -109,6 +109,10 @@ public:
     [[nodiscard]] std::size_t key_waiters();
     // What SIGHUP does: reread the certificate and key. Returns once the reload has finished.
     void reload_certificate();
+    // SIGHUP itself, on the loop: also starts a certificate reload, which this does not await.
+    void sighup();
+    // How often the gateway told its verifier to drop its caches.
+    [[nodiscard]] std::size_t verifier_drops();
     [[nodiscard]] std::string metrics();
     // What the probe finds from the next loop turn on; nullopt stops it probing at all.
     void set_health(std::optional<bool> database_up, std::optional<bool> store_up);

@@ -111,6 +111,20 @@ public:
 
     [[nodiscard]] bool keys_expired() const noexcept { return expired_; }
 
+    // Everything learned from the key set goes, and a fetch starts now rather than at the next
+    // unseen kid: tokens wait on it as on any fetch, so none is answered from what was dropped.
+    // A fetch already in flight is replaced, since its answer may predate the rotation that
+    // prompted the drop. fetch() only queues the request, so nothing here blocks the loop.
+    void drop_caches() noexcept {
+        keys_ = detail::KeySet{};
+        verdicts_.clear();
+        unknown_kids_.clear();
+        if (fetching_) {
+            fetcher_.cancel(*this);
+        }
+        start_fetch();
+    }
+
     void cancel_wait(IKeyWaiter& waiter) noexcept {
         std::erase(waiters_, &waiter);
         std::ranges::replace(notifying_, &waiter, nullptr);
@@ -315,6 +329,10 @@ void JwksVerifier::cancel_wait(IKeyWaiter& waiter) noexcept {
 
 bool JwksVerifier::keys_expired() const noexcept {
     return state_->keys_expired();
+}
+
+void JwksVerifier::drop_caches() noexcept {
+    state_->drop_caches();
 }
 
 } // namespace infra::auth

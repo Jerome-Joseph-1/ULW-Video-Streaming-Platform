@@ -224,9 +224,20 @@ void Gateway::on_signal(net::Signal signal) noexcept {
         begin_drain();
         return;
     case net::Signal::Reload:
+        drop_auth_caches();
         deps_.transports.reload(deps_.pool, *this);
         return;
     }
+}
+
+// After Askedin rotates its signing key, which withdraws the old one at once, its tokens must
+// stop verifying here now rather than when the cache would next refetch (ADR-0079). The drop is
+// immediate; the refetch it starts runs on the loop like any other, and requests meanwhile wait
+// on it as on an unseen key.
+void Gateway::drop_auth_caches() noexcept {
+    deps_.verifier.drop_caches();
+    ++counters_.auth_cache_drops;
+    deps_.log.info("auth caches dropped");
 }
 
 // A renewed certificate is picked up without dropping a connection; a bad one is reported and
@@ -423,6 +434,9 @@ std::string Gateway::render_metrics() {
     e.counter("certificate_reload_failures_total",
               "SIGHUP reloads refused; the previous certificate stayed in service.",
               c.certificate_reload_failures);
+    e.counter("auth_cache_drops_total",
+              "SIGHUPs that dropped the cached JWKS keys and every remembered verified token.",
+              c.auth_cache_drops);
     e.family("playlist_requests_total", "Playlist requests, by kind.", MetricType::Counter);
     e.sample("playlist_requests_total", {{.name = "kind", .value = "master"}}, c.playlists_master);
     e.sample("playlist_requests_total", {{.name = "kind", .value = "media"}}, c.playlists_media);

@@ -59,6 +59,11 @@ public:
     // Whether the keys it had were dropped for going too long without a successful refresh,
     // so that every token is refused until one succeeds. A fixed key set never is.
     [[nodiscard]] virtual bool keys_expired() const noexcept { return false; }
+    // Forgets the cached key set and every verified token it remembers, and starts a refresh at
+    // once (on SIGHUP, after the issuer rotated its key: ADR-0079). Tokens then wait on that
+    // refresh as for an unseen key. On the reactor thread; never blocks. A fixed key set has
+    // nothing to forget.
+    virtual void drop_caches() noexcept {}
 };
 
 } // namespace core::ports

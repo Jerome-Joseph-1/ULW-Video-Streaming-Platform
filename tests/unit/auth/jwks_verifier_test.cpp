@@ -61,6 +61,11 @@ const TestKey& next_ed_key() {
     return key;
 }
 
+const TestKey& next_rsa_key() {
+    static const TestKey key = TestKey::rsa("rsa-2");
+    return key;
+}
+
 const TestKey& small_rsa_key() {
     static const TestKey key = TestKey::rsa("rsa-small", 1024);
     return key;
@@ -122,6 +127,26 @@ std::string token_with_kid(std::string_view kid) {
     const std::string header = R"({"alg":"EdDSA","kid":")" + std::string(kid) + R"("})";
     const std::string input = encode_base64url(header) + '.' + encode_base64url(test_payload());
     return input + '.' + encode_base64url(ed_key().sign("EdDSA", input));
+}
+
+// What Askedin's auth-service issues (docs/integration/auth.md, Askedin): RS256 under a header
+// of alg, kid and typ only; aud an array of one; sub a lowercase UUID, repeated as uid; jti equal
+// to the kid; tid, perms and sid besides; no nbf; exp an hour after iat. Its 2FA challenge and
+// PAT swap tokens are the same but for `aud` and a `typ` claim.
+std::string askedin_token(const TestKey& key, const std::string& aud = R"(["askedin-platform"])",
+                          std::optional<std::string> typ = std::nullopt) {
+    const std::string header = R"({"alg":"RS256","kid":")" + key.kid() + R"(","typ":"JWT"})";
+    const std::string payload = test_payload({{"aud", aud},
+                                              {"sub", R"("0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b")"},
+                                              {"uid", R"("0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b")"},
+                                              {"iat", ulw::test::numeric_date(0)},
+                                              {"jti", '"' + key.kid() + '"'},
+                                              {"tid", R"("t-1")"},
+                                              {"perms", R"(["video:upload"])"},
+                                              {"sid", R"("s-1")"},
+                                              {"typ", std::move(typ)}});
+    const std::string input = encode_base64url(header) + '.' + encode_base64url(payload);
+    return input + '.' + encode_base64url(key.sign("RS256", input));
 }
 
 std::unexpected<AuthError> refused(AuthError e) {
@@ -553,6 +578,123 @@ TEST_F(JwksVerifierTest, DestructionCancelsTheArmedTimers) {
     advance(minutes(20));
     EXPECT_EQ(waiter.calls, 0);
     EXPECT_EQ(fetcher_.requests, 1);
+}
+
+// Askedin's access tokens as its auth-service issues them verify, and the user is their sub.
+TEST_F(JwksVerifierTest, AnAskedinAccessTokenVerifies) {
+    const VerifyResult verified =
+        verify_through_fetch(askedin_token(rsa_key()), key_set({rsa_key().jwk()}));
+    ASSERT_TRUE(verified.has_value());
+    EXPECT_EQ(verified->subject.view(), "0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b");
+}
+
+// Askedin signs its 2FA challenges and PAT swaps with the same key as its access tokens; only the
+// audience tells them apart, and neither may authenticate here under the default audience.
+TEST_F(JwksVerifierTest, AskedinsTwoFactorAndPatTokensAreRefusedForTheirAudience) {
+    ASSERT_EQ(ulw::test::kTestRules.audience, "askedin-platform") << "not the default audience";
+    const std::string jwks = key_set({rsa_key().jwk()});
+    EXPECT_EQ(verify_through_fetch(
+                  askedin_token(rsa_key(), R"(["askedin-2fa"])", R"("2fa_challenge")"), jwks),
+              refused(AuthError::WrongAudience));
+    EXPECT_EQ(verify(askedin_token(rsa_key(), R"(["askedin-pat"])", R"("pat")")),
+              refused(AuthError::WrongAudience));
+    EXPECT_EQ(verify(askedin_token(rsa_key(), R"("askedin-2fa")", R"("2fa_challenge")")),
+              refused(AuthError::WrongAudience));
+    EXPECT_EQ(verify(askedin_token(rsa_key(), R"("askedin-pat")", R"("pat")")),
+              refused(AuthError::WrongAudience));
+    // The same token under the platform's audience verifies: the audience alone refused them.
+    EXPECT_TRUE(verify(askedin_token(rsa_key(), R"(["askedin-platform"])", R"("pat")"))
+                    .value_or(refused(AuthError::KeysUnavailable)));
+    EXPECT_EQ(fetcher_.requests, 1);
+}
+
+// Askedin rotates without overlap: the old kid leaves the set the moment the new key is made. A
+// token verified before goes on verifying from the remembered verdict, and its key from the
+// cached set, until the next refetch.
+TEST_F(JwksVerifierTest, AWithdrawnKeyGoesOnVerifyingUntilTheNextRefetchWithoutADrop) {
+    const std::string old_token = askedin_token(rsa_key());
+    EXPECT_TRUE(verify_through_fetch(old_token, key_set({rsa_key().jwk()})));
+    // Rotated now: the published set holds next_rsa_key() alone, and nobody has asked for it.
+    advance(minutes(15) - seconds(1));
+    EXPECT_TRUE(verify(old_token).value_or(refused(AuthError::KeysUnavailable)));
+    EXPECT_EQ(fetcher_.requests, 1);
+    advance(milliseconds(1200));
+    ASSERT_EQ(fetcher_.requests, 2);
+    fetcher_.respond(key_set({next_rsa_key().jwk()}));
+    EXPECT_EQ(verify(old_token), refused(AuthError::UnknownKey));
+}
+
+// What SIGHUP does: the keys and every remembered verdict go, a fetch starts at once, and a
+// token whose key left the set is refused as soon as it lands.
+TEST_F(JwksVerifierTest, DroppingTheCachesRefusesATokenWhoseKeyLeftTheSet) {
+    const std::string old_token = askedin_token(rsa_key());
+    EXPECT_TRUE(verify_through_fetch(old_token, key_set({rsa_key().jwk()})));
+    EXPECT_TRUE(verify(old_token).value_or(refused(AuthError::KeysUnavailable)));
+    ASSERT_EQ(fetcher_.requests, 1);
+
+    verifier_->drop_caches();
+    EXPECT_EQ(fetcher_.requests, 2) << "no fetch started by the drop";
+    ASSERT_TRUE(fetcher_.in_flight());
+    CountingWaiter waiter;
+    EXPECT_FALSE(verify(old_token, waiter).has_value()) << "answered from a dropped cache";
+    fetcher_.respond(key_set({next_rsa_key().jwk()}));
+    pump();
+    EXPECT_EQ(waiter.calls, 1);
+    EXPECT_EQ(verify(old_token, waiter), refused(AuthError::UnknownKey));
+    // The new key came with that fetch.
+    EXPECT_TRUE(
+        verify(askedin_token(next_rsa_key())).value_or(refused(AuthError::KeysUnavailable)));
+    EXPECT_EQ(fetcher_.requests, 2);
+}
+
+// A token whose key is still published verifies again after the drop's fetch, signature and all.
+TEST_F(JwksVerifierTest, AfterADropATokenStillPublishedVerifiesAgain) {
+    const std::string token = askedin_token(rsa_key());
+    EXPECT_TRUE(verify_through_fetch(token, key_set({rsa_key().jwk()})));
+    verifier_->drop_caches();
+    EXPECT_TRUE(verify_through_fetch(token, key_set({rsa_key().jwk()})));
+    EXPECT_EQ(fetcher_.requests, 2);
+}
+
+// A drop during a fetch replaces it: what that fetch would bring may predate the rotation.
+TEST_F(JwksVerifierTest, ADropDuringAFetchCancelsItAndStartsAnother) {
+    CountingWaiter waiter;
+    EXPECT_FALSE(verify(askedin_token(rsa_key()), waiter).has_value());
+    ASSERT_EQ(fetcher_.requests, 1);
+    verifier_->drop_caches();
+    EXPECT_EQ(fetcher_.cancels, 1);
+    EXPECT_EQ(fetcher_.requests, 2);
+    fetcher_.respond(key_set({rsa_key().jwk()}));
+    pump();
+    EXPECT_EQ(waiter.calls, 1);
+    EXPECT_TRUE(
+        verify(askedin_token(rsa_key()), waiter).value_or(refused(AuthError::KeysUnavailable)));
+}
+
+// A kid remembered as unknown is forgotten too: after the drop it waits for the fetch instead of
+// being refused at once.
+TEST_F(JwksVerifierTest, ADropForgetsUnknownKids) {
+    const std::string next = askedin_token(next_rsa_key());
+    EXPECT_EQ(verify_through_fetch(next, key_set({rsa_key().jwk()})),
+              refused(AuthError::UnknownKey));
+    EXPECT_EQ(verify(next), refused(AuthError::UnknownKey));
+    verifier_->drop_caches();
+    EXPECT_TRUE(verify_through_fetch(next, key_set({next_rsa_key().jwk()})));
+}
+
+// With the endpoint down a drop leaves nothing to verify with: every token is refused as
+// KeysUnavailable (503) until a retry lands. Fail closed, as after max_key_age.
+TEST_F(JwksVerifierTest, ADropWhileTheKeySetIsUnreachableRefusesUntilAFetchLands) {
+    const std::string token = askedin_token(rsa_key());
+    EXPECT_TRUE(verify_through_fetch(token, key_set({rsa_key().jwk()})));
+    verifier_->drop_caches();
+    EXPECT_EQ(verify_through_fetch(token, "<html>not a key set</html>"),
+              refused(AuthError::KeysUnavailable));
+    EXPECT_FALSE(verifier_->keys_expired());
+    advance(seconds(1) + milliseconds(200));
+    ASSERT_EQ(fetcher_.requests, 3);
+    fetcher_.respond(key_set({rsa_key().jwk()}));
+    EXPECT_TRUE(verify(token).value_or(refused(AuthError::KeysUnavailable)));
 }
 
 } // namespace
