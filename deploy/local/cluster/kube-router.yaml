@@ -57,6 +57,7 @@ spec:
         app.kubernetes.io/name: kube-router
     spec:
       serviceAccountName: kube-router
+      # The node's own network namespace: the one whose iptables it programs.
       hostNetwork: true
       priorityClassName: system-node-critical
       tolerations:
@@ -75,19 +76,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-          # It programs the node's iptables and ipsets.
+          # It programs the node's iptables and ipsets, which takes these two capabilities and
+          # no others; the kernel loads the netfilter modules they need on first use. Only the
+          # router, switched off, would load a module itself.
           securityContext:
-            privileged: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_ADMIN", "NET_RAW"]
           volumeMounts:
-            - name: lib-modules
-              mountPath: /lib/modules
-              readOnly: true
             - name: xtables-lock
               mountPath: /run/xtables.lock
       volumes:
-        - name: lib-modules
-          hostPath:
-            path: /lib/modules
         - name: xtables-lock
           hostPath:
             path: /run/xtables.lock
