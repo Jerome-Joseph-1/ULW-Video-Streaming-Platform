@@ -8,6 +8,7 @@
 #include <chrono>
 #include <climits>
 #include <poll.h>
+#include <stop_token>
 #include <unistd.h>
 #include <utility>
 
@@ -116,12 +117,18 @@ bool AsyncLogSink::write_out(std::optional<core::MonoTime>& deadline, const std:
 }
 
 void AsyncLogSink::drain(const std::stop_token& stop) {
+    // Taking the mutex before notifying means the stop cannot land between a wait's check of
+    // the predicate and its sleep.
+    const std::stop_callback wake_on_stop(stop, [this] {
+        { const std::scoped_lock lock(mutex_); }
+        wake_.notify_one();
+    });
     std::optional<core::MonoTime> deadline;
     while (true) {
         {
             std::unique_lock lock(mutex_);
             // The stop is only honoured once nothing is queued, so the destructor flushes.
-            wake_.wait(lock, stop, [this] { return !queued_.empty(); });
+            wake_.wait(lock, [this, &stop] { return !queued_.empty() || stop.stop_requested(); });
             if (queued_.empty()) {
                 return;
             }

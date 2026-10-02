@@ -69,7 +69,7 @@ private:
     // Wakes the thread from a wait for the reader when the sink is being destroyed.
     os::UniqueFd stopping_;
     std::mutex mutex_;
-    std::condition_variable_any wake_;
+    std::condition_variable wake_;
     // Filled by writers under the mutex; swapped with `out_` by the thread, which then writes
     // `out_` without holding it.
     std::vector<char> queued_;

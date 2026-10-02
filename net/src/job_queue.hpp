@@ -19,7 +19,7 @@ public:
 
 private:
     std::mutex mutex_;
-    std::condition_variable_any ready_;
+    std::condition_variable ready_;
     std::deque<IOffloadJob*> jobs_;
 };
 
