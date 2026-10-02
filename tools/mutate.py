@@ -27,12 +27,16 @@ that rebuild short); SIGKILL leaves the mutant in place (`git checkout` the file
 test that outlasts its timeout is killed with its whole process group. Each mutant's id is
 file:line:operator:index, stable for a given source.
 
+The test command is a test binary inside the repository or the build tree, given only
+googletest flags, or ctest with the options in CTEST_VALUED and CTEST_FLAGS; anything else is
+refused with exit 2. --sample takes the mutants whose sha256 of seed and id sorts first.
+
 Mutants build with CCACHE_READONLY so they do not fill the cache; the restored source hits it.
 """
 import argparse
+import hashlib
 import json
 import os
-import random
 import re
 import signal
 import subprocess
@@ -43,7 +47,7 @@ from pathlib import Path
 # tools/pathguard.py, which keeps each path given on the command line inside the repository
 # and the temporary directories.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pathguard import inside  # noqa: E402
+from pathguard import REPOSITORY, inside  # noqa: E402
 
 REL_OPS = ["<", "<=", ">", ">=", "==", "!="]
 REL = re.compile(r"(?<=\s)(<=|>=|==|!=|<|>)(?=\s)")
@@ -56,6 +60,17 @@ RET_BOOL = re.compile(r"\breturn (true|false);")
 TARGET = re.compile(r"\w[\w.+/-]*")
 # Statements whose deletion mostly changes logging or metrics wording, not behaviour.
 QUIET = re.compile(r"\b(log|LOG|ulw_log|logger|trace|debug)\w*\s*[.(]|static_assert")
+# The characters of a declaration's type and name, and what may follow the name.
+DECL_HEAD = re.compile(r"[\w:<>,\s*&]*")
+DECL_END = ("=", "(", "{", ";")
+# A googletest flag, the only option a test binary is given.
+GTEST_FLAG = re.compile(r"--gtest_[a-z_]+(=.*)?", re.DOTALL)
+# The ctest options a test command may use: those that take a value, then those that do not.
+CTEST_VALUED = {"--test-dir", "-R", "--tests-regex", "-E", "--exclude-regex", "-L", "--label-regex",
+                "-LE", "--label-exclude", "-j", "--parallel", "--timeout", "-C", "--build-config",
+                "--repeat"}
+CTEST_FLAGS = {"--output-on-failure", "--stop-on-failure", "-Q", "--quiet", "-V", "--verbose",
+               "--no-tests=error", "--schedule-random"}
 
 
 def mask(lines):
@@ -96,6 +111,65 @@ def mask(lines):
             i += 1
         out.append("".join(chars))
     return out
+
+
+def is_declaration(code):
+    r"""Whether `code` opens with a declaration: a type, a name, then = ( { or ;.
+
+    The same test as re.match(r"[\w:<>,\s*&]+\s+\w+\s*(=|\(|\{|;)", code), without its
+    overlapping quantifiers: none of = ( { ; is in the leading class, so the match can only end
+    where the longest run of that class does.
+    """
+    head = DECL_HEAD.match(code).group()
+    if not code.startswith(DECL_END, len(head)):
+        return False
+    words = head.rstrip()
+    name = len(words) - len(re.match(r"\w*", words[::-1]).group())
+    return len(words) > name >= 2 and words[name - 1].isspace()
+
+
+def refuse(message):
+    print(f"mutate.py: {message}; refused", file=sys.stderr)
+    sys.exit(2)
+
+
+def test_command(cmd, build_dir):
+    """The test command, checked: ctest with the options in CTEST_VALUED and CTEST_FLAGS, or an
+    executable inside the repository or the build tree given only googletest flags. Anything
+    else exits 2, so no argument reaches a program as an option it was not meant to take."""
+    if cmd[0] == "ctest":
+        checked, value_next = ["ctest"], False
+        for arg in cmd[1:]:
+            if value_next:
+                value_next = False
+                if checked[-1] == "--test-dir":
+                    arg = str(inside(arg))
+                elif arg.startswith("-"):
+                    refuse(f"{checked[-1]} takes a value, not {arg!r}")
+            elif arg in CTEST_VALUED:
+                value_next = True
+            elif arg not in CTEST_FLAGS:
+                refuse(f"ctest option {arg!r} is not one a test command uses")
+            checked.append(arg)
+        if value_next:
+            refuse(f"{checked[-1]} takes a value")
+        return checked
+    if os.sep not in cmd[0]:
+        refuse(f"the test program {cmd[0]!r} is neither ctest nor a path")
+    program = inside(cmd[0])
+    if not (program.is_relative_to(REPOSITORY) or program.is_relative_to(build_dir)):
+        refuse(f"the test program {cmd[0]!r} is not ctest or inside the repository or the build tree")
+    if not (program.is_file() and os.access(program, os.X_OK)):
+        refuse(f"the test program {cmd[0]!r} is not an executable file")
+    for arg in cmd[1:]:
+        if arg.startswith("-") and not GTEST_FLAG.fullmatch(arg):
+            refuse(f"{arg!r} is not a googletest flag")
+    return [str(program)] + cmd[1:]
+
+
+def sample_order(seed, key):
+    """A stable rank for `key` under --seed: another seed reorders, the same one repeats."""
+    return hashlib.sha256(f"{seed}:{key}".encode()).hexdigest()
 
 
 def balanced_end(text, start):
@@ -170,7 +244,7 @@ def mutants_for(path, root):
                 and code.count("(") == code.count(")")
                 and (re.match(r"[\w.\->\[\]*]+(\(|\s*(=|\+=|-=|\|=|&=|<<=|>>=)\s|\+\+|--)", code)
                      or re.match(r"(\+\+|--)\w", code))
-                and not re.match(r"[\w:<>,\s*&]+\s+\w+\s*(=|\(|\{|;)", code)):
+                and not is_declaration(code)):
             indent = len(line) - len(line.lstrip())
             add(n, "del", indent, line.strip(), "", f"delete `{line.strip()}`")
     return found
@@ -285,8 +359,8 @@ def main():
         if missing:
             sys.exit(f"unknown mutant ids: {sorted(missing)}")
     elif a.sample:
-        rng = random.Random(a.seed)
-        pools = {f: rng.sample(ms, len(ms)) for f, ms in per_file.items()}
+        pools = {f: sorted(ms, key=lambda m: sample_order(a.seed, m["id"]))
+                 for f, ms in per_file.items()}
         chosen = []
         # Round-robin over the files, weighted by how many mutants each has.
         total = sum(len(ms) for ms in per_file.values()) or 1
@@ -294,7 +368,7 @@ def main():
         for f in a.files:
             chosen += pools[f][:quota[f]]
         # Interleaved, so a --budget-s that runs out still leaves every file sampled.
-        rng.shuffle(chosen)
+        chosen.sort(key=lambda m: sample_order(a.seed, "run:" + m["id"]))
     else:
         chosen = [m for ms in per_file.values() for m in ms]
     if a.list:
@@ -308,12 +382,10 @@ def main():
     # A target is a name ninja knows, never one of its options.
     if not TARGET.fullmatch(a.target):
         sys.exit(f"--target {a.target!r} is not a ninja target name")
-    # A test program named by path runs from inside the repository or a temporary directory;
-    # a bare name is looked up on PATH, as before.
-    if os.sep in cmd[0]:
-        cmd = [str(inside(cmd[0]))] + cmd[1:]
+    build_dir = inside(a.build_dir)
+    cmd = test_command(cmd, build_dir)
 
-    build = ["ninja", "-C", str(inside(a.build_dir)), "-j1", a.target]
+    build = ["ninja", "-C", str(build_dir), "-j1", a.target]
     env = dict(os.environ, CCACHE_READONLY="1")
     rc, out, _ = run(build, a.build_timeout)
     if rc != 0:

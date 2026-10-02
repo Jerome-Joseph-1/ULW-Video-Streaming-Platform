@@ -25,9 +25,16 @@ tools/mutate.py --list --files http/src/request_parser.cpp        # the mutants,
 tools/mutate.py ... --only http/src/request_parser.cpp:202:del:0  # chosen mutants again
 ```
 
+The test command after `--` is either a test binary inside the repository or the build tree,
+given only googletest flags (`--gtest_*`), or `ctest` with the options a test run needs
+(`--test-dir`, `-R`, `-E`, `-L`, `-LE`, `-j`, `-C`, `--timeout`, `--repeat`,
+`--output-on-failure`, `--stop-on-failure`, `--no-tests=error` and the like); anything else is
+refused with exit 2.
+
 `--lines path:10-80,120-200` restricts a file to the functions under study, and `--sample`
-spreads the mutants over the files in proportion to how many each has. Each mutant rebuilds one
-object and relinks one binary; mutants build with `CCACHE_READONLY`, so they do not fill the
+spreads the mutants over the files in proportion to how many each has; the sample is the mutants
+whose SHA-256 of seed and id sorts first, so a `--seed` repeats it exactly. Each mutant rebuilds
+one object and relinks one binary; mutants build with `CCACHE_READONLY`, so they do not fill the
 cache, and the restored source hits it. Run it from its own worktree: it edits sources in place.
 It restores the file when stopped by SIGINT, SIGTERM or SIGHUP, and kills a timed-out build or
 test with its whole process group; after a SIGKILL, `git checkout` the file it was mutating.
