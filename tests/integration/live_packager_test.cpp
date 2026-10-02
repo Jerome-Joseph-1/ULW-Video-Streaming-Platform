@@ -220,6 +220,9 @@ TEST_F(LivePackagerTest, ASlidingWindowKeepsAMonotonicSequenceAndEndsWithEndlist
     const auto publisher = start_publisher(*port, 24);
 
     watch(*publisher);
+    // The packager ends only once a publisher has come and gone: one that never connected (an
+    // SRT handshake that timed out) leaves it listening, so the publisher's own end comes first.
+    ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
 
     const auto ended_playlist = playlist();
@@ -386,6 +389,9 @@ TEST_F(LivePackagerTest, ACrashedPackagerResumesTheSequenceWhereTheStoreLeftIt) 
         << packager->output();
     const auto publisher = start_publisher(*port, 12);
     watch(*publisher);
+    // The packager ends only once a publisher has come and gone: one that never connected (an
+    // SRT handshake that timed out) leaves it listening, so the publisher's own end comes first.
+    ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
 
     const auto ended_playlist = playlist();
