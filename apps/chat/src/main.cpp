@@ -152,6 +152,10 @@ int run() {
     if (auto r = ops::disable_core_dumps(); !r) {
         return fail("disable core dumps", errno_text(r.error()));
     }
+    // Before the first allocation in earnest (ADR-0078); a sanitizer's allocator refuses it.
+    if (!ops::return_large_blocks()) {
+        std::println(stderr, "chat_server: large blocks stay on the heap: the allocator refused");
+    }
     auto config = chat::load_config(read_env);
     if (!config) {
         return fail(config.error().variable, config.error().reason, kBadConfig);

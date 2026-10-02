@@ -365,6 +365,10 @@ int run(std::span<const std::string_view> args) {
     if (auto r = ops::disable_core_dumps(); !r) {
         return fail(boot, "disable core dumps", errno_text(r.error()));
     }
+    // Before the first allocation in earnest (ADR-0078); a sanitizer's allocator refuses it.
+    if (!ops::return_large_blocks()) {
+        boot.warn("large blocks stay on the heap: the allocator refused");
+    }
 
     const auto cli = ops::parse_command_line(gateway::settings(), args);
     if (!cli) {

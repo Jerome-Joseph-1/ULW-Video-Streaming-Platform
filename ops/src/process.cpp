@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <memory>
 #include <string_view>
 #include <unistd.h>
@@ -73,6 +74,14 @@ std::expected<void, int> disable_core_dumps() noexcept {
     }
     if (::prctl(PR_SET_DUMPABLE, 0) != 0) {
         return std::unexpected(errno);
+    }
+    return {};
+}
+
+std::expected<void, int> return_large_blocks() noexcept {
+    constexpr int kMmapThreshold = 16 * 1024;
+    if (::mallopt(M_MMAP_THRESHOLD, kMmapThreshold) != 1) {
+        return std::unexpected(EINVAL);
     }
     return {};
 }

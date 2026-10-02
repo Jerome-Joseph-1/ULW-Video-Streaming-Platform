@@ -20,4 +20,12 @@ namespace ops {
 // error is the errno of the call that failed.
 [[nodiscard]] std::expected<void, int> disable_core_dumps() noexcept;
 
+// Hands every allocation of 16 KiB or more to mmap, and so back to the kernel when it is freed,
+// instead of carving it from the heap, where a long-lived service's transient frame, message and
+// parse buffers leave holes that glibc never returns (ADR-0078). Setting the threshold also
+// stops glibc from raising it on its own, which is what lets those buffers back into the heap.
+// Call it first, before anything is allocated in earnest. The error is EINVAL when the
+// allocator refuses the setting, as a sanitizer's allocator does; the service runs on without it.
+[[nodiscard]] std::expected<void, int> return_large_blocks() noexcept;
+
 } // namespace ops

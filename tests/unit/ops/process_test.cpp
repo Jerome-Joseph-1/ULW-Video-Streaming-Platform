@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <malloc.h>
 #include <unistd.h>
 #include <vector>
 
@@ -58,6 +59,40 @@ TEST(DisableCoreDumps, LeavesNoCoreLimitAndAProcessNobodyMayReadOrAttachTo) {
     int status = 0;
     ASSERT_EQ(::waitpid(child, &status, 0), child);
     ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+
+// In a child, since the setting holds for the rest of the process. glibc still serves a request
+// from a hole it has free; only when the heap would grow does a block of 32 KiB, under the
+// default threshold of 128 KiB, go to a mapping of its own instead. So the child asks for more
+// than the heap holds free, and some of the blocks must be mapped, and returned when freed.
+TEST(ReturnLargeBlocks, BlocksOfThirtyTwoKibPastTheHeapsFreeSpaceAreMappedAndReturned) {
+    constexpr int kRefused = 2;
+    constexpr std::size_t kBlock = 32 * 1024;
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        if (!ops::return_large_blocks()) {
+            ::_exit(kRefused);
+        }
+        const auto before = mallinfo2();
+        std::vector<void*> blocks(before.fordblks / kBlock + 16);
+        for (void*& block : blocks) {
+            block = std::malloc(kBlock);
+        }
+        const bool mapped = mallinfo2().hblks > before.hblks;
+        for (void* block : blocks) {
+            std::free(block);
+        }
+        const bool returned = mallinfo2().hblks == before.hblks;
+        ::_exit(mapped && returned ? 0 : 1);
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    if (WEXITSTATUS(status) == kRefused) {
+        GTEST_SKIP() << "this allocator refuses mallopt, as a sanitizer's does";
+    }
     EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
