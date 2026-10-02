@@ -259,7 +259,7 @@ def check_askedin_gateway_stand_in(subject, token):
 def scenario_auth():
     subject = f"auth-{uuid.uuid4().hex[:8]}"
     missing = f"/api/v1/videos/{unknown_video_id()}"
-    for alg in ("PS256", "ES256", "EdDSA"):
+    for alg in ("RS256", "PS256", "ES256", "EdDSA"):
         status, _, _ = request("GET", missing, mint(subject, alg))
         check(status == 404, f"{alg} token: expected 404 for an unknown video, got {status}")
     token = mint(subject)
