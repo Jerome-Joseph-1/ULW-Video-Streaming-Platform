@@ -28,7 +28,7 @@ if [[ ! -f $lib ]] || [[ $(cat "$dir/.ulw-stamp" 2>/dev/null) != "$stamp" ]]; th
     mkdir -p "$cache"
     crate=$(mktemp "$cache/download.XXXXXX")
     trap 'rm -f "$crate"' EXIT
-    if ! curl -fsSL -o "$crate" \
+    if ! curl -fsSL --proto =https --proto-redir =https -o "$crate" \
         "https://static.crates.io/crates/gst-plugin-webrtchttp/gst-plugin-webrtchttp-$version.crate" ||
         ! echo "$sha256  $crate" | sha256sum --check --quiet -; then
         echo "fetch-whipsink.sh: the crate download failed or did not match its SHA-256" >&2

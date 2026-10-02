@@ -79,6 +79,22 @@ elsewhere, change the second `from` in the same files:
 kubectl get pods -A -l app.kubernetes.io/name=prometheus -o custom-columns=NS:.metadata.namespace
 ```
 
+Both the gateway's and the worker's NetworkPolicies also limit what they reach out to: cluster
+DNS in `kube-system`, and TCP 5432 (Postgres) and 443 (R2; for the gateway also Askedin's JWKS).
+The worker's 5432 and 443 exclude the pod network, `10.42.0.0/16` (K3s's default; change it in
+`overlays/*/video-worker/networkpolicy.yaml` if the cluster's differs). The gateway's 443 does
+not, in case `JWKS_URL` names an in-cluster Service; a policy matches the pod's own port, so if
+that Service's pods listen on a port other than 443, add it to the gateway's egress rule, or the
+gateway can fetch no keys (`auth_failures` rise with 503s). Check, before the first apply:
+
+```sh
+kubectl get pods -n kube-system -l k8s-app=kube-dns -o name        # cluster DNS is in kube-system
+kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}'           # each a /24 in 10.42.0.0/16
+```
+
+After it, the gateway's log shows no failed key fetch and its `/readyz` stays 200; a worker
+that cannot reach the bucket fails its first job with a store error.
+
 The gateway limits each client address (20 connections, or 20 requests in flight before they
 are authenticated, and 10 new connections a second) and each user (300 requests a minute, 100
 GiB of uploads a day), per replica. Behind Envoy every connection comes from Envoy's pods, so
@@ -103,6 +119,18 @@ With the wrong block every client counts as Envoy: the gateway resets Envoy's co
 20 and `connections_rejected_total{reason="ip_connections"}` climbs. With a proxy more or fewer
 in front than `ULW_TRUSTED_PROXY_HOPS` says, clients are counted as the wrong address; step 5.4
 checks which one the gateway sees.
+
+`chat_server` holds each client address to a share of its connections too (20 open sockets, 80
+from one IPv6 /48, 10 new ones a second, and 16 sockets per user; docs/adr/0076), and reads the
+same `ULW_TRUSTED_PROXIES` and `ULW_TRUSTED_PROXY_HOPS`. When chat is served behind Envoy, set
+both on its Deployment exactly as on the gateway's. Without them every WebSocket arrives from
+Envoy's pods, so all clients together share Envoy's 20 sockets per address: the 21st client
+through an Envoy pod is reset at accept, and
+`connections_rejected_total{reason="ip_connections"}` on the chat node climbs while its
+`connections_current` is nowhere near 1280, the node's fixed cap. With the proxies set, the chat
+node tells clients apart by `X-Forwarded-For` at their upgrade requests, and it refuses
+`ULW_TRUSTED_PROXY_HOPS` without `ULW_TRUSTED_PROXIES` and warns of a block wider than /8 (IPv6
+/32), as the gateway does.
 
 The NetworkPolicy admits Envoy's pods and every pod in the `monitoring` namespace, both from
 inside the trusted block. A monitoring pod can therefore send any `X-Forwarded-For` it likes; all
@@ -240,9 +268,14 @@ COMMIT;
 DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user sub>';
 ```
 
-A member removed this way keeps receiving the room's messages, and can read its history, until
-their connection closes; their next join is refused. To cut them off at once, also restart the
-chat pods.
+A member removed this way is cut off at once on every chat node, however the row goes (a DELETE,
+or an UPDATE that moves it to another room or user; one that leaves both as they were removes
+nobody): a trigger (migration 0009) notifies the nodes, each takes that user's sockets out of the
+room, and the client gets an `error` with `not_member` for it (docs/adr/0073). Their next join is
+refused. No restart is needed. If a node's listening session to Postgres was down when the row
+went, the node checks every closed room its clients are in once it listens again, four checks at
+a time and retrying each second while the database fails, so a removal made during a database
+outage takes effect once the node reconnects. `member_removals_total` counts the sockets taken out.
 
 A stream's live chat admits anyone, and only the server side opens one: a client's join can
 record a room only as closed, and a stream join is refused with `not_live` until the stream's
@@ -316,10 +349,26 @@ build the gateways run), and a NetworkPolicy that lets it reach cluster DNS, Pos
 the store (443) and nothing else. It aborts uploads past their `expires_at`, fails their videos
 with "upload expired", releases their storage sessions, removes any object a finished commit
 left at their key, and aborts sessions older than the uploads' lifetime that no upload owns
-(docs/adr/0049). Each pass prints `reaper_uploads_expired_last_run`,
-`reaper_uploads_release_failed_last_run` and `reaper_parts_orphaned_last_run` on stdout, as
+(docs/adr/0049). It also forgets direct and group chat rooms that a refused join recorded more
+than a day ago and nothing used since (no members, never on the room plane), however old; a
+stream's live chat is never forgotten. It looks at 10,000 rooms a pass at most, from where the
+last pass stopped, and starts over from the oldest once it reaches the cutoff
+(`chat_rooms_forget_cursor`, docs/adr/0075). Each pass prints
+`reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run`,
+`reaper_parts_orphaned_last_run` and `reaper_chat_rooms_forgotten_last_run` on stdout, as
 gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
 confirmed, and the Job's log says which.
+
+**Deploy the release that carries migration 0010 off-peak.** Migrations run inside a
+transaction, so its index on `chat_rooms (recorded_at, room_id)` is built without
+`CONCURRENTLY`: until the gateway's migrate container commits it, every chat join of a closed
+room, every member listing and every live chat opened waits (the column it adds is a catalog
+change, with no rewrite). The build sorts every row of `chat_rooms`, a uuid, a text and a
+timestamp each: a few seconds per million rooms, so check first with
+`SELECT count(*) FROM chat_rooms;`. Taking its locks waits at most 5 s for traffic before the
+migration gives up and the init container runs it again (`lock_timeout`, docs/adr/0031). A join
+that waits past the chat service's request timeout is answered `unavailable`, and the client
+retries it.
 
 The NetworkPolicy allows ports, not addresses, because Postgres runs on the node's host and R2
 is on the internet. If the host's address is stable, add it as an `ipBlock` to the 5432 rule.
@@ -352,6 +401,172 @@ is on the internet. If the host's address is stable, add it as an `ipBlock` to t
 The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
 `askedin-gateway`. If the video plane gets a hostname of its own, add `hostnames:` to both
 `httproute.yaml` files.
+
+### 4a. Deploying by digest
+
+The overlays name the images by branch tag (`:development`, `:master`) with
+`imagePullPolicy: Always`. A tag is mutable: whoever can push to the registry can change what
+the next restart, reschedule or node drain runs, and two gateway pods started a minute apart can
+run different builds. LiveKit, which is not built here, is already pinned by digest. Ours cannot
+be written into the manifests at commit time, because the digest only exists once the pipeline
+has built that very commit. So the pipeline has to write it, and ArgoCD, which owns the
+manifests, then deploys exactly that digest. Nothing in `woodpecker.yml` does this yet: it needs
+two things only you can set up, a Woodpecker secret allowed to push to the monorepo branch
+ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist:
+
+1. Put a `kustomization.yaml` in each of `overlays/{stage,prod}/video-gateway`, `video-worker`
+   and `upload-reaper`, listing that directory's manifests under `resources:` and the image under
+   `images:`. ArgoCD renders a directory with a `kustomization.yaml` through kustomize on its
+   own. Change `imagePullPolicy: Always` to `IfNotPresent`: a digest never changes, so there is
+   nothing to pull again.
+2. Add a step to `woodpecker.yml` after both image steps, in place of `rollout-restart`: resolve
+   the digest of the tag just pushed under the commit's SHA (not the branch tag, which a
+   concurrent build may have moved), write it with kustomize, and commit it. With `crane` and
+   `kustomize` in an image pinned by tag and digest like every other step:
+
+   ```sh
+   overlays=<path to overlays/ in the monorepo>   # fill in: the directory holding stage and prod
+   case "$CI_COMMIT_BRANCH" in
+     master) env=prod ;;
+     development) env=stage ;;
+   esac
+   gw=git.askedin.com/askedin/askedin-monorepo/video-gateway
+   wk=git.askedin.com/askedin/askedin-monorepo/video-worker
+   gw_digest=$(crane digest "$gw:$CI_COMMIT_SHA")
+   wk_digest=$(crane digest "$wk:$CI_COMMIT_SHA")
+   git config user.name "<pipeline commit name>"      # fill in
+   git config user.email "<pipeline commit email>"    # fill in
+   # The monorepo's clone URL, assumed from the registry path: confirm it. The token is read
+   # from the environment on each call, never written to .git/config.
+   git remote add deploy https://git.askedin.com/askedin/askedin-monorepo.git
+   git config credential.helper \
+     '!f() { echo "username=<push user>"; echo "password=$DEPLOY_PUSH_TOKEN"; }; f'
+   pin() {
+     (cd "$overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
+     (cd "$overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
+     (cd "$overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
+     # Already pinned (a rerun, or the branch holds this digest): nothing to commit.
+     git diff --quiet || git commit -qam "deploy: video images $CI_COMMIT_SHA [skip ci]"
+   }
+   pin
+   for attempt in 1 2 3; do
+     git push deploy "HEAD:$CI_COMMIT_BRANCH" && exit 0
+     # Non-fast-forward: start again from the branch as it is now, not from a rebase.
+     git fetch deploy "$CI_COMMIT_BRANCH" && git checkout -q FETCH_HEAD || exit 1
+     # A code commit after this one builds and pins its own digest; leave it to that build.
+     newer=$(git rev-list -1 --fixed-strings --invert-grep --grep='[skip ci]' \
+       "$CI_COMMIT_SHA..HEAD")
+     [ -z "$newer" ] || exit 0
+     pin
+   done
+   exit 1
+   ```
+
+   Fill in `overlays` for the monorepo's layout, the commit identity and push user, and confirm
+   the remote URL. The token comes from a Woodpecker secret, named in the step and never written
+   into the file:
+
+   ```yaml
+   environment:
+     DEPLOY_PUSH_TOKEN:
+       from_secret: deploy_push_token
+   ```
+
+   Woodpecker checks out the commit as a detached HEAD, so the push names the branch,
+   `HEAD:$CI_COMMIT_BRANCH`; a bare `git push` has no branch to push. The commit carries
+   `[skip ci]`, so it does not build again; ArgoCD sees the new digest and rolls the deployments
+   itself, the gateway's init container migrating first as today.
+
+   When the push is refused because the branch moved, a rebase would always conflict if the
+   commit that landed is another build's digest commit: both edit the same `digest:` lines from
+   the same base. So the step fetches the branch, and if a code commit (one whose message lacks
+   `[skip ci]`) has landed after `$CI_COMMIT_SHA`, it stops without pinning, because that newer
+   build pins itself. Otherwise only digest commits landed, from builds of this commit or older
+   ones, and it redoes its three edits on the fetched tree, commits and pushes, up to three
+   times. The edits are regenerated rather than replayed, so a shallow clone (Woodpecker's
+   default) is enough: the fetch brings the commits after the clone's, and the check reads only
+   the range after `$CI_COMMIT_SHA`, which the clone has. The rule holds only while every commit
+   on the branch runs this pipeline: if the monorepo's pipeline filters on paths (`when: path:`),
+   a commit outside them never pins, so limit the check to the same paths
+   (`git rev-list ... "$CI_COMMIT_SHA..HEAD" -- <the video paths>`). The `exit`s end the step,
+   so the snippet is the step's last command.
+   Drop the restricted kubeconfig then: the pipeline no longer touches the cluster.
+3. Rollback (section 6) becomes one of:
+   - `kustomize edit set image` to the digest of `<good sha>`, committed with `[skip ci]`;
+   - a revert of the digest commit, whose message must also carry `[skip ci]`
+     (`git revert --no-edit <commit>`, then `git commit --amend` to add it). Without it the
+     revert builds the branch's HEAD, the bad code, and the new digest step pins it again;
+   - a revert of the bad code itself, which builds and pins a good image the normal way.
+
+   Any of these instead of a retag and a restart. Before a rollback by digest, cancel or wait
+   out any pipeline still running on the branch: one that finishes afterwards sees the rollback
+   as another build's digest commit and pins its own image over it.
+
+Until then, what a pod runs is at least recorded. This prints each pod's resolved digest, which
+must match `crane digest <image>:<sha>` of the commit you meant to deploy:
+
+```sh
+kubectl -n apps-stage get pods -o \
+  jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'
+```
+
+### Image builds and the worker's ffmpeg
+
+The two images come from different distributions (docs/adr/0074): `video-gateway` is Ubuntu
+24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
+packages, ffmpeg among them, from snapshot.debian.org; both images' binaries are built on
+Ubuntu, since only Ubuntu's glibc lets them carry the CET marks the hardening check requires.
+On the worker those marks are a static property only: Debian's own `libc.so.6` is unmarked, so
+the kernel does not enable a shadow stack for the worker's processes. And because the worker's
+binaries run on trixie's libraries, the Ubuntu release they are built on must not have a newer
+glibc or libstdc++ than trixie; the trixie workflow fails if they stop loading there.
+Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org over
+http for the worker's bootstrap of ca-certificates (signed and checked for freshness), and
+Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes its CA as the
+build secret `ca-bundle`. The pipeline itself is unchanged: `target: worker` still builds the
+worker image.
+
+#### Updating the worker's ffmpeg
+
+The platform's on-call engineer owns this. The daily trigger is the nightly e2e run: its
+sandbox job's "Image vulnerabilities" step (tools/security/trivy-image.sh) fails as soon as a
+HIGH or CRITICAL with a fix in the archive affects the worker image, and that failure is the
+signal to bump. Every Monday, also read debian-security-announce (or
+https://security-tracker.debian.org/tracker/source-package/ffmpeg) for trixie DSAs the gate
+does not rate HIGH. For a DSA against ffmpeg, OpenSSL or glibc, bump within two working days;
+otherwise bump at least monthly.
+
+1. Pick a timestamp after the DSA's upload reached snapshot.debian.org: the `first_seen` of the
+   `debian-security` archive in
+   `https://snapshot.debian.org/mr/package/ffmpeg/<version>/binfiles/ffmpeg/<version>?fileinfo=1`
+   (the version URL-encoded, `7%3A7.1.5-0%2Bdeb13u1`).
+2. If Docker Hub has a newer `debian:trixie-slim` (a new 13.x point release), move the
+   Dockerfile's `DEBIAN` digest to it. The base image's own packages (libc6, util-linux,
+   perl-base, ncurses, libsystemd0 and the rest) are upgraded to the snapshot's versions at
+   every build whatever the digest, but a current base keeps that upgrade small.
+3. In a `debian:trixie-slim` container at the digest the Dockerfile names, with this checkout
+   mounted, print the candidates at that timestamp:
+
+   ```sh
+   DEBIAN_SNAPSHOT=<timestamp> deploy/docker/apt-install-debian.sh --policy \
+       ffmpeg ca-certificates openssl libcurl4t64 libpq5 libssl3t64 openssl-provider-legacy
+   ```
+
+4. Set `DEBIAN_SNAPSHOT` in `deploy/docker/Dockerfile` to the timestamp and every pinned version
+   in the `worker` stage to its candidate. A build fails if a pin is not
+   what the snapshot holds, so nothing drifts silently.
+5. If ffmpeg's upstream version changed (the part before `-0+deb13u`, say 7.1.5 to 7.1.6; a
+   `+deb13uN` patch alone does not need it), run in that container, with ffmpeg and strace
+   installed, `tools/trace-ffmpeg-syscalls.sh` as root and as an ordinary user (setpriv, from
+   util-linux, when given a uid; `runuser -u <user> --` otherwise) and
+   `tools/ffmpeg-address-space.sh --full`. Extend `infra/ffmpeg/src/seccomp_filter.hpp` with
+   any new call, each with its reason (docs/adr/0048); a command line that nears its address
+   space limit is a finding for docs/adr/0074 before it is a bump. The trixie workflow runs both
+   on every pull request that touches the Dockerfile, so its log shows them too.
+6. Open the pull request, then dispatch the e2e workflow on its branch (Actions, e2e, "Run
+   workflow"): pull requests do not run it. Its sandbox job builds the worker image, runs the
+   VOD flow through it, checks the release binaries' hardening and runs the Trivy gate. Deploy
+   as usual (step 4).
 
 ## 5. Verify on stage (M14)
 

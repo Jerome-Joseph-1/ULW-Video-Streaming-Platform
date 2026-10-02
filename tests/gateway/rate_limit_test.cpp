@@ -1,3 +1,5 @@
+#include "http/client_limits.hpp"
+
 #include "bounded_table.hpp"
 #include "rate_limit.hpp"
 
@@ -273,6 +275,18 @@ TEST(ClientKey, CountsAnIpv6SiteAsOneClient) {
     const auto v4 = *net::IpAddress::parse("198.51.100.7");
     EXPECT_EQ(gateway::client_key(v4), v4);
     EXPECT_NE(gateway::client_key(v4), gateway::client_key(*net::IpAddress::parse("198.51.100.8")));
+}
+
+// Chat's cap on one IPv6 customer (ADR-0076): every /64 of a /48 is one block, and IPv4 has none.
+TEST(ClientBlock, CountsTheSlash64sOfAnIpv6Slash48AsOneBlock) {
+    const auto first = *net::IpAddress::parse("2001:db8:1:2::1");
+    const auto last = *net::IpAddress::parse("2001:db8:1:ffff:ffff::9");
+    const auto next = *net::IpAddress::parse("2001:db8:2::1");
+    EXPECT_NE(http::client_key(first), http::client_key(last));
+    EXPECT_EQ(http::client_block(first), http::client_block(last));
+    EXPECT_EQ(http::client_block(first), net::IpAddress::parse("2001:db8:1::"));
+    EXPECT_NE(http::client_block(first), http::client_block(next));
+    EXPECT_FALSE(http::client_block(*net::IpAddress::parse("198.51.100.7")));
 }
 
 } // namespace

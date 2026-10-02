@@ -82,4 +82,22 @@ TEST(TokenBucket, ItIsFullOnlyOnceEveryTokenIsBack) {
     EXPECT_TRUE(bucket.full(kStart + Millis{1'000}));
 }
 
+TEST(PacedBucket, ItsBurstIsThereAtOnceThenOneAnIntervalAndItFillsWhenLeftAlone) {
+    const Millis minute{60'000};
+    chat::PacedBucket bucket(3, minute, kStart);
+    EXPECT_TRUE(bucket.full(kStart));
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(bucket.available(kStart)) << i;
+        bucket.take(kStart);
+    }
+    EXPECT_FALSE(bucket.available(kStart));
+    EXPECT_FALSE(bucket.available(kStart + minute - Millis{1}));
+    EXPECT_TRUE(bucket.available(kStart + minute));
+    bucket.take(kStart + minute);
+    EXPECT_FALSE(bucket.available(kStart + minute));
+    EXPECT_FALSE(bucket.full(kStart + 3 * minute));
+    EXPECT_TRUE(bucket.full(kStart + 4 * minute));
+    EXPECT_FALSE(chat::PacedBucket(0, minute, kStart).available(kStart));
+}
+
 } // namespace
