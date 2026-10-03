@@ -561,8 +561,7 @@ TEST_F(ConfigTest, OnlyTheConnectionStringTheStoreKeysAndLiveKitsSecretAreSecret
             s.env == "ULW_S3_ACCESS_KEY_ID" || s.env == "ULW_S3_SECRET_ACCESS_KEY";
         // The kubelet's, read to know the process runs in a pod, and PATH, passed on to a
         // packager the gateway starts: nobody configures either.
-        EXPECT_EQ(s.key.empty(),
-                  store_key || s.env == "KUBERNETES_SERVICE_HOST" || s.env == "PATH")
+        EXPECT_EQ(s.key.empty(), store_key || s.env == "KUBERNETES_SERVICE_HOST" || s.env == "PATH")
             << s.env;
         EXPECT_EQ(s.secret,
                   store_key || s.env == "ULW_DATABASE_URL" || s.env == "LIVEKIT_API_SECRET")
