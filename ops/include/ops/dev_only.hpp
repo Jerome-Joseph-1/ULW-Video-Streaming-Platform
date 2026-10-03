@@ -54,7 +54,8 @@ struct TokenRules {
 // them, for keys from `keys`. With JWKS_URL, JWT_AUDIENCE is required: every identity provider
 // names its own, and a guessed default would either refuse every token or accept another
 // service's. With a local key set it defaults to kDevAudience. ULW_JWT_SUBJECT_CLAIM defaults to
-// `sub` and is 1 to 64 of A-Z a-z 0-9 and _ . : / - (the claim names identity providers use).
+// `sub` and is 1 to 64 of A-Z a-z 0-9 and _ . : / - (the claim names identity providers use),
+// never iss, aud, exp, nbf, iat or jti.
 // The refusal names the variable at fault.
 [[nodiscard]] std::expected<TokenRules, DevOnlyRefusal> token_rules(const DevLookup& env,
                                                                     const KeySource& keys);

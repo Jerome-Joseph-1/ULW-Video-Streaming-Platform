@@ -1,7 +1,7 @@
-# What the sandbox changes in the egress policies, and why: MinIO serves the store on port 9000,
-# and the mock auth-service's pods serve the JWKS on 8443 behind its Service's 443 (to the
-# gateway and chat). Policies match a pod's own port, after the Service has translated it, so
-# both ports are added (deploy/kubernetes/RUNBOOK.md, step 1, says the same of any operator's in-cluster store or
+# What the sandbox changes in the egress policies, and why: MinIO serves the store on port 9000, and
+# the mock auth-service's pods serve the JWKS on 8443 behind its Service's 443 (to the gateway and
+# chat). Policies match a pod's own port, after the Service has translated it, so both ports are
+# added (deploy/kubernetes/RUNBOOK.md, step 1, says the same of any operator's in-cluster store or
 # JWKS). Everything else is as the base has it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

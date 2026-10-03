@@ -178,6 +178,7 @@ TEST_F(ConfiguredSubjectClaimTest, TheConfiguredClaimIsCheckedAsSubIs) {
     EXPECT_EQ(error_with(R"("")"), AuthError::MissingSubject);
     EXPECT_EQ(error_with("-1"), AuthError::Malformed);
     EXPECT_EQ(error_with("1.5"), AuthError::Malformed);
+    EXPECT_EQ(error_with("18446744073709551616"), AuthError::Malformed);
     EXPECT_EQ(error_with("true"), AuthError::Malformed);
     EXPECT_EQ(error_with(R"({"id":"u-42"})"), AuthError::Malformed);
     EXPECT_EQ(error_with(R"("alice smith")"), AuthError::Malformed);

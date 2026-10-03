@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Trivy's misconfiguration checks over what deploy/ ships and runs (docs/adr/0072): the
-# Kubernetes manifests and Dockerfiles as they are, and the example overlays and the sandbox's
-# two kustomizations as rendered, since their patches and config are not manifests on their own. The checks are the ones built
-# into the pinned Trivy release; --skip-check-update keeps them from being replaced by whatever
-# the registry serves today. Any finding, of any severity, not in tools/security/trivyignore.yaml
-# (or past its expired_at there) fails.
+# Trivy's misconfiguration checks over what deploy/ ships and runs (docs/adr/0072): the Kubernetes
+# manifests and Dockerfiles as they are, and the example overlays and the sandbox's two
+# kustomizations as rendered, since their patches and config are not manifests on their own. The
+# checks are the ones built into the pinned Trivy release; --skip-check-update keeps them from being
+# replaced by whatever the registry serves today. Any finding, of any severity, not in
+# tools/security/trivyignore.yaml (or past its expired_at there) fails.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)

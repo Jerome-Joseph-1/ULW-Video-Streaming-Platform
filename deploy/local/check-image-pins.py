@@ -23,7 +23,14 @@ Every `image:` value in the files (Kubernetes manifests, compose and kind files)
                 (NAME_image=TAG beside NAME_digest=sha256:...), as e2e-up.sh and stunner/up.sh
                 pull it.
 
-Each option needs at least one file. An unknown option is an error.
+validate-manifests.sh passes all four groups. An operator checks an overlay of their own by
+rendering it and passing only --pinned (or --kubernetes, for one that follows `main`):
+
+  kubectl kustomize overlays/<env> > /tmp/ulw.yaml
+  deploy/local/check-image-pins.py --pinned /tmp/ulw.yaml
+
+At least one group is needed, each option given needs at least one file, and --images-sh is
+needed with --sandbox and only read then. An unknown option is an error.
 """
 import argparse
 import re
@@ -96,19 +103,24 @@ def check(kubernetes, pinned, host, sandbox, tags: set[str]) -> list[str]:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--images-sh", type=Path, required=True)
+    parser.add_argument("--images-sh", type=Path)
     for group in ("kubernetes", "pinned", "host", "sandbox"):
-        parser.add_argument(f"--{group}", type=Path, nargs="+", required=True)
+        parser.add_argument(f"--{group}", type=Path, nargs="+", default=[])
     args = parser.parse_args(argv)  # an unknown option or a missing file list exits 2
-    images_sh = inside(args.images_sh)
+    if not (args.kubernetes or args.pinned or args.host or args.sandbox):
+        parser.error("nothing to check: give --kubernetes, --pinned, --host or --sandbox")
+    if args.sandbox and args.images_sh is None:
+        parser.error("--sandbox needs --images-sh")
+    images_sh = inside(args.images_sh) if args.sandbox else None
     kubernetes = [inside(p) for p in args.kubernetes]
     pinned = [inside(p) for p in args.pinned]
     host = [inside(p) for p in args.host]
     sandbox = [inside(p) for p in args.sandbox]
-    for path in [images_sh, *kubernetes, *pinned, *host, *sandbox]:
+    for path in [*([images_sh] if images_sh else []), *kubernetes, *pinned, *host, *sandbox]:
         if not path.is_file():
             parser.error(f"{path}: no such file")
-    errors = check(kubernetes, pinned, host, sandbox, pinned_tags(images_sh))
+    tags = pinned_tags(images_sh) if images_sh else set()
+    errors = check(kubernetes, pinned, host, sandbox, tags)
     for e in errors:
         print(f"check-image-pins: {e}", file=sys.stderr)
     return 1 if errors else 0

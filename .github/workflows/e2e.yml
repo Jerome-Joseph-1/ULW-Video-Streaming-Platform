@@ -109,9 +109,9 @@ jobs:
             docker rm "$container" >/dev/null
           done
           tools/check-hardening.sh "$RUNNER_TEMP"/release-bin/*/*
-      # The four images an operator runs, for OS and library vulnerabilities. Every HIGH or CRITICAL,
-      # by Trivy's rating or NVD's, fixed or not, goes into the job summary and the JSON report
-      # below; HIGH and CRITICAL by Trivy's rating with a fix available fail
+      # The four images an operator runs, for OS and library vulnerabilities. Every HIGH or
+      # CRITICAL, by Trivy's rating or NVD's, fixed or not, goes into the job summary and the JSON
+      # report below; HIGH and CRITICAL by Trivy's rating with a fix available fail
       # (tools/security/trivy-image.sh). mock-auth is the sandbox's own.
       - name: Image vulnerabilities
         if: ${{ !cancelled() && steps.up.outcome == 'success' }}

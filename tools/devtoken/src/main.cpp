@@ -33,7 +33,7 @@ constexpr std::string_view kUsage = R"(usage:
       otherwise; --ttl to 3600.
 )";
 
-// JWT_AUDIENCE's default with a local key set (ops::kDevAudience; ADR-0087).
+// JWT_AUDIENCE's default with a local key set (ops::kDevAudience; ADR-0088).
 constexpr std::string_view kDefaultAudience = "ulw-dev";
 constexpr std::int64_t kDefaultTtlSeconds = 3600;
 

@@ -148,7 +148,8 @@ replacements:
           name: chat
         fieldPaths:
           - spec.template.spec.containers.[name=chat].env.[name=ULW_ALLOWED_ORIGINS].value
-  # The pod network: the proxies the gateway and chat trust, and the block the worker and the packagers may not reach.
+  # The pod network: the proxies the gateway and chat trust, and the block the worker and the
+  # packagers may not reach.
   - source:
       kind: ConfigMap
       name: ulw-operator-config

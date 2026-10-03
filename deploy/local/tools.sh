@@ -22,8 +22,8 @@ pins=(
     "metrics-server.yaml v0.9.0 1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b
      https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"
     # STUNner's CRDs, from its Helm chart at the v1.2.1 tag (deploy/stunner/up.sh). The chart's
-    # other templates are rendered in deploy/kubernetes/cluster/stunner/; its Gateway API CRDs are not
-    # used, since Envoy Gateway's install.yaml above carries a release of its own.
+    # other templates are rendered in deploy/kubernetes/cluster/stunner/; its Gateway API CRDs are
+    # not used, since Envoy Gateway's install.yaml above carries a release of its own.
     "stunner-crds.yaml v1.2.1 720ab0c18e0e51b8cee18259685061e03cc0d3d01e90a0c0fc20c5144351b279
      https://raw.githubusercontent.com/l7mp/stunner-helm/08555494a2fdb53c0f8a0146cfa1c951dbb83f1b/helm/stunner/crds/stunner-crds.yaml"
     # Docker's default seccomp profile, from which seccomp-profile.py derives the worker's.

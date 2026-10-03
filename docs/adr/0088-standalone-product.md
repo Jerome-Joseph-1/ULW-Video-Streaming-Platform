@@ -42,8 +42,9 @@ everything an operator must choose has to be a setting, in one place per environ
   refuse to start (exit 2) without it, naming the variable. With a local development key set
   (`ULW_DEV_JWKS_FILE`, `ULW_DEV_MODE=1`) it defaults to `ulw-dev`, which `ulw_devtoken` now
   mints by default. `JWT_ISSUER` and `JWKS_URL` stay required as before. The user is the claim
-  `ULW_JWT_SUBJECT_CLAIM` names (default `sub`; 1 to 64 of `A-Z a-z 0-9 _ . : / -`); no other
-  claim stands in for it. `sub` must be a string; another claim may also be a non-negative
+  `ULW_JWT_SUBJECT_CLAIM` names (default `sub`; 1 to 64 of `A-Z a-z 0-9 _ . : / -`, never one
+  of `iss`, `aud`, `exp`, `nbf`, `iat` or `jti`, which would make all users one identity or
+  every token a new user); no other claim stands in for it. `sub` must be a string; another claim may also be a non-negative
   integer, taken in decimal, as the `id` fallback took it. Both settings are read by one function
   (`ops::token_rules`) for the gateway and chat, and logged with the gateway's effective
   configuration.

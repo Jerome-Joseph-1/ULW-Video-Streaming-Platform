@@ -203,6 +203,24 @@ class ImagePinsTest(unittest.TestCase):
         self.assertEqual(self.run_check(kubernetes, host, [])[0], 2)
         self.assertEqual(self.run_check(kubernetes, host, sandbox, [])[0], 2)
 
+    def test_an_operator_checks_a_rendered_overlay_alone(self):
+        good = self.manifest("mine.yaml", "ghcr.io/jerome-joseph-1/ulw-chat:" + "a" * 40)
+        bad = self.manifest("theirs.yaml", "ghcr.io/jerome-joseph-1/ulw-chat:main")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(pins.main(["--pinned", str(good)]), 0)
+            self.assertEqual(pins.main(["--pinned", str(bad)]), 1)
+            self.assertEqual(pins.main(["--kubernetes", str(bad)]), 0)
+        self.assertIn("a pinned overlay names a published commit", err.getvalue())
+
+    def test_nothing_to_check_or_a_sandbox_without_images_sh_is_an_error(self):
+        _, _, sandbox = self.ok_files()
+        for argv in ([], ["--images-sh", str(self.images_sh)], ["--sandbox", str(sandbox[0])]):
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as raised:
+                pins.main(argv)
+            self.assertEqual(raised.exception.code, 2)
+
     def test_a_missing_file_is_an_error(self):
         _, host, sandbox = self.ok_files()
         self.assertEqual(self.run_check([pathlib.Path("/nonexistent.yaml")], host, sandbox)[0], 2)

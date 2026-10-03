@@ -83,10 +83,11 @@ spec:
                 # while that much of the limit below is idle): docs/adr/0053 measured 0.5 to 1
                 # core per stream, so the default leaves room for the 720p re-encode.
           # One stream at a time in the base (overlays/production takes two): egress counts its
-          # cores from the limit, admits a participant egress only while 2 of them are idle
-          # under its 80% ceiling, so 3 cores admit one and refuse a second (Unavailable from
-          # the relay). Each stream takes 0.5 to 1 core and ~300 MB (docs/adr/0053), so the
-          # request is one stream's worst case and the memory limit one stream with room. Disk: logs and the handler's temporary files.
+          # cores from the limit, admits a participant egress only while 2 of them are idle under
+          # its 80% ceiling, so 3 cores admit one and refuse a second (Unavailable from the relay).
+          # Each stream takes 0.5 to 1 core and ~300 MB (docs/adr/0053), so the request is one
+          # stream's worst case and the memory limit one stream with room. Disk: logs and the
+          # handler's temporary files.
           resources:
             requests:
               cpu: "1"

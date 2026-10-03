@@ -162,4 +162,20 @@ TEST_F(TokenRulesTest, TheSubjectClaimIsSubUnlessNamedAndAClaimNameWhenNamed) {
     }
 }
 
+// As the subject, iss or aud would make every user of the provider one identity, and exp, nbf,
+// iat or jti every token a user of its own.
+TEST_F(TokenRulesTest, AClaimThatNamesNoUserIsRefusedAsTheSubject) {
+    env["JWT_AUDIENCE"] = "ulw-test-audience";
+    for (const char* reserved : {"iss", "aud", "exp", "nbf", "iat", "jti"}) {
+        env["ULW_JWT_SUBJECT_CLAIM"] = reserved;
+        const auto r = rules(jwks);
+        ASSERT_FALSE(r) << reserved;
+        EXPECT_EQ(r.error().variable, "ULW_JWT_SUBJECT_CLAIM");
+    }
+    for (const char* allowed : {"sub", "uid", "issuer", "jti_user"}) {
+        env["ULW_JWT_SUBJECT_CLAIM"] = allowed;
+        EXPECT_TRUE(rules(jwks)) << allowed;
+    }
+}
+
 } // namespace

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Brings up a sandbox operator's cluster on this machine, from scratch: a kind cluster, Postgres
-# and MinIO beside it (as an operator's often run outside the cluster), Envoy Gateway, the mock
+# Brings up a sandbox operator's cluster on this machine, from scratch: a kind cluster, Postgres and
+# MinIO beside it (as an operator's often run outside the cluster), Envoy Gateway, the mock
 # auth-service, and deploy/kubernetes's video-gateway, video-worker and chat, configured by
-# config.env and built from this checkout (and the live packager's image, which runs no pod here), and STUNner with
-# LiveKit behind it (deploy/stunner/up.sh). Rerunning rebuilds the images and reapplies
-# everything; e2e-down.sh removes it.
-# Nothing here knows how to reach any real operator's infrastructure.
+# config.env and built from this checkout (and the live packager's image, which runs no pod here),
+# and STUNner with LiveKit behind it (deploy/stunner/up.sh). Rerunning rebuilds the images and
+# reapplies everything; e2e-down.sh removes it. Nothing here knows how to reach any real operator's
+# infrastructure.
 #
 #   ULW_BUILDER    build with this docker buildx builder instead of the default one; the images
 #                  then reach the node as OCI archives and never enter the local image store
@@ -99,8 +99,8 @@ pinned "$eg_image" "$eg_digest"
 pinned "$envoy_image" "$envoy_digest"
 pinned "$kube_router_image" "$kube_router_digest"
 
-# start NAME DOCKER_RUN_ARGS... runs a backing service on the kind network, where the node
-# reaches it as an operator's cluster reaches services outside it; its data is a tmpfs and goes with it.
+# start NAME DOCKER_RUN_ARGS... runs a backing service on the kind network, where the node reaches
+# it as an operator's cluster reaches services outside it; its data is a tmpfs and goes with it.
 start() {
     local name=$1
     shift

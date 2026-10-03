@@ -499,6 +499,7 @@ Render and check before applying; the output is everything the environment runs:
 ```sh
 kubectl kustomize overlays/<env> > /tmp/ulw.yaml
 grep -n 'image:' /tmp/ulw.yaml                       # your tags, upstream images by digest
+../local/check-image-pins.py --pinned /tmp/ulw.yaml   # a production overlay: no :main (4a)
 kubectl apply --dry-run=server -f /tmp/ulw.yaml
 kubectl apply -k overlays/<env>
 kubectl -n "$NS" rollout status deployment/video-gateway --timeout=10m
@@ -533,8 +534,18 @@ runs, and two gateway pods started a minute apart can run different builds. Acce
 staging environment only. A production environment always names a published commit: its SHA
 tag, which publish-images never moves once pushed, and preferably its digest too, as
 `<sha>@sha256:<digest>`, which the runtime pulls by digest while the SHA keeps it readable.
-`deploy/local/check-image-pins.py` fails `overlays/production` in this repository if it renders
-any of these images by `main` or another moving tag.
+
+`:main` (or any other moving tag) in a production overlay is caught by
+`deploy/local/check-image-pins.py --pinned`, which fails if a rendered overlay names one of
+these images by anything but a 40-hex SHA or a digest. This repository runs it on
+`overlays/production`; nothing runs it on yours, so run it on your own production overlay before
+every apply, from a checkout of this repository, from `deploy/kubernetes` as every command here
+(it needs Python 3 and PyYAML):
+
+```sh
+kubectl kustomize overlays/<env> > /tmp/ulw.yaml
+../local/check-image-pins.py --pinned /tmp/ulw.yaml    # exit 0, or the image at fault
+```
 
 1. Take the images from the publish run's summary for the commit you mean to deploy (Actions,
    publish-images, the run, Summary, "Published images"), each as `<sha>@sha256:<digest>`, or

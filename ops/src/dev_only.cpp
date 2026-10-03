@@ -1,6 +1,7 @@
 #include "ops/dev_only.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <utility>
 
@@ -86,6 +87,15 @@ std::expected<TokenRules, DevOnlyRefusal> token_rules(const DevLookup& env, cons
         return std::unexpected(
             DevOnlyRefusal{.variable = "ULW_JWT_SUBJECT_CLAIM",
                            .reason = "expected a claim name: 1 to 64 of A-Z a-z 0-9 _ . : / -"});
+    }
+    // Claims every token carries with another meaning: as the subject they would make all of a
+    // provider's users one identity (iss, aud) or every token a new user (exp, nbf, iat, jti).
+    constexpr std::array<std::string_view, 6> kReserved{"iss", "aud", "exp", "nbf", "iat", "jti"};
+    if (std::ranges::find(kReserved, claim) != kReserved.end()) {
+        return std::unexpected(DevOnlyRefusal{
+            .variable = "ULW_JWT_SUBJECT_CLAIM",
+            .reason = "a registered claim that does not name a user (iss, aud, exp, nbf, iat, "
+                      "jti); expected sub or the claim that holds the user's id"});
     }
     return TokenRules{.audience = std::move(audience).value_or(std::string(kDevAudience)),
                       .subject_claim = std::move(claim)};
