@@ -31,6 +31,8 @@ struct Config {
     std::filesystem::path scratch;
     // The ulw_sandbox helper; empty means the one installed beside this executable.
     std::filesystem::path sandbox;
+    // Absolute paths, or bare names looked up in search_path's absolute directories
+    // (infra/ffmpeg/src/process.cpp): the sandbox helper searches no PATH itself.
     std::string ffmpeg;
     std::string ffprobe;
     // PATH for the sandboxed children, which inherit nothing else.

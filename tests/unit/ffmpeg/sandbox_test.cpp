@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include <algorithm>
@@ -24,11 +25,14 @@
 #include <grp.h>
 #include <gtest/gtest.h>
 #include <pthread.h>
+#include <spawn.h>
+#include <sstream>
 #include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -89,9 +93,8 @@ protected:
         }
         stdout_.clear();
         auto child = infra::ffmpeg::run_sandboxed(
-            Sandbox{.helper = kHelper,
-                    .environment = {"PATH=/usr/bin:/bin"},
-                    .syscall_filter = syscall_filter_},
+            Sandbox{
+                .helper = kHelper, .environment = environment_, .syscall_filter = syscall_filter_},
             limits, args, clock_,
             [this](std::string_view bytes) {
                 stdout_.append(bytes);
@@ -104,11 +107,52 @@ protected:
         return child.value_or(ChildExit{});
     }
 
+    // The helper itself, not through run_sandboxed, which looks a bare name up first. Returns
+    // its exit code and what it wrote to stderr.
+    std::pair<int, std::string> run_helper(const std::vector<std::string>& program) {
+        std::vector<std::string> argv_text{kHelper.string(),
+                                           "--writable",
+                                           writable_.path().string(),
+                                           "--address-space",
+                                           std::to_string(kGiB),
+                                           "--cpu-seconds",
+                                           "30",
+                                           "--no-syscall-filter",
+                                           "--"};
+        argv_text.insert(argv_text.end(), program.begin(), program.end());
+        std::vector<char*> argv;
+        argv.reserve(argv_text.size() + 1);
+        for (std::string& arg : argv_text) {
+            argv.push_back(arg.data());
+        }
+        argv.push_back(nullptr);
+        std::string path = "PATH=/usr/bin:/bin";
+        const std::array<char*, 2> envp{path.data(), nullptr};
+        const fs::path err = errors_.path() / "stderr";
+        posix_spawn_file_actions_t actions{};
+        EXPECT_EQ(::posix_spawn_file_actions_init(&actions), 0);
+        EXPECT_EQ(::posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, err.c_str(),
+                                                     O_WRONLY | O_CREAT | O_TRUNC, 0600),
+                  0);
+        pid_t pid = 0;
+        const int spawned =
+            ::posix_spawn(&pid, kHelper.c_str(), &actions, nullptr, argv.data(), envp.data());
+        ::posix_spawn_file_actions_destroy(&actions);
+        EXPECT_EQ(spawned, 0);
+        int status = 0;
+        EXPECT_EQ(::waitpid(pid, &status, 0), pid);
+        std::ostringstream text;
+        text << std::ifstream(err).rdbuf();
+        return {WIFEXITED(status) ? WEXITSTATUS(status) : -1, std::move(text).str()};
+    }
+
     const fs::path kHelper{ULW_SANDBOX_BIN};
+    std::vector<std::string> environment_{"PATH=/usr/bin:/bin"};
     // Off here so that an ordinary shell can stand in for ffmpeg; SyscallFilterTest turns it on.
     bool syscall_filter_ = false;
     os::SystemClock clock_;
     ulw::test::TempDir writable_{"ulw-sandbox"};
+    ulw::test::TempDir errors_{"ulw-sandbox-stderr"};
     std::string stdout_;
     std::function<void(const std::string&)> on_stdout_;
 };
@@ -394,6 +438,75 @@ TEST_F(SandboxTest, TheHelpersOwnFailuresHaveTheirOwnCodes) {
                                       .wall = {}});
     EXPECT_EQ(child.exit_code, infra::ffmpeg::kSandboxSetupFailed);
     EXPECT_NE(child.stderr_tail.find("writable directory"), std::string::npos);
+}
+
+// The helper runs its program exactly as named: never looked up on a PATH, never relative, never
+// through a "..", and only a regular file it may execute.
+TEST_F(SandboxTest, TheHelperSearchesNoPathForABareName) {
+    const auto [code, err] = run_helper({"true"});
+    EXPECT_EQ(code, infra::ffmpeg::kProgramNotFound);
+    EXPECT_NE(err.find("no PATH is searched"), std::string::npos) << err;
+}
+
+TEST_F(SandboxTest, TheHelperRunsAnAbsolutePathItIsGiven) {
+    const auto [code, err] = run_helper({"/bin/sh", "-c", "exit 3"});
+    EXPECT_EQ(code, 3) << err;
+}
+
+TEST_F(SandboxTest, ARelativePathIsRefused) {
+    const auto child = run({"bin/sh", "-c", "exit 0"});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kCannotExecute);
+    EXPECT_NE(child.stderr_tail.find("not an absolute path"), std::string::npos)
+        << child.stderr_tail;
+}
+
+TEST_F(SandboxTest, APathThroughDotDotIsRefused) {
+    const auto child = run({"/usr/bin/../bin/sh", "-c", "exit 0"});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kCannotExecute);
+    EXPECT_NE(child.stderr_tail.find("has a .. component"), std::string::npos) << child.stderr_tail;
+}
+
+TEST_F(SandboxTest, APathNotInNormalFormIsRefused) {
+    for (const std::string path : {"/usr/./bin/sh", "/usr//bin/sh"}) {
+        const auto child = run({path, "-c", "exit 0"});
+        EXPECT_EQ(child.exit_code, infra::ffmpeg::kCannotExecute) << path;
+        EXPECT_NE(child.stderr_tail.find("not in normal form"), std::string::npos)
+            << path << ": " << child.stderr_tail;
+    }
+}
+
+TEST_F(SandboxTest, ADirectoryIsRefused) {
+    const auto child = run({writable_.path().string()});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kCannotExecute);
+    EXPECT_NE(child.stderr_tail.find("not a regular file"), std::string::npos) << child.stderr_tail;
+}
+
+TEST_F(SandboxTest, AFileWithNoExecutePermissionIsRefused) {
+    const fs::path script = errors_.path() / "script";
+    std::ofstream(script) << "#!/bin/sh\nexit 0\n";
+    fs::permissions(script, fs::perms::owner_read | fs::perms::owner_write);
+    const auto child = run({script.string()});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kCannotExecute);
+    EXPECT_NE(child.stderr_tail.find("refusing to run"), std::string::npos) << child.stderr_tail;
+}
+
+TEST_F(SandboxTest, AMissingAbsolutePathIsNotFound) {
+    const auto child = run({"/nonexistent/ffmpeg"});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kProgramNotFound);
+    EXPECT_NE(child.stderr_tail.find("refusing to run /nonexistent/ffmpeg"), std::string::npos)
+        << child.stderr_tail;
+}
+
+// A bare name is looked up by run_sandboxed in the PATH the program is given, and only in its
+// absolute directories: a relative one would be the writable directory, which the input fills.
+TEST_F(SandboxTest, ARelativeSearchPathDirectoryIsNeverSearched) {
+    const fs::path planted = writable_.path() / "planted";
+    std::ofstream(planted) << "#!/bin/sh\necho planted\n";
+    fs::permissions(planted, fs::perms::owner_all);
+    environment_ = {"PATH=.:/usr/bin:/bin"};
+    const auto child = run({"planted"});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kProgramNotFound) << child.stderr_tail;
+    EXPECT_EQ(stdout_, "");
 }
 
 class SyscallFilterTest : public SandboxTest {

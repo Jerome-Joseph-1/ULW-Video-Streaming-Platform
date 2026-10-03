@@ -41,6 +41,8 @@ struct Config {
     // ULW_SCRATCH_DIR/<stream>: this packager's alone, which startup clears.
     std::filesystem::path scratch;
     std::filesystem::path sandbox;
+    // Absolute paths, or bare names looked up in search_path's absolute directories
+    // (infra/ffmpeg/src/process.cpp): the sandbox helper searches no PATH itself.
     std::string ffmpeg;
     std::string ffprobe;
     std::string search_path;
