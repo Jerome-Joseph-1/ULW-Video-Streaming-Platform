@@ -112,6 +112,14 @@ services:
           # (the ingest spec saw a WHIP publisher's audio missing for 20 s on a runner). LiveKit
           # v1.13.7 marks this the coming default (pkg/config/config.go).
           enable_psrpc_for_get_list_participants: true
+        # Room and participant events, signed with the key above, to a gateway started with
+        # ULW_LIVE_WEBHOOK_PORT=7890 (docs/adr/0093): its stream service takes a stream live
+        # when its publisher publishes and ends it when the publisher has gone. With nothing
+        # listening there, LiveKit logs each failed send and drops it; nothing else changes.
+        webhook:
+          api_key: ulw-dev-key
+          urls:
+            - http://127.0.0.1:7890/livekit/webhook
         logging:
           level: info
     healthcheck:

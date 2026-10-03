@@ -79,6 +79,9 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            # LiveKit's webhooks only (live-hooks.yaml, docs/adr/0093); no route reaches it.
+            - name: hooks
+              containerPort: 8081
           env:
             - name: ULW_LISTEN_PORT
               value: "8080"
@@ -176,6 +179,13 @@ spec:
             # Stage follows main, as its other images do (docs/adr/0085).
             - name: ULW_LIVE_PACKAGER_IMAGE_TAG
               value: main
+            # LiveKit's webhooks take a stream live when its publisher publishes and end it once
+            # the publisher has been gone for the grace (docs/adr/0093), on a listener of their
+            # own that only LiveKit's pods reach (live-hooks.yaml).
+            - name: ULW_LIVE_WEBHOOK_PORT
+              value: "8081"
+            - name: ULW_LIVE_PUBLISHER_GRACE_SECONDS
+              value: "10"
           # Sized from the 1 GB gateway box (brief 8.1, docs/adr/0027). One upload connection
           # costs ~428 KB: ~180 KB in the process, 128 KiB + 16 KiB of socket buffers and a
           # ~100 KB backend socket, all charged to the pod's memory cgroup. At the 448 uploads

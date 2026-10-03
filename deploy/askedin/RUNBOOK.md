@@ -7,7 +7,7 @@ What ships:
 
 | Path | What |
 |---|---|
-| `overlays/{stage,prod}/video-gateway/` | Deployment (2 replicas, migrations in its init container), Service, HTTPRoute + BackendTrafficPolicy, NetworkPolicy; `live-rbac.yaml` and `live-networkpolicy.yaml` for its stream service (step 9) |
+| `overlays/{stage,prod}/video-gateway/` | Deployment (2 replicas, migrations in its init container), Service, HTTPRoute + BackendTrafficPolicy, NetworkPolicy; `live-rbac.yaml`, `live-networkpolicy.yaml` and `live-hooks.yaml` (LiveKit's webhooks) for its stream service (step 9) |
 | `overlays/{stage,prod}/video-worker/` | Deployment (1 replica), NetworkPolicy; no Service, no route |
 | `overlays/{stage,prod}/upload-reaper/` | CronJob (every 15 minutes) and NetworkPolicy; the gateway image's `ulw_reaper` (step 3a) |
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
@@ -1222,13 +1222,37 @@ lists its packagers, and each Job's log ends `recording: queued as video <id>`. 
 did not start or relays that never reached them: look at the Jobs' events and logs, and at
 egress's.
 
+**LiveKit's webhooks** (docs/adr/0093) take a stream live when its publisher publishes and end
+it (`publisher_left`) once the publisher has been gone for `ULW_LIVE_PUBLISHER_GRACE_SECONDS`
+(10), so an encoder with a fixed token, or a client that crashed, needs nobody to call `start`
+or `end`. LiveKit posts them, signed with the `LIVEKIT_API_KEY` of `sfu-secrets`, to the
+gateway's second listener (`ULW_LIVE_WEBHOOK_PORT`, 8081): the Service `video-gateway-hooks`,
+which no HTTPRoute names, admitted by `video-gateway/live-hooks.yaml`'s NetworkPolicy from
+LiveKit's pods only. LiveKit's configuration names it in its `webhook` block
+(`livekit/deployment.yaml`). Check after a rollout that they arrive and are believed:
+
+```sh
+kubectl -n "$NS" logs deploy/livekit | grep -m3 '"sent webhook"'        # statusCode 200
+kubectl -n "$NS" exec deploy/video-gateway -- wget -qO- 127.0.0.1:8080/metrics \
+  | grep -E '^live_webhooks_total|^live_webhook_refusals_total'
+```
+
+`live_webhook_refusals_total{reason="signature"}` or `{reason="unknown_key"}` rising means
+LiveKit signs with a key the gateway does not have: both must read the same pair from
+`sfu-secrets`. LiveKit's own log saying `failed to send webhook` means the Service, the port or
+the policy is wrong; streams then still go live through `start` and end through `end` and the
+sweep, as before.
+
 **Prod**, at phase-6, once egress is applied there (step 7): add the same block of environment
 to `overlays/prod/video-gateway/deployment.yaml` as stage's (`serviceAccountName`,
 `automountServiceAccountToken: true`, and the `LIVEKIT_*` and `ULW_LIVE_*` variables, with
 `apps` for `apps-stage`, `wss://askedin.com` for the client URL, `ULW_LIVE_MAX_STREAMS` `"2"` and
-the packager's tag by digest). `live-rbac.yaml` and `live-networkpolicy.yaml` already ship in
-prod's overlay; they grant nothing until the Deployment names the account. Until then prod's
-stream routes answer `404`.
+the packager's tag by digest), with its `hooks` port and `ULW_LIVE_WEBHOOK_PORT` and
+`ULW_LIVE_PUBLISHER_GRACE_SECONDS`; and add stage's `LIVEKIT_API_KEY` variable and `webhook`
+block to `overlays/prod/livekit/deployment.yaml`, with `.apps.` for `.apps-stage.` in its URL.
+`live-rbac.yaml`, `live-networkpolicy.yaml` and `live-hooks.yaml` already ship in prod's overlay;
+they grant nothing until the Deployment names the account and listens on the port. Until then
+prod's stream routes answer `404`.
 
 ### Secrets and the database role
 

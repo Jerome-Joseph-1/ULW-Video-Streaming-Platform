@@ -1,0 +1,44 @@
+# LiveKit's webhooks to the gateway's stream service (docs/adr/0093): the gateway's second
+# listener, port 8081 (ULW_LIVE_WEBHOOK_PORT), behind a Service of its own that no HTTPRoute
+# names, so nothing from the internet reaches it, and admitted from LiveKit's pods alone. Every
+# request is still verified against LiveKit's key pair before it is read.
+apiVersion: v1
+kind: Service
+metadata:
+  name: video-gateway-hooks
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/name: video-gateway
+    app.kubernetes.io/part-of: ulw
+spec:
+  selector:
+    app.kubernetes.io/name: video-gateway
+  ports:
+    - name: hooks
+      port: 8081
+      targetPort: 8081
+      appProtocol: http
+---
+# Policies add up: networkpolicy.yaml admits Envoy and Prometheus to the public port, this one
+# LiveKit to the webhook port and nobody else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: video-gateway-hooks
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/name: video-gateway
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: video-gateway
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - port: 8081
+          protocol: TCP
