@@ -16,6 +16,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <poll.h>
 #include <span>
@@ -297,10 +298,9 @@ private:
         if (in_.size() < header + length) {
             return std::nullopt;
         }
-        std::string payload;
-        for (std::size_t i = 0; i < length; ++i) {
-            payload += static_cast<char>(in_[header + i]);
-        }
+        std::string payload(length, '\0');
+        const auto bytes = std::span(in_).subspan(header, length);
+        std::memcpy(payload.data(), bytes.data(), bytes.size());
         in_.erase(in_.begin(), in_.begin() + static_cast<std::ptrdiff_t>(header + length));
         return std::pair{static_cast<codec::ws::Opcode>(b0 & 0x0FU), std::move(payload)};
     }

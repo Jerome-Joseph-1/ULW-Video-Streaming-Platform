@@ -613,6 +613,31 @@ TEST_P(MessageStoreConformance, AJoinCannotOpenARoomRecordedClosed) {
     EXPECT_EQ(admits(listed, core::ports::RoomKind::GroupChat), Admission::NotMember);
 }
 
+// What a call's handler reads (ADR-0050): the recorded kind and the list, and nothing recorded.
+TEST_P(MessageStoreConformance, AccessReadsTheRecordedKindAndTheListAndRecordsNothing) {
+    using core::ports::RoomAccess;
+    using core::ports::RoomKind;
+    const auto access = [&](const core::RoomId& room, const core::UserId& user) {
+        return ask<RoomAccess>([&](auto done) { store().access(room, user, std::move(done)); });
+    };
+    // Not new_room(): on Postgres the room plane's row records a group chat.
+    const core::RoomId room = core::RoomId::generate(clock_, random_);
+    EXPECT_EQ(access(room, alice_), (RoomAccess{.kind = std::nullopt, .member = false}));
+    // Still unrecorded: a direct chat's first join records it as one.
+    EXPECT_EQ(ask<Admission>([&](auto done) {
+                  store().admits(room, alice_, RoomKind::DirectChat, std::move(done));
+              }),
+              Admission::NotMember);
+    EXPECT_EQ(access(room, alice_), (RoomAccess{.kind = RoomKind::DirectChat, .member = false}));
+    ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(room, alice_, std::move(done)); }));
+    EXPECT_EQ(access(room, alice_), (RoomAccess{.kind = RoomKind::DirectChat, .member = true}));
+    EXPECT_EQ(access(room, bob_), (RoomAccess{.kind = RoomKind::DirectChat, .member = false}));
+    // A room recorded by its first member is a group chat.
+    const core::RoomId group = core::RoomId::generate(clock_, random_);
+    ASSERT_TRUE(ask<void>([&](auto done) { store().add_member(group, bob_, std::move(done)); }));
+    EXPECT_EQ(access(group, bob_), (RoomAccess{.kind = RoomKind::GroupChat, .member = true}));
+}
+
 // ADR-0070: the id says which rooms get a live chat's bounds, so only a stream's room is opened.
 TEST_P(MessageStoreConformance, RecordLiveRefusesARoomThatIsNotAStreamsChat) {
     // A presence room is named too (version 8), under its own tag.

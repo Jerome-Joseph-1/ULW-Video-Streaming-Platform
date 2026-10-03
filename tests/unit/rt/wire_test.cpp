@@ -126,6 +126,33 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     EXPECT_EQ(text(deliver.body), text(body));
 }
 
+TEST_F(WireTest, AnAskAndItsAnswerComeBackAsTheyWereSent) {
+    const auto body = bytes("ask \x00 me");
+    std::vector<std::byte> out;
+    wire::encode_ask(out, 21, room_, body);
+    wire::encode_answer(out, 21, wire::Status::Ok, bytes("answer"));
+    wire::encode_answer(out, 22, wire::Status::NotOwner, {});
+    const auto frames = decode_all(out);
+    ASSERT_EQ(frames.size(), 3U);
+    const auto& ask = std::get<wire::Ask>(frames[0]);
+    EXPECT_EQ(ask.request, 21U);
+    EXPECT_EQ(ask.room, room_);
+    EXPECT_EQ(text(ask.body), text(body));
+    const auto& answer = std::get<wire::Answer>(frames[1]);
+    EXPECT_EQ(answer.request, 21U);
+    EXPECT_EQ(answer.status, wire::Status::Ok);
+    EXPECT_EQ(text(answer.body), "answer");
+    const auto& refused = std::get<wire::Answer>(frames[2]);
+    EXPECT_EQ(refused.status, wire::Status::NotOwner);
+    EXPECT_TRUE(refused.body.empty());
+}
+
+TEST_F(WireTest, AnAnswerWithAStatusNobodyDefinedIsMalformed) {
+    std::string answer(8, '\0');
+    answer += '\x06';
+    EXPECT_EQ(error_of(raw(10, answer)), wire::DecodeError::Malformed);
+}
+
 TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
     std::vector<std::byte> out;
     wire::encode_send(out, 1, room_, alice_, key_, {});
@@ -174,7 +201,7 @@ TEST_F(WireTest, AZeroLengthIsRefused) {
 TEST_F(WireTest, AnUnknownTypeIsRefused) {
     EXPECT_EQ(error_of(raw(0, "")), wire::DecodeError::UnknownType);
     wire::Decoder fresh;
-    fresh.feed(raw(9, ""));
+    fresh.feed(raw(11, ""));
     EXPECT_EQ(fresh.next(), std::unexpected(wire::DecodeError::UnknownType));
 }
 

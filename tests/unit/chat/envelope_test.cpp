@@ -270,6 +270,29 @@ TEST(Envelope, AMessageWrittenIntoAReusedTextIsTheSameAsIntoANewOne) {
     }
 }
 
+TEST(Envelope, ACallNamesItsRoomAndTheAskingDevice) {
+    const auto c =
+        chat::parse_command(R"({"type":"call","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd",)"
+                            R"("device":"01a0eb86-6cca-7dce-84cc-3bb47615f9aa"})");
+    ASSERT_TRUE(c);
+    const auto& call = std::get<chat::Call>(*c);
+    EXPECT_EQ(call.room, room());
+    EXPECT_EQ(call.device.to_string(), "01a0eb86-6cca-7dce-84cc-3bb47615f9aa");
+    const std::string room_field = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
+    EXPECT_EQ(chat::parse_command(R"({"type":"call",)" + room_field + "}"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"call",)" + room_field + R"(,"device":"phone"})"),
+              std::unexpected(EnvelopeError::BadDevice));
+    EXPECT_EQ(
+        chat::parse_command(R"({"type":"call",)" + room_field +
+                            R"(,"device":"01a0eb86-6cca-7dce-84cc-3bb47615f9aa","generation":2})"),
+        std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(
+        chat::parse_command(R"({"type":"call","device":"01a0eb86-6cca-7dce-84cc-3bb47615f9aa"})"),
+        std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::reason(EnvelopeError::BadDevice), "bad_device");
+}
+
 TEST(Envelope, RepliesAreTheDocumentedShapes) {
     const auto id = *rt::MessageKey::parse("m-3");
     std::string out;
@@ -306,6 +329,25 @@ TEST(Envelope, RepliesAreTheDocumentedShapes) {
     out.clear();
     chat::write_user_error(out, "too_many_watches", bob);
     EXPECT_EQ(out, R"({"type":"error","reason":"too_many_watches","user":"auth0|bob"})");
+    out.clear();
+    chat::write_ticket(
+        out, room(),
+        {.endpoint = "wss://media.example.test",
+         .credential = "eyJ.a.b",
+         .expires_at = core::WallTime{std::chrono::milliseconds{1'790'000'060'999}}});
+    EXPECT_EQ(
+        out,
+        R"({"type":"ticket","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","url":"wss://media.example.test","token":"eyJ.a.b","expires_at":1790000060})");
+    out.clear();
+    chat::write_call_error(out, "unavailable", room(), core::Millis{2000});
+    EXPECT_EQ(
+        out,
+        R"({"type":"error","reason":"unavailable","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","retry_after_ms":2000})");
+    out.clear();
+    chat::write_call_error(out, "not_callable", room(), std::nullopt);
+    EXPECT_EQ(
+        out,
+        R"({"type":"error","reason":"not_callable","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
 }
 
 } // namespace

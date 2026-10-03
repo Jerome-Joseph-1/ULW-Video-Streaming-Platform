@@ -14,6 +14,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -47,6 +48,9 @@ public:
     virtual void send(const core::RoomId& room, rt::IMember& from, const core::UserId& sender,
                       const rt::MessageKey& key, std::vector<std::byte> body,
                       rt::SendCallback done) = 0;
+    // What the room's owner answers itself (rt::RoomRouter::ask_owner): a call's ticket.
+    virtual void ask_owner(const core::RoomId& room, rt::IMember& from,
+                           std::span<const std::byte> request, rt::OwnerAnswer done) = 0;
 };
 
 struct ServiceLimits {
@@ -178,6 +182,9 @@ public:
     // A page of the room's stored messages, as message frames and then a history frame, for a
     // client in the room. Cut short to what the client can take while it is behind.
     void history(ClientId id, const History& history);
+    // A ticket to the room's call, from its owner (ADR-0050), for a client in the room. Charged
+    // as a join: each costs the owner a store read and an SFU call.
+    void call(ClientId id, const Call& call);
     // The client's connection has sent everything it had queued: a lossy client that fell
     // behind is sent what it is still owed.
     void drained(ClientId id) noexcept;
@@ -243,6 +250,8 @@ private:
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
+    void called(ClientId id, const core::RoomId& room,
+                std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
     void fell_behind(ClientId id, const core::RoomId& room) noexcept;
     void catch_up(Room& room, ClientId id, Client& c);
     std::uint64_t replay(const Room& room, Client& c, std::uint64_t after);
