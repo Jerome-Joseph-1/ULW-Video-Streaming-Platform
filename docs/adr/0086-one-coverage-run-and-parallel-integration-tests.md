@@ -87,7 +87,7 @@ many: splitting work across more jobs makes runs queue.
   - Files: scratch and output directories are `mkdtemp` directories per test.
   The conformance label still runs one test at a time, after the integration label.
 - **The worker test** queues its jobs the way the gateway's commit does, with `NOTIFY
-  job_available`: the same 51 jobs and every assertion, in about 30 s instead of 275.
+  job_available`: the same 51 jobs and every assertion, in 34-47 s under `-j4` locally instead of 275 s.
 - **ccache.** The setup action takes `ccache-save: "false"`, which restores with
   `actions/cache/restore` and saves nothing. `cluster`, `ingest` and `autobahn` use it, so the
   `gcc-ci` key is saved by a full build.
@@ -95,11 +95,14 @@ many: splitting work across more jobs makes runs queue.
 ## Consequences
 
 - Measured locally (4 cores, ci preset, Postgres with `max_connections=400` and MinIO from
-  compose): the integration label in about 4.5 min with `-j4` against 18 min one at a time on
-  the runner, five runs in a row without a failure. Expected on the runners: `integration (ci)`
-  about 9 min, `integration (asan)` about 11, `coverage` about 17, `build-test (gcc/ci)` about 10
-  once its cache holds the build.
-- The job count is unchanged by this decision, and one lower with sonar.yml gone.
+  compose): the integration label took 884 s one test at a time and 272-350 s with `-j4`, six
+  runs in a row with every test passing, at most 128 sessions open at once. Before the fixes
+  above, `-j4` runs failed on exhausted connections and on `S3StoreLive`'s sweep aborting
+  `S3WireClaims`' uploads. Expected on the runners: `integration (ci)` about 9 min,
+  `integration (asan)` about 11, `coverage` about 17, `build-test (gcc/ci)` about 10 once its
+  cache holds the build. The asan preset under `-j` was not run locally.
+- ci.yml keeps its 20 jobs; sonar.yml's job is gone. A pull request from this repository runs
+  the same number as before (the coverage job in place of sonar.yml's), a push to main one fewer.
 - A new integration test that touches something process-wide or server-wide (pausing or
   restarting a server, a fixed port, a whole bucket, a cluster-wide setting) needs `SERIAL` or
   its own resource; one that only uses its scratch database, a unique prefix and reserved
