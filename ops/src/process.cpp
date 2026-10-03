@@ -8,7 +8,9 @@
 
 #include <array>
 #include <cerrno>
+#include <cstddef>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <memory>
 #include <string_view>
@@ -75,6 +77,24 @@ std::expected<void, int> disable_core_dumps() noexcept {
         return std::unexpected(errno);
     }
     return {};
+}
+
+std::string_view jemalloc_version() noexcept {
+    // Looked up rather than linked, so a binary without jemalloc needs no stub: mallctl exists
+    // only where jemalloc does.
+    using Mallctl = int (*)(const char*, void*, std::size_t*, void*, std::size_t);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): dlsym returns void*
+    const auto mallctl = reinterpret_cast<Mallctl>(::dlsym(RTLD_DEFAULT, "mallctl"));
+    if (mallctl == nullptr) {
+        return {};
+    }
+    const char* version = nullptr;
+    std::size_t size = sizeof(version);
+    if (mallctl("version", static_cast<void*>(&version), &size, nullptr, 0) != 0 ||
+        version == nullptr) {
+        return {};
+    }
+    return version;
 }
 
 } // namespace ops

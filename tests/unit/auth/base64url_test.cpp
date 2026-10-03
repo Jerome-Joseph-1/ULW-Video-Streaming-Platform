@@ -11,6 +11,7 @@
 
 namespace {
 
+using infra::auth::append_base64url;
 using infra::auth::decode_base64url;
 using infra::auth::encode_base64url;
 
@@ -22,6 +23,24 @@ TEST(Base64UrlTest, EncodesTheRfc4648VectorsWithoutPadding) {
     EXPECT_EQ(encode_base64url(std::string_view{"foob"}), "Zm9vYg");
     EXPECT_EQ(encode_base64url(std::string_view{"fooba"}), "Zm9vYmE");
     EXPECT_EQ(encode_base64url(std::string_view{"foobar"}), "Zm9vYmFy");
+}
+
+TEST(Base64UrlTest, AppendsWhatEncodeReturns) {
+    std::string bytes;
+    for (int i = 0; i < 256; ++i) {
+        bytes.push_back(static_cast<char>(255 - i));
+    }
+    const std::span<const unsigned char> octets{
+        reinterpret_cast<const unsigned char*>(bytes.data()), // NOLINT(*-reinterpret-cast)
+        bytes.size()};
+    for (std::size_t len = 0; len <= 6; ++len) {
+        std::string out = "prefix:";
+        append_base64url(out, octets.first(len));
+        EXPECT_EQ(out, "prefix:" + encode_base64url(octets.first(len))) << len;
+    }
+    std::string out;
+    append_base64url(out, octets);
+    EXPECT_EQ(out, encode_base64url(octets));
 }
 
 TEST(Base64UrlTest, UsesTheUrlSafeAlphabet) {

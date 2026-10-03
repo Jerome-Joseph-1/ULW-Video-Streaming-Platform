@@ -46,7 +46,10 @@ RUN --mount=type=bind,source=deploy/docker/apt-install.sh,target=/usr/local/sbin
 WORKDIR /src
 COPY . .
 ARG ULW_GIT_SHA=unknown
-RUN CC=gcc-14 CXX=g++-14 cmake --preset release -DULW_BUILD_TESTS=OFF \
+# No binary built here links jemalloc: only chat_server does (ADR-0081), and it has no image
+# yet. Its image will need libjemalloc-dev=5.3.0-2build1 here and libjemalloc2=5.3.0-2build1 in
+# its runtime, the versions its soaks measured.
+RUN CC=gcc-14 CXX=g++-14 cmake --preset release -DULW_BUILD_TESTS=OFF -DULW_JEMALLOC=OFF \
         -DULW_GIT_SHA=${ULW_GIT_SHA} \
  && cmake --build --preset release \
         --target gateway_server ulw_migrate ulw_reaper transcode_worker ulw_sandbox \

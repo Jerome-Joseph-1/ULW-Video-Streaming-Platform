@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <string_view>
 
 namespace ops {
 
@@ -19,5 +20,9 @@ namespace ops {
 // uid, which ops::leave_root puts back. Call it first, before the configuration is read. The
 // error is the errno of the call that failed.
 [[nodiscard]] std::expected<void, int> disable_core_dumps() noexcept;
+
+// The version of the jemalloc this process allocates with, as jemalloc reports it, or empty when
+// it allocates with glibc's malloc: the services link jemalloc (ADR-0081) and log which they got.
+[[nodiscard]] std::string_view jemalloc_version() noexcept;
 
 } // namespace ops

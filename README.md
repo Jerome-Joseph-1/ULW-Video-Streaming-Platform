@@ -6,7 +6,7 @@ FFmpeg HLS transcode worker, and a realtime plane for chat, calls and live strea
 ## Build and test
 
 Needs GCC 14 or Clang 19 (Clang 18 lacks `std::expected` in libstdc++; ADR-0022), CMake 3.28+,
-Ninja, and development packages for OpenSSL 3, libcurl, libpq and liburing 2.5+.
+Ninja, and development packages for OpenSSL 3, libcurl, libpq, liburing 2.5+ and jemalloc.
 
 ```sh
 cmake --preset dev && cmake --build --preset dev && ctest --preset dev
