@@ -1,25 +1,26 @@
-# Operations contract
+# Operator contract
 
-What Askedin's platform provides to the video service, and what the service exposes back for
-probes and monitoring. The step-by-step deployment (secrets script lines, database role,
-pipeline, rollback) is in [`deploy/askedin/RUNBOOK.md`](../../deploy/askedin/RUNBOOK.md); this
-page does not repeat it.
+What an operator's platform provides to the video service, how the service is configured, and
+what it exposes back for probes and monitoring. The step-by-step Kubernetes deployment (the
+operator config file, secrets, database role, rollout, rollback) is in
+[`deploy/kubernetes/RUNBOOK.md`](../../deploy/kubernetes/RUNBOOK.md); this page does not repeat
+it.
 
-## What the platform provides
+## What the operator provides
 
 | Dependency | Used by | Requirement |
 |---|---|---|
 | Postgres 16 | gateway, worker, chat, live packager | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
 | Postgres log settings | chat | Bound parameters stay out of the server log: `log_parameter_max_length_on_error = 0` (the default), and `log_parameter_max_length = 0` whenever statement logging is on (`log_statement` `mod` or `all`, `log_min_duration_statement`, `log_min_duration_sample`, `log_transaction_sample_rate`), with `auto_explain.log_parameter_max_length = 0` if auto_explain is loaded. Otherwise chat message bodies, plaintext or ciphertext, are written to the log (ADR-0054). RUNBOOK step 3 sets them on the database. |
-| R2 bucket | gateway, worker, live packager | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
-| R2 API tokens | gateway, worker, live packager | One per component (ADR-0066). The gateway's token must allow, on `videos/<video id>/raw` and `videos/<video id>/hls/...`: CreateMultipartUpload, UploadPart, ListParts, CompleteMultipartUpload, AbortMultipartUpload (which must be permitted), HeadObject, GetObject (playlists it rewrites, and presigned GET for segments and init) and PutObject. The upload reaper runs with the gateway's secret and additionally needs ListMultipartUploads (bucket level), ListObjectsV2 and DeleteObject. The live packager's token (`live-packager-secrets`, RUNBOOK "Live streams") reads and writes `live/<stream>/...` (the segments, playlists and their reads back at the stream's end) and writes the recording to `videos/<video id>/raw` with a multipart upload, which it aborts or deletes when the copy fails: object read and write on the bucket, as the worker's. |
-| Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS with TLS 1.3 (`JWKS_URL` must be `https://`; a server offering only TLS 1.2 or older is refused, see below). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
-| DNS and TLS | Envoy | TLS terminates at Askedin's Envoy Gateway; the service speaks plain HTTP behind it (ADR-0001). The HTTPRoutes send `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` to the gateway and `/rt` (exactly; chat's WebSocket) to chat, on the environment's hostnames only (stage `stage.askedin.com`, unconfirmed; prod `askedin.com` and `www.askedin.com`), since stage and prod share `askedin-gateway`, so `<CHAT_HOST>` in [chat.md](chat.md) is any of them. |
+| Object store bucket (R2, or any S3-compatible store as `minio`) | gateway, worker, live packager | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
+| Object store API tokens | gateway, worker, live packager | One per component (ADR-0066). The gateway's token must allow, on `videos/<video id>/raw` and `videos/<video id>/hls/...`: CreateMultipartUpload, UploadPart, ListParts, CompleteMultipartUpload, AbortMultipartUpload (which must be permitted), HeadObject, GetObject (playlists it rewrites, and presigned GET for segments and init) and PutObject. The upload reaper runs with the gateway's secret and additionally needs ListMultipartUploads (bucket level), ListObjectsV2 and DeleteObject. The live packager's token (`LIVE_PACKAGER_SECRET`, RUNBOOK step 9) reads and writes `live/<stream>/...` (the segments, playlists and their reads back at the stream's end) and writes the recording to `videos/<video id>/raw` with a multipart upload, which it aborts or deletes when the copy fails: object read and write on the bucket, as the worker's. |
+| The identity provider's JWKS | gateway, chat | Reachable from the pods over HTTPS with TLS 1.3 (`JWKS_URL` must be `https://`; a server offering only TLS 1.2 or older is refused, see below). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
+| DNS and TLS | Envoy | TLS terminates at the operator's Envoy Gateway (`GATEWAY_NAME` in `GATEWAY_NAMESPACE`); the service speaks plain HTTP behind it (ADR-0001). The HTTPRoutes send `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` to the gateway and `/rt` (exactly; chat's WebSocket) to chat, on the environment's `PUBLIC_HOSTNAME` only, since environments may share one Gateway, so `<CHAT_HOST>` in [chat.md](chat.md) is that host. |
 | Envoy route timeout | Envoy | None (`request: 0s`), on the gateway's upload and video routes and chat's; 15 s on `/api/v1/live`, whose playlist requests are short GETs never held open. A chunk may take up to 1024 s at the gateway's minimum rate, and the gateway enforces its own timeouts; a chat socket lasts as long as its token. Upstream idle timeout below the gateway's 10 s keep-alive timeout (5 s in the shipped `BackendTrafficPolicy`). |
-| Seccomp profile | worker and live packager nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
-| Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on the environment's hostnames only, as the video and chat routes: `stage.askedin.com` on stage, `askedin.com` and `www.askedin.com` on prod, so a ticket must name one of its environment's hosts. `/twirp` is never routed (ADR-0050, ADR-0053). |
-| TURN port | Askedin (node firewall) | UDP 3478 (stage) and UDP 3479 (prod) open to the internet on k8s-prod's node; both environments share its address, so each has its own port and its own STUNner Gateway (RUNBOOK step 7). Nothing else: LiveKit's UDP 7882 stays inside the cluster. |
-| LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP 9000, `srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000`, ADR-0083), and its pods must be labelled `app.kubernetes.io/name: livekit-egress`, the only pods the packager's NetworkPolicy admits. It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Shipped as `deploy/askedin/overlays/{stage,prod}/livekit-egress/` (one concurrent stream on stage, two on prod) and `livekit-redis/` (ClusterIP, password in `sfu-secrets`, reachable from LiveKit and egress only); LiveKit names the same Redis. Prod's apply waits for the phase-6 tag (RUNBOOK step 7). |
+| Seccomp profile | worker and live packager nodes | `cluster/seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
+| Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on the environment's `PUBLIC_HOSTNAME` only, as the video and chat routes, so a ticket must name that host. `/twirp` is never routed (ADR-0050, ADR-0053). |
+| TURN port | the operator (firewall) | `TURN_PORT` (UDP, 3478 by default) open to the internet on the address STUNner's LoadBalancer Service gets. Environments that share one address each need their own port and their own STUNner Gateway (RUNBOOK step 7, ADR-0084). Nothing else: LiveKit's UDP 7882 stays inside the cluster. |
+| LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP 9000, `srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000`, ADR-0083), and its pods must be labelled `app.kubernetes.io/name: livekit-egress`, the only pods the packager's NetworkPolicy admits. It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Shipped as `deploy/kubernetes/base/livekit-egress/` (one concurrent stream; two in `overlays/production`) and `livekit-redis/` (ClusterIP, password in `SFU_SECRET`, reachable from LiveKit and egress only); LiveKit names the same Redis (RUNBOOK step 7). |
 
 ### Environment, by name
 
@@ -28,7 +29,7 @@ page does not repeat it.
 The gateway and the worker read each setting from, in rising precedence, its default, a TOML
 file (`--config <path>` or `ULW_CONFIG`), the environment, and a command-line flag
 (`--listen-port 8081` for `listen.port`: the file key with dots and underscores as dashes). The
-Askedin deployment uses the environment only, which is what the table lists. An empty value
+Kubernetes deployment uses the environment only, which is what the table lists. An empty value
 counts as unset. A file must be a regular file owned by root or the process's user and not
 writable by group or others. Secrets (marked below) are never taken from a flag, and from a file
 only if no one but its owner can read it (`0400` or `0600`); the store keys only from the
@@ -57,18 +58,19 @@ effective configuration, secrets as `<redacted>`.
 |---|---|---|---|---|
 | `ULW_DATABASE_URL` | required | required | required | Secret |
 | `ULW_STORAGE` | `r2` (default), `minio`, `fs` | same | | |
-| `ULW_R2_ACCOUNT_ID` | with `r2` | with `r2` | | Secret |
-| `ULW_S3_ENDPOINT` | with `minio` | with `minio` | | `https://` anywhere the network between them is not the host's own. `http://` is accepted for the sandbox's MinIO or one on the same host: requests are signed, so the keys never cross, but the objects and signed URLs do, in the clear. An `https://` endpoint must speak TLS 1.3. `r2` is always `https://`, and Cloudflare serves TLS 1.3 |
-| `ULW_BUCKET` | with `r2`/`minio` | same | | Secret |
+| `ULW_R2_ACCOUNT_ID` | with `r2` | with `r2` | | `R2_ACCOUNT_ID` in config.env |
+| `ULW_S3_ENDPOINT` | with `minio` | with `minio` | | `S3_ENDPOINT` in config.env; any S3-compatible store with path-style requests. `https://` anywhere the network between them is not the host's own. `http://` is accepted for the sandbox's MinIO or one on the same host: requests are signed, so the keys never cross, but the objects and signed URLs do, in the clear. An `https://` endpoint must speak TLS 1.3. `r2` is always `https://`, and Cloudflare serves TLS 1.3 |
+| `ULW_BUCKET` | with `r2`/`minio` | same | | `BUCKET` in config.env |
 | `ULW_S3_ACCESS_KEY_ID`, `ULW_S3_SECRET_ACCESS_KEY` | with `r2`/`minio` | same | | Secret, separate tokens per component |
-| `JWKS_URL` | required (or `ULW_DEV_JWKS_FILE`) | never set | required (or `ULW_DEV_JWKS_FILE`) | Not secret: Askedin's are set in the overlays ([auth.md](auth.md#askedin)) |
-| `JWT_ISSUER` | required | never set | required | Prod's is set in its overlay; stage's stays in the gateway's secret until it is confirmed ([auth.md](auth.md#askedin)) |
-| `JWT_AUDIENCE` | default `askedin-platform` | | same | |
-| `ULW_AUTH_COOKIE` | default `auth_token` | | same | `auth_token_stage` on stage |
+| `JWKS_URL` | required (or `ULW_DEV_JWKS_FILE`) | never set | required (or `ULW_DEV_JWKS_FILE`) | Not secret: `JWKS_URL` in config.env ([auth.md](auth.md#configuring-an-identity-provider)) |
+| `JWT_ISSUER` | required | never set | required | `JWT_ISSUER` in config.env |
+| `JWT_AUDIENCE` | required with `JWKS_URL`; with `ULW_DEV_JWKS_FILE` default `ulw-dev` | | same | `JWT_AUDIENCE` in config.env. No default against a JWKS: the process exits `2` without it |
+| `ULW_JWT_SUBJECT_CLAIM` | claim name, default `sub` | | same | `JWT_SUBJECT_CLAIM` in config.env: the claim that names the user ([auth.md](auth.md#how-the-user-id-is-derived)). 1 to 64 of `A-Z a-z 0-9 _ . : / -` |
+| `ULW_AUTH_COOKIE` | default `auth_token` | | same | `AUTH_COOKIE` in config.env |
 | `ULW_ALLOWED_ORIGINS` | comma-separated `scheme://host[:port]`, default none | | same | Pages whose requests may carry the cookie. Gateway: required in `Origin` for a cookie `POST`, `PATCH` or `DELETE`; with none set, the cookie serves only same-origin `GET` and `HEAD`. Chat: required for a cookie socket. Set it to the web app's origin before the cookie is used for uploads. `http://` only for `localhost`, `127.0.0.1` or `[::1]`; an explicit default port (`:443`, `:80`) is refused, and so is a host not written as a browser writes it: a domain in uppercase, an IPv4 address other than four decimal octets (`10.0.0.1`, not `010.0.0.1`, `0x7f.1`, `127.1` or `10.0.0.1.`), or an IPv6 one not in RFC 5952 form (`[2001:db8::1]`, not `[2001:0db8:0:0:0:0:0:1]` or `[::ffff:192.0.2.1]`). Only same-origin pages (and same-site ones with `ULW_ALLOW_SAME_SITE=1`) get through, since `Sec-Fetch-Site` is checked first ([auth.md](auth.md#cookies-and-other-sites)). |
 | `ULW_ALLOW_SAME_SITE` | `0` (default) or `1` | | | `1` lets pages on a sibling subdomain (`Sec-Fetch-Site: same-site`) send the cookie: set it only when the web app is served from one. |
 | `ULW_JWKS_MAX_STALE_HOURS` | 1 to 168, default 24 | | same | How long the keys stay trusted while every JWKS refetch fails; past it every token is refused and `jwks_keys_expired` is `1` ([auth.md](auth.md)) |
-| `ULW_DEV_MODE` | `0` (default) or `1` | | same | `1` marks a development run, which `ULW_DEV_JWKS_FILE` needs; that file is refused in a Kubernetes pod whatever this says. Never set in stage or production |
+| `ULW_DEV_MODE` | `0` (default) or `1` | | same | `1` marks a development run, which `ULW_DEV_JWKS_FILE` needs; that file is refused in a Kubernetes pod whatever this says. Never set in a real deployment |
 | `ULW_LISTEN_PORT` | default 8080 | | default 9101 | |
 | `ULW_TRANSPORT` | `plain` (default) or `tls` | | | `tls` needs `ULW_TLS_CERT_FILE` and `ULW_TLS_KEY_FILE`. Session tickets are sealed with a random in-memory key replaced every 12 h, on a timer, so also on a server no client reaches; the key before it still opens tickets for 12 h more and is then wiped, so a ticket resumes for 12 to 24 h, across certificate reloads, and a leaked key opens at most a day of resumed sessions. Nothing to configure; replicas do not share keys, so a client resumes only on the replica that issued its ticket |
 | `ULW_REACTOR` | `io_uring` (default) or `epoll` | | same | Falls back to epoll when io_uring is unavailable |
@@ -82,7 +84,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_MAX_SESSIONS_PER_USER` | | | 1 to 1280, default 16 | Open chat sockets per user on a node; past it an upgrade is answered `429` with `Retry-After: 5` (ADR-0076) |
 | `ULW_REQUESTS_PER_USER_PER_MINUTE` | default 300 | | | Authenticated requests, burst of the same size |
 | `ULW_UPLOAD_BYTES_PER_USER_PER_DAY` | bytes, default 107374182400 (100 GiB), at least 16777216 | | | Charged by each `PATCH`'s `Content-Length`, the part never sent given back; best effort: per replica, in memory, forgotten on restart |
-| `ULW_TRUSTED_PROXIES` | comma-separated CIDR blocks, default none | | same | Peers whose `X-Forwarded-For` is believed. Set to the pod network Envoy's data plane runs in (K3s default `10.42.0.0/16`); RUNBOOK step 1. A block shorter than /8 (IPv4) or /32 (IPv6) is logged as a warning. |
+| `ULW_TRUSTED_PROXIES` | comma-separated CIDR blocks, default none | | same | Peers whose `X-Forwarded-For` is believed. Set to the pod network Envoy's data plane runs in (`POD_CIDR` in config.env; K3s's default is `10.42.0.0/16`); RUNBOOK step 1. A block shorter than /8 (IPv4) or /32 (IPv6) is logged as a warning. |
 | `ULW_TRUSTED_PROXY_HOPS` | 1 to 16, default 1, only with `ULW_TRUSTED_PROXIES` | | same | Proxies in front, each appending one entry: the client is that many entries from the right. Fewer entries, or a malformed one, count the request against the proxy itself. |
 | `ULW_RUN_AS_USER` | user name, default none | same | same | Also read by `ulw_reaper` and `ulw_migrate`. Used only when started as root: the process binds its ports and raises its descriptor limit, then becomes this user before it serves, takes a job or dials the database. With `ULW_TRANSPORT=tls` the certificate and key are read after that, at start and on every SIGHUP, so this user must be able to read them. |
 | `ULW_ALLOW_ROOT` | `0` (default) or `1` | same | same | Also read by `ulw_reaper` and `ulw_migrate`. Root with no `ULW_RUN_AS_USER` exits `2` unless this is `1`: for development and test harnesses only. |
@@ -92,9 +94,10 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
 | `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks |
-| `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | The overlays set the address to the pod's own, `$(POD_IP):9201`, and take the secret from `chat-secrets` (ADR-0083) |
+| `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | The base sets the address to the pod's own, `$(POD_IP):9201`, and takes the secret from `CHAT_SECRET` (ADR-0083) |
 
-The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
+The Kubernetes secret names (each set in config.env) and the lines that create them are in the
+RUNBOOK, step 3.
 
 <!-- infra/curl/src/exchange.cpp -->
 
@@ -102,14 +105,14 @@ Every https request the services make goes through libcurl with TLS 1.3 only (mi
 maximum); a later TLS version needs a code change. That covers the JWKS fetch, R2 or a MinIO
 given an `https://` endpoint, and LiveKit's API when it is `https://`.
 A server that offers only TLS 1.2 or older fails the handshake, logged as a network error,
-whatever the host's OpenSSL configuration allows. Askedin checks its JWKS host before deploying
-(RUNBOOK step 1); Cloudflare serves R2 over TLS 1.3. The database connection is libpq's, not
+whatever the host's OpenSSL configuration allows. The operator checks the JWKS host and any
+`https://` store endpoint before deploying (RUNBOOK step 1); Cloudflare serves R2 over TLS 1.3. The database connection is libpq's, not
 libcurl's, and keeps its own `sslmode` settings.
 
 <!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
 
-The live packager (one process per stream, environment only; on Askedin one Job per stream from
-`deploy/askedin/live-packager/job.yaml`, ADR-0083) takes
+The live packager (one process per stream, environment only; on Kubernetes one Job per stream
+from `deploy/kubernetes/live-packager/job.yaml`, ADR-0083) takes
 `ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below),
 `ULW_FFMPEG` and `ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
@@ -117,7 +120,7 @@ live-only with neither; one without the other stops it at startup:
 | Variable | Live packager | Notes |
 |---|---|---|
 | `ULW_DATABASE_URL` | with recording | Secret; the same database as the gateway's |
-| `ULW_STREAM_OWNER` | with recording | The broadcaster's Askedin user id (`sub`), who owns the video |
+| `ULW_STREAM_OWNER` | with recording | The broadcaster's user id (the token's subject claim), who owns the video |
 
 The role in its database URL needs no more than `SELECT, INSERT` on `live_recordings`, `INSERT`
 and `SELECT (id)` on `videos` (the insert returns the id it wrote), `INSERT` on `jobs`, and
@@ -248,7 +251,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `resident_memory_bytes` | gauge | Resident set size of the process |
 
 Worth alerting on: `readyz` failing outside a rollout; `jwks_keys_expired` at `1` (page: no
-token verifies until Askedin's JWKS is reachable again); any rise in `playlists_rejected_total`,
+token verifies until the identity provider's JWKS is reachable again); any rise in `playlists_rejected_total`,
 `presign_failures_total`, `view_batches_failed_total` or `store_paging_errors_total` (page:
 retrying will not fix it); `admission_rejections_total` rising steadily;
 `backend_write_stall_seconds` observations at 30 s and above rising (the bucket is slow);
@@ -347,7 +350,7 @@ the drain begins) and the 2 s log flush fit inside it.
 
 On SIGHUP the gateway and chat_server fetch the key set again at once and, when that fetch
 succeeds, replace their cached JWKS keys and forget every remembered verified token (ADR-0082);
-until then the cached keys keep answering. Send it to every pod after Askedin rotates its
+until then the cached keys keep answering. Send it to every pod after the identity provider rotates its
 signing key ([auth.md](auth.md#key-rotation)). The gateway also rereads its certificate and
 key when `ULW_TRANSPORT=tls`. Nothing else changes and no connection is closed. `gateway_server`
 is PID 1 in its image, so `kill -HUP 1` from a shell in the container reaches it.

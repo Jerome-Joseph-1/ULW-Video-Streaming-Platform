@@ -1,7 +1,22 @@
 # ULW
 
 A C++23 video platform for Linux: resumable uploads streamed straight to object storage, an
-FFmpeg HLS transcode worker, and a realtime plane for chat, calls and live streams.
+FFmpeg HLS transcode worker, and a realtime plane for chat, calls and live streams. It is a
+standalone product: it keeps no users and trusts the JWTs of whatever identity provider its
+operator configures, and it ships as public container images that any operator pulls and
+configures for its own cluster.
+
+## Deploying it
+
+The images are published from `main` to GitHub's container registry, public, as
+`ghcr.io/jerome-joseph-1/ulw-video-gateway`, `ulw-video-worker`, `ulw-chat` and
+`ulw-live-packager`, each tagged with its commit SHA and `main`. To run them on Kubernetes,
+copy an overlay of [`deploy/kubernetes/`](deploy/kubernetes/RUNBOOK.md), fill in its one
+operator config file (`config.env`: namespace, hostname, Gateway, identity provider, object
+store, image tags, TURN port, secret names), create the secrets, and
+`kubectl apply -k deploy/kubernetes/overlays/<env>`; the
+[RUNBOOK](deploy/kubernetes/RUNBOOK.md) walks through it. Apps integrate against
+[`docs/integration/`](docs/integration/README.md).
 
 ## Build and test
 
@@ -63,8 +78,8 @@ ULW_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:55432/postgres \
 Then start `gateway_server` (`apps/gateway`); settings come from a TOML file, `ULW_*`
 environment variables and flags (ADR-0040). For the whole platform behind Envoy in a kind
 cluster (needs Docker): `make e2e-up`, `make e2e-test`, `make e2e-down`; also `make e2e-load`,
-`make e2e-stunner` and `make validate-manifests`. Shipping to the real cluster is in
-[`deploy/askedin/RUNBOOK.md`](deploy/askedin/RUNBOOK.md).
+`make e2e-stunner` and `make validate-manifests`. Deploying to a real cluster is in
+[`deploy/kubernetes/RUNBOOK.md`](deploy/kubernetes/RUNBOOK.md).
 
 ## Architecture
 
@@ -85,7 +100,8 @@ publisher -WHIP-> LiveKit -egress (SRT)-> live_packager -> R2 (HLS)   (ADR-0053)
 Binaries live in `apps/`: `gateway_server` (uploads, catalog, playback), `transcode_worker`,
 `chat_server`, `live_packager`, `ulw_reaper`, `ulw_migrate` (schema init container).
 Playback returns rewritten playlists with presigned URLs; segment bytes never pass through
-the gateway (ADR-0002). Identity is Askedin's JWT, verified against its JWKS (ADR-0018).
+the gateway (ADR-0002). Identity is the operator's identity provider's JWT, verified against
+its JWKS (ADR-0018).
 
 Layering, ports and adapters, enforced by `tools/check-boundaries.sh`:
 
@@ -99,6 +115,7 @@ Layering, ports and adapters, enforced by `tools/check-boundaries.sh`:
 ## Documentation
 
 - [`docs/adr/`](docs/adr/README.md) architecture decisions, one per file, immutable
-- [`docs/integration/`](docs/integration/README.md) the contract for Askedin's app and backend teams
+- [`docs/integration/`](docs/integration/README.md) the contract for apps and backends that integrate it
+- [`deploy/kubernetes/`](deploy/kubernetes/RUNBOOK.md) the Kubernetes manifests and the operator's guide
 - [`docs/operations/`](docs/operations/soak.md) soak procedure and results
 - [`docs/operations/testing.md`](docs/operations/testing.md) mutation testing of the unit suites
