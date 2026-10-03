@@ -27,17 +27,18 @@ tools/mutate.py ... --files http/src/request_parser.cpp --only http/src/request_
 
 The test command after `--` is either a test binary inside the repository or the build tree,
 given only googletest flags (`--gtest_*`, passed to it as the `GTEST_*` environment variables
-googletest reads in their place; `--gtest_list_tests`, `--gtest_output`, `--gtest_flagfile`
-and the sharding flags `--gtest_total_shards`, `--gtest_shard_index` and
-`--gtest_shard_status_file` are refused), or `ctest`, run in the build tree, with exactly these
-options, none of which takes a value:
-`--output-on-failure`, `--stop-on-failure`, `--no-tests=error`, `--schedule-random`, `-Q`,
-`--quiet`, `-V` and `--verbose`. Anything else is refused with exit 2, as is a `--files` path
-outside the directory it runs from, and an environment setting a variable googletest would read
-to list instead of run, write a file, read flags from a file or run only part of the suite:
-`GTEST_LIST_TESTS`, `GTEST_OUTPUT`, `GTEST_FLAGFILE`, `GTEST_TOTAL_SHARDS`, `GTEST_SHARD_INDEX`,
-`GTEST_SHARD_STATUS_FILE`, `XML_OUTPUT_FILE`, `TEST_PREMATURE_EXIT_FILE` or
-`TESTBRIDGE_TEST_ONLY` (unset them first; ctest passes them on to every test binary too).
+googletest reads in their place; `--gtest_list_tests`, `--gtest_output`,
+`--gtest_stream_result_to`, `--gtest_flagfile` and the sharding flags `--gtest_total_shards`,
+`--gtest_shard_index` and `--gtest_shard_status_file` are refused), or `ctest`, run in the build
+tree, with exactly these options, none of which takes a value: `--output-on-failure`,
+`--stop-on-failure`, `--no-tests=error`, `--schedule-random`, `-Q`, `--quiet`, `-V` and
+`--verbose`. Anything else is refused with exit 2, as is a `--files` path outside the directory
+it runs from, and an environment setting a variable googletest would read to list instead of
+run, write a file, send the results to a host, read flags from a file or run only part of the
+suite: `GTEST_LIST_TESTS`, `GTEST_OUTPUT`, `GTEST_STREAM_RESULT_TO`, `GTEST_FLAGFILE`,
+`GTEST_TOTAL_SHARDS`, `GTEST_SHARD_INDEX`, `GTEST_SHARD_STATUS_FILE`, `XML_OUTPUT_FILE`,
+`TEST_PREMATURE_EXIT_FILE` or `TESTBRIDGE_TEST_ONLY` (unset them first; ctest passes them on to
+every test binary too).
 
 `--lines path:10-80,120-200` restricts a file to the functions under study, and `--sample`
 spreads the mutants over the files in proportion to how many each has; the sample is the mutants
