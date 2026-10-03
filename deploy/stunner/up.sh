@@ -21,6 +21,7 @@ source "$here/images.sh"
 # checks mint (ADR-0037); the LiveKit pair is the one the local call suite signs tickets with.
 turn_secret=ulw-sandbox-turn-testtest123
 livekit_keys='ulw-dev-key: ulw-dev-secret-testtest123-not-a-real-secret'
+redis_password=ulw-sandbox-redis-testtest123
 
 log() { echo "stunner: $*" >&2; }
 
@@ -32,6 +33,7 @@ require_sandbox
 pinned "$stunner_operator_image" "$stunner_operator_digest"
 pinned "$stunnerd_image" "$stunnerd_digest"
 pinned "$livekit_image" "$livekit_digest"
+pinned "$livekit_redis_image" "$livekit_redis_digest"
 
 # STUNner needs the Gateway API CRDs; they come from Envoy Gateway's pinned install.yaml, the
 # release e2e-up.sh installs, so the two never disagree about their version. Only the CRDs: the
@@ -65,7 +67,9 @@ kubectl -n stunner-system create secret generic stunner-secrets --from-literal=t
     --from-literal="secret=$turn_secret" --dry-run=client -o yaml | apply_stdin
 kubectl -n apps-stage create secret generic sfu-secrets --from-literal=ASKEDIN_ENV=stage \
     --from-literal="LIVEKIT_KEYS=$livekit_keys" --from-literal="TURN_HOST=$outside_gateway" \
-    --from-literal="TURN_SECRET=$turn_secret" --dry-run=client -o yaml | apply_stdin
+    --from-literal="TURN_SECRET=$turn_secret" --from-literal="LIVEKIT_API_KEY=${livekit_keys%%: *}" \
+    --from-literal="LIVEKIT_API_SECRET=${livekit_keys#*: }" \
+    --from-literal="REDIS_PASSWORD=$redis_password" --dry-run=client -o yaml | apply_stdin
 
 log "applying the operator, the Gateway and LiveKit"
 kubectl kustomize --load-restrictor LoadRestrictionsNone "$root/deploy/stunner" | apply_stdin
@@ -82,7 +86,9 @@ done
 # the Gateway's configuration.
 kubectl -n apps-stage wait --for=create --timeout=120s deployment/stunner
 kubectl -n apps-stage rollout status deployment/stunner --timeout=180s
-# A changed secret reaches LiveKit only through a new pod.
+# A changed secret reaches Redis and LiveKit only through new pods; LiveKit needs Redis up.
+kubectl -n apps-stage rollout restart deployment/livekit-redis >/dev/null
+kubectl -n apps-stage rollout status deployment/livekit-redis --timeout=120s
 kubectl -n apps-stage rollout restart deployment/livekit >/dev/null
 kubectl -n apps-stage rollout status deployment/livekit --timeout=180s
 log "up: TURN on $outside_gateway:3478/udp, LiveKit signalling on http://$outside_gateway:17880"

@@ -30,6 +30,10 @@ stunnerd_digest=sha256:a9a06157564d0630a8a95b9eab1307340bc1e710c53c890daff5fd0df
 # outside the cluster, so e2e-down.sh removes only the tag and leaves the content.
 livekit_image=docker.io/livekit/livekit-server:v1.13.7
 livekit_digest=sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3
+# Redis 7.4.6 (alpine), LiveKit's bus to egress, as compose.yaml's calls profile runs it and
+# deploy/askedin/overlays/*/livekit-redis names it.
+livekit_redis_image=docker.io/library/redis:7.4.6-alpine
+livekit_redis_digest=sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
 # The client of tests/cluster/stunner_check.py, which runs its stdlib-only probe from the
 # sandbox's outside network (sandbox.sh). Python 3.13.13.
 probe_image=docker.io/library/python@sha256:e81548ac35b07a3bd4805f275107592ef458b1e893c0e04d45aedaa19416cca5
