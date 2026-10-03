@@ -22,8 +22,8 @@ std::string numeric_date(std::int64_t offset_seconds) {
 
 std::string test_payload(std::initializer_list<ClaimChange> changes) {
     std::vector<std::pair<std::string, std::string>> members{
-        {"iss", R"("https://id.askedin.test")"},
-        {"aud", R"("askedin-platform")"},
+        {"iss", R"("https://id.example.com")"},
+        {"aud", R"("ulw-test-audience")"},
         {"sub", R"("alice")"},
         {"email", R"("alice@example.com")"},
         {"exp", numeric_date(3600)},

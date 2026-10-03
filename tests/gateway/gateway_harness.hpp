@@ -93,6 +93,8 @@ public:
     // Connections the gateway has read part of a request from; accepted alone is not enough.
     [[nodiscard]] std::size_t busy_connections();
     [[nodiscard]] std::size_t claims();
+    // The claims the gateway's requests hold, by its own count: catalog_claims_held.
+    [[nodiscard]] std::size_t claims_held();
     void drain();
     // Manual clock only: moves time forward on the loop thread and returns once the timers
     // it made due have fired.
@@ -130,6 +132,9 @@ public:
     // Every upload and video call to the catalog fails with `error` from now on; nullopt stops it.
     void fail_catalog(std::optional<core::ports::CatalogError> error);
     void fail_find_video(std::optional<core::ports::CatalogError> error);
+    // Claims are taken at once but their answers wait while held (MemoryCatalog::hold_claims).
+    void hold_claims(bool held);
+    [[nodiscard]] std::size_t held_claims();
 
 private:
     struct Loop;

@@ -64,6 +64,7 @@ constexpr std::array kSettings{
     ops::Setting{.env = "KUBERNETES_SERVICE_HOST", .key = ""},
     ops::Setting{.env = "JWT_ISSUER", .key = "auth.issuer"},
     ops::Setting{.env = "JWT_AUDIENCE", .key = "auth.audience"},
+    ops::Setting{.env = "ULW_JWT_SUBJECT_CLAIM", .key = "auth.subject_claim"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
     ops::Setting{.env = "ULW_ALLOWED_ORIGINS", .key = "auth.allowed_origins"},
     ops::Setting{.env = "ULW_ALLOW_SAME_SITE", .key = "auth.allow_same_site"},
@@ -263,7 +264,13 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
         return std::unexpected(std::move(issuer.error()));
     }
     config.jwt_issuer = std::move(*issuer);
-    config.jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform");
+    auto rules =
+        ops::token_rules(env, ops::KeySource{.url = config.jwks_url, .file = config.dev_jwks_file});
+    if (!rules) {
+        return error(rules.error().variable, rules.error().reason);
+    }
+    config.jwt_audience = std::move(rules->audience);
+    config.jwt_subject_claim = std::move(rules->subject_claim);
     config.limits.auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token");
     if (const auto list = lookup(env, "ULW_ALLOWED_ORIGINS")) {
         auto origins = http::parse_origin_list(*list);
@@ -286,7 +293,9 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
         return error("ULW_DEV_JWKS_FILE", "unreadable, or larger than 64 KiB");
     }
     const auto keys = infra::auth::Ed25519LocalVerifier::create(
-        *jwks, {.issuer = config.jwt_issuer, .audience = config.jwt_audience});
+        *jwks, {.issuer = config.jwt_issuer,
+                .audience = config.jwt_audience,
+                .subject_claim = config.jwt_subject_claim});
     if (!keys) {
         return error("ULW_DEV_JWKS_FILE", infra::auth::to_string(keys.error()));
     }
@@ -494,7 +503,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     for (const std::string& origin : config.limits.allowed_origins) {
         origins += (origins.empty() ? "" : ",") + origin;
     }
-    const std::array<std::pair<std::string_view, std::string>, 33> values{{
+    const std::array<std::pair<std::string_view, std::string>, 34> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -529,6 +538,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_DEV_MODE", config.dev_mode ? "1" : ""},
         {"JWT_ISSUER", config.jwt_issuer},
         {"JWT_AUDIENCE", config.jwt_audience},
+        {"ULW_JWT_SUBJECT_CLAIM", config.jwt_subject_claim},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},
         {"ULW_ALLOWED_ORIGINS", origins},
         {"ULW_ALLOW_SAME_SITE", config.limits.allow_same_site ? "1" : ""},

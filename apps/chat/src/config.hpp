@@ -51,13 +51,17 @@ struct Config {
     std::string node_secret;
     net::ReactorKind reactor = net::ReactorKind::IoUring;
     std::string database_url;
-    // Exactly one of the two: Askedin's JWKS, or a local key set for offline development.
+    // Exactly one of the two: the identity provider's JWKS, or a local key set for offline
+    // development.
     std::string jwks_url;
     // ULW_JWKS_MAX_STALE_HOURS: how long keys stay trusted while every refetch fails.
     std::uint32_t jwks_max_stale_hours = 24;
     std::string dev_jwks_file;
     std::string jwt_issuer;
+    // Required with jwks_url; ops::kDevAudience by default with a local key set.
     std::string jwt_audience;
+    // ULW_JWT_SUBJECT_CLAIM: the claim that names the user, `sub` by default.
+    std::string jwt_subject_claim = "sub";
     std::string auth_cookie;
     // Pages allowed to open a socket that authenticates with the cookie, as exact
     // "scheme://host[:port]" origins. Empty: the cookie is not accepted at all.

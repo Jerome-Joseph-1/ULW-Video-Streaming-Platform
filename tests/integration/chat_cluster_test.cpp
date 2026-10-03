@@ -167,11 +167,38 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     ASSERT_TRUE(now_owned == "chat-2 2" || now_owned == "chat-3 2") << now_owned;
     std::cout << "owner before the stop: chat-1 1, after: " << now_owned << "\n";
 
-    // The survivors carry on through the new owner.
-    ASSERT_TRUE(send_until_heard(*bob, "bob after the failover"));
-    ASSERT_TRUE(send_until_heard(*carol, "carol after the failover"));
-    ASSERT_TRUE(bob->message(last_body_["carol"]));
+    // The survivors carry on through the new owner. Each hears its own message back, and so is
+    // routed to it: its node gets everything the new owner sequences from then on.
+    const auto bob_first = send_until_heard(*bob, "bob after the failover");
+    ASSERT_TRUE(bob_first);
+    const std::string bob_first_body = last_body_["bob"];
+    const auto carol_first = send_until_heard(*carol, "carol after the failover");
+    ASSERT_TRUE(carol_first);
+    const std::string carol_first_body = last_body_["carol"];
+    // Both routed, each hears the other live.
+    ASSERT_TRUE(send_until_heard(*bob, "bob once both are routed"));
     ASSERT_TRUE(carol->message(last_body_["bob"]));
+    ASSERT_TRUE(send_until_heard(*carol, "carol once both are routed"));
+    ASSERT_TRUE(bob->message(last_body_["carol"]));
+    // Before that, a node still between owners may have missed the other's first message live
+    // (ADR-0035): it is not lost. Each survivor finds both in history under the seqs their
+    // senders heard, and any it heard live came under the same seq.
+    const std::uint64_t first = std::min(*bob_first, *carol_first);
+    for (Client* c : {bob.get(), carol.get()}) {
+        const auto page = history(*c, R"(,"after":)" + std::to_string(first - 1));
+        ASSERT_TRUE(page) << c->name();
+        for (const auto& [body, seq] :
+             {std::pair{bob_first_body, *bob_first}, std::pair{carol_first_body, *carol_first}}) {
+            EXPECT_TRUE(std::ranges::any_of(
+                *page, [&](const Seen& m) { return m.seq == seq && m.body == body; }))
+                << c->name() << " cannot find seq " << seq << " in history";
+            for (const Seen& m : c->messages()) {
+                if (m.body == body) {
+                    EXPECT_EQ(m.seq, seq) << c->name();
+                }
+            }
+        }
+    }
     const std::string seq_before = last_seq();
 
     // Resumed, the old owner still believes it owns the room: its write is fenced out.
@@ -224,7 +251,8 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     secrets.push_back(node_secret_);
     for (const std::string body :
          {"hello from chat-2", "hello from chat-1", "stale", "bob after the failover",
-          "carol after the failover", "alice is back"}) {
+          "carol after the failover", "bob once both are routed", "carol once both are routed",
+          "alice is back"}) {
         secrets.push_back(body);
         secrets.push_back(infra::auth::encode_base64url(body));
     }

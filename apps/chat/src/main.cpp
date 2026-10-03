@@ -142,7 +142,9 @@ std::expected<void, std::string> make_sfu(const chat::Config& config, Services& 
 }
 
 std::expected<void, std::string> make_verifier(const chat::Config& config, Services& s) {
-    infra::auth::ClaimRules rules{.issuer = config.jwt_issuer, .audience = config.jwt_audience};
+    infra::auth::ClaimRules rules{.issuer = config.jwt_issuer,
+                                  .audience = config.jwt_audience,
+                                  .subject_claim = config.jwt_subject_claim};
     if (!config.dev_jwks_file.empty()) {
         const auto jwks = read_key_set(config.dev_jwks_file);
         if (!jwks) {

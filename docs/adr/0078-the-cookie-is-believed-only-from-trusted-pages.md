@@ -1,6 +1,6 @@
 # 0078. The gateway believes the auth cookie only from pages it trusts
 
-Status: Accepted
+Status: Accepted, amended by 0088 (the origins are `ALLOWED_ORIGINS` in the operator's `config.env`)
 Date: 2026-09-30
 
 ## Context

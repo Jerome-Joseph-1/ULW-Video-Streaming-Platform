@@ -8,7 +8,7 @@ client outside the cluster's network gets from it what a browser on the internet
   2. From a container on the outside network (deploy/local/sandbox.sh), at an address fixed
      here, turn_probe.py sends a hand-built Binding request to 198.18.0.1:3478, which reaches
      STUNner through the host's DNAT, the node's NodePort and the Service, as a browser's
-     packets reach k8s-prod. XOR-MAPPED-ADDRESS must be that container's address and port:
+     packets reach a real cluster. XOR-MAPPED-ADDRESS must be that container's address and port:
      anything masquerading on the way (the Service's default traffic policy, Docker's NAT)
      shows up as another address.
   3. A TURN Allocate with a credential minted from the sandbox's shared secret succeeds, signed
@@ -36,7 +36,7 @@ from vod_flow import Failure, Refused, check, kubectl  # noqa: E402
 
 ROOT = vod_flow.ROOT
 HERE = pathlib.Path(__file__).resolve().parent
-NAMESPACE = "apps-stage"
+NAMESPACE = "ulw"
 OUTSIDE_NETWORK = "ulw-e2e-outside"
 TURN_SERVER = ("198.18.0.1", 3478)
 # The probe's address on the outside network, fixed so the expected mapping comes from here and

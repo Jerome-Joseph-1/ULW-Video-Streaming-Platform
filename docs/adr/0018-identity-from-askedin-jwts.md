@@ -1,6 +1,6 @@
 # 0018. Identity is borrowed from Askedin
 
-Status: Accepted
+Status: Accepted, amended by 0088 (identity is the operator's provider: no default audience against a JWKS, a configurable subject claim, no `id` fallback)
 Date: 2026-09-28
 
 ## Context

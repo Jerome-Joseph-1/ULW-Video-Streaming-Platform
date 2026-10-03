@@ -161,7 +161,7 @@ services:
         # A participant relay re-encodes one 720p stream, about one core. Egress admits a
         # request only while that much CPU is idle, which a laptop or a runner busy with the
         # rest of a test run often is not; the cost here keeps the local recorder from turning
-        # every request away. Askedin's deployment keeps the default.
+        # every request away. deploy/kubernetes keeps the default.
         cpu_cost:
           participant_cpu_cost: 0.1
           max_cpu_utilization: 0.99
