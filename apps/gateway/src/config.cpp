@@ -90,6 +90,9 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_K8S_NAMESPACE", .key = "live.k8s_namespace"},
     ops::Setting{.env = "ULW_K8S_TOKEN_FILE", .key = "live.k8s_token_file"},
     ops::Setting{.env = "ULW_K8S_CA_FILE", .key = "live.k8s_ca_file"},
+    // LiveKit's webhooks (ADR-0093).
+    ops::Setting{.env = "ULW_LIVE_WEBHOOK_PORT", .key = "live.webhook_port"},
+    ops::Setting{.env = "ULW_LIVE_PUBLISHER_GRACE_SECONDS", .key = "live.publisher_grace_seconds"},
     // Not a setting: passed on to a packager the gateway starts as a process.
     ops::Setting{.env = "PATH", .key = ""},
 };
@@ -557,13 +560,39 @@ std::expected<void, ConfigError> load_kubernetes_runtime(const EnvLookup& env, L
     return {};
 }
 
+// LiveKit's webhooks (ADR-0093): a listener of their own, never the public one, and the grace
+// a publisher that left has to come back.
+std::expected<void, ConfigError> load_webhooks(const EnvLookup& env, Config& config) {
+    LiveConfig& live = config.live;
+    if (lookup(env, "ULW_LIVE_WEBHOOK_PORT")) {
+        const auto port = number<std::uint16_t>(env, "ULW_LIVE_WEBHOOK_PORT", 0, 1, 65'535);
+        if (!port) {
+            return std::unexpected(port.error());
+        }
+        if (*port == config.port) {
+            return error("ULW_LIVE_WEBHOOK_PORT",
+                         "must not be ULW_LISTEN_PORT: webhooks are not served where the public "
+                         "route sends requests");
+        }
+        live.webhook_port = *port;
+    }
+    // A full reconnect of LiveKit's client takes seconds; past five minutes a stream nobody
+    // publishes is not one anybody is waiting for.
+    const auto grace = number<std::uint32_t>(env, "ULW_LIVE_PUBLISHER_GRACE_SECONDS", 10, 1, 300);
+    if (!grace) {
+        return std::unexpected(grace.error());
+    }
+    live.watch.grace = core::Seconds{*grace};
+    return {};
+}
+
 std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config) {
     LiveConfig& live = config.live;
     auto api = lookup(env, "LIVEKIT_API_URL");
     if (!api) {
         // Off: nothing else of it may be set, or a deployment would believe it publishes.
-        for (const std::string_view name :
-             {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER", "ULW_LIVE_PACKAGER_SRT"}) {
+        for (const std::string_view name : {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER",
+                                            "ULW_LIVE_PACKAGER_SRT", "ULW_LIVE_WEBHOOK_PORT"}) {
             if (lookup(env, name)) {
                 return error(name, "set, but LIVEKIT_API_URL is not");
             }
@@ -613,6 +642,9 @@ std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config)
     live.settings.segment = core::Seconds{*segment};
     live.settings.max_streams = *streams;
     live.settings.start_window = core::Seconds{*window};
+    if (auto r = load_webhooks(env, config); !r) {
+        return r;
+    }
     const std::string runtime = lookup(env, "ULW_LIVE_PACKAGER").value_or("");
     if (runtime == "process") {
         live.runtime = PackagerRuntime::Process;
@@ -740,7 +772,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     };
     const bool process = live.enabled && live.runtime == PackagerRuntime::Process;
     const bool kubernetes = live.enabled && live.runtime == PackagerRuntime::Kubernetes;
-    const std::array<std::pair<std::string_view, std::string>, 48> values{{
+    const std::array<std::pair<std::string_view, std::string>, 50> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -795,6 +827,11 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_K8S_API_URL", kubernetes ? live.k8s_api_url : ""},
         {"ULW_K8S_NAMESPACE", live.k8s_namespace},
         {"ULW_K8S_TOKEN_FILE", kubernetes ? live.k8s_token_file : ""},
+        {"ULW_LIVE_WEBHOOK_PORT", live.webhook_port != 0 ? std::to_string(live.webhook_port) : ""},
+        {"ULW_LIVE_PUBLISHER_GRACE_SECONDS",
+         live.webhook_port != 0
+             ? std::to_string(std::chrono::duration_cast<core::Seconds>(live.watch.grace).count())
+             : ""},
     }};
     for (const auto& [variable, value] : values) {
         if (value.empty()) {

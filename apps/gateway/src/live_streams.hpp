@@ -79,12 +79,22 @@ struct StartedStream {
     bool created = false;
 };
 
+// What publisher_left found.
+enum class Departure : std::uint8_t {
+    // The publisher was gone at the media server, and the stream ended for it now.
+    Ended,
+    // The media server still has the publisher connected: it came back, or never left.
+    Present,
+    // Not live: still starting, which only its start window ends, or ended already.
+    NotLive,
+};
+
 struct LiveCounters {
     std::uint64_t created = 0;
     std::uint64_t tickets = 0;
     std::uint64_t went_live = 0;
     // By core::ports::LiveEnd.
-    std::array<std::uint64_t, 4> ended{};
+    std::array<std::uint64_t, 5> ended{};
     std::uint64_t store_failures = 0;
     std::uint64_t media_failures = 0;
     std::uint64_t packager_failures = 0;
@@ -113,6 +123,11 @@ public:
     // Ends the stream for its owner. Idempotent: ending an ended stream closes its room again.
     void end(const core::LiveStreamId& id, const core::UserId& owner,
              LiveDone<core::ports::LiveStream> done);
+    // LiveKit said the stream's publisher left, or its room finished, and the grace for a
+    // reconnect has passed (ADR-0093): a live stream whose publisher the media server no longer
+    // has ends for that reason. Asking the media server, not believing the event, keeps a
+    // publisher that came back through another gateway replica on air.
+    void publisher_left(const core::LiveStreamId& id, LiveDone<Departure> done);
     // The stream as any viewer may see it.
     void status(const core::LiveStreamId& id, LiveDone<core::ports::LiveStream> done);
     // A viewer found the stream's playlist ended: the packager has ended it.

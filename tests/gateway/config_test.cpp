@@ -604,7 +604,8 @@ TEST_F(LiveConfigTest, LiveStreamsAreOffUnlessLiveKitIsNamed) {
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_FALSE(config->live.enabled);
-    for (const char* stray : {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER", "ULW_LIVE_PACKAGER_SRT"}) {
+    for (const char* stray : {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER", "ULW_LIVE_PACKAGER_SRT",
+                              "ULW_LIVE_WEBHOOK_PORT"}) {
         auto with = env;
         env[stray] = "x";
         EXPECT_EQ(refused_variable(), stray);
@@ -741,6 +742,41 @@ TEST_F(LiveConfigTest, EveryLiveSettingIsChecked) {
     ASSERT_TRUE(config);
     EXPECT_EQ(config->live.settings.start_window, core::Seconds{120});
     EXPECT_EQ(config->live.settings.segment, core::Seconds{4});
+}
+
+// LiveKit's webhooks (ADR-0093): a listener of their own, off unless its port is set.
+TEST_F(LiveConfigTest, WebhooksHaveAListenerOfTheirOwn) {
+    live("kubernetes");
+    const auto off = load();
+    ASSERT_TRUE(off);
+    EXPECT_EQ(off->live.webhook_port, 0U);
+    EXPECT_EQ(off->live.watch.grace, core::Seconds{10});
+    EXPECT_EQ(effective_log(*off).find("ULW_LIVE_WEBHOOK_PORT"), std::string::npos);
+
+    env["ULW_LIVE_WEBHOOK_PORT"] = "8081";
+    env["ULW_LIVE_PUBLISHER_GRACE_SECONDS"] = "3";
+    const auto on = load();
+    ASSERT_TRUE(on) << on.error().variable << ": " << on.error().reason;
+    EXPECT_EQ(on->live.webhook_port, 8081U);
+    EXPECT_EQ(on->live.watch.grace, core::Seconds{3});
+    const std::string all = effective_log(*on);
+    EXPECT_NE(all.find(R"("name":"ULW_LIVE_WEBHOOK_PORT","value":"8081")"), std::string::npos);
+    EXPECT_NE(all.find(R"("name":"ULW_LIVE_PUBLISHER_GRACE_SECONDS","value":"3")"),
+              std::string::npos);
+
+    // Never where the public route sends requests.
+    env["ULW_LISTEN_PORT"] = "8081";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_WEBHOOK_PORT");
+    env.erase("ULW_LISTEN_PORT");
+    for (const char* bad : {"0", "65536", "port"}) {
+        env["ULW_LIVE_WEBHOOK_PORT"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_WEBHOOK_PORT") << bad;
+    }
+    env["ULW_LIVE_WEBHOOK_PORT"] = "8081";
+    for (const char* bad : {"0", "301", "x"}) {
+        env["ULW_LIVE_PUBLISHER_GRACE_SECONDS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_PUBLISHER_GRACE_SECONDS") << bad;
+    }
 }
 
 TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {

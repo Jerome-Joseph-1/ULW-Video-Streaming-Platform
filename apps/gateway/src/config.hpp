@@ -5,6 +5,7 @@
 #include "gateway.hpp"
 #include "ops/log.hpp"
 #include "ops/settings.hpp"
+#include "publisher_watch.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -50,6 +51,10 @@ struct LiveConfig {
     std::string k8s_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token";
     std::string k8s_ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
     LiveSettings settings;
+    // LiveKit's webhooks (ADR-0093): the port of their own listener, 0 for none, and how the
+    // publisher's comings and goings are followed.
+    std::uint16_t webhook_port = 0;
+    WatchSettings watch;
 };
 
 struct Config {
