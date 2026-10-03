@@ -4,7 +4,8 @@
 # CI runs them) under coverage.py and writes a Cobertura XML report of the Python product code
 # (deploy/ and tools/; tests are not measured) for SonarQube Cloud (ADR-0079). Settings are in
 # tools/coverage-python.rc; paths in the report are relative to the repository root.
-# Needs coverage.py for the python3 on PATH (CI: Ubuntu's python3-coverage, pinned in sonar.yml).
+# Needs coverage.py for the python3 on PATH (CI: Ubuntu's python3-coverage, pinned in ci.yml's
+# coverage job).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 out=$(realpath -m "$1")

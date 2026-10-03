@@ -102,6 +102,18 @@ protected:
                     bytes(body), {}, infra::s3util::kUnsignedPayload);
     }
 
+    // A part's ETag, or a failure naming what the store answered instead: dereferencing an
+    // absent header would be undefined behaviour, not a test failure.
+    static std::string etag_of(const Response& part) {
+        const auto etag = part.header("etag");
+        if (!etag) {
+            ADD_FAILURE() << "no ETag on a part upload: status " << part.status << "\n"
+                          << part.body;
+            return {};
+        }
+        return std::string(*etag);
+    }
+
     Response complete(const core::StorageKey& k, const std::string& id, const std::string& body) {
         const std::array headers{Header{.name = "content-type", .value = "application/xml"}};
         return send(Method::Post, bucket_->object(k, {{.name = "uploadId", .value = id}}),
@@ -158,9 +170,7 @@ TEST_F(S3WireClaims, SmallFinalPartIsAcceptedAndMultipartETagEndsInThePartCount)
     const Response p2 = upload_part(k, id, 2, std::string(1024, 'b'));
     ASSERT_EQ(p1.status, 200);
     ASSERT_EQ(p2.status, 200);
-    const Response done = complete(
-        k, id,
-        completion({{1, std::string(*p1.header("etag"))}, {2, std::string(*p2.header("etag"))}}));
+    const Response done = complete(k, id, completion({{1, etag_of(p1)}, {2, etag_of(p2)}}));
     ASSERT_EQ(done.status, 200) << done.body;
     const auto result = infra::s3util::parse_complete_multipart_upload(done.body);
     ASSERT_TRUE(result);
@@ -194,9 +204,7 @@ TEST_F(S3WireClaims, PartsOutOfOrderAreRefusedWithInvalidPartOrder) {
     const auto id = initiate(k);
     const Response p1 = upload_part(k, id, 1, std::string(kMinPart, 'a'));
     const Response p2 = upload_part(k, id, 2, std::string(10, 'b'));
-    const Response done = complete(
-        k, id,
-        completion({{2, std::string(*p2.header("etag"))}, {1, std::string(*p1.header("etag"))}}));
+    const Response done = complete(k, id, completion({{2, etag_of(p2)}, {1, etag_of(p1)}}));
     EXPECT_EQ(done.status, 400);
     EXPECT_EQ(error_code(done), "InvalidPartOrder");
 }
@@ -205,7 +213,7 @@ TEST_F(S3WireClaims, RetriedCompleteFindsNoSuchUploadAndHeadShowsTheObject) {
     const auto k = key("retried");
     const auto id = initiate(k);
     const Response p1 = upload_part(k, id, 1, std::string(4096, 'r'));
-    const std::string body = completion({{1, std::string(*p1.header("etag"))}});
+    const std::string body = completion({{1, etag_of(p1)}});
     ASSERT_EQ(complete(k, id, body).status, 200);
     const Response again = complete(k, id, body);
     EXPECT_EQ(again.status, 404);
@@ -222,9 +230,7 @@ TEST_F(S3WireClaims, UndersizedNonFinalPartFailsAtCompleteNotAtUpload) {
     const Response p2 = upload_part(k, id, 2, std::string(1024, 'y'));
     EXPECT_EQ(p1.status, 200);
     EXPECT_EQ(p2.status, 200);
-    const Response done = complete(
-        k, id,
-        completion({{1, std::string(*p1.header("etag"))}, {2, std::string(*p2.header("etag"))}}));
+    const Response done = complete(k, id, completion({{1, etag_of(p1)}, {2, etag_of(p2)}}));
     EXPECT_EQ(done.status, 400);
     EXPECT_EQ(error_code(done), "EntityTooSmall");
 }

@@ -111,10 +111,10 @@ jobs:
         run: tests/load/echo_acceptance.sh build/ci ${{ matrix.reactor }} 20
 
   # The storage laws, the wire behaviour the S3 adapter relies on, the store's reaper, and the
-  # catalog and job queue, against real servers. Nothing here passes -j, and nothing may: the
-  # pool test docker-pauses the Postgres every other catalog and queue test is using, and the
-  # reaper test aborts every upload in the shared bucket older than its cutoff, conformance
-  # runs included, which is also why those come after the integration label, not beside it.
+  # catalog and job queue, against real servers. The integration label runs one test per core
+  # (ADR-0086): every test has a scratch database, a bucket prefix or bucket and ports of its
+  # own, and the one that docker-pauses the Postgres is RUN_SERIAL (tests/CMakeLists.txt), so it
+  # never overlaps another. The conformance label still runs one test at a time, after it.
   integration:
     name: integration (${{ matrix.preset }})
     runs-on: ubuntu-24.04
@@ -148,11 +148,25 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: ${{ matrix.cc }}-${{ matrix.preset }}-integration
+      # One test per core opens up to about 130 sessions at once (measured locally), past the
+      # image's default of 100. A service container takes no command line, so the limit is set
+      # with ALTER SYSTEM and the server restarted; deploy/local/compose.yaml sets the same.
+      - name: Raise the test Postgres's connection limit
+        env:
+          PG: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$PG" psql -U postgres -qc "ALTER SYSTEM SET max_connections = 400"
+          docker restart "$PG" >/dev/null
+          for _ in $(seq 60); do
+            docker exec "$PG" pg_isready -U postgres -q && break
+            sleep 1
+          done
+          test "$(docker exec "$PG" psql -U postgres -tAc 'SHOW max_connections')" = 400
       - name: Start MinIO
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
       - run: cmake --preset ${{ matrix.preset }} -DULW_CONFORMANCE_LIVE=ON
       - run: cmake --build --preset ${{ matrix.preset }}
-      - run: ctest --test-dir build/${{ matrix.preset }} -L integration --output-on-failure
+      - run: ctest --test-dir build/${{ matrix.preset }} -L integration -j "$(nproc)" --output-on-failure
         env:
           # The job context exists only in steps, not in the job's own env.
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
@@ -164,18 +178,21 @@ jobs:
         run: docker compose -f deploy/local/compose.yaml logs minio
 
   # Line and branch coverage of the unit and integration labels, each top-level directory
-  # compared with its floor in tools/coverage-floors.txt (ADR-0080). The table is the step
+  # compared with its floor in tools/coverage-floors.txt (ADR-0080), and the SonarQube Cloud
+  # analysis that reads it (ADR-0079), measured once for both (ADR-0086). The table is the step
   # summary; the HTML report is an artifact. Its own ccache key: the instrumented objects never
-  # match another job's, and pull requests restore what main's last run left. Off pull requests
-  # unless labelled `coverage`: a serial run of both labels is the longest job here.
+  # match another job's, and pull requests restore what main's last run left. On pull requests
+  # from this repository (the ones the scan has a token for) and on those labelled `coverage`;
+  # a fork's unlabelled pull request skips it, as it skipped both before.
   coverage:
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository ||
       contains(github.event.pull_request.labels.*.name, 'coverage')
     runs-on: ubuntu-24.04
-    # Unmeasured: set from the first run's duration (ADR-0080).
-    timeout-minutes: 90
+    # The unit label one test at a time (6 min on main), the integration label one test per
+    # core (19 min one at a time on main), the report and the scan (2 min).
+    timeout-minutes: 60
     services:
       postgres:
         # Same digest as deploy/local/compose.yaml.
@@ -187,10 +204,42 @@ jobs:
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
     env:
+      CC: clang-19
+      CXX: clang++-19
       ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
+      # Ubuntu 24.04's coverage.py, by version and the .deb's SHA-256 (the archive's Packages
+      # index for noble/universe lists the same hash).
+      PYTHON_COVERAGE_VERSION: 7.4.4+dfsg1-0ubuntu2
+      PYTHON_COVERAGE_SHA256: 259a4bb007428b0ac613cf2784153fe6e26c225e86b8be29583e6f52fecd370b
+      # The Go toolchain the mock-auth image builds with: deploy/local/mock-auth/Dockerfile's
+      # golang image, by the same tag and digest.
+      GOLANG_IMAGE: golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
+      SONAR_SCANNER_VERSION: 8.1.0.6389
+      # The linux-x64 zip's SHA-256: the scan action's own sonar-scanner-version file at the
+      # pinned commit, Maven Central's .sha256, and a local download all agree. The action's
+      # default scannerVersion at that commit is this version too.
+      SONAR_SCANNER_SHA256: bb8f709f9cb73352f8d1260a3b3c506c0f41146754bc630762c126d795499d0b
     steps:
+      # Only whether the secret is set reaches this step, never its value; the value is in the
+      # scan step's env alone. Without it (a fork's or Dependabot's pull request, or the owner
+      # has not added it) and on the nightly run, the scan and the reports only it reads are
+      # skipped, with a notice.
+      - name: Check for SONAR_TOKEN
+        id: token
+        env:
+          HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "${HAS_SONAR_TOKEN:-}" = "true" ] && [ "$EVENT" != "schedule" ]; then
+            echo "present=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "present=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::SONAR_TOKEN is not set or this is the nightly run; skipping SonarQube Cloud analysis"
+          fi
+      # Full history for the scan's blame and new-code detection.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
@@ -201,15 +250,47 @@ jobs:
         run: |
           version=$(dpkg-query -W -f='${Version}' clang-19)
           sudo apt-get install -y -qq --no-install-recommends "llvm-19=$version"
+      - name: Install coverage.py, pinned
+        if: steps.token.outputs.present == 'true'
+        run: |
+          cd "$RUNNER_TEMP"
+          apt-get download "python3-coverage=$PYTHON_COVERAGE_VERSION"
+          deb=python3-coverage_${PYTHON_COVERAGE_VERSION}_amd64.deb
+          echo "$PYTHON_COVERAGE_SHA256  $deb" | sha256sum --check --strict
+          sudo apt-get install -y -qq --no-install-recommends "./$deb"
+      # One test per core opens up to about 130 sessions at once (measured locally), past the
+      # image's default of 100. A service container takes no command line, so the limit is set
+      # with ALTER SYSTEM and the server restarted; deploy/local/compose.yaml sets the same.
+      - name: Raise the test Postgres's connection limit
+        env:
+          PG: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$PG" psql -U postgres -qc "ALTER SYSTEM SET max_connections = 400"
+          docker restart "$PG" >/dev/null
+          for _ in $(seq 60); do
+            docker exec "$PG" pg_isready -U postgres -q && break
+            sleep 1
+          done
+          test "$(docker exec "$PG" psql -U postgres -tAc 'SHOW max_connections')" = 400
       - name: Start MinIO
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      # The whole coverage build, so generated headers and sources exist and
+      # build/coverage/compile_commands.json matches what was compiled and measured.
       - run: cmake --preset coverage -DULW_CONFORMANCE_LIVE=ON
-      - run: cmake --build --preset coverage
-      - run: tools/coverage.sh build/coverage unit integration
+      - id: build
+        run: cmake --build --preset coverage
+      # Writes build/coverage/coverage/ (and llvm-cov-show.txt for the scan). The integration
+      # label runs one test per core, as the integration job runs it; the unit label one at a
+      # time, as build-test runs it. The floors are reported, not enforced (ADR-0080); a
+      # failing test fails the job, after the scan below.
+      - name: C++ coverage
+        run: tools/coverage.sh build/coverage unit integration
         env:
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          COVERAGE_PARALLEL: integration
           # Report-only on every trigger until the floors are set from a CI run (ADR-0080).
           COVERAGE_ENFORCE: "0"
+          COVERAGE_SONAR: ${{ steps.token.outputs.present == 'true' && '1' || '0' }}
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -219,7 +300,55 @@ jobs:
             build/coverage/coverage/summary.json
             build/coverage/coverage/summary.md
           if-no-files-found: warn
-      - run: ccache --show-stats
+      # Every *_test.py under coverage.py; writes build/coverage-python.xml.
+      - name: Python coverage
+        if: ${{ !cancelled() && steps.token.outputs.present == 'true' }}
+        run: tools/coverage-python.sh build/coverage-python.xml
+      # Every Go module's tests (tools/coverage-go.sh) in the pinned golang image, as the
+      # runner's user and without a network, so nothing is fetched; writes build/coverage-go.out.
+      # The checkout is mounted at its own path, so the script sees the paths the scan sees.
+      - name: Go coverage
+        if: ${{ !cancelled() && steps.token.outputs.present == 'true' }}
+        run: |
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e GOPATH=/tmp/go -e GOCACHE=/tmp/go-build \
+            -v "$PWD:$PWD" -w "$PWD" "$GOLANG_IMAGE" tools/coverage-go.sh build/coverage-go.out
+      # The scanner is fetched here, checked against its SHA-256, and placed where the scan
+      # action's tool cache looks (sonar-scanner-cli/<version as semver>/linux-x64 plus a
+      # .complete marker), so the action never downloads it. The action is told to fetch from
+      # an address that cannot resolve: if its cache layout ever stops matching this, the step
+      # fails instead of downloading something unchecked.
+      - name: Install the pinned SonarScanner CLI
+        if: ${{ !cancelled() && steps.token.outputs.present == 'true' && steps.build.outcome == 'success' }}
+        run: |
+          zip=$RUNNER_TEMP/sonar-scanner.zip
+          curl -fsSL --proto '=https' --proto-redir '=https' --retry 5 --retry-all-errors \
+            --retry-delay 2 -o "$zip" \
+            "https://repo1.maven.org/maven2/org/sonarsource/scanner/cli/sonar-scanner-cli/${SONAR_SCANNER_VERSION}/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip"
+          echo "$SONAR_SCANNER_SHA256  $zip" | sha256sum --check --strict
+          IFS=. read -r major minor patch build <<<"$SONAR_SCANNER_VERSION"
+          cache=$RUNNER_TOOL_CACHE/sonar-scanner-cli/$major.$minor.$patch-build.$build
+          rm -rf "$cache"
+          mkdir -p "$cache"
+          unzip -q "$zip" -d "$RUNNER_TEMP/sonar-scanner"
+          mv "$RUNNER_TEMP/sonar-scanner/sonar-scanner-${SONAR_SCANNER_VERSION}-linux-x64" "$cache/linux-x64"
+          touch "$cache/linux-x64.complete"
+          rm -f "$zip"
+      # Branch and pull request parameters (sonar.branch.name, sonar.pullrequest.*) are not set
+      # here: the scanner reads them from the GitHub Actions environment and event.
+      # Runs whenever the build did, so a failing test still leaves the analysis on the
+      # dashboard; coverage from a run with a failed test is lower than the truth. The token is
+      # in this step's env and nowhere else.
+      - name: SonarQube Cloud scan
+        if: ${{ !cancelled() && steps.token.outputs.present == 'true' && steps.build.outcome == 'success' }}
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          scannerVersion: ${{ env.SONAR_SCANNER_VERSION }}
+          scannerBinariesUrl: https://scanner-download-disabled.invalid
+      - if: ${{ !cancelled() }}
+        run: ccache --show-stats
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
 
@@ -250,9 +379,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # These targets alone: restored, not saved (see the setup action's ccache-save).
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-ci
+          ccache-save: "false"
       - run: cmake --preset ci
       - run: cmake --build --preset ci --target chat_server chat_cluster_tests chat_e2ee_tests
       - run: ctest --test-dir build/ci -R '^Reactors/Chat(Cluster|E2ee)Test\.' --output-on-failure
@@ -269,9 +400,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Three targets alone: restored, not saved (see the setup action's ccache-save).
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-ci
+          ccache-save: "false"
       # gst-launch and the plugins the publisher's pipeline uses, and the development files
       # whipsink builds against (fetch-whipsink.sh).
       - name: Install GStreamer
@@ -388,9 +521,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # One target alone: restored, not saved (see the setup action's ccache-save).
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-ci
+          ccache-save: "false"
       - run: cmake --preset ci
       - run: cmake --build --preset ci --target ulw_ws_echo_server
       - run: tests/autobahn/run.sh build/ci
