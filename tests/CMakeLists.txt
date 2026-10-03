@@ -51,6 +51,7 @@ target_link_libraries(os_unit_tests PRIVATE ulw::os)
 target_include_directories(os_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(ops_unit_tests unit
+    unit/ops/allocator_test.cpp
     unit/ops/async_log_test.cpp
     unit/ops/dev_only_test.cpp
     unit/ops/log_test.cpp
