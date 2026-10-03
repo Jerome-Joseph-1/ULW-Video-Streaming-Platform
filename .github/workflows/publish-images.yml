@@ -6,9 +6,11 @@ name: publish-images
 #
 # Only a commit on main whose ci run for its push to main succeeded is published. A push to main
 # starts this beside ci: the images are built and checked while ci runs, and nothing is pushed
-# until the API reports that ci run's success for this very commit. A manual run publishes a
-# commit already on main (its `ref`, or main's tip), under the same check. Pull requests never
-# run this, so no pull request's code ever runs where the package token is.
+# until the API reports that ci run's success for this very commit. Every push to main runs ci's
+# full lane (docs/operations/ci-lanes.md), so each squash merge gets that run; a batch/** branch's
+# run never counts. A manual run publishes a commit already on main (its `ref`, or main's tip),
+# under the same check. Pull requests never run this, so no pull request's code ever runs where the
+# package token is.
 #
 # Each image is built as e2e.yml's sandbox job builds it (deploy/local/e2e-up.sh) and must pass the
 # same gates there before anything is pushed: the release binaries' hardening
