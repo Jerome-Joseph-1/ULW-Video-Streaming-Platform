@@ -895,7 +895,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     for (const std::string& origin : config.limits.allowed_origins) {
         origins += (origins.empty() ? "" : ",") + origin;
     }
-    const std::array<std::pair<std::string_view, std::string>, 33> values{{
+    const std::array<std::pair<std::string_view, std::string>, 34> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
