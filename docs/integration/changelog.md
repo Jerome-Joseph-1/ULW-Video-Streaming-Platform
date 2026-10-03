@@ -3,6 +3,30 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-03: a live stream goes live and ends when its publisher does
+
+<!-- apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md -->
+
+An addition; nothing that worked before changes. Where the media server reports to the
+gateway (stage now, prod with the rest of live), a stream goes live as soon as its publisher's
+first track arrives, and ends about 10 s after its publisher disconnects and does not come back
+([live.md](live.md#starting-a-stream)).
+
+| Before | Now |
+|---|---|
+| A stream went live only through `POST /api/v1/live/{id}/start` | It also goes live by itself when its publisher publishes; `start` still works and is harmless |
+| A publisher that vanished left its stream `live` until its packager had exited and the sweep saw it (`finished`) | It is `ended` about 10 s after the publisher left, with `ended_by` `publisher_left` |
+| `ended_by` was `owner`, `finished`, `failed` or `timeout` | It may also be `publisher_left` |
+
+What to do:
+
+- **Broadcaster clients:** nothing required. Encoders with a fixed token (OBS) no longer need a
+  page to call `start` or `end`.
+- **Clients reading `ended_by`:** accept `publisher_left`, and treat any value you do not know as
+  an ended stream.
+- **Operators:** LiveKit's configuration names the gateway's webhook listener, which no route
+  exposes (RUNBOOK, step 9).
+
 ## 2026-10-03: live streams are started, taken live and ended through the gateway
 
 <!-- apps/gateway/src/routes.hpp, apps/gateway/src/live_streams.cpp, docs/adr/0091-the-stream-service-lives-in-the-gateway.md -->
