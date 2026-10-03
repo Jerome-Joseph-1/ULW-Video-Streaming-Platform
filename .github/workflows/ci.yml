@@ -300,11 +300,11 @@ jobs:
         run: docker compose -f deploy/local/compose.yaml --profile calls logs livekit egress
 
   # clang-tidy over every translation unit, with the same checks, split round-robin over the
-  # sorted list: the full tree in one job took 59-95 min. Shard I/4 checks files I, I+4, ...;
+  # sorted list: the full tree in one job took 59-95 min. Shard I/N checks files I, I+N, ...;
   # run-clang-tidy_test.sh proves the shards disjoint and complete. Shard 0 also runs the quick
   # checks. Four shards, not more: a ci run is already close to the 20 concurrent hosted jobs.
   lint:
-    name: boundaries + format + tidy (${{ matrix.shard }}/4)
+    name: boundaries + format + tidy (${{ strategy.job-index }}/${{ strategy.job-total }})
     runs-on: ubuntu-24.04
     # A quarter of the tree took 15-24 min (runner speed varies); well past that is a hang.
     timeout-minutes: 60
@@ -356,15 +356,15 @@ jobs:
         # request author's text.
         env:
           BASE_REF: ${{ github.base_ref }}
-          SHARD: ${{ matrix.shard }}
+          SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
         run: |
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR "origin/$BASE_REF...HEAD")
-          tools/run-clang-tidy.sh --shard "$SHARD/4" build/ci "${changed[@]}"
+          tools/run-clang-tidy.sh --shard "$SHARD" build/ci "${changed[@]}"
       - name: clang-tidy (full tree)
         if: github.event_name != 'pull_request'
         env:
-          SHARD: ${{ matrix.shard }}
-        run: tools/run-clang-tidy.sh --shard "$SHARD/4" build/ci
+          SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
+        run: tools/run-clang-tidy.sh --shard "$SHARD" build/ci
       # Last, and run even when a step above failed, so a branch whose decision number waits on
       # another branch still gets its format and clang-tidy results.
       - name: docs (decision numbering, routes documented)
@@ -456,7 +456,7 @@ jobs:
         run: |
           read -ra targets <<<"$FUZZ_TARGETS"
           tools/run-fuzzers.sh build/fuzz fuzz-work "$SECONDS_TO_RUN" "${targets[@]}"
-      - if: failure()
+      - if: ${{ !success() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-artifacts
