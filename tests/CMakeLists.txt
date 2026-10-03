@@ -232,6 +232,11 @@ add_test(NAME chat_soak_judge
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/soak/chat_soak_test.py)
 set_tests_properties(chat_soak_judge PROPERTIES LABELS unit)
 
+# The gateway soak's reports beside its verdict, on synthetic data: tests/soak.
+add_test(NAME soak_reports
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/soak/soak_test.py)
+set_tests_properties(soak_reports PROPERTIES LABELS unit)
+
 # The coverage summary and floor check on synthetic llvm-cov exports: tools/coverage_report.py.
 add_test(NAME coverage_report
     COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/coverage_report_test.py)
