@@ -227,9 +227,11 @@ class BalancedEndTest(unittest.TestCase):
 
 class SampleOrderTest(unittest.TestCase):
     def test_stable_for_a_seed_and_different_across_seeds(self):
-        self.assertEqual(mutate.sample_order(1, "k"), mutate.sample_order(1, "k"))
-        self.assertNotEqual(mutate.sample_order(1, "k"), mutate.sample_order(2, "k"))
-        self.assertEqual(len(mutate.sample_order(1, "k")), 64)
+        first = mutate.sample_order(1, "k")
+        again = mutate.sample_order(1, "k")
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, mutate.sample_order(2, "k"))
+        self.assertEqual(len(first), 64)
 
 
 class ApplyTest(Workspace):
