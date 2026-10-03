@@ -28,7 +28,7 @@ the evening before a demo.
 | `DEMO_PORT` | `8080` | The page |
 | `DEMO_S3_PORT` | `9900` | The store; the browser fetches video segments from it directly |
 | `DEMO_RTC_TCP_PORT`, `DEMO_RTC_UDP_PORT` | `7881`, `7882` | Call and live media |
-| `DEMO_IMAGE_TAG` | `main` | Which published build of our images: `main`, or a commit's 40-character SHA |
+| `ULW_TAG` | `main` | Which published build of our images: `main`, or a commit's 40-character SHA, to pin a build that was checked (`DEMO_IMAGE_TAG` is the same setting) |
 | `DEMO_BUILD=1` | off | Build our images from this checkout instead of pulling them (20 to 40 minutes) |
 | `DEMO_LIVE=0` | on | Leave out the live recorder (saves the 1.5 GB download; going live then does not work) |
 

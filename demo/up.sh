@@ -7,7 +7,8 @@
 #
 # Other settings (defaults): DEMO_PORT (8080) for the page, DEMO_S3_PORT (9900) for the store,
 # DEMO_RTC_TCP_PORT (7881) and DEMO_RTC_UDP_PORT (7882) for call and live media,
-# DEMO_IMAGE_TAG (main) for which published build. Needs Docker with Compose v2 only.
+# ULW_TAG (main) for which published build of our images: main, or a commit's full SHA, to pin
+# a build that was checked (DEMO_IMAGE_TAG is the same setting). Needs Docker with Compose v2.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here"
@@ -23,8 +24,40 @@ export DEMO_PORT=${DEMO_PORT:-8080}
 export DEMO_S3_PORT=${DEMO_S3_PORT:-9900}
 export DEMO_RTC_TCP_PORT=${DEMO_RTC_TCP_PORT:-7881}
 export DEMO_RTC_UDP_PORT=${DEMO_RTC_UDP_PORT:-7882}
-export DEMO_IMAGE_TAG=${DEMO_IMAGE_TAG:-main}
+export DEMO_IMAGE_TAG=${ULW_TAG:-${DEMO_IMAGE_TAG:-main}}
 registry=ghcr.io/jerome-joseph-1
+
+# Preflight: what usually goes wrong, said before anything is downloaded.
+say "Checking this machine"
+arch=$(docker info --format '{{.Architecture}}' 2>/dev/null || echo unknown)
+echo "    Docker $(docker version --format '{{.Server.Version}}' 2>/dev/null), $(docker info --format '{{.NCPU}} CPUs, {{.MemTotal}}' 2>/dev/null | awk '{printf "%s %s %.1f GB memory", $1, $2, $3/1073741824}'), $arch"
+case $arch in
+    aarch64 | arm64)
+        echo "    Apple Silicon or another arm64 machine: our images are amd64, and run emulated (Rosetta)."
+        echo "    Everything works; transcodes are a few times slower, so keep demo clips short." ;;
+esac
+running=$(docker compose ps -q netns 2>/dev/null || true)
+if [[ -z $running ]]; then
+    for port in "$DEMO_PORT" "$DEMO_S3_PORT" "$DEMO_RTC_TCP_PORT"; do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            die "port $port is in use on this machine; pick another (README.md, Troubleshooting), e.g. DEMO_PORT=8090 DEMO_S3_PORT=9910 demo/up.sh"
+        fi
+    done
+    echo "    ports $DEMO_PORT, $DEMO_S3_PORT, $DEMO_RTC_TCP_PORT/tcp and $DEMO_RTC_UDP_PORT/udp: free"
+fi
+# Free space where Docker keeps images (on macOS, inside Docker Desktop's disk image).
+free_kb=$(docker run --rm --entrypoint df docker.io/library/nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de -Pk / 2>/dev/null | awk 'NR==2 {print $4}')
+if [[ -n $free_kb ]]; then
+    free_gb=$((free_kb / 1048576))
+    echo "    Docker's disk: ${free_gb} GB free"
+    if ((free_gb < 5)); then
+        if docker image inspect "$registry/ulw-video-worker:$DEMO_IMAGE_TAG" >/dev/null 2>&1; then
+            echo "    (under 5 GB, but the images seem to be here already)"
+        else
+            die "Docker has ${free_gb} GB free; the first start needs about 5 GB (8 GB with room for videos). Free some with 'docker system prune', or enlarge Docker Desktop's disk (Settings > Resources)"
+        fi
+    fi
+fi
 
 if [[ ${DEMO_BUILD:-0} == 1 ]]; then
     say "Building the images from this checkout ($(git -C .. rev-parse --short=12 HEAD 2>/dev/null || echo unknown))"

@@ -16,7 +16,10 @@ demo.live = { streams, state: 'idle' };
 const announceRoom = () => myRooms().find((r) => r.kind === 'group' && !r.e2ee);
 
 export function initLive() {
-  $('go-live').addEventListener('click', () => goLive().catch((e) => liveStatus(`could not go live: ${e.message}`)));
+  $('go-live').addEventListener('click', () => goLive().catch(async (e) => {
+    liveStatus(`could not go live: ${e.message}`);
+    await abandon();
+  }));
   $('end-live').addEventListener('click', () => endLive());
   $('watch-form').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -159,8 +162,14 @@ async function goLive() {
     check();
     setTimeout(() => reject(new Error('media did not connect within 20 s')), 20_000);
   });
-  liveStatus('media connected; starting the packager...');
-  const live = await api('POST', `/api/v1/live/${stream.id}/start`);
+  liveStatus('media connected; starting the packager and the recorder...');
+  // start is idempotent; retry it on 503 (live.md), within the recorder's 30 s.
+  let live;
+  for (let attempt = 0; attempt < 6; ++attempt) {
+    live = await api('POST', `/api/v1/live/${stream.id}/start`);
+    if (live.status !== 503) break;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
   if (!live.ok) throw new Error(`start answered ${live.status}`);
   demo.live.state = 'live';
   log('live_started', { id: stream.id });
@@ -171,6 +180,19 @@ async function goLive() {
   streams.set(stream.id, { id: stream.id, owner: session.user, state: 'live' });
   renderStreams();
   broadcast.fresh = fresh;
+}
+
+// A stream that never went live: end it, so the demo's one stream slot is free again.
+async function abandon() {
+  const b = broadcast;
+  broadcast = null;
+  $('go-live').disabled = false;
+  $('end-live').disabled = true;
+  if (!b) return;
+  await api('POST', `/api/v1/live/${b.id}/end`).catch(() => {});
+  b.pc?.close();
+  for (const t of b.media?.getTracks() ?? []) t.stop();
+  $('live-preview').srcObject = null;
 }
 
 async function endLive() {
