@@ -119,6 +119,8 @@ class Service {
 function pageServer(gatewayPort, proxied, player) {
   const files = {
     '/': ['text/html', path.join(here, player)],
+    // A broadcaster's page, for the live publishing run.
+    '/publisher': ['text/html', path.join(here, 'live-publisher.html')],
     '/hls.js': ['text/javascript', path.join(here, 'node_modules/hls.js/dist/hls.min.js')],
   };
   return http.createServer((req, res) => {
@@ -146,9 +148,10 @@ function pageServer(gatewayPort, proxied, player) {
 }
 
 // `player` is the page served at /; the live run plays with its own page and bucket, and
-// needs no worker.
+// needs no worker. `gatewayEnv` adds to the gateway's environment, given the stack's work
+// directory and database; `users` are further subjects to mint tokens for.
 export async function startStack({ player = 'player.html', bucket = config.bucket,
-  worker: withWorker = true } = {}) {
+  worker: withWorker = true, gatewayEnv = () => ({}), users = [] } = {}) {
   const work = mkdtempSync(path.join(tmpdir(), 'ulw-e2e-'));
   const database = `ulw_e2e_${randomBytes(6).toString('hex')}`;
   const databaseUrl = withDatabase(config.postgres, database);
@@ -163,9 +166,10 @@ export async function startStack({ player = 'player.html', bucket = config.bucke
   execFileSync(bin('tools/devtoken/ulw_devtoken'), ['keygen', key]);
   const jwks = path.join(work, 'jwks.json');
   writeFileSync(jwks, execFileSync(bin('tools/devtoken/ulw_devtoken'), ['jwks', key]));
-  const token = execFileSync(bin('tools/devtoken/ulw_devtoken'),
-    ['mint', key, '--iss', config.issuer, '--sub', 'e2e-viewer', '--ttl', '3600'])
-    .toString().trim();
+  const mint = (sub) => execFileSync(bin('tools/devtoken/ulw_devtoken'),
+    ['mint', key, '--iss', config.issuer, '--sub', sub, '--ttl', '3600']).toString().trim();
+  const token = mint('e2e-viewer');
+  const tokens = Object.fromEntries(users.map((sub) => [sub, mint(sub)]));
 
   const storage = {
     ULW_STORAGE: 'minio',
@@ -184,6 +188,7 @@ export async function startStack({ player = 'player.html', bucket = config.bucke
     ULW_DEV_JWKS_FILE: jwks,
     ULW_DEV_MODE: "1",
     JWT_ISSUER: config.issuer,
+    ...gatewayEnv({ work, databaseUrl }),
     // The per-client limits stay at their defaults: a real browser playing through them is
     // part of what this suite shows.
     ...rootAllowed,
@@ -204,6 +209,7 @@ export async function startStack({ player = 'player.html', bucket = config.bucke
 
   return {
     token,
+    tokens,
     gateway: `http://127.0.0.1:${gatewayPort}`,
     gatewayPort,
     origin: `http://127.0.0.1:${page.address().port}`,
@@ -211,6 +217,7 @@ export async function startStack({ player = 'player.html', bucket = config.bucke
     proxied,
     // What gateway_server has logged so far, for a failure report.
     gatewayOutput: () => gateway.output,
+    workerOutput: () => (worker ? worker.output : ''),
     work,
     async stop() {
       await new Promise((resolve) => page.close(resolve));

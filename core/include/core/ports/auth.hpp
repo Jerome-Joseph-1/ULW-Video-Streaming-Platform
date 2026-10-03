@@ -19,6 +19,9 @@ struct Claims {
     UserId subject;
     std::string email;
     WallTime expires_at;
+    // Whether the token carries what the deployment asks of a broadcaster (ADR-0092); true
+    // where it asks nothing.
+    bool may_broadcast = true;
 };
 
 enum class AuthError : std::uint8_t {

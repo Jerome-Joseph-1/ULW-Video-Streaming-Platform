@@ -33,6 +33,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/key_package_test.cpp
     unit/core/ladder_test.cpp
     unit/core/parse_test.cpp
+    unit/core/url_test.cpp
     unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
@@ -290,11 +291,13 @@ ulw_add_test_suite(gateway_tests unit
     gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
     gateway/gateway_store_stall_test.cpp
+    gateway/gateway_streams_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
     gateway/health_test.cpp
     gateway/key_fetcher_test.cpp
     gateway/live_manifest_cache_test.cpp
+    gateway/live_streams_test.cpp
     gateway/rate_limit_test.cpp
     gateway/send_window.cpp
     gateway/upload_claim_test.cpp)
@@ -385,6 +388,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_harness.cpp
     integration/postgres_job_queue_test.cpp
     integration/postgres_live_recordings_test.cpp
+    integration/postgres_live_streams_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
@@ -395,6 +399,19 @@ target_include_directories(postgres_integration_tests
 target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
+
+# The stream service over the Postgres and LiveKit of deploy/local/compose.yaml; it skips when
+# LiveKit is not running.
+ulw_add_test_suite(live_service_integration_tests integration
+    integration/live_service_test.cpp
+    integration/postgres_harness.cpp)
+target_link_libraries(live_service_integration_tests PRIVATE ulw::gateway_lib ulw::pg_store
+    ulw::sfu_livekit ulw::auth PkgConfig::LIBPQ OpenSSL::Crypto)
+target_include_directories(live_service_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+target_compile_definitions(live_service_integration_tests
+    PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
+add_dependencies(live_service_integration_tests ulw_migrate)
 
 ulw_add_test_suite(reaper_unit_tests unit
     unit/reaper/config_test.cpp
@@ -722,6 +739,14 @@ target_link_libraries(sfu_unit_tests PRIVATE ulw::sfu_livekit ulw::auth ulw::tes
 # White-box tests of token minting and of how RoomService answers are read.
 target_include_directories(sfu_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src
     ${PROJECT_SOURCE_DIR}/tests)
+
+# How the stream service starts packagers: as child processes, and as Jobs through a scripted
+# Kubernetes API server.
+ulw_add_test_suite(packagers_unit_tests unit
+    unit/packagers/kubernetes_packagers_test.cpp
+    unit/packagers/process_packagers_test.cpp)
+target_link_libraries(packagers_unit_tests PRIVATE ulw::packagers ulw::test_http_server)
+target_include_directories(packagers_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 # The signalling side of the call suite, tests/call/run.sh.
 ulw_add_executable(ulw_call_harness call/harness_main.cpp)

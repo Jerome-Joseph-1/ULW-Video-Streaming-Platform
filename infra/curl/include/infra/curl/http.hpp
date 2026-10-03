@@ -12,7 +12,7 @@
 
 namespace infra::curl {
 
-enum class Method : std::uint8_t { Get, Head, Put, Post, Delete };
+enum class Method : std::uint8_t { Get, Head, Put, Post, Patch, Delete };
 
 [[nodiscard]] std::string_view to_string(Method method) noexcept;
 
@@ -29,6 +29,11 @@ struct Request {
     // MAX_TOTAL_CONNECTIONS waits unbounded and, if it waited too long, fails as soon as it
     // leaves the queue.
     std::chrono::milliseconds timeout{0};
+    // A PEM file of the authorities a https peer's certificate must chain to, in place of the
+    // system's: a Kubernetes API server's own cluster CA. Empty uses the system's. The
+    // initializer lets designated initializers that predate it leave it out.
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    std::string ca_file{};
 };
 
 struct Response {
@@ -65,8 +70,8 @@ struct Failure {
 using Result = std::expected<Response, Failure>;
 
 // Blocks for the whole exchange, so never on a reactor thread. Safe from many threads at
-// once: every call has a handle and a connection of its own. `body` is sent with PUT and
-// POST and must be empty otherwise.
+// once: every call has a handle and a connection of its own. `body` is sent with PUT, POST and
+// PATCH and must be empty otherwise.
 [[nodiscard]] Result perform(const Request& request, std::span<const std::byte> body = {});
 
 // Feeds a blocking streamed upload. Nothing can wake a blocked transfer, so returning 0 before

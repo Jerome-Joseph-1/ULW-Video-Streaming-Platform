@@ -19,15 +19,17 @@ constexpr SessionSettings kRecordingSession{.application_name = "ulw-live-packag
 constexpr Sql kFind = "SELECT video_id, failure FROM live_recordings WHERE stream_id = $1";
 
 // The stream's row goes first and everything else hangs off it, so a second call for the stream
-// inserts nothing at all. The job is what the gateway's upload commit queues.
+// inserts nothing at all. The job is what the gateway's upload commit queues. The video starts
+// at version 1, as an upload's does once it reaches processing: every transition bumps the
+// version, and a video in processing at 0 (or ready at 1) is one the gateway reads as corrupt.
 constexpr Sql kRecord = R"sql(
 WITH claimed AS (
     INSERT INTO live_recordings (stream_id, video_id) VALUES ($1, $2)
     ON CONFLICT (stream_id) DO NOTHING
     RETURNING video_id),
 video AS (
-    INSERT INTO videos (id, owner_id, title, state)
-    SELECT video_id, $3, $4, 'processing' FROM claimed
+    INSERT INTO videos (id, owner_id, title, state, version)
+    SELECT video_id, $3, $4, 'processing', 1 FROM claimed
     RETURNING id)
 INSERT INTO jobs (video_id, kind, source_key, request_id)
 SELECT id, 'transcode', $5, $6 FROM video)sql";
