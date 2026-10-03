@@ -5,6 +5,7 @@
 #include "sockaddr.hpp"
 
 #include <netinet/in.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 
 #include <algorithm>
@@ -87,6 +88,11 @@ bool is_transient_accept_error(int err) noexcept {
     default:
         return false;
     }
+}
+
+[[nodiscard]] bool locked_memory_is_unlimited() noexcept {
+    rlimit limit{};
+    return ::getrlimit(RLIMIT_MEMLOCK, &limit) == 0 && limit.rlim_cur == RLIM_INFINITY;
 }
 
 } // namespace
@@ -223,7 +229,17 @@ io_uring_sqe* UringReactor::next_sqe() noexcept {
 // Zero copy is only used where the kernel also says whether it managed it
 // (IORING_SEND_ZC_REPORT_USAGE, 6.2): 6.1 has SENDMSG_ZC but rejects the flag with EINVAL, and
 // the opcode probe cannot tell the two apart, so one real send to ourselves decides.
+//
+// Every zero-copy send in flight charges two pages of a datagram to the locked-memory counter its
+// user shares across all its processes, checked against RLIMIT_MEMLOCK unless the process has
+// CAP_IPC_LOCK. kMaxSendsInFlight of them are 8 MiB, the whole of the usual default limit, and
+// since 6.14 every ring's own pages are charged to the same counter. Under any finite limit, the
+// burst below (or a busy socket) could refuse another reactor of the same user its ring with
+// ENOMEM, so zero copy is only tried where the limit is unlimited.
 bool UringReactor::probe_zero_copy_send() noexcept {
+    if (!locked_memory_is_unlimited()) {
+        return false;
+    }
     io_uring_probe* probe = io_uring_get_probe_ring(&ring_);
     if (probe == nullptr) {
         return false;
@@ -246,9 +262,8 @@ bool UringReactor::probe_zero_copy_send() noexcept {
     probe_.msg.msg_namelen = sizeof(sockaddr_in);
     probe_.msg.msg_iov = &probe_.iov;
     probe_.msg.msg_iovlen = 1;
-    // As many sends at once as the reactor ever holds: on the 6.8 kernel of CI's runners a single
-    // zero-copy send succeeds while a burst of them to one socket fails some, so only a burst
-    // confirms zero copy is safe to use.
+    // As many sends at once as the reactor ever holds, so that a kernel which refuses some of a
+    // burst (where one send alone succeeds) is never trusted with zero copy.
     for (std::size_t i = 0; i < kMaxSendsInFlight; ++i) {
         io_uring_sqe* sqe = next_sqe();
         io_uring_prep_sendmsg_zc(sqe, fd->get(), &probe_.msg, 0);
