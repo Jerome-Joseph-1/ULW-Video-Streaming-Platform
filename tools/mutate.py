@@ -99,17 +99,19 @@ def mask(lines):
                 continue
             if c in "\"'":
                 raw = c == '"' and i > 0 and line[i - 1] == "R"
+                # `close` is the closing quote's index, or the line's end when the literal
+                # runs on to the next line, so that all of its first line is blanked.
                 if raw:
                     end = line.find(')"', i)
-                    stop = n if end < 0 else end + 2
+                    close = n if end < 0 else end + 1
                 else:
                     j = i + 1
                     while j < n and line[j] != c:
                         j += 2 if line[j] == "\\" else 1
-                    stop = min(j + 1, n)
-                for j in range(i + 1, stop - 1):
+                    close = min(j, n)
+                for j in range(i + 1, close):
                     chars[j] = "_"
-                i = stop
+                i = close + 1
                 continue
             i += 1
         out.append("".join(chars))
