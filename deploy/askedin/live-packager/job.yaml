@@ -1,8 +1,9 @@
 # One live stream's packager (docs/adr/0046, 0083): live_packager takes the stream from LiveKit's
 # recorder over SRT, writes its HLS to the store, and once the stream ends queues its recording
 # as a video (ADR-0055). One process per stream, so one Job per stream, made from this template
-# by whatever starts the stream: the stream service once it exists, by hand until then
-# (RUNBOOK.md, step 9). It is not in the overlays, so ArgoCD never applies it.
+# by whatever starts the stream: the gateway's stream service (ADR-0091), which reads this file
+# from its image, or by hand (RUNBOOK.md, step 9). It is not in the overlays, so ArgoCD never
+# applies it.
 #
 # The template's variables, filled with envsubst naming exactly these (RUNBOOK.md):
 #   ULW_NAMESPACE     apps-stage or apps
@@ -79,8 +80,10 @@ spec:
                   fieldPath: status.podIP
             - name: ULW_STREAM_ID
               value: ${ULW_STREAM_ID}
+            # Quoted: a user id may hold ':', '|' or '@', which a plain YAML scalar would not
+            # take as text, and never holds '"' or '\'.
             - name: ULW_STREAM_OWNER
-              value: ${ULW_STREAM_OWNER}
+              value: "${ULW_STREAM_OWNER}"
             # The SRT listener binds the pod's own address (numeric only), on the port the
             # Service and the NetworkPolicy name.
             - name: ULW_LIVE_INGEST_HOST
@@ -91,6 +94,11 @@ spec:
             # both defaults.
             - name: ULW_LIVE_SEGMENT_SECONDS
               value: "2"
+            # The relay calls within seconds of the Job's start (ADR-0091); a packager it never
+            # reaches, or one restarted after its relay went, ends and records the stream after
+            # this long instead of waiting out activeDeadlineSeconds.
+            - name: ULW_LIVE_CALLER_WAIT_SECONDS
+              value: "60"
             - name: ULW_STORAGE
               value: r2
             - name: ULW_SCRATCH_DIR

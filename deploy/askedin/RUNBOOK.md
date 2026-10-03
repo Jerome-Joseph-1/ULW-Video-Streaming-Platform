@@ -7,13 +7,13 @@ What ships:
 
 | Path | What |
 |---|---|
-| `overlays/{stage,prod}/video-gateway/` | Deployment (2 replicas, migrations in its init container), Service, HTTPRoute + BackendTrafficPolicy, NetworkPolicy |
+| `overlays/{stage,prod}/video-gateway/` | Deployment (2 replicas, migrations in its init container), Service, HTTPRoute + BackendTrafficPolicy, NetworkPolicy; `live-rbac.yaml` and `live-networkpolicy.yaml` for its stream service (step 9) |
 | `overlays/{stage,prod}/video-worker/` | Deployment (1 replica), NetworkPolicy; no Service, no route |
 | `overlays/{stage,prod}/upload-reaper/` | CronJob (every 15 minutes) and NetworkPolicy; the gateway image's `ulw_reaper` (step 3a) |
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
 | `overlays/{stage,prod}/chat/` | Deployment (3 replicas, docs/adr/0019), Service, HTTPRoute for its WebSocket (`/rt`), NetworkPolicy; secrets and Postgres settings in step 3 |
 | `overlays/{stage,prod}/live-packager/` | The headless Service that names each stream's packager in DNS, and the NetworkPolicy every packager runs under (step 9) |
-| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083) |
+| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream by the gateway's stream service, which carries it in its image; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083, 0091) |
 | `woodpecker.yml` | Kept for Askedin: builds and pushes the four images to git.askedin.com, which no overlay names any more, then `rollout restart`; the images now come prebuilt from GHCR (step 4) |
 | `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
 | `overlays/{stage,prod}/stunner/` | The TURN Gateway (UDP 3478 on stage, 3479 on prod) and the UDPRoute to LiveKit |
@@ -25,8 +25,8 @@ The realtime plane is stage only until its phase is tagged there: STUNner, LiveK
 Redis with phase-4 (one-to-one calls), egress with phase-6 (live). Its prod overlays ship, but
 apply each only after its phase tag, and after the steps only Askedin can take (a public UDP
 port, a DNS name, prod's own keys): step 7, "Prod".
-Live streams also need a stream service to start each stream's packager, which does not exist
-yet: until it does, a packager is started by hand (step 9).
+Live streams are started by the gateway's stream service, which makes each stream's packager
+Job (step 9); stage's gateway has it on, prod's turns it on with egress at phase-6.
 
 The images are built and published by this repository, public on GitHub's container registry
 as `ghcr.io/jerome-joseph-1/ulw-<svc>` (step 4); Askedin only pulls and deploys them. Open
@@ -347,9 +347,10 @@ A stream's live chat admits anyone, and only the server side opens one: a client
 record a room only as closed, and a stream join is refused with `not_live` until the stream's
 chat is open. A stream's chat room is named by the stream (docs/adr/0070), and viewers join it
 by the stream's name. Only such a room can be live: the database refuses any other id
-(`chat_rooms_live_is_a_stream`), since every chat node tells a live chat by its id alone. Until the product calls `IMessageStore::record_live` when a stream goes
-on air, open a stream's chat before its viewers arrive, as the service's role, with the stream's
-name for `<stream>`:
+(`chat_rooms_live_is_a_stream`), since every chat node tells a live chat by its id alone. The
+gateway's stream service opens the chat of every stream it starts, in the statement that stores
+the stream (docs/adr/0091). A stream started by hand (step 9) needs its chat opened before its
+viewers arrive, as the service's role, with the stream's name for `<stream>`:
 
 ```sql
 INSERT INTO chat_rooms (room_id, kind)
@@ -1014,10 +1015,11 @@ then the prod overlays stay out of the monorepo's prod tree. What differs from s
   requested, 1536Mi at most (~300 MB per stream, docs/adr/0053). Raise the limit by 2.5 cores
   per further concurrent stream, if the node has them.
 
-Nothing in prod's chat, gateway or packager overlays changes for it: no ULW service reads
-LiveKit's address or keys yet. The call and stream services, when they ship, read the same
-`LIVEKIT_KEYS` pair and LiveKit's in-cluster address, `http://livekit.apps.svc.cluster.local:7880`
-(`.apps-stage.` on stage).
+Nothing in prod's chat or packager overlays changes for it. The gateway's stream service reads
+the same `LIVEKIT_KEYS` pair (as `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` from `sfu-secrets`)
+and LiveKit's in-cluster address, `http://livekit.apps.svc.cluster.local:7880` (`.apps-stage.`
+on stage); prod's gateway turns it on at phase-6 (step 9). The call service, when it ships,
+reads the same.
 
 Owner steps, all Askedin's, in this order:
 
@@ -1168,27 +1170,65 @@ compromise during a JWKS outage, use
 `kubectl -n "$NS" rollout restart deployment/video-gateway deployment/chat` instead: new pods
 start with no keys and refuse every token (`503`) until a fetch succeeds, which fails closed.
 
-## 9. Live streams: the packager (stage)
+## 9. Live streams: the stream service and the packager
 
 A live stream reaches viewers as HLS that its packager writes to the bucket (docs/adr/0046),
-from LiveKit's recorder (egress), which the stream service starts once the publisher's WHIP
-POST has succeeded (docs/adr/0053). A packager is one process per stream, so on the cluster it
-is one Job per stream, made from `live-packager/job.yaml` (docs/adr/0083). What is not here
-yet, and is needed before a stream can go out:
+from LiveKit's recorder (egress), which the gateway's stream service starts once the publisher's
+WHIP POST has succeeded and the broadcaster's client says so (docs/adr/0053, 0091). A packager
+is one process per stream, so on the cluster it is one Job per stream, made from
+`live-packager/job.yaml` (docs/adr/0083) by the stream service. What it takes:
 
 - **LiveKit egress and its Redis**: `overlays/*/livekit-egress/` and `overlays/*/livekit-redis/`
   (step 7). Egress's pods carry `app.kubernetes.io/name: livekit-egress`, the only pods the
   packager's NetworkPolicy admits, and LiveKit's configuration names the same Redis. Stage's
   egress takes one stream at a time, prod's two; a further one is refused (`Unavailable` from
-  the relay) until one ends.
-- **The stream service**, which makes each stream's Job and Secret, calls the relay with the
-  stream's passphrase, and records the stream's chat live (step 3). Until it exists, the steps
-  below start a packager by hand.
+  the relay) until one ends, which is why the gateway's `ULW_LIVE_MAX_STREAMS` is 1 on stage.
+- **The stream service**, in the gateway (docs/integration/live.md, "Starting a stream"). It
+  stores each stream (`live_streams`, migration 0011, run by the gateway's init container),
+  hands its owner publisher tickets, opens the stream's live chat, makes the stream's Secret
+  (`live-packager-<stream>`, the SRT passphrase) and Job, relays the publisher to it, and ends
+  the stream. It runs as the `video-gateway` service account, whose Role
+  (`video-gateway/live-rbac.yaml`) allows creating Jobs and Secrets, reading Jobs and patching
+  Secrets in the gateway's namespace, and nothing else; `video-gateway/live-networkpolicy.yaml`
+  lets the gateway reach LiveKit's API (7880) and the API server (6443). The Job's image tag is
+  the gateway's `ULW_LIVE_PACKAGER_IMAGE_TAG`: `main` on stage, a `<sha>@sha256:<digest>` on prod
+  (4a). The Job template is the one in the gateway's image, built from this repository's
+  `live-packager/job.yaml`; a change to it ships with the gateway.
 
-The relay's packager address (the SFU adapter's `packager_srt`, ADR-0053) is
+The relay's packager address (the gateway's `ULW_LIVE_PACKAGER_SRT`, ADR-0053) is
 `srt://{stream}.live-packager.apps-stage.svc.cluster.local:9000` on stage, and `.apps.` in
 place of `.apps-stage.` on prod: `overlays/*/live-packager/service.yaml` gives each packager pod
 that name.
+
+The gateway takes LiveKit's key pair from `sfu-secrets` (step 7), the same values egress uses,
+so there is no gateway key to add. Check after the first rollout that the account works, and that
+it can do nothing more:
+
+```sh
+NS=apps-stage
+for verb in "create jobs" "get jobs" "create secrets" "patch secrets"; do
+  kubectl -n "$NS" auth can-i $verb --as=system:serviceaccount:$NS:video-gateway   # yes
+done
+for verb in "get secrets" "list jobs" "delete jobs" "create pods/exec"; do
+  kubectl -n "$NS" auth can-i $verb --as=system:serviceaccount:$NS:video-gateway   # no
+done
+kubectl -n "$NS" logs deploy/video-gateway | grep -m1 '"name":"ULW_LIVE_PACKAGER"'
+```
+
+A stream then runs without anyone on the cluster: the broadcaster's client starts it, publishes,
+goes live and ends it; `kubectl -n "$NS" get jobs -l app.kubernetes.io/name=live-packager`
+lists its packagers, and each Job's log ends `recording: queued as video <id>`. The gateway's
+`live_streams_ended_total{reason="failed"}` or `{reason="timeout"}` rising means packagers that
+did not start or relays that never reached them: look at the Jobs' events and logs, and at
+egress's.
+
+**Prod**, at phase-6, once egress is applied there (step 7): add the same block of environment
+to `overlays/prod/video-gateway/deployment.yaml` as stage's (`serviceAccountName`,
+`automountServiceAccountToken: true`, and the `LIVEKIT_*` and `ULW_LIVE_*` variables, with
+`apps` for `apps-stage`, `wss://askedin.com` for the client URL, `ULW_LIVE_MAX_STREAMS` `"2"` and
+the packager's tag by digest). `live-rbac.yaml` and `live-networkpolicy.yaml` already ship in
+prod's overlay; they grant nothing until the Deployment names the account. Until then prod's
+stream routes answer `404`.
 
 ### Secrets and the database role
 
@@ -1244,6 +1284,9 @@ Add a rule beside step 3a's, merged into the same `lifecycle.json`; the number o
 ```
 
 ### Start a stream's packager by hand
+
+For a stream the stream service did not start (a test from the cluster, or a stream to record
+again): the service never touches it, and nothing ends it but its publisher or SIGUSR1.
 
 The stream id names the Job and the pod's DNS record, so it must be a DNS label here: lowercase
 letters, digits and `-`, 1 to 63 (ADR-0053). The passphrase is the stream's own, 10 to 79

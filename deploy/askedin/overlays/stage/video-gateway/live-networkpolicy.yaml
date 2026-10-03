@@ -1,0 +1,31 @@
+# What the gateway's stream service (docs/adr/0091) reaches besides what networkpolicy.yaml
+# allows, in a policy of its own so that it can go with the feature: LiveKit's server API, for
+# publisher tickets, relays and closing a stream's room, and the API server, to make each
+# stream's packager Job (live-rbac.yaml). Policies add up, so this widens video-gateway's egress
+# by these two and nothing else. The API server is K3s's, on the node at 6443 behind the
+# kubernetes Service's 443 (which networkpolicy.yaml's 443 already covers before the Service
+# rewrites it); a port, not an address, as for Postgres there.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: video-gateway-live
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/name: video-gateway
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: video-gateway
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - port: 7880
+          protocol: TCP
+    - ports:
+        - port: 6443
+          protocol: TCP

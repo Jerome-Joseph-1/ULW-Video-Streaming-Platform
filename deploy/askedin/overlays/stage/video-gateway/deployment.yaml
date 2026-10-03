@@ -26,7 +26,10 @@ spec:
         app.kubernetes.io/name: video-gateway
         app.kubernetes.io/part-of: ulw
     spec:
-      automountServiceAccountToken: false
+      # The stream service makes each live stream's packager Job with this account's token
+      # (live-rbac.yaml, docs/adr/0091); nothing else in the pod uses it.
+      serviceAccountName: video-gateway
+      automountServiceAccountToken: true
       enableServiceLinks: false
       # preStop 5 s + the gateway's 30 s drain deadline (Limits::drain_deadline), with 10 s
       # for the process to unwind before the kubelet sends SIGKILL.
@@ -143,6 +146,36 @@ spec:
                 secretKeyRef:
                   name: video-gateway-secrets
                   key: JWT_ISSUER
+            # Live streams (docs/adr/0091, RUNBOOK step 9): LiveKit's server API in the
+            # cluster, the public host its tickets name (the /rtc and /whip routes of
+            # livekit/httproute.yaml), the key pair egress uses too, and packagers as Jobs from
+            # the template in the image, dialled by the relay through live-packager's headless
+            # Service. One stream at a time: what stage's egress takes.
+            - name: LIVEKIT_API_URL
+              value: http://livekit.apps-stage.svc.cluster.local:7880
+            - name: LIVEKIT_CLIENT_URL
+              value: wss://stage.askedin.com
+            - name: LIVEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_API_KEY
+            - name: LIVEKIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_API_SECRET
+            - name: ULW_LIVE_PACKAGER
+              value: kubernetes
+            - name: ULW_LIVE_PACKAGER_SRT
+              value: srt://{stream}.live-packager.apps-stage.svc.cluster.local:9000
+            - name: ULW_LIVE_MAX_STREAMS
+              value: "1"
+            - name: ULW_LIVE_JOB_TEMPLATE
+              value: /usr/local/share/ulw/live-packager-job.yaml
+            # Stage follows main, as its other images do (docs/adr/0085).
+            - name: ULW_LIVE_PACKAGER_IMAGE_TAG
+              value: main
           # Sized from the 1 GB gateway box (brief 8.1, docs/adr/0027). One upload connection
           # costs ~428 KB: ~180 KB in the process, 128 KiB + 16 KiB of socket buffers and a
           # ~100 KB backend socket, all charged to the pod's memory cgroup. At the 448 uploads
