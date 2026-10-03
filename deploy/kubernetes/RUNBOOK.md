@@ -345,7 +345,8 @@ including every room from before M19 (migration 0006), needs a new room id.
 
 The chat nodes speak a versioned channel to each other (docs/adr/0043), and a node refuses a
 peer of another version. A release that changes the version (M19 moves it from 2 to 3, the
-call handler from 3 to 4, docs/adr/0087) splits a rolling update in two: until the last old pod
+call handler from 3 to 4, docs/adr/0087, and the call's ring from 4 to 5, docs/adr/0091; one
+`Recreate` covers both when they ship together) splits a rolling update in two: until the last old pod
 is gone, old and new nodes cannot reach each other, rooms owned across the split are unreachable
 from the other side, and their joins and sends fail as `unavailable` (clients retry them). Roll
 such a release out with the chat Deployment's strategy set to `Recreate`
@@ -856,7 +857,10 @@ Generate a key pair per environment, never shared. Chat's call handler (docs/adr
 tickets with the same pair LiveKit checks them with, and calls LiveKit's server API at
 `http://livekit:7880` (a value in the chat Deployment). The chat Deployment reads the pair and
 `LIVEKIT_CLIENT_URL` as optional: without them chat starts with calls off and answers every call
-with `calls_disabled`. All of these read the Secret only at start, so after a change restart
+with `calls_disabled`. With calls on, the first ticket of a call rings the other member, for
+45 s unless the chat container's environment sets `ULW_CALL_RING_TIMEOUT_MS` (1000 to 300000;
+docs/adr/0091); the base leaves it unset, and an overlay that wants another ring patches it in.
+All of these read the Secret only at start, so after a change restart
 Redis first (LiveKit does not start without it); STUNner rereads its secret by itself:
 
 ```sh

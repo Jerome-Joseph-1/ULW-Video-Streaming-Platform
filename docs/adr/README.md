@@ -90,5 +90,6 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted, amended by 0088 |
 | [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted, amended by 0088 |
 | [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted |
-| [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted |
+| [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted, amended by 0091 |
 | [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
+| [0091](0091-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md) | A call's ring lives on the room's owner and reaches each member through their presence room | Accepted |

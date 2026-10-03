@@ -69,6 +69,9 @@ struct Config {
     // ULW_PRESENCE_GRACE_MS: how long a user whose last connection closed still shows online.
     // Unset: PresenceLimits::grace.
     std::optional<core::Millis> presence_grace;
+    // ULW_CALL_RING_TIMEOUT_MS: how long a call rings with nobody answering (ADR-0091). Unset:
+    // RingLimits::ring_timeout.
+    std::optional<core::Millis> ring_timeout;
     ClientLimits client_limits;
     // Unset when LIVEKIT_API_KEY is: calls are not configured, and a call is answered
     // calls_disabled. With the key, the other three LIVEKIT_ variables are required.
