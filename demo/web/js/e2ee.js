@@ -1,130 +1,134 @@
-// End-to-end encryption for the demo's encrypted room: the ONE file to replace when the OpenMLS
-// browser client (feat/e2ee-wasm, clients/web-mls) is ready. chat.js uses only what this module
-// exports below; nothing else in the page touches keys or ciphertext.
+// End-to-end encryption for the page's encrypted room. chat.js uses only openSession below.
 //
-// THIS IS A STAND-IN, NOT MLS. It is a demo cipher built from WebCrypto: each member's device
-// has an ECDH P-256 key, announced in the room; a message is encrypted with AES-256-GCM once
-// per member, under a key derived (HKDF-SHA-256) from ECDH between the sender's key and that
-// member's. What it does show truthfully is the platform's side of end-to-end encryption: chat
-// stores, orders and relays opaque bytes and never holds a key (docs/integration/e2ee.md). It
-// has none of MLS's properties: no forward secrecy or post-compromise security, no
-// authentication of who announced a key, and the private key sits in localStorage.
+// MLS (RFC 9420) through the OpenMLS browser client, clients/web-mls (feat/e2ee-wasm, ADR-0099),
+// which the web proxy serves at /mls/ from this checkout. Every body in the room is one
+// MLSMessage, as docs/integration/e2ee.md ("Browser client") lays out; MlsRoom (mls-room.js)
+// does the group's bookkeeping. A build without that client gets the WebCrypto stand-in
+// (e2ee-standin.js), which says on the page that it is not MLS.
 //
-// The contract (what an MLS module provides instead):
-//   label                        what the page shows the cipher as
-//   openSession({ user, room, members, publish })
-//                                -> session; publish(payload) posts a handshake payload (a JSON
-//                                   value) to the room, as MLS key packages, commits and
-//                                   welcomes would be
-//   session.receive({ sender, seq, payload })
-//                                -> { text } a decrypted message, { note } a handshake event to
-//                                   show, { error } one that cannot be read, or null; called for
-//                                   every e2ee payload in the room, in seq order, history first
-//   session.ready()              history is in: announce this device if it must
-//   session.state()              -> { canSend, detail }
-//   session.encrypt(text)        -> payload for chat (async)
+// The contract:
+//   openSession({ user, room, members, post(id, body) }) -> session
+//     session.label           what the page shows the encryption as
+//     session.receive(frame)  every `message` frame of the room, in seq order, history first;
+//                             -> { text } decrypted, { note } a group event to show,
+//                                { error } one that cannot be read, or null to show nothing
+//     session.ready()         history is in: create the group, or ask to be added
+//     session.state()         -> { canSend, complete, detail }
+//     session.send(text)      encrypts and posts; -> the message id, whose echo is this
+//                             device's own message (MLS cannot decrypt its own)
+import { store } from './core.js';
+import * as standin from './e2ee-standin.js';
 
-export const label = 'demo cipher (ECDH P-256 + AES-GCM), not MLS';
+let module = null;
 
-const enc = new TextEncoder();
-const dec = new TextDecoder();
-const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
-const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-
-async function deviceKey(user) {
-  const name = `ulw-demo:${user}:e2ee-device-key`;
+async function loadMls() {
   try {
-    const saved = JSON.parse(localStorage.getItem(name));
-    if (saved) {
-      return {
-        privateKey: await crypto.subtle.importKey('jwk', saved.privateKey, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']),
-        publicJwk: saved.publicJwk,
-      };
-    }
-  } catch { /* make a new one */ }
-  const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  const privateJwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
-  const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey);
-  const publicJwk = { kty, crv, x, y };
-  try { localStorage.setItem(name, JSON.stringify({ privateKey: privateJwk, publicJwk })); } catch { /* ignore */ }
-  return {
-    privateKey: await crypto.subtle.importKey('jwk', privateJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']),
-    publicJwk,
-  };
+    const room = await import('/mls/mls-room.js');
+    const wasm = await import('/mls/web_mls.js');
+    await room.loadMls('/mls/web_mls_bg.wasm');
+    return { ...room, ciphersuite: wasm.ciphersuite };
+  } catch (e) {
+    console.info(`no MLS client in this build (${e.message}); using the stand-in cipher`);
+    return null;
+  }
 }
 
-const sameKey = (a, b) => a && b && a.x === b.x && a.y === b.y;
+export async function openSession(options) {
+  module ??= loadMls();
+  const mls = await module;
+  return mls ? openMls(mls, options) : standin.openSession(options);
+}
 
-export async function openSession({ user, room, members, publish }) {
-  const me = await deviceKey(user);
-  const keys = new Map(); // member -> public JWK, the latest each announced
-  const aead = new Map(); // `${x}|${y}` of the other side -> AES key
+const SUITES = { 1: 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' };
 
-  async function sharedKey(publicJwk) {
-    const id = `${publicJwk.x}|${publicJwk.y}`;
-    if (!aead.has(id)) {
-      const peer = await crypto.subtle.importKey('jwk', { ...publicJwk, ext: true }, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
-      const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: peer }, me.privateKey, 256);
-      const hkdf = await crypto.subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
-      aead.set(id, await crypto.subtle.deriveKey(
-        { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(room), info: enc.encode('ulw-demo e2ee v1') },
-        hkdf, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']));
-    }
-    return aead.get(id);
+async function openMls(mls, { user, room, members, post }) {
+  // This browser profile's device for the user: its MLS identity is `<user>/<device>`, and its
+  // state (keys and groups) is kept in IndexedDB under that name.
+  let device = store.get('mls-device', null);
+  if (!device) {
+    device = `${user}/${crypto.randomUUID().slice(0, 8)}`;
+    store.set('mls-device', device);
   }
+  const saved = await mls.loadState(device).catch(() => null);
+  const client = saved ? mls.MlsClient.importState(saved) : new mls.MlsClient(mls.utf8(device));
+  let saving = Promise.resolve();
+  let out = null;
+  let lastId = null;
+  let groupTraffic = false;
+  const keyPackages = [];
+  const suite = mls.ciphersuite();
+
+  const mlsRoom = new mls.MlsRoom({
+    client,
+    room,
+    send: (id, body) => { lastId = id; post(id, body); },
+    onMessage: (m) => { out = { text: m.text, sender: m.sender }; },
+    onEvent: (e) => {
+      const who = (e.sender ?? '').split('/')[0];
+      const note = {
+        created: 'this device started the MLS group',
+        joined: `this device joined the MLS group (epoch ${e.epoch})`,
+        adding: `adding ${String(e.who ?? '').split('/')[0]}'s device to the group`,
+        added: `the group now has ${mlsRoom.group?.memberCount} devices (epoch ${e.epoch})`,
+        commit: `${who} changed the group (epoch ${e.epoch})`,
+      }[e.type];
+      if (note && !out) out = { note };
+    },
+    onState: (state) => { saving = saving.then(() => mls.saveState(device, state)).catch(() => {}); },
+  });
 
   return {
-    async receive({ sender, payload }) {
-      if (!members.includes(sender)) return { error: `${sender} is not a member` };
-      if (payload.k === 'key') {
-        const fresh = !sameKey(keys.get(sender), payload.pub);
-        keys.set(sender, payload.pub);
-        return fresh ? { note: `${sender} announced a device key` } : null;
+    label: `MLS (RFC 9420), ciphersuite ${suite}${SUITES[suite] ? ` (${SUITES[suite]})` : ''}, OpenMLS in WebAssembly`,
+
+    async receive(frame) {
+      let info;
+      try {
+        info = mls.inspect(mls.fromBase64url(frame.body));
+      } catch {
+        return null; // not an MLS message (the stand-in's, from before this build)
       }
-      if (payload.k === 'msg') {
-        const mine = payload.to?.[user];
-        if (!mine) return { error: 'not encrypted for this device' };
-        // ECDH(mine, sender's) is ECDH(sender's, mine); my own copy is ECDH(mine, mine).
-        try {
-          const key = await sharedKey(payload.from);
-          const plain = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: unb64(mine.iv), additionalData: enc.encode(`${room}|${sender}`) },
-            key, unb64(mine.ct));
-          return { text: dec.decode(plain) };
-        } catch {
-          return { error: 'cannot decrypt (the key it was sent to is gone)' };
-        }
+      if (info.wireFormat === 'key_package') keyPackages.push(frame);
+      else groupTraffic = true;
+      out = null;
+      mlsRoom.receive(frame);
+      const result = out;
+      out = null;
+      if (result?.text !== undefined) {
+        // The MLS credential names the device; chat names the account that sent the frame.
+        const who = result.sender.split('/')[0];
+        return who === frame.sender ? { text: result.text } : { text: result.text, warning: `MLS sender ${result.sender} is not ${frame.sender}` };
       }
-      return null;
+      return result;
     },
 
     async ready() {
-      if (!sameKey(keys.get(user), me.publicJwk)) {
-        keys.set(user, me.publicJwk);
-        await publish({ k: 'key', pub: me.publicJwk });
+      if (mlsRoom.joined) return;
+      // The room's first member starts the group when there is none yet, and adds whoever
+      // asked before it existed; everyone else asks to be added.
+      if (members[0] === user && !groupTraffic) {
+        mlsRoom.create();
+        for (const frame of keyPackages) if (frame.sender !== user) mlsRoom.receive(frame);
+      } else {
+        mlsRoom.announce();
       }
     },
 
     state() {
-      const missing = members.filter((m) => m !== user && !keys.has(m));
+      if (!mlsRoom.joined) {
+        return { canSend: false, complete: false, detail: `waiting to be added to the MLS group${members[0] === user ? '' : ` (by ${members[0]}, who must open this room)`}` };
+      }
+      const count = mlsRoom.group.memberCount;
       return {
-        canSend: missing.length < members.length - 1,
-        detail: missing.length ? `waiting for ${missing.join(', ')} to open this room once (their device key)` : `encrypted to ${members.join(', ')}`,
+        canSend: true,
+        complete: count >= members.length,
+        detail: `MLS epoch ${mlsRoom.group.epoch}, encrypted to ${count} device${count === 1 ? '' : 's'}${count < members.length ? `; waiting for ${members.length - count} more to open this room` : ''}`,
       };
     },
 
-    async encrypt(text) {
-      const to = {};
-      for (const [member, pub] of keys) {
-        if (!members.includes(member)) continue;
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        // My own copy is under ECDH(me, me), so it is the sender's key either way.
-        const ct = await crypto.subtle.encrypt(
-          { name: 'AES-GCM', iv, additionalData: enc.encode(`${room}|${user}`) },
-          await sharedKey(member === user ? me.publicJwk : pub), enc.encode(text));
-        to[member] = { iv: b64(iv), ct: b64(ct) };
-      }
-      return { k: 'msg', from: me.publicJwk, to };
+    async send(text) {
+      lastId = null;
+      mlsRoom.sendText(text);
+      return lastId;
     },
   };
 }

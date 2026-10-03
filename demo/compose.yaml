@@ -312,6 +312,9 @@ services:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web:/usr/share/nginx/html:ro
+      # The checkout, for the OpenMLS browser client the page loads from /mls/ when this build
+      # has one (clients/web-mls/dist, feat/e2ee-wasm).
+      - ..:/repo:ro
     healthcheck:
       # Ready when every service the page talks to is.
       test: ["CMD", "sh", "-c", "for u in /api/v1/readyz /_demo/chat/readyz /_demo/livekit/ /auth/healthz; do wget -q -O /dev/null http://127.0.0.1:8080$$u || exit 1; done"]

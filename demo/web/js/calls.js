@@ -5,7 +5,7 @@
 // call_ringing, call_answered, ... arrive unasked). A chat without it gives tickets with no
 // `call`; then the page rings through the room itself, as calls.md says to: its own
 // {t:'ring'} messages, which only this page understands.
-import { $, chat, demo, directRoomWith, directory, el, log, myRooms, onThisHost, presenceDot, sendBody, session, store, toast, uuid } from './core.js';
+import { $, chat, demo, directRoomWith, directory, el, log, myRooms, onThisHost, presenceDot, roomById, sendBody, session, store, toast, uuid } from './core.js';
 import { onAppMessage } from './chat.js';
 
 const { Room, RoomEvent, Track } = window.LivekitClient;
@@ -255,15 +255,16 @@ async function answer() {
   answeringHere = true;
   stopRing();
   if (call) await hangUp();
-  call = { room: r.room, callId: r.callId, peer: r.from, role: 'callee', kind: 'direct', mode: r.mode, state: 'connecting' };
-  showPanel(`Call with ${r.from}`);
+  const group = roomById(r.room)?.kind === 'group';
+  call = { room: r.room, callId: r.callId, peer: r.from, role: 'callee', kind: group ? 'group' : 'direct', mode: r.mode, state: 'connecting' };
+  showPanel(group ? `${roomById(r.room).name}: group call` : `Call with ${r.from}`);
   try {
     const ticket = await ticketFor(r.room);
     if (r.mode === 'server' && !ticket.call) { endCall('the call ended while answering'); return; }
     if (r.mode === 'app') sendBody(r.room, { t: 'ring', what: 'answer', call: r.callId });
     await connect(ticket);
     log('call_answered_here', { from: r.from });
-    setState(call.lk.remoteParticipants.size ? 'in-call' : 'connecting', `in call with ${r.from}`);
+    setState(group || call.lk.remoteParticipants.size ? 'in-call' : 'connecting', group ? 'in the group call' : `in call with ${r.from}`);
   } catch (e) {
     endCall(`could not answer: ${e.message}`);
   } finally {
@@ -283,7 +284,10 @@ function decline() {
 async function hangUp(reason = 'call ended') {
   const c = call;
   if (!c) return;
-  if (c.kind === 'direct' && c.callId) {
+  if (c.kind === 'group' && c.callId) {
+    // Group calls (feat/group-calls): leave the call; it goes on for the others.
+    chat.send({ type: 'call_leave', room: c.room, call: c.callId });
+  } else if (c.kind === 'direct' && c.callId) {
     const answered = c.state === 'in-call' || c.role === 'callee' || c.answered;
     if (c.mode === 'server') {
       chat.send({ type: c.role === 'caller' && !answered ? 'call_cancel' : 'call_end', room: c.room, call: c.callId });
