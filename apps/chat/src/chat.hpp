@@ -11,6 +11,7 @@
 #include "rt/room_router.hpp"
 
 #include "call.hpp"
+#include "call_bell.hpp"
 #include "chat_service.hpp"
 #include "presence.hpp"
 #include "token_bucket.hpp"
@@ -175,7 +176,7 @@ private:
 };
 
 // The chat service's view of this node's RoomRouter.
-class RouterRooms final : public IRooms {
+class RouterRooms final : public IRooms, public IRingPlane {
 public:
     explicit RouterRooms(rt::RoomRouter& router) noexcept : router_(router) {}
 
@@ -193,6 +194,12 @@ public:
     void ask_owner(const core::RoomId& room, rt::IMember& from, std::span<const std::byte> request,
                    rt::OwnerAnswer done) override {
         router_.ask_owner(room, from, request, std::move(done));
+    }
+    void notify(const core::RoomId& room, std::span<const std::byte> notice) noexcept override {
+        router_.notify(room, notice);
+    }
+    [[nodiscard]] bool owns(const core::RoomId& room) const noexcept override {
+        return router_.owns(room);
     }
 
 private:
@@ -244,6 +251,7 @@ public:
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
     [[nodiscard]] ChatService& chat() noexcept { return chat_; }
     [[nodiscard]] Presence& presence() noexcept { return presence_; }
+    [[nodiscard]] CallBell& bell() noexcept { return bell_; }
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
     void retire(net::Slab<Session>::Handle handle) noexcept;
     // Where a session encodes a frame before the reactor copies it into its send queue: one
@@ -294,6 +302,9 @@ private:
     // Sessions detach from both as they close, so they outlive them.
     ChatService chat_;
     Presence presence_;
+    // Pushes the call events the router hears to this node's sockets; the router stops telling
+    // it before it goes.
+    CallBell bell_;
     // Answers the router's asks for the rooms this node owns; the router is told to stop asking
     // before it goes.
     CallHandler calls_;

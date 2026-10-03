@@ -489,27 +489,128 @@ void ChatService::history(ClientId id, const History& history) {
     }
 }
 
+ChatService::Room* ChatService::calling_room(Client& c, ClientId id, const core::RoomId& room) {
+    Room* r = find(room);
+    if (r == nullptr || !r->joined ||
+        std::ranges::find(r->subscribers, id, &Room::Subscriber::id) == r->subscribers.end()) {
+        answer(*c.client, reason(rt::RouteError::NotJoined), room);
+        return nullptr;
+    }
+    if (!admit_join(c.user)) {
+        answer(*c.client, "busy", room);
+        return nullptr;
+    }
+    return r;
+}
+
 void ChatService::call(ClientId id, const Call& call) {
     Client* c = find(id);
     if (c == nullptr) {
         return;
     }
-    Room* r = find(call.room);
-    if (r == nullptr || !r->joined ||
-        std::ranges::find(r->subscribers, id, &Room::Subscriber::id) == r->subscribers.end()) {
-        answer(*c->client, reason(rt::RouteError::NotJoined), call.room);
-        return;
-    }
-    if (!admit_join(c->user)) {
-        answer(*c->client, "busy", call.room);
+    Room* r = calling_room(*c, id, call.room);
+    if (r == nullptr) {
         return;
     }
     rooms_plane_.ask_owner(
-        call.room, *r, encode_request({.user = c->user, .device = call.device}),
+        call.room, *r, encode_request(CallRequest{.user = c->user, .device = call.device}),
         [this, id,
          room = call.room](std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
             called(id, room, std::move(result));
         });
+}
+
+void ChatService::call_move(ClientId id, const CallMove& move) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    Room* r = calling_room(*c, id, move.room);
+    if (r == nullptr) {
+        return;
+    }
+    rooms_plane_.ask_owner(
+        move.room, *r,
+        encode_request(
+            CallSignalRequest{.user = c->user, .signal = move.signal, .call = move.call}),
+        [this, id, move](std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
+            moved(id, move, std::move(result));
+        });
+}
+
+void ChatService::moved(ClientId id, const CallMove& move,
+                        std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    try {
+        std::string out;
+        if (!result) {
+            const rt::RouteError error = result.error();
+            const bool retry =
+                error == rt::RouteError::Unavailable || error == rt::RouteError::Fenced;
+            write_call_error(out, retry ? "unavailable" : reason(error), move.room,
+                             retry ? std::optional(kCallRetry) : std::nullopt);
+            c->client->push(out);
+            return;
+        }
+        const auto answer = decode_answer(*result);
+        if (!answer) {
+            write_call_error(out, "unavailable", move.room, kCallRetry);
+            c->client->push(out);
+            return;
+        }
+        switch (answer->outcome) {
+        case CallOutcome::Done: {
+            RingEvent event = RingEvent::Declined;
+            switch (move.signal) {
+            case CallSignal::Decline:
+                event = RingEvent::Declined;
+                break;
+            case CallSignal::Cancel:
+                event = RingEvent::Cancelled;
+                break;
+            case CallSignal::End:
+                event = RingEvent::Ended;
+                break;
+            }
+            // decode_answer gives every Done its caller.
+            write_call_event(out, {.event = event,
+                                   .to = c->user,
+                                   .room = move.room,
+                                   .call = move.call,
+                                   .from = answer->caller.value_or(c->user),
+                                   .by = c->user,
+                                   .expires_at = {}});
+            break;
+        }
+        case CallOutcome::NoCall:
+            write_call_error(out, "no_call", move.room, std::nullopt);
+            break;
+        case CallOutcome::NotMember:
+            write_call_error(out, "not_member", move.room, std::nullopt);
+            break;
+        case CallOutcome::NotCallable:
+            write_call_error(out, "not_callable", move.room, std::nullopt);
+            break;
+        case CallOutcome::Disabled:
+            write_call_error(out, "calls_disabled", move.room, std::nullopt);
+            break;
+        case CallOutcome::Busy:
+            write_call_error(out, "busy", move.room, std::nullopt);
+            break;
+        case CallOutcome::Ticket:
+        case CallOutcome::Unavailable:
+        case CallOutcome::Failed:
+            write_call_error(out, "unavailable", move.room, kCallRetry);
+            break;
+        }
+        c->client->push(out);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        c->client->allocation_failed();
+    }
 }
 
 void ChatService::called(ClientId id, const core::RoomId& room,
@@ -539,7 +640,7 @@ void ChatService::called(ClientId id, const core::RoomId& room,
         switch (answer->outcome) {
         case CallOutcome::Ticket:
             if (const auto& ticket = answer->ticket) {
-                write_ticket(out, room, *ticket);
+                write_ticket(out, room, *ticket, answer->call);
             }
             break;
         case CallOutcome::NotMember:
@@ -559,6 +660,11 @@ void ChatService::called(ClientId id, const core::RoomId& room,
             break;
         case CallOutcome::Busy:
             write_call_error(out, "busy", room, std::nullopt);
+            break;
+        // A signal's outcomes; no ticket is answered with them.
+        case CallOutcome::NoCall:
+        case CallOutcome::Done:
+            write_call_error(out, "unavailable", room, kCallRetry);
             break;
         }
         c->client->push(out);

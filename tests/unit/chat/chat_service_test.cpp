@@ -4,6 +4,7 @@
 #include "call.hpp"
 #include "chat_service.hpp"
 #include "support/fake_clock.hpp"
+#include "support/fake_random.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1560,8 +1561,10 @@ TEST_F(ChatServiceTest, ACallIsAskedOfTheRoomsOwnerAndItsTicketHandedToTheClient
     ASSERT_EQ(rooms_.asks.size(), 1U);
     EXPECT_EQ(rooms_.asks[0].room, room_id());
     EXPECT_EQ(rooms_.asks[0].member, &member);
-    const auto request = chat::decode_request(rooms_.asks[0].request);
-    ASSERT_TRUE(request);
+    const auto asked = chat::decode_request(rooms_.asks[0].request);
+    ASSERT_TRUE(asked);
+    const auto* request = std::get_if<chat::CallRequest>(&*asked);
+    ASSERT_NE(request, nullptr);
     EXPECT_EQ(request->user.view(), "alice");
     EXPECT_EQ(request->device.to_string(), kDevice);
     rooms_.asks[0].done(answer(chat::CallOutcome::Ticket,
@@ -1578,6 +1581,93 @@ TEST_F(ChatServiceTest, ACallIsAskedOfTheRoomsOwnerAndItsTicketHandedToTheClient
     EXPECT_EQ(json->find("url")->as_string(), "wss://media.test");
     EXPECT_EQ(json->find("token")->as_string(), "jwt");
     EXPECT_EQ(json->find("expires_at")->as_u64(), 1'790'000'060U);
+}
+
+TEST_F(ChatServiceTest, ACallsDeclineIsAskedOfTheOwnerAndAnsweredWithTheEventTheOthersHear) {
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    ulw::test::FakeRandom random;
+    const chat::CallId call = chat::CallId::generate(clock_, random);
+    const chat::CallMove decline{
+        .room = room_id(), .signal = chat::CallSignal::Decline, .call = call};
+    service_->call_move(b, decline);
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_joined");
+    EXPECT_TRUE(rooms_.asks.empty());
+    join(b);
+    rooms_.admit();
+    bob.take();
+
+    service_->call_move(b, decline);
+    ASSERT_EQ(rooms_.asks.size(), 1U);
+    const auto asked = chat::decode_request(rooms_.asks[0].request);
+    ASSERT_TRUE(asked);
+    const auto* request = std::get_if<chat::CallSignalRequest>(&*asked);
+    ASSERT_NE(request, nullptr);
+    EXPECT_EQ(request->user.view(), "bob");
+    EXPECT_EQ(request->signal, chat::CallSignal::Decline);
+    EXPECT_EQ(request->call, call);
+    rooms_.asks[0].done(chat::encode_answer({.outcome = chat::CallOutcome::Done,
+                                             .ticket = std::nullopt,
+                                             .call = call,
+                                             .caller = *core::UserId::parse("alice")}));
+    const auto got = bob.take();
+    ASSERT_EQ(got.size(), 1U);
+    const auto json = core::json::parse(got[0]);
+    ASSERT_TRUE(json);
+    EXPECT_EQ(json->find("type")->as_string(), "call_declined");
+    EXPECT_EQ(json->find("room")->as_string(), kRoom);
+    EXPECT_EQ(json->find("call")->as_string(), call.to_string());
+    EXPECT_EQ(json->find("from")->as_string(), "alice");
+    EXPECT_EQ(json->find("by")->as_string(), "bob");
+
+    // Cancel and end are answered with their own events; the rest as a ticket's errors are,
+    // with no_call for a call that is not there to move.
+    const std::vector<std::pair<chat::CallSignal, std::string>> done{
+        {chat::CallSignal::Cancel, "call_cancelled"}, {chat::CallSignal::End, "call_ended"}};
+    for (const auto& [signal, type] : done) {
+        service_->call_move(b, {.room = room_id(), .signal = signal, .call = call});
+        auto finish = std::move(rooms_.asks.back().done);
+        rooms_.asks.pop_back();
+        finish(chat::encode_answer({.outcome = chat::CallOutcome::Done,
+                                    .ticket = std::nullopt,
+                                    .call = call,
+                                    .caller = *core::UserId::parse("bob")}));
+        EXPECT_EQ(seen(bob.take().at(0)).type, type);
+    }
+    const std::vector<std::pair<std::expected<std::vector<std::byte>, RouteError>, std::string>>
+        cases{
+            {answer(chat::CallOutcome::NoCall), "no_call"},
+            {answer(chat::CallOutcome::NotMember), "not_member"},
+            {answer(chat::CallOutcome::NotCallable), "not_callable"},
+            {answer(chat::CallOutcome::Disabled), "calls_disabled"},
+            {answer(chat::CallOutcome::Busy), "busy"},
+            {answer(chat::CallOutcome::Unavailable), "unavailable"},
+            {answer(chat::CallOutcome::Failed), "unavailable"},
+            {std::unexpected(RouteError::Fenced), "unavailable"},
+            {std::unexpected(RouteError::NotJoined), "not_joined"},
+            {std::vector<std::byte>{std::byte{9}}, "unavailable"},
+        };
+    for (const auto& [result, reason] : cases) {
+        service_->call_move(b, decline);
+        auto finish = std::move(rooms_.asks.back().done);
+        rooms_.asks.pop_back();
+        finish(result);
+        const Seen s = seen(bob.take().at(0));
+        EXPECT_EQ(s.type, "error");
+        EXPECT_EQ(s.reason, reason);
+        EXPECT_EQ(s.retry_after_ms.has_value(), reason == "unavailable") << reason;
+    }
+    // A ticket answered with a signal's outcome is not one.
+    service_->call(b, {.room = room_id(), .device = *core::DeviceId::parse(kDevice)});
+    auto finish = std::move(rooms_.asks.back().done);
+    rooms_.asks.pop_back();
+    finish(answer(chat::CallOutcome::NoCall));
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "unavailable");
+    // A client gone before the answer hears nothing.
+    service_->call_move(b, decline);
+    service_->detach(b);
+    rooms_.asks.back().done(answer(chat::CallOutcome::NoCall));
+    EXPECT_TRUE(bob.take().empty());
 }
 
 TEST_F(ChatServiceTest, ACallTheOwnerRefusesOrCannotAnswerIsAnErrorWithARetryHintWhenOneHelps) {

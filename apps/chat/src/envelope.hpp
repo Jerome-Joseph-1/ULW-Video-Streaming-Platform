@@ -7,6 +7,8 @@
 #include "rt/message_key.hpp"
 #include "rt/room_router.hpp"
 
+#include "ring.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -37,7 +39,11 @@
 //   {"type":"watch","user":"<sub>"}     hear when the user comes online or goes offline
 //   {"type":"unwatch","user":"<sub>"}   stop; unanswered
 //   {"type":"call","room":"<uuid>","device":"<uuid>"}   a ticket to the room's call, for this
-//       device: the room must be a direct chat this connection has joined (ADR-0050)
+//       device: the room must be a direct chat this connection has joined (ADR-0050). The first
+//       rings the other member; the other member's answers the ring (ADR-0092)
+//   {"type":"call_decline"|"call_cancel"|"call_end","room":"<uuid>","call":"<uuid>"}   turn a
+//       ringing call down (a callee), give up ringing (the caller), or end an answered call
+//       (either member); answered with the event the other member hears
 // Server to client:
 //   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
 //                                                      whose last seq is lower missed messages
@@ -49,8 +55,14 @@
 //   {"type":"watching","user":"<sub>","status":"online"|"offline"}   the answer to watch: what
 //                                                                   this node knows now
 //   {"type":"presence","user":"<sub>","status":"online"|"offline"}   each change after that
-//   {"type":"ticket","room":"<uuid>","url":"<wss url>","token":"<jwt>","expires_at":<unix s>}
-//       the answer to call: connect the SFU's client SDK to url with token before expires_at
+//   {"type":"ticket","room":"<uuid>","url":"<wss url>","token":"<jwt>","expires_at":<unix s>,
+//    "call":"<uuid>"}   the answer to call: connect the SFU's client SDK to url with token before
+//       expires_at. call names the ring the ticket belongs to; absent when there is none
+//   {"type":"call_ringing","room":"<uuid>","call":"<uuid>","from":"<sub>","expires_at":<unix s>}
+//       unasked, on every socket of both members: from is calling, until expires_at
+//   {"type":"call_answered"|"call_declined"|"call_cancelled"|"call_ended","room":"<uuid>",
+//    "call":"<uuid>","from":"<sub>","by":"<sub>"}   unasked, on every socket of both members
+//   {"type":"call_missed","room":"<uuid>","call":"<uuid>","from":"<sub>"}   nobody answered
 //   {"type":"error","reason":"<code>"}          with "room" and "id" when known, "user" for a
 //                                               watch, and "retry_after_ms" when the reason is
 //                                               rate_limited, or unavailable for a call
@@ -106,7 +118,14 @@ struct Call {
     core::DeviceId device;
 };
 
-using Command = std::variant<Join, Send, History, Watch, Unwatch, Call>;
+// call_decline, call_cancel or call_end.
+struct CallMove {
+    core::RoomId room;
+    CallSignal signal = CallSignal::Decline;
+    CallId call;
+};
+
+using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -127,6 +146,8 @@ enum class EnvelopeError : std::uint8_t {
     BadUser,
     // Not a device id: a canonical lowercase UUID.
     BadDevice,
+    // Not a call id: a canonical lowercase UUID.
+    BadCall,
 };
 
 [[nodiscard]] std::expected<Command, EnvelopeError> parse_command(std::string_view text);
@@ -151,9 +172,13 @@ void write_user_error(std::string& out, std::string_view reason, const core::Use
 void write_rate_limited(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                         core::Millis retry_after);
 
-// The answer to a call: the ticket the client takes to the SFU.
+// The answer to a call: the ticket the client takes to the SFU, and the ring it belongs to.
 void write_ticket(std::string& out, const core::RoomId& room,
-                  const core::ports::MediaTicket& ticket);
+                  const core::ports::MediaTicket& ticket,
+                  const std::optional<CallId>& call = std::nullopt);
+// What a ring's notice tells each socket of its member, and what a member's own decline,
+// cancel or end is answered with.
+void write_call_event(std::string& out, const CallNotice& notice);
 // A call refused, with a hint of when to ask again for a refusal a retry may cure.
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
                       std::optional<core::Millis> retry_after);

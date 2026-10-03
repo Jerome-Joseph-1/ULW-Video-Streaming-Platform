@@ -1,6 +1,7 @@
 #include "call.hpp"
 
-#include <array>
+#include "layout.hpp"
+
 #include <chrono>
 #include <string_view>
 #include <utility>
@@ -10,111 +11,63 @@ namespace chat {
 namespace {
 
 // The layouts' first byte; a node that reads another is answered Unavailable, as for an owner
-// that cannot be reached.
-constexpr std::uint8_t kLayout = 1;
-constexpr std::size_t kDeviceBytes = core::Uuid::kTextLength;
+// that cannot be reached. 2: an ask says what it asks for, and a ticket names its call.
+constexpr std::uint8_t kLayout = 2;
+// What an ask asks for: a ticket, or one of CallSignal's values.
+constexpr std::uint8_t kTicket = 0;
 
-void put_u8(std::vector<std::byte>& out, std::uint8_t v) {
-    out.push_back(static_cast<std::byte>(v));
-}
-
-void put_u64(std::vector<std::byte>& out, std::uint64_t v) {
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        out.push_back(static_cast<std::byte>((v >> static_cast<unsigned>(shift)) & 0xFFU));
-    }
-}
-
-void put_text(std::vector<std::byte>& out, std::string_view text) {
-    const auto bytes = std::as_bytes(std::span{text});
-    out.insert(out.end(), bytes.begin(), bytes.end());
-}
-
-// Endpoints and credentials are a URL and a JWT: well under 64 KiB.
-void put_long(std::vector<std::byte>& out, std::string_view text) {
-    put_u8(out, static_cast<std::uint8_t>((text.size() >> 8U) & 0xFFU));
-    put_u8(out, static_cast<std::uint8_t>(text.size() & 0xFFU));
-    put_text(out, text);
-}
-
-class Reader {
-public:
-    explicit Reader(std::span<const std::byte> bytes) noexcept : rest_(bytes) {}
-
-    [[nodiscard]] std::optional<std::uint8_t> u8() noexcept {
-        if (rest_.empty()) {
-            return std::nullopt;
-        }
-        const auto v = std::to_integer<std::uint8_t>(rest_.front());
-        rest_ = rest_.subspan(1);
-        return v;
-    }
-
-    [[nodiscard]] std::optional<std::uint64_t> u64() noexcept {
-        if (rest_.size() < sizeof(std::uint64_t)) {
-            return std::nullopt;
-        }
-        std::uint64_t v = 0;
-        for (const std::byte b : rest_.first(sizeof(std::uint64_t))) {
-            v = (v << 8U) | std::to_integer<std::uint64_t>(b);
-        }
-        rest_ = rest_.subspan(sizeof(std::uint64_t));
-        return v;
-    }
-
-    [[nodiscard]] std::optional<std::string_view> text(std::size_t n) noexcept {
-        if (rest_.size() < n) {
-            return std::nullopt;
-        }
-        // The bytes are characters; reading them as such is what this layout means.
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-        const std::string_view out{reinterpret_cast<const char*>(rest_.data()), n};
-        rest_ = rest_.subspan(n);
-        return out;
-    }
-
-    [[nodiscard]] std::optional<std::string_view> short_text() noexcept {
-        return u8().and_then([this](std::uint8_t n) { return text(n); });
-    }
-
-    [[nodiscard]] std::optional<std::string_view> long_text() noexcept {
-        const auto high = u8();
-        const auto low = u8();
-        if (!high || !low) {
-            return std::nullopt;
-        }
-        return text((std::size_t{*high} << 8U) | *low);
-    }
-
-    [[nodiscard]] bool empty() const noexcept { return rest_.empty(); }
-
-private:
-    std::span<const std::byte> rest_;
-};
+// A direct chat lists two members; a few more are read, for a list that grew.
+constexpr std::size_t kMembersRead = 8;
 
 } // namespace
+
+using layout::put_long;
+using layout::put_short;
+using layout::put_u64;
+using layout::put_u8;
+using layout::put_uuid;
 
 std::vector<std::byte> encode_request(const CallRequest& request) {
     std::vector<std::byte> out;
     put_u8(out, kLayout);
-    put_u8(out, static_cast<std::uint8_t>(request.user.view().size()));
-    put_text(out, request.user.view());
-    std::array<char, kDeviceBytes> device{};
-    request.device.format_to(device);
-    put_text(out, {device.data(), device.size()});
+    put_u8(out, kTicket);
+    put_short(out, request.user.view());
+    put_uuid(out, request.device);
     return out;
 }
 
-std::optional<CallRequest> decode_request(std::span<const std::byte> bytes) {
-    Reader in{bytes};
+std::vector<std::byte> encode_request(const CallSignalRequest& request) {
+    std::vector<std::byte> out;
+    put_u8(out, kLayout);
+    put_u8(out, static_cast<std::uint8_t>(request.signal));
+    put_short(out, request.user.view());
+    put_uuid(out, request.call);
+    return out;
+}
+
+std::optional<CallAsk> decode_request(std::span<const std::byte> bytes) {
+    layout::Reader in{bytes};
     if (in.u8() != kLayout) {
         return std::nullopt;
     }
-    const auto user = in.short_text().transform(core::UserId::parse);
-    const auto device = in.text(kDeviceBytes).transform(core::DeviceId::parse);
-    if (!user || !*user || !device || !*device || !in.empty()) {
+    const auto what = in.u8();
+    auto user = in.user();
+    if (!what || !user || *what > static_cast<std::uint8_t>(CallSignal::End)) {
         return std::nullopt;
     }
-    return CallRequest{.user = **user, .device = **device};
+    if (*what == kTicket) {
+        const auto device = in.uuid<core::DeviceId>();
+        if (!device || !in.empty()) {
+            return std::nullopt;
+        }
+        return CallRequest{.user = *user, .device = *device};
+    }
+    const auto call = in.uuid<CallId>();
+    if (!call || !in.empty()) {
+        return std::nullopt;
+    }
+    return CallSignalRequest{
+        .user = *user, .signal = static_cast<CallSignal>(*what), .call = *call};
 }
 
 std::vector<std::byte> encode_answer(const CallAnswer& answer) {
@@ -128,17 +81,24 @@ std::vector<std::byte> encode_answer(const CallAnswer& answer) {
             std::chrono::duration_cast<core::Millis>(answer.ticket->expires_at.time_since_epoch())
                 .count();
         put_u64(out, static_cast<std::uint64_t>(ms));
+        put_u8(out, answer.call ? 1 : 0);
+        if (answer.call) {
+            put_uuid(out, *answer.call);
+        }
+    }
+    if (answer.outcome == CallOutcome::Done && answer.caller) {
+        put_short(out, answer.caller->view());
     }
     return out;
 }
 
 std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
-    Reader in{bytes};
+    layout::Reader in{bytes};
     if (in.u8() != kLayout) {
         return std::nullopt;
     }
     const auto outcome = in.u8();
-    if (!outcome || *outcome > static_cast<std::uint8_t>(CallOutcome::Busy)) {
+    if (!outcome || *outcome > static_cast<std::uint8_t>(CallOutcome::Done)) {
         return std::nullopt;
     }
     CallAnswer answer{.outcome = static_cast<CallOutcome>(*outcome), .ticket = std::nullopt};
@@ -146,13 +106,26 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
         const auto endpoint = in.long_text();
         const auto credential = in.long_text();
         const auto ms = in.u64();
-        if (!endpoint || !credential || !ms) {
+        const auto has_call = in.u8();
+        if (!endpoint || !credential || !ms || !has_call || *has_call > 1) {
             return std::nullopt;
         }
         answer.ticket = core::ports::MediaTicket{
             .endpoint = std::string(*endpoint),
             .credential = std::string(*credential),
             .expires_at = core::WallTime{core::Millis{static_cast<core::Millis::rep>(*ms)}}};
+        if (*has_call == 1) {
+            answer.call = in.uuid<CallId>();
+            if (!answer.call) {
+                return std::nullopt;
+            }
+        }
+    }
+    if (answer.outcome == CallOutcome::Done) {
+        answer.caller = in.user();
+        if (!answer.caller) {
+            return std::nullopt;
+        }
     }
     if (!in.empty()) {
         return std::nullopt;
@@ -161,8 +134,10 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
 }
 
 CallHandler::CallHandler(core::ports::IMessageStore& messages, core::ports::ISfu* sfu,
-                         const core::ports::IClock& clock, CallLimits limits)
-    : messages_(messages), sfu_(sfu), clock_(clock), limits_(limits), next_sweep_(clock.now()) {}
+                         IRingPlane& plane, const core::ports::IClock& clock,
+                         core::ports::IRandom& random, CallLimits limits)
+    : messages_(messages), sfu_(sfu), clock_(clock), limits_(limits),
+      ringer_(plane, clock, random, limits.ring), next_sweep_(clock.now()) {}
 
 CallHandler::~CallHandler() = default;
 
@@ -186,11 +161,17 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
         }
         ++in_flight_;
         counted = true;
+        if (const auto* s = std::get_if<CallSignalRequest>(&*asked)) {
+            signal(room, *s, std::move(answer));
+            return;
+        }
         // The member list, read on the owner at the moment of asking: a client's join may be
         // older than a removal still on its way to its node (ADR-0073).
         messages_.access(
-            room, asked->user,
-            [this, room, waiter = Waiter{.request = *asked, .answer = std::move(answer)}](
+            room, std::get<CallRequest>(*asked).user,
+            [this, room,
+             waiter =
+                 Waiter{.request = std::get<CallRequest>(*asked), .answer = std::move(answer)}](
                 core::ports::MessageResult<core::ports::RoomAccess> access) mutable noexcept {
                 checked(room, std::move(waiter), access);
             });
@@ -205,26 +186,98 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
     }
 }
 
+void CallHandler::signal(const core::RoomId& room, const CallSignalRequest& request,
+                         rt::OwnerAnswer answer) {
+    // The member list again, as for a ticket: only a member may move the call.
+    messages_.access(
+        room, request.user,
+        [this, room, request, answer = std::move(answer)](
+            core::ports::MessageResult<core::ports::RoomAccess> access) mutable noexcept {
+            --in_flight_;
+            signalled(room, request, answer, access);
+        });
+}
+
+void CallHandler::signalled(
+    const core::RoomId& room, const CallSignalRequest& request, rt::OwnerAnswer& answer,
+    const core::ports::MessageResult<core::ports::RoomAccess>& access) noexcept {
+    if (!callable(access, answer)) {
+        return;
+    }
+    const auto caller = ringer_.signal(room, request.user, request.signal, request.call);
+    if (!caller) {
+        ++counters_.no_call;
+        finish(answer, {.outcome = CallOutcome::NoCall, .ticket = std::nullopt});
+        return;
+    }
+    finish(answer, {.outcome = CallOutcome::Done,
+                    .ticket = std::nullopt,
+                    .call = request.call,
+                    .caller = caller});
+}
+
+bool CallHandler::callable(const core::ports::MessageResult<core::ports::RoomAccess>& access,
+                           rt::OwnerAnswer& answer) noexcept {
+    if (!access) {
+        ++counters_.store_unavailable;
+        finish(answer, {.outcome = CallOutcome::Unavailable, .ticket = std::nullopt});
+        return false;
+    }
+    if (access->kind != core::ports::RoomKind::DirectChat) {
+        ++counters_.not_callable;
+        finish(answer, {.outcome = CallOutcome::NotCallable, .ticket = std::nullopt});
+        return false;
+    }
+    if (!access->member) {
+        ++counters_.not_member;
+        finish(answer, {.outcome = CallOutcome::NotMember, .ticket = std::nullopt});
+        return false;
+    }
+    return true;
+}
+
 void CallHandler::checked(const core::RoomId& room, Waiter waiter,
                           core::ports::MessageResult<core::ports::RoomAccess> access) noexcept {
-    if (!access) {
+    if (!callable(access, waiter.answer)) {
+        --in_flight_;
+        return;
+    }
+    if (!ringer_.idle(room)) {
+        admit(room, std::move(waiter));
+        return;
+    }
+    // This ticket may start the room's call: past the cap it is refused before the SFU is asked.
+    if (ringer_.full()) {
+        ++counters_.busy;
+        --in_flight_;
+        finish(waiter.answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
+        return;
+    }
+    try {
+        messages_.members(
+            room, std::nullopt, kMembersRead,
+            [this, room, waiter = std::move(waiter)](
+                core::ports::MessageResult<std::vector<core::UserId>> members) mutable noexcept {
+                listed(room, std::move(waiter), std::move(members));
+            });
+    } catch (const std::bad_alloc&) {
+        // Whatever was moved out of the waiter answers nothing; the asker times out.
+        --in_flight_;
+        if (waiter.answer) {
+            waiter.answer(std::unexpected(rt::RouteError::Unavailable));
+        }
+    }
+}
+
+void CallHandler::listed(const core::RoomId& room, Waiter waiter,
+                         core::ports::MessageResult<std::vector<core::UserId>> members) noexcept {
+    if (!members) {
         ++counters_.store_unavailable;
         --in_flight_;
         finish(waiter.answer, {.outcome = CallOutcome::Unavailable, .ticket = std::nullopt});
         return;
     }
-    if (access->kind != core::ports::RoomKind::DirectChat) {
-        ++counters_.not_callable;
-        --in_flight_;
-        finish(waiter.answer, {.outcome = CallOutcome::NotCallable, .ticket = std::nullopt});
-        return;
-    }
-    if (!access->member) {
-        ++counters_.not_member;
-        --in_flight_;
-        finish(waiter.answer, {.outcome = CallOutcome::NotMember, .ticket = std::nullopt});
-        return;
-    }
+    waiter.members = std::move(*members);
     admit(room, std::move(waiter));
 }
 
@@ -323,22 +376,21 @@ void CallHandler::join(const core::RoomId& room, Entry& entry, Waiter waiter) no
         ++entry.joining;
         const core::UserId user = waiter.request.user;
         const core::DeviceId device = waiter.request.device;
-        entry.media->join(
-            user, device, core::ports::MediaRole::Member,
-            [this, room, answer = std::move(waiter.answer)](
-                std::expected<core::ports::MediaTicket, core::ports::MediaError>
-                    ticket) mutable noexcept {
-                --in_flight_;
-                if (const auto it = rooms_.find(room); it != rooms_.end()) {
-                    --it->second.joining;
-                }
-                if (!ticket) {
-                    finish(answer, {.outcome = failure(ticket.error()), .ticket = std::nullopt});
-                    return;
-                }
-                ++counters_.tickets;
-                finish(answer, {.outcome = CallOutcome::Ticket, .ticket = std::move(*ticket)});
-            });
+        entry.media->join(user, device, core::ports::MediaRole::Member,
+                          [this, room, waiter = std::move(waiter)](
+                              std::expected<core::ports::MediaTicket, core::ports::MediaError>
+                                  ticket) mutable noexcept {
+                              --in_flight_;
+                              if (const auto it = rooms_.find(room); it != rooms_.end()) {
+                                  --it->second.joining;
+                              }
+                              if (!ticket) {
+                                  finish(waiter.answer, {.outcome = failure(ticket.error()),
+                                                         .ticket = std::nullopt});
+                                  return;
+                              }
+                              ticketed(room, waiter, waiter.answer, std::move(*ticket));
+                          });
     } catch (const std::bad_alloc&) {
         --entry.joining;
         --in_flight_;
@@ -346,6 +398,19 @@ void CallHandler::join(const core::RoomId& room, Entry& entry, Waiter waiter) no
             waiter.answer(std::unexpected(rt::RouteError::Unavailable));
         }
     }
+}
+
+void CallHandler::ticketed(const core::RoomId& room, const Waiter& waiter, rt::OwnerAnswer& answer,
+                           core::ports::MediaTicket ticket) noexcept {
+    // Rung once the ticket is in hand: a caller the SFU turned away rings nobody.
+    const auto call = ringer_.ticketed(room, waiter.request.user, waiter.members);
+    if (!call) {
+        ++counters_.busy;
+        finish(answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
+        return;
+    }
+    ++counters_.tickets;
+    finish(answer, {.outcome = CallOutcome::Ticket, .ticket = std::move(ticket), .call = *call});
 }
 
 void CallHandler::finish(rt::OwnerAnswer& answer, const CallAnswer& outcome) noexcept {
@@ -372,6 +437,7 @@ CallOutcome CallHandler::failure(core::ports::MediaError error) noexcept {
 }
 
 void CallHandler::sweep() noexcept {
+    ringer_.tick();
     // Called after every turn of the loop; the rooms are looked at once a second.
     constexpr core::Millis kSweepEvery{1'000};
     const core::MonoTime now = clock_.now();

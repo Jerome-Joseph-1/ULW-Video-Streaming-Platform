@@ -1,5 +1,7 @@
 #include "call.hpp"
+#include "presence_room.hpp"
 #include "support/fake_clock.hpp"
+#include "support/fake_random.hpp"
 
 #include <gtest/gtest.h>
 #include <memory>
@@ -51,9 +53,23 @@ public:
         done({});
     }
     void members(const core::RoomId& /*room*/, std::optional<core::UserId> /*after*/,
-                 std::size_t /*limit*/,
+                 std::size_t limit,
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override {
-        done(std::vector<core::UserId>{});
+        ++lists;
+        if (members_throwing) {
+            throw std::bad_alloc();
+        }
+        if (list_down) {
+            done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+            return;
+        }
+        std::vector<core::UserId> out;
+        for (const std::string& m : members_) {
+            if (out.size() < limit) {
+                out.push_back(*core::UserId::parse(m));
+            }
+        }
+        done(std::move(out));
     }
     using core::ports::IMessageStore::admits;
     void admits(const core::RoomId& /*room*/, const core::UserId& /*user*/, RoomKind /*asked*/,
@@ -86,6 +102,33 @@ public:
     // access fails to take the ask at all, as an allocation inside it would.
     bool throwing = false;
     int reads = 0;
+    // The member list, as the ring reads it.
+    bool list_down = false;
+    bool members_throwing = false;
+    int lists = 0;
+};
+
+// The room plane as the ring sees it: the notices, decoded.
+class FakePlane final : public chat::IRingPlane {
+public:
+    void notify(const core::RoomId& room, std::span<const std::byte> notice) noexcept override {
+        auto decoded = chat::decode_notice(notice);
+        EXPECT_TRUE(decoded && chat::presence_room(decoded->to) == room);
+        if (decoded) {
+            sent.push_back(*decoded);
+        }
+    }
+    [[nodiscard]] bool owns(const core::RoomId& /*room*/) const noexcept override { return true; }
+
+    [[nodiscard]] std::vector<chat::RingEvent> events() const {
+        std::vector<chat::RingEvent> out;
+        for (const chat::CallNotice& n : sent) {
+            out.push_back(n.event);
+        }
+        return out;
+    }
+
+    std::vector<chat::CallNotice> sent;
 };
 
 struct Joined {
@@ -182,14 +225,32 @@ public:
 
 class CallHandlerTest : public ::testing::Test {
 protected:
-    explicit CallHandlerTest(chat::CallLimits limits = {})
-        : handler_(std::make_unique<chat::CallHandler>(store_, &sfu_, clock_, limits)) {}
+    explicit CallHandlerTest(chat::CallLimits limits = {}) : handler_(make(limits)) {}
+
+    std::unique_ptr<chat::CallHandler> make(chat::CallLimits limits = {}) {
+        return std::make_unique<chat::CallHandler>(store_, &sfu_, plane_, clock_, random_, limits);
+    }
+
+    // Declines, cancels or ends `call` as `user`; the answer lands in answers_ as ask's do.
+    void move(std::string_view user, chat::CallSignal signal, const chat::CallId& call,
+              std::string_view room = kRoom) {
+        const auto request = chat::encode_request(chat::CallSignalRequest{
+            .user = *core::UserId::parse(user), .signal = signal, .call = call});
+        handler_->on_ask(room_id(room), request,
+                         [this](std::expected<std::vector<std::byte>, rt::RouteError> r) noexcept {
+                             if (!r) {
+                                 errors_.push_back(r.error());
+                                 return;
+                             }
+                             answers_.push_back(*chat::decode_answer(*r));
+                         });
+    }
 
     // Asks as `user` from `device`; the answer lands in answers_, in the order they come.
     void ask(std::string_view user = "alice", std::string_view device = kDevice,
              std::string_view room = kRoom) {
-        const auto request = chat::encode_request(
-            {.user = *core::UserId::parse(user), .device = *core::DeviceId::parse(device)});
+        const auto request = chat::encode_request(chat::CallRequest{
+            .user = *core::UserId::parse(user), .device = *core::DeviceId::parse(device)});
         handler_->on_ask(room_id(room), request,
                          [this](std::expected<std::vector<std::byte>, rt::RouteError> r) noexcept {
                              if (!r) {
@@ -211,7 +272,9 @@ protected:
 
     FakeStore store_;
     FakeSfu sfu_;
+    FakePlane plane_;
     ulw::test::FakeClock clock_;
+    ulw::test::FakeRandom random_;
     std::unique_ptr<chat::CallHandler> handler_;
     std::vector<chat::CallAnswer> answers_;
     std::vector<rt::RouteError> errors_;
@@ -292,8 +355,7 @@ TEST_F(CallHandlerTest, AMemberTakenOffTheListGetsNoTicketThoughTheRoomIsOpen) {
 }
 
 TEST_F(CallHandlerTest, AnAskTheStoreCouldNotTakeLeavesNoAskCounted) {
-    handler_ = std::make_unique<chat::CallHandler>(store_, &sfu_, clock_,
-                                                   chat::CallLimits{.max_in_flight = 1});
+    handler_ = make(chat::CallLimits{.max_in_flight = 1});
     store_.throwing = true;
     ask("alice");
     ask("alice");
@@ -308,8 +370,7 @@ TEST_F(CallHandlerTest, AnAskTheStoreCouldNotTakeLeavesNoAskCounted) {
 }
 
 TEST_F(CallHandlerTest, AnOpenTheSfuCouldNotTakeAnswersItsWaitersAndLeavesTheRoomFree) {
-    handler_ = std::make_unique<chat::CallHandler>(store_, &sfu_, clock_,
-                                                   chat::CallLimits{.max_in_flight = 1});
+    handler_ = make(chat::CallLimits{.max_in_flight = 1});
     sfu_.throwing = true;
     ask("alice");
     EXPECT_EQ(errors_, std::vector{rt::RouteError::Unavailable});
@@ -368,7 +429,8 @@ TEST_F(CallHandlerTest, AMemberListThatCannotBeReadIsRetryable) {
 }
 
 TEST_F(CallHandlerTest, WithoutAnSfuEveryAskIsAnsweredDisabled) {
-    handler_ = std::make_unique<chat::CallHandler>(store_, nullptr, clock_, chat::CallLimits{});
+    handler_ = std::make_unique<chat::CallHandler>(store_, nullptr, plane_, clock_, random_,
+                                                   chat::CallLimits{});
     EXPECT_FALSE(handler_->enabled());
     ask("alice");
     EXPECT_EQ(outcomes(), std::vector{CallOutcome::Disabled});
@@ -403,6 +465,171 @@ TEST_F(CallHandlerTest, AHandleNobodyAskedForWithinTheIdleTimeIsLetGo) {
     ask("bob", kOtherDevice);
     ASSERT_EQ(sfu_.opens.size(), 1U);
     EXPECT_EQ(sfu_.opens[0].generation, chat::kCallGeneration);
+}
+
+TEST_F(CallHandlerTest, TheFirstTicketRingsTheOtherMemberAndTheCalleesTicketAnswersIt) {
+    ask("alice");
+    // The list is read before the SFU is asked: the ticket may start the call.
+    EXPECT_EQ(store_.lists, 1);
+    sfu_.open();
+    EXPECT_TRUE(plane_.sent.empty()) << "rung before the caller had a ticket";
+    sfu_.issue();
+    ASSERT_EQ(outcomes(), std::vector{CallOutcome::Ticket});
+    ASSERT_TRUE(answers_[0].call);
+    const chat::CallId call = *answers_[0].call;
+    EXPECT_EQ(plane_.events(), std::vector(2, chat::RingEvent::Ringing));
+    EXPECT_EQ(handler_->calls(), 1U);
+
+    ask("bob", kOtherDevice);
+    // A call rings already: no list is read for an answer.
+    EXPECT_EQ(store_.lists, 1);
+    sfu_.issue();
+    ASSERT_EQ(answers_.size(), 2U);
+    EXPECT_EQ(answers_[1].call, call);
+    EXPECT_EQ(plane_.events(), (std::vector{chat::RingEvent::Ringing, chat::RingEvent::Ringing,
+                                            chat::RingEvent::Answered, chat::RingEvent::Answered}));
+    EXPECT_EQ(handler_->ring_counters().answered, 1U);
+}
+
+TEST_F(CallHandlerTest, ATicketTheSfuRefusedRingsNobody) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue(std::unexpected(MediaError::Unavailable));
+    EXPECT_EQ(outcomes(), std::vector{CallOutcome::Unavailable});
+    EXPECT_TRUE(plane_.sent.empty());
+    EXPECT_EQ(handler_->calls(), 0U);
+}
+
+TEST_F(CallHandlerTest, TheCalleeDeclinesOnTheOwnerWhichChecksTheListAgain) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    plane_.sent.clear();
+    const int reads = store_.reads;
+    move("bob", chat::CallSignal::Decline, call);
+    EXPECT_EQ(store_.reads, reads + 1);
+    ASSERT_EQ(answers_.size(), 2U);
+    EXPECT_EQ(answers_[1].outcome, CallOutcome::Done);
+    EXPECT_EQ(answers_[1].caller, core::UserId::parse("alice").value());
+    EXPECT_EQ(plane_.events(), std::vector(2, chat::RingEvent::Declined));
+    EXPECT_EQ(handler_->calls(), 0U);
+    // Nothing left to decline, or to cancel.
+    move("bob", chat::CallSignal::Decline, call);
+    move("alice", chat::CallSignal::Cancel, call);
+    EXPECT_EQ(outcomes(), (std::vector{CallOutcome::Ticket, CallOutcome::Done, CallOutcome::NoCall,
+                                       CallOutcome::NoCall}));
+    EXPECT_EQ(handler_->counters().no_call, 2U);
+}
+
+TEST_F(CallHandlerTest, OnlyAMemberOfADirectChatMovesItsCall) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    plane_.sent.clear();
+    move("mallory", chat::CallSignal::Decline, call);
+    // Removed from the list since: the owner's read says so, whatever bob's join said.
+    std::erase(store_.members_, "bob");
+    move("bob", chat::CallSignal::Decline, call);
+    store_.members_.emplace_back("bob");
+    store_.kind = RoomKind::GroupChat;
+    move("bob", chat::CallSignal::Decline, call);
+    store_.kind = RoomKind::DirectChat;
+    store_.down = true;
+    move("bob", chat::CallSignal::Decline, call);
+    EXPECT_EQ(outcomes(),
+              (std::vector{CallOutcome::Ticket, CallOutcome::NotMember, CallOutcome::NotMember,
+                           CallOutcome::NotCallable, CallOutcome::Unavailable}));
+    EXPECT_TRUE(plane_.sent.empty());
+    EXPECT_EQ(handler_->calls(), 1U);
+    // A store that cannot take the read leaves nothing counted.
+    store_.down = false;
+    store_.throwing = true;
+    move("bob", chat::CallSignal::Decline, call);
+    store_.throwing = false;
+    move("bob", chat::CallSignal::Decline, call);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+}
+
+TEST_F(CallHandlerTest, AMemberListTheRingCannotReadIsRetryableAndTheSfuIsNotAsked) {
+    store_.list_down = true;
+    ask("alice");
+    EXPECT_EQ(outcomes(), std::vector{CallOutcome::Unavailable});
+    EXPECT_TRUE(sfu_.opens.empty());
+    EXPECT_EQ(handler_->counters().store_unavailable, 1U);
+    store_.list_down = false;
+    store_.members_throwing = true;
+    ask("alice");
+    // Nothing answered it: the asker's own deadline does (rt::kOwnerAskTimeout).
+    EXPECT_EQ(answers_.size(), 1U);
+    EXPECT_TRUE(errors_.empty());
+    store_.members_throwing = false;
+    // Neither left an ask counted.
+    handler_ = make(chat::CallLimits{.max_in_flight = 1});
+    ask("alice");
+    EXPECT_EQ(sfu_.opens.size(), 1U);
+}
+
+TEST_F(CallHandlerTest, TheRingRunsOutOnTheSweepOfTheLoop) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    plane_.sent.clear();
+    clock_.advance(chat::RingLimits{}.ring_timeout);
+    handler_->sweep();
+    EXPECT_EQ(plane_.events().back(), chat::RingEvent::Missed);
+    EXPECT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(handler_->ring_counters().missed, 1U);
+}
+
+TEST_F(CallHandlerTest, ATicketForAnAnswerThatCameAfterTheRingEndedRingsNobody) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    // Bob answers while alice cancels: the cancel wins the race to the owner.
+    ask("bob", kOtherDevice);
+    move("alice", chat::CallSignal::Cancel, call);
+    plane_.sent.clear();
+    sfu_.issue();
+    ASSERT_EQ(answers_.size(), 3U);
+    EXPECT_EQ(answers_[2].outcome, CallOutcome::Ticket);
+    EXPECT_FALSE(answers_[2].call);
+    EXPECT_TRUE(plane_.sent.empty());
+}
+
+TEST_F(CallHandlerTest, SignalsWithoutAnSfuAreDisabledAsTicketsAre) {
+    handler_ = std::make_unique<chat::CallHandler>(store_, nullptr, plane_, clock_, random_,
+                                                   chat::CallLimits{});
+    move("bob", chat::CallSignal::Decline, chat::CallId::generate(clock_, random_));
+    EXPECT_EQ(outcomes(), std::vector{CallOutcome::Disabled});
+}
+
+class RingBoundedCallHandlerTest : public CallHandlerTest {
+protected:
+    RingBoundedCallHandlerTest()
+        : CallHandlerTest(chat::CallLimits{.ring = chat::RingLimits{.max_calls = 1}}) {}
+};
+
+TEST_F(RingBoundedCallHandlerTest, ATicketThatWouldStartACallPastTheCapIsBusyBeforeTheSfu) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    ask("alice", kDevice, kOtherRoom);
+    EXPECT_EQ(outcomes(), (std::vector{CallOutcome::Ticket, CallOutcome::Busy}));
+    EXPECT_TRUE(sfu_.opens.empty());
+    // Two idle rooms asked at once both pass the check; the second to get its ticket is busy.
+    handler_ = make(chat::CallLimits{.ring = chat::RingLimits{.max_calls = 1}});
+    answers_.clear();
+    ask("alice", kDevice, kOtherRoom);
+    ask("alice", kDevice, kRoom);
+    sfu_.open();
+    sfu_.open();
+    sfu_.issue();
+    sfu_.issue();
+    EXPECT_EQ(outcomes(), (std::vector{CallOutcome::Ticket, CallOutcome::Busy}));
+    EXPECT_EQ(handler_->calls(), 1U);
 }
 
 class BoundedCallHandlerTest : public CallHandlerTest {
@@ -449,8 +676,35 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
                                     .device = *core::DeviceId::parse(kDevice)};
     const auto decoded = chat::decode_request(chat::encode_request(request));
     ASSERT_TRUE(decoded);
-    EXPECT_EQ(decoded->user, request.user);
-    EXPECT_EQ(decoded->device, request.device);
+    const auto* ticket_ask = std::get_if<chat::CallRequest>(&*decoded);
+    ASSERT_NE(ticket_ask, nullptr);
+    EXPECT_EQ(ticket_ask->user, request.user);
+    EXPECT_EQ(ticket_ask->device, request.device);
+
+    ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    const chat::CallId call = chat::CallId::generate(clock, random);
+    for (const chat::CallSignal signal :
+         {chat::CallSignal::Decline, chat::CallSignal::Cancel, chat::CallSignal::End}) {
+        const chat::CallSignalRequest move{.user = request.user, .signal = signal, .call = call};
+        const auto back = chat::decode_request(chat::encode_request(move));
+        ASSERT_TRUE(back);
+        const auto* moved = std::get_if<chat::CallSignalRequest>(&*back);
+        ASSERT_NE(moved, nullptr);
+        EXPECT_EQ(moved->user, move.user);
+        EXPECT_EQ(moved->signal, signal);
+        EXPECT_EQ(moved->call, call);
+    }
+    auto unknown_ask = chat::encode_request(request);
+    unknown_ask[1] = std::byte{4};
+    EXPECT_FALSE(chat::decode_request(unknown_ask));
+    auto short_ask = chat::encode_request(request);
+    short_ask.pop_back();
+    EXPECT_FALSE(chat::decode_request(short_ask));
+    auto long_move = chat::encode_request(chat::CallSignalRequest{
+        .user = request.user, .signal = chat::CallSignal::End, .call = call});
+    long_move.push_back(std::byte{'x'});
+    EXPECT_FALSE(chat::decode_request(long_move));
 
     const chat::CallAnswer ticket{
         .outcome = CallOutcome::Ticket,
@@ -472,8 +726,26 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     trailing.push_back(std::byte{0});
     EXPECT_FALSE(chat::decode_answer(trailing));
     auto unknown = chat::encode_answer({.outcome = CallOutcome::Busy, .ticket = std::nullopt});
-    unknown[1] = std::byte{7};
+    unknown[1] = std::byte{9};
     EXPECT_FALSE(chat::decode_answer(unknown));
+
+    // A ticket names its call; a signal done names the call's caller.
+    chat::CallAnswer rung = ticket;
+    rung.call = call;
+    const auto with_call = chat::decode_answer(chat::encode_answer(rung));
+    ASSERT_TRUE(with_call);
+    EXPECT_EQ(with_call->call, call);
+    const auto done = chat::decode_answer(chat::encode_answer({.outcome = CallOutcome::Done,
+                                                               .ticket = std::nullopt,
+                                                               .call = call,
+                                                               .caller = request.user}));
+    ASSERT_TRUE(done);
+    EXPECT_EQ(done->caller, request.user);
+    auto truncated = chat::encode_answer(rung);
+    truncated.pop_back();
+    EXPECT_FALSE(chat::decode_answer(truncated));
+    EXPECT_FALSE(chat::decode_answer(
+        chat::encode_answer({.outcome = CallOutcome::Done, .ticket = std::nullopt})));
 }
 
 } // namespace
