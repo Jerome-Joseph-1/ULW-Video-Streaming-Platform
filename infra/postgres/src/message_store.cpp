@@ -250,6 +250,51 @@ private:
     MessageCallback<core::ports::Admission> done_;
 };
 
+// Binds the user id, which must outlive the statement.
+class Access final : public Operation {
+public:
+    Access(const core::RoomId& room, const core::UserId& user,
+           MessageCallback<core::ports::RoomAccess> done)
+        : room_(room), user_(user), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = message_sql::kAccess,
+                         .params = Params{}.add_uuid(room_.uuid()).add_text(user_.view())};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+            return std::nullopt;
+        }
+        const auto text = outcome->get(0, 0);
+        const auto member = outcome->get(0, 1).and_then(parse_bool);
+        if (!member) {
+            done_(std::unexpected(MessageStoreError::Corrupt));
+            return std::nullopt;
+        }
+        core::ports::RoomAccess access{.kind = std::nullopt, .member = *member};
+        if (text) {
+            access.kind = kind_of(*text);
+            if (!access.kind) {
+                done_(std::unexpected(MessageStoreError::Corrupt));
+                return std::nullopt;
+            }
+        }
+        done_(access);
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    core::UserId user_;
+    MessageCallback<core::ports::RoomAccess> done_;
+};
+
 class RecordLive final : public Operation {
 public:
     RecordLive(const core::RoomId& room, MessageCallback<void> done)
@@ -432,6 +477,11 @@ void PgMessageStore::admits(const core::RoomId& room, const core::UserId& user,
                             core::ports::RoomKind asked, core::ports::Recording recording,
                             MessageCallback<core::ports::Admission> done) {
     impl_->pool().submit(std::make_unique<Admits>(room, user, asked, recording, std::move(done)));
+}
+
+void PgMessageStore::access(const core::RoomId& room, const core::UserId& user,
+                            MessageCallback<core::ports::RoomAccess> done) {
+    impl_->pool().submit(std::make_unique<Access>(room, user, std::move(done)));
 }
 
 void PgMessageStore::record_live(const core::RoomId& room, MessageCallback<void> done) {

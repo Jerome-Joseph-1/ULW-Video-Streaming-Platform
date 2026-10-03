@@ -79,6 +79,35 @@ public:
     int taken = 0;
 };
 
+// Answers asks with "<node>:" and the request, at once or when told to.
+class Owner final : public rt::IOwnerService {
+public:
+    explicit Owner(std::string node) : node_(std::move(node)) {}
+
+    void on_ask(const core::RoomId& /*room*/, std::span<const std::byte> request,
+                rt::OwnerAnswer answer) noexcept override {
+        asked.push_back(ulw::test::as_text(request));
+        if (hold) {
+            held.push_back(std::move(answer));
+            return;
+        }
+        answer(reply(asked.back()));
+    }
+
+    [[nodiscard]] std::vector<std::byte> reply(std::string_view request) const {
+        const std::string text = node_ + ":" + std::string(request);
+        const auto b = std::as_bytes(std::span{text});
+        return {b.begin(), b.end()};
+    }
+
+    bool hold = false;
+    std::vector<std::string> asked;
+    std::vector<rt::OwnerAnswer> held;
+
+private:
+    std::string node_;
+};
+
 // A test value, made up for these tests; real deployments take theirs from the environment.
 constexpr std::string_view kSecret = "unit-test-node-secret-000000000000000";
 
@@ -275,6 +304,23 @@ struct Tuning {
     std::optional<core::Millis> peer_stall_timeout = std::nullopt;
     // The store refuses to record the node, which then never becomes ready.
     bool refuse_advertise = false;
+    // The router's clock, when not the fixture's.
+    const core::ports::IClock* clock = nullptr;
+};
+
+// The system's clock, moved on by the test: a router given it sees its deadlines pass without
+// the test waiting them out. Its reactor keeps the real clock, so ticks still come.
+class SkewedClock final : public core::ports::IClock {
+public:
+    [[nodiscard]] core::MonoTime now() const noexcept override { return real_.now() + skew_; }
+    [[nodiscard]] core::WallTime wall_now() const noexcept override {
+        return real_.wall_now() + skew_;
+    }
+    void advance(core::Millis d) noexcept { skew_ += d; }
+
+private:
+    os::SystemClock real_;
+    core::Millis skew_{0};
 };
 
 class RoomRouterTest : public ::testing::TestWithParam<ReactorKind> {
@@ -309,7 +355,8 @@ protected:
         config.max_rooms = tuning.max_rooms.value_or(config.max_rooms);
         config.revalidate_every = tuning.revalidate_every.value_or(config.revalidate_every);
         config.peer_stall_timeout = tuning.peer_stall_timeout.value_or(config.peer_stall_timeout);
-        node->router = std::make_unique<rt::RoomRouter>(*reactor_, *node->store, clock_, random_,
+        const core::ports::IClock& clock = tuning.clock != nullptr ? *tuning.clock : clock_;
+        node->router = std::make_unique<rt::RoomRouter>(*reactor_, *node->store, clock, random_,
                                                         std::move(config), node->events);
         EXPECT_TRUE(node->router->start(std::move(*listener)));
         Node& out = *node;
@@ -359,6 +406,22 @@ protected:
             return std::unexpected(RouteError::Unavailable);
         }
         return *result;
+    }
+
+    // The owner's answer as text, or the error.
+    std::expected<std::string, RouteError> ask(Node& node, Member& member, std::string_view text) {
+        std::optional<std::expected<std::vector<std::byte>, RouteError>> result;
+        const auto body = std::as_bytes(std::span{text});
+        node.router->ask_owner(room_, member, body,
+                               [&](auto r) noexcept { result = std::move(r); });
+        if (!pump([&] { return result.has_value(); })) {
+            ADD_FAILURE() << "ask never answered";
+            return std::unexpected(RouteError::Unavailable);
+        }
+        if (!*result) {
+            return std::unexpected(result->error());
+        }
+        return ulw::test::as_text(**result);
     }
 
     // Sends again while the node is still finding the room's new owner.
@@ -736,6 +799,128 @@ TEST_P(RoomRouterTest, SendingToARoomTheMemberHasNotJoinedIsRefused) {
     EXPECT_EQ(db_.rooms.at(room_).last_seq, 0U);
 }
 
+TEST_P(RoomRouterTest, AnAskIsAnsweredByTheRoomsOwnerWhicheverNodeTheMemberIsOn) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Owner on_a("chat-a");
+    Owner on_b("chat-b");
+    a.router->serve(&on_a);
+    b.router->serve(&on_b);
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    ASSERT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-a"));
+    EXPECT_EQ(ask(b, bob, "from bob"), "chat-a:from bob");
+    EXPECT_EQ(ask(a, alice, "from alice"), "chat-a:from alice");
+    EXPECT_EQ(on_a.asked, (std::vector<std::string>{"from bob", "from alice"}));
+    EXPECT_TRUE(on_b.asked.empty());
+    EXPECT_EQ(b.router->counters().forwarded, 1U);
+}
+
+TEST_P(RoomRouterTest, AnAskOfARoomNotJoinedOrOfAnOwnerWithNoServiceIsRefused) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    Member mallory;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    EXPECT_EQ(ask(b, mallory, "hi"), std::unexpected(RouteError::NotJoined));
+    // Nothing serves asks on the owner yet.
+    EXPECT_EQ(ask(b, bob, "hi"), std::unexpected(RouteError::Unavailable));
+    EXPECT_EQ(ask(a, alice, "hi"), std::unexpected(RouteError::Unavailable));
+    // An ask past the bound never leaves the node.
+    Owner on_a("chat-a");
+    a.router->serve(&on_a);
+    const std::string large(rt::kMaxOwnerMessage + 1, 'x');
+    EXPECT_EQ(ask(b, bob, large), std::unexpected(RouteError::Unavailable));
+    EXPECT_TRUE(on_a.asked.empty());
+}
+
+TEST_P(RoomRouterTest, AnAskTheOwnerSitsOnIsUnavailableAfterTheAskTimeoutNotTheForwardOne) {
+    SkewedClock skewed;
+    Node& a = start("chat-a", kSecret, Tuning{.clock = &skewed});
+    Node& b = start("chat-b", kSecret, Tuning{.clock = &skewed});
+    Owner on_a("chat-a");
+    on_a.hold = true;
+    a.router->serve(&on_a);
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    // One ask forwarded, one answered on the owner itself; the service answers neither.
+    std::optional<std::expected<std::vector<std::byte>, RouteError>> forwarded;
+    std::optional<std::expected<std::vector<std::byte>, RouteError>> local;
+    const auto body = std::as_bytes(std::span{std::string_view{"hi"}});
+    b.router->ask_owner(room_, bob, body, [&](auto r) noexcept { forwarded = std::move(r); });
+    a.router->ask_owner(room_, alice, body, [&](auto r) noexcept { local = std::move(r); });
+    ASSERT_TRUE(pump([&] { return on_a.held.size() == 2; }));
+
+    // Each router's next tick checks the deadlines against the clock as it now reads.
+    const auto tick_on_both = [&] {
+        const std::uint64_t a_ticks = a.router->counters().ticks;
+        const std::uint64_t b_ticks = b.router->counters().ticks;
+        return pump([&] {
+            return a.router->counters().ticks > a_ticks && b.router->counters().ticks > b_ticks;
+        });
+    };
+
+    // Past a send's forward timeout: an ask takes longer than that, and is still waited for.
+    skewed.advance(rt::kOwnerAskTimeout / 2);
+    ASSERT_TRUE(tick_on_both());
+    EXPECT_FALSE(forwarded.has_value());
+    EXPECT_FALSE(local.has_value());
+    EXPECT_EQ(b.router->counters().forward_timeouts, 0U);
+
+    skewed.advance(rt::kOwnerAskTimeout / 2 + core::Millis{1'000});
+    ASSERT_TRUE(pump([&] { return forwarded.has_value() && local.has_value(); }));
+    EXPECT_EQ(*forwarded, std::unexpected(RouteError::Unavailable));
+    EXPECT_EQ(*local, std::unexpected(RouteError::Unavailable));
+    // Answered by the deadlines, not by a link that went down: the forwarded ask by its link's,
+    // the owner's own by the router's, and the link between the nodes is still up.
+    EXPECT_EQ(b.router->counters().forward_timeouts, 1U);
+    EXPECT_EQ(a.router->counters().ask_timeouts, 1U);
+    EXPECT_EQ(b.router->counters().peers_lost, 0U);
+    EXPECT_EQ(a.router->counters().peers_lost, 0U);
+    EXPECT_TRUE(b.events.lost.empty());
+    EXPECT_TRUE(a.events.lost.empty());
+    // The service's late answers reach nobody.
+    for (rt::OwnerAnswer& answer : on_a.held) {
+        answer(on_a.reply("late"));
+    }
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_EQ(*forwarded, std::unexpected(RouteError::Unavailable));
+}
+
+TEST_P(RoomRouterTest, AnAskWhoseMemberLeftIsAnsweredToNobody) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Owner on_a("chat-a");
+    on_a.hold = true;
+    a.router->serve(&on_a);
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    int answered = 0;
+    const auto body = std::as_bytes(std::span{std::string_view{"hi"}});
+    b.router->ask_owner(room_, bob, body, [&](auto) noexcept { ++answered; });
+    a.router->ask_owner(room_, alice, body, [&](auto) noexcept { ++answered; });
+    ASSERT_TRUE(pump([&] { return on_a.held.size() == 2; }));
+    b.router->leave(room_, bob);
+    a.router->leave(room_, alice);
+    for (rt::OwnerAnswer& answer : on_a.held) {
+        answer(on_a.reply("late"));
+    }
+    // The forwarded answer crosses the node channel before it is dropped.
+    Member carol;
+    ASSERT_TRUE(join(b, carol));
+    on_a.hold = false;
+    EXPECT_EQ(ask(b, carol, "after"), "chat-a:after");
+    EXPECT_EQ(answered, 0);
+}
+
 TEST_P(RoomRouterTest, AMemberWhoLeftReceivesNothingMore) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");
@@ -811,7 +996,7 @@ TEST_P(RoomRouterTest, AHelloOfAnotherVersionIsRefusedAsSuch) {
     peer.send(hello);
     EXPECT_TRUE(peer.hung_up());
     EXPECT_EQ(a.events.refused,
-              std::vector<std::string>{"version mismatch: peer speaks 1, this node 3"});
+              std::vector<std::string>{"version mismatch: peer speaks 1, this node 4"});
 }
 
 TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {

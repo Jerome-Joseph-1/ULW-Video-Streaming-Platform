@@ -65,10 +65,13 @@ done
 # The keys are the ones RUNBOOK.md lists, with sandbox values.
 kubectl -n stunner-system create secret generic stunner-secrets --from-literal=type=ephemeral \
     --from-literal="secret=$turn_secret" --dry-run=client -o yaml | apply_stdin
+# Chat's call handler signs tickets with the same pair (docs/adr/0087), and names Envoy's
+# listener on this host as the URL clients reach LiveKit's /rtc route on.
 kubectl -n apps-stage create secret generic sfu-secrets --from-literal=ASKEDIN_ENV=stage \
     --from-literal="LIVEKIT_KEYS=$livekit_keys" --from-literal="TURN_HOST=$outside_gateway" \
     --from-literal="TURN_SECRET=$turn_secret" --from-literal="LIVEKIT_API_KEY=${livekit_keys%%: *}" \
     --from-literal="LIVEKIT_API_SECRET=${livekit_keys#*: }" \
+    --from-literal="LIVEKIT_CLIENT_URL=ws://127.0.0.1:18080" \
     --from-literal="REDIS_PASSWORD=$redis_password" --dry-run=client -o yaml | apply_stdin
 
 log "applying the operator, the Gateway and LiveKit"
@@ -91,4 +94,10 @@ kubectl -n apps-stage rollout restart deployment/livekit-redis >/dev/null
 kubectl -n apps-stage rollout status deployment/livekit-redis --timeout=120s
 kubectl -n apps-stage rollout restart deployment/livekit >/dev/null
 kubectl -n apps-stage rollout status deployment/livekit --timeout=180s
+# Chat (when e2e-up.sh deployed it) reads sfu-secrets only at start: until its pods restart they
+# answer calls with calls_disabled.
+if kubectl -n apps-stage get deployment chat >/dev/null 2>&1; then
+    kubectl -n apps-stage rollout restart deployment/chat >/dev/null
+    kubectl -n apps-stage rollout status deployment/chat --timeout=300s
+fi
 log "up: TURN on $outside_gateway:3478/udp, LiveKit signalling on http://$outside_gateway:17880"

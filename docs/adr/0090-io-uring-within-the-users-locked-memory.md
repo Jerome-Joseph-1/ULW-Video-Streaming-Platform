@@ -1,10 +1,10 @@
-# 0090. The io_uring reactor stays within its user's locked memory: zero copy only without a limit, and a host's limit per parallel test
+# 0090. The io_uring reactor stays within its user's locked memory: zero copy only where the limit cannot refuse it
 
 Status: Accepted
 Date: 2026-10-03
 Amends: ADR-0051 (zero-copy sends are tried only where RLIMIT_MEMLOCK is unlimited or the
-process has CAP_IPC_LOCK); ADR-0086 (the integration label's step runs with 8 MiB of locked
-memory per core)
+process has CAP_IPC_LOCK); ADR-0086 (the integration label's steps run with the locked-memory
+limit lifted, as #132 put it in ci.yml)
 
 ## Context
 
@@ -49,11 +49,12 @@ remain unexplained, and the burst stays in the probe for them.
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
-| Raise the limit in CI only | One line in the workflow | Rejected alone: production hosts with the 8 MiB default (Debian, Fedora, systemd services) would have each starting reactor refuse the others, a gateway's shards included, and fall back to epoll |
+| Lift the limit in CI only | One line in the workflow | Rejected alone (CI does lift it, below): production hosts with the 8 MiB default (Debian, Fedora, systemd services) would have each starting reactor refuse the others, a gateway's shards included, and fall back to epoll |
 | Probe with one send, rely on the per-socket fallback | Keeps zero copy everywhere | Rejected: 1,024 zero-copy sends in flight still charge 8 MiB at run time, whatever the probe did |
 | Probe in small batches | Lower peak during the probe | Rejected: same run-time charge, and the burst is what proves the kernel takes as many as the reactor holds |
 | Try zero copy only where RLIMIT_MEMLOCK is unlimited; otherwise plain sends, no probe | The reactor charges its user its rings and nothing else under any finite limit; zero copy's benefit for datagrams of 2 KiB or less is unmeasured, and loopback always copies (ADR-0051) | Accepted |
 | Smaller rings | Less per reactor | Rejected: not the cause; 4,096 entries are sized for 448 connections per shard |
+| A finite limit in CI of 8 MiB per core | Keeps CI as close to a default host as `-j` allows | Rejected: the counter is the sum over the user, and a ring stays charged for a moment after its process exits, so no figure sized from one test holds |
 
 ## Decision
 
@@ -70,21 +71,25 @@ remain unexplained, and the burst stays in the probe for them.
   as another user, a refusal before the reactors start (the user's other processes already hold
   the room) skips the test with that reason. With the probe as it was it fails most runs (18 of
   20 in review).
-- `tools/memlock-per-core.sh` runs a command with RLIMIT_MEMLOCK raised (with sudo) to 8 MiB per
-  core, keeping a higher limit. The integration job's `ctest -j` step and the coverage job's
-  `tools/coverage.sh` run under it: one test per core is a host's processes per core, under one
-  user's counter. The limit stays finite, so zero copy stays off there as on a default host.
+- In ci.yml the integration job's `ctest -j` step and the coverage job's `tools/coverage.sh`
+  first lift the step shell's limit (`sudo prlimit --pid $$ --memlock=unlimited:unlimited`, from
+  #132): one test per core is many processes under one user's counter.
 - `tools/io_uring_probe.c` prints the soft limit next to the kernel sysctl.
 
 ## Consequences
 
 - No io_uring reactor uses zero-copy sends under a finite locked-memory limit without
-  CAP_IPC_LOCK, CI's hosted runners included (where the probe already failed at 8 MiB). That
+  CAP_IPC_LOCK, as in CI's jobs that keep the runners' 8 MiB (build-test, reactor-matrix). That
   includes kernels before 6.15, where `SENDMSG_ZC` cost no locked memory and zero copy was on.
   A process with CAP_IPC_LOCK (root in the initial user namespace) and a finite limit keeps it.
   Hosts and containers with an unlimited limit keep ADR-0051's behaviour, self-hosted runners
   given `LimitMEMLOCK=infinity` as docs/operations/soak.md describes among them;
   `zero_copy_sends` in the datagram stats shows which a process has.
+- The integration and coverage steps run unlimited, so there every reactor runs the 1,024-send
+  probe and its sockets start on zero copy, switching to plain sends at the first notification
+  that the kernel copied, as loopback always does (ADR-0051). Those steps exercise the probe and
+  that switch; the unit label (one test at a time, under 8 MiB) exercises the plain path and,
+  through the new test, the charge.
 - Under an unlimited limit the probe still charges 8 MiB to the user's shared counter while it
   runs; nothing is refused, but the counter is not empty then, so a process of the same user
   under a finite limit can still be refused for that moment.

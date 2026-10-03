@@ -27,10 +27,13 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -984,8 +987,9 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     // 900 messages of 2000 bytes, about 2.6 MiB for each viewer: rounds of one message per
     // sender, each round read by everyone but the slow viewers before the next, so that no
     // one else is ever behind. A send the room or the user turns away as rate_limited is tried
-    // again in the next round, with a new id since it was never sequenced; the room's allowance
-    // (40, then 20 a second on each node) sets the pace.
+    // again, with a new id since it was never sequenced, once the refusal's retry_after_ms has
+    // passed, and first on its node; the room's allowance (40, then 20 a second on each node)
+    // sets the pace.
     constexpr std::size_t kMessages = 900;
     // Past the first half, the room keeps its most and the slow viewers are long behind.
     constexpr std::size_t kSettled = 450;
@@ -1006,13 +1010,33 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     std::uint64_t settled_seq = 0;
     std::size_t sampled = 0;
     std::vector<Resident> samples;
+    // Where each of the others' last wait for the head found it. Every wait looks only at what
+    // is new: going through all a client had heard for each frame it read made this process,
+    // not the nodes, set the pace, until under ASan on a loaded runner 90 messages took longer
+    // than stall_timeout and the slow viewers were rightly closed between two of their reads.
+    std::map<const Client*, std::size_t> found;
+    for (auto* group : {&senders, &viewers}) {
+        for (auto& c : *group) {
+            found[c.get()] = 0;
+        }
+    }
+    // A node that turned a send away is not sent to again until the refusal's retry_after_ms has
+    // passed: the allowance it ran out of has a token then. Its refused sender goes first, so
+    // that no other sender on the node takes that token before it. A send has two allowances,
+    // its user's and then the room's, and a refusal names the wait for the one that ran out, so
+    // the other may refuse the retry once; a third refusal in a row means a limit did not lift
+    // when the node said it would.
+    using Clock = std::chrono::steady_clock;
+    std::array<Clock::time_point, 3> not_before{};
+    std::array<std::size_t, 3> first_on{};
+    std::array<bool, 3> waited{};
+    std::array<int, 3> refused_after_wait{};
     while (acked < kMessages) {
-        // A node that turned one send away turns away the rest of the round's too: they are
-        // not tried, which keeps the retrying down to a few sends a round.
         std::array<bool, 3> refused{};
-        for (std::size_t s = 0; s < senders.size(); ++s) {
-            const std::size_t node = s / 10;
-            if (refused.at(node)) {
+        for (std::size_t turn = 0; turn < senders.size(); ++turn) {
+            const std::size_t node = turn / 10;
+            const std::size_t s = (node * 10) + ((first_on.at(node) + turn) % 10);
+            if (refused.at(node) || Clock::now() < not_before.at(node)) {
                 continue;
             }
             if (!holding[s] && next < kMessages) {
@@ -1027,38 +1051,75 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
                 ids[s] = std::format("m{}-{}", *holding[s], attempts);
             }
             ++attempts;
+            // The answer is the first for this id after the send: an id sent again after
+            // unavailable has its earlier answer before it.
+            const std::size_t before = senders[s]->seen().size();
             ASSERT_TRUE(senders[s]->send(send_command(live, body(*holding[s]), ids[s])));
-            const std::size_t answers = senders[s]->count([&](const Seen& seen) {
+            const auto at = senders[s]->wait_from(before, [&](const Seen& seen) {
                 return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
             });
-            ASSERT_TRUE(senders[s]->wait_for([&](const Seen&) {
-                return senders[s]->count([&](const Seen& seen) {
-                    return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
-                }) > answers;
-            })) << ids[s];
-            const Seen answer =
-                *std::ranges::find_last_if(senders[s]->seen(), [&](const Seen& seen) {
-                     return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
-                 }).begin();
+            ASSERT_TRUE(at) << ids[s];
+            const Seen answer = senders[s]->seen()[*at];
+            const bool after_wait = std::exchange(waited.at(node), false);
             if (answer.type == "sent") {
+                refused_after_wait.at(node) = 0;
                 head = std::max(head, answer.seq);
                 holding[s].reset();
                 ids[s].clear();
                 ++acked;
             } else if (answer.reason == "rate_limited") {
+                refused_after_wait.at(node) = after_wait ? refused_after_wait.at(node) + 1 : 0;
+                ASSERT_LT(refused_after_wait.at(node), 2)
+                    << senders[s]->name() << " was turned away again after waiting out both "
+                    << "allowances' retry_after_ms: the rate limit never lifted";
+                ASSERT_TRUE(answer.retry_after_ms) << ids[s];
                 refused.at(node) = true;
+                waited.at(node) = true;
+                first_on.at(node) = s % 10;
+                not_before.at(node) =
+                    Clock::now() + std::chrono::milliseconds(*answer.retry_after_ms);
                 ids[s].clear();
             } else {
                 ASSERT_EQ(answer.reason, "unavailable") << ids[s];
             }
         }
-        ASSERT_LT(attempts, 200'000U) << "the rate limit never lifted";
+        // When every node with something to send is waiting out a refusal, the soonest of them
+        // is waited for on its refused sender's connection, taking in what arrives meanwhile.
+        const auto pending = [&](std::size_t n) {
+            return next < kMessages ||
+                   std::ranges::any_of(std::span(holding).subspan(n * 10, 10),
+                                       [](const auto& h) { return h.has_value(); });
+        };
+        const bool any_sendable =
+            std::ranges::any_of(std::array<std::size_t, 3>{0, 1, 2}, [&](std::size_t n) {
+                return pending(n) && Clock::now() >= not_before.at(n);
+            });
+        if (!any_sendable && acked < kMessages) {
+            std::size_t n = 3;
+            for (std::size_t k = 0; k < 3; ++k) {
+                if (pending(k) && (n == 3 || not_before.at(k) < not_before.at(n))) {
+                    n = k;
+                }
+            }
+            ASSERT_LT(n, 3U);
+            Client& refused_sender = *senders[(n * 10) + first_on.at(n)];
+            const auto left =
+                std::chrono::ceil<std::chrono::milliseconds>(not_before.at(n) - Clock::now());
+            if (left.count() > 0) {
+                refused_sender.wait_from(
+                    refused_sender.seen().size(), [](const Seen&) { return false; }, left);
+                ASSERT_EQ(refused_sender.ending(), "open") << refused_sender.name();
+            }
+        }
         for (auto* group : {&senders, &viewers}) {
             for (auto& c : *group) {
-                ASSERT_TRUE(c->wait_for([&](const Seen& seen) {
+                // What came before the last round's head came before this one's too.
+                std::size_t& from = found.at(c.get());
+                const auto at = c->wait_from(from, [&](const Seen& seen) {
                     return seen.type == "message" && seen.seq >= head;
-                })) << c->name()
-                    << " never got seq " << head;
+                });
+                ASSERT_TRUE(at) << c->name() << " never got seq " << head;
+                from = *at;
             }
         }
         if (acked / kReadEvery > reads) {
@@ -1225,6 +1286,137 @@ TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePasswor
         EXPECT_NE(chat->output().find("ULW_DATABASE_URL"), std::string::npos) << chat->output();
         EXPECT_EQ(chat->output().find("hunt"), std::string::npos) << chat->output();
     }
+}
+
+// A call's ticket, as the room WebSocket answers a call (docs/integration/calls.md): the ticket,
+// or an error.
+std::optional<Seen> call_answer(Client& client, const std::string& room,
+                                const std::string& device) {
+    const auto answers = [&](const Seen& s) {
+        return s.room == room && (s.type == "ticket" || s.type == "error");
+    };
+    // This call's answer, not one an earlier call of the client's got.
+    std::size_t earlier = client.count(answers);
+    if (!client.send(R"({"type":"call","room":")" + room + R"(","device":")" + device + R"("})")) {
+        return std::nullopt;
+    }
+    return client.wait_for([&](const Seen& s) {
+        if (!answers(s)) {
+            return false;
+        }
+        if (earlier > 0) {
+            --earlier;
+            return false;
+        }
+        return true;
+    });
+}
+
+// LIVEKIT_CLIENT_URL, what every ticket names; empty when unset.
+std::string livekit_client_url() {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
+    const char* url = std::getenv("LIVEKIT_CLIENT_URL");
+    return url == nullptr ? std::string() : std::string(url);
+}
+
+// The port LiveKit's client URL names, which this test reaches it on: ws://127.0.0.1:<port>.
+std::uint16_t livekit_port() {
+    const std::string url = livekit_client_url();
+    return core::parse_integer<std::uint16_t>(url.substr(url.rfind(':') + 1)).value_or(0);
+}
+
+// A client on LiveKit's signalling socket, with what LiveKit sent it first once its ticket
+// admitted it: the join response (protobuf, whose strings appear as they are). nullopt when
+// LiveKit refused the ticket, with its status line in `refusal`.
+struct RtcClient {
+    ulw::test::WsClient socket;
+    std::string join;
+};
+
+std::optional<RtcClient> rtc_join(const std::string& token, std::string* refusal) {
+    auto rtc = ulw::test::WsClient::connect(
+        livekit_port(), "/rtc?access_token=" + token + "&auto_subscribe=1&sdk=js&protocol=15", "",
+        refusal);
+    if (!rtc) {
+        return std::nullopt;
+    }
+    while (auto frame = rtc->next_frame(std::chrono::seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Binary) {
+            return RtcClient{.socket = std::move(*rtc), .join = std::move(frame->second)};
+        }
+    }
+    return std::nullopt;
+}
+
+// M23 to M26 through chat (ADR-0050): each member of a direct chat asks for the call on the room
+// WebSocket of whichever node it is on; the room's owner answers both, and LiveKit admits each
+// ticket into the same room, where the second finds the first. Needs a LiveKit
+// (LIVEKIT_API_URL and the rest, as tests/call/run.sh sets them); skipped without one.
+TEST_P(ChatClusterTest, ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsToOneRoom) {
+    if (ulw::test::livekit_environment().empty()) {
+        GTEST_SKIP() << "no LiveKit: set LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY "
+                        "and LIVEKIT_API_SECRET";
+    }
+    const std::string direct = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(direct, {"alice", "bob"}, "direct_chat"));
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    // Alice's join makes chat-1 the room's owner; bob's node forwards his call to it.
+    ASSERT_EQ(join_answer(*alice, direct), "joined");
+    ASSERT_EQ(join_answer(*bob, direct), "joined");
+    // Fixed and distinct: two devices are two participants only if their ids differ.
+    const std::string alice_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9a1";
+    const std::string bob_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9b1";
+    const auto issued = std::chrono::duration_cast<seconds>(clock_.wall_now().time_since_epoch());
+    const auto a = call_answer(*alice, direct, alice_device);
+    const auto b = call_answer(*bob, direct, bob_device);
+    ASSERT_TRUE(a && b);
+    ASSERT_EQ(a->type, "ticket") << a->reason;
+    ASSERT_EQ(b->type, "ticket") << b->reason;
+    EXPECT_EQ(a->url, livekit_client_url());
+    EXPECT_EQ(b->url, a->url);
+    // A minute to connect with (ADR-0050).
+    EXPECT_GE(a->expires_at, static_cast<std::uint64_t>(issued.count()) + 59);
+    EXPECT_LE(a->expires_at, static_cast<std::uint64_t>(issued.count()) + 61);
+    EXPECT_EQ(metric(nodes_[0], "call_tickets_total"), 2U);
+    EXPECT_EQ(metric(nodes_[1], "call_tickets_total"), 0U);
+    EXPECT_EQ(metric(nodes_[0], "call_rooms_opened_total"), 1U);
+
+    std::string refusal;
+    const auto first = rtc_join(a->token, &refusal);
+    ASSERT_TRUE(first) << "LiveKit refused alice's ticket: " << refusal;
+    EXPECT_NE(first->join.find(direct + ":1"), std::string::npos);
+    EXPECT_NE(first->join.find("alice/" + alice_device), std::string::npos);
+    const auto second = rtc_join(b->token, &refusal);
+    ASSERT_TRUE(second) << "LiveKit refused bob's ticket: " << refusal;
+    EXPECT_NE(second->join.find(direct + ":1"), std::string::npos);
+    EXPECT_NE(second->join.find("bob/" + bob_device), std::string::npos);
+    EXPECT_NE(second->join.find("alice/" + alice_device), std::string::npos)
+        << "bob's join response does not name alice as already in the room";
+
+    // A call is two participants: a third device, with a ticket of its own, is refused.
+    const auto third = call_answer(*alice, direct, "01a0eb86-6cca-7dce-84cc-3bb47615f9a2");
+    ASSERT_TRUE(third);
+    ASSERT_EQ(third->type, "ticket") << third->reason;
+    EXPECT_FALSE(rtc_join(third->token, &refusal)) << "LiveKit admitted a third participant";
+
+    // The ticket is what admits: one with its signature altered is refused.
+    // The signature's first character: all six of its bits are the signature's, where the
+    // last character's lowest two are padding.
+    std::string forged = a->token;
+    char& signed_char = forged.at(forged.rfind('.') + 1);
+    signed_char = signed_char == 'A' ? 'B' : 'A';
+    EXPECT_FALSE(rtc_join(forged, &refusal));
+    EXPECT_NE(refusal.find(" 401"), std::string::npos) << refusal;
+
+    // A group chat has no call (ADR-0058).
+    auto again = connect(nodes_[2], 0);
+    ASSERT_TRUE(again);
+    ASSERT_NO_FATAL_FAILURE(join(*again));
+    const auto group = call_answer(*again, room_, alice_device);
+    ASSERT_TRUE(group);
+    EXPECT_EQ(group->reason, "not_callable");
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatClusterTest,

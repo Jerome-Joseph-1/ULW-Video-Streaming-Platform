@@ -90,4 +90,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted |
 | [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted |
 | [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted, amended by 0090 |
-| [0090](0090-io-uring-within-the-users-locked-memory.md) | The io_uring reactor stays within its user's locked memory: zero copy only without a limit, and a host's limit per parallel test | Accepted |
+| [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted |
+| [0090](0090-io-uring-within-the-users-locked-memory.md) | The io_uring reactor stays within its user's locked memory: zero copy only where the limit cannot refuse it | Accepted |
