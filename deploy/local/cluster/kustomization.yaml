@@ -40,3 +40,11 @@ patches:
   - path: worker-patch.yaml
   - path: chat-patch.yaml
   - path: networkpolicy-patch.yaml
+  # The shipped routes answer only stage's host; the sandbox is reached as 127.0.0.1:18080, so
+  # its routes name no hostname.
+  - target:
+      kind: HTTPRoute
+      name: video-gateway|chat
+    patch: |-
+      - op: remove
+        path: /spec/hostnames
