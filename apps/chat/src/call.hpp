@@ -33,7 +33,7 @@ inline constexpr std::uint16_t kCallParticipants = 2;
 // A group chat's call: CallLimits::group_participants devices, within these bounds (ADR-0095).
 inline constexpr std::uint16_t kMinGroupParticipants = 3;
 inline constexpr std::uint16_t kMaxGroupParticipants = 16;
-// The media generation a room starts at (migrations/0011). It moves on only to put someone out
+// The media generation a room starts at (migrations/0015). It moves on only to put someone out
 // of the call or to end a group call, by the owner's fenced write (ADR-0050, ADR-0095).
 inline constexpr core::ports::MediaGeneration kCallGeneration{1};
 
