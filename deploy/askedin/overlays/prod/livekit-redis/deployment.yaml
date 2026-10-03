@@ -1,0 +1,93 @@
+# The bus between LiveKit and its recorder (egress): LiveKit reaches egress only through Redis
+# (docs/adr/0053), so a live stream's relay needs it. It holds nothing durable: rooms and
+# egress requests in flight, all of which a restart loses as a LiveKit restart does. So no
+# persistence (no save, no append-only file) and no volume beyond an empty working directory.
+# Only LiveKit and egress reach it (networkpolicy.yaml), with the password in sfu-secrets.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livekit-redis
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: livekit-redis
+    app.kubernetes.io/part-of: ulw
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: livekit-redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: livekit-redis
+        app.kubernetes.io/part-of: ulw
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          # redis 7.4.6 (alpine), the image deploy/local/compose.yaml's calls profile runs.
+          image: docker.io/library/redis:7.4.6-alpine@sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
+          imagePullPolicy: IfNotPresent
+          # redis-server directly: command replaces the image's entrypoint script, whose only
+          # job (dropping from root with gosu) a pod already running as 10001 does not need.
+          # The password is an argument, so it shows in this pod's own process list only.
+          command:
+            - redis-server
+            - --port
+            - "6379"
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+          ports:
+            - name: redis
+              containerPort: 6379
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: REDIS_PASSWORD
+          # A handful of keys per room and per egress request: a few MiB in use, the rest the
+          # server itself.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+              ephemeral-storage: 64Mi
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 16Mi

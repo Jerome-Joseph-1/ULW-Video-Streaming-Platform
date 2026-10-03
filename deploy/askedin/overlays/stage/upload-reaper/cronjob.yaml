@@ -37,7 +37,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: reaper
-              image: git.askedin.com/askedin/askedin-monorepo/video-gateway:development
+              image: ghcr.io/jerome-joseph-1/ulw-video-gateway:main
               imagePullPolicy: Always
               command: ["/usr/local/bin/ulw_reaper"]
               env:

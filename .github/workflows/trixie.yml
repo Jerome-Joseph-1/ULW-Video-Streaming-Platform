@@ -1,12 +1,13 @@
 name: trixie
 
-# The worker image's ffmpeg (Debian 13, docs/adr/0074) under the code that drives it. ci.yml's
-# unit and integration jobs run the runner's Ubuntu ffmpeg 6.1; this builds the ffmpeg suites and
-# the worker's, the live packager's and the live recording's integration suites on the runner,
-# as the image's binaries are built on Ubuntu, and runs them inside the worker image, on its
-# libraries and its ffmpeg 7.1. It also re-traces the syscalls and re-measures the address
-# space the sandbox's limits must hold, there. Only when the image or the code around
-# ffmpeg changes, and nightly, since a snapshot bump can land without touching that code.
+# The worker image's ffmpeg (Debian 13, docs/adr/0074), which the live packager's image shares,
+# under the code that drives it. ci.yml's unit and integration jobs run the runner's Ubuntu
+# ffmpeg 6.1; this builds the ffmpeg suites and the worker's, the live packager's and the live
+# recording's integration suites on the runner, as the images' binaries are built on Ubuntu,
+# and runs them inside the worker image, on its libraries and its ffmpeg 7.1. It also
+# re-traces the syscalls and re-measures the address space the sandbox's limits must hold,
+# there. Only when the image or the code around ffmpeg changes, and nightly, since a snapshot
+# bump can land without touching that code.
 on:
   push:
     branches: [main]
@@ -94,22 +95,29 @@ jobs:
           cmake --build --preset ci --target ffmpeg_unit_tests worker_integration_tests
           live_packager_integration_tests live_recording_integration_tests
       - run: docker build -f deploy/docker/Dockerfile --target worker -t ulw-worker-test .
-      # The image's own binaries, built on Ubuntu, against trixie's libraries. They link with
+      # The live packager's image shares the worker's Debian stage, so only its own binaries
+      # need loading there; the suites below run its code on the same libraries and ffmpeg.
+      - run: >-
+          docker build -f deploy/docker/Dockerfile --target live-packager
+          -t ulw-live-packager-test .
+      # The images' own binaries, built on Ubuntu, against trixie's libraries. They link with
       # -z now, so a symbol version trixie lacks (a newer glibc or libstdc++ on the build
       # release) fails at load, before main: exit 127 or the loader's message. A refusal of
       # the empty configuration is main running, which is the pass.
-      - name: The image's binaries load on trixie
+      - name: The images' binaries load on trixie
         run: |
           status=0
-          for binary in transcode_worker ulw_sandbox; do
+          for pair in ulw-worker-test:transcode_worker ulw-worker-test:ulw_sandbox \
+              ulw-live-packager-test:live_packager ulw-live-packager-test:ulw_sandbox; do
+            image=${pair%%:*} binary=${pair#*:}
             code=0
-            output=$(docker run --rm --entrypoint "/usr/local/bin/$binary" ulw-worker-test 2>&1) ||
+            output=$(docker run --rm --entrypoint "/usr/local/bin/$binary" "$image" 2>&1) ||
               code=$?
-            echo "$binary: exit $code: $output"
+            echo "$image $binary: exit $code: $output"
             if [[ $code -eq 127 ]] || grep -qE \
                 "error while loading shared libraries|symbol lookup error|version .* not found" \
                 <<<"$output"; then
-              echo "::error::$binary does not load on trixie"
+              echo "::error::$binary in $image does not load on trixie"
               status=1
             fi
           done

@@ -1,0 +1,43 @@
+# LiveKit's signalling WebSocket, the endpoint a call ticket names (the client SDK connects to
+# <ticket url>/rtc), and its WHIP endpoint, the one a publisher ticket names (docs/adr/0053):
+# POST /whip/v1 starts a live stream's ingest session, PATCH and DELETE on the session's
+# /whip/v1/<id> trickle candidates and end it. Its server API (/twirp) stays inside the cluster:
+# only the call and stream services call it.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: livekit
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: livekit
+    app.kubernetes.io/part-of: ulw
+spec:
+  parentRefs:
+    - name: askedin-gateway
+      namespace: apps
+  # Askedin's prod origins (docs/integration/auth.md, Askedin): stage and prod share
+  # askedin-gateway, so a route without hostnames would also answer stage's. A call or
+  # publisher ticket for prod must name one of these hosts.
+  hostnames:
+    - askedin.com
+    - www.askedin.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /rtc
+      backendRefs:
+        - name: livekit
+          port: 7880
+      # A signalling connection lasts the whole call.
+      timeouts:
+        request: 0s
+    # One request each, answered as soon as LiveKit has the session's answer or has applied
+    # the candidates; the route's default timeout covers them.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /whip
+      backendRefs:
+        - name: livekit
+          port: 7880

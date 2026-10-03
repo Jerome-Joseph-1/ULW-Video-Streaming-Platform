@@ -15,6 +15,10 @@ spec:
     # nothing and every request 404s, with no error anywhere.
     - name: askedin-gateway
       namespace: apps
+  # Stage's host, unconfirmed by Askedin (RUNBOOK.md, open decisions): stage and prod share
+  # askedin-gateway, so a route without hostnames would also answer prod's.
+  hostnames:
+    - stage.askedin.com
   rules:
     - matches:
         - path:
@@ -31,6 +35,17 @@ spec:
       # enforces its own header, body-rate and 6 h backstop timeouts, so Envoy imposes none.
       timeouts:
         request: 0s
+    # Live playlists (docs/integration/live.md): one short GET, answered from the gateway's
+    # manifest cache or one storage read, and never held open, so Envoy's ordinary bound stands.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/live
+      backendRefs:
+        - name: video-gateway
+          port: 80
+      timeouts:
+        request: 15s
 ---
 # The gateway closes a keep-alive connection that sits idle for its 10 s header timeout. If
 # Envoy kept pooled upstream connections longer, it would sometimes send a request down one the

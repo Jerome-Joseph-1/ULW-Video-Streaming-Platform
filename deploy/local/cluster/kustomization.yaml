@@ -18,15 +18,33 @@ resources:
   - ../../askedin/overlays/stage/video-gateway/networkpolicy.yaml
   - ../../askedin/overlays/stage/video-worker/deployment.yaml
   - ../../askedin/overlays/stage/video-worker/networkpolicy.yaml
-# Images built by e2e-up.sh and loaded into the node; nothing is pulled from Askedin's registry.
+  - ../../askedin/overlays/stage/chat/deployment.yaml
+  - ../../askedin/overlays/stage/chat/service.yaml
+  - ../../askedin/overlays/stage/chat/httproute.yaml
+  - ../../askedin/overlays/stage/chat/networkpolicy.yaml
+  - ../../askedin/overlays/stage/live-packager/service.yaml
+  - ../../askedin/overlays/stage/live-packager/networkpolicy.yaml
+# Images built by e2e-up.sh and loaded into the node; nothing is pulled from ghcr.io.
 images:
-  - name: git.askedin.com/askedin/askedin-monorepo/video-gateway
+  - name: ghcr.io/jerome-joseph-1/ulw-video-gateway
     newName: ulw/video-gateway
     newTag: e2e
-  - name: git.askedin.com/askedin/askedin-monorepo/video-worker
+  - name: ghcr.io/jerome-joseph-1/ulw-video-worker
     newName: ulw/video-worker
+    newTag: e2e
+  - name: ghcr.io/jerome-joseph-1/ulw-chat
+    newName: ulw/chat
     newTag: e2e
 patches:
   - path: gateway-patch.yaml
   - path: worker-patch.yaml
+  - path: chat-patch.yaml
   - path: networkpolicy-patch.yaml
+  # The shipped routes answer only stage's host; the sandbox is reached as 127.0.0.1:18080, so
+  # its routes name no hostname.
+  - target:
+      kind: HTTPRoute
+      name: video-gateway|chat
+    patch: |-
+      - op: remove
+        path: /spec/hostnames

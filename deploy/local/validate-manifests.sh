@@ -5,10 +5,13 @@
 # fails. The Woodpecker pipeline goes through woodpecker-cli's linter, with its buildx plugin
 # privileged as RUNBOOK.md has the Woodpecker server configure it.
 #
+# The live packager's Job (deploy/askedin/live-packager/job.yaml) is a template, filled in per
+# stream; it is checked here as filled in for a sample stream in each environment.
+#
 # With --server, it also asks the sandbox cluster's API server (e2e-up.sh must have run) to
-# dry-run the Askedin overlays, prod and stage, and STUNner's manifests, which checks them
-# against the admission chain and the CRDs as installed. Only the sandbox: its kubeconfig is
-# the only one this script uses.
+# dry-run the Askedin overlays, prod and stage, the packager's Job as above, and STUNner's
+# manifests, which checks them against the admission chain and the CRDs as installed. Only the
+# sandbox: its kubeconfig is the only one this script uses.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -24,12 +27,29 @@ trap 'rm -rf "$manifests"' EXIT
     >"$manifests/sandbox.yaml"
 "$tools/kubectl" kustomize --load-restrictor LoadRestrictionsNone "$root/deploy/stunner" \
     >"$manifests/stunner.yaml"
+# As RUNBOOK.md fills it with envsubst, for these variables only ($(POD_IP) stays as written).
+# shellcheck disable=SC2016 # the template's literal ${...}, not the shell's
+packager_job() {
+    sed -e "s/\${ULW_NAMESPACE}/$1/g" -e "s/\${ULW_IMAGE_TAG}/$2/g" \
+        -e 's/\${ULW_STREAM_ID}/sample-stream/g' \
+        -e 's/\${ULW_STREAM_OWNER}/0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d/g' \
+        "$root/deploy/askedin/live-packager/job.yaml"
+}
+# Stage may follow main; prod names a commit published from main (RUNBOOK.md, step 9).
+packager_job apps-stage main >"$manifests/live-packager-stage.yaml"
+packager_job apps 0123456789abcdef0123456789abcdef01234567 >"$manifests/live-packager-prod.yaml"
+# shellcheck disable=SC2016 # a literal ${
+if grep -n '\${' "$manifests"/live-packager-*.yaml; then
+    echo "validate-manifests: live-packager/job.yaml has a variable RUNBOOK.md does not fill" >&2
+    exit 1
+fi
 
 "$tools/kubeconform" -strict -summary -output text \
     -schema-location "$tools/schemas/{{.ResourceKind}}{{.KindSuffix}}.json" \
     -schema-location "$tools/schemas/crd/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
     "$root/deploy/askedin/overlays" "$root/deploy/askedin/stunner" "$manifests/sandbox.yaml" \
-    "$manifests/stunner.yaml"
+    "$manifests/stunner.yaml" "$manifests/live-packager-stage.yaml" \
+    "$manifests/live-packager-prod.yaml"
 
 # Every image by digest (check-image-pins.py): what Askedin runs and what the host runs
 # directly, and, for the sandbox's kustomizations as rendered, a tag images.sh pins to one.
@@ -60,4 +80,6 @@ if [[ ${1:-} == --server ]]; then
         kubectl apply --dry-run=server -f "$manifest"
     done < <(find "$root/deploy/askedin/overlays" "$root/deploy/askedin/stunner" -name '*.yaml' \
         -print0 | sort -z)
+    kubectl apply --dry-run=server -f "$manifests/live-packager-stage.yaml" \
+        -f "$manifests/live-packager-prod.yaml"
 fi

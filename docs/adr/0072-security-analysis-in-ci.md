@@ -241,3 +241,7 @@ cppcheck is not added. Reopen if clang-tidy is dropped, or a cppcheck release pa
   `third_party/README.md`.
 - Upgrading a scanner is a change to `tools/security/tools.sh` (version, SHA-256, URL), and for
   CodeQL to the action's SHA; both are reviewed like any dependency.
+- 2026-10-03: this repository's own builds are now `ghcr.io/jerome-joseph-1/ulw-...`,
+  published from main by `publish-images.yml`, not `git.askedin.com/askedin/askedin-monorepo/...`;
+  the allowlist table's exemption for them follows, and under `overlays/prod/` they must name a
+  commit SHA or a digest, never `main` (ADR-0085).

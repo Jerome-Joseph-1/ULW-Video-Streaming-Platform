@@ -9,6 +9,12 @@ inputs:
       "false" skips restoring, and so saving, the ccache: for a job that builds with
       CCACHE_DISABLE, whose empty cache would otherwise be saved under its key.
     default: "true"
+  ccache-save:
+    description: >-
+      "false" restores the ccache without saving it: for a job that builds only some targets,
+      whose partial cache would otherwise be saved under a key that full builds share, and,
+      being first to finish, win it (actions/cache never replaces a key).
+    default: "true"
 runs:
   using: composite
   steps:
@@ -146,8 +152,15 @@ runs:
         flock -w 900 "$HOME/.rustup-install.lock" rustup toolchain install --no-self-update
         cargo fetch --locked
     - name: Restore ccache
-      if: inputs.ccache != 'false'
+      if: inputs.ccache != 'false' && inputs.ccache-save != 'false'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.environment == 'self-hosted' && '.ccache' || '~/.cache/ccache' }}
+        key: ccache-${{ inputs.cache-key }}-${{ github.sha }}
+        restore-keys: ccache-${{ inputs.cache-key }}-
+    - name: Restore ccache, not to be saved
+      if: inputs.ccache != 'false' && inputs.ccache-save == 'false'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.environment == 'self-hosted' && '.ccache' || '~/.cache/ccache' }}
         key: ccache-${{ inputs.cache-key }}-${{ github.sha }}
