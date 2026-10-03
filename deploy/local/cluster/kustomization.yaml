@@ -22,6 +22,10 @@ resources:
   - ../../askedin/overlays/stage/chat/service.yaml
   - ../../askedin/overlays/stage/chat/httproute.yaml
   - ../../askedin/overlays/stage/chat/networkpolicy.yaml
+  # The packagers' namespace, which the two below are in, and the gateway's service account,
+  # which its Deployment names (live is off in the sandbox: gateway-patch.yaml).
+  - ../../askedin/overlays/stage/live-packager/namespace.yaml
+  - ../../askedin/overlays/stage/video-gateway/live-rbac.yaml
   - ../../askedin/overlays/stage/live-packager/service.yaml
   - ../../askedin/overlays/stage/live-packager/networkpolicy.yaml
 # Images built by e2e-up.sh and loaded into the node; nothing is pulled from ghcr.io.
