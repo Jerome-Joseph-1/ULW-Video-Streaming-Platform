@@ -66,7 +66,7 @@ is a conditional write, so the first reason stands.
 |---|---|---|
 | End the stream on `participant_left` at once | Simplest | Rejected: a full reconnect is a leave and a join seconds apart, and the events can arrive in either order or at different replicas |
 | Track presence per replica and end on its own count | No extra call | Rejected: a replica that missed the join (sent to another) would end a stream whose publisher is back |
-| After a grace, ask LiveKit whether the publisher is connected (`GetParticipant`, which does not recreate a dropped room) and end only if not | LiveKit is the one that knows; late, duplicated or misrouted events cannot end a stream whose publisher is there | Accepted |
+| After a grace, ask LiveKit whether the publisher is connected (`ListRooms` for the room, then `GetParticipant` in it; neither recreates a dropped room) and end only if not | LiveKit is the one that knows; late, duplicated or misrouted events cannot end a stream whose publisher is there | Accepted |
 | Go live on `participant_joined` and `track_published` through the owner's start path | One path, already idempotent, already safe against a concurrent `start` | Accepted |
 
 ## Decision
@@ -94,8 +94,10 @@ is a conditional write, so the first reason stands.
     time per stream and replica; repeats for a session already live ask nothing again. A start a
     dependency could not answer is retried every 2 s while the publisher stays, 5 times. Not the
     owner's stream, or no such stream: nothing, and the stream is not followed.
-  - `participant_left` or `participant_connection_aborted` leaving no session present, or
-    `room_finished`: a grace of `ULW_LIVE_PUBLISHER_GRACE_SECONDS` (10 s, 1 to 300) on the
+  - LiveKit holds one session per identity, so each followed stream keeps one current session: a
+    join of a new session replaces it (the old one counts as gone, wherever its leave was sent).
+  - `participant_left` or `participant_connection_aborted` of the current session (or of one this
+    replica never saw join), or `room_finished`: a grace of `ULW_LIVE_PUBLISHER_GRACE_SECONDS` (10 s, 1 to 300) on the
     reactor's timer. A join of a new session within it cancels it. At its end (after any start
     under way has answered) the service reads the row: only a `live` stream is considered (a
     `starting` one keeps its start window, since its room comes and goes with its tickets while an
@@ -103,7 +105,10 @@ is a conditional write, so the first reason stands.
     only if not, with the new reason `publisher_left` (`live_streams.end_reason`, migration 0013),
     then closes its room. A check LiveKit could not answer is retried every 2 s, 5 times, and then
     left to the sweep.
-  - A session seen leaving is remembered (16 per stream), so its late join or track changes
+  - `room_finished` for a room this replica follows nothing in is checked against the row first
+    (one read by primary key): a call's room named like a stream's, or a stream that is not
+    live, arms no grace.
+  - A session seen leaving or replaced is remembered (16 per stream), so its late join or track changes
     nothing. Each replica follows at most 1024 streams; an idle one makes room for a new one.
 - **The owner's API stays** as ADR-0092 has it. `start` and the webhook's start run the same
   idempotent path, in either order or at once (one packager, one relay); `end` and
@@ -123,8 +128,14 @@ is a conditional write, so the first reason stands.
   already mint publisher tickets, so this adds no new party to trust.
 - A replay within a token's five minutes can repeat a start (idempotent) or a departure, whose end
   LiveKit's own answer decides. Event ids are not remembered.
-- Each departure costs a row read and one `GetParticipant`; each ending, the room's deletion as
-  before. LiveKit's room events for calls cost a JSON parse and a counter.
+- Each departure costs a row read and two LiveKit calls (`ListRooms`, then `GetParticipant` if
+  the room is there: in a room no node holds, `GetParticipant` answers `unavailable`, not
+  `not_found`); each ending, the room's deletion as before. LiveKit's participant events for calls
+  cost a JSON parse and a counter, and a call room's `room_finished` one row read.
+- Graces and retries live in the replica's memory: those under way when it restarts (a rollout)
+  are lost. Their streams end as before ADR-0093 did: by the packager's own end and the sweep
+  (`finished`), or the start window.
+- The listener also gives each request 10 s from its first byte, besides the 10 s idle timer.
 - `live_webhooks_total{outcome}`, `live_webhook_refusals_total{reason}` (a rise of `signature`
   or `unknown_key` is a key mismatch between LiveKit and the gateway, or someone posting),
   `live_publisher_departures_total`, `live_publisher_returns_total`, `live_publisher_kept_total`
