@@ -60,13 +60,7 @@ bool is_r2_account_id(std::string_view s) noexcept {
 } // namespace
 
 std::string_view to_string(Scheme scheme) noexcept {
-    switch (scheme) {
-    case Scheme::Http:
-        return "http";
-    case Scheme::Https:
-        return "https";
-    }
-    return "https";
+    return scheme == Scheme::Http ? "http" : "https";
 }
 
 std::expected<Endpoint, ProfileError> parse_endpoint(std::string_view url) {

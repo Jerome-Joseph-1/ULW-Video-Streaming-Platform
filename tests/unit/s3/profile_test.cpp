@@ -12,6 +12,7 @@ using infra::s3util::parse_endpoint;
 using infra::s3util::ProfileError;
 using infra::s3util::S3Profile;
 using infra::s3util::Scheme;
+using infra::s3util::to_string;
 
 TEST(S3Profile, MinioIsPathStyleInTheDefaultRegionOnTheGivenEndpoint) {
     const auto p = S3Profile::minio("http://minio.internal:9000");
@@ -49,6 +50,11 @@ TEST(S3Profile, RejectsAccountIdsThatAreNotThirtyTwoLowercaseHexDigits) {
                   ProfileError::InvalidAccountId)
             << a;
     }
+}
+
+TEST(Endpoint, SpellsEachSchemeAsAUrlDoes) {
+    EXPECT_EQ(to_string(Scheme::Http), "http");
+    EXPECT_EQ(to_string(Scheme::Https), "https");
 }
 
 TEST(Endpoint, LeavesTheSchemeDefaultPortOutOfTheAuthority) {
