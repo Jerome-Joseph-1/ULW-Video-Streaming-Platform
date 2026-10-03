@@ -16,6 +16,7 @@
 #include "live_manifest_cache.hpp"
 #include "playback.hpp"
 #include "routes.hpp"
+#include "upload_claim.hpp"
 
 #include <array>
 #include <memory>
@@ -138,7 +139,6 @@ private:
         bool started = false;
         bool finishing = false;
         bool responded = false;
-        bool claimed = false;
     };
 
     // One blocking storage job and its result. The inputs are copied in before the pool sees
@@ -177,7 +177,8 @@ private:
     void start_create() noexcept;
     void start_append() noexcept;
     void start_lookup() noexcept;
-    void on_claimed(core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept;
+    void on_claimed(std::uint64_t request, const core::UploadId& upload,
+                    core::ports::CatalogResult<core::ports::ClaimedUpload> result) noexcept;
     void on_found(core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept;
     void on_video(core::ports::CatalogResult<core::VideoRecord> result) noexcept;
     void start_playlist(const core::VideoRecord& video) noexcept;
@@ -215,7 +216,12 @@ private:
     void fail_storage(core::ports::StorageError error) noexcept;
     void fail_catalog(core::ports::CatalogError error) noexcept;
     void finish_request() noexcept;
+    // Releases the claim the current request holds, if it holds one.
     void release_claim() noexcept;
+    // `request` is the one this connection is serving: a completion for any other is stale.
+    [[nodiscard]] bool serving(std::uint64_t request) const noexcept {
+        return phase_ == Phase::Request && request == request_seq_;
+    }
     void release_slot() noexcept;
     void release_client_holds() noexcept;
     void release_request_hold() noexcept;
@@ -283,6 +289,9 @@ private:
 
     // The upload slot the current PATCH holds, released when that request ends.
     std::optional<core::UserId> slot_user_;
+    // The upload claim the current PATCH holds, keyed by request_seq_: released when that
+    // request ends, and never by a completion for another request.
+    UploadClaim claim_;
     net::IpAddress peer_;
     // The peer's count for this connection; none when the peer is a trusted proxy.
     std::optional<ClientHold> connection_hold_;

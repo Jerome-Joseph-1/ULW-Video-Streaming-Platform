@@ -1,8 +1,8 @@
 name: publish-images
 
-# Publishes the four images Askedin runs (video-gateway, video-worker, chat, live-packager) to
+# Publishes the four images an operator runs (video-gateway, video-worker, chat, live-packager) to
 # GitHub's container registry, ghcr.io/jerome-joseph-1/ulw-<service>, tagged with the full
-# commit SHA and `main`, never `latest` (deploy/askedin/RUNBOOK.md, step 4).
+# commit SHA and `main`, never `latest` (deploy/kubernetes/RUNBOOK.md, step 4).
 #
 # Only a commit on main whose ci run for its push to main succeeded is published. A push to main
 # starts this beside ci: the images are built and checked while ci runs, and nothing is pushed
@@ -10,15 +10,15 @@ name: publish-images
 # commit already on main (its `ref`, or main's tip), under the same check. Pull requests never
 # run this, so no pull request's code ever runs where the package token is.
 #
-# Each image is built as e2e.yml's sandbox job builds it (deploy/local/e2e-up.sh) and must pass
-# the same gates there before anything is pushed: the release binaries' hardening
-# (tools/check-hardening.sh) and Trivy's image gate (tools/security/trivy-image.sh). A SHA
-# tag is pushed once: a commit published before keeps its digest. `main` moves, for all four
-# images together, only once all four SHA tags are published and only to the commit that is
-# main's tip then, so a slower run of an older commit never takes it back. `main` is for stage;
-# prod is pinned to a SHA and digest (docs/adr/0085). Each digest is attested (build
-# provenance) by the run that pushed it, and printed in the run's summary as
-# <sha>@sha256:<digest>, ready to pin.
+# Each image is built as e2e.yml's sandbox job builds it (deploy/local/e2e-up.sh) and must pass the
+# same gates there before anything is pushed: the release binaries' hardening
+# (tools/check-hardening.sh) and Trivy's image gate (tools/security/trivy-image.sh). A SHA tag is
+# pushed once: a commit published before keeps its digest. `main` moves, for all four images
+# together, only once all four SHA tags are published and only to the commit that is main's tip
+# then, so a slower run of an older commit never takes it back. `main` is for a staging environment;
+# production is pinned to a SHA and digest (docs/adr/0085). Each digest is attested (build
+# provenance) by the run that pushed it, and printed in the run's summary as <sha>@sha256:<digest>,
+# ready to pin.
 on:
   push:
     branches: [main]
@@ -94,7 +94,7 @@ jobs:
           SHA: ${{ steps.commit.outputs.sha }}
         run: test "$(git rev-parse HEAD)" = "$SHA"
       # The same Dockerfile targets and build argument as e2e-up.sh, with the full SHA as
-      # woodpecker.yml stamps it. A hosted runner needs no proxy CA, so no ca-bundle secret.
+      # ULW_GIT_SHA. A hosted runner needs no proxy CA, so no ca-bundle secret.
       - name: Build the images
         env:
           SHA: ${{ steps.commit.outputs.sha }}
@@ -225,7 +225,7 @@ jobs:
           {
             echo "### Published images"
             echo
-            echo "Commit \`$SHA\`. Pin prod to these, \`<sha>@sha256:<digest>\` (RUNBOOK.md, 4a):"
+            echo "Commit \`$SHA\`. Pin a production config.env to these, \`<sha>@sha256:<digest>\` (RUNBOOK.md, 4a):"
             echo
             echo '```'
             printf '%s\n' "${summary[@]}"

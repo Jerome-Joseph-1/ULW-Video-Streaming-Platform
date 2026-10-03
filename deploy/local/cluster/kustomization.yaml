@@ -1,33 +1,32 @@
 # Everything the sandbox runs once Envoy Gateway's CRDs are in: a NetworkPolicy enforcer, the
-# Gateway, the mock auth-service, the policies that mimic askedin-gateway, and the stage
-# overlays exactly as they ship, with only what the sandbox must change patched below.
+# Gateway, the mock auth-service, the policies that mimic an operator's identity-header edge,
+# and the parts of deploy/kubernetes/base the sandbox runs, configured by ../config.env through
+# the same component every overlay uses, with only what the sandbox must change patched below.
 # Rendered with
 #   kubectl kustomize --load-restrictor LoadRestrictionsNone deploy/local/cluster
-# because the overlays live outside this directory.
+# because the base and the config live outside this directory.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - kube-router.yaml
   - envoy.yaml
   - mock-auth.yaml
-  - askedin-identity.yaml
+  - edge-identity.yaml
   - backing.yaml
-  - ../../askedin/overlays/stage/video-gateway/deployment.yaml
-  - ../../askedin/overlays/stage/video-gateway/service.yaml
-  - ../../askedin/overlays/stage/video-gateway/httproute.yaml
-  - ../../askedin/overlays/stage/video-gateway/networkpolicy.yaml
-  - ../../askedin/overlays/stage/video-worker/deployment.yaml
-  - ../../askedin/overlays/stage/video-worker/networkpolicy.yaml
-  - ../../askedin/overlays/stage/chat/deployment.yaml
-  - ../../askedin/overlays/stage/chat/service.yaml
-  - ../../askedin/overlays/stage/chat/httproute.yaml
-  - ../../askedin/overlays/stage/chat/networkpolicy.yaml
-  # The packagers' namespace, which the two below are in, and the gateway's service account,
-  # which its Deployment names (live is off in the sandbox: gateway-patch.yaml).
-  - ../../askedin/overlays/stage/live-packager/namespace.yaml
-  - ../../askedin/overlays/stage/video-gateway/live-rbac.yaml
-  - ../../askedin/overlays/stage/live-packager/service.yaml
-  - ../../askedin/overlays/stage/live-packager/networkpolicy.yaml
+  - ../../kubernetes/base/video-gateway
+  - ../../kubernetes/base/video-worker
+  - ../../kubernetes/base/chat
+  - ../../kubernetes/base/live-packager
+configMapGenerator:
+  - name: ulw-operator-config
+    envs:
+      - ../config.env
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"
+components:
+  - ../../kubernetes/components/operator-config
 # Images built by e2e-up.sh and loaded into the node; nothing is pulled from ghcr.io.
 images:
   - name: ghcr.io/jerome-joseph-1/ulw-video-gateway
@@ -44,8 +43,8 @@ patches:
   - path: worker-patch.yaml
   - path: chat-patch.yaml
   - path: networkpolicy-patch.yaml
-  # The shipped routes answer only stage's host; the sandbox is reached as 127.0.0.1:18080, so
-  # its routes name no hostname.
+  # The shipped routes answer only PUBLIC_HOSTNAME; the sandbox is reached as 127.0.0.1:18080,
+  # so its routes name no hostname.
   - target:
       kind: HTTPRoute
       name: video-gateway|chat

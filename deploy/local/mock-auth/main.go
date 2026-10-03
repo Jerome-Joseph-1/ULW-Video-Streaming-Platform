@@ -1,7 +1,7 @@
-// mock-auth stands in for Askedin's auth-service inside the sandbox cluster. It signs tokens
-// the way the real service does (the claims our verifier reads, the stage cookie) and publishes
-// its keys at /.well-known/jwks.json, which the gateway fetches over https exactly as it would
-// fetch Askedin's. It signs with every algorithm the gateway accepts, each with a key of its own
+// mock-auth stands in for an identity provider inside the sandbox cluster. It signs tokens the
+// way a real one does (the claims our verifier reads, the cookie) and publishes its keys at
+// /.well-known/jwks.json, which the gateway fetches over https exactly as it would fetch a real
+// provider's. It signs with every algorithm the gateway accepts, each with a key of its own
 // whose JWK names that algorithm: an RSA key for RS256, another for PS256, an EC P-256 key for
 // ES256 and an Ed25519 key for EdDSA, so each is exercised through the cluster. It rotates all
 // four on demand.
@@ -12,8 +12,8 @@
 //	POST /rotate                  new keys; tokens signed before stay valid for one rotation
 //	GET  /healthz
 //	GET  /whoami                  the x-user-* headers it was sent, as JSON; the sandbox routes
-//	                              it behind the header-stripping policies that mimic
-//	                              askedin-gateway (deploy/local/cluster/askedin-identity.yaml)
+//	                              it behind the header-stripping policies that mimic an
+//	                              operator's edge (deploy/local/cluster/edge-identity.yaml)
 //
 // Test infrastructure only: the keys live in memory and die with the pod.
 package main
@@ -299,8 +299,8 @@ func (i *issuer) routes() *http.ServeMux {
 
 func main() {
 	name := flag.String("issuer", "", "iss of every token, and what JWT_ISSUER must say")
-	audience := flag.String("audience", "askedin-platform", "aud of every token")
-	cookie := flag.String("cookie", "auth_token_stage", "cookie /token sets")
+	audience := flag.String("audience", "ulw-sandbox", "aud of every token")
+	cookie := flag.String("cookie", "auth_token", "cookie /token sets")
 	plain := flag.String("listen", ":8080", "plain HTTP listener, reached through the Gateway")
 	secure := flag.String("listen-tls", ":8443", "HTTPS listener the verifiers fetch keys from")
 	cert := flag.String("tls-cert", "", "certificate chain for -listen-tls")

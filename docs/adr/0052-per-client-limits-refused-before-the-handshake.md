@@ -1,6 +1,6 @@
 # 0052. Per-client limits, refused before the handshake, and dropping root
 
-Status: Accepted
+Status: Accepted, amended by 0088 (the trusted proxies are `POD_CIDR` in the operator's `config.env`)
 Date: 2026-09-29
 
 ## Context

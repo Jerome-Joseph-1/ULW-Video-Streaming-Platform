@@ -20,6 +20,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -28,6 +29,7 @@ using core::ports::PackagerError;
 using core::ports::PackagerState;
 using infra::packagers::check_job_template;
 using infra::packagers::fill_job_template;
+using infra::packagers::JobValues;
 using infra::packagers::KubernetesConfig;
 using infra::packagers::KubernetesPackagers;
 using ulw::test::HttpTestServer;
@@ -35,19 +37,44 @@ using ulw::test::Reply;
 using ulw::test::ServedRequest;
 
 constexpr std::string_view kStream = "0192f3a4-0000-7000-8000-0000000000aa";
+
+JobValues job_values() {
+    return JobValues{.namespace_name = "apps-test",
+                     .image_tag = "abc123@sha256:00ff",
+                     .pull_policy = "IfNotPresent",
+                     .storage = "minio",
+                     .r2_account_id = "",
+                     .s3_endpoint = "http://minio:9000",
+                     .bucket = "ulw-test",
+                     .packager_secret = "live-packager-secrets"};
+}
 constexpr std::string_view kTemplate =
     "apiVersion: batch/v1\n"
     "kind: Job\n"
     "metadata:\n"
     "  name: ${ULW_STREAM_ID}\n"
-    "  namespace: ${ULW_NAMESPACE}\n"
+    "  namespace: ${LIVE_NAMESPACE}\n"
     "spec:\n"
     "  template:\n"
     "    spec:\n"
     "      containers:\n"
     "        - name: packager\n"
-    "          image: ghcr.io/example/ulw-live-packager:${ULW_IMAGE_TAG}\n"
+    "          image: ghcr.io/example/ulw-live-packager:${LIVE_PACKAGER_IMAGE_TAG}\n"
+    "          imagePullPolicy: ${IMAGE_PULL_POLICY}\n"
     "          env:\n"
+    "            - name: ULW_STORAGE\n"
+    "              value: ${STORAGE}\n"
+    "            - name: ULW_R2_ACCOUNT_ID\n"
+    "              value: \"${R2_ACCOUNT_ID}\"\n"
+    "            - name: ULW_S3_ENDPOINT\n"
+    "              value: \"${S3_ENDPOINT}\"\n"
+    "            - name: ULW_BUCKET\n"
+    "              value: ${BUCKET}\n"
+    "            - name: ULW_DATABASE_URL\n"
+    "              valueFrom:\n"
+    "                secretKeyRef:\n"
+    "                  name: ${LIVE_PACKAGER_SECRET}\n"
+    "                  key: ULW_DATABASE_URL\n"
     "            - name: ULW_STREAM_OWNER\n"
     "              value: \"${ULW_STREAM_OWNER}\"\n"
     "            - name: ULW_LIVE_INGEST_HOST\n"
@@ -156,11 +183,10 @@ protected:
 
     KubernetesConfig config() const {
         return KubernetesConfig{.api_url = api.url() + "/",
-                                .namespace_name = "apps-test",
                                 .token_file = (dir.path() / "token").string(),
                                 .ca_file = "",
                                 .job_template = std::string(kTemplate),
-                                .image_tag = "abc123@sha256:00ff"};
+                                .job = job_values()};
     }
 
     void write_token(std::string_view text) const {
@@ -208,8 +234,7 @@ TEST_F(KubernetesPackagersTest, StartingMakesTheJobThenItsSecretOwnedByIt) {
     // The Job, the template filled in: Kubernetes' own $(POD_IP) left for it to expand.
     EXPECT_EQ(requests[0].path(), "/apis/batch/v1/namespaces/apps-test/jobs");
     EXPECT_EQ(requests[0].header("content-type"), "application/yaml");
-    EXPECT_EQ(requests[0].body,
-              fill_job_template(kTemplate, "apps-test", "abc123@sha256:00ff", id, "auth0|alice"));
+    EXPECT_EQ(requests[0].body, fill_job_template(kTemplate, job_values(), id, "auth0|alice"));
     EXPECT_NE(requests[0].body.find("value: \"auth0|alice\""), std::string::npos);
     EXPECT_NE(requests[0].body.find("$(POD_IP)"), std::string::npos);
     // The stream's Secret, holding its passphrase, owned by the Job from its creation.
@@ -339,17 +364,23 @@ TEST_F(KubernetesPackagersTest, NoTokenIsTheConfigurationsFault) {
     EXPECT_TRUE(api.requests().empty());
 }
 
-TEST(KubernetesJobTemplate, OnlyTheFourPlaceholdersAreFilled) {
+TEST(KubernetesJobTemplate, OnlyTheConfigKeysAndTheStreamAreFilled) {
     EXPECT_TRUE(check_job_template(kTemplate));
     EXPECT_FALSE(check_job_template("name: fixed\n"));
     const auto unknown = check_job_template("name: ${ULW_STREAM_ID}\nimage: ${ULW_OTHER}\n");
     ASSERT_FALSE(unknown);
     EXPECT_NE(unknown.error().find("${ULW_OTHER}"), std::string::npos);
     EXPECT_FALSE(check_job_template("name: ${ULW_STREAM_ID} ${"));
-    EXPECT_EQ(fill_job_template("a ${ULW_NAMESPACE} b ${ULW_IMAGE_TAG} c ${ULW_STREAM_ID} d "
-                                "\"${ULW_STREAM_OWNER}\" $(POD_IP) ${",
-                                "ns", "tag", "s1", "u|1"),
-              "a ns b tag c s1 d \"u|1\" $(POD_IP) ${");
+    // The names a by-hand start fills from config.env, so both make the same Job.
+    EXPECT_EQ(fill_job_template("a ${LIVE_NAMESPACE} b ${LIVE_PACKAGER_IMAGE_TAG} c "
+                                "${ULW_STREAM_ID} d \"${ULW_STREAM_OWNER}\" $(POD_IP) "
+                                "${IMAGE_PULL_POLICY} ${STORAGE} \"${R2_ACCOUNT_ID}\" "
+                                "\"${S3_ENDPOINT}\" ${BUCKET} ${LIVE_PACKAGER_SECRET} ${",
+                                job_values(), "s1", "u|1"),
+              "a apps-test b abc123@sha256:00ff c s1 d \"u|1\" $(POD_IP) IfNotPresent minio \"\" "
+              "\"http://minio:9000\" ulw-test live-packager-secrets ${");
+    // A name the template no longer uses is refused like any other.
+    EXPECT_FALSE(check_job_template("name: ${ULW_STREAM_ID}\nnamespace: ${ULW_NAMESPACE}\n"));
 }
 
 TEST(KubernetesPackagersConfig, RefusesWhatCouldNotWork) {
@@ -358,21 +389,31 @@ TEST(KubernetesPackagersConfig, RefusesWhatCouldNotWork) {
     auto multi = std::move(*infra::curl::Multi::create(*reactor));
     auto pool = std::move(*net::OffloadPool::create(*reactor, 1));
     const KubernetesConfig good{.api_url = "https://kubernetes.default.svc",
-                                .namespace_name = "apps",
                                 .token_file = "/nonexistent",
                                 .ca_file = "/nonexistent",
                                 .job_template = std::string(kTemplate),
-                                .image_tag = "main"};
+                                .job = job_values()};
     EXPECT_TRUE(KubernetesPackagers::create(*reactor, *multi, *pool, reactor_clock, good));
     auto bad = good;
     bad.api_url = "kubernetes.default.svc";
     EXPECT_FALSE(KubernetesPackagers::create(*reactor, *multi, *pool, reactor_clock, bad));
-    bad = good;
-    bad.namespace_name = "Apps";
-    EXPECT_FALSE(KubernetesPackagers::create(*reactor, *multi, *pool, reactor_clock, bad));
-    bad = good;
-    bad.image_tag = "main\nimage: evil";
-    EXPECT_FALSE(KubernetesPackagers::create(*reactor, *multi, *pool, reactor_clock, bad));
+    // Each value goes into a YAML scalar: nothing that would end one, or name what it should not.
+    const std::vector<std::pair<std::string JobValues::*, std::string>> refused{
+        {&JobValues::namespace_name, "Apps"},
+        {&JobValues::image_tag, "main\nimage: evil"},
+        {&JobValues::pull_policy, "Sometimes"},
+        {&JobValues::storage, "fs"},
+        {&JobValues::r2_account_id, "0123\nx: y"},
+        {&JobValues::s3_endpoint, "http://minio:9000\"\n"},
+        {&JobValues::bucket, "Media Bucket"},
+        {&JobValues::packager_secret, "video-gateway-secrets\n"},
+    };
+    for (const auto& [field, value] : refused) {
+        bad = good;
+        bad.job.*field = value;
+        EXPECT_FALSE(KubernetesPackagers::create(*reactor, *multi, *pool, reactor_clock, bad))
+            << value;
+    }
     bad = good;
     bad.job_template = "kind: Job\n";
     EXPECT_FALSE(KubernetesPackagers::create(*reactor, *multi, *pool, reactor_clock, bad));

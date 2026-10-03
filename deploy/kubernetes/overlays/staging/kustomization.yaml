@@ -1,0 +1,21 @@
+# A staging environment: the base as it is, configured by config.env (RUNBOOK.md, step 4), with
+# live streams through the gateway on (components/live-streams).
+#   kubectl apply -k deploy/kubernetes/overlays/staging
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+# The operator configuration, read by the component below and never applied itself.
+configMapGenerator:
+  - name: ulw-operator-config
+    envs:
+      - config.env
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"
+components:
+  - ../../components/operator-config
+  # Live streams on (RUNBOOK.md, step 9); overlays/production adds it once its operator turns
+  # them on.
+  - ../../components/live-streams

@@ -56,7 +56,7 @@ test('a live stream plays, keeps a monotonic manifest, and ends cleanly after EN
         const response = await fetch(stack.gatewayManifest, viewer);
         return response.ok ? (await response.text()).split('#EXTINF').length - 1 : 0;
       }, { timeout: 60_000, intervals: [200] }).toBeGreaterThanOrEqual(kSegmentsBeforeJoin);
-      // Same origin as the page, as behind the Askedin route: the cookie rides along on every
+      // Same origin as the page, as behind an operator's route: the cookie rides along on every
       // playlist request, and never on a segment's, which goes to the store.
       await page.context().addCookies([{ name: 'auth_token', value: stack.token,
         url: stack.origin }]);

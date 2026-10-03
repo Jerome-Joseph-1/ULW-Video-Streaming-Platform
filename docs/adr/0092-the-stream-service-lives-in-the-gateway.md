@@ -58,7 +58,7 @@ What had to be settled, from the code as it stands:
 | A controller watching a CRD or the rows, making Jobs | The gateway holds no Kubernetes credential | Rejected for now: another Deployment, image and protocol for one create per stream; the Role below gives the gateway exactly that create and nothing more. Reopen if a second component needs to start packagers |
 | The gateway creates the Job and its Secret through the API server with its own service account, in a namespace that holds packagers only, under an admission policy | Two calls per stream on the reactor through libcurl, as LiveKit's are; a Role there with create on Jobs and Secrets and get on Jobs; the policy holds what it creates to a packager's shape | Accepted |
 | The Job's spec built in C++ | No file to ship | Rejected: the by-hand path of RUNBOOK step 9 would drift from the gateway's; ops could not change a request or limit without a rebuild of the code |
-| The template file (`deploy/askedin/live-packager/job.yaml`) baked into the gateway's image and filled with exactly its four variables | One template for the gateway and the runbook; it ships with the code that fills it | Accepted |
+| The template file (`deploy/kubernetes/live-packager/job.yaml`) baked into the gateway's image and filled with exactly its variables, named as the `config.env` keys a by-hand start sources (ADR-0088) | One template for the gateway and the runbook; it ships with the code that fills it | Accepted |
 | A packager per stream as a child process of the gateway | No cluster needed | Accepted for development, the local stack and the browser suite only, behind the same port (`IPackagers`); one stream at a time, as every child takes the one ingest port the relay is configured with |
 
 **Seeing the end**
@@ -77,7 +77,8 @@ What had to be settled, from the code as it stands:
   sent to a client or logged), created, live and end times, and why it ended (`owner`,
   `finished`, `failed`, `timeout`). A partial unique index keeps **one unfinished stream per
   user**; the insert refuses a stream past `ULW_LIVE_MAX_STREAMS` unfinished on the platform
-  (what egress can relay: stage 1, prod 2, and at most 64, what one sweep reads) and a stream
+  (what egress can relay: one with the base's egress, two with the production example's, and
+  at most 64, what one sweep reads) and a stream
   past `ULW_LIVE_STREAMS_PER_USER_PER_HOUR` (default 6) created by its owner in the hour before,
   whatever became of them (`429`): what a client looping on create and end costs is bounded.
   Creates run in one transaction that first takes a transaction-scoped advisory lock, in a
@@ -119,8 +120,8 @@ What had to be settled, from the code as it stands:
   per process, not one each. An end that lands while `start` is relaying is honoured: `start`
   finds the row ended, closes the room again (the relay just started ends with it) and answers
   `409`.
-- **Packagers on the cluster.** They run in a namespace of their own (`apps-stage-live`,
-  `apps-live`): a quota (running pods to the streams the platform takes, and Jobs and Secrets
+- **Packagers on the cluster.** They run in a namespace of their own (`LIVE_NAMESPACE` in the
+  operator's `config.env`, `<NAMESPACE>-live` in the examples; ADR-0088): a quota (running pods to the streams the platform takes, and Jobs and Secrets
   for about an hour of streams, a finished Job being removed an hour after it ends, its
   recording queued before its process exits; a start past it, which the API server refuses
   `403` "exceeded quota", is answered `503` with `Retry-After: 60` as the platform full), a
@@ -145,8 +146,9 @@ What had to be settled, from the code as it stands:
   `live-packager-secrets`) of type `Opaque`, owned by that stream's Job alone, changed on
   update in their metadata only; `deploy/local/check-live-admission.py` checks each rule with a
   server-side dry run. The gateway creates the Job from the template in its image
-  (`/usr/local/share/ulw/live-packager-job.yaml`, filled with the namespace, the configured image
-  tag, the stream id and the owner, quoted, and a user id outside its own alphabet refused), then
+  (`/usr/local/share/ulw/live-packager-job.yaml`, filled with the packagers' namespace, image
+  tag, pull policy and Secret, the gateway's own store, the stream id and the owner, quoted, and
+  a user id outside its own alphabet refused), then
   the stream's Secret `live-packager-<id>` (the passphrase) with the Job as its owner from its
   creation, so the Job's removal an hour after it finishes removes it and a Job that could not be
   made leaves no Secret. The pod waits for the Secret, which exists before its image is pulled.
@@ -180,8 +182,11 @@ What had to be settled, from the code as it stands:
 - The gateway holds a Kubernetes credential that can create Jobs. It reaches only the
   packagers' namespace, which holds nothing but packagers and their Secrets, and the admission
   policy holds what it creates there to a packager's shape: a compromised gateway can start a
-  packager, under the quota, and nothing else. The policy and its binding are cluster-scoped, so
-  whoever applies the overlays must be allowed to apply those.
+  packager, under the quota, and nothing else. The policy and its binding are cluster-scoped
+  (named `<NAMESPACE>-live-packagers`), so whoever applies an overlay must be allowed to apply
+  those. The packagers' namespace, Role and policy ship in the base; the gateway's settings, its
+  token and its wider egress are a kustomize component (`components/live-streams`) an overlay
+  lists to turn live streams on, so an environment runs without them until its operator does.
 - The gateway reaches LiveKit's server API (7880) and the API server; its NetworkPolicy gains
   both. The local stack and the browser suite use the process runtime, which runs one stream at
   a time and passes a packager only the gateway's store and database settings.

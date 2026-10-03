@@ -76,10 +76,12 @@ is a conditional write, so the first reason stands.
   `POST /livekit/webhook`; anything else is `404` or `405`. At most 32 connections, a 10 s idle
   timeout, a 64 KiB body cap (`413` from the `Content-Length` alone, before the body is read), and
   one token bucket for the listener (200 at once, 100 a second; `429` with `Retry-After`, which
-  LiveKit retries). On stage: port 8081, Service `video-gateway-hooks` (ClusterIP, named by no
-  route), and NetworkPolicy `video-gateway-hooks` admitting only LiveKit's pods to that port.
-  LiveKit posts to `http://video-gateway-hooks.<namespace>.svc.cluster.local:8081/livekit/webhook`
-  with `webhook.api_key` the key it already shares with the gateway (`sfu-secrets`).
+  LiveKit retries). In the Kubernetes deployment it comes with `components/live-streams`: port
+  8081, Service `video-gateway-hooks` (ClusterIP, named by no route), and NetworkPolicy
+  `video-gateway-hooks` admitting only LiveKit's pods to that port. LiveKit
+  (`base/livekit/deployment.yaml`) posts to `http://video-gateway-hooks:8081/livekit/webhook`
+  in its own namespace, with `webhook.api_key` the key it already shares with the gateway
+  (`SFU_SECRET`).
 - **Verification**, before the body is parsed: a bare HS256 JWT of three base64url parts, at most
   4 KiB; the HMAC-SHA256 under `LIVEKIT_API_SECRET`, compared with `CRYPTO_memcmp`; then `iss`
   equal to `LIVEKIT_API_KEY`, `exp` present and not more than 60 s past, `nbf` not more than 60 s
@@ -114,9 +116,9 @@ is a conditional write, so the first reason stands.
   idempotent path, in either order or at once (one packager, one relay); `end` and
   `publisher_left` are both conditional ends, and whichever is first stands. Clients may keep
   calling both; fixed-token encoders and crashed clients no longer need to.
-- **Prod** keeps live off (ADR-0092): its overlay ships the Service and NetworkPolicy, which admit
-  nothing until the gateway listens on the port; the gateway's `ULW_LIVE_WEBHOOK_PORT` and
-  LiveKit's `webhook` block are added with the rest of live at phase-6 (RUNBOOK step 9).
+- **Where live streams are off** (an overlay without `components/live-streams`), there is no
+  listener, Service or policy; LiveKit's sends to the name fail and are dropped, which changes
+  nothing else (deploy/kubernetes/RUNBOOK.md, step 9).
 
 ## Consequences
 

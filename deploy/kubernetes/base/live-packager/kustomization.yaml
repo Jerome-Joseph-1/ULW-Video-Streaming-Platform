@@ -1,0 +1,14 @@
+# One part of the base; deploy/kubernetes/RUNBOOK.md says what each part holds. Everything here
+# is in the packagers' own namespace (LIVE_NAMESPACE in config.env, docs/adr/0092) but the
+# admission policy, which is cluster-scoped. It grants nothing until the gateway's Deployment
+# names its account and token, which components/live-streams adds.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  - default-deny.yaml
+  - rbac.yaml
+  - resourcequota.yaml
+  - admission-policy.yaml

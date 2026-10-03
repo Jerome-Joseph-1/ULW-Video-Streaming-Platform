@@ -84,7 +84,7 @@ FROM runtime AS gateway
 COPY --from=build /out/gateway/ /usr/local/bin/
 # The packager Job template the stream service fills in for each stream (docs/adr/0092), the
 # same file the runbook's by-hand start uses.
-COPY --from=build /src/deploy/askedin/live-packager/job.yaml /usr/local/share/ulw/live-packager-job.yaml
+COPY --from=build /src/deploy/kubernetes/live-packager/job.yaml /usr/local/share/ulw/live-packager-job.yaml
 USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/gateway_server"]
@@ -129,7 +129,7 @@ ENTRYPOINT ["/usr/local/bin/transcode_worker"]
 
 # One process per stream (docs/adr/0083): its SRT listener's UDP port is the deployment's
 # choice (ULW_LIVE_INGEST_PORT), so none is exposed here. Its scratch root is made 0700 and
-# owned by its user, as docs/integration/operations-contract.md asks; the pod mounts an
+# owned by its user, as docs/integration/operator-contract.md asks; the pod mounts an
 # emptyDir over it.
 FROM ffmpeg-runtime AS live-packager
 RUN install -d -o 10001 -g 10001 -m 0700 /var/cache/ulw-live

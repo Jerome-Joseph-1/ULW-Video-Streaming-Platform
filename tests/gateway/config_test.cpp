@@ -59,6 +59,7 @@ protected:
         {"ULW_DATABASE_URL", "postgresql://ulw@db/ulw"},
         {"JWKS_URL", "https://auth.example.test/.well-known/jwks.json"},
         {"JWT_ISSUER", "https://auth.example.test"},
+        {"JWT_AUDIENCE", "ulw-test-audience"},
         {"ULW_S3_ACCESS_KEY_ID", "AKIAEXAMPLE"},
         {"ULW_S3_SECRET_ACCESS_KEY", "example-secret"},
     };
@@ -87,7 +88,8 @@ TEST_F(ConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->storage, StorageBackend::R2);
     EXPECT_EQ(config->storage_location, "0123456789abcdef0123456789abcdef");
     EXPECT_EQ(config->bucket, "ulw-media");
-    EXPECT_EQ(config->jwt_audience, "askedin-platform");
+    EXPECT_EQ(config->jwt_audience, "ulw-test-audience");
+    EXPECT_EQ(config->jwt_subject_claim, "sub");
     EXPECT_EQ(config->limits.auth_cookie, "auth_token");
     EXPECT_TRUE(config->limits.allowed_origins.empty());
     EXPECT_FALSE(config->limits.allow_same_site);
@@ -96,8 +98,8 @@ TEST_F(ConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
 }
 
 TEST_F(ConfigTest, EachRequiredVariableIsNamedWhenMissing) {
-    for (const std::string name :
-         {"ULW_R2_ACCOUNT_ID", "ULW_BUCKET", "ULW_DATABASE_URL", "JWKS_URL", "JWT_ISSUER"}) {
+    for (const std::string name : {"ULW_R2_ACCOUNT_ID", "ULW_BUCKET", "ULW_DATABASE_URL",
+                                   "JWKS_URL", "JWT_ISSUER", "JWT_AUDIENCE"}) {
         const std::string saved = env.at(name);
         env.erase(name);
         EXPECT_EQ(refused_variable(), name);
@@ -115,16 +117,55 @@ TEST_F(ConfigTest, KeysFetchedOverPlainHttpAreRefused) {
     EXPECT_EQ(refused_variable(), "JWKS_URL");
 }
 
+// Every identity provider names its own audience, so against a JWKS there is no default: a
+// guessed one would refuse every token, or accept tokens meant for another service.
+TEST_F(ConfigTest, KeysFromAJwksNeedTheAudienceSaidOutright) {
+    env.erase("JWT_AUDIENCE");
+    auto config = load();
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().variable, "JWT_AUDIENCE");
+    EXPECT_NE(config.error().reason.find("JWKS_URL"), std::string::npos) << config.error().reason;
+    env["JWT_AUDIENCE"] = "";
+    EXPECT_EQ(refused_variable(), "JWT_AUDIENCE");
+}
+
 TEST_F(ConfigTest, ALocalKeySetReplacesTheJwksUrl) {
     const KeySetFile file(kKeySet);
     env.erase("JWKS_URL");
+    env.erase("JWT_AUDIENCE");
     env["ULW_DEV_JWKS_FILE"] = file.path();
     env["ULW_DEV_MODE"] = "1";
-    const auto config = load();
+    auto config = load();
     ASSERT_TRUE(config) << config.error().reason;
     EXPECT_EQ(config->dev_jwks_file, file.path());
     EXPECT_EQ(config->dev_jwks, kKeySet);
     EXPECT_TRUE(config->jwks_url.empty());
+    // What ulw_devtoken mints by default.
+    EXPECT_EQ(config->jwt_audience, "ulw-dev");
+    env["JWT_AUDIENCE"] = "ulw-test-audience";
+    config = load();
+    ASSERT_TRUE(config) << config.error().reason;
+    EXPECT_EQ(config->jwt_audience, "ulw-test-audience");
+}
+
+// For an identity provider that names its users in a claim other than sub.
+TEST_F(ConfigTest, TheSubjectClaimIsSubUnlessNamed) {
+    env["ULW_JWT_SUBJECT_CLAIM"] = "";
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->jwt_subject_claim, "sub");
+    for (const char* good : {"user_id", "uid", "https://example.com/claims/uid", "a.b-c:d"}) {
+        env["ULW_JWT_SUBJECT_CLAIM"] = good;
+        config = load();
+        ASSERT_TRUE(config) << good;
+        EXPECT_EQ(config->jwt_subject_claim, good);
+    }
+    const std::string too_long(65, 'a');
+    for (const std::string& bad :
+         {std::string("user id"), std::string("sub\""), std::string("sub\t"), too_long}) {
+        env["ULW_JWT_SUBJECT_CLAIM"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_JWT_SUBJECT_CLAIM") << bad;
+    }
 }
 
 // Whoever can set it signs any identity they like, so it takes development mode said outright,
@@ -289,14 +330,14 @@ TEST_F(ConfigTest, OverridesAreTakenAsGiven) {
 
 // The same list, parsed the same way, as chat's (http::parse_origin_list).
 TEST_F(ConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
-    env["ULW_ALLOWED_ORIGINS"] = "https://app.askedin.com,http://localhost:5173";
+    env["ULW_ALLOWED_ORIGINS"] = "https://app.example.com,http://localhost:5173";
     env["ULW_ALLOW_SAME_SITE"] = "1";
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_EQ(config->limits.allowed_origins,
-              (std::vector<std::string>{"https://app.askedin.com", "http://localhost:5173"}));
+              (std::vector<std::string>{"https://app.example.com", "http://localhost:5173"}));
     EXPECT_TRUE(config->limits.allow_same_site);
-    for (const char* bad : {"app.askedin.com", "https://app.askedin.com/", "https://App.test",
+    for (const char* bad : {"app.example.com", "https://app.example.com/", "https://App.test",
                             "https://a.test,,https://b.test", "https://", "*"}) {
         env["ULW_ALLOWED_ORIGINS"] = bad;
         EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
@@ -691,8 +732,16 @@ TEST_F(LiveConfigTest, TheKubernetesRuntimeReadsItsTemplate) {
     EXPECT_EQ(l.k8s_token_file, "/run/token");
     EXPECT_EQ(l.k8s_ca_file, "/run/ca.crt");
     EXPECT_EQ(l.settings.max_streams, 2U);
+    EXPECT_EQ(l.pull_policy, "IfNotPresent");
+    EXPECT_EQ(l.packager_secret, "live-packager-secrets");
     EXPECT_NE(effective_log(*config).find(R"("name":"ULW_K8S_NAMESPACE","value":"apps-test")"),
               std::string::npos);
+    env["ULW_LIVE_PACKAGER_PULL_POLICY"] = "Always";
+    env["ULW_LIVE_PACKAGER_SECRET"] = "packager-keys";
+    const auto named = load();
+    ASSERT_TRUE(named) << named.error().variable << ": " << named.error().reason;
+    EXPECT_EQ(named->live.pull_policy, "Always");
+    EXPECT_EQ(named->live.packager_secret, "packager-keys");
 }
 
 TEST_F(LiveConfigTest, TheKubernetesRuntimeRefusesWhatCouldNotWork) {
@@ -708,9 +757,18 @@ TEST_F(LiveConfigTest, TheKubernetesRuntimeRefusesWhatCouldNotWork) {
     env["ULW_K8S_API_URL"] = "kubernetes.default.svc";
     EXPECT_EQ(refused_variable(), "ULW_K8S_API_URL");
     live("kubernetes");
+    env["ULW_LIVE_PACKAGER_PULL_POLICY"] = "Sometimes";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER_PULL_POLICY");
+    live("kubernetes");
     env.erase("ULW_K8S_NAMESPACE");
     // No service account here to name one.
     EXPECT_EQ(refused_variable(), "ULW_K8S_NAMESPACE");
+    // A Job on another node cannot reach the gateway's directory.
+    live("kubernetes");
+    env.erase("ULW_R2_ACCOUNT_ID");
+    env["ULW_STORAGE"] = "fs";
+    env["ULW_FS_ROOT"] = "/srv/ulw";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER");
 }
 
 TEST_F(LiveConfigTest, EveryLiveSettingIsChecked) {
@@ -839,6 +897,9 @@ TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {
               std::string::npos);
     EXPECT_NE(all.find(R"("name":"ULW_MAX_CONNECTIONS","value":"448","from":"default")"),
               std::string::npos);
+    EXPECT_NE(all.find(R"("name":"ULW_JWT_SUBJECT_CLAIM","value":"sub","from":"default")"),
+              std::string::npos)
+        << all;
 }
 
 // A development run says so beside the key set it trusts, and where the switch came from.

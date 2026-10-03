@@ -217,6 +217,9 @@ public:
     [[nodiscard]] const Limits& limits() const noexcept { return limits_; }
     [[nodiscard]] Counters& counters() noexcept { return counters_; }
     [[nodiscard]] std::size_t upload_slots_in_use() const noexcept { return upload_slots_; }
+    // Upload claims (ADR-0065) the shard's requests hold now; each connection's UploadClaim
+    // keeps it.
+    [[nodiscard]] std::size_t claims_held() const noexcept { return claims_held_; }
     [[nodiscard]] ViewRecorder& views() noexcept { return views_; }
     [[nodiscard]] LiveManifestCache& live() noexcept { return live_; }
     // From a chunk's first byte handed to the store to the store holding all of it durably.
@@ -248,6 +251,10 @@ public:
 
 private:
     class Discard;
+    // Only a connection's UploadClaim moves the count of claims held.
+    friend class Connection;
+
+    [[nodiscard]] std::size_t& claims_held_count() noexcept { return claims_held_; }
 
     struct ClientEntry {
         TokenBucket new_connections;
@@ -272,6 +279,8 @@ private:
     BucketRule upload_byte_rule_;
     BoundedTable<net::IpAddress, ClientEntry, AddressHash> clients_;
     BoundedTable<core::UserId, UserEntry, UserHash> users_;
+    // Before the connections: one destroyed holding a claim counts it back down.
+    std::size_t claims_held_ = 0;
     net::Slab<Connection> connections_;
     std::unordered_map<core::UserId, std::size_t> uploads_by_user_;
     std::size_t upload_slots_ = 0;

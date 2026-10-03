@@ -7,7 +7,6 @@
 #include <functional>
 #include <optional>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace infra::catalog {
@@ -35,10 +34,10 @@ public:
     void find_upload(const core::UploadId& id,
                      core::ports::CatalogCallback<core::ports::StoredUpload> done) override;
     void claim_upload(const core::UploadId& id, const core::UserId& owner,
-                      core::ports::CatalogCallback<core::ports::StoredUpload> done) override;
-    void release_upload(const core::UploadId& id) noexcept override;
-    void record_progress(const core::UploadId& id, const core::VideoId& video,
-                         std::uint64_t durable_offset,
+                      core::ports::CatalogCallback<core::ports::ClaimedUpload> done) override;
+    void release_upload(const core::UploadId& id, core::ports::ClaimToken token) noexcept override;
+    void record_progress(const core::UploadId& id, core::ports::ClaimToken token,
+                         const core::VideoId& video, std::uint64_t durable_offset,
                          core::ports::CatalogCallback<void> done) override;
     void commit_upload(const core::UploadId& id, const core::VideoId& video,
                        const std::string& request_id,
@@ -67,6 +66,11 @@ public:
         find_video_error_ = error;
     }
 
+    // While held, claim_upload takes or refuses the claim at once but its answer waits, as a
+    // database's would in flight; hold_claims(false) sends every answer that waited.
+    void hold_claims(bool held);
+    [[nodiscard]] std::size_t held_claims() const noexcept { return held_claims_.size(); }
+
     [[nodiscard]] const std::vector<Job>& jobs() const noexcept { return jobs_; }
     [[nodiscard]] std::size_t claims() const noexcept { return claimed_.size(); }
     [[nodiscard]] const std::vector<core::ports::ViewEvent>& views() const noexcept {
@@ -81,9 +85,13 @@ private:
     net::IReactor& reactor_;
     net::TimerId timer_;
     std::vector<std::move_only_function<void() noexcept>> pending_;
+    bool hold_claims_ = false;
+    std::vector<std::move_only_function<void() noexcept>> held_claims_;
     std::unordered_map<core::UploadId, core::ports::StoredUpload> uploads_;
     std::unordered_map<core::VideoId, core::VideoRecord> videos_;
-    std::unordered_set<core::UploadId> claimed_;
+    // Each claim held, by the token of its grant.
+    std::unordered_map<core::UploadId, core::ports::ClaimToken> claimed_;
+    std::uint64_t last_token_ = 0;
     std::vector<Job> jobs_;
     std::vector<core::ports::ViewEvent> views_;
     std::optional<core::ports::CatalogError> views_error_;

@@ -10,6 +10,7 @@ ulw_add_library(gateway_lib
     src/playback.cpp
     src/publisher_watch.cpp
     src/rate_limit.cpp
+    src/upload_claim.cpp
     src/view_recorder.cpp
     src/webhook_server.cpp)
 target_include_directories(gateway_lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)

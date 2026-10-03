@@ -46,7 +46,7 @@ The stream, as every one of these answers it (`Cache-Control: no-store`):
 | `publish` | `POST /api/v1/live` only: the first publisher ticket |
 
 Who may broadcast: any signed-in user, unless the deployment names a claim
-(`ULW_LIVE_BROADCASTER_CLAIM`, [operations-contract.md](operations-contract.md)): then only a
+(`ULW_LIVE_BROADCASTER_CLAIM`, [operator-contract.md](operator-contract.md)): then only a
 token whose claim holds the value it names (a string equal to it, an array holding it, or
 `true`) may start a stream; anyone signed in may still watch. Each user may start a few streams
 an hour, however each ends, and the platform runs a fixed number at once.
@@ -62,7 +62,7 @@ The flow:
    publisher to it; the answer is the stream, `live`. Call it within 30 s of the POST's `201`:
    the media server's recorder looks for the publisher that long. It is idempotent: retry it on
    `503` or a lost answer. A stream nobody takes live within 2 minutes is ended (`timeout`).
-   Where the media server reports to the gateway (ADR-0093; on stage), the stream also goes
+   Where the media server reports to the gateway (ADR-0093; where live streams are on), the stream also goes
    live by itself as soon as the publisher's first track arrives, so an encoder with a fixed
    token (OBS) needs nobody to call `start`; calling it as well is harmless, and its answer is
    the client's confirmation.
@@ -137,9 +137,9 @@ handed out earlier. Nothing else of the platform is between the client and the m
 - **Media.** Send only: one audio track (Opus) and one video track (VP8 or H.264), bundled. The
   stream is re-encoded to one 720p rendition at 30 fps with a keyframe every segment, whatever
   the source's own keyframe interval.
-- **ICE servers.** On Askedin's cluster media reaches the media server only through TURN, and the
-  TURN servers come in the `201`'s `Link` headers, not from `OPTIONS`. A browser therefore
-  trickles: create the offer, POST it before calling `setLocalDescription`, call
+- **ICE servers.** On the Kubernetes deployment media reaches the media server only through
+  TURN, and the TURN servers come in the `201`'s `Link` headers, not from `OPTIONS`. A browser
+  therefore trickles: create the offer, POST it before calling `setLocalDescription`, call
   `setConfiguration` with the `Link` servers, then `setLocalDescription(offer)` and
   `setRemoteDescription(answer)`, and PATCH the candidates as they come (RFC 9725 sections 4.3.1
   and 4.6). An encoder that puts all its candidates in the offer (GStreamer's `whipsink`) works
@@ -249,7 +249,7 @@ times its end is observed:
 
 | Field | Value |
 |---|---|
-| `owner` | The broadcaster: the Askedin user id the stream was started for. Only they can see or play it, as with an upload |
+| `owner` | The broadcaster: the user id (the token's subject) the stream was started for. Only they can see or play it, as with an upload |
 | `title` | `Live stream <stream id>` |
 | `state` | `processing` as soon as the recording is stored, then `ready` (or `failed`) exactly as an upload's video ([videos-and-playback.md](videos-and-playback.md#lifecycle)) |
 | `duration_ms` | The whole stream. A stream whose packager restarted is one video: its parts are joined, without the gap between them; a part without audio is silent in it |

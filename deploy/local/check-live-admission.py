@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Checks the packagers' admission policy (deploy/askedin/overlays/<env>/live-packager/
+"""Checks the packagers' admission policy (deploy/kubernetes/base/live-packager/
 admission-policy.yaml, docs/adr/0092) against a real API server: what the gateway's service
 account may create in the packagers' namespace, and what it may not.
 
-    deploy/local/check-live-admission.py <env> -- <kubectl command...>
+    deploy/local/check-live-admission.py <overlay> -- <kubectl command...>
 
-The kubectl command must reach an API server (the sandbox's, or a bare kube-apiserver) as a
-user who may impersonate, with the overlay's live-packager/ manifests and the gateway's
-video-gateway/live-rbac.yaml applied. Every check is a server-side dry run, so nothing is
-stored. The template is live-packager/job.yaml, filled in as the gateway fills it; each refused
-case changes it, or the Secret, in one way the policy must refuse.
+<overlay> names deploy/kubernetes/overlays/<overlay>, whose config.env gives the namespaces and
+fills the template. The kubectl command must reach an API server (the sandbox's, or a bare
+kube-apiserver) as a user who may impersonate, with that overlay's namespaces, its
+live-packager part and the gateway's service account applied (RUNBOOK.md, step 9). Every check
+is a server-side dry run, so nothing is stored. The template is live-packager/job.yaml, filled
+in as the gateway fills it; each refused case changes it, or the Secret, in one way the policy
+must refuse.
 """
 import copy
 import json
@@ -20,7 +22,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-NAMESPACES = {"stage": ("apps-stage", "apps-stage-live"), "prod": ("apps", "apps-live")}
+KUBE = ROOT / "deploy/kubernetes"
 STREAM = "0192f3a4-0000-7000-8000-0000000000aa"
 # Changes the API server's own validation refuses before admission is asked, in a user
 # namespace (hostUsers false) or on a server that admits no privileged pod; the policy holds
@@ -28,11 +30,24 @@ STREAM = "0192f3a4-0000-7000-8000-0000000000aa"
 REFUSED_BEFORE = {"the node's network", "the node's pids", "privileged"}
 
 
-def job_template(namespace: str) -> dict:
-    text = (ROOT / "deploy/askedin/live-packager/job.yaml").read_text(encoding="utf-8")
-    for name, value in (("ULW_NAMESPACE", namespace), ("ULW_IMAGE_TAG", "main"),
-                        ("ULW_STREAM_ID", STREAM), ("ULW_STREAM_OWNER", "auth0|alice")):
-        text = text.replace("${" + name + "}", value)
+def config_env(overlay: str) -> dict[str, str]:
+    """The overlay's config.env, KEY=value lines, as kustomize and a shell read it."""
+    values = {}
+    text = (KUBE / "overlays" / overlay / "config.env").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            key, _, value = line.partition("=")
+            values[key] = value
+    return values
+
+
+def job_template(config: dict[str, str]) -> dict:
+    text = (KUBE / "live-packager/job.yaml").read_text(encoding="utf-8")
+    values = {**config, "ULW_STREAM_ID": STREAM, "ULW_STREAM_OWNER": "auth0|alice"}
+    for name in ("LIVE_NAMESPACE", "LIVE_PACKAGER_IMAGE_TAG", "IMAGE_PULL_POLICY", "STORAGE",
+                 "R2_ACCOUNT_ID", "S3_ENDPOINT", "BUCKET", "LIVE_PACKAGER_SECRET",
+                 "ULW_STREAM_ID", "ULW_STREAM_OWNER"):
+        text = text.replace("${" + name + "}", values[name])
     return yaml.safe_load(text)
 
 
@@ -88,7 +103,7 @@ def job_cases(base: dict):
     yield case("another stream's Secret", lambda j: container(j)["env"].append(
         {"name": "X", "valueFrom": {"secretKeyRef": {"name": "live-packager-other",
                                                      "key": "ULW_LIVE_SRT_PASSPHRASE"}}}))
-    yield case("another Secret", lambda j: container(j)["env"].append(
+    yield case("the gateway's Secret", lambda j: container(j)["env"].append(
         {"name": "X", "valueFrom": {"secretKeyRef": {"name": "video-gateway-secrets",
                                                      "key": "ULW_DATABASE_URL"}}}))
     yield case("another name", lambda j: j["metadata"].update(name="not-the-instance"))
@@ -106,7 +121,7 @@ def job_cases(base: dict):
     yield case("another hostname", lambda j: pod(j).update(hostname="packager"))
     yield case("no hostname", lambda j: pod(j).pop("hostname"))
     yield case("another subdomain", lambda j: pod(j).update(subdomain="video-gateway"))
-    yield case("a node", lambda j: pod(j).update(nodeName="k8s-prod"))
+    yield case("a node", lambda j: pod(j).update(nodeName="node-1"))
     yield case("a priority class",
                lambda j: pod(j).update(priorityClassName="system-node-critical"))
     yield case("another kind of workload",
@@ -145,14 +160,16 @@ def dry_run(kubectl: list[str], gateway: str, manifest: dict) -> subprocess.Comp
 
 
 def main() -> int:
-    if len(sys.argv) < 4 or sys.argv[1] not in NAMESPACES or sys.argv[2] != "--":
+    if (len(sys.argv) < 4 or sys.argv[2] != "--"
+            or not (KUBE / "overlays" / sys.argv[1] / "config.env").is_file()):
         print(__doc__, file=sys.stderr)
         return 2
     kubectl = sys.argv[3:]
-    gateway_ns, live = NAMESPACES[sys.argv[1]]
-    gateway = f"system:serviceaccount:{gateway_ns}:video-gateway"
+    config = config_env(sys.argv[1])
+    live = config["LIVE_NAMESPACE"]
+    gateway = f"system:serviceaccount:{config['NAMESPACE']}:video-gateway"
     failures = []
-    job = job_template(live)
+    job = job_template(config)
     for name, manifest in (("the template's Job", job), ("the stream's Secret", secret(live))):
         done = dry_run(kubectl, gateway, manifest)
         if done.returncode != 0:

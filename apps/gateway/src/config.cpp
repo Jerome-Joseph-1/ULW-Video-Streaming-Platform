@@ -64,6 +64,7 @@ constexpr std::array kSettings{
     ops::Setting{.env = "KUBERNETES_SERVICE_HOST", .key = ""},
     ops::Setting{.env = "JWT_ISSUER", .key = "auth.issuer"},
     ops::Setting{.env = "JWT_AUDIENCE", .key = "auth.audience"},
+    ops::Setting{.env = "ULW_JWT_SUBJECT_CLAIM", .key = "auth.subject_claim"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
     ops::Setting{.env = "ULW_ALLOWED_ORIGINS", .key = "auth.allowed_origins"},
     ops::Setting{.env = "ULW_ALLOW_SAME_SITE", .key = "auth.allow_same_site"},
@@ -89,6 +90,8 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_LIVE_PACKAGER_PORT", .key = "live.packager_port"},
     ops::Setting{.env = "ULW_LIVE_JOB_TEMPLATE", .key = "live.job_template"},
     ops::Setting{.env = "ULW_LIVE_PACKAGER_IMAGE_TAG", .key = "live.packager_image_tag"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_PULL_POLICY", .key = "live.packager_pull_policy"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_SECRET", .key = "live.packager_secret"},
     ops::Setting{.env = "ULW_K8S_API_URL", .key = "live.k8s_api_url"},
     ops::Setting{.env = "ULW_K8S_NAMESPACE", .key = "live.k8s_namespace"},
     ops::Setting{.env = "ULW_K8S_TOKEN_FILE", .key = "live.k8s_token_file"},
@@ -290,7 +293,13 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
         return std::unexpected(std::move(issuer.error()));
     }
     config.jwt_issuer = std::move(*issuer);
-    config.jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform");
+    auto rules =
+        ops::token_rules(env, ops::KeySource{.url = config.jwks_url, .file = config.dev_jwks_file});
+    if (!rules) {
+        return error(rules.error().variable, rules.error().reason);
+    }
+    config.jwt_audience = std::move(rules->audience);
+    config.jwt_subject_claim = std::move(rules->subject_claim);
     config.limits.auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token");
     if (const auto list = lookup(env, "ULW_ALLOWED_ORIGINS")) {
         auto origins = http::parse_origin_list(*list);
@@ -313,7 +322,9 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
         return error("ULW_DEV_JWKS_FILE", "unreadable, or larger than 64 KiB");
     }
     const auto keys = infra::auth::Ed25519LocalVerifier::create(
-        *jwks, {.issuer = config.jwt_issuer, .audience = config.jwt_audience});
+        *jwks, {.issuer = config.jwt_issuer,
+                .audience = config.jwt_audience,
+                .subject_claim = config.jwt_subject_claim});
     if (!keys) {
         return error("ULW_DEV_JWKS_FILE", infra::auth::to_string(keys.error()));
     }
@@ -517,7 +528,12 @@ std::expected<void, ConfigError> load_process_runtime(const EnvLookup& env, cons
     return {};
 }
 
-std::expected<void, ConfigError> load_kubernetes_runtime(const EnvLookup& env, LiveConfig& live) {
+std::expected<void, ConfigError> load_kubernetes_runtime(const EnvLookup& env, const Config& config,
+                                                         LiveConfig& live) {
+    // A packager Job reaches the gateway's store over the network, never its directory.
+    if (config.storage == StorageBackend::Filesystem) {
+        return error("ULW_LIVE_PACKAGER", "kubernetes needs ULW_STORAGE r2 or minio, not fs");
+    }
     auto path = required(env, "ULW_LIVE_JOB_TEMPLATE");
     if (!path) {
         return std::unexpected(std::move(path.error()));
@@ -536,6 +552,15 @@ std::expected<void, ConfigError> load_kubernetes_runtime(const EnvLookup& env, L
     live.job_template_file = std::move(*path);
     live.job_template = std::move(*text);
     live.image_tag = std::move(*tag);
+    if (auto policy = lookup(env, "ULW_LIVE_PACKAGER_PULL_POLICY")) {
+        if (*policy != "Always" && *policy != "IfNotPresent" && *policy != "Never") {
+            return error("ULW_LIVE_PACKAGER_PULL_POLICY", "must be Always, IfNotPresent or Never");
+        }
+        live.pull_policy = std::move(*policy);
+    }
+    if (auto secret = lookup(env, "ULW_LIVE_PACKAGER_SECRET")) {
+        live.packager_secret = std::move(*secret);
+    }
     if (auto url = lookup(env, "ULW_K8S_API_URL")) {
         if (!url->starts_with("https://") && !url->starts_with("http://")) {
             return error("ULW_K8S_API_URL", "must be an http or https URL");
@@ -678,7 +703,7 @@ std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config)
         }
     } else if (runtime == "kubernetes") {
         live.runtime = PackagerRuntime::Kubernetes;
-        if (auto r = load_kubernetes_runtime(env, live); !r) {
+        if (auto r = load_kubernetes_runtime(env, config, live); !r) {
             return r;
         }
     } else {
@@ -811,12 +836,15 @@ void log_values(const std::array<std::pair<std::string_view, std::string>, N>& v
 }
 
 // The stream service's settings, as logged: empty where live streams are off.
-std::array<std::pair<std::string_view, std::string>, 19> live_values(const LiveConfig& live) {
+std::array<std::pair<std::string_view, std::string>, 21> live_values(const LiveConfig& live) {
     const auto live_value = [&live](std::string value) {
         return live.enabled ? std::move(value) : std::string{};
     };
     const bool process = live.enabled && live.runtime == PackagerRuntime::Process;
     const bool kubernetes = live.enabled && live.runtime == PackagerRuntime::Kubernetes;
+    const auto k8s_value = [kubernetes](std::string value) {
+        return kubernetes ? std::move(value) : std::string{};
+    };
     const auto webhook_values = webhook_settings(live);
     return {{
         {"LIVEKIT_API_URL", live.livekit_api_url},
@@ -835,9 +863,11 @@ std::array<std::pair<std::string_view, std::string>, 19> live_values(const LiveC
         {"ULW_LIVE_PACKAGER_BIN", live.packager_binary},
         {"ULW_LIVE_JOB_TEMPLATE", live.job_template_file},
         {"ULW_LIVE_PACKAGER_IMAGE_TAG", live.image_tag},
-        {"ULW_K8S_API_URL", kubernetes ? live.k8s_api_url : ""},
+        {"ULW_LIVE_PACKAGER_PULL_POLICY", k8s_value(live.pull_policy)},
+        {"ULW_LIVE_PACKAGER_SECRET", k8s_value(live.packager_secret)},
+        {"ULW_K8S_API_URL", k8s_value(live.k8s_api_url)},
         {"ULW_K8S_NAMESPACE", live.k8s_namespace},
-        {"ULW_K8S_TOKEN_FILE", kubernetes ? live.k8s_token_file : ""},
+        {"ULW_K8S_TOKEN_FILE", k8s_value(live.k8s_token_file)},
         {"ULW_LIVE_WEBHOOK_PORT", webhook_values.first},
         {"ULW_LIVE_PUBLISHER_GRACE_SECONDS", webhook_values.second},
     }};
@@ -900,6 +930,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_DEV_MODE", config.dev_mode ? "1" : ""},
         {"JWT_ISSUER", config.jwt_issuer},
         {"JWT_AUDIENCE", config.jwt_audience},
+        {"ULW_JWT_SUBJECT_CLAIM", config.jwt_subject_claim},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},
         {"ULW_ALLOWED_ORIGINS", origins},
         {"ULW_ALLOW_SAME_SITE", config.limits.allow_same_site ? "1" : ""},

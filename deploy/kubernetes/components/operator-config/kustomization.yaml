@@ -1,0 +1,502 @@
+# Copies each value of an overlay's config.env into the manifests that use it. The overlay
+# generates the ConfigMap ulw-operator-config from its config.env (marked local-config, so it is
+# never applied) and lists this component; RUNBOOK.md, step 4, has the keys. A key missing from
+# config.env, or a field missing from a manifest, fails the build rather than leaving the base's
+# example value in place.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+replacements:
+  # Every resource's namespace.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NAMESPACE
+    targets:
+      - select:
+          namespace: ulw
+        reject:
+          - kind: ConfigMap
+            name: ulw-operator-config
+        fieldPaths:
+          - metadata.namespace
+  # The Gateway the HTTPRoutes attach to.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.GATEWAY_NAME
+    targets:
+      - select:
+          kind: HTTPRoute
+          name: video-gateway|chat|livekit
+        fieldPaths:
+          - spec.parentRefs.0.name
+  # Its namespace.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.GATEWAY_NAMESPACE
+    targets:
+      - select:
+          kind: HTTPRoute
+          name: video-gateway|chat|livekit
+        fieldPaths:
+          - spec.parentRefs.0.namespace
+  # The host every HTTPRoute answers.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.PUBLIC_HOSTNAME
+    targets:
+      - select:
+          kind: HTTPRoute
+          name: video-gateway|chat|livekit
+        fieldPaths:
+          - spec.hostnames.0
+  # JWKS_URL of the gateway and chat.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.JWKS_URL
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=JWKS_URL].value
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=JWKS_URL].value
+  # JWT_ISSUER of the gateway and chat.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.JWT_ISSUER
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=JWT_ISSUER].value
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=JWT_ISSUER].value
+  # JWT_AUDIENCE of the gateway and chat.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.JWT_AUDIENCE
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=JWT_AUDIENCE].value
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=JWT_AUDIENCE].value
+  # ULW_JWT_SUBJECT_CLAIM of the gateway and chat.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.JWT_SUBJECT_CLAIM
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_JWT_SUBJECT_CLAIM].value
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_JWT_SUBJECT_CLAIM].value
+  # ULW_AUTH_COOKIE of the gateway and chat.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.AUTH_COOKIE
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_AUTH_COOKIE].value
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_AUTH_COOKIE].value
+  # ULW_ALLOWED_ORIGINS of the gateway and chat.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.ALLOWED_ORIGINS
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_ALLOWED_ORIGINS].value
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_ALLOWED_ORIGINS].value
+  # The pod network: the proxies the gateway and chat trust, and the block the worker and the
+  # packagers may not reach.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.POD_CIDR
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_TRUSTED_PROXIES].value
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_TRUSTED_PROXIES].value
+      - select:
+          kind: NetworkPolicy
+          name: video-worker
+        fieldPaths:
+          - spec.egress.1.to.0.ipBlock.except.0
+      - select:
+          kind: NetworkPolicy
+          name: live-packager
+        fieldPaths:
+          - spec.egress.1.to.0.ipBlock.except.0
+  # ULW_STORAGE of the gateway, the worker and the upload reaper.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.STORAGE
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_STORAGE].value
+      - select:
+          kind: Deployment
+          name: video-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].env.[name=ULW_STORAGE].value
+      - select:
+          kind: CronJob
+          name: upload-reaper
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.containers.[name=reaper].env.[name=ULW_STORAGE].value
+  # ULW_R2_ACCOUNT_ID of the gateway, the worker and the upload reaper.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.R2_ACCOUNT_ID
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_R2_ACCOUNT_ID].value
+      - select:
+          kind: Deployment
+          name: video-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].env.[name=ULW_R2_ACCOUNT_ID].value
+      - select:
+          kind: CronJob
+          name: upload-reaper
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.containers.[name=reaper].env.[name=ULW_R2_ACCOUNT_ID].value
+  # ULW_S3_ENDPOINT of the gateway, the worker and the upload reaper.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.S3_ENDPOINT
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_S3_ENDPOINT].value
+      - select:
+          kind: Deployment
+          name: video-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].env.[name=ULW_S3_ENDPOINT].value
+      - select:
+          kind: CronJob
+          name: upload-reaper
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.containers.[name=reaper].env.[name=ULW_S3_ENDPOINT].value
+  # ULW_BUCKET of the gateway, the worker and the upload reaper.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.BUCKET
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_BUCKET].value
+      - select:
+          kind: Deployment
+          name: video-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].env.[name=ULW_BUCKET].value
+      - select:
+          kind: CronJob
+          name: upload-reaper
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.containers.[name=reaper].env.[name=ULW_BUCKET].value
+  # The tag (or tag@digest) of ulw-video-gateway: the gateway, its migrations and the upload reaper.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.VIDEO_GATEWAY_IMAGE_TAG
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=migrate].image
+          - spec.template.spec.containers.[name=gateway].image
+        options:
+          delimiter: ":"
+          index: 1
+      - select:
+          kind: CronJob
+          name: upload-reaper
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.containers.[name=reaper].image
+        options:
+          delimiter: ":"
+          index: 1
+  # The tag (or tag@digest) of ulw-video-worker.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.VIDEO_WORKER_IMAGE_TAG
+    targets:
+      - select:
+          kind: Deployment
+          name: video-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].image
+        options:
+          delimiter: ":"
+          index: 1
+  # The tag (or tag@digest) of ulw-chat.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.CHAT_IMAGE_TAG
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].image
+        options:
+          delimiter: ":"
+          index: 1
+  # How the kubelet pulls this repository's images.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.IMAGE_PULL_POLICY
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=migrate].imagePullPolicy
+          - spec.template.spec.containers.[name=gateway].imagePullPolicy
+      - select:
+          kind: Deployment
+          name: video-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].imagePullPolicy
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].imagePullPolicy
+      - select:
+          kind: CronJob
+          name: upload-reaper
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.containers.[name=reaper].imagePullPolicy
+  # STUNner's UDP listener, and the port LiveKit tells clients to relay through.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.TURN_PORT
+    targets:
+      - select:
+          kind: Gateway
+          name: stunner
+        fieldPaths:
+          - spec.listeners.[name=turn-udp].port
+      - select:
+          kind: Deployment
+          name: livekit
+        fieldPaths:
+          - spec.template.spec.containers.[name=livekit].env.[name=TURN_PORT].value
+  # The gateway's Secret, which the upload reaper shares.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.VIDEO_GATEWAY_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.initContainers.*.env.*.valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.*.env.*.valueFrom.secretKeyRef.name
+      - select:
+          kind: CronJob
+          name: upload-reaper
+        fieldPaths:
+          - spec.jobTemplate.spec.template.spec.containers.*.env.*.valueFrom.secretKeyRef.name
+  # The worker's Secret.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.VIDEO_WORKER_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: video-worker
+        fieldPaths:
+          - spec.template.spec.containers.*.env.*.valueFrom.secretKeyRef.name
+  # Chat's Secret.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.CHAT_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_DATABASE_URL].valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_NODE_SECRET].valueFrom.secretKeyRef.name
+  # The realtime plane's Secret: LiveKit, its Redis, egress, and chat's call settings.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SFU_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=LIVEKIT_CLIENT_URL].valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.[name=chat].env.[name=LIVEKIT_API_KEY].valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.[name=chat].env.[name=LIVEKIT_API_SECRET].valueFrom.secretKeyRef.name
+      - select:
+          kind: Deployment
+          name: livekit
+        fieldPaths:
+          - spec.template.spec.containers.*.env.*.valueFrom.secretKeyRef.name
+      - select:
+          kind: Deployment
+          name: livekit-redis
+        fieldPaths:
+          - spec.template.spec.containers.*.env.*.valueFrom.secretKeyRef.name
+      - select:
+          kind: Deployment
+          name: livekit-egress
+        fieldPaths:
+          - spec.template.spec.containers.*.env.*.valueFrom.secretKeyRef.name
+  # The packagers' own namespace (docs/adr/0092): its resources, the Namespace itself, and where
+  # egress dials a packager and the admission policy is bound.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_NAMESPACE
+    targets:
+      - select:
+          namespace: ulw-live
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: Namespace
+          name: ulw-live
+        fieldPaths:
+          - metadata.name
+      - select:
+          kind: NetworkPolicy
+          name: livekit-egress
+        fieldPaths:
+          - spec.egress.3.to.0.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]
+      - select:
+          kind: ValidatingAdmissionPolicyBinding
+        fieldPaths:
+          - spec.matchResources.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]
+  # The gateway's namespace, where the packagers' policies and grants name its pods and account:
+  # egress's pods dial in, the gateway's account is bound, and the admission policy holds that
+  # account (system:serviceaccount:<NAMESPACE>:video-gateway). The policy is cluster-scoped, so
+  # it and its binding are named after the environment: <NAMESPACE>-live-packagers.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NAMESPACE
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: live-packager
+        fieldPaths:
+          - spec.ingress.0.from.0.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]
+      - select:
+          kind: RoleBinding
+          name: video-gateway-live-packagers
+        fieldPaths:
+          - subjects.0.namespace
+      - select:
+          kind: ValidatingAdmissionPolicy
+        fieldPaths:
+          - spec.matchConditions.0.expression
+        options:
+          delimiter: ":"
+          index: 2
+      - select:
+          kind: ValidatingAdmissionPolicy
+        fieldPaths:
+          - metadata.name
+        options:
+          delimiter: "-"
+          index: 0
+      - select:
+          kind: ValidatingAdmissionPolicyBinding
+        fieldPaths:
+          - metadata.name
+          - spec.policyName
+        options:
+          delimiter: "-"
+          index: 0
+  # The packagers' Secret, the one besides its own stream's that a packager may read.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_PACKAGER_SECRET
+    targets:
+      - select:
+          kind: ValidatingAdmissionPolicy
+        fieldPaths:
+          - spec.variables.[name=sharedSecret].expression
+        options:
+          delimiter: "'"
+          index: 1

@@ -64,10 +64,10 @@ public:
     void find_upload(const core::UploadId& id,
                      core::ports::CatalogCallback<core::ports::StoredUpload> done) override;
     void claim_upload(const core::UploadId& id, const core::UserId& owner,
-                      core::ports::CatalogCallback<core::ports::StoredUpload> done) override;
-    void release_upload(const core::UploadId& id) noexcept override;
-    void record_progress(const core::UploadId& id, const core::VideoId& video,
-                         std::uint64_t durable_offset,
+                      core::ports::CatalogCallback<core::ports::ClaimedUpload> done) override;
+    void release_upload(const core::UploadId& id, core::ports::ClaimToken token) noexcept override;
+    void record_progress(const core::UploadId& id, core::ports::ClaimToken token,
+                         const core::VideoId& video, std::uint64_t durable_offset,
                          core::ports::CatalogCallback<void> done) override;
     void commit_upload(const core::UploadId& id, const core::VideoId& video,
                        const std::string& request_id,

@@ -1,4 +1,4 @@
-# The sandbox replica of Askedin's cluster: one kind node standing in for k8s-prod. e2e-up.sh
+# The sandbox operator's cluster: one kind node standing in for a real cluster's. e2e-up.sh
 # creates it; nothing here is used against a real cluster.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -29,7 +29,7 @@ nodes:
       # The WebRTC-facing ports, on the outside network's gateway address only (sandbox.sh):
       # STUNner's TURN listener (deploy/stunner, NodePort 31478), which carries every media
       # packet of every call, so it is the only UDP port published at all; and LiveKit's
-      # signalling, which production routes through askedin-gateway instead.
+      # signalling, which a real deployment routes through the operator's Gateway instead.
       - containerPort: 31478
         hostPort: 3478
         listenAddress: 198.18.0.1

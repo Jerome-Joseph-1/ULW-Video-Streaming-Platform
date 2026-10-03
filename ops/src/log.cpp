@@ -14,6 +14,22 @@ constexpr std::string_view kTruncated = R"(,"truncated":true)";
 // Room kept for the marker and the closing "}\n".
 constexpr std::size_t kReserve = kTruncated.size() + 2;
 
+// The bytes quoted() writes for `text`, quotes included.
+std::size_t quoted_size(std::string_view text) noexcept {
+    std::size_t n = 2;
+    for (const char c : text) {
+        const auto u = static_cast<unsigned char>(c);
+        if (c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t') {
+            n += 2;
+        } else if (u < 0x20 || u == 0x7f) {
+            n += 6;
+        } else {
+            ++n;
+        }
+    }
+    return n;
+}
+
 template <std::size_t N> std::string_view digits(std::array<char, N>& out, auto value) noexcept {
     // to_chars takes a [first, last) pointer pair.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
@@ -112,8 +128,8 @@ void LineBuilder::raw(std::string_view text) noexcept {
     }
 }
 
-// JSON string escaping. The worst case is six bytes per input byte (\u001f); room is checked
-// against that before anything is written, so a field goes in whole or not at all.
+// JSON string escaping, up to six bytes per input byte (\u001f). add() checks the room against
+// quoted_size() before anything is written, so a field goes in whole or not at all.
 void LineBuilder::quoted(std::string_view text) noexcept {
     constexpr std::string_view kHex = "0123456789abcdef";
     raw("\"");
@@ -166,10 +182,11 @@ void LineBuilder::add(const Field& field) noexcept {
     } else if (const auto* d = std::get_if<double>(&field.value())) {
         text = digits(num, *d);
     }
-    // ,"key": plus the value, escaped at worst.
-    const std::size_t worst =
-        4 + (6 * field.key().size()) + (string != nullptr ? 2 + (6 * text.size()) : text.size());
-    if (!fits(worst)) {
+    // ,"key": plus the value, counted as escaped: at the escaping's worst case, six bytes for
+    // every byte, a 150-byte error was left out of a line with room for it.
+    const std::size_t size =
+        2 + quoted_size(field.key()) + (string != nullptr ? quoted_size(text) : text.size());
+    if (!fits(size)) {
         truncated_ = true;
         return;
     }

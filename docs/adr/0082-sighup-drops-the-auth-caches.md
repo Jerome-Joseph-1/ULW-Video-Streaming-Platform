@@ -1,6 +1,6 @@
 # 0082. SIGHUP drops the auth caches
 
-Status: Accepted
+Status: Accepted, amended by 0088 (the rotation procedure is the operator's, `deploy/kubernetes/RUNBOOK.md` step 8)
 Date: 2026-10-02
 
 ## Context
