@@ -66,8 +66,9 @@ using SendCallback =
 // handler's tickets, ADR-0050): opaque bytes there, opaque bytes back, at most this many each
 // way. Small: a few names out, a URL and a token back.
 inline constexpr std::size_t kMaxOwnerMessage = 4096;
-// How long a member's node waits for the owner's answer: the owner's own work may be a store
-// read and two calls to another service, each with its own timeout of a few seconds.
+// How long a member's node waits for the owner's answer, whether the owner is another node or
+// this one: the owner's own work may be a store read and two calls to another service, each with
+// its own timeout of a few seconds. Checked on the router's tick, a quarter second late at most.
 inline constexpr core::Millis kOwnerAskTimeout{15'000};
 
 using OwnerAnswer =
@@ -190,7 +191,8 @@ public:
 
     // Asks the room's owner, which answers through its IOwnerService, for a member that has
     // joined the room here: NotJoined otherwise, as for send. Unavailable when the owner cannot
-    // be reached, has no service, or does not answer within kOwnerAskTimeout. Like a send, the
+    // be reached, has no service, or does not answer within kOwnerAskTimeout (this node's own
+    // service included, when it is the owner). Like a send, the
     // answer is dropped if the member leaves the room first. `request` is at most
     // kMaxOwnerMessage bytes.
     void ask_owner(const core::RoomId& room, IMember& from, std::span<const std::byte> request,

@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -15,11 +16,12 @@ using core::ports::MediaError;
 using core::ports::RoomKind;
 
 constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
+constexpr std::string_view kOtherRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fe";
 constexpr std::string_view kDevice = "01a0eb86-6cca-7dce-84cc-3bb47615f9aa";
 constexpr std::string_view kOtherDevice = "01a0eb86-6cca-7dce-84cc-3bb47615f9bb";
 
-core::RoomId room_id() {
-    return *core::RoomId::parse(kRoom);
+core::RoomId room_id(std::string_view room = kRoom) {
+    return *core::RoomId::parse(room);
 }
 
 // Only access matters to the handler; it answers what the test set, at once or when told to.
@@ -62,6 +64,9 @@ public:
     void access(const core::RoomId& /*room*/, const core::UserId& user,
                 core::ports::MessageCallback<core::ports::RoomAccess> done) override {
         ++reads;
+        if (throwing) {
+            throw std::bad_alloc();
+        }
         if (down) {
             done(std::unexpected(core::ports::MessageStoreError::Unavailable));
             return;
@@ -78,6 +83,8 @@ public:
     std::optional<RoomKind> kind = RoomKind::DirectChat;
     std::vector<std::string> members_{"alice", "bob"};
     bool down = false;
+    // access fails to take the ask at all, as an allocation inside it would.
+    bool throwing = false;
     int reads = 0;
 };
 
@@ -129,6 +136,9 @@ public:
     void open_room(const core::RoomId& room, core::ports::MediaGeneration generation,
                    core::ports::MediaRoomKind kind, std::uint16_t max_participants,
                    OpenDone done) override {
+        if (throwing) {
+            throw std::bad_alloc();
+        }
         opens.push_back({.room = room,
                          .generation = generation,
                          .kind = kind,
@@ -166,6 +176,8 @@ public:
     std::vector<Joined> joins;
     int answered_opens = 0;
     int closes = 0;
+    // open_room fails to take the open at all, as an allocation inside it would.
+    bool throwing = false;
 };
 
 class CallHandlerTest : public ::testing::Test {
@@ -174,10 +186,11 @@ protected:
         : handler_(std::make_unique<chat::CallHandler>(store_, &sfu_, clock_, limits)) {}
 
     // Asks as `user` from `device`; the answer lands in answers_, in the order they come.
-    void ask(std::string_view user = "alice", std::string_view device = kDevice) {
+    void ask(std::string_view user = "alice", std::string_view device = kDevice,
+             std::string_view room = kRoom) {
         const auto request = chat::encode_request(
             {.user = *core::UserId::parse(user), .device = *core::DeviceId::parse(device)});
-        handler_->on_ask(room_id(), request,
+        handler_->on_ask(room_id(room), request,
                          [this](std::expected<std::vector<std::byte>, rt::RouteError> r) noexcept {
                              if (!r) {
                                  errors_.push_back(r.error());
@@ -265,6 +278,51 @@ TEST_F(CallHandlerTest, TheRoomIsOpenedOnceAndItsHandleReusedForEveryLaterAsk) {
     EXPECT_EQ(handler_->rooms(), 1U);
 }
 
+TEST_F(CallHandlerTest, AMemberTakenOffTheListGetsNoTicketThoughTheRoomIsOpen) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    ASSERT_EQ(outcomes(), std::vector{CallOutcome::Ticket});
+    // The list is read for every ask, on the owner: the removal counts at once.
+    std::erase(store_.members_, "alice");
+    ask("alice");
+    EXPECT_EQ(outcomes(), (std::vector{CallOutcome::Ticket, CallOutcome::NotMember}));
+    EXPECT_TRUE(sfu_.joins.empty());
+    EXPECT_EQ(handler_->counters().tickets, 1U);
+}
+
+TEST_F(CallHandlerTest, AnAskTheStoreCouldNotTakeLeavesNoAskCounted) {
+    handler_ = std::make_unique<chat::CallHandler>(store_, &sfu_, clock_,
+                                                   chat::CallLimits{.max_in_flight = 1});
+    store_.throwing = true;
+    ask("alice");
+    ask("alice");
+    // Nothing answered them: the asker's own deadline does (rt::kOwnerAskTimeout).
+    EXPECT_TRUE(answers_.empty());
+    store_.throwing = false;
+    ask("alice");
+    ASSERT_EQ(sfu_.opens.size(), 1U) << "the failed asks were still counted in flight";
+    sfu_.open();
+    sfu_.issue();
+    EXPECT_EQ(outcomes(), std::vector{CallOutcome::Ticket});
+}
+
+TEST_F(CallHandlerTest, AnOpenTheSfuCouldNotTakeAnswersItsWaitersAndLeavesTheRoomFree) {
+    handler_ = std::make_unique<chat::CallHandler>(store_, &sfu_, clock_,
+                                                   chat::CallLimits{.max_in_flight = 1});
+    sfu_.throwing = true;
+    ask("alice");
+    EXPECT_EQ(errors_, std::vector{rt::RouteError::Unavailable});
+    EXPECT_EQ(handler_->rooms(), 0U);
+    // Neither the room nor the count is left behind: the next ask opens it.
+    sfu_.throwing = false;
+    ask("bob", kOtherDevice);
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    sfu_.open();
+    sfu_.issue();
+    EXPECT_EQ(outcomes(), std::vector{CallOutcome::Ticket});
+}
+
 TEST_F(CallHandlerTest, AsksWhileTheRoomIsOpeningWaitForThatOneOpen) {
     ask("alice");
     ask("bob", kOtherDevice);
@@ -330,7 +388,11 @@ TEST_F(CallHandlerTest, AHandleNobodyAskedForWithinTheIdleTimeIsLetGo) {
     ask("alice");
     sfu_.open();
     sfu_.issue();
-    clock_.advance(chat::CallLimits{}.idle - core::Millis{1});
+    clock_.advance(chat::CallLimits{}.idle - core::Millis{1'000});
+    handler_->sweep();
+    EXPECT_EQ(handler_->rooms(), 1U);
+    // Looked at once a second, however often it is called.
+    clock_.advance(core::Millis{999});
     handler_->sweep();
     EXPECT_EQ(handler_->rooms(), 1U);
     clock_.advance(core::Millis{1});
@@ -360,6 +422,26 @@ TEST_F(BoundedCallHandlerTest, AsksPastWhatTheNodeTakesAreBusy) {
     EXPECT_EQ(outcomes(),
               (std::vector{CallOutcome::Busy, CallOutcome::Ticket, CallOutcome::Ticket}));
     EXPECT_EQ(handler_->counters().busy, 1U);
+}
+
+TEST_F(BoundedCallHandlerTest, ANewRoomPastTheCapWaitsForAnIdleHandleToGo) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    ask("alice", kDevice, kOtherRoom);
+    EXPECT_EQ(outcomes(), (std::vector{CallOutcome::Ticket, CallOutcome::Busy}));
+    EXPECT_TRUE(sfu_.opens.empty());
+    // The first room's handle idles out; the cap makes room for the second at once, with no
+    // sweep of the loop's own in between.
+    clock_.advance(chat::CallLimits{}.idle);
+    ask("alice", kDevice, kOtherRoom);
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].room, room_id(kOtherRoom));
+    sfu_.open();
+    sfu_.issue();
+    EXPECT_EQ(outcomes(),
+              (std::vector{CallOutcome::Ticket, CallOutcome::Busy, CallOutcome::Ticket}));
+    EXPECT_EQ(handler_->rooms(), 1U);
 }
 
 TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {

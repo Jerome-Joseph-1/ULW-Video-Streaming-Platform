@@ -852,10 +852,29 @@ public:
 
     void serve(IOwnerService* service) noexcept { service_ = service; }
 
+    // Answers the asks past their deadline Unavailable, once they are out of asks_: an answer
+    // may ask again.
+    void expire_asks(core::MonoTime now) {
+        std::vector<OwnerAnswer> late;
+        std::erase_if(asks_, [&](auto& entry) {
+            if (entry.second.deadline > now) {
+                return false;
+            }
+            late.push_back(std::move(entry.second.done));
+            return true;
+        });
+        for (OwnerAnswer& done : late) {
+            done(std::unexpected(RouteError::Unavailable));
+        }
+    }
+
     // Holds `done` for an ask by `member`, as pending() holds a send's.
     OwnerAnswer asking(const core::RoomId& room, IMember& member, OwnerAnswer done) {
         const std::uint64_t id = next_send_++;
-        asks_.emplace(id, PendingAsk{.room = room, .member = &member, .done = std::move(done)});
+        asks_.emplace(id, PendingAsk{.room = room,
+                                     .member = &member,
+                                     .done = std::move(done),
+                                     .deadline = clock_.now() + kOwnerAskTimeout});
         return [this, id](std::expected<std::vector<std::byte>, RouteError> result) noexcept {
             const auto it = asks_.find(id);
             if (it == asks_.end()) {
@@ -1033,6 +1052,9 @@ private:
         core::RoomId room;
         IMember* member;
         OwnerAnswer done;
+        // Answered Unavailable then, whoever was to answer: the owner's own service, which may
+        // be this node's, or another node over the channel.
+        core::MonoTime deadline;
     };
 
     // A room with members on this node.
@@ -1120,6 +1142,7 @@ private:
         for (RequestDone& done : expired) {
             done(wire::Status::Unavailable, 0, {});
         }
+        expire_asks(now);
         if (now < next_beat_) {
             return;
         }

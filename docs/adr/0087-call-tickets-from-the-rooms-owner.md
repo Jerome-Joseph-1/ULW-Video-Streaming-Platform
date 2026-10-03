@@ -41,8 +41,8 @@ used. Four things ADR-0050 leaves open had to be settled to ship the handler:
   the room's owner through `RoomRouter::ask_owner`: on the owner itself the call handler answers
   in process; elsewhere the ask goes as an `Ask` frame and comes back as an `Answer` frame, which
   moves the node channel to version 4. An ask waits at most 15 s (`kOwnerAskTimeout`: a store
-  read and two SFU calls of up to 5 s each) and is dropped, like a send, if the member leaves
-  the room first. Each ask is charged as a join (burst 64, then 1/s per user).
+  read and two SFU calls of up to 5 s each), on the owner as much as from another node, and is
+  then answered `unavailable`; like a send, it is dropped if the member leaves the room first. Each ask is charged as a join (burst 64, then 1/s per user).
 - **The owner's check.** The handler reads the room's recorded kind and the asker's membership
   (`IMessageStore::access`) at the moment of asking. Only a direct chat has a call
   (`not_callable` for a group chat, a stream's live chat or a room with no kind recorded); only
