@@ -617,11 +617,18 @@ def scenario_chat():
         body = base64.urlsafe_b64encode(os.urandom(24)).rstrip(b"=").decode()
         message_id = uuid.uuid4().hex
         sockets[0].send({"type": "send", "room": room, "id": message_id, "body": body})
-        sockets[0].expect("sent")
         for i, s in enumerate(sockets):
-            got = s.expect("message")
-            check(got.get("id") == message_id and got.get("body") == body,
-                  f"socket {i} got {got}, not the message sent")
+            # The sender gets its own message as well as `sent`, in either order.
+            wanted = {"message", "sent"} if i == 0 else {"message"}
+            while wanted:
+                got = s.recv(10)
+                check(got is not None, f"socket {i}: no {' or '.join(sorted(wanted))} in 10 s")
+                kind = got.get("type")
+                check(kind != "error", f"socket {i}: chat answered {got}")
+                if kind == "message":
+                    check(got.get("id") == message_id and got.get("body") == body,
+                          f"socket {i} got {got}, not the message sent")
+                wanted.discard(kind)
     finally:
         for s in sockets:
             s.close()
