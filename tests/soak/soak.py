@@ -196,15 +196,11 @@ class Stack:
             query = "list-type=2" + (f"&continuation-token={urllib.parse.quote(token, safe='')}"
                                      if token else "")
             listing = ElementTree.fromstring(self.s3_body(f"{self.bucket}?{query}"))
-            ns = {"s3": listing.tag.split("}")[0].strip("{")} if "}" in listing.tag else {}
-            find = (lambda e, tag: e.findall(f"s3:{tag}", ns)) if ns else \
-                (lambda e, tag: e.findall(tag))
-            keys += [c.findtext("s3:Key" if ns else "Key", namespaces=ns)
-                     for c in find(listing, "Contents")]
-            truncated = (listing.findtext("s3:IsTruncated" if ns else "IsTruncated",
-                                          namespaces=ns) or "") == "true"
-            token = listing.findtext("s3:NextContinuationToken" if ns
-                                     else "NextContinuationToken", namespaces=ns)
+            # S3's namespace, when the listing has one, prefixes every element's tag.
+            prefix = listing.tag[:listing.tag.index("}") + 1] if "}" in listing.tag else ""
+            keys += [c.findtext(prefix + "Key") for c in listing.findall(prefix + "Contents")]
+            truncated = (listing.findtext(prefix + "IsTruncated") or "") == "true"
+            token = listing.findtext(prefix + "NextContinuationToken")
             if not truncated or not token:
                 break
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -341,6 +337,19 @@ class Stack:
             shutil.rmtree(self.scratch, ignore_errors=True)
 
 
+def with_stack(stack, stop, run):
+    """Runs `run`, then, whether it returned or raised, stops the load and the services and
+    cleans up what the run made."""
+    try:
+        run()
+    finally:
+        stop.set()
+        try:
+            stack.stop()
+        finally:
+            stack.cleanup()
+
+
 def traversable_without_privilege(path):
     """Whether this process, with its uid and gid but no capabilities (as the worker's sandbox
     runs ffprobe), can reach `path`: every directory on the way grants it search."""
@@ -385,6 +394,12 @@ class ReadyVideos:
         with self.lock:
             self.pending.append((user, video))
 
+    def promote(self, user, video):
+        with self.lock:
+            self.done.append((user, video))
+            # A bounded working set; older videos stay in the store untouched.
+            self.done = self.done[-200:]
+
     def pick(self, rng, user=None):
         with self.lock:
             mine = [v for u, v in self.done if user is None or u == user]
@@ -404,20 +419,19 @@ class ReadyVideos:
         still = []
         for user, video in pending:
             status, _, data = client.http("GET", f"/api/v1/videos/{video}", user=user)
-            state = json.loads(data).get("state") if status == 200 else None
+            video_json = json.loads(data) if status == 200 else {}
+            state = video_json.get("state")
             if state == "ready":
                 self.counts.add("videos_ready_total")
-                with self.lock:
-                    self.done.append((user, video))
-                    # A bounded working set; older videos stay in the store untouched.
-                    self.done = self.done[-200:]
-            elif state in ("processing", "uploading", "init"):
-                still.append((user, video))
-            else:
+                self.promote(user, video)
+            elif state == "failed":
                 # A video that will never play: its reason is what the end of the run reports.
-                reason = json.loads(data).get("error_reason") if status == 200 else None
                 self.counts.add("videos_failed")
-                self.counts.add(f"video_{state or status}: {reason}")
+                self.counts.add(f"video_failed: {video_json.get('error_reason')}")
+            else:
+                # Still on its way, or a poll that failed (a 503, a dropped connection): asked
+                # again next time, never counted as the video's failure.
+                still.append((user, video))
         with self.lock:
             self.pending = [p for p in self.pending if p not in pending] + still
 
@@ -816,7 +830,9 @@ def preflight(stack, counts, ready, clip, timeout=180):
         status, _, data = client.http("GET", f"/api/v1/videos/{up['video_id']}", user=USERS[0])
         video = json.loads(data) if status == 200 else {}
         if video.get("state") == "ready":
-            ready.add(USERS[0], up["video_id"])
+            # Played like the others, but not counted in "videos made ready": that counts
+            # what the load made.
+            ready.promote(USERS[0], up["video_id"])
             return None
         if video.get("state") == "failed":
             failures = [line.strip() for line in
@@ -1014,8 +1030,11 @@ def errors_report(totals, windows, gateway_log):
             except (ValueError, KeyError):
                 continue
             route, status = entry.get("route", "?"), entry.get("status")
-            context = next((what for what, start, end in windows
-                            if start - slack <= at <= end + slack), "outside both")
+            during = [what for what, start, end in windows if start - slack <= at <= end + slack]
+            # The two can overlap; each makes its own status (503 the saturation, 500 the store
+            # fault), so a 5xx goes to the one that makes it when both were under way.
+            makes = {503: "saturation", 500: "store_fault"}.get(status)
+            context = makes if makes in during else (during[0] if during else "outside both")
             key = (route, status, context)
             by_key[key] = by_key.get(key, 0) + 1
             if context == "outside both" and len(others) < 10:
@@ -1120,17 +1139,16 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     stack = Stack(args, out)
     stack.copy_binaries()
-    stack.prepare()
     clip = out / "clip.mp4"
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
-                    "testsrc2=size=320x240:rate=25", "-f", "lavfi", "-i", "sine=frequency=440",
-                    "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
-                    "-shortest", clip], check=True)
-    # From start() to the last stop(), whatever fails (start itself, the sampling loop) still
-    # stops the services: the soak may run as root, where nothing else would stop them.
-    # stop() is idempotent, so the finally's call after a run is a no-op.
     stop = threading.Event()
-    try:
+    state = {}
+
+    def run_load():
+        stack.prepare()
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "testsrc2=size=320x240:rate=25", "-f", "lavfi", "-i",
+                        "sine=frequency=440", "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-shortest", clip], check=True)
         stack.start()
         pids = stack.pids()
         (out / "pids.json").write_text(json.dumps({**pids, "soak": os.getpid()}))
@@ -1203,10 +1221,13 @@ def main():
         for t in threads if not failure else []:
             t.join(timeout=120)
         codes = stack.stop()
-    finally:
-        stop.set()
-        stack.stop()
-    stack.cleanup()
+        state.update(rows=rows, counts=counts, codes=codes, failure=failure)
+
+    # Whatever fails, from prepare() to the last sample (or a Ctrl-C), still stops the services
+    # (the soak may run as root, where nothing else would) and drops the database, the bucket
+    # and the scratch directory. stop() is idempotent.
+    with_stack(stack, stop, run_load)
+    rows, counts, codes, failure = (state[k] for k in ["rows", "counts", "codes", "failure"])
     (out / "windows.json").write_text(json.dumps(stack.windows))
     passed, report = judge(rows, args.clients)
     totals = counts.snapshot()

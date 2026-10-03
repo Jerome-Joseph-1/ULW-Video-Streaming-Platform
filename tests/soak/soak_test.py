@@ -90,6 +90,15 @@ class ErrorsReport(unittest.TestCase):
         self.assertIn("  get_video 503 during outside both: 1", lines)
         self.assertIn("get_video 503", line_with(lines, "08:05:00"))
 
+    def test_overlapping_faults_each_take_the_status_they_make(self):
+        t0 = soak.utc_seconds("2026-10-03T08:00:00.000Z")
+        windows = [("store_fault", t0, t0 + 3), ("saturation", t0 + 1, t0 + 2)]
+        self.write_log([("2026-10-03T08:00:01.500Z", "append_chunk", 503),
+                        ("2026-10-03T08:00:01.600Z", "media_playlist", 500)])
+        lines = errors_report({}, windows, self.log)
+        self.assertIn("  append_chunk 503 during saturation: 1", lines)
+        self.assertIn("  media_playlist 500 during store_fault: 1", lines)
+
     def test_without_the_gateway_log_only_the_clients_are_reported(self):
         lines = errors_report({}, [], self.log)
         self.assertEqual(lines, ["5xx seen by the clients, by action and status:", "  none"])
@@ -161,6 +170,74 @@ class BucketCleanup(unittest.TestCase):
                                               ("DELETE", "ulw-soak-x/a/2%20b"),
                                               ("DELETE", "ulw-soak-x/c")])
         self.assertEqual(calls[-1], ("DELETE", "ulw-soak-x"))
+
+
+class Cleanup(unittest.TestCase):
+    class FakeStack:
+        def __init__(self, stop_raises=False):
+            self.calls = []
+            self.stop_raises = stop_raises
+
+        def stop(self):
+            self.calls.append("stop")
+            if self.stop_raises:
+                raise OSError("stop failed")
+
+        def cleanup(self):
+            self.calls.append("cleanup")
+
+    def test_a_stage_that_raises_still_stops_the_services_and_cleans_up(self):
+        for error in [RuntimeError("gateway never became ready"), KeyboardInterrupt()]:
+            stack = self.FakeStack()
+            stop = soak.threading.Event()
+
+            def run():
+                raise error
+
+            with self.assertRaises(type(error)):
+                soak.with_stack(stack, stop, run)
+            self.assertTrue(stop.is_set())
+            self.assertEqual(stack.calls, ["stop", "cleanup"])
+
+    def test_cleanup_runs_even_when_stopping_fails(self):
+        stack = self.FakeStack(stop_raises=True)
+        with self.assertRaises(OSError):
+            soak.with_stack(stack, soak.threading.Event(), lambda: None)
+        self.assertEqual(stack.calls, ["stop", "cleanup"])
+
+
+class Polling(unittest.TestCase):
+    class FakeClient:
+        def __init__(self, answers):
+            self.answers = answers
+
+        def http(self, method, path, user):
+            return self.answers[path.rsplit("/", 1)[1]]
+
+    def test_only_a_failed_state_counts_as_a_failed_video(self):
+        counts = soak.Counts()
+        ready = soak.ReadyVideos(counts)
+        for video in ["ok", "bad", "busy", "unavailable", "dropped"]:
+            ready.add("alice", video)
+        ready.poll(self.FakeClient({
+            "ok": (200, {}, b'{"state":"ready"}'),
+            "bad": (200, {}, b'{"state":"failed","error_reason":"the file could not be decoded"}'),
+            "busy": (200, {}, b'{"state":"processing"}'),
+            "unavailable": (503, {}, b""),
+            "dropped": (0, {}, b"")}))
+        totals = counts.snapshot()
+        self.assertEqual(totals.get("videos_ready_total"), 1)
+        self.assertEqual(totals.get("videos_failed"), 1)
+        self.assertEqual(totals.get("video_failed: the file could not be decoded"), 1)
+        self.assertEqual(sorted(v for _, v in ready.pending), ["busy", "dropped", "unavailable"])
+        self.assertEqual(ready.done, [("alice", "ok")])
+
+    def test_the_preflight_clip_is_played_but_not_counted_as_made_by_the_load(self):
+        counts = soak.Counts()
+        ready = soak.ReadyVideos(counts)
+        ready.promote("alice", "preflight")
+        self.assertEqual(ready.done, [("alice", "preflight")])
+        self.assertNotIn("videos_ready_total", counts.snapshot())
 
 
 @unittest.skipUnless(os.geteuid() == 0, "the sandbox's view is root's without capabilities")
