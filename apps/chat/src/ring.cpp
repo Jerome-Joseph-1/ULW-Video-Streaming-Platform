@@ -78,7 +78,9 @@ std::optional<CallNotice> decode_notice(std::span<const std::byte> bytes) {
 
 Ringer::Ringer(IRingPlane& plane, const core::ports::IClock& clock, core::ports::IRandom& random,
                RingLimits limits)
-    : plane_(plane), clock_(clock), random_(random), limits_(limits), next_prune_(clock.now()) {}
+    : plane_(plane), clock_(clock), random_(random), limits_(limits),
+      window_rings_(std::clamp<std::size_t>(limits.rings_per_window, 1, kMaxRingsPerWindow)),
+      next_prune_(clock.now()) {}
 
 std::optional<core::Millis> Ringer::ring_limited(const core::RoomId& room,
                                                  const core::UserId& caller) noexcept {
@@ -93,8 +95,9 @@ std::optional<core::Millis> Ringer::ring_limited(const core::RoomId& room,
         wait = std::chrono::ceil<core::Millis>(h.declined_until - now);
     }
     // The oldest of the last rings_per_window starts frees a place when it leaves the window.
-    if (limits_.rings_per_window > 0 && h.starts.size() >= limits_.rings_per_window) {
-        const core::MonoTime frees = h.starts.front() + limits_.ring_window;
+    if (h.count >= window_rings_) {
+        // Full, the next to be written over is the oldest.
+        const core::MonoTime frees = h.starts.at(h.next) + limits_.ring_window;
         if (now < frees) {
             wait = std::max(wait, std::chrono::ceil<core::Millis>(frees - now));
         }
@@ -126,14 +129,21 @@ bool Ringer::remember(const core::RoomId& room) {
     if (histories_.contains(room) || histories_.size() < limits_.max_histories) {
         return true;
     }
-    prune(clock_.now());
+    // At the cap every ring attempt would walk all the histories: once a second is enough, as
+    // the limits are seconds long.
+    const core::MonoTime now = clock_.now();
+    if (now >= next_prune_) {
+        next_prune_ = now + core::Millis{1'000};
+        prune(now);
+    }
     return histories_.size() < limits_.max_histories;
 }
 
 void Ringer::prune(core::MonoTime now) noexcept {
     std::erase_if(histories_, [&](const auto& entry) {
         const History& h = entry.second;
-        const bool rang_lately = !h.starts.empty() && now < h.starts.back() + limits_.ring_window;
+        const std::size_t newest = (h.next + window_rings_ - 1) % window_rings_;
+        const bool rang_lately = h.count > 0 && now < h.starts.at(newest) + limits_.ring_window;
         return !rang_lately && now >= h.declined_until && !calls_.contains(entry.first);
     });
 }
@@ -214,10 +224,14 @@ void Ringer::start(const core::RoomId& room, const core::UserId& caller,
                      .first->second;
     try {
         schedule(room, call, std::min(call.ring_deadline, call.next_announce));
-        std::deque<core::MonoTime>& starts = histories_[room].starts;
-        starts.push_back(now);
-        while (starts.size() > std::max<std::size_t>(limits_.rings_per_window, 1)) {
-            starts.pop_front();
+        History& h = histories_[room];
+        h.starts.at(h.next) = now;
+        h.next = static_cast<std::uint8_t>((h.next + 1U) % window_rings_);
+        h.count = static_cast<std::uint8_t>(std::min<std::size_t>(h.count + 1U, window_rings_));
+        // The member who declined calling back: the caller they declined is no longer held.
+        if (h.declined && *h.declined != caller) {
+            h.declined.reset();
+            h.declined_until = {};
         }
     } catch (const std::bad_alloc&) {
         // A call nothing would ever ring out is not kept.

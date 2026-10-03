@@ -138,7 +138,8 @@ What the ring does not cover:
 
 - **Ringing too often.** A direct chat starts at most 5 rings a minute, whoever calls, and a
   caller whose call was declined may not ring that member again for 30 s (the declining member
-  may call back at once). A ticket past either is refused `ring_limited` before anything rings.
+  may call back at once, which lifts the wait). A ticket past either is refused `ring_limited`
+  before anything rings.
 - **Answering at the last moment.** A callee's ticket asked before `expires_at` holds the ring
   up to 10 s past it while LiveKit issues it, so the answer is not lost to `call_missed`: the
   caller may hear `call_answered` a few seconds after `expires_at`, and the callee's own

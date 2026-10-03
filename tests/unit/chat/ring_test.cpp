@@ -400,6 +400,95 @@ TEST_F(RingerTest, AnswerAskedAfterTheTimeoutDoesNotHoldTheRing) {
     EXPECT_EQ(ringer_.counters().graced, 0U);
 }
 
+// Bob's ticket ask has reached the owner a millisecond before the timeout, and the timeout has
+// passed while the SFU issues it: the call is held in its answer grace.
+class GracedRingerTest : public RingerTest {
+protected:
+    CallId held() {
+        const CallId call = ring();
+        clock_.advance(chat::RingLimits{}.ring_timeout - core::Millis{1});
+        ringer_.answering(room_id(), user("bob"));
+        clock_.advance(core::Millis{1'000});
+        ringer_.tick();
+        plane_.take();
+        EXPECT_EQ(ringer_.counters().graced, 1U);
+        EXPECT_FALSE(ringer_.idle(room_id()));
+        return call;
+    }
+};
+
+TEST_F(GracedRingerTest, ADeclineDuringTheGraceEndsTheCallAndTheTicketThatFollowsRingsNobody) {
+    const CallId call = held();
+    // Bob's other device declines while his first device's ticket is being issued.
+    EXPECT_EQ(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call), user("alice"));
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Declined, "alice", "bob"),
+                                          line(RingEvent::Declined, "bob", "bob")}));
+    EXPECT_EQ(ringer_.ticketed(room_id(), user("bob"), std::nullopt), std::nullopt);
+    clock_.advance(chat::RingLimits{}.answer_grace);
+    ringer_.tick();
+    EXPECT_TRUE(plane_.take().empty()) << "rang out a call already declined";
+    EXPECT_EQ(ringer_.counters().missed, 0U);
+}
+
+TEST_F(GracedRingerTest, ACancelDuringTheGraceWinsOverTheAnswerStillOnItsWay) {
+    const CallId call = held();
+    EXPECT_EQ(ringer_.signal(room_id(), user("alice"), CallSignal::Cancel, call), user("alice"));
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Cancelled, "alice", "alice"),
+                                          line(RingEvent::Cancelled, "bob", "alice")}));
+    EXPECT_EQ(ringer_.ticketed(room_id(), user("bob"), std::nullopt), std::nullopt);
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_TRUE(ringer_.idle(room_id()));
+}
+
+TEST_F(GracedRingerTest, ADeposedOwnerForgetsAHeldCallWithoutAWord) {
+    const CallId call = held();
+    plane_.owning = false;
+    clock_.advance(chat::RingLimits{}.answer_grace);
+    ringer_.tick();
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(ringer_.counters().orphaned, 1U);
+    EXPECT_EQ(ringer_.counters().missed, 0U);
+    // The answer that arrives after finds nothing to answer.
+    EXPECT_EQ(ringer_.ticketed(room_id(), user("bob"), std::nullopt), std::nullopt);
+    EXPECT_FALSE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call));
+}
+
+TEST_F(RingerTest, TheMemberWhoDeclinedCallingBackFreesTheCallerTheyDeclined) {
+    const CallId call = ring();
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call));
+    ASSERT_TRUE(ringer_.ring_limited(room_id(), user("alice")));
+    // Bob calls alice back and gives up: alice may ring him now, well inside the cooldown.
+    const auto back = ringer_.ticketed(room_id(), user("bob"), kPair);
+    ASSERT_TRUE(back && *back);
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::Cancel, **back));
+    EXPECT_FALSE(ringer_.ring_limited(room_id(), user("alice")));
+    EXPECT_TRUE(ringer_.ticketed(room_id(), user("alice"), kPair).value_or(std::nullopt));
+}
+
+TEST(RingLimitsBounds, TheRingsAllowedPerWindowAreHeldBetweenOneAndWhatAHistoryHolds) {
+    for (const auto& [asked, allowed] : std::vector<std::pair<std::uint32_t, std::size_t>>{
+             {0, 1}, {100, chat::kMaxRingsPerWindow}}) {
+        FakePlane plane;
+        ulw::test::FakeClock clock;
+        ulw::test::FakeRandom random;
+        chat::Ringer ringer(plane, clock, random, chat::RingLimits{.rings_per_window = asked});
+        std::size_t rung = 0;
+        while (true) {
+            const auto call = ringer.ticketed(room_id(), user("alice"), kPair);
+            if (!call) {
+                EXPECT_EQ(call.error().why, chat::RingRefusal::Why::Limited);
+                break;
+            }
+            ASSERT_TRUE(*call);
+            ++rung;
+            ASSERT_TRUE(ringer.signal(room_id(), user("alice"), CallSignal::Cancel, **call));
+            clock.advance(core::Millis{1});
+        }
+        EXPECT_EQ(rung, allowed) << asked;
+    }
+}
+
 class HistoryBoundedRingerTest : public RingerTest {
 protected:
     HistoryBoundedRingerTest() : RingerTest(chat::RingLimits{.max_histories = 1}) {}

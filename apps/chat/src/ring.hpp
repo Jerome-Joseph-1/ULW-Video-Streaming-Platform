@@ -4,9 +4,9 @@
 #include "core/ports/clock.hpp"
 #include "core/ports/random.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <expected>
 #include <optional>
 #include <set>
@@ -70,6 +70,9 @@ public:
     [[nodiscard]] virtual bool owns(const core::RoomId& room) const noexcept = 0;
 };
 
+// The most rings a room may be allowed per window: what each room's history has room for.
+inline constexpr std::size_t kMaxRingsPerWindow = 16;
+
 struct RingLimits {
     // How long a call rings with nobody answering before both members are told it was missed.
     // What phones ring for before voicemail: 30 to 60 s. ULW_CALL_RING_TIMEOUT_MS overrides it.
@@ -87,6 +90,7 @@ struct RingLimits {
     // Rings a room may start within ring_window: a ticket that would start one more is answered
     // ring_limited, with when to try again. A person calls, gives up, calls again a few times;
     // a loop of ticket and cancel would otherwise ring the other member every second or two.
+    // 1 to kMaxRingsPerWindow; a value outside is taken as the nearest bound.
     std::uint32_t rings_per_window = 5;
     core::Millis ring_window{60'000};
     // After a callee declines, the caller may not ring the room again for this long (the
@@ -96,8 +100,10 @@ struct RingLimits {
     // for the SFU to issue it: an answer just before expires_at is not lost to call_missed. The
     // SFU's open and join take up to 5 s each.
     core::Millis answer_grace{10'000};
-    // Rooms whose recent rings are remembered for the two limits above: about 100 bytes each,
-    // 1.6 MiB in all. Past it, a ring that would need another is answered busy.
+    // Rooms whose recent rings are remembered for the two limits above: a History
+    // (kMaxRingsPerWindow start times, the declined caller's id inline, and its deadline: under 300
+    // bytes) plus its room id and the map's node and bucket, about 340 bytes each, 5.5 MiB in all.
+    // Past it, a ring that would need another is answered busy.
     std::size_t max_histories = 16'384;
 };
 
@@ -203,8 +209,11 @@ private:
     using Calls = std::unordered_map<core::RoomId, Call>;
     // A room's recent rings, for RingLimits::rings_per_window and decline_cooldown.
     struct History {
-        // When its latest rings started, oldest first; at most rings_per_window.
-        std::deque<core::MonoTime> starts;
+        // When its latest rings started: a ring buffer of the last `count` of them, at most
+        // rings_per_window, the next to write at `next`.
+        std::array<core::MonoTime, kMaxRingsPerWindow> starts{};
+        std::uint8_t count = 0;
+        std::uint8_t next = 0;
         std::optional<core::UserId> declined;
         core::MonoTime declined_until;
     };
@@ -231,6 +240,8 @@ private:
     // When each call has something due: its ring timeout or next announcement while ringing,
     // the end of its hold once answered.
     std::set<std::pair<core::MonoTime, core::RoomId>> due_;
+    // rings_per_window, within 1 to kMaxRingsPerWindow.
+    std::size_t window_rings_;
     std::unordered_map<core::RoomId, History> histories_;
     core::MonoTime next_prune_;
 };

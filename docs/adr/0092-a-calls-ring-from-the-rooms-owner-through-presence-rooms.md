@@ -91,11 +91,16 @@ What a ring needs, and what the system gives today:
   past either is refused before the member list or the SFU is asked, and checked again when the
   ticket is issued: `ring_limited` with `retry_after_ms`, counted as
   `call_refusals_total{reason="ring_limited"}`. Each room's recent ring starts are remembered
-  (16384 rooms at most, forgotten once no limit needs them; past it a ring is `busy`).
+  in a fixed buffer of at most 16 (`kMaxRingsPerWindow`; `rings_per_window` is held to 1 to 16),
+  about 340 bytes a room with the map's own, for 16384 rooms at most (5.5 MiB), forgotten once no
+  limit needs them; past it a ring is `busy`, and the forgetting runs at most once a second. A
+  declined caller's cooldown ends early when the member who declined rings the room themselves.
 - **Answer grace.** A callee's ticket ask that reaches the owner before the ring's timeout holds
   the call up to 10 s past it (`answer_grace`): its ticket answers the call when the SFU issues
   it. An ask that fails rings out at the end of the grace (`call_rings_total{outcome="graced"}`
-  counts the held rings).
+  counts the held rings) The grace is decided when the owner's handler checks the ask, after its read of the
+  room's access, not when the ask leaves the client: a very slow read can push an ask that was
+  sent in time past the timeout, and the call rings out.
 - **Owner changes.** A node that no longer owns a room forgets its calls at their next
   deadline without a word (`call_rings_total{outcome="orphaned"}`). The new owner knows none:
   a decline or cancel is `no_call`, and the callee's ticket rings the caller as a new call, which
