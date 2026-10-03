@@ -103,9 +103,8 @@ protected:
 
     StoreResult<std::optional<std::uint64_t>> media(const core::RoomId& room,
                                                     std::uint64_t generation, rt::MediaStep step) {
-        return ask<std::optional<std::uint64_t>>([&](auto done) {
-            store_->media_generation(room, generation, step, std::move(done));
-        });
+        return ask<std::optional<std::uint64_t>>(
+            [&](auto done) { store_->media_generation(room, generation, step, std::move(done)); });
     }
 
     StoreResult<std::vector<core::RoomId>> heartbeat(const core::NodeId& by,

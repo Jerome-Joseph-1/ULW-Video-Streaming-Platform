@@ -281,8 +281,8 @@ participants_of(std::string_view answer) {
         }
         const auto ms = integer_of(p.find("joined_at_ms"));
         const auto seconds = integer_of(p.find("joined_at"));
-        const core::Millis since = ms ? core::Millis{*ms}
-                                      : core::Millis{seconds.value_or(0) * 1000};
+        const core::Millis since =
+            ms ? core::Millis{*ms} : core::Millis{seconds.value_or(0) * 1000};
         out.push_back({.user = *user, .device = *device, .joined_at = core::WallTime{since}});
     }
     return out;

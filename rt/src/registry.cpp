@@ -136,15 +136,14 @@ bool RoomRegistry::media_generation(const core::RoomId& room, MediaStep step,
     if (!generation) {
         return false;
     }
-    store_.media_generation(
-        room, *generation, step,
-        [this, room, generation = *generation,
-         done = std::move(done)](StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
-            if (r && !*r) {
-                fenced(room, generation, OwnerWrite::MediaGeneration);
-            }
-            done(r);
-        });
+    store_.media_generation(room, *generation, step,
+                            [this, room, generation = *generation, done = std::move(done)](
+                                StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
+                                if (r && !*r) {
+                                    fenced(room, generation, OwnerWrite::MediaGeneration);
+                                }
+                                done(r);
+                            });
     return true;
 }
 

@@ -931,8 +931,8 @@ public:
         return registry_.owned(room).has_value();
     }
 
-    [[nodiscard]] std::optional<std::uint64_t> owner_generation(const core::RoomId& room) const
-        noexcept {
+    [[nodiscard]] std::optional<std::uint64_t>
+    owner_generation(const core::RoomId& room) const noexcept {
         return registry_.owned(room);
     }
 

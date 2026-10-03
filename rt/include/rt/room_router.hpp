@@ -240,8 +240,8 @@ public:
     [[nodiscard]] bool owns(const core::RoomId& room) const noexcept;
 
     // The generation this node owns the room under, as far as it knows (owns() above).
-    [[nodiscard]] std::optional<std::uint64_t> owner_generation(const core::RoomId& room) const
-        noexcept;
+    [[nodiscard]] std::optional<std::uint64_t>
+    owner_generation(const core::RoomId& room) const noexcept;
     // The room's media generation, read or moved on (MediaStep) by an owner write fenced on
     // this node's ownership of the room (ADR-0050, ADR-0095): nullopt when this node does not
     // own the room, or no longer does (the store fenced it, and nothing was written; the room

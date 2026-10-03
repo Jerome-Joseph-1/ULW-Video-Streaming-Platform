@@ -580,15 +580,17 @@ TEST_P(LiveKitSfuTest, ParticipantsAreTheMembersConnectedToTheGeneration) {
         if (request.path() != "/twirp/livekit.RoomService/ListParticipants") {
             return Reply{.status = 200, .headers = {}, .body = "{}"};
         }
-        return Reply{.status = 200,
-                     .headers = {},
-                     .body = std::string(R"({"participants":[)") +
-                             R"({"identity":"alice/)" + std::string(kDevice) +
-                             R"(","state":"ACTIVE","joined_at":"1790000000","joined_at_ms":"1790000000123"},)" +
-                             R"({"identity":"bob/0192f3a4-0000-7000-8000-00000000000e","state":"JOINED","joined_at":1790000001},)" +
-                             R"({"identity":"carol/0192f3a4-0000-7000-8000-00000000000f","state":"DISCONNECTED"},)" +
-                             R"({"identity":"EG_recorder","state":"ACTIVE"},)" +
-                             R"({"identity":"mallory/not-a-uuid","state":"ACTIVE"}]})"};
+        return Reply{
+            .status = 200,
+            .headers = {},
+            .body =
+                std::string(R"({"participants":[)") + R"({"identity":"alice/)" +
+                std::string(kDevice) +
+                R"(","state":"ACTIVE","joined_at":"1790000000","joined_at_ms":"1790000000123"},)" +
+                R"({"identity":"bob/0192f3a4-0000-7000-8000-00000000000e","state":"JOINED","joined_at":1790000001},)" +
+                R"({"identity":"carol/0192f3a4-0000-7000-8000-00000000000f","state":"DISCONNECTED"},)" +
+                R"({"identity":"EG_recorder","state":"ACTIVE"},)" +
+                R"({"identity":"mallory/not-a-uuid","state":"ACTIVE"}]})"};
     });
     start(server.base_url());
     auto room = open(MediaGeneration{5});
@@ -630,8 +632,7 @@ TEST_P(LiveKitSfuTest, ARoomLiveKitDroppedHoldsNobody) {
 }
 
 TEST_P(LiveKitSfuTest, ListingParticipantsFailsByWhetherARetryCanHelp) {
-    for (const auto& [status, body, error] :
-         std::vector<std::tuple<int, std::string, MediaError>>{
+    for (const auto& [status, body, error] : std::vector<std::tuple<int, std::string, MediaError>>{
              {503, R"({"code":"unavailable"})", MediaError::Unavailable},
              {401, R"({"code":"unauthenticated"})", MediaError::Refused},
              // A 404 that is not LiveKit's not_found: a route that is not there.

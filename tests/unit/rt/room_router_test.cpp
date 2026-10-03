@@ -548,8 +548,7 @@ TEST_P(RoomRouterTest, OnlyTheOwnerReadsOrMovesARoomsMediaGeneration) {
     db_.take(room_, *core::NodeId::parse("chat-b"));
     a.store->hold = true;
     std::optional<rt::StoreResult<std::optional<std::uint64_t>>> fenced;
-    a.router->media_generation(room_, rt::MediaStep::Advance,
-                               [&](auto r) noexcept { fenced = r; });
+    a.router->media_generation(room_, rt::MediaStep::Advance, [&](auto r) noexcept { fenced = r; });
     a.store->release_held();
     ASSERT_TRUE(pump([&] { return fenced.has_value(); }));
     EXPECT_EQ(*fenced, MediaAnswer{std::optional<std::uint64_t>{}});
