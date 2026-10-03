@@ -121,6 +121,7 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         {"connections_rejected_total", "counter"},
         {"connections_current", "gauge"},
         {"uploads_in_flight", "gauge"},
+        {"catalog_claims_held", "gauge"},
         {"admission_rejections_total", "counter"},
         {"rate_limited_total", "counter"},
         {"cross_site_rejections_total", "counter"},

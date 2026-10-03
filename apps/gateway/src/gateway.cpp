@@ -385,6 +385,7 @@ std::string Gateway::render_metrics() {
              c.rejected_ip_rate);
     e.gauge("connections_current", "Connections open now.", connections_.size());
     e.gauge("uploads_in_flight", "Chunk uploads holding an admission slot.", upload_slots_);
+    e.gauge("catalog_claims_held", "Upload claims held by requests in flight.", claims_held_);
     e.counter("admission_rejections_total",
               "Chunk uploads refused a slot, for the user's limit or the process's.",
               c.admission_rejections);

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ULW direct call client</title>
+<script src="/livekit-client.umd.js"></script>
+</head>
+<body>
+<script>
+  // A client of the product as docs/integration/calls.md describes it: the chat WebSocket
+  // (authenticated by the cookie, as a browser is), a join of the direct chat, a call ask, and
+  // the ticket it answers taken to LiveKit with the SDK. Nothing here holds a LiveKit key.
+  const { Room, RoomEvent, Track } = LivekitClient;
+  window.events = [];
+  window.chatFrames = [];
+  const note = (type, detail = {}) => window.events.push({ type, at: Date.now(), ...detail });
+
+  let socket = null;
+  const waiting = [];
+
+  window.openChat = (url) => new Promise((resolve, reject) => {
+    socket = new WebSocket(url);
+    socket.onopen = () => resolve();
+    socket.onerror = () => reject(new Error(`chat socket to ${url} failed`));
+    socket.onclose = (e) => note('chat-closed', { code: e.code });
+    socket.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      window.chatFrames.push(frame);
+      const i = waiting.findIndex((w) => w.matches(frame));
+      if (i >= 0) waiting.splice(i, 1)[0].resolve(frame);
+    };
+  });
+
+  window.closeChat = () => new Promise((resolve) => {
+    if (socket.readyState === WebSocket.CLOSED) return resolve();
+    socket.addEventListener('close', () => resolve());
+    socket.close();
+  });
+
+  // Sends a command and resolves with its answer: `joined` or an error for a join, `ticket` or
+  // an error for a call, matched by the room.
+  const answers = { join: ['joined', 'error'], call: ['ticket', 'error'] };
+  window.command = (cmd) => new Promise((resolve) => {
+    waiting.push({ matches: (f) => f.room === cmd.room && answers[cmd.type].includes(f.type),
+      resolve });
+    socket.send(JSON.stringify(cmd));
+  });
+
+  // Remote tracks by participant identity and kind, each attached to an element so that it plays
+  // (and decodes) as a call's would.
+  window.remote = {};
+  window.connectCall = async ({ url, token }) => {
+    // Off so that the receiver always gets the published layer: the decode checks below want
+    // frames at a steady rate, not whatever adaptive streaming picks for a hidden element.
+    const room = new Room({ adaptiveStream: false, dynacast: false });
+    window.room = room;
+    room.on(RoomEvent.ParticipantConnected,
+      (p) => note('participant-connected', { who: p.identity }));
+    room.on(RoomEvent.ParticipantDisconnected,
+      (p) => note('participant-disconnected', { who: p.identity }));
+    room.on(RoomEvent.TrackSubscribed, (track, _pub, p) => {
+      note('track-subscribed', { who: p.identity, kind: track.kind });
+      const element = track.attach();
+      element.muted = track.kind === Track.Kind.Video;
+      document.body.append(element);
+      window.remote[p.identity] =
+        { ...window.remote[p.identity], [track.kind]: { track, element } };
+    });
+    room.on(RoomEvent.TrackUnsubscribed, (track, _pub, p) => {
+      note('track-unsubscribed', { who: p.identity, kind: track.kind });
+      for (const element of track.detach()) element.remove();
+      if (window.remote[p.identity]) delete window.remote[p.identity][track.kind];
+    });
+    room.on(RoomEvent.Disconnected, (reason) => note('disconnected', { reason }));
+    await room.connect(url, token);
+    await room.localParticipant.enableCameraAndMicrophone();
+    return room.localParticipant.identity;
+  };
+
+  // A connect that may be refused, tried once: whether LiveKit admitted it, without keeping the
+  // room.
+  window.tryCall = async ({ url, token }) => {
+    const room = new Room();
+    try {
+      await room.connect(url, token, { maxRetries: 0 });
+      await room.disconnect();
+      return { admitted: true };
+    } catch (e) {
+      return { admitted: false, error: String(e.message ?? e) };
+    }
+  };
+
+  window.leaveCall = () => window.room.disconnect();
+
+  // What this page has decoded of `who`'s media so far: the video element's size and play
+  // position, and the receivers' own counters.
+  window.decoded = async (who) => {
+    const tracks = window.remote[who] ?? {};
+    const out = { video: null, audio: null };
+    for (const kind of ['video', 'audio']) {
+      const entry = tracks[kind];
+      if (!entry) continue;
+      const inbound = {};
+      (await entry.track.receiver.getStats()).forEach((s) => {
+        if (s.type === 'inbound-rtp') Object.assign(inbound, s);
+      });
+      out[kind] = {
+        currentTime: entry.element.currentTime,
+        readyState: entry.element.readyState,
+        videoWidth: entry.element.videoWidth ?? 0,
+        packetsReceived: inbound.packetsReceived ?? 0,
+        framesDecoded: inbound.framesDecoded ?? 0,
+        totalSamplesReceived: inbound.totalSamplesReceived ?? 0,
+      };
+    }
+    return out;
+  };
+</script>
+</body>
+</html>

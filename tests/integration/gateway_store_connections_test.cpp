@@ -135,17 +135,45 @@ protected:
         return std::string(*doc->find("upload_id")->as_string());
     }
 
-    // bytes_ingested_total, or nullopt when /metrics could not be read.
-    [[nodiscard]] std::optional<std::uint64_t> ingested() const {
+    // A gauge or counter without labels, or nullopt when /metrics could not be read.
+    [[nodiscard]] std::optional<std::uint64_t> metric(std::string_view name) const {
         HttpClient c({.port = port_});
         const auto r = c.request("GET", "/metrics", "");
-        constexpr std::string_view kName = "\nbytes_ingested_total ";
-        const std::size_t at = r ? r->body.find(kName) : std::string::npos;
+        const std::string series = "\n" + std::string(name) + " ";
+        const std::size_t at = r ? r->body.find(series) : std::string::npos;
         if (at == std::string::npos) {
             return std::nullopt;
         }
-        const std::string_view rest = std::string_view(r->body).substr(at + kName.size());
+        const std::string_view rest = std::string_view(r->body).substr(at + series.size());
         return core::parse_integer<std::uint64_t>(rest.substr(0, rest.find('\n')));
+    }
+
+    [[nodiscard]] std::optional<std::uint64_t> ingested() const {
+        return metric("bytes_ingested_total");
+    }
+
+    // Advisory locks held in the scratch database: the gateway's claims, as Postgres sees them.
+    [[nodiscard]] std::string advisory_locks() const {
+        auto conn = db_->session();
+        return ulw::test::scalar(conn, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                                       "AND database = (SELECT oid FROM pg_database "
+                                       "WHERE datname = current_database())");
+    }
+
+    // The gateway's count and Postgres's agree on `n` claims held.
+    [[nodiscard]] bool claims_settle_at(std::size_t n) const {
+        return gateway_->poll_until(
+            [&] {
+                return metric("catalog_claims_held") == n && advisory_locks() == std::to_string(n);
+            },
+            seconds(10), milliseconds(50));
+    }
+
+    [[nodiscard]] std::string patch_head(const std::string& upload, std::size_t offset) const {
+        return "PATCH /api/v1/uploads/" + upload +
+               " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer " + token_ +
+               "\r\nUpload-Offset: " + std::to_string(offset) +
+               "\r\nContent-Length: " + std::to_string(kUploadBytes - offset) + "\r\n\r\n";
     }
 
     os::SystemClock clock_;
@@ -168,10 +196,7 @@ TEST_F(GatewayStoreConnections, MoreUploadsThanADefaultMultiHoldsEachHaveAStoreC
         clients.push_back(std::make_unique<HttpClient>(ulw::test::Endpoint{.port = port_}));
         const std::string upload = create(*clients.back());
         ASSERT_FALSE(upload.empty());
-        ASSERT_TRUE(clients.back()->send_raw(
-            "PATCH /api/v1/uploads/" + upload + " HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer " +
-            token_ + "\r\nUpload-Offset: 0\r\nContent-Length: " + std::to_string(kUploadBytes) +
-            "\r\n\r\n"));
+        ASSERT_TRUE(clients.back()->send_raw(patch_head(upload, 0)));
         ASSERT_TRUE(clients.back()->send_raw(std::span(data)));
     }
     std::optional<std::uint64_t> seen;
@@ -182,6 +207,54 @@ TEST_F(GatewayStoreConnections, MoreUploadsThanADefaultMultiHoldsEachHaveAStoreC
         },
         seconds(10), milliseconds(250)))
         << "ingested " << seen.value_or(0) << " of " << kUploads * kLeadBytes;
+}
+
+// Each PATCH holds its upload's claim, an advisory lock on the catalog's session (ADR-0065),
+// for as long as it runs, and gives it back however it ends: catalog_claims_held follows the
+// locks Postgres holds back to 0.
+TEST_F(GatewayStoreConnections, EveryClaimIsCountedWhileHeldAndGivenBackHoweverItsPatchEnds) {
+    EXPECT_TRUE(claims_settle_at(0));
+    const std::vector<std::byte> data(kUploadBytes, std::byte{'x'});
+    {
+        // Completed.
+        HttpClient c(ulw::test::Endpoint{.port = port_});
+        const std::string upload = create(c);
+        ASSERT_FALSE(upload.empty());
+        ASSERT_TRUE(c.send_raw(patch_head(upload, 0)));
+        ASSERT_TRUE(c.send_raw(std::span(data)));
+        const auto r = c.read_response();
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 204);
+        EXPECT_TRUE(claims_settle_at(0));
+    }
+    {
+        // Refused: an offset the store does not have, found out after the claim was taken.
+        HttpClient c(ulw::test::Endpoint{.port = port_});
+        const std::string upload = create(c);
+        ASSERT_FALSE(upload.empty());
+        ASSERT_TRUE(c.send_raw(patch_head(upload, kLeadBytes)));
+        ASSERT_TRUE(c.send_raw(std::span(data).first(kUploadBytes - kLeadBytes)));
+        const auto r = c.read_response();
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 409);
+        EXPECT_EQ(r->upload_offset(), 0U);
+        EXPECT_TRUE(claims_settle_at(0));
+    }
+    {
+        // Abandoned mid-chunk by their clients.
+        constexpr std::size_t kHeld = 3;
+        std::vector<std::unique_ptr<HttpClient>> clients;
+        for (std::size_t i = 0; i < kHeld; ++i) {
+            clients.push_back(std::make_unique<HttpClient>(ulw::test::Endpoint{.port = port_}));
+            const std::string upload = create(*clients.back());
+            ASSERT_FALSE(upload.empty());
+            ASSERT_TRUE(clients.back()->send_raw(patch_head(upload, 0)));
+            ASSERT_TRUE(clients.back()->send_raw(std::span(data).first(kLeadBytes)));
+        }
+        EXPECT_TRUE(claims_settle_at(kHeld));
+        clients.clear();
+        EXPECT_TRUE(claims_settle_at(0));
+    }
 }
 
 } // namespace
