@@ -46,7 +46,8 @@ build/coverage unit integration`), coverage.py over the Python unit tests
 (`tools/coverage-python.sh build/coverage-python.xml`) and the Go modules' tests
 (`tools/coverage-go.sh build/coverage-go.out`); settings are in `sonar-project.properties`.
 It is advisory (`sonar.qualitygate.wait=false`): the quality gate, whose new-code condition is
-80% coverage, is reported on the dashboard and the pull request and never fails the job. It needs the `SONAR_TOKEN` secret and Automatic Analysis turned off in the
+80% coverage, is reported on the dashboard and the pull request and never fails the job. It
+needs the `SONAR_TOKEN` secret and Automatic Analysis turned off in the
 project's settings. Pull requests from forks get no secrets, so no analysis. If the repository ever becomes private, delete `SONAR_TOKEN` to stay free:
 the job then skips itself.
 
