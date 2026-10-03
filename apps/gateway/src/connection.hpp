@@ -184,6 +184,7 @@ private:
     void on_playlist(ControlJob job) noexcept;
     void fail_playlist(PlaylistFailure failure) noexcept;
     void start_live() noexcept;
+    void start_bodiless() noexcept;
     // The stream service's routes (ADR-0091).
     void start_stream_route() noexcept;
     void create_stream(LiveStreams& live, const core::UserId& user) noexcept;

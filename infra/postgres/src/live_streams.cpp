@@ -285,14 +285,14 @@ void PgLiveStreams::create(core::ports::NewLiveStream stream, std::uint32_t max_
     // owner and passphrase live in the decision below, which lives as long as the operation.
     auto owner = std::make_unique<core::UserId>(stream.owner);
     auto passphrase = std::make_unique<std::string>(std::move(stream.passphrase));
-    Statement write{.sql = kCreate,
-                    .params = Params{}
-                                  .add_uuid(stream.id.uuid())
-                                  .add_text(owner->view())
-                                  .add_text(*passphrase)
-                                  .add_int(micros_since_epoch(stream.at))
-                                  .add_int(static_cast<std::int64_t>(max_unfinished))};
-    Statement read{.sql = kCurrent, .params = Params{}.add_text(owner->view())};
+    const Statement write{.sql = kCreate,
+                          .params = Params{}
+                                        .add_uuid(stream.id.uuid())
+                                        .add_text(owner->view())
+                                        .add_text(*passphrase)
+                                        .add_int(micros_since_epoch(stream.at))
+                                        .add_int(static_cast<std::int64_t>(max_unfinished))};
+    const Statement read{.sql = kCurrent, .params = Params{}.add_text(owner->view())};
     impl_->pool().submit(std::make_unique<WriteThenRead<CreatedLiveStream>>(
         write, read,
         [owner = std::move(owner), passphrase = std::move(passphrase)](

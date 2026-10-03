@@ -551,11 +551,6 @@ void Connection::advance() noexcept {
     case RouteId::GetVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
-        if (req_.message_complete && !req_.started) {
-            req_.started = true;
-            start_lookup();
-        }
-        return;
     case RouteId::LivePlaylist:
     case RouteId::CreateStream:
     case RouteId::StreamStatus:
@@ -564,13 +559,22 @@ void Connection::advance() noexcept {
     case RouteId::EndStream:
         if (req_.message_complete && !req_.started) {
             req_.started = true;
-            if (req_.route == RouteId::LivePlaylist) {
-                start_live();
-            } else {
-                start_stream_route();
-            }
+            start_bodiless();
         }
         return;
+    }
+}
+
+// The requests that carry no body start once their head is in.
+void Connection::start_bodiless() noexcept {
+    if (req_.route == RouteId::LivePlaylist) {
+        start_live();
+    } else if (req_.route == RouteId::CreateStream || req_.route == RouteId::StreamStatus ||
+               req_.route == RouteId::StreamTicket || req_.route == RouteId::StartStream ||
+               req_.route == RouteId::EndStream) {
+        start_stream_route();
+    } else {
+        start_lookup();
     }
 }
 
