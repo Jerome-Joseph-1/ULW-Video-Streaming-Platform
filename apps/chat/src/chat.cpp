@@ -233,8 +233,21 @@ void ChatServer::on_signal(net::Signal signal) noexcept {
         begin_drain();
         return;
     case net::Signal::Reload:
+        drop_auth_caches();
         return;
     }
+}
+
+// SIGHUP, after Askedin rotates its signing key (ADR-0082): tokens under the withdrawn key stop
+// opening sockets once a key fetch succeeds, not when the cache would next refetch; until then
+// the cached keys keep answering. Sockets already open keep running to their token's expiry, as
+// they would have anyway (ADR-0073).
+void ChatServer::drop_auth_caches() noexcept {
+    deps_.verifier.drop_caches();
+    ++counters_.auth_cache_drops;
+    log_event(R"("level":"info","msg":"auth cache drop requested; completes on the next )"
+              R"(successful key fetch","node":"{}")",
+              deps_.node.view());
 }
 
 void ChatServer::begin_drain() noexcept {
@@ -332,6 +345,8 @@ std::string ChatServer::render_metrics() const {
         "member_removals_total {}\n"
         "member_check_failures_total {}\n"
         "jwks_keys_expired {}\n"
+        "auth_cache_drops_total {}\n"
+        "auth_cache_drop_pending {}\n"
         "unrecorded_joins_total {}\n",
         c.connections_accepted, c.rejected_capacity, c.rejected_socket, c.rejected_ip_connections,
         c.rejected_ip_block, c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions,
@@ -347,7 +362,7 @@ std::string ChatServer::render_metrics() const {
         router.peers_refused, router.slow_peers, presence_.rooms(), presence.sent,
         presence.received, presence.notified, presence.expired, presence.gaps, c.token_expiries,
         chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0,
-        chat.unrecorded_joins);
+        c.auth_cache_drops, deps_.verifier.drop_pending() ? 1 : 0, chat.unrecorded_joins);
 }
 
 } // namespace chat

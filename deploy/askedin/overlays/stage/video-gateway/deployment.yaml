@@ -92,6 +92,10 @@ spec:
               value: askedin-platform
             - name: ULW_AUTH_COOKIE
               value: auth_token_stage
+            # Askedin's auth-service JWK set; not askedin.com's own /.well-known/jwks.json, which
+            # is an HTML page, and not its in-cluster http:// URL, which ULW refuses.
+            - name: JWKS_URL
+              value: https://auth-stage.askedin.com/.well-known/jwks.json
             # Every connection comes from Envoy's data plane, so the per-client limits count the
             # address Envoy appends to X-Forwarded-For, believed only from peers in this block:
             # K3s's default pod network (RUNBOOK step 1 checks it). One proxy, Envoy, stands in
@@ -125,11 +129,10 @@ spec:
                 secretKeyRef:
                   name: video-gateway-secrets
                   key: ULW_S3_SECRET_ACCESS_KEY
-            - name: JWKS_URL
-              valueFrom:
-                secretKeyRef:
-                  name: video-gateway-secrets
-                  key: JWKS_URL
+            # Stage's issuer is not confirmed yet, so it stays in the secret rather than here:
+            # a wrong value refuses every token. Askedin's deployment template says
+            # https://auth-stage.askedin.com/auth; read the live value before moving it here
+            # (docs/integration/auth.md, Askedin).
             - name: JWT_ISSUER
               valueFrom:
                 secretKeyRef:

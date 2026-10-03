@@ -1,6 +1,8 @@
 # What the sandbox changes in the stage video-gateway, and why:
 # - images come from the node, never a registry;
 # - MinIO stands in for R2, so ULW_S3_ENDPOINT replaces ULW_R2_ACCOUNT_ID;
+# - the mock auth-service stands in for Askedin's, so JWKS_URL comes from the sandbox's secret
+#   instead of the overlay's value;
 # - the mock auth-service's certificate is signed by the sandbox CA, which replaces the system
 #   bundle libcurl reads, so the JWKS fetch is verified exactly as against Askedin's.
 # - kind's pod network is 10.244.0.0/16, not K3s's 10.42.0.0/16. The per-client limits stay at
@@ -30,6 +32,12 @@ spec:
                 secretKeyRef:
                   name: video-gateway-secrets
                   key: ULW_S3_ENDPOINT
+            - name: JWKS_URL
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: video-gateway-secrets
+                  key: JWKS_URL
             - name: ULW_TRUSTED_PROXIES
               value: "10.244.0.0/16"
           volumeMounts:

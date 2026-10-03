@@ -89,3 +89,4 @@ Layering, ports and adapters, enforced by `tools/check-boundaries.sh`:
 - [`docs/adr/`](docs/adr/README.md) architecture decisions, one per file, immutable
 - [`docs/integration/`](docs/integration/README.md) the contract for Askedin's app and backend teams
 - [`docs/operations/`](docs/operations/soak.md) soak procedure and results
+- [`docs/operations/testing.md`](docs/operations/testing.md) mutation testing of the unit suites

@@ -223,6 +223,11 @@ add_test(NAME coverage_report
     COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/coverage_report_test.py)
 set_tests_properties(coverage_report PROPERTIES LABELS unit)
 
+# The mutation driver on tiny sources, with the build and the test binary faked: tools/mutate.py.
+add_test(NAME mutation_driver
+    COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/mutate_test.py)
+set_tests_properties(mutation_driver PROPERTIES LABELS unit)
+
 ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
 target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
 add_test(NAME ws_fuzz_corpus COMMAND ws_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/ws)

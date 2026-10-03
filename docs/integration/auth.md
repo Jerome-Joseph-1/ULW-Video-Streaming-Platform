@@ -88,7 +88,7 @@ These rules took effect as a security fix on an endpoint marked Stable
 | Rule | Value |
 |---|---|
 | Format | Compact JWS: exactly three base64url parts separated by two dots, at most 8 KiB in all |
-| Header `alg` | `RS256`, `PS256`, `ES256` or `EdDSA`. Anything else, `none` included, is refused. |
+| Header `alg` | `RS256`, `PS256`, `ES256` or `EdDSA`. Anything else, `none` included, is refused. Askedin signs with `RS256` only ([Askedin](#askedin)). |
 | Header `kid` | Required, 1 to 256 bytes, and must name a key in the key set |
 | Header `crit` | Must be absent |
 | Algorithm vs key | The key decides. An RSA key (2048 to 8192 bits) verifies `RS256`/`PS256`, an EC P-256 key `ES256`, an OKP Ed25519 key `EdDSA`. A key that publishes its own `alg` accepts only that one. A token whose `alg` does not fit its key is refused. |
@@ -117,12 +117,12 @@ it is compared byte for byte. Two tokens with different subjects are two differe
 
 ## Key set
 
-<!-- apps/gateway/src/config.cpp (load_auth), infra/auth/src/jwks_verifier.cpp, infra/auth/include/infra/auth/jwks_verifier.hpp -->
+<!-- apps/gateway/src/config.cpp (load_auth), infra/auth/src/jwks_verifier.cpp, infra/auth/include/infra/auth/jwks_verifier.hpp, apps/gateway/src/gateway.cpp and apps/chat/src/chat.cpp (on_signal, drop_auth_caches) -->
 
 | Setting | Meaning |
 |---|---|
-| `JWKS_URL` | Askedin's JWK set. Must be `https://`; the process refuses to start otherwise. |
-| `JWT_ISSUER` | Required. |
+| `JWKS_URL` | Askedin's JWK set. Must be `https://`; the process refuses to start otherwise. Askedin's values: [Askedin](#askedin). |
+| `JWT_ISSUER` | Required. Askedin's values: [Askedin](#askedin). |
 | `JWT_AUDIENCE` | Optional, default `askedin-platform`. |
 | `ULW_AUTH_COOKIE` | Optional, default `auth_token`. |
 | `ULW_JWKS_MAX_STALE_HOURS` | Optional, 1 to 168, default 24: how long keys stay trusted while every refetch fails (below). |
@@ -148,9 +148,104 @@ Caching and refresh:
   `kid` is refused without another fetch for 60 s. Fetches triggered by unseen `kid`s are at
   least 10 s apart.
 - A verified token is remembered by digest for up to 15 minutes, never past its `exp`.
+- A key withdrawn from the set therefore goes on verifying, and the tokens it verified go on
+  being accepted, until the next successful refetch: up to 15 minutes, or sooner if a token with
+  an unseen `kid` triggers a fetch first.
+- SIGHUP requests a drop of the auth caches (gateway and chat; ADR-0082): a fetch starts at
+  once, replacing one in flight, with the retry backoff counted from 1 s again. Refetch first,
+  then swap: while it runs, the cached keys and remembered tokens go on answering as before, and
+  when it succeeds it replaces the key set and forgets every remembered verified token and
+  unknown `kid` in one step, so a token whose key left the set is refused with `401` from then
+  on. Each request logs `auth cache drop requested; completes on the next successful key fetch`
+  at info level and counts in `auth_cache_drops_total`; the `auth_cache_drop_pending` gauge
+  reads 1 from the SIGHUP until a fetch completes the drop. If the key set cannot be fetched,
+  nothing is dropped: the cached keys, the old key's included, keep working until a fetch
+  succeeds, and the drop stays pending through the retries. Chat sockets already open are not
+  closed; they run to their token's `exp`.
 
 So a newly rotated-in key is accepted within one fetch of first use, provided Askedin publishes
-it before issuing tokens with it.
+it before issuing tokens with it, and a withdrawn key stops verifying once the fetch after a
+SIGHUP succeeds.
+
+## Askedin
+
+<!-- tests/unit/auth/jwks_verifier_test.cpp (askedin_token), deploy/askedin/overlays/*/video-gateway/deployment.yaml -->
+
+What Askedin's auth-service issues and publishes, as its owner set it out on 2026-10-03 from its
+code (commit `ebd9b2ab`) and the live hosts, and the settings ULW needs for it.
+
+| Setting | Stage | Prod |
+|---|---|---|
+| `JWKS_URL` | `https://auth-stage.askedin.com/.well-known/jwks.json` | `https://auth.askedin.com/.well-known/jwks.json` |
+| `JWT_ISSUER` | `https://auth-stage.askedin.com/auth`, **unconfirmed**: the value in Askedin's deployment template, not yet read from the live secret (below) | `https://auth.askedin.com` exactly: no path, no trailing slash (confirmed 2026-10-03) |
+| `JWT_AUDIENCE` | `askedin-platform` (the default) | `askedin-platform` (the default) |
+| `ULW_AUTH_COOKIE` | `auth_token_stage` | `auth_token` |
+| `ULW_ALLOWED_ORIGINS` (chat socket) | `https://stage.askedin.com` | `https://askedin.com,https://www.askedin.com` |
+
+These origins were given for chat's socket. The gateway reads the same variable for cookie
+writes ([Cookies and other sites](#cookies-and-other-sites)); its overlays do not set it yet.
+
+`iss` is compared byte for byte, so a wrong `JWT_ISSUER` refuses every token with `401`. Until
+the stage value is read from the live secret, stage's `JWT_ISSUER` stays in the gateway's
+secret, not in its overlay. Whoever has access to the stage cluster confirms it with:
+
+```sh
+kubectl -n apps-stage get secret auth-service-secrets -o jsonpath='{.data.ISSUER}' | base64 -d
+```
+
+Do not use:
+
+- `https://askedin.com/.well-known/jwks.json`: it answers an HTML page, not a key set, so every
+  fetch fails and no token ever verifies.
+- The auth-service's in-cluster `http://` URL: `JWKS_URL` must be `https://`, and the process
+  refuses to start otherwise.
+- OIDC discovery: `/.well-known/openid-configuration` answers `404`. ULW never reads it; it needs
+  `JWKS_URL` and `JWT_ISSUER` set explicitly.
+
+The key set is `{"keys":[...]}` as `application/json` with `Cache-Control: public, max-age=3600`,
+and lists only active keys, normally one. ULW does not read the header; it refetches every 15
+minutes as above.
+
+### Askedin's tokens
+
+| Item | What Askedin sends | What ULW does with it |
+|---|---|---|
+| Signature | `RS256` (RSASSA-PKCS1-v1_5 with SHA-256), one RSA-2048 key per environment. Nothing is signed with `PS256`, `ES256` or `EdDSA`. | Verifies against the key named by `kid` |
+| Header | `{"alg":"RS256","kid":...,"typ":"JWT"}`, nothing else | `typ` is not read |
+| `iss`, `aud` | As in the table above; `aud` is an array of one | Checked as in [What a token must be](#what-a-token-must-be) |
+| `sub` | The user id, a lowercase canonical UUID, stable for the user | The user, byte for byte |
+| `uid` | Equal to `sub` | Not read |
+| `exp` | `iat` + 3600: tokens live an hour | Checked, 60 s skew |
+| `iat` | Set | Not read |
+| `nbf` | Not set | Checked only when present |
+| `jti` | Set, but **equal to the `kid`**: the same for every token under a key, so not a token id | Not read. Nothing may use it as a token id, a replay key or a cache key; the verdict cache keys on the token's SHA-256 |
+| `email` | Optional; never `null` | Optional string |
+| `tid`, `perms`, `sid` | Set | Not read |
+
+The same key also signs two kinds of token that must never authenticate at ULW. Only the audience
+tells them apart from an access token, and under `JWT_AUDIENCE=askedin-platform` both are refused
+with `401` (`WrongAudience`):
+
+| Token | `aud` | `typ` claim | Lifetime |
+|---|---|---|---|
+| 2FA challenge | `askedin-2fa` | `2fa_challenge` | 5 minutes |
+| PAT internal swap | `askedin-pat` | `pat` | 2 minutes at most |
+
+Never set `JWT_AUDIENCE` to either of these. A test
+(`JwksVerifierTest.AskedinsTwoFactorAndPatTokensAreRefusedForTheirAudience`) keeps both refused.
+
+### Key rotation
+
+Askedin rotates with no overlap: one transaction creates the new key and deactivates the old
+one, and the old `kid` leaves the JWKS at once. ULW, left alone, goes on accepting tokens signed
+with the old key for up to 15 minutes after that, from the cached key set and the remembered
+verified tokens (Caching and refresh, above).
+
+So Askedin's rotation runbook, which restarts the services that verify its tokens, must also
+reach ULW once the rotation has committed, in the rotated environment: SIGHUP every
+`gateway_server` and `chat_server` process (deploy/askedin/RUNBOOK.md, "8. Askedin signing key
+rotation"), or restart them. Afterwards each pod's `auth_cache_drops_total` has gone up by one
+and its `auth_cache_drop_pending` is back to 0, and a token under the old key gets `401`.
 
 ## Rejections
 
