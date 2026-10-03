@@ -16,7 +16,12 @@ fi
 want=$((8 * 1024 * 1024 * $(nproc)))
 have=$(ulimit -l)
 if [ "$have" != unlimited ] && [ $((have * 1024)) -lt "$want" ]; then
-    sudo prlimit --pid $$ --memlock="$want:$want"
+    # A higher hard limit stays as it is.
+    hard=$(ulimit -H -l)
+    if [ "$hard" != unlimited ]; then
+        hard=$((hard * 1024 > want ? hard * 1024 : want))
+    fi
+    sudo prlimit --pid $$ --memlock="$want:$hard"
 fi
 echo "max locked memory: $(ulimit -l) KiB (soft), $(ulimit -H -l) KiB (hard), for $(nproc) cores" >&2
 exec "$@"

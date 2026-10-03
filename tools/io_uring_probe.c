@@ -21,16 +21,13 @@ int main(void) {
         fclose(f);
     }
     printf("%-34s %d\n", "kernel.io_uring_disabled", disabled);
-
-    /* Since 6.14 every ring is charged to the user's locked memory, shared by all its
-     * processes, as is every zero-copy send in flight: ENOMEM is usually this limit. */
     struct rlimit memlock;
     if (getrlimit(RLIMIT_MEMLOCK, &memlock) == 0) {
         if (memlock.rlim_cur == RLIM_INFINITY)
-            printf("%-34s unlimited\n", "max locked memory");
+            printf("%-34s %s\n", "RLIMIT_MEMLOCK", "unlimited");
         else
-            printf("%-34s %llu KiB\n", "max locked memory",
-                   (unsigned long long)(memlock.rlim_cur / 1024));
+            printf("%-34s %llu KiB\n", "RLIMIT_MEMLOCK",
+                   (unsigned long long)memlock.rlim_cur / 1024);
     }
 
     struct io_uring ring;
