@@ -19,7 +19,7 @@ on:
         type: boolean
         default: true
       demo:
-        description: Also run the laptop demo's smoke test (demo/, every tab in headless Chrome)
+        description: Run the laptop demo's smoke test (demo/); with sandbox unticked, only that
         type: boolean
         default: false
       demo_build:
@@ -35,7 +35,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: e2e
+  # A demo-only run (demo ticked, sandbox not) runs nothing else and has a lane of its own.
+  group: e2e${{ github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox && '-demo' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -159,6 +160,7 @@ jobs:
   # host; Chrome's offers go through codec/sdp and back byte for byte. run.sh starts its own
   # gateway_server and transcode_worker on a scratch database and bucket.
   browser:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
@@ -209,6 +211,7 @@ jobs:
   # MinIO on the URLs the gateway signed; the media sequence only grows; the stream's end
   # reaches the player as EXT-X-ENDLIST and playback ends cleanly (tests/e2e/live.e2e.mjs).
   live-playback:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
@@ -280,6 +283,7 @@ jobs:
   # this runner, its egress per call and CPU per call against the derivation (brief 8.1,
   # ADR-0012). Independent of the sandbox cluster; the SFU runs in a container of its own.
   call-capacity:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
