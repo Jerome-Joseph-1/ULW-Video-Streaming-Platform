@@ -141,6 +141,37 @@ class ImagePinsTest(unittest.TestCase):
         rc, _ = self.run_check([self.manifest("d.yaml", own)], *self.ok_files()[1:])
         self.assertEqual(rc, 0)
 
+    def prod_manifest(self, image: str) -> pathlib.Path:
+        path = pathlib.Path(self.dir.name) / "overlays" / "prod" / "chat"
+        path.mkdir(parents=True, exist_ok=True)
+        return self.manifest("overlays/prod/chat/deployment.yaml", image)
+
+    def test_prod_never_follows_main(self):
+        _, host, sandbox = self.ok_files()
+        for tag in (":main", ":latest", ":abc123", ":" + "a" * 39):
+            with self.subTest(tag=tag):
+                image = "ghcr.io/jerome-joseph-1/ulw-chat" + tag
+                rc, err = self.run_check([self.prod_manifest(image)], host, sandbox)
+                self.assertEqual(rc, 1)
+                self.assertIn("prod names a published commit", err)
+
+    def test_prod_names_a_commit_or_a_digest(self):
+        _, host, sandbox = self.ok_files()
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        for ref in (":<sha>", ":" + sha, ":" + sha + DIGEST, DIGEST, ":main" + DIGEST):
+            with self.subTest(ref=ref):
+                image = "ghcr.io/jerome-joseph-1/ulw-chat" + ref
+                self.assertEqual(self.run_check([self.prod_manifest(image)], host, sandbox),
+                                 (0, ""))
+
+    def test_stage_may_follow_main(self):
+        _, host, sandbox = self.ok_files()
+        stage = pathlib.Path(self.dir.name) / "overlays" / "stage" / "chat"
+        stage.mkdir(parents=True)
+        path = self.manifest("overlays/stage/chat/deployment.yaml",
+                             "ghcr.io/jerome-joseph-1/ulw-chat:main")
+        self.assertEqual(self.run_check([path], host, sandbox), (0, ""))
+
     def test_another_ghcr_image_needs_a_digest(self):
         _, host, sandbox = self.ok_files()
         for image in ("ghcr.io/someone-else/ulw-video-gateway:main", "ghcr.io/jerome-joseph-1/x:1"):

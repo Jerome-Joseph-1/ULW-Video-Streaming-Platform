@@ -10,7 +10,9 @@ must carry @sha256:<64 hex>, with these exceptions, each only where it can occur
 
   --askedin  what Askedin runs (deploy/askedin): this repository's own builds,
              ghcr.io/jerome-joseph-1/ulw-..., which .github/workflows/publish-images.yml pushes
-             under the commit's SHA and `main`, and the overlays follow by `main`.
+             under the commit's SHA and `main`. Stage's overlays follow `main`; a file under
+             overlays/prod/ must not (docs/adr/0085): there an own build names `:<sha>` (the
+             placeholder Askedin sets), a 40-hex commit SHA, or an @sha256: digest.
   --host     what the host runs directly (compose.yaml, kind.yaml): ulw/..., the sandbox's own
              builds, never pulled.
   --sandbox  the sandbox's kustomizations as rendered: ulw/... likewise; and an upstream image is
@@ -34,6 +36,8 @@ from pathguard import inside  # noqa: E402
 
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 OWN_BUILD = "ghcr.io/jerome-joseph-1/ulw-"
+# What prod may name an own build by: the placeholder, a commit SHA, or a digest.
+PROD_OWN_BUILD = re.compile(r":(<sha>|[0-9a-f]{40})$|@sha256:[0-9a-f]{64}$")
 SANDBOX_BUILD = "ulw/"
 
 
@@ -62,12 +66,21 @@ def pinned_tags(images_sh: Path) -> set[str]:
     return {tag for name, tag in tags.items() if name in digests}
 
 
+def is_prod(path: Path) -> bool:
+    parts = path.parts
+    return any(parts[i:i + 2] == ("overlays", "prod") for i in range(len(parts) - 1))
+
+
 def check(askedin, host, sandbox, tags: set[str]) -> list[str]:
     errors = []
     for path in askedin:
         for image in file_images(path):
-            if not image.startswith(OWN_BUILD) and not DIGEST.search(image):
-                errors.append(f"{path}: {image} is not pinned by digest (@sha256:...)")
+            if not image.startswith(OWN_BUILD):
+                if not DIGEST.search(image):
+                    errors.append(f"{path}: {image} is not pinned by digest (@sha256:...)")
+            elif is_prod(path) and not PROD_OWN_BUILD.search(image):
+                errors.append(f"{path}: {image}: prod names a published commit (:<sha>, a "
+                              "40-hex SHA or @sha256:...), never a moving tag such as :main")
     for path in host:
         for image in file_images(path):
             if not image.startswith(SANDBOX_BUILD) and not DIGEST.search(image):

@@ -42,7 +42,9 @@ spec:
       # the old image keeps working against the new schema until it is replaced.
       initContainers:
         - name: migrate
-          image: ghcr.io/jerome-joseph-1/ulw-video-gateway:main
+          # Prod never follows :main: set a SHA publish-images.yml published from main,
+          # best as <sha>@sha256:<digest> from its run's summary (RUNBOOK.md, 4a).
+          image: ghcr.io/jerome-joseph-1/ulw-video-gateway:<sha>
           imagePullPolicy: Always
           command: ["/usr/local/bin/ulw_migrate"]
           env:
@@ -71,7 +73,8 @@ spec:
               drop: ["ALL"]
       containers:
         - name: gateway
-          image: ghcr.io/jerome-joseph-1/ulw-video-gateway:main
+          # The same build as migrate's above.
+          image: ghcr.io/jerome-joseph-1/ulw-video-gateway:<sha>
           imagePullPolicy: Always
           ports:
             - name: http

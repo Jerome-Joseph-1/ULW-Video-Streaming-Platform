@@ -6,8 +6,9 @@
 #
 # The template's variables, filled with envsubst naming exactly these (RUNBOOK.md):
 #   ULW_NAMESPACE     apps-stage or apps
-#   ULW_IMAGE_TAG     main, as the overlays' images, or a commit SHA that
-#                     publish-images.yml pushed (ghcr.io/jerome-joseph-1/ulw-live-packager)
+#   ULW_IMAGE_TAG     a commit SHA that publish-images.yml pushed from main
+#                     (ghcr.io/jerome-joseph-1/ulw-live-packager), best <sha>@sha256:<digest>
+#                     from its run's summary; prod always names one, stage may use main
 #   ULW_STREAM_ID     the stream id; also the pod's DNS name, so a DNS label: lowercase
 #                     letters, digits and '-', 1 to 63, as ADR-0053 requires of a stream id
 #                     when the relay's packager_srt names {stream}
