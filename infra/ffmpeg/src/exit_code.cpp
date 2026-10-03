@@ -48,32 +48,24 @@ std::optional<TranscodeFailure> classify(int exit_code, int signal, Ending endin
 
 bool refused_our_file(std::string_view stderr_tail,
                       std::span<const std::filesystem::path> ours) noexcept {
-    // strerror's text for EACCES, EPERM and EROFS, which ffmpeg prints after the path.
+    // strerror's text for EACCES, EPERM and EROFS.
     constexpr std::array<std::string_view, 3> kRefusals = {
         "Permission denied", "Operation not permitted", "Read-only file system"};
-    while (!stderr_tail.empty()) {
-        const std::size_t nl = stderr_tail.find('\n');
-        std::string_view line = stderr_tail.substr(0, nl);
-        stderr_tail.remove_prefix(nl == std::string_view::npos ? stderr_tail.size() : nl + 1);
-        while (line.ends_with('\r') || line.ends_with(' ')) {
-            line.remove_suffix(1);
-        }
-        const bool refusal = std::ranges::any_of(
-            kRefusals, [line](std::string_view r) { return line.ends_with(r); });
-        if (!refusal) {
+    const auto blank = [](char c) { return c == '\n' || c == '\r' || c == ' '; };
+    while (!stderr_tail.empty() && blank(stderr_tail.back())) {
+        stderr_tail.remove_suffix(1);
+    }
+    const std::size_t nl = stderr_tail.rfind('\n');
+    std::string_view line = nl == std::string_view::npos ? stderr_tail : stderr_tail.substr(nl + 1);
+    for (const auto& path : ours) {
+        const std::string& text = path.native();
+        if (text.empty() || !line.starts_with(text) ||
+            !line.substr(text.size()).starts_with(": ")) {
             continue;
         }
-        for (const auto& path : ours) {
-            const std::string& text = path.native();
-            // The path itself, or one under it, and not a longer name that merely starts so.
-            const std::size_t at = text.empty() ? std::string_view::npos : line.find(text);
-            if (at == std::string_view::npos) {
-                continue;
-            }
-            const std::string_view after = line.substr(at + text.size());
-            if (after.starts_with(':') || after.starts_with('/') || after.starts_with('\'')) {
-                return true;
-            }
+        const std::string_view said = line.substr(text.size() + 2);
+        if (std::ranges::find(kRefusals, said) != kRefusals.end()) {
+            return true;
         }
     }
     return false;
