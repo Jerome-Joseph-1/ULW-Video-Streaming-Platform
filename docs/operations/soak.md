@@ -74,10 +74,13 @@ hosted runners. What the workflows rely on:
   every io_uring test fail on its own. Ubuntu 24.04's 6.8 kernel (6.8.0-146-generic) answers
   every provided buffer ring registration with EINVAL, so the host runs the HWE kernel:
   `sudo apt-get install --install-recommends linux-generic-hwe-24.04`, reboot, and check that
-  `uname -r` no longer starts with 6.8. Should the probe report ENOMEM instead, give the
-  runner services `LimitMEMLOCK=infinity` under `[Service]` in a drop-in such as
+  `uname -r` no longer starts with 6.8.
+- `LimitMEMLOCK=infinity` for every runner service, under `[Service]` in a drop-in such as
   `/etc/systemd/system/actions.runner.<name>.service.d/memlock.conf`, then
-  `sudo systemctl daemon-reload` and restart them.
+  `sudo systemctl daemon-reload` and a restart of each runner while it is idle. The HWE kernel
+  charges each reactor's ring (about 400 KiB) to the locked memory of the user that made it,
+  and the four runners are one user: under the default 8 MiB, concurrent jobs' io_uring tests
+  failed with ENOMEM. The setup action stops a job whose runner's limit is not unlimited.
 - The setup action's two sysctls, `kernel.apparmor_restrict_unprivileged_userns=0` (the worker's
   sandbox) and `vm.mmap_rnd_bits=28` (the sanitizers), which every job sets again; to keep them
   across reboots, put them in a file under `/etc/sysctl.d/`. Both weaken the host's defaults,
