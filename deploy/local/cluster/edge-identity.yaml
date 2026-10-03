@@ -1,0 +1,76 @@
+# What an operator's edge may do for other services behind the same Gateway, mimicked with Envoy
+# Gateway policies: strip any x-user-* a client sent, verify the token, and inject x-user-id /
+# x-user-email from its claims. Stripping applies to every route on the Gateway, video-gateway's
+# included; the verify-and-inject step applies only to the stand-in service below, because
+# video-gateway is routed directly and verifies tokens itself (ADR-0018), as it must anywhere.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: public-gateway
+  namespace: gateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: public-gateway
+  # Early: before any filter, so the JWT filter's injected headers are the only ones left.
+  headers:
+    earlyRequestHeaders:
+      remove: ["x-user-id", "x-user-email"]
+---
+# A service behind the Gateway: the mock auth-service's /whoami echoes the x-user-*
+# headers it receives, so a test can see what the proxy passed on.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: identity-echo
+  namespace: auth
+spec:
+  parentRefs:
+    - name: public-gateway
+      namespace: gateway-system
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /identity-echo/whoami
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /whoami
+      backendRefs:
+        - name: mock-auth
+          port: 80
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: edge-identity
+  namespace: auth
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: identity-echo
+  jwt:
+    providers:
+      - name: sandbox
+        issuer: https://auth.ulw-sandbox.test
+        audiences: ["ulw-sandbox"]
+        remoteJWKS:
+          uri: http://mock-auth.auth.svc.cluster.local/.well-known/jwks.json
+          backendRefs:
+            - name: mock-auth
+              port: 80
+        extractFrom:
+          headers:
+            - name: Authorization
+              valuePrefix: "Bearer "
+          cookies: ["auth_token"]
+        claimToHeaders:
+          - header: x-user-id
+            claim: sub
+          - header: x-user-email
+            claim: email

@@ -242,10 +242,10 @@ void ChatServer::on_signal(net::Signal signal) noexcept {
     }
 }
 
-// SIGHUP, after Askedin rotates its signing key (ADR-0082): tokens under the withdrawn key stop
-// opening sockets once a key fetch succeeds, not when the cache would next refetch; until then
-// the cached keys keep answering. Sockets already open keep running to their token's expiry, as
-// they would have anyway (ADR-0073).
+// SIGHUP, after the identity provider rotates its signing key (ADR-0082): tokens under the
+// withdrawn key stop opening sockets once a key fetch succeeds, not when the cache would next
+// refetch; until then the cached keys keep answering. Sockets already open keep running to their
+// token's expiry, as they would have anyway (ADR-0073).
 void ChatServer::drop_auth_caches() noexcept {
     deps_.verifier.drop_caches();
     ++counters_.auth_cache_drops;

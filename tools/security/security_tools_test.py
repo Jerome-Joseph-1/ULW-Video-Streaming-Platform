@@ -103,9 +103,12 @@ class ImagePinsTest(unittest.TestCase):
     def manifest(self, name: str, image: str) -> pathlib.Path:
         return self.write(name, f"spec:\n  containers:\n    - image: {image}\n")
 
-    def run_check(self, askedin, host, sandbox) -> tuple[int, str]:
-        argv = ["--images-sh", str(self.images_sh), "--askedin", *map(str, askedin),
-                "--host", *map(str, host), "--sandbox", *map(str, sandbox)]
+    def run_check(self, kubernetes, host, sandbox, pinned=None) -> tuple[int, str]:
+        if pinned is None:
+            pinned = [self.manifest("production.yaml", "docker.io/x/y:1" + DIGEST)]
+        argv = ["--images-sh", str(self.images_sh), "--kubernetes", *map(str, kubernetes),
+                "--pinned", *map(str, pinned), "--host", *map(str, host),
+                "--sandbox", *map(str, sandbox)]
         err = io.StringIO()
         with redirect_stderr(err):
             try:
@@ -122,54 +125,55 @@ class ImagePinsTest(unittest.TestCase):
     def test_pinned_files_pass(self):
         self.assertEqual(self.run_check(*self.ok_files()), (0, ""))
 
-    def test_an_unpinned_askedin_image_fails(self):
+    def test_an_unpinned_kubernetes_image_fails(self):
         _, host, sandbox = self.ok_files()
         rc, err = self.run_check([self.manifest("b.yaml", "docker.io/x/y:1")], host, sandbox)
         self.assertEqual(rc, 1)
         self.assertIn("not pinned by digest", err)
 
-    def test_the_sandbox_build_exemption_is_not_for_askedin(self):
+    def test_the_sandbox_build_exemption_is_not_for_kubernetes(self):
         _, host, sandbox = self.ok_files()
         rc, _ = self.run_check([self.manifest("b.yaml", "ulw/video-gateway:e2e")], host, sandbox)
         self.assertEqual(rc, 1)
 
-    def test_the_own_build_exemption_is_only_for_askedin(self):
-        askedin, _, sandbox = self.ok_files()
+    def test_the_own_build_exemption_is_only_for_kubernetes(self):
+        kubernetes, _, sandbox = self.ok_files()
         own = "ghcr.io/jerome-joseph-1/ulw-video-gateway:main"
-        rc, _ = self.run_check(askedin, [self.manifest("c.yaml", own)], sandbox)
+        rc, _ = self.run_check(kubernetes, [self.manifest("c.yaml", own)], sandbox)
         self.assertEqual(rc, 1)
         rc, _ = self.run_check([self.manifest("d.yaml", own)], *self.ok_files()[1:])
         self.assertEqual(rc, 0)
 
-    def prod_manifest(self, image: str) -> pathlib.Path:
-        path = pathlib.Path(self.dir.name) / "overlays" / "prod" / "chat"
-        path.mkdir(parents=True, exist_ok=True)
-        return self.manifest("overlays/prod/chat/deployment.yaml", image)
-
-    def test_prod_never_follows_main(self):
-        _, host, sandbox = self.ok_files()
-        for tag in (":main", ":latest", ":abc123", ":" + "a" * 39):
+    def test_a_pinned_overlay_never_follows_main(self):
+        kubernetes, host, sandbox = self.ok_files()
+        for tag in (":main", ":latest", ":abc123", ":" + "a" * 39, ":<sha>"):
             with self.subTest(tag=tag):
                 image = "ghcr.io/jerome-joseph-1/ulw-chat" + tag
-                rc, err = self.run_check([self.prod_manifest(image)], host, sandbox)
+                rc, err = self.run_check(kubernetes, host, sandbox,
+                                         [self.manifest("production.yaml", image)])
                 self.assertEqual(rc, 1)
-                self.assertIn("prod names a published commit", err)
+                self.assertIn("a pinned overlay names a published commit", err)
 
-    def test_prod_names_a_commit_or_a_digest(self):
-        _, host, sandbox = self.ok_files()
+    def test_a_pinned_overlay_names_a_commit_or_a_digest(self):
+        kubernetes, host, sandbox = self.ok_files()
         sha = "0123456789abcdef0123456789abcdef01234567"
-        for ref in (":<sha>", ":" + sha, ":" + sha + DIGEST, DIGEST, ":main" + DIGEST):
+        for ref in (":" + sha, ":" + sha + DIGEST, DIGEST, ":main" + DIGEST):
             with self.subTest(ref=ref):
                 image = "ghcr.io/jerome-joseph-1/ulw-chat" + ref
-                self.assertEqual(self.run_check([self.prod_manifest(image)], host, sandbox),
+                self.assertEqual(self.run_check(kubernetes, host, sandbox,
+                                                [self.manifest("production.yaml", image)]),
                                  (0, ""))
 
-    def test_stage_may_follow_main(self):
+    def test_a_pinned_overlay_still_pins_upstream_images_by_digest(self):
+        kubernetes, host, sandbox = self.ok_files()
+        rc, err = self.run_check(kubernetes, host, sandbox,
+                                 [self.manifest("production.yaml", "docker.io/x/y:1")])
+        self.assertEqual(rc, 1)
+        self.assertIn("not pinned by digest", err)
+
+    def test_an_unpinned_overlay_may_follow_main(self):
         _, host, sandbox = self.ok_files()
-        stage = pathlib.Path(self.dir.name) / "overlays" / "stage" / "chat"
-        stage.mkdir(parents=True)
-        path = self.manifest("overlays/stage/chat/deployment.yaml",
-                             "ghcr.io/jerome-joseph-1/ulw-chat:main")
+        path = self.manifest("staging.yaml", "ghcr.io/jerome-joseph-1/ulw-chat:main")
         self.assertEqual(self.run_check([path], host, sandbox), (0, ""))
 
     def test_another_ghcr_image_needs_a_digest(self):
@@ -179,23 +183,43 @@ class ImagePinsTest(unittest.TestCase):
             self.assertEqual(rc, 1, image)
 
     def test_a_sandbox_tag_needs_a_pinned_digest(self):
-        askedin, host, _ = self.ok_files()
-        rc, err = self.run_check(askedin, host, [self.manifest("s.yaml", "docker.io/loose:v1")])
+        kubernetes, host, _ = self.ok_files()
+        rc, err = self.run_check(kubernetes, host, [self.manifest("s.yaml", "docker.io/loose:v1")])
         self.assertEqual(rc, 1)
         self.assertIn("pins no digest", err)
 
     def test_an_unknown_option_is_an_error(self):
-        askedin, host, sandbox = self.ok_files()
+        kubernetes, host, sandbox = self.ok_files()
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit) as raised:
-            pins.main(["--images-sh", str(self.images_sh), "--askedin", str(askedin[0]),
-                       "--host", str(host[0]), "--sandbox", str(sandbox[0]), "--loaded", "x"])
+            pins.main(["--images-sh", str(self.images_sh), "--kubernetes", str(kubernetes[0]),
+                       "--pinned", str(kubernetes[0]), "--host", str(host[0]),
+                       "--sandbox", str(sandbox[0]), "--loaded", "x"])
         self.assertEqual(raised.exception.code, 2)
 
     def test_an_empty_file_list_is_an_error(self):
-        askedin, host, sandbox = self.ok_files()
+        kubernetes, host, sandbox = self.ok_files()
         self.assertEqual(self.run_check([], host, sandbox)[0], 2)
-        self.assertEqual(self.run_check(askedin, host, [])[0], 2)
+        self.assertEqual(self.run_check(kubernetes, host, [])[0], 2)
+        self.assertEqual(self.run_check(kubernetes, host, sandbox, [])[0], 2)
+
+    def test_an_operator_checks_a_rendered_overlay_alone(self):
+        good = self.manifest("mine.yaml", "ghcr.io/jerome-joseph-1/ulw-chat:" + "a" * 40)
+        bad = self.manifest("theirs.yaml", "ghcr.io/jerome-joseph-1/ulw-chat:main")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(pins.main(["--pinned", str(good)]), 0)
+            self.assertEqual(pins.main(["--pinned", str(bad)]), 1)
+            self.assertEqual(pins.main(["--kubernetes", str(bad)]), 0)
+        self.assertIn("a pinned overlay names a published commit", err.getvalue())
+
+    def test_nothing_to_check_or_a_sandbox_without_images_sh_is_an_error(self):
+        _, _, sandbox = self.ok_files()
+        for argv in ([], ["--images-sh", str(self.images_sh)], ["--sandbox", str(sandbox[0])]):
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as raised:
+                pins.main(argv)
+            self.assertEqual(raised.exception.code, 2)
 
     def test_a_missing_file_is_an_error(self):
         _, host, sandbox = self.ok_files()

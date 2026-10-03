@@ -300,6 +300,12 @@ std::size_t GatewayUnderTest::claims() {
     return out;
 }
 
+std::size_t GatewayUnderTest::claims_held() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->gateway->claims_held(); });
+    return out;
+}
+
 void GatewayUnderTest::drain() {
     on_loop([&] { loop_->gateway->begin_drain(); });
 }
@@ -394,6 +400,16 @@ void GatewayUnderTest::fail_catalog(std::optional<core::ports::CatalogError> err
 
 void GatewayUnderTest::fail_find_video(std::optional<core::ports::CatalogError> error) {
     on_loop([&] { loop_->catalog->fail_find_video(error); });
+}
+
+void GatewayUnderTest::hold_claims(bool held) {
+    on_loop([&] { loop_->catalog->hold_claims(held); });
+}
+
+std::size_t GatewayUnderTest::held_claims() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->catalog->held_claims(); });
+    return out;
 }
 
 std::string GatewayUnderTest::metrics() {

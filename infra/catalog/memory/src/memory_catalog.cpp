@@ -75,30 +75,52 @@ void MemoryCatalog::find_upload(const core::UploadId& id, CatalogCallback<Stored
 }
 
 void MemoryCatalog::claim_upload(const core::UploadId& id, const core::UserId& owner,
-                                 CatalogCallback<StoredUpload> done) {
+                                 CatalogCallback<core::ports::ClaimedUpload> done) {
     if (refused(done)) {
         return;
     }
     const auto it = uploads_.find(id);
-    core::ports::CatalogResult<StoredUpload> result = std::unexpected(CatalogError::NotFound);
+    core::ports::CatalogResult<core::ports::ClaimedUpload> result =
+        std::unexpected(CatalogError::NotFound);
     if (it != uploads_.end() && it->second.upload.owner == owner) {
-        if (claimed_.insert(id).second) {
-            result = it->second;
+        const core::ports::ClaimToken token{++last_token_};
+        if (claimed_.try_emplace(id, token).second) {
+            result = core::ports::ClaimedUpload{.stored = it->second, .token = token};
         } else {
             result = std::unexpected(CatalogError::Conflict);
         }
     }
-    defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
-        done(std::move(result));
-    });
+    std::move_only_function<void() noexcept> answer =
+        [done = std::move(done), result = std::move(result)]() mutable noexcept {
+            done(std::move(result));
+        };
+    if (hold_claims_) {
+        held_claims_.push_back(std::move(answer));
+        return;
+    }
+    defer(std::move(answer));
 }
 
-void MemoryCatalog::release_upload(const core::UploadId& id) noexcept {
-    claimed_.erase(id);
+void MemoryCatalog::hold_claims(bool held) {
+    hold_claims_ = held;
+    if (held) {
+        return;
+    }
+    for (auto& answer : std::exchange(held_claims_, {})) {
+        defer(std::move(answer));
+    }
 }
 
-void MemoryCatalog::record_progress(const core::UploadId& id, const core::VideoId& video,
-                                    std::uint64_t durable_offset, CatalogCallback<void> done) {
+void MemoryCatalog::release_upload(const core::UploadId& id,
+                                   core::ports::ClaimToken token) noexcept {
+    if (const auto it = claimed_.find(id); it != claimed_.end() && it->second == token) {
+        claimed_.erase(it);
+    }
+}
+
+void MemoryCatalog::record_progress(const core::UploadId& id, core::ports::ClaimToken token,
+                                    const core::VideoId& video, std::uint64_t durable_offset,
+                                    CatalogCallback<void> done) {
     if (refused(done)) {
         return;
     }
@@ -106,7 +128,8 @@ void MemoryCatalog::record_progress(const core::UploadId& id, const core::VideoI
     core::ports::CatalogResult<void> result{};
     if (it == uploads_.end()) {
         result = std::unexpected(CatalogError::NotFound);
-    } else if (!claimed_.contains(id)) {
+    } else if (const auto claim = claimed_.find(id);
+               claim == claimed_.end() || claim->second != token) {
         result = std::unexpected(CatalogError::Conflict);
     } else if (it->second.upload.state == core::UploadState::Active) {
         auto& offset = it->second.upload.durable_offset;

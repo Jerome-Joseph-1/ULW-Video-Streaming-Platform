@@ -109,14 +109,25 @@ TEST(Refusal, APathTheInputNamesIsNotOurs) {
         "/scratch/soak-worker/job-1/source2: Permission denied\n", ours));
 }
 
-TEST(Refusal, AnOutputUnderOurDirectoryAndEveryAccessErrorCount) {
+TEST(Refusal, OnlyTheLastLineExactlyNamingOneOfOursCounts) {
     const std::array ours{kSource, kOut};
+    // Every access error's text, on the last line with anything on it.
     EXPECT_TRUE(infra::ffmpeg::refused_our_file(
-        "frame=1\n[hls @ 0x1] Failed to open file '/scratch/soak-worker/job-1/hls/720p/"
-        "init.mp4': Read-only file system\r\nmore\n",
-        ours));
+        "/scratch/soak-worker/job-1/hls: Operation not permitted\r\n\n", ours));
     EXPECT_TRUE(infra::ffmpeg::refused_our_file(
+        "/scratch/soak-worker/job-1/hls: Read-only file system", ours));
+    // A path under ours, or ours quoted inside a longer line: not how ffprobe reports its input.
+    EXPECT_FALSE(infra::ffmpeg::refused_our_file(
         "/scratch/soak-worker/job-1/hls/master.m3u8: Operation not permitted", ours));
+    EXPECT_FALSE(infra::ffmpeg::refused_our_file(
+        "[hls @ 0x1] Failed to open file '/scratch/soak-worker/job-1/hls': Permission denied",
+        ours));
+    // Anything said after the refusal: the program went on, so the refusal was not its end.
+    EXPECT_FALSE(infra::ffmpeg::refused_our_file(
+        "/scratch/soak-worker/job-1/source: Permission denied\nInvalid data found\n", ours));
+    // More after the refusal's text on the same line.
+    EXPECT_FALSE(infra::ffmpeg::refused_our_file(
+        "/scratch/soak-worker/job-1/source: Permission denied (while reading a ref)", ours));
 }
 
 TEST(Refusal, OnlyARejectionIsRefined) {

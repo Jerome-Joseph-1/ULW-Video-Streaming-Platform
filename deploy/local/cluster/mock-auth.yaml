@@ -1,4 +1,4 @@
-# Stands in for Askedin's auth-service, which the sandbox must never reach.
+# Stands in for an identity provider: the sandbox reaches no real one.
 # The gateway fetches its JWKS over https inside the cluster; test clients mint tokens through
 # the Gateway at /mock-auth/token. e2e-up.sh creates the mock-auth-tls secret from a CA that
 # lives only in deploy/local/.state.
@@ -94,8 +94,8 @@ metadata:
   namespace: auth
 spec:
   parentRefs:
-    - name: askedin-gateway
-      namespace: apps
+    - name: public-gateway
+      namespace: gateway-system
   rules:
     - matches:
         - path:

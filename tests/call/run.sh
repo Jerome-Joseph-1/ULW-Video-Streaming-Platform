@@ -8,7 +8,10 @@
 # which is started with its recorder if they are not running (and left running). The ingest spec
 # also needs gst-launch-1.0 with the good and bad plugins, ffmpeg, cargo and GStreamer's
 # development files (fetch-whipsink.sh builds whipsink), and the live_packager and ulw_sandbox
-# targets of the same build. The environment can point the suite elsewhere:
+# targets of the same build. The direct-call spec needs psql, a Postgres (ULW_TEST_DATABASE_URL)
+# and the chat_server, ulw_migrate and ulw_devtoken targets instead of the harness; the recorder
+# is started only when a spec that uses the harness runs. The environment can point the suite
+# elsewhere:
 #   LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
 #       Another LiveKit, such as the one deploy/stunner/up.sh puts behind STUNner in the kind
 #       sandbox. The local server is then left alone. The ingest spec's packager test needs a
@@ -27,10 +30,37 @@ root=$(cd "$here/../.." && pwd)
 build=$(realpath "${1:-$root/build/ci}")
 shift $(($# > 0 ? 1 : 0))
 
+# The harness stands in for chat in call.spec.mjs and ingest.spec.mjs; direct-call.spec.mjs runs
+# the product itself instead: chat_server, ulw_migrate and ulw_devtoken of the same build, on a
+# scratch database of the Postgres at ULW_TEST_DATABASE_URL (default the local one of
+# deploy/local/compose.yaml), created and dropped with psql.
 export ULW_CALL_HARNESS=$build/tests/ulw_call_harness
-if [[ ! -x $ULW_CALL_HARNESS ]]; then
+export ULW_BUILD_DIR=$build
+# Which specs the arguments select: those named, or all of them.
+specs=()
+for arg in "$@"; do
+    [[ $arg == *.spec.mjs ]] && specs+=("$arg")
+done
+[[ ${#specs[@]} -eq 0 ]] && specs=(call.spec.mjs ingest.spec.mjs direct-call.spec.mjs)
+needs_harness=
+needs_chat=
+for spec in "${specs[@]}"; do
+    case $spec in
+    *direct-call.spec.mjs) needs_chat=1 ;;
+    *) needs_harness=1 ;;
+    esac
+done
+if [[ -n $needs_harness && ! -x $ULW_CALL_HARNESS ]]; then
     echo "run.sh: $ULW_CALL_HARNESS missing; build the ulw_call_harness target" >&2
     exit 1
+fi
+if [[ -n $needs_chat ]]; then
+    for target in apps/chat/chat_server apps/migrate/ulw_migrate tools/devtoken/ulw_devtoken; do
+        if [[ ! -x $build/$target ]]; then
+            echo "run.sh: $build/$target missing; build the ${target##*/} target" >&2
+            exit 1
+        fi
+    done
 fi
 
 local_livekit=http://127.0.0.1:7880
@@ -40,8 +70,9 @@ export LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-ulw-dev-secret-testtest123-not-a
 export LIVEKIT_API_URL=${LIVEKIT_API_URL:-$local_livekit}
 export LIVEKIT_CLIENT_URL=${LIVEKIT_CLIENT_URL:-ws://127.0.0.1:7880}
 if [[ $LIVEKIT_API_URL == "$local_livekit" ]]; then
+    # The recorder only for the specs that relay through it (the harness's).
     docker compose -f "$root/deploy/local/compose.yaml" --profile calls up -d --wait livekit \
-        egress >/dev/null
+        ${needs_harness:+egress} >/dev/null
 fi
 
 ULW_E2E_CHROME=${ULW_E2E_CHROME:-$("$here/fetch-chrome.sh")}

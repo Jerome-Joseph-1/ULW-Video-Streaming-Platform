@@ -1,0 +1,27 @@
+# Where LiveKit's recorder (egress) finds a stream's packager (docs/adr/0083). Each packager is
+# a Job of its own (deploy/kubernetes/live-packager/job.yaml) whose pod is named, in DNS, after
+# its stream: hostname <stream>, subdomain live-packager. This headless Service gives every such
+# pod the record <stream>.live-packager.<namespace>.svc.cluster.local, so the relay's
+# packager_srt is srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000 (ADR-0053),
+# with NAMESPACE from config.env.
+# No cluster IP: the recorder dials the one pod of its stream, never a pool.
+apiVersion: v1
+kind: Service
+metadata:
+  name: live-packager
+  namespace: ulw
+  labels:
+    app.kubernetes.io/name: live-packager
+    app.kubernetes.io/part-of: ulw
+spec:
+  clusterIP: None
+  # A packager has no readiness probe (it serves no HTTP), and the recorder is started only
+  # once its pod runs; the record exists from the pod's address on.
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: live-packager
+  ports:
+    - name: srt
+      port: 9000
+      targetPort: srt
+      protocol: UDP

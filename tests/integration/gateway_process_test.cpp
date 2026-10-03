@@ -56,7 +56,7 @@ protected:
     [[nodiscard]] std::string token(std::string subject) const {
         const os::SystemClock clock;
         return *key_->mint({.issuer = "ulw-test",
-                            .audience = "askedin-platform",
+                            .audience = "ulw-dev",
                             .subject = std::move(subject),
                             .email = {},
                             .ttl = seconds(600)},

@@ -21,7 +21,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0015](0015-single-owner-rooms-with-fenced-writes.md) | One owning node per room, with generation-fenced writes | Accepted |
 | [0016](0016-end-to-end-encryption-for-private-chat-only.md) | End-to-end encryption for private chat only | Accepted |
 | [0017](0017-sans-io-protocol-codecs.md) | Protocol codecs are sans-IO | Accepted |
-| [0018](0018-identity-from-askedin-jwts.md) | Identity is borrowed from Askedin | Accepted |
+| [0018](0018-identity-from-askedin-jwts.md) | Identity is borrowed from Askedin | Accepted, amended by 0088 |
 | [0019](0019-chat-in-its-own-binary.md) | Chat runs in its own binary | Accepted |
 | [0020](0020-livekit-as-the-first-sfu.md) | LiveKit as the first SFU | Accepted |
 | [0021](0021-single-shot-buffer-select-recv.md) | Single-shot buffer-select receives, not multishot | Accepted |
@@ -34,13 +34,13 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0028](0028-segments-fetched-cross-origin-without-credentials.md) | Viewers fetch segments cross-origin, without credentials | Accepted |
 | [0029](0029-websocket-messages-own-their-payload.md) | WebSocket messages own their payload | Accepted |
 | [0030](0030-container-images-on-ubuntu-from-a-dated-snapshot.md) | Container images build and run on Ubuntu 24.04 from a dated snapshot | Accepted |
-| [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted, image publishing amended by 0085 |
-| [0032](0032-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted |
+| [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted, image publishing amended by 0085, deployment by 0088 |
+| [0032](0032-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted, amended by 0088 |
 | [0033](0033-sdp-parsed-strictly-and-serialized-exactly.md) | SDP is parsed strictly into a typed model that serializes back exactly | Accepted |
 | [0034](0034-rtp-and-rtcp-read-in-place.md) | RTP and RTCP are read in place, for tooling and tests | Accepted |
 | [0035](0035-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
-| [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted |
+| [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted, amended by 0088 |
 | [0038](0038-single-use-key-packages-in-postgres.md) | Single-use key packages in Postgres, with a replenish signal | Accepted |
 | [0039](0039-json-logs-metrics-and-readiness-off-the-loop.md) | JSON logs, metrics and readiness, none of them waiting on the loop | Accepted |
 | [0040](0040-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
@@ -55,8 +55,8 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0049](0049-upload-reaper-as-a-cron-job.md) | Abandoned uploads are reaped by a CronJob | Accepted |
 | [0050](0050-clients-reach-the-sfu-with-a-ticket.md) | Clients reach the SFU with a ticket, not through our signalling | Accepted |
 | [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted, amended by 0090 |
-| [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted |
-| [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted |
+| [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted, amended by 0088 |
+| [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted, amended by 0088 |
 | [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted, amended by 0075 |
 | [0055](0055-a-live-recording-is-remuxed-from-the-stored-segments.md) | A live recording is remuxed from its stored segments into one object, and queued once per stream | Accepted |
 | [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
@@ -66,29 +66,30 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0060](0060-pump-staging-is-appended-to-and-bounded.md) | Pump staging is appended to, bounded, and overflow is 413 | Accepted |
 | [0061](0061-cmake-3-28-presets-v6-and-the-ci-test-preset.md) | CMake 3.28, presets version 6, and a `ci` test preset | Accepted |
 | [0062](0062-ulw-sanitize-is-the-one-sanitizer-target.md) | `ulw_sanitize` is the one sanitizer interface target | Accepted |
-| [0063](0063-gateway-memory-high-600m-max-700m.md) | The gateway's memory: high at 600 MB, max at 700 MB | Accepted |
+| [0063](0063-gateway-memory-high-600m-max-700m.md) | The gateway's memory: high at 600 MB, max at 700 MB | Accepted, amended by 0088 |
 | [0064](0064-the-first-accepted-patch-starts-the-upload.md) | The first accepted PATCH moves a video from `init` to `uploading` | Accepted |
 | [0065](0065-concurrent-patches-serialised-by-a-per-upload-advisory-lock.md) | Concurrent PATCHes are serialised by a per-upload advisory lock | Accepted |
-| [0066](0066-the-gateways-object-store-credentials.md) | What the gateway's object-store credentials may do | Accepted |
+| [0066](0066-the-gateways-object-store-credentials.md) | What the gateway's object-store credentials may do | Accepted, amended by 0088 |
 | [0067](0067-chat-resume-is-a-join-with-after.md) | Chat resume is a `join` with `after`, and acks are `joined` and `sent` | Accepted |
 | [0068](0068-a-failed-job-fails-its-video.md) | A job that fails for good fails its video in the same statement | Accepted |
 | [0069](0069-chat-soak-flatness-per-command-delivery-and-connection.md) | Chat soak flatness judged per command, delivery and connection | Accepted |
 | [0070](0070-live-chat-lossy-and-bounded.md) | A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere | Accepted |
 | [0071](0071-slow-readers-are-not-reset-by-the-kernel.md) | Slow readers are not reset by the kernel: the gateway and the node channel bound their own peers | Accepted |
-| [0072](0072-security-analysis-in-ci.md) | Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check | Accepted, own-build registry exemption amended by 0085 |
+| [0072](0072-security-analysis-in-ci.md) | Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check | Accepted, own-build registry exemption amended by 0085 and 0088 |
 | [0073](0073-a-chat-socket-ends-with-its-token-and-its-membership.md) | A chat socket ends with its token, and a room with its membership | Accepted |
 | [0074](0074-ffmpeg-from-debian-security.md) | The worker's ffmpeg comes from Debian 13's security archive | Accepted |
 | [0075](0075-unused-chat-room-records-are-forgotten.md) | A chat room's record that nothing used is forgotten | Accepted |
 | [0076](0076-chat-per-client-connection-limits.md) | chat_server holds each address and each user to a share of its connections | Accepted |
 | [0077](0077-the-body-rate-window-skips-a-store-hold.md) | The body rate window skips a store's hold and keeps the bytes it counted | Accepted |
-| [0078](0078-the-cookie-is-believed-only-from-trusted-pages.md) | The gateway believes the auth cookie only from pages it trusts | Accepted |
+| [0078](0078-the-cookie-is-believed-only-from-trusted-pages.md) | The gateway believes the auth cookie only from pages it trusts | Accepted, amended by 0088 |
 | [0079](0079-sonarqube-cloud-analysis-in-ci.md) | SonarQube Cloud analysis in CI, with the compile database, on the Free plan | Accepted, amended by 0086 |
 | [0080](0080-coverage-floor.md) | Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory | Accepted, amended by 0086 |
 | [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted |
-| [0082](0082-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted |
-| [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085 |
-| [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted |
-| [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted |
+| [0082](0082-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted, amended by 0088 |
+| [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085, deployment by 0088 |
+| [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted, amended by 0088 |
+| [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted, amended by 0088 |
 | [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted, amended by 0090 |
 | [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted |
+| [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
 | [0090](0090-io-uring-within-the-users-locked-memory.md) | The io_uring reactor stays within its user's locked memory: zero copy only where the limit cannot refuse it | Accepted |
