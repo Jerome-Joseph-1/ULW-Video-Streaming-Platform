@@ -91,14 +91,42 @@ TEST(TuneAllocator, LeavesMallocToAnOperatorsMallocTunable) {
     EXPECT_TRUE(p.calls.empty());
 }
 
-TEST(TuneAllocator, TunablesOfOtherPartsOfGlibcAndEmptyVariablesAreNoMallocSetting) {
+TEST(TuneAllocator, MallocSettingsItDoesNotMakeAreLeftToGlibcWhicheverWayTheyAreSpelt) {
     FakeProcess p;
-    p.env = {{"GLIBC_TUNABLES", "glibc.cpu.hwcaps=-AVX2:glibc.rtld.nns=2"},
-             {"MALLOC_ARENA_MAX", ""}};
+    p.env = {{"GLIBC_TUNABLES",
+              "glibc.cpu.hwcaps=-AVX2:glibc.malloc.perturb=165:glibc.malloc.check=3:"
+              "glibc.malloc.arena_test=8:glibc.malloc.arena_max_typo=4"},
+             {"MALLOC_PERTURB_", "165"},
+             {"MALLOC_CHECK_", "3"},
+             {"MALLOC_TOP_PAD_", "0"},
+             {"MALLOC_ARENA_TEST", "8"}};
     const auto report = ops::tune_allocator(ops::MallocTuning{}, p.seams());
     ASSERT_TRUE(report) << report.error();
     EXPECT_EQ(report->choice, ops::AllocatorChoice::Tuned);
     EXPECT_EQ(p.calls, kTuned);
+}
+
+// glibc reads an empty MALLOC_ARENA_MAX as 0, below its minimum, and ignores it.
+TEST(TuneAllocator, AnEmptyArenaMaxIsNoSetting) {
+    FakeProcess p;
+    p.env = {{"MALLOC_ARENA_MAX", ""}};
+    const auto report = ops::tune_allocator(ops::MallocTuning{}, p.seams());
+    ASSERT_TRUE(report) << report.error();
+    EXPECT_EQ(report->choice, ops::AllocatorChoice::Tuned);
+    EXPECT_EQ(p.calls, kTuned);
+}
+
+// glibc reads an empty MALLOC_MMAP_THRESHOLD_ or MALLOC_TRIM_THRESHOLD_ as 0, and applies it.
+TEST(TuneAllocator, AnEmptyThresholdVariableIsTheOperatorsZero) {
+    for (const char* name : {"MALLOC_MMAP_THRESHOLD_", "MALLOC_TRIM_THRESHOLD_"}) {
+        FakeProcess p;
+        p.env = {{name, ""}};
+        const auto report = ops::tune_allocator(ops::MallocTuning{}, p.seams());
+        ASSERT_TRUE(report) << report.error();
+        EXPECT_EQ(report->choice, ops::AllocatorChoice::Operator) << name;
+        EXPECT_EQ(report->description, std::string("glibc ") + name + "=");
+        EXPECT_TRUE(p.calls.empty()) << name;
+    }
 }
 
 TEST(TuneAllocator, LeavesJemallocAlone) {
@@ -134,37 +162,47 @@ TEST(TuneAllocator, TheProcessSeamsSeeTheBuildsSanitizerAndNoJemalloc) {
 // Kept where the compiler cannot see it unused, so the allocations below are not elided.
 void* volatile g_held = nullptr;
 
-std::size_t mapped_chunks() {
-    return mallinfo2().hblks;
+std::optional<std::string> process_env(std::string_view name) {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): no other thread sets the environment
+    const char* value = std::getenv(std::string(name).c_str());
+    return value == nullptr ? std::nullopt : std::optional<std::string>(value);
 }
 
-// The real thing, in this process: once tuned, freeing a large mapped buffer no longer raises
-// glibc's mmap threshold, so a 192 KiB buffer after it is still a mapping of its own. Untuned,
-// the free would raise the threshold to 1 MiB and the 192 KiB would come from the heap.
-TEST(TuneAllocator, FixesGlibcsMmapThresholdInThisProcess) {
-    const auto report = ops::tune_allocator(
-        ops::MallocTuning{}, ops::process_allocator([](std::string_view name) {
-            // The process's own environment, as the gateway reads it.
-            // NOLINTNEXTLINE(concurrency-mt-unsafe): no other thread sets the environment
-            const char* value = std::getenv(std::string(name).c_str());
-            return value == nullptr ? std::nullopt : std::optional<std::string>(value);
-        }));
-    ASSERT_TRUE(report) << report.error();
-    if (report->choice != ops::AllocatorChoice::Tuned) {
-        GTEST_SKIP() << "malloc is not glibc's to tune here: " << report->description;
-    }
+// 0 when the mmap threshold held: a 192 KiB buffer allocated after a 1 MiB mapped one was freed
+// is still a mapping of its own. Untuned, that free raises glibc's threshold to 1 MiB and the
+// 192 KiB comes from the heap.
+int threshold_held() {
     // NOLINTBEGIN(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory): malloc itself
     // is under test
     g_held = std::malloc(std::size_t{1} << 20U);
-    ASSERT_NE(g_held, nullptr);
     std::free(g_held);
-    const std::size_t before = mapped_chunks();
+    const std::size_t before = mallinfo2().hblks;
     g_held = std::malloc(std::size_t{192} << 10U);
-    ASSERT_NE(g_held, nullptr);
-    EXPECT_EQ(mapped_chunks(), before + 1);
+    const std::size_t after = mallinfo2().hblks;
     std::free(g_held);
     // NOLINTEND(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
     g_held = nullptr;
+    return after == before + 1 ? 0 : 1;
+}
+
+// The real thing, in a child process, so the tuning does not reach the other tests.
+TEST(TuneAllocator, FixesGlibcsMmapThresholdInAProcess) {
+    // What the real process would do, asked with a mallopt that changes nothing.
+    auto probe = ops::process_allocator(process_env);
+    probe.mallopt = [](int, int) { return 1; };
+    const auto expected = ops::tune_allocator(ops::MallocTuning{}, probe);
+    ASSERT_TRUE(expected) << expected.error();
+    if (expected->choice != ops::AllocatorChoice::Tuned) {
+        GTEST_SKIP() << "malloc is not glibc's to tune here: " << expected->description;
+    }
+    EXPECT_EXIT(
+        {
+            const auto report =
+                ops::tune_allocator(ops::MallocTuning{}, ops::process_allocator(process_env));
+            std::_Exit(report && report->choice == ops::AllocatorChoice::Tuned ? threshold_held()
+                                                                               : 2);
+        },
+        ::testing::ExitedWithCode(0), "");
 }
 
 } // namespace

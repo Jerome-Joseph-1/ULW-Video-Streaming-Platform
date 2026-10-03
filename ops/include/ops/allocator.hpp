@@ -24,8 +24,9 @@ struct MallocTuning {
 enum class AllocatorChoice : std::uint8_t {
     // glibc's malloc, with MallocTuning applied.
     Tuned,
-    // glibc's malloc, left as the operator's environment set it (MALLOC_* or a glibc.malloc.*
-    // tunable): applying ours after glibc read those would quietly undo them.
+    // glibc's malloc, left as the operator's environment set it (MALLOC_ARENA_MAX,
+    // MALLOC_MMAP_THRESHOLD_, MALLOC_TRIM_THRESHOLD_ or their GLIBC_TUNABLES entries): applying
+    // ours after glibc read those would quietly undo them.
     Operator,
     // jemalloc, linked or preloaded: mallopt would reach nothing.
     Jemalloc,
@@ -50,7 +51,7 @@ struct AllocatorSeams {
     std::function<int(int option, int value)> mallopt;
 };
 
-// True when the build replaced malloc with a sanitizer's (ASan, TSan, MSan, HWASan).
+// True when the build replaced malloc with a sanitizer's (ASan, TSan, MSan, HWASan, LSan).
 [[nodiscard]] bool sanitizer_replaces_malloc() noexcept;
 
 // This process: `env`, jemalloc found at run time (ops::jemalloc_version()), the build's
@@ -58,8 +59,11 @@ struct AllocatorSeams {
 [[nodiscard]] AllocatorSeams process_allocator(Lookup env);
 
 // Applies `tuning` with mallopt unless jemalloc or a sanitizer allocates, or the operator set
-// glibc's malloc through the environment. Call it first in main, before any thread exists, so
-// every thread shares the one arena. The error names the option and value glibc refused.
+// one of these settings through the environment. Call it before any thread exists (the gateway
+// calls it first in run(), which main calls), so every thread shares the one arena. The error
+// names the option and value glibc refused. An allocator preloaded in place of glibc's that is
+// not jemalloc (tcmalloc, say) answers mallopt itself, and may report Tuned for settings it
+// ignores.
 [[nodiscard]] std::expected<AllocatorReport, std::string>
 tune_allocator(const MallocTuning& tuning, const AllocatorSeams& seams);
 

@@ -12,16 +12,31 @@ namespace ops {
 
 namespace {
 
-// glibc's malloc variables (mallopt(3)): any of them set means the operator is tuning malloc.
-constexpr std::array<std::string_view, 6> kMallocVariables{
-    "MALLOC_ARENA_MAX",       "MALLOC_ARENA_TEST", "MALLOC_MMAP_THRESHOLD_",
-    "MALLOC_TRIM_THRESHOLD_", "MALLOC_TOP_PAD_",   "MALLOC_MMAP_MAX_"};
+// The settings tune_allocator makes, in both of glibc's spellings: an environment variable
+// (mallopt(3)) and a GLIBC_TUNABLES entry. Either one set means the operator is choosing them,
+// and the whole tuning is left out; the other malloc settings (perturb, check, tcache, top pad,
+// mmap max) are not ours and are left to glibc whichever way they are spelt.
+struct OperatorSetting {
+    std::string_view variable;
+    std::string_view tunable;
+    // glibc 2.39 reads an empty MALLOC_MMAP_THRESHOLD_ or MALLOC_TRIM_THRESHOLD_ as 0
+    // (elf/dl-tunables.c), so present is set; an empty MALLOC_ARENA_MAX is 0, below its
+    // minimum of 1, and ignored.
+    bool empty_counts;
+};
+constexpr std::array<OperatorSetting, 3> kOperatorSettings{{
+    {.variable = "MALLOC_ARENA_MAX", .tunable = "glibc.malloc.arena_max", .empty_counts = false},
+    {.variable = "MALLOC_MMAP_THRESHOLD_",
+     .tunable = "glibc.malloc.mmap_threshold",
+     .empty_counts = true},
+    {.variable = "MALLOC_TRIM_THRESHOLD_",
+     .tunable = "glibc.malloc.trim_threshold",
+     .empty_counts = true},
+}};
 constexpr std::string_view kTunables = "GLIBC_TUNABLES";
-constexpr std::string_view kMallocTunable = "glibc.malloc.";
 
-// The operator's malloc settings, "NAME=value" separated by spaces, or empty for none. An
-// empty variable is no setting: glibc ignores it too. Of GLIBC_TUNABLES only the glibc.malloc.*
-// entries count; it also carries tunables of other parts of glibc.
+// The operator's settings of what tune_allocator sets, "NAME=value" separated by spaces, or
+// empty for none.
 std::string operator_settings(const Lookup& env) {
     std::string found;
     const auto add = [&found](std::string_view entry) {
@@ -30,9 +45,10 @@ std::string operator_settings(const Lookup& env) {
         }
         found += entry;
     };
-    for (const std::string_view name : kMallocVariables) {
-        if (const auto value = env(name); value && !value->empty()) {
-            add(std::format("{}={}", name, *value));
+    for (const OperatorSetting& setting : kOperatorSettings) {
+        if (const auto value = env(setting.variable);
+            value && (setting.empty_counts || !value->empty())) {
+            add(std::format("{}={}", setting.variable, *value));
         }
     }
     if (const auto tunables = env(kTunables)) {
@@ -40,8 +56,11 @@ std::string operator_settings(const Lookup& env) {
         while (!rest.empty()) {
             const std::size_t end = rest.find(':');
             const std::string_view entry = rest.substr(0, end);
-            if (entry.starts_with(kMallocTunable)) {
-                add(entry);
+            const std::string_view name = entry.substr(0, entry.find('='));
+            for (const OperatorSetting& setting : kOperatorSettings) {
+                if (name == setting.tunable) {
+                    add(entry);
+                }
             }
             rest = end == std::string_view::npos ? std::string_view{} : rest.substr(end + 1);
         }
@@ -56,7 +75,8 @@ bool sanitizer_replaces_malloc() noexcept {
     return true;
 #elif defined(__has_feature)
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) ||                         \
-    __has_feature(memory_sanitizer) || __has_feature(hwaddress_sanitizer)
+    __has_feature(memory_sanitizer) || __has_feature(hwaddress_sanitizer) ||                       \
+    __has_feature(leak_sanitizer)
     return true;
 #else
     return false;
