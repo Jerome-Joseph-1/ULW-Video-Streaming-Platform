@@ -128,7 +128,8 @@ ulw_add_test_suite(net_unit_tests unit
     unit/net/slab_test.cpp
     unit/net/sockaddr_test.cpp
     unit/net/timing_wheel_test.cpp
-    unit/net/transport_tls_test.cpp)
+    unit/net/transport_tls_test.cpp
+    unit/net/uring_locked_memory_test.cpp)
 target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo ulw::test_tls)
 # White-box tests of the reactor internals.
 target_include_directories(net_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/net/src ${PROJECT_SOURCE_DIR}/tests)
