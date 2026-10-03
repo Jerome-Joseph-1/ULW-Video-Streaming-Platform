@@ -91,12 +91,14 @@ call asks).
    - Close B for a moment and reopen it (or reload): history is back, and bob goes offline
      and online for alice after the 10 s grace.
 3. **End-to-end encrypted chat (1.5 min)**, still **Chat**.
-   - In both windows open **encrypted (alice + bob)** (the lock). The banner says it is
-     encrypted to alice and bob once both have opened it.
-   - Send a message from A; B reads it. Tick **show what the server stores** in either
-     window: the stored body under each message is ciphertext. The chat server never had a key.
-   - Say plainly: this room uses a demo cipher (WebCrypto ECDH + AES-GCM), not MLS yet; the
-     OpenMLS browser client replaces it (`web/js/e2ee.js` is the one file that changes).
+   - In A open **encrypted (alice + bob)** (the lock) first, then in B. Alice's browser starts
+     the MLS group; bob's asks to join with a key package; alice's adds him and he joins from
+     the welcome. The banner shows the MLS epoch and that it is encrypted to 2 devices.
+   - Send a message from B; A reads it. Tick **show what the server stores**: under each
+     message is the body chat stored, an MLS ciphertext. The chat server never had a key.
+   - The banner names the encryption: MLS (RFC 9420) ciphersuite 1, OpenMLS compiled to
+     WebAssembly (clients/web-mls). A build without that client falls back to a WebCrypto
+     stand-in, and the banner then says "demo cipher, not MLS".
 4. **1:1 call with ringing (2 min)**, tab **Calls**.
    - In A click **Call** next to bob. B rings wherever it is, with **Answer** and **Decline**
      and a ring tone. Click **Answer**: both see each other.
@@ -132,6 +134,7 @@ To start over with an empty catalog: `demo/down.sh --wipe && demo/up.sh`.
 | Both windows show the same user | Each window keeps its own user; a window opened from another (Cmd+click) may copy it. Click **switch user**, or open `http://localhost:8080/?user=bob`. |
 | Live: "busy" | The demo runs one live stream at a time. End the other (its owner's **End stream**), or wait about 2 minutes for an abandoned one to time out. |
 | Live plays nothing for a long time | The recorder admits a stream only with CPU to spare; close other heavy apps. `docker compose -f demo/compose.yaml logs egress gateway` shows it. |
+| The encrypted room says "waiting to be added" and stays so | The group was made by a browser that is gone (site data cleared, another browser). Click **reset encryption** in both windows (alice's first), or start clean: `demo/down.sh --wipe && demo/up.sh` and clear the site's data for localhost:8080. |
 | Everything is stuck after the laptop slept | `demo/down.sh && demo/up.sh`. |
 
 ## How the demo maps onto the platform
@@ -149,8 +152,11 @@ To start over with an empty catalog: `demo/down.sh --wipe && demo/up.sh`.
   itself with messages of its own, as docs/integration/calls.md says to.
 - **Live streams.** No endpoint lists streams; the page announces its own in the team room and
   checks each with `GET /api/v1/live/{id}`.
-- **E2EE.** `web/js/e2ee.js` is a stand-in (see above), behind the interface the OpenMLS
-  browser client will implement.
+- **E2EE.** `web/js/e2ee.js` runs MLS with the OpenMLS browser client (clients/web-mls/dist,
+  served at `/mls/` from this checkout), every room body one MLSMessage, the group id the room
+  id. Each browser profile keeps a device per user (identity `<user>/<id>`) in IndexedDB. The
+  room's first member (alice) starts the group and adds whoever asks. Without the client in the
+  checkout it uses `web/js/e2ee-standin.js`, labelled as not MLS.
 
 ## The smoke test
 

@@ -27,6 +27,12 @@ if ((status != 0)); then
     docker compose -f "$here/../compose.yaml" ps -a > results/compose-ps.txt 2>&1 || true
     docker compose -f "$here/../compose.yaml" logs --no-color > results/compose.log 2>&1 || true
     echo "smoke: failed; the stack's logs are in demo/smoke/results/compose.log" >&2
+    if [[ -n ${CI:-} ]]; then
+        # The job log is easier to reach than the artifact: the media server's view of the run.
+        docker version --format 'docker {{.Server.Version}}' || true
+        docker compose -f "$here/../compose.yaml" logs --no-color --tail 150 livekit egress gateway 2>&1 |
+            grep -v -E '"event":"(setting|request)"' | tail -200 || true
+    fi
 fi
 if [[ ${DEMO_DOWN:-0} == 1 ]]; then
     "$here/../down.sh" --wipe

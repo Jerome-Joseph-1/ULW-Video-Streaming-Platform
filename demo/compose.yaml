@@ -207,7 +207,6 @@ services:
     environment:
       ULW_DATABASE_URL: *db
       ULW_LISTEN_PORT: "9101"
-      ULW_NODE_ID: demo-chat
       ULW_NODE_ADDRESS: 127.0.0.1:9201
       ULW_DEV_LOOPBACK_NODES: "1"
       ULW_NODE_SECRET: ulw-demo-node-secret-testtest123-not-real
