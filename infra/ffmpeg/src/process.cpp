@@ -148,9 +148,11 @@ std::string resolve_program(const std::string& name, const std::vector<std::stri
         return name;
     }
     std::string_view search = kDefaultSearchPath;
+    // The first, as the program's getenv would find it.
     for (const std::string& entry : environment) {
         if (entry.starts_with("PATH=")) {
             search = std::string_view(entry).substr(std::string_view("PATH=").size());
+            break;
         }
     }
     std::optional<std::string> present;

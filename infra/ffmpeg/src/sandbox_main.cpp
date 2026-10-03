@@ -156,9 +156,8 @@ struct Refusal {
     struct stat status {};
     if (::stat(path.c_str(), &status) != 0) {
         const int error = errno;
-        return std::unexpected(
-            Refusal{.exit_code = error == ENOENT || error == ENOTDIR ? kNotFound : kCannotExecute,
-                    .reason = std::generic_category().message(error)});
+        return std::unexpected(Refusal{.exit_code = error == ENOENT ? kNotFound : kCannotExecute,
+                                       .reason = std::generic_category().message(error)});
     }
     if (!S_ISREG(status.st_mode)) {
         return std::unexpected(Refusal{.reason = "not a regular file"});

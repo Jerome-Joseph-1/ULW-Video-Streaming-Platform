@@ -139,6 +139,9 @@ protected:
             ::posix_spawn(&pid, kHelper.c_str(), &actions, nullptr, argv.data(), envp.data());
         ::posix_spawn_file_actions_destroy(&actions);
         EXPECT_EQ(spawned, 0);
+        if (spawned != 0) {
+            return {-1, "posix_spawn: " + std::to_string(spawned)};
+        }
         int status = 0;
         EXPECT_EQ(::waitpid(pid, &status, 0), pid);
         std::ostringstream text;
@@ -507,6 +510,36 @@ TEST_F(SandboxTest, ARelativeSearchPathDirectoryIsNeverSearched) {
     const auto child = run({"planted"});
     EXPECT_EQ(child.exit_code, infra::ffmpeg::kProgramNotFound) << child.stderr_tail;
     EXPECT_EQ(stdout_, "");
+}
+
+// The same with a relative directory that does hold the program as seen from here, where
+// run_sandboxed looks it up: it is still skipped.
+TEST_F(SandboxTest, ARelativeSearchPathDirectoryIsSkippedWhereTheLookupRuns) {
+    const ulw::test::TempDir dir("ulw-sandbox-path");
+    const fs::path planted = dir.path() / "planted";
+    std::ofstream(planted) << "#!/bin/sh\necho planted\n";
+    fs::permissions(planted, fs::perms::owner_all);
+    const fs::path relative = fs::relative(dir.path(), fs::current_path());
+    ASSERT_FALSE(relative.empty());
+    ASSERT_TRUE(relative.is_relative());
+    environment_ = {"PATH=" + relative.string() + ":/usr/bin:/bin"};
+    const auto child = run({"planted"});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kProgramNotFound) << child.stderr_tail;
+    EXPECT_EQ(stdout_, "");
+}
+
+// As execvp did: a file we may not execute earlier on the path does not hide one we may.
+TEST_F(SandboxTest, ALookupPassesOverAFileItMayNotExecute) {
+    const ulw::test::TempDir first("ulw-sandbox-path-a");
+    const ulw::test::TempDir second("ulw-sandbox-path-b");
+    std::ofstream(first.path() / "tool") << "#!/bin/sh\necho first\n";
+    fs::permissions(first.path() / "tool", fs::perms::owner_read | fs::perms::owner_write);
+    std::ofstream(second.path() / "tool") << "#!/bin/sh\necho second\n";
+    fs::permissions(second.path() / "tool", fs::perms::owner_all);
+    environment_ = {"PATH=" + first.path().string() + ":" + second.path().string()};
+    const auto child = run({"tool"});
+    EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
+    EXPECT_EQ(stdout_, "second\n");
 }
 
 class SyscallFilterTest : public SandboxTest {
