@@ -1,8 +1,9 @@
 # LiveKit's webhooks to the gateway's stream service (docs/adr/0093): the gateway's second
-# listener, port 8081 (ULW_LIVE_WEBHOOK_PORT, deployment-patch.yaml), behind a Service of its own
-# that no HTTPRoute names, so nothing from the internet reaches it, and admitted from LiveKit's
-# pods alone. Every request is still verified against LiveKit's key pair before it is read.
-# base/livekit/deployment.yaml posts to it by the Service's name, in the same namespace.
+# listener, port 8081 (ULW_LIVE_WEBHOOK_PORT, set by kustomization.yaml's patch), behind a
+# Service of its own that no HTTPRoute names, so nothing from the internet reaches it, and
+# admitted from LiveKit's pods alone. Every request is still verified against LiveKit's key pair
+# before it is read. base/livekit/deployment.yaml posts to it by the Service's name, in the same
+# namespace.
 apiVersion: v1
 kind: Service
 metadata:

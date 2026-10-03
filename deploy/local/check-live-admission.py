@@ -15,6 +15,8 @@ must refuse.
 """
 import copy
 import json
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -153,6 +155,24 @@ def secret_cases(base: dict):
     yield "a Secret of another type", token
 
 
+# What the command line may name: an overlay directory, a kubectl binary and kubectl's own
+# --flag or --flag=value options (the server, a token, a kubeconfig), nothing that kubectl would
+# read as another verb or file. A namespace is a DNS label.
+OVERLAY = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+FLAG = re.compile(r"^--[a-z][a-z0-9-]*(=[^\s]+)?$")
+LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def kubectl_command(args: list[str]) -> list[str] | None:
+    """The kubectl to run, as an absolute path, and its flags; None for anything else."""
+    if not args or Path(args[0]).name != "kubectl":
+        return None
+    binary = shutil.which(args[0])
+    if binary is None or not all(FLAG.match(flag) for flag in args[1:]):
+        return None
+    return [str(Path(binary).resolve()), *args[1:]]
+
+
 def dry_run(kubectl: list[str], gateway: str, manifest: dict) -> subprocess.CompletedProcess:
     return subprocess.run(
         [*kubectl, f"--as={gateway}", "create", "--dry-run=server", "-o", "name", "-f", "-"],
@@ -160,12 +180,17 @@ def dry_run(kubectl: list[str], gateway: str, manifest: dict) -> subprocess.Comp
 
 
 def main() -> int:
-    if (len(sys.argv) < 4 or sys.argv[2] != "--"
+    kubectl = kubectl_command(sys.argv[3:])
+    if (len(sys.argv) < 4 or sys.argv[2] != "--" or kubectl is None
+            or not OVERLAY.match(sys.argv[1])
             or not (KUBE / "overlays" / sys.argv[1] / "config.env").is_file()):
         print(__doc__, file=sys.stderr)
         return 2
-    kubectl = sys.argv[3:]
     config = config_env(sys.argv[1])
+    if not LABEL.match(config["NAMESPACE"]) or not LABEL.match(config["LIVE_NAMESPACE"]):
+        print("check-live-admission: NAMESPACE and LIVE_NAMESPACE must be DNS labels",
+              file=sys.stderr)
+        return 2
     live = config["LIVE_NAMESPACE"]
     gateway = f"system:serviceaccount:{config['NAMESPACE']}:video-gateway"
     failures = []

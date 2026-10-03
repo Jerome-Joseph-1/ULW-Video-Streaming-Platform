@@ -2,6 +2,7 @@
 
 #include "core/models/upload.hpp"
 #include "core/util/parse.hpp"
+#include "core/util/url.hpp"
 #include "http/client_limits.hpp"
 #include "http/origin.hpp"
 #include "http/request_parser.hpp"
@@ -562,8 +563,9 @@ std::expected<void, ConfigError> load_kubernetes_runtime(const EnvLookup& env, c
         live.packager_secret = std::move(*secret);
     }
     if (auto url = lookup(env, "ULW_K8S_API_URL")) {
-        if (!url->starts_with("https://") && !url->starts_with("http://")) {
-            return error("ULW_K8S_API_URL", "must be an http or https URL");
+        // The API server's token goes with every request: https, or http to this machine only.
+        if (!core::secure_url(*url, "https", "http", core::loopback_host)) {
+            return error("ULW_K8S_API_URL", "must be an https URL (http only to loopback)");
         }
         live.k8s_api_url = std::move(*url);
     }
@@ -667,15 +669,21 @@ std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config)
         }
         return {};
     }
-    if (!api->starts_with("http://") && !api->starts_with("https://")) {
-        return error("LIVEKIT_API_URL", "must be an http or https URL");
+    // LiveKit serves its API in plain HTTP inside the cluster, behind NetworkPolicy; anywhere
+    // else the signed requests take https.
+    if (!core::secure_url(*api, "https", "http", [](std::string_view host) {
+            return core::loopback_host(host) || core::cluster_host(host);
+        })) {
+        return error("LIVEKIT_API_URL",
+                     "must be an https URL (http only to loopback or a cluster Service)");
     }
     auto client = required(env, "LIVEKIT_CLIENT_URL");
     if (!client) {
         return std::unexpected(std::move(client.error()));
     }
-    if (!client->starts_with("ws://") && !client->starts_with("wss://")) {
-        return error("LIVEKIT_CLIENT_URL", "must be a ws or wss URL");
+    // What a broadcaster's client dials with its ticket: wss, or ws to this machine only.
+    if (!core::secure_url(*client, "wss", "ws", core::loopback_host)) {
+        return error("LIVEKIT_CLIENT_URL", "must be a wss URL (ws only to loopback)");
     }
     auto key = required(env, "LIVEKIT_API_KEY");
     if (!key) {
