@@ -68,6 +68,12 @@ constexpr core::Millis kRecentKeysWindow{60'000};
 // window shrinks for everyone, to half a minute at the thousand a second one room can reach
 // (ADR-0035): still ten forward timeouts.
 constexpr std::size_t kRecentKeys = 32'768;
+// Rooms whose owner a notice is waiting to learn, each one read of the store's owners, and
+// notices each may hold meanwhile. A notice is a few hundred bytes (a call's ring, ADR-0092):
+// 256 rooms of 8 hold at most 8 MiB at kMaxOwnerMessage, far less as sent. Past either, a
+// notice is dropped, as one whose owner cannot be reached is.
+constexpr std::size_t kMaxNoticeLookups = 256;
+constexpr std::size_t kMaxNoticesPerLookup = 8;
 
 // A Reply carries a seq, an Answer a body; each leaves the other empty.
 using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq,
@@ -338,6 +344,10 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 router_.on_ask(handle_, f->request, f->room, f->body);
                 return true;
             }
+            if (const auto* f = std::get_if<wire::Notify>(&frame)) {
+                router_.on_notify(f->room, f->body);
+                return true;
+            }
             return false;
         }
 
@@ -600,6 +610,10 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 router_.disowned(f->room, node_);
                 return true;
             }
+            if (const auto* f = std::get_if<wire::Notice>(&frame)) {
+                router_.hear_here(f->room, f->body);
+                return true;
+            }
             return false;
         }
 
@@ -851,6 +865,155 @@ public:
     }
 
     void serve(IOwnerService* service) noexcept { service_ = service; }
+
+    // ---- notices
+
+    void notify(const core::RoomId& room, std::span<const std::byte> body) noexcept {
+        if (body.size() > kMaxOwnerMessage) {
+            ++counters_.notices_dropped;
+            return;
+        }
+        bool looking = false;
+        try {
+            if (registry_.owned(room)) {
+                fan_notice(room, body);
+                return;
+            }
+            if (const auto owner = known_owner_of(room)) {
+                forward_notice(owner->node, room, body);
+                return;
+            }
+            // Read, not resolved: a lookup that found no owner would claim the room, and a room
+            // nobody joined has nobody to hear the notice.
+            auto [it, first] = notice_lookups_.try_emplace(room);
+            if (first && notice_lookups_.size() > kMaxNoticeLookups) {
+                notice_lookups_.erase(it);
+                ++counters_.notices_dropped;
+                return;
+            }
+            if (it->second.size() >= kMaxNoticesPerLookup) {
+                ++counters_.notices_dropped;
+                return;
+            }
+            it->second.emplace_back(body.begin(), body.end());
+            if (!first) {
+                return;
+            }
+            looking = true;
+            store_.read_owners(
+                {room},
+                [this, room](
+                    StoreResult<std::vector<std::pair<core::RoomId, Ownership>>> owners) noexcept {
+                    try {
+                        looked_up(room, owners);
+                    } catch (const std::bad_alloc&) {
+                        ++counters_.allocation_failures;
+                        ++counters_.notices_dropped;
+                    }
+                });
+        } catch (const std::bad_alloc&) {
+            ++counters_.allocation_failures;
+            ++counters_.notices_dropped;
+            // Whatever waits for a lookup that never started would wait for good.
+            if (looking) {
+                if (const auto it = notice_lookups_.find(room); it != notice_lookups_.end()) {
+                    counters_.notices_dropped += it->second.size();
+                    notice_lookups_.erase(it);
+                }
+            }
+        }
+    }
+
+    void hear(INoticeListener* listener) noexcept { listener_ = listener; }
+
+    [[nodiscard]] bool owns(const core::RoomId& room) const noexcept {
+        return registry_.owned(room).has_value();
+    }
+
+    // The node a notice of a room goes to: this one's idea of its owner, if it has one.
+    [[nodiscard]] std::optional<Ownership> known_owner_of(const core::RoomId& room) const {
+        if (auto known = registry_.known_owner(room)) {
+            return known;
+        }
+        const auto it = local_.find(room);
+        if (it != local_.end() && remote_owner(it->second)) {
+            return it->second.owner;
+        }
+        return std::nullopt;
+    }
+
+    void looked_up(const core::RoomId& room,
+                   const StoreResult<std::vector<std::pair<core::RoomId, Ownership>>>& owners) {
+        const auto it = notice_lookups_.find(room);
+        if (it == notice_lookups_.end()) {
+            return;
+        }
+        std::vector<std::vector<std::byte>> waiting = std::move(it->second);
+        notice_lookups_.erase(it);
+        std::optional<Ownership> owner;
+        if (owners) {
+            for (const auto& [r, o] : *owners) {
+                if (r == room) {
+                    owner = o;
+                }
+            }
+        }
+        for (const std::vector<std::byte>& body : waiting) {
+            if (registry_.owned(room)) {
+                fan_notice(room, body);
+            } else if (owner && owner->node != config_.self) {
+                forward_notice(owner->node, room, body);
+            } else {
+                ++counters_.notices_dropped;
+            }
+        }
+    }
+
+    void forward_notice(const core::NodeId& node, const core::RoomId& room,
+                        std::span<const std::byte> body) {
+        std::vector<std::byte> frame;
+        wire::encode_notify(frame, room, body);
+        ++counters_.notices_forwarded;
+        link(node).send(frame);
+    }
+
+    // As the room's owner: to its members here, and to every node subscribed to it.
+    void fan_notice(const core::RoomId& room, std::span<const std::byte> body) {
+        ++counters_.notices_fanned_out;
+        hear_here(room, body);
+        const auto o = owned_.find(room);
+        if (o == owned_.end() || o->second.subscribers.empty()) {
+            return;
+        }
+        std::vector<std::byte> frame;
+        wire::encode_notice(frame, room, body);
+        std::erase_if(o->second.subscribers, [&](const net::Slab<Inbound>::Handle& h) {
+            Inbound* in = inbound_.get(h);
+            if (in == nullptr) {
+                return true;
+            }
+            in->send(frame);
+            return false;
+        });
+    }
+
+    void hear_here(const core::RoomId& room, std::span<const std::byte> body) noexcept {
+        if (listener_ == nullptr || !local_.contains(room)) {
+            return;
+        }
+        ++counters_.notices_heard;
+        listener_->on_notice(room, body);
+    }
+
+    // A Notify from another node: passed on if this node holds the room, else dropped. Never
+    // resolved, which could take a room nobody here has members in.
+    void on_notify(const core::RoomId& room, std::span<const std::byte> body) {
+        if (!registry_.owned(room) || body.size() > kMaxOwnerMessage) {
+            ++counters_.notices_dropped;
+            return;
+        }
+        fan_notice(room, body);
+    }
 
     // Answers the asks past their deadline Unavailable, once they are out of asks_: an answer
     // may ask again.
@@ -1817,6 +1980,9 @@ private:
     std::unordered_map<std::uint64_t, PendingAsk> asks_;
     std::uint64_t next_send_ = 1;
     IOwnerService* service_ = nullptr;
+    INoticeListener* listener_ = nullptr;
+    // Notices waiting for their room's owner to be read, by room.
+    std::unordered_map<core::RoomId, std::vector<std::vector<std::byte>>> notice_lookups_;
     std::uint64_t next_link_ = 1;
     net::TimerId timer_;
     core::MonoTime next_beat_;
@@ -1859,6 +2025,18 @@ void RoomRouter::ask_owner(const core::RoomId& room, IMember& from,
 
 void RoomRouter::serve(IOwnerService* service) noexcept {
     impl_->serve(service);
+}
+
+void RoomRouter::notify(const core::RoomId& room, std::span<const std::byte> body) noexcept {
+    impl_->notify(room, body);
+}
+
+void RoomRouter::hear(INoticeListener* listener) noexcept {
+    impl_->hear(listener);
+}
+
+bool RoomRouter::owns(const core::RoomId& room) const noexcept {
+    return impl_->owns(room);
 }
 
 void RoomRouter::release_rooms(StoreCallback<void> done) {
