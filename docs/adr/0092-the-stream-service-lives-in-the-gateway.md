@@ -120,27 +120,35 @@ What had to be settled, from the code as it stands:
   finds the row ended, closes the room again (the relay just started ends with it) and answers
   `409`.
 - **Packagers on the cluster.** They run in a namespace of their own (`apps-stage-live`,
-  `apps-live`): a quota (running pods to the streams the platform takes, a day's Jobs and
-  Secrets), a default-deny NetworkPolicy beside the packager's own (SRT in from egress in the
+  `apps-live`): a quota (running pods to the streams the platform takes, and Jobs and Secrets
+  for about an hour of streams, a finished Job being removed an hour after it ends, its
+  recording queued before its process exits; a start past it, which the API server refuses
+  `403` "exceeded quota", is answered `503` with `Retry-After: 60` as the platform full), a
+  default-deny NetworkPolicy beside the packager's own (SRT in from egress in the
   gateway's namespace; DNS, Postgres and the object store out), and Pod Security enforced at
   `baseline` and warned at `restricted`. A packager meets every rule of `restricted` but one:
   its sandbox's `procMount: Unmasked` (ADR-0032), which `restricted` refuses for any pod and
   `baseline` admits only in a pod's own user namespace (`hostUsers: false`), checked with a
-  server-side dry run against kube-apiserver v1.37.0. The gateway's service account
+  server-side dry run against kube-apiserver v1.37.0. `baseline` admits it so from Kubernetes
+  v1.35 on; an older cluster's `baseline` refuses `Unmasked` for any pod, so live publishing on
+  the cluster needs v1.35 or later (RUNBOOK.md, step 1 and step 9). The gateway's service account
   (`video-gateway`, in the gateway's namespace) has a Role there and nowhere else: `create` and
   `get` on Jobs, `create` on Secrets; no `list`, `update`, `patch`, `delete`, `exec`, and no read
   of any Secret. A ValidatingAdmissionPolicy bound to that account in that namespace admits only
-  a packager Job of the template's shape (labelled `live-packager`, instance its own name, one
-  container of the packager's image, no init or ephemeral containers, emptyDir volumes only, no
+  a packager Job of the template's shape (named after its stream, a UUIDv7, labelled
+  `live-packager`, instance its own name, one container of the packager's image run with its own
+  entrypoint, no command or arguments, its hostname its name under the `live-packager`
+  subdomain, no node or priority class, no init or ephemeral containers, emptyDir volumes only, no
   token, the default account, a user namespace, none of the node's namespaces, no privilege or
   escalation, no `envFrom`, and Secret references to `live-packager-secrets` and its own
-  stream's Secret only) and Secrets named `live-packager-<stream>` of type `Opaque`, changed on
+  stream's Secret only) and Secrets named exactly `live-packager-<stream>` (never the shared
+  `live-packager-secrets`) of type `Opaque`, owned by that stream's Job alone, changed on
   update in their metadata only; `deploy/local/check-live-admission.py` checks each rule with a
   server-side dry run. The gateway creates the Job from the template in its image
   (`/usr/local/share/ulw/live-packager-job.yaml`, filled with the namespace, the configured image
   tag, the stream id and the owner, quoted, and a user id outside its own alphabet refused), then
   the stream's Secret `live-packager-<id>` (the passphrase) with the Job as its owner from its
-  creation, so the Job's removal a day after it finishes removes it and a Job that could not be
+  creation, so the Job's removal an hour after it finishes removes it and a Job that could not be
   made leaves no Secret. The pod waits for the Secret, which exists before its image is pulled.
   A start that finds either made already finishes the first one's work. The token is an hour's
   projected token of the account, mounted into the gateway's container alone (the pod's
