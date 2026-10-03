@@ -1,5 +1,6 @@
-// 1:1 calls through the product, in Chrome: Alice and Bob, members of a direct chat, each open
-// the chat WebSocket on a different node of a two-node cluster, join the room, ask for the call,
+// 1:1 calls through the product, in Chrome: Alice opens a direct chat with Bob over chat
+// (open_direct, ADR-0096), each opens the chat WebSocket on a different node of a two-node
+// cluster, joins the room, asks for the call,
 // and take the ticket chat answers to LiveKit with the pinned livekit-client SDK, publishing the
 // fake camera and microphone. Each must decode the other's audio and video. A second device of
 // Alice's is refused by LiveKit (the call holds two), Carol is refused by chat (not a member);
@@ -9,7 +10,7 @@
 import { chromium, expect, test } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';
 
-import { psql, startChat } from './chat-stack.mjs';
+import { startChat } from './chat-stack.mjs';
 import { servePage } from './peers.mjs';
 
 // Frames and seconds of play that show media is decoding, not merely arriving: the fake camera
@@ -98,7 +99,8 @@ test('a direct chat call, asked for on chat and connected in the browser', async
       return { user, context, page, device: randomUUID() };
     };
     const ask = (c, cmd) => c.page.evaluate((x) => window.command(x), cmd);
-    const room = randomUUID();
+    // The direct chat's room, once Alice has opened it.
+    let room;
     const join = (c) => ask(c, { type: 'join', room, kind: 'direct' });
     const call = (c, device = c.device) => ask(c, { type: 'call', room, device });
     const tickets = async () =>
@@ -107,17 +109,18 @@ test('a direct chat call, asked for on chat and connected in the browser', async
     const alice = await client('alice', nodeA);
     const bob = await client('bob', nodeB);
 
-    await test.step('the direct chat is created and its members listed', async () => {
-      // Alice's first join records the room as a direct chat; it lists nobody yet, so it is
-      // refused. The members are then listed as the operators do (RUNBOOK, "Chat rooms").
-      expect(await join(alice)).toMatchObject({ type: 'error', reason: 'not_member' });
-      psql(chat.databaseUrl, `BEGIN;
-        INSERT INTO chat_rooms (room_id, kind) VALUES ('${room}', 'direct_chat')
-          ON CONFLICT (room_id) DO NOTHING;
-        INSERT INTO chat_members (room_id, user_id) VALUES ('${room}', 'alice'), ('${room}', 'bob');
-        COMMIT;`);
-      expect(psql(chat.databaseUrl, `SELECT kind FROM chat_rooms WHERE room_id = '${room}'`))
-        .toBe('direct_chat');
+    await test.step('alice opens the direct chat with bob, and both are its members', async () => {
+      // Opened over chat, as the product does: the pair's room, the same whichever of them asks.
+      const opened = await ask(alice, { type: 'open_direct', user: 'bob' });
+      expect(opened).toMatchObject({ type: 'direct', user: 'bob' });
+      room = opened.room;
+      expect(room).toMatch(/^03[0-9a-f]{6}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      // Bob, on the other node, hears that he was listed, without asking.
+      await expect.poll(() => bob.page.evaluate((r) => window.chatFrames.filter((f) =>
+        f.type === 'member' && f.room === r && f.user === 'bob' && f.change === 'added').length,
+      room), { timeout: 10_000 }).toBe(1);
+      expect(await ask(bob, { type: 'open_direct', user: 'alice' }))
+        .toMatchObject({ type: 'direct', room, user: 'alice' });
       expect(await join(alice)).toMatchObject({ type: 'joined', room });
       expect(await join(bob)).toMatchObject({ type: 'joined', room });
     });
