@@ -278,14 +278,17 @@ body length): `info`, `warn` for a 5xx, `debug` for probes and scrapes.
 
 The gateway's first line, `starting`, carries `"allocator"`: what its malloc runs with
 (ADR-0094). Normally `"glibc arena_max=1 mmap_threshold=131072 trim_threshold=131072"`, set
-by the gateway itself before it starts a thread. An operator who sets glibc's malloc in the
-environment (`MALLOC_ARENA_MAX`, `MALLOC_ARENA_TEST`, `MALLOC_MMAP_THRESHOLD_`,
-`MALLOC_TRIM_THRESHOLD_`, `MALLOC_TOP_PAD_`, `MALLOC_MMAP_MAX_`, or a `glibc.malloc.*` entry
-in `GLIBC_TUNABLES`) gets those instead, all of the gateway's own left out, and the field lists
-them (`"glibc MALLOC_ARENA_MAX=2"`); `"jemalloc"` and `"sanitizer"` mean a build or preload
-whose allocator ignores glibc's settings. The shipped units and manifests set none of these;
-the gateway's memory bounds (ADR-0063) were measured with its own settings. A `mallopt` that
-glibc refuses stops the gateway at startup: `startup failed`, step `allocator`.
+by the gateway itself before it starts a thread. An operator who sets any of those three in the
+environment (`MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_` or `MALLOC_TRIM_THRESHOLD_`, or
+`glibc.malloc.arena_max`, `.mmap_threshold` or `.trim_threshold` in `GLIBC_TUNABLES`; a
+threshold variable set to the empty string counts, as glibc reads it as 0) gets glibc with the
+environment's settings instead, none of the gateway's, and the field lists them
+(`"glibc MALLOC_ARENA_MAX=2"`). glibc's other malloc settings (`MALLOC_PERTURB_`,
+`MALLOC_CHECK_`, tcache and the like) are left to glibc and do not turn the gateway's off.
+`"jemalloc"` and `"sanitizer"` mean a build or preload whose allocator ignores glibc's settings;
+another preloaded allocator may stub `mallopt` and still read as tuned. The shipped units and
+manifests set none of these. A `mallopt` that glibc refuses stops the gateway at startup:
+`startup failed`, step `allocator`.
 
 The gateway never waits for its log reader: lines go to a 256 KiB buffer that a thread of its
 own writes out. When the reader falls behind and the buffer is full, lines are dropped and
