@@ -174,6 +174,16 @@ std::optional<Frame> answer_of(Cursor& in) noexcept {
     return Answer{.request = *request, .status = static_cast<Status>(*status), .body = body};
 }
 
+// A Notify or a Notice: a room, then the body to the end.
+template <class F> std::optional<Frame> notice_of(Cursor& in) noexcept {
+    const auto room = in.room();
+    const auto body = in.rest();
+    if (!room || body.size() > kMaxBody) {
+        return std::nullopt;
+    }
+    return F{.room = *room, .body = body};
+}
+
 std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
     switch (type) {
     case Type::Hello: {
@@ -254,6 +264,10 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         return ask_of(in);
     case Type::Answer:
         return answer_of(in);
+    case Type::Notify:
+        return notice_of<Notify>(in);
+    case Type::Notice:
+        return notice_of<Notice>(in);
     }
     return std::nullopt;
 }
@@ -268,7 +282,7 @@ std::optional<Frame> parse(Type type, Cursor in) noexcept {
 
 std::optional<Type> type_of(std::uint8_t byte) noexcept {
     if (byte < static_cast<std::uint8_t>(Type::Hello) ||
-        byte > static_cast<std::uint8_t>(Type::Answer)) {
+        byte > static_cast<std::uint8_t>(Type::Notice)) {
         return std::nullopt;
     }
     return static_cast<Type>(byte);
@@ -360,6 +374,22 @@ void encode_answer(std::vector<std::byte>& out, std::uint64_t request, Status st
     const std::size_t at = begin(out, Type::Answer);
     put_u64(out, request);
     put_u8(out, static_cast<std::uint8_t>(status));
+    out.insert(out.end(), body.begin(), body.end());
+    end(out, at);
+}
+
+void encode_notify(std::vector<std::byte>& out, const core::RoomId& room,
+                   std::span<const std::byte> body) {
+    const std::size_t at = begin(out, Type::Notify);
+    put_room(out, room);
+    out.insert(out.end(), body.begin(), body.end());
+    end(out, at);
+}
+
+void encode_notice(std::vector<std::byte>& out, const core::RoomId& room,
+                   std::span<const std::byte> body) {
+    const std::size_t at = begin(out, Type::Notice);
+    put_room(out, room);
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }
