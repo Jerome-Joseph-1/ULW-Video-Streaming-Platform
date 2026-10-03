@@ -2,9 +2,11 @@
 # A stream is one Job and one pod, a tenth of a core and 256Mi requested, at most a core and
 # 512Mi (live-packager/job.yaml). Running pods are bounded by the streams the platform takes
 # (the gateway's ULW_LIVE_MAX_STREAMS) and one more, restarting; finished pods count for
-# nothing. A finished Job stays a day for its log (its TTL), so the Job and Secret counts bound
-# a day's worth of streams, 200, far past what the per-user hourly cap lets through, and stop a
-# runaway well before it fills etcd.
+# nothing. A finished Job stays an hour for its log (its TTL), so the Job and Secret counts
+# bound the streams started in about an hour, 300, far past what the per-user hourly cap lets
+# through on a platform of this size, and stop a runaway well before it fills etcd. A start
+# past them is refused by the API server ("exceeded quota"), which the gateway answers as the
+# platform full: 503 with Retry-After.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -14,8 +16,8 @@ metadata:
     app.kubernetes.io/part-of: ulw
 spec:
   hard:
-    count/jobs.batch: "200"
-    count/secrets: "204"
+    count/jobs.batch: "300"
+    count/secrets: "304"
     pods: "3"
     requests.cpu: 300m
     requests.memory: 768Mi

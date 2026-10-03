@@ -44,7 +44,7 @@ The worker gives each ffmpeg its own namespaces (docs/adr/0032), which needs pod
 namespaces. On k8s-prod:
 
 ```sh
-kubectl version                        # server v1.33 or later
+kubectl version                        # server v1.33 or later; v1.35 or later for live (step 9)
 uname -r                               # 6.3 or later (idmapped mounts on overlayfs)
 k3s --version; runc --version          # containerd 2.x, runc 1.2 or later
 ```
@@ -1221,20 +1221,26 @@ is one process per stream, so on the cluster it is one Job per stream, made from
   and read Jobs back (`live-packager/rbac.yaml`). `live-packager/admission-policy.yaml` (a
   ValidatingAdmissionPolicy and its binding, cluster-scoped) holds what it creates there to a
   packager's shape: the packager's image and nothing else, no host namespaces, no token, no
-  Secret but `live-packager-secrets` and the stream's own. `video-gateway/live-networkpolicy.yaml`
+  Secret but `live-packager-secrets` and the stream's own, no command or arguments, the
+  stream's own name and DNS name, no node or priority class, and Secrets named exactly
+  `live-packager-<stream>` and owned by that stream's Job. `video-gateway/live-networkpolicy.yaml`
   lets the gateway reach LiveKit's API (7880) and the API server (6443). The Job's image tag is
   the gateway's `ULW_LIVE_PACKAGER_IMAGE_TAG`: `main` on stage, a `<sha>@sha256:<digest>` on prod
   (4a). The Job template is the one in the gateway's image, built from this repository's
   `live-packager/job.yaml`; a change to it ships with the gateway.
 - **The packagers' namespace**, `live-packager/namespace.yaml`, with a quota
-  (`resourcequota.yaml`: running pods to the streams the platform takes, and a day's worth of
-  Jobs and Secrets), a default-deny NetworkPolicy beside the packager's own
+  (`resourcequota.yaml`: running pods to the streams the platform takes, and about an hour's
+  Jobs and Secrets, a finished Job being removed an hour after it ends; a start past the quota
+  is answered `503` with `Retry-After`, as the platform full), a default-deny NetworkPolicy beside the packager's own
   (`default-deny.yaml`, `networkpolicy.yaml`: SRT from egress in the gateway's namespace in;
   DNS, Postgres and the object store out), and Pod Security enforced at `baseline`, warned at
   `restricted`. A packager meets `restricted` but for one rule: its sandbox's `procMount:
   Unmasked`, which `restricted` refuses for any pod and `baseline` admits in a user namespace of
-  the pod's own (`hostUsers: false`), as a packager's is. ArgoCD's account must be allowed to
-  apply the namespace and the cluster-scoped admission policy and binding.
+  the pod's own (`hostUsers: false`), as a packager's is. **That needs Kubernetes v1.35 or
+  later**: before it, `baseline` refuses `procMount: Unmasked` whatever the pod, and every
+  packager would be refused. Check `kubectl version` (server) before applying `live-packager/`.
+  ArgoCD's account must be allowed to apply the namespace and the cluster-scoped admission
+  policy and binding.
 
 The relay's packager address (the gateway's `ULW_LIVE_PACKAGER_SRT`, ADR-0053) is
 `srt://{stream}.live-packager.apps-stage-live.svc.cluster.local:9000` on stage, and
@@ -1306,7 +1312,10 @@ account. With it, add the `hooks` port, `ULW_LIVE_WEBHOOK_PORT` and
 `ULW_LIVE_PUBLISHER_GRACE_SECONDS` to the Deployment, and stage's `LIVEKIT_API_KEY` variable and
 `webhook` block to `overlays/prod/livekit/deployment.yaml`, with `.apps.` for `.apps-stage.` in
 its URL; `video-gateway/live-hooks.yaml` admits nothing until the gateway listens on the port.
-Until then prod's stream routes answer `404`.
+Until then prod's stream routes answer `404`. Set `ULW_LIVE_BROADCASTER_CLAIM` there
+too (`<claim>=<value>`, docs/integration/live.md, "Starting a stream"), to the claim Askedin's
+tokens carry for the users it lets broadcast: unset, every signed-in user may start a stream,
+which is right for stage's testers and not for prod.
 
 ### Secrets and the database role
 
@@ -1397,7 +1406,7 @@ is PID 1 in its container). A SIGTERM (a node drain, a
 `kubectl delete pod`) drains instead: the process exits 0, the Job counts as complete, and the
 stream is left to be continued by a new packager for the same stream id, which whoever started
 the stream must start (the template's `backoffLimit` restarts only failures). The Job and its
-pod are removed a day after they finish; delete the stream's Secret with them:
+pod are removed an hour after they finish; delete the stream's Secret with them:
 
 ```sh
 kubectl -n "$NS" delete secret "live-packager-$STREAM"

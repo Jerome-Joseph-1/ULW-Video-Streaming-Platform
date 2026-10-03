@@ -36,9 +36,15 @@ def job_template(namespace: str) -> dict:
     return yaml.safe_load(text)
 
 
+def owner(name: str = STREAM, kind: str = "Job", api_version: str = "batch/v1",
+          uid: str = "00000000-0000-4000-8000-000000000001") -> dict:
+    return {"apiVersion": api_version, "kind": kind, "name": name, "uid": uid}
+
+
 def secret(namespace: str) -> dict:
     return {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-            "metadata": {"name": f"live-packager-{STREAM}", "namespace": namespace},
+            "metadata": {"name": f"live-packager-{STREAM}", "namespace": namespace,
+                         "ownerReferences": [owner()]},
             "stringData": {"ULW_LIVE_SRT_PASSPHRASE": "fake-passphrase-testtest123"}}
 
 
@@ -86,14 +92,46 @@ def job_cases(base: dict):
         {"name": "X", "valueFrom": {"secretKeyRef": {"name": "video-gateway-secrets",
                                                      "key": "ULW_DATABASE_URL"}}}))
     yield case("another name", lambda j: j["metadata"].update(name="not-the-instance"))
+
+    def not_a_stream(j):
+        # Named, labelled and addressed alike, only not a stream's id.
+        name = "live-packager-secrets"
+        j["metadata"]["name"] = name
+        j["metadata"]["labels"]["app.kubernetes.io/instance"] = name
+        pod(j)["hostname"] = name
+
+    yield case("a name not a stream's", not_a_stream)
+    yield case("a command", lambda j: container(j).update(command=["/bin/sh", "-c", "id"]))
+    yield case("arguments", lambda j: container(j).update(args=["--help"]))
+    yield case("another hostname", lambda j: pod(j).update(hostname="packager"))
+    yield case("no hostname", lambda j: pod(j).pop("hostname"))
+    yield case("another subdomain", lambda j: pod(j).update(subdomain="video-gateway"))
+    yield case("a node", lambda j: pod(j).update(nodeName="k8s-prod"))
+    yield case("a priority class",
+               lambda j: pod(j).update(priorityClassName="system-node-critical"))
     yield case("another kind of workload",
                lambda j: j["metadata"]["labels"].update({"app.kubernetes.io/name": "x"}))
 
 
 def secret_cases(base: dict):
-    other = copy.deepcopy(base)
-    other["metadata"]["name"] = "video-gateway-secrets"
-    yield "a Secret of another name", other
+    def case(name, change):
+        made = copy.deepcopy(base)
+        change(made)
+        return name, made
+
+    yield case("a Secret of another name",
+               lambda s: s["metadata"].update(name="video-gateway-secrets"))
+    yield case("the shared Secret", lambda s: s["metadata"].update(name="live-packager-secrets"))
+    yield case("a Secret named past a stream's",
+               lambda s: s["metadata"].update(name=f"live-packager-{STREAM}-x"))
+    yield case("a Secret of no owner", lambda s: s["metadata"].pop("ownerReferences"))
+    yield case("a Secret owned by another stream's Job", lambda s: s["metadata"].update(
+        ownerReferences=[owner("0192f3a4-0000-7000-8000-0000000000bb")]))
+    yield case("a Secret owned by another kind", lambda s: s["metadata"].update(
+        ownerReferences=[owner(kind="Deployment", api_version="apps/v1")]))
+    yield case("a Secret of two owners", lambda s: s["metadata"].update(
+        ownerReferences=[owner(), owner(kind="Deployment", api_version="apps/v1",
+                                        uid="00000000-0000-4000-8000-000000000002")]))
     token = copy.deepcopy(base)
     token["type"] = "kubernetes.io/service-account-token"
     token["metadata"]["annotations"] = {"kubernetes.io/service-account.name": "default"}

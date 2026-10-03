@@ -152,6 +152,9 @@ LiveFailure LiveStreams::packager_failure(PackagerError e) noexcept {
     switch (e) {
     case PackagerError::Unavailable:
         return LiveFailure::Unavailable;
+    // The cluster's quota, the platform's own bound: answered as the stream count's is.
+    case PackagerError::Full:
+        return LiveFailure::Full;
     case PackagerError::Refused:
         return LiveFailure::Internal;
     }

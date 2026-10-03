@@ -65,16 +65,21 @@ public:
         const std::scoped_lock lock(mutex_);
         status_[std::string(job)] = std::move(status);
     }
-    void fail_with(std::optional<int> status) {
+    void fail_with(std::optional<int> status, std::string message = {}) {
         const std::scoped_lock lock(mutex_);
         fail_ = status;
+        fail_message_ = std::move(message);
     }
 
 private:
     Reply answer(const ServedRequest& r) {
         const std::scoped_lock lock(mutex_);
         if (fail_) {
-            return json(*fail_, R"({"kind":"Status","code":)" + std::to_string(*fail_) + "}");
+            std::string body = R"({"kind":"Status","code":)" + std::to_string(*fail_);
+            if (!fail_message_.empty()) {
+                body += R"(,"message":")" + fail_message_ + '"';
+            }
+            return json(*fail_, body + "}");
         }
         const std::string path(r.path());
         const std::string secrets = "/api/v1/namespaces/apps-test/secrets";
@@ -120,6 +125,7 @@ private:
     std::map<std::string, std::string> uids_;
     std::map<std::string, std::string> status_;
     std::optional<int> fail_;
+    std::string fail_message_;
     HttpTestServer server_;
 };
 
@@ -278,6 +284,26 @@ TEST_F(KubernetesPackagersTest, FailuresAreUnavailableOrRefusedByWhatARetryCould
     EXPECT_EQ(start(), std::unexpected(PackagerError::Refused));
     api.fail_with(std::nullopt);
     ASSERT_TRUE(start());
+}
+
+TEST_F(KubernetesPackagersTest, ASpentQuotaIsFullNotRefused) {
+    // As the API server's quota admission words it.
+    api.fail_with(403, R"(jobs.batch \"x\" is forbidden: exceeded quota: live-packagers, )"
+                       R"(requested: count/jobs.batch=1, used: count/jobs.batch=300, )"
+                       R"(limited: count/jobs.batch=300)");
+    EXPECT_EQ(start(), std::unexpected(PackagerError::Full));
+    api.fail_with(403, R"(jobs.batch is forbidden: User \"x\" cannot create resource)");
+    EXPECT_EQ(start(), std::unexpected(PackagerError::Refused));
+}
+
+TEST_F(KubernetesPackagersTest, PackagersDestroyedWhileTheTokenIsReadLeaveThePoolSafe) {
+    std::optional<std::expected<PackagerState, PackagerError>> r;
+    packagers->state(*core::LiveStreamId::parse(kStream), [&](auto x) noexcept { r = x; });
+    ASSERT_EQ(pool->in_flight(), 1U);
+    // The token's job is on the pool; its owner goes before it completes.
+    packagers.reset();
+    EXPECT_TRUE(ulw::test::pump_until(*reactor, [&] { return pool->in_flight() == 0; }));
+    EXPECT_FALSE(r.has_value());
 }
 
 TEST_F(KubernetesPackagersTest, AnUnreachableServerIsUnavailable) {

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -41,6 +42,7 @@ constexpr std::size_t kMaxToken = std::size_t{16} * 1024;
 constexpr core::Millis kTokenReuse{60'000};
 
 constexpr int kOk = 200;
+constexpr int kForbidden = 403;
 constexpr int kNotFound = 404;
 constexpr int kConflict = 409;
 constexpr int kTooManyRequests = 429;
@@ -55,6 +57,12 @@ PackagerError classify(const curl::Result& result) noexcept {
                    : PackagerError::Unavailable;
     }
     const int status = result->status;
+    // The namespace's ResourceQuota spent: as many packagers as the platform takes are there
+    // already, which the API server answers 403 Forbidden with "exceeded quota" in its Status
+    // message (k8s.io/apiserver's quota admission). Any other 403 is the Role or the token.
+    if (status == kForbidden && result->body.find("exceeded quota") != std::string::npos) {
+        return PackagerError::Full;
+    }
     // Unauthorized or forbidden is the Role or the token; a 4xx otherwise the template.
     return status == kTooManyRequests || status >= kServerErrors ? PackagerError::Unavailable
                                                                  : PackagerError::Refused;
@@ -274,11 +282,19 @@ public:
 private:
     class Call;
 
-    // The token file is read off the loop, on the offload pool.
+    // The token file is read off the loop, on the offload pool. The job holds itself while it
+    // is on the pool, so an owner destroyed meanwhile leaves the pool thread writing into a job
+    // that is still alive; its completion then finds no owner and frees it. The path is the
+    // job's own copy: the pool thread reads nothing of its owner.
     class TokenJob final : public net::IOffloadJob {
     public:
-        // The path is the job's own copy: the pool thread reads nothing of its owner.
-        TokenJob(Impl& owner, std::string path) noexcept : owner_(owner), path_(std::move(path)) {}
+        TokenJob(Impl& owner, std::string path) noexcept : owner_(&owner), path_(std::move(path)) {}
+        static void submit(net::OffloadPool& pool, const std::shared_ptr<TokenJob>& job) {
+            job->self_ = job;
+            pool.submit(*job);
+        }
+        // On the reactor thread, as complete() is.
+        void detach() noexcept { owner_ = nullptr; }
         void run() noexcept override {
             try {
                 token_ = read_token(path_);
@@ -286,12 +302,19 @@ private:
                 token_.clear();
             }
         }
-        void complete() noexcept override { owner_.token_read(std::move(token_)); }
+        void complete() noexcept override {
+            // Last: this may be the job's last reference.
+            const std::shared_ptr<TokenJob> keep = std::move(self_);
+            if (owner_ != nullptr) {
+                owner_->token_read(std::move(token_));
+            }
+        }
 
     private:
-        Impl& owner_;
+        Impl* owner_;
         std::string path_;
         std::string token_;
+        std::shared_ptr<TokenJob> self_;
     };
 
     [[nodiscard]] std::string secrets_path() const {
@@ -374,7 +397,7 @@ private:
         token_waiters_.push_back(std::move(done));
         if (!reading_) {
             reading_ = true;
-            offload_.submit(token_job_);
+            TokenJob::submit(offload_, token_job_);
         }
     }
 
@@ -391,7 +414,7 @@ private:
     core::MonoTime token_at_;
     bool reading_ = false;
     std::vector<TokenDone> token_waiters_;
-    TokenJob token_job_;
+    std::shared_ptr<TokenJob> token_job_;
     std::vector<std::unique_ptr<Call>> calls_;
 };
 
@@ -437,13 +460,15 @@ KubernetesPackagers::Impl::Impl(net::IReactor& reactor, curl::Multi& multi,
                                 net::OffloadPool& offload, const core::ports::IClock& clock,
                                 KubernetesConfig config) noexcept
     : multi_(multi), offload_(offload), clock_(clock), config_(std::move(config)), later_(reactor),
-      token_job_(*this, config_.token_file) {
+      token_job_(std::make_shared<TokenJob>(*this, config_.token_file)) {
     while (config_.api_url.ends_with('/')) {
         config_.api_url.pop_back();
     }
 }
 
-KubernetesPackagers::Impl::~Impl() = default;
+KubernetesPackagers::Impl::~Impl() {
+    token_job_->detach();
+}
 
 void KubernetesPackagers::Impl::call(curl::Method method, std::string path, std::string_view type,
                                      std::string body, AnswerDone done) {
