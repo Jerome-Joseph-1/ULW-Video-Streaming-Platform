@@ -451,10 +451,13 @@ Each is tagged with the full commit SHA and with `main`, never `latest` (docs/ad
 tag is pushed once and always resolves to the same digest: publishing a commit again reuses
 what was published. `main` moves for all four images together, only after all four SHA tags
 are pushed, and only to main's tip. The run's summary lists each image as
-`ghcr.io/jerome-joseph-1/ulw-<service>:<sha>@sha256:<digest>`, ready to pin (4a), and each
-digest carries a build provenance attestation
+`ghcr.io/jerome-joseph-1/ulw-<service>:<sha>@sha256:<digest>`, ready to pin (4a). Each digest
+carries a build provenance attestation from the run that first pushed it; a later run of the
+same commit reuses the digest and attests nothing
 (`gh attestation verify oci://ghcr.io/jerome-joseph-1/ulw-chat@sha256:... --repo
-Jerome-Joseph-1/ULW-Video-Streaming-Platform`).
+Jerome-Joseph-1/ULW-Video-Streaming-Platform`). If a run fails while moving `main`, `main` may
+point at this build for only some images: re-run the job, which is safe because a SHA tag is
+never pushed again.
 
 **Stage follows `:main`; prod never does.** Stage's overlays name `:main` with
 `imagePullPolicy: Always`, as they named the branch tags before, so a restart runs the newest
@@ -564,15 +567,17 @@ ArgoCD then deploys exactly.
    env=prod                                # or stage
    SHA=<full commit sha on main>
    r=ghcr.io/jerome-joseph-1
-   pin() {  # pin FILE SERVICE DIGEST
+   pin() {  # pin FILE SERVICE DIGEST (sha256:..., without the @, which pin adds)
      sed -i -E "s#($r/ulw-$2):[^ ]+\$#\1:$SHA@$3#" "overlays/$env/$1"
    }
-   pin video-gateway/deployment.yaml video-gateway <gateway digest>
-   pin upload-reaper/cronjob.yaml video-gateway <gateway digest>
-   pin video-worker/deployment.yaml video-worker <worker digest>
-   pin chat/deployment.yaml chat <chat digest>
+   pin video-gateway/deployment.yaml video-gateway sha256:<gateway digest>
+   pin upload-reaper/cronjob.yaml video-gateway sha256:<gateway digest>
+   pin video-worker/deployment.yaml video-worker sha256:<worker digest>
+   pin chat/deployment.yaml chat sha256:<chat digest>
    grep -rn "image: $r/" "overlays/$env"   # every one now names $SHA@sha256:...
    ```
+
+   This is GNU sed; on macOS, BSD sed needs `sed -i '' -E` in `pin`.
 
    Change `imagePullPolicy: Always` to `IfNotPresent` in the pinned overlays: a digest never
    changes, so there is nothing to pull again. Commit; ArgoCD rolls the deployments itself, the

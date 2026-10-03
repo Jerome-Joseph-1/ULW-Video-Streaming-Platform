@@ -46,9 +46,11 @@ stage environment that should track the newest code, not for prod.
   the digest it was first published under, and a later run reuses and reports it. `main` moves
   for all four images together, only after all four SHA tags exist, and only while the commit
   is still `main`'s tip. Nothing is tagged `latest`.
-- Every pushed digest gets a build provenance attestation (`actions/attest-build-provenance`),
-  verifiable with `gh attestation verify`; the run's summary lists each image as
-  `<sha>@sha256:<digest>`.
+- Every pushed digest gets a build provenance attestation (`actions/attest-build-provenance`)
+  from the run that first pushed it, verifiable with `gh attestation verify`; a later run that
+  finds the SHA tag already published attests nothing, since it did not build that digest.
+  `:main` tags the pushed manifest itself (`--prefer-index=false`), so it carries the same
+  attested digest. The run's summary lists each image as `<sha>@sha256:<digest>`.
 - Stage's overlays follow `:main`. Prod's overlays ship with the placeholder `:<sha>` and are
   set, before prod syncs, to a SHA published from main, preferably `<sha>@sha256:<digest>`
   from that run's summary (deploy/askedin/RUNBOOK.md, 4a). `deploy/local/check-image-pins.py`
