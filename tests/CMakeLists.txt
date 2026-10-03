@@ -597,6 +597,7 @@ if(ULW_BUILD_WORKER)
         unit/live_packager/publisher_test.cpp
         unit/live_packager/recorder_test.cpp
         unit/live_packager/recording_plan_test.cpp
+        unit/live_packager/scratch_test.cpp
         unit/live_packager/segment_tracker_test.cpp
         unit/live_packager/stream_id_test.cpp
         unit/live_packager/watch_test.cpp)
