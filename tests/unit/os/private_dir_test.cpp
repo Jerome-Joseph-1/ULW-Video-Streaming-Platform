@@ -2,11 +2,18 @@
 
 #include "support/temp_dir.hpp"
 
+#include <sys/resource.h>
 #include <sys/stat.h>
 
+#include <cerrno>
+#include <climits>
+#include <expected>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <string>
+#include <system_error>
 #include <unistd.h>
 
 namespace {
@@ -18,6 +25,63 @@ namespace fs = std::filesystem;
     EXPECT_EQ(::lstat(p.c_str(), &st), 0) << p;
     return st.st_mode & 07777;
 }
+
+std::string reason(int err) {
+    return std::generic_category().message(err);
+}
+
+// Lowers the soft limit on open files to the lowest descriptor free now, so the next open fails
+// with EMFILE, and restores the limit when it goes.
+class NoFreeDescriptor {
+public:
+    NoFreeDescriptor() {
+        if (::getrlimit(RLIMIT_NOFILE, &saved_) != 0) {
+            return;
+        }
+        const int lowest = ::open("/", O_RDONLY | O_CLOEXEC);
+        if (lowest < 0) {
+            return;
+        }
+        ::close(lowest);
+        rlimit lowered = saved_;
+        lowered.rlim_cur = static_cast<rlim_t>(lowest);
+        active_ = ::setrlimit(RLIMIT_NOFILE, &lowered) == 0;
+    }
+    ~NoFreeDescriptor() {
+        if (active_) {
+            ::setrlimit(RLIMIT_NOFILE, &saved_);
+        }
+    }
+    NoFreeDescriptor(const NoFreeDescriptor&) = delete;
+    NoFreeDescriptor& operator=(const NoFreeDescriptor&) = delete;
+    NoFreeDescriptor(NoFreeDescriptor&&) = delete;
+    NoFreeDescriptor& operator=(NoFreeDescriptor&&) = delete;
+
+    [[nodiscard]] bool active() const noexcept { return active_; }
+
+private:
+    rlimit saved_{};
+    bool active_ = false;
+};
+
+// Runs in `dir` while it lives, and goes back to where it was.
+class InDirectory {
+public:
+    explicit InDirectory(const fs::path& dir) : saved_(fs::current_path()) {
+        fs::current_path(dir);
+    }
+    ~InDirectory() {
+        std::error_code ec;
+        fs::current_path(saved_, ec);
+    }
+    InDirectory(const InDirectory&) = delete;
+    InDirectory& operator=(const InDirectory&) = delete;
+    InDirectory(InDirectory&&) = delete;
+    InDirectory& operator=(InDirectory&&) = delete;
+
+private:
+    fs::path saved_;
+};
 
 class MakePrivateDir : public ::testing::Test {
 protected:
@@ -85,19 +149,45 @@ TEST_F(MakePrivateDir, RefusesADirectoryAnotherUserOwns) {
     EXPECT_EQ(mode_of(dir), before);
 }
 
-TEST_F(MakePrivateDir, RefusesAParentAnotherUserOwns) {
-    // Only root can make a directory another user owns.
-    if (::geteuid() != 0) {
-        GTEST_SKIP() << "needs root";
+// A directory of the host's, owned by a user who is neither this process's nor root, that this
+// process may open: a service's own under /var (man's cache, postgres's data root, a spool).
+// Empty when the host has none.
+fs::path someone_elses_directory() {
+    for (const char* const top : {"/var/cache", "/var/lib", "/var/spool", "/var/log", "/home"}) {
+        std::error_code ec;
+        for (const fs::directory_entry& entry : fs::directory_iterator(top, ec)) {
+            struct stat st {};
+            if (::lstat(entry.path().c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid != 0 &&
+                st.st_uid != ::geteuid() && ::access(entry.path().c_str(), R_OK | X_OK) == 0) {
+                return entry.path();
+            }
+        }
     }
-    const fs::path root = tmp.path() / "theirs";
-    ASSERT_EQ(::mkdir(root.c_str(), 0700), 0);
-    ASSERT_EQ(::chmod(root.c_str(), 0777), 0);
-    ASSERT_EQ(::chown(root.c_str(), 65534, 65534), 0);
-    const auto made = os::make_private_dir(root / "node-1");
+    return {};
+}
+
+TEST_F(MakePrivateDir, RefusesAParentAnotherUserOwns) {
+    // Root makes one; anyone else looks for one of the host's. Nothing is made in it either way.
+    fs::path parent;
+    if (::geteuid() == 0) {
+        parent = tmp.path() / "theirs";
+        ASSERT_EQ(::mkdir(parent.c_str(), 0700), 0);
+        ASSERT_EQ(::chmod(parent.c_str(), 0777), 0);
+        ASSERT_EQ(::chown(parent.c_str(), 65534, 65534), 0);
+    } else {
+        parent = someone_elses_directory();
+        if (parent.empty()) {
+            GTEST_SKIP() << "not root, and no directory of another user's to try instead";
+        }
+    }
+    struct stat st {};
+    ASSERT_EQ(::lstat(parent.c_str(), &st), 0) << parent;
+    const auto made = os::make_private_dir(parent / "ulw-private-node-1");
     ASSERT_FALSE(made);
-    EXPECT_NE(made.error().find("owned by uid 65534"), std::string::npos) << made.error();
-    EXPECT_FALSE(fs::exists(root / "node-1"));
+    EXPECT_EQ(made.error(), parent.string() + ": owned by uid " + std::to_string(st.st_uid) +
+                                ", neither this process's user nor root, who alone may hold the "
+                                "directory it keeps its own in");
+    EXPECT_FALSE(fs::exists(parent / "ulw-private-node-1"));
 }
 
 TEST_F(MakePrivateDir, RefusesAParentThatIsASymbolicLink) {
@@ -119,6 +209,72 @@ TEST_F(MakePrivateDir, RefusesAPathEndingInASlash) {
     const auto made = os::make_private_dir(tmp.path() / "node-1/");
     ASSERT_FALSE(made);
     EXPECT_EQ(mode_of(target), 0755U);
+}
+
+TEST_F(MakePrivateDir, MakesABareNameInTheWorkingDirectory) {
+    const InDirectory in(tmp.path());
+    const auto made = os::make_private_dir("node-1");
+    ASSERT_TRUE(made) << made.error();
+    EXPECT_EQ(mode_of(tmp.path() / "node-1"), 0700U);
+}
+
+TEST_F(MakePrivateDir, AcceptsADirectoryKeptInOneRootOwns) {
+    // The temporary directory is root's on any host this runs on; the test's own directory,
+    // made in it, is the one to take.
+    struct stat st {};
+    if (::lstat(tmp.path().parent_path().c_str(), &st) != 0 || st.st_uid != 0) {
+        GTEST_SKIP() << tmp.path().parent_path() << " is not root's";
+    }
+    ASSERT_EQ(::chmod(tmp.path().c_str(), 0755), 0);
+    const auto made = os::make_private_dir(tmp.path());
+    ASSERT_TRUE(made) << made.error();
+    EXPECT_EQ(mode_of(tmp.path()), 0700U);
+}
+
+TEST_F(MakePrivateDir, AcceptsARootOwnedParentAnyoneMayWriteWithoutTheStickyBit) {
+    // What a kubelet makes for an emptyDir: root's, 0777, no sticky bit. Only root can make one.
+    if (::geteuid() != 0) {
+        GTEST_SKIP() << "needs root";
+    }
+    const fs::path empty_dir = tmp.path() / "empty-dir";
+    ASSERT_EQ(::mkdir(empty_dir.c_str(), 0700), 0);
+    ASSERT_EQ(::chmod(empty_dir.c_str(), 0777), 0);
+    const auto made = os::make_private_dir(empty_dir / "node-1");
+    ASSERT_TRUE(made) << made.error();
+    EXPECT_EQ(mode_of(empty_dir / "node-1"), 0700U);
+    EXPECT_EQ(mode_of(empty_dir), 0777U);
+}
+
+TEST_F(MakePrivateDir, NamesTheComponentAboveThatCannotBeMade) {
+    // A file where a directory above it should be: mkdir finds something there and moves on,
+    // and the component below it cannot be made.
+    std::ofstream(tmp.path() / "file") << "x";
+    const fs::path below = tmp.path() / "file" / "scratch";
+    const auto made = os::make_private_dir(below / "node-1");
+    ASSERT_FALSE(made);
+    EXPECT_EQ(made.error(), below.string() + ": " + reason(ENOTDIR));
+}
+
+TEST_F(MakePrivateDir, NamesTheDirectoryThatCannotBeMadeInItsParent) {
+    const fs::path dir = tmp.path() / std::string(NAME_MAX + 1, 'n');
+    const auto made = os::make_private_dir(dir);
+    ASSERT_FALSE(made);
+    EXPECT_EQ(made.error(), dir.string() + ": " + reason(ENAMETOOLONG));
+    EXPECT_TRUE(fs::is_empty(tmp.path()));
+}
+
+TEST_F(MakePrivateDir, ReportsAnOpenThatFailsForAnyOtherReasonAsThatReason) {
+    // Out of descriptors is not a link or a file in the way, and is not told as one.
+    const fs::path dir = tmp.path() / "node-1";
+    std::expected<void, std::string> made;
+    {
+        const NoFreeDescriptor none;
+        ASSERT_TRUE(none.active());
+        made = os::make_private_dir(dir);
+    }
+    ASSERT_FALSE(made);
+    EXPECT_EQ(made.error(), tmp.path().string() + ": " + reason(EMFILE));
+    EXPECT_FALSE(fs::exists(dir));
 }
 
 } // namespace
