@@ -56,6 +56,33 @@ runs:
           echo "::error::$HOME/.cargo/bin must be on the runner's PATH, ahead of any other rustup"
           exit 1
         fi
+    # The reactor's tests run under io_uring and epoll alike, and a host that refuses the
+    # reactor its ring fails every io_uring one with nothing but "Value of: r, Actual: false".
+    # The probe sets up a ring and buffer rings of the reactor's sizes, as the runner's user
+    # under the runner service's limits, and the job stops here naming the cause instead.
+    - name: Check that the host gives the reactor its io_uring
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        probe="$RUNNER_TEMP/io_uring_probe"
+        gcc -O2 tools/io_uring_probe.c -o "$probe" -luring
+        echo "kernel $(uname -r), user $(id -un), max locked memory $(ulimit -l) KiB"
+        if "$probe" | tee "$probe.out"; then
+          exit 0
+        fi
+        errno=$(sed -n 's/.*(errno \([0-9]*\)).*/\1/p' "$probe.out" | head -n1)
+        case "$errno" in
+          12)
+            echo "::error::io_uring refused the reactor's ring for memory (ENOMEM) under a max locked memory of $(ulimit -l) KiB. The runner services need LimitMEMLOCK=infinity: docs/operations/soak.md, The self-hosted host."
+            ;;
+          1)
+            echo "::error::io_uring is refused to $(id -un) (EPERM): kernel.io_uring_disabled is $(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo absent). The host needs kernel.io_uring_disabled=0: docs/operations/soak.md, The self-hosted host."
+            ;;
+          *)
+            echo "::error::io_uring cannot give the reactor what it needs on kernel $(uname -r) (errno ${errno:-none}); the probe's report is above. docs/operations/soak.md, The self-hosted host, lists what the host must provide."
+            ;;
+        esac
+        exit 1
     # On the self-hosted host the crate registry and the ccache live in the job's own
     # workspace (.cargo-home, .ccache; git-ignored, and removed by the next checkout's clean),
     # not the home its runners share: no job reads what a concurrent or an earlier one left
