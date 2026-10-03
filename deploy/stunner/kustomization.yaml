@@ -77,6 +77,15 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/resources/requests/cpu
         value: 100m
+  # The shipped route answers only PUBLIC_HOSTNAME; clients reach LiveKit's /rtc as
+  # 127.0.0.1:18080 (the URL chat's tickets name, up.sh), so, as for the routes in
+  # ../local/cluster, it names no hostname: with one, Envoy answers 404 there.
+  - target:
+      kind: HTTPRoute
+      name: livekit
+    patch: |-
+      - op: remove
+        path: /spec/hostnames
   # The kind node has no load balancer: the TURN listener is a NodePort, which kind.yaml
   # publishes on the outside network as 198.18.0.1:3478. That is the address clients use, so
   # the Gateway names it; STUNner reports a Gateway Programmed only once it knows one.
