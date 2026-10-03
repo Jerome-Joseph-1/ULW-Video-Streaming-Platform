@@ -34,6 +34,9 @@ enum class LiveEnd : std::uint8_t {
     Failed,
     // Nobody went live within the start window, or it outlived the longest stream.
     Timeout,
+    // LiveKit said its publisher left the room, or the room finished, and the publisher was
+    // still gone after a grace for reconnects (ADR-0093).
+    PublisherLeft,
 };
 
 [[nodiscard]] std::string_view to_string(LiveState s) noexcept;
