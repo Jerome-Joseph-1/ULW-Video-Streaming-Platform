@@ -110,3 +110,6 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
   opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw;
 }
 #toast.show { opacity: .95; }
+.fp { font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+.fp.big { font-size: 15px; margin: 6px 0; }
+.ask { border-color: var(--accent); }

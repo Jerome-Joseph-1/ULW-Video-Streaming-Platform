@@ -16,6 +16,10 @@
 //     session.state()         -> { canSend, complete, detail }
 //     session.send(text)      encrypts and posts; -> the message id, whose echo is this
 //                             device's own message (MLS cannot decrypt its own)
+//     session.sendFailed(id, reason)   chat refused that send (an `error` with its id)
+//     session.members()       [{identity, fingerprint}] of the group, when there is one
+//   options.approve({identity, chatSender, fingerprintText}) -> Promise<boolean>: whether the
+//   group's first member adds that device (MLS asks; the page shows an Approve/Deny card)
 import { store } from './core.js';
 import * as standin from './e2ee-standin.js';
 
@@ -41,96 +45,150 @@ export async function openSession(options) {
 
 const SUITES = { 1: 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' };
 
-async function openMls(mls, { user, room, members, post }) {
+async function openMls(mls, { user, room, members, post, approve, onEvent }) {
   // This browser profile's device for the user: its MLS identity is `<user>/<device>`, and its
-  // state (keys and groups) is kept in IndexedDB under that name.
+  // state (keys, groups, what it still has to post) is kept in IndexedDB under that name.
   let device = store.get('mls-device', null);
   if (!device) {
     device = `${user}/${crypto.randomUUID().slice(0, 8)}`;
     store.set('mls-device', device);
   }
-  const saved = await mls.loadState(device).catch(() => null);
+  let saved;
+  try {
+    saved = await mls.loadState(device);
+  } catch (e) {
+    const detail = e.message === 'device_in_use'
+      ? `this browser's MLS device for ${user} (${device}) is open in another tab or window; close that one and reload`
+      : `this browser's MLS device could not be read (${e.message})`;
+    return blocked(detail);
+  }
   const client = saved ? mls.MlsClient.importState(saved) : new mls.MlsClient(mls.utf8(device));
-  let saving = Promise.resolve();
   let out = null;
-  let lastId = null;
-  let lastGroupSeq = 0;
-  const keyPackages = [];
+  // Each key package's frame, and each user's newest: a device that asked again (a reload
+  // without its state, an earlier run's device) supersedes what it asked before.
+  const packages = new Map(); // keyPackageRef -> { seq, sender }
+  const newest = new Map(); // chat user -> seq of their newest key package
+  const pending = new Map(); // chat user -> { seq, abort } of the question on screen
   const suite = mls.ciphersuite();
+  const fp = (f) => mls.formatFingerprint(f);
 
   const mlsRoom = new mls.MlsRoom({
     client,
     room,
-    send: (id, body) => { lastId = id; post(id, body); },
+    user,
+    send: post,
+    // The group's first member is asked about every device that wants in, with its fingerprint
+    // to compare with what that device's page shows. No by default.
+    approveKeyPackage: async (ask) => {
+      const asked = packages.get(ask.keyPackageRef);
+      if (asked && newest.get(asked.sender) > asked.seq) return false; // superseded
+      if (ask.chatSender === user) return false; // this user's earlier device: one device per user here
+      const controller = new AbortController();
+      pending.set(ask.chatSender, { seq: asked?.seq ?? 0, abort: () => controller.abort() });
+      try {
+        return await approve({ ...ask, fingerprintText: fp(ask.fingerprint) }, controller.signal);
+      } finally {
+        if (pending.get(ask.chatSender)?.seq === (asked?.seq ?? 0)) pending.delete(ask.chatSender);
+      }
+    },
     onMessage: (m) => { out = { text: m.text, sender: m.sender }; },
     onEvent: (e) => {
-      const who = (e.sender ?? '').split('/')[0];
+      const who = mls.userPart(e.sender ?? e.who ?? e.identity ?? '');
       const note = {
         created: 'this device started the MLS group',
         joined: `this device joined the MLS group (epoch ${e.epoch})`,
-        adding: `adding ${String(e.who ?? '').split('/')[0]}'s device to the group`,
-        added: `the group now has ${mlsRoom.group?.memberCount} devices (epoch ${e.epoch})`,
+        adding: `adding ${who}'s device ${e.who} (fingerprint ${e.fingerprint ? fp(e.fingerprint) : '?'})`,
+        added: `the group now has ${e.members?.length} devices (epoch ${e.epoch})`,
         commit: `${who} changed the group (epoch ${e.epoch})`,
+        denied: `${e.chatSender ?? who}'s device ${e.identity ?? ''} was not added: ${e.reason}`,
+        lost: `a change to the group lost its epoch (${e.epoch}) and is retried`,
+        removed: 'this device was removed from the group',
+        error: `MLS: ${e.reason}`,
       }[e.type];
       if (note && !out) out = { note };
+      onEvent?.(e);
     },
-    onState: (state) => { saving = saving.then(() => mls.saveState(device, state)).catch(() => {}); },
+    // Awaited before anything is posted; a failure is an `error` event and posts nothing.
+    onState: (state) => mls.saveState(device, state),
   });
 
   return {
     label: `MLS (RFC 9420), ciphersuite ${suite}${SUITES[suite] ? ` (${SUITES[suite]})` : ''}, OpenMLS in WebAssembly`,
+    device,
+    fingerprint: fp(client.fingerprint),
 
     async receive(frame) {
-      let info;
       try {
-        info = mls.inspect(mls.fromBase64url(frame.body));
+        const info = mls.inspect(mls.fromBase64url(frame.body));
+        if (info.wireFormat === 'key_package') {
+          packages.set(info.keyPackageRef, { seq: frame.seq, sender: frame.sender });
+          newest.set(frame.sender, Math.max(newest.get(frame.sender) ?? 0, frame.seq));
+          // A question about this user's older device is moot now: withdraw it (a no).
+          const open = pending.get(frame.sender);
+          if (open && open.seq < frame.seq) open.abort();
+        }
       } catch {
         return null; // not an MLS message (the stand-in's, from before this build)
       }
-      if (info.wireFormat === 'key_package') keyPackages.push(frame);
-      else lastGroupSeq = frame.seq;
       out = null;
-      mlsRoom.receive(frame);
+      const done = mlsRoom.receive(frame); // its callbacks run before it returns; never throws
       const result = out;
       out = null;
+      await done;
       if (result?.text !== undefined) {
-        // The MLS credential names the device; chat names the account that sent the frame.
-        const who = result.sender.split('/')[0];
+        // The credential names the device; chat names the account that sent the frame.
+        const who = mls.userPart(result.sender);
         return who === frame.sender ? { text: result.text } : { text: result.text, warning: `MLS sender ${result.sender} is not ${frame.sender}` };
       }
       return result;
     },
 
     async ready() {
+      // What this device had not got back from the room yet, posted again under the same ids.
+      await mlsRoom.resume();
       if (mlsRoom.joined) return;
-      // The room's first member starts the group whenever its device is not in one, and adds
-      // whoever asked since the group traffic before it (an earlier group's, whose devices are
-      // gone: a demo restarted without --wipe); everyone else asks to be added.
+      // The room's first member starts the group whenever its device is in none (after a demo
+      // restarted without --wipe, an earlier group's devices are gone), and is then asked about
+      // the newest device of each member who asked; everyone else asks to be added, once.
       if (members[0] === user) {
-        mlsRoom.create();
-        for (const frame of keyPackages) if (frame.sender !== user && frame.seq > lastGroupSeq) mlsRoom.receive(frame);
-      } else {
-        mlsRoom.announce();
+        await mlsRoom.create();
+      } else if (!mlsRoom.memo?.announced) {
+        await mlsRoom.announce();
       }
     },
 
+    sendFailed: (id, reason) => mlsRoom.sendFailed(id, reason),
+
+    members: () => mlsRoom.members().map((m) => ({ identity: m.identity, fingerprint: fp(m.fingerprint) })),
+
     state() {
       if (!mlsRoom.joined) {
-        return { canSend: false, complete: false, detail: `waiting to be added to the MLS group${members[0] === user ? '' : ` (by ${members[0]}, who must open this room)`}` };
+        return { canSend: false, complete: false, detail: members[0] === user ? 'starting the MLS group' : `waiting for ${members[0]} to approve this device (they must have this room open)` };
       }
-      const count = mlsRoom.group.memberCount;
+      const count = mlsRoom.members().length;
       return {
         canSend: true,
         complete: count >= members.length,
-        detail: `MLS epoch ${mlsRoom.group.epoch}, encrypted to ${count} device${count === 1 ? '' : 's'}${count < members.length ? `; waiting for ${members.length - count} more to open this room` : ''}`,
+        detail: `MLS epoch ${mlsRoom.group.epoch}, encrypted to ${count} device${count === 1 ? '' : 's'}${count < members.length ? `; waiting for ${members.length - count} more` : ''}`,
       };
     },
 
     async send(text) {
-      lastId = null;
-      mlsRoom.sendText(text);
-      return lastId;
+      return mlsRoom.sendText(text);
     },
+  };
+}
+
+// A session that can do nothing, and says why.
+function blocked(detail) {
+  return {
+    label: 'MLS (unavailable here)',
+    receive: async () => null,
+    ready: async () => {},
+    sendFailed: async () => {},
+    members: () => [],
+    state: () => ({ canSend: false, complete: false, detail }),
+    send: async () => { throw new Error(detail); },
   };
 }
 

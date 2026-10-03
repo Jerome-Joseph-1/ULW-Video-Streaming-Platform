@@ -31,7 +31,7 @@ if ((status != 0)); then
         # The job log is easier to reach than the artifact: the media server's view of the run.
         docker version --format 'docker {{.Server.Version}}' || true
         docker compose -f "$here/../compose.yaml" logs --no-color --tail 150 livekit egress gateway 2>&1 |
-            grep -v -E '"event":"(setting|request)"' | tail -200 || true
+            grep -v -E '"event":"setting"|"event":"request".*"status":2' | tail -250 || true
     fi
 fi
 if [[ ${DEMO_DOWN:-0} == 1 ]]; then
