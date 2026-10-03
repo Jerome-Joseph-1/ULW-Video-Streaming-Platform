@@ -45,8 +45,9 @@ public:
         released.push_back(id);
         tokens.push_back(token);
     }
-    void record_progress(const core::UploadId& /*id*/, const core::VideoId& /*video*/,
-                         std::uint64_t /*durable_offset*/, CatalogCallback<void> done) override {
+    void record_progress(const core::UploadId& /*id*/, ClaimToken /*token*/,
+                         const core::VideoId& /*video*/, std::uint64_t /*durable_offset*/,
+                         CatalogCallback<void> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
     void commit_upload(const core::UploadId& /*id*/, const core::VideoId& /*video*/,
@@ -165,15 +166,28 @@ TEST(UploadClaim, AReleaseNamesTheGrantItGivesBack) {
     std::size_t held = 0;
     UploadClaim claim(catalog, held);
     claim.adopt(1, kFirst, kOne);
+    EXPECT_EQ(claim.token_of(1), kOne);
     claim.release(1);
     claim.adopt(2, kFirst, kTwo);
+    EXPECT_EQ(claim.token_of(1), std::nullopt);
+    EXPECT_EQ(claim.token_of(2), kTwo);
     claim.release(2);
+    EXPECT_EQ(claim.token_of(2), std::nullopt);
     EXPECT_EQ(catalog.released, (std::vector{kFirst, kFirst}));
     EXPECT_EQ(catalog.tokens, (std::vector{kOne, kTwo}));
 }
 
 class MemoryCatalogClaims : public ::testing::Test {
 protected:
+    [[nodiscard]] core::ports::CatalogResult<void> progress(ClaimToken token,
+                                                            std::uint64_t offset) {
+        std::optional<core::ports::CatalogResult<void>> out;
+        catalog.record_progress(id, token, video, offset,
+                                [&](auto r) noexcept { out = std::move(r); });
+        EXPECT_TRUE(ulw::test::pump_until(*reactor, [&] { return out.has_value(); }));
+        return out.value_or(std::unexpected(CatalogError::Unavailable));
+    }
+
     [[nodiscard]] core::ports::CatalogResult<ClaimedUpload> claim() {
         std::optional<core::ports::CatalogResult<ClaimedUpload>> out;
         catalog.claim_upload(id, owner, [&](auto r) noexcept { out = std::move(r); });
@@ -234,6 +248,20 @@ TEST_F(MemoryCatalogClaims, AReleaseWithAnEarlierGrantsTokenReleasesNothing) {
     catalog.release_upload(id, second->token);
     EXPECT_EQ(catalog.claims(), 0U);
     EXPECT_TRUE(claim());
+}
+
+// An append still running under a grant that was given back, the upload since claimed again,
+// records nothing under the new grant; the new grant's own progress is recorded.
+TEST_F(MemoryCatalogClaims, ProgressUnderAnEarlierGrantsTokenIsRefused) {
+    const auto first = claim();
+    ASSERT_TRUE(first);
+    EXPECT_TRUE(progress(first->token, 256));
+    catalog.release_upload(id, first->token);
+    EXPECT_EQ(progress(first->token, 512).error(), CatalogError::Conflict);
+    const auto second = claim();
+    ASSERT_TRUE(second);
+    EXPECT_EQ(progress(first->token, 512).error(), CatalogError::Conflict);
+    EXPECT_TRUE(progress(second->token, 512));
 }
 
 } // namespace

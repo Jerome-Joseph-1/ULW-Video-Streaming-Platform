@@ -118,8 +118,9 @@ void MemoryCatalog::release_upload(const core::UploadId& id,
     }
 }
 
-void MemoryCatalog::record_progress(const core::UploadId& id, const core::VideoId& video,
-                                    std::uint64_t durable_offset, CatalogCallback<void> done) {
+void MemoryCatalog::record_progress(const core::UploadId& id, core::ports::ClaimToken token,
+                                    const core::VideoId& video, std::uint64_t durable_offset,
+                                    CatalogCallback<void> done) {
     if (refused(done)) {
         return;
     }
@@ -127,7 +128,8 @@ void MemoryCatalog::record_progress(const core::UploadId& id, const core::VideoI
     core::ports::CatalogResult<void> result{};
     if (it == uploads_.end()) {
         result = std::unexpected(CatalogError::NotFound);
-    } else if (!claimed_.contains(id)) {
+    } else if (const auto claim = claimed_.find(id);
+               claim == claimed_.end() || claim->second != token) {
         result = std::unexpected(CatalogError::Conflict);
     } else if (it->second.upload.state == core::UploadState::Active) {
         auto& offset = it->second.upload.durable_offset;

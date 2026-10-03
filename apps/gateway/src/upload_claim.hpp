@@ -43,6 +43,14 @@ public:
     [[nodiscard]] bool held_by(std::uint64_t request) const noexcept {
         return holder_ && holder_->request == request;
     }
+    // The grant `request` holds, for the catalog calls made under it; nullopt when it holds none.
+    [[nodiscard]] std::optional<core::ports::ClaimToken>
+    token_of(std::uint64_t request) const noexcept {
+        if (holder_ && holder_->request == request) {
+            return holder_->token;
+        }
+        return std::nullopt;
+    }
 
 private:
     struct Holder {

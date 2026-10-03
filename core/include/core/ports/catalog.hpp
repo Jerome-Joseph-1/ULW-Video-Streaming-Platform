@@ -79,9 +79,11 @@ public:
     // nothing.
     virtual void release_upload(const UploadId& id, ClaimToken token) noexcept = 0;
 
-    // Records a durable offset reached by the holder of the claim, and moves the video from
-    // init to uploading on the first one. Offsets never move backwards.
-    virtual void record_progress(const UploadId& id, const VideoId& video,
+    // Records a durable offset reached by the holder of the grant `token` names, and moves the
+    // video from init to uploading on the first one. Offsets never move backwards. Refused with
+    // Conflict when `token` is not the upload's current grant: an append that outlived its claim
+    // records nothing under a later one.
+    virtual void record_progress(const UploadId& id, ClaimToken token, const VideoId& video,
                                  std::uint64_t durable_offset, CatalogCallback<void> done) = 0;
 
     // One transaction: the upload completes, the video moves to processing and a transcode

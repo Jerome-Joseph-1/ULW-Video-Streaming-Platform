@@ -815,13 +815,15 @@ void Connection::on_durable() noexcept {
     session_.reset();
     const core::UploadId* id = get(req_.upload_id);
     const core::ports::StoredUpload* stored = get(req_.upload);
-    if (id == nullptr || stored == nullptr) {
+    // Recorded under this request's own grant: one that has been lost records nothing.
+    const auto token = claim_.token_of(request_seq_);
+    if (id == nullptr || stored == nullptr || !token) {
         fail(Status::InternalServerError);
         return;
     }
     ++pending_;
     deps().catalog.record_progress(
-        *id, stored->upload.video_id, offset,
+        *id, *token, stored->upload.video_id, offset,
         [this, offset, request = request_seq_](core::ports::CatalogResult<void> result) noexcept {
             --pending_;
             if (!serving(request)) {
@@ -1200,7 +1202,8 @@ void Connection::on_offset(ControlJob job) noexcept {
     const std::uint64_t* offset = get(req_.upload_offset);
     const core::UploadId* id = get(req_.upload_id);
     const core::ports::StoredUpload* stored = get(req_.upload);
-    if (offset == nullptr || id == nullptr || stored == nullptr) {
+    const auto token = claim_.token_of(request_seq_);
+    if (offset == nullptr || id == nullptr || stored == nullptr || !token) {
         fail(Status::InternalServerError);
         return;
     }
@@ -1212,7 +1215,7 @@ void Connection::on_offset(ControlJob job) noexcept {
     // commit or a HEAD after this request agrees with both.
     ++pending_;
     deps().catalog.record_progress(
-        *id, stored->upload.video_id, durable,
+        *id, *token, stored->upload.video_id, durable,
         [this, durable, request = request_seq_](core::ports::CatalogResult<void> result) noexcept {
             --pending_;
             if (!serving(request)) {

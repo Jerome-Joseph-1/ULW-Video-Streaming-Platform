@@ -550,10 +550,11 @@ public:
         }
     }
 
-    [[nodiscard]] bool holds(const core::UploadId& id) const noexcept {
+    // `token` names the upload's current grant, held on the live session.
+    [[nodiscard]] bool holds(const core::UploadId& id, ClaimToken token) const noexcept {
         const auto it = claims_.find(id);
         return it != claims_.end() && it->second.state == ClaimState::Held &&
-               it->second.session == live_session();
+               it->second.token == token && it->second.session == live_session();
     }
 
 private:
@@ -698,9 +699,10 @@ void PgUploadCatalog::release_upload(const core::UploadId& id, ClaimToken token)
     impl_->release(id, token);
 }
 
-void PgUploadCatalog::record_progress(const core::UploadId& id, const core::VideoId& video,
-                                      std::uint64_t durable_offset, CatalogCallback<void> done) {
-    if (!impl_->holds(id)) {
+void PgUploadCatalog::record_progress(const core::UploadId& id, ClaimToken token,
+                                      const core::VideoId& video, std::uint64_t durable_offset,
+                                      CatalogCallback<void> done) {
+    if (!impl_->holds(id, token)) {
         impl_->refuse(std::move(done), CatalogError::Conflict);
         return;
     }

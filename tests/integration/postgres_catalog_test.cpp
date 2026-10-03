@@ -21,6 +21,7 @@ namespace {
 using core::ports::CatalogError;
 using core::ports::CatalogResult;
 using core::ports::ClaimedUpload;
+using core::ports::ClaimToken;
 using core::ports::NewUpload;
 using core::ports::StoredUpload;
 using infra::postgres::CatalogConfig;
@@ -111,9 +112,9 @@ protected:
                                        const core::UserId& owner = tester()) {
         return call<ClaimedUpload>([&](auto done) { c.claim_upload(id, owner, std::move(done)); });
     }
-    CatalogResult<void> progress(const NewUpload& u, std::uint64_t offset) {
+    CatalogResult<void> progress(const NewUpload& u, ClaimToken token, std::uint64_t offset) {
         return call<void>([&](auto done) {
-            catalog->record_progress(u.upload.id, u.video.id, offset, std::move(done));
+            catalog->record_progress(u.upload.id, token, u.video.id, offset, std::move(done));
         });
     }
     CatalogResult<core::VideoState> commit(PgUploadCatalog& c, const NewUpload& u) {
@@ -133,8 +134,9 @@ protected:
 
     // Claims, then records progress up to the whole size: an upload ready to commit.
     void fill(const NewUpload& u) {
-        ASSERT_TRUE(claim(*catalog, u.upload.id));
-        ASSERT_TRUE(progress(u, u.upload.size_bytes));
+        const auto held = claim(*catalog, u.upload.id);
+        ASSERT_TRUE(held);
+        ASSERT_TRUE(progress(u, held->token, u.upload.size_bytes));
     }
 
     std::string jobs_for(const NewUpload& u) {
@@ -249,16 +251,17 @@ TEST_P(CatalogTest, AReadyOrFailedVideoReadsBackWithItsDurationOrReason) {
 TEST_P(CatalogTest, FirstProgressStartsTheVideoAndOffsetsNeverMoveBack) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
-    ASSERT_TRUE(claim(*catalog, u.upload.id));
+    const auto held = claim(*catalog, u.upload.id);
+    ASSERT_TRUE(held);
 
-    ASSERT_TRUE(progress(u, kChunk));
+    ASSERT_TRUE(progress(u, held->token, kChunk));
     const auto started = video(u.video.id);
     ASSERT_TRUE(started);
     EXPECT_EQ(started->state, core::VideoState::Uploading);
     EXPECT_EQ(started->version, 1U);
 
-    ASSERT_TRUE(progress(u, 2 * kChunk));
-    ASSERT_TRUE(progress(u, kChunk));
+    ASSERT_TRUE(progress(u, held->token, 2 * kChunk));
+    ASSERT_TRUE(progress(u, held->token, kChunk));
     EXPECT_EQ(upload(u.upload.id)->upload.durable_offset, 2 * kChunk);
     EXPECT_EQ(video(u.video.id)->version, 1U);
 }
@@ -266,7 +269,7 @@ TEST_P(CatalogTest, FirstProgressStartsTheVideoAndOffsetsNeverMoveBack) {
 TEST_P(CatalogTest, ProgressWithoutAClaimIsRefused) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
-    EXPECT_EQ(progress(u, kChunk).error(), CatalogError::Conflict);
+    EXPECT_EQ(progress(u, ClaimToken{}, kChunk).error(), CatalogError::Conflict);
     EXPECT_EQ(upload(u.upload.id)->upload.durable_offset, 0U);
 }
 
@@ -469,8 +472,9 @@ TEST_P(CatalogTest, KilledGatewayFreesItsClaimsAtOnce) {
 TEST_P(CatalogTest, LosingTheLockSessionLosesEveryClaim) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
-    ASSERT_TRUE(claim(*catalog, u.upload.id));
-    ASSERT_TRUE(progress(u, kChunk));
+    const auto held = claim(*catalog, u.upload.id);
+    ASSERT_TRUE(held);
+    ASSERT_TRUE(progress(u, held->token, kChunk));
 
     auto conn = db->session();
     ASSERT_EQ(scalar(conn,
@@ -479,7 +483,7 @@ TEST_P(CatalogTest, LosingTheLockSessionLosesEveryClaim) {
               "1");
     CatalogResult<void> recorded;
     const bool refused = ulw::test::pump_until(*reactor, [&] {
-        recorded = progress(u, 2 * kChunk);
+        recorded = progress(u, held->token, 2 * kChunk);
         return !recorded;
     });
     ASSERT_TRUE(refused);
@@ -512,14 +516,16 @@ TEST_P(CatalogTest, AReleaseFromTheHolderOfALostClaimLeavesTheNewClaimHeld) {
     }));
     EXPECT_NE(again->token, lost->token);
 
+    // The old holder's append, still in flight, records nothing under the new grant.
+    EXPECT_EQ(progress(u, lost->token, kChunk).error(), CatalogError::Conflict);
     catalog->release_upload(u.upload.id, lost->token);
-    EXPECT_TRUE(progress(u, kChunk));
+    EXPECT_TRUE(progress(u, again->token, kChunk));
     other = make_catalog();
     ASSERT_TRUE(other);
     EXPECT_EQ(claim(*other, u.upload.id).error(), CatalogError::Conflict);
 
     catalog->release_upload(u.upload.id, again->token);
-    EXPECT_EQ(progress(u, 2 * kChunk).error(), CatalogError::Conflict);
+    EXPECT_EQ(progress(u, again->token, 2 * kChunk).error(), CatalogError::Conflict);
     CatalogResult<ClaimedUpload> taken = std::unexpected(CatalogError::Conflict);
     ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] {
         taken = claim(*other, u.upload.id);

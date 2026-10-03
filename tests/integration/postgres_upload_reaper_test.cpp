@@ -176,9 +176,10 @@ TEST_F(UploadReaperTest, IgnoresUploadsThatCompletedOrWereAbortedByTheirOwner) {
     const NewUpload discarded = created();
     Reply<core::ports::ClaimedUpload> claimed;
     catalog->claim_upload(committed.upload.id, committed.upload.owner, claimed.callback());
-    ASSERT_TRUE(ulw::test::wait(*reactor, claimed));
+    const auto held = ulw::test::wait(*reactor, claimed);
+    ASSERT_TRUE(held);
     ASSERT_TRUE(call([&](auto done) {
-        catalog->record_progress(committed.upload.id, committed.video.id, 3 * kChunk,
+        catalog->record_progress(committed.upload.id, held->token, committed.video.id, 3 * kChunk,
                                  std::move(done));
     }));
     ASSERT_TRUE(call<core::VideoState>([&](auto done) {
