@@ -86,7 +86,7 @@ protected:
         const fs::path jwks = files_.path() / "jwks.json";
         std::ofstream(jwks) << key->public_jwks();
         token_ = *key->mint({.issuer = std::string(kIssuer),
-                             .audience = "askedin-platform",
+                             .audience = "ulw-dev",
                              .subject = "alice",
                              .email = {},
                              .ttl = seconds(600)},

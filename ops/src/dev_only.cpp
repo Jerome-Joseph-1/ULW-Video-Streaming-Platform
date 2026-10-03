@@ -1,5 +1,7 @@
 #include "ops/dev_only.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <utility>
 
 namespace ops {
@@ -60,6 +62,33 @@ std::expected<KeySource, DevOnlyRefusal> key_source(const DevLookup& env) {
         return std::unexpected(std::move(r.error()));
     }
     return KeySource{.url = std::move(url).value_or(""), .file = std::move(file).value_or("")};
+}
+
+std::expected<TokenRules, DevOnlyRefusal> token_rules(const DevLookup& env, const KeySource& keys) {
+    constexpr std::size_t kMaxClaimName = 64;
+    const auto value = [&env](std::string_view name) {
+        std::optional<std::string> v = env(name);
+        return v && !v->empty() ? std::move(v) : std::nullopt;
+    };
+    std::optional<std::string> audience = value("JWT_AUDIENCE");
+    if (!audience && !keys.url.empty()) {
+        return std::unexpected(DevOnlyRefusal{
+            .variable = "JWT_AUDIENCE",
+            .reason = "not set; required with JWKS_URL: the aud the identity provider puts in "
+                      "tokens meant for this service"});
+    }
+    std::string claim = value("ULW_JWT_SUBJECT_CLAIM").value_or("sub");
+    const auto allowed = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+               c == '_' || c == '.' || c == ':' || c == '/' || c == '-';
+    };
+    if (claim.size() > kMaxClaimName || !std::ranges::all_of(claim, allowed)) {
+        return std::unexpected(
+            DevOnlyRefusal{.variable = "ULW_JWT_SUBJECT_CLAIM",
+                           .reason = "expected a claim name: 1 to 64 of A-Z a-z 0-9 _ . : / -"});
+    }
+    return TokenRules{.audience = std::move(audience).value_or(std::string(kDevAudience)),
+                      .subject_claim = std::move(claim)};
 }
 
 } // namespace ops

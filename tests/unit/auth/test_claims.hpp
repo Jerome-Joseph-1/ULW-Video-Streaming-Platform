@@ -11,8 +11,8 @@
 
 namespace ulw::test {
 
-inline const infra::auth::ClaimRules kTestRules{.issuer = "https://id.askedin.test",
-                                                .audience = "askedin-platform"};
+inline const infra::auth::ClaimRules kTestRules{.issuer = "https://id.example.com",
+                                                .audience = "ulw-test-audience"};
 
 // A NumericDate `offset_seconds` from the FakeClock's starting wall time.
 [[nodiscard]] std::string numeric_date(std::int64_t offset_seconds);
