@@ -3,6 +3,7 @@
 #include "layout.hpp"
 
 #include <chrono>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -89,6 +90,10 @@ std::vector<std::byte> encode_answer(const CallAnswer& answer) {
     if (answer.outcome == CallOutcome::Done && answer.caller) {
         put_short(out, answer.caller->view());
     }
+    if (answer.outcome == CallOutcome::RingLimited) {
+        put_u64(out,
+                static_cast<std::uint64_t>(answer.retry_after.value_or(core::Millis{0}).count()));
+    }
     return out;
 }
 
@@ -98,7 +103,7 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
         return std::nullopt;
     }
     const auto outcome = in.u8();
-    if (!outcome || *outcome > static_cast<std::uint8_t>(CallOutcome::Done)) {
+    if (!outcome || *outcome > static_cast<std::uint8_t>(CallOutcome::RingLimited)) {
         return std::nullopt;
     }
     CallAnswer answer{.outcome = static_cast<CallOutcome>(*outcome), .ticket = std::nullopt};
@@ -126,6 +131,14 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
         if (!answer.caller) {
             return std::nullopt;
         }
+    }
+    if (answer.outcome == CallOutcome::RingLimited) {
+        const auto ms = in.u64();
+        if (!ms ||
+            *ms > static_cast<std::uint64_t>(std::numeric_limits<core::Millis::rep>::max())) {
+            return std::nullopt;
+        }
+        answer.retry_after = core::Millis{static_cast<core::Millis::rep>(*ms)};
     }
     if (!in.empty()) {
         return std::nullopt;
@@ -243,7 +256,17 @@ void CallHandler::checked(const core::RoomId& room, Waiter waiter,
         return;
     }
     if (!ringer_.idle(room)) {
+        // A callee answering: the ring waits for this ticket a little past its timeout.
+        ringer_.answering(room, waiter.request.user);
         admit(room, std::move(waiter));
+        return;
+    }
+    // This ticket may start the room's ring: one the room may not start yet is refused before
+    // the SFU is asked.
+    if (const auto wait = ringer_.ring_limited(room, waiter.request.user)) {
+        --in_flight_;
+        finish(waiter.answer,
+               {.outcome = CallOutcome::RingLimited, .ticket = std::nullopt, .retry_after = wait});
         return;
     }
     // This ticket may start the room's call: past the cap it is refused before the SFU is asked.
@@ -405,8 +428,17 @@ void CallHandler::ticketed(const core::RoomId& room, const Waiter& waiter, rt::O
     // Rung once the ticket is in hand: a caller the SFU turned away rings nobody.
     const auto call = ringer_.ticketed(room, waiter.request.user, waiter.members);
     if (!call) {
-        ++counters_.busy;
-        finish(answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
+        switch (call.error().why) {
+        case RingRefusal::Why::Busy:
+            ++counters_.busy;
+            finish(answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
+            return;
+        case RingRefusal::Why::Limited:
+            finish(answer, {.outcome = CallOutcome::RingLimited,
+                            .ticket = std::nullopt,
+                            .retry_after = call.error().retry_after});
+            return;
+        }
         return;
     }
     ++counters_.tickets;

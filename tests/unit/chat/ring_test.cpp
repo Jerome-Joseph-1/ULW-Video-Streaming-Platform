@@ -289,11 +289,130 @@ TEST_F(BoundedRingerTest, ACallPastTheCapIsBusyAndRingsNobody) {
     EXPECT_TRUE(ringer_.full());
     const auto refused = ringer_.ticketed(room_id(kOtherRoom), user("alice"), kPair);
     ASSERT_FALSE(refused);
-    EXPECT_EQ(refused.error(), chat::RingRefusal::Busy);
+    EXPECT_EQ(refused.error().why, chat::RingRefusal::Why::Busy);
     EXPECT_TRUE(plane_.take().empty());
     EXPECT_EQ(ringer_.counters().busy, 1U);
     // The call already ringing is not affected.
     EXPECT_TRUE(ringer_.ticketed(room_id(), user("bob"), std::nullopt).value_or(std::nullopt));
+}
+
+class RateLimitedRingerTest : public RingerTest {
+protected:
+    RateLimitedRingerTest()
+        : RingerTest(chat::RingLimits{.rings_per_window = 2, .ring_window = core::Millis{60'000}}) {
+    }
+};
+
+TEST_F(RateLimitedRingerTest, ARoomRingsAtMostSoOftenAndIsToldWhenItMayAgain) {
+    // A loop of ticket and cancel, two seconds a round.
+    const CallId first = ring();
+    ASSERT_TRUE(ringer_.signal(room_id(), user("alice"), CallSignal::Cancel, first));
+    clock_.advance(core::Millis{2'000});
+    const CallId second = ring();
+    ASSERT_TRUE(ringer_.signal(room_id(), user("alice"), CallSignal::Cancel, second));
+    clock_.advance(core::Millis{2'000});
+    plane_.take();
+    const auto refused = ringer_.ticketed(room_id(), user("alice"), kPair);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().why, chat::RingRefusal::Why::Limited);
+    // The first ring leaves the window 60 s after it started.
+    EXPECT_EQ(refused.error().retry_after, core::Millis{56'000});
+    EXPECT_TRUE(plane_.take().empty());
+    // Per room, whoever calls: bob is held to it too; another room is not.
+    EXPECT_EQ(ringer_.ring_limited(room_id(), user("bob")), core::Millis{56'000});
+    EXPECT_TRUE(ringer_.ticketed(room_id(kOtherRoom), user("alice"), kPair).value_or(std::nullopt));
+    EXPECT_EQ(ringer_.counters().limited, 2U);
+    clock_.advance(core::Millis{56'000});
+    ringer_.tick();
+    EXPECT_TRUE(ringer_.ticketed(room_id(), user("alice"), kPair).value_or(std::nullopt));
+}
+
+TEST_F(RingerTest, ADeclinedCallerWaitsBeforeRingingAgainWhileTheCalleeMayCallBack) {
+    const CallId call = ring();
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call));
+    plane_.take();
+    const chat::RingLimits limits;
+    const auto refused = ringer_.ticketed(room_id(), user("alice"), kPair);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().why, chat::RingRefusal::Why::Limited);
+    EXPECT_EQ(refused.error().retry_after, limits.decline_cooldown);
+    EXPECT_TRUE(plane_.take().empty());
+    clock_.advance(limits.decline_cooldown - core::Millis{1});
+    EXPECT_EQ(ringer_.ring_limited(room_id(), user("alice")), core::Millis{1});
+    // Bob calling back is not held by his own decline.
+    EXPECT_FALSE(ringer_.ring_limited(room_id(), user("bob")));
+    clock_.advance(core::Millis{1});
+    EXPECT_FALSE(ringer_.ring_limited(room_id(), user("alice")));
+}
+
+TEST_F(RingerTest, ACalleeAnsweringJustBeforeTheTimeoutIsNotLostToMissed) {
+    const CallId call = ring();
+    plane_.take();
+    const chat::RingLimits limits;
+    clock_.advance(limits.ring_timeout - core::Millis{1});
+    ringer_.tick();
+    plane_.take();
+    // Bob's ticket ask reaches the owner a millisecond before the timeout; the SFU takes its
+    // time issuing it.
+    ringer_.answering(room_id(), user("bob"));
+    clock_.advance(core::Millis{1'000});
+    ringer_.tick();
+    EXPECT_TRUE(plane_.take().empty()) << "rung out while bob's ticket was being issued";
+    EXPECT_EQ(ringer_.counters().graced, 1U);
+    EXPECT_EQ(ringer_.ticketed(room_id(), user("bob"), std::nullopt), call);
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Answered, "alice", "bob"),
+                                          line(RingEvent::Answered, "bob", "bob")}));
+    EXPECT_EQ(ringer_.counters().missed, 0U);
+}
+
+TEST_F(RingerTest, AnAnswerThatNeverComesRingsOutAtTheEndOfTheGraceAndALateOneHoldsNothing) {
+    ring();
+    plane_.take();
+    const chat::RingLimits limits;
+    // The caller, and an ask after the timeout, hold nothing.
+    ringer_.answering(room_id(), user("alice"));
+    clock_.advance(limits.ring_timeout - core::Millis{1});
+    ringer_.answering(room_id(), user("bob"));
+    clock_.advance(core::Millis{1});
+    ringer_.tick();
+    EXPECT_TRUE(plane_.take().empty());
+    clock_.advance(limits.answer_grace - core::Millis{1});
+    ringer_.answering(room_id(), user("bob"));
+    ringer_.tick();
+    EXPECT_TRUE(plane_.take().empty());
+    clock_.advance(core::Millis{1});
+    ringer_.tick();
+    EXPECT_EQ(plane_.take(),
+              (std::vector{line(RingEvent::Missed, "alice"), line(RingEvent::Missed, "bob")}));
+    // Nothing to answer once rung out.
+    ringer_.answering(room_id(), user("bob"));
+    EXPECT_TRUE(ringer_.idle(room_id()));
+}
+
+TEST_F(RingerTest, AnswerAskedAfterTheTimeoutDoesNotHoldTheRing) {
+    ring();
+    plane_.take();
+    const chat::RingLimits limits;
+    clock_.advance(limits.ring_timeout);
+    ringer_.answering(room_id(), user("bob"));
+    ringer_.tick();
+    EXPECT_EQ(plane_.take().size(), 2U);
+    EXPECT_EQ(ringer_.counters().graced, 0U);
+}
+
+class HistoryBoundedRingerTest : public RingerTest {
+protected:
+    HistoryBoundedRingerTest() : RingerTest(chat::RingLimits{.max_histories = 1}) {}
+};
+
+TEST_F(HistoryBoundedRingerTest, ARoomPastTheRememberedRoomsIsBusyUntilAnOldOneIsForgotten) {
+    const CallId call = ring();
+    ASSERT_TRUE(ringer_.signal(room_id(), user("alice"), CallSignal::Cancel, call));
+    const auto refused = ringer_.ticketed(room_id(kOtherRoom), user("alice"), kPair);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().why, chat::RingRefusal::Why::Busy);
+    clock_.advance(chat::RingLimits{}.ring_window);
+    EXPECT_TRUE(ringer_.ticketed(room_id(kOtherRoom), user("alice"), kPair).value_or(std::nullopt));
 }
 
 TEST(CallNoticeCodec, ANoticeComesBackAsItWasSentAndAnythingElseIsRefused) {

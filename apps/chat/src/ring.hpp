@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <expected>
 #include <optional>
 #include <set>
@@ -83,6 +84,21 @@ struct RingLimits {
     // Calls ringing or answered at once on this node, as the owner of their rooms: about 300
     // bytes each, 1.2 MiB in all. A ticket that would start another is answered busy.
     std::size_t max_calls = 4'096;
+    // Rings a room may start within ring_window: a ticket that would start one more is answered
+    // ring_limited, with when to try again. A person calls, gives up, calls again a few times;
+    // a loop of ticket and cancel would otherwise ring the other member every second or two.
+    std::uint32_t rings_per_window = 5;
+    core::Millis ring_window{60'000};
+    // After a callee declines, the caller may not ring the room again for this long (the
+    // callee may call back at once): a decline is not answered by ringing again straight away.
+    core::Millis decline_cooldown{30'000};
+    // A callee's ticket asked before the ring timeout keeps the call ringing this much longer,
+    // for the SFU to issue it: an answer just before expires_at is not lost to call_missed. The
+    // SFU's open and join take up to 5 s each.
+    core::Millis answer_grace{10'000};
+    // Rooms whose recent rings are remembered for the two limits above: about 100 bytes each,
+    // 1.6 MiB in all. Past it, a ring that would need another is answered busy.
+    std::size_t max_histories = 16'384;
 };
 
 struct RingCounters {
@@ -92,8 +108,12 @@ struct RingCounters {
     std::uint64_t cancelled = 0;
     std::uint64_t missed = 0;
     std::uint64_t ended = 0;
-    // Tickets refused because max_calls were ringing or answered.
+    // Tickets refused because max_calls were ringing or answered, or max_histories remembered.
     std::uint64_t busy = 0;
+    // Tickets refused because the room rang too often lately, or its caller was just declined.
+    std::uint64_t limited = 0;
+    // Rings kept past their timeout because a callee's ticket was being issued.
+    std::uint64_t graced = 0;
     // Calls forgotten without a word because this node no longer owns their room: the members'
     // devices stop ringing at expires_at.
     std::uint64_t orphaned = 0;
@@ -109,9 +129,16 @@ enum class CallSignal : std::uint8_t {
     End = 3,
 };
 
-enum class RingRefusal : std::uint8_t {
-    // max_calls are ringing or answered.
-    Busy,
+struct RingRefusal {
+    enum class Why : std::uint8_t {
+        // max_calls are ringing or answered, or max_histories rooms remembered.
+        Busy,
+        // The room rang rings_per_window times within ring_window, or the caller was declined
+        // within decline_cooldown: try again after `retry_after`.
+        Limited,
+    };
+    Why why = Why::Busy;
+    core::Millis retry_after{0};
 };
 
 // The ring state machine of the rooms this node owns. A room has at most one call: ringing
@@ -128,6 +155,13 @@ public:
     [[nodiscard]] bool idle(const core::RoomId& room) const noexcept;
     // No room more can have a call.
     [[nodiscard]] bool full() const noexcept { return calls_.size() >= limits_.max_calls; }
+    // How long until `caller` may start a ring in the room, when not now (the limits beside
+    // RingLimits::rings_per_window); counted as a refusal.
+    [[nodiscard]] std::optional<core::Millis> ring_limited(const core::RoomId& room,
+                                                           const core::UserId& caller) noexcept;
+    // A callee of the room's ringing call asked for a ticket: the call keeps ringing until the
+    // ticket is issued, up to answer_grace past its timeout.
+    void answering(const core::RoomId& room, const core::UserId& user) noexcept;
 
     // `user` was issued a ticket for the room's call. `members` is the room's member list when
     // the ask found the room idle, and nullopt otherwise. Answers the call the ticket belongs
@@ -161,11 +195,24 @@ private:
         core::WallTime expires_at;
         core::MonoTime next_announce;
         core::MonoTime hold_until;
+        // Until when a callee's ticket is being issued; rung out no earlier.
+        core::MonoTime answering_until;
         // Its entry in due_.
         core::MonoTime due;
     };
     using Calls = std::unordered_map<core::RoomId, Call>;
+    // A room's recent rings, for RingLimits::rings_per_window and decline_cooldown.
+    struct History {
+        // When its latest rings started, oldest first; at most rings_per_window.
+        std::deque<core::MonoTime> starts;
+        std::optional<core::UserId> declined;
+        core::MonoTime declined_until;
+    };
 
+    // Makes room for one more history, forgetting those no limit needs any more; false when
+    // there is none.
+    [[nodiscard]] bool remember(const core::RoomId& room);
+    void prune(core::MonoTime now) noexcept;
     void start(const core::RoomId& room, const core::UserId& caller,
                std::vector<core::UserId> callees, const CallId& id);
     void schedule(const core::RoomId& room, Call& call, core::MonoTime due);
@@ -184,6 +231,8 @@ private:
     // When each call has something due: its ring timeout or next announcement while ringing,
     // the end of its hold once answered.
     std::set<std::pair<core::MonoTime, core::RoomId>> due_;
+    std::unordered_map<core::RoomId, History> histories_;
+    core::MonoTime next_prune_;
 };
 
 } // namespace chat

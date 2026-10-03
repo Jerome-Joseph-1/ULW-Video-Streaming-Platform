@@ -601,6 +601,7 @@ void ChatService::moved(ClientId id, const CallMove& move,
             write_call_error(out, "busy", move.room, std::nullopt);
             break;
         case CallOutcome::Ticket:
+        case CallOutcome::RingLimited:
         case CallOutcome::Unavailable:
         case CallOutcome::Failed:
             write_call_error(out, "unavailable", move.room, kCallRetry);
@@ -660,6 +661,9 @@ void ChatService::called(ClientId id, const core::RoomId& room,
             break;
         case CallOutcome::Busy:
             write_call_error(out, "busy", room, std::nullopt);
+            break;
+        case CallOutcome::RingLimited:
+            write_call_error(out, "ring_limited", room, answer->retry_after.value_or(kCallRetry));
             break;
         // A signal's outcomes; no ticket is answered with them.
         case CallOutcome::NoCall:

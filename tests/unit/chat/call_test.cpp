@@ -607,6 +607,62 @@ TEST_F(CallHandlerTest, SignalsWithoutAnSfuAreDisabledAsTicketsAre) {
     EXPECT_EQ(outcomes(), std::vector{CallOutcome::Disabled});
 }
 
+TEST_F(CallHandlerTest, ATicketThatWouldRingTooSoonIsRefusedBeforeTheSfuWithWhenToRetry) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    move("bob", chat::CallSignal::Decline, call);
+    // Alice rings again at once: held by bob's decline, without a list read or an SFU call.
+    const int lists = store_.lists;
+    ask("alice");
+    ASSERT_EQ(answers_.size(), 3U);
+    EXPECT_EQ(answers_[2].outcome, CallOutcome::RingLimited);
+    EXPECT_EQ(answers_[2].retry_after, chat::RingLimits{}.decline_cooldown);
+    EXPECT_EQ(store_.lists, lists);
+    EXPECT_TRUE(sfu_.joins.empty());
+    EXPECT_EQ(handler_->ring_counters().limited, 1U);
+    // Bob may call back.
+    ask("bob", kOtherDevice);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_TRUE(answers_.back().call);
+}
+
+TEST_F(CallHandlerTest, ARingLimitReachedWhileTheTicketWasIssuedIsRefusedThen) {
+    handler_ = make(chat::CallLimits{.ring = chat::RingLimits{.rings_per_window = 1}});
+    // Two asks of an idle room at once: both pass the check; the second ticket would ring again.
+    ask("alice");
+    ask("alice", kOtherDevice);
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    move("alice", chat::CallSignal::Cancel, call);
+    sfu_.issue();
+    ASSERT_EQ(answers_.size(), 3U);
+    EXPECT_EQ(answers_[2].outcome, CallOutcome::RingLimited);
+    EXPECT_EQ(answers_[2].retry_after, chat::RingLimits{}.ring_window);
+}
+
+TEST_F(CallHandlerTest, ACalleesTicketAskedJustBeforeTheTimeoutAnswersOnceTheSfuIssuesIt) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    plane_.sent.clear();
+    clock_.advance(chat::RingLimits{}.ring_timeout - core::Millis{1});
+    handler_->sweep();
+    plane_.sent.clear();
+    ask("bob", kOtherDevice);
+    // The SFU is slow; the timeout passes meanwhile.
+    clock_.advance(core::Millis{3'000});
+    handler_->sweep();
+    EXPECT_TRUE(plane_.sent.empty());
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(plane_.events(), std::vector(2, chat::RingEvent::Answered));
+    EXPECT_EQ(handler_->ring_counters().missed, 0U);
+}
+
 class RingBoundedCallHandlerTest : public CallHandlerTest {
 protected:
     RingBoundedCallHandlerTest()
@@ -727,7 +783,7 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     trailing.push_back(std::byte{0});
     EXPECT_FALSE(chat::decode_answer(trailing));
     auto unknown = chat::encode_answer({.outcome = CallOutcome::Busy, .ticket = std::nullopt});
-    unknown[1] = std::byte{9};
+    unknown[1] = std::byte{10};
     EXPECT_FALSE(chat::decode_answer(unknown));
 
     // A ticket names its call; a signal done names the call's caller.
@@ -747,6 +803,31 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     EXPECT_FALSE(chat::decode_answer(truncated));
     EXPECT_FALSE(chat::decode_answer(
         chat::encode_answer({.outcome = CallOutcome::Done, .ticket = std::nullopt})));
+
+    // A refused ring says when to ask again.
+    const auto limited =
+        chat::decode_answer(chat::encode_answer({.outcome = CallOutcome::RingLimited,
+                                                 .ticket = std::nullopt,
+                                                 .retry_after = core::Millis{29'500}}));
+    ASSERT_TRUE(limited);
+    EXPECT_EQ(limited->retry_after, core::Millis{29'500});
+    auto cut = chat::encode_answer({.outcome = CallOutcome::RingLimited,
+                                    .ticket = std::nullopt,
+                                    .retry_after = core::Millis{1}});
+    cut.pop_back();
+    EXPECT_FALSE(chat::decode_answer(cut));
+
+    // Layout 1, #132's, is another node's: neither its asks nor its answers are read.
+    auto old_ask = chat::encode_request(request);
+    old_ask[0] = std::byte{1};
+    EXPECT_FALSE(chat::decode_request(old_ask));
+    auto old_answer = chat::encode_answer(rung);
+    old_answer[0] = std::byte{1};
+    EXPECT_FALSE(chat::decode_answer(old_answer));
+    auto old_refusal =
+        chat::encode_answer({.outcome = CallOutcome::NotMember, .ticket = std::nullopt});
+    old_refusal[0] = std::byte{1};
+    EXPECT_FALSE(chat::decode_answer(old_refusal));
 }
 
 } // namespace

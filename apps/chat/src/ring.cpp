@@ -78,7 +78,65 @@ std::optional<CallNotice> decode_notice(std::span<const std::byte> bytes) {
 
 Ringer::Ringer(IRingPlane& plane, const core::ports::IClock& clock, core::ports::IRandom& random,
                RingLimits limits)
-    : plane_(plane), clock_(clock), random_(random), limits_(limits) {}
+    : plane_(plane), clock_(clock), random_(random), limits_(limits), next_prune_(clock.now()) {}
+
+std::optional<core::Millis> Ringer::ring_limited(const core::RoomId& room,
+                                                 const core::UserId& caller) noexcept {
+    const auto it = histories_.find(room);
+    if (it == histories_.end()) {
+        return std::nullopt;
+    }
+    const History& h = it->second;
+    const core::MonoTime now = clock_.now();
+    core::Millis wait{0};
+    if (h.declined == caller && now < h.declined_until) {
+        wait = std::chrono::ceil<core::Millis>(h.declined_until - now);
+    }
+    // The oldest of the last rings_per_window starts frees a place when it leaves the window.
+    if (limits_.rings_per_window > 0 && h.starts.size() >= limits_.rings_per_window) {
+        const core::MonoTime frees = h.starts.front() + limits_.ring_window;
+        if (now < frees) {
+            wait = std::max(wait, std::chrono::ceil<core::Millis>(frees - now));
+        }
+    }
+    if (wait <= core::Millis{0}) {
+        return std::nullopt;
+    }
+    ++counters_.limited;
+    return wait;
+}
+
+void Ringer::answering(const core::RoomId& room, const core::UserId& user) noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end()) {
+        return;
+    }
+    Call& call = it->second;
+    const core::MonoTime now = clock_.now();
+    // Only an answer asked while the call still rings holds it; a late one cannot extend it.
+    if (call.answered || now >= call.ring_deadline ||
+        std::ranges::find(call.callees, user) == call.callees.end()) {
+        return;
+    }
+    call.answering_until =
+        std::max(call.answering_until, call.ring_deadline + limits_.answer_grace);
+}
+
+bool Ringer::remember(const core::RoomId& room) {
+    if (histories_.contains(room) || histories_.size() < limits_.max_histories) {
+        return true;
+    }
+    prune(clock_.now());
+    return histories_.size() < limits_.max_histories;
+}
+
+void Ringer::prune(core::MonoTime now) noexcept {
+    std::erase_if(histories_, [&](const auto& entry) {
+        const History& h = entry.second;
+        const bool rang_lately = !h.starts.empty() && now < h.starts.back() + limits_.ring_window;
+        return !rang_lately && now >= h.declined_until && !calls_.contains(entry.first);
+    });
+}
 
 bool Ringer::idle(const core::RoomId& room) const noexcept {
     return !calls_.contains(room);
@@ -122,16 +180,20 @@ Ringer::ticketed(const core::RoomId& room, const core::UserId& user,
         if (callees.empty()) {
             return std::nullopt;
         }
-        if (full()) {
+        if (const auto wait = ring_limited(room, user)) {
+            return std::unexpected(
+                RingRefusal{.why = RingRefusal::Why::Limited, .retry_after = *wait});
+        }
+        if (full() || !remember(room)) {
             ++counters_.busy;
-            return std::unexpected(RingRefusal::Busy);
+            return std::unexpected(RingRefusal{.why = RingRefusal::Why::Busy});
         }
         const CallId id = CallId::generate(clock_, random_);
         start(room, user, std::move(callees), id);
         return id;
     } catch (const std::bad_alloc&) {
         ++counters_.allocation_failures;
-        return std::unexpected(RingRefusal::Busy);
+        return std::unexpected(RingRefusal{.why = RingRefusal::Why::Busy});
     }
 }
 
@@ -147,13 +209,19 @@ void Ringer::start(const core::RoomId& room, const core::UserId& caller,
                                              .expires_at = clock_.wall_now() + limits_.ring_timeout,
                                              .next_announce = now + limits_.announce_every,
                                              .hold_until = now,
+                                             .answering_until = now,
                                              .due = now})
                      .first->second;
     try {
         schedule(room, call, std::min(call.ring_deadline, call.next_announce));
+        std::deque<core::MonoTime>& starts = histories_[room].starts;
+        starts.push_back(now);
+        while (starts.size() > std::max<std::size_t>(limits_.rings_per_window, 1)) {
+            starts.pop_front();
+        }
     } catch (const std::bad_alloc&) {
         // A call nothing would ever ring out is not kept.
-        calls_.erase(room);
+        forget(calls_.find(room));
         throw;
     }
     ++counters_.started;
@@ -190,6 +258,11 @@ std::optional<core::UserId> Ringer::signal(const core::RoomId& room, const core:
         }
         event = RingEvent::Declined;
         ++counters_.declined;
+        // remember() made the room's history when its ring started.
+        if (const auto h = histories_.find(room); h != histories_.end()) {
+            h->second.declined = c.caller;
+            h->second.declined_until = clock_.now() + limits_.decline_cooldown;
+        }
         break;
     case CallSignal::Cancel:
         if (c.answered || c.caller != user) {
@@ -214,6 +287,11 @@ std::optional<core::UserId> Ringer::signal(const core::RoomId& room, const core:
 
 void Ringer::tick() noexcept {
     const core::MonoTime now = clock_.now();
+    // The histories are looked at once a second: the limits are seconds long.
+    if (now >= next_prune_) {
+        next_prune_ = now + core::Millis{1'000};
+        prune(now);
+    }
     while (!due_.empty() && due_.begin()->first <= now) {
         const core::RoomId room = due_.begin()->second;
         const auto it = calls_.find(room);
@@ -232,6 +310,16 @@ void Ringer::tick() noexcept {
         if (call.answered) {
             forget(it);
             continue;
+        }
+        if (now >= call.ring_deadline && now < call.answering_until) {
+            // A callee's ticket is on its way: rung out only if it never comes.
+            ++counters_.graced;
+            try {
+                schedule(room, call, call.answering_until);
+                continue;
+            } catch (const std::bad_alloc&) {
+                ++counters_.allocation_failures;
+            }
         }
         if (now >= call.ring_deadline) {
             ++counters_.missed;

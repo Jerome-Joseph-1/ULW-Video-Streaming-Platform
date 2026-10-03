@@ -57,6 +57,9 @@ enum class CallOutcome : std::uint8_t {
     NoCall = 7,
     // A signal did what it asked.
     Done = 8,
+    // The ticket would start a ring the room may not start yet (RingLimits::rings_per_window,
+    // decline_cooldown); retry_after says when it may.
+    RingLimited = 9,
 };
 
 // A ticket for this device.
@@ -83,6 +86,8 @@ struct CallAnswer {
     std::optional<CallId> call = std::nullopt;
     // With Done: the call's caller, which the asker's own event names.
     std::optional<core::UserId> caller = std::nullopt;
+    // With RingLimited: when to ask again.
+    std::optional<core::Millis> retry_after = std::nullopt;
 };
 
 // The asks travel between nodes as opaque bytes (rt::RoomRouter::ask_owner); these are their

@@ -369,6 +369,7 @@ std::string ChatServer::render_metrics() const {
         "call_errors_total{{source=\"sfu\",kind=\"refused\"}} {}\n"
         "call_errors_total{{source=\"store\",kind=\"unavailable\"}} {}\n"
         "call_refusals_total{{reason=\"no_call\"}} {}\n"
+        "call_refusals_total{{reason=\"ring_limited\"}} {}\n"
         "calls_ringing_or_answered {}\n"
         "call_rings_total{{outcome=\"started\"}} {}\n"
         "call_rings_total{{outcome=\"answered\"}} {}\n"
@@ -378,6 +379,7 @@ std::string ChatServer::render_metrics() const {
         "call_rings_total{{outcome=\"ended\"}} {}\n"
         "call_rings_total{{outcome=\"orphaned\"}} {}\n"
         "call_rings_total{{outcome=\"busy\"}} {}\n"
+        "call_rings_total{{outcome=\"graced\"}} {}\n"
         "call_notices_sent_total {}\n"
         "call_events_pushed_total {}\n"
         "call_notices_unheard_total {}\n"
@@ -403,10 +405,10 @@ std::string ChatServer::render_metrics() const {
         c.auth_cache_drops, deps_.verifier.drop_pending() ? 1 : 0, chat.unrecorded_joins,
         calls_.enabled() ? 1 : 0, call.tickets, call.not_member, call.not_callable, call.busy,
         call.opens, calls_.rooms(), call.sfu_unavailable, call.sfu_refused, call.store_unavailable,
-        call.no_call, calls_.calls(), ring.started, ring.answered, ring.declined, ring.cancelled,
-        ring.missed, ring.ended, ring.orphaned, ring.busy, ring.notices, bell.pushed, bell.unheard,
-        bell.malformed, router.notices_forwarded, router.notices_fanned_out, router.notices_heard,
-        router.notices_dropped);
+        call.no_call, ring.limited, calls_.calls(), ring.started, ring.answered, ring.declined,
+        ring.cancelled, ring.missed, ring.ended, ring.orphaned, ring.busy, ring.graced,
+        ring.notices, bell.pushed, bell.unheard, bell.malformed, router.notices_forwarded,
+        router.notices_fanned_out, router.notices_heard, router.notices_dropped);
 }
 
 } // namespace chat

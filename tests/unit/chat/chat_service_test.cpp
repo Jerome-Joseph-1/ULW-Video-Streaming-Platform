@@ -1685,6 +1685,10 @@ TEST_F(ChatServiceTest, ACallTheOwnerRefusesOrCannotAnswerIsAnErrorWithARetryHin
             {answer(chat::CallOutcome::Failed), "call_failed"},
             {answer(chat::CallOutcome::Disabled), "calls_disabled"},
             {answer(chat::CallOutcome::Busy), "busy"},
+            {chat::encode_answer({.outcome = chat::CallOutcome::RingLimited,
+                                  .ticket = std::nullopt,
+                                  .retry_after = core::Millis{2'000}}),
+             "ring_limited"},
             {std::unexpected(RouteError::Unavailable), "unavailable"},
             {std::unexpected(RouteError::Busy), "busy"},
             {std::vector<std::byte>{std::byte{9}}, "unavailable"},
@@ -1699,7 +1703,8 @@ TEST_F(ChatServiceTest, ACallTheOwnerRefusesOrCannotAnswerIsAnErrorWithARetryHin
         EXPECT_EQ(s.type, "error");
         EXPECT_EQ(s.reason, reason);
         // Only what a retry may cure says when to retry.
-        EXPECT_EQ(s.retry_after_ms.has_value(), reason == "unavailable") << reason;
+        EXPECT_EQ(s.retry_after_ms.has_value(), reason == "unavailable" || reason == "ring_limited")
+            << reason;
     }
 }
 
