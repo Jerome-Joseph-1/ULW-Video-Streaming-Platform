@@ -339,6 +339,37 @@ std::size_t Gateway::held_bytes() noexcept {
     return bytes;
 }
 
+namespace {
+
+void render_live_metrics(ops::Exposition& e, const LiveStreams& live) {
+    using ops::MetricType;
+    const LiveCounters& l = live.counters();
+    e.counter("live_streams_created_total", "Live streams started for their owners.", l.created);
+    e.counter("live_tickets_issued_total", "Publisher tickets handed to stream owners.", l.tickets);
+    e.counter("live_streams_went_live_total",
+              "Live streams whose publisher was first relayed to their packager.", l.went_live);
+    e.family("live_streams_ended_total", "Live streams ended, by why.", MetricType::Counter);
+    for (const core::ports::LiveEnd reason :
+         {core::ports::LiveEnd::Owner, core::ports::LiveEnd::Finished, core::ports::LiveEnd::Failed,
+          core::ports::LiveEnd::Timeout}) {
+        e.sample("live_streams_ended_total",
+                 {{.name = "reason", .value = core::ports::to_string(reason)}},
+                 l.ended.at(static_cast<std::size_t>(reason)));
+    }
+    e.family("live_dependency_failures_total",
+             "Stream service calls a dependency failed or refused, by dependency.",
+             MetricType::Counter);
+    e.sample("live_dependency_failures_total", {{.name = "dependency", .value = "database"}},
+             l.store_failures);
+    e.sample("live_dependency_failures_total", {{.name = "dependency", .value = "media"}},
+             l.media_failures);
+    e.sample("live_dependency_failures_total", {{.name = "dependency", .value = "packager"}},
+             l.packager_failures);
+    e.counter("live_sweeps_total", "Looks at the unfinished live streams.", l.sweeps);
+}
+
+} // namespace
+
 std::string Gateway::render_metrics() {
     const Counters& c = counters_;
     const ViewCounters& v = views_.counters();
@@ -458,6 +489,9 @@ std::string Gateway::render_metrics() {
               lc.evictions);
     e.gauge("live_playlist_cache_entries", "Live playlists held.", live_.entries());
     e.gauge("live_playlist_cache_bytes", "Bytes of live playlists held.", live_.bytes());
+    if (deps_.live_streams != nullptr) {
+        render_live_metrics(e, *deps_.live_streams);
+    }
     e.counter("playlists_rejected_total", "Stored playlists that broke a rewriting rule.",
               c.playlists_rejected);
     e.counter("presign_failures_total", "Segment URLs the store could not sign.",

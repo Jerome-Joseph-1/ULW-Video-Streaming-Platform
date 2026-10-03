@@ -18,12 +18,17 @@ enum class RouteId : std::uint8_t {
     MasterPlaylist,
     MediaPlaylist,
     LivePlaylist,
+    CreateStream,
+    StreamStatus,
+    StreamTicket,
+    StartStream,
+    EndStream,
     Healthz,
     Readyz,
     Metrics,
 };
 
-inline constexpr std::array<http::Route<RouteId>, 14> kRoutes{{
+inline constexpr std::array<http::Route<RouteId>, 19> kRoutes{{
     {.method = http::Method::Post, .pattern = "/api/v1/uploads", .id = RouteId::CreateUpload},
     {.method = http::Method::Patch, .pattern = "/api/v1/uploads/{id}", .id = RouteId::AppendChunk},
     {.method = http::Method::Head, .pattern = "/api/v1/uploads/{id}", .id = RouteId::UploadOffset},
@@ -43,6 +48,16 @@ inline constexpr std::array<http::Route<RouteId>, 14> kRoutes{{
     {.method = http::Method::Get,
      .pattern = "/api/v1/live/{id}/index.m3u8",
      .id = RouteId::LivePlaylist},
+    // The stream service (ADR-0091).
+    {.method = http::Method::Post, .pattern = "/api/v1/live", .id = RouteId::CreateStream},
+    {.method = http::Method::Get, .pattern = "/api/v1/live/{id}", .id = RouteId::StreamStatus},
+    {.method = http::Method::Post,
+     .pattern = "/api/v1/live/{id}/ticket",
+     .id = RouteId::StreamTicket},
+    {.method = http::Method::Post,
+     .pattern = "/api/v1/live/{id}/start",
+     .id = RouteId::StartStream},
+    {.method = http::Method::Post, .pattern = "/api/v1/live/{id}/end", .id = RouteId::EndStream},
     {.method = http::Method::Get, .pattern = "/api/v1/healthz", .id = RouteId::Healthz},
     {.method = http::Method::Get, .pattern = "/api/v1/readyz", .id = RouteId::Readyz},
     // The names a kubelet or a load balancer probes by default, outside the API prefix.
@@ -74,6 +89,16 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "media_playlist";
     case RouteId::LivePlaylist:
         return "live_playlist";
+    case RouteId::CreateStream:
+        return "create_stream";
+    case RouteId::StreamStatus:
+        return "stream_status";
+    case RouteId::StreamTicket:
+        return "stream_ticket";
+    case RouteId::StartStream:
+        return "start_stream";
+    case RouteId::EndStream:
+        return "end_stream";
     case RouteId::Healthz:
         return "healthz";
     case RouteId::Readyz:
@@ -99,6 +124,11 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
     case RouteId::LivePlaylist:
+    case RouteId::CreateStream:
+    case RouteId::StreamStatus:
+    case RouteId::StreamTicket:
+    case RouteId::StartStream:
+    case RouteId::EndStream:
         return true;
     }
     return true;

@@ -16,6 +16,7 @@
 #include "bounded_table.hpp"
 #include "health.hpp"
 #include "live_manifest_cache.hpp"
+#include "live_streams.hpp"
 #include "ops/log.hpp"
 #include "ops/metrics.hpp"
 #include "rate_limit.hpp"
@@ -51,6 +52,9 @@ struct Deps {
     ops::Logger& log;
     // Written by the health probe's thread; only read here.
     const Health& health;
+    // The stream service (ADR-0091); none where live publishing is not configured, and its
+    // routes then answer 404.
+    LiveStreams* live_streams = nullptr;
 };
 
 struct Limits {

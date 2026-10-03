@@ -1,8 +1,12 @@
 #include "core/version.hpp"
 #include "infra/auth/local_verifier.hpp"
+#include "infra/packagers/kubernetes_packagers.hpp"
+#include "infra/packagers/process_packagers.hpp"
 #include "infra/postgres/health_check.hpp"
+#include "infra/postgres/live_streams.hpp"
 #include "infra/postgres/upload_catalog.hpp"
 #include "infra/s3util/credentials.hpp"
+#include "infra/sfu/livekit/livekit_sfu.hpp"
 #include "infra/storage/fs_store.hpp"
 #include "infra/storage/s3_store.hpp"
 #include "net/offload_pool.hpp"
@@ -123,6 +127,14 @@ struct Services {
     std::unique_ptr<infra::postgres::PgUploadCatalog> catalog;
     std::unique_ptr<gateway::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
+    // The stream service and what it drives, when live publishing is configured (ADR-0091).
+    // LiveKit and the Kubernetes API get a multi of their own, as key fetches do, so that no
+    // upload holding the store's connections delays a ticket.
+    std::unique_ptr<infra::curl::Multi> live_multi;
+    std::unique_ptr<core::ports::ISfu> sfu;
+    std::unique_ptr<core::ports::IPackagers> packagers;
+    std::unique_ptr<infra::postgres::PgLiveStreams> live_store;
+    std::unique_ptr<gateway::LiveStreams> live;
     std::unique_ptr<gateway::Gateway> gateway;
     std::unique_ptr<net::SignalWatcher> signals;
     std::unique_ptr<infra::postgres::PgHealthCheck> database_check;
@@ -236,6 +248,66 @@ std::expected<void, std::string> make_verifier(const gateway::Config& config, Se
     return {};
 }
 
+std::expected<void, std::string> make_live(const gateway::Config& config, Services& s) {
+    const gateway::LiveConfig& live = config.live;
+    if (!live.enabled) {
+        return {};
+    }
+    auto multi = infra::curl::Multi::create(*s.reactor);
+    if (!multi) {
+        return std::unexpected("libcurl multi for the stream service failed to start");
+    }
+    s.live_multi = std::move(*multi);
+    auto sfu = infra::sfu::livekit::make_sfu(
+        *s.reactor, *s.live_multi, s.clock,
+        infra::sfu::livekit::Config{.api_url = live.livekit_api_url,
+                                    .client_url = live.livekit_client_url,
+                                    .api_key = live.livekit_api_key,
+                                    .api_secret = live.livekit_api_secret,
+                                    .packager_srt = live.packager_srt});
+    if (!sfu) {
+        return std::unexpected(std::string(infra::sfu::livekit::to_string(sfu.error())));
+    }
+    s.sfu = std::move(*sfu);
+    if (live.runtime == gateway::PackagerRuntime::Process) {
+        auto packagers = infra::packagers::ProcessPackagers::create(
+            *s.reactor, {.binary = live.packager_binary, .environment = live.packager_environment});
+        if (!packagers) {
+            return std::unexpected(std::move(packagers.error()));
+        }
+        s.packagers = std::move(*packagers);
+    } else {
+        auto packagers = infra::packagers::KubernetesPackagers::create(
+            *s.reactor, *s.live_multi, *s.pool, s.clock,
+            {.api_url = live.k8s_api_url,
+             .namespace_name = live.k8s_namespace,
+             .token_file = live.k8s_token_file,
+             .ca_file = live.k8s_ca_file,
+             .job_template = live.job_template,
+             .image_tag = live.image_tag});
+        if (!packagers) {
+            return std::unexpected(std::move(packagers.error()));
+        }
+        s.packagers = std::move(*packagers);
+    }
+    auto store = infra::postgres::PgLiveStreams::create(
+        *s.reactor, *s.pool, infra::postgres::LiveStreamsConfig{.conninfo = config.database_url});
+    if (!store) {
+        return std::unexpected(std::move(store.error()));
+    }
+    s.live_store = std::move(*store);
+    s.live = std::make_unique<gateway::LiveStreams>(gateway::LiveDeps{.reactor = *s.reactor,
+                                                                      .store = *s.live_store,
+                                                                      .sfu = *s.sfu,
+                                                                      .packagers = *s.packagers,
+                                                                      .clock = s.clock,
+                                                                      .random = s.random,
+                                                                      .log = s.log},
+                                                    live.settings);
+    s.live->start_sweeping();
+    return {};
+}
+
 // A key nothing ever writes: NotFound proves the store answers, and costs one GET.
 constexpr std::string_view kProbeKey = "health/probe";
 
@@ -291,6 +363,9 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
     if (auto r = make_verifier(config, s); !r) {
         return fail(log, "auth", r.error());
     }
+    if (auto r = make_live(config, s); !r) {
+        return fail(log, "live", r.error());
+    }
 
     s.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *s.reactor,
                                                                  .transports = *s.transports,
@@ -303,7 +378,8 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
                                                                  .clock = s.clock,
                                                                  .random = s.random,
                                                                  .log = log,
-                                                                 .health = s.health},
+                                                                 .health = s.health,
+                                                                 .live_streams = s.live.get()},
                                                    config.limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.gateway);
     if (!signals) {
