@@ -263,6 +263,24 @@ TEST(Json, RejectsAStrayCharacterWhereAContainerCouldEnd) {
     }
 }
 
+// Plain ASCII is taken a run at a time: each run ends at the first byte that is not, which is
+// read as it would be on its own.
+TEST(Json, ARunOfPlainAsciiEndsAtWhateverIsNot) {
+    EXPECT_EQ(parse("\"ab\xc3\xa9"
+                    "cd\\u0041ef\\\"gh\"")
+                  ->as_string(),
+              "ab\xc3\xa9"
+              "cdAef\"gh");
+    EXPECT_EQ(parse("\" ~\x7f\"")->as_string(), " ~\x7f");
+    for (const std::string_view s : {"\"ab\x01"
+                                     "cd\"",
+                                     "\"ab\x80"
+                                     "cd\"",
+                                     "\"ab\xc3\x28\"", "\"ab"}) {
+        EXPECT_FALSE(parse(s)) << s;
+    }
+}
+
 TEST(Json, RejectsBytesNoUtf8SequenceStartsWithOrContinuesWith) {
     for (const std::string_view s :
          {"\"\x80\"", "\"\xbf\"", "\"\xc1\xbf\"", "\"\xf5\x80\x80\x80\"", "\"\xff\"",
