@@ -9,8 +9,8 @@ Uploads go through Envoy's HTTPRoute with tokens minted by the mock auth-service
 tests/load/upload_load.py, each holding one connection open and sending a real MP4 the worker
 transcodes; how many videos reached ready is reported, not required. While they run, `kubectl top pods --containers` is sampled every 10 s
 for the video-gateway and video-worker pods. The run fails if any sample exceeds a container's
-CPU or memory limit as the applied Deployment declares it (the stage overlay, which is what
-deploy/askedin/overlays ships), if a container restarted or was OOM-killed (a killed pod has no
+CPU or memory limit as the applied Deployment declares it (deploy/kubernetes/base, which the
+sandbox runs), if a container restarted or was OOM-killed (a killed pod has no
 sample to show it), or if fewer uploads were in flight at the peak than the gateway admits.
 Writes report.json and samples.csv to --out.
 

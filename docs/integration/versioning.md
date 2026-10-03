@@ -23,13 +23,13 @@
 | Upload endpoints ([uploads.md](uploads.md)) | Stable under `/api/v1` |
 | Video and playback endpoints ([videos-and-playback.md](videos-and-playback.md)) | Stable under `/api/v1` |
 | Auth ([auth.md](auth.md)) | Stable |
-| Probes and metrics ([operations-contract.md](operations-contract.md)) | Stable paths; metric set may grow |
+| Probes and metrics ([operator-contract.md](operator-contract.md)) | Stable paths; metric set may grow |
 | Chat, calls, live, E2EE | Draft until the milestone named at the top of each page merges |
 
 ## Proposal: compatibility policy
 
-*This is a proposal. Nothing in the code enforces it yet; it becomes policy once Askedin's
-teams agree to it.*
+*This is a proposal. Nothing in the code enforces it yet; it becomes policy once the
+project's maintainers and the teams integrating it agree to it.*
 
 1. **Additive changes need no new version.** Within `/api/v1` the service may add endpoints,
    add fields to response objects, add optional request fields, add values to `state` or to
@@ -38,9 +38,9 @@ teams agree to it.*
 2. **Breaking changes get a new path prefix.** Removing or renaming a field, endpoint or header,
    changing a field's type or meaning, tightening validation of input that was accepted, or
    changing a status code a client acts on, ships as `/api/v2/...`. `/api/v1` keeps working
-   beside it for at least 90 days after `v2` is live in prod.
-3. **Announcement.** A breaking change is announced to Askedin's app and backend teams at least
-   30 days before `v2` reaches prod, with a changelog entry in this directory listing every
+   beside it for at least 90 days after `v2` ships in a release.
+3. **Announcement.** A breaking change is announced to the teams integrating it at least 30
+   days before `v2` ships in a release, with a changelog entry in this directory listing every
    difference and the date `v1` goes away. Security fixes may shorten this; they are announced
    as soon as they ship, in [changelog.md](changelog.md).
 4. **Chat envelope.** From M17 on, the envelope is versioned by the WebSocket path: `/rt` is

@@ -28,12 +28,13 @@ constexpr std::string_view kUsage = R"(usage:
       Prints the public JWK set to hand the service's local verifier.
   ulw_devtoken mint <key-file> --iss <issuer> --sub <subject>
                     [--aud <audience>] [--email <email>] [--ttl <seconds>]
-      Prints a token signed with the key. --aud defaults to askedin-platform,
-      --ttl to 3600.
+      Prints a token signed with the key. --aud defaults to ulw-dev, the
+      audience a local key set is checked for unless JWT_AUDIENCE says
+      otherwise; --ttl to 3600.
 )";
 
-// JWT_AUDIENCE's default (ADR-0018).
-constexpr std::string_view kDefaultAudience = "askedin-platform";
+// JWT_AUDIENCE's default with a local key set (ops::kDevAudience; ADR-0088).
+constexpr std::string_view kDefaultAudience = "ulw-dev";
 constexpr std::int64_t kDefaultTtlSeconds = 3600;
 
 constexpr int kUsageError = 2;

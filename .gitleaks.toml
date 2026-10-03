@@ -41,3 +41,13 @@ paths = ['''^deploy/stunner/up\.sh$''']
 description = "crate name in a lockfile"
 targetRules = ["generic-api-key"]
 paths = ['''^infra/e2ee/mls_ffi_bridge/Cargo\.lock$''']
+
+# The setup action's cache-key input names a ccache (gcc-14-ci-live-publish and the like), not a
+# credential; the rule fires on its entropy.
+[[allowlists]]
+description = "ccache names in workflow files"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^\.github/workflows/[a-z0-9-]+\.yml$''']
+regexTarget = "line"
+regexes = ['''^\s*cache-key:\s*[a-z0-9-]+\s*$''']

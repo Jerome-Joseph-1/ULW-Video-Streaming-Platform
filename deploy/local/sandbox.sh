@@ -12,7 +12,7 @@ kubectl() { "$tools/kubectl" --kubeconfig "$kubeconfig" --context "$context" "$@
 # The sandbox's stand-in for the internet: a Docker network the kind network cannot see.
 # kind.yaml publishes the node's WebRTC-facing ports on its gateway address, the host's side of
 # that network, so a client in it reaches the node through the same DNAT a client on the
-# internet goes through to reach k8s-prod, and keeps its own source address the whole way
+# internet goes through to reach a cluster's node, and keeps its own source address the whole way
 # (tests/cluster/stunner_check.py). The network is in Docker's routed mode (Docker 27 or later):
 # in the default NAT mode Docker masquerades the client as the host, and with masquerading
 # merely switched off it still drops every packet addressed to a container that arrives from

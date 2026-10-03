@@ -35,10 +35,12 @@ inline constexpr int kProgramNotFound = 127;
 [[nodiscard]] std::optional<core::ports::TranscodeFailure> classify(int exit_code, int signal,
                                                                     Ending ending) noexcept;
 
-// Whether a line of `stderr_tail` says the program was refused one of `ours` (or a path under
-// one): it names the path and ends with the access error's strerror text, as ffmpeg and
-// ffprobe print a file they cannot open. A path the input itself names (a manifest's) is not
-// ours, so an input cannot pass its own failure off as ours.
+// Whether the last line of `stderr_tail` with anything on it is exactly "<one of ours>: " and an
+// access error's strerror text, as ffprobe prints the input it cannot open, and as nothing else
+// it prints ends. The input cannot pass its own failure off as ours: our paths sit in a
+// workspace named job-<64 random bits> (apps/worker/src/workspace.cpp) that the input cannot
+// know, so a path it names (a manifest's) is never one of ours, and a line it makes ffprobe
+// print about one of its own files neither matches nor, followed by anything, comes last.
 [[nodiscard]] bool refused_our_file(std::string_view stderr_tail,
                                     std::span<const std::filesystem::path> ours) noexcept;
 

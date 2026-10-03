@@ -73,6 +73,39 @@ TEST_F(LoggerTest, EscapingIsCountedWhenCheckingRoom) {
     EXPECT_EQ(doc->find("truncated")->as_bool(), true);
 }
 
+TEST_F(LoggerTest, AFieldThatFitsAsEscapedIsKeptWhateverItsWorstCase) {
+    // 700 plain bytes fit beside the fixed fields; at six bytes each, the escaping's worst
+    // case, they would not. The worker's "step failed" lost its error to that worst case.
+    const std::string detail =
+        "ffprobe exited 1: /" + std::string(660, 'p') + ": Permission denied";
+    log.warn("step failed", {{"job", 1}, {"step", "probe"}, {"error", detail}, {"after", 2}});
+    const auto doc = core::json::parse(sink.lines().at(0));
+    ASSERT_TRUE(doc) << sink.lines().at(0);
+    ASSERT_NE(doc->find("error"), nullptr);
+    EXPECT_EQ(doc->find("error")->as_string(), detail);
+    EXPECT_EQ(doc->find("after")->as_u64(), 2U);
+    EXPECT_EQ(doc->find("truncated"), nullptr);
+}
+
+TEST_F(LoggerTest, AFieldExactlyAtTheRoomLeftFitsAndOneByteMoreDoesNot) {
+    const std::string fixed = R"({"ts":"2026-01-01T01:02:03.045Z","level":"info","svc":"gateway",)"
+                              R"("event":"e")";
+    // The line keeps room for ,"truncated":true} and the newline.
+    const std::size_t reserve = std::string_view(R"(,"truncated":true)").size() + 2;
+    // ,"m":"" is 7 bytes beside the value.
+    const std::size_t room = ops::LineBuilder::kCapacity - fixed.size() - reserve - 7;
+    log.info("e", {{"m", std::string(room, 'a')}});
+    log.info("e", {{"m", std::string(room + 1, 'a')}});
+    const auto fits = core::json::parse(sink.lines().at(0));
+    const auto over = core::json::parse(sink.lines().at(1));
+    ASSERT_TRUE(fits && over);
+    ASSERT_NE(fits->find("m"), nullptr);
+    EXPECT_EQ(fits->find("m")->as_string(), std::string(room, 'a'));
+    EXPECT_EQ(fits->find("truncated"), nullptr);
+    EXPECT_EQ(over->find("m"), nullptr);
+    EXPECT_EQ(over->find("truncated")->as_bool(), true);
+}
+
 TEST(LogLevel, NamesRoundTrip) {
     for (const auto level :
          {ops::Level::Debug, ops::Level::Info, ops::Level::Warn, ops::Level::Error}) {

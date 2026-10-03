@@ -275,6 +275,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!issuer) {
         return error("JWT_ISSUER", "not set");
     }
+    auto rules = ops::token_rules(env, *keys);
+    if (!rules) {
+        return error(rules.error().variable, rules.error().reason);
+    }
     auto allowed = origins(env);
     if (!allowed) {
         return std::unexpected(std::move(allowed.error()));
@@ -306,7 +310,8 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .jwks_max_stale_hours = *max_stale_hours,
                   .dev_jwks_file = std::move(keys->file),
                   .jwt_issuer = std::move(*issuer),
-                  .jwt_audience = lookup(env, "JWT_AUDIENCE").value_or("askedin-platform"),
+                  .jwt_audience = std::move(rules->audience),
+                  .jwt_subject_claim = std::move(rules->subject_claim),
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
                   .allowed_origins = std::move(*allowed),
                   .presence_grace = *grace,

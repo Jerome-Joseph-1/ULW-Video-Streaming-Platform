@@ -11,8 +11,8 @@ NAME = re.compile(r"^(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
 REQUIRED = ("## Context", "## Options", "## Decision", "## Consequences")
 ROUTES = ROOT / "apps" / "gateway" / "src" / "routes.hpp"
 GUIDE = ROOT / "docs" / "integration"
-# Where Askedin's teams look up an endpoint; each route needs a table row, `METHOD /path`, in one.
-ROUTE_PAGES = ("uploads.md", "videos-and-playback.md", "live.md", "operations-contract.md")
+# Where integrators look up an endpoint; each route needs a table row, `METHOD /path`, in one.
+ROUTE_PAGES = ("uploads.md", "videos-and-playback.md", "live.md", "operator-contract.md")
 ROUTE_ENTRY = re.compile(r'\.method\s*=\s*http::Method::(\w+)\s*,\s*\.pattern\s*=\s*"([^"]+)"')
 
 

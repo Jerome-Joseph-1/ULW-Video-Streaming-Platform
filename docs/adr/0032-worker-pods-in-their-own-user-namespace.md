@@ -1,6 +1,6 @@
 # 0032. The worker pod runs in its own user namespace with a derived seccomp profile
 
-Status: Accepted
+Status: Accepted, amended by 0088 (the profile is `deploy/kubernetes/cluster/seccomp/ulw-worker.json`)
 Date: 2026-09-29
 
 ## Context

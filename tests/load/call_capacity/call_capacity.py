@@ -54,7 +54,7 @@ DERIVED_CALL_MBPS = 1.4
 DERIVED_CALLS = 385
 PUBLISH_BPS = 700_000
 TOLERANCE = 0.10
-# The overlay's cpu limit for the SFU (deploy/askedin/overlays/stage/livekit/deployment.yaml).
+# The base's cpu limit for the SFU (deploy/kubernetes/base/livekit/deployment.yaml).
 SFU_CORES = 2.0
 WIDTH, HEIGHT, FPS = 640, 360, 30
 # Distinct noise frames, cycled: an encoder cannot compress noise, so every track sends at its
