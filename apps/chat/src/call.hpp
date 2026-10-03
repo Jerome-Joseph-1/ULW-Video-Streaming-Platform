@@ -106,7 +106,8 @@ public:
 
     void on_ask(const core::RoomId& room, std::span<const std::byte> request,
                 rt::OwnerAnswer answer) noexcept override;
-    // Lets go of the media rooms nobody asked for within CallLimits::idle. Cheap to call often.
+    // Lets go of the media rooms nobody asked for within CallLimits::idle. Cheap to call often:
+    // it looks at the rooms once a second at most.
     void sweep() noexcept;
 
     [[nodiscard]] bool enabled() const noexcept { return sfu_ != nullptr; }
@@ -135,6 +136,11 @@ private:
                 std::expected<std::unique_ptr<core::ports::IMediaRoom>, core::ports::MediaError>
                     result) noexcept;
     void join(const core::RoomId& room, Entry& entry, Waiter waiter) noexcept;
+    // Answers the asks waiting for the room's open Unavailable, and forgets the room unless it
+    // holds a handle or joins: the open could not be asked.
+    void abandon_open(const core::RoomId& room) noexcept;
+    // sweep(), now, whenever it last ran: for a new room at the cap.
+    void sweep_now() noexcept;
     static void finish(rt::OwnerAnswer& answer, const CallAnswer& outcome) noexcept;
     [[nodiscard]] CallOutcome failure(core::ports::MediaError error) noexcept;
 
@@ -144,6 +150,7 @@ private:
     CallLimits limits_;
     CallCounters counters_;
     std::size_t in_flight_ = 0;
+    core::MonoTime next_sweep_;
     // Declared last: the handles go before anything they were made with.
     std::unordered_map<core::RoomId, Entry> rooms_;
 };

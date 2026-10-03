@@ -162,12 +162,13 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
 
 CallHandler::CallHandler(core::ports::IMessageStore& messages, core::ports::ISfu* sfu,
                          const core::ports::IClock& clock, CallLimits limits)
-    : messages_(messages), sfu_(sfu), clock_(clock), limits_(limits) {}
+    : messages_(messages), sfu_(sfu), clock_(clock), limits_(limits), next_sweep_(clock.now()) {}
 
 CallHandler::~CallHandler() = default;
 
 void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> request,
                          rt::OwnerAnswer answer) noexcept {
+    bool counted = false;
     try {
         const auto asked = decode_request(request);
         if (!asked) {
@@ -184,6 +185,7 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
             return;
         }
         ++in_flight_;
+        counted = true;
         // The member list, read on the owner at the moment of asking: a client's join may be
         // older than a removal still on its way to its node (ADR-0073).
         messages_.access(
@@ -193,6 +195,9 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
                 checked(room, std::move(waiter), access);
             });
     } catch (const std::bad_alloc&) {
+        if (counted) {
+            --in_flight_;
+        }
         // Whatever was moved out of `answer` answers nothing; the asker times out.
         if (answer) {
             answer(std::unexpected(rt::RouteError::Unavailable));
@@ -228,7 +233,7 @@ void CallHandler::admit(const core::RoomId& room, Waiter waiter) noexcept {
         auto it = rooms_.find(room);
         if (it == rooms_.end()) {
             if (rooms_.size() >= limits_.max_rooms) {
-                sweep();
+                sweep_now();
             }
             if (rooms_.size() >= limits_.max_rooms) {
                 ++counters_.busy;
@@ -251,16 +256,37 @@ void CallHandler::admit(const core::RoomId& room, Waiter waiter) noexcept {
         if (!first) {
             return;
         }
-        sfu_->open_room(
-            room, kCallGeneration, core::ports::MediaRoomKind::Call, kCallParticipants,
-            [this,
-             room](std::expected<std::unique_ptr<core::ports::IMediaRoom>, core::ports::MediaError>
-                       result) noexcept { opened(room, std::move(result)); });
+        try {
+            sfu_->open_room(
+                room, kCallGeneration, core::ports::MediaRoomKind::Call, kCallParticipants,
+                [this, room](
+                    std::expected<std::unique_ptr<core::ports::IMediaRoom>, core::ports::MediaError>
+                        result) noexcept { opened(room, std::move(result)); });
+        } catch (const std::bad_alloc&) {
+            // Nothing will answer the waiters, this one or any that would join them later.
+            abandon_open(room);
+        }
     } catch (const std::bad_alloc&) {
+        // Before the waiter was queued: it is still this call's to answer.
         --in_flight_;
         if (waiter.answer) {
             waiter.answer(std::unexpected(rt::RouteError::Unavailable));
         }
+    }
+}
+
+void CallHandler::abandon_open(const core::RoomId& room) noexcept {
+    const auto it = rooms_.find(room);
+    if (it == rooms_.end()) {
+        return;
+    }
+    std::vector<Waiter> waiting = std::exchange(it->second.opening, {});
+    if (!it->second.media && it->second.joining == 0) {
+        rooms_.erase(it);
+    }
+    for (Waiter& w : waiting) {
+        --in_flight_;
+        w.answer(std::unexpected(rt::RouteError::Unavailable));
     }
 }
 
@@ -346,6 +372,17 @@ CallOutcome CallHandler::failure(core::ports::MediaError error) noexcept {
 }
 
 void CallHandler::sweep() noexcept {
+    // Called after every turn of the loop; the rooms are looked at once a second.
+    constexpr core::Millis kSweepEvery{1'000};
+    const core::MonoTime now = clock_.now();
+    if (now < next_sweep_) {
+        return;
+    }
+    next_sweep_ = now + kSweepEvery;
+    sweep_now();
+}
+
+void CallHandler::sweep_now() noexcept {
     const core::MonoTime now = clock_.now();
     std::erase_if(rooms_, [&](const auto& entry) {
         const Entry& e = entry.second;
