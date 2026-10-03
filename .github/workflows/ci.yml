@@ -299,11 +299,19 @@ jobs:
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml --profile calls logs livekit egress
 
+  # clang-tidy over every translation unit, with the same checks, split round-robin over the
+  # sorted list: the full tree in one job took 59-95 min. Shard I/4 checks files I, I+4, ...;
+  # run-clang-tidy_test.sh proves the shards disjoint and complete. Shard 0 also runs the quick
+  # checks. Four shards, not more: a ci run is already close to the 20 concurrent hosted jobs.
   lint:
-    name: boundaries + format + tidy
+    name: boundaries + format + tidy (${{ matrix.shard }}/4)
     runs-on: ubuntu-24.04
-    # The full-tree tidy on main took 59-88 min (runner speed varies); well past that is a hang.
-    timeout-minutes: 150
+    # A quarter of the tree took 15-24 min (runner speed varies); well past that is a hang.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     env:
       CC: clang-19
       CXX: clang++-19
@@ -312,43 +320,55 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      # Nothing here is compiled: the build stops at the generated headers.
       - uses: ./.github/actions/setup
         with:
           cache-key: clang-lint
-      - run: tools/check-boundaries.sh
-      - run: tools/check-format.sh
+          ccache: "false"
+      - if: matrix.shard == 0
+        run: tools/check-boundaries.sh
+      - if: matrix.shard == 0
+        run: tools/check-format.sh
       # M22: the E2EE phase changed neither the chat service nor the router, formatting aside:
       # phase-2 against phase-3. Until a person pushes both tags, the script says it is waiting
       # on them and succeeds.
       - name: E2EE diagnostic check
+        if: matrix.shard == 0
         run: tools/e2ee_diagnostic_check.sh
-      - run: cmake --preset ci
-      # Generated headers must exist before clang-tidy can parse the sources.
-      - run: cmake --build --preset ci --target ulw_build_info
       # The bridge's own checks, the generated C header's drift check among them.
       - name: OpenMLS bridge (rustfmt, clippy, cargo test)
+        if: matrix.shard == 0
         working-directory: infra/e2ee/mls_ffi_bridge
         run: |
           rustup component add rustfmt clippy
           cargo fmt --check
           cargo clippy --locked --offline --all-targets -- -D warnings
           cargo test --locked --offline
+      - run: cmake --preset ci
+      # Generated headers must exist before clang-tidy can parse the sources.
+      - run: cmake --build --preset ci --target ulw_build_info
+      # Against the real compile database, so it covers exactly the list being split.
+      - name: clang-tidy sharding self-check
+        run: tools/run-clang-tidy_test.sh build/ci
       - name: clang-tidy (changed files)
         if: github.event_name == 'pull_request'
         # Through the environment, not spliced into the script: a branch name is the pull
         # request author's text.
         env:
           BASE_REF: ${{ github.base_ref }}
+          SHARD: ${{ matrix.shard }}
         run: |
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR "origin/$BASE_REF...HEAD")
-          tools/run-clang-tidy.sh build/ci "${changed[@]}"
+          tools/run-clang-tidy.sh --shard "$SHARD/4" build/ci "${changed[@]}"
       - name: clang-tidy (full tree)
         if: github.event_name != 'pull_request'
-        run: tools/run-clang-tidy.sh build/ci
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: tools/run-clang-tidy.sh --shard "$SHARD/4" build/ci
       # Last, and run even when a step above failed, so a branch whose decision number waits on
       # another branch still gets its format and clang-tidy results.
       - name: docs (decision numbering, routes documented)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shard == 0 }}
         run: python3 tools/check-docs.py
 
   # The WebSocket codec against the Autobahn fuzzingclient, through the echo server on each
@@ -384,15 +404,14 @@ jobs:
   # main; thirty on the nightly and manual runs. Other pull requests skip the build: the unit
   # label already replays the committed corpora on every build.
   fuzz:
-    name: fuzz (${{ matrix.target }})
+    name: fuzz
+    # Seven targets on four cores: two rounds of the run length (30 min nightly), plus the build.
+    timeout-minutes: 120
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [ws, http, hls, toml, mls, sdp, rtp]
     env:
       CC: clang-19
       CXX: clang++-19
+      FUZZ_TARGETS: ws http hls toml mls sdp rtp
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -423,23 +442,27 @@ jobs:
           cache-key: clang-fuzz
       - if: steps.scope.outputs.seconds != '0'
         run: cmake --preset fuzz
+      # All the fuzzers in one build, which shares the libraries they link.
       - if: steps.scope.outputs.seconds != '0'
-        run: cmake --build --preset fuzz --target ${{ matrix.target }}_fuzz
-      # A scratch corpus, so what the run discovers never lands in the checkout.
+        run: |
+          read -ra targets <<<"$FUZZ_TARGETS"
+          cmake --build --preset fuzz --target "${targets[@]/%/_fuzz}"
+      # Each target for the full run length on a core of its own, nproc at a time; any crash
+      # fails the job. A scratch corpus per target, so what a run discovers never lands in the
+      # checkout.
       - if: steps.scope.outputs.seconds != '0'
         env:
-          TARGET: ${{ matrix.target }}
           SECONDS_TO_RUN: ${{ steps.scope.outputs.seconds }}
         run: |
-          mkdir -p fuzz-work/corpus fuzz-work/artifacts
-          cp "tests/fuzz/corpus/$TARGET"/* fuzz-work/corpus/
-          "build/fuzz/tests/${TARGET}_fuzz" -max_total_time="$SECONDS_TO_RUN" \
-            -print_final_stats=1 -artifact_prefix=fuzz-work/artifacts/ fuzz-work/corpus
+          read -ra targets <<<"$FUZZ_TARGETS"
+          tools/run-fuzzers.sh build/fuzz fuzz-work "$SECONDS_TO_RUN" "${targets[@]}"
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
-          path: fuzz-work/artifacts
+          name: fuzz-artifacts
+          path: |
+            fuzz-work/*/artifacts
+            fuzz-work/*/fuzz.log
 
   # Every commit, not just the tip: a secret that was committed and then removed is still one.
   # Allowlist entries are in .gitleaks.toml, each scoped to a rule and a file.
