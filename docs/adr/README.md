@@ -92,3 +92,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted |
 | [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted |
 | [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
+| [0099](0099-the-browser-runs-openmls-as-webassembly.md) | The browser runs the bridge's OpenMLS as WebAssembly, built in a pinned image | Accepted |
