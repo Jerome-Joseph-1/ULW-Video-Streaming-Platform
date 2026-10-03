@@ -154,6 +154,35 @@ TEST_F(ClaimsTest, EmailIsOptionalButMustBeAPrintableString) {
               AuthError::Malformed);
 }
 
+TEST_F(ClaimsTest, AnEmailOf254BytesIsTheLongestTaken) {
+    const std::string at_limit = std::string(250, 'a') + "@b.c";
+    const auto taken = check(test_payload({{"email", '"' + at_limit + '"'}}));
+    ASSERT_TRUE(taken.has_value());
+    EXPECT_EQ(taken->email, at_limit);
+    EXPECT_EQ(error_of(test_payload({{"email", R"("a)" + at_limit + '"'}})), AuthError::Malformed);
+}
+
+TEST_F(ClaimsTest, AnEmailWithAnyControlCharacterIsMalformed) {
+    for (const std::string_view escaped :
+         {R"(\t)", R"(\n)", R"(\u0001)", R"(\u001f)", R"(\u007f)"}) {
+        EXPECT_EQ(
+            error_of(test_payload({{"email", R"("a)" + std::string(escaped) + R"(@b.test")"}})),
+            AuthError::Malformed)
+            << escaped;
+    }
+    EXPECT_TRUE(check(test_payload({{"email", R"("a b@c.test")"}})).has_value());
+}
+
+// The earliest second a nanosecond clock can hold, whole, is the earliest date taken.
+TEST_F(ClaimsTest, NotBeforeMayBeAsEarlyAsTheClockCanHoldAndNoEarlier) {
+    const std::int64_t earliest =
+        std::chrono::duration_cast<std::chrono::seconds>(core::WallTime::duration::min()).count() +
+        1;
+    EXPECT_TRUE(check(test_payload({{"nbf", std::to_string(earliest)}})).has_value());
+    EXPECT_EQ(error_of(test_payload({{"nbf", std::to_string(earliest - 1)}})),
+              AuthError::Malformed);
+}
+
 TEST_F(ClaimsTest, APayloadMustBeAnObjectWithoutRepeatedClaims) {
     EXPECT_EQ(error_of("[]"), AuthError::Malformed);
     EXPECT_EQ(error_of("not json"), AuthError::Malformed);

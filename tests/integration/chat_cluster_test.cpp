@@ -233,7 +233,7 @@ TEST_P(ChatClusterTest, AStoppedOwnerIsReplacedAndItsLateWriteIsFencedOutAndDeli
     }
 }
 
-// The build links jemalloc unless a sanitizer is on (ADR-0078); each node says which it got.
+// The build links jemalloc unless a sanitizer is on (ADR-0081); each node says which it got.
 TEST_P(ChatClusterTest, EveryNodeAllocatesWithTheAllocatorTheBuildLinked) {
     const std::string expected =
         ULW_EXPECT_JEMALLOC != 0 ? R"("allocator":"jemalloc 5.)" : R"("allocator":"default")";

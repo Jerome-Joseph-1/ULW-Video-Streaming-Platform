@@ -69,8 +69,10 @@ public:
 
     // One transaction: the upload completes, the video moves to processing and a transcode
     // job is queued. Idempotent: a repeat finds the work done and succeeds without a second job.
+    // Answers the video's state as that transaction saw it: processing after the commit that
+    // did the work, and whatever the worker has made of the video since on a repeat.
     virtual void commit_upload(const UploadId& id, const VideoId& video,
-                               const std::string& request_id, CatalogCallback<void> done) = 0;
+                               const std::string& request_id, CatalogCallback<VideoState> done) = 0;
     virtual void abort_upload(const UploadId& id, CatalogCallback<void> done) = 0;
 
     virtual void find_video(const VideoId& id, CatalogCallback<VideoRecord> done) = 0;

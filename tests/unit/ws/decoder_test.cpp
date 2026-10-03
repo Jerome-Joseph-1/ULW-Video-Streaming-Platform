@@ -292,6 +292,8 @@ TEST(WsDecoder, RefusesATextMessageThatEndsInsideASequence) {
     const Decoded d = decode_whole(raw_frame(kFin | kText, bytes({'a', 0xE2, 0x82})));
 
     EXPECT_EQ(d.error, CloseCode::InvalidPayload);
+    // The refused message is not delivered alongside the error.
+    EXPECT_TRUE(d.frames.empty());
 }
 
 TEST(WsDecoder, LeavesBinaryPayloadUnchecked) {

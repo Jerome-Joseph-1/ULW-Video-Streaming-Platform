@@ -22,7 +22,7 @@ namespace ops {
 [[nodiscard]] std::expected<void, int> disable_core_dumps() noexcept;
 
 // The version of the jemalloc this process allocates with, as jemalloc reports it, or empty when
-// it allocates with glibc's malloc: the services link jemalloc (ADR-0078) and log which they got.
+// it allocates with glibc's malloc: the services link jemalloc (ADR-0081) and log which they got.
 [[nodiscard]] std::string_view jemalloc_version() noexcept;
 
 } // namespace ops

@@ -10,7 +10,7 @@ find_package(OpenSSL 3.0 REQUIRED)
 find_package(CURL 8.0 REQUIRED)
 pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
 
-# chat_server's allocator (ADR-0078): jemalloc gives freed memory back where glibc leaves it in
+# chat_server's allocator (ADR-0081): jemalloc gives freed memory back where glibc leaves it in
 # holes. Never under a sanitizer, whose allocator it would replace.
 option(ULW_JEMALLOC "Link chat_server against jemalloc" ON)
 add_library(ulw_allocator INTERFACE)

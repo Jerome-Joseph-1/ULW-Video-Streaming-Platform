@@ -195,6 +195,10 @@ TEST(Video, KeepsTitlesByteForByte) {
              std::string_view("  padded  "),
              std::string_view("Kyoto \xe4\xba\xac\xe9\x83\xbd, caf\xc3\xa9, \xf0\x90\x8d\x88"),
              std::string_view("a"),
+             // A lead byte from each row of the table of well-formed sequences.
+             std::string_view(
+                 "\xe1\x80\x80 \xec\xbf\xbf \xee\x80\x80 \xef\xbc\x81 \xf1\x80\x80\x80 "
+                 "\xf3\xbf\xbf\xbf \xf4\x8f\xbf\xbf"),
          }) {
         const auto video = Video::create(video_id(), owner(), std::string(title));
         ASSERT_TRUE(video.has_value()) << title;

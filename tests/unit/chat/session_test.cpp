@@ -22,11 +22,13 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <filesystem>
 #include <format>
 #include <future>
 #include <gtest/gtest.h>
@@ -609,6 +611,37 @@ TEST_P(ChatSessionTest, ABinaryFrameIsNotSomethingThisProtocolTakes) {
     EXPECT_EQ(alice->close_status(seconds(10)), 1003);
 }
 
+// A valid token does not carry a request that is not a WebSocket handshake.
+TEST_P(ChatSessionTest, AnUpgradeThatBreaksTheHandshakeIsRefusedWhateverItsToken) {
+    const std::string token = "Authorization: Bearer user.alice\r\n";
+    // WsClient sends one of each already; a second is a handshake error, even one that is
+    // well formed on its own (16 zero bytes in base64).
+    const std::string second_key = "Sec-WebSocket-Key: " + std::string(22, 'A') + "==\r\n";
+    EXPECT_EQ(refusal(token + second_key), "HTTP/1.1 400 Bad Request");
+    EXPECT_EQ(refusal(token + "Sec-WebSocket-Version: 13\r\n"), "HTTP/1.1 426 Upgrade Required");
+    // Nothing here takes a body.
+    EXPECT_EQ(refusal(token + "Content-Length: 5\r\n"), "HTTP/1.1 400 Bad Request");
+    EXPECT_TRUE(open_as("alice"));
+}
+
+// RFC 6455 section 5: a client's frame unmasked, with an opcode no one defined, or with a
+// reserved bit no extension negotiated, fails the connection with 1002, and the node counts it.
+TEST_P(ChatSessionTest, AFrameThatBreaksTheProtocolClosesWith1002AndIsCounted) {
+    const std::vector<std::vector<unsigned char>> frames{
+        {0x81, 0x02, 'h', 'i'},
+        {0x83, 0x80, 0x01, 0x02, 0x03, 0x04},
+        {0xC1, 0x80, 0x01, 0x02, 0x03, 0x04},
+    };
+    for (const auto& frame : frames) {
+        auto alice = open_as("alice");
+        ASSERT_TRUE(alice);
+        ASSERT_TRUE(alice->send_raw(std::as_bytes(std::span(frame))));
+        EXPECT_EQ(alice->close_status(seconds(10)), 1002) << static_cast<int>(frame[0]);
+    }
+    const auto metrics = ulw::test::http_get(node_->port(), "/metrics");
+    EXPECT_NE(metrics.body.find("protocol_errors_total 3\n"), std::string::npos) << metrics.body;
+}
+
 TEST_P(ChatSessionTest, AUserJoiningRoomsFasterThanTheLimitIsTurnedAwayOnEveryConnection) {
     node_.reset();
     node_ = std::make_unique<Node>(GetParam(),
@@ -682,6 +715,24 @@ TEST_P(ChatSessionTest, AClientThatAnswersNothingIsClosedAtTheIdleTimeoutNotAPin
     }
     EXPECT_EQ(later_pings, 0);
     EXPECT_FALSE(quiet->connected());
+}
+
+// The timer that should send the ping runs late: the node's clock has already passed the ping
+// interval, not reached it exactly.
+TEST_P(ChatSessionTest, AQuietClientIsPingedEvenWhenTheTimerRunsLate) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(),
+                                   chat::Limits{.ping_interval = core::Millis{1'000},
+                                                .idle_timeout = core::Millis{5'000},
+                                                .service = {},
+                                                .presence = {}},
+                                   true);
+    auto quiet = open_as("alice");
+    ASSERT_TRUE(quiet);
+    node_->advance(core::Millis{1'500});
+    const auto ping = quiet->next_frame(seconds(10));
+    ASSERT_TRUE(ping);
+    EXPECT_EQ(ping->first, codec::ws::Opcode::Ping);
 }
 
 // The seq of a message frame, or nullopt for anything else.
@@ -781,6 +832,40 @@ std::optional<std::uint64_t> metric(std::uint16_t port, std::string_view name) {
         std::string_view(body).substr(start, body.find('\n', start) - start));
 }
 
+// A member that asked never to miss a message and stops reading is closed once its unread output
+// passes max_backlog, and resumes from its last seq when it comes back.
+TEST_P(ChatSessionTest, AMemberThatStopsReadingIsClosedAsASlowConsumer) {
+    node_.reset();
+    node_ = std::make_unique<Node>(
+        GetParam(), chat::Limits{.service = {.send_burst = 1'000,
+                                             .max_send_bytes_in_flight = std::size_t{1} << 20U},
+                                 .presence = {}});
+    auto stopped = WsClient::connect(node_->port(), "/rt", "Authorization: Bearer user.reader\r\n",
+                                     nullptr, 16 * 1024);
+    auto sender = open_as("sender");
+    ASSERT_TRUE(stopped && sender);
+    const std::string room = std::string(kRoom);
+    for (auto* ws : {&*stopped, &*sender}) {
+        ASSERT_TRUE(ws->send_text(R"({"type":"join","room":")" + room + R"("})"));
+        ASSERT_EQ(ws->next_text(seconds(10)).value_or("").find(R"("type":"joined")"), 1U);
+    }
+    // About 2.8 KiB a message on the wire: 200 of them are twice max_backlog, past the socket
+    // buffers too. The sender reads its own, so only the stopped member falls behind.
+    const std::string body = infra::auth::encode_base64url(std::string(2'000, 'x'));
+    std::uint64_t heard = 0;
+    for (std::uint64_t k = 1; k <= 200; ++k) {
+        ASSERT_TRUE(sender->send_text(
+            std::format(R"({{"type":"send","room":"{}","id":"s{}","body":"{}"}})", room, k, body)));
+        while (heard < k) {
+            const auto text = sender->next_text(seconds(10));
+            ASSERT_TRUE(text);
+            heard = message_seq(*text).value_or(heard);
+        }
+    }
+    EXPECT_TRUE(ulw::test::eventually(
+        [&] { return metric(node_->port(), "slow_consumers_total") == std::uint64_t{1}; }));
+}
+
 // Once the keys go unrefreshed too long every token is refused, so the gauge an alert watches
 // says so while it lasts.
 TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
@@ -875,6 +960,46 @@ TEST_P(ChatSessionTest, AViewerThatAcknowledgesNothingForTheStallTimeoutIsClosed
     EXPECT_EQ(metric(node_->port(), "stalled_readers_total"), 1U);
     std::cout << "the stopped viewer was closed after " << sent
               << " messages; the slow one got all it was owed up to seq " << last << "\n";
+}
+
+// The node's own ends of its accepted client connections: sockets in this process whose local
+// port is the node's client port and which have a peer. The listener has none.
+std::vector<int> accepted_ends(std::uint16_t port) {
+    std::vector<int> out;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+        const auto fd = core::parse_integer<int>(entry.path().filename().string());
+        if (!fd) {
+            continue;
+        }
+        sockaddr_in local{};
+        sockaddr_in peer{};
+        socklen_t local_len = sizeof local;
+        socklen_t peer_len = sizeof peer;
+        // Both take every address family through the generic sockaddr header.
+        // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+        if (::getsockname(*fd, reinterpret_cast<sockaddr*>(&local), &local_len) == 0 &&
+            local.sin_family == AF_INET && ntohs(local.sin_port) == port &&
+            ::getpeername(*fd, reinterpret_cast<sockaddr*>(&peer), &peer_len) == 0) {
+            out.push_back(*fd);
+        }
+        // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+    }
+    return out;
+}
+
+// Linux counts a shut receive window against TCP_USER_TIMEOUT from the first window probe, so a
+// viewer that reads, but frees its window a little at a time, would be ended by the kernel as if
+// it had vanished. The session bounds a stall itself (the test above); the kernel's timer stays
+// off on a client's connection.
+TEST_P(ChatSessionTest, AClientConnectionIsNotEndedByTheKernelsUserTimeout) {
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    const auto ends = accepted_ends(node_->port());
+    ASSERT_EQ(ends.size(), 1U);
+    int timeout = -1;
+    socklen_t len = sizeof timeout;
+    ASSERT_EQ(::getsockopt(ends.front(), IPPROTO_TCP, TCP_USER_TIMEOUT, &timeout, &len), 0);
+    EXPECT_EQ(timeout, 0);
 }
 
 TEST_P(ChatSessionTest, AWatcherHearsAUserArriveAndLeaveOverTheSocket) {
@@ -975,6 +1100,21 @@ TEST_P(ChatSessionTest, FramesSentBehindAnUpgradeWaitingOnKeysAreReadOnceItIsAcc
     ASSERT_TRUE(alice);
     expect_first_frames_answered(*alice);
     EXPECT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 0; }));
+}
+
+// Reading stops while the upgrade waits on keys; it starts again once the upgrade is accepted.
+TEST_P(ChatSessionTest, FramesSentAfterAnUpgradeThatWaitedOnKeysAreRead) {
+    auto upgrade = std::async(std::launch::async, [&] {
+        return WsClient::connect(node_->port(), "/rt", "Authorization: Bearer slow.alice\r\n",
+                                 nullptr);
+    });
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->key_waiters == 1; }));
+    node_->refresh_keys = true;
+    auto alice = upgrade.get();
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
 }
 
 TEST_P(ChatSessionTest, AnUpgradeThatFailedWhileWaitingOnKeysIsNotAcceptedWhenTheyArrive) {
