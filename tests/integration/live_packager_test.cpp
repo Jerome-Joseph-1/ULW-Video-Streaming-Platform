@@ -67,6 +67,8 @@ struct PackagerOptions {
     unsigned segment = 2;
     // The object store the packager talks to; the proxy tests point it at their own.
     std::string endpoint = kEndpoint;
+    // ULW_LIVE_CALLER_WAIT_SECONDS; 0 leaves it unset.
+    unsigned caller_wait = 0;
 };
 
 class LivePackagerTest : public ::testing::Test {
@@ -105,7 +107,8 @@ protected:
              "ULW_S3_ACCESS_KEY_ID=" + kAccessKey, "ULW_S3_SECRET_ACCESS_KEY=" + kSecretKey,
              "ULW_SCRATCH_DIR=" +
                  (scratch.empty() ? scratch_dirs_.back()->path().string() : scratch),
-             std::string("ULW_SANDBOX_BIN=") + ULW_SANDBOX_BIN});
+             std::string("ULW_SANDBOX_BIN=") + ULW_SANDBOX_BIN,
+             "ULW_LIVE_CALLER_WAIT_SECONDS=" + std::to_string(options.caller_wait)});
         EXPECT_NE(packager, nullptr);
         return packager;
     }
@@ -498,6 +501,38 @@ TEST_F(LivePackagerTest, SigtermBeforeAnyPublisherLeavesNothingToEnd) {
     packager->signal(SIGTERM);
     EXPECT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
     EXPECT_FALSE(stored("index.m3u8"));
+}
+
+// A stream service sets a wait for the relay's caller (ADR-0091): a packager nobody calls ends
+// its stream by itself rather than waiting for a signal.
+TEST_F(LivePackagerTest, APackagerNobodyCallsEndsTheStreamAfterItsWait) {
+    const auto packager = start_packager({.caller_wait = 1});
+    ASSERT_TRUE(ingest_port(*packager)) << packager->output();
+    EXPECT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
+    EXPECT_NE(packager->output().find("no publisher connected in 1 s; ending the stream"),
+              std::string::npos)
+        << packager->output();
+}
+
+// A packager restarted after its relay went (a crash, the Job's restart) has no caller coming:
+// it ends what the earlier run published instead of leaving the playlist open.
+TEST_F(LivePackagerTest, ARestartNobodyCallsEndsTheStreamItContinues) {
+    {
+        const auto packager = start_packager();
+        const auto port = ingest_port(*packager);
+        ASSERT_TRUE(port) << packager->output();
+        const auto publisher = start_publisher(*port, 0);
+        watch(*publisher, [&] { return last_ && last_->segments.size() >= 2; });
+        packager->signal(SIGKILL);
+        static_cast<void>(packager->wait_exit(kExitPatience));
+    }
+    ASSERT_FALSE(playlist()->ended);
+    const auto again = start_packager({.caller_wait = 1});
+    EXPECT_EQ(again->wait_exit(kExitPatience), 0) << again->output();
+    const auto ended = playlist();
+    ASSERT_TRUE(ended);
+    EXPECT_TRUE(ended->ended);
+    EXPECT_GE(ended->segments.size(), 2U);
 }
 
 TEST_F(LivePackagerTest, AnEndedStreamIsNotStartedAgain) {
