@@ -4,6 +4,7 @@
 //! identity, the ratchet tree in the welcome, OpenMLS's default wire format policy, and every
 //! message serialised as an MLSMessage (RFC 9420, section 6).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use openmls::prelude::tls_codec::Deserialize as _;
@@ -11,6 +12,8 @@ use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
+use openmls_traits::crypto::OpenMlsCrypto;
+use openmls_traits::types::HashType;
 
 /// The suite RFC 9420 makes mandatory, and the only one the bridge speaks.
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
@@ -18,8 +21,13 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 /// A device id or a group id: 1 to 64 bytes, as the bridge allows.
 pub const MAX_IDENTITY: usize = 64;
 
-// Exported state starts with this, then a format version.
-const STATE_MAGIC: &[u8; 8] = b"ULWMLS\0\x01";
+/// How many past epochs' message secrets a group keeps, so an application message sent just
+/// before a commit, and sequenced after it, still decrypts. Local: nothing on the wire changes.
+pub const MAX_PAST_EPOCHS: usize = 4;
+
+// Exported state starts with this and a format version: 1 had no application data.
+const STATE_MAGIC: &[u8; 7] = b"ULWMLS\0";
+const STATE_VERSION: u8 = 2;
 
 /// The bridge's `UlwMlsStatus`, less `Ok`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,8 +76,21 @@ pub struct Received {
     pub kind: Kind,
     /// The plaintext of an application message; empty otherwise.
     pub plaintext: Vec<u8>,
-    /// The identity in the sender's credential.
+    /// The identity in the sender's credential: for a commit, its committer.
     pub sender: Vec<u8>,
+    /// The sender's leaf index.
+    pub sender_leaf: Option<u32>,
+    /// A commit removed this device: the group can no longer be used.
+    pub self_removed: bool,
+}
+
+/// A member of a group, as this device sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberInfo {
+    pub leaf: u32,
+    pub identity: Vec<u8>,
+    /// SHA-256 of its signature public key, hex: what two people compare out of band.
+    pub fingerprint: String,
 }
 
 /// What an MLSMessage is, read without any keys: how a room's bodies are told apart.
@@ -84,6 +105,23 @@ pub struct Info {
     pub content_type: Option<&'static str>,
     /// For a key package: the identity in its credential, once its signature checks.
     pub identity: Option<Vec<u8>>,
+    /// For a key package: SHA-256 of its signature public key, hex.
+    pub fingerprint: Option<String>,
+    /// For a key package: its KeyPackageRef (RFC 9420, section 5.2), hex.
+    pub key_package_ref: Option<String>,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// SHA-256 of a signature public key, hex.
+pub fn fingerprint(signature_key: &[u8]) -> Result<String> {
+    let crypto = openmls_rust_crypto::RustCrypto::default();
+    let digest = crypto
+        .hash(HashType::Sha2_256, signature_key)
+        .map_err(|_| Error::Internal)?;
+    Ok(hex(&digest))
 }
 
 /// A device's MLS identity: its signature key, its credential, and a store holding the private
@@ -93,6 +131,9 @@ pub struct Client {
     signer: SignatureKeyPair,
     credential: CredentialWithKey,
     identity: Vec<u8>,
+    // The application's own bytes, kept with the state (mls-room.js keeps its outstanding
+    // commit and the key packages it has decided on here).
+    app_data: RefCell<Vec<u8>>,
 }
 
 fn check_id(id: &[u8]) -> Result<()> {
@@ -162,7 +203,22 @@ impl Client {
             provider,
             signer,
             identity: identity.to_vec(),
+            app_data: RefCell::default(),
         })
+    }
+
+    pub fn app_data(&self) -> Vec<u8> {
+        self.app_data.borrow().clone()
+    }
+
+    /// Bytes the application keeps with the state; `export_state` includes them.
+    pub fn set_app_data(&self, data: &[u8]) {
+        *self.app_data.borrow_mut() = data.to_vec();
+    }
+
+    /// SHA-256 of this device's signature public key, hex.
+    pub fn fingerprint(&self) -> Result<String> {
+        fingerprint(self.signer.public())
     }
 
     pub fn identity(&self) -> &[u8] {
@@ -190,6 +246,7 @@ impl Client {
         let config = MlsGroupCreateConfig::builder()
             .ciphersuite(CIPHERSUITE)
             .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
             .build();
         MlsGroup::new_with_group_id(
             &self.provider,
@@ -205,19 +262,31 @@ impl Client {
     }
 
     /// Joins the group a welcome invites this device into. `Rejected` when the welcome names
-    /// none of this device's key packages: it was for someone else.
-    pub fn join(&self, welcome: &[u8]) -> Result<MlsGroup> {
+    /// none of this device's key packages (it was for someone else), when `expected_group`
+    /// is given and the welcome's group is another, or when this device is in that group
+    /// already. A refused welcome leaves no group behind.
+    pub fn join(&self, welcome: &[u8], expected_group: Option<&[u8]>) -> Result<MlsGroup> {
         let MlsMessageBodyIn::Welcome(welcome) = decode(welcome)? else {
             return Err(Error::Malformed);
         };
         let config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
             .build();
         let staged = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
             .map_err(|e| match e {
                 WelcomeError::LibraryError(_) | WelcomeError::StorageError(_) => Error::Internal,
                 _ => Error::Rejected,
             })?;
+        let group_id = staged.group_context().group_id().clone();
+        if expected_group.is_some_and(|g| g != group_id.as_slice()) {
+            return Err(Error::Rejected);
+        }
+        let existing =
+            MlsGroup::load(self.provider.storage(), &group_id).map_err(|_| Error::Internal)?;
+        if existing.is_some() {
+            return Err(Error::Rejected);
+        }
         staged
             .into_group(&self.provider)
             .map_err(|_| Error::Internal)
@@ -231,7 +300,7 @@ impl Client {
     }
 
     /// Removes a group's state from the store.
-    pub fn forget_group(&self, mut group: MlsGroup) -> Result<()> {
+    pub fn forget_group(&self, group: &mut MlsGroup) -> Result<()> {
         group
             .delete(self.provider.storage())
             .map_err(|_| Error::Internal)
@@ -251,8 +320,10 @@ impl Client {
         // Sorted, so the same state exports as the same bytes.
         entries.sort();
         let mut out = STATE_MAGIC.to_vec();
+        out.push(STATE_VERSION);
         put(&mut out, &self.identity);
         put(&mut out, self.signer.public());
+        put(&mut out, &self.app_data.borrow());
         out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
         for (key, value) in entries {
             put(&mut out, key);
@@ -263,12 +334,21 @@ impl Client {
 
     /// The device `export_state` saved.
     pub fn import_state(state: &[u8]) -> Result<Self> {
-        let mut input = state
+        let input = state
             .strip_prefix(STATE_MAGIC.as_slice())
             .ok_or(Error::Malformed)?;
+        let (&version, mut input) = input.split_first().ok_or(Error::Malformed)?;
+        if version != 1 && version != STATE_VERSION {
+            return Err(Error::Malformed);
+        }
         let identity = take(&mut input)?.to_vec();
         check_id(&identity).map_err(|_| Error::Malformed)?;
         let public = take(&mut input)?.to_vec();
+        let app_data = if version >= 2 {
+            take(&mut input)?.to_vec()
+        } else {
+            Vec::new()
+        };
         if input.len() < 4 {
             return Err(Error::Malformed);
         }
@@ -301,6 +381,7 @@ impl Client {
             provider,
             signer,
             identity,
+            app_data: RefCell::new(app_data),
         })
     }
 
@@ -322,6 +403,11 @@ impl Client {
                 .map_err(|_| Error::Rejected)?;
             packages.push(package);
         }
+        // Nothing another member proposed rides along: process() refuses proposals, and this
+        // keeps it so if any were queued before.
+        group
+            .clear_pending_proposals(self.provider.storage())
+            .map_err(|_| Error::Internal)?;
         let (commit, welcome, _) = group
             .add_members(&self.provider, &self.signer, &packages)
             .map_err(|e| match e {
@@ -392,14 +478,21 @@ impl Client {
         serialize(&message)
     }
 
-    /// A message another member sent to the group: application messages decrypt, commits are
-    /// merged (the room has already ordered them), proposals are queued. A member never
-    /// processes its own messages.
+    /// A message another member sent to the group: application messages decrypt, and commits
+    /// are merged (the room has already ordered them). Refused (`Rejected`), and left
+    /// unapplied: a standalone proposal, which nothing here sends and which would otherwise
+    /// ride along with the next commit; and a commit that adds members made by anyone but
+    /// the group's first member, the one the room convention lets add (ADR-0099). A member
+    /// never processes its own messages.
     pub fn process(&self, group: &mut MlsGroup, message: &[u8]) -> Result<Received> {
         let protocol_message = MlsMessageIn::tls_deserialize_exact(message)
             .map_err(|_| Error::Malformed)?
             .try_into_protocol_message()
             .map_err(|_| Error::Malformed)?;
+        if protocol_message.content_type() == ContentType::Proposal {
+            return Err(Error::Rejected);
+        }
+        let first_leaf = group.members().next().map(|m| m.index);
         let processed = group
             .process_message(&self.provider, protocol_message)
             .map_err(|e| match e {
@@ -410,6 +503,11 @@ impl Client {
                 _ => Error::Rejected,
             })?;
         let sender = processed.credential().serialized_content().to_vec();
+        let sender_leaf = match processed.sender() {
+            Sender::Member(leaf) => Some(*leaf),
+            _ => None,
+        };
+        let mut self_removed = false;
         let (kind, plaintext) = match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(application) => {
                 (Kind::Application, application.into_bytes())
@@ -421,6 +519,10 @@ impl Client {
                 (Kind::Proposal, Vec::new())
             }
             ProcessedMessageContent::StagedCommitMessage(commit) => {
+                if commit.add_proposals().next().is_some() && sender_leaf != first_leaf {
+                    return Err(Error::Rejected);
+                }
+                self_removed = commit.self_removed();
                 group
                     .merge_staged_commit(&self.provider, *commit)
                     .map_err(|_| Error::Internal)?;
@@ -434,15 +536,23 @@ impl Client {
             kind,
             plaintext,
             sender,
+            sender_leaf: sender_leaf.map(|l| l.u32()),
+            self_removed,
         })
     }
 }
 
-/// The identities of a group's members, in leaf order.
-pub fn members(group: &MlsGroup) -> Vec<Vec<u8>> {
+/// A group's members, in leaf order.
+pub fn members(group: &MlsGroup) -> Result<Vec<MemberInfo>> {
     group
         .members()
-        .map(|m| m.credential.serialized_content().to_vec())
+        .map(|m| {
+            Ok(MemberInfo {
+                leaf: m.index.u32(),
+                identity: m.credential.serialized_content().to_vec(),
+                fingerprint: fingerprint(&m.signature_key)?,
+            })
+        })
         .collect()
 }
 
@@ -455,6 +565,8 @@ pub fn inspect(bytes: &[u8]) -> Result<Info> {
         epoch: None,
         content_type: None,
         identity: None,
+        fingerprint: None,
+        key_package_ref: None,
     };
     match message.extract() {
         MlsMessageBodyIn::PublicMessage(m) => {
@@ -485,6 +597,11 @@ pub fn inspect(bytes: &[u8]) -> Result<Info> {
                     .serialized_content()
                     .to_vec(),
             );
+            info.fingerprint = Some(fingerprint(package.leaf_node().signature_key().as_slice())?);
+            info.key_package_ref = Some(hex(package
+                .hash_ref(&crypto)
+                .map_err(|_| Error::Internal)?
+                .as_slice()));
         }
     }
     Ok(info)

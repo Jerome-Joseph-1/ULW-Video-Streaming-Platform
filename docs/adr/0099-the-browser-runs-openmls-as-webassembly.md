@@ -27,9 +27,10 @@ boundary 6).
 
 - `clients/web-mls` is a crate exposing a small JavaScript API through wasm-bindgen: `MlsClient`
   (new identity, `keyPackage`, `createGroup`, `joinGroup`, `loadGroup`, `exportState`,
-  `importState`), `MlsGroup` (`add`, `remove`, `mergePendingCommit`, `clearPendingCommit`,
-  `encrypt`, `process`, epoch and members) and `inspect`, which says what a body is without
-  keys. Every choice that reaches the wire is the bridge's: ciphersuite 1
+  `importState`, `fingerprint`, `appData`), `MlsGroup` (`add`, `remove`, `mergePendingCommit`,
+  `clearPendingCommit`, `encrypt`, `process`, epoch, members with their fingerprints) and
+  `inspect`, which says what a body is without keys. A client keeps one in-memory state per
+  group however many handles reach it. Every choice that reaches the wire is the bridge's: ciphersuite 1
   (`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`), basic credentials carrying the device id,
   the ratchet tree in the welcome, OpenMLS's default wire format policy, and every message
   serialised as an MLSMessage. Failures throw an `Error` whose message is the bridge's status
@@ -40,31 +41,64 @@ boundary 6).
   shared crate at another version. Both getrandom majors in the graph (0.2 under `rand_core`
   0.6, 0.4 under OpenMLS) are told to use `crypto.getRandomValues` (`js`, `wasm_js`).
   `wasm-bindgen =0.2.129`, the version the lock already had.
-- `build.sh` builds in `rust:1.94.1-slim-bookworm`, pinned by digest, as `linux/amd64`
-  everywhere: rustc 1.94.1 as the bridge (ADR-0044), `cargo build --locked`, and the
-  wasm-bindgen 0.2.129 release binary checked against its SHA-256. `dist/` (the `.wasm`, the
+- `build.sh` builds in an image (`Dockerfile.build`) on `rust:1.94.1-slim-bookworm`, pinned by
+  digest, as `linux/amd64` everywhere: rustc 1.94.1 as the bridge (ADR-0044) and `cargo build
+  --locked`. Docker checks the two downloads against recorded SHA-256s (`ADD --checksum`): the
+  wasm32 standard library for that rustc, whose hash is the one the release's channel manifest
+  lists (fetched over TLS; the manifest's signature was not checked), installed from that
+  tarball instead of by `rustup target add`, whose download nothing could check against a
+  recorded hash; and the wasm-bindgen 0.2.129 release binary, whose hash is the one first
+  downloaded, since the release publishes none. `dist/` (the `.wasm`, the
   `--target web` glue, its typings and `mls-room.js`) is committed, with `dist/SHA256SUMS`;
   `build.sh --check` rebuilds and fails if a byte differs.
-- The room is the delivery service. Each body in an encrypted room is one MLSMessage; its wire
-  format says whether it is a key package (a device asking to be added), a welcome, or a group
-  message, and the group id is the room id's text. The member at the group's first leaf adds an
-  announced key package. A member sends its commit, merges it when its echo arrives with no other
-  commit for that epoch ahead of it in seq order, and only then sends the welcome.
-  `mls-room.js` implements this for pages, so the browser holds no protocol logic of its own.
+- The room is the delivery service, for now. Each body in an encrypted room is one MLSMessage;
+  its wire format says whether it is a key package (a device asking to be added), a welcome, or
+  a group message, and the group id is the room id's text. Ordering commits by the room's seq is
+  interim: ADR-0038's directory, which claims an epoch for a commit (`submit_commit`) before it
+  is sent, is not on this path, since no client API serves it yet.
+- Who joins: only the member at the group's first leaf adds, and only a key package whose
+  credential's user part (`alice` in `alice/laptop`) is the chat user who posted it, and only
+  once the page's `approveKeyPackage` says yes, which by default it does not; the example page
+  asks the person, showing the device's fingerprint (SHA-256 of its signature key). Receivers
+  refuse a commit that adds members unless the first leaf made it, and drop standalone
+  proposals, so no other member can slip a device in. A device takes a welcome only after
+  announcing itself, and only into the room's group; it is told the members and their
+  fingerprints.
+- A member sends its commit, merges it when its echo arrives with no other commit for that
+  epoch ahead of it in seq order, and only then sends the welcome. Everything a device posts
+  goes through an outbox kept in its exported state: the state is saved before the body is
+  posted, and outstanding bodies are posted again under their ids after a reload or a refused
+  send, which chat sequences once. Groups keep four past epochs' message secrets, so a message
+  sent just before a commit and sequenced after it still decrypts. `mls-room.js` implements
+  all of this for pages, and holds a device in one tab at a time (Web Locks).
 - State export is the provider's whole store (signature key, unused key packages' private keys,
-  every group) with the identity, as one byte string for IndexedDB.
+  every group) with the identity and the page's own data (the outbox, the key packages decided
+  on), as one byte string for IndexedDB.
 - `interop/run.sh` is the check: the WebAssembly build and the bridge's own code (a C program
   linking `libmls_ffi_bridge.a`) form groups both ways through a real chat_server on a scratch
   database, read each other's messages, follow each other's commits and check the stored bodies
-  are the bytes sent and the bridge's framing (plaintext + 166 bytes). `--browser` adds
-  `example.html` in two Chromium contexts, with the native device in the same room and a reload
-  restored from IndexedDB.
+  are the bytes sent and the bridge's framing (plaintext + 166 bytes). `room.test.mjs` checks
+  the convention against an in-memory room (approval, forged credentials, foreign welcomes,
+  save-before-post, a lost commit across a reload). `--browser` adds `example.html` in two
+  Chromium contexts, approving by the shown fingerprint, with the native device in the same
+  room, a second tab refused and a reload restored from IndexedDB. CI runs the crate's tests
+  and clippy for both targets, the room tests, and `build.sh --check`.
 
 ## Consequences
 
 - The `.wasm` is about 2 MB; it loads once per page and is cached.
-- Committed binaries must be rebuilt when the crate or its lock changes; `build.sh --check`
-  says whether they match the source. Nothing in CI runs it yet.
+- Committed binaries must be rebuilt when the crate, its lock or `mls-room.js` changes; CI's
+  `build.sh --check` fails until they are.
+- Trust: there is no authentication service. A credential is a name its device chose, and the
+  server, which carries every key package, welcome and commit, can still influence membership:
+  it can post a key package under any user it controls, withhold or reorder messages, and keep
+  a device from ever being added or from hearing a commit. The user-part check ties a device to
+  the chat account that posted it, which the server vouches for; the approval and the
+  fingerprints are what let people check, out of band, that a device is the one they mean.
+  The server never sees message keys or plaintext.
+- Liveness: only the first leaf adds. While that device is offline nobody joins, and if it is
+  gone for good the group must be started again. Handing the role on, or letting any member add
+  with an epoch claim from the directory, is future work.
 - Whoever holds exported state is that device. Pages keep it in IndexedDB unencrypted; a
   passphrase or a non-extractable WebCrypto key wrapping it is future work.
 - Announcing key packages in the room shows the room's members which devices want to join,
@@ -73,5 +107,7 @@ boundary 6).
 - A device that joins reads nothing from before its welcome, as ADR-0016 says. A page that
   reconnects reads live messages only; resuming with `after` and applying commits past a gap
   (docs/integration/chat.md) is left to the product client.
+- Not done yet: verifying the channel manifest's signature (the hash is trusted as fetched over
+  TLS); an epoch claim from the directory before sending a commit; removing members from a page.
 - Reopen with ADR-0044: if the bridge moves to libcrux or another OpenMLS version, this crate
   moves with it.

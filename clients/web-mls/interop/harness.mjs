@@ -18,7 +18,9 @@ const PEER = process.env.ULW_FFI_PEER ?? join(here, "ffi_peer");
 const PG = process.env.ULW_TEST_DATABASE_URL ??
     "postgresql://postgres:testtest123@127.0.0.1:55432/postgres";
 const CHAT_BIN = process.env.ULW_CHAT_BIN ?? "";
-const CHAT_IMAGE = process.env.ULW_CHAT_IMAGE ?? "ghcr.io/jerome-joseph-1/ulw-chat:main";
+// main as of 404c008, by digest; ULW_CHAT_IMAGE or ULW_CHAT_BIN for another.
+const CHAT_IMAGE = process.env.ULW_CHAT_IMAGE ??
+    "ghcr.io/jerome-joseph-1/ulw-chat@sha256:ba893a0f2e564074f5fb532cee054047f91185d839d7d1338ac972bd04e52e4f";
 export const PORT = Number(process.env.ULW_CHAT_PORT ?? 9171);
 const ISSUER = "https://auth.example.com";
 
@@ -193,6 +195,11 @@ export class NativeDevice {
     constructor(identity) {
         this.identity = identity;
         this.child = spawn(PEER, [], { stdio: ["pipe", "pipe", "inherit"] });
+        this.child.on("error", (e) => {
+            for (const waiter of this.queue.splice(0)) {
+                waiter(`err ${e.message}`);
+            }
+        });
         cleanups.push(() => this.child.kill());
         this.lines = createInterface({ input: this.child.stdout });
         this.queue = [];

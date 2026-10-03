@@ -3,6 +3,7 @@
 //! `invalid_argument`, `internal`).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use js_sys::Uint8Array;
@@ -15,10 +16,34 @@ fn js(error: Error) -> JsError {
     JsError::new(error.as_str())
 }
 
-/// A device: its identity, signature key, key packages and groups.
+type Groups = Rc<RefCell<HashMap<Vec<u8>, Rc<RefCell<MlsGroup>>>>>;
+
+/// A device: its identity, signature key, key packages and groups. Each group has one state
+/// in memory however many `MlsGroup` handles reach it, so two handles never diverge.
 #[wasm_bindgen(js_name = MlsClient)]
 pub struct JsClient {
     inner: Rc<Client>,
+    groups: Groups,
+}
+
+impl JsClient {
+    fn wrap(client: Client) -> JsClient {
+        JsClient {
+            inner: Rc::new(client),
+            groups: Rc::default(),
+        }
+    }
+
+    fn handle(&self, group: MlsGroup) -> JsGroup {
+        let id = group.group_id().as_slice().to_vec();
+        let group = Rc::new(RefCell::new(group));
+        self.groups.borrow_mut().insert(id, Rc::clone(&group));
+        JsGroup {
+            client: Rc::clone(&self.inner),
+            groups: Rc::clone(&self.groups),
+            group,
+        }
+    }
 }
 
 #[wasm_bindgen(js_class = MlsClient)]
@@ -26,22 +51,35 @@ impl JsClient {
     /// A new device whose basic credential carries `identity` (1 to 64 bytes: its device id).
     #[wasm_bindgen(constructor)]
     pub fn new(identity: &[u8]) -> Result<JsClient, JsError> {
-        Ok(JsClient {
-            inner: Rc::new(Client::new(identity).map_err(js)?),
-        })
+        Ok(JsClient::wrap(Client::new(identity).map_err(js)?))
     }
 
     /// The device `exportState` saved, groups and unused key packages included.
     #[wasm_bindgen(js_name = importState)]
     pub fn import_state(state: &[u8]) -> Result<JsClient, JsError> {
-        Ok(JsClient {
-            inner: Rc::new(Client::import_state(state).map_err(js)?),
-        })
+        Ok(JsClient::wrap(Client::import_state(state).map_err(js)?))
     }
 
     #[wasm_bindgen(getter)]
     pub fn identity(&self) -> Vec<u8> {
         self.inner.identity().to_vec()
+    }
+
+    /// SHA-256 of this device's signature public key, hex, for comparing out of band.
+    #[wasm_bindgen(getter)]
+    pub fn fingerprint(&self) -> Result<String, JsError> {
+        self.inner.fingerprint().map_err(js)
+    }
+
+    /// The application's bytes kept with the state (mls-room.js uses them).
+    #[wasm_bindgen(getter, js_name = appData)]
+    pub fn app_data(&self) -> Vec<u8> {
+        self.inner.app_data()
+    }
+
+    #[wasm_bindgen(setter, js_name = appData)]
+    pub fn set_app_data(&self, data: &[u8]) {
+        self.inner.set_app_data(data);
     }
 
     /// A fresh single-use KeyPackage as an MLSMessage: post it to the room for a member to add.
@@ -55,22 +93,37 @@ impl JsClient {
     #[wasm_bindgen(js_name = createGroup)]
     pub fn create_group(&self, group_id: &[u8]) -> Result<JsGroup, JsError> {
         let group = self.inner.create_group(group_id).map_err(js)?;
-        Ok(JsGroup::wrap(&self.inner, group))
+        Ok(self.handle(group))
     }
 
     /// Joins the group a Welcome invites this device into; throws `rejected` when the welcome
-    /// is for other devices.
+    /// is for other devices, is for a group other than `expectedGroupId` (when given), or for
+    /// a group this device is in already. A refused welcome leaves nothing behind.
     #[wasm_bindgen(js_name = joinGroup)]
-    pub fn join_group(&self, welcome: &[u8]) -> Result<JsGroup, JsError> {
-        let group = self.inner.join(welcome).map_err(js)?;
-        Ok(JsGroup::wrap(&self.inner, group))
+    pub fn join_group(
+        &self,
+        welcome: &[u8],
+        expected_group_id: Option<Vec<u8>>,
+    ) -> Result<JsGroup, JsError> {
+        let group = self
+            .inner
+            .join(welcome, expected_group_id.as_deref())
+            .map_err(js)?;
+        Ok(self.handle(group))
     }
 
     /// A group this device is in, from its state; throws `not_a_member` when there is none.
     #[wasm_bindgen(js_name = loadGroup)]
     pub fn load_group(&self, group_id: &[u8]) -> Result<JsGroup, JsError> {
+        if let Some(group) = self.groups.borrow().get(group_id) {
+            return Ok(JsGroup {
+                client: Rc::clone(&self.inner),
+                groups: Rc::clone(&self.groups),
+                group: Rc::clone(group),
+            });
+        }
         let group = self.inner.load_group(group_id).map_err(js)?;
-        Ok(JsGroup::wrap(&self.inner, group))
+        Ok(self.handle(group))
     }
 
     /// Everything this device holds, as bytes for IndexedDB. Secret: whoever has them is this
@@ -108,6 +161,8 @@ pub struct Received {
     kind: Kind,
     plaintext: Vec<u8>,
     sender: Vec<u8>,
+    sender_leaf: Option<u32>,
+    self_removed: bool,
 }
 
 #[wasm_bindgen]
@@ -129,10 +184,47 @@ impl Received {
         self.plaintext.clone()
     }
 
-    /// The identity in the sender's credential.
+    /// The identity in the sender's credential: for a commit, the committer's.
     #[wasm_bindgen(getter)]
     pub fn sender(&self) -> Vec<u8> {
         self.sender.clone()
+    }
+
+    /// The sender's leaf index.
+    #[wasm_bindgen(getter, js_name = senderLeaf)]
+    pub fn sender_leaf(&self) -> Option<u32> {
+        self.sender_leaf
+    }
+
+    /// The commit removed this device; the group can no longer be used.
+    #[wasm_bindgen(getter, js_name = selfRemoved)]
+    pub fn self_removed(&self) -> bool {
+        self.self_removed
+    }
+}
+
+/// A group member: `{leaf, identity, fingerprint}`.
+#[wasm_bindgen]
+pub struct Member {
+    info: core::MemberInfo,
+}
+
+#[wasm_bindgen]
+impl Member {
+    #[wasm_bindgen(getter)]
+    pub fn leaf(&self) -> u32 {
+        self.info.leaf
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn identity(&self) -> Vec<u8> {
+        self.info.identity.clone()
+    }
+
+    /// SHA-256 of its signature public key, hex.
+    #[wasm_bindgen(getter)]
+    pub fn fingerprint(&self) -> String {
+        self.info.fingerprint.clone()
     }
 }
 
@@ -173,6 +265,18 @@ impl MessageInfo {
     pub fn identity(&self) -> Option<Vec<u8>> {
         self.info.identity.clone()
     }
+
+    /// A key package's signature key fingerprint: SHA-256, hex.
+    #[wasm_bindgen(getter)]
+    pub fn fingerprint(&self) -> Option<String> {
+        self.info.fingerprint.clone()
+    }
+
+    /// A key package's KeyPackageRef, hex: the same package always has the same one.
+    #[wasm_bindgen(getter, js_name = keyPackageRef)]
+    pub fn key_package_ref(&self) -> Option<String> {
+        self.info.key_package_ref.clone()
+    }
 }
 
 /// Reads what kind of MLSMessage a body is. Throws `malformed` for anything else, and
@@ -195,16 +299,8 @@ pub fn ciphersuite() -> u16 {
 #[wasm_bindgen(js_name = MlsGroup)]
 pub struct JsGroup {
     client: Rc<Client>,
-    group: RefCell<MlsGroup>,
-}
-
-impl JsGroup {
-    fn wrap(client: &Rc<Client>, group: MlsGroup) -> JsGroup {
-        JsGroup {
-            client: Rc::clone(client),
-            group: RefCell::new(group),
-        }
-    }
+    groups: Groups,
+    group: Rc<RefCell<MlsGroup>>,
 }
 
 #[wasm_bindgen(js_class = MlsGroup)]
@@ -219,12 +315,19 @@ impl JsGroup {
         self.group.borrow().epoch().as_u64() as f64
     }
 
-    /// Members' identities, in leaf order.
-    pub fn members(&self) -> Vec<Uint8Array> {
-        core::members(&self.group.borrow())
-            .iter()
-            .map(|m| Uint8Array::from(m.as_slice()))
-            .collect()
+    /// The members, in leaf order: `[{leaf, identity, fingerprint}]`.
+    pub fn members(&self) -> Result<Vec<Member>, JsError> {
+        Ok(core::members(&self.group.borrow())
+            .map_err(js)?
+            .into_iter()
+            .map(|info| Member { info })
+            .collect())
+    }
+
+    /// Whether the group can still be used: false once a commit removed this device.
+    #[wasm_bindgen(getter)]
+    pub fn active(&self) -> bool {
+        self.group.borrow().is_active()
     }
 
     #[wasm_bindgen(getter, js_name = memberCount)]
@@ -288,13 +391,18 @@ impl JsGroup {
             kind: r.kind,
             plaintext: r.plaintext,
             sender: r.sender,
+            sender_leaf: r.sender_leaf,
+            self_removed: r.self_removed,
         })
     }
 
-    /// Deletes the group's state from the client's store; the handle is unusable afterwards.
+    /// Deletes the group's state from the client's store; every handle to it is unusable
+    /// afterwards.
     pub fn forget(self) -> Result<(), JsError> {
+        let id = self.group.borrow().group_id().as_slice().to_vec();
+        self.groups.borrow_mut().remove(&id);
         self.client
-            .forget_group(self.group.into_inner())
+            .forget_group(&mut self.group.borrow_mut())
             .map_err(js)
     }
 }

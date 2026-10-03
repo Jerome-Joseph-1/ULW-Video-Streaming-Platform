@@ -1,0 +1,31 @@
+# The image build.sh builds dist/ in (ADR-0099). Every input is pinned: the rust image by
+# digest (rustc 1.94.1, the FFI bridge's), and the two downloads by the SHA-256 Docker checks
+# before using them: the wasm32 standard library for that rustc (its hash as the release's
+# channel manifest, channel-rust-1.94.1.toml, lists it) and the wasm-bindgen 0.2.129 release
+# binary (the version Cargo.lock pins for the library half; its hash as first downloaded, since
+# the release publishes none).
+FROM rust:1.94.1-slim-bookworm@sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2
+
+ADD --checksum=sha256:d9b438eae15a462f6a3ec54a5ec18f951acbed1511cf7187839bdda27ce9ca2c \
+    https://static.rust-lang.org/dist/2026-03-26/rust-std-1.94.1-wasm32-unknown-unknown.tar.gz \
+    /tmp/rust-std.tar.gz
+ADD --checksum=sha256:82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e \
+    https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129/wasm-bindgen-0.2.129-x86_64-unknown-linux-musl.tar.gz \
+    /tmp/wasm-bindgen.tar.gz
+
+# The target goes into the toolchain's sysroot from the checked tarball, rather than through
+# `rustup target add`, whose download nothing here could check against a recorded hash.
+RUN set -eu; \
+    mkdir /tmp/std; \
+    tar -xzf /tmp/rust-std.tar.gz -C /tmp/std --strip-components=1; \
+    /tmp/std/install.sh --prefix="$(rustc --print sysroot)" --disable-ldconfig \
+        --components=rust-std-wasm32-unknown-unknown >/dev/null; \
+    tar -xzf /tmp/wasm-bindgen.tar.gz -C /usr/local/bin --strip-components=1 \
+        wasm-bindgen-0.2.129-x86_64-unknown-linux-musl/wasm-bindgen; \
+    rm -rf /tmp/std /tmp/rust-std.tar.gz /tmp/wasm-bindgen.tar.gz; \
+    test "$(wasm-bindgen --version)" = "wasm-bindgen 0.2.129"; \
+    rustc --print target-libdir --target wasm32-unknown-unknown >/dev/null
+
+# The checkout's rust-toolchain.toml names this toolchain; naming it here keeps rustup from
+# fetching anything for it.
+ENV RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu

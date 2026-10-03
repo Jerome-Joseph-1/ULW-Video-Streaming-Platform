@@ -16,6 +16,21 @@ export class AddResult {
 }
 
 /**
+ * A group member: `{leaf, identity, fingerprint}`.
+ */
+export class Member {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * SHA-256 of its signature public key, hex.
+     */
+    readonly fingerprint: string;
+    readonly identity: Uint8Array;
+    readonly leaf: number;
+}
+
+/**
  * What a room message's body is, read without keys.
  */
 export class MessageInfo {
@@ -31,6 +46,10 @@ export class MessageInfo {
      */
     readonly epoch: number | undefined;
     /**
+     * A key package's signature key fingerprint: SHA-256, hex.
+     */
+    readonly fingerprint: string | undefined;
+    /**
      * A public or private message's group id.
      */
     readonly groupId: Uint8Array | undefined;
@@ -39,13 +58,18 @@ export class MessageInfo {
      */
     readonly identity: Uint8Array | undefined;
     /**
+     * A key package's KeyPackageRef, hex: the same package always has the same one.
+     */
+    readonly keyPackageRef: string | undefined;
+    /**
      * `key_package`, `welcome`, `private_message`, `public_message` or `group_info`.
      */
     readonly wireFormat: string;
 }
 
 /**
- * A device: its identity, signature key, key packages and groups.
+ * A device: its identity, signature key, key packages and groups. Each group has one state
+ * in memory however many `MlsGroup` handles reach it, so two handles never diverge.
  */
 export class MlsClient {
     free(): void;
@@ -66,9 +90,10 @@ export class MlsClient {
     static importState(state: Uint8Array): MlsClient;
     /**
      * Joins the group a Welcome invites this device into; throws `rejected` when the welcome
-     * is for other devices.
+     * is for other devices, is for a group other than `expectedGroupId` (when given), or for
+     * a group this device is in already. A refused welcome leaves nothing behind.
      */
-    joinGroup(welcome: Uint8Array): MlsGroup;
+    joinGroup(welcome: Uint8Array, expected_group_id?: Uint8Array | null): MlsGroup;
     /**
      * A fresh single-use KeyPackage as an MLSMessage: post it to the room for a member to add.
      */
@@ -81,6 +106,14 @@ export class MlsClient {
      * A new device whose basic credential carries `identity` (1 to 64 bytes: its device id).
      */
     constructor(identity: Uint8Array);
+    /**
+     * The application's bytes kept with the state (mls-room.js uses them).
+     */
+    appData: Uint8Array;
+    /**
+     * SHA-256 of this device's signature public key, hex, for comparing out of band.
+     */
+    readonly fingerprint: string;
     readonly identity: Uint8Array;
 }
 
@@ -103,13 +136,14 @@ export class MlsGroup {
      */
     encrypt(plaintext: Uint8Array): Uint8Array;
     /**
-     * Deletes the group's state from the client's store; the handle is unusable afterwards.
+     * Deletes the group's state from the client's store; every handle to it is unusable
+     * afterwards.
      */
     forget(): void;
     /**
-     * Members' identities, in leaf order.
+     * The members, in leaf order: `[{leaf, identity, fingerprint}]`.
      */
-    members(): Uint8Array[];
+    members(): Member[];
     mergePendingCommit(): void;
     /**
      * Another member's message: decrypts an application message, merges a commit, queues a
@@ -120,6 +154,10 @@ export class MlsGroup {
      * Commits removing the member whose credential carries `identity`. Pending, as for `add`.
      */
     remove(identity: Uint8Array): Uint8Array;
+    /**
+     * Whether the group can still be used: false once a commit removed this device.
+     */
+    readonly active: boolean;
     readonly epoch: number;
     readonly groupId: Uint8Array;
     readonly hasPendingCommit: boolean;
@@ -142,7 +180,15 @@ export class Received {
      */
     readonly plaintext: Uint8Array;
     /**
-     * The identity in the sender's credential.
+     * The commit removed this device; the group can no longer be used.
+     */
+    readonly selfRemoved: boolean;
+    /**
+     * The sender's leaf index.
+     */
+    readonly senderLeaf: number | undefined;
+    /**
+     * The identity in the sender's credential: for a commit, the committer's.
      */
     readonly sender: Uint8Array;
 }
@@ -163,6 +209,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_addresult_free: (a: number, b: number) => void;
+    readonly __wbg_member_free: (a: number, b: number) => void;
     readonly __wbg_messageinfo_free: (a: number, b: number) => void;
     readonly __wbg_mlsclient_free: (a: number, b: number) => void;
     readonly __wbg_mlsgroup_free: (a: number, b: number) => void;
@@ -171,19 +218,28 @@ export interface InitOutput {
     readonly addresult_welcome: (a: number) => [number, number];
     readonly ciphersuite: () => number;
     readonly inspect: (a: number, b: number) => [number, number, number];
+    readonly member_fingerprint: (a: number) => [number, number];
+    readonly member_identity: (a: number) => [number, number];
+    readonly member_leaf: (a: number) => number;
     readonly messageinfo_contentType: (a: number) => [number, number];
     readonly messageinfo_epoch: (a: number) => [number, number];
+    readonly messageinfo_fingerprint: (a: number) => [number, number];
     readonly messageinfo_groupId: (a: number) => [number, number];
     readonly messageinfo_identity: (a: number) => [number, number];
+    readonly messageinfo_keyPackageRef: (a: number) => [number, number];
     readonly messageinfo_wireFormat: (a: number) => [number, number];
+    readonly mlsclient_appData: (a: number) => [number, number];
     readonly mlsclient_createGroup: (a: number, b: number, c: number) => [number, number, number];
     readonly mlsclient_exportState: (a: number) => [number, number, number, number];
+    readonly mlsclient_fingerprint: (a: number) => [number, number, number, number];
     readonly mlsclient_identity: (a: number) => [number, number];
     readonly mlsclient_importState: (a: number, b: number) => [number, number, number];
-    readonly mlsclient_joinGroup: (a: number, b: number, c: number) => [number, number, number];
+    readonly mlsclient_joinGroup: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly mlsclient_keyPackage: (a: number) => [number, number, number, number];
     readonly mlsclient_loadGroup: (a: number, b: number, c: number) => [number, number, number];
     readonly mlsclient_new: (a: number, b: number) => [number, number, number];
+    readonly mlsclient_set_appData: (a: number, b: number, c: number) => void;
+    readonly mlsgroup_active: (a: number) => number;
     readonly mlsgroup_add: (a: number, b: number, c: number) => [number, number, number];
     readonly mlsgroup_clearPendingCommit: (a: number) => [number, number];
     readonly mlsgroup_encrypt: (a: number, b: number, c: number) => [number, number, number, number];
@@ -192,13 +248,15 @@ export interface InitOutput {
     readonly mlsgroup_groupId: (a: number) => [number, number];
     readonly mlsgroup_hasPendingCommit: (a: number) => number;
     readonly mlsgroup_memberCount: (a: number) => number;
-    readonly mlsgroup_members: (a: number) => [number, number];
+    readonly mlsgroup_members: (a: number) => [number, number, number, number];
     readonly mlsgroup_mergePendingCommit: (a: number) => [number, number];
     readonly mlsgroup_process: (a: number, b: number, c: number) => [number, number, number];
     readonly mlsgroup_remove: (a: number, b: number, c: number) => [number, number, number, number];
     readonly received_kind: (a: number) => [number, number];
     readonly received_plaintext: (a: number) => [number, number];
+    readonly received_selfRemoved: (a: number) => number;
     readonly received_sender: (a: number) => [number, number];
+    readonly received_senderLeaf: (a: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
