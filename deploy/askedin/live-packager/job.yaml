@@ -1,0 +1,159 @@
+# One live stream's packager (docs/adr/0046, 0083): live_packager takes the stream from LiveKit's
+# recorder over SRT, writes its HLS to the store, and once the stream ends queues its recording
+# as a video (ADR-0055). One process per stream, so one Job per stream, made from this template
+# by whatever starts the stream: the stream service once it exists, by hand until then
+# (RUNBOOK.md, step 9). It is not in the overlays, so ArgoCD never applies it.
+#
+# The template's variables, filled with envsubst naming exactly these (RUNBOOK.md):
+#   ULW_NAMESPACE     apps-stage or apps
+#   ULW_IMAGE_TAG     development (stage) or master (prod), as the overlays' images
+#   ULW_STREAM_ID     the stream id; also the pod's DNS name, so a DNS label: lowercase
+#                     letters, digits and '-', 1 to 63, as ADR-0053 requires of a stream id
+#                     when the relay's packager_srt names {stream}
+#   ULW_STREAM_OWNER  the broadcaster's Askedin user id (sub), who owns the recording's video
+# The stream's SRT passphrase is in its own Secret, live-packager-<stream>, made beside it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${ULW_STREAM_ID}
+  namespace: ${ULW_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: live-packager
+    app.kubernetes.io/part-of: ulw
+    app.kubernetes.io/instance: ${ULW_STREAM_ID}
+spec:
+  # Restarted in place on failure (OnFailure, below): the pod keeps its address, so its DNS
+  # record stays, and a packager killed between the stream's end and its recording records it
+  # on the next start (docs/integration/operations-contract.md). Six failures in a row is a
+  # stream that cannot be packaged; the Job fails and its log says why.
+  backoffLimit: 6
+  # The longest stream is 12 h (ULW_LIVE_MAX_HOURS), and its recording is copied far faster
+  # than real time; an hour more is a packager that is stuck.
+  activeDeadlineSeconds: 46800
+  # Kept a day after it ends, for its log ("recording: queued as video <id>").
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: live-packager
+        app.kubernetes.io/part-of: ulw
+        app.kubernetes.io/instance: ${ULW_STREAM_ID}
+    spec:
+      restartPolicy: OnFailure
+      # <stream>.live-packager.<namespace>.svc.cluster.local, through the headless Service
+      # in overlays/*/live-packager: where the recorder's SRT caller dials (ADR-0053).
+      hostname: ${ULW_STREAM_ID}
+      subdomain: live-packager
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # SIGTERM drains: the packager stops, the stream is left to be continued by a new run,
+      # and the process exits within seconds; the default 30 s covers it.
+      terminationGracePeriodSeconds: 30
+      # As the worker's pod, and for the same reason: the packager runs ffmpeg through
+      # ulw_sandbox, in user, network, mount and pid namespaces of its own (ADR-0025, 0032,
+      # 0046), which needs the pod in a user namespace of its own, an unmasked /proc and the
+      # worker's seccomp profile (RUNBOOK.md, step 2).
+      hostUsers: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/ulw-worker.json
+      containers:
+        - name: packager
+          image: git.askedin.com/askedin/askedin-monorepo/live-packager:${ULW_IMAGE_TAG}
+          imagePullPolicy: Always
+          ports:
+            - name: srt
+              containerPort: 9000
+              protocol: UDP
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: ULW_STREAM_ID
+              value: ${ULW_STREAM_ID}
+            - name: ULW_STREAM_OWNER
+              value: ${ULW_STREAM_OWNER}
+            # The SRT listener binds the pod's own address (numeric only), on the port the
+            # Service and the NetworkPolicy name.
+            - name: ULW_LIVE_INGEST_HOST
+              value: $(POD_IP)
+            - name: ULW_LIVE_INGEST_PORT
+              value: "9000"
+            # The segment length must equal the relay's keyframe interval (ADR-0053); 2 s is
+            # both defaults.
+            - name: ULW_LIVE_SEGMENT_SECONDS
+              value: "2"
+            - name: ULW_STORAGE
+              value: r2
+            - name: ULW_SCRATCH_DIR
+              value: /var/cache/ulw-live
+            - name: ULW_LIVE_SRT_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: live-packager-${ULW_STREAM_ID}
+                  key: ULW_LIVE_SRT_PASSPHRASE
+            # The role needs only what operations-contract.md lists for the packager
+            # (RUNBOOK.md, step 9).
+            - name: ULW_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: live-packager-secrets
+                  key: ULW_DATABASE_URL
+            - name: ULW_R2_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: live-packager-secrets
+                  key: ULW_R2_ACCOUNT_ID
+            - name: ULW_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: live-packager-secrets
+                  key: ULW_BUCKET
+            - name: ULW_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: live-packager-secrets
+                  key: ULW_S3_ACCESS_KEY_ID
+            - name: ULW_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: live-packager-secrets
+                  key: ULW_S3_SECRET_ACCESS_KEY
+          # Memory: the remux measured 58 MB resident (ADR-0046); at the start of a run the live
+          # ffmpeg holds its probe window, 7.5 MB at the default 20 Mbit/s ceiling and 137 MB
+          # at worst; the recording holds one upload part, 16 MiB at that ceiling, beside two
+          # copying ffmpeg children of about 60 MB each (operations-contract.md). 512 MiB holds
+          # the worst of these with room; the request covers a stream being packaged.
+          # CPU: the remux is a copy, 0.3% of a core (ADR-0046); the recording's copies run
+          # far faster than real time and may take a core while they do.
+          # Disk: ffmpeg lists twice the 10-segment window, each segment at most T + 0.5 s at
+          # 20 Mbit/s, about 125 MB, and the recording holds one segment more; 1 GiB of scratch
+          # covers that with room, plus the log as video-gateway's.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+              ephemeral-storage: 1280Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            procMount: Unmasked
+          volumeMounts:
+            - name: scratch
+              mountPath: /var/cache/ulw-live
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 1Gi

@@ -16,6 +16,10 @@ mock auth-service, as a browser's would through askedin-gateway:
   netpol      a pod beside the gateway cannot open a connection to it (x-user-id forgery has
               nothing to reach), while it can reach the auth-service; the worker reaches the
               store but neither the gateway nor the auth-service
+  chat        the chat Deployment's three nodes through the route: an upgrade on /rt without a
+              token is refused, a stream's live chat opened as the RUNBOOK opens it is joined
+              by several sockets, and a message sent on one reaches every one of them, wherever
+              Envoy put them; a pod beside chat cannot reach its node-channel port
 
     tests/cluster/vod_flow.py [--allow-skip] [SCENARIO...]     all of them when none is named
 
@@ -31,11 +35,13 @@ Against a real deployment (deploy/askedin/RUNBOOK.md), ULW_E2E_URL names the Gat
 run there, only when named, and nothing calls kubectl: the scenarios that delete pods, start
 pods or drive the mock auth-service are refused.
 """
+import base64
 import http.client
 import json
 import os
 import pathlib
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -54,6 +60,8 @@ SANDBOX_URL = "http://127.0.0.1:18080"
 SANDBOX_STORE = {"minio:9000": ("127.0.0.1", 19000)}
 REAL_TARGET_SCENARIOS = {"upload", "playback"}
 NAMESPACE = "apps-stage"
+# The sandbox's Postgres container (e2e-up.sh), where the chat scenario opens a stream's chat.
+SANDBOX_PG = "ulw-e2e-pg"
 # A clip at 1280x720 transcodes to two rungs (720p, 360p) in well under a minute on the
 # sandbox's half-core worker; the clock allows for a slow machine.
 READY_TIMEOUT_S = 600
@@ -165,6 +173,18 @@ def kubectl(*args, check_rc=True):
     if check_rc and result.returncode != 0:
         raise Failure(f"kubectl {' '.join(args)}: {result.stderr.strip()}")
     return result
+
+
+def sandbox_sql(sql):
+    """Runs `sql` in the sandbox's Postgres as its superuser, as the RUNBOOK's statements run on
+    Askedin's; only ever against the sandbox, like kubectl."""
+    if not KUBECTL_ALLOWED:
+        raise Refused("SQL is only run against the sandbox")
+    result = subprocess.run(["docker", "exec", SANDBOX_PG, "psql", "-U", "postgres", "-qAt",
+                             "-v", "ON_ERROR_STOP=1", "-c", sql], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Failure(f"psql: {result.stderr.strip()}")
+    return result.stdout.strip()
 
 
 def unknown_video_id():
@@ -491,12 +511,150 @@ def scenario_playback(workdir):
     print(f"  {len(variants)} renditions, {segments} init and media segments from the store")
 
 
+class ChatSocket:
+    """A minimal RFC 6455 client for the chat scenario: masked text frames out, Pings answered,
+    text frames in as JSON (tests/soak/chat_soak.py has the full one)."""
+
+    def __init__(self, token=None):
+        self.sock = socket.create_connection((BASE.hostname, BASE.port), timeout=10)
+        key = base64.b64encode(os.urandom(16)).decode()
+        head = (f"GET /rt HTTP/1.1\r\nHost: {BASE.hostname}:{BASE.port}\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n")
+        if token:
+            head += f"Authorization: Bearer {token}\r\n"
+        self.sock.sendall((head + "\r\n").encode())
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        line, _, self.buf = data.partition(b"\r\n\r\n")
+        self.buf = bytearray(self.buf)
+        parts = line.split(b" ", 2)
+        self.status = int(parts[1]) if len(parts) > 1 else 0
+
+    def send(self, obj, opcode=0x1):
+        payload = obj if isinstance(obj, bytes) else json.dumps(obj).encode()
+        n, mask = len(payload), os.urandom(4)
+        head = bytes([0x80 | opcode])
+        head += bytes([0x80 | n]) if n < 126 else bytes([0x80 | 126]) + n.to_bytes(2, "big")
+        self.sock.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    def recv(self, timeout):
+        """The next JSON message, or None when `timeout` passes first."""
+        deadline = time.monotonic() + timeout
+        while True:
+            b = self.buf
+            if len(b) >= 2:
+                n, at = b[1] & 0x7F, 2
+                if n == 126:
+                    n, at = int.from_bytes(b[2:4], "big"), 4
+                elif n == 127:
+                    n, at = int.from_bytes(b[2:10], "big"), 10
+                if len(b) >= at + n:
+                    op, payload = b[0] & 0x0F, bytes(b[at:at + n])
+                    del b[:at + n]
+                    if op == 0x9:
+                        self.send(payload, 0xA)
+                    elif op == 0x8:
+                        raise Failure(f"chat closed the socket: {payload[:2].hex()}")
+                    elif op == 0x1:
+                        return json.loads(payload)
+                    continue
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            self.sock.settimeout(left)
+            try:
+                chunk = self.sock.recv(65536)
+            except socket.timeout:
+                return None
+            if not chunk:
+                raise Failure("chat closed the connection")
+            self.buf += chunk
+
+    def expect(self, kind, timeout=10):
+        while True:
+            message = self.recv(timeout)
+            check(message is not None, f"no {kind} from chat within {timeout} s")
+            if message.get("type") == kind:
+                return message
+            check(message.get("type") != "error", f"chat answered {message} waiting for {kind}")
+
+    def close(self):
+        self.sock.close()
+
+
+def scenario_chat():
+    ready = kubectl("-n", NAMESPACE, "get", "deploy", "chat",
+                    "-o", "jsonpath={.status.readyReplicas}").stdout.strip()
+    check(ready == "3", f"chat has {ready or 0} ready replicas, not the overlay's 3")
+    refused = ChatSocket()
+    refused.close()
+    check(refused.status == 401, f"an upgrade without a token: expected 401, got {refused.status}")
+    # Opened as the RUNBOOK opens a stream's chat before its viewers arrive.
+    stream = f"e2e-chat-{uuid.uuid4().hex[:8]}"
+    kind = sandbox_sql(
+        "INSERT INTO chat_rooms (room_id, kind) "
+        f"SELECT live_chat_room('{stream}'), 'stream_live_chat' "
+        f"WHERE NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = live_chat_room('{stream}')) "
+        "AND NOT EXISTS (SELECT 1 FROM room_state "
+        f"WHERE room_id = live_chat_room('{stream}') AND kind <> 'stream_live_chat') "
+        "ON CONFLICT (room_id) DO UPDATE SET kind = chat_rooms.kind RETURNING kind")
+    check(kind == "stream_live_chat", f"opening the stream's chat printed {kind!r}")
+    # Enough sockets that Envoy spreads them over the three nodes, so the message crosses the
+    # node channel from its room's owner to the others.
+    sockets = []
+    try:
+        for i in range(6):
+            s = ChatSocket(mint(f"chat-{i}-{uuid.uuid4().hex[:6]}", "RS256"))
+            sockets.append(s)
+            check(s.status == 101, f"upgrade {i} with a token: expected 101, got {s.status}")
+            s.send({"type": "join", "stream": stream})
+            room = s.expect("joined")["room"]
+        body = base64.urlsafe_b64encode(os.urandom(24)).rstrip(b"=").decode()
+        message_id = uuid.uuid4().hex
+        sockets[0].send({"type": "send", "room": room, "id": message_id, "body": body})
+        sockets[0].expect("sent")
+        for i, s in enumerate(sockets):
+            got = s.expect("message")
+            check(got.get("id") == message_id and got.get("body") == body,
+                  f"socket {i} got {got}, not the message sent")
+    finally:
+        for s in sockets:
+            s.close()
+    print(f"  {len(sockets)} sockets on the stream's chat each got the message")
+    check_chat_node_port()
+
+
+def check_chat_node_port():
+    """The node channel admits chat pods alone (ADR-0035): a pod beside chat is refused there,
+    though it reaches the auth-service, as in the netpol scenario."""
+    ip = kubectl("-n", NAMESPACE, "get", "pods", "-l", "app.kubernetes.io/name=chat",
+                 "-o", "jsonpath={.items[0].status.podIP}").stdout.strip()
+    check(ip, "no chat pod IP")
+    probe = (f"timeout 5 bash -c 'exec 3<>/dev/tcp/{ip}/9201' && echo node-reached; "
+             "timeout 5 bash -c 'exec 3<>/dev/tcp/mock-auth.auth.svc.cluster.local/80' "
+             "&& echo auth-reached; true")
+    result = kubectl("-n", NAMESPACE, "run", f"chat-probe-{uuid.uuid4().hex[:6]}", "--rm", "-i",
+                     "--restart=Never", "--image=ulw/video-gateway:e2e",
+                     "--image-pull-policy=Never", "--command", "--", "bash", "-c", probe)
+    check("auth-reached" in result.stdout,
+          f"the probe pod has no network at all: {result.stdout!r}")
+    check("node-reached" not in result.stdout,
+          "a pod that is not chat reached chat's node port despite its NetworkPolicy")
+    print("  a pod beside chat is refused its node port")
+
+
 SCENARIOS = {
     "auth": lambda _: scenario_auth(),
     "upload": scenario_upload,
     "pod-kill": scenario_pod_kill,
     "netpol": lambda _: scenario_netpol(),
     "playback": scenario_playback,
+    "chat": lambda _: scenario_chat(),
 }
 
 

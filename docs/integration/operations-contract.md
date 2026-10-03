@@ -9,16 +9,16 @@ page does not repeat it.
 
 | Dependency | Used by | Requirement |
 |---|---|---|
-| Postgres 16 | gateway, worker, chat | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
+| Postgres 16 | gateway, worker, chat, live packager | One database, owned by the service's role, so migrations can run DDL (ADR-0031). The gateway's init container (`ulw_migrate`) applies migrations before the gateway starts. |
 | Postgres log settings | chat | Bound parameters stay out of the server log: `log_parameter_max_length_on_error = 0` (the default), and `log_parameter_max_length = 0` whenever statement logging is on (`log_statement` `mod` or `all`, `log_min_duration_statement`, `log_min_duration_sample`, `log_transaction_sample_rate`), with `auto_explain.log_parameter_max_length = 0` if auto_explain is loaded. Otherwise chat message bodies, plaintext or ciphertext, are written to the log (ADR-0054). RUNBOOK step 3 sets them on the database. |
-| R2 bucket | gateway, worker | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
-| R2 API tokens | gateway, worker | One per component (ADR-0066). The gateway's token must allow, on `videos/<video id>/raw` and `videos/<video id>/hls/...`: CreateMultipartUpload, UploadPart, ListParts, CompleteMultipartUpload, AbortMultipartUpload (which must be permitted), HeadObject, GetObject (playlists it rewrites, and presigned GET for segments and init) and PutObject. The upload reaper runs with the gateway's secret and additionally needs ListMultipartUploads (bucket level), ListObjectsV2 and DeleteObject. |
+| R2 bucket | gateway, worker, live packager | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
+| R2 API tokens | gateway, worker, live packager | One per component (ADR-0066). The gateway's token must allow, on `videos/<video id>/raw` and `videos/<video id>/hls/...`: CreateMultipartUpload, UploadPart, ListParts, CompleteMultipartUpload, AbortMultipartUpload (which must be permitted), HeadObject, GetObject (playlists it rewrites, and presigned GET for segments and init) and PutObject. The upload reaper runs with the gateway's secret and additionally needs ListMultipartUploads (bucket level), ListObjectsV2 and DeleteObject. The live packager's token (`live-packager-secrets`, RUNBOOK "Live streams") reads and writes `live/<stream>/...` (the segments, playlists and their reads back at the stream's end) and writes the recording to `videos/<video id>/raw` with a multipart upload, which it aborts or deletes when the copy fails: object read and write on the bucket, as the worker's. |
 | Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS (`JWKS_URL` must be `https://`). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
-| DNS and TLS | Envoy | TLS terminates at Askedin's Envoy Gateway; the service speaks plain HTTP behind it (ADR-0001). The HTTPRoute sends `/api/v1/uploads` and `/api/v1/videos` to the gateway. |
-| Envoy route timeout | Envoy | None (`request: 0s`). A chunk may take up to 1024 s at the gateway's minimum rate, and the gateway enforces its own timeouts. Upstream idle timeout below the gateway's 10 s keep-alive timeout (5 s in the shipped `BackendTrafficPolicy`). |
-| Seccomp profile | worker nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
+| DNS and TLS | Envoy | TLS terminates at Askedin's Envoy Gateway; the service speaks plain HTTP behind it (ADR-0001). The HTTPRoutes send `/api/v1/uploads` and `/api/v1/videos` to the gateway and `/rt` (exactly; chat's WebSocket) to chat, on every hostname of `askedin-gateway`, so `<CHAT_HOST>` in [chat.md](chat.md) is any of them. |
+| Envoy route timeout | Envoy | None (`request: 0s`), on the gateway's routes and chat's. A chunk may take up to 1024 s at the gateway's minimum rate, and the gateway enforces its own timeouts; a chat socket lasts as long as its token. Upstream idle timeout below the gateway's 10 s keep-alive timeout (5 s in the shipped `BackendTrafficPolicy`). |
+| Seccomp profile | worker and live packager nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
 | Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on every hostname of `askedin-gateway`: the stage HTTPRoute names none, as the video routes do not. `/twirp` is never routed (ADR-0050, ADR-0053). |
-| LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP). It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Not in the overlays yet: it ships with the packager's. |
+| LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP 9000, `srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000`, ADR-0083), and its pods must be labelled `app.kubernetes.io/name: livekit-egress`, the only pods the packager's NetworkPolicy admits. It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Not in the overlays yet; the packager's are. |
 
 ### Environment, by name
 
@@ -91,13 +91,14 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
 | `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | |
-| `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | Chat has no Askedin overlay yet |
+| `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | The overlays set the address to the pod's own, `$(POD_IP):9201`, and take the secret from `chat-secrets` (ADR-0083) |
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
 
 <!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
 
-The live packager (one process per stream, environment only, no Askedin overlay yet) takes
+The live packager (one process per stream, environment only; on Askedin one Job per stream from
+`deploy/askedin/live-packager/job.yaml`, ADR-0083) takes
 `ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR`, `ULW_FFMPEG` and
 `ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:

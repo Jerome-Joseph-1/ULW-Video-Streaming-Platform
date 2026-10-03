@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Brings up the sandbox replica of Askedin's cluster on this machine, from scratch: a kind
 # cluster, Postgres and MinIO beside it (as they run beside K3s on k8s-prod), Envoy Gateway,
-# the mock auth-service, the stage overlays of video-gateway and video-worker built from this
-# checkout, and STUNner with LiveKit behind it (deploy/stunner/up.sh). Rerunning rebuilds the
-# images and reapplies everything; e2e-down.sh removes it.
+# the mock auth-service, the stage overlays of video-gateway, video-worker and chat built from
+# this checkout (and the live packager's image, which runs no pod here), and STUNner with
+# LiveKit behind it (deploy/stunner/up.sh). Rerunning rebuilds the images and reapplies
+# everything; e2e-down.sh removes it.
 # Nothing here knows how to reach Askedin's infrastructure.
 #
 #   ULW_BUILDER    build with this docker buildx builder instead of the default one; the images
@@ -92,6 +93,8 @@ build() {
 build "${built_images[0]}" "$root" "$root/deploy/docker/Dockerfile" gateway
 build "${built_images[1]}" "$root" "$root/deploy/docker/Dockerfile" worker
 build "${built_images[2]}" "$here/mock-auth" "$here/mock-auth/Dockerfile"
+build "${built_images[3]}" "$root" "$root/deploy/docker/Dockerfile" chat
+build "${built_images[4]}" "$root" "$root/deploy/docker/Dockerfile" live-packager
 
 pinned "$eg_image" "$eg_digest"
 pinned "$envoy_image" "$envoy_digest"
@@ -173,6 +176,13 @@ for service in video-gateway video-worker; do
         --from-literal="ULW_S3_SECRET_ACCESS_KEY=$password" \
         "${extra[@]}" --dry-run=client -o yaml | apply_stdin
 done
+# Chat's, as RUNBOOK.md lists them, with a node secret made for this run.
+kubectl -n apps-stage create secret generic chat-secrets \
+    --from-literal=ASKEDIN_ENV=stage \
+    --from-literal="ULW_DATABASE_URL=postgresql://postgres:$password@postgres:5432/postgres" \
+    --from-literal="ULW_NODE_SECRET=$(openssl rand -base64 48)" \
+    --from-literal="JWKS_URL=https://mock-auth.auth.svc.cluster.local/.well-known/jwks.json" \
+    --from-literal="JWT_ISSUER=$issuer" --dry-run=client -o yaml | apply_stdin
 
 log "applying the sandbox and the stage overlays"
 kubectl kustomize --load-restrictor LoadRestrictionsNone "$here/cluster" | apply_stdin
@@ -202,10 +212,14 @@ endpoint minio s3 9000 "$minio"
 
 # The images are rebuilt on every run under the same tag, so pods from an earlier run would
 # keep the old ones.
-kubectl -n apps-stage rollout restart deployment/video-gateway deployment/video-worker >/dev/null
+kubectl -n apps-stage rollout restart deployment/video-gateway deployment/video-worker \
+    deployment/chat >/dev/null
 kubectl -n auth rollout status deployment/mock-auth --timeout=120s
 kubectl -n apps-stage rollout status deployment/video-gateway --timeout=300s
 kubectl -n apps-stage rollout status deployment/video-worker --timeout=300s
+# Chat's tables come from the gateway's init container, so a chat pod that started before it
+# had migrated waits unready (or restarts) until they exist.
+kubectl -n apps-stage rollout status deployment/chat --timeout=300s
 kubectl -n envoy-gateway-system wait --for=condition=Available deployment \
     --selector=gateway.envoyproxy.io/owning-gateway-name=askedin-gateway --timeout=180s
 # Envoy takes a moment to program the routes after its pod is ready.

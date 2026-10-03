@@ -36,5 +36,7 @@ probe_image=docker.io/library/python@sha256:e81548ac35b07a3bd4805f275107592ef458
 # The same Postgres and MinIO builds as compose.yaml; these run beside the node, not in it.
 pg_image=postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
 minio_image=docker.io/pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
-# Built from this checkout.
-built_images=(ulw/video-gateway:e2e ulw/video-worker:e2e ulw/mock-auth:e2e)
+# Built from this checkout. live-packager is built, checked and scanned like the rest but runs no
+# pod: a packager is one Job per stream, started for a stream (deploy/askedin/live-packager).
+built_images=(ulw/video-gateway:e2e ulw/video-worker:e2e ulw/mock-auth:e2e ulw/chat:e2e
+    ulw/live-packager:e2e)

@@ -18,6 +18,12 @@ resources:
   - ../../askedin/overlays/stage/video-gateway/networkpolicy.yaml
   - ../../askedin/overlays/stage/video-worker/deployment.yaml
   - ../../askedin/overlays/stage/video-worker/networkpolicy.yaml
+  - ../../askedin/overlays/stage/chat/deployment.yaml
+  - ../../askedin/overlays/stage/chat/service.yaml
+  - ../../askedin/overlays/stage/chat/httproute.yaml
+  - ../../askedin/overlays/stage/chat/networkpolicy.yaml
+  - ../../askedin/overlays/stage/live-packager/service.yaml
+  - ../../askedin/overlays/stage/live-packager/networkpolicy.yaml
 # Images built by e2e-up.sh and loaded into the node; nothing is pulled from Askedin's registry.
 images:
   - name: git.askedin.com/askedin/askedin-monorepo/video-gateway
@@ -26,7 +32,11 @@ images:
   - name: git.askedin.com/askedin/askedin-monorepo/video-worker
     newName: ulw/video-worker
     newTag: e2e
+  - name: git.askedin.com/askedin/askedin-monorepo/chat
+    newName: ulw/chat
+    newTag: e2e
 patches:
   - path: gateway-patch.yaml
   - path: worker-patch.yaml
+  - path: chat-patch.yaml
   - path: networkpolicy-patch.yaml

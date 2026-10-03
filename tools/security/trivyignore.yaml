@@ -11,18 +11,20 @@
 # binary packages it waives, not by paths, and expires within 92 days (docs/adr/0072).
 
 misconfigurations:
-  # The worker's ffmpeg runs in user, pid and mount namespaces of its own and mounts a /proc
-  # for its pid namespace (docs/adr/0025, 0032). The kubelet's masked /proc paths would stop
-  # that mount; Unmasked only takes effect inside the pod's own user namespace
-  # (hostUsers: false), so no host /proc path is exposed.
+  # The worker's ffmpeg, and the live packager's, run in user, pid and mount namespaces of their
+  # own and mount a /proc for their pid namespace (docs/adr/0025, 0032, 0046). The kubelet's
+  # masked /proc paths would stop that mount; Unmasked only takes effect inside the pod's own
+  # user namespace (hostUsers: false), so no host /proc path is exposed.
   - id: KSV-0027
     paths:
       - deploy/askedin/overlays/prod/video-worker/deployment.yaml
       - deploy/askedin/overlays/stage/video-worker/deployment.yaml
       - rendered/deploy-local-cluster/deployment-apps-stage-video-worker.yaml
+      - deploy/askedin/live-packager/job.yaml
     statement: >-
-      The worker sandbox mounts /proc for its own pid namespace inside the pod's user namespace
-      (hostUsers: false), which needs procMount Unmasked; ADR-0025 and ADR-0032.
+      The ffmpeg sandbox (worker and live packager) mounts /proc for its own pid namespace
+      inside the pod's user namespace (hostUsers: false), which needs procMount Unmasked;
+      ADR-0025, ADR-0032 and ADR-0046.
     expired_at: 2027-09-01
 
   # The STUNner gateway operator's RBAC, as its Helm chart ships it (operator.yaml's header).
