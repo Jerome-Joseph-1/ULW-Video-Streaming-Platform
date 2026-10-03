@@ -288,6 +288,11 @@ jobs:
           sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
           --calls 4 --seconds 60 --out call-capacity
         timeout-minutes: 10
+      # M29 (ADR-0095): group calls of four, against n x (n - 1) streams out per call.
+      - run: >-
+          sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
+          --calls 2 --participants 4 --seconds 60 --out call-capacity/group-of-4
+        timeout-minutes: 10
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

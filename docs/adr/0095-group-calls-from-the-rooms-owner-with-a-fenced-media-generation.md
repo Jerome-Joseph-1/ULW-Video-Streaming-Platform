@@ -116,7 +116,10 @@ and receives n (each publisher's layers, about 1.3 x the top one with simulcast)
 The cap of 8 keeps a full call under a quarter of a pod's CPU and under a tenth of its
 bandwidth; 16 is the most one pod can carry at all. `tools/group_call_capacity_test.sh` runs
 `tests/load/call_capacity` with rooms of n and checks the measured egress against
-n x (n - 1) x the per-stream rate, within 10%.
+n x (n - 1) x the per-stream rate, within 10%. Measured locally (two rooms of four, 30 s, 700 kbps
+per publisher, one layer): 8.96 Mbit/s out per call against the derived 8.4 (+6.7%, packet
+headers included), out over in 2.96 against 3, and 0.047 cores per call, under the 0.095 the
+1:1 figure extrapolates to; the CI runner's figure (`e2e.yml`) is the one to size by.
 
 ## Consequences
 
