@@ -69,6 +69,8 @@ public:
     void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
                 core::ports::Recording recording,
                 core::ports::MessageCallback<core::ports::Admission> done) override;
+    void access(const core::RoomId& room, const core::UserId& user,
+                core::ports::MessageCallback<core::ports::RoomAccess> done) override;
     void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
     void watch_members(core::ports::IMemberListener* listener) noexcept override;
 

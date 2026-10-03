@@ -193,6 +193,17 @@ void MemoryMessageStore::admits(const core::RoomId& room, const core::UserId& us
     defer([done = std::move(done), answer]() mutable noexcept { done(answer); });
 }
 
+void MemoryMessageStore::access(const core::RoomId& room, const core::UserId& user,
+                                MessageCallback<core::ports::RoomAccess> done) {
+    core::ports::RoomAccess answer;
+    if (const auto recorded = kinds_.find(room); recorded != kinds_.end()) {
+        answer.kind = recorded->second;
+    }
+    const auto listed = members_.find(room);
+    answer.member = listed != members_.end() && listed->second.contains(user);
+    defer([done = std::move(done), answer]() mutable noexcept { done(answer); });
+}
+
 void MemoryMessageStore::record_live(const core::RoomId& room, MessageCallback<void> done) {
     const auto listed = members_.find(room);
     const bool has_members = listed != members_.end() && !listed->second.empty();

@@ -80,6 +80,13 @@ spec:
       ports:
         - port: 9201
           protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - port: 7880
+          protocol: TCP
     - ports:
         - port: 5432
           protocol: TCP

@@ -1,4 +1,5 @@
 ulw_add_library(chat_lib
+    src/call.cpp
     src/chat.cpp
     src/chat_service.cpp
     src/config.cpp
@@ -19,4 +20,4 @@ target_link_libraries(chat_lib PUBLIC
 ulw_add_executable(chat_server
     src/main.cpp)
 target_link_libraries(chat_server PRIVATE
-    ulw::chat_lib ulw::os ulw::ops ulw::pg_rooms ulw::pg_store ulw::allocator)
+    ulw::chat_lib ulw::os ulw::ops ulw::pg_rooms ulw::pg_store ulw::sfu_livekit ulw::allocator)

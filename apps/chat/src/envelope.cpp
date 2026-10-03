@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <format>
 #include <iterator>
 #include <span>
@@ -176,6 +177,25 @@ std::expected<core::UserId, EnvelopeError> user_of(const core::json::Value& mess
     return *user;
 }
 
+std::expected<Command, EnvelopeError> call_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "device"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    const auto text = string_of(message, "device");
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto device = core::DeviceId::parse(*text);
+    if (!device) {
+        return std::unexpected(EnvelopeError::BadDevice);
+    }
+    return Call{.room = *room, .device = *device};
+}
+
 void append_room(std::string& out, const core::RoomId& room) {
     std::array<char, core::Uuid::kTextLength> text{};
     room.format_to(text);
@@ -210,6 +230,9 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     }
     if (name == "history") {
         return history_of(*message);
+    }
+    if (name == "call") {
+        return call_of(*message);
     }
     if (name == "watch" || name == "unwatch") {
         const auto user = user_of(*message);
@@ -311,6 +334,28 @@ void write_rate_limited(std::string& out, const core::RoomId& room, const rt::Me
     std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{}}})", retry_after.count());
 }
 
+void write_ticket(std::string& out, const core::RoomId& room,
+                  const core::ports::MediaTicket& ticket) {
+    out += R"({"type":"ticket",)";
+    append_room(out, room);
+    out += R"(,"url":)";
+    core::json::append_string(out, ticket.endpoint);
+    out += R"(,"token":)";
+    core::json::append_string(out, ticket.credential);
+    std::format_to(
+        std::back_inserter(out), R"(,"expires_at":{}}})",
+        std::chrono::duration_cast<core::Seconds>(ticket.expires_at.time_since_epoch()).count());
+}
+
+void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
+                      std::optional<core::Millis> retry_after) {
+    write_error(out, reason, room);
+    if (retry_after) {
+        out.pop_back();
+        std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{}}})", retry_after->count());
+    }
+}
+
 std::string_view reason(EnvelopeError e) noexcept {
     switch (e) {
     case EnvelopeError::NotJson:
@@ -329,6 +374,8 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "unavailable";
     case EnvelopeError::BadUser:
         return "bad_user";
+    case EnvelopeError::BadDevice:
+        return "bad_device";
     }
     return "malformed";
 }
