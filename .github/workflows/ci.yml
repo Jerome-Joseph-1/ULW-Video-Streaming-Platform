@@ -175,7 +175,7 @@ jobs:
       # together, and a ring stays charged for a moment after its process exits. A reactor that
       # cannot get a ring fails with ENOMEM (an IoUring test) or falls back to epoll (a server
       # under test). The limit is the sum over the user, so no bound sized from one test holds;
-      # nothing here measures it (ADR-0086).
+      # nothing here measures it.
       - run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
           ctest --test-dir build/${{ matrix.preset }} -L integration -j "$(nproc)" --output-on-failure
