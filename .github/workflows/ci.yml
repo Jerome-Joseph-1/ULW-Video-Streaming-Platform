@@ -111,22 +111,16 @@ jobs:
         run: tests/load/echo_acceptance.sh build/ci ${{ matrix.reactor }} 20
 
   # The storage laws, the wire behaviour the S3 adapter relies on, the store's reaper, and the
-  # catalog and job queue, against real servers. Nothing here passes -j, and nothing may: the
-  # pool test docker-pauses the Postgres every other catalog and queue test is using, and the
-  # reaper test aborts every upload in the shared bucket older than its cutoff, conformance
-  # runs included, which is also why those come after the integration label, not beside it.
-  # The label is split across three runners instead (ADR-0083): shard i runs every third test
-  # from the i-th (ctest -I i,,3), one at a time, against a Postgres and a MinIO of its own, so
-  # no two tests ever share a server at once, and the three together run every test once. Each
-  # test makes its own scratch database, so none depends on another having run first.
+  # catalog and job queue, against real servers. The integration label runs one test per core
+  # (ADR-0086): every test has a scratch database, a bucket prefix or bucket and ports of its
+  # own, and the one that docker-pauses the Postgres is RUN_SERIAL (tests/CMakeLists.txt), so it
+  # never overlaps another. The conformance label still runs one test at a time, after it.
   integration:
-    name: integration (${{ matrix.preset }}, ${{ matrix.shard }}/3)
+    name: integration (${{ matrix.preset }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        preset: [ci, asan]
-        shard: [1, 2, 3]
         include:
           - { preset: ci, cc: gcc-14, cxx: g++-14 }
           - { preset: asan, cc: clang-19, cxx: clang++-19 }
@@ -154,17 +148,29 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: ${{ matrix.cc }}-${{ matrix.preset }}-integration
+      # One test per core opens up to about 130 sessions at once (measured locally), past the
+      # image's default of 100. A service container takes no command line, so the limit is set
+      # with ALTER SYSTEM and the server restarted; deploy/local/compose.yaml sets the same.
+      - name: Raise the test Postgres's connection limit
+        env:
+          PG: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$PG" psql -U postgres -qc "ALTER SYSTEM SET max_connections = 400"
+          docker restart "$PG" >/dev/null
+          for _ in $(seq 60); do
+            docker exec "$PG" pg_isready -U postgres -q && break
+            sleep 1
+          done
+          test "$(docker exec "$PG" psql -U postgres -tAc 'SHOW max_connections')" = 400
       - name: Start MinIO
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
       - run: cmake --preset ${{ matrix.preset }} -DULW_CONFORMANCE_LIVE=ON
       - run: cmake --build --preset ${{ matrix.preset }}
-      - run: ctest --test-dir build/${{ matrix.preset }} -L integration -I ${{ matrix.shard }},,3 --no-tests=error --output-on-failure
+      - run: ctest --test-dir build/${{ matrix.preset }} -L integration -j "$(nproc)" --output-on-failure
         env:
           # The job context exists only in steps, not in the job's own env.
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
-      # Once, on the first shard, after its share of the label as before.
       - name: storage conformance on both reactors
-        if: matrix.shard == 1
         run: |
           ULW_REACTOR=io_uring ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
           ULW_REACTOR=epoll ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
@@ -173,27 +179,20 @@ jobs:
 
   # Line and branch coverage of the unit and integration labels, each top-level directory
   # compared with its floor in tools/coverage-floors.txt (ADR-0080), and the SonarQube Cloud
-  # analysis that reads it (ADR-0079), measured once for both (ADR-0083). Four shards each run
-  # every fourth test of both labels under the coverage preset, one test at a time, against a
-  # Postgres and a MinIO of their own, and hand on their merged profile; the `coverage` job
-  # below rebuilds the same tree from the shards' ccache, merges the four profiles, writes the
-  # report and runs the scan. Its own ccache key: the instrumented objects never match another
-  # job's, and pull requests restore what main's last run left. On pull requests from this
-  # repository (the ones the scan has a token for) and on those labelled `coverage`; a fork's
-  # pull request, which no token reaches, skips both unless labelled.
-  coverage-shard:
-    name: coverage (shard ${{ matrix.shard }}/4)
+  # analysis that reads it (ADR-0079), measured once for both (ADR-0086). The table is the step
+  # summary; the HTML report is an artifact. Its own ccache key: the instrumented objects never
+  # match another job's, and pull requests restore what main's last run left. On pull requests
+  # from this repository (the ones the scan has a token for) and on those labelled `coverage`;
+  # a fork's unlabelled pull request skips it, as it skipped both before.
+  coverage:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository ||
       contains(github.event.pull_request.labels.*.name, 'coverage')
     runs-on: ubuntu-24.04
-    # A quarter of the labels (the whole took 25 min on main), the 275 s worker test included.
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+    # The unit label one test at a time (6 min on main), the integration label one test per
+    # core (19 min one at a time on main), the report and the scan (2 min).
+    timeout-minutes: 60
     services:
       postgres:
         # Same digest as deploy/local/compose.yaml.
@@ -205,65 +204,9 @@ jobs:
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
     env:
-      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-        with:
-          cache-key: clang-coverage
-      # llvm-profdata and llvm-cov from the same llvm-toolchain-19 build as the clang-19 the
-      # setup installed: a profile is only readable by the version that wrote it.
-      - name: Install llvm-19, pinned to the installed clang-19
-        run: |
-          version=$(dpkg-query -W -f='${Version}' clang-19)
-          sudo apt-get install -y -qq --no-install-recommends "llvm-19=$version"
-      - name: Start MinIO
-        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
-      - run: cmake --preset coverage -DULW_CONFORMANCE_LIVE=ON
-      - run: cmake --build --preset coverage
-      # Writes build/coverage/coverage/ulw.profdata, this shard's tests' profiles merged.
-      - run: tools/coverage.sh build/coverage unit integration
-        env:
-          ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
-          COVERAGE_SHARD: ${{ matrix.shard }}/4
-      # The report job checks it built with the same clang: a profile only matches the
-      # binaries of the compiler that made them.
-      - name: Record the clang that built the profile
-        if: ${{ !cancelled() }}
-        run: |
-          mkdir -p build/coverage/coverage
-          dpkg-query -W -f='${Version}\n' clang-19 >build/coverage/coverage/clang-19.version
-      # Also after a failed test, as the single job reported then too.
-      - if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-profile-${{ matrix.shard }}
-          path: |
-            build/coverage/coverage/ulw.profdata
-            build/coverage/coverage/clang-19.version
-          if-no-files-found: warn
-          retention-days: 3
-      - run: ccache --show-stats
-      - if: failure()
-        run: docker compose -f deploy/local/compose.yaml logs minio
-
-  # The shards' profiles merged into the report (the table is the step summary, the HTML an
-  # artifact) and, where SONAR_TOKEN reaches, the SonarQube Cloud scan (ADR-0079, ADR-0083).
-  # The scan's job builds the tree (from the shards' ccache: the compile database and the
-  # generated headers must exist at the paths the scanner reads) but runs no test. The token
-  # is in the scan step's env alone; pull requests from forks and Dependabot get no secrets,
-  # and the scheduled run skips the scan, so there it is the report alone.
-  coverage:
-    needs: coverage-shard
-    if: ${{ !cancelled() && needs.coverage-shard.result != 'skipped' }}
-    runs-on: ubuntu-24.04
-    # A cached build (about 1 min on main), the report (seconds) and the scan (about 2 min).
-    timeout-minutes: 30
-    env:
       CC: clang-19
       CXX: clang++-19
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:55432/postgres
       # Ubuntu 24.04's coverage.py, by version and the .deb's SHA-256 (the archive's Packages
       # index for noble/universe lists the same hash).
       PYTHON_COVERAGE_VERSION: 7.4.4+dfsg1-0ubuntu2
@@ -298,11 +241,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # The shards' key, restored and not saved: the shards built and saved the same objects.
       - uses: ./.github/actions/setup
         with:
           cache-key: clang-coverage
-          ccache-save: "false"
+      # llvm-profdata and llvm-cov from the same llvm-toolchain-19 build as the clang-19 the
+      # setup installed: a profile is only readable by the version that wrote it.
       - name: Install llvm-19, pinned to the installed clang-19
         run: |
           version=$(dpkg-query -W -f='${Version}' clang-19)
@@ -315,39 +258,36 @@ jobs:
           deb=python3-coverage_${PYTHON_COVERAGE_VERSION}_amd64.deb
           echo "$PYTHON_COVERAGE_SHA256  $deb" | sha256sum --check --strict
           sudo apt-get install -y -qq --no-install-recommends "./$deb"
-      # The shards' configuration and build, so the binaries are the ones the profiles were
-      # written by, and build/coverage/compile_commands.json and every generated header and
-      # source it names exist for the scan.
+      # One test per core opens up to about 130 sessions at once (measured locally), past the
+      # image's default of 100. A service container takes no command line, so the limit is set
+      # with ALTER SYSTEM and the server restarted; deploy/local/compose.yaml sets the same.
+      - name: Raise the test Postgres's connection limit
+        env:
+          PG: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$PG" psql -U postgres -qc "ALTER SYSTEM SET max_connections = 400"
+          docker restart "$PG" >/dev/null
+          for _ in $(seq 60); do
+            docker exec "$PG" pg_isready -U postgres -q && break
+            sleep 1
+          done
+          test "$(docker exec "$PG" psql -U postgres -tAc 'SHOW max_connections')" = 400
+      - name: Start MinIO
+        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      # The whole coverage build, so generated headers and sources exist and
+      # build/coverage/compile_commands.json matches what was compiled and measured.
       - run: cmake --preset coverage -DULW_CONFORMANCE_LIVE=ON
       - id: build
         run: cmake --build --preset coverage
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: coverage-profile-*
-          path: ${{ runner.temp }}/coverage-profiles
-      - name: Check the shards' profiles
+      # Writes build/coverage/coverage/ (and llvm-cov-show.txt for the scan). The integration
+      # label runs one test per core, as the integration job runs it; the unit label one at a
+      # time, as build-test runs it. The floors are reported, not enforced (ADR-0080); a
+      # failing test fails the job, after the scan below.
+      - name: C++ coverage
+        run: tools/coverage.sh build/coverage unit integration
         env:
-          PROFILES: ${{ runner.temp }}/coverage-profiles
-        run: |
-          mine=$(dpkg-query -W -f='${Version}' clang-19)
-          found=0
-          for version in "$PROFILES"/*/clang-19.version; do
-            [ -e "$version" ] || continue
-            if [ "$(cat "$version")" != "$mine" ]; then
-              echo "::error::${version%/*} was built by clang-19 $(cat "$version"), this job by $mine"
-              exit 1
-            fi
-            found=$((found + 1))
-          done
-          if [ "$found" -ne 4 ]; then
-            echo "::warning title=coverage::$found of 4 shards left a profile; the numbers are partial"
-          fi
-      # Writes build/coverage/coverage/ (and llvm-cov-show.txt for the scan). The floors are
-      # reported, not enforced (ADR-0080).
-      - name: C++ coverage report
-        run: tools/coverage.sh build/coverage
-        env:
-          COVERAGE_PROFILES: ${{ runner.temp }}/coverage-profiles
+          ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          COVERAGE_PARALLEL: integration
           # Report-only on every trigger until the floors are set from a CI run (ADR-0080).
           COVERAGE_ENFORCE: "0"
           COVERAGE_SONAR: ${{ steps.token.outputs.present == 'true' && '1' || '0' }}
@@ -397,7 +337,8 @@ jobs:
       # Branch and pull request parameters (sonar.branch.name, sonar.pullrequest.*) are not set
       # here: the scanner reads them from the GitHub Actions environment and event.
       # Runs whenever the build did, so a failing test still leaves the analysis on the
-      # dashboard; coverage from a run with a failed test is lower than the truth.
+      # dashboard; coverage from a run with a failed test is lower than the truth. The token is
+      # in this step's env and nowhere else.
       - name: SonarQube Cloud scan
         if: ${{ !cancelled() && steps.token.outputs.present == 'true' && steps.build.outcome == 'success' }}
         uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
@@ -408,15 +349,8 @@ jobs:
           scannerBinariesUrl: https://scanner-download-disabled.invalid
       - if: ${{ !cancelled() }}
         run: ccache --show-stats
-      # A shard's failed test fails this job too, after the report and the scan, as it failed
-      # the single coverage job: the numbers above then are not a measurement.
-      - name: Every shard passed
-        if: ${{ !cancelled() && needs.coverage-shard.result != 'success' }}
-        env:
-          RESULT: ${{ needs.coverage-shard.result }}
-        run: |
-          echo "::error title=coverage::a coverage shard ended in '$RESULT'; the numbers above are partial"
-          exit 1
+      - if: failure()
+        run: docker compose -f deploy/local/compose.yaml logs minio
 
   # The M16 and M17 acceptance: three chat_server processes on ports 9101-9103 over one
   # Postgres. Their room's owner stopped until a survivor takes over, then resumed to be fenced
@@ -621,9 +555,7 @@ jobs:
       - if: steps.scope.outputs.seconds != '0'
         uses: ./.github/actions/setup
         with:
-          # One key per target: each job builds its own target alone, and a key they shared
-          # would hold whichever finished first.
-          cache-key: clang-fuzz-${{ matrix.target }}
+          cache-key: clang-fuzz
       - if: steps.scope.outputs.seconds != '0'
         run: cmake --preset fuzz
       - if: steps.scope.outputs.seconds != '0'

@@ -233,10 +233,9 @@ TEST_F(UploadReaperTest, AnUploadCommittedWhileTheReaperWaitedForItsRowIsLeftAlo
     auto watcher = db->session();
     bool waiting = false;
     for (int i = 0; i < 2000 && !waiting; ++i) {
-        waiting =
-            scalar(watcher,
-                   "SELECT count(*) FROM pg_stat_activity "
-                   "WHERE application_name = 'ulw-reaper' AND wait_event_type = 'Lock'") == "1";
+        waiting = scalar(watcher,
+                         "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                         "AND application_name = 'ulw-reaper' AND wait_event_type = 'Lock'") == "1";
         if (!waiting &&
             expiry.wait_for(std::chrono::milliseconds(5)) == std::future_status::ready) {
             break;

@@ -9,16 +9,11 @@
 # With COVERAGE_SONAR=1 it also writes <build-dir>/coverage/llvm-cov-show.txt, the `llvm-cov
 # show` text report SonarQube Cloud reads (sonar.cfamily.llvm-cov.reportPath, ADR-0079).
 #
-# Split across machines (ADR-0083), in two steps:
-#   COVERAGE_SHARD=i/n runs every n-th test of each label from its i-th (ctest -I i,,n), so the
-#     n shards together run every test exactly once, and merges what they measured into
-#     <build-dir>/coverage/ulw.profdata. No report: one shard's numbers are a fraction.
-#   COVERAGE_PROFILES=<dir> runs no test: it merges every *.profdata under <dir> (the shards')
-#     and reports on that, over this build's binaries. They must be the shards' build: the same
-#     sources, preset and clang, which is what makes the profiles match the binaries.
-#
-# Every label runs one test at a time, as CI's other jobs run them: several suites time servers
-# and the database, and a busy runner would change what they measure.
+# A label runs one test at a time unless COVERAGE_PARALLEL names it (space-separated): then one
+# test per core (ctest -j), which is safe only for a label whose tests that must not overlap
+# another carry RUN_SERIAL or a RESOURCE_LOCK (tests/CMakeLists.txt, ADR-0086). Profiles from
+# concurrent processes do not clobber each other: each binary writes to a pool of files named by
+# its own signature (%8m), merged under a lock.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 root=$PWD
@@ -40,45 +35,19 @@ enforce=${COVERAGE_ENFORCE:-1}
 [[ $enforce == 0 || $enforce == 1 ]] || { echo "coverage: COVERAGE_ENFORCE is 0 or 1" >&2; exit 2; }
 sonar=${COVERAGE_SONAR:-0}
 [[ $sonar == 0 || $sonar == 1 ]] || { echo "coverage: COVERAGE_SONAR is 0 or 1" >&2; exit 2; }
-shard=${COVERAGE_SHARD:-}
-shard_args=()
-if [[ -n $shard ]]; then
-    if ! [[ $shard =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || ((BASH_REMATCH[1] > BASH_REMATCH[2])); then
-        echo "coverage: COVERAGE_SHARD is i/n with 1 <= i <= n" >&2
-        exit 2
-    fi
-    shard_args=(-I "${BASH_REMATCH[1]},,${BASH_REMATCH[2]}")
-fi
-profiles=${COVERAGE_PROFILES:-}
-if [[ -n $shard && -n $profiles ]]; then
-    echo "coverage: COVERAGE_SHARD and COVERAGE_PROFILES are two steps, not one" >&2
-    exit 2
-fi
+
+parallel=" ${COVERAGE_PARALLEL:-} "
 
 failed=0
-if [[ -n $profiles ]]; then
-    mapfile -d '' -t merged < <(find "$profiles" -type f -name '*.profdata' -print0 | sort -z)
-    [[ ${#merged[@]} -gt 0 ]] || { echo "coverage: no *.profdata under $profiles" >&2; exit 1; }
-    echo "coverage: merging ${#merged[@]} profiles from $profiles" >&2
-    "llvm-profdata$llvm" merge -sparse -o "$out/ulw.profdata" "${merged[@]}"
-else
-    for label in "${labels[@]}"; do
-        # The same per-test limit as the ci test preset. With a shard, -I takes every n-th
-        # test of the ones the label selects.
-        ctest --test-dir "$build_dir" -L "^${label}\$" "${shard_args[@]}" -j 1 --timeout 600 \
-            --no-tests=error --output-on-failure || failed=1
-    done
-    "llvm-profdata$llvm" merge -sparse -o "$out/ulw.profdata" "$out"/profiles/*.profraw
-fi
+for label in "${labels[@]}"; do
+    jobs=1
+    [[ $parallel == *" $label "* ]] && jobs=$(nproc)
+    # The same per-test limit as the ci test preset.
+    ctest --test-dir "$build_dir" -L "^${label}\$" -j "$jobs" --timeout 600 --no-tests=error \
+        --output-on-failure || failed=1
+done
 
-if [[ -n $shard ]]; then
-    rm -rf "$out/profiles"
-    if [[ $failed -ne 0 ]]; then
-        echo "coverage: a test failed in shard $shard; its profile is not a measurement" >&2
-        exit 1
-    fi
-    exit 0
-fi
+"llvm-profdata$llvm" merge -sparse -o "$out/ulw.profdata" "$out"/profiles/*.profraw
 
 # Every instrumented binary, test suites and the servers they start alike; a source file only
 # a binary no test ran is counted, at zero.
