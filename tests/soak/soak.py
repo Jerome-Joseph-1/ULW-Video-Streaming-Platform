@@ -32,6 +32,10 @@ The load:
               gateway's back, then fetched
   SIGHUP      every 10 minutes the gateway reloads its certificate
 
+Before the load starts, one clip is uploaded and must come back ready (preflight()): a worker
+that cannot transcode would leave the playlist and store-fault load nothing to play, and the run
+stops there (exit 2) with the worker's reason.
+
 Not driven: the JWKS fetch path (the gateway verifies against a local key set) and database
 outages (the database is shared with other work).
 
@@ -66,12 +70,20 @@ short or too quiet to tell fails rather than passes.
         and holds at most WORKER_FD_NOISE for it. The upper end of the fitted rise over the
         window must stay under that bound, or the range the warm-up already showed if larger.
 
+After the verdict the summary adds what the verdict does not use: the gateway's RSS per 15 min
+through the first hour and per hour after, with the slope over the last 4, 2 and 1 h (does the
+growth level off?), whether each load path ran, and every 5xx attributed: the clients' by the
+action that got it, the gateway's (from gateway.log) by route and status, marked when it fell in
+a saturation (every slot taken: 503 by design) or a store fault (a ready video's playlist gone:
+500 by design).
+
 --rejudge also gives the verdict of the criterion this one replaced (slope per hour against
 MemoryHigh over 30 days, not normalised), so earlier runs can be read both ways.
 """
 
 import argparse
 import csv
+import datetime
 import http.client
 import json
 import math
@@ -81,8 +93,10 @@ import shutil
 import signal
 import socket
 import ssl
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -142,6 +156,10 @@ class Stack:
         self.codes = None
         self.tls = None
         self.tokens = {}
+        self.scratch = None
+        self.scratch_is_temporary = False
+        # (what, start, end) of the actions that make 5xx on purpose, in time.time().
+        self.windows = []
 
     def copy_binaries(self):
         self.bin.mkdir(parents=True, exist_ok=True)
@@ -220,10 +238,19 @@ class Stack:
                        "ULW_REQUESTS_PER_USER_PER_MINUTE": "1000000"}
         if os.environ.get("ULW_REACTOR"):
             gateway_env["ULW_REACTOR"] = os.environ["ULW_REACTOR"]
-        scratch = self.out / "scratch"
-        scratch.mkdir(exist_ok=True)
+        self.scratch = self.out / "scratch"
+        if not traversable_without_privilege(self.out):
+            # The sandbox drops every capability before ffprobe opens the source, so a root
+            # soak whose --out lies under a home directory of mode 750 (Ubuntu's default, as
+            # under a self-hosted runner's _work) has every probe refused: no video is ever
+            # ready, and the playlist and store-fault load never runs.
+            self.scratch = Path(tempfile.mkdtemp(prefix="ulw-soak-scratch-"))
+            self.scratch_is_temporary = True
+            log(f"{self.out} is not reachable without privilege; worker scratch in "
+                f"{self.scratch}")
+        self.scratch.mkdir(exist_ok=True)
         worker_env = {**self.common_env(), "ULW_NODE_ID": "soak-worker",
-                      "ULW_SCRATCH_DIR": str(scratch), "ULW_FFMPEG_THREADS": "1"}
+                      "ULW_SCRATCH_DIR": str(self.scratch), "ULW_FFMPEG_THREADS": "1"}
         for name, program, env in [("gateway", "gateway_server", gateway_env),
                                    ("worker", "transcode_worker", worker_env)]:
             out = open(self.out / f"{name}.log", "ab")
@@ -267,6 +294,25 @@ class Stack:
         subprocess.run(["psql", self.admin_url, "-qc",
                         f"DROP DATABASE IF EXISTS {self.name} WITH (FORCE)"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if self.scratch_is_temporary:
+            shutil.rmtree(self.scratch, ignore_errors=True)
+
+
+def traversable_without_privilege(path):
+    """Whether this process, with its uid and gid but no capabilities (as the worker's sandbox
+    runs ffprobe), can reach `path`: every directory on the way grants it search."""
+    uid, gid = os.geteuid(), os.getegid()
+    for d in [Path(path).resolve(), *Path(path).resolve().parents]:
+        st = d.stat()
+        if st.st_uid == uid:
+            bit = stat.S_IXUSR
+        elif st.st_gid == gid or st.st_gid in os.getgroups():
+            bit = stat.S_IXGRP
+        else:
+            bit = stat.S_IXOTH
+        if not st.st_mode & bit:
+            return False
+    return True
 
 
 class Counts:
@@ -286,8 +332,9 @@ class Counts:
 class ReadyVideos:
     """Committed videos, promoted to `done` once the worker has made them ready."""
 
-    def __init__(self):
+    def __init__(self, counts):
         self.lock = threading.Lock()
+        self.counts = counts
         self.pending = []
         self.done = []
 
@@ -316,12 +363,18 @@ class ReadyVideos:
             status, _, data = client.http("GET", f"/api/v1/videos/{video}", user=user)
             state = json.loads(data).get("state") if status == 200 else None
             if state == "ready":
+                self.counts.add("videos_ready_total")
                 with self.lock:
                     self.done.append((user, video))
                     # A bounded working set; older videos stay in the store untouched.
                     self.done = self.done[-200:]
             elif state in ("processing", "uploading", "init"):
                 still.append((user, video))
+            else:
+                # A video that will never play: its reason is what the end of the run reports.
+                reason = json.loads(data).get("error_reason") if status == 200 else None
+                self.counts.add("videos_failed")
+                self.counts.add(f"video_{state or status}: {reason}")
         with self.lock:
             self.pending = [p for p in self.pending if p not in pending] + still
 
@@ -337,6 +390,8 @@ class Worker(threading.Thread):
         self.ready = ready
         self.rng = random.Random(seed)
         self.conn = None
+        # The action under way, which a 5xx is attributed to.
+        self.action = "other"
 
     def http(self, method, path, body=None, headers=None, user="alice", token=True):
         h = dict(headers or {})
@@ -353,6 +408,8 @@ class Worker(threading.Thread):
                     self.conn.close()
                     self.conn = None
                 self.counts.add(f"status_{r.status // 100}xx")
+                if r.status >= 500:
+                    self.counts.add(f"5xx {self.action} {r.status}")
                 return r.status, r.headers, data
             except (OSError, http.client.HTTPException):
                 self.conn.close()
@@ -391,6 +448,7 @@ class Worker(threading.Thread):
             s.close()
 
     def guarded(self, name, action):
+        self.action = name
         try:
             action()
         except Exception as e:  # a client error must not end the run
@@ -582,6 +640,7 @@ class Slow(Worker):
     def body(self, drip):
         user = SLOW_USER
         conn = Worker(self.stack, self.counts, self.stop, self.ready, 0)
+        conn.action = "slow_rate" if drip else "slow_idle"
         up = conn.create(MIB, user, "slow.bin")
         if not up:
             return
@@ -628,6 +687,7 @@ class Saturation(Worker):
     def saturate(self):
         uploads = {u: [self.create(MIB, u, "hold.bin") for _ in range(4)] for u in HOLDERS}
         held = []
+        started = time.time()
         try:
             if any(up is None for ups in uploads.values() for up in ups):
                 return
@@ -643,6 +703,9 @@ class Saturation(Worker):
         finally:
             for s in held:
                 s.close()
+            # Until the last hold is closed every slot may be taken, so any upload refused
+            # with 503 in between is this test's doing.
+            self.stack.windows.append(("saturation", started, time.time()))
             for user, ups in uploads.items():
                 for up in ups:
                     if up:
@@ -660,25 +723,66 @@ class StoreFaults(Worker):
         super().__init__(stack, counts, stop, ready, 4000)
 
     def break_one(self):
+        # Each way out is counted, so a run that never gets as far as the fetch says why.
         video = self.ready.pick(self.rng)
         if video is None:
+            self.counts.add("store_fault_skipped_no_ready_video")
             return
         user = self.ready.owner(video)
         self.ready.forget(video)
         status, _, data = self.http("GET", f"/api/v1/videos/{video}/master.m3u8", user=user)
         if status != 200:
+            self.counts.add(f"store_fault_skipped_master_{status}")
             return
         rungs = [l for l in data.decode().splitlines() if l and not l.startswith("#")]
         if not rungs:
+            self.counts.add("store_fault_skipped_no_rungs")
             return
         rung = rungs[0].rstrip("/").split("/")[-2]
-        self.stack.s3("DELETE", f"{self.stack.bucket}/videos/{video}/hls/{rung}/index.m3u8")
-        status, _, _ = self.http("GET", rungs[0], user=user)
+        started = time.time()
+        try:
+            self.stack.s3("DELETE", f"{self.stack.bucket}/videos/{video}/hls/{rung}/index.m3u8")
+            status, _, _ = self.http("GET", rungs[0], user=user)
+        finally:
+            self.stack.windows.append(("store_fault", started, time.time()))
         self.counts.add(f"store_missing_{status}")
 
     def run(self):
         while not self.stop.wait(120.0):
             self.guarded("store_fault", self.break_one)
+
+
+def preflight(stack, counts, ready, clip, timeout=180):
+    """One upload of the clip, followed until the worker has made it ready. None if it was,
+    or why not: a worker that cannot transcode leaves the playlist and store-fault load with
+    nothing to play, and a run under it would measure a different load from the one it names."""
+    client = Worker(stack, counts, threading.Event(), ready, 5000)
+    client.action = "preflight"
+    up = client.create(len(clip), USERS[0])
+    if not up:
+        return "preflight: the upload could not be created"
+    status, _, _ = client.patch(up["upload_id"], 0, clip, USERS[0])
+    if status != 204:
+        return f"preflight: the clip's chunk got HTTP {status}"
+    status, _, _ = client.http("POST", f"/api/v1/uploads/{up['upload_id']}/commit",
+                               user=USERS[0])
+    if status != 200:
+        return f"preflight: the commit got HTTP {status}"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status, _, data = client.http("GET", f"/api/v1/videos/{up['video_id']}", user=USERS[0])
+        video = json.loads(data) if status == 200 else {}
+        if video.get("state") == "ready":
+            ready.add(USERS[0], up["video_id"])
+            return None
+        if video.get("state") == "failed":
+            failures = [line.strip() for line in
+                        open(stack.out / "worker.log", errors="replace")
+                        if '"step failed"' in line]
+            return (f"preflight: the worker failed the clip ({video.get('error_reason')}); "
+                    f"its log says: {failures[-1] if failures else 'nothing'}")
+        time.sleep(1.0)
+    return f"preflight: the clip was not ready within {timeout} s"
 
 
 def proc_sample(pid):
@@ -798,6 +902,109 @@ def judge_hourly(rows, clients):
     return passed, report
 
 
+def at_minute(rows, minute):
+    """The sample nearest `minute`, or None when none is within one sampling interval."""
+    best = min(rows, key=lambda r: abs(r["elapsed_min"] - minute))
+    step = rows[1]["elapsed_min"] - rows[0]["elapsed_min"] if len(rows) > 1 else 1.0
+    return best if abs(best["elapsed_min"] - minute) <= step else None
+
+
+def shape_report(rows):
+    """Lines describing how the gateway's RSS moved: per 15 min through the first hour, per
+    hour after, and the slope over the last 4 h and 2 h. Information only: judge() decides.
+    Answers whether growth decelerates to a plateau or keeps a steady tail."""
+    if len(rows) < 2:
+        return ["rss shape: too few samples"]
+    lines = ["gateway rss over the run (MiB; change since the previous mark in KB):"]
+    end = rows[-1]["elapsed_min"]
+    marks = [m for m in [0, 15, 30, 45, 60, *range(120, int(end) + 1, 60)] if m < end] + [end]
+    previous = None
+    for minute in marks:
+        r = at_minute(rows, minute)
+        if r is None or r is previous:
+            continue
+        rss = r["gateway_rss_kb"] * 1024
+        delta = "" if previous is None else \
+            f" ({(rss - previous['gateway_rss_kb'] * 1024) / 1e3:+.0f})"
+        lines.append(f"  {r['elapsed_min'] / 60:5.2f} h  {rss / MIB:7.2f}{delta}")
+        previous = r
+    for hours in [4, 2, 1]:
+        tail = [r for r in rows if r["elapsed_min"] >= end - hours * 60]
+        if end < hours * 60 + WARMUP_MINUTES or len(tail) < 3:
+            lines.append(f"  last {hours} h: the run is too short")
+            continue
+        slope, se = fit([(r["elapsed_min"] / 60, r["gateway_rss_kb"] * 1024) for r in tail])
+        requests = per_hour(tail, "requests")
+        per_request = f", {(slope + Z95 * se) / requests:.3f} B a request at most" \
+            if requests > 0 else ""
+        lines.append(f"  last {hours} h: slope {slope / 1e3:+.1f} KB/h, 95% upper end "
+                     f"{(slope + Z95 * se) / 1e3:+.1f} KB/h{per_request}")
+    return lines
+
+
+def utc_seconds(ts):
+    """time.time() of the gateway log's "2026-10-03T08:07:01.123Z"."""
+    return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+
+def errors_report(totals, windows, gateway_log):
+    """Lines attributing every 5xx: the client's by the action that got it, and the gateway's
+    (gateway.log) by route and status, each marked deliberate when it falls in a saturation
+    (every slot taken, 503) or a store fault (a ready video's playlist deleted, 500)."""
+    lines = []
+    if totals is not None:
+        client = sorted((k, v) for k, v in totals.items() if k.startswith("5xx "))
+        lines = ["5xx seen by the clients, by action and status:"]
+        lines += [f"  {k[4:]}: {v}" for k, v in client] or ["  none"]
+    if not gateway_log or not Path(gateway_log).exists():
+        return lines
+    slack = 2.0
+    by_key = {}
+    others = []
+    with open(gateway_log, errors="replace") as f:
+        for line in f:
+            if '"status":5' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+                at = utc_seconds(entry["ts"])
+            except (ValueError, KeyError):
+                continue
+            route, status = entry.get("route", "?"), entry.get("status")
+            context = next((what for what, start, end in windows
+                            if start - slack <= at <= end + slack), "outside both")
+            key = (route, status, context)
+            by_key[key] = by_key.get(key, 0) + 1
+            if context == "outside both" and len(others) < 10:
+                others.append(f"    {entry['ts']} {entry.get('method', '?')} {route} {status} "
+                              f"{entry.get('ms', '?')} ms")
+    lines.append("5xx answered by the gateway (gateway.log), by route, status and when:")
+    lines += [f"  {route} {status} during {context}: {n}"
+              for (route, status, context), n in sorted(by_key.items(), key=str)] or ["  none"]
+    if others:
+        lines.append("  first of those outside a saturation or store fault:")
+        lines += others
+    return lines
+
+
+def coverage_report(totals):
+    """Lines saying whether each load path ran, so a run that silently skipped one shows."""
+    checks = [("videos made ready", totals.get("videos_ready_total", 0)),
+              ("videos failed", totals.get("videos_failed", 0)),
+              ("media playlists fetched", totals.get("playlists", 0)),
+              ("store faults that fetched a deleted playlist",
+               sum(v for k, v in totals.items() if k.startswith("store_missing_"))),
+              ("resumes completed", totals.get("resumes_completed", 0)),
+              ("cancels", totals.get("cancels", 0))]
+    lines = ["load paths:"]
+    for name, n in checks:
+        missing = n == 0 and name != "videos failed"
+        lines.append(f"  {name}: {n}{'  NOT EXERCISED' if missing else ''}")
+    lines += [f"  {k}: {v}" for k, v in sorted(totals.items())
+              if k.startswith(("video_", "store_fault_skipped"))]
+    return lines
+
+
 def load_samples(path):
     rows = []
     with open(path) as f:
@@ -825,6 +1032,12 @@ def rejudge(path, clients):
     print("hourly criterion (replaced):")
     print("\n".join("  " + line for line in old_report))
     print(f"  verdict: {'PASS' if old else 'FAIL'}")
+    print("\n".join(shape_report(rows)))
+    # The run's own record of its deliberate faults and the gateway's log, when beside it.
+    here = Path(path).parent
+    if (here / "windows.json").exists() and (here / "gateway.log").exists():
+        windows = json.loads((here / "windows.json").read_text())
+        print("\n".join(errors_report(None, windows, here / "gateway.log")))
     return 0 if new else 1
 
 
@@ -867,12 +1080,15 @@ def main():
             f"database {stack.name}, bucket {stack.bucket}")
 
         counts = Counts()
-        ready = ReadyVideos()
+        ready = ReadyVideos(counts)
+        failure = preflight(stack, counts, ready, clip.read_bytes())
+        if failure:
+            log(failure)
         threads = [Client(stack, counts, stop, ready, i) for i in range(args.clients)]
         threads += [Uploads(stack, counts, stop, ready, clip.read_bytes()),
                     Slow(stack, counts, stop, ready), Saturation(stack, counts, stop, ready),
                     StoreFaults(stack, counts, stop, ready)]
-        for t in threads:
+        for t in threads if not failure else []:
             t.start()
         poller = Worker(stack, Counts(), stop, ready, 99)
 
@@ -883,10 +1099,9 @@ def main():
                   "videos_ready",
                   "resumes_completed", "cancels", "playlists", "sighups"]
         started = time.time()
-        end = started + args.hours * 3600
+        end = started + args.hours * 3600 if not failure else started
         next_sighup = started + 600
         sighups = 0
-        failure = None
         with open(out / "samples.csv", "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fields)
             writer.writeheader()
@@ -927,17 +1142,22 @@ def main():
                 time.sleep(min(5.0, max(0.0, next_sample - time.time())))
 
         stop.set()
-        for t in threads:
+        for t in threads if not failure else []:
             t.join(timeout=120)
         codes = stack.stop()
     finally:
         stop.set()
         stack.stop()
     stack.cleanup()
+    (out / "windows.json").write_text(json.dumps(stack.windows))
     passed, report = judge(rows, args.clients)
+    totals = counts.snapshot()
     summary = [f"soak: {args.hours} h requested, {len(rows)} samples, {args.clients} clients",
                f"exit codes after SIGTERM: {codes}",
-               f"totals: {json.dumps(counts.snapshot(), sort_keys=True)}"] + report
+               f"totals: {json.dumps(totals, sort_keys=True)}"] + report
+    # What the verdict does not use, for reading the run from its log alone.
+    summary += shape_report(rows) + coverage_report(totals) + \
+        errors_report(totals, stack.windows, out / "gateway.log")
     if failure:
         summary.append(f"FAILED: {failure}")
     verdict = "PASS" if passed and not failure and all(v == 0 for v in codes.values()) else "FAIL"
