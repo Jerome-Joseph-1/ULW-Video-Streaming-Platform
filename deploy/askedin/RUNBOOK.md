@@ -26,7 +26,10 @@ do, a packager is started by hand (step 9).
 
 Open decisions, yours: whether this builds inside the Askedin monorepo or pushes from this
 repository (the image names `git.askedin.com/askedin/askedin-monorepo/<svc>` assume the
-monorepo), and stage's `JWT_ISSUER`. Askedin's `JWKS_URL` for each environment and prod's
+monorepo), stage's `JWT_ISSUER`, and stage's host. Every stage HTTPRoute (`video-gateway`,
+`chat`, `livekit`) names `stage.askedin.com` in `hostnames:`, **unconfirmed**: the stage web
+app's origin, assumed to be its host; change those three files if stage is served elsewhere
+(prod's routes name `askedin.com` and `www.askedin.com`). Askedin's `JWKS_URL` for each environment and prod's
 `JWT_ISSUER` are set in the overlays (docs/integration/auth.md, Askedin); stage's issuer stays in
 the secret until it is read from the live one (step 3). Askedin's key rotation needs a step on
 their side that reaches ULW: step 8.
@@ -457,8 +460,10 @@ is on the internet. If the host's address is stable, add it as an `ipBlock` to t
    reset would not hurt.
 4. From then on ArgoCD syncs the manifests and Woodpecker only restarts.
 
-The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
-`askedin-gateway`. If the video plane gets a hostname of its own, add `hostnames:` to both
+The route serves `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` on the environment's
+hostnames only: `stage.askedin.com` on stage, `askedin.com` and `www.askedin.com` on prod. Both
+environments attach to the one `askedin-gateway`, so a route without `hostnames:` would answer
+the other environment's host too. If the video plane gets a hostname of its own, add it to both
 `httproute.yaml` files.
 
 ### 4a. Deploying by digest
@@ -643,7 +648,7 @@ otherwise bump at least monthly.
    ```sh
    kubectl -n apps-stage get deploy video-gateway video-worker chat # 2/2, 1/1 and 3/3
    kubectl -n apps-stage logs deploy/video-gateway -c migrate        # "applied …" or "schema is up to date"
-   for route in video-gateway chat; do
+   for route in video-gateway chat livekit; do
      kubectl -n apps-stage get httproute "$route" \
        -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}{"\n"}'   # True
    done
@@ -656,7 +661,10 @@ otherwise bump at least monthly.
    database: its log says which.
 
    A route with `Accepted` missing or False is the stage 404 trap: check `parentRefs` names
-   namespace `apps`.
+   namespace `apps`. A route is also not Accepted (`NoMatchingListenerHostname`) when none of its
+   `hostnames` falls within a listener hostname of `askedin-gateway`: check the listeners cover
+   the apex `askedin.com` as well as `www.askedin.com` and `stage.askedin.com` (a `*.askedin.com`
+   listener does not match the apex).
 2. An end-to-end run with a real stage token (from a browser session's `auth_token_stage`
    cookie):
 
