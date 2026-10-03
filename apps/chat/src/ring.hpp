@@ -70,6 +70,25 @@ public:
     [[nodiscard]] virtual bool owns(const core::RoomId& room) const noexcept = 0;
 };
 
+// A ring that has just started, for the callees' devices that may have no socket open: a Web
+// Push to each (push.hpp, ADR-0097).
+struct CallPush {
+    core::RoomId room;
+    CallId call;
+    core::UserId from;
+    std::vector<core::UserId> callees;
+    // When it stops ringing, as the clients are told, and as this node's clock has it.
+    core::WallTime expires_at;
+    core::MonoTime deadline;
+};
+
+// Where a ring's start goes besides the notices; null when push is not configured.
+class IRingPush {
+public:
+    virtual ~IRingPush() = default;
+    virtual void ringing(const CallPush& push) noexcept = 0;
+};
+
 // The most rings a room may be allowed per window: what each room's history has room for.
 inline constexpr std::size_t kMaxRingsPerWindow = 16;
 
@@ -154,8 +173,9 @@ struct RingRefusal {
 // clock's, and deadlines are met by tick(), which the server runs after every turn of its loop.
 class Ringer {
 public:
+    // `push`, when given, hears every ring that starts, and must outlive the ringer.
     Ringer(IRingPlane& plane, const core::ports::IClock& clock, core::ports::IRandom& random,
-           RingLimits limits);
+           RingLimits limits, IRingPush* push = nullptr);
 
     // The room has no call: a ticket asked now may start one, and its member list is needed.
     [[nodiscard]] bool idle(const core::RoomId& room) const noexcept;
@@ -232,6 +252,7 @@ private:
     [[nodiscard]] static bool member_of(const Call& call, const core::UserId& user) noexcept;
 
     IRingPlane& plane_;
+    IRingPush* push_;
     const core::ports::IClock& clock_;
     core::ports::IRandom& random_;
     RingLimits limits_;

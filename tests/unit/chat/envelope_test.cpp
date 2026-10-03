@@ -453,3 +453,103 @@ TEST(Envelope, RepliesAreTheDocumentedShapes) {
 }
 
 } // namespace
+
+namespace {
+
+using chat::EnvelopeError;
+
+constexpr std::string_view kP256dh =
+    "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+constexpr std::string_view kAuth = "BTBZMqHH6r4Tts7J_aSIgg";
+constexpr std::string_view kDeviceId = "01a0eb86-6cca-7dce-84cc-3bb47615f9d1";
+
+std::string subscribe(std::string_view device, std::string_view endpoint, std::string_view p256dh,
+                      std::string_view auth, std::string_view extra = {}) {
+    std::string out = R"({"type":"push_subscribe","device":")" + std::string(device) +
+                      R"(","endpoint":")" + std::string(endpoint) + R"(","p256dh":")" +
+                      std::string(p256dh) + R"(","auth":")" + std::string(auth) + '"';
+    out += extra;
+    out += '}';
+    return out;
+}
+
+TEST(Envelope, APushSubscriptionIsReadAsTheBrowserGivesIt) {
+    const auto c = chat::parse_command(
+        subscribe(kDeviceId, "https://fcm.googleapis.com/fcm/send/x", kP256dh, kAuth));
+    ASSERT_TRUE(c);
+    const auto& s = std::get<chat::PushSubscribe>(*c);
+    EXPECT_EQ(s.device.to_string(), kDeviceId);
+    EXPECT_EQ(s.endpoint, "https://fcm.googleapis.com/fcm/send/x");
+    EXPECT_EQ(s.p256dh[0], 0x04);
+    EXPECT_EQ(infra::auth::encode_base64url(std::span<const unsigned char>(s.p256dh)), kP256dh);
+    EXPECT_EQ(infra::auth::encode_base64url(std::span<const unsigned char>(s.auth)), kAuth);
+}
+
+TEST(Envelope, APushSubscriptionWithAnythingWrongIsRefused) {
+    const std::string endpoint = "https://fcm.googleapis.com/x";
+    EXPECT_EQ(chat::parse_command(subscribe("dev-1", endpoint, kP256dh, kAuth)),
+              std::unexpected(EnvelopeError::BadDevice));
+    // Keys of the wrong length, padded, or not base64url at all.
+    EXPECT_EQ(chat::parse_command(subscribe(kDeviceId, endpoint, kP256dh.substr(1), kAuth)),
+              std::unexpected(EnvelopeError::BadKey));
+    EXPECT_EQ(
+        chat::parse_command(subscribe(kDeviceId, endpoint, kP256dh, "BTBZMqHH6r4Tts7J_aSIgg==")),
+        std::unexpected(EnvelopeError::BadKey));
+    EXPECT_EQ(
+        chat::parse_command(subscribe(kDeviceId, endpoint, kP256dh, "BTBZMqHH6r4Tts7J_aSIg!")),
+        std::unexpected(EnvelopeError::BadKey));
+    EXPECT_EQ(chat::parse_command(subscribe(kDeviceId, endpoint, kAuth, kAuth)),
+              std::unexpected(EnvelopeError::BadKey));
+    EXPECT_EQ(chat::parse_command(subscribe(kDeviceId, endpoint, kP256dh, kAuth, R"(,"x":1)")),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"push_subscribe","device":")" +
+                                  std::string(kDeviceId) + R"(","endpoint":"https://a/x"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"push_subscribe","device":")" +
+                                  std::string(kDeviceId) + R"(","endpoint":1,"p256dh":")" +
+                                  std::string(kP256dh) + R"(","auth":")" + std::string(kAuth) +
+                                  R"("})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"push_subscribe","endpoint":"https://a/x"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::reason(EnvelopeError::BadKey), "bad_key");
+}
+
+TEST(Envelope, PushKeyAndUnsubscribeTakeNothingElse) {
+    ASSERT_TRUE(chat::parse_command(R"({"type":"push_key"})"));
+    EXPECT_TRUE(
+        std::holds_alternative<chat::PushKey>(*chat::parse_command(R"({"type":"push_key"})")));
+    EXPECT_EQ(chat::parse_command(R"({"type":"push_key","device":"x"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    const auto u = chat::parse_command(R"({"type":"push_unsubscribe","device":")" +
+                                       std::string(kDeviceId) + R"("})");
+    ASSERT_TRUE(u);
+    EXPECT_EQ(std::get<chat::PushUnsubscribe>(*u).device.to_string(), kDeviceId);
+    EXPECT_EQ(chat::parse_command(R"({"type":"push_unsubscribe"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"push_unsubscribe","device":"Dev"})"),
+              std::unexpected(EnvelopeError::BadDevice));
+    EXPECT_EQ(chat::parse_command(R"({"type":"push_unsubscribe","device":")" +
+                                  std::string(kDeviceId) + R"(","all":true})"),
+              std::unexpected(EnvelopeError::Malformed));
+}
+
+TEST(Envelope, PushAnswersAreTheDocumentedShapes) {
+    const auto device = *core::DeviceId::parse(kDeviceId);
+    std::string out;
+    chat::write_push_key(out, "BKey_-");
+    EXPECT_EQ(out, R"({"type":"push_key","key":"BKey_-"})");
+    out.clear();
+    chat::write_push_done(out, "push_subscribed", device);
+    EXPECT_EQ(out, R"({"type":"push_subscribed","device":")" + std::string(kDeviceId) + R"("})");
+    out.clear();
+    chat::write_push_error(out, "rate_limited", device, core::Millis{10'000});
+    EXPECT_EQ(out, R"({"type":"error","reason":"rate_limited","device":")" +
+                       std::string(kDeviceId) + R"(","retry_after_ms":10000})");
+    out.clear();
+    chat::write_push_error(out, "push_disabled", std::nullopt);
+    EXPECT_EQ(out, R"({"type":"error","reason":"push_disabled"})");
+    EXPECT_TRUE(core::json::parse(out).has_value());
+}
+
+} // namespace

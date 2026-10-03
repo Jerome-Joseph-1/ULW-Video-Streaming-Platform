@@ -9,6 +9,7 @@
 
 #include "ring.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -44,6 +45,11 @@
 //   {"type":"call_decline"|"call_cancel"|"call_end","room":"<uuid>","call":"<uuid>"}   turn a
 //       ringing call down (a callee), give up ringing (the caller), or end an answered call
 //       (either member); answered with the event the other member hears
+//   {"type":"push_key"}   the key a browser subscribes to push with (ADR-0097)
+//   {"type":"push_subscribe","device":"<uuid>","endpoint":"<https url>","p256dh":"<base64url>",
+//    "auth":"<base64url>"}   this device's push subscription, as PushSubscription.toJSON()
+//       gives its endpoint and keys; replaces what the device had
+//   {"type":"push_unsubscribe","device":"<uuid>"}   forget this device's subscription
 // Server to client:
 //   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
 //                                                      whose last seq is lower missed messages
@@ -63,6 +69,9 @@
 //   {"type":"call_answered"|"call_declined"|"call_cancelled"|"call_ended","room":"<uuid>",
 //    "call":"<uuid>","from":"<sub>","by":"<sub>"}   unasked, on every socket of both members
 //   {"type":"call_missed","room":"<uuid>","call":"<uuid>","from":"<sub>"}   nobody answered
+//   {"type":"push_key","key":"<base64url>"}   the answer to push_key
+//   {"type":"push_subscribed"|"push_unsubscribed","device":"<uuid>"}   the answers to
+//       push_subscribe and push_unsubscribe
 //   {"type":"error","reason":"<code>"}          with "room" and "id" when known, "user" for a
 //                                               watch, and "retry_after_ms" when the reason is
 //                                               rate_limited, or unavailable for a call
@@ -125,7 +134,23 @@ struct CallMove {
     CallId call;
 };
 
-using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove>;
+struct PushKey {};
+
+// A browser's push subscription for this device (ADR-0097). The endpoint is checked against the
+// operator's allowlist by the server, not here.
+struct PushSubscribe {
+    core::DeviceId device;
+    std::string endpoint;
+    std::array<std::uint8_t, 65> p256dh{};
+    std::array<std::uint8_t, 16> auth{};
+};
+
+struct PushUnsubscribe {
+    core::DeviceId device;
+};
+
+using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, PushKey,
+                             PushSubscribe, PushUnsubscribe>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -148,6 +173,8 @@ enum class EnvelopeError : std::uint8_t {
     BadDevice,
     // Not a call id: a canonical lowercase UUID.
     BadCall,
+    // A push subscription's p256dh or auth that is not base64url of 65 or 16 bytes.
+    BadKey,
 };
 
 [[nodiscard]] std::expected<Command, EnvelopeError> parse_command(std::string_view text);
@@ -182,6 +209,15 @@ void write_call_event(std::string& out, const CallNotice& notice);
 // A call refused, with a hint of when to ask again for a refusal a retry may cure.
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
                       std::optional<core::Millis> retry_after);
+
+// The answer to push_key.
+void write_push_key(std::string& out, std::string_view key);
+// `type` is "push_subscribed" or "push_unsubscribed".
+void write_push_done(std::string& out, std::string_view type, const core::DeviceId& device);
+// A push command refused, with the device when known and a hint of when to ask again.
+void write_push_error(std::string& out, std::string_view reason,
+                      const std::optional<core::DeviceId>& device,
+                      std::optional<core::Millis> retry_after = std::nullopt);
 
 // The error codes clients see.
 [[nodiscard]] std::string_view reason(EnvelopeError e) noexcept;

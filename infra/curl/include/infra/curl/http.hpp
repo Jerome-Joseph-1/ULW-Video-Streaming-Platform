@@ -39,7 +39,9 @@ struct Request {
     // https:// only, whatever the URL says.
     bool https_only = false;
     // A PEM bundle of the certificate authorities to trust instead of the system's; empty for the
-    // system's. For tests, which serve a CA of their own.
+    // system's. For tests, which serve a CA of their own. Initialised so that a designated
+    // initializer may leave it out.
+    // NOLINTNEXTLINE(readability-redundant-member-init)
     std::string ca_file = {};
 };
 

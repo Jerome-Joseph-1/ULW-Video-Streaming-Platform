@@ -132,9 +132,11 @@ public:
     // `sfu` null: calls are not configured here, and every ask is answered Disabled. The store,
     // the SFU and the plane must outlive the handler, and the SFU must drop what it still owes
     // the handler without calling it (as the LiveKit adapter does when destroyed) once the
-    // handler is gone. `plane` carries the ring's notices.
+    // handler is gone. `plane` carries the ring's notices; `push`, when given, hears each ring
+    // that starts (Web Push, ADR-0097) and must outlive the handler.
     CallHandler(core::ports::IMessageStore& messages, core::ports::ISfu* sfu, IRingPlane& plane,
-                const core::ports::IClock& clock, core::ports::IRandom& random, CallLimits limits);
+                const core::ports::IClock& clock, core::ports::IRandom& random, CallLimits limits,
+                IRingPush* push = nullptr);
     ~CallHandler() override;
     CallHandler(const CallHandler&) = delete;
     CallHandler& operator=(const CallHandler&) = delete;

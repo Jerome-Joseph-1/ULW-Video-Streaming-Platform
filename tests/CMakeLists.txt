@@ -343,6 +343,22 @@ target_link_libraries(curl_unit_tests PRIVATE ulw::curl_multi ulw::test_http_ser
     test_stalled_resolver ulw::test_tls)
 target_include_directories(curl_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
+# HttpTestServer over TLS, with the test CA's identity: a push service, for one.
+ulw_add_library(test_https_server support/https_test_server.cpp)
+target_include_directories(test_https_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(test_https_server PUBLIC ulw::test_http_server ulw::test_tls
+    PRIVATE ulw::net_lib Threads::Threads)
+
+ulw_add_test_suite(webpush_unit_tests unit
+    unit/webpush/curl_transport_test.cpp
+    unit/webpush/ece_test.cpp
+    unit/webpush/endpoint_test.cpp
+    unit/webpush/sender_test.cpp
+    unit/webpush/vapid_test.cpp)
+target_link_libraries(webpush_unit_tests PRIVATE ulw::webpush ulw::auth ulw::os
+    ulw::test_https_server OpenSSL::Crypto)
+target_include_directories(webpush_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
 ulw_add_test_suite(storage_s3_unit_tests unit
     unit/s3store/part_session_test.cpp
     unit/s3store/s3_store_test.cpp
@@ -444,6 +460,18 @@ target_link_libraries(message_store_integration_tests PRIVATE ulw::pg_rooms ulw:
 target_include_directories(message_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
+# Web Push against the Postgres the suites above use: the subscription store, and a ring's push
+# delivered over TLS to a push service in the test that decrypts it.
+ulw_add_test_suite(push_integration_tests integration
+    integration/postgres_harness.cpp
+    integration/fake_push_service.cpp
+    integration/push_delivery_test.cpp
+    integration/push_subscriptions_test.cpp)
+target_link_libraries(push_integration_tests PRIVATE ulw::chat_lib ulw::pg_store ulw::webpush
+    ulw::auth ulw::os ulw::test_https_server PkgConfig::LIBPQ)
+target_include_directories(push_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
 ulw_add_test_suite(chat_unit_tests unit
     unit/chat/call_bell_test.cpp
     unit/chat/call_test.cpp
@@ -454,6 +482,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/live_chat_test.cpp
     unit/chat/memory_store_access_test.cpp
     unit/chat/presence_test.cpp
+    unit/chat/push_test.cpp
     unit/chat/ring_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)

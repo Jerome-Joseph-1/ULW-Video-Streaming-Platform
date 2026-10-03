@@ -153,13 +153,21 @@ struct ClientId {
     friend bool operator==(ClientId, ClientId) = default;
 };
 
+// Finds an attached client again by its id: how an answer that comes later reaches it.
+class IClientLookup {
+public:
+    virtual ~IClientLookup() = default;
+    // Null once the client detached.
+    [[nodiscard]] virtual IClient* client(ClientId id) noexcept = 0;
+};
+
 // Policy between the client edge and the room plane: who may send how much, which rooms each
 // client hears, how a delivery reaches a client that is behind, and what a client that comes
 // back is sent again. It joins each room once for all its clients on this node, keeps the
 // room's latest messages, and hands each message to every client in the room. Bodies are
 // opaque bytes here: carried, kept and passed on, never read. Everything runs on the reactor
 // thread.
-class ChatService final : public core::ports::IMemberListener {
+class ChatService final : public core::ports::IMemberListener, public IClientLookup {
 public:
     // `messages` answers whether a room admits a user, and tells the service of removals from
     // member lists from construction on. Neither its answers nor its removals may reach a
@@ -177,6 +185,7 @@ public:
     [[nodiscard]] ClientId attach(IClient& client, const core::UserId& user);
     // Takes the client out of its rooms; nothing reaches it after this.
     void detach(ClientId id) noexcept;
+    [[nodiscard]] IClient* client(ClientId id) noexcept override;
     void join(ClientId id, const Join& join);
     void send(ClientId id, Send send);
     // A page of the room's stored messages, as message frames and then a history frame, for a

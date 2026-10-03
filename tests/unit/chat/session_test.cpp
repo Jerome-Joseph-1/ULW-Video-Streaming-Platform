@@ -15,8 +15,10 @@
 #include "session.hpp"
 #include "support/eventually.hpp"
 #include "support/fake_clock.hpp"
+#include "support/fake_push_transport.hpp"
 #include "support/fake_random.hpp"
 #include "support/fake_verifier.hpp"
+#include "support/memory_push_store.hpp"
 #include "support/reactor_harness.hpp"
 #include "support/ws_client.hpp"
 #include "unit/rt/memory_room_store.hpp"
@@ -85,8 +87,11 @@ private:
 class Node {
 public:
     // With `manual_clock`, time on the node stands still until advance() moves it.
-    explicit Node(net::ReactorKind kind, chat::Limits limits = {}, bool manual_clock = false)
-        : limits_(std::move(limits)), manual_clock_(manual_clock) {
+    // With `push`, Web Push is configured, on a store in memory and a sender whose push service
+    // answers nothing.
+    explicit Node(net::ReactorKind kind, chat::Limits limits = {}, bool manual_clock = false,
+                  bool push = false)
+        : limits_(std::move(limits)), manual_clock_(manual_clock), push_(push) {
         std::promise<std::uint16_t> port;
         auto ready = port.get_future();
         healthy_ = healthy_promise_.get_future();
@@ -197,6 +202,15 @@ private:
             port.set_value(0);
             return;
         }
+        ulw::test::MemoryPushStore push_store;
+        const auto vapid = infra::webpush::VapidKey::from_private(infra::webpush::PrivateKey{3});
+        infra::webpush::PushSender sender(std::make_unique<ulw::test::FakePushTransport>(), *vapid,
+                                          clock, {.subject = "mailto:ops@example.com"});
+        chat::PushDeps push_deps{.store = push_store,
+                                 .sender = sender,
+                                 .key = *vapid,
+                                 .hosts = infra::webpush::PushHosts::defaults(),
+                                 .limits = {}};
         auto server = std::make_unique<chat::ChatServer>(
             chat::Deps{.node = *core::NodeId::parse("chat-1"),
                        .reactor = **reactor,
@@ -204,7 +218,9 @@ private:
                        .messages = *messages,
                        .verifier = verifier,
                        .clock = clock,
-                       .random = random},
+                       .random = random,
+                       .sfu = nullptr,
+                       .push = push_ ? &push_deps : nullptr},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
             limits_);
         NamedPeers accept(*server, peer_lock_, named_peer_);
@@ -234,6 +250,7 @@ private:
             }
             (*reactor)->run_once(core::Millis{5});
             server->reap();
+            push_store.flush();
             if (refresh_keys.exchange(false)) {
                 verifier.refresh_keys();
             }
@@ -263,6 +280,7 @@ private:
 
     chat::Limits limits_;
     bool manual_clock_;
+    bool push_;
     std::mutex peer_lock_;
     std::optional<net::IpAddress> named_peer_;
     std::promise<void> healthy_promise_;
@@ -1369,6 +1387,58 @@ TEST_P(ChatSessionTest, BehindATrustedProxyAnUpgradeAnswered401Or403GivesItsAddr
     // have been answered 429 from the second on, and would be now.
     EXPECT_TRUE(open(from_a + "Authorization: Bearer user.alice\r\n"));
     EXPECT_EQ(counter(R"(upgrades_limited_total{limit="ip"})"), 0U);
+}
+
+TEST_P(ChatSessionTest, PushCommandsAreAnsweredPushDisabledWhereItIsNotConfigured) {
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(alice->send_text(R"({"type":"push_key"})"));
+    EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"push_disabled"})");
+    ASSERT_TRUE(alice->send_text(
+        R"({"type":"push_unsubscribe","device":"01a0eb86-6cca-7dce-84cc-3bb47615f9d1"})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"error","reason":"push_disabled","device":")"
+              R"(01a0eb86-6cca-7dce-84cc-3bb47615f9d1"})");
+    EXPECT_EQ(counter("push_enabled"), 0U);
+}
+
+TEST_P(ChatSessionTest, ASocketRegistersAPushSubscriptionAFewTimesAMinuteAtMost) {
+    node_ = std::make_unique<Node>(GetParam(), chat::Limits{}, false, true);
+    ASSERT_NE(node_->port(), 0);
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(alice->send_text(R"({"type":"push_key"})"));
+    const auto key = alice->next_text(seconds(10));
+    ASSERT_TRUE(key.has_value());
+    EXPECT_TRUE(key->starts_with(R"({"type":"push_key","key":"B)")) << *key;
+    const std::string device = "01a0eb86-6cca-7dce-84cc-3bb47615f9d1";
+    const std::string subscribe =
+        R"({"type":"push_subscribe","device":")" + device +
+        R"(","endpoint":"https://fcm.googleapis.com/fcm/send/x","p256dh":")"
+        R"(BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4)"
+        R"(","auth":"BTBZMqHH6r4Tts7J_aSIgg"})";
+    ASSERT_TRUE(alice->send_text(subscribe));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"push_subscribed","device":")" + device + R"("})");
+    ASSERT_TRUE(alice->send_text(R"({"type":"push_unsubscribe","device":")" + device + R"("})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"push_unsubscribed","device":")" + device + R"("})");
+    // Five at once, then one each ten seconds.
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(alice->send_text(subscribe));
+        EXPECT_EQ(alice->next_text(seconds(10)),
+                  R"({"type":"push_subscribed","device":")" + device + R"("})");
+    }
+    ASSERT_TRUE(alice->send_text(subscribe));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"error","reason":"rate_limited","device":")" + device +
+                  R"(","retry_after_ms":10000})");
+    // A key costs the store nothing and is not counted.
+    ASSERT_TRUE(alice->send_text(R"({"type":"push_key"})"));
+    EXPECT_EQ(alice->next_text(seconds(10)), key);
+    EXPECT_EQ(counter("push_enabled"), 1U);
+    EXPECT_EQ(counter(R"(push_subscriptions_total{op="subscribed"})"), 4U);
+    EXPECT_EQ(counter(R"(push_subscriptions_total{op="unsubscribed"})"), 1U);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,

@@ -41,6 +41,8 @@ public:
     TestPki(const TestPki&) = delete;
     TestPki& operator=(const TestPki&) = delete;
 
+    // The CA's certificate, PEM: what a client that trusts this CA alone loads.
+    [[nodiscard]] std::string ca_file() const { return (dir_ / "ca.pem").string(); }
     // The identity the gateway and transport tests serve.
     [[nodiscard]] const net::TlsFiles& server() const noexcept { return server_; }
     // A new key and a certificate for it naming `common_name`, under `stem` in the directory.

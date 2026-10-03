@@ -216,6 +216,67 @@ std::expected<Command, EnvelopeError> call_move_of(const core::json::Value& mess
     return CallMove{.room = *room, .signal = signal, .call = *call};
 }
 
+std::expected<core::DeviceId, EnvelopeError> device_of(const core::json::Value& message) {
+    const auto text = string_of(message, "device");
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto device = core::DeviceId::parse(*text);
+    if (!device) {
+        return std::unexpected(EnvelopeError::BadDevice);
+    }
+    return *device;
+}
+
+template <std::size_t N>
+bool key_of(const core::json::Value& message, std::string_view field,
+            std::array<std::uint8_t, N>& into) {
+    const auto text = string_of(message, field);
+    // Each key is a few dozen characters; a longer text is not one, and is not decoded.
+    constexpr std::size_t kMaxText = ((N * 4) + 2) / 3;
+    if (!text || text->size() != kMaxText) {
+        return false;
+    }
+    const auto bytes = infra::auth::decode_base64url(*text);
+    if (!bytes || bytes->size() != N) {
+        return false;
+    }
+    std::ranges::transform(*bytes, into.begin(),
+                           [](char c) { return static_cast<std::uint8_t>(c); });
+    return true;
+}
+
+std::expected<Command, EnvelopeError> push_subscribe_of(const core::json::Value& message) {
+    if (!only(message, {"type", "device", "endpoint", "p256dh", "auth"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto device = device_of(message);
+    if (!device) {
+        return std::unexpected(device.error());
+    }
+    const auto endpoint = string_of(message, "endpoint");
+    if (!endpoint || message.find("p256dh") == nullptr || message.find("auth") == nullptr) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    PushSubscribe out{
+        .device = *device, .endpoint = std::string(*endpoint), .p256dh = {}, .auth = {}};
+    if (!key_of(message, "p256dh", out.p256dh) || !key_of(message, "auth", out.auth)) {
+        return std::unexpected(EnvelopeError::BadKey);
+    }
+    return out;
+}
+
+std::expected<Command, EnvelopeError> push_unsubscribe_of(const core::json::Value& message) {
+    if (!only(message, {"type", "device"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto device = device_of(message);
+    if (!device) {
+        return std::unexpected(device.error());
+    }
+    return PushUnsubscribe{.device = *device};
+}
+
 void append_room(std::string& out, const core::RoomId& room) {
     std::array<char, core::Uuid::kTextLength> text{};
     room.format_to(text);
@@ -262,6 +323,18 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     }
     if (name == "call_end") {
         return call_move_of(*message, CallSignal::End);
+    }
+    if (name == "push_key") {
+        if (!only(*message, {"type"})) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        return PushKey{};
+    }
+    if (name == "push_subscribe") {
+        return push_subscribe_of(*message);
+    }
+    if (name == "push_unsubscribe") {
+        return push_unsubscribe_of(*message);
     }
     if (name == "watch" || name == "unwatch") {
         const auto user = user_of(*message);
@@ -433,6 +506,36 @@ void write_call_error(std::string& out, std::string_view reason, const core::Roo
     }
 }
 
+void write_push_key(std::string& out, std::string_view key) {
+    out += R"({"type":"push_key","key":)";
+    core::json::append_string(out, key);
+    out += '}';
+}
+
+void write_push_done(std::string& out, std::string_view type, const core::DeviceId& device) {
+    out += R"({"type":")";
+    out += type;
+    out += R"(","device":")";
+    out += device.to_string();
+    out += R"("})";
+}
+
+void write_push_error(std::string& out, std::string_view reason,
+                      const std::optional<core::DeviceId>& device,
+                      std::optional<core::Millis> retry_after) {
+    out += R"({"type":"error","reason":)";
+    core::json::append_string(out, reason);
+    if (device) {
+        out += R"(,"device":")";
+        out += device->to_string();
+        out += '"';
+    }
+    if (retry_after) {
+        std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{})", retry_after->count());
+    }
+    out += '}';
+}
+
 std::string_view reason(EnvelopeError e) noexcept {
     switch (e) {
     case EnvelopeError::NotJson:
@@ -455,6 +558,8 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "bad_device";
     case EnvelopeError::BadCall:
         return "bad_call";
+    case EnvelopeError::BadKey:
+        return "bad_key";
     }
     return "malformed";
 }

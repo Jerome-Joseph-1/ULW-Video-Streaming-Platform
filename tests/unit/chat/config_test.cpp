@@ -1,3 +1,5 @@
+#include "infra/webpush/endpoint.hpp"
+
 #include "config.hpp"
 
 #include <gtest/gtest.h>
@@ -324,6 +326,86 @@ TEST_F(ChatConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
         env["ULW_ALLOWED_ORIGINS"] = bad;
         EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
     }
+}
+
+} // namespace
+
+namespace {
+
+// RFC 8291's sender key: a valid P-256 scalar, and nobody's secret.
+constexpr std::string_view kVapidKey = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
+
+TEST_F(ChatConfigTest, PushIsOffUnlessTheVapidKeyIsSetAndThenNeedsASubject) {
+    env["ULW_PUSH_HOSTS"] = "push.example.com";
+    env["ULW_PUSH_VAPID_SUBJECT"] = "mailto:ops@example.com";
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->push);
+    env.erase("ULW_PUSH_VAPID_SUBJECT");
+    env["ULW_PUSH_VAPID_PRIVATE_KEY"] = std::string(kVapidKey);
+    EXPECT_EQ(refused_variable(), "ULW_PUSH_VAPID_SUBJECT");
+    env["ULW_PUSH_VAPID_SUBJECT"] = "ops@example.com";
+    EXPECT_EQ(refused_variable(), "ULW_PUSH_VAPID_SUBJECT");
+    env["ULW_PUSH_VAPID_SUBJECT"] = "mailto:ops@example.com";
+    config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    ASSERT_TRUE(config->push);
+    EXPECT_EQ(config->push->vapid_private_key, kVapidKey);
+    EXPECT_EQ(config->push->vapid_subject, "mailto:ops@example.com");
+    EXPECT_EQ(config->push->hosts, "push.example.com");
+    EXPECT_FALSE(config->push->max_per_user);
+    EXPECT_FALSE(config->push->dev_allow_private);
+    EXPECT_TRUE(config->push->dev_ca_file.empty());
+    env.erase("ULW_PUSH_HOSTS");
+    EXPECT_EQ(load()->push->hosts, infra::webpush::kDefaultPushHosts);
+}
+
+TEST_F(ChatConfigTest, ABadVapidKeyIsRefusedWithoutQuotingIt) {
+    env["ULW_PUSH_VAPID_SUBJECT"] = "mailto:ops@example.com";
+    for (const std::string& key :
+         {std::string("not-a-key"), std::string(43, 'A'), std::string(kVapidKey) + "AA"}) {
+        env["ULW_PUSH_VAPID_PRIVATE_KEY"] = key;
+        const auto config = load();
+        ASSERT_FALSE(config) << key;
+        EXPECT_EQ(config.error().variable, "ULW_PUSH_VAPID_PRIVATE_KEY");
+        EXPECT_EQ(config.error().reason.find(key), std::string::npos);
+    }
+}
+
+TEST_F(ChatConfigTest, PushHostsAndTheDeviceCapAreChecked) {
+    env["ULW_PUSH_VAPID_PRIVATE_KEY"] = std::string(kVapidKey);
+    env["ULW_PUSH_VAPID_SUBJECT"] = "https://example.com/contact";
+    env["ULW_PUSH_HOSTS"] = "*.com";
+    EXPECT_EQ(refused_variable(), "ULW_PUSH_HOSTS");
+    env["ULW_PUSH_HOSTS"] = "10.0.0.1";
+    EXPECT_EQ(refused_variable(), "ULW_PUSH_HOSTS");
+    env.erase("ULW_PUSH_HOSTS");
+    for (const char* bad : {"0", "33", "ten"}) {
+        env["ULW_PUSH_MAX_SUBSCRIPTIONS_PER_USER"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_PUSH_MAX_SUBSCRIPTIONS_PER_USER") << bad;
+    }
+    env["ULW_PUSH_MAX_SUBSCRIPTIONS_PER_USER"] = "4";
+    EXPECT_EQ(load()->push->max_per_user, 4U);
+}
+
+TEST_F(ChatConfigTest, APrivatePushServiceAndItsCaAreForDevelopmentOnly) {
+    env["ULW_PUSH_VAPID_PRIVATE_KEY"] = std::string(kVapidKey);
+    env["ULW_PUSH_VAPID_SUBJECT"] = "mailto:ops@example.com";
+    env["ULW_DEV_PUSH_ALLOW_PRIVATE"] = "1";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_PUSH_ALLOW_PRIVATE");
+    env["ULW_DEV_PUSH_ALLOW_PRIVATE"] = "yes";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_PUSH_ALLOW_PRIVATE");
+    env["ULW_DEV_PUSH_ALLOW_PRIVATE"] = "0";
+    env["ULW_DEV_PUSH_CA_FILE"] = "/tmp/ca.pem";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_PUSH_CA_FILE");
+    env["ULW_DEV_MODE"] = "1";
+    env["ULW_DEV_PUSH_ALLOW_PRIVATE"] = "1";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable;
+    EXPECT_TRUE(config->push->dev_allow_private);
+    EXPECT_EQ(config->push->dev_ca_file, "/tmp/ca.pem");
+    env["KUBERNETES_SERVICE_HOST"] = "10.43.0.1";
+    EXPECT_EQ(refused_variable(), "ULW_DEV_PUSH_CA_FILE");
 }
 
 } // namespace

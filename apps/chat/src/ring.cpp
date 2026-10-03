@@ -77,8 +77,8 @@ std::optional<CallNotice> decode_notice(std::span<const std::byte> bytes) {
 }
 
 Ringer::Ringer(IRingPlane& plane, const core::ports::IClock& clock, core::ports::IRandom& random,
-               RingLimits limits)
-    : plane_(plane), clock_(clock), random_(random), limits_(limits),
+               RingLimits limits, IRingPush* push)
+    : plane_(plane), push_(push), clock_(clock), random_(random), limits_(limits),
       window_rings_(std::clamp<std::size_t>(limits.rings_per_window, 1, kMaxRingsPerWindow)),
       next_prune_(clock.now()) {}
 
@@ -240,6 +240,22 @@ void Ringer::start(const core::RoomId& room, const core::UserId& caller,
     }
     ++counters_.started;
     announce(room, call, RingEvent::Ringing, std::nullopt);
+    if (push_ != nullptr) {
+        // Every callee, connected or not: the owner does not know where their sockets are, and
+        // an open socket is no sign of a screen anyone looks at. Clients match the push to the
+        // call by its id and show it once (calls.md).
+        try {
+            push_->ringing(CallPush{.room = room,
+                                    .call = call.id,
+                                    .from = caller,
+                                    .callees = call.callees,
+                                    .expires_at = call.expires_at,
+                                    .deadline = call.ring_deadline});
+        } catch (const std::bad_alloc&) {
+            // The call rings on the sockets regardless.
+            ++counters_.allocation_failures;
+        }
+    }
 }
 
 void Ringer::schedule(const core::RoomId& room, Call& call, core::MonoTime due) {

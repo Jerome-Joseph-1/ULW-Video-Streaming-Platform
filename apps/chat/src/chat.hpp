@@ -14,6 +14,7 @@
 #include "call_bell.hpp"
 #include "chat_service.hpp"
 #include "presence.hpp"
+#include "push.hpp"
 #include "token_bucket.hpp"
 
 #include <cstddef>
@@ -123,6 +124,9 @@ struct Deps {
     // The SFU calls are answered with (ADR-0050); null when calls are not configured, and every
     // call is then answered calls_disabled. Must outlive the server.
     core::ports::ISfu* sfu = nullptr;
+    // Web Push for calls (ADR-0097); null when not configured, and push commands are then
+    // answered push_disabled. What it names must outlive the server.
+    PushDeps* push = nullptr;
 };
 
 struct Counters {
@@ -244,6 +248,7 @@ public:
     // Every session not yet retired, for a test that acts on one from the reactor thread.
     template <class Fn> void for_each_session(Fn fn) { sessions_.for_each_live(fn); }
     [[nodiscard]] std::string render_metrics() const;
+    [[nodiscard]] std::string render_push_metrics() const;
 
     [[nodiscard]] const Deps& deps() const noexcept { return deps_; }
     [[nodiscard]] const Access& access() const noexcept { return access_; }
@@ -252,6 +257,8 @@ public:
     [[nodiscard]] ChatService& chat() noexcept { return chat_; }
     [[nodiscard]] Presence& presence() noexcept { return presence_; }
     [[nodiscard]] CallBell& bell() noexcept { return bell_; }
+    // Null when push is not configured.
+    [[nodiscard]] Push* push() noexcept { return push_ ? &*push_ : nullptr; }
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
     void retire(net::Slab<Session>::Handle handle) noexcept;
     // Where a session encodes a frame before the reactor copies it into its send queue: one
@@ -305,6 +312,8 @@ private:
     // Pushes the call events the router hears to this node's sockets; the router stops telling
     // it before it goes.
     CallBell bell_;
+    // Hears each ring the call handler starts, so it is made first and goes last.
+    std::optional<Push> push_;
     // Answers the router's asks for the rooms this node owns; the router is told to stop asking
     // before it goes.
     CallHandler calls_;

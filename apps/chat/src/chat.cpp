@@ -82,7 +82,10 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(std::move(limits)), rooms_(deps.router),
       chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
       presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
-      calls_(deps.messages, deps.sfu, rooms_, deps.clock, deps.random, limits_.calls),
+      push_(deps.push == nullptr ? std::nullopt
+                                 : std::make_optional<Push>(*deps.push, chat_, deps.clock)),
+      calls_(deps.messages, deps.sfu, rooms_, deps.clock, deps.random, limits_.calls,
+             push_ ? &*push_ : nullptr),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
                http::AddressHash{http::SeededHash(seed(deps_.random))}),
@@ -280,6 +283,9 @@ void ChatServer::reap() noexcept {
     deps_.router.reap();
     chat_.sweep();
     calls_.sweep();
+    if (push_) {
+        push_->tick();
+    }
 }
 
 Session* ChatServer::session(net::Slab<Session>::Handle handle) noexcept {
@@ -306,7 +312,7 @@ std::string ChatServer::render_metrics() const {
     const CallCounters& call = calls_.counters();
     const RingCounters& ring = calls_.ring_counters();
     const BellCounters& bell = bell_.counters();
-    return std::format(
+    std::string out = std::format(
         "connections_accepted_total {}\n"
         "connections_rejected_total{{reason=\"capacity\"}} {}\n"
         "connections_rejected_total{{reason=\"socket\"}} {}\n"
@@ -409,6 +415,41 @@ std::string ChatServer::render_metrics() const {
         ring.cancelled, ring.missed, ring.ended, ring.orphaned, ring.busy, ring.graced,
         ring.notices, bell.pushed, bell.unheard, bell.malformed, router.notices_forwarded,
         router.notices_fanned_out, router.notices_heard, router.notices_dropped);
+    out += render_push_metrics();
+    return out;
+}
+
+// Web Push (ADR-0097), with fixed labels; all zero when push is not configured.
+std::string ChatServer::render_push_metrics() const {
+    const PushCounters none{};
+    const infra::webpush::SenderCounters no_sends{};
+    const PushCounters& p = push_ ? push_->counters() : none;
+    const infra::webpush::SenderCounters& s = push_ ? push_->sender_counters() : no_sends;
+    return std::format("push_enabled {}\n"
+                       "push_subscriptions_total{{op=\"subscribed\"}} {}\n"
+                       "push_subscriptions_total{{op=\"unsubscribed\"}} {}\n"
+                       "push_subscriptions_total{{op=\"refused\"}} {}\n"
+                       "push_subscriptions_total{{op=\"busy\"}} {}\n"
+                       "push_subscriptions_total{{op=\"forgotten\"}} {}\n"
+                       "push_store_failures_total {}\n"
+                       "push_lookups_total{{outcome=\"read\"}} {}\n"
+                       "push_lookups_total{{outcome=\"dropped\"}} {}\n"
+                       "push_messages_total{{outcome=\"queued\"}} {}\n"
+                       "push_messages_total{{outcome=\"skipped\"}} {}\n"
+                       "push_sends_total{{outcome=\"delivered\"}} {}\n"
+                       "push_sends_total{{outcome=\"gone\"}} {}\n"
+                       "push_sends_total{{outcome=\"rejected\"}} {}\n"
+                       "push_sends_total{{outcome=\"failed\"}} {}\n"
+                       "push_sends_total{{outcome=\"refused_address\"}} {}\n"
+                       "push_sends_total{{outcome=\"expired\"}} {}\n"
+                       "push_sends_total{{outcome=\"dropped\"}} {}\n"
+                       "push_retries_total {}\n"
+                       "push_queue_depth {}\n"
+                       "push_in_flight {}\n",
+                       push_ ? 1 : 0, p.subscribed, p.unsubscribed, p.refused, p.busy, p.forgotten,
+                       p.store_failures, p.lookups, p.lookups_dropped, p.messages, p.skipped,
+                       s.delivered, s.gone, s.rejected, s.failed, s.refused, s.expired, s.dropped,
+                       s.retried, push_ ? push_->queued() : 0, push_ ? push_->in_flight() : 0);
 }
 
 } // namespace chat

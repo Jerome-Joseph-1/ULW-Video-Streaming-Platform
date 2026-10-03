@@ -518,7 +518,59 @@ void Session::command(const codec::ws::Frame& frame) {
         chat.call_move(*client_, *m);
         return;
     }
+    if (std::holds_alternative<PushKey>(*parsed) ||
+        std::holds_alternative<PushSubscribe>(*parsed) ||
+        std::holds_alternative<PushUnsubscribe>(*parsed)) {
+        push_command(*parsed);
+        return;
+    }
     server_.presence().unwatch(*presence_, std::get<Unwatch>(*parsed).user);
+}
+
+void Session::push_command(const Command& command) {
+    // Set by the upgrade, which is the only way into the Open phase.
+    if (!client_ || !user_) {
+        close_with(kInternalError);
+        return;
+    }
+    const ClientId client = *client_;
+    const core::UserId& user = *user_;
+    Push* push = server_.push();
+    const auto* subscribe = std::get_if<PushSubscribe>(&command);
+    const auto* unsubscribe = std::get_if<PushUnsubscribe>(&command);
+    std::optional<core::DeviceId> device;
+    if (subscribe != nullptr) {
+        device = subscribe->device;
+    } else if (unsubscribe != nullptr) {
+        device = unsubscribe->device;
+    }
+    std::string out;
+    if (push == nullptr) {
+        write_push_error(out, "push_disabled", device);
+        send_text(out);
+        return;
+    }
+    if (std::holds_alternative<PushKey>(command)) {
+        push->key(*this);
+        return;
+    }
+    // Each subscribe or unsubscribe is a store write: a few a minute per socket is more than a
+    // browser ever needs (one when the app starts, one when the subscription changes).
+    const core::MonoTime t = now();
+    if (!push_budget_) {
+        push_budget_.emplace(kPushBurst, kPushInterval, t);
+    }
+    if (!push_budget_->available(t)) {
+        write_push_error(out, "rate_limited", device, kPushInterval);
+        send_text(out);
+        return;
+    }
+    push_budget_->take(t);
+    if (subscribe != nullptr) {
+        push->subscribe(client, user, *subscribe);
+    } else if (unsubscribe != nullptr) {
+        push->unsubscribe(client, user, *unsubscribe);
+    }
 }
 
 bool Session::push(std::string_view text) noexcept {

@@ -547,3 +547,50 @@ TEST(CallNoticeCodec, ANoticeComesBackAsItWasSentAndAnythingElseIsRefused) {
 }
 
 } // namespace
+
+namespace {
+
+class FakePush final : public chat::IRingPush {
+public:
+    void ringing(const chat::CallPush& push) noexcept override { heard.push_back(push); }
+    std::vector<chat::CallPush> heard;
+};
+
+class PushingRingerTest : public ::testing::Test {
+protected:
+    PushingRingerTest() : ringer_(plane_, clock_, random_, chat::RingLimits{}, &push_) {}
+
+    FakePlane plane_;
+    FakePush push_;
+    ulw::test::FakeClock clock_;
+    ulw::test::FakeRandom random_;
+    chat::Ringer ringer_;
+};
+
+TEST_F(PushingRingerTest, ARingThatStartsIsPushedToItsCalleesOnce) {
+    const std::vector<core::UserId> three{user("alice"), user("bob"), user("carol")};
+    const auto call = ringer_.ticketed(room_id(), user("alice"), three);
+    ASSERT_TRUE(call && *call);
+    ASSERT_EQ(push_.heard.size(), 1U);
+    const chat::CallPush& p = push_.heard[0];
+    EXPECT_EQ(p.room, room_id());
+    EXPECT_EQ(p.call, **call);
+    EXPECT_EQ(p.from, user("alice"));
+    EXPECT_EQ(p.callees, (std::vector<core::UserId>{user("bob"), user("carol")}));
+    EXPECT_EQ(p.expires_at, clock_.wall_now() + chat::RingLimits{}.ring_timeout);
+    EXPECT_EQ(p.deadline, clock_.now() + chat::RingLimits{}.ring_timeout);
+    // Announcing it again, answering it, asking again: nothing more is pushed.
+    clock_.advance(chat::RingLimits{}.announce_every);
+    ringer_.tick();
+    EXPECT_EQ(ringer_.ticketed(room_id(), user("bob"), std::nullopt), **call);
+    EXPECT_EQ(ringer_.ticketed(room_id(), user("alice"), std::nullopt), **call);
+    EXPECT_EQ(push_.heard.size(), 1U);
+    // Nobody else on the list: no ring, no push.
+    const auto alone = ringer_.ticketed(room_id(kOtherRoom), user("alice"),
+                                        std::vector<core::UserId>{user("alice")});
+    ASSERT_TRUE(alone.has_value());
+    EXPECT_FALSE(alone->has_value());
+    EXPECT_EQ(push_.heard.size(), 1U);
+}
+
+} // namespace

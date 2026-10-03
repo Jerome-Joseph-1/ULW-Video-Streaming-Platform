@@ -38,6 +38,25 @@ struct CallsConfig {
     std::string api_secret;
 };
 
+// Web Push for calls (ADR-0097). Unset when ULW_PUSH_VAPID_PRIVATE_KEY is: push commands are
+// answered push_disabled and rings push nothing.
+struct PushConfig {
+    // ULW_PUSH_VAPID_PRIVATE_KEY, from a Secret: the P-256 private key in base64url (43
+    // characters), checked here. Never logged.
+    std::string vapid_private_key;
+    // ULW_PUSH_VAPID_SUBJECT: "mailto:" or "https://" contact for the push services. Required with
+    // the key.
+    std::string vapid_subject;
+    // ULW_PUSH_HOSTS: the push service hosts endpoints may name; the major browsers' by default.
+    std::string hosts;
+    // ULW_PUSH_MAX_SUBSCRIPTIONS_PER_USER, 1 to 32; unset: PushLimits::max_per_user.
+    std::optional<std::size_t> max_per_user;
+    // ULW_DEV_PUSH_CA_FILE and ULW_DEV_PUSH_ALLOW_PRIVATE, development only (ops::allow_dev_only):
+    // a test push service with its own CA, on loopback.
+    std::string dev_ca_file;
+    bool dev_allow_private = false;
+};
+
 struct Config {
     core::NodeId node;
     // Clients: WebSocket upgrades on /rt, and the health and metrics endpoints.
@@ -76,6 +95,7 @@ struct Config {
     // Unset when LIVEKIT_API_KEY is: calls are not configured, and a call is answered
     // calls_disabled. With the key, the other three LIVEKIT_ variables are required.
     std::optional<CallsConfig> calls;
+    std::optional<PushConfig> push;
     // Who to become when started as root.
     std::string run_as_user;
     // Stay root when started as root with no run_as_user; otherwise that is refused.

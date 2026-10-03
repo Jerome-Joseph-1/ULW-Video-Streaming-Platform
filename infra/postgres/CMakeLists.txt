@@ -20,6 +20,7 @@ ulw_add_library(pg_store
     src/migrator.cpp
     src/params.cpp
     src/pool.cpp
+    src/push_subscriptions.cpp
     src/result.cpp
     src/sqlstate.cpp
     src/sync_connection.cpp

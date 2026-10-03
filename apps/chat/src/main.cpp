@@ -4,8 +4,12 @@
 #include "infra/auth/local_verifier.hpp"
 #include "infra/curl/multi.hpp"
 #include "infra/postgres/message_store.hpp"
+#include "infra/postgres/push_subscriptions.hpp"
 #include "infra/postgres/room_store.hpp"
 #include "infra/sfu/livekit/livekit_sfu.hpp"
+#include "infra/webpush/curl_transport.hpp"
+#include "infra/webpush/sender.hpp"
+#include "infra/webpush/vapid.hpp"
 #include "net/offload_pool.hpp"
 #include "net/signals.hpp"
 #include "net/socket.hpp"
@@ -98,6 +102,13 @@ struct Services {
     // server's call handler holds media rooms of the SFU and is destroyed first.
     std::unique_ptr<infra::curl::Multi> sfu_multi;
     std::unique_ptr<core::ports::ISfu> sfu;
+    // Web Push (ADR-0097), when configured: its store, its own libcurl multi, the VAPID key and
+    // the sender, which the server's Push borrows.
+    std::unique_ptr<infra::postgres::PgPushSubscriptions> push_store;
+    std::unique_ptr<infra::curl::Multi> push_multi;
+    std::optional<infra::webpush::VapidKey> vapid;
+    std::unique_ptr<infra::webpush::PushSender> push_sender;
+    std::unique_ptr<chat::PushDeps> push;
     std::unique_ptr<chat::ChatServer> server;
     std::unique_ptr<net::SignalWatcher> signals;
 
@@ -112,6 +123,8 @@ struct Services {
         offload.reset();
         signals.reset();
         messages.reset();
+        // Its answers point into the server's Push.
+        push_store.reset();
         server.reset();
         store.reset();
     }
@@ -177,6 +190,48 @@ std::expected<void, std::string> make_verifier(const chat::Config& config, Servi
     return {};
 }
 
+// Nothing when push is not configured. The configuration checked the key and the hosts.
+std::expected<void, std::string> make_push(const chat::Config& config, Services& s) {
+    if (!config.push) {
+        return {};
+    }
+    const chat::PushConfig& push = *config.push;
+    auto store = infra::postgres::PgPushSubscriptions::create(*s.reactor, *s.offload,
+                                                              {.conninfo = config.database_url});
+    if (!store) {
+        return std::unexpected("ULW_DATABASE_URL is not a connection string this server can use");
+    }
+    s.push_store = std::move(*store);
+    const infra::webpush::SenderLimits sender_limits{.subject = push.vapid_subject};
+    auto multi = infra::curl::Multi::create(*s.reactor, sender_limits.max_in_flight);
+    if (!multi) {
+        return std::unexpected("libcurl multi for push failed to start");
+    }
+    s.push_multi = std::move(*multi);
+    auto key = infra::webpush::VapidKey::from_base64url(push.vapid_private_key);
+    auto hosts = infra::webpush::PushHosts::parse(push.hosts);
+    if (!key || !hosts) {
+        return std::unexpected("ULW_PUSH_VAPID_PRIVATE_KEY or ULW_PUSH_HOSTS cannot be used");
+    }
+    s.vapid.emplace(std::move(*key));
+    s.push_sender = std::make_unique<infra::webpush::PushSender>(
+        std::make_unique<infra::webpush::CurlPushTransport>(
+            *s.push_multi,
+            infra::webpush::CurlTransportOptions{.public_only = !push.dev_allow_private,
+                                                 .ca_file = push.dev_ca_file}),
+        *s.vapid, s.clock, sender_limits);
+    chat::PushLimits limits;
+    limits.max_per_user = push.max_per_user.value_or(limits.max_per_user);
+    s.push =
+        std::make_unique<chat::PushDeps>(chat::PushDeps{.store = *s.push_store,
+                                                        .sender = *s.push_sender,
+                                                        .key = *s.vapid,
+                                                        .hosts = std::move(*hosts),
+                                                        .limits = limits,
+                                                        .dev_any_port = push.dev_allow_private});
+    return {};
+}
+
 // Where tickets send clients, or that calls are off, as a JSON string; never the key or the
 // secret.
 std::string calls_text(const chat::Config& config) {
@@ -185,8 +240,15 @@ std::string calls_text(const chat::Config& config) {
     return out;
 }
 
-// The token verifier and, when calls are configured, the SFU; the exit code when either cannot
-// start.
+// Whether push is on, as a JSON string; never the key.
+std::string_view push_text(const chat::Config& config) {
+    if (!config.push) {
+        return R"("off")";
+    }
+    return config.push->dev_allow_private ? R"("on, private addresses allowed")" : R"("on")";
+}
+
+// The token verifier and, when configured, the SFU and push; the exit code when one cannot start.
 std::optional<int> make_clients(const chat::Config& config, Services& s) {
     if (auto r = make_verifier(config, s); !r) {
         return fail("auth", r.error());
@@ -194,6 +256,9 @@ std::optional<int> make_clients(const chat::Config& config, Services& s) {
     if (auto r = make_sfu(config, s); !r) {
         return fail("LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET",
                     r.error(), kBadConfig);
+    }
+    if (auto r = make_push(config, s); !r) {
+        return fail("push", r.error(), kBadConfig);
     }
     return std::nullopt;
 }
@@ -317,7 +382,8 @@ int run() {
                    .verifier = *s.verifier,
                    .clock = s.clock,
                    .random = s.random,
-                   .sfu = s.sfu.get()},
+                   .sfu = s.sfu.get(),
+                   .push = s.push.get()},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},
         chat_limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.server);
@@ -338,10 +404,10 @@ int run() {
     const std::string calls = calls_text(*config);
     chat::log_event(
         R"("level":"info","msg":"listening","version":"{}","git":"{}","node":"{}","port":{},)"
-        R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}","calls":{})",
+        R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}","calls":{},"push":{})",
         info.version, info.git_sha, config->node.view(), config->port, config->node_address,
         net::to_string(choice->kind), choice->fell_back_from_io_uring ? " (fallback)" : "", keys,
-        jemalloc.empty() ? "default" : "jemalloc ", jemalloc, calls);
+        jemalloc.empty() ? "default" : "jemalloc ", jemalloc, calls, push_text(*config));
 
     while (!s.server->finished()) {
         s.reactor->run_once(kLoopTick);

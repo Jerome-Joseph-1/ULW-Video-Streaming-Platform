@@ -3,6 +3,8 @@
 #include "core/util/parse.hpp"
 #include "http/client_limits.hpp"
 #include "http/origin.hpp"
+#include "infra/webpush/endpoint.hpp"
+#include "infra/webpush/vapid.hpp"
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
@@ -211,6 +213,66 @@ std::expected<std::optional<CallsConfig>, ConfigError> calls_config(const EnvLoo
     return out;
 }
 
+// All or nothing once the key is given, as calls are: a deployment without push has no Secret
+// for the key, while the other variables may sit in a shared config.
+std::expected<std::optional<PushConfig>, ConfigError> push_config(const EnvLookup& env) {
+    auto key = lookup(env, "ULW_PUSH_VAPID_PRIVATE_KEY");
+    if (!key) {
+        return std::nullopt;
+    }
+    // The reason never quotes the value.
+    if (!infra::webpush::VapidKey::from_base64url(*key)) {
+        return error("ULW_PUSH_VAPID_PRIVATE_KEY",
+                     "not a P-256 private key in base64url (32 bytes, 43 characters)");
+    }
+    PushConfig out{.vapid_private_key = std::move(*key),
+                   .vapid_subject = {},
+                   .hosts = std::string(infra::webpush::kDefaultPushHosts),
+                   .max_per_user = std::nullopt,
+                   .dev_ca_file = {},
+                   .dev_allow_private = false};
+    auto subject = lookup(env, "ULW_PUSH_VAPID_SUBJECT");
+    if (!subject) {
+        return error("ULW_PUSH_VAPID_SUBJECT", "not set, but ULW_PUSH_VAPID_PRIVATE_KEY is");
+    }
+    if (!infra::webpush::is_vapid_subject(*subject)) {
+        return error("ULW_PUSH_VAPID_SUBJECT", "expected a mailto: or https:// contact");
+    }
+    out.vapid_subject = std::move(*subject);
+    if (auto hosts = lookup(env, "ULW_PUSH_HOSTS")) {
+        auto parsed = infra::webpush::PushHosts::parse(*hosts);
+        if (!parsed) {
+            return error("ULW_PUSH_HOSTS", parsed.error());
+        }
+        out.hosts = std::move(*hosts);
+    }
+    constexpr std::size_t kMaxPerUser = 32;
+    const auto per_user =
+        bounded<std::size_t>(env, "ULW_PUSH_MAX_SUBSCRIPTIONS_PER_USER", 1, kMaxPerUser);
+    if (!per_user) {
+        return std::unexpected(per_user.error());
+    }
+    out.max_per_user = *per_user;
+    if (auto ca = lookup(env, "ULW_DEV_PUSH_CA_FILE")) {
+        if (auto allowed = ops::allow_dev_only("ULW_DEV_PUSH_CA_FILE", env); !allowed) {
+            return error(allowed.error().variable, allowed.error().reason);
+        }
+        out.dev_ca_file = std::move(*ca);
+    }
+    if (const auto text = lookup(env, "ULW_DEV_PUSH_ALLOW_PRIVATE")) {
+        if (*text != "0" && *text != "1") {
+            return error("ULW_DEV_PUSH_ALLOW_PRIVATE", "expected 0 or 1");
+        }
+        if (*text == "1") {
+            if (auto allowed = ops::allow_dev_only("ULW_DEV_PUSH_ALLOW_PRIVATE", env); !allowed) {
+                return error(allowed.error().variable, allowed.error().reason);
+            }
+            out.dev_allow_private = true;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 std::vector<unsigned> wide_trusted_proxies(const ClientLimits& limits) {
@@ -315,6 +377,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!calls) {
         return std::unexpected(std::move(calls.error()));
     }
+    auto push = push_config(env);
+    if (!push) {
+        return std::unexpected(std::move(push.error()));
+    }
     const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
     if (!allow_root) {
         return error("ULW_ALLOW_ROOT", "expected 0 or 1");
@@ -338,6 +404,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .ring_timeout = *ring,
                   .client_limits = std::move(*limits),
                   .calls = std::move(*calls),
+                  .push = std::move(*push),
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
                   .allow_root = *allow_root};
 }

@@ -151,6 +151,11 @@ ChatService::Client* ChatService::find(ClientId id) noexcept {
     return it == clients_.end() ? nullptr : &it->second;
 }
 
+IClient* ChatService::client(ClientId id) noexcept {
+    Client* c = find(id);
+    return c == nullptr ? nullptr : c->client;
+}
+
 ChatService::Room* ChatService::find(const core::RoomId& room) noexcept {
     const auto it = rooms_.find(room);
     return it == rooms_.end() ? nullptr : it->second.get();

@@ -102,6 +102,7 @@ private:
     void read_frames(net::BorrowedBytes bytes);
     [[nodiscard]] bool within_control_budget(std::size_t in_this_read) noexcept;
     void command(const codec::ws::Frame& frame);
+    void push_command(const Command& command);
 
     void send_text(std::string_view text);
     void send_frame(const codec::ws::Frame& frame);
@@ -159,6 +160,10 @@ private:
     std::optional<ClientId> client_;
     std::optional<PresenceClientId> presence_;
     std::optional<BellId> bell_;
+    // push_subscribe and push_unsubscribe: kPushBurst at once, then one each kPushInterval.
+    static constexpr std::uint32_t kPushBurst = 5;
+    static constexpr core::Millis kPushInterval{10'000};
+    std::optional<PacedBucket> push_budget_;
 
     codec::ws::Decoder decoder_;
     std::uint32_t control_tokens_;

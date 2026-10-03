@@ -145,29 +145,29 @@ constexpr std::array<std::uint8_t, IpAddress::kBytes> v6(std::uint8_t a, std::ui
 constexpr unsigned kMapped = 96;
 
 constexpr std::array kRefusedV4{
-    Block{v4(0, 0, 0, 0), kMapped + 8},       // "this network"
-    Block{v4(10, 0, 0, 0), kMapped + 8},      // RFC 1918
-    Block{v4(100, 64, 0, 0), kMapped + 10},   // shared address space (CGNAT)
-    Block{v4(127, 0, 0, 0), kMapped + 8},     // loopback
-    Block{v4(169, 254, 0, 0), kMapped + 16},  // link-local, cloud metadata
-    Block{v4(172, 16, 0, 0), kMapped + 12},   // RFC 1918
-    Block{v4(192, 0, 0, 0), kMapped + 24},    // IETF protocol assignments
-    Block{v4(192, 0, 2, 0), kMapped + 24},    // TEST-NET-1
-    Block{v4(192, 88, 99, 0), kMapped + 24},  // 6to4 relay anycast
-    Block{v4(192, 168, 0, 0), kMapped + 16},  // RFC 1918
-    Block{v4(198, 18, 0, 0), kMapped + 15},   // benchmarking
-    Block{v4(198, 51, 100, 0), kMapped + 24}, // TEST-NET-2
-    Block{v4(203, 0, 113, 0), kMapped + 24},  // TEST-NET-3
-    Block{v4(224, 0, 0, 0), kMapped + 4},     // multicast
-    Block{v4(240, 0, 0, 0), kMapped + 4},     // reserved, and the broadcast address
+    Block{.base = v4(0, 0, 0, 0), .bits = kMapped + 8},       // "this network"
+    Block{.base = v4(10, 0, 0, 0), .bits = kMapped + 8},      // RFC 1918
+    Block{.base = v4(100, 64, 0, 0), .bits = kMapped + 10},   // shared address space (CGNAT)
+    Block{.base = v4(127, 0, 0, 0), .bits = kMapped + 8},     // loopback
+    Block{.base = v4(169, 254, 0, 0), .bits = kMapped + 16},  // link-local, cloud metadata
+    Block{.base = v4(172, 16, 0, 0), .bits = kMapped + 12},   // RFC 1918
+    Block{.base = v4(192, 0, 0, 0), .bits = kMapped + 24},    // IETF protocol assignments
+    Block{.base = v4(192, 0, 2, 0), .bits = kMapped + 24},    // TEST-NET-1
+    Block{.base = v4(192, 88, 99, 0), .bits = kMapped + 24},  // 6to4 relay anycast
+    Block{.base = v4(192, 168, 0, 0), .bits = kMapped + 16},  // RFC 1918
+    Block{.base = v4(198, 18, 0, 0), .bits = kMapped + 15},   // benchmarking
+    Block{.base = v4(198, 51, 100, 0), .bits = kMapped + 24}, // TEST-NET-2
+    Block{.base = v4(203, 0, 113, 0), .bits = kMapped + 24},  // TEST-NET-3
+    Block{.base = v4(224, 0, 0, 0), .bits = kMapped + 4},     // multicast
+    Block{.base = v4(240, 0, 0, 0), .bits = kMapped + 4},     // reserved, and the broadcast address
 };
 
 // Inside 2000::/3, the global unicast block every other IPv6 address is refused outside of.
 constexpr std::array kRefusedV6{
-    Block{v6(0x20, 0x01, 0x00, 0x00), 23}, // IETF protocol assignments, Teredo
-    Block{v6(0x20, 0x01, 0x0d, 0xb8), 32}, // documentation
-    Block{v6(0x20, 0x02), 16},             // 6to4
-    Block{v6(0x3f, 0xff, 0x00, 0x00), 20}, // documentation (RFC 9637)
+    Block{.base = v6(0x20, 0x01, 0x00, 0x00), .bits = 23}, // IETF protocol assignments, Teredo
+    Block{.base = v6(0x20, 0x01, 0x0d, 0xb8), .bits = 32}, // documentation
+    Block{.base = v6(0x20, 0x02), .bits = 16},             // 6to4
+    Block{.base = v6(0x3f, 0xff, 0x00, 0x00), .bits = 20}, // documentation (RFC 9637)
 };
 
 bool within(const IpAddress& address, const Block& block) noexcept {

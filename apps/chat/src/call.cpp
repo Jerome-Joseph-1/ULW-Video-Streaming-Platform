@@ -148,9 +148,9 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
 
 CallHandler::CallHandler(core::ports::IMessageStore& messages, core::ports::ISfu* sfu,
                          IRingPlane& plane, const core::ports::IClock& clock,
-                         core::ports::IRandom& random, CallLimits limits)
+                         core::ports::IRandom& random, CallLimits limits, IRingPush* push)
     : messages_(messages), sfu_(sfu), clock_(clock), limits_(limits),
-      ringer_(plane, clock, random, limits.ring), next_sweep_(clock.now()) {}
+      ringer_(plane, clock, random, limits.ring, push), next_sweep_(clock.now()) {}
 
 CallHandler::~CallHandler() = default;
 
