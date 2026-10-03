@@ -27,8 +27,15 @@ spec:
   variables:
     - name: isJob
       expression: request.resource.resource == 'jobs'
+    # A stream's id, a UUIDv7 in its text form: the Job's name, and its Secret's after the
+    # prefix. Exact, so that no name of another kind (live-packager-secrets) passes for one.
+    - name: stream
+      expression: "'[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'"
   validations:
     # Jobs: a packager, named after its stream.
+    - expression: >-
+        !variables.isJob || object.metadata.name.matches('^' + variables.stream + '$')
+      message: a packager Job is named after its stream, a UUIDv7
     - expression: >-
         !variables.isJob ||
         (has(object.metadata.labels) &&
@@ -50,6 +57,25 @@ spec:
          (!has(object.spec.template.spec.ephemeralContainers) ||
           size(object.spec.template.spec.ephemeralContainers) == 0))
       message: a packager Job has no init or ephemeral containers
+    # The image's own entrypoint, nothing else run in it.
+    - expression: >-
+        !variables.isJob ||
+        object.spec.template.spec.containers.all(c, !has(c.command) && !has(c.args))
+      message: a packager runs its image's entrypoint, with no command or arguments
+    # Its DNS name is the one the relay dials, <stream>.live-packager.<namespace>; nothing
+    # chooses where it runs or what it may evict.
+    - expression: >-
+        !variables.isJob ||
+        (has(object.spec.template.spec.hostname) &&
+         object.spec.template.spec.hostname == object.metadata.name &&
+         has(object.spec.template.spec.subdomain) &&
+         object.spec.template.spec.subdomain == 'live-packager')
+      message: a packager's hostname is its stream, under the live-packager subdomain
+    - expression: >-
+        !variables.isJob ||
+        (!has(object.spec.template.spec.nodeName) &&
+         !has(object.spec.template.spec.priorityClassName))
+      message: a packager Job names no node and no priority class
     - expression: >-
         !variables.isJob || !has(object.spec.template.spec.volumes) ||
         object.spec.template.spec.volumes.all(v, has(v.emptyDir))
@@ -85,11 +111,20 @@ spec:
             e.valueFrom.secretKeyRef.name in
               ['live-packager-secrets', 'live-packager-' + object.metadata.name]))
       message: a packager reads live-packager-secrets and its own stream's Secret only
-    # Secrets: a stream's, of the one plain type, never rewritten.
+    # Secrets: a stream's, of the one plain type, owned by its stream's Job, never rewritten.
     - expression: >-
         variables.isJob ||
-        (object.metadata.name.startsWith('live-packager-') && object.type == 'Opaque')
+        (object.metadata.name.matches('^live-packager-' + variables.stream + '$') &&
+         object.type == 'Opaque')
       message: the gateway makes only streams' Secrets, live-packager-<stream>, Opaque
+    - expression: >-
+        variables.isJob ||
+        (has(object.metadata.ownerReferences) &&
+         size(object.metadata.ownerReferences) == 1 &&
+         object.metadata.ownerReferences[0].apiVersion == 'batch/v1' &&
+         object.metadata.ownerReferences[0].kind == 'Job' &&
+         'live-packager-' + object.metadata.ownerReferences[0].name == object.metadata.name)
+      message: a stream's Secret is owned by its stream's Job and nothing else
     - expression: >-
         variables.isJob || request.operation != 'UPDATE' ||
         ((has(object.data) ? object.data : {}) == (has(oldObject.data) ? oldObject.data : {}) &&
