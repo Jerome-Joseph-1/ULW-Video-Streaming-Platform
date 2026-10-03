@@ -17,11 +17,13 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <liburing.h>
 #include <memory>
 #include <poll.h>
+#include <string>
 #include <unistd.h>
 #include <vector>
 
@@ -53,9 +55,16 @@ TEST(ReactorFactory, EpollIsTakenAsRequestedWithoutFallback) {
 TEST(ReactorFactory, IoUringIsTakenWhereTheKernelOffersIt) {
     os::SystemClock clock;
     auto choice = net::make_reactor_with_fallback(ReactorKind::IoUring, clock, kSlots);
-    ASSERT_TRUE(choice);
-    EXPECT_EQ(choice->kind, ReactorKind::IoUring);
-    EXPECT_FALSE(choice->fell_back_from_io_uring);
+    ASSERT_TRUE(choice) << "no reactor: " << std::strerror(choice.error()) << " (errno "
+                        << choice.error() << ")";
+    // Why io_uring was refused, when it was: ENOMEM is usually RLIMIT_MEMLOCK (ADR-0090).
+    const std::string refusal = choice->fell_back_from_io_uring
+                                    ? std::string(std::strerror(*choice->fell_back_from_io_uring)) +
+                                          " (errno " +
+                                          std::to_string(*choice->fell_back_from_io_uring) + ")"
+                                    : std::string("none");
+    EXPECT_EQ(choice->kind, ReactorKind::IoUring) << "io_uring refused: " << refusal;
+    EXPECT_FALSE(choice->fell_back_from_io_uring) << "io_uring refused: " << refusal;
     EXPECT_NE(dynamic_cast<net::detail::UringReactor*>(choice->reactor.get()), nullptr);
 }
 
