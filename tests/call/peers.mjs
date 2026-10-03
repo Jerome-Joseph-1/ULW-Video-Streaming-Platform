@@ -41,9 +41,10 @@ export function startSignalling(env = {}) {
   };
 }
 
-export function servePage() {
+// `page` is what / serves: call.html, or direct-call.html for the product's client.
+export function servePage(page = 'call.html') {
   const files = {
-    '/': ['call.html', 'text/html'],
+    '/': [page, 'text/html'],
     '/livekit-client.umd.js': ['node_modules/livekit-client/dist/livekit-client.umd.js',
       'text/javascript'],
   };

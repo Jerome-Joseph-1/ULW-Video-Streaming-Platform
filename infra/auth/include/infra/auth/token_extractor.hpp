@@ -17,7 +17,7 @@ enum class TokenSourceError : std::uint8_t {
 };
 
 // Finds the token in a request: `Authorization: Bearer <token>`, else the cookie named
-// `cookie_name` (auth_token, or auth_token_stage on staging). Fed every header of the request;
+// `cookie_name` (ULW_AUTH_COOKIE, auth_token by default). Fed every header of the request;
 // all others, x-user-* included, are ignored, never trusted. The token views the header value
 // it came from.
 class TokenExtractor {

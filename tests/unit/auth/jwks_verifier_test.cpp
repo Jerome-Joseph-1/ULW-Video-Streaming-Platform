@@ -37,7 +37,7 @@ using ulw::test::signed_token;
 using ulw::test::test_payload;
 using ulw::test::TestKey;
 
-constexpr std::string_view kUrl = "https://id.askedin.test/.well-known/jwks.json";
+constexpr std::string_view kUrl = "https://id.example.com/.well-known/jwks.json";
 
 // Key generation dominates this suite's run time and ctest runs every test in a process of
 // its own, so each key is made once per process and only when a test asks for it.
@@ -129,15 +129,15 @@ std::string token_with_kid(std::string_view kid) {
     return input + '.' + encode_base64url(ed_key().sign("EdDSA", input));
 }
 
-// What Askedin's auth-service issues (docs/integration/auth.md, Askedin): RS256 under a header
-// of alg, kid and typ only; aud an array of one; sub a lowercase UUID, repeated as uid; jti equal
+// A token as a typical identity provider issues it: RS256 under a header of alg, kid and typ
+// only; aud an array of one; sub a lowercase UUID, repeated as uid; jti equal
 // to the kid; tid, perms and sid besides; no nbf; exp an hour after iat. Its 2FA challenge and
 // PAT swap tokens are the same but for `aud` and a `typ` claim.
-constexpr std::string_view kAskedinUser = "0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b";
+constexpr std::string_view kProviderUser = "0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b";
 
-std::string askedin_token(const TestKey& key, const std::string& aud = R"(["askedin-platform"])",
-                          std::optional<std::string> typ = std::nullopt,
-                          std::string_view sub = kAskedinUser) {
+std::string provider_token(const TestKey& key, const std::string& aud = R"(["ulw-test-audience"])",
+                           std::optional<std::string> typ = std::nullopt,
+                           std::string_view sub = kProviderUser) {
     const std::string quoted_sub = '"' + std::string(sub) + '"';
     const std::string header = R"({"alg":"RS256","kid":")" + key.kid() + R"(","typ":"JWT"})";
     const std::string payload = test_payload({{"aud", aud},
@@ -438,8 +438,8 @@ TEST_F(JwksVerifierTest, AFailedRefetchKeepsTheKeysAndRetriesWithCappedBackoff) 
     EXPECT_EQ(fetcher_.requests, expected_requests + 1);
 }
 
-// A key Askedin withdraws while its JWKS cannot be reached must not verify for ever: after a
-// day without a successful fetch the keys, and every verdict they gave, are dropped.
+// A key the identity provider withdraws while its JWKS cannot be reached must not verify for ever:
+// after a day without a successful fetch the keys, and every verdict they gave, are dropped.
 TEST_F(JwksVerifierTest, KeysUnrefreshedForADayAreDroppedAndEveryTokenRefusedUntilAFetchLands) {
     std::vector<core::Millis> expiries;
     verifier_ = std::make_unique<JwksVerifier>(
@@ -584,39 +584,39 @@ TEST_F(JwksVerifierTest, DestructionCancelsTheArmedTimers) {
     EXPECT_EQ(fetcher_.requests, 1);
 }
 
-// Askedin's access tokens as its auth-service issues them verify, and the user is their sub.
-TEST_F(JwksVerifierTest, AnAskedinAccessTokenVerifies) {
+// A provider's access token as provider_token shapes it verifies, and the user is its sub.
+TEST_F(JwksVerifierTest, AProviderAccessTokenVerifies) {
     const VerifyResult verified =
-        verify_through_fetch(askedin_token(rsa_key()), key_set({rsa_key().jwk()}));
+        verify_through_fetch(provider_token(rsa_key()), key_set({rsa_key().jwk()}));
     ASSERT_TRUE(verified.has_value());
     EXPECT_EQ(verified->subject.view(), "0b5e4b1e-7c1a-4d8e-9f3a-2c6d8e1f4a7b");
 }
 
-// Askedin signs its 2FA challenges and PAT swaps with the same key as its access tokens; only the
-// audience tells them apart, and neither may authenticate here under the default audience.
-TEST_F(JwksVerifierTest, AskedinsTwoFactorAndPatTokensAreRefusedForTheirAudience) {
-    ASSERT_EQ(ulw::test::kTestRules.audience, "askedin-platform") << "not the default audience";
+// A provider may sign its 2FA challenges and PAT swaps with the same key as its access tokens;
+// only the audience tells them apart, and neither may authenticate here under the configured one.
+TEST_F(JwksVerifierTest, TwoFactorAndPatTokensAreRefusedForTheirAudience) {
+    ASSERT_EQ(ulw::test::kTestRules.audience, "ulw-test-audience") << "not the test audience";
     const std::string jwks = key_set({rsa_key().jwk()});
     EXPECT_EQ(verify_through_fetch(
-                  askedin_token(rsa_key(), R"(["askedin-2fa"])", R"("2fa_challenge")"), jwks),
+                  provider_token(rsa_key(), R"(["ulw-test-2fa"])", R"("2fa_challenge")"), jwks),
               refused(AuthError::WrongAudience));
-    EXPECT_EQ(verify(askedin_token(rsa_key(), R"(["askedin-pat"])", R"("pat")")),
+    EXPECT_EQ(verify(provider_token(rsa_key(), R"(["ulw-test-pat"])", R"("pat")")),
               refused(AuthError::WrongAudience));
-    EXPECT_EQ(verify(askedin_token(rsa_key(), R"("askedin-2fa")", R"("2fa_challenge")")),
+    EXPECT_EQ(verify(provider_token(rsa_key(), R"("ulw-test-2fa")", R"("2fa_challenge")")),
               refused(AuthError::WrongAudience));
-    EXPECT_EQ(verify(askedin_token(rsa_key(), R"("askedin-pat")", R"("pat")")),
+    EXPECT_EQ(verify(provider_token(rsa_key(), R"("ulw-test-pat")", R"("pat")")),
               refused(AuthError::WrongAudience));
-    // The same token under the platform's audience verifies: the audience alone refused them.
-    EXPECT_TRUE(verify(askedin_token(rsa_key(), R"(["askedin-platform"])", R"("pat")"))
+    // The same token under the configured audience verifies: the audience alone refused them.
+    EXPECT_TRUE(verify(provider_token(rsa_key(), R"(["ulw-test-audience"])", R"("pat")"))
                     .value_or(refused(AuthError::KeysUnavailable)));
     EXPECT_EQ(fetcher_.requests, 1);
 }
 
-// Askedin rotates without overlap: the old kid leaves the set the moment the new key is made. A
-// token verified before goes on verifying from the remembered verdict, and its key from the
+// A provider that rotates without overlap: the old kid leaves the set the moment the new key is
+// made. A token verified before goes on verifying from the remembered verdict, and its key from the
 // cached set, until the next refetch.
 TEST_F(JwksVerifierTest, AWithdrawnKeyGoesOnVerifyingUntilTheNextRefetchWithoutADrop) {
-    const std::string old_token = askedin_token(rsa_key());
+    const std::string old_token = provider_token(rsa_key());
     EXPECT_TRUE(verify_through_fetch(old_token, key_set({rsa_key().jwk()})));
     // Rotated now: the published set holds next_rsa_key() alone, and nobody has asked for it.
     advance(minutes(15) - seconds(1));
@@ -628,23 +628,23 @@ TEST_F(JwksVerifierTest, AWithdrawnKeyGoesOnVerifyingUntilTheNextRefetchWithoutA
     EXPECT_EQ(verify(old_token), refused(AuthError::UnknownKey));
 }
 
-// Askedin's jti is its kid, the same for every token under a key: two users' tokens with one jti
-// are answered each as itself, from the signature and from the cache alike.
+// A provider whose jti is its kid, the same for every token under a key: two users' tokens with one
+// jti are answered each as itself, from the signature and from the cache alike.
 TEST_F(JwksVerifierTest, TokensSharingAJtiAreAnsweredEachAsItsOwnUser) {
     constexpr std::string_view kOther = "7d0c6a52-3b9e-4f1d-8a2c-5e6f7a8b9c0d";
-    const std::string first = askedin_token(rsa_key());
+    const std::string first = provider_token(rsa_key());
     const std::string second =
-        askedin_token(rsa_key(), R"(["askedin-platform"])", std::nullopt, kOther);
+        provider_token(rsa_key(), R"(["ulw-test-audience"])", std::nullopt, kOther);
     const auto subject = [&](const std::string& token) {
         const VerifyResult r = verify(token).value_or(refused(AuthError::KeysUnavailable));
         return r ? std::string(r->subject.view()) : std::string("refused");
     };
     const VerifyResult verified = verify_through_fetch(first, key_set({rsa_key().jwk()}));
     ASSERT_TRUE(verified.has_value());
-    EXPECT_EQ(verified->subject.view(), kAskedinUser);
+    EXPECT_EQ(verified->subject.view(), kProviderUser);
     EXPECT_EQ(subject(second), kOther);
     // Both answered from the cache now.
-    EXPECT_EQ(subject(first), kAskedinUser);
+    EXPECT_EQ(subject(first), kProviderUser);
     EXPECT_EQ(subject(second), kOther);
     EXPECT_EQ(fetcher_.requests, 1);
 }
@@ -652,7 +652,7 @@ TEST_F(JwksVerifierTest, TokensSharingAJtiAreAnsweredEachAsItsOwnUser) {
 // What SIGHUP does: a fetch starts at once, the cached keys and verdicts keep answering while it
 // runs, and when it lands a token whose key left the set is refused.
 TEST_F(JwksVerifierTest, DroppingTheCachesRefusesATokenWhoseKeyLeftTheSet) {
-    const std::string old_token = askedin_token(rsa_key());
+    const std::string old_token = provider_token(rsa_key());
     EXPECT_TRUE(verify_through_fetch(old_token, key_set({rsa_key().jwk()})));
     ASSERT_EQ(fetcher_.requests, 1);
     EXPECT_FALSE(verifier_->drop_pending());
@@ -670,14 +670,14 @@ TEST_F(JwksVerifierTest, DroppingTheCachesRefusesATokenWhoseKeyLeftTheSet) {
     EXPECT_EQ(verify(old_token), refused(AuthError::UnknownKey));
     // The new key came with that fetch.
     EXPECT_TRUE(
-        verify(askedin_token(next_rsa_key())).value_or(refused(AuthError::KeysUnavailable)));
+        verify(provider_token(next_rsa_key())).value_or(refused(AuthError::KeysUnavailable)));
     EXPECT_EQ(fetcher_.requests, 2);
 }
 
 // The drop forgets every verdict even when the key stayed, so the next answer is a signature
 // check again, and still a pass.
 TEST_F(JwksVerifierTest, AfterADropATokenStillPublishedVerifiesAgain) {
-    const std::string token = askedin_token(rsa_key());
+    const std::string token = provider_token(rsa_key());
     EXPECT_TRUE(verify_through_fetch(token, key_set({rsa_key().jwk()})));
     verifier_->drop_caches();
     EXPECT_TRUE(verify(token).value_or(refused(AuthError::KeysUnavailable)));
@@ -690,7 +690,7 @@ TEST_F(JwksVerifierTest, AfterADropATokenStillPublishedVerifiesAgain) {
 // A drop during a fetch replaces it: what that fetch would bring may predate the rotation.
 TEST_F(JwksVerifierTest, ADropDuringAFetchCancelsItAndStartsAnother) {
     CountingWaiter waiter;
-    EXPECT_FALSE(verify(askedin_token(rsa_key()), waiter).has_value());
+    EXPECT_FALSE(verify(provider_token(rsa_key()), waiter).has_value());
     ASSERT_EQ(fetcher_.requests, 1);
     verifier_->drop_caches();
     EXPECT_EQ(fetcher_.cancels, 1);
@@ -700,13 +700,13 @@ TEST_F(JwksVerifierTest, ADropDuringAFetchCancelsItAndStartsAnother) {
     pump();
     EXPECT_EQ(waiter.calls, 1);
     EXPECT_TRUE(
-        verify(askedin_token(rsa_key()), waiter).value_or(refused(AuthError::KeysUnavailable)));
+        verify(provider_token(rsa_key()), waiter).value_or(refused(AuthError::KeysUnavailable)));
 }
 
 // The drop's fetch forgets the kids remembered as unknown before it, so one may be looked up
 // again; a kid sought during that fetch and missing from it is still remembered.
 TEST_F(JwksVerifierTest, ADropForgetsUnknownKidsButRemembersTheOnesItsFetchMissed) {
-    const std::string remembered = askedin_token(next_rsa_key());
+    const std::string remembered = provider_token(next_rsa_key());
     EXPECT_EQ(verify_through_fetch(remembered, key_set({rsa_key().jwk()})),
               refused(AuthError::UnknownKey));
     verifier_->drop_caches();
@@ -729,7 +729,7 @@ TEST_F(JwksVerifierTest, ADropForgetsUnknownKidsButRemembersTheOnesItsFetchMisse
 // included, and the drop completes with the first retry that succeeds. The retries back off from
 // 1 s again, however many failures came before the drop.
 TEST_F(JwksVerifierTest, ADropWhoseFetchFailsKeepsTheKeysUntilARetryCompletesIt) {
-    const std::string old_token = askedin_token(rsa_key());
+    const std::string old_token = provider_token(rsa_key());
     EXPECT_TRUE(verify_through_fetch(old_token, key_set({rsa_key().jwk()})));
     // Three failed refetches: the next retry would be 4 s away.
     advance(minutes(15) + milliseconds(200));

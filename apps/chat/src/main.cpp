@@ -5,6 +5,7 @@
 #include "infra/curl/multi.hpp"
 #include "infra/postgres/message_store.hpp"
 #include "infra/postgres/room_store.hpp"
+#include "infra/sfu/livekit/livekit_sfu.hpp"
 #include "net/offload_pool.hpp"
 #include "net/signals.hpp"
 #include "net/socket.hpp"
@@ -93,6 +94,10 @@ struct Services {
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
     std::unique_ptr<chat::RoomLog> room_log;
     std::unique_ptr<rt::RoomRouter> router;
+    // Calls (ADR-0050), when configured: LiveKit's server API on its own libcurl multi. The
+    // server's call handler holds media rooms of the SFU and is destroyed first.
+    std::unique_ptr<infra::curl::Multi> sfu_multi;
+    std::unique_ptr<core::ports::ISfu> sfu;
     std::unique_ptr<chat::ChatServer> server;
     std::unique_ptr<net::SignalWatcher> signals;
 
@@ -112,8 +117,34 @@ struct Services {
     }
 };
 
+// Nothing when calls are not configured; LiveKit's adapter checks the values.
+std::expected<void, std::string> make_sfu(const chat::Config& config, Services& s) {
+    if (!config.calls) {
+        return {};
+    }
+    auto multi = infra::curl::Multi::create(*s.reactor);
+    if (!multi) {
+        return std::unexpected("libcurl multi for LiveKit failed to start");
+    }
+    s.sfu_multi = std::move(*multi);
+    const chat::CallsConfig& calls = *config.calls;
+    auto sfu = infra::sfu::livekit::make_sfu(*s.reactor, *s.sfu_multi, s.clock,
+                                             {.api_url = calls.api_url,
+                                              .client_url = calls.client_url,
+                                              .api_key = calls.api_key,
+                                              .api_secret = calls.api_secret,
+                                              .packager_srt = {}});
+    if (!sfu) {
+        return std::unexpected(std::string(infra::sfu::livekit::to_string(sfu.error())));
+    }
+    s.sfu = std::move(*sfu);
+    return {};
+}
+
 std::expected<void, std::string> make_verifier(const chat::Config& config, Services& s) {
-    infra::auth::ClaimRules rules{.issuer = config.jwt_issuer, .audience = config.jwt_audience};
+    infra::auth::ClaimRules rules{.issuer = config.jwt_issuer,
+                                  .audience = config.jwt_audience,
+                                  .subject_claim = config.jwt_subject_claim};
     if (!config.dev_jwks_file.empty()) {
         const auto jwks = read_key_set(config.dev_jwks_file);
         if (!jwks) {
@@ -144,6 +175,27 @@ std::expected<void, std::string> make_verifier(const chat::Config& config, Servi
                     std::chrono::duration_cast<std::chrono::hours>(age).count());
             }});
     return {};
+}
+
+// Where tickets send clients, or that calls are off, as a JSON string; never the key or the
+// secret.
+std::string calls_text(const chat::Config& config) {
+    std::string out;
+    core::json::append_string(out, config.calls ? config.calls->client_url : "off");
+    return out;
+}
+
+// The token verifier and, when calls are configured, the SFU; the exit code when either cannot
+// start.
+std::optional<int> make_clients(const chat::Config& config, Services& s) {
+    if (auto r = make_verifier(config, s); !r) {
+        return fail("auth", r.error());
+    }
+    if (auto r = make_sfu(config, s); !r) {
+        return fail("LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET",
+                    r.error(), kBadConfig);
+    }
+    return std::nullopt;
 }
 
 int run() {
@@ -214,8 +266,8 @@ int run() {
         return fail("ULW_DATABASE_URL", "not a connection string this server can use", kBadConfig);
     }
     s.messages = std::move(*messages);
-    if (auto r = make_verifier(*config, s); !r) {
-        return fail("auth", r.error());
+    if (const std::optional<int> code = make_clients(*config, s)) {
+        return *code;
     }
 
     s.room_log = std::make_unique<chat::RoomLog>(config->node);
@@ -255,7 +307,8 @@ int run() {
                    .messages = *s.messages,
                    .verifier = *s.verifier,
                    .clock = s.clock,
-                   .random = s.random},
+                   .random = s.random,
+                   .sfu = s.sfu.get()},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},
         chat_limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.server);
@@ -273,12 +326,13 @@ int run() {
                                         ? config->jwks_url
                                         : "DEVELOPMENT " + config->dev_jwks_file);
     const std::string_view jemalloc = ops::jemalloc_version();
+    const std::string calls = calls_text(*config);
     chat::log_event(
         R"("level":"info","msg":"listening","version":"{}","git":"{}","node":"{}","port":{},)"
-        R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}")",
+        R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}","calls":{})",
         info.version, info.git_sha, config->node.view(), config->port, config->node_address,
         net::to_string(choice->kind), choice->fell_back_from_io_uring ? " (fallback)" : "", keys,
-        jemalloc.empty() ? "default" : "jemalloc ", jemalloc);
+        jemalloc.empty() ? "default" : "jemalloc ", jemalloc, calls);
 
     while (!s.server->finished()) {
         s.reactor->run_once(kLoopTick);

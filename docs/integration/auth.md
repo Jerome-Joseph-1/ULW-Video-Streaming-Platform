@@ -1,9 +1,9 @@
 # Authentication
 
-Every upload and playback endpoint, and the chat WebSocket, needs an Askedin access token. The
-service keeps no users and issues no tokens of its own (ADR-0018): it verifies Askedin's JWTs
-in-process against Askedin's published key set, and the user is whatever the token's subject
-says.
+Every upload and playback endpoint, and the chat WebSocket, needs an access token from the
+operator's identity provider. The service keeps no users and issues no tokens of its own
+(ADR-0018): it verifies the provider's JWTs in-process against the provider's published key set,
+and the user is whatever the token's subject claim says.
 
 ## Where the token goes
 
@@ -12,7 +12,7 @@ says.
 | Source | Form | Notes |
 |---|---|---|
 | `Authorization` header | `Bearer <token>` | Scheme matched without regard to case, then one or more spaces. Wins over the cookie when both are present. |
-| Cookie | `<cookie name>=<token>` | Name from `ULW_AUTH_COOKIE`: `auth_token` in prod, `auth_token_stage` on stage. The value may be wrapped in double quotes. |
+| Cookie | `<cookie name>=<token>` | Name from `ULW_AUTH_COOKIE`, default `auth_token`. The value may be wrapped in double quotes. |
 
 A request is refused with `401` when:
 
@@ -58,7 +58,7 @@ with an `Authorization` header is not checked: other sites cannot make the brows
   cookie. With no list set, the cookie works only for `GET` and `HEAD` from the gateway's own
   origin.
 - Cookie writes work only same-origin, with the API on the page's own host: a page on
-  `askedin.com` calling `www.askedin.com`, or the reverse, gets `403` unless
+  `example.com` calling `www.example.com`, or the reverse, gets `403` unless
   `ULW_ALLOW_SAME_SITE=1` is set.
 - `ULW_ALLOWED_ORIGINS` entries are `scheme://host[:port]`, lowercase, exactly as a browser
   writes `Origin`. `http://` is accepted only for `localhost`, `127.0.0.1` and `[::1]` (a dev
@@ -91,13 +91,13 @@ These rules took effect as a security fix on an endpoint marked Stable
 | Rule | Value |
 |---|---|
 | Format | Compact JWS: exactly three base64url parts separated by two dots, at most 8 KiB in all |
-| Header `alg` | `RS256`, `PS256`, `ES256` or `EdDSA`. Anything else, `none` included, is refused. Askedin signs with `RS256` only ([Askedin](#askedin)). |
+| Header `alg` | `RS256`, `PS256`, `ES256` or `EdDSA`. Anything else, `none` included, is refused. |
 | Header `kid` | Required, 1 to 256 bytes, and must name a key in the key set |
 | Header `crit` | Must be absent |
 | Algorithm vs key | The key decides. An RSA key (2048 to 8192 bits) verifies `RS256`/`PS256`, an EC P-256 key `ES256`, an OKP Ed25519 key `EdDSA`. A key that publishes its own `alg` accepts only that one. A token whose `alg` does not fit its key is refused. |
 | Keys used | Only keys with `use` absent or `sig`, and `key_ops` absent or containing `verify` |
 | `iss` | Must equal `JWT_ISSUER` exactly |
-| `aud` | A string equal to `JWT_AUDIENCE`, or an array of strings containing it. Default `askedin-platform`. |
+| `aud` | A string equal to `JWT_AUDIENCE`, or an array of strings containing it. |
 | `exp` | Required, NumericDate. Refused once `now - 60 s >= exp`. |
 | `nbf` | Optional. Refused while `now + 60 s < nbf`. |
 | Clock skew | 60 s on both `exp` and `nbf` |
@@ -108,11 +108,16 @@ The signature is checked before any claim is read.
 
 ## How the user id is derived
 
-<!-- infra/auth/src/claims.cpp (subject_of), core/src/ids.cpp (UserId::parse) -->
+<!-- infra/auth/src/claims.cpp (subject_of), ops/src/dev_only.cpp (token_rules), core/src/ids.cpp (UserId::parse) -->
 
-1. `sub`, if present. It must be a string.
-2. Otherwise `id`, as a string or as a non-negative integer (taken in decimal, `42` becomes `"42"`).
-3. Neither present: refused.
+The user is the claim `ULW_JWT_SUBJECT_CLAIM` names, `sub` unless set:
+
+1. `sub` must be a string (RFC 7519).
+2. Another claim, for a provider that puts its user id elsewhere (`user_id`, say, or a
+   namespaced `https://example.com/uid`), may be a string or a non-negative integer, taken in
+   decimal (`42` becomes `"42"`).
+3. The claim absent, or an empty string: refused. No other claim stands in for it; with
+   `ULW_JWT_SUBJECT_CLAIM=user_id`, a token's `sub` is not read at all.
 
 The result must be 1 to 128 characters from `A-Z a-z 0-9 . _ : @ | + -`; anything else is
 refused rather than cleaned up. This string is the owner of every video the user uploads, and
@@ -124,9 +129,10 @@ it is compared byte for byte. Two tokens with different subjects are two differe
 
 | Setting | Meaning |
 |---|---|
-| `JWKS_URL` | Askedin's JWK set. Must be `https://`; the process refuses to start otherwise. Askedin's values: [Askedin](#askedin). |
-| `JWT_ISSUER` | Required. Askedin's values: [Askedin](#askedin). |
-| `JWT_AUDIENCE` | Optional, default `askedin-platform`. |
+| `JWKS_URL` | The identity provider's JWK set. Must be `https://`; the process refuses to start otherwise. |
+| `JWT_ISSUER` | Required. The provider's `iss`, byte for byte. |
+| `JWT_AUDIENCE` | Required with `JWKS_URL`: the `aud` the provider puts in tokens meant for ULW. No default, since a guessed one would refuse every token or accept tokens meant for another service; the process refuses to start without it (exit 2). With `ULW_DEV_JWKS_FILE` it defaults to `ulw-dev`, what `ulw_devtoken` mints. |
+| `ULW_JWT_SUBJECT_CLAIM` | Optional, default `sub`: the claim that names the user ([How the user id is derived](#how-the-user-id-is-derived)). 1 to 64 of `A-Z a-z 0-9 _ . : / -`, and not `iss`, `aud`, `exp`, `nbf`, `iat` or `jti` (claims that name no user); anything else stops the process at startup. |
 | `ULW_AUTH_COOKIE` | Optional, default `auth_token`. |
 | `ULW_JWKS_MAX_STALE_HOURS` | Optional, 1 to 168, default 24: how long keys stay trusted while every refetch fails (below). |
 | `ULW_DEV_JWKS_FILE` | Development only: a local Ed25519 key set instead of `JWKS_URL`. Setting both is a startup error. It is refused (exit 2) unless `ULW_DEV_MODE=1`, and refused regardless inside a Kubernetes pod (`KUBERNETES_SERVICE_HOST` set, as the kubelet does in every container), so a key set left in a real deployment's configuration stops the process instead of being trusted. The gateway and chat server both apply this. The first log line prints `keys=DEVELOPMENT <file>` so it cannot go unnoticed. |
@@ -139,7 +145,7 @@ Caching and refresh:
 - Keys are trusted for at most `ULW_JWKS_MAX_STALE_HOURS` (1 to 168, default 24) after the last
   successful fetch. Past that, while every refetch fails, the keys and every cached verdict are
   dropped and each token is refused as if the key set were unavailable, until a fetch succeeds:
-  a key Askedin withdraws while its JWKS cannot be reached stops verifying within a day. The
+  a key the provider withdraws while its JWKS cannot be reached stops verifying within a day. The
   process logs `jwks keys expired` at error level once, and the `jwks_keys_expired` gauge (gateway
   and chat `/metrics`) reads 1 while it lasts; alert on it. The default is a day because refetches
   are 15 minutes apart and retried every minute, so an outage that long has had 1,440 retries and
@@ -166,89 +172,66 @@ Caching and refresh:
   succeeds, and the drop stays pending through the retries. Chat sockets already open are not
   closed; they run to their token's `exp`.
 
-So a newly rotated-in key is accepted within one fetch of first use, provided Askedin publishes
-it before issuing tokens with it, and a withdrawn key stops verifying once the fetch after a
+So a newly rotated-in key is accepted within one fetch of first use, provided the provider
+publishes it before issuing tokens with it, and a withdrawn key stops verifying once the fetch after a
 SIGHUP succeeds.
 
-## Askedin
+## Configuring an identity provider
 
-<!-- tests/unit/auth/jwks_verifier_test.cpp (askedin_token), deploy/askedin/overlays/*/video-gateway/deployment.yaml -->
+<!-- deploy/kubernetes/overlays/*/config.env, tests/unit/auth/jwks_verifier_test.cpp (provider_token) -->
 
-What Askedin's auth-service issues and publishes, as its owner set it out on 2026-10-03 from its
-code (commit `ebd9b2ab`) and the live hosts, and the settings ULW needs for it.
+Any provider that signs JWTs with one of the algorithms above and publishes its keys as a JWK
+set works. The operator sets, per environment (in Kubernetes, `JWKS_URL`, `JWT_ISSUER`,
+`JWT_AUDIENCE`, `JWT_SUBJECT_CLAIM`, `AUTH_COOKIE` and `ALLOWED_ORIGINS` in the overlay's
+`config.env`, deploy/kubernetes/RUNBOOK.md):
 
-| Setting | Stage | Prod |
-|---|---|---|
-| `JWKS_URL` | `https://auth-stage.askedin.com/.well-known/jwks.json` | `https://auth.askedin.com/.well-known/jwks.json` |
-| `JWT_ISSUER` | `https://auth-stage.askedin.com/auth`, **unconfirmed**: the value in Askedin's deployment template, not yet read from the live secret (below) | `https://auth.askedin.com` exactly: no path, no trailing slash (confirmed 2026-10-03) |
-| `JWT_AUDIENCE` | `askedin-platform` (the default) | `askedin-platform` (the default) |
-| `ULW_AUTH_COOKIE` | `auth_token_stage` | `auth_token` |
-| `ULW_ALLOWED_ORIGINS` | `https://stage.askedin.com` | `https://askedin.com,https://www.askedin.com` |
+| Setting | What to put there |
+|---|---|
+| `JWKS_URL` | The provider's JWK set over `https://`, as its `jwks_uri` names it |
+| `JWT_ISSUER` | Exactly the `iss` its tokens carry: same scheme, host, path and trailing slash or none |
+| `JWT_AUDIENCE` | An audience the provider issues for ULW alone, present in every access token meant for it |
+| `ULW_JWT_SUBJECT_CLAIM` | `sub`, unless the provider names users in another claim |
+| `ULW_AUTH_COOKIE` | The cookie the web app keeps the token in, if it uses one |
+| `ULW_ALLOWED_ORIGINS` | The web app's pages that use the cookie ([Cookies and other sites](#cookies-and-other-sites)) |
 
-These origins were given for chat's socket. The gateway's overlays set the same values for cookie
-writes ([Cookies and other sites](#cookies-and-other-sites)).
-
-`iss` is compared byte for byte, so a wrong `JWT_ISSUER` refuses every token with `401`. Until
-the stage value is read from the live secret, stage's `JWT_ISSUER` stays in the gateway's
-secret, not in its overlay. Whoever has access to the stage cluster confirms it with:
-
-```sh
-kubectl -n apps-stage get secret auth-service-secrets -o jsonpath='{.data.ISSUER}' | base64 -d
-```
+`iss` is compared byte for byte, so a wrong `JWT_ISSUER` refuses every token with `401`. Read it
+from a real token (`echo <token> | cut -d. -f2 | base64 -d`, padding aside) rather than from the
+provider's documentation.
 
 Do not use:
 
-- `https://askedin.com/.well-known/jwks.json`: it answers an HTML page, not a key set, so every
-  fetch fails and no token ever verifies.
-- The auth-service's in-cluster `http://` URL: `JWKS_URL` must be `https://`, and the process
-  refuses to start otherwise.
-- OIDC discovery: `/.well-known/openid-configuration` answers `404`. ULW never reads it; it needs
-  `JWKS_URL` and `JWT_ISSUER` set explicitly.
+- A URL that answers anything but a key set (a web page's `/.well-known/jwks.json` that serves
+  HTML, say): every fetch fails and no token ever verifies.
+- An in-cluster `http://` URL: `JWKS_URL` must be `https://`, and the process refuses to start
+  otherwise.
+- OIDC discovery: ULW never reads `/.well-known/openid-configuration`; it needs `JWKS_URL` and
+  `JWT_ISSUER` set explicitly.
 
-The key set is `{"keys":[...]}` as `application/json` with `Cache-Control: public, max-age=3600`,
-and lists only active keys, normally one. ULW does not read the header; it refetches every 15
-minutes as above.
+The key set is fetched as `{"keys":[...]}`; ULW ignores its caching headers and refetches every
+15 minutes as above. `typ`, `jti`, `iat` and claims other than `iss`, `aud`, `exp`, `nbf`, the
+subject claim and `email` are not read. Nothing may use `jti` as a token id, a replay key or a
+cache key here: some providers set it to the `kid`, the same for every token under a key, and the
+verdict cache keys on the token's SHA-256.
 
-### Askedin's tokens
+### Other tokens under the same key
 
-| Item | What Askedin sends | What ULW does with it |
-|---|---|---|
-| Signature | `RS256` (RSASSA-PKCS1-v1_5 with SHA-256), one RSA-2048 key per environment. Nothing is signed with `PS256`, `ES256` or `EdDSA`. | Verifies against the key named by `kid` |
-| Header | `{"alg":"RS256","kid":...,"typ":"JWT"}`, nothing else | `typ` is not read |
-| `iss`, `aud` | As in the table above; `aud` is an array of one | Checked as in [What a token must be](#what-a-token-must-be) |
-| `sub` | The user id, a lowercase canonical UUID, stable for the user | The user, byte for byte |
-| `uid` | Equal to `sub` | Not read |
-| `exp` | `iat` + 3600: tokens live an hour | Checked, 60 s skew |
-| `iat` | Set | Not read |
-| `nbf` | Not set | Checked only when present |
-| `jti` | Set, but **equal to the `kid`**: the same for every token under a key, so not a token id | Not read. Nothing may use it as a token id, a replay key or a cache key; the verdict cache keys on the token's SHA-256 |
-| `email` | Optional; never `null` | Optional string |
-| `tid`, `perms`, `sid` | Set | Not read |
-
-The same key also signs two kinds of token that must never authenticate at ULW. Only the audience
-tells them apart from an access token, and under `JWT_AUDIENCE=askedin-platform` both are refused
-with `401` (`WrongAudience`):
-
-| Token | `aud` | `typ` claim | Lifetime |
-|---|---|---|---|
-| 2FA challenge | `askedin-2fa` | `2fa_challenge` | 5 minutes |
-| PAT internal swap | `askedin-pat` | `pat` | 2 minutes at most |
-
-Never set `JWT_AUDIENCE` to either of these. A test
-(`JwksVerifierTest.AskedinsTwoFactorAndPatTokensAreRefusedForTheirAudience`) keeps both refused.
+A provider may sign tokens that must never authenticate at ULW (a two-factor challenge, a
+personal-access-token swap) with the same key as its access tokens. Only the audience tells them
+apart, so `JWT_AUDIENCE` must be one that only access tokens for ULW carry; never set it to the
+audience of such a token. A test (`JwksVerifierTest.TwoFactorAndPatTokensAreRefusedForTheirAudience`)
+keeps tokens under another audience refused with `401` (`WrongAudience`).
 
 ### Key rotation
 
-Askedin rotates with no overlap: one transaction creates the new key and deactivates the old
-one, and the old `kid` leaves the JWKS at once. ULW, left alone, goes on accepting tokens signed
-with the old key for up to 15 minutes after that, from the cached key set and the remembered
-verified tokens (Caching and refresh, above).
+A provider that rotates with no overlap (the old `kid` leaves the JWKS the moment the new key is
+made) leaves ULW, left alone, accepting tokens signed with the old key for up to 15 minutes, from
+the cached key set and the remembered verified tokens (Caching and refresh, above).
 
-So Askedin's rotation runbook, which restarts the services that verify its tokens, must also
-reach ULW once the rotation has committed, in the rotated environment: SIGHUP every
-`gateway_server` and `chat_server` process (deploy/askedin/RUNBOOK.md, "8. Askedin signing key
-rotation"), or restart them. Afterwards each pod's `auth_cache_drops_total` has gone up by one
-and its `auth_cache_drop_pending` is back to 0, and a token under the old key gets `401`.
+So the operator's rotation procedure must also reach ULW once the rotation has committed, in the
+rotated environment: SIGHUP every `gateway_server` and `chat_server` process
+(deploy/kubernetes/RUNBOOK.md, "8. Signing key rotation"), or restart them. Afterwards each pod's
+`auth_cache_drops_total` has gone up by one and its `auth_cache_drop_pending` is back to 0, and a
+token under the old key gets `401`.
 
 ## Rejections
 
@@ -270,7 +253,7 @@ verification. Chat's `401` carries no `WWW-Authenticate` header. The gateway's r
 
 Client action:
 
-- `401`: get a fresh token from Askedin (sign in again, or refresh) and retry once. A second
+- `401`: get a fresh token from the identity provider (sign in again, or refresh) and retry once. A second
   `401` with a fresh token means a configuration mismatch (issuer, audience, key set); report it
   with the request id.
 - `503`: retry after the `Retry-After` delay. Do not sign the user out; the token may be fine.

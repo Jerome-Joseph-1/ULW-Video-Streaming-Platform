@@ -82,18 +82,22 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(std::move(limits)), rooms_(deps.router),
       chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
       presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
+      calls_(deps.messages, deps.sfu, deps.clock, limits_.calls),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
                http::AddressHash{http::SeededHash(seed(deps_.random))}),
       users_(limits_.max_connections + 1, http::ViewHash{http::SeededHash(seed(deps_.random))}),
       // A block entry holds nothing but its count, so only open connections need one.
       blocks_(limits_.max_connections + 1, http::AddressHash{http::SeededHash(seed(deps_.random))}),
-      sessions_(limits_.max_connections) {}
+      sessions_(limits_.max_connections) {
+    deps_.router.serve(&calls_);
+}
 
 ChatServer::~ChatServer() {
     // The message store is destroyed first (Services in main.cpp), and reap() below sweeps the
     // service, which would otherwise ask it what a resync still owes.
     chat_.stop();
+    deps_.router.serve(nullptr);
     deps_.reactor.cancel_timer(drain_timer_);
     sessions_.for_each_live([](Session& s) { s.close(); });
     reap();
@@ -238,10 +242,10 @@ void ChatServer::on_signal(net::Signal signal) noexcept {
     }
 }
 
-// SIGHUP, after Askedin rotates its signing key (ADR-0082): tokens under the withdrawn key stop
-// opening sockets once a key fetch succeeds, not when the cache would next refetch; until then
-// the cached keys keep answering. Sockets already open keep running to their token's expiry, as
-// they would have anyway (ADR-0073).
+// SIGHUP, after the identity provider rotates its signing key (ADR-0082): tokens under the
+// withdrawn key stop opening sockets once a key fetch succeeds, not when the cache would next
+// refetch; until then the cached keys keep answering. Sockets already open keep running to their
+// token's expiry, as they would have anyway (ADR-0073).
 void ChatServer::drop_auth_caches() noexcept {
     deps_.verifier.drop_caches();
     ++counters_.auth_cache_drops;
@@ -273,6 +277,7 @@ void ChatServer::reap() noexcept {
     sessions_.reap([this](Session& s) { return deps_.reactor.is_quiescent(s.conn()); });
     deps_.router.reap();
     chat_.sweep();
+    calls_.sweep();
 }
 
 Session* ChatServer::session(net::Slab<Session>::Handle handle) noexcept {
@@ -296,6 +301,7 @@ std::string ChatServer::render_metrics() const {
     const rt::RouterCounters& router = deps_.router.counters();
     const ServiceCounters& chat = chat_.counters();
     const PresenceCounters& presence = presence_.counters();
+    const CallCounters& call = calls_.counters();
     return std::format(
         "connections_accepted_total {}\n"
         "connections_rejected_total{{reason=\"capacity\"}} {}\n"
@@ -347,7 +353,17 @@ std::string ChatServer::render_metrics() const {
         "jwks_keys_expired {}\n"
         "auth_cache_drops_total {}\n"
         "auth_cache_drop_pending {}\n"
-        "unrecorded_joins_total {}\n",
+        "unrecorded_joins_total {}\n"
+        "calls_enabled {}\n"
+        "call_tickets_total {}\n"
+        "call_refusals_total{{reason=\"not_member\"}} {}\n"
+        "call_refusals_total{{reason=\"not_callable\"}} {}\n"
+        "call_refusals_total{{reason=\"busy\"}} {}\n"
+        "call_rooms_opened_total {}\n"
+        "call_rooms {}\n"
+        "call_errors_total{{source=\"sfu\",kind=\"unavailable\"}} {}\n"
+        "call_errors_total{{source=\"sfu\",kind=\"refused\"}} {}\n"
+        "call_errors_total{{source=\"store\",kind=\"unavailable\"}} {}\n",
         c.connections_accepted, c.rejected_capacity, c.rejected_socket, c.rejected_ip_connections,
         c.rejected_ip_block, c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions,
         clients_.size(), users_.size(), blocks_.size(), clients_.evictions(), sessions_.size(),
@@ -362,7 +378,9 @@ std::string ChatServer::render_metrics() const {
         router.peers_refused, router.slow_peers, presence_.rooms(), presence.sent,
         presence.received, presence.notified, presence.expired, presence.gaps, c.token_expiries,
         chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0,
-        c.auth_cache_drops, deps_.verifier.drop_pending() ? 1 : 0, chat.unrecorded_joins);
+        c.auth_cache_drops, deps_.verifier.drop_pending() ? 1 : 0, chat.unrecorded_joins,
+        calls_.enabled() ? 1 : 0, call.tickets, call.not_member, call.not_callable, call.busy,
+        call.opens, calls_.rooms(), call.sfu_unavailable, call.sfu_refused, call.store_unavailable);
 }
 
 } // namespace chat

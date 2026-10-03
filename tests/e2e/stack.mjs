@@ -1,6 +1,6 @@
 // The services one E2E run needs, started from the build tree: a scratch database on the
 // local Postgres, a bucket on the local MinIO, gateway_server and (for VOD) transcode_worker,
-// and a page server that stands in for the Askedin route putting /api on the app's own origin.
+// and a page server that stands in for an operator's route putting /api on the app's own origin.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

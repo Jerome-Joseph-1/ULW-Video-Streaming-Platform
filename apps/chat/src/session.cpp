@@ -509,6 +509,10 @@ void Session::command(const codec::ws::Frame& frame) {
         server_.presence().watch(*presence_, w->user);
         return;
     }
+    if (const auto* c = std::get_if<Call>(&*parsed)) {
+        chat.call(*client_, *c);
+        return;
+    }
     server_.presence().unwatch(*presence_, std::get<Unwatch>(*parsed).user);
 }
 

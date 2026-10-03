@@ -1,6 +1,6 @@
 # 0084. Prod's TURN Gateway on its own port, sharing the cluster's STUNner configuration
 
-Status: Accepted
+Status: Accepted, amended by 0088 (the TURN port is `TURN_PORT`, an operator's choice)
 Date: 2026-10-03
 Amends: ADR-0037 ("One Gateway, one listener, `TURN-UDP` on 3478": that is now stage's Gateway;
 prod has one of its own on 3479)

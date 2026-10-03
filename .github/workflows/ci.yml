@@ -141,8 +141,9 @@ jobs:
   # (ADR-0086): every test has a scratch database, a bucket prefix or bucket and ports of its
   # own, and the one that docker-pauses the Postgres is RUN_SERIAL (tests/CMakeLists.txt), so it
   # never overlaps another. The conformance label still runs one test at a time, after it.
-  # Hosted only: Postgres on fixed host port 15432, restarted by its container id, and MinIO
-  # by its fixed container name on 9000; jobs sharing a host would collide on all of them.
+  # Hosted only: Postgres on fixed host port 15432, restarted by its container id, MinIO by
+  # its fixed container name on 9000, LiveKit on 7880, and a locked-memory limit lifted with
+  # prlimit; jobs sharing a host would collide on all of them.
   integration:
     name: integration (${{ matrix.preset }})
     runs-on: ubuntu-24.04
@@ -192,18 +193,35 @@ jobs:
           test "$(docker exec "$PG" psql -U postgres -tAc 'SHOW max_connections')" = 400
       - name: Start MinIO
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      # The chat cluster's calls go through it (docs/adr/0087); its Redis comes with it.
+      - name: Start LiveKit
+        run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit
       - run: cmake --preset ${{ matrix.preset }} -DULW_CONFORMANCE_LIVE=ON
       - run: cmake --build --preset ${{ matrix.preset }}
-      - run: ctest --test-dir build/${{ matrix.preset }} -L integration -j "$(nproc)" --output-on-failure
+      # Without the locked-memory limit lifted, one test per core runs out of it: the kernel
+      # charges every io_uring ring (about 410 KiB at the reactor's 4096 entries) to the user's
+      # RLIMIT_MEMLOCK, 8 MiB on the runner, so about 20 rings for all of that user's processes
+      # together, and a ring stays charged for a moment after its process exits. A reactor that
+      # cannot get a ring fails with ENOMEM (an IoUring test) or falls back to epoll (a server
+      # under test). The limit is the sum over the user, so no bound sized from one test holds;
+      # nothing here measures it.
+      - run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          ctest --test-dir build/${{ matrix.preset }} -L integration -j "$(nproc)" --output-on-failure
         env:
           # The job context exists only in steps, not in the job's own env.
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          # deploy/local/compose.yaml's fake key pair, as tests/call/run.sh uses it.
+          LIVEKIT_API_URL: http://127.0.0.1:7880
+          LIVEKIT_CLIENT_URL: ws://127.0.0.1:7880
+          LIVEKIT_API_KEY: ulw-dev-key
+          LIVEKIT_API_SECRET: ulw-dev-secret-testtest123-not-a-real-secret
       - name: storage conformance on both reactors
         run: |
           ULW_REACTOR=io_uring ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
           ULW_REACTOR=epoll ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
       - if: failure()
-        run: docker compose -f deploy/local/compose.yaml logs minio
+        run: docker compose -f deploy/local/compose.yaml --profile calls logs minio livekit
 
   # Line and branch coverage of the unit and integration labels, each top-level directory
   # compared with its floor in tools/coverage-floors.txt (ADR-0080), and the SonarQube Cloud
@@ -313,8 +331,12 @@ jobs:
       # label runs one test per core, as the integration job runs it; the unit label one at a
       # time, as build-test runs it. The floors are reported, not enforced (ADR-0080); a
       # failing test fails the job, after the scan below.
+      # The integration label one test per core needs the locked-memory limit lifted, as in
+      # the integration job.
       - name: C++ coverage
-        run: tools/coverage.sh build/coverage unit integration
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          tools/coverage.sh build/coverage unit integration
         env:
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
           COVERAGE_PARALLEL: integration
@@ -421,19 +443,33 @@ jobs:
 
   # M30's acceptance (tests/call/ingest.spec.mjs, ADR-0053): WHIP publishers, GStreamer's
   # whipsink among them, against the LiveKit, Redis and egress of deploy/local/compose.yaml, and a
-  # relayed stream through to the live packager's playlist.
+  # relayed stream through to the live packager's playlist. On the same LiveKit, 1:1 calls through
+  # the product (tests/call/direct-call.spec.mjs, ADR-0087): two chat_server nodes issue the
+  # tickets, and two Chrome profiles connect with them and decode each other's media.
   # Hosted only: LiveKit, Redis and egress on the host's network, on fixed ports and with
-  # fixed container names.
+  # fixed container names, and Postgres on fixed host port 15432.
   ingest:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["15432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
     env:
       CC: gcc-14
       CXX: g++-14
+      # The chat nodes' scratch database (tests/call/chat-stack.mjs).
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:15432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Three targets alone: restored, not saved (see the setup action's ccache-save).
+      # These targets alone: restored, not saved (see the setup action's ccache-save).
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-ci
@@ -446,6 +482,8 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-nice libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev
+      # chat-stack.mjs creates and drops its scratch database with psql.
+      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       # A build is only good for the GStreamer it linked against and the compiler that made it;
       # fetch-whipsink.sh rebuilds whatever the key lets through that does not match either.
       - name: GStreamer version
@@ -460,8 +498,10 @@ jobs:
       - name: Start LiveKit, Redis and egress
         run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit egress
       - run: cmake --preset ci
-      - run: cmake --build --preset ci --target ulw_call_harness live_packager ulw_sandbox
-      - run: tests/call/run.sh build/ci ingest.spec.mjs
+      - run: >-
+          cmake --build --preset ci --target ulw_call_harness live_packager ulw_sandbox
+          chat_server ulw_migrate ulw_devtoken
+      - run: tests/call/run.sh build/ci ingest.spec.mjs direct-call.spec.mjs
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml --profile calls logs livekit egress
 

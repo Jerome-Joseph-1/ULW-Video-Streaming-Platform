@@ -1,0 +1,60 @@
+# Egress serves nothing: no ingress but LiveKit's media answering the sessions egress opened
+# to it. Out of the pod it reaches cluster DNS, LiveKit (signalling on 7880, media on its UDP
+# port), Redis, and each stream's packager on its SRT port (UDP 9000), and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: livekit-egress
+  namespace: ulw
+  labels:
+    app.kubernetes.io/name: livekit-egress
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit-egress
+  policyTypes: ["Ingress", "Egress"]
+  # ICE checks from LiveKit's media port to the candidates egress offered; replies to what egress
+  # sent pass anyway, these cover LiveKit's own checks.
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - port: 1024
+          endPort: 65535
+          protocol: UDP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - port: 7880
+          protocol: TCP
+        - port: 7882
+          protocol: UDP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit-redis
+      ports:
+        - port: 6379
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: live-packager
+      ports:
+        - port: 9000
+          protocol: UDP

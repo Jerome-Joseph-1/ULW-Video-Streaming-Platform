@@ -27,6 +27,17 @@ struct ClientLimits {
     std::size_t trusted_proxy_hops = 1;
 };
 
+// Where calls go (ADR-0050): LiveKit's server API, the URL clients reach it on, and the key pair
+// tickets are signed with, as the call suite's harness names them. Never logged.
+struct CallsConfig {
+    // LIVEKIT_API_URL: "http://livekit:7880"; the node's own RoomService calls.
+    std::string api_url;
+    // LIVEKIT_CLIENT_URL: "wss://<media host>"; what every ticket names.
+    std::string client_url;
+    std::string api_key;
+    std::string api_secret;
+};
+
 struct Config {
     core::NodeId node;
     // Clients: WebSocket upgrades on /rt, and the health and metrics endpoints.
@@ -40,13 +51,17 @@ struct Config {
     std::string node_secret;
     net::ReactorKind reactor = net::ReactorKind::IoUring;
     std::string database_url;
-    // Exactly one of the two: Askedin's JWKS, or a local key set for offline development.
+    // Exactly one of the two: the identity provider's JWKS, or a local key set for offline
+    // development.
     std::string jwks_url;
     // ULW_JWKS_MAX_STALE_HOURS: how long keys stay trusted while every refetch fails.
     std::uint32_t jwks_max_stale_hours = 24;
     std::string dev_jwks_file;
     std::string jwt_issuer;
+    // Required with jwks_url; ops::kDevAudience by default with a local key set.
     std::string jwt_audience;
+    // ULW_JWT_SUBJECT_CLAIM: the claim that names the user, `sub` by default.
+    std::string jwt_subject_claim = "sub";
     std::string auth_cookie;
     // Pages allowed to open a socket that authenticates with the cookie, as exact
     // "scheme://host[:port]" origins. Empty: the cookie is not accepted at all.
@@ -55,6 +70,9 @@ struct Config {
     // Unset: PresenceLimits::grace.
     std::optional<core::Millis> presence_grace;
     ClientLimits client_limits;
+    // Unset when LIVEKIT_API_KEY is: calls are not configured, and a call is answered
+    // calls_disabled. With the key, the other three LIVEKIT_ variables are required.
+    std::optional<CallsConfig> calls;
     // Who to become when started as root.
     std::string run_as_user;
     // Stay root when started as root with no run_as_user; otherwise that is refused.

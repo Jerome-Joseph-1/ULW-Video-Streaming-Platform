@@ -2,10 +2,10 @@
 """End-to-end checks of the VOD plane in the sandbox cluster (deploy/local/e2e-up.sh).
 
 Every request goes through Envoy's HTTPRoute at 127.0.0.1:18080 with a token minted by the
-mock auth-service, as a browser's would through askedin-gateway:
+mock auth-service, as a browser's would through an operator's Gateway:
 
   auth        each signing algorithm, the cookie, key rotation, refusals, and the
-              askedin-gateway stand-in replacing forged x-user-* headers with the token's
+              edge stand-in replacing forged x-user-* headers with the token's
   upload      a clip uploaded chunk by chunk, transcoded by the worker, reaching ready
   playback    the master and every media playlist through the route, and every init and media
               segment from the object store at the presigned URLs they carry, none from the
@@ -20,6 +20,10 @@ mock auth-service, as a browser's would through askedin-gateway:
               token is refused, a stream's live chat opened as the RUNBOOK opens it is joined
               by several sockets, and a message sent on one reaches every one of them, wherever
               Envoy put them; a pod beside chat cannot reach its node-channel port
+  call        a 1:1 call through chat (ADR-0050, ADR-0087): both members of a direct chat ask for
+              the call on the room WebSocket and get tickets naming the route; LiveKit, through
+              the route, admits both into the room's one media room, the second seeing the first;
+              a group chat has no call
 
     tests/cluster/vod_flow.py [--allow-skip] [SCENARIO...]     all of them when none is named
 
@@ -30,8 +34,8 @@ kubectl only ever runs against the sandbox: deploy/local/.state/kubeconfig with 
 kind-ulw-e2e, whose API server must be on 127.0.0.1, checked before anything runs. The
 caller's KUBECONFIG is ignored.
 
-Against a real deployment (deploy/askedin/RUNBOOK.md), ULW_E2E_URL names the Gateway
-(https://host) and ULW_E2E_TOKEN a token its auth-service issued. Only upload and playback may
+Against a real deployment (deploy/kubernetes/RUNBOOK.md), ULW_E2E_URL names the Gateway
+(https://host) and ULW_E2E_TOKEN a token its identity provider issued. Only upload and playback may
 run there, only when named, and nothing calls kubectl: the scenarios that delete pods, start
 pods or drive the mock auth-service are refused.
 """
@@ -59,7 +63,7 @@ SANDBOX_URL = "http://127.0.0.1:18080"
 # e2e-up.sh publishes MinIO here; presigned URLs name it minio:9000, as the pods do.
 SANDBOX_STORE = {"minio:9000": ("127.0.0.1", 19000)}
 REAL_TARGET_SCENARIOS = {"upload", "playback"}
-NAMESPACE = "apps-stage"
+NAMESPACE = "ulw"
 # The sandbox's Postgres container (e2e-up.sh), where the chat scenario opens a stream's chat.
 SANDBOX_PG = "ulw-e2e-pg"
 # A clip at 1280x720 transcodes to two rungs (720p, 360p) in well under a minute on the
@@ -160,7 +164,7 @@ def mint(subject, alg="ES256"):
     status, headers, data = request("POST", f"/mock-auth/token?sub={subject}&alg={alg}"
                                     f"&email={subject}@ulw-sandbox.test")
     check(status == 200, f"mint {alg}: {status} {data!r}")
-    check("auth_token_stage=" in headers.get("set-cookie", ""), "mint set no stage cookie")
+    check("auth_token=" in headers.get("set-cookie", ""), "mint set no cookie")
     return json.loads(data)["token"]
 
 
@@ -177,7 +181,7 @@ def kubectl(*args, check_rc=True):
 
 def sandbox_sql(sql):
     """Runs `sql` in the sandbox's Postgres as its superuser, as the RUNBOOK's statements run on
-    Askedin's; only ever against the sandbox, like kubectl."""
+    an operator's; only ever against the sandbox, like kubectl."""
     if not KUBECTL_ALLOWED:
         raise Refused("SQL is only run against the sandbox")
     result = subprocess.run(["docker", "exec", SANDBOX_PG, "psql", "-U", "postgres", "-qAt",
@@ -262,30 +266,30 @@ def commit_and_wait_ready(token, upload):
         time.sleep(2)
 
 
-def check_askedin_gateway_stand_in(subject, token):
-    """The askedin-gateway stand-in (deploy/local/cluster/askedin-identity.yaml) drops
-    x-user-* headers a client sends and injects the token's own; /askedin-service/whoami
-    echoes what arrived behind it."""
+def check_edge_stand_in(subject, token):
+    """The edge stand-in (deploy/local/cluster/edge-identity.yaml) drops x-user-* headers a
+    client sends and injects the token's own; /identity-echo/whoami echoes what arrived behind
+    it."""
     forged = {"x-user-id": "someone-else", "x-user-email": "someone-else@ulw-sandbox.test"}
-    status, _, data = request("GET", "/askedin-service/whoami", token, headers=forged)
+    status, _, data = request("GET", "/identity-echo/whoami", token, headers=forged)
     check(status == 200, f"whoami with a token: {status} {data!r}")
     seen = json.loads(data)
     check(seen == {"x-user-id": [subject], "x-user-email": [f"{subject}@ulw-sandbox.test"]},
           f"behind the stand-in, expected only the token's identity, got {seen}")
-    status, _, data = request("GET", "/askedin-service/whoami", headers=forged)
+    status, _, data = request("GET", "/identity-echo/whoami", headers=forged)
     check(status == 401, f"whoami with forged headers and no token: {status} {data!r}")
 
 
 def check_cookie_writes(token):
-    """The stage overlay's ULW_ALLOWED_ORIGINS lets the web app write with the cookie, as the
-    browser sends it: Origin on every POST, PATCH and DELETE (ADR-0078). Another page's
-    Origin is refused."""
-    cookie = f"auth_token_stage={token}"
+    """The sandbox's ULW_ALLOWED_ORIGINS (ALLOWED_ORIGINS in deploy/local/config.env) lets the
+    web app write with the cookie, as the browser sends it: Origin on every POST, PATCH and
+    DELETE (ADR-0078). Another page's Origin is refused."""
+    cookie = f"auth_token={token}"
     body = {"filename": "cookie.mp4", "size_bytes": 1, "content_type": "video/mp4"}
     status, _, data = request("POST", "/api/v1/uploads", body=body, cookie=cookie,
                               headers={"Origin": "https://elsewhere.example"})
     check(status == 403, f"cookie create from another origin: expected 403, got {status} {data!r}")
-    page = {"Origin": "https://stage.askedin.com", "Sec-Fetch-Site": "same-origin"}
+    page = {"Origin": "https://sandbox.ulw.test", "Sec-Fetch-Site": "same-origin"}
     status, _, data = request("POST", "/api/v1/uploads", body=body, cookie=cookie, headers=page)
     check(status == 201, f"cookie create from the web app: expected 201, got {status} {data!r}")
     upload_id = json.loads(data)["upload_id"]
@@ -301,7 +305,7 @@ def scenario_auth():
         status, _, _ = request("GET", missing, mint(subject, alg))
         check(status == 404, f"{alg} token: expected 404 for an unknown video, got {status}")
     token = mint(subject)
-    status, _, _ = request("GET", missing, cookie=f"auth_token_stage={token}")
+    status, _, _ = request("GET", missing, cookie=f"auth_token={token}")
     check(status == 404, f"cookie token: expected 404, got {status}")
     status, _, _ = request("GET", missing)
     check(status == 401, f"no token: expected 401, got {status}")
@@ -311,7 +315,7 @@ def scenario_auth():
     tampered = f"{signed}.{'B' if signature[0] == 'A' else 'A'}{signature[1:]}"
     status, _, _ = request("GET", missing, tampered)
     check(status == 401, f"tampered signature: expected 401, got {status}")
-    check_askedin_gateway_stand_in(subject, token)
+    check_edge_stand_in(subject, token)
     check_cookie_writes(token)
     # The live prefix reaches the gateway (its 401), not Envoy's unmatched-route 404.
     status, _, _ = request("GET", f"/api/v1/live/{uuid.uuid4().hex}/index.m3u8")
@@ -537,10 +541,10 @@ class ChatSocket:
     """A minimal RFC 6455 client for the chat scenario: masked text frames out, Pings answered,
     text frames in as JSON (tests/soak/chat_soak.py has the full one)."""
 
-    def __init__(self, token=None):
+    def __init__(self, token=None, path="/rt"):
         self.sock = socket.create_connection((BASE.hostname, BASE.port), timeout=10)
         key = base64.b64encode(os.urandom(16)).decode()
-        head = (f"GET /rt HTTP/1.1\r\nHost: {BASE.hostname}:{BASE.port}\r\n"
+        head = (f"GET {path} HTTP/1.1\r\nHost: {BASE.hostname}:{BASE.port}\r\n"
                 "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                 f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n")
         if token:
@@ -566,6 +570,11 @@ class ChatSocket:
 
     def recv(self, timeout):
         """The next JSON message, or None when `timeout` passes first."""
+        return self.next_frame(timeout, 0x1)
+
+    def next_frame(self, timeout, wanted):
+        """The next text (0x1) message as JSON, or binary (0x2) one as bytes, skipping the other
+        kind; None when `timeout` passes first."""
         deadline = time.monotonic() + timeout
         while True:
             b = self.buf
@@ -582,8 +591,8 @@ class ChatSocket:
                         self.send(payload, 0xA)
                     elif op == 0x8:
                         raise Failure(f"chat closed the socket: {payload[:2].hex()}")
-                    elif op == 0x1:
-                        return json.loads(payload)
+                    elif op == wanted:
+                        return json.loads(payload) if op == 0x1 else payload
                     continue
             left = deadline - time.monotonic()
             if left <= 0:
@@ -677,6 +686,67 @@ def check_chat_node_port():
     print("  a pod beside chat is refused its node port")
 
 
+def scenario_call():
+    room = unknown_video_id()
+    tag = uuid.uuid4().hex[:6]
+    alice, bob = f"call-a-{tag}", f"call-b-{tag}"
+    # A direct chat of the two, listed as the RUNBOOK lists members (section 3).
+    sandbox_sql(f"BEGIN; INSERT INTO chat_rooms (room_id, kind) VALUES ('{room}', 'direct_chat'); "
+                f"INSERT INTO chat_members (room_id, user_id) VALUES ('{room}', '{alice}'), "
+                f"('{room}', '{bob}'); COMMIT")
+    sockets, rtc = [], []
+    try:
+        tickets = {}
+        for user in (alice, bob):
+            s = ChatSocket(mint(user, "RS256"))
+            sockets.append(s)
+            check(s.status == 101, f"{user}'s upgrade: expected 101, got {s.status}")
+            s.send({"type": "join", "room": room})
+            s.expect("joined")
+            device = str(uuid.uuid4())
+            s.send({"type": "call", "room": room, "device": device})
+            ticket = s.expect("ticket")
+            check(ticket.get("room") == room, f"{user}'s ticket names another room: {ticket}")
+            # The route the sandbox's LiveKit is reached on (deploy/stunner/up.sh).
+            check(ticket.get("url") == SANDBOX_URL.replace("http", "ws", 1),
+                  f"{user}'s ticket names {ticket.get('url')!r}")
+            check(time.time() < ticket.get("expires_at", 0) <= time.time() + 61,
+                  f"{user}'s ticket expires at {ticket.get('expires_at')}, not within a minute")
+            tickets[user] = (ticket["token"], f"{user}/{device}".encode())
+        # LiveKit through its route, as the client SDK connects: the join response names the
+        # room's first generation and the participant, and the second finds the first in it.
+        joins = []
+        for user in (alice, bob):
+            token, identity = tickets[user]
+            r = ChatSocket(path=f"/rtc?access_token={token}&auto_subscribe=1&sdk=js&protocol=15")
+            rtc.append(r)
+            check(r.status == 101, f"LiveKit refused {user}'s ticket: {r.status}")
+            join = r.next_frame(10, 0x2)
+            check(join is not None, f"no join response from LiveKit for {user} in 10 s")
+            check(f"{room}:1".encode() in join and identity in join,
+                  f"{user}'s join response names neither the room's call nor {identity!r}")
+            joins.append(join)
+        check(tickets[alice][1] in joins[1], "bob's join response does not name alice")
+        # Only a direct chat has a call (ADR-0058): a group chat of alice's is refused.
+        group = unknown_video_id()
+        sandbox_sql(f"BEGIN; INSERT INTO chat_rooms (room_id, kind) VALUES ('{group}', "
+                    f"'group_chat'); INSERT INTO chat_members (room_id, user_id) VALUES "
+                    f"('{group}', '{alice}'); COMMIT")
+        sockets[0].send({"type": "join", "room": group})
+        sockets[0].expect("joined")
+        sockets[0].send({"type": "call", "room": group, "device": str(uuid.uuid4())})
+        while True:
+            got = sockets[0].recv(10)
+            check(got is not None, "no answer to a group chat's call in 10 s")
+            if got.get("type") == "error" and got.get("room") == group:
+                break
+        check(got.get("reason") == "not_callable", f"a group chat's call answered {got}")
+    finally:
+        for s in sockets + rtc:
+            s.close()
+    print("  both members got tickets through chat, and LiveKit admitted both to one room")
+
+
 SCENARIOS = {
     "auth": lambda _: scenario_auth(),
     "upload": scenario_upload,
@@ -684,6 +754,7 @@ SCENARIOS = {
     "netpol": lambda _: scenario_netpol(),
     "playback": scenario_playback,
     "chat": lambda _: scenario_chat(),
+    "call": lambda _: scenario_call(),
 }
 
 

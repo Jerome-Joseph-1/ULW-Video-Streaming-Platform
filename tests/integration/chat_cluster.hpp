@@ -36,11 +36,28 @@
 
 namespace ulw::test {
 
-inline constexpr std::string_view kIssuer = "https://auth.test.askedin.com";
+inline constexpr std::string_view kIssuer = "https://auth.example.com";
 inline constexpr std::chrono::milliseconds kReadyCheckPeriod{250};
 inline constexpr std::array kUsers{"alice", "bob", "carol", "dave"};
 // Short, so that the presence tests wait seconds for a grace to run out, not the default ten.
 inline constexpr std::chrono::milliseconds kGrace{2'000};
+
+// The LiveKit server calls go to, as tests/call/run.sh names it: LIVEKIT_API_URL,
+// LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET, all four or none. With them the
+// nodes answer calls (ADR-0050); without them they answer calls_disabled.
+inline std::vector<std::string> livekit_environment() {
+    std::vector<std::string> out;
+    for (const char* name :
+         {"LIVEKIT_API_URL", "LIVEKIT_CLIENT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"}) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
+        const char* value = std::getenv(name);
+        if (value == nullptr || *value == '\0') {
+            return {};
+        }
+        out.push_back(std::string(name) + "=" + value);
+    }
+    return out;
+}
 
 // Empty when the ports are not pinned: each node then reserves its own.
 inline std::vector<std::uint16_t> pinned_client_ports() {
@@ -70,6 +87,10 @@ struct Seen {
     std::uint64_t count = 0;
     std::string user;
     std::string status;
+    // Of a call's ticket.
+    std::string url;
+    std::string token;
+    std::uint64_t expires_at = 0;
 };
 
 inline std::optional<Seen> parse_seen(const std::string& text) {
@@ -91,7 +112,13 @@ inline std::optional<Seen> parse_seen(const std::string& text) {
            .retry_after_ms = std::nullopt,
            .count = 0,
            .user = string("user"),
-           .status = string("status")};
+           .status = string("status"),
+           .url = string("url"),
+           .token = string("token"),
+           .expires_at = 0};
+    if (const core::json::Value* expires = json->find("expires_at")) {
+        s.expires_at = expires->as_u64().value_or(0);
+    }
     if (const core::json::Value* count = json->find("count")) {
         s.count = count->as_u64().value_or(0);
     }
@@ -137,9 +164,23 @@ public:
     template <class Pred>
     std::optional<Seen> wait_for(Pred pred,
                                  std::chrono::milliseconds limit = std::chrono::seconds(15)) {
-        for (const Seen& s : seen_) {
-            if (pred(s)) {
-                return s;
+        const auto at = wait_from(0, pred, limit);
+        if (!at) {
+            return std::nullopt;
+        }
+        return seen_[*at];
+    }
+
+    // Where in seen() the first message from `from` on that matches `pred` is, reading until
+    // one arrives. Each message is looked at once: a caller that waits again from what it was
+    // given, or from what it had before it sent, costs what is new, not all it has heard.
+    template <class Pred>
+    std::optional<std::size_t>
+    wait_from(std::size_t from, Pred pred,
+              std::chrono::milliseconds limit = std::chrono::seconds(15)) {
+        for (std::size_t i = from; i < seen_.size(); ++i) {
+            if (pred(seen_[i])) {
+                return i;
             }
         }
         const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -153,8 +194,8 @@ public:
             if (!keep(*text)) {
                 return std::nullopt;
             }
-            if (pred(seen_.back())) {
-                return seen_.back();
+            if (seen_.size() > from && pred(seen_.back())) {
+                return seen_.size() - 1;
             }
         }
         return std::nullopt;
@@ -274,6 +315,9 @@ protected:
             // Every client here, and every readiness poll, comes from 127.0.0.1; the per-address
             // limits have tests of their own (tests/unit/chat/session_test.cpp).
             "ULW_MAX_CONNECTIONS_PER_IP=1280", "ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND=65536"};
+        for (std::string& livekit : livekit_environment()) {
+            env.push_back(std::move(livekit));
+        }
         for (const char* passed : {"ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"}) {
             // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
             if (const char* value = std::getenv(passed)) {
@@ -304,7 +348,7 @@ protected:
     [[nodiscard]] std::string mint(const std::string& user) const {
         return key_
             ->mint({.issuer = std::string(kIssuer),
-                    .audience = "askedin-platform",
+                    .audience = "ulw-dev",
                     .subject = user,
                     .email = {},
                     .ttl = std::chrono::seconds(600)},
@@ -355,12 +399,13 @@ protected:
 
     // Lists members for a room, as the service's operators do (RUNBOOK section 3): the room is
     // recorded closed first.
-    void list_members(const std::string& room, const std::vector<std::string>& users) const {
+    void list_members(const std::string& room, const std::vector<std::string>& users,
+                      const std::string& kind = "group_chat") const {
         auto conn = db_->session();
         ASSERT_TRUE(conn.exec("INSERT INTO chat_rooms (room_id, kind) "
-                              "VALUES ($1::text::uuid, 'group_chat') "
+                              "VALUES ($1::text::uuid, $2) "
                               "ON CONFLICT (room_id) DO NOTHING",
-                              infra::postgres::Params{}.add_text(room)));
+                              infra::postgres::Params{}.add_text(room).add_text(kind)));
         for (const std::string& user : users) {
             ASSERT_TRUE(
                 conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::text::uuid, $2)",

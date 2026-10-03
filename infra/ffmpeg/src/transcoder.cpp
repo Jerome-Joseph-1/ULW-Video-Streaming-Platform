@@ -5,6 +5,7 @@
 #include "process.hpp"
 #include "progress.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -140,7 +141,8 @@ TranscodeResult<MediaInfo> FfmpegTranscoder::probe(const fs::path& input, std::s
     std::error_code ec;
     const std::uint64_t source_bytes = fs::file_size(input, ec);
     if (ec) {
-        return std::unexpected(TranscodeError{.kind = TranscodeFailure::Rejected,
+        // The worker fetched the source a moment ago: not being able to stat it is ours.
+        return std::unexpected(TranscodeError{.kind = TranscodeFailure::Inaccessible,
                                               .exit_code = 0,
                                               .detail = "source: " + ec.message()});
     }
@@ -154,7 +156,9 @@ TranscodeResult<MediaInfo> FfmpegTranscoder::probe(const fs::path& input, std::s
         return std::unexpected(spawn_error(std::move(child.error())));
     }
     if (const auto failure = classify(child->exit_code, child->signal, child->ending)) {
-        return std::unexpected(error_of(*failure, *child, "ffprobe"));
+        const std::array ours{input};
+        return std::unexpected(error_of(
+            refine(*failure, child->exit_code, child->stderr_tail, ours), *child, "ffprobe"));
     }
     auto media = parse_probe(output, source_bytes);
     if (!media) {
@@ -190,7 +194,9 @@ FfmpegTranscoder::run(const fs::path& input, const fs::path& out_dir, const Medi
         return std::unexpected(spawn_error(std::move(child.error())));
     }
     if (const auto failure = classify(child->exit_code, child->signal, child->ending)) {
-        return std::unexpected(error_of(*failure, *child, "ffmpeg"));
+        const std::array ours{input, out_dir};
+        return std::unexpected(error_of(
+            refine(*failure, child->exit_code, child->stderr_tail, ours), *child, "ffmpeg"));
     }
     // The rates ffmpeg 7 puts in the master differ from run to run (settle_master_bandwidth).
     // A master that is missing or unreadable is left for verify to report.
@@ -227,9 +233,13 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
     const Limits limits = transcode_budget(media, out_dir);
     // What a checking child's failure means: its input is our output, so anything it refuses
     // is our output failing verification.
-    const auto failed_check = [](const ChildExit& child, std::string_view what) {
-        auto kind = classify(child.exit_code, child.signal, child.ending)
-                        .value_or(TranscodeFailure::Unverified);
+    // `read` is what the checking child was given to open.
+    const auto failed_check = [](const ChildExit& child, std::string_view what,
+                                 const fs::path& read) {
+        const std::array ours{read};
+        auto kind = refine(classify(child.exit_code, child.signal, child.ending)
+                               .value_or(TranscodeFailure::Unverified),
+                           child.exit_code, child.stderr_tail, ours);
         if (kind == TranscodeFailure::Rejected) {
             kind = TranscodeFailure::Unverified;
         }
@@ -246,7 +256,8 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
             return std::unexpected(spawn_error(std::move(child.error())));
         }
         if (child->exit_code != 0 || child->ending != Ending::Exited) {
-            return std::unexpected(failed_check(*child, "ffprobe " + rung.name));
+            return std::unexpected(
+                failed_check(*child, "ffprobe " + rung.name, out_dir / rung.name / "index.m3u8"));
         }
         auto keyframes = parse_keyframes(output);
         if (!keyframes || keyframes->empty()) {
@@ -267,7 +278,7 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
         return std::unexpected(spawn_error(std::move(child.error())));
     }
     if (child->exit_code != 0 || child->ending != Ending::Exited) {
-        return std::unexpected(failed_check(*child, "decode check"));
+        return std::unexpected(failed_check(*child, "decode check", out_dir / "master.m3u8"));
     }
     // -v error prints nothing at all for a clean decode.
     if (child->stderr_bytes != 0) {

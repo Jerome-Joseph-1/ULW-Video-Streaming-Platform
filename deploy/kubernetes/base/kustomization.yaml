@@ -1,0 +1,15 @@
+# Every manifest ULW runs, with example values (namespace ulw, video.example.com, ...) that an
+# overlay replaces from its config.env through components/operator-config. Never applied as it
+# is: apply an overlay (RUNBOOK.md, step 4).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - video-gateway
+  - video-worker
+  - upload-reaper
+  - chat
+  - live-packager
+  - stunner
+  - livekit
+  - livekit-redis
+  - livekit-egress

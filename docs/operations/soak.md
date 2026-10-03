@@ -27,6 +27,34 @@ three runs here predate the column, so for them `--rejudge` reports the per-chun
 judged, and a leak on each chunk shows only through the per-session line, since every chunk
 belongs to a session.
 
+### What the summary says beyond the verdict
+
+Before the load starts, one clip is uploaded and must come back ready, or the run stops with
+exit 2 and the worker's reason. Without ready videos the playlist load turns into bad requests
+and the store faults never delete anything, as in runs 37079940150 and 37108394263, whose every
+probe failed: the soak ran as root with `--out` under the runner's home directory (mode 750,
+another owner), and the sandbox drops every capability before ffprobe opens the source, so root
+could not reach it. The soak now puts the worker's scratch in a fresh directory under `/tmp`
+when `--out` cannot be reached that way.
+
+After the verdict, and from `--rejudge`, the summary prints, for information only:
+- the gateway's RSS at 0, 15, 30, 45 and 60 minutes, then every hour, with the change between
+  marks, and the fitted slope over the last 4, 2 and 1 h (with its upper end per request),
+  which tells a plateau from a steady tail;
+- each load path's count (videos made ready or failed, with the reasons, playlists fetched,
+  store faults that reached the fetch, commits, resumes, cancellations, saturations refused by
+  the gateway's limit, slow clients ended by a timer), marked when one never ran;
+- every 5xx: the clients' by the action that got it, and the gateway's, from `gateway.log`, by
+  route and status, marked when it fell inside a saturation or a store fault. Both make 5xx by
+  design: while the saturation holds every upload slot, any chunk request, the soak's own
+  uploads and resumes included, gets 503; a ready video whose media playlist is missing from
+  the store gets 500. A 5xx outside both is listed with its time.
+
+A run in which any of those load paths (all but failed videos) never ran is reported
+`INVALID: load path never exercised: ...` below its verdict and exits 2: it did not apply the
+load it names, so its verdict on RSS and descriptors, printed unchanged, is not evidence either
+way. At cleanup the soak empties and deletes its MinIO bucket, as it drops its database.
+
 ## On a runner
 
 `.github/workflows/soak-experiment.yml` runs either soak, or both (on two hosted runners at once, or one after the

@@ -43,9 +43,9 @@ handed out earlier. Nothing else of the platform is between the client and the m
 - **Media.** Send only: one audio track (Opus) and one video track (VP8 or H.264), bundled. The
   stream is re-encoded to one 720p rendition at 30 fps with a keyframe every segment, whatever
   the source's own keyframe interval.
-- **ICE servers.** On Askedin's cluster media reaches the media server only through TURN, and the
-  TURN servers come in the `201`'s `Link` headers, not from `OPTIONS`. A browser therefore
-  trickles: create the offer, POST it before calling `setLocalDescription`, call
+- **ICE servers.** On the Kubernetes deployment media reaches the media server only through
+  TURN, and the TURN servers come in the `201`'s `Link` headers, not from `OPTIONS`. A browser
+  therefore trickles: create the offer, POST it before calling `setLocalDescription`, call
   `setConfiguration` with the `Link` servers, then `setLocalDescription(offer)` and
   `setRemoteDescription(answer)`, and PATCH the candidates as they come (RFC 9725 sections 4.3.1
   and 4.6). An encoder that puts all its candidates in the offer (GStreamer's `whipsink`) works
@@ -153,7 +153,7 @@ times its end is observed:
 
 | Field | Value |
 |---|---|
-| `owner` | The broadcaster: the Askedin user id the stream was started for. Only they can see or play it, as with an upload |
+| `owner` | The broadcaster: the user id (the token's subject) the stream was started for. Only they can see or play it, as with an upload |
 | `title` | `Live stream <stream id>` |
 | `state` | `processing` as soon as the recording is stored, then `ready` (or `failed`) exactly as an upload's video ([videos-and-playback.md](videos-and-playback.md#lifecycle)) |
 | `duration_ms` | The whole stream. A stream whose packager restarted is one video: its parts are joined, without the gap between them; a part without audio is silent in it |

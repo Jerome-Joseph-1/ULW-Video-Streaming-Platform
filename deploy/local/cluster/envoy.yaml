@@ -1,15 +1,16 @@
-# The front door, laid out as on Askedin's cluster: Gateway askedin-gateway in namespace apps,
-# which routes from other namespaces attach to. Envoy Gateway itself comes from its pinned
+# The front door, as an operator's cluster has one: Gateway public-gateway in namespace
+# gateway-system (GATEWAY_NAME and GATEWAY_NAMESPACE in ../config.env), which routes from other
+# namespaces attach to. Envoy Gateway itself comes from its pinned
 # install.yaml (tools.sh); this adds the class, the proxy image and the Gateway.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: apps
+  name: gateway-system
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: apps-stage
+  name: ulw
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
@@ -41,12 +42,12 @@ spec:
     name: sandbox
     namespace: envoy-gateway-system
 ---
-# Plain HTTP where Askedin's listener terminates TLS: what reaches the backends is the same.
+# Plain HTTP where a real listener terminates TLS: what reaches the backends is the same.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
-  name: askedin-gateway
-  namespace: apps
+  name: public-gateway
+  namespace: gateway-system
 spec:
   gatewayClassName: envoy
   listeners:
@@ -62,13 +63,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: askedin-gateway-nodeport
+  name: public-gateway-nodeport
   namespace: envoy-gateway-system
 spec:
   type: NodePort
   selector:
-    gateway.envoyproxy.io/owning-gateway-name: askedin-gateway
-    gateway.envoyproxy.io/owning-gateway-namespace: apps
+    gateway.envoyproxy.io/owning-gateway-name: public-gateway
+    gateway.envoyproxy.io/owning-gateway-namespace: gateway-system
   ports:
     - name: http
       port: 80

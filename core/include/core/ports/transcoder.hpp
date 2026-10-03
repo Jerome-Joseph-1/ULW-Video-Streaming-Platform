@@ -47,6 +47,10 @@ enum class TranscodeFailure : std::uint8_t {
     Sandbox,
     // The output exists but failed verification.
     Unverified,
+    // The program could not open a file of ours (the source we fetched, the directory we gave
+    // it for output): permission denied or a read-only mount. A fault in the host or in the
+    // sandbox's setup, not in the input, so it is never the owner's file that is blamed.
+    Inaccessible,
 };
 
 struct TranscodeError {
