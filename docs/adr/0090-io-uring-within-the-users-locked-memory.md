@@ -2,9 +2,9 @@
 
 Status: Accepted
 Date: 2026-10-03
-Amends: ADR-0051 (zero-copy sends are tried only where RLIMIT_MEMLOCK is unlimited; the burst
-errors it saw on the runners' 6.8 kernel were this limit); ADR-0086 (the integration label's
-step runs with 8 MiB of locked memory per core)
+Amends: ADR-0051 (zero-copy sends are tried only where RLIMIT_MEMLOCK is unlimited or the
+process has CAP_IPC_LOCK); ADR-0086 (the integration label's step runs with 8 MiB of locked
+memory per core)
 
 ## Context
 
@@ -18,12 +18,14 @@ io_uring and starting up.
 
 What the kernel does (io_uring/memmap.c, notif.h):
 
-- Since 6.14 the SQ and CQ rings are regions, and every region's pages are charged to
+- Since 6.14 the SQ and CQ rings are regions (8078486e1d53 and 81a4058e0cd0, through
+  `io_create_region` and `__io_account_mem`), and every region's pages are charged to
   `user->locked_vm` against the creating process's soft RLIMIT_MEMLOCK, failing with ENOMEM
   (5.12 to 6.13 charged them to the memory cgroup only). The counter is per user, shared by
-  every process of that uid; only CAP_IPC_LOCK exempts a process.
+  every process of that uid; only CAP_IPC_LOCK in the initial user namespace exempts a process.
 - Every zero-copy send in flight charges `(len >> PAGE_SHIFT) + 2` pages to the same counter,
-  given back when its notification is reaped (since 6.0).
+  given back when its notification is reaped: `SEND_ZC` since 6.0; `SENDMSG_ZC`, which the
+  reactor uses, only since 6.15 (04491732fc99, not in the 6.6, 6.8, 6.12 or 6.14 stable trees).
 
 The reactor's rings are 4,096 SQEs and 8,192 CQEs plus two provided buffer rings: 104 pages,
 about 416 KiB. Measured on 6.18 as an unprivileged user under an 8 MiB limit: 20 bare rings fit
@@ -38,10 +40,10 @@ few milliseconds, and any other process of the user creating a ring meanwhile wa
 - the 36 io_uring tests of `postgres_integration_tests` (asan), twice each, four at a time as an
   unprivileged user under 8 MiB: one ENOMEM in 216 runs before, none in 432 after.
 
-The same arithmetic explains ADR-0051's observation on the runners' 6.8 kernel, which did not
-yet charge the rings: a single zero-copy send succeeded and a burst of 1,024 lost some, while
-6.18 never did: 1,024 sends of two pages each are exactly the runners' 8 MiB, and the 6.18
-measurement was most likely taken as root, whose CAP_IPC_LOCK exempts it.
+This does not explain ADR-0051's observation on the runners' 6.8 kernel, where a single
+zero-copy send succeeded and some of a burst of 1,024 failed: upstream 6.8 charges neither the
+rings nor `SENDMSG_ZC` to the limit. Unless Ubuntu's 6.8 backported 04491732fc99, those errors
+remain unexplained, and the burst stays in the probe for them.
 
 ## Options
 
@@ -56,12 +58,18 @@ measurement was most likely taken as root, whose CAP_IPC_LOCK exempts it.
 ## Decision
 
 - `UringReactor::probe_zero_copy_send` returns false without sending anything unless the soft
-  RLIMIT_MEMLOCK is RLIM_INFINITY. Where it is unlimited, the 1,024-send probe runs as before.
+  RLIMIT_MEMLOCK is RLIM_INFINITY or the process has CAP_IPC_LOCK effective in the initial user
+  namespace (its uid_map maps every id to itself; inside another, the kernel ignores the
+  capability). Then the kernel charges it nothing it can be refused, and the 1,024-send probe
+  runs as before.
 - `ReactorFactory.StartingAnIoUringReactorChargesTheUsersLockedMemoryOnlyItsRings` starts two
-  reactors in a child that has dropped CAP_IPC_LOCK and has an 8 MiB limit, while another process
-  of the same user, under 6 MiB of its own, registers and unregisters a 16 KiB buffer in a loop.
-  A refusal means the user's charge passed 6 MiB while two reactors' rings are under 1 MiB. It
-  failed 40 of 40 runs with the probe as it was, as root and as an unprivileged user.
+  reactors in a child with an 8 MiB limit and without CAP_IPC_LOCK, while another process of the
+  same user, under 6 MiB of its own, registers and unregisters a 16 KiB buffer in a loop. A
+  refusal means the user's charge passed 6 MiB while two reactors' rings are under 1 MiB. Run as
+  root, the child first becomes a uid no account or process has, so its counter is its own; run
+  as another user, a refusal before the reactors start (the user's other processes already hold
+  the room) skips the test with that reason. With the probe as it was it fails most runs (18 of
+  20 in review).
 - `tools/memlock-per-core.sh` runs a command with RLIMIT_MEMLOCK raised (with sudo) to 8 MiB per
   core, keeping a higher limit. The integration job's `ctest -j` step and the coverage job's
   `tools/coverage.sh` run under it: one test per core is a host's processes per core, under one
@@ -70,9 +78,16 @@ measurement was most likely taken as root, whose CAP_IPC_LOCK exempts it.
 
 ## Consequences
 
-- No io_uring reactor uses zero-copy sends under a finite locked-memory limit, CI included (where
-  the probe already failed at 8 MiB). Hosts and containers with an unlimited limit keep
-  ADR-0051's behaviour; `zero_copy_sends` in the datagram stats shows which a process has.
+- No io_uring reactor uses zero-copy sends under a finite locked-memory limit without
+  CAP_IPC_LOCK, CI's hosted runners included (where the probe already failed at 8 MiB). That
+  includes kernels before 6.15, where `SENDMSG_ZC` cost no locked memory and zero copy was on.
+  A process with CAP_IPC_LOCK (root in the initial user namespace) and a finite limit keeps it.
+  Hosts and containers with an unlimited limit keep ADR-0051's behaviour, self-hosted runners
+  given `LimitMEMLOCK=infinity` as docs/operations/soak.md describes among them;
+  `zero_copy_sends` in the datagram stats shows which a process has.
+- Under an unlimited limit the probe still charges 8 MiB to the user's shared counter while it
+  runs; nothing is refused, but the counter is not empty then, so a process of the same user
+  under a finite limit can still be refused for that moment.
 - Each reactor still charges its user about 416 KiB of locked memory on 6.14 and later, so an
   8 MiB limit holds 19 reactors across all of a user's processes. A process that runs more
   shards than that under one user needs a higher limit; ENOMEM from `make_reactor` names it, and
