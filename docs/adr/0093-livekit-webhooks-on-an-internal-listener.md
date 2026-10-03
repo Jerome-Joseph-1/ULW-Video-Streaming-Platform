@@ -2,18 +2,18 @@
 
 Status: Accepted
 Date: 2026-10-03
-Amends: ADR-0091 (what takes a stream live, and what ends it)
+Amends: ADR-0092 (what takes a stream live, and what ends it)
 
 ## Context
 
-ADR-0091 takes a stream live on its owner's word: the broadcaster's client calls
+ADR-0092 takes a stream live on its owner's word: the broadcaster's client calls
 `POST /api/v1/live/{id}/start` after its WHIP POST succeeds, and `end` to finish. It leaves a
 LiveKit webhook receiver as the follow-up, for two cases the client's word does not cover:
 
 - **Fixed-token encoders** (OBS, `whipsink`) publish with no page beside them to call `start`.
 - **Clients that crash**, or lose their network, never call `end`. The relay ends when LiveKit
   drops the publisher, the packager ends the playlist and the sweep ends the row (`finished`) once
-  the packager has exited, minutes later; a stream that never went live waits out its 10-minute
+  the packager has exited, minutes later; a stream that never went live waits out its 2-minute
   start window.
 
 What LiveKit v1.13.7 does, from its source (`webhook/` and `auth/` of the protocol module it pins,
@@ -39,7 +39,7 @@ What LiveKit v1.13.7 does, from its source (`webhook/` and `auth/` of the protoc
   LiveKit's recorder joins a relayed room as a participant of its own.
 
 From the stream service as it stands: every stream's room is `<stream id>:1` and its publisher's
-identity `<owner>/<stream id>` (ADR-0091); going live is idempotent and safe to repeat; every end
+identity `<owner>/<stream id>` (ADR-0092); going live is idempotent and safe to repeat; every end
 is a conditional write, so the first reason stands.
 
 ## Options
@@ -100,16 +100,16 @@ is a conditional write, so the first reason stands.
     under way has answered) the service reads the row: only a `live` stream is considered (a
     `starting` one keeps its start window, since its room comes and goes with its tickets while an
     encoder is set up); it asks LiveKit whether the publisher is connected, and ends the stream
-    only if not, with the new reason `publisher_left` (`live_streams.end_reason`, migration 0012),
+    only if not, with the new reason `publisher_left` (`live_streams.end_reason`, migration 0013),
     then closes its room. A check LiveKit could not answer is retried every 2 s, 5 times, and then
     left to the sweep.
   - A session seen leaving is remembered (16 per stream), so its late join or track changes
     nothing. Each replica follows at most 1024 streams; an idle one makes room for a new one.
-- **The owner's API stays** as ADR-0091 has it. `start` and the webhook's start run the same
+- **The owner's API stays** as ADR-0092 has it. `start` and the webhook's start run the same
   idempotent path, in either order or at once (one packager, one relay); `end` and
   `publisher_left` are both conditional ends, and whichever is first stands. Clients may keep
   calling both; fixed-token encoders and crashed clients no longer need to.
-- **Prod** keeps live off (ADR-0091): its overlay ships the Service and NetworkPolicy, which admit
+- **Prod** keeps live off (ADR-0092): its overlay ships the Service and NetworkPolicy, which admit
   nothing until the gateway listens on the port; the gateway's `ULW_LIVE_WEBHOOK_PORT` and
   LiveKit's `webhook` block are added with the rest of live at phase-6 (RUNBOOK step 9).
 

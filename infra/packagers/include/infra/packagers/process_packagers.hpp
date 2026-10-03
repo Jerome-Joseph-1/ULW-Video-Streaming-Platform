@@ -20,7 +20,7 @@ struct ProcessConfig {
 };
 
 // Packagers as child processes of this one, for development, the local stack and the browser
-// suite (ADR-0091); on a cluster each is a Job instead. A child's exit is seen through a pidfd
+// suite (ADR-0092); on a cluster each is a Job instead. A child's exit is seen through a pidfd
 // the reactor watches. Children outlive this object: destroying it stops watching them, and a
 // stream still running runs to its end on its own.
 //

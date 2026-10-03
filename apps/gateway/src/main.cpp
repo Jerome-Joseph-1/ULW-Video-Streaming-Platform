@@ -127,7 +127,7 @@ struct Services {
     std::unique_ptr<infra::postgres::PgUploadCatalog> catalog;
     std::unique_ptr<gateway::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
-    // The stream service and what it drives, when live publishing is configured (ADR-0091).
+    // The stream service and what it drives, when live publishing is configured (ADR-0092).
     // LiveKit and the Kubernetes API get a multi of their own, as key fetches do, so that no
     // upload holding the store's connections delays a ticket.
     std::unique_ptr<infra::curl::Multi> live_multi;
@@ -221,7 +221,10 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
 }
 
 std::expected<void, std::string> make_verifier(const gateway::Config& config, Services& s) {
-    infra::auth::ClaimRules rules{.issuer = config.jwt_issuer, .audience = config.jwt_audience};
+    infra::auth::ClaimRules rules{.issuer = config.jwt_issuer,
+                                  .audience = config.jwt_audience,
+                                  .broadcaster_claim = config.live.broadcaster_claim,
+                                  .broadcaster_value = config.live.broadcaster_value};
     if (!config.dev_jwks_file.empty()) {
         auto local = infra::auth::Ed25519LocalVerifier::create(config.dev_jwks, std::move(rules));
         if (!local) {

@@ -201,7 +201,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!kbps) {
         return std::unexpected(kbps.error());
     }
-    // 0, the default, waits for as long as it takes; a stream service sets it (ADR-0091).
+    // 0, the default, waits for as long as it takes; a stream service sets it (ADR-0092).
     const auto caller_wait =
         bounded<std::uint32_t>(env, "ULW_LIVE_CALLER_WAIT_SECONDS", 0, 0, kMaxCallerWaitSeconds);
     if (!caller_wait) {

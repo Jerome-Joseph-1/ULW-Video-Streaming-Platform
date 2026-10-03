@@ -61,15 +61,20 @@ public:
 
     explicit FakeLiveStore(net::IReactor& reactor) noexcept : later_(reactor) {}
 
-    void create(core::ports::NewLiveStream stream, std::uint32_t max_unfinished,
+    void create(core::ports::NewLiveStream stream, core::ports::LiveLimits limits,
                 core::ports::LiveCallback<core::ports::CreatedLiveStream> done) override {
         ++calls;
         auto answer = [&]() -> core::ports::LiveResult<core::ports::CreatedLiveStream> {
             if (fail) {
                 return std::unexpected(*fail);
             }
-            std::uint32_t unfinished = 0;
+            std::int64_t unfinished = 0;
+            std::int64_t recent = 0;
             for (const auto& [id, row] : rows) {
+                if (row.owner == stream.owner &&
+                    row.created_at > stream.at - std::chrono::hours(1)) {
+                    ++recent;
+                }
                 if (row.state == core::ports::LiveState::Ended) {
                     continue;
                 }
@@ -78,7 +83,10 @@ public:
                 }
                 ++unfinished;
             }
-            if (unfinished >= max_unfinished) {
+            if (recent >= limits.per_owner_per_hour) {
+                return std::unexpected(LiveStoreError::TooMany);
+            }
+            if (unfinished >= limits.max_unfinished) {
                 return std::unexpected(LiveStoreError::Full);
             }
             LiveStream row{.id = stream.id,

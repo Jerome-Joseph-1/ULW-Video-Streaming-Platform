@@ -343,18 +343,54 @@ TEST_F(LiveStreamsTest, ARelayTheMediaServerRefusesLeavesTheStreamStarting) {
     ASSERT_TRUE(go_live(started->stream.id, "alice"));
 }
 
-TEST_F(LiveStreamsTest, AStreamEndedWhileGoingLiveIsNotMadeLive) {
+TEST_F(LiveStreamsTest, AStreamEndedWhileGoingLiveIsNotMadeLiveAndItsRoomIsClosedAgain) {
     const auto started = create("alice");
     ASSERT_TRUE(started);
+    const std::string id = started->stream.id.to_string();
     Result<LiveStream> r;
     live->go_live(started->stream.id, user("alice"), [&](auto x) noexcept { r = std::move(x); });
-    // The owner's end lands between the relay and the row.
+    // The owner's end lands between the relay and the row: its close came before the relay.
     ASSERT_TRUE(pump_until(*reactor, [&] { return !sfu->relays.empty(); }));
     row(started->stream.id).state = LiveState::Ended;
     row(started->stream.id).ended_at = clock.wall_now();
     row(started->stream.id).ended_by = LiveEnd::Owner;
+    sfu->calls.clear();
     EXPECT_EQ(wait(r), std::unexpected(LiveFailure::Ended));
     EXPECT_EQ(row(started->stream.id).state, LiveState::Ended);
+    // The room is closed after the relay, so the relay ends with it.
+    EXPECT_EQ(sfu->calls, (std::vector<std::string>{"open " + id + ":1 stream 0", "close " + id}));
+}
+
+TEST_F(LiveStreamsTest, AUserCreatesOnlySoManyStreamsAnHour) {
+    LiveSettings settings;
+    settings.streams_per_user_per_hour = 2;
+    make(settings);
+    for (int i = 0; i < 2; ++i) {
+        const auto made = create("alice");
+        ASSERT_TRUE(made);
+        ASSERT_TRUE(end(made->stream.id, "alice"));
+    }
+    EXPECT_EQ(create("alice"), std::unexpected(LiveFailure::RateLimited));
+    EXPECT_TRUE(create("bob"));
+    clock.advance(core::Millis{3'601'000});
+    EXPECT_TRUE(create("alice"));
+}
+
+TEST_F(LiveStreamsTest, ViewersReportingOneEndEndItOnce) {
+    const auto started = create("alice");
+    ASSERT_TRUE(started);
+    ASSERT_TRUE(go_live(started->stream.id, "alice"));
+    const std::size_t before = store->calls;
+    live->playlist_ended(started->stream.id);
+    live->playlist_ended(started->stream.id);
+    live->playlist_ended(started->stream.id);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return live->pending() == 0; }));
+    EXPECT_EQ(store->calls, before + 1);
+    EXPECT_EQ(row(started->stream.id).ended_by, LiveEnd::Finished);
+    // Once that end is done, another report is looked at again.
+    live->playlist_ended(started->stream.id);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return live->pending() == 0; }));
+    EXPECT_EQ(store->calls, before + 2);
 }
 
 TEST_F(LiveStreamsTest, TheOwnerEndsTheStreamAndItsRoomIsClosedEveryTime) {
@@ -479,8 +515,9 @@ TEST_F(LiveStreamsTest, SweepsRepeatOnTheirInterval) {
 }
 
 TEST(LiveFailureNames, EveryFailureHasOne) {
-    for (const LiveFailure f : {LiveFailure::NotFound, LiveFailure::Ended, LiveFailure::Full,
-                                LiveFailure::Unavailable, LiveFailure::Internal}) {
+    for (const LiveFailure f :
+         {LiveFailure::NotFound, LiveFailure::Ended, LiveFailure::Full, LiveFailure::RateLimited,
+          LiveFailure::Unavailable, LiveFailure::Internal}) {
         EXPECT_FALSE(gateway::to_string(f).empty());
     }
 }

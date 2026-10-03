@@ -19,7 +19,7 @@ page does not repeat it.
 | Seccomp profile | worker and live packager nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
 | Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on the environment's hostnames only, as the video and chat routes: `stage.askedin.com` on stage, `askedin.com` and `www.askedin.com` on prod, so a ticket must name one of its environment's hosts. `/twirp` is never routed (ADR-0050, ADR-0053). |
 | TURN port | Askedin (node firewall) | UDP 3478 (stage) and UDP 3479 (prod) open to the internet on k8s-prod's node; both environments share its address, so each has its own port and its own STUNner Gateway (RUNBOOK step 7). Nothing else: LiveKit's UDP 7882 stays inside the cluster. |
-| LiveKit server API and the Kubernetes API, from the gateway | live streams | The gateway's stream service (ADR-0091) calls LiveKit's server API (`LIVEKIT_API_URL`, port 7880 in the cluster) for tickets, relays and closing a stream's room, and, with `ULW_LIVE_PACKAGER=kubernetes`, the API server with its pod's service account to create each stream's packager Job and Secret. The account (`video-gateway`) needs a Role in the gateway's namespace with `create` on `jobs` and `secrets`, `get` on `jobs` and `patch` on `secrets`, and nothing else; its token is mounted (`automountServiceAccountToken: true`), and its NetworkPolicy lets it reach LiveKit's 7880 and the API server's 6443 (`deploy/askedin/overlays/*/video-gateway/live-*.yaml`, RUNBOOK step 9). The packager image's tag is the gateway's `ULW_LIVE_PACKAGER_IMAGE_TAG`. |
+| LiveKit server API and the Kubernetes API, from the gateway | live streams | The gateway's stream service (ADR-0092) calls LiveKit's server API (`LIVEKIT_API_URL`, port 7880 in the cluster) for tickets, relays and closing a stream's room, and, with `ULW_LIVE_PACKAGER=kubernetes`, the API server with its pod's service account to create each stream's packager Job and Secret. Packagers run in a namespace of their own (`apps-stage-live`, `apps-live`) with a quota, a default-deny NetworkPolicy plus the packager's own, and Pod Security enforced at `baseline` (warned at `restricted`). The account (`video-gateway`, in the gateway's namespace) has a Role there and nowhere else: `create` and `get` on `jobs`, `create` on `secrets`. A ValidatingAdmissionPolicy bound to that account and namespace admits only a packager Job of the template's shape and the stream's own Secret (`deploy/askedin/overlays/*/live-packager/`, checked by `deploy/local/check-live-admission.py`). Its token is projected into the gateway's container alone, the pod's automount staying off, and its NetworkPolicy lets it reach LiveKit's 7880 and the API server's 6443 (`video-gateway/live-*.yaml`, RUNBOOK step 9). The packager image's tag is the gateway's `ULW_LIVE_PACKAGER_IMAGE_TAG`. |
 | LiveKit's webhooks, to the gateway | live streams | LiveKit posts room and participant events, signed with the API key it shares with the gateway (its configuration's `webhook.api_key` and `webhook.urls`), to the gateway's second listener, `ULW_LIVE_WEBHOOK_PORT` (8081 on the cluster), at `/livekit/webhook` (ADR-0093). That port is behind its own ClusterIP Service, `video-gateway-hooks`, which no HTTPRoute names, and a NetworkPolicy admitting LiveKit's pods (`app.kubernetes.io/name: livekit`) only (`deploy/askedin/overlays/*/video-gateway/live-hooks.yaml`). It must never be routed from the internet. Stage has it on; prod's turns on with the rest of live (RUNBOOK step 9). |
 | LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP 9000, `srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000`, ADR-0083), and its pods must be labelled `app.kubernetes.io/name: livekit-egress`, the only pods the packager's NetworkPolicy admits. It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Shipped as `deploy/askedin/overlays/{stage,prod}/livekit-egress/` (one concurrent stream on stage, two on prod) and `livekit-redis/` (ClusterIP, password in `sfu-secrets`, reachable from LiveKit and egress only); LiveKit names the same Redis. Prod's apply waits for the phase-6 tag (RUNBOOK step 7). |
 
@@ -95,6 +95,10 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
 | `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | The overlays set the address to the pod's own, `$(POD_IP):9201`, and take the secret from `chat-secrets` (ADR-0083) |
+| `LIVEKIT_API_KEY` | | | optional | Turns calls on (ADR-0087): unset or empty, chat starts with calls off and answers every `call` with `calls_disabled`, whatever the other three say. Set, the other three are required, or chat exits `2` naming the missing one. The overlays read it from `sfu-secrets`, as optional |
+| `LIVEKIT_API_SECRET` | | | with `LIVEKIT_API_KEY` | Secret: signs every ticket, and must be the one LiveKit holds for the key (`LIVEKIT_KEYS`). 32 to 256 bytes, checked at start (exit `2`) |
+| `LIVEKIT_API_URL` | | | with `LIVEKIT_API_KEY` | LiveKit's server API, `http://` or `https://`, checked at start (exit `2`); the overlays set `http://livekit:7880` |
+| `LIVEKIT_CLIENT_URL` | | | with `LIVEKIT_API_KEY` | What every ticket names for clients, `ws://` or `wss://`, checked at start (exit `2`): `wss://` and a hostname of `askedin-gateway`, whose `/rtc` route reaches LiveKit. From `sfu-secrets` |
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
 
@@ -112,7 +116,7 @@ libcurl's, and keeps its own `sslmode` settings.
 
 <!-- apps/gateway/src/config.cpp (load_live), apps/gateway/src/main.cpp (make_live), infra/packagers -->
 
-The gateway's stream service (ADR-0091) is on when `LIVEKIT_API_URL` is set, and then needs the
+The gateway's stream service (ADR-0092) is on when `LIVEKIT_API_URL` is set, and then needs the
 rest of these; with it unset none of them may be set, and the stream routes answer `404`. Its
 rows live in the gateway's database (`live_streams`, migration 0011).
 
@@ -124,11 +128,13 @@ rows live in the gateway's database (`live_streams`, migration 0011).
 | `ULW_LIVE_PACKAGER_SRT` | required with it | Where the relay calls a packager: `srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000` on the cluster, `srt://127.0.0.1:<port>` for the process runtime |
 | `ULW_LIVE_PACKAGER` | `process` or `kubernetes`, required with it | Where packagers run |
 | `ULW_LIVE_SEGMENT_SECONDS` | 2 to 10, default 2 | The relay's keyframe interval; must equal the packager's `ULW_LIVE_SEGMENT_SECONDS` |
-| `ULW_LIVE_MAX_STREAMS` | 1 to 10000, default 2 | Unfinished streams on the platform at once; more are `503`. Set it to what egress takes (stage 1, prod 2); `1` with `process` |
-| `ULW_LIVE_START_WINDOW_SECONDS` | 60 to 86400, default 600 | A stream not taken live in this long is ended (`timeout`) |
+| `ULW_LIVE_MAX_STREAMS` | 1 to 64, default 2 | Unfinished streams on the platform at once; more are `503`. Set it to what egress takes (stage 1, prod 2); `1` with `process`. At most what one sweep looks at, 64 |
+| `ULW_LIVE_START_WINDOW_SECONDS` | 60 to 86400, default 120 | A stream not taken live in this long is ended (`timeout`) |
+| `ULW_LIVE_STREAMS_PER_USER_PER_HOUR` | 1 to 1000, default 6 | Streams one user may start in an hour, however they end; more are `429` |
+| `ULW_LIVE_BROADCASTER_CLAIM` | `<claim>=<value>`, default none | Who may start a stream: a token whose claim of that name is the value (a string equal to it, an array holding it, or `true` for `true`). Unset: any signed-in user. Others are `403` on `POST /api/v1/live` and may still watch |
 | `ULW_LIVE_JOB_TEMPLATE` | with `kubernetes` | The Job template, read at start; the image carries it at `/usr/local/share/ulw/live-packager-job.yaml` |
 | `ULW_LIVE_PACKAGER_IMAGE_TAG` | with `kubernetes` | The packager image's tag the template names; prod's `<sha>@sha256:<digest>` (RUNBOOK 4a) |
-| `ULW_K8S_API_URL`, `ULW_K8S_NAMESPACE`, `ULW_K8S_TOKEN_FILE`, `ULW_K8S_CA_FILE` | with `kubernetes`, optional | Default to the in-cluster API server and the pod's service account (its namespace, token and CA) |
+| `ULW_K8S_API_URL`, `ULW_K8S_NAMESPACE`, `ULW_K8S_TOKEN_FILE`, `ULW_K8S_CA_FILE` | with `kubernetes`, optional | Default to the in-cluster API server and the pod's service account (its namespace, token and CA). The overlays name the packagers' namespace and the projected token's files. A packager counts as listening once its Job reports a ready pod (`status.ready`): its container started, which binds the SRT listener at once; the relay's caller retries its handshake for seconds |
 | `ULW_LIVE_WEBHOOK_PORT` | 1 to 65535, optional, not `ULW_LISTEN_PORT` | The listener for LiveKit's webhooks (ADR-0093), serving `POST /livekit/webhook` only, each request verified with `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`. Unset: no listener, and streams go live and end through the owner's `start` and `end` and the sweep alone. Never expose it through the public route |
 | `ULW_LIVE_PUBLISHER_GRACE_SECONDS` | 1 to 300, default 10 | With webhooks: how long a live stream's publisher may be gone (a full reconnect) before LiveKit is asked whether it is, and the stream ended `publisher_left` if not |
 | `ULW_LIVE_PACKAGER_BIN`, `ULW_LIVE_PACKAGER_SCRATCH_DIR`, `ULW_LIVE_PACKAGER_PORT` | with `process` | The `live_packager` binary (absolute, with `ulw_sandbox` beside it), its scratch root, and the one ingest port every packager takes (default 9000). Each packager gets the gateway's store and database settings, and `PATH`; nothing else of its environment |
@@ -138,7 +144,7 @@ The live packager (one process per stream, environment only; on Askedin one Job 
 `ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below),
 `ULW_FFMPEG` and `ULW_FFPROBE`. `ULW_LIVE_CALLER_WAIT_SECONDS` (0 to 86400, default 0: no limit)
 is how long it waits for its SRT caller before it ends the stream without one, as SIGUSR1 would;
-the Job template sets 60 (ADR-0091). It records an ended stream as a video (ADR-0055) when given both of these, and is
+the Job template sets 60 (ADR-0092). It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |
@@ -264,7 +270,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `live_playlist_single_flight_joins_total` | counter | Misses that waited on a store read another request had started instead of starting one |
 | `live_playlist_cache_evictions_total` | counter | Fresh copies dropped for the bounds (512 streams, 4 MiB) |
 | `live_playlist_cache_entries`, `live_playlist_cache_bytes` | gauge | Streams and bytes held |
-| `live_streams_created_total`, `live_tickets_issued_total`, `live_streams_went_live_total` | counter | The stream service (ADR-0091), when live streams are on: streams started, publisher tickets issued, streams first relayed to their packager |
+| `live_streams_created_total`, `live_tickets_issued_total`, `live_streams_went_live_total` | counter | The stream service (ADR-0092), when live streams are on: streams started, publisher tickets issued, streams first relayed to their packager |
 | `live_streams_ended_total{reason="owner"}`, `{reason="finished"}`, `{reason="failed"}`, `{reason="timeout"}`, `{reason="publisher_left"}` | counter | Streams ended, by why. `failed` (a packager that could not run) or `timeout` (never taken live, or past 13 h) rising is packagers or relays not working; `publisher_left` is LiveKit's word that the publisher went, confirmed after the grace (ADR-0093) |
 | `live_webhooks_total{outcome="accepted"}`, `{outcome="refused"}`, `{outcome="limited"}`, `{outcome="bad_request"}` | counter | With `ULW_LIVE_WEBHOOK_PORT`: LiveKit's webhook requests, by what became of them |
 | `live_webhook_refusals_total{reason=...}` | counter | Webhooks refused before they were read: `no_authorization`, `malformed`, `algorithm`, `signature`, `unknown_key`, `no_expiry`, `expired`, `not_yet_valid`, `body_hash`, `too_large`. `signature` or `unknown_key` rising is LiveKit and the gateway holding different keys, or someone else posting |
@@ -317,7 +323,12 @@ each line directly.
 
 Worker: no HTTP port. Liveness is a heartbeat file, `<ULW_SCRATCH_DIR>/heartbeat-<node>`,
 touched at least every 20 s; the shipped probe restarts the pod after two minutes without a
-touch. The worker exposes no metrics yet.
+touch. The worker exposes no metrics yet. Alert on its `error` line `transcoder refused its own
+files` (with `worker_files_refused_total`): the sandboxed ffprobe or ffmpeg could not open the
+source the worker fetched or write the output directory it was given, a fault in the scratch
+directory's permissions or mounts, not in the upload. Every job on that worker will fail the
+same way; each is given back to the queue and retried, and its video fails only after the job's
+attempts run out.
 
 <!-- apps/chat/src/session.cpp (route), apps/chat/src/chat.cpp (render_metrics) -->
 
@@ -352,8 +363,15 @@ that died), `presence_gaps_total` (seqs a presence room skipped at this node, af
 node repeated what it had said there), `jwks_keys_expired`, `auth_cache_drops_total` and
 `auth_cache_drop_pending` (as the gateway's),
 `unrecorded_joins_total` (refused joins of rooms with no kind recorded that recorded nothing,
-their user past the allowance: steady growth is someone walking room ids). Chat is a draft
-([chat.md](chat.md)).
+their user past the allowance: steady growth is someone walking room ids), and for calls
+(ADR-0087): `calls_enabled` (1 when LiveKit is configured), `call_tickets_total`,
+`call_refusals_total{reason="not_member"}`, `{reason="not_callable"}` and `{reason="busy"}`,
+`call_rooms_opened_total` and `call_rooms` (media rooms opened, and handles kept, on the
+rooms this node owns), `call_errors_total{source="sfu",kind="unavailable"}` (LiveKit unreachable
+or overloaded: clients are told to retry), `{source="sfu",kind="refused"}` (LiveKit refused the
+request as made, a configuration fault: clients get `call_failed`) and
+`{source="store",kind="unavailable"}`. Each is counted on the node that owns the room, not the
+one the client is on. Chat is a draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

@@ -53,7 +53,7 @@ struct Deps {
     ops::Logger& log;
     // Written by the health probe's thread; only read here.
     const Health& health;
-    // The stream service (ADR-0091); none where live publishing is not configured, and its
+    // The stream service (ADR-0092); none where live publishing is not configured, and its
     // routes then answer 404.
     LiveStreams* live_streams = nullptr;
     // LiveKit's webhooks and what they drive (ADR-0093), for /metrics only; none where the

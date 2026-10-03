@@ -1,4 +1,4 @@
--- The live streams the stream service started (ADR-0091). A row is a stream from the moment its
+-- The live streams the stream service started (ADR-0092). A row is a stream from the moment its
 -- owner asks for one until it ends; the id is the stream's name everywhere else too (its
 -- packager, its playlist under live/<id>/, its chat through live_chat_room, its recording in
 -- live_recordings, keyed by the id's text).

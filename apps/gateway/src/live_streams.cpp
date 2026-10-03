@@ -19,7 +19,7 @@ using core::ports::PackagerError;
 using core::ports::PackagerState;
 
 // Every stream is generation 1 of its room for all its life: a stream is never moved on to a
-// new generation, it ends (ADR-0091), and a closed generation is the stream's end.
+// new generation, it ends (ADR-0092), and a closed generation is the stream's end.
 constexpr core::ports::MediaGeneration kGeneration{1};
 // 24 random bytes as hex: 48 characters, inside SRT's 10 to 79 (ADR-0046).
 constexpr std::size_t kPassphraseBytes = 24;
@@ -63,6 +63,8 @@ std::string_view to_string(LiveFailure f) noexcept {
         return "ended";
     case LiveFailure::Full:
         return "full";
+    case LiveFailure::RateLimited:
+        return "rate limited";
     case LiveFailure::Unavailable:
         return "unavailable";
     case LiveFailure::Internal:
@@ -117,6 +119,8 @@ LiveFailure LiveStreams::store_failure(LiveStoreError e) noexcept {
         return LiveFailure::NotFound;
     case LiveStoreError::Full:
         return LiveFailure::Full;
+    case LiveStoreError::TooMany:
+        return LiveFailure::RateLimited;
     case LiveStoreError::Unavailable:
         ++counters_.store_failures;
         return LiveFailure::Unavailable;
@@ -172,7 +176,9 @@ void LiveStreams::create(const core::UserId& owner, LiveDone<StartedStream> done
         .at = deps_.clock.wall_now(),
     };
     deps_.store.create(
-        std::move(row), settings_.max_streams,
+        std::move(row),
+        core::ports::LiveLimits{.max_unfinished = settings_.max_streams,
+                                .per_owner_per_hour = settings_.streams_per_user_per_hour},
         [this, done = std::move(done)](
             core::ports::LiveResult<core::ports::CreatedLiveStream> created) mutable noexcept {
             if (!created) {
@@ -355,9 +361,9 @@ void LiveStreams::await_packager(Stream stream, core::MonoTime deadline, LiveDon
 }
 
 void LiveStreams::relay(Stream stream, LiveDone<Stream> done) {
-    const core::RoomId name = room_of(stream.id);
+    const core::RoomId room_id = room_of(stream.id);
     deps_.sfu.open_room(
-        name, kGeneration, core::ports::MediaRoomKind::Stream, 0,
+        room_id, kGeneration, core::ports::MediaRoomKind::Stream, 0,
         [this, stream = std::move(stream),
          done = std::move(done)](std::expected<std::unique_ptr<core::ports::IMediaRoom>, MediaError>
                                      opened) mutable noexcept {
@@ -393,9 +399,16 @@ void LiveStreams::relay(Stream stream, LiveDone<Stream> done) {
                                 done(std::unexpected(store_failure(marked.error())));
                                 return;
                             }
-                            // Ended meanwhile: the owner's end, or a sweep's.
+                            // Ended meanwhile: the owner's end, or a sweep's, whose close may
+                            // have come before this relay. The room is closed again, so the
+                            // relay just started ends with it.
                             if (marked->state == LiveState::Ended) {
-                                done(std::unexpected(LiveFailure::Ended));
+                                close_room(
+                                    std::move(*marked),
+                                    [done = std::move(done)](
+                                        std::expected<Stream, LiveFailure>) mutable noexcept {
+                                        done(std::unexpected(LiveFailure::Ended));
+                                    });
                                 return;
                             }
                             if (first) {
@@ -453,9 +466,9 @@ void LiveStreams::finish(const core::LiveStreamId& id, LiveEnd reason, LiveDone<
 // session, and the packager ends the playlist and records the stream (ADR-0053). A packager
 // that no relay ever reached ends the stream itself once its wait for a caller runs out.
 void LiveStreams::close_room(Stream stream, LiveDone<Stream> done) {
-    const core::RoomId name = room_of(stream.id);
+    const core::RoomId room_id = room_of(stream.id);
     deps_.sfu.open_room(
-        name, kGeneration, core::ports::MediaRoomKind::Stream, 0,
+        room_id, kGeneration, core::ports::MediaRoomKind::Stream, 0,
         [this, stream = std::move(stream),
          done = std::move(done)](std::expected<std::unique_ptr<core::ports::IMediaRoom>, MediaError>
                                      opened) mutable noexcept {
@@ -554,9 +567,17 @@ void LiveStreams::publisher_left(const core::LiveStreamId& id, LiveDone<Departur
 }
 
 void LiveStreams::playlist_ended(const core::LiveStreamId& id) {
+    std::string key = id.to_string();
+    if (ending_.contains(key)) {
+        return;
+    }
+    ending_.insert(key);
     ++pending_;
     finish(id, LiveEnd::Finished,
-           [this](std::expected<Stream, LiveFailure>) noexcept { --pending_; });
+           [this, key = std::move(key)](std::expected<Stream, LiveFailure>) noexcept {
+               --pending_;
+               ending_.erase(key);
+           });
 }
 
 void LiveStreams::start_sweeping() noexcept {

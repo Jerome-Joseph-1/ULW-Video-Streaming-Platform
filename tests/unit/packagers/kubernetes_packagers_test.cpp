@@ -106,9 +106,6 @@ private:
             return json(200, R"({"metadata":{"name":")" + name + R"(","uid":")" + uids_[name] +
                                  R"("},"status":)" + status_[name] + "}");
         }
-        if (r.method == "PATCH" && path.starts_with(secrets + "/")) {
-            return json(secrets_.contains(path.substr(secrets.size() + 1)) ? 200 : 404, "{}");
-        }
         return json(400, "{}");
     }
 
@@ -193,37 +190,32 @@ protected:
     std::unique_ptr<KubernetesPackagers> packagers;
 };
 
-TEST_F(KubernetesPackagersTest, StartingMakesTheSecretTheJobAndTiesOneToTheOther) {
+TEST_F(KubernetesPackagersTest, StartingMakesTheJobThenItsSecretOwnedByIt) {
     ASSERT_TRUE(start());
     const auto requests = api.requests();
-    ASSERT_EQ(requests.size(), 3U);
+    ASSERT_EQ(requests.size(), 2U);
     for (const ServedRequest& r : requests) {
         EXPECT_EQ(r.header("authorization"), "Bearer fake-token-testtest123");
+        EXPECT_EQ(r.method, "POST");
     }
     const std::string id(kStream);
-    // The stream's Secret, holding its passphrase and nothing else of it.
-    EXPECT_EQ(requests[0].method, "POST");
-    EXPECT_EQ(requests[0].path(), "/api/v1/namespaces/apps-test/secrets");
-    EXPECT_EQ(requests[0].header("content-type"), "application/json");
-    const auto secret = core::json::parse(requests[0].body);
+    // The Job, the template filled in: Kubernetes' own $(POD_IP) left for it to expand.
+    EXPECT_EQ(requests[0].path(), "/apis/batch/v1/namespaces/apps-test/jobs");
+    EXPECT_EQ(requests[0].header("content-type"), "application/yaml");
+    EXPECT_EQ(requests[0].body,
+              fill_job_template(kTemplate, "apps-test", "abc123@sha256:00ff", id, "auth0|alice"));
+    EXPECT_NE(requests[0].body.find("value: \"auth0|alice\""), std::string::npos);
+    EXPECT_NE(requests[0].body.find("$(POD_IP)"), std::string::npos);
+    // The stream's Secret, holding its passphrase, owned by the Job from its creation.
+    EXPECT_EQ(requests[1].path(), "/api/v1/namespaces/apps-test/secrets");
+    EXPECT_EQ(requests[1].header("content-type"), "application/json");
+    const auto secret = core::json::parse(requests[1].body);
     ASSERT_TRUE(secret);
     EXPECT_EQ(secret->find("metadata")->find("name")->as_string(), "live-packager-" + id);
+    EXPECT_EQ(secret->find("type")->as_string(), "Opaque");
     EXPECT_EQ(secret->find("stringData")->find("ULW_LIVE_SRT_PASSPHRASE")->as_string(),
               "fake-passphrase-testtest123");
-    // The Job, the template filled in: Kubernetes' own $(POD_IP) left for it to expand.
-    EXPECT_EQ(requests[1].path(), "/apis/batch/v1/namespaces/apps-test/jobs");
-    EXPECT_EQ(requests[1].header("content-type"), "application/yaml");
-    EXPECT_EQ(requests[1].body,
-              fill_job_template(kTemplate, "apps-test", "abc123@sha256:00ff", id, "auth0|alice"));
-    EXPECT_NE(requests[1].body.find("value: \"auth0|alice\""), std::string::npos);
-    EXPECT_NE(requests[1].body.find("$(POD_IP)"), std::string::npos);
-    // The Secret becomes the Job's, so the Job's removal removes it.
-    EXPECT_EQ(requests[2].method, "PATCH");
-    EXPECT_EQ(requests[2].path(), "/api/v1/namespaces/apps-test/secrets/live-packager-" + id);
-    EXPECT_EQ(requests[2].header("content-type"), "application/merge-patch+json");
-    const auto patch = core::json::parse(requests[2].body);
-    ASSERT_TRUE(patch);
-    const auto* owners = patch->find("metadata")->find("ownerReferences")->as_array();
+    const auto* owners = secret->find("metadata")->find("ownerReferences")->as_array();
     ASSERT_EQ(owners->size(), 1U);
     EXPECT_EQ((*owners)[0].find("kind")->as_string(), "Job");
     EXPECT_EQ((*owners)[0].find("name")->as_string(), id);
@@ -234,11 +226,19 @@ TEST_F(KubernetesPackagersTest, AStartRepeatedFinishesTheFirstOnesWork) {
     ASSERT_TRUE(start());
     ASSERT_TRUE(start());
     const auto requests = api.requests();
-    ASSERT_EQ(requests.size(), 7U);
-    // Both made already: the Job is read for its uid, and the Secret tied to it again.
-    EXPECT_EQ(requests[5].method, "GET");
-    EXPECT_EQ(requests[6].method, "PATCH");
-    EXPECT_NE(requests[6].body.find("uid-1"), std::string::npos);
+    ASSERT_EQ(requests.size(), 5U);
+    // The Job made already: read for its uid, and its Secret, made already too, is done.
+    EXPECT_EQ(requests[3].method, "GET");
+    EXPECT_EQ(requests[4].method, "POST");
+    EXPECT_NE(requests[4].body.find("uid-1"), std::string::npos);
+}
+
+TEST_F(KubernetesPackagersTest, AJobTheServerRefusesLeavesNoSecret) {
+    api.fail_with(422);
+    EXPECT_EQ(start(), std::unexpected(PackagerError::Refused));
+    const auto requests = api.requests();
+    ASSERT_EQ(requests.size(), 1U);
+    EXPECT_EQ(requests[0].path(), "/apis/batch/v1/namespaces/apps-test/jobs");
 }
 
 TEST_F(KubernetesPackagersTest, TheJobsStatusSaysHowThePackagerStands) {

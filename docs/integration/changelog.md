@@ -29,7 +29,7 @@ What to do:
 
 ## 2026-10-03: live streams are started, taken live and ended through the gateway
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/live_streams.cpp, docs/adr/0091-the-stream-service-lives-in-the-gateway.md -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/live_streams.cpp, docs/adr/0092-the-stream-service-lives-in-the-gateway.md -->
 
 An addition; nothing that worked before changes. A broadcaster's client now gets its publisher
 tickets from five new endpoints ([live.md](live.md#starting-a-stream)): `POST /api/v1/live`,
@@ -46,11 +46,25 @@ What to do:
 
 - **Broadcaster clients:** follow the flow in [live.md](live.md#starting-a-stream): create,
   POST the offer, `start`, a fresh ticket before every later WHIP request, then DELETE or `end`.
-  One unfinished stream per user.
+  One unfinished stream per user, a few started an hour (`429` past them), and, where the
+  deployment names a broadcaster claim, only users holding it (`403` for others).
 - **Viewer clients:** nothing changes for the playlist. `GET /api/v1/live/{id}` says whether a
   stream is `starting`, `live` or `ended`.
 - **Operators:** the gateway needs LiveKit's API key and the packager settings, and on the
   cluster a service account that may create the packagers' Jobs (RUNBOOK, step 9).
+
+## 2026-10-03: a worker fault is no longer reported as the owner's bad file
+
+<!-- infra/ffmpeg/src/exit_code.cpp (refine), apps/worker/src/job_runner.cpp (public_reason) -->
+
+Not breaking; nothing to do. When the transcoder could not read the uploaded file or write its
+output for a reason on our side (file permissions or a read-only mount on the worker), the
+video went to `failed` at once with `error_reason` `the file could not be decoded as video`.
+Such a job is now retried like the other transient worker faults, and only if every attempt
+fails does the video go to `failed`, with `error_reason`
+`the transcoder could not read its working files`. A file that really cannot be decoded is
+reported as before. As [videos-and-playback.md](videos-and-playback.md) says, show
+`error_reason` or log it, and do not parse it.
 
 ## 2026-09-30: the cookie is accepted only from trusted pages (security fix)
 

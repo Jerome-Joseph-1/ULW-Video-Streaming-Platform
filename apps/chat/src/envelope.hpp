@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/ports/media.hpp"
 #include "core/ports/message_store.hpp"
 #include "core/util/time.hpp"
 #include "rt/message_key.hpp"
@@ -35,6 +36,8 @@
 //       "limit":<n>          optional: 1 to 100, 50 when absent
 //   {"type":"watch","user":"<sub>"}     hear when the user comes online or goes offline
 //   {"type":"unwatch","user":"<sub>"}   stop; unanswered
+//   {"type":"call","room":"<uuid>","device":"<uuid>"}   a ticket to the room's call, for this
+//       device: the room must be a direct chat this connection has joined (ADR-0050)
 // Server to client:
 //   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
 //                                                      whose last seq is lower missed messages
@@ -46,9 +49,11 @@
 //   {"type":"watching","user":"<sub>","status":"online"|"offline"}   the answer to watch: what
 //                                                                   this node knows now
 //   {"type":"presence","user":"<sub>","status":"online"|"offline"}   each change after that
+//   {"type":"ticket","room":"<uuid>","url":"<wss url>","token":"<jwt>","expires_at":<unix s>}
+//       the answer to call: connect the SFU's client SDK to url with token before expires_at
 //   {"type":"error","reason":"<code>"}          with "room" and "id" when known, "user" for a
 //                                               watch, and "retry_after_ms" when the reason is
-//                                               rate_limited
+//                                               rate_limited, or unavailable for a call
 // A message id is 1 to 64 of [A-Za-z0-9_-], chosen by the sender and unique per room: sending
 // the same id again is answered with the seq the first send got, and delivered once. A body is
 // any bytes, in base64url without padding (RFC 4648 section 5); they are carried and returned
@@ -96,7 +101,12 @@ struct Unwatch {
     core::UserId user;
 };
 
-using Command = std::variant<Join, Send, History, Watch, Unwatch>;
+struct Call {
+    core::RoomId room;
+    core::DeviceId device;
+};
+
+using Command = std::variant<Join, Send, History, Watch, Unwatch, Call>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -115,6 +125,8 @@ enum class EnvelopeError : std::uint8_t {
     Unavailable,
     // Not a user id.
     BadUser,
+    // Not a device id: a canonical lowercase UUID.
+    BadDevice,
 };
 
 [[nodiscard]] std::expected<Command, EnvelopeError> parse_command(std::string_view text);
@@ -138,6 +150,13 @@ void write_user_error(std::string& out, std::string_view reason, const core::Use
 
 void write_rate_limited(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                         core::Millis retry_after);
+
+// The answer to a call: the ticket the client takes to the SFU.
+void write_ticket(std::string& out, const core::RoomId& room,
+                  const core::ports::MediaTicket& ticket);
+// A call refused, with a hint of when to ask again for a refusal a retry may cure.
+void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
+                      std::optional<core::Millis> retry_after);
 
 // The error codes clients see.
 [[nodiscard]] std::string_view reason(EnvelopeError e) noexcept;

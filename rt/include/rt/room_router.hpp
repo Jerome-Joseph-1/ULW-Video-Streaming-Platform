@@ -62,6 +62,29 @@ using JoinCallback =
 using SendCallback =
     std::move_only_function<void(std::expected<std::uint64_t, RouteError>) noexcept>;
 
+// A request a room's owner answers itself, for the room's members wherever they are (the call
+// handler's tickets, ADR-0050): opaque bytes there, opaque bytes back, at most this many each
+// way. Small: a few names out, a URL and a token back.
+inline constexpr std::size_t kMaxOwnerMessage = 4096;
+// How long a member's node waits for the owner's answer, whether the owner is another node or
+// this one: the owner's own work may be a store read and two calls to another service, each with
+// its own timeout of a few seconds. Checked on the router's tick, a quarter second late at most.
+inline constexpr core::Millis kOwnerAskTimeout{15'000};
+
+using OwnerAnswer =
+    std::move_only_function<void(std::expected<std::vector<std::byte>, RouteError>) noexcept>;
+
+// What answers asks on the room's owner. Called on the reactor thread, only while this node
+// owns the room. `answer` may be called later, once, from any callback on the reactor thread,
+// and never after the router is destroyed: whoever holds it drops it first. An answer larger
+// than kMaxOwnerMessage reaches the asker as Unavailable.
+class IOwnerService {
+public:
+    virtual ~IOwnerService() = default;
+    virtual void on_ask(const core::RoomId& room, std::span<const std::byte> request,
+                        OwnerAnswer answer) noexcept = 0;
+};
+
 // What the router reports for the log and the metrics. Called on the reactor thread.
 class IRouterEvents {
 public:
@@ -128,6 +151,12 @@ struct RouterCounters {
     std::uint64_t slow_peers = 0;
     // Sends answered with the seq their key already had, instead of being sequenced again.
     std::uint64_t duplicates = 0;
+    // Asks of members here that no answer reached before kOwnerAskTimeout and that the router's
+    // own deadline answered: those the owner's service was to answer on this node itself (a
+    // forwarded one is counted in forward_timeouts, by its link's deadline, which is the same).
+    std::uint64_t ask_timeouts = 0;
+    // Turns of the router's tick, which checks every deadline: four a second.
+    std::uint64_t ticks = 0;
 };
 
 // One node's share of the room plane (ADR-0015, ADR-0035). Members join rooms here, wherever
@@ -165,6 +194,17 @@ public:
     // sequenced again: the answer is the seq it got the first time.
     void send(const core::RoomId& room, IMember& from, const core::UserId& sender,
               const MessageKey& key, std::vector<std::byte> body, SendCallback done);
+
+    // Asks the room's owner, which answers through its IOwnerService, for a member that has
+    // joined the room here: NotJoined otherwise, as for send. Unavailable when the owner cannot
+    // be reached, has no service, or does not answer within kOwnerAskTimeout (this node's own
+    // service included, when it is the owner). Like a send, the
+    // answer is dropped if the member leaves the room first. `request` is at most
+    // kMaxOwnerMessage bytes.
+    void ask_owner(const core::RoomId& room, IMember& from, std::span<const std::byte> request,
+                   OwnerAnswer done);
+    // Who answers asks for the rooms this node owns; nullptr (the start) answers Unavailable.
+    void serve(IOwnerService* service) noexcept;
 
     // For a drain: stops owning rooms and makes them claimable at once.
     void release_rooms(StoreCallback<void> done);

@@ -1,4 +1,4 @@
-// ADR-0091 acceptance: live publishing as a real client does it, with nothing but the gateway's
+// ADR-0092 acceptance: live publishing as a real client does it, with nothing but the gateway's
 // stream service issuing tickets. A broadcaster's page starts a stream through the API and
 // publishes a camera and microphone (Chromium's fake devices) over WHIP with the ticket it got;
 // the stream service starts the packager and relays the publisher to it; a second user watches

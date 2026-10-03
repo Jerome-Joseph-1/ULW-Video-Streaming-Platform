@@ -144,6 +144,14 @@ std::string read_token(const std::string& path) {
     return out;
 }
 
+// The user id's own alphabet (core::UserId): nothing in it ends a double-quoted YAML scalar.
+bool valid_owner(std::string_view owner) noexcept {
+    return !owner.empty() && std::ranges::all_of(owner, [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+               c == '.' || c == '_' || c == ':' || c == '@' || c == '|' || c == '+' || c == '-';
+    });
+}
+
 } // namespace
 
 std::expected<void, std::string> check_job_template(std::string_view text) {
@@ -211,25 +219,17 @@ public:
 
     void start(const core::ports::PackagerSpec& spec, core::ports::PackagerDone done) {
         const std::string stream = spec.stream.to_string();
-        std::string secret = R"({"apiVersion":"v1","kind":"Secret","metadata":{"name":)";
-        core::json::append_string(secret, secret_name(stream));
-        secret += R"(,"labels":{"app.kubernetes.io/name":"live-packager",)"
-                  R"("app.kubernetes.io/part-of":"ulw","app.kubernetes.io/instance":)";
-        core::json::append_string(secret, stream);
-        secret += R"(}},"type":"Opaque","stringData":{"ULW_LIVE_SRT_PASSPHRASE":)";
-        core::json::append_string(secret, spec.passphrase);
-        secret += "}}";
+        // A user id never holds what would end the template's quoted scalar; one that did is
+        // refused here rather than written into a manifest (ADR-0092).
+        if (!valid_owner(spec.owner.view())) {
+            later_.post([done = std::move(done)]() mutable noexcept {
+                done(std::unexpected(PackagerError::Refused));
+            });
+            return;
+        }
         std::string job = fill_job_template(config_.job_template, config_.namespace_name,
                                             config_.image_tag, stream, spec.owner.view());
-        call(curl::Method::Post, secrets_path(), "application/json", std::move(secret),
-             [this, stream, job = std::move(job),
-              done = std::move(done)](Answer made) mutable noexcept {
-                 if (!ok(made) && !status_is(made, kConflict)) {
-                     done(std::unexpected(classify(made)));
-                     return;
-                 }
-                 create_job(stream, std::move(job), std::move(done));
-             });
+        create_job(stream, std::move(job), spec.passphrase, std::move(done));
     }
 
     void state(const core::LiveStreamId& stream, core::ports::PackagerStateDone done) {
@@ -271,18 +271,17 @@ public:
         }
     }
 
-    [[nodiscard]] const std::string& token_file() const noexcept { return config_.token_file; }
-
 private:
     class Call;
 
     // The token file is read off the loop, on the offload pool.
     class TokenJob final : public net::IOffloadJob {
     public:
-        explicit TokenJob(Impl& owner) noexcept : owner_(owner) {}
+        // The path is the job's own copy: the pool thread reads nothing of its owner.
+        TokenJob(Impl& owner, std::string path) noexcept : owner_(owner), path_(std::move(path)) {}
         void run() noexcept override {
             try {
-                token_ = read_token(owner_.token_file());
+                token_ = read_token(path_);
             } catch (...) {
                 token_.clear();
             }
@@ -291,6 +290,7 @@ private:
 
     private:
         Impl& owner_;
+        std::string path_;
         std::string token_;
     };
 
@@ -304,16 +304,22 @@ private:
         return jobs_path() + "/" + std::string(stream);
     }
 
-    void create_job(const std::string& stream, std::string job, core::ports::PackagerDone done) {
+    // The Job first, then its Secret made its dependent from the start, so the Job's removal (a
+    // day after it finishes) removes the Secret too, and no Secret exists without its Job. The
+    // pod waits for the Secret: the kubelet starts the container only once it can read it, and
+    // the Secret is there before the image is pulled.
+    void create_job(const std::string& stream, std::string job, std::string passphrase,
+                    core::ports::PackagerDone done) {
         call(curl::Method::Post, jobs_path(), "application/yaml", std::move(job),
-             [this, stream, done = std::move(done)](Answer made) mutable noexcept {
+             [this, stream, passphrase = std::move(passphrase),
+              done = std::move(done)](Answer made) mutable noexcept {
                  if (ok(made)) {
                      const auto uid = uid_of(made->body);
                      if (!uid) {
                          done(std::unexpected(PackagerError::Unavailable));
                          return;
                      }
-                     own_secret(stream, *uid, std::move(done));
+                     create_secret(stream, *uid, passphrase, std::move(done));
                      return;
                  }
                  if (!status_is(made, kConflict)) {
@@ -322,32 +328,38 @@ private:
                  }
                  // Made before, by a start whose answer was lost: its uid is the one to name.
                  call(curl::Method::Get, job_path(stream), {}, {},
-                      [this, stream, done = std::move(done)](Answer got) mutable noexcept {
+                      [this, stream, passphrase = std::move(passphrase),
+                       done = std::move(done)](Answer got) mutable noexcept {
                           const auto uid = ok(got) ? uid_of(got->body) : std::nullopt;
                           if (!uid) {
                               done(std::unexpected(ok(got) ? PackagerError::Unavailable
                                                            : classify(got)));
                               return;
                           }
-                          own_secret(stream, *uid, std::move(done));
+                          create_secret(stream, *uid, passphrase, std::move(done));
                       });
              });
     }
 
-    // The Job owns the Secret, so the Job's removal (ttlSecondsAfterFinished) removes it too.
-    void own_secret(const std::string& stream, const std::string& uid,
-                    core::ports::PackagerDone done) {
-        std::string patch = R"({"metadata":{"ownerReferences":[{"apiVersion":"batch/v1",)"
-                            R"("kind":"Job","name":)";
-        core::json::append_string(patch, stream);
-        patch += R"(,"uid":)";
-        core::json::append_string(patch, uid);
-        patch += "}]}}";
-        call(curl::Method::Patch, secrets_path() + "/" + secret_name(stream),
-             "application/merge-patch+json", std::move(patch),
-             [done = std::move(done)](Answer patched) mutable noexcept {
-                 if (!ok(patched)) {
-                     done(std::unexpected(classify(patched)));
+    void create_secret(const std::string& stream, const std::string& uid,
+                       const std::string& passphrase, core::ports::PackagerDone done) {
+        std::string secret = R"({"apiVersion":"v1","kind":"Secret","metadata":{"name":)";
+        core::json::append_string(secret, secret_name(stream));
+        secret += R"(,"labels":{"app.kubernetes.io/name":"live-packager",)"
+                  R"("app.kubernetes.io/part-of":"ulw","app.kubernetes.io/instance":)";
+        core::json::append_string(secret, stream);
+        secret += R"(},"ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":)";
+        core::json::append_string(secret, stream);
+        secret += R"(,"uid":)";
+        core::json::append_string(secret, uid);
+        secret += R"(}]},"type":"Opaque","stringData":{"ULW_LIVE_SRT_PASSPHRASE":)";
+        core::json::append_string(secret, passphrase);
+        secret += "}}";
+        call(curl::Method::Post, secrets_path(), "application/json", std::move(secret),
+             [done = std::move(done)](Answer made) mutable noexcept {
+                 // Made before: by the same start, whose answer was lost.
+                 if (!ok(made) && !status_is(made, kConflict)) {
+                     done(std::unexpected(classify(made)));
                      return;
                  }
                  done({});
@@ -425,7 +437,7 @@ KubernetesPackagers::Impl::Impl(net::IReactor& reactor, curl::Multi& multi,
                                 net::OffloadPool& offload, const core::ports::IClock& clock,
                                 KubernetesConfig config) noexcept
     : multi_(multi), offload_(offload), clock_(clock), config_(std::move(config)), later_(reactor),
-      token_job_(*this) {
+      token_job_(*this, config_.token_file) {
     while (config_.api_url.ends_with('/')) {
         config_.api_url.pop_back();
     }

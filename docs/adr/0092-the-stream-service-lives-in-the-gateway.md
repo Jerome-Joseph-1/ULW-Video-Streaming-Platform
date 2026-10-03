@@ -1,8 +1,8 @@
-# 0091. The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word
+# 0092. The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word
 
 Status: Accepted
 Date: 2026-10-03
-Amends: ADR-0053 (who relays, and when), ADR-0055 (who records a drained stream), ADR-0083
+Amends: ADR-0053 (who relays, and when), ADR-0070 (a stream's chat closes when it ends), ADR-0055 (who records a drained stream), ADR-0083
 (what starts a packager, and the RBAC it needs)
 
 ## Context
@@ -56,7 +56,7 @@ What had to be settled, from the code as it stands:
 | Option | Why it was tempting | Verdict |
 |---|---|---|
 | A controller watching a CRD or the rows, making Jobs | The gateway holds no Kubernetes credential | Rejected for now: another Deployment, image and protocol for one create per stream; the Role below gives the gateway exactly that create and nothing more. Reopen if a second component needs to start packagers |
-| The gateway creates the Secret and the Job through the API server with its own service account | Three calls per stream on the reactor through libcurl, as LiveKit's are; a namespaced Role (create Jobs and Secrets, get Jobs, patch Secrets) | Accepted |
+| The gateway creates the Job and its Secret through the API server with its own service account, in a namespace that holds packagers only, under an admission policy | Two calls per stream on the reactor through libcurl, as LiveKit's are; a Role there with create on Jobs and Secrets and get on Jobs; the policy holds what it creates to a packager's shape | Accepted |
 | The Job's spec built in C++ | No file to ship | Rejected: the by-hand path of RUNBOOK step 9 would drift from the gateway's; ops could not change a request or limit without a rebuild of the code |
 | The template file (`deploy/askedin/live-packager/job.yaml`) baked into the gateway's image and filled with exactly its four variables | One template for the gateway and the runbook; it ships with the code that fills it | Accepted |
 | A packager per stream as a child process of the gateway | No cluster needed | Accepted for development, the local stack and the browser suite only, behind the same port (`IPackagers`); one stream at a time, as every child takes the one ingest port the relay is configured with |
@@ -77,8 +77,20 @@ What had to be settled, from the code as it stands:
   sent to a client or logged), created, live and end times, and why it ended (`owner`,
   `finished`, `failed`, `timeout`). A partial unique index keeps **one unfinished stream per
   user**; the insert refuses a stream past `ULW_LIVE_MAX_STREAMS` unfinished on the platform
-  (what egress can relay: stage 1, prod 2). Creating a stream opens its live chat in the same
-  statement (ADR-0070's `record_live`, as RUNBOOK step 3 did by hand).
+  (what egress can relay: stage 1, prod 2, and at most 64, what one sweep reads) and a stream
+  past `ULW_LIVE_STREAMS_PER_USER_PER_HOUR` (default 6) created by its owner in the hour before,
+  whatever became of them (`429`): what a client looping on create and end costs is bounded.
+  Creates run in one transaction that first takes a transaction-scoped advisory lock, in a
+  statement of its own: the insert's counts then read a snapshot taken after the previous
+  creator committed (a lock taken inside the insert's own statement would come after that
+  statement's snapshot), so concurrent creates never pass a cap together. The same transaction
+  opens the stream's live chat with the chat store's own guarded statement (ADR-0070's
+  `record_live`), and ending a stream closes its chat to new joins in the transaction that ends
+  it (`chat_rooms.closed_at`, migration 0012: the room keeps its kind and reads as closed with no
+  members, so a join is `not_live`). Sockets already joined stay until they leave.
+- **Who may broadcast.** Any signed-in user, unless `ULW_LIVE_BROADCASTER_CLAIM` names a claim
+  and value; then only a token carrying it may start a stream (`403` otherwise). Watching stays
+  open to any signed-in user (ADR-0059).
 - **API** (docs/integration/live.md): `POST /api/v1/live` (a new stream with its first publisher
   ticket, `201`; or the owner's unfinished one with a fresh ticket, `200`), `POST
   /api/v1/live/{id}/ticket` (a fresh ticket), `POST /api/v1/live/{id}/start` (go live), `POST
@@ -100,20 +112,48 @@ What had to be settled, from the code as it stands:
   records the stream (ADR-0055) and exits. A close that fails is `503`; the row has ended
   already, so no ticket is issued again, and a repeated `end` closes the room again. The other
   ends: a status request that finds the playlist ended ends the row (`finished`); a sweep every
-  10 s ends a `starting` stream past `ULW_LIVE_START_WINDOW_SECONDS` (default 10 minutes) and a
+  10 s ends a `starting` stream past `ULW_LIVE_START_WINDOW_SECONDS` (default 2 minutes) and a
   `live` one past 13 hours (`timeout`), and asks each live stream's packager how it stands:
   finished ends the row `finished`, failed or gone `failed`. Every gateway replica sweeps; every
-  write is conditional, so they agree.
-- **Packagers on the cluster.** The gateway's service account (`video-gateway`) has a Role in its
-  own namespace allowing `create` on Jobs and Secrets, `get` on Jobs and `patch` on Secrets,
-  nothing else (not `list`, `delete`, `exec`, or any read of a Secret). It creates the stream's
-  Secret `live-packager-<id>` (the passphrase), then the Job from the template in its image
-  (`/usr/local/share/ulw/live-packager-job.yaml`, filled with the namespace, the configured
-  image tag, the stream id and the owner, quoted), then makes the Job the Secret's owner, so the
-  Job's removal a day after it finishes removes the Secret. A start that finds either made
-  already finishes the first one's work. The token is the pod's projected service account
-  token, read off the loop and again once a minute old; the API server's certificate is checked
-  against the cluster CA.
+  write is conditional, so they agree. Viewers polling a stream that just ended report one end
+  per process, not one each. An end that lands while `start` is relaying is honoured: `start`
+  finds the row ended, closes the room again (the relay just started ends with it) and answers
+  `409`.
+- **Packagers on the cluster.** They run in a namespace of their own (`apps-stage-live`,
+  `apps-live`): a quota (running pods to the streams the platform takes, a day's Jobs and
+  Secrets), a default-deny NetworkPolicy beside the packager's own (SRT in from egress in the
+  gateway's namespace; DNS, Postgres and the object store out), and Pod Security enforced at
+  `baseline` and warned at `restricted`. A packager meets every rule of `restricted` but one:
+  its sandbox's `procMount: Unmasked` (ADR-0032), which `restricted` refuses for any pod and
+  `baseline` admits only in a pod's own user namespace (`hostUsers: false`), checked with a
+  server-side dry run against kube-apiserver v1.37.0. The gateway's service account
+  (`video-gateway`, in the gateway's namespace) has a Role there and nowhere else: `create` and
+  `get` on Jobs, `create` on Secrets; no `list`, `update`, `patch`, `delete`, `exec`, and no read
+  of any Secret. A ValidatingAdmissionPolicy bound to that account in that namespace admits only
+  a packager Job of the template's shape (labelled `live-packager`, instance its own name, one
+  container of the packager's image, no init or ephemeral containers, emptyDir volumes only, no
+  token, the default account, a user namespace, none of the node's namespaces, no privilege or
+  escalation, no `envFrom`, and Secret references to `live-packager-secrets` and its own
+  stream's Secret only) and Secrets named `live-packager-<stream>` of type `Opaque`, changed on
+  update in their metadata only; `deploy/local/check-live-admission.py` checks each rule with a
+  server-side dry run. The gateway creates the Job from the template in its image
+  (`/usr/local/share/ulw/live-packager-job.yaml`, filled with the namespace, the configured image
+  tag, the stream id and the owner, quoted, and a user id outside its own alphabet refused), then
+  the stream's Secret `live-packager-<id>` (the passphrase) with the Job as its owner from its
+  creation, so the Job's removal a day after it finishes removes it and a Job that could not be
+  made leaves no Secret. The pod waits for the Secret, which exists before its image is pulled.
+  A start that finds either made already finishes the first one's work. The token is an hour's
+  projected token of the account, mounted into the gateway's container alone (the pod's
+  automount is off), read off the loop and again once a minute old; the API server's
+  certificate is checked against the cluster CA. A packager counts as listening once its Job
+  reports a ready pod (`status.ready`): it has no readiness probe, so ready is its container
+  started, which binds the SRT listener at once; the relay's SRT caller retries its handshake for
+  seconds.
+- **Relays are deduplicated per process.** The media adapter queues relay calls for one
+  participant behind the one in flight in that process (ADR-0053); two gateway replicas asked to
+  start the same stream at once each list LiveKit's egresses first, and only a start that lands
+  within the other's half second before LiveKit records it can start a second relay. The second
+  is to the same packager, whose listener admits one caller; the extra egress gives up.
 - **The packager waits a minute for its caller** (`ULW_LIVE_CALLER_WAIT_SECONDS=60` in the
   template, 0 and unlimited by default), then ends its stream as SIGUSR1 would. That bounds a
   relay that never came, and makes a packager restarted after a crash (the Job's `OnFailure`)
@@ -129,11 +169,11 @@ What had to be settled, from the code as it stands:
   sweep finds the Job complete and ends it `finished`, and the stream's playlist has no
   `EXT-X-ENDLIST`, as ADR-0047's stale-stream rule describes. Continuing a stream on a new Job is
   not done; a broadcaster starts a new stream.
-- The gateway holds a Kubernetes credential that can create Jobs, whose pods can mount any
-  Secret in the namespace. The Role keeps it to one namespace and to creating, never reading;
-  a ValidatingAdmissionPolicy that admits only the packager's image and labels from the
-  gateway's account would narrow it further, and is the follow-up if the namespace gains
-  Secrets the gateway must not reach.
+- The gateway holds a Kubernetes credential that can create Jobs. It reaches only the
+  packagers' namespace, which holds nothing but packagers and their Secrets, and the admission
+  policy holds what it creates there to a packager's shape: a compromised gateway can start a
+  packager, under the quota, and nothing else. The policy and its binding are cluster-scoped, so
+  whoever applies the overlays must be allowed to apply those.
 - The gateway reaches LiveKit's server API (7880) and the API server; its NetworkPolicy gains
   both. The local stack and the browser suite use the process runtime, which runs one stream at
   a time and passes a packager only the gateway's store and database settings.

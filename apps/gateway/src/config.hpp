@@ -24,7 +24,7 @@ enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
 // (ADR-0001); TLS where the gateway faces clients itself.
 enum class Transport : std::uint8_t { Plain, Tls };
 
-// Where a stream's packager runs (ADR-0091): a child process of the gateway, for development
+// Where a stream's packager runs (ADR-0092): a child process of the gateway, for development
 // and the local stack, or a Kubernetes Job.
 enum class PackagerRuntime : std::uint8_t { Process, Kubernetes };
 
@@ -50,6 +50,10 @@ struct LiveConfig {
     std::string k8s_namespace;
     std::string k8s_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token";
     std::string k8s_ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+    // ULW_LIVE_BROADCASTER_CLAIM, "<claim>=<value>": who may start a stream. Empty: anyone
+    // signed in.
+    std::string broadcaster_claim;
+    std::string broadcaster_value;
     LiveSettings settings;
     // LiveKit's webhooks (ADR-0093): the port of their own listener, 0 for none, and how the
     // publisher's comings and goings are followed.

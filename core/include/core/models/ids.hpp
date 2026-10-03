@@ -54,7 +54,7 @@ using VideoId = UuidId<struct VideoTag>;
 using UploadId = UuidId<struct UploadTag>;
 using RoomId = UuidId<struct RoomTag>;
 using DeviceId = UuidId<struct DeviceTag>;
-// A live stream the stream service started (ADR-0091). Its text form is also the stream's name
+// A live stream the stream service started (ADR-0092). Its text form is also the stream's name
 // everywhere else: the packager's, the playlist's and the live chat's, and a DNS label.
 using LiveStreamId = UuidId<struct LiveStreamTag>;
 

@@ -82,7 +82,7 @@ RUN --mount=type=bind,source=deploy/docker/apt-install.sh,target=/usr/local/sbin
 
 FROM runtime AS gateway
 COPY --from=build /out/gateway/ /usr/local/bin/
-# The packager Job template the stream service fills in for each stream (docs/adr/0091), the
+# The packager Job template the stream service fills in for each stream (docs/adr/0092), the
 # same file the runbook's by-hand start uses.
 COPY --from=build /src/deploy/askedin/live-packager/job.yaml /usr/local/share/ulw/live-packager-job.yaml
 USER 10001:10001

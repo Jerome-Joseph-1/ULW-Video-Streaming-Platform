@@ -1144,6 +1144,12 @@ void Connection::start_stream_route() noexcept {
         return;
     }
     if (req_.route == RouteId::CreateStream) {
+        // A deployment may keep broadcasting to the users a claim names
+        // (ULW_LIVE_BROADCASTER_CLAIM); everything else stays open to any signed-in user.
+        if (!claims->may_broadcast) {
+            fail(Status::Forbidden);
+            return;
+        }
         create_stream(*live, claims->subject);
         return;
     }
@@ -1279,6 +1285,11 @@ void Connection::fail_live(LiveFailure failure) noexcept {
         // Streams end; a minute is about how soon one might.
         req_.retry_after = std::chrono::seconds{60};
         fail(Status::ServiceUnavailable);
+        return;
+    case LiveFailure::RateLimited:
+        // The hour the count looks back over moves on; a stream's worth of it is a few minutes.
+        req_.retry_after = std::chrono::seconds{600};
+        fail(Status::TooManyRequests);
         return;
     case LiveFailure::Unavailable:
         req_.retry_after = std::chrono::seconds{2};

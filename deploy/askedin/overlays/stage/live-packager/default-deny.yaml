@@ -1,0 +1,13 @@
+# Nothing in or out of the packagers' namespace but what networkpolicy.yaml admits for a
+# packager: a pod that is not one (none should be; the admission policy lets the gateway make
+# nothing else) reaches nothing and is reached by nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: apps-stage-live
+  labels:
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]

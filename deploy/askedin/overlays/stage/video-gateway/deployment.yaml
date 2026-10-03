@@ -27,9 +27,10 @@ spec:
         app.kubernetes.io/part-of: ulw
     spec:
       # The stream service makes each live stream's packager Job with this account's token
-      # (live-rbac.yaml, docs/adr/0091); nothing else in the pod uses it.
+      # (live-rbac.yaml, docs/adr/0092). The token is mounted into the gateway's container alone
+      # (the kube-api volume below), never the pod's other containers.
       serviceAccountName: video-gateway
-      automountServiceAccountToken: true
+      automountServiceAccountToken: false
       enableServiceLinks: false
       # preStop 5 s + the gateway's 30 s drain deadline (Limits::drain_deadline), with 10 s
       # for the process to unwind before the kubelet sends SIGKILL.
@@ -149,7 +150,7 @@ spec:
                 secretKeyRef:
                   name: video-gateway-secrets
                   key: JWT_ISSUER
-            # Live streams (docs/adr/0091, RUNBOOK step 9): LiveKit's server API in the
+            # Live streams (docs/adr/0092, RUNBOOK step 9): LiveKit's server API in the
             # cluster, the public host its tickets name (the /rtc and /whip routes of
             # livekit/httproute.yaml), the key pair egress uses too, and packagers as Jobs from
             # the template in the image, dialled by the relay through live-packager's headless
@@ -171,7 +172,15 @@ spec:
             - name: ULW_LIVE_PACKAGER
               value: kubernetes
             - name: ULW_LIVE_PACKAGER_SRT
-              value: srt://{stream}.live-packager.apps-stage.svc.cluster.local:9000
+              value: srt://{stream}.live-packager.apps-stage-live.svc.cluster.local:9000
+            # The packagers' own namespace, and the account's token, the cluster's CA and the
+            # pod's namespace as the kube-api volume projects them.
+            - name: ULW_K8S_NAMESPACE
+              value: apps-stage-live
+            - name: ULW_K8S_TOKEN_FILE
+              value: /var/run/ulw/kube-api/token
+            - name: ULW_K8S_CA_FILE
+              value: /var/run/ulw/kube-api/ca.crt
             - name: ULW_LIVE_MAX_STREAMS
               value: "1"
             - name: ULW_LIVE_JOB_TEMPLATE
@@ -245,3 +254,27 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: kube-api
+              mountPath: /var/run/ulw/kube-api
+              readOnly: true
+      volumes:
+        # What the API server needs of the gateway, for the stream service only: an hour's
+        # token of its account (the kubelet renews it; the gateway rereads it every minute),
+        # the cluster's CA, and the pod's namespace.
+        - name: kube-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace

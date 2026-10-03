@@ -47,6 +47,7 @@ Client to server:
 | `join` | `room`, or `stream` for a live stream's chat; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, or `"direct"`; not with `stream`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names (see [Member lists](#member-lists)). `stream` names a live stream as its playback URL does, and joins its chat (see [A stream's live chat](#a-streams-live-chat)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
+| `call` | `room`, `device` (a UUID the client keeps per device) | A ticket to the room's 1:1 call, for a direct chat this connection has joined. See [calls.md](calls.md). |
 
 Server to client:
 
@@ -56,7 +57,8 @@ Server to client:
 | `sent` | `room`, `id`, `seq` | The message was sequenced as `seq`. A resend with the same `id` gets the same answer. |
 | `message` | `room`, `seq`, `sender`, `id`, `body` | A message in the room, your own included, live, resumed or from history. `sender` is the poster's user id ([auth.md](auth.md)). |
 | `history` | `room`, `count` | Ends the answer to a `history` command, after its `count` messages. `0`: nothing more in that direction. |
-| `error` | `reason`, plus `room` and `id` when known, `retry_after_ms` for `rate_limited` | A command failed. |
+| `ticket` | `room`, `url`, `token`, `expires_at` | The answer to `call`: connect LiveKit's SDK to `url` with `token` before `expires_at` (Unix seconds). See [calls.md](calls.md). |
+| `error` | `reason`, plus `room` and `id` when known, `retry_after_ms` for `rate_limited` and for a call's `unavailable` | A command failed. |
 
 ```json
 {"type":"join","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","after":41}
@@ -143,7 +145,9 @@ list never said no: join again.
   `room` is refused with `bad_room`: a live chat is joined only by its stream.
 - **Open once the stream's chat is opened.** The server side records a stream's room live
   before viewers join (RUNBOOK, "Chat rooms"). Until then a stream join is refused with
-  `not_live`; retry when the stream is on air. Once open it admits anyone signed in.
+  `not_live`; retry when the stream is on air. Once open it admits anyone signed in, until the
+  stream ends: then it closes to new joins (`not_live` again), while sockets already in it stay
+  until they leave (ADR-0092).
 - **Always lossy.** Every viewer is lossy, whatever its `delivery`, and is never closed for being
   behind. A viewer more than 64 KiB behind is sent nothing new until its connection has caught
   up; then it is sent what it missed, oldest first, but only the newest 64 messages of it. The
@@ -170,6 +174,8 @@ list never said no: join again.
 | `bad_id` | `id` is not a message id | Fix the client |
 | `bad_body` | `body` is not base64url | Fix the client |
 | `bad_stream` | `stream` is not a stream name | Fix the client |
+| `bad_device` | A call's `device` is not a canonical lowercase UUID | Fix the client |
+| `not_callable`, `call_failed`, `calls_disabled` | A call was refused; see [calls.md](calls.md#errors) | As there |
 | `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |

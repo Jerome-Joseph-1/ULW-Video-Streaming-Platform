@@ -14,7 +14,7 @@
 
 namespace core::ports {
 
-// Where a live stream the stream service started stands (ADR-0091). It only moves forward:
+// Where a live stream the stream service started stands (ADR-0092). It only moves forward:
 // Starting (the owner has a publisher ticket, nothing is relayed yet), Live (the stream's
 // packager runs and the media server relays the publisher to it), Ended.
 enum class LiveState : std::uint8_t {
@@ -62,6 +62,8 @@ enum class LiveStoreError : std::uint8_t {
     NotFound,
     // As many streams are unfinished as the platform takes at once.
     Full,
+    // The owner has created as many streams in the last hour as one may.
+    TooMany,
     // The database is unreachable or refused the statement; the request may be retried.
     Unavailable,
     // A stored row violates an invariant.
@@ -79,6 +81,13 @@ struct NewLiveStream {
     UserId owner;
     std::string passphrase;
     WallTime at;
+};
+
+// What a create is held to: streams unfinished on the platform at once, and streams one owner
+// may create in an hour, whatever became of them.
+struct LiveLimits {
+    std::int64_t max_unfinished = 2;
+    std::int64_t per_owner_per_hour = 6;
 };
 
 struct CreatedLiveStream {
@@ -101,16 +110,18 @@ public:
     virtual ~ILiveStreamStore() = default;
 
     // Stores the stream, Starting, and opens its live chat, unless its owner already has an
-    // unfinished one (answered with that one) or `max_unfinished` streams are unfinished
-    // already (Full).
-    virtual void create(NewLiveStream stream, std::uint32_t max_unfinished,
+    // unfinished one (answered with that one), `max_unfinished` streams are unfinished already
+    // (Full), or the owner created `per_owner_per_hour` in the hour before (TooMany). Creates
+    // are serialised, so concurrent ones never pass a cap together.
+    virtual void create(NewLiveStream stream, LiveLimits limits,
                         LiveCallback<CreatedLiveStream> done) = 0;
     virtual void find(const LiveStreamId& id, LiveCallback<LiveStream> done) = 0;
     // Starting or Live becomes Live, live since `at` unless it already was; an ended stream is
     // answered as it is.
     virtual void mark_live(const LiveStreamId& id, WallTime at, LiveCallback<LiveStream> done) = 0;
-    // Ends the stream at `at` for `reason`, unless it has ended already; answers the stream as
-    // it then stands, so a repeat sees the first end.
+    // Ends the stream at `at` for `reason`, unless it has ended already, and closes its live
+    // chat to new joins with it; answers the stream as it then stands, so a repeat sees the
+    // first end.
     virtual void end(const LiveStreamId& id, LiveEnd reason, WallTime at,
                      LiveCallback<EndedLiveStream> done) = 0;
     // Up to `limit` unfinished streams, oldest first.
@@ -155,7 +166,7 @@ using PackagerStateDone =
     std::move_only_function<void(std::expected<PackagerState, PackagerError>) noexcept>;
 
 // Starts and watches one packager per stream: a process beside the gateway, or a Kubernetes Job
-// (ADR-0083, ADR-0091). A packager ends its stream by itself once its publisher goes, or once
+// (ADR-0083, ADR-0092). A packager ends its stream by itself once its publisher goes, or once
 // none has come for a while after it starts, so there is no call to stop one. Every member runs
 // on the reactor thread, and every callback there later, never from inside the call.
 class IPackagers {

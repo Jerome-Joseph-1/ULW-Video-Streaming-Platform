@@ -48,7 +48,7 @@ inline constexpr std::array<http::Route<RouteId>, 19> kRoutes{{
     {.method = http::Method::Get,
      .pattern = "/api/v1/live/{id}/index.m3u8",
      .id = RouteId::LivePlaylist},
-    // The stream service (ADR-0091).
+    // The stream service (ADR-0092).
     {.method = http::Method::Post, .pattern = "/api/v1/live", .id = RouteId::CreateStream},
     {.method = http::Method::Get, .pattern = "/api/v1/live/{id}", .id = RouteId::StreamStatus},
     {.method = http::Method::Post,

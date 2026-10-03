@@ -20,6 +20,10 @@ mock auth-service, as a browser's would through askedin-gateway:
               token is refused, a stream's live chat opened as the RUNBOOK opens it is joined
               by several sockets, and a message sent on one reaches every one of them, wherever
               Envoy put them; a pod beside chat cannot reach its node-channel port
+  call        a 1:1 call through chat (ADR-0050, ADR-0087): both members of a direct chat ask for
+              the call on the room WebSocket and get tickets naming the route; LiveKit, through
+              the route, admits both into the room's one media room, the second seeing the first;
+              a group chat has no call
 
     tests/cluster/vod_flow.py [--allow-skip] [SCENARIO...]     all of them when none is named
 
@@ -537,10 +541,10 @@ class ChatSocket:
     """A minimal RFC 6455 client for the chat scenario: masked text frames out, Pings answered,
     text frames in as JSON (tests/soak/chat_soak.py has the full one)."""
 
-    def __init__(self, token=None):
+    def __init__(self, token=None, path="/rt"):
         self.sock = socket.create_connection((BASE.hostname, BASE.port), timeout=10)
         key = base64.b64encode(os.urandom(16)).decode()
-        head = (f"GET /rt HTTP/1.1\r\nHost: {BASE.hostname}:{BASE.port}\r\n"
+        head = (f"GET {path} HTTP/1.1\r\nHost: {BASE.hostname}:{BASE.port}\r\n"
                 "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                 f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n")
         if token:
@@ -566,6 +570,11 @@ class ChatSocket:
 
     def recv(self, timeout):
         """The next JSON message, or None when `timeout` passes first."""
+        return self.next_frame(timeout, 0x1)
+
+    def next_frame(self, timeout, wanted):
+        """The next text (0x1) message as JSON, or binary (0x2) one as bytes, skipping the other
+        kind; None when `timeout` passes first."""
         deadline = time.monotonic() + timeout
         while True:
             b = self.buf
@@ -582,8 +591,8 @@ class ChatSocket:
                         self.send(payload, 0xA)
                     elif op == 0x8:
                         raise Failure(f"chat closed the socket: {payload[:2].hex()}")
-                    elif op == 0x1:
-                        return json.loads(payload)
+                    elif op == wanted:
+                        return json.loads(payload) if op == 0x1 else payload
                     continue
             left = deadline - time.monotonic()
             if left <= 0:
@@ -677,6 +686,67 @@ def check_chat_node_port():
     print("  a pod beside chat is refused its node port")
 
 
+def scenario_call():
+    room = unknown_video_id()
+    tag = uuid.uuid4().hex[:6]
+    alice, bob = f"call-a-{tag}", f"call-b-{tag}"
+    # A direct chat of the two, listed as the RUNBOOK lists members (section 3).
+    sandbox_sql(f"BEGIN; INSERT INTO chat_rooms (room_id, kind) VALUES ('{room}', 'direct_chat'); "
+                f"INSERT INTO chat_members (room_id, user_id) VALUES ('{room}', '{alice}'), "
+                f"('{room}', '{bob}'); COMMIT")
+    sockets, rtc = [], []
+    try:
+        tickets = {}
+        for user in (alice, bob):
+            s = ChatSocket(mint(user, "RS256"))
+            sockets.append(s)
+            check(s.status == 101, f"{user}'s upgrade: expected 101, got {s.status}")
+            s.send({"type": "join", "room": room})
+            s.expect("joined")
+            device = str(uuid.uuid4())
+            s.send({"type": "call", "room": room, "device": device})
+            ticket = s.expect("ticket")
+            check(ticket.get("room") == room, f"{user}'s ticket names another room: {ticket}")
+            # The route the sandbox's LiveKit is reached on (deploy/stunner/up.sh).
+            check(ticket.get("url") == SANDBOX_URL.replace("http", "ws", 1),
+                  f"{user}'s ticket names {ticket.get('url')!r}")
+            check(time.time() < ticket.get("expires_at", 0) <= time.time() + 61,
+                  f"{user}'s ticket expires at {ticket.get('expires_at')}, not within a minute")
+            tickets[user] = (ticket["token"], f"{user}/{device}".encode())
+        # LiveKit through its route, as the client SDK connects: the join response names the
+        # room's first generation and the participant, and the second finds the first in it.
+        joins = []
+        for user in (alice, bob):
+            token, identity = tickets[user]
+            r = ChatSocket(path=f"/rtc?access_token={token}&auto_subscribe=1&sdk=js&protocol=15")
+            rtc.append(r)
+            check(r.status == 101, f"LiveKit refused {user}'s ticket: {r.status}")
+            join = r.next_frame(10, 0x2)
+            check(join is not None, f"no join response from LiveKit for {user} in 10 s")
+            check(f"{room}:1".encode() in join and identity in join,
+                  f"{user}'s join response names neither the room's call nor {identity!r}")
+            joins.append(join)
+        check(tickets[alice][1] in joins[1], "bob's join response does not name alice")
+        # Only a direct chat has a call (ADR-0058): a group chat of alice's is refused.
+        group = unknown_video_id()
+        sandbox_sql(f"BEGIN; INSERT INTO chat_rooms (room_id, kind) VALUES ('{group}', "
+                    f"'group_chat'); INSERT INTO chat_members (room_id, user_id) VALUES "
+                    f"('{group}', '{alice}'); COMMIT")
+        sockets[0].send({"type": "join", "room": group})
+        sockets[0].expect("joined")
+        sockets[0].send({"type": "call", "room": group, "device": str(uuid.uuid4())})
+        while True:
+            got = sockets[0].recv(10)
+            check(got is not None, "no answer to a group chat's call in 10 s")
+            if got.get("type") == "error" and got.get("room") == group:
+                break
+        check(got.get("reason") == "not_callable", f"a group chat's call answered {got}")
+    finally:
+        for s in sockets + rtc:
+            s.close()
+    print("  both members got tickets through chat, and LiveKit admitted both to one room")
+
+
 SCENARIOS = {
     "auth": lambda _: scenario_auth(),
     "upload": scenario_upload,
@@ -684,6 +754,7 @@ SCENARIOS = {
     "netpol": lambda _: scenario_netpol(),
     "playback": scenario_playback,
     "chat": lambda _: scenario_chat(),
+    "call": lambda _: scenario_call(),
 }
 
 

@@ -37,13 +37,14 @@ struct KubernetesConfig {
                                             std::string_view image_tag, std::string_view stream,
                                             std::string_view owner);
 
-// Packagers as Kubernetes Jobs, one per stream, made from the template (ADR-0083, ADR-0091)
-// through the API server with the pod's service account, whose Role allows creating Jobs and
-// Secrets and reading Jobs in its namespace, nothing else. Starting one is three calls: the
-// stream's Secret (its SRT passphrase), the Job, then the Secret made the Job's dependent, so
-// the Job's removal a day after it finishes takes the Secret with it. Each call that finds its
-// object made already counts as done, so a start repeated after a lost answer finishes the
-// first one's work. The Job's status says how the packager stands.
+// Packagers as Kubernetes Jobs, one per stream, made from the template (ADR-0083, ADR-0092)
+// through the API server with the gateway's service account, whose Role in the packagers' own
+// namespace allows creating Jobs and Secrets and reading Jobs, nothing else; an admission policy
+// holds what it creates to the packager's shape. Starting one is two calls: the Job, then the
+// stream's Secret (its SRT passphrase) created with the Job as its owner, so the Job's removal a
+// day after it finishes takes the Secret with it and no Secret outlives a Job that failed to
+// start. A call that finds its object made already counts as done, so a start repeated after a
+// lost answer finishes the first one's work. The Job's status says how the packager stands.
 class KubernetesPackagers final : public core::ports::IPackagers {
 public:
     class Impl;

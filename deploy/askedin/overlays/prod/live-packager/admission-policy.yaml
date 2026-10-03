@@ -1,0 +1,111 @@
+# What the gateway's service account may create in apps-live (docs/adr/0092): a packager Job of
+# exactly live-packager/job.yaml's shape, and that Job's Secret. RBAC lets it create Jobs, whose
+# pods could otherwise run any image with any Secret of the namespace; this policy is what keeps
+# a compromised gateway from doing so. Cluster-scoped, bound to that one account in that one
+# namespace; every other user, ArgoCD and the RUNBOOK's by-hand start included, is untouched.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ulw-prod-live-packagers
+  labels:
+    app.kubernetes.io/part-of: ulw
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+  matchConditions:
+    - name: from-the-gateway
+      expression: request.userInfo.username == 'system:serviceaccount:apps:video-gateway'
+  variables:
+    - name: isJob
+      expression: request.resource.resource == 'jobs'
+  validations:
+    # Jobs: a packager, named after its stream.
+    - expression: >-
+        !variables.isJob ||
+        (has(object.metadata.labels) &&
+         'app.kubernetes.io/name' in object.metadata.labels &&
+         object.metadata.labels['app.kubernetes.io/name'] == 'live-packager' &&
+         'app.kubernetes.io/instance' in object.metadata.labels &&
+         object.metadata.labels['app.kubernetes.io/instance'] == object.metadata.name)
+      message: a packager Job is labelled live-packager, its instance its own name
+    - expression: >-
+        !variables.isJob ||
+        (size(object.spec.template.spec.containers) == 1 &&
+         object.spec.template.spec.containers[0].image.startsWith(
+           'ghcr.io/jerome-joseph-1/ulw-live-packager:'))
+      message: a packager Job runs one container, of the packager's image
+    - expression: >-
+        !variables.isJob ||
+        ((!has(object.spec.template.spec.initContainers) ||
+          size(object.spec.template.spec.initContainers) == 0) &&
+         (!has(object.spec.template.spec.ephemeralContainers) ||
+          size(object.spec.template.spec.ephemeralContainers) == 0))
+      message: a packager Job has no init or ephemeral containers
+    - expression: >-
+        !variables.isJob || !has(object.spec.template.spec.volumes) ||
+        object.spec.template.spec.volumes.all(v, has(v.emptyDir))
+      message: a packager Job mounts emptyDir volumes only
+    - expression: >-
+        !variables.isJob ||
+        (has(object.spec.template.spec.automountServiceAccountToken) &&
+         object.spec.template.spec.automountServiceAccountToken == false &&
+         (!has(object.spec.template.spec.serviceAccountName) ||
+          object.spec.template.spec.serviceAccountName == 'default'))
+      message: a packager Job runs as the default account, with no token mounted
+    - expression: >-
+        !variables.isJob ||
+        (has(object.spec.template.spec.hostUsers) &&
+         object.spec.template.spec.hostUsers == false &&
+         !(has(object.spec.template.spec.hostNetwork) && object.spec.template.spec.hostNetwork) &&
+         !(has(object.spec.template.spec.hostPID) && object.spec.template.spec.hostPID) &&
+         !(has(object.spec.template.spec.hostIPC) && object.spec.template.spec.hostIPC))
+      message: a packager Job runs in a user namespace, on none of the node's namespaces
+    - expression: >-
+        !variables.isJob ||
+        object.spec.template.spec.containers.all(c,
+          has(c.securityContext) &&
+          has(c.securityContext.allowPrivilegeEscalation) &&
+          c.securityContext.allowPrivilegeEscalation == false &&
+          !(has(c.securityContext.privileged) && c.securityContext.privileged) &&
+          !has(c.envFrom))
+      message: a packager's container gains no privilege and takes no whole Secret
+    - expression: >-
+        !variables.isJob ||
+        object.spec.template.spec.containers.all(c, !has(c.env) ||
+          c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) ||
+            e.valueFrom.secretKeyRef.name in
+              ['live-packager-secrets', 'live-packager-' + object.metadata.name]))
+      message: a packager reads live-packager-secrets and its own stream's Secret only
+    # Secrets: a stream's, of the one plain type, never rewritten.
+    - expression: >-
+        variables.isJob ||
+        (object.metadata.name.startsWith('live-packager-') && object.type == 'Opaque')
+      message: the gateway makes only streams' Secrets, live-packager-<stream>, Opaque
+    - expression: >-
+        variables.isJob || request.operation != 'UPDATE' ||
+        ((has(object.data) ? object.data : {}) == (has(oldObject.data) ? oldObject.data : {}) &&
+         object.type == oldObject.type)
+      message: an update of a stream's Secret changes its metadata only
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ulw-prod-live-packagers
+  labels:
+    app.kubernetes.io/part-of: ulw
+spec:
+  policyName: ulw-prod-live-packagers
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: apps-live

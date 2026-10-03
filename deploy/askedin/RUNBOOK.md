@@ -13,7 +13,7 @@ What ships:
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
 | `overlays/{stage,prod}/chat/` | Deployment (3 replicas, docs/adr/0019), Service, HTTPRoute for its WebSocket (`/rt`), NetworkPolicy; secrets and Postgres settings in step 3 |
 | `overlays/{stage,prod}/live-packager/` | The headless Service that names each stream's packager in DNS, and the NetworkPolicy every packager runs under (step 9) |
-| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream by the gateway's stream service, which carries it in its image; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083, 0091) |
+| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream by the gateway's stream service, which carries it in its image; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083, 0092) |
 | `woodpecker.yml` | Kept for Askedin: builds and pushes the four images to git.askedin.com, which no overlay names any more, then `rollout restart`; the images now come prebuilt from GHCR (step 4) |
 | `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
 | `overlays/{stage,prod}/stunner/` | The TURN Gateway (UDP 3478 on stage, 3479 on prod) and the UDPRoute to LiveKit |
@@ -349,7 +349,7 @@ chat is open. A stream's chat room is named by the stream (docs/adr/0070), and v
 by the stream's name. Only such a room can be live: the database refuses any other id
 (`chat_rooms_live_is_a_stream`), since every chat node tells a live chat by its id alone. The
 gateway's stream service opens the chat of every stream it starts, in the statement that stores
-the stream (docs/adr/0091). A stream started by hand (step 9) needs its chat opened before its
+the stream (docs/adr/0092). A stream started by hand (step 9) needs its chat opened before its
 viewers arrive, as the service's role, with the stream's name for `<stream>`:
 
 ```sql
@@ -368,7 +368,8 @@ recorded kind never changes, so a room that was joined, listed or created before
 including every room from before M19 (migration 0006), needs a new room id.
 
 The chat nodes speak a versioned channel to each other (docs/adr/0043), and a node refuses a
-peer of another version. A release that changes the version (M19 moves it from 2 to 3) splits a
+peer of another version. A release that changes the version (M19 moves it from 2 to 3, the
+call handler from 3 to 4, docs/adr/0087) splits a
 rolling update in two: until the last old pod is gone, old and new nodes cannot reach each
 other, rooms owned across the split are unreachable from the other side, and their joins and
 sends fail as `unavailable` (clients retry them). Roll such a release out with the chat
@@ -854,6 +855,9 @@ New keys for `.env.stage` and `.env.prod` (names only):
 TURN_SECRET              32+ random bytes, base64; the same value in both files
 TURN_HOST                where browsers reach STUNner: the node's public IP, or a DNS name for it
 LIVEKIT_KEYS             "<api key>: <api secret>", the secret at least 32 characters
+LIVEKIT_CLIENT_URL       wss://<a hostname of askedin-gateway>, where browsers reach LiveKit's
+                         /rtc route (overlays/stage/livekit/httproute.yaml); every call ticket
+                         names it
 REDIS_PASSWORD           32+ random characters, letters and digits; LiveKit's and egress's Redis
 ```
 
@@ -889,7 +893,8 @@ deployed (below, "Prod"), guard them to stage; drop the guard in the same change
 
 ```sh
 if [[ $NS == apps-stage ]]; then
-  # Egress takes the pair as two values; both come from LIVEKIT_KEYS, so they cannot disagree.
+  # Egress and chat take the pair as two values; both come from LIVEKIT_KEYS, so they cannot
+  # disagree.
   kubectl -n "$NS" create secret generic sfu-secrets \
     --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
     --from-literal=LIVEKIT_KEYS="$LIVEKIT_KEYS" \
@@ -898,18 +903,24 @@ if [[ $NS == apps-stage ]]; then
     --from-literal=REDIS_PASSWORD="$REDIS_PASSWORD" \
     --from-literal=TURN_HOST="$TURN_HOST" \
     --from-literal=TURN_SECRET="$TURN_SECRET" \
+    --from-literal=LIVEKIT_CLIENT_URL="$LIVEKIT_CLIENT_URL" \
     --dry-run=client -o yaml | kubectl apply -f -
 fi
 ```
 
-The call service gets the same `LIVEKIT_KEYS` pair once it ships. Add Redis, LiveKit and egress
-to the rollout-restart list, in that order (LiveKit does not start without Redis); STUNner
+Chat's call handler (docs/adr/0087) signs tickets with the same pair LiveKit checks them with,
+split out of `LIVEKIT_KEYS` into `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`, names
+`LIVEKIT_CLIENT_URL` in every ticket, and calls LiveKit's server API at `http://livekit:7880` (a
+value in the chat Deployment). The chat Deployment reads those three from `sfu-secrets` as
+optional: in an environment without them, chat starts with calls off and answers every call with
+`calls_disabled`. Add Redis, LiveKit, egress and chat to the rollout-restart list, in that order
+(LiveKit does not start without Redis), since each reads the secret only at start; STUNner
 rereads its secret by itself:
 
 ```sh
 kubectl -n "$NS" rollout restart deployment/livekit-redis
 kubectl -n "$NS" rollout status deployment/livekit-redis
-kubectl -n "$NS" rollout restart deployment/livekit deployment/livekit-egress
+kubectl -n "$NS" rollout restart deployment/livekit deployment/livekit-egress deployment/chat
 ```
 
 To rotate `TURN_SECRET`: change it in both env files, run `scripts/create-turn-secret.sh`, then
@@ -963,6 +974,23 @@ TURN_SECRET=$(set -a; . ./.env.stage; printf '%s' "$TURN_SECRET") \
 
 The secret goes in through the environment, read from the env file, so it never reaches the
 command line or the shell history.
+
+Calls through chat (docs/integration/calls.md). Each chat pod's first log line names where
+tickets send clients, and its metrics say calls are on:
+
+```sh
+kubectl -n apps-stage logs deploy/chat | grep -m1 '"msg":"listening"'   # "calls":"wss://...", not "off"
+kubectl -n apps-stage port-forward deploy/chat 19101:9101 >/dev/null & sleep 2
+curl -s localhost:19101/metrics | grep calls_enabled                       # calls_enabled 1
+kill %1
+```
+
+Then, from a page of an allowed origin signed in as a member of a direct chat (or a native
+client with its bearer token): `join` the room, send `{"type":"call","room":"<room>",
+"device":"<uuid>"}` and expect a `ticket` whose `url` is `LIVEKIT_CLIENT_URL`;
+`room.connect(url, token)` with `livekit-client` must succeed, and a second member's must show
+the first as a participant. `call_errors_total` stays at 0 on every pod; a growing
+`{source="sfu",kind="refused"}` means chat and LiveKit hold different key pairs.
 
 It only sends STUN and TURN requests. Expect `binding.mapped` to be the machine's public
 address (compare `curl -s https://ifconfig.me`): anything else means the node masquerades
@@ -1174,7 +1202,7 @@ start with no keys and refuse every token (`503`) until a fetch succeeds, which 
 
 A live stream reaches viewers as HLS that its packager writes to the bucket (docs/adr/0046),
 from LiveKit's recorder (egress), which the gateway's stream service starts once the publisher's
-WHIP POST has succeeded and the broadcaster's client says so (docs/adr/0053, 0091). A packager
+WHIP POST has succeeded and the broadcaster's client says so (docs/adr/0053, 0092). A packager
 is one process per stream, so on the cluster it is one Job per stream, made from
 `live-packager/job.yaml` (docs/adr/0083) by the stream service. What it takes:
 
@@ -1187,36 +1215,60 @@ is one process per stream, so on the cluster it is one Job per stream, made from
   stores each stream (`live_streams`, migration 0011, run by the gateway's init container),
   hands its owner publisher tickets, opens the stream's live chat, makes the stream's Secret
   (`live-packager-<stream>`, the SRT passphrase) and Job, relays the publisher to it, and ends
-  the stream. It runs as the `video-gateway` service account, whose Role
-  (`video-gateway/live-rbac.yaml`) allows creating Jobs and Secrets, reading Jobs and patching
-  Secrets in the gateway's namespace, and nothing else; `video-gateway/live-networkpolicy.yaml`
+  the stream. It runs as the `video-gateway` service account (`video-gateway/live-rbac.yaml`,
+  its token mounted into the gateway's container alone), which may do one thing: in the
+  packagers' own namespace, `apps-stage-live` (`apps-live` on prod), create Jobs and Secrets
+  and read Jobs back (`live-packager/rbac.yaml`). `live-packager/admission-policy.yaml` (a
+  ValidatingAdmissionPolicy and its binding, cluster-scoped) holds what it creates there to a
+  packager's shape: the packager's image and nothing else, no host namespaces, no token, no
+  Secret but `live-packager-secrets` and the stream's own. `video-gateway/live-networkpolicy.yaml`
   lets the gateway reach LiveKit's API (7880) and the API server (6443). The Job's image tag is
   the gateway's `ULW_LIVE_PACKAGER_IMAGE_TAG`: `main` on stage, a `<sha>@sha256:<digest>` on prod
   (4a). The Job template is the one in the gateway's image, built from this repository's
   `live-packager/job.yaml`; a change to it ships with the gateway.
+- **The packagers' namespace**, `live-packager/namespace.yaml`, with a quota
+  (`resourcequota.yaml`: running pods to the streams the platform takes, and a day's worth of
+  Jobs and Secrets), a default-deny NetworkPolicy beside the packager's own
+  (`default-deny.yaml`, `networkpolicy.yaml`: SRT from egress in the gateway's namespace in;
+  DNS, Postgres and the object store out), and Pod Security enforced at `baseline`, warned at
+  `restricted`. A packager meets `restricted` but for one rule: its sandbox's `procMount:
+  Unmasked`, which `restricted` refuses for any pod and `baseline` admits in a user namespace of
+  the pod's own (`hostUsers: false`), as a packager's is. ArgoCD's account must be allowed to
+  apply the namespace and the cluster-scoped admission policy and binding.
 
 The relay's packager address (the gateway's `ULW_LIVE_PACKAGER_SRT`, ADR-0053) is
-`srt://{stream}.live-packager.apps-stage.svc.cluster.local:9000` on stage, and `.apps.` in
-place of `.apps-stage.` on prod: `overlays/*/live-packager/service.yaml` gives each packager pod
-that name.
+`srt://{stream}.live-packager.apps-stage-live.svc.cluster.local:9000` on stage, and
+`.apps-live.` in place of `.apps-stage-live.` on prod: `overlays/*/live-packager/service.yaml`
+gives each packager pod that name.
 
 The gateway takes LiveKit's key pair from `sfu-secrets` (step 7), the same values egress uses,
 so there is no gateway key to add. Check after the first rollout that the account works, and that
 it can do nothing more:
 
 ```sh
-NS=apps-stage
-for verb in "create jobs" "get jobs" "create secrets" "patch secrets"; do
-  kubectl -n "$NS" auth can-i $verb --as=system:serviceaccount:$NS:video-gateway   # yes
+NS=apps-stage LIVE=apps-stage-live          # prod: NS=apps LIVE=apps-live
+AS=--as=system:serviceaccount:$NS:video-gateway
+for verb in "create jobs" "get jobs" "create secrets"; do
+  kubectl -n "$LIVE" auth can-i $verb $AS     # yes
 done
-for verb in "get secrets" "list jobs" "delete jobs" "create pods/exec"; do
-  kubectl -n "$NS" auth can-i $verb --as=system:serviceaccount:$NS:video-gateway   # no
+for verb in "get secrets" "list jobs" "delete jobs" "patch secrets" "create pods/exec"; do
+  kubectl -n "$LIVE" auth can-i $verb $AS     # no
 done
+kubectl -n "$NS" auth can-i create jobs $AS   # no: nothing in the gateway's own namespace
 kubectl -n "$NS" logs deploy/video-gateway | grep -m1 '"name":"ULW_LIVE_PACKAGER"'
 ```
 
+The admission policy is checked, case by case, with a server-side dry run of the template and of
+every way it must refuse (nothing is stored), and Pod Security with the template's own dry run,
+which must answer with no `baseline` refusal (a `restricted` warning for `procMount` is
+expected):
+
+```sh
+python3 deploy/local/check-live-admission.py stage -- kubectl    # prod: prod
+```
+
 A stream then runs without anyone on the cluster: the broadcaster's client starts it, publishes,
-goes live and ends it; `kubectl -n "$NS" get jobs -l app.kubernetes.io/name=live-packager`
+goes live and ends it; `kubectl -n "$LIVE" get jobs -l app.kubernetes.io/name=live-packager`
 lists its packagers, and each Job's log ends `recording: queued as video <id>`. The gateway's
 `live_streams_ended_total{reason="failed"}` or `{reason="timeout"}` rising means packagers that
 did not start or relays that never reached them: look at the Jobs' events and logs, and at
@@ -1244,15 +1296,17 @@ the policy is wrong; streams then still go live through `start` and end through 
 sweep, as before.
 
 **Prod**, at phase-6, once egress is applied there (step 7): add the same block of environment
-to `overlays/prod/video-gateway/deployment.yaml` as stage's (`serviceAccountName`,
-`automountServiceAccountToken: true`, and the `LIVEKIT_*` and `ULW_LIVE_*` variables, with
-`apps` for `apps-stage`, `wss://askedin.com` for the client URL, `ULW_LIVE_MAX_STREAMS` `"2"` and
-the packager's tag by digest), with its `hooks` port and `ULW_LIVE_WEBHOOK_PORT` and
-`ULW_LIVE_PUBLISHER_GRACE_SECONDS`; and add stage's `LIVEKIT_API_KEY` variable and `webhook`
-block to `overlays/prod/livekit/deployment.yaml`, with `.apps.` for `.apps-stage.` in its URL.
-`live-rbac.yaml`, `live-networkpolicy.yaml` and `live-hooks.yaml` already ship in prod's overlay;
-they grant nothing until the Deployment names the account and listens on the port. Until then
-prod's stream routes answer `404`.
+to `overlays/prod/video-gateway/deployment.yaml` as stage's (`serviceAccountName`, the
+`kube-api` volume and its mount, and the `LIVEKIT_*`, `ULW_LIVE_*` and `ULW_K8S_*` variables,
+with `apps` for `apps-stage`, `apps-live` for `apps-stage-live`, `wss://askedin.com` for the
+client URL, `ULW_LIVE_MAX_STREAMS` `"2"` and the packager's tag by digest). Prod's
+`live-packager/` (namespace, Role, admission policy, quota, policies) and
+`video-gateway/live-*.yaml` already ship; they grant nothing until the Deployment names the
+account. With it, add the `hooks` port, `ULW_LIVE_WEBHOOK_PORT` and
+`ULW_LIVE_PUBLISHER_GRACE_SECONDS` to the Deployment, and stage's `LIVEKIT_API_KEY` variable and
+`webhook` block to `overlays/prod/livekit/deployment.yaml`, with `.apps.` for `.apps-stage.` in
+its URL; `video-gateway/live-hooks.yaml` admits nothing until the gateway listens on the port.
+Until then prod's stream routes answer `404`.
 
 ### Secrets and the database role
 
@@ -1279,10 +1333,11 @@ GRANT INSERT ON jobs TO ulw_stage_live;
 GRANT USAGE ON SEQUENCE jobs_id_seq TO ulw_stage_live;
 ```
 
-Lines for `scripts/create-k8s-secrets.sh`:
+Lines for `scripts/create-k8s-secrets.sh`, in the packagers' namespace (`apps-stage-live`,
+`apps-live`), where every packager runs:
 
 ```sh
-kubectl -n "$NS" create secret generic live-packager-secrets \
+kubectl -n "$LIVE" create secret generic live-packager-secrets \
   --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
   --from-literal=ULW_DATABASE_URL="$VIDEO_LIVE_DATABASE_URL" \
   --from-literal=ULW_R2_ACCOUNT_ID="$VIDEO_R2_ACCOUNT_ID" \
@@ -1317,7 +1372,7 @@ letters, digits and `-`, 1 to 63 (ADR-0053). The passphrase is the stream's own,
 characters, and goes only into its Secret and the relay request:
 
 ```sh
-NS=apps-stage TAG=main                 # prod: NS=apps TAG=<sha>@sha256:<digest> (4a)
+NS=apps-stage-live TAG=main            # prod: NS=apps-live TAG=<sha>@sha256:<digest> (4a)
 STREAM=launch-2026
 OWNER=<the broadcaster's Askedin user id (sub)>
 kubectl -n "$NS" create secret generic "live-packager-$STREAM" \

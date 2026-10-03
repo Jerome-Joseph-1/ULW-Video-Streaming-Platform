@@ -1,9 +1,7 @@
-# The stream service in the gateway (docs/adr/0091) starts each live stream's packager as a Job
-# from live-packager/job.yaml, with the stream's SRT passphrase in a Secret of its own that the
-# Job then owns (so the Job's removal a day after it finishes takes the Secret along). This is
-# the account it does that with, and all it may do: make Jobs and Secrets in this namespace,
-# read Jobs back for their status, and patch a Secret to name its Job as owner. It reads no
-# Secret, lists nothing, deletes nothing, and runs nothing in a pod.
+# The gateway's own account (docs/adr/0092). It may do nothing in apps: its one Role is in the
+# packagers' namespace, apps-live (live-packager/rbac.yaml), where it creates each live stream's
+# Job and Secret, held to a packager's shape by live-packager/admission-policy.yaml. Its token is
+# mounted into the gateway's container alone (video-gateway/deployment.yaml), not the pod's.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -12,36 +10,4 @@ metadata:
   labels:
     app.kubernetes.io/name: video-gateway
     app.kubernetes.io/part-of: ulw
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: video-gateway-live-packagers
-  namespace: apps
-  labels:
-    app.kubernetes.io/name: video-gateway
-    app.kubernetes.io/part-of: ulw
-rules:
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["create", "get"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: video-gateway-live-packagers
-  namespace: apps
-  labels:
-    app.kubernetes.io/name: video-gateway
-    app.kubernetes.io/part-of: ulw
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: video-gateway-live-packagers
-subjects:
-  - kind: ServiceAccount
-    name: video-gateway
-    namespace: apps
+automountServiceAccountToken: false

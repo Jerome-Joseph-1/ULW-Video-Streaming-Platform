@@ -96,7 +96,7 @@ struct WebhookEvent {
 [[nodiscard]] std::optional<WebhookEvent> parse_webhook_event(std::string_view body);
 
 // The stream a LiveKit room belongs to: the stream service names a stream's room
-// "<stream id>:1", its one generation (ADR-0091). Anything else is no stream's room.
+// "<stream id>:1", its one generation (ADR-0092). Anything else is no stream's room.
 [[nodiscard]] std::optional<core::LiveStreamId> stream_of_room(std::string_view room);
 
 // The owner, when `identity` is the publisher of `stream`: "<owner>/<stream id>", the identity

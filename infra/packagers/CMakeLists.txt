@@ -1,4 +1,4 @@
-# How the stream service starts a stream's packager (ADR-0091): a child process, or a Kubernetes
+# How the stream service starts a stream's packager (ADR-0092): a child process, or a Kubernetes
 # Job through the API server.
 ulw_add_library(packagers
     src/kubernetes_packagers.cpp

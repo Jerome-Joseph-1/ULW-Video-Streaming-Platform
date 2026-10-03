@@ -43,7 +43,7 @@ public:
     PgLiveStreams(PgLiveStreams&&) = delete;
     PgLiveStreams& operator=(PgLiveStreams&&) = delete;
 
-    void create(core::ports::NewLiveStream stream, std::uint32_t max_unfinished,
+    void create(core::ports::NewLiveStream stream, core::ports::LiveLimits limits,
                 core::ports::LiveCallback<core::ports::CreatedLiveStream> done) override;
     void find(const core::LiveStreamId& id,
               core::ports::LiveCallback<core::ports::LiveStream> done) override;

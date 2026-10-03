@@ -1,4 +1,4 @@
-// The stream service's routes (ADR-0091) through a real gateway shard, over fakes of the
+// The stream service's routes (ADR-0092) through a real gateway shard, over fakes of the
 // service's store, media server and packagers.
 #include "core/util/json.hpp"
 
@@ -215,6 +215,21 @@ TEST_F(GatewayStreams, FailuresAnswerAsDocumented) {
     });
     const std::string id = text_at(json_of(send("POST", "/api/v1/live", kAlice)), "id");
     EXPECT_EQ(send("POST", "/api/v1/live/" + id + "/start", kAlice).status, 503);
+}
+
+TEST_F(GatewayStreams, OnlyATokenCarryingTheBroadcasterClaimStartsAStream) {
+    // "viewer." tokens verify without what ULW_LIVE_BROADCASTER_CLAIM asks for.
+    EXPECT_EQ(send("POST", "/api/v1/live", "viewer.alice").status, 403);
+    const std::string id = create();
+    // Watching needs nothing of the kind.
+    EXPECT_EQ(send("GET", "/api/v1/live/" + id, "viewer.bob").status, 200);
+}
+
+TEST_F(GatewayStreams, AUserPastTheHourlyCountIsToldToWait) {
+    gw.with_live([](LiveFakes& f) { f.store.fail = core::ports::LiveStoreError::TooMany; });
+    const HttpResponse r = send("POST", "/api/v1/live", kAlice);
+    EXPECT_EQ(r.status, 429);
+    EXPECT_EQ(r.header("retry-after"), "600");
 }
 
 TEST_F(GatewayStreams, RequestsCarryNoBodyAndNeedAToken) {

@@ -17,11 +17,13 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
+#include <string>
 #include <vector>
 
 namespace gateway {
 
-// The stream service (ADR-0091): starts a user's live stream, hands its owner publisher tickets,
+// The stream service (ADR-0092): starts a user's live stream, hands its owner publisher tickets,
 // starts the stream's packager and the relay to it when the owner goes live, ends it when the
 // owner asks, and notices when it has ended by itself. The rows live in Postgres, so any gateway
 // process can serve any request for any stream; nothing here is the only copy of anything.
@@ -31,13 +33,16 @@ struct LiveSettings {
     core::Seconds segment{2};
     // Unfinished streams the platform takes at once: what egress can relay (RUNBOOK step 9).
     std::uint32_t max_streams = 2;
+    // Streams one user may create in an hour, whatever becomes of them: what a client looping
+    // on create and end can cost the platform (rooms, Jobs, rows).
+    std::uint32_t streams_per_user_per_hour = 6;
     // How long going live waits for the stream's packager to listen: a Job's pod is scheduled
     // and its image pulled first.
     core::Millis ready_wait{30'000};
     core::Millis ready_poll{500};
-    // A stream nobody took live in this long is ended. Its tickets lasted a minute each, so the
-    // window is the owner's time to set up an encoder, not a credential's lifetime.
-    core::Seconds start_window{600};
+    // A stream nobody took live in this long is ended: two tickets' worth, the time to post an
+    // offer and go live, with room for an encoder set up by hand.
+    core::Seconds start_window{120};
     // The longest stream (ULW_LIVE_MAX_HOURS, 12 h) and an hour for its recording: past this
     // the stream is ended whatever its packager says.
     core::Seconds max_age{std::chrono::hours(13)};
@@ -63,6 +68,8 @@ enum class LiveFailure : std::uint8_t {
     Ended,
     // The platform runs as many streams as it takes.
     Full,
+    // The user created as many streams in the last hour as one may.
+    RateLimited,
     // A dependency did not answer or is busy; a retry may succeed.
     Unavailable,
     // A dependency refused the request as made, or a stored row is broken.
@@ -180,6 +187,9 @@ private:
     std::size_t sweep_index_ = 0;
     bool sweeping_ = false;
     std::size_t pending_ = 0;
+    // Streams whose end a viewer's playlist reported and that are being ended: every viewer
+    // polling the status sees the same end, and one end is enough.
+    std::set<std::string, std::less<>> ending_;
 };
 
 [[nodiscard]] std::string_view to_string(LiveFailure f) noexcept;
