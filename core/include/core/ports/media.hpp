@@ -21,8 +21,8 @@ enum class MediaError : std::uint8_t {
     Refused,
     // The room was closed through this handle; its generation admits nobody again.
     Closed,
-    // The media server supports the call, but this adapter does not implement it yet (group
-    // calls, ADR-0058). Permanent for the build: retrying cannot help.
+    // The media server supports the call, but this adapter does not implement it (ADR-0058).
+    // Permanent for the build: retrying cannot help.
     NotImplemented,
 };
 
@@ -38,8 +38,9 @@ struct MediaTicket {
     WallTime expires_at;
 };
 
-// One connected device in a room, as the media server reports it. Group calls (M27) read the
-// roster to check that a room holds everyone who was admitted and no one else.
+// One connected device in a room, as the media server reports it. A group call's owner reads the
+// roster to know whether anyone is still in the call, and whether a new device would fit
+// (ADR-0095).
 struct MediaParticipant {
     UserId user;
     DeviceId device;
@@ -105,8 +106,9 @@ public:
     virtual void join(const UserId& user, const DeviceId& device, MediaRole role,
                       TicketDone done) = 0;
     // Who is connected to this generation right now, in no particular order; a ticket that has
-    // been issued but not used does not count. Group calls only (ADR-0058): an adapter without
-    // them reports `NotImplemented`.
+    // been issued but not used does not count, and neither does anything connected that is not
+    // a member (a relay's recorder). A generation the media server has dropped holds nobody.
+    // `Closed` through a handle that was closed.
     virtual void participants(ParticipantsDone done) = 0;
     // Sends what that participant publishes to `target`'s packager, re-encoded for it, until
     // the participant leaves or the generation closes; its leaving is how the packager learns

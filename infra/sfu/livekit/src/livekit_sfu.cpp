@@ -226,6 +226,68 @@ std::expected<std::optional<std::string>, MediaError> running_relay(std::string_
     return std::nullopt;
 }
 
+// A room's participants, each with its tracks, about 1 to 2 KiB apiece; a group call holds 16
+// at most (ADR-0095), and 64 KiB leaves room for LiveKit's own recorder joining one.
+constexpr CallLimits kListParticipantsLimits{.timeout = core::Millis{5000},
+                                             .max_response = std::size_t{64} * 1024};
+
+// A JSON integer LiveKit's Twirp may write either way: protojson writes int64 as a string.
+std::optional<std::int64_t> integer_of(const core::json::Value* value) noexcept {
+    if (value == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto number = value->as_i64()) {
+        return number;
+    }
+    const auto text = value->as_string();
+    if (!text) {
+        return std::nullopt;
+    }
+    return core::parse_integer<std::int64_t>(*text);
+}
+
+// The members connected to a room, from a ListParticipants answer: identities that are not
+// "<user>/<device>" (LiveKit's recorder, a WHIP source) are not members, and participants that
+// are leaving no longer count. A room LiveKit does not have answers with no list: nobody.
+std::expected<std::vector<core::ports::MediaParticipant>, MediaError>
+participants_of(std::string_view answer) {
+    std::vector<core::ports::MediaParticipant> out;
+    if (answer.empty()) {
+        return out;
+    }
+    const auto parsed = core::json::parse(answer);
+    if (!parsed) {
+        return std::unexpected(MediaError::Unavailable);
+    }
+    const core::json::Value* list = parsed->find("participants");
+    if (list == nullptr || list->as_array() == nullptr) {
+        return out;
+    }
+    for (const core::json::Value& p : *list->as_array()) {
+        const core::json::Value* identity = p.find("identity");
+        const auto text = identity != nullptr ? identity->as_string() : std::nullopt;
+        const core::json::Value* state = p.find("state");
+        if (!text || (state != nullptr && state->as_string() == "DISCONNECTED")) {
+            continue;
+        }
+        const auto slash = text->find('/');
+        if (slash == std::string_view::npos) {
+            continue;
+        }
+        const auto user = core::UserId::parse(text->substr(0, slash));
+        const auto device = core::DeviceId::parse(text->substr(slash + 1));
+        if (!user || !device) {
+            continue;
+        }
+        const auto ms = integer_of(p.find("joined_at_ms"));
+        const auto seconds = integer_of(p.find("joined_at"));
+        const core::Millis since = ms ? core::Millis{*ms}
+                                      : core::Millis{seconds.value_or(0) * 1000};
+        out.push_back({.user = *user, .device = *device, .joined_at = core::WallTime{since}});
+    }
+    return out;
+}
+
 std::string identity_of(const core::UserId& user, const core::DeviceId& device) {
     // A user id never holds '/', so the identity splits back apart unambiguously.
     std::string identity(user.view());
@@ -364,11 +426,32 @@ public:
     }
 
     void participants(core::ports::ParticipantsDone done) override {
-        // Through the service so the callback runs later, never inside this call.
-        service_.fail(MediaError::NotImplemented,
-                      [done = std::move(done)](Answer r) mutable noexcept {
-                          done(std::unexpected(r.error()));
-                      });
+        if (closed_) {
+            service_.fail(MediaError::Closed, [done = std::move(done)](Answer r) mutable noexcept {
+                done(std::unexpected(r.error()));
+            });
+            return;
+        }
+        std::string body = R"({"room":)";
+        core::json::append_string(body, name_);
+        body += '}';
+        // A room LiveKit dropped for standing empty holds nobody: not found is an answer.
+        service_.fetch(
+            "RoomService/ListParticipants", std::move(body),
+            Grant{.permission = Permission::AdminRoom, .room = name_, .identity = {}},
+            kListParticipantsLimits,
+            [done = std::move(done)](Answer listed) mutable noexcept {
+                if (!listed) {
+                    done(std::unexpected(listed.error()));
+                    return;
+                }
+                try {
+                    done(participants_of(*listed));
+                } catch (const std::bad_alloc&) {
+                    done(std::unexpected(MediaError::Unavailable));
+                }
+            },
+            IfAbsent::Succeed);
     }
 
     void relay(const core::UserId& user, const core::DeviceId& device,

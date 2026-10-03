@@ -33,6 +33,11 @@ void append_video_grant(std::string& out, const Grant& grant) {
     case Permission::CreateRooms:
         out += R"("roomCreate":true)";
         break;
+    case Permission::AdminRoom:
+        out += R"("room":)";
+        core::json::append_string(out, grant.room);
+        out += R"(,"roomAdmin":true)";
+        break;
     case Permission::RecordRoom:
         out += R"("roomRecord":true)";
         break;
