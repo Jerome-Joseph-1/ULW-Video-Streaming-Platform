@@ -37,7 +37,8 @@ spec:
           # redis 7.4.6 (alpine), the image deploy/local/compose.yaml's calls profile runs.
           image: docker.io/library/redis:7.4.6-alpine@sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
           imagePullPolicy: IfNotPresent
-          # Started as a non-root user, the image's entrypoint runs redis-server as it is.
+          # redis-server directly: command replaces the image's entrypoint script, whose only
+          # job (dropping from root with gosu) a pod already running as 10001 does not need.
           # The password is an argument, so it shows in this pod's own process list only.
           command:
             - redis-server

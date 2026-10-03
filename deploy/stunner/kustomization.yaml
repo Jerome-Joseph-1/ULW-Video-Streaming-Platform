@@ -49,6 +49,17 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
+  # Redis requests 50m on Askedin's node; one kind node on a 4-core runner has almost no CPU
+  # left to reserve once the gateways, the worker, chat, LiveKit and STUNner's dataplane hold
+  # theirs (deploy/local/cluster/chat-patch.yaml says the same of chat), so the sandbox's Redis
+  # reserves next to nothing and runs on what is idle. Memory is left as the target has it.
+  - target:
+      kind: Deployment
+      name: livekit-redis
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 10m
   # The kind node has no load balancer: the TURN listener is a NodePort, which kind.yaml
   # publishes on the outside network as 198.18.0.1:3478. That is the address clients use, so
   # the Gateway names it; STUNner reports a Gateway Programmed only once it knows one.

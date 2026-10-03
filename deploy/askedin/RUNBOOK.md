@@ -964,11 +964,11 @@ it before its phase is tagged on stage**: STUNner, LiveKit and Redis after phase
 calls), egress after phase-6 (live), each once stage has passed "Verify on stage" above. Until
 then the prod overlays stay out of the monorepo's prod tree. What differs from stage, and why:
 
-- **TURN on UDP 3479, not 3478.** Stage and prod share k8s-prod's one node, ServiceLB publishes
-  each LoadBalancer Service on that node's address, and stage's Gateway already holds UDP 3478
-  there; a second Service on 3478 would stay pending. Prod gets a Gateway of its own rather
-  than a route on stage's, so its relay reaches prod's LiveKit only. LiveKit's
-  `rtc.turn_servers` names 3479 to match.
+- **TURN on UDP 3479, not 3478** (docs/adr/0084). Stage and prod share k8s-prod's one node,
+  ServiceLB publishes each LoadBalancer Service on that node's address, and stage's Gateway
+  already holds UDP 3478 there; a second Service on 3478 would stay pending. Prod gets a
+  Gateway of its own rather than a route on stage's, so its relay reaches prod's LiveKit only.
+  LiveKit's `rtc.turn_servers` names 3479 to match.
 - **Signalling on Askedin's prod hostnames.** Prod's HTTPRoute names `askedin.com` and
   `www.askedin.com`, stage's `stage.askedin.com`, as every ULW route does (step 4): both attach
   to the one `askedin-gateway`, and each answers its own environment's hosts only. A call or
