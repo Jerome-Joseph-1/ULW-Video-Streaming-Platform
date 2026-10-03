@@ -22,7 +22,8 @@ What to do:
 
 - **Broadcaster clients:** follow the flow in [live.md](live.md#starting-a-stream): create,
   POST the offer, `start`, a fresh ticket before every later WHIP request, then DELETE or `end`.
-  One unfinished stream per user.
+  One unfinished stream per user, a few started an hour (`429` past them), and, where the
+  deployment names a broadcaster claim, only users holding it (`403` for others).
 - **Viewer clients:** nothing changes for the playlist. `GET /api/v1/live/{id}` says whether a
   stream is `starting`, `live` or `ended`.
 - **Operators:** the gateway needs LiveKit's API key and the packager settings, and on the

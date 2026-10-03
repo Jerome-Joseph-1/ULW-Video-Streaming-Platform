@@ -11,7 +11,8 @@ store (ADR-0014), fetched the same way as VOD ([videos-and-playback.md](videos-a
 playlists through the gateway, segments from presigned store URLs. Live playlists are cached for
 less than VOD's 60 s. When a stream ends its recording becomes an ordinary video that goes
 through `processing` to `ready`. Live chat is a chat room in lossy delivery mode
-([chat.md](chat.md)), joined by the stream's id, and open from the moment the stream is started.
+([chat.md](chat.md)), joined by the stream's id, open from the moment the stream is started and
+closed to new joins once it ends.
 
 ## Starting a stream
 
@@ -40,9 +41,15 @@ The stream, as every one of these answers it (`Cache-Control: no-store`):
 | `state` | `starting` (tickets issued, nothing relayed yet), `live` (its packager runs and the publisher is relayed to it) or `ended`. It only moves forward |
 | `playlist` | Where viewers watch: `/api/v1/live/{id}/index.m3u8` ([Watching a stream](#watching-a-stream)) |
 | `created_at`, `live_at`, `ended_at` | Unix seconds, or `null` until then |
-| `ended_by` | `null` until it ends; then `owner` (ended with `end`), `finished` (the publisher went: a WHIP DELETE, the media server dropping it, 12 hours, or a broken stream), `failed` (its packager could not run) or `timeout` (not taken live within 10 minutes of `POST /api/v1/live`, or past 13 hours) |
+| `ended_by` | `null` until it ends; then `owner` (ended with `end`), `finished` (the publisher went: a WHIP DELETE, the media server dropping it, 12 hours, or a broken stream), `failed` (its packager could not run) or `timeout` (not taken live within 2 minutes of `POST /api/v1/live`, or past 13 hours) |
 | `video_id` | The owner only: the recording's video once it is queued, else `null` ([When a stream ends](#when-a-stream-ends)). Absent for anyone else |
 | `publish` | `POST /api/v1/live` only: the first publisher ticket |
+
+Who may broadcast: any signed-in user, unless the deployment names a claim
+(`ULW_LIVE_BROADCASTER_CLAIM`, [operations-contract.md](operations-contract.md)): then only a
+token whose claim holds the value it names (a string equal to it, an array holding it, or
+`true`) may start a stream; anyone signed in may still watch. Each user may start a few streams
+an hour, however each ends, and the platform runs a fixed number at once.
 
 The flow:
 
@@ -54,7 +61,7 @@ The flow:
    stream's packager, waits for it (seconds; up to 30), and has the media server relay the
    publisher to it; the answer is the stream, `live`. Call it within 30 s of the POST's `201`:
    the media server's recorder looks for the publisher that long. It is idempotent: retry it on
-   `503` or a lost answer. A stream nobody takes live within 10 minutes is ended (`timeout`).
+   `503` or a lost answer. A stream nobody takes live within 2 minutes is ended (`timeout`).
 4. Before every WHIP request after the POST (each PATCH, an ICE restart, the DELETE), `POST
    /api/v1/live/{id}/ticket` for a fresh ticket.
 5. To stop, DELETE the WHIP session with a fresh ticket, or `POST /api/v1/live/{id}/end`, or
@@ -69,10 +76,10 @@ the playlist is, and the stream's chat is joined by the same id ([chat.md](chat.
 | Status | Meaning | Client action |
 |---|---|---|
 | `401` | No token, or a bad one | Sign in again |
-| `403` | The auth cookie from a page that is not allowed, or without `Origin` | Send the request from the app's own page, or with `Authorization` |
+| `403` | The auth cookie from a page that is not allowed, or without `Origin`; or, on `POST /api/v1/live`, a user the deployment does not let broadcast (below) | Send the request from the app's own page, or with `Authorization`; a user who may not broadcast should not be offered it |
 | `404` | No such stream, or not the caller's to act on | Stop |
 | `409` | The stream has ended: no ticket, and no going live again | Start a new stream |
-| `429` | The user's request rate is used up | Wait `Retry-After` |
+| `429` | The user's request rate is used up, or, on `POST /api/v1/live`, the user started as many streams in the last hour as one may (6 by default; `Retry-After: 600`) | Wait `Retry-After` |
 | `503` | The platform runs as many streams as it takes (`Retry-After: 60`), or the database, the media server or the packager runtime is unavailable or slow (`Retry-After: 2`). An `end` answered `503` has ended the stream all the same; repeat it so the publisher is disconnected | Retry after `Retry-After` |
 | `500` | A dependency refused the request as made | Report with `X-Request-Id` |
 
