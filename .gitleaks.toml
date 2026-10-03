@@ -55,3 +55,14 @@ condition = "AND"
 paths = ['''^\.github/workflows/[a-z0-9-]+\.yml$''']
 regexTarget = "line"
 regexes = ['''^\s*cache-key:\s*[a-z0-9-]+\s*$''']
+
+# RFC 8291 Appendix A's published test vectors (the user agent's public key, auth secret and
+# salt, and the application server's private key): example values from the RFC, nobody's secret.
+[[allowlists]]
+description = "RFC 8291 Web Push test vectors"
+targetRules = ["generic-api-key"]
+paths = [
+    '''^tests/unit/chat/config_test\.cpp$''',
+    '''^tests/unit/chat/envelope_test\.cpp$''',
+    '''^tests/unit/webpush/ece_test\.cpp$''',
+]
