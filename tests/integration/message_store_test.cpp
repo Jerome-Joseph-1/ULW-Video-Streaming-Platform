@@ -400,6 +400,60 @@ TEST_F(MessageStoreTest, AJoinOfARecordedRoomWritesNothing) {
     EXPECT_EQ(xmin(), before);
 }
 
+// What a call's handler reads of a room (ADR-0050): its recorded kind and whether a user is
+// listed, and nothing written, not even for a room nobody has recorded.
+TEST_F(MessageStoreTest, AccessReadsTheKindAndTheListAndWritesNothing) {
+    using core::ports::RoomAccess;
+    using core::ports::RoomKind;
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    const auto access = [&](const core::RoomId& room, const core::UserId& user) {
+        return ask<RoomAccess>([&](auto done) { store_->access(room, user, std::move(done)); });
+    };
+    const auto rows = [&](const core::RoomId& room) {
+        return scalar(*conn_,
+                      "SELECT (SELECT count(*) FROM chat_rooms WHERE room_id = $1) + "
+                      "(SELECT count(*) FROM chat_members WHERE room_id = $1)",
+                      Params{}.add_uuid(room.uuid()));
+    };
+    const core::RoomId unrecorded = new_room();
+    EXPECT_EQ(access(unrecorded, alice_), (RoomAccess{.kind = std::nullopt, .member = false}));
+    EXPECT_EQ(rows(unrecorded), "0");
+
+    const core::RoomId direct = new_room();
+    EXPECT_EQ(ask<core::ports::Admission>([&](auto done) {
+                  store_->admits(direct, alice_, RoomKind::DirectChat, std::move(done));
+              }),
+              core::ports::Admission::NotMember);
+    EXPECT_EQ(access(direct, alice_), (RoomAccess{.kind = RoomKind::DirectChat, .member = false}));
+
+    const core::RoomId group = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(group, alice_, std::move(done)); }));
+    const auto xmin = [&] {
+        return scalar(*conn_, "SELECT xmin::text FROM chat_rooms WHERE room_id = $1",
+                      Params{}.add_uuid(group.uuid()));
+    };
+    const std::string before = xmin();
+    EXPECT_EQ(access(group, alice_), (RoomAccess{.kind = RoomKind::GroupChat, .member = true}));
+    EXPECT_EQ(access(group, bob), (RoomAccess{.kind = RoomKind::GroupChat, .member = false}));
+    EXPECT_EQ(xmin(), before);
+    EXPECT_EQ(rows(group), "2");
+
+    const core::RoomId live = stream_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
+    EXPECT_EQ(access(live, bob), (RoomAccess{.kind = RoomKind::StreamLiveChat, .member = false}));
+}
+
+// A store whose database cannot be reached answers unavailable, never a room's access.
+TEST_F(MessageStoreTest, AccessOnADatabaseThatCannotBeReachedIsUnavailable) {
+    auto store = PgMessageStore::create(
+        *reactor_, *offload_,
+        {.conninfo = "postgresql://ulw@127.0.0.1:1/ulw", .connect_timeout = core::Millis{2000}});
+    ASSERT_TRUE(store) << store.error();
+    EXPECT_EQ(ask<core::ports::RoomAccess>(
+                  [&](auto done) { (*store)->access(new_room(), alice_, std::move(done)); }),
+              std::unexpected(core::ports::MessageStoreError::Unavailable));
+}
+
 // Membership is what keeps a closed room closed: a member taken off is refused at the next join,
 // and taking them off again, or taking off someone never added, changes nothing.
 TEST_F(MessageStoreTest, AMemberTakenOffAClosedRoomIsNoLongerAdmitted) {
