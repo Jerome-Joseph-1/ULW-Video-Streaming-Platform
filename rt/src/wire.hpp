@@ -18,8 +18,9 @@
 // node or sender is a length byte and its characters. A body runs to the end of its frame.
 namespace rt::wire {
 
-// 2: Send and Deliver carry the client's message key. 3: a Reply may say Conflict.
-inline constexpr std::uint8_t kVersion = 3;
+// 2: Send and Deliver carry the client's message key. 3: a Reply may say Conflict. 4: Ask and
+// Answer carry what a room's owner answers for its members (a call's ticket, ADR-0050).
+inline constexpr std::uint8_t kVersion = 4;
 // The largest message a client may send (codec::ws::Decoder's 64 KiB, ADR-0029), plus room for
 // the other fields, which take at most 239 bytes (a Send: type, request, room, sender, key).
 inline constexpr std::size_t kMaxBody = std::size_t{64} * 1024;
@@ -52,6 +53,11 @@ enum class Type : std::uint8_t {
     Challenge = 7,
     // Dialer to owner, answering Challenge: the dialer's proof. Nothing else is taken first.
     Proof = 8,
+    // Dialer to owner: a request the room's owner answers itself (IOwnerService). Answered with
+    // an Answer.
+    Ask = 9,
+    // Owner to dialer: the outcome of an Ask, and the owner's answer when it is Ok.
+    Answer = 10,
 };
 
 enum class Status : std::uint8_t {
@@ -110,7 +116,20 @@ struct Deliver {
     std::span<const std::byte> body;
 };
 
-using Frame = std::variant<Hello, Challenge, Proof, Subscribe, Unsubscribe, Send, Reply, Deliver>;
+// The body is a view, as Send's; at most kMaxBody either way.
+struct Ask {
+    std::uint64_t request = 0;
+    core::RoomId room;
+    std::span<const std::byte> body;
+};
+struct Answer {
+    std::uint64_t request = 0;
+    Status status = Status::Ok;
+    std::span<const std::byte> body;
+};
+
+using Frame = std::variant<Hello, Challenge, Proof, Subscribe, Unsubscribe, Send, Reply, Deliver,
+                           Ask, Answer>;
 
 void encode_hello(std::vector<std::byte>& out, const core::NodeId& node, const Nonce& nonce);
 void encode_challenge(std::vector<std::byte>& out, const core::NodeId& node, const Nonce& nonce,
@@ -127,6 +146,11 @@ void encode_reply(std::vector<std::byte>& out, std::uint64_t request, Status sta
 void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::uint64_t seq,
                     const core::UserId& sender, const MessageKey& key,
                     std::span<const std::byte> body);
+// Bodies above kMaxBody are the caller's bug, as for encode_send.
+void encode_ask(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
+                std::span<const std::byte> body);
+void encode_answer(std::vector<std::byte>& out, std::uint64_t request, Status status,
+                   std::span<const std::byte> body);
 
 enum class DecodeError : std::uint8_t {
     // A length of zero or above kMaxFrame.

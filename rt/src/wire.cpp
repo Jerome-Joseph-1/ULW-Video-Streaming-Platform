@@ -153,6 +153,27 @@ private:
     std::span<const std::byte> rest_;
 };
 
+std::optional<Frame> ask_of(Cursor& in) noexcept {
+    const auto request = in.u64();
+    const auto room = in.room();
+    const auto body = in.rest();
+    if (!request || !room || body.size() > kMaxBody) {
+        return std::nullopt;
+    }
+    return Ask{.request = *request, .room = *room, .body = body};
+}
+
+std::optional<Frame> answer_of(Cursor& in) noexcept {
+    const auto request = in.u64();
+    const auto status = in.u8();
+    const auto body = in.rest();
+    if (!request || !status || *status > static_cast<std::uint8_t>(Status::Conflict) ||
+        body.size() > kMaxBody) {
+        return std::nullopt;
+    }
+    return Answer{.request = *request, .status = static_cast<Status>(*status), .body = body};
+}
+
 std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
     switch (type) {
     case Type::Hello: {
@@ -229,6 +250,10 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         }
         return Deliver{.room = *room, .seq = *seq, .sender = *sender, .key = *key, .body = body};
     }
+    case Type::Ask:
+        return ask_of(in);
+    case Type::Answer:
+        return answer_of(in);
     }
     return std::nullopt;
 }
@@ -243,7 +268,7 @@ std::optional<Frame> parse(Type type, Cursor in) noexcept {
 
 std::optional<Type> type_of(std::uint8_t byte) noexcept {
     if (byte < static_cast<std::uint8_t>(Type::Hello) ||
-        byte > static_cast<std::uint8_t>(Type::Proof)) {
+        byte > static_cast<std::uint8_t>(Type::Answer)) {
         return std::nullopt;
     }
     return static_cast<Type>(byte);
@@ -317,6 +342,24 @@ void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::
     put_u64(out, seq);
     put_short(out, sender.view());
     put_short(out, key.view());
+    out.insert(out.end(), body.begin(), body.end());
+    end(out, at);
+}
+
+void encode_ask(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
+                std::span<const std::byte> body) {
+    const std::size_t at = begin(out, Type::Ask);
+    put_u64(out, request);
+    put_room(out, room);
+    out.insert(out.end(), body.begin(), body.end());
+    end(out, at);
+}
+
+void encode_answer(std::vector<std::byte>& out, std::uint64_t request, Status status,
+                   std::span<const std::byte> body) {
+    const std::size_t at = begin(out, Type::Answer);
+    put_u64(out, request);
+    put_u8(out, static_cast<std::uint8_t>(status));
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }

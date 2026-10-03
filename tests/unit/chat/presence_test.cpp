@@ -49,6 +49,11 @@ public:
                           .body = std::move(body),
                           .done = std::move(done)});
     }
+    // Presence never asks a room's owner anything.
+    void ask_owner(const core::RoomId& /*room*/, rt::IMember& /*from*/,
+                   std::span<const std::byte> /*request*/, rt::OwnerAnswer done) override {
+        done(std::unexpected(rt::RouteError::Unavailable));
+    }
 
     void settle() {
         while (!joins_.empty() || !sends_.empty()) {

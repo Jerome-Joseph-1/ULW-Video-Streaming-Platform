@@ -248,6 +248,13 @@ private:
         return true;
     }
 
+    // A byte a string holds as it is written: neither an escape, its end, a control character
+    // nor part of a multibyte sequence.
+    [[nodiscard]] static bool plain_ascii(char c) noexcept {
+        const auto b = static_cast<unsigned char>(c);
+        return b >= 0x20 && b < 0x80 && c != '"' && c != '\\';
+    }
+
     // Bytes from `from` to the string's closing quote, or to the end of the text if it has none.
     [[nodiscard]] std::size_t source_length(std::size_t from) const noexcept {
         std::size_t i = from;
@@ -280,6 +287,17 @@ private:
                 if (!escape(out)) {
                     return false;
                 }
+                continue;
+            }
+            if (static_cast<unsigned char>(c) < 0x80) {
+                // A run of plain ASCII, all of a base64url body say, goes in with one append
+                // rather than one for each byte.
+                std::size_t end = pos_ + 1;
+                while (end < text_.size() && plain_ascii(text_[end])) {
+                    ++end;
+                }
+                out.append(text_.substr(pos_, end - pos_));
+                pos_ = end;
                 continue;
             }
             const std::size_t n = utf8_length(text_.substr(pos_));
