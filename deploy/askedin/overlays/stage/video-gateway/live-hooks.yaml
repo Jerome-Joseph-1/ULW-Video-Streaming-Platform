@@ -20,7 +20,9 @@ spec:
       appProtocol: http
 ---
 # Policies add up: networkpolicy.yaml admits Envoy and Prometheus to the public port, this one
-# LiveKit to the webhook port and nobody else.
+# LiveKit to the webhook port and nobody else. LiveKit's own policy restricts only its ingress,
+# so it may post here; egress and the packagers (in the -live namespace, behind its default
+# deny) send no webhooks and are not admitted.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
