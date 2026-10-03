@@ -3,6 +3,31 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-03: clients open direct chats and manage group chats themselves
+
+<!-- apps/chat/src/membership.cpp, apps/chat/src/envelope.cpp, migrations/0014_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
+
+Additive to [chat.md](chat.md); nothing breaks for a client that does not use it. New commands on
+the chat WebSocket: `open_direct`, `create_group`, `add_members`, `remove_member`, `leave`,
+`rooms` and `members` ([Changing member lists](chat.md#changing-member-lists)), and an unasked
+`member` frame when a member list you are on, or of a room you joined, changes.
+
+| Before | Now |
+|---|---|
+| Members were listed by operators in the database | Users open direct chats and create groups; a group's admin adds and removes members; anyone leaves a group |
+| A direct chat was any room id the operators listed two users in | `open_direct` names the pair's room: a version 8 id starting with `03`, the same whichever of the two asks. Rooms listed by operators keep working as before |
+| A removal was told to the removed user's sockets in the room (`error` `not_member`) | The same, and then a `member` frame with `change` `removed` to every socket of that user and every socket in the room; additions are told likewise |
+| A `join`'s `"kind"` was taken as given | For a room starting with `03` or `04` (version 8) the kind is the room's; a `"kind"` naming the other is `bad_room` |
+
+What to do:
+
+- **Clients:** to start a conversation, send `open_direct` and join the room it answers, instead
+  of asking an operator. Ignore `member` frames you do not use; in end-to-end encrypted rooms,
+  act on them as [chat.md](chat.md#changing-member-lists) says (commit the change in MLS).
+- **Operators:** migration 0014 builds an index on `chat_members` that holds member changes (not
+  joins) while it builds; deploy it off-peak (RUNBOOK). Watch
+  `membership_refusals_total{reason="unavailable"}`.
+
 ## 2026-10-03: the subject claim is configured, and the audience is required
 
 <!-- infra/auth/src/claims.cpp (subject_of), ops/src/dev_only.cpp (token_rules), docs/adr/0088-standalone-product.md -->

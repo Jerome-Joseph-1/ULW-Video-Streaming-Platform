@@ -1,7 +1,8 @@
 # Chat
 
-> **Draft until phase 2 is tagged.** Messages, acks, resume, history, member lists and
-> [presence](#presence) below are what `main` does. Nothing here is expected to change before
+> **Draft until phase 2 is tagged.** Messages, acks, resume, history, member lists (and the
+> [commands that change them](#changing-member-lists)) and [presence](#presence) below are what
+> `main` does. Nothing here is expected to change before
 > the tag, but it is not a compatibility promise until then.
 
 Chat is its own service, `chat_server`, separate from the video gateway (ADR-0019). Clients hold
@@ -48,6 +49,7 @@ Client to server:
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 | `call` | `room`, `device` (a UUID the client keeps per device) | A ticket to the room's 1:1 call, for a direct chat this connection has joined. See [calls.md](calls.md). |
+| `open_direct`, `create_group`, `add_members`, `remove_member`, `leave`, `rooms`, `members` | See [Changing member lists](#changing-member-lists) | A user's direct and group chats, and who is in them. |
 
 Server to client:
 
@@ -58,6 +60,7 @@ Server to client:
 | `message` | `room`, `seq`, `sender`, `id`, `body` | A message in the room, your own included, live, resumed or from history. `sender` is the poster's user id ([auth.md](auth.md)). |
 | `history` | `room`, `count` | Ends the answer to a `history` command, after its `count` messages. `0`: nothing more in that direction. |
 | `ticket` | `room`, `url`, `token`, `expires_at` | The answer to `call`: connect LiveKit's SDK to `url` with `token` before `expires_at` (Unix seconds). See [calls.md](calls.md). |
+| `direct`, `group`, `added`, `removed`, `left`, `rooms`, `members`, `member` | See [Changing member lists](#changing-member-lists) | Answers to the member-list commands, and `member`, sent unasked when a list you are on, or of a room you joined, changes. |
 | `error` | `reason`, plus `room` and `id` when known, `retry_after_ms` for `rate_limited` and for a call's `unavailable` | A command failed. |
 
 ```json
@@ -123,14 +126,91 @@ room is in use (a room nothing used may be forgotten, below):
   can be one; a client cannot. It is joined by the stream's name (see
   [A stream's live chat](#a-streams-live-chat)), and refused with `not_live` until it is open.
 
-No client command changes a member list; they are set by the service's operators, and later by
-the product, in the database. A member removed from the list is taken out of the room at once
-on every socket they have, on every node (ADR-0073): each gets an `error` with `not_member` for
+Members change their lists with the commands below ([Changing member lists](#changing-member-lists));
+operators may still change them in the database (RUNBOOK). A member removed from the list,
+however, is taken out of the room at once on every socket they have, on every node (ADR-0073): each gets an `error` with `not_member` for
 the room, unasked, and receives nothing more from it; `send` and `history` there answer
 `not_joined`, and the next `join` is refused. After a node lost track of removals for a while it
 checks every member list its sockets rely on again; a list it cannot read for a reason other
 than an outage takes the socket out of the room the same way, but with `unavailable`, since the
 list never said no: join again.
+
+### Changing member lists
+
+<!-- apps/chat/src/membership.cpp, apps/chat/src/named_rooms.cpp, apps/chat/src/envelope.cpp, infra/postgres/src/message_sql.hpp (kOpenDirect, kCreateGroup, kAddMembers, kExpel, kLeave, kRoomsFirst, kRoster), migrations/0014_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
+
+A signed-in user opens direct chats, creates group chats and manages them on the same WebSocket.
+None of these needs a `join` first; join the room afterwards to send and read it. Every answer
+goes to the connection that asked; what changed reaches the users concerned on their own
+sockets, on every node, as an unasked `member` frame.
+
+Client to server:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `open_direct` | `user` | The direct chat of you and `user`. The first time, it lists you both; after that it is the same room, whichever of you asks, and changes nothing. |
+| `create_group` | `id`, optional `users` (at most 50) | A group chat with you as its admin and `users` as its members. `id` is a request id, as a message's (1 to 64 of `A-Z a-z 0-9 _ -`): the same `id` again, after `unavailable` say, names the same room and lists nobody more. Use a new `id` per group. |
+| `add_members` | `room`, `users` (1 to 50) | Lists `users` in a group chat you are an admin of. Those listed already are left as they are. |
+| `remove_member` | `room`, `user` | Takes `user` off a group chat you are an admin of. Naming yourself is `leave`. |
+| `leave` | `room` | Takes you off a group chat's list. When its last admin leaves, the remaining member whose id sorts first (bytewise) becomes its admin. Your sockets that joined the room leave it as for any removal (`error` `not_member`, then `member`), before or after the answer. |
+| `rooms` | optional `after` (a room id), `limit` (1 to 100, default 50) | The rooms you are listed in, in room id order (bytewise, not by activity); the next page is `after` the last one. |
+| `members` | `room`, optional `after` (a user id), `limit` (1 to 100, default 50) | The room's members and their roles, by user id; only for a member. |
+
+Server to client:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `direct` | `room`, `user` | The answer to `open_direct`. |
+| `group` | `room`, `id` | The answer to `create_group`. |
+| `added` | `room`, `users` | The answer to `add_members`: who it listed, not those listed already. |
+| `removed` | `room`, `user` | The answer to `remove_member`. |
+| `left` | `room` | The answer to `leave`. |
+| `rooms` | `rooms` (objects of `room`, `kind`: `direct`, `group` or `live`; `role`: `member` or `admin`; and `peer`, the other member of a direct chat), `more` | A page of your rooms; `more` is `true` when another follows. |
+| `members` | `room`, `members` (objects of `user` and `role`), `more` | A page of the room's members. |
+| `member` | `room`, `user`, `change` (`added` or `removed`) | Unasked: `user` was listed in, or taken off, the room. Sent to every socket of `user` and to every socket that joined the room, however the list changed (a command, or an operator). |
+| `error` | `reason`, plus `room`, `id` (of a `create_group`) and `user` when the command named them, `retry_after_ms` for `rate_limited` | The command changed nothing. |
+
+As `user-1`:
+
+```json
+{"type":"open_direct","user":"user-42"}
+{"type":"direct","room":"03db1b2d-a8da-8387-a668-3abc70b6953e","user":"user-42"}
+{"type":"create_group","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W","users":["user-42","user-7"]}
+{"type":"group","room":"04ff0817-879c-8a63-b5a8-9ebacad5d927","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W"}
+{"type":"member","room":"04ff0817-879c-8a63-b5a8-9ebacad5d927","user":"user-1","change":"added"}
+{"type":"rooms","rooms":[{"room":"03db1b2d-a8da-8387-a668-3abc70b6953e","kind":"direct","role":"member","peer":"user-42"},{"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927","kind":"group","role":"admin"}],"more":false}
+```
+
+- **Rooms are named by what they are for.** A direct chat's room id is derived from its two user
+  ids, a group's from its creator and the `create_group` `id`: version 8 UUIDs whose first byte
+  is `03` (direct) or `04` (group), then the first 15 bytes of SHA-256 over `ulw direct chat`,
+  a newline, the two user ids in bytewise order with a newline between them (for a group:
+  `ulw group chat`, a newline, the creator's id, a newline, the request's `id`), with the version
+  and variant bits set. Alice and Bob's room (`alice`, `bob`) is
+  `032768cd-63d3-8415-bc35-024bab6c3653`. Use the room the answer names rather than computing it.
+  A `join` of such a room asks for its kind whatever it says, and is `bad_room` if `"kind"`
+  names the other.
+- **Who you name.** A user id is the identity provider's subject for that person
+  ([auth.md](auth.md)). The service has no list of users, so it does not check that someone
+  exists: resolve people to ids in your own directory, and never send a name typed by the user.
+- **Roles.** A group's creator is its admin; everyone else is a member, and so are both people
+  of a direct chat. Only an admin adds or removes others (`not_admin`). A direct chat's pair never
+  changes: `add_members`, `remove_member` and `leave` on one are `not_group`. A member an
+  operator removed from a direct chat is not put back when the other opens it again.
+- **Size.** A group holds at most 100 members; an `add_members` that would pass that adds
+  nobody (`too_many_members`).
+- **Allowance.** `open_direct`, `create_group`, `add_members`, `remove_member` and `leave` share
+  one allowance per user per node: 20 at once, then one each 3 s; past it they are
+  `rate_limited` with `retry_after_ms`. `rooms` and `members` count with joins and history.
+- **End-to-end encrypted rooms.** The server's list decides who may join, send and read; the MLS
+  group is your devices' (ADR-0016), and the server never reads a commit. When you add members,
+  fetch a KeyPackage for each of their devices from the key directory and send the Commit and
+  the Welcome as ordinary messages in the room; the new members join and read the Welcome from
+  history. When a `member` frame says someone was removed or left, one remaining member's device
+  commits their removal (someone who leaves cannot remove themselves); the first valid Commit
+  for an epoch in `seq` order wins ([e2ee.md](e2ee.md)). Compare the MLS roster with `members`
+  and treat a difference as a commit owed. A removed member receives nothing from the room from
+  the moment of removal, before any commit.
 
 ### A stream's live chat
 
@@ -167,19 +247,24 @@ list never said no: join again.
 | `reason` | Meaning | Client action |
 |---|---|---|
 | `not_json` | The frame is not JSON | Fix the client |
-| `malformed` | Not an object, unknown or missing `type`, missing or unknown field, a value of the wrong kind, both `before` and `after`, a `limit` out of range | Fix the client |
-| `bad_room` | `room` is not a canonical lowercase UUID, or is a stream's chat room given to `join` | Fix the client; join a stream's chat by `stream` |
+| `malformed` | Not an object, unknown or missing `type`, missing or unknown field, a value of the wrong kind, both `before` and `after`, a `limit` out of range, `users` empty for `add_members` or longer than 50 | Fix the client |
+| `bad_room` | `room` (or a `rooms` `after`) is not a canonical lowercase UUID, is a stream's chat room given to `join`, or a direct or group chat's room joined with `"kind"` naming the other | Fix the client; join a stream's chat by `stream` |
 | `bad_id` | `id` is not a message id | Fix the client |
 | `bad_body` | `body` is not base64url | Fix the client |
 | `bad_stream` | `stream` is not a stream name | Fix the client |
 | `bad_device` | A call's `device` is not a canonical lowercase UUID | Fix the client |
+| `bad_user` | A `user`, an entry of `users` or a `members` `after` is not a user id | Fix the client |
+| `self` | `open_direct` with your own user id | Nothing to open |
+| `not_admin` | `add_members` or `remove_member` by a member who is not the group's admin | Do not retry |
+| `not_group` | `add_members`, `remove_member` or `leave` of a direct chat (or a stream's live chat) | Do not retry |
+| `too_many_members` | The group would hold more than 100 members | Remove members first |
 | `not_callable`, `call_failed`, `calls_disabled` | A call was refused; see [calls.md](calls.md#errors) | As there |
-| `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive | Do not retry |
+| `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive. For a member-list command: you are not on the room's list | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |
 | `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
 | `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |
-| `rate_limited` | Past the send allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered |
+| `rate_limited` | Past the send allowance, or the member-list allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered, the list not changed |
 | `busy` | Join or history allowance exceeded, too many sends awaiting answers, the room's owner queue is full, or too much unread output for a history page | Back off and retry |
 | `unavailable` | The room's owner or the store could not be reached, or the server could not take the command just then; also sent unasked, with `room`, when the server could not confirm your membership of a room you are in (below), which you then no longer receive | Retry; resend a `send` with the same `id`; `join` a room it was sent unasked for again |
 | `fenced` | The room changed owners while the write was in flight | Retry with the same `id` |
@@ -203,6 +288,9 @@ list never said no: join again.
 | Resends recognised | For about a minute on the node that sequenced or delivered them; always, by the store, once sequenced | |
 | Resume and history output | 128 KiB queued behind a connection's unread output | Shorter page, or `busy` |
 | History pages and resumes | Counted with joins: burst 64, then 1/s per user | `error` `busy` |
+| Member-list changes | Burst 20, then 1 each 3 s per user across the user's connections on a node | `error` `rate_limited` with `retry_after_ms` |
+| `rooms` and `members` pages | Counted with joins; 1 to 100 entries each | `error` `busy` |
+| Group size | 100 members; 50 users named per `create_group` or `add_members` | `error` `too_many_members`; `malformed` |
 | Lossy delivery | Nothing new while more than 64 KiB behind; then the newest 64 missed, oldest first | Gap in seqs; fill from history |
 | Live chat message | 2000 bytes of body | `error` `too_large` |
 | Live chat sends | Burst 40, then 20/s per chat per node, from all senders, on top of each user's | `error` `rate_limited` with `retry_after_ms` |

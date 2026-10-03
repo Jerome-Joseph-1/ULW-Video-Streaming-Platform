@@ -295,9 +295,12 @@ ALTER DATABASE ulw SET auto_explain.log_parameter_max_length = 0;
 as `ulw` then print `0`.
 
 Chat rooms other than a stream's live chat admit only their listed members (docs/adr/0054).
-Until the product manages the lists, they are rows in `chat_members`, set as the service's role.
-Record the room as closed in the same transaction, before its first member, as the service's own
-statement does, so that it can never be recorded live while it lists anyone:
+Users manage the lists themselves over the chat WebSocket (`open_direct`, `create_group`,
+`add_members`, `remove_member`, `leave`; docs/integration/chat.md, docs/adr/0096): nothing here
+is needed to start a conversation. The lists are rows in `chat_members`, and an operator may
+still change them as the service's role, to repair a list or to moderate. Record a room as
+closed in the same transaction, before its first member, as the service's own statements do, so
+that it can never be recorded live while it lists anyone:
 
 ```sql
 BEGIN;
@@ -313,8 +316,20 @@ DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user id>'
 `<user id>` is the token's subject claim (`JWT_SUBJECT_CLAIM`, docs/integration/auth.md). A
 member removed this way is cut off at once on every chat node, however the row goes (a DELETE,
 or an UPDATE that moves it to another room or user; one that leaves both as they were removes
-nobody): a trigger (migration 0009) notifies the nodes, each takes that user's sockets out of the
-room, and the client gets an `error` with `not_member` for it (docs/adr/0073). Their next join is
+nobody): a trigger (migration 0014; 0009's for nodes from before it) notifies the nodes, each
+takes that user's sockets out of the room, and the client gets an `error` with `not_member` for
+it (docs/adr/0073); the user's other sockets, and everyone in the room, get a `member` frame.
+A member listed this way is told the same way. A room whose id starts with `03` or `04` and has
+version 8 (third group starting with `8`) is a direct or group chat the service named: the
+database accepts it only as that kind (`chat_rooms_named_kind`).
+
+A member's `role` is `member` (the default) or `admin`; a group's creator is its admin, and only
+admins add or remove others. To give a group another admin, or one to a group listed before
+migration 0014 (which has none):
+
+```sql
+UPDATE chat_members SET role = 'admin' WHERE room_id = '<room uuid>' AND user_id = '<user id>';
+``` Their next join is
 refused. No restart is needed. If a node's listening session to Postgres was down when the row
 went, the node checks every closed room its clients are in once it listens again, four checks at
 a time and retrying each second while the database fails, so a removal made during a database
@@ -413,6 +428,16 @@ timestamp each: a few seconds per million rooms, so check first with
 migration gives up and the init container runs it again (`lock_timeout`, docs/adr/0031). A join
 that waits past the chat service's request timeout is answered `unavailable`, and the client
 retries it.
+
+**Deploy the release that carries migration 0014 off-peak.** Its index on
+`chat_members (user_id, room_id)` is built without `CONCURRENTLY` too: until the migrate
+container commits it, every member added or removed, by a user's command or by an operator,
+waits; joins only read the table and do not. The build sorts every row of `chat_members`: check
+first with `SELECT count(*) FROM chat_members;`. Its other changes are catalog changes (a column
+with a default, two checks added `NOT VALID`, a trigger). Nodes from before it hear removals on
+the old channel and are told of no additions; once every chat node runs the new release,
+`DROP TRIGGER chat_member_removed ON chat_members; DROP TRIGGER chat_member_moved ON
+chat_members;` stops the old channel's duplicate notifications (a later migration does it).
 
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside
 the cluster. If their addresses are stable, patch them in as an `ipBlock` on the 5432 and 443

@@ -21,7 +21,8 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
 <!-- apps/chat/src/call.cpp (CallHandler::checked), apps/chat/src/call.hpp (kCallParticipants), docs/adr/0087-call-tickets-from-the-rooms-owner.md -->
 
 - A **direct chat** (`"kind":"direct"`, [chat.md](chat.md#member-lists)) has one call, for its
-  members only. A group chat, a stream's live chat, or a room with no kind recorded has none
+  members only. Open one with `open_direct` ([chat.md](chat.md#changing-member-lists)) and
+  join the room it answers. A group chat, a stream's live chat, or a room with no kind recorded has none
   (`not_callable`).
 - The call holds **two participants**. A participant is a device: each member on one device. A
   second device of the same member takes the other member's place, and LiveKit refuses a third.

@@ -336,7 +336,15 @@ rooms this node owns), `call_errors_total{source="sfu",kind="unavailable"}` (Liv
 or overloaded: clients are told to retry), `{source="sfu",kind="refused"}` (LiveKit refused the
 request as made, a configuration fault: clients get `call_failed`) and
 `{source="store",kind="unavailable"}`. Each is counted on the node that owns the room, not the
-one the client is on. Chat is a draft ([chat.md](chat.md)).
+one the client is on. For member lists changed by their users (ADR-0096), counted on the node
+the asking client is on: `directs_opened_total` (direct chats whose pair an `open_direct`
+listed), `groups_created_total`, `members_changed_total{change="added"}`, `{change="removed"}`
+and `{change="left"}`, `membership_refusals_total{reason="not_member"}`, `{reason="not_admin"}`,
+`{reason="not_group"}`, `{reason="too_many_members"}`, `{reason="rate_limited"}` and
+`{reason="unavailable"}` (the database could not be reached, or held a named room recorded as
+another kind: alert if it rises while the database is healthy), and `member_events_total`
+(`member` frames this node sent when a list changed, whichever node changed it). Chat is a
+draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

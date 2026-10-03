@@ -57,7 +57,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
 | [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted, amended by 0088 |
 | [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted, amended by 0088 |
-| [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted, amended by 0075 |
+| [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted, amended by 0075 and 0096 |
 | [0055](0055-a-live-recording-is-remuxed-from-the-stored-segments.md) | A live recording is remuxed from its stored segments into one object, and queued once per stream | Accepted |
 | [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
 | [0057](0057-the-probe-window-follows-the-configuration.md) | The packager's probe window follows its configuration | Accepted |
@@ -76,7 +76,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0070](0070-live-chat-lossy-and-bounded.md) | A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere | Accepted |
 | [0071](0071-slow-readers-are-not-reset-by-the-kernel.md) | Slow readers are not reset by the kernel: the gateway and the node channel bound their own peers | Accepted |
 | [0072](0072-security-analysis-in-ci.md) | Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check | Accepted, own-build registry exemption amended by 0085 and 0088 |
-| [0073](0073-a-chat-socket-ends-with-its-token-and-its-membership.md) | A chat socket ends with its token, and a room with its membership | Accepted |
+| [0073](0073-a-chat-socket-ends-with-its-token-and-its-membership.md) | A chat socket ends with its token, and a room with its membership | Accepted, amended by 0096 |
 | [0074](0074-ffmpeg-from-debian-security.md) | The worker's ffmpeg comes from Debian 13's security archive | Accepted |
 | [0075](0075-unused-chat-room-records-are-forgotten.md) | A chat room's record that nothing used is forgotten | Accepted |
 | [0076](0076-chat-per-client-connection-limits.md) | chat_server holds each address and each user to a share of its connections | Accepted |
@@ -92,3 +92,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted |
 | [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted |
 | [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
+| [0096](0096-member-lists-changed-by-their-users.md) | Member lists are changed by their users, over the room WebSocket, under the room's lock | Accepted |
