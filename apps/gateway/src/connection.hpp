@@ -110,6 +110,8 @@ private:
         std::optional<core::ports::StoredUpload> upload;
         std::optional<PendingCreate> create;
         std::optional<core::ports::Claims> claims;
+        // A live stream's status, held while the playlist says whether it has ended.
+        std::optional<core::ports::LiveStream> stream;
         std::string body;
         http::PathParams params{};
         std::string_view token;
@@ -183,6 +185,17 @@ private:
     void on_playlist(ControlJob job) noexcept;
     void fail_playlist(PlaylistFailure failure) noexcept;
     void start_live() noexcept;
+    void start_bodiless() noexcept;
+    // The stream service's routes (ADR-0092).
+    void start_stream_route() noexcept;
+    void create_stream(LiveStreams& live, const core::UserId& user) noexcept;
+    // Status, ticket, start or end, by the route.
+    void act_on_stream(LiveStreams& live, const core::LiveStreamId& id,
+                       const core::UserId& user) noexcept;
+    void on_stream_status(const core::ports::LiveStream& stream) noexcept;
+    void respond_stream(http::Status status, const core::ports::LiveStream& stream,
+                        const core::ports::MediaTicket* ticket) noexcept;
+    void fail_live(LiveFailure failure) noexcept;
     void on_durable() noexcept;
     void drain_staging() noexcept;
     void end_stall() noexcept;

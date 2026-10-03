@@ -328,6 +328,33 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
               "stream_live_chat lossy");
 }
 
+// ADR-0092: a stream's chat closes when the stream ends. Its kind stays recorded, and from then
+// on it reads as a closed room nobody is a member of: a viewer's join is refused, and a call's
+// check finds it closed.
+TEST_F(MessageStoreTest, AClosedStreamChatAdmitsNobody) {
+    const core::RoomId room = stream_room();
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->record_live(room, std::move(done)); }));
+    const auto join = [&] {
+        return ask<core::ports::Admission>([&](auto done) {
+            store_->admits(room, bob, core::ports::RoomKind::StreamLiveChat, std::move(done));
+        });
+    };
+    EXPECT_EQ(join(), core::ports::Admission::Admitted);
+    ASSERT_TRUE(conn_->exec("UPDATE chat_rooms SET closed_at = now() WHERE room_id = $1",
+                            Params{}.add_uuid(room.uuid())));
+    EXPECT_EQ(join(), core::ports::Admission::NotLive);
+    EXPECT_EQ(ask<core::ports::RoomAccess>(
+                  [&](auto done) { store_->access(room, bob, std::move(done)); }),
+              (core::ports::RoomAccess{.kind = core::ports::RoomKind::GroupChat, .member = false}));
+    // Only an open room closes.
+    const core::RoomId group = new_room();
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'group_chat')",
+                            Params{}.add_uuid(group.uuid())));
+    EXPECT_FALSE(conn_->exec("UPDATE chat_rooms SET closed_at = now() WHERE room_id = $1",
+                             Params{}.add_uuid(group.uuid())));
+}
+
 // ADR-0070: the database itself refuses to record any other room live, so an operator's
 // statement cannot open a room whose id every node takes for a closed one.
 TEST_F(MessageStoreTest, OnlyAStreamsRoomCanBeRecordedLive) {

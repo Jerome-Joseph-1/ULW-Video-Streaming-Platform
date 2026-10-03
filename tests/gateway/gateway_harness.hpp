@@ -7,6 +7,7 @@
 #include "config.hpp"
 #include "gateway.hpp"
 #include "health.hpp"
+#include "live_fakes.hpp"
 #include "support/http_client.hpp"
 #include "support/memory_log.hpp"
 
@@ -59,6 +60,18 @@ struct GatewayOptions {
     // Neither set: no probe has finished yet.
     std::optional<bool> database_up = true;
     std::optional<bool> store_up = true;
+    // The stream service, over in-memory fakes of its store, media server and packagers; the
+    // test reaches them through live().
+    bool live_streams = false;
+    gateway::LiveSettings live_settings{};
+};
+
+// What the stream service runs on in the harness. Loop thread only: through on_loop().
+struct LiveFakes {
+    FakeLiveStore& store;
+    FakeSfu& sfu;
+    FakePackagers& packagers;
+    gateway::LiveStreams& service;
 };
 
 // A gateway shard on its own reactor thread, as in production, reachable over loopback.
@@ -120,6 +133,8 @@ public:
     [[nodiscard]] std::string metrics();
     // What the probe finds from the next loop turn on; nullopt stops it probing at all.
     void set_health(std::optional<bool> database_up, std::optional<bool> store_up);
+    // Runs `fn` on the loop thread with the stream service's fakes; live_streams only.
+    void with_live(const std::function<void(LiveFakes&)>& fn);
     // Everything the gateway logged, at every level.
     [[nodiscard]] const MemoryLog& log() const { return *log_; }
 

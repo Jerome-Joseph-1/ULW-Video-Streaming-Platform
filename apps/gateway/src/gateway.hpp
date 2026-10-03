@@ -16,10 +16,12 @@
 #include "bounded_table.hpp"
 #include "health.hpp"
 #include "live_manifest_cache.hpp"
+#include "live_streams.hpp"
 #include "ops/log.hpp"
 #include "ops/metrics.hpp"
 #include "rate_limit.hpp"
 #include "view_recorder.hpp"
+#include "webhook_server.hpp"
 
 #include <array>
 #include <chrono>
@@ -51,6 +53,13 @@ struct Deps {
     ops::Logger& log;
     // Written by the health probe's thread; only read here.
     const Health& health;
+    // The stream service (ADR-0092); none where live publishing is not configured, and its
+    // routes then answer 404.
+    LiveStreams* live_streams = nullptr;
+    // LiveKit's webhooks and what they drive (ADR-0093), for /metrics only; none where the
+    // webhook listener is off.
+    const WebhookServer* webhooks = nullptr;
+    const PublisherWatch* publisher_watch = nullptr;
 };
 
 struct Limits {
