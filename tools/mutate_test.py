@@ -630,7 +630,9 @@ class FakePopen:
 class RunTest(unittest.TestCase):
     def test_a_real_process_in_a_session_of_its_own(self):
         rc, out, elapsed = mutate.run(
-            [sys.executable, "-c", "import os, sys; print(os.getsid(0) == os.getpid()); "
+            # stdout into a pipe is block-buffered unless PYTHONUNBUFFERED is set (it is in some
+            # shells, not on CI), so the child flushes it to pin the order in the merged stream.
+            [sys.executable, "-c", "import os, sys; print(os.getsid(0) == os.getpid(), flush=True); "
                                    "print('é', file=sys.stderr); sys.exit(3)"],
             timeout=30, env=dict(os.environ, X="1"), cwd=tempfile.gettempdir())
         self.assertEqual(rc, 3)
