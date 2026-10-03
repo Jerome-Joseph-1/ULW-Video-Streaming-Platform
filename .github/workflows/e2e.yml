@@ -1,9 +1,9 @@
 name: e2e
 
-# The sandbox cluster end to end: bring it up, run the VOD checks, the STUNner checks and the
-# resource check under load, take it down. A manual run, the nightly one and a phase tag's are
-# the same job with the same steps. Everything happens inside this runner's kind cluster; the
-# workflow has no credentials and reaches nothing of Askedin's.
+# The sandbox cluster end to end: bring it up, run the VOD and chat checks, the STUNner checks
+# and the resource check under load, take it down. A manual run, the nightly one and a phase
+# tag's are the same job with the same steps. Everything happens inside this runner's kind
+# cluster; the workflow has no credentials and reaches nothing of Askedin's.
 #
 # Beside it, two jobs run on a build tree, with no cluster, each starting its own services from
 # it and serving its own page, so neither can be pointed at the sandbox route. browser runs the
@@ -99,7 +99,8 @@ jobs:
         if: ${{ !cancelled() && steps.up.outcome == 'success' }}
         # Outside the checkout, so nothing copied out of an image lands in the workspace.
         run: |
-          for image in ulw/video-gateway:e2e ulw/video-worker:e2e; do
+          for image in ulw/video-gateway:e2e ulw/video-worker:e2e ulw/chat:e2e \
+              ulw/live-packager:e2e; do
             dir=$RUNNER_TEMP/release-bin/${image//[:\/]/-}
             mkdir -p "$dir"
             container=$(docker create "$image")
@@ -107,7 +108,7 @@ jobs:
             docker rm "$container" >/dev/null
           done
           tools/check-hardening.sh "$RUNNER_TEMP"/release-bin/*/*
-      # The two images Askedin runs, for OS and library vulnerabilities. Every HIGH or CRITICAL,
+      # The four images Askedin runs, for OS and library vulnerabilities. Every HIGH or CRITICAL,
       # by Trivy's rating or NVD's, fixed or not, goes into the job summary and the JSON report
       # below; HIGH and CRITICAL by Trivy's rating with a fix available fail
       # (tools/security/trivy-image.sh). mock-auth is the sandbox's own.
@@ -115,7 +116,9 @@ jobs:
         if: ${{ !cancelled() && steps.up.outcome == 'success' }}
         env:
           TRIVY_REPORT_DIR: ${{ runner.temp }}/trivy-image
-        run: tools/security/trivy-image.sh ulw/video-gateway:e2e ulw/video-worker:e2e
+        run: >-
+          tools/security/trivy-image.sh ulw/video-gateway:e2e ulw/video-worker:e2e ulw/chat:e2e
+          ulw/live-packager:e2e
       - if: ${{ !cancelled() && steps.up.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

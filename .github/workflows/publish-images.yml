@@ -1,0 +1,296 @@
+name: publish-images
+
+# Publishes the four images Askedin runs (video-gateway, video-worker, chat, live-packager) to
+# GitHub's container registry, ghcr.io/jerome-joseph-1/ulw-<service>, tagged with the full
+# commit SHA and `main`, never `latest` (deploy/askedin/RUNBOOK.md, step 4).
+#
+# Only a commit on main whose ci run for its push to main succeeded is published. A push to main
+# starts this beside ci: the images are built and checked while ci runs, and nothing is pushed
+# until the API reports that ci run's success for this very commit. A manual run publishes a
+# commit already on main (its `ref`, or main's tip), under the same check. Pull requests never
+# run this, so no pull request's code ever runs where the package token is.
+#
+# Each image is built as e2e.yml's sandbox job builds it (deploy/local/e2e-up.sh) and must pass
+# the same gates there before anything is pushed: the release binaries' hardening
+# (tools/check-hardening.sh) and Trivy's image gate (tools/security/trivy-image.sh). A SHA
+# tag is pushed once: a commit published before keeps its digest. `main` moves, for all four
+# images together, only once all four SHA tags are published and only to the commit that is
+# main's tip then, so a slower run of an older commit never takes it back. `main` is for stage;
+# prod is pinned to a SHA and digest (docs/adr/0085). Each digest is attested (build
+# provenance) by the run that pushed it, and printed in the run's summary as
+# <sha>@sha256:<digest>, ready to pin.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, branch or tag to publish; it must resolve to a commit on main (empty for main's tip)
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+# One publish at a time; a newer one waits rather than cancelling one that is pushing. Only one
+# waits: a newer push replaces a waiting run, so an intermediate commit may go unpublished
+# (publish it by hand with "Run workflow" if it is wanted).
+concurrency:
+  group: publish-images
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Only main's own definition of this workflow, and only in this repository (a fork has no
+    # package of that name to push).
+    if: github.repository == 'Jerome-Joseph-1/ULW-Video-Streaming-Platform' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    # The build and gates take most of an hour; the rest is waiting on ci, whose longest job
+    # may take 150 minutes.
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read # ci's runs for the commit, the gate before pushing
+      packages: write # the push to ghcr.io
+      id-token: write # build provenance: the OIDC token Sigstore signs with
+      attestations: write # build provenance: the attestation API
+    env:
+      NAMESPACE: ghcr.io/jerome-joseph-1
+    steps:
+      - name: Resolve the commit and check it is on main
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            sha=$GITHUB_SHA
+          else
+            ref=${REF:-main}
+            if [[ ! $ref =~ ^[A-Za-z0-9._/-]{1,200}$ || $ref == *..* ]]; then
+              echo "ref '$ref' is not a commit, branch or tag name" >&2
+              exit 1
+            fi
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)
+          fi
+          if [[ ! $sha =~ ^[0-9a-f]{40}$ ]]; then
+            echo "could not resolve a commit: '$sha'" >&2
+            exit 1
+          fi
+          # Commits of $sha that main lacks: none when $sha is main or one of its ancestors.
+          behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...main" --jq .behind_by)
+          if [[ $behind != 0 ]]; then
+            echo "$sha is not on main" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "publishing $sha"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.commit.outputs.sha }}
+          persist-credentials: false
+      - name: Check the checkout is that commit
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SHA"
+      # The same Dockerfile targets and build argument as e2e-up.sh, with the full SHA as
+      # woodpecker.yml stamps it. A hosted runner needs no proxy CA, so no ca-bundle secret.
+      - name: Build the images
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          for pair in gateway:video-gateway worker:video-worker chat:chat \
+              live-packager:live-packager; do
+            target=${pair%%:*}
+            image=$NAMESPACE/ulw-${pair#*:}:$SHA
+            echo "::group::$image"
+            docker buildx build --file deploy/docker/Dockerfile --target "$target" \
+              --build-arg "ULW_GIT_SHA=$SHA" \
+              --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$SHA" \
+              --label "org.opencontainers.image.created=$created" \
+              --label "org.opencontainers.image.title=ulw-${pair#*:}" \
+              --load --tag "$image" .
+            echo "::endgroup::"
+          done
+      # As e2e.yml's "Release binaries hardened" (docs/adr/0072).
+      - name: Release binaries hardened
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          for service in video-gateway video-worker chat live-packager; do
+            dir=$RUNNER_TEMP/release-bin/$service
+            mkdir -p "$dir"
+            container=$(docker create "$NAMESPACE/ulw-$service:$SHA")
+            docker cp "$container:/usr/local/bin/." "$dir"
+            docker rm "$container" >/dev/null
+          done
+          tools/check-hardening.sh "$RUNNER_TEMP"/release-bin/*/*
+      # As e2e.yml's "Image vulnerabilities": HIGH or CRITICAL with a fix available fails.
+      - name: Image vulnerabilities
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+          TRIVY_REPORT_DIR: ${{ runner.temp }}/trivy-image
+        run: >-
+          tools/security/trivy-image.sh "$NAMESPACE/ulw-video-gateway:$SHA"
+          "$NAMESPACE/ulw-video-worker:$SHA" "$NAMESPACE/ulw-chat:$SHA"
+          "$NAMESPACE/ulw-live-packager:$SHA"
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-image
+          path: ${{ runner.temp }}/trivy-image
+          if-no-files-found: warn
+      # The commit's ci run for its push to main must have succeeded; wait while it runs. The
+      # API reports a re-run's latest attempt, so a successful re-run counts.
+      - name: Wait for ci on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          deadline=$((SECONDS + 170 * 60))
+          while :; do
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=50" \
+              --jq '[.workflow_runs[] | {status, conclusion}]')
+            if jq -e 'any(.conclusion == "success")' <<<"$runs" >/dev/null; then
+              echo "ci succeeded on $SHA"
+              break
+            fi
+            if jq -e 'length > 0 and all(.status == "completed")' <<<"$runs" >/dev/null; then
+              echo "ci did not succeed on $SHA: $runs" >&2
+              exit 1
+            fi
+            # A commit whose push skipped ci ([skip ci]) never gets a run.
+            if jq -e 'length == 0' <<<"$runs" >/dev/null && (( SECONDS > 15 * 60 )); then
+              echo "no ci run for $SHA after 15 minutes; was ci skipped?" >&2
+              exit 1
+            fi
+            if (( SECONDS > deadline )); then
+              echo "no successful ci run on $SHA in time: $runs" >&2
+              exit 1
+            fi
+            echo "waiting for ci on $SHA: $runs"
+            sleep 60
+          done
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Push the images
+        id: push
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          # Each image's :$SHA first. A SHA already published keeps the digest it was published
+          # under: this build's created label differs, so pushing it again would move the tag to
+          # a new digest, and a SHA tag must always resolve to the same one (RUNBOOK.md, 4a).
+          # A package that does not exist yet may answer 401 or 403 rather than not found; that
+          # is taken as unpublished, and a real auth problem still fails at the push.
+          summary=()
+          inspect() {
+            docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' \
+              2>"$RUNNER_TEMP/inspect.err"
+          }
+          for service in video-gateway video-worker chat live-packager; do
+            repo=$NAMESPACE/ulw-$service
+            pushed=false
+            if found=$(inspect "$repo:$SHA") || { sleep 5; found=$(inspect "$repo:$SHA"); }; then
+              digest=$(jq -r . <<<"$found")
+              echo "$repo:$SHA is already published as $digest; not pushed again"
+              note=" (already published, attested by the run that pushed it)"
+            elif grep -Eqi 'not found|manifest unknown|name unknown|denied|unauthorized|forbidden|40[13]' \
+                "$RUNNER_TEMP/inspect.err"; then
+              if ! grep -Eqi 'not found|manifest unknown|name unknown' "$RUNNER_TEMP/inspect.err"; then
+                echo "::warning::$repo:$SHA: the registry refused the lookup ($(head -c 200 "$RUNNER_TEMP/inspect.err")); taken as a package not created yet"
+              fi
+              docker push --quiet "$repo:$SHA"
+              digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+                "$repo:$SHA" | sed -n "s|^$repo@\(sha256:[0-9a-f]\{64\}\)\$|\1|p" | head -n1)
+              pushed=true
+              note=""
+            else
+              echo "$repo:$SHA: could not tell whether it is published:" >&2
+              cat "$RUNNER_TEMP/inspect.err" >&2
+              exit 1
+            fi
+            if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "$repo:$SHA: no digest: '$digest'" >&2
+              exit 1
+            fi
+            echo "${service//-/_}=$digest" >> "$GITHUB_OUTPUT"
+            echo "${service//-/_}_pushed=$pushed" >> "$GITHUB_OUTPUT"
+            summary+=("$repo:$SHA@$digest$note")
+          done
+          {
+            echo "### Published images"
+            echo
+            echo "Commit \`$SHA\`. Pin prod to these, \`<sha>@sha256:<digest>\` (RUNBOOK.md, 4a):"
+            echo
+            echo '```'
+            printf '%s\n' "${summary[@]}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "${summary[@]}"
+      # Provenance for each digest this run pushed. A digest an earlier run pushed was attested
+      # by that run; this one did not build it, so it does not attest it.
+      - if: steps.push.outputs.video_gateway_pushed == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.NAMESPACE }}/ulw-video-gateway
+          subject-digest: ${{ steps.push.outputs.video_gateway }}
+          push-to-registry: true
+      - if: steps.push.outputs.video_worker_pushed == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.NAMESPACE }}/ulw-video-worker
+          subject-digest: ${{ steps.push.outputs.video_worker }}
+          push-to-registry: true
+      - if: steps.push.outputs.chat_pushed == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.NAMESPACE }}/ulw-chat
+          subject-digest: ${{ steps.push.outputs.chat }}
+          push-to-registry: true
+      - if: steps.push.outputs.live_packager_pushed == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.NAMESPACE }}/ulw-live-packager
+          subject-digest: ${{ steps.push.outputs.live_packager }}
+          push-to-registry: true
+      # :main moves for all four images or none: only once every :$SHA is published, and only
+      # if $SHA is still main's tip, so a slower run of an older commit never takes it back.
+      - name: Move main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+          VIDEO_GATEWAY: ${{ steps.push.outputs.video_gateway }}
+          VIDEO_WORKER: ${{ steps.push.outputs.video_worker }}
+          CHAT: ${{ steps.push.outputs.chat }}
+          LIVE_PACKAGER: ${{ steps.push.outputs.live_packager }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [[ $tip != "$SHA" ]]; then
+            echo "\`main\` left alone: main's tip is now \`$tip\`." >> "$GITHUB_STEP_SUMMARY"
+            echo "main's tip is $tip, not $SHA; main not moved"
+            exit 0
+          fi
+          for pair in "video-gateway:$VIDEO_GATEWAY" "video-worker:$VIDEO_WORKER" "chat:$CHAT" \
+              "live-packager:$LIVE_PACKAGER"; do
+            repo=$NAMESPACE/ulw-${pair%%:*}
+            # --prefer-index=false: tag the pushed manifest itself, not a new index around it,
+            # so :main has the attested digest.
+            for try in 1 2 3; do
+              docker buildx imagetools create --prefer-index=false --tag "$repo:main" \
+                "$repo@${pair#*:}" && break
+              if (( try == 3 )); then
+                echo "\`main\` may have moved for only some images: re-run this job, which is safe because \`:$SHA\` is never pushed again." >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+              fi
+              sleep 15
+            done
+          done
+          echo "\`main\` moved to \`$SHA\`." >> "$GITHUB_STEP_SUMMARY"
+      - name: Log out of ghcr.io
+        if: always()
+        run: docker logout ghcr.io

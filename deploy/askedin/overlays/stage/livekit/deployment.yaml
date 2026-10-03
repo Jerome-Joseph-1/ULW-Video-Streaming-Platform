@@ -11,9 +11,8 @@ metadata:
     app.kubernetes.io/name: livekit
     app.kubernetes.io/part-of: ulw
 spec:
-  # One server: LiveKit spreads rooms over several only through Redis, which this cluster does
-  # not run. Recreate, because a second server beside the first would split rooms between two
-  # processes that cannot see each other's.
+  # One server: it is sized for one (below), and the Redis it now has (livekit-redis/, the bus
+  # to egress) is unmeasured as a bus between several. Recreate, so a rollout never runs two.
   replicas: 1
   strategy:
     type: Recreate
@@ -69,6 +68,12 @@ spec:
                 secretKeyRef:
                   name: sfu-secrets
                   key: TURN_SECRET
+            # Redis (livekit-redis/), the bus egress takes its requests from.
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: REDIS_PASSWORD
             - name: LIVEKIT_CONFIG
               value: |
                 port: 7880
@@ -94,6 +99,15 @@ spec:
                 room:
                   # Rooms exist only because the call service opened them.
                   auto_create: false
+                # LiveKit reaches egress, the recorder of a live stream, only through Redis
+                # (docs/adr/0053).
+                redis:
+                  address: livekit-redis:6379
+                  password: $(REDIS_PASSWORD)
+                api:
+                  # ListParticipants from the room itself, not from its copy in Redis, which can
+                  # keep a stale snapshot of a participant (deploy/local/compose.yaml says how).
+                  enable_psrpc_for_get_list_participants: true
                 logging:
                   level: info
           # CPU binds before bandwidth. tests/load/call_capacity measured 0.0158 cores per 1:1

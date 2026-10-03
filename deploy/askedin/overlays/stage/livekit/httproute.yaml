@@ -15,6 +15,10 @@ spec:
   parentRefs:
     - name: askedin-gateway
       namespace: apps
+  # Stage's host, unconfirmed by Askedin (RUNBOOK.md, open decisions): stage and prod share
+  # askedin-gateway, so a route without hostnames would also answer prod's.
+  hostnames:
+    - stage.askedin.com
   rules:
     - matches:
         - path:

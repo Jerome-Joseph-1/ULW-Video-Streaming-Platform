@@ -57,6 +57,9 @@ with an `Authorization` header is not checked: other sites cannot make the brows
   web app's own origin must therefore be in `ULW_ALLOWED_ORIGINS` for it to upload with the
   cookie. With no list set, the cookie works only for `GET` and `HEAD` from the gateway's own
   origin.
+- Cookie writes work only same-origin, with the API on the page's own host: a page on
+  `askedin.com` calling `www.askedin.com`, or the reverse, gets `403` unless
+  `ULW_ALLOW_SAME_SITE=1` is set.
 - `ULW_ALLOWED_ORIGINS` entries are `scheme://host[:port]`, lowercase, exactly as a browser
   writes `Origin`. `http://` is accepted only for `localhost`, `127.0.0.1` and `[::1]` (a dev
   server); any other `http://` entry stops the gateway at startup. An entry naming the scheme's
@@ -180,10 +183,10 @@ code (commit `ebd9b2ab`) and the live hosts, and the settings ULW needs for it.
 | `JWT_ISSUER` | `https://auth-stage.askedin.com/auth`, **unconfirmed**: the value in Askedin's deployment template, not yet read from the live secret (below) | `https://auth.askedin.com` exactly: no path, no trailing slash (confirmed 2026-10-03) |
 | `JWT_AUDIENCE` | `askedin-platform` (the default) | `askedin-platform` (the default) |
 | `ULW_AUTH_COOKIE` | `auth_token_stage` | `auth_token` |
-| `ULW_ALLOWED_ORIGINS` (chat socket) | `https://stage.askedin.com` | `https://askedin.com,https://www.askedin.com` |
+| `ULW_ALLOWED_ORIGINS` | `https://stage.askedin.com` | `https://askedin.com,https://www.askedin.com` |
 
-These origins were given for chat's socket. The gateway reads the same variable for cookie
-writes ([Cookies and other sites](#cookies-and-other-sites)); its overlays do not set it yet.
+These origins were given for chat's socket. The gateway's overlays set the same values for cookie
+writes ([Cookies and other sites](#cookies-and-other-sites)).
 
 `iss` is compared byte for byte, so a wrong `JWT_ISSUER` refuses every token with `401`. Until
 the stage value is read from the live secret, stage's `JWT_ISSUER` stays in the gateway's
