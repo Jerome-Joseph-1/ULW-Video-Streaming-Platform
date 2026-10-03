@@ -64,13 +64,19 @@ permissions at the top; each job asks for `contents: read`, and CodeQL's alone a
 `ULW_BUILD_TESTS=OFF`: the tests would double the build, and nothing they contain ships.
 ccache is off for that build, because CodeQL sees only the compiler invocations that run, and
 the setup action neither restores nor saves a ccache for the job (`ccache: "false"`), so no
-empty cache is saved under its key. Its configuration file keeps `security-extended` and asks
-it to drop alerts under `build/`, where FetchContent unpacks llhttp and srt: those are
-upstream's, and the `dependencies` job tracks their advisories. GitHub's documentation says
-`paths-ignore` may not take effect for compiled languages such as C and C++, whose files are
-extracted as the build compiles them; whether it drops the alerts in `build/` is unverified
-until the first run. If it does not, the alerts there
-are upstream's and are dismissed as such, or the config moves to a `query-filters` exclusion.
+empty cache is saved under its key. Its configuration file keeps `security-extended`. CodeQL
+extracts a manual C++ build by tracing every compiler that runs after `codeql-action/init`, and
+`paths-ignore` does not filter what the trace extracts: the first runs, with `build/**`
+ignored, still reported an alert in a CMake `try_compile` probe under `build/`. So the job
+keeps out of the trace what is not ours by running it before `init`: the configure, whose
+probes are compiler runs, and the build of the FetchContent dependencies (`llhttp_static`,
+`srt_static`), which are upstream's and whose advisories the `dependencies` job tracks. The
+traced `cmake --build` then compiles exactly the first-party translation units of
+`compile_commands.json`, the migrations embedded in `bundled_migrations.cpp` among them, and no
+dependency's; first-party sources still read the dependencies' headers as they include them.
+Building the dependencies untraced keeps them out of the database, where a filter over the
+uploaded SARIF would analyse them and then drop the alerts, at the cost of a third-party action
+in a job that holds `security-events: write`.
 
 zizmor runs with the job's own token (`GH_TOKEN`, `contents: read`), which turns on its online
 audits of every pinned action: `impostor-commit` (the SHA is in that action's repository, not
