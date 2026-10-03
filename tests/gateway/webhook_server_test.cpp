@@ -183,14 +183,21 @@ TEST_F(WebhookServerTest, NothingUnverifiedIsHandedOn) {
     };
     const std::string body(kBody);
     const std::vector<Case> cases{
-        {"", body, WebhookRejection::NoAuthorization},
-        {sign_webhook(body, {.secret = "fake-another-secret-0123456789abcdef01",
-                             .issued = now(),
-                             .expires = now() + 300}),
-         body, WebhookRejection::Signature},
-        {livekit_token(body, now()), body + " ", WebhookRejection::BodyHash},
-        {livekit_token(body, now() - 3600), body, WebhookRejection::Expired},
-        {"Bearer " + livekit_token(body, now()), body, WebhookRejection::Malformed},
+        {.authorization = "", .body = body, .reason = WebhookRejection::NoAuthorization},
+        {.authorization = sign_webhook(body, {.secret = "fake-another-secret-0123456789abcdef01",
+                                              .issued = now(),
+                                              .expires = now() + 300}),
+         .body = body,
+         .reason = WebhookRejection::Signature},
+        {.authorization = livekit_token(body, now()),
+         .body = body + " ",
+         .reason = WebhookRejection::BodyHash},
+        {.authorization = livekit_token(body, now() - 3600),
+         .body = body,
+         .reason = WebhookRejection::Expired},
+        {.authorization = "Bearer " + livekit_token(body, now()),
+         .body = body,
+         .reason = WebhookRejection::Malformed},
     };
     for (const Case& c : cases) {
         const int fd = connect();

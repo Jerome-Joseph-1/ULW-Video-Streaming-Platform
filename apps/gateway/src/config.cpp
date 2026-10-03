@@ -642,9 +642,6 @@ std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config)
     live.settings.segment = core::Seconds{*segment};
     live.settings.max_streams = *streams;
     live.settings.start_window = core::Seconds{*window};
-    if (auto r = load_webhooks(env, config); !r) {
-        return r;
-    }
     const std::string runtime = lookup(env, "ULW_LIVE_PACKAGER").value_or("");
     if (runtime == "process") {
         live.runtime = PackagerRuntime::Process;
@@ -732,6 +729,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (auto r = load_live(env, config); !r) {
         return std::unexpected(std::move(r.error()));
     }
+    if (config.live.enabled) {
+        if (auto r = load_webhooks(env, config); !r) {
+            return std::unexpected(std::move(r.error()));
+        }
+    }
     return config;
 }
 
@@ -745,6 +747,20 @@ std::expected<void, ConfigError> check_descriptor_budget(const Limits& limits, s
     }
     return {};
 }
+
+namespace {
+
+// ULW_LIVE_WEBHOOK_PORT and ULW_LIVE_PUBLISHER_GRACE_SECONDS as logged: empty while the webhook
+// listener is off.
+std::pair<std::string, std::string> webhook_settings(const LiveConfig& live) {
+    if (live.webhook_port == 0) {
+        return {};
+    }
+    return {std::to_string(live.webhook_port),
+            std::to_string(std::chrono::duration_cast<core::Seconds>(live.watch.grace).count())};
+}
+
+} // namespace
 
 void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log) {
     const auto [storage,
@@ -772,6 +788,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     };
     const bool process = live.enabled && live.runtime == PackagerRuntime::Process;
     const bool kubernetes = live.enabled && live.runtime == PackagerRuntime::Kubernetes;
+    const auto webhook_values = webhook_settings(live);
     const std::array<std::pair<std::string_view, std::string>, 50> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
@@ -827,11 +844,8 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_K8S_API_URL", kubernetes ? live.k8s_api_url : ""},
         {"ULW_K8S_NAMESPACE", live.k8s_namespace},
         {"ULW_K8S_TOKEN_FILE", kubernetes ? live.k8s_token_file : ""},
-        {"ULW_LIVE_WEBHOOK_PORT", live.webhook_port != 0 ? std::to_string(live.webhook_port) : ""},
-        {"ULW_LIVE_PUBLISHER_GRACE_SECONDS",
-         live.webhook_port != 0
-             ? std::to_string(std::chrono::duration_cast<core::Seconds>(live.watch.grace).count())
-             : ""},
+        {"ULW_LIVE_WEBHOOK_PORT", webhook_values.first},
+        {"ULW_LIVE_PUBLISHER_GRACE_SECONDS", webhook_values.second},
     }};
     for (const auto& [variable, value] : values) {
         if (value.empty()) {

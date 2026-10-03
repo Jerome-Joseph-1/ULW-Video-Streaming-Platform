@@ -15,9 +15,11 @@ constexpr std::size_t kGoneSessions = 16;
 
 } // namespace
 
-// One stream's publisher as this replica has heard of it.
-class PublisherWatch::Followed final : public net::ITimerHandler {
-public:
+// One stream's publisher as this replica has heard of it. Its state is the watch's to read and
+// write, so all of it is open to it.
+struct PublisherWatch::Followed final : public net::ITimerHandler {
+    PublisherWatch& watch_;
+
     enum class Wait : std::uint8_t {
         // The publisher is gone; at the end the stream ends unless it is back.
         Grace,
@@ -26,7 +28,7 @@ public:
     };
 
     Followed(PublisherWatch& watch, core::LiveStreamId stream) noexcept
-        : id(stream), key(stream.to_string()), watch_(watch) {}
+        : watch_(watch), id(stream), key(stream.to_string()) {}
     ~Followed() override { cancel(); }
     Followed(const Followed&) = delete;
     Followed& operator=(const Followed&) = delete;
@@ -69,9 +71,6 @@ public:
     std::uint32_t start_attempts = 0;
     std::uint32_t check_attempts = 0;
     std::uint64_t used = 0;
-
-private:
-    PublisherWatch& watch_;
     std::optional<net::TimerId> timer_;
 };
 

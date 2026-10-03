@@ -27,7 +27,9 @@ public:
 protected:
     IWebhookSink() = default;
     IWebhookSink(const IWebhookSink&) = default;
+    IWebhookSink(IWebhookSink&&) = default;
     IWebhookSink& operator=(const IWebhookSink&) = default;
+    IWebhookSink& operator=(IWebhookSink&&) = default;
 };
 
 struct WatchSettings {
@@ -91,7 +93,7 @@ public:
     [[nodiscard]] bool in_grace(const core::LiveStreamId& id) const noexcept;
 
 private:
-    class Followed;
+    struct Followed;
 
     void joined(Followed& stream, const core::UserId& owner, const std::string& session) noexcept;
     void left(Followed& stream, const std::string& session) noexcept;

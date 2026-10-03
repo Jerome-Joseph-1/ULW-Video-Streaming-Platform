@@ -337,6 +337,20 @@ gateway::ProbeChecks probe_checks(Services& s) {
             .store_paging_errors = s.paging_errors};
 }
 
+void reap_webhooks(Services& s) noexcept {
+    if (s.webhooks) {
+        s.webhooks->reap();
+    }
+}
+
+// LiveKit's webhooks, on their own listener, when the stream service has them (ADR-0093).
+std::expected<void, int> listen_for_webhooks(Services& s, os::UniqueFd listener) {
+    if (!s.webhooks) {
+        return {};
+    }
+    return s.reactor->listen(std::move(listener), *s.webhooks);
+}
+
 int serve(const gateway::Config& config, const os::NofileLimits& limits, os::UniqueFd listener,
           os::UniqueFd webhook_listener, ops::Logger& log,
           const std::optional<ops::Notifier>& notifier) {
@@ -402,10 +416,8 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
     if (auto r = s.reactor->listen(std::move(listener), *s.gateway); !r) {
         return fail(log, "register listener", errno_text(r.error()));
     }
-    if (s.webhooks) {
-        if (auto r = s.reactor->listen(std::move(webhook_listener), *s.webhooks); !r) {
-            return fail(log, "register webhook listener", errno_text(r.error()));
-        }
+    if (auto r = listen_for_webhooks(s, std::move(webhook_listener)); !r) {
+        return fail(log, "register webhook listener", errno_text(r.error()));
     }
     s.database_check = std::make_unique<infra::postgres::PgHealthCheck>(config.database_url);
     s.probe = std::make_unique<gateway::HealthProbe>(s.health, probe_checks(s), s.clock, log);
@@ -434,9 +446,7 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
     while (!s.gateway->finished()) {
         s.reactor->run_once(kLoopTick);
         s.gateway->reap();
-        if (s.webhooks) {
-            s.webhooks->reap();
-        }
+        reap_webhooks(s);
         // Only a loop that turns pings: a wedged loop is what the watchdog is for.
         if (watchdog && s.clock.now() >= next_ping) {
             notifier->watchdog();
