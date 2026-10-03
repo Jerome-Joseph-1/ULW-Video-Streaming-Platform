@@ -284,11 +284,13 @@ ulw_add_test_suite(gateway_tests unit
     gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
     gateway/gateway_store_stall_test.cpp
+    gateway/gateway_streams_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
     gateway/health_test.cpp
     gateway/key_fetcher_test.cpp
     gateway/live_manifest_cache_test.cpp
+    gateway/live_streams_test.cpp
     gateway/rate_limit_test.cpp
     gateway/send_window.cpp)
 target_link_libraries(gateway_tests PRIVATE
@@ -378,6 +380,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_harness.cpp
     integration/postgres_job_queue_test.cpp
     integration/postgres_live_recordings_test.cpp
+    integration/postgres_live_streams_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
@@ -713,6 +716,14 @@ target_link_libraries(sfu_unit_tests PRIVATE ulw::sfu_livekit ulw::auth ulw::tes
 # White-box tests of token minting and of how RoomService answers are read.
 target_include_directories(sfu_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src
     ${PROJECT_SOURCE_DIR}/tests)
+
+# How the stream service starts packagers: as child processes, and as Jobs through a scripted
+# Kubernetes API server.
+ulw_add_test_suite(packagers_unit_tests unit
+    unit/packagers/kubernetes_packagers_test.cpp
+    unit/packagers/process_packagers_test.cpp)
+target_link_libraries(packagers_unit_tests PRIVATE ulw::packagers ulw::test_http_server)
+target_include_directories(packagers_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 # The signalling side of the call suite, tests/call/run.sh.
 ulw_add_executable(ulw_call_harness call/harness_main.cpp)
