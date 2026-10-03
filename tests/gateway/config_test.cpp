@@ -755,6 +755,9 @@ TEST_F(LiveConfigTest, TheKubernetesRuntimeRefusesWhatCouldNotWork) {
     live("kubernetes");
     env["ULW_K8S_API_URL"] = "kubernetes.default.svc";
     EXPECT_EQ(refused_variable(), "ULW_K8S_API_URL");
+    // The account's token goes with every request.
+    env["ULW_K8S_API_URL"] = "http://10.43.0.1";
+    EXPECT_EQ(refused_variable(), "ULW_K8S_API_URL");
     live("kubernetes");
     env["ULW_LIVE_PACKAGER_PULL_POLICY"] = "Sometimes";
     EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER_PULL_POLICY");
@@ -774,6 +777,9 @@ TEST_F(LiveConfigTest, EveryLiveSettingIsChecked) {
     const std::vector<std::pair<std::string, std::string>> bad{
         {"LIVEKIT_API_URL", "livekit:7880"},
         {"LIVEKIT_CLIENT_URL", "https://media.example.test"},
+        // Plain schemes only where nothing crosses a shared network.
+        {"LIVEKIT_CLIENT_URL", "ws://media.example.test"},
+        {"LIVEKIT_API_URL", "http://livekit.example.com"},
         {"ULW_LIVE_PACKAGER_SRT", "udp://packager:9000"},
         {"ULW_LIVE_PACKAGER", "docker"},
         {"ULW_LIVE_SEGMENT_SECONDS", "1"},

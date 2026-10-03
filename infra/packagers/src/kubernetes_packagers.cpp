@@ -1,6 +1,7 @@
 #include "infra/packagers/kubernetes_packagers.hpp"
 
 #include "core/util/json.hpp"
+#include "core/util/url.hpp"
 
 #include "later.hpp"
 
@@ -582,8 +583,9 @@ void KubernetesPackagers::Impl::finished(Call& call, Answer answer) noexcept {
 std::expected<std::unique_ptr<KubernetesPackagers>, std::string>
 KubernetesPackagers::create(net::IReactor& reactor, curl::Multi& multi, net::OffloadPool& offload,
                             const core::ports::IClock& clock, KubernetesConfig config) {
-    if (!config.api_url.starts_with("https://") && !config.api_url.starts_with("http://")) {
-        return std::unexpected("the API server's URL must be http:// or https://");
+    // Every request carries the account's token: https, or http to this machine only.
+    if (!core::secure_url(config.api_url, "https", "http", core::loopback_host)) {
+        return std::unexpected("the API server's URL must be https (http only to loopback)");
     }
     if (auto values = check_job_values(config.job); !values) {
         return std::unexpected(std::move(values.error()));

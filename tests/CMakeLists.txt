@@ -33,6 +33,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/key_package_test.cpp
     unit/core/ladder_test.cpp
     unit/core/parse_test.cpp
+    unit/core/url_test.cpp
     unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
