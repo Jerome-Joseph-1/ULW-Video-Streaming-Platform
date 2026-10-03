@@ -2,13 +2,10 @@
 
 #include "support/temp_dir.hpp"
 
-#include <sys/resource.h>
 #include <sys/stat.h>
 
 #include <cerrno>
 #include <climits>
-#include <expected>
-#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -29,40 +26,6 @@ namespace fs = std::filesystem;
 std::string reason(int err) {
     return std::generic_category().message(err);
 }
-
-// Lowers the soft limit on open files to the lowest descriptor free now, so the next open fails
-// with EMFILE, and restores the limit when it goes.
-class NoFreeDescriptor {
-public:
-    NoFreeDescriptor() {
-        if (::getrlimit(RLIMIT_NOFILE, &saved_) != 0) {
-            return;
-        }
-        const int lowest = ::open("/", O_RDONLY | O_CLOEXEC);
-        if (lowest < 0) {
-            return;
-        }
-        ::close(lowest);
-        rlimit lowered = saved_;
-        lowered.rlim_cur = static_cast<rlim_t>(lowest);
-        active_ = ::setrlimit(RLIMIT_NOFILE, &lowered) == 0;
-    }
-    ~NoFreeDescriptor() {
-        if (active_) {
-            ::setrlimit(RLIMIT_NOFILE, &saved_);
-        }
-    }
-    NoFreeDescriptor(const NoFreeDescriptor&) = delete;
-    NoFreeDescriptor& operator=(const NoFreeDescriptor&) = delete;
-    NoFreeDescriptor(NoFreeDescriptor&&) = delete;
-    NoFreeDescriptor& operator=(NoFreeDescriptor&&) = delete;
-
-    [[nodiscard]] bool active() const noexcept { return active_; }
-
-private:
-    rlimit saved_{};
-    bool active_ = false;
-};
 
 // Runs in `dir` while it lives, and goes back to where it was.
 class InDirectory {
@@ -316,17 +279,13 @@ TEST_F(MakePrivateDir, NamesTheDirectoryThatCannotBeMadeInItsParent) {
 }
 
 TEST_F(MakePrivateDir, ReportsAnOpenThatFailsForAnyOtherReasonAsThatReason) {
-    // Out of descriptors is not a link or a file in the way, and is not told as one.
-    const fs::path dir = tmp.path() / "node-1";
-    std::expected<void, std::string> made;
-    {
-        const NoFreeDescriptor none;
-        ASSERT_TRUE(none.active());
-        made = os::make_private_dir(dir);
-    }
+    // A parent name no file system accepts is not a link or a file in the way, and is not told
+    // as one. Nothing above is made, so the open is what fails.
+    const fs::path parent = tmp.path() / std::string(NAME_MAX + 1, 'p');
+    const auto made = os::make_private_dir(parent / "node-1", os::MissingParent::Refuse);
     ASSERT_FALSE(made);
-    EXPECT_EQ(made.error(), tmp.path().string() + ": " + reason(EMFILE));
-    EXPECT_FALSE(fs::exists(dir));
+    EXPECT_EQ(made.error(), parent.string() + ": " + reason(ENAMETOOLONG));
+    EXPECT_TRUE(fs::is_empty(tmp.path()));
 }
 
 } // namespace
