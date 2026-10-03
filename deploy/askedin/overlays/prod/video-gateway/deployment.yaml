@@ -99,6 +99,11 @@ spec:
             # is an HTML page, and not its in-cluster http:// URL, which ULW refuses.
             - name: JWKS_URL
               value: https://auth.askedin.com/.well-known/jwks.json
+            # The web app's pages, as Askedin gave them for chat (docs/integration/auth.md,
+            # Askedin). A browser sends Origin on every cookie POST, PATCH and DELETE; without
+            # the page listed here those writes are refused 403 (ADR-0078).
+            - name: ULW_ALLOWED_ORIGINS
+              value: https://askedin.com,https://www.askedin.com
             # Exactly the iss Askedin's auth-service signs, compared byte for byte: no path, no
             # trailing slash (confirmed 2026-10-03, docs/integration/auth.md, Askedin).
             - name: JWT_ISSUER

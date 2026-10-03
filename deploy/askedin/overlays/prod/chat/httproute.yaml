@@ -14,6 +14,11 @@ spec:
     # must.
     - name: askedin-gateway
       namespace: apps
+  # Askedin's prod origins (docs/integration/auth.md, Askedin): stage and prod share
+  # askedin-gateway, so a route without hostnames would also answer stage's.
+  hostnames:
+    - askedin.com
+    - www.askedin.com
   rules:
     - matches:
         - path:

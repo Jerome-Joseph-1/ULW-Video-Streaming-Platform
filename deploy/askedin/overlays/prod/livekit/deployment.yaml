@@ -6,7 +6,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: livekit
-  namespace: apps-stage
+  namespace: apps
   labels:
     app.kubernetes.io/name: livekit
     app.kubernetes.io/part-of: ulw
@@ -91,8 +91,9 @@ spec:
                   # to calls longer than almost any, while a leaked credential still dies the
                   # same day.
                   turn_servers:
+                    # Prod's STUNner listens on 3479 (stunner/gateway.yaml says why).
                     - host: $(TURN_HOST)
-                      port: 3478
+                      port: 3479
                       protocol: udp
                       secret: $(TURN_SECRET)
                       ttl: 14400
