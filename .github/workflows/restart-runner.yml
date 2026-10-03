@@ -8,7 +8,7 @@ name: restart-runner
 # restart cancels that job; busy means a Runner.Worker in the runner service's cgroup, which holds
 # whichever bin.<version> a self-updated runner runs from. Another runner is restarted at once.
 # The job runs on whichever self-hosted runner takes it, so when that is the target the restart is
-# handed to a systemd timer 15 s on, after this job has ended; it checks again then and skips the
+# handed to a systemd timer 30 s on, after this job has ended; it checks again then and skips the
 # restart if the runner has taken a new job meanwhile, unless `force` is set. A forced restart
 # stops the runner's listener; a job's processes that outlive it for 30 s stay in its cgroup.
 
@@ -53,10 +53,10 @@ jobs:
             exit 1
           fi
           # Exit status 0 when the unit's cgroup holds a Runner.Worker, that is, a job is running.
-          # A stopped or failed runner runs nothing; a running one whose cgroup cannot be read
+          # A stopped or failed runner runs nothing; any other whose cgroup cannot be read
           # counts as busy, so the check fails closed. Defined once and passed to the delayed
           # check as text, with the unit as an argument.
-          busy='[[ $(systemctl show -p ActiveState --value "$1") == active ]] || exit 1
+          busy='case $(systemctl show -p ActiveState --value "$1") in inactive | failed) exit 1 ;; esac
             cg=$(systemctl show -p ControlGroup --value "$1")
             [[ -n $cg && -r /sys/fs/cgroup$cg/cgroup.procs ]] || exit 0
             while read -r pid; do
@@ -76,10 +76,11 @@ jobs:
             sudo systemctl restart "$unit"
             echo "runner $TARGET ($unit) restarted"
           else
-            sudo systemd-run --quiet --collect --on-active=15 --timer-property=AccuracySec=1s \
+            sudo systemd-run --quiet --collect --expand-environment=no --on-active=30 \
+                --timer-property=AccuracySec=1s \
                 --unit="restart-runner-$TARGET-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
                 /usr/bin/bash -c 'if [[ $2 != true ]] && bash -c "$3" busy "$1"; then
                   echo "runner $1 took a new job; not restarted"; else systemctl restart "$1"; fi' \
                 restart "$unit" "$FORCE" "$busy"
-            echo "runner $TARGET ($unit) is this job's runner: it restarts 15 s after this job"
+            echo "runner $TARGET ($unit) is this job's runner: it restarts 30 s after this job"
           fi
