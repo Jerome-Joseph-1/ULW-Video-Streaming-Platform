@@ -56,19 +56,16 @@ bool refused_our_file(std::string_view stderr_tail,
         stderr_tail.remove_suffix(1);
     }
     const std::size_t nl = stderr_tail.rfind('\n');
-    std::string_view line = nl == std::string_view::npos ? stderr_tail : stderr_tail.substr(nl + 1);
-    for (const auto& path : ours) {
+    const std::string_view line =
+        nl == std::string_view::npos ? stderr_tail : stderr_tail.substr(nl + 1);
+    return std::ranges::any_of(ours, [&](const std::filesystem::path& path) {
         const std::string& text = path.native();
         if (text.empty() || !line.starts_with(text) ||
             !line.substr(text.size()).starts_with(": ")) {
-            continue;
+            return false;
         }
-        const std::string_view said = line.substr(text.size() + 2);
-        if (std::ranges::find(kRefusals, said) != kRefusals.end()) {
-            return true;
-        }
-    }
-    return false;
+        return std::ranges::find(kRefusals, line.substr(text.size() + 2)) != kRefusals.end();
+    });
 }
 
 TranscodeFailure refine(TranscodeFailure kind, int exit_code, std::string_view stderr_tail,
