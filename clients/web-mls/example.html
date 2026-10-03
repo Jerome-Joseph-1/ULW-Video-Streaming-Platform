@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLS chat example</title>
+<style>
+  :root { --bg: #fff; --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --accent: #0a66c2; --mine: #e8f1fb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161618; --fg: #f2f2f7; --muted: #a1a1a6; --line: #3a3a3c; --accent: #4c9bf0; --mine: #1f2d3d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.lede { color: var(--muted); margin: 0 0 16px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 0 0 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 8px 0 2px; }
+  input { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
+          background: var(--bg); color: var(--fg); font: inherit; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  button { padding: 8px 14px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent);
+           color: #fff; font: inherit; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  #status { font-size: 13px; color: var(--muted); margin: 8px 0; min-height: 1.4em; }
+  #log { border: 1px solid var(--line); border-radius: 8px; padding: 8px; height: 320px; overflow-y: auto; }
+  .msg { padding: 6px 10px; border-radius: 6px; margin: 4px 0; overflow-wrap: anywhere; }
+  .msg.mine { background: var(--mine); }
+  .msg .who { font-weight: 600; margin-right: 6px; }
+  .event { font-size: 12px; color: var(--muted); margin: 2px 0; }
+  form.send { display: flex; gap: 8px; margin-top: 8px; }
+  form.send input { flex: 1; }
+</style>
+</head>
+<body>
+<main>
+  <h1>End-to-end encrypted chat (MLS)</h1>
+  <p class="lede">OpenMLS in WebAssembly. The chat server carries each MLS message as an opaque body.
+    Open this page in two browser contexts (a normal and a private window), one device in each.</p>
+
+  <fieldset id="setup">
+    <label for="chat">Chat WebSocket</label>
+    <input id="chat" value="ws://localhost:9171/rt">
+    <label for="room">Room id (both devices' users must be on its member list)</label>
+    <input id="room" placeholder="0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d">
+    <label for="device">Device name (the MLS identity, 1 to 64 bytes)</label>
+    <input id="device" placeholder="alice-laptop">
+    <label for="token">Token (set as the auth_token cookie; this page's origin must be in ULW_ALLOWED_ORIGINS)</label>
+    <input id="token" type="password" autocomplete="off">
+    <div class="row"><button id="connect">Connect</button></div>
+  </fieldset>
+
+  <div class="row">
+    <button id="create" disabled>Start the group</button>
+    <button id="announce" class="secondary" disabled>Ask to join</button>
+  </div>
+  <div id="status">Not connected.</div>
+  <div id="log" aria-live="polite"></div>
+  <form class="send" id="send">
+    <input id="text" placeholder="Message" autocomplete="off" disabled>
+    <button id="sendButton" disabled>Send</button>
+  </form>
+</main>
+
+<script type="module">
+import { loadMls, MlsClient, MlsRoom, utf8, loadState, saveState } from "./dist/mls-room.js";
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.hash.slice(1));
+for (const f of ["chat", "room", "device", "token"]) {
+  if (params.has(f)) $(f).value = params.get(f);
+}
+
+let room = null;
+let saving = Promise.resolve();
+
+function status(text) { $("status").textContent = text; }
+
+function line(cls, html) {
+  const div = document.createElement("div");
+  div.className = cls;
+  div.append(...html);
+  $("log").append(div);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function message(who, text, mine) {
+  const name = document.createElement("span");
+  name.className = "who";
+  name.textContent = who;
+  line(mine ? "msg mine" : "msg", [name, document.createTextNode(text)]);
+}
+
+function refresh() {
+  const joined = room?.joined ?? false;
+  $("create").disabled = !room || joined;
+  $("announce").disabled = !room || joined;
+  $("text").disabled = !joined;
+  $("sendButton").disabled = !joined;
+  if (joined) {
+    status(`In the group: epoch ${room.group.epoch}, ${room.group.memberCount} members.`);
+  }
+}
+
+$("connect").onclick = async () => {
+  const device = $("device").value.trim();
+  const roomId = $("room").value.trim().toLowerCase();
+  if (!device || !roomId) { status("Room and device name are needed."); return; }
+  if ($("token").value) {
+    document.cookie = `auth_token=${$("token").value}; path=/; SameSite=Strict`;
+  }
+  await loadMls();
+  const saved = await loadState(device).catch(() => null);
+  const client = saved ? MlsClient.importState(saved) : new MlsClient(utf8(device));
+  const ws = new WebSocket($("chat").value);
+  room = new MlsRoom({
+    client,
+    room: roomId,
+    send: (id, body) => ws.send(JSON.stringify({ type: "send", room: roomId, id, body })),
+    onMessage: (m) => { message(m.sender, m.text, false); refresh(); },
+    onEvent: (e) => { line("event", [document.createTextNode(JSON.stringify(e))]); refresh(); },
+    onState: (s) => { saving = saving.then(() => saveState(device, s)).catch(() => {}); },
+  });
+  ws.onopen = () => ws.send(JSON.stringify({ type: "join", room: roomId }));
+  ws.onclose = (e) => { status(`Disconnected (${e.code}).`); room = null; refresh(); };
+  ws.onmessage = (e) => {
+    const f = JSON.parse(e.data);
+    if (f.type === "joined") {
+      $("setup").disabled = true;
+      status(room.joined ? "" : `Connected as ${device}. Start the group, or ask to join one.`);
+      refresh();
+    } else if (f.type === "message" && f.room === roomId) {
+      room.receive(f);
+      refresh();
+    } else if (f.type === "error") {
+      line("event", [document.createTextNode(`server: ${f.reason}`)]);
+    }
+  };
+};
+
+$("create").onclick = () => { room.create(); refresh(); };
+$("announce").onclick = () => { room.announce(); status("Asked to join; waiting for a member to add this device."); };
+$("send").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("text").value;
+  if (!text) return;
+  room.sendText(text);
+  message($("device").value.trim(), text, true);
+  $("text").value = "";
+};
+</script>
+</body>
+</html>
