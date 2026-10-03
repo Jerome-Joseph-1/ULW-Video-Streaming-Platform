@@ -877,6 +877,7 @@ void ChatService::sweep() noexcept {
     std::erase_if(joins_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(sends_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(refusals_, [now](const auto& entry) { return entry.second.full(now); });
+    std::erase_if(memberships_, [now](const auto& entry) { return entry.second.full(now); });
 }
 
 void ChatService::leave(ClientId id, Client& c, const core::RoomId& room) noexcept {
@@ -921,6 +922,7 @@ void ChatService::on_member_removed(const core::RoomId& room, const core::UserId
         ++counters_.removals;
         answer(*c.client, "not_member", room);
     }
+    tell_members(room, user, false);
 }
 
 void ChatService::unconfirmed(const core::RoomId& room, const core::UserId& user) noexcept {

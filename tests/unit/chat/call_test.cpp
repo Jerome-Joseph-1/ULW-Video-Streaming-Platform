@@ -1,5 +1,6 @@
 #include "call.hpp"
 #include "support/fake_clock.hpp"
+#include "support/no_membership_store.hpp"
 
 #include <gtest/gtest.h>
 #include <memory>
@@ -25,7 +26,7 @@ core::RoomId room_id(std::string_view room = kRoom) {
 }
 
 // Only access matters to the handler; it answers what the test set, at once or when told to.
-class FakeStore final : public core::ports::IMessageStore {
+class FakeStore final : public ulw::test::NoMembershipStore {
 public:
     void history_before(
         const core::RoomId& /*room*/, std::optional<std::uint64_t> /*before*/,

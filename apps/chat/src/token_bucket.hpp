@@ -43,6 +43,8 @@ public:
     // Whether take() would succeed at `now`, without taking.
     [[nodiscard]] bool available(core::MonoTime now) const noexcept;
     void take(core::MonoTime now) noexcept;
+    // How long from `now` until take() would succeed: zero when it would now.
+    [[nodiscard]] core::Millis wait(core::MonoTime now) const noexcept;
     [[nodiscard]] bool full(core::MonoTime now) const noexcept { return due_ <= now; }
 
 private:

@@ -53,6 +53,9 @@ constexpr auto kExplainBefore =
 constexpr auto kExplainAfter =
     explain_of<kExplain.size() + infra::postgres::message_sql::kHistoryAfterText.size() + 1>(
         infra::postgres::message_sql::kHistoryAfterText);
+constexpr auto kExplainRooms =
+    explain_of<kExplain.size() + infra::postgres::message_sql::kRoomsFirstText.size() + 1>(
+        infra::postgres::message_sql::kRoomsFirstText);
 
 std::vector<std::byte> bytes(std::string_view text) {
     std::vector<std::byte> out(text.size());
@@ -187,9 +190,13 @@ public:
     void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override {
         removed.emplace_back(room, user);
     }
+    void on_member_added(const core::RoomId& room, const core::UserId& user) noexcept override {
+        added.emplace_back(room, user);
+    }
     void on_members_resync() noexcept override { ++resyncs; }
 
     std::vector<std::pair<core::RoomId, core::UserId>> removed;
+    std::vector<std::pair<core::RoomId, core::UserId>> added;
     int resyncs = 0;
 };
 
@@ -530,6 +537,184 @@ TEST_F(MessageStoreTest, MembersArePagedInByteOrderAfterTheLastIdSeen) {
     const auto all = page(std::nullopt, 100);
     ASSERT_TRUE(all);
     EXPECT_EQ(names(*all), ids);
+}
+
+// Member lists their users change (ADR-0096): what only Postgres can show of them. The laws both
+// stores keep are in conformance/message_store_conformance_test.cpp.
+
+using core::ports::MembershipChange;
+using core::ports::MembershipOutcome;
+
+std::vector<core::UserId> users_named(std::string_view prefix, std::size_t count) {
+    std::vector<core::UserId> out;
+    out.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        out.push_back(*core::UserId::parse(std::format("{}{:03}", prefix, i)));
+    }
+    return out;
+}
+
+// Two adds that each fit the group alone, asked at once: the second reads the list after the
+// first committed, under the room's lock, and adds nobody. The test holds the lock first, so
+// both are waiting on it when it goes, and neither can have read the list before.
+TEST_F(MessageStoreTest, AddsAskedAtOnceNeverTakeAGroupPastItsCap) {
+    const core::RoomId room = named_room("04");
+    ASSERT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->create_group(room, alice_, users_named("first", 49), std::move(done));
+              })->changed.size(),
+              50U);
+    auto holder = db_->session();
+    ASSERT_TRUE(holder.exec("BEGIN"));
+    ASSERT_TRUE(holder.exec("SELECT 1 FROM chat_rooms WHERE room_id = $1 FOR UPDATE",
+                            Params{}.add_uuid(room.uuid())));
+    std::vector<MessageResult<MembershipChange>> answers;
+    for (const std::string_view batch : {"left", "right"}) {
+        store_->add_members(
+            room, alice_, users_named(batch, 30),
+            [&](MessageResult<MembershipChange> r) noexcept { answers.push_back(std::move(r)); });
+    }
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] {
+        return scalar(*conn_, "SELECT count(*) FROM pg_stat_activity WHERE "
+                              "datname = current_database() AND wait_event_type = 'Lock'") == "2";
+    })) << "the adds did not both wait for the room's lock";
+    ASSERT_TRUE(holder.exec("COMMIT"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answers.size() == 2; }));
+    ASSERT_TRUE(answers[0] && answers[1]);
+    std::vector<std::size_t> added{answers[0]->changed.size(), answers[1]->changed.size()};
+    std::ranges::sort(added);
+    EXPECT_EQ(added, (std::vector<std::size_t>{0, 30}));
+    EXPECT_TRUE(answers[0]->outcome == MembershipOutcome::Full ||
+                answers[1]->outcome == MembershipOutcome::Full);
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_members WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "80");
+}
+
+// Both of a pair opening their chat at the same moment, as two people starting a conversation
+// do: one lists the two, the other finds them listed, and both are answered.
+TEST_F(MessageStoreTest, BothOfAPairOpeningTheirChatAtOnceListItOnce) {
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    for (int round = 0; round < 20; ++round) {
+        const core::RoomId room = named_room("03");
+        std::vector<MessageResult<MembershipChange>> answers;
+        const auto keep = [&](MessageResult<MembershipChange> r) noexcept {
+            answers.push_back(std::move(r));
+        };
+        store_->open_direct(room, alice_, bob, keep);
+        store_->open_direct(room, bob, alice_, keep);
+        ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answers.size() == 2; }));
+        ASSERT_TRUE(answers[0] && answers[1]);
+        ASSERT_EQ(answers[0]->outcome, MembershipOutcome::Done);
+        ASSERT_EQ(answers[1]->outcome, MembershipOutcome::Done);
+        EXPECT_EQ(answers[0]->changed.size() + answers[1]->changed.size(), 2U);
+        EXPECT_EQ(scalar(*conn_,
+                         "SELECT string_agg(user_id, ' ' ORDER BY user_id) FROM chat_members "
+                         "WHERE room_id = $1",
+                         Params{}.add_uuid(room.uuid())),
+                  "auth0|alice auth0|bob");
+    }
+}
+
+// A refusal writes nothing, and its transaction does not outlive it.
+TEST_F(MessageStoreTest, ARefusedChangeWritesNothingAndLeavesNoTransactionOpen) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(room, alice_, std::move(done)); }));
+    const auto state = [&] {
+        return scalar(*conn_,
+                      "SELECT (SELECT xmin::text FROM chat_rooms WHERE room_id = $1) || ' ' || "
+                      "(SELECT string_agg(user_id || ':' || role, ' ') FROM chat_members "
+                      "WHERE room_id = $1)",
+                      Params{}.add_uuid(room.uuid()));
+    };
+    const std::string before = state();
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    EXPECT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->open_direct(room, alice_, bob, std::move(done));
+              })->outcome,
+              MembershipOutcome::WrongKind);
+    // Listed by an operator, alice is a member, not an admin.
+    EXPECT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->add_members(room, alice_, {bob}, std::move(done));
+              })->outcome,
+              MembershipOutcome::NotAdmin);
+    EXPECT_EQ(state(), before);
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM pg_stat_activity WHERE "
+                             "datname = current_database() AND state LIKE 'idle in transaction%'"),
+              "0");
+}
+
+// Whoever lists a member, the nodes hear it: an operator's INSERT as much as the service's own.
+// A row whose role changes lists and removes nobody.
+TEST_F(MessageStoreTest, AMemberListedInTheDatabaseIsHeardAsAnAddition) {
+    Removals heard;
+    store_->watch_members(&heard);
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return heard.resyncs > 0; }))
+        << "the store never listened";
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'group_chat')",
+                            Params{}.add_uuid(room.uuid())));
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1, $2)",
+                            Params{}.add_uuid(room.uuid()).add_text(alice_.view())));
+    ASSERT_TRUE(conn_->exec("UPDATE chat_members SET role = 'admin' WHERE room_id = $1",
+                            Params{}.add_uuid(room.uuid())));
+    ASSERT_TRUE(
+        conn_->exec("DELETE FROM chat_members WHERE room_id = $1", Params{}.add_uuid(room.uuid())));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return !heard.removed.empty(); }));
+    ASSERT_EQ(heard.added.size(), 1U);
+    EXPECT_EQ(heard.added[0], std::pair(room, alice_));
+    ASSERT_EQ(heard.removed.size(), 1U);
+    EXPECT_EQ(heard.removed[0], std::pair(room, alice_));
+    store_->watch_members(nullptr);
+}
+
+// A room named by a pair is only ever a direct chat, and one named by a creator a group chat: the
+// database refuses anything else, the room plane creates them as such, and a role is one of two.
+TEST_F(MessageStoreTest, NamedRoomsAreOnlyTheKindTheirIdNamesAndRolesOnlyMemberOrAdmin) {
+    const core::RoomId direct = named_room("03");
+    const core::RoomId group = named_room("04");
+    EXPECT_FALSE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'group_chat')",
+                             Params{}.add_uuid(direct.uuid())));
+    EXPECT_FALSE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'direct_chat')",
+                             Params{}.add_uuid(group.uuid())));
+    // Created by the room plane before anything recorded it, as a node resolving it would.
+    ASSERT_NE(own(direct), 0U);
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT concat_ws(' ', r.kind, s.kind) "
+                     "FROM chat_rooms r JOIN room_state s USING (room_id) WHERE room_id = $1",
+                     Params{}.add_uuid(direct.uuid())),
+              "direct_chat direct_chat");
+    ASSERT_NE(own(group), 0U);
+    EXPECT_EQ(scalar(*conn_, "SELECT kind FROM chat_rooms WHERE room_id = $1",
+                     Params{}.add_uuid(group.uuid())),
+              "group_chat");
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(group, alice_, std::move(done)); }));
+    EXPECT_FALSE(conn_->exec("UPDATE chat_members SET role = 'owner' WHERE room_id = $1",
+                             Params{}.add_uuid(group.uuid())));
+    EXPECT_EQ(scalar(*conn_, "SELECT role FROM chat_members WHERE room_id = $1",
+                     Params{}.add_uuid(group.uuid())),
+              "member");
+}
+
+// A user's rooms are read through the index on (user_id, room_id), not by scanning every list.
+TEST_F(MessageStoreTest, AUsersRoomsAreReadThroughTheirIndex) {
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_members (room_id, user_id) "
+                            "SELECT gen_random_uuid(), 'user' || (n % 500) "
+                            "FROM generate_series(1, 20000) AS n"));
+    ASSERT_TRUE(conn_->exec("ANALYZE chat_members"));
+    auto plan = conn_->exec(Sql{kExplainRooms.data()}, Params{}.add_text("user7").add_int(51));
+    ASSERT_TRUE(plan) << plan.error().message;
+    std::string text;
+    for (int row = 0; row < plan->rows(); ++row) {
+        text += plan->get(row, 0).value_or("");
+        text += '\n';
+    }
+    EXPECT_NE(text.find("chat_members_by_user"), std::string::npos) << text;
+    const auto rooms = ask<std::vector<core::ports::RoomEntry>>([&](auto done) {
+        store_->rooms_of(*core::UserId::parse("user7"), std::nullopt, 100, std::move(done));
+    });
+    ASSERT_TRUE(rooms);
+    EXPECT_EQ(rooms->size(), 40U);
 }
 
 TEST_F(MessageStoreTest, BodiesAreByteaNeverTextAndNothingIndexesThem) {

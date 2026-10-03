@@ -363,7 +363,19 @@ std::string ChatServer::render_metrics() const {
         "call_rooms {}\n"
         "call_errors_total{{source=\"sfu\",kind=\"unavailable\"}} {}\n"
         "call_errors_total{{source=\"sfu\",kind=\"refused\"}} {}\n"
-        "call_errors_total{{source=\"store\",kind=\"unavailable\"}} {}\n",
+        "call_errors_total{{source=\"store\",kind=\"unavailable\"}} {}\n"
+        "directs_opened_total {}\n"
+        "groups_created_total {}\n"
+        "members_changed_total{{change=\"added\"}} {}\n"
+        "members_changed_total{{change=\"removed\"}} {}\n"
+        "members_changed_total{{change=\"left\"}} {}\n"
+        "membership_refusals_total{{reason=\"not_member\"}} {}\n"
+        "membership_refusals_total{{reason=\"not_admin\"}} {}\n"
+        "membership_refusals_total{{reason=\"not_group\"}} {}\n"
+        "membership_refusals_total{{reason=\"too_many_members\"}} {}\n"
+        "membership_refusals_total{{reason=\"rate_limited\"}} {}\n"
+        "membership_refusals_total{{reason=\"unavailable\"}} {}\n"
+        "member_events_total {}\n",
         c.connections_accepted, c.rejected_capacity, c.rejected_socket, c.rejected_ip_connections,
         c.rejected_ip_block, c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions,
         clients_.size(), users_.size(), blocks_.size(), clients_.evictions(), sessions_.size(),
@@ -380,7 +392,11 @@ std::string ChatServer::render_metrics() const {
         chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0,
         c.auth_cache_drops, deps_.verifier.drop_pending() ? 1 : 0, chat.unrecorded_joins,
         calls_.enabled() ? 1 : 0, call.tickets, call.not_member, call.not_callable, call.busy,
-        call.opens, calls_.rooms(), call.sfu_unavailable, call.sfu_refused, call.store_unavailable);
+        call.opens, calls_.rooms(), call.sfu_unavailable, call.sfu_refused, call.store_unavailable,
+        chat.directs_opened, chat.groups_created, chat.members_added, chat.members_removed,
+        chat.members_left, chat.membership_not_member, chat.membership_not_admin,
+        chat.membership_not_group, chat.membership_full, chat.membership_rate_limited,
+        chat.membership_unavailable, chat.member_events);
 }
 
 } // namespace chat

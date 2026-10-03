@@ -513,6 +513,34 @@ void Session::command(const codec::ws::Frame& frame) {
         chat.call(*client_, *c);
         return;
     }
+    if (const auto* o = std::get_if<OpenDirect>(&*parsed)) {
+        chat.open_direct(*client_, *o);
+        return;
+    }
+    if (auto* g = std::get_if<CreateGroup>(&*parsed)) {
+        chat.create_group(*client_, std::move(*g));
+        return;
+    }
+    if (auto* a = std::get_if<AddMembers>(&*parsed)) {
+        chat.add_members(*client_, std::move(*a));
+        return;
+    }
+    if (const auto* r = std::get_if<RemoveMember>(&*parsed)) {
+        chat.remove_member(*client_, *r);
+        return;
+    }
+    if (const auto* l = std::get_if<LeaveRoom>(&*parsed)) {
+        chat.leave_room(*client_, *l);
+        return;
+    }
+    if (const auto* r = std::get_if<ListRooms>(&*parsed)) {
+        chat.list_rooms(*client_, *r);
+        return;
+    }
+    if (const auto* m = std::get_if<ListMembers>(&*parsed)) {
+        chat.list_members(*client_, *m);
+        return;
+    }
     server_.presence().unwatch(*presence_, std::get<Unwatch>(*parsed).user);
 }
 

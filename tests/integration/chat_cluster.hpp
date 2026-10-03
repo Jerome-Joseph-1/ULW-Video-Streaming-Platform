@@ -91,6 +91,10 @@ struct Seen {
     std::string url;
     std::string token;
     std::uint64_t expires_at = 0;
+    // Of a member list's change.
+    std::string change;
+    // The frame as it came, for the fields above do not cover.
+    std::string raw;
 };
 
 inline std::optional<Seen> parse_seen(const std::string& text) {
@@ -115,7 +119,9 @@ inline std::optional<Seen> parse_seen(const std::string& text) {
            .status = string("status"),
            .url = string("url"),
            .token = string("token"),
-           .expires_at = 0};
+           .expires_at = 0,
+           .change = string("change"),
+           .raw = text};
     if (const core::json::Value* expires = json->find("expires_at")) {
         s.expires_at = expires->as_u64().value_or(0);
     }
@@ -434,6 +440,45 @@ protected:
         }
         const auto answer =
             client.wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
+        if (!answer) {
+            return "no answer";
+        }
+        return answer->type == "joined" ? "joined" : answer->reason;
+    }
+
+    // Sends `command` and waits for its answer: the first frame after it of type `answer`, or an
+    // error. Frames that came before it are not looked at.
+    static std::optional<Seen> ask(Client& client, const std::string& command,
+                                   std::string_view answer) {
+        const std::size_t from = client.seen().size();
+        if (!client.send(command)) {
+            return std::nullopt;
+        }
+        const auto at = client.wait_from(
+            from, [&](const Seen& s) { return s.type == answer || s.type == "error"; });
+        if (!at) {
+            return std::nullopt;
+        }
+        return client.seen()[*at];
+    }
+
+    // The direct chat of the client's user and `peer`, opened over the room WebSocket
+    // (ADR-0096): its room id, or the error's reason prefixed with "error: ".
+    static std::string open_direct(Client& client, const std::string& peer) {
+        const auto answer =
+            ask(client, R"({"type":"open_direct","user":")" + peer + R"("})", "direct");
+        if (!answer) {
+            return "no answer";
+        }
+        return answer->type == "direct" ? answer->room : "error: " + answer->reason;
+    }
+
+    // As join_answer, but looking only at what comes after the join: for a client that has been
+    // answered joined or refused before.
+    static std::string join_again(Client& client, const std::string& room,
+                                  const std::string& fields = "") {
+        const auto answer =
+            ask(client, R"({"type":"join","room":")" + room + R"(")" + fields + "}", "joined");
         if (!answer) {
             return "no answer";
         }

@@ -58,6 +58,12 @@ enum class NamedRoom : std::uint8_t {
     StreamChat = 0x01,
     // A user's presence room, from the user's id (apps/chat/src/presence_room.cpp).
     Presence = 0x02,
+    // A direct chat, from the pair of its two users (apps/chat/src/named_rooms.cpp, ADR-0096):
+    // the same pair always names the same room.
+    DirectChat = 0x03,
+    // A group chat, from its creator and the id the creator gave the request (ADR-0096): a
+    // repeated create names the room the first one made.
+    GroupChat = 0x04,
 };
 
 // Whether the room's id was derived from a name of `kind`.
@@ -75,6 +81,19 @@ enum class NamedRoom : std::uint8_t {
 // no lookup.
 [[nodiscard]] inline bool is_stream_chat(const RoomId& room) noexcept {
     return is_named_room(room, NamedRoom::StreamChat);
+}
+
+// The kind a room named by a pair or a creator is, by its id alone; nullopt for any other id. A
+// join of such a room asks for this kind whatever it says, and a room with no kind recorded is
+// created as it, so nothing can record it as another (ADR-0096).
+[[nodiscard]] inline std::optional<RoomKind> named_kind(const RoomId& room) noexcept {
+    if (is_named_room(room, NamedRoom::DirectChat)) {
+        return RoomKind::DirectChat;
+    }
+    if (is_named_room(room, NamedRoom::GroupChat)) {
+        return RoomKind::GroupChat;
+    }
+    return std::nullopt;
 }
 
 // What admits answers for a join.
@@ -107,6 +126,77 @@ struct RoomAccess {
     bool member = false;
 
     friend bool operator==(const RoomAccess&, const RoomAccess&) = default;
+};
+
+// What a member may do to a room's member list (ADR-0096). A group chat's creator is its first
+// admin; admins add and remove members; anyone listed may leave a group chat. Members of a direct
+// chat, and rows an operator inserts without a role, are plain members.
+enum class MemberRole : std::uint8_t { Member, Admin };
+
+// A small group (ADR-0016): each member's device is an MLS member, and every commit reaches all
+// of them. Counted with the creator and every admin.
+inline constexpr std::size_t kMaxGroupMembers = 100;
+// Users one create or add names at once, besides the one asking: the answer lists those it
+// added, and each is a notification on every chat node.
+inline constexpr std::size_t kMaxMembersPerChange = 50;
+// A page of a user's rooms, or of a room's members with their roles: each entry is well under
+// 300 bytes on the client's socket, so a page stays inside a history page's share of its budget.
+inline constexpr std::size_t kMaxListPage = 100;
+
+// One of a user's rooms, as rooms_of lists them.
+struct RoomEntry {
+    RoomId room;
+    // A room listed with no kind recorded (ADR-0075's race) is a group chat, as a join records it.
+    RoomKind kind = RoomKind::GroupChat;
+    MemberRole role = MemberRole::Member;
+    // The other member of a direct chat, while one is listed.
+    std::optional<UserId> peer;
+
+    friend bool operator==(const RoomEntry&, const RoomEntry&) = default;
+};
+
+struct MemberEntry {
+    UserId user;
+    MemberRole role = MemberRole::Member;
+
+    friend bool operator==(const MemberEntry&, const MemberEntry&) = default;
+};
+
+// A page of a room's members, read for one of them. `asker_listed` false: the asker is not on the
+// list, and `members` is empty, whatever the list holds.
+struct Roster {
+    bool asker_listed = false;
+    std::vector<MemberEntry> members;
+
+    friend bool operator==(const Roster&, const Roster&) = default;
+};
+
+// What a member-list change asked by a user answers when the store could be asked. Every
+// refusal wrote nothing.
+enum class MembershipOutcome : std::uint8_t {
+    Done,
+    // The user asking is not on the room's list (nor is the room recorded at all).
+    NotMember,
+    // Only an admin may add or remove others.
+    NotAdmin,
+    // The room is not a group chat: a direct chat's two never change, and a stream's live chat
+    // has no list to manage.
+    NotGroup,
+    // The change would take the group past kMaxGroupMembers.
+    Full,
+    // open_direct or create_group of a room recorded as another kind.
+    WrongKind,
+};
+
+struct MembershipChange {
+    MembershipOutcome outcome = MembershipOutcome::Done;
+    // Done: who the change listed or took off, in byte order of their ids; empty when it changed
+    // nothing (a repeat).
+    std::vector<UserId> changed;
+    // Done, by a leave or a removal: who became the room's admin because the last one went.
+    std::optional<UserId> promoted;
+
+    friend bool operator==(const MembershipChange&, const MembershipChange&) = default;
 };
 
 // Whether a join of a room with no kind recorded may record one. Skipped answers exactly as
@@ -147,7 +237,9 @@ public:
     // `user` is no longer on the member list of `room`, whoever changed it and however: an
     // operator's DELETE in the database counts as much as remove_member.
     virtual void on_member_removed(const RoomId& room, const UserId& user) noexcept = 0;
-    // Removals may have gone unannounced (the store lost its way to hear them): whatever relies
+    // `user` is on the member list of `room` now, whoever listed them and however.
+    virtual void on_member_added(const RoomId& room, const UserId& user) noexcept = 0;
+    // Changes may have gone unannounced (the store lost its way to hear them): whatever relies
     // on them must check the member lists it cares about again.
     virtual void on_members_resync() noexcept = 0;
 };
@@ -209,9 +301,50 @@ public:
     // is created); recording it again does nothing. The in-memory store keeps no room plane, so
     // only the first three apply to it.
     virtual void record_live(const RoomId& room, MessageCallback<void> done) = 0;
-    // Where removals from any room's member list are told from now on; nullptr stops them. One
+    // Where changes to any room's member list are told from now on; nullptr stops them. One
     // listener at a time.
     virtual void watch_members(IMemberListener* listener) noexcept = 0;
+
+    // Member lists as their users change them (ADR-0096). Each decides from the list as it is when
+    // it runs, under the room's lock, so two changes of one room never both pass a check that
+    // only one of them would: authority, the size cap and the room's kind are read with the
+    // write. Ids in `changed` are those the change actually made.
+    //
+    // The direct chat of `user` and `peer` (distinct), at `room` (named_kind DirectChat): records
+    // it and lists both when it lists nobody yet; otherwise changes nothing, so a member an
+    // operator removed is not put back. NotMember when it lists others but not `user`, WrongKind
+    // when it is recorded as another kind.
+    virtual void open_direct(const RoomId& room, const UserId& user, const UserId& peer,
+                             MessageCallback<MembershipChange> done) = 0;
+    // A group chat at `room` (named_kind GroupChat), `creator` its admin and `members` (at most
+    // kMaxMembersPerChange, distinct, without the creator) its members: when it lists nobody yet.
+    // A repeat changes nothing and answers Done if the creator is still listed, NotMember if not;
+    // WrongKind when the room is recorded as another kind.
+    virtual void create_group(const RoomId& room, const UserId& creator,
+                              std::vector<UserId> members,
+                              MessageCallback<MembershipChange> done) = 0;
+    // `users` (at most kMaxMembersPerChange, distinct) listed in the group chat by its admin
+    // `actor`; those already listed are left as they are. Full when the group would pass
+    // kMaxGroupMembers, and then nobody is added.
+    virtual void add_members(const RoomId& room, const UserId& actor, std::vector<UserId> users,
+                             MessageCallback<MembershipChange> done) = 0;
+    // `user` taken off the group chat's list by its admin `actor`; someone not listed changes
+    // nothing. `actor` itself leaves as leave_room does.
+    virtual void expel(const RoomId& room, const UserId& actor, const UserId& user,
+                       MessageCallback<MembershipChange> done) = 0;
+    // `user` leaves the group chat. When the last admin goes and anyone is left, the remaining
+    // member whose id sorts first becomes admin. NotGroup for a direct chat, whose list does
+    // not change.
+    virtual void leave_room(const RoomId& room, const UserId& user,
+                            MessageCallback<MembershipChange> done) = 0;
+    // The rooms `user` is listed in, in byte order of their ids from after `after`, at most
+    // min(limit, kMaxListPage).
+    virtual void rooms_of(const UserId& user, std::optional<RoomId> after, std::size_t limit,
+                          MessageCallback<std::vector<RoomEntry>> done) = 0;
+    // The room's members and their roles, in byte order of their ids from after `after`, at most
+    // min(limit, kMaxListPage): only for `asker` while listed.
+    virtual void roster(const RoomId& room, const UserId& asker, std::optional<UserId> after,
+                        std::size_t limit, MessageCallback<Roster> done) = 0;
 };
 
 } // namespace core::ports
