@@ -489,6 +489,10 @@ TEST_F(LivePackagerTest, AnEndedStreamIsNotStartedAgain) {
         const auto port = ingest_port(*packager);
         ASSERT_TRUE(port) << packager->output();
         const auto publisher = start_publisher(*port, 5);
+        // The packager ends only once a publisher has come and gone: one that never connected
+        // (an SRT handshake that timed out) leaves it listening, so the publisher's own end
+        // comes first.
+        ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
         ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
     }
     const auto again = start_packager();
@@ -526,6 +530,9 @@ TEST_F(LivePackagerTest,
         EXPECT_FALSE(unencrypted.connect(*port, "", stream_));
     }
     const auto publisher = start_publisher(*port, 6);
+    // The packager ends only once a publisher has come and gone: one that never connected (an
+    // SRT handshake that timed out) leaves it listening, so the publisher's own end comes first.
+    ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
     const auto ended_playlist = playlist();
     ASSERT_TRUE(ended_playlist);
@@ -598,6 +605,9 @@ TEST_F(LivePackagerTest, AStoreOutageShorterThanThePatienceDoesNotEndTheStream) 
     EXPECT_FALSE(publisher->wait_exit(seconds(13)));
     proxy.fail_puts(false);
     watch(*publisher);
+    // The packager ends only once a publisher has come and gone: one that never connected (an
+    // SRT handshake that timed out) leaves it listening, so the publisher's own end comes first.
+    ASSERT_EQ(publisher->wait_exit(kExitPatience), 0) << publisher->output();
     ASSERT_EQ(packager->wait_exit(kExitPatience), 0) << packager->output();
 
     EXPECT_EQ(packager->output().find("giving up"), std::string::npos) << packager->output();
@@ -652,6 +662,9 @@ TEST_F(LivePackagerTest, ASecondPackagerOnTheStreamSupersedesTheFirstWithoutOver
 
     const auto newer_publisher = start_publisher(*newer_port, 10);
     watch(*newer_publisher);
+    // The packager ends only once a publisher has come and gone: one that never connected (an
+    // SRT handshake that timed out) leaves it listening, so the publisher's own end comes first.
+    ASSERT_EQ(newer_publisher->wait_exit(kExitPatience), 0) << newer_publisher->output();
     ASSERT_EQ(newer->wait_exit(kExitPatience), 0) << newer->output();
     const auto ended_playlist = playlist();
     ASSERT_TRUE(ended_playlist);
