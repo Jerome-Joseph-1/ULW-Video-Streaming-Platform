@@ -327,7 +327,18 @@ rooms this node owns), `call_errors_total{source="sfu",kind="unavailable"}` (Liv
 or overloaded: clients are told to retry), `{source="sfu",kind="refused"}` (LiveKit refused the
 request as made, a configuration fault: clients get `call_failed`) and
 `{source="store",kind="unavailable"}`. Each is counted on the node that owns the room, not the
-one the client is on. Chat is a draft ([chat.md](chat.md)).
+one the client is on. A call's ring (ADR-0092), also on the room's owner:
+`call_refusals_total{reason="no_call"}` (declines, cancels and ends of a call that was not there
+to move), `calls_ringing_or_answered`, `call_rings_total{outcome="started"}`, `{outcome="answered"}`,
+`{outcome="declined"}`, `{outcome="cancelled"}`, `{outcome="missed"}`, `{outcome="ended"}`,
+`{outcome="orphaned"}` (forgotten without a word because the node no longer owns the room) and
+`{outcome="busy"}` (tickets refused past 4096 calls), and `call_notices_sent_total`; on the
+members' nodes, `call_events_pushed_total` (events written to sockets),
+`call_notices_unheard_total` (notices for a member with no socket on the node) and
+`call_notices_malformed_total`; and the room plane's unsequenced notices that carry them,
+`notices_total{stage="forwarded"}`, `{stage="fanned_out"}`, `{stage="heard"}` and
+`{stage="dropped"}` (no owner, an owner that let the room go, a lookup that failed). Chat is a
+draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at
