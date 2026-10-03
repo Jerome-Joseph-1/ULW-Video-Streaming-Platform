@@ -67,6 +67,11 @@ public:
         find_video_error_ = error;
     }
 
+    // While held, claim_upload takes or refuses the claim at once but its answer waits, as a
+    // database's would in flight; hold_claims(false) sends every answer that waited.
+    void hold_claims(bool held);
+    [[nodiscard]] std::size_t held_claims() const noexcept { return held_claims_.size(); }
+
     [[nodiscard]] const std::vector<Job>& jobs() const noexcept { return jobs_; }
     [[nodiscard]] std::size_t claims() const noexcept { return claimed_.size(); }
     [[nodiscard]] const std::vector<core::ports::ViewEvent>& views() const noexcept {
@@ -81,6 +86,8 @@ private:
     net::IReactor& reactor_;
     net::TimerId timer_;
     std::vector<std::move_only_function<void() noexcept>> pending_;
+    bool hold_claims_ = false;
+    std::vector<std::move_only_function<void() noexcept>> held_claims_;
     std::unordered_map<core::UploadId, core::ports::StoredUpload> uploads_;
     std::unordered_map<core::VideoId, core::VideoRecord> videos_;
     std::unordered_set<core::UploadId> claimed_;

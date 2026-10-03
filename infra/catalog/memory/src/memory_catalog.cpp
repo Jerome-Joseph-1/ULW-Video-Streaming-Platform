@@ -88,9 +88,25 @@ void MemoryCatalog::claim_upload(const core::UploadId& id, const core::UserId& o
             result = std::unexpected(CatalogError::Conflict);
         }
     }
-    defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
-        done(std::move(result));
-    });
+    std::move_only_function<void() noexcept> answer =
+        [done = std::move(done), result = std::move(result)]() mutable noexcept {
+            done(std::move(result));
+        };
+    if (hold_claims_) {
+        held_claims_.push_back(std::move(answer));
+        return;
+    }
+    defer(std::move(answer));
+}
+
+void MemoryCatalog::hold_claims(bool held) {
+    hold_claims_ = held;
+    if (held) {
+        return;
+    }
+    for (auto& answer : std::exchange(held_claims_, {})) {
+        defer(std::move(answer));
+    }
 }
 
 void MemoryCatalog::release_upload(const core::UploadId& id) noexcept {
