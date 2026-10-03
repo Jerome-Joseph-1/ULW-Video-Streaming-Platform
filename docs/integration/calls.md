@@ -144,8 +144,10 @@ What the ring does not cover:
   up to 10 s past it while LiveKit issues it, so the answer is not lost to `call_missed`: the
   caller may hear `call_answered` a few seconds after `expires_at`, and the callee's own
   devices should keep the call they answered even past `expires_at`.
-- **A member with no socket open hears nothing**: there are no push notifications yet. A
-  device that connects while the call still rings hears the next announcement, within 15 s.
+- **A member with no socket open** hears the ring only through a [push
+  notification](#push-notifications), where the deployment has push on and the device
+  subscribed. A device that connects while the call still rings hears the next announcement,
+  within 15 s.
 - **Rejoining.** Asking for a ticket again within 2 minutes of the last one in an answered call
   joins it without ringing anyone. Later, it rings the other member: a client already connected
   to the room's LiveKit call that hears `call_ringing` for that room from the other member
@@ -154,6 +156,120 @@ What the ring does not cover:
   word: devices stop at `expires_at`, and a decline or cancel then is `no_call`. A callee who
   answers by asking for a ticket rings the caller as a new call, which the caller's client,
   connected to LiveKit and waiting, answers as above.
+
+## Push notifications
+
+<!-- apps/chat/src/push.cpp (Push), apps/chat/src/session.cpp (Session::push_command), infra/webpush/, docs/adr/0097-web-push-for-incoming-calls.md -->
+
+Where the operator turned push on (`push_key` answers a key rather than `push_disabled`), a
+call that starts ringing also sends a standard Web Push to every subscribed device of each
+callee, whether or not it has a socket open: an app in a background tab, or with no tab at all,
+still rings. The push goes through the browser's own push service (Chrome's and other Chromium
+browsers' FCM, Firefox's, Safari's, Edge's), encrypted so that only the browser can read it
+(RFC 8291), and carries exactly what the socket's `call_ringing` carries, never a message's
+content:
+
+```json
+{"type":"call_ringing","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","call":"01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192","from":"user-42","expires_at":1790000045}
+```
+
+It is sent once per ring, as the ring starts, with `Urgency: high` and a TTL of the ring's
+timeout: a device that comes online after `expires_at` is not handed it. Nothing is pushed when
+the call is answered, declined, cancelled or missed (browsers require every push to show a
+notification, so a push cannot silently withdraw one): the app closes the notification itself
+(step 5 below). Only browsers are covered: native Android and iOS apps (FCM to an app, APNs) are
+not yet.
+
+**Subscribing** (on the chat socket, any time after it opens; no room needed):
+
+| Client sends | Answer | |
+|---|---|---|
+| `{"type":"push_key"}` | `{"type":"push_key","key":"<base64url>"}` | The `applicationServerKey` to subscribe with. Unchanging unless the operator rotates it |
+| `{"type":"push_subscribe","device":"<uuid>","endpoint":"<url>","p256dh":"<base64url>","auth":"<base64url>"}` | `{"type":"push_subscribed","device":"<uuid>"}` | This device's subscription: `endpoint` and `keys` exactly as `PushSubscription.toJSON()` gives them. Replaces whatever the device had |
+| `{"type":"push_unsubscribe","device":"<uuid>"}` | `{"type":"push_unsubscribed","device":"<uuid>"}` | Forget this device's subscription; answered the same when it had none |
+
+`device` is the same per-install UUID the `call` command takes. A user keeps up to 10 devices
+(the operator's `ULW_PUSH_MAX_SUBSCRIPTIONS_PER_USER`); subscribing an eleventh forgets the one
+subscribed longest ago. An endpoint belongs to one user: when another account subscribes the
+same browser, the first account's subscription there is gone. A subscription the push service
+reports expired is deleted; subscribe again when the browser gives a new one.
+
+Errors, each with the `device` when the command named one:
+
+| `reason` | Meaning | Client action |
+|---|---|---|
+| `push_disabled` | Push is not configured on this deployment | Do not retry; the app rings only on open sockets |
+| `bad_device`, `bad_key`, `malformed` | Not a canonical UUID; `p256dh` not 65 bytes on P-256 or `auth` not 16 bytes, in unpadded base64url; a field missing or extra | Fix the client |
+| `bad_endpoint` | Not `https://` on port 443, longer than 2048 bytes, an IP address, or not a URL | Fix the client: send the browser's endpoint as given |
+| `push_host_not_allowed` | The endpoint's push service is not one the operator allows | Do not retry; this browser's push service is not supported here |
+| `rate_limited` | More than 5 subscribes or unsubscribes on this socket at once, past one every 10 s (`retry_after_ms`) | Wait that long |
+| `busy`, `unavailable` | The node has too many writes waiting, or the database could not be reached | Retry after a few seconds |
+
+**The client flow** (a web app; `sw.js` is its service worker):
+
+1. **Subscribe on every start.** Register the service worker, ask `push_key`, and subscribe
+   with it; then send `push_subscribe`. Re-sending the same subscription is cheap and keeps it
+   the device's newest. If the key changed since the last subscription (keep it in
+   IndexedDB), unsubscribe the old one first: the browser refuses a second key otherwise.
+
+   ```js
+   const reg = await navigator.serviceWorker.register('/sw.js');
+   const key = await ask({type: 'push_key'});                    // {type:'push_key', key}
+   let sub = await reg.pushManager.getSubscription();
+   if (sub && sub.options.applicationServerKey &&
+       b64url(sub.options.applicationServerKey) !== key.key) {
+     await sub.unsubscribe(); sub = null;
+   }
+   sub ??= await reg.pushManager.subscribe({userVisibleOnly: true,
+                                            applicationServerKey: key.key});
+   const {endpoint, keys} = sub.toJSON();
+   send({type: 'push_subscribe', device: deviceId, endpoint, p256dh: keys.p256dh, auth: keys.auth});
+   ```
+
+2. **Show the call** in the service worker. Tag the notification with the call id, so a second
+   push for the same call replaces the first rather than stacking. Past `expires_at` (a push
+   that waited in the push service), show it as missed instead; every push must show something.
+
+   ```js
+   self.addEventListener('push', (event) => {
+     const ring = event.data.json();                      // the call_ringing above
+     if (ring.type !== 'call_ringing') return;
+     const live = Date.now() / 1000 < ring.expires_at;
+     event.waitUntil(self.registration.showNotification(
+       live ? `${ring.from} is calling` : `Missed call from ${ring.from}`,
+       {tag: `call-${ring.call}`, renotify: live, requireInteraction: live, data: ring,
+        actions: live ? [{action: 'answer', title: 'Answer'}, {action: 'decline', title: 'Decline'}] : []}));
+   });
+   ```
+
+   A page of the app that is visible and connected has heard `call_ringing` on its socket as
+   well: it may ring in-page and close the notification by its tag (both name the same `call`).
+
+3. **Open it to answer.** A click opens (or focuses) the app on the call; the page opens the
+   socket, `join`s the room and asks for a ticket (`call`), which is the answer
+   ([Ringing](#ringing)). "Decline" opens the app to `join` and send `call_decline`. Check
+   `expires_at` first: past it (and its 10 s grace) the ring is over, and asking for a ticket
+   would ring the caller as a new call; offer to call back instead.
+
+   ```js
+   self.addEventListener('notificationclick', (event) => {
+     const ring = event.notification.data;
+     event.notification.close();
+     const url = `/call?room=${ring.room}&call=${ring.call}&do=${event.action || 'answer'}`;
+     event.waitUntil(clients.matchAll({type: 'window'}).then((open) =>
+       open.length ? open[0].focus().then((c) => c.navigate(url)) : clients.openWindow(url)));
+   });
+   ```
+
+4. **Keep the subscription current.** On `pushsubscriptionchange` the browser has a new
+   endpoint: the app sends `push_subscribe` with it when it next opens a socket (a service
+   worker has no socket of its own).
+5. **Close the ringing elsewhere.** No push follows `call_answered`, `call_declined`,
+   `call_cancelled` or `call_missed`: when a page hears one on its socket, close the
+   notification tagged with that call; at the latest, the next click finds it past
+   `expires_at`.
+6. **On sign-out**, send `push_unsubscribe` while the socket is still authenticated, then
+   `sub.unsubscribe()`, so the next account on the browser is not rung for this one.
 
 ## Errors
 

@@ -49,6 +49,7 @@ Client to server:
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 | `call` | `room`, `device` (a UUID the client keeps per device) | A ticket to the room's 1:1 call, for a direct chat this connection has joined. See [calls.md](calls.md). |
 | `call_decline`, `call_cancel`, `call_end` | `room`, `call` | Turn a ringing call down (the callee), give up ringing (the caller), or end an answered call (either member), for a direct chat this connection has joined. See [calls.md](calls.md#ringing). |
+| `push_key`, `push_subscribe`, `push_unsubscribe` | none; `device`, `endpoint`, `p256dh`, `auth`; `device` | The key to subscribe a browser to push with, and this device's Web Push subscription, which rings it for calls with no socket open. See [calls.md](calls.md#push-notifications). |
 
 Server to client:
 
@@ -60,6 +61,7 @@ Server to client:
 | `history` | `room`, `count` | Ends the answer to a `history` command, after its `count` messages. `0`: nothing more in that direction. |
 | `ticket` | `room`, `url`, `token`, `expires_at`, `call` when the ticket belongs to a call | The answer to `call`: connect LiveKit's SDK to `url` with `token` before `expires_at` (Unix seconds). See [calls.md](calls.md). |
 | `call_ringing`, `call_answered`, `call_declined`, `call_cancelled`, `call_missed`, `call_ended` | `room`, `call`, `from`; `expires_at` (ringing) or `by` (the others but missed) | Unasked, on every socket of both members of a direct chat, joined to the room or not: a call rings, or how it went. See [calls.md](calls.md#ringing). |
+| `push_key`, `push_subscribed`, `push_unsubscribed` | `key`; `device`; `device` | The answers to the push commands. See [calls.md](calls.md#push-notifications). |
 | `error` | `reason`, plus `room` and `id` when known, `retry_after_ms` for `rate_limited` and for a call's `unavailable` | A command failed. |
 
 ```json
@@ -177,6 +179,7 @@ list never said no: join again.
 | `bad_device` | A call's `device` is not a canonical lowercase UUID | Fix the client |
 | `bad_call` | A `call_decline`, `call_cancel` or `call_end` whose `call` is not a canonical lowercase UUID | Fix the client |
 | `not_callable`, `call_failed`, `calls_disabled`, `no_call`, `ring_limited` | A call was refused; see [calls.md](calls.md#errors) | As there |
+| `push_disabled`, `bad_key`, `bad_endpoint`, `push_host_not_allowed` | A push command was refused; see [calls.md](calls.md#push-notifications) | As there |
 | `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |

@@ -393,6 +393,7 @@ replacements:
         fieldPaths:
           - spec.template.spec.containers.[name=chat].env.[name=ULW_DATABASE_URL].valueFrom.secretKeyRef.name
           - spec.template.spec.containers.[name=chat].env.[name=ULW_NODE_SECRET].valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_PUSH_VAPID_PRIVATE_KEY].valueFrom.secretKeyRef.name
   # The realtime plane's Secret: LiveKit, its Redis, egress, and chat's call settings.
   - source:
       kind: ConfigMap
@@ -421,3 +422,24 @@ replacements:
           name: livekit-egress
         fieldPaths:
           - spec.template.spec.containers.*.env.*.valueFrom.secretKeyRef.name
+  # Web Push for incoming calls (docs/adr/0097): chat's VAPID subject and push service hosts.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.PUSH_VAPID_SUBJECT
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_PUSH_VAPID_SUBJECT].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.PUSH_HOSTS
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_PUSH_HOSTS].value

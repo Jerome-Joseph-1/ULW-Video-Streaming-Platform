@@ -17,6 +17,7 @@ it.
 | The identity provider's JWKS | gateway, chat | Reachable from the pods over HTTPS with TLS 1.3 (`JWKS_URL` must be `https://`; a server offering only TLS 1.2 or older is refused, see below). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
 | DNS and TLS | Envoy | TLS terminates at the operator's Envoy Gateway (`GATEWAY_NAME` in `GATEWAY_NAMESPACE`); the service speaks plain HTTP behind it (ADR-0001). The HTTPRoutes send `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` to the gateway and `/rt` (exactly; chat's WebSocket) to chat, on the environment's `PUBLIC_HOSTNAME` only, since environments may share one Gateway, so `<CHAT_HOST>` in [chat.md](chat.md) is that host. |
 | Envoy route timeout | Envoy | None (`request: 0s`), on the gateway's upload and video routes and chat's; 15 s on `/api/v1/live`, whose playlist requests are short GETs never held open. A chunk may take up to 1024 s at the gateway's minimum rate, and the gateway enforces its own timeouts; a chat socket lasts as long as its token. Upstream idle timeout below the gateway's 10 s keep-alive timeout (5 s in the shipped `BackendTrafficPolicy`). |
+| Browsers' push services | chat, when push is on | Egress from chat's pods on TCP 443 to the hosts `ULW_PUSH_HOSTS` names (by default `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com`, `*.notify.windows.com`), resolved by cluster DNS, with TLS 1.3 and no proxy; the shipped NetworkPolicy allows 443 to any address, as for the JWKS. Free to use: no account, no key but the VAPID key the operator generates (RUNBOOK step 3). Native mobile push (FCM to Android apps, APNs) is not offered (ADR-0097) |
 | Seccomp profile | worker and live packager nodes | `cluster/seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
 | Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on the environment's `PUBLIC_HOSTNAME` only, as the video and chat routes, so a ticket must name that host. `/twirp` is never routed (ADR-0050, ADR-0053). |
 | TURN port | the operator (firewall) | `TURN_PORT` (UDP, 3478 by default) open to the internet on the address STUNner's LoadBalancer Service gets. Environments that share one address each need their own port and their own STUNner Gateway (RUNBOOK step 7, ADR-0084). Nothing else: LiveKit's UDP 7882 stays inside the cluster. |
@@ -99,6 +100,11 @@ effective configuration, secrets as `<redacted>`.
 | `LIVEKIT_API_SECRET` | | | with `LIVEKIT_API_KEY` | Secret: signs every ticket, and must be the one LiveKit holds for the key (`LIVEKIT_KEYS`). 32 to 256 bytes, checked at start (exit `2`) |
 | `LIVEKIT_API_URL` | | | with `LIVEKIT_API_KEY` | LiveKit's server API, `http://` or `https://`, checked at start (exit `2`); the base sets `http://livekit:7880` |
 | `LIVEKIT_CLIENT_URL` | | | with `LIVEKIT_API_KEY` | What every ticket names for clients, `ws://` or `wss://`, checked at start (exit `2`): `wss://<PUBLIC_HOSTNAME>`, whose `/rtc` route reaches LiveKit. From `SFU_SECRET` |
+| `ULW_PUSH_VAPID_PRIVATE_KEY` | | | optional | Secret: turns on Web Push for incoming calls (ADR-0097), the P-256 private key every push is signed with (RFC 8292), 43 characters of base64url. Unset or empty, push is off and push commands are answered `push_disabled`. Not a key: exit `2`, the value never quoted. Never logged. The base reads it from `CHAT_SECRET`, as optional; RUNBOOK step 3 makes one. Changing it orphans every subscription until its client subscribes again |
+| `ULW_PUSH_VAPID_SUBJECT` | | | with the key | `mailto:` or `https://` contact the push services may use about this sender (`PUSH_VAPID_SUBJECT` in config.env); missing or another scheme with the key set: exit `2` |
+| `ULW_PUSH_HOSTS` | | | default: the four major browsers' | Comma-separated push service hosts, exact or `*.domain` (at least two labels), that a subscription's endpoint may name (`PUSH_HOSTS` in config.env). An endpoint must also be `https://`, on 443, at most 2048 bytes, and a name, not an address; the addresses it resolves to are checked at connect time and anything not global unicast (private, loopback, link-local, CGNAT, multicast, documentation, NAT64, 6to4, Teredo) is refused |
+| `ULW_PUSH_MAX_SUBSCRIPTIONS_PER_USER` | | | 1 to 32, default 10 | Devices a user may have subscribed; a new one past it replaces the one saved longest ago |
+| `ULW_DEV_PUSH_ALLOW_PRIVATE`, `ULW_DEV_PUSH_CA_FILE` | | | development only | A test push service on loopback, on any port, with its own CA: allowed only with `ULW_DEV_MODE=1` and never in a Kubernetes pod; the startup line says `"push":"on, private addresses allowed"` |
 
 The Kubernetes secret names (each set in config.env) and the lines that create them are in the
 RUNBOOK, step 3.
@@ -348,8 +354,21 @@ members' nodes, `call_events_pushed_total` (events written to sockets),
 `call_notices_unheard_total` (notices for a member with no socket on the node) and
 `call_notices_malformed_total`; and the room plane's unsequenced notices that carry them,
 `notices_total{stage="forwarded"}`, `{stage="fanned_out"}`, `{stage="heard"}` and
-`{stage="dropped"}` (no owner, an owner that let the room go, a lookup that failed). Chat is a
-draft ([chat.md](chat.md)).
+`{stage="dropped"}` (no owner, an owner that let the room go, a lookup that failed). Web Push
+for calls (ADR-0097), on the room's owner, which pushes: `push_enabled`,
+`push_subscriptions_total{op="subscribed"}`, `{op="unsubscribed"}`, `{op="refused"}` (an endpoint
+or key that failed the checks), `{op="busy"}` (64 writes waiting) and `{op="forgotten"}`
+(deleted on a push service's 404 or 410), `push_store_failures_total`,
+`push_lookups_total{outcome="read"}` and `{outcome="dropped"}` (a callee's list not read, 256
+reads waiting), `push_messages_total{outcome="queued"}` and `{outcome="skipped"}` (a stored
+endpoint the allowlist no longer names, or a key that could not be encrypted to),
+`push_sends_total{outcome="delivered"}`, `{outcome="gone"}`, `{outcome="rejected"}` (any other
+4xx: a steady count of 401 or 403 is a VAPID key the subscriptions were not made with),
+`{outcome="failed"}` (no response, or 5xx/429 past three attempts), `{outcome="refused_address"}`
+(a push host that resolved only to private addresses: look at DNS), `{outcome="expired"}`
+(the ring ended before the message could leave) and `{outcome="dropped"}` (1024 waiting),
+`push_retries_total`, `push_queue_depth` and `push_in_flight` (16 at most). Chat is a draft
+([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

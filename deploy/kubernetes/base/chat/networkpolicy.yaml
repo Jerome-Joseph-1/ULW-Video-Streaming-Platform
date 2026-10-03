@@ -2,8 +2,12 @@
 # reads /metrics, both on the client port. The node port admits the other chat pods alone
 # (ADR-0035): it authenticates them by a shared secret, but nothing else has a reason to try.
 # Out of the pod it reaches cluster DNS, the other chat pods' node port, LiveKit's server API
-# (7880), Postgres (5432) and, over 443, the identity provider's JWKS, and nothing else. Ports,
-# not addresses, as for the gateway: Postgres may run outside the cluster (RUNBOOK.md, 3a). If
+# (7880), Postgres (5432) and, over 443, the identity provider's JWKS and the browsers' push
+# services (Web Push for calls, docs/adr/0097), and nothing else. Ports, not addresses, as for the
+# gateway: Postgres may run outside the cluster (RUNBOOK.md, 3a), and the push services are
+# Google's, Mozilla's, Apple's and Microsoft's fleets, whose addresses no policy can list. Which
+# push hosts chat sends to is ULW_PUSH_HOSTS; that it never reaches a private, loopback or
+# link-local address over 443 is chat's own check at connect time (docs/adr/0097). If
 # JWKS_URL names an in-cluster Service whose pods listen on a port other than 443, that target
 # port must be added here.
 #
