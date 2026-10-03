@@ -1,0 +1,32 @@
+# The reaper serves nothing and reaches out to three things: cluster DNS, Postgres and the
+# object store. Ports are the restriction: Postgres and the object store may run outside the
+# cluster, where no selector can name them (RUNBOOK.md, 3a).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: upload-reaper
+  namespace: ulw
+  labels:
+    app.kubernetes.io/name: upload-reaper
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: upload-reaper
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 5432
+          protocol: TCP
+        - port: 443
+          protocol: TCP

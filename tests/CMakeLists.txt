@@ -231,6 +231,11 @@ add_test(NAME chat_soak_judge
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/soak/chat_soak_test.py)
 set_tests_properties(chat_soak_judge PROPERTIES LABELS unit)
 
+# The gateway soak's reports beside its verdict, on synthetic data: tests/soak.
+add_test(NAME soak_reports
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/soak/soak_test.py)
+set_tests_properties(soak_reports PROPERTIES LABELS unit)
+
 # The coverage summary and floor check on synthetic llvm-cov exports: tools/coverage_report.py.
 add_test(NAME coverage_report
     COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/coverage_report_test.py)
@@ -278,6 +283,7 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
+    gateway/gateway_claim_test.cpp
     gateway/gateway_harness.cpp
     gateway/gateway_limits_test.cpp
     gateway/gateway_live_test.cpp
@@ -290,7 +296,8 @@ ulw_add_test_suite(gateway_tests unit
     gateway/key_fetcher_test.cpp
     gateway/live_manifest_cache_test.cpp
     gateway/rate_limit_test.cpp
-    gateway/send_window.cpp)
+    gateway/send_window.cpp
+    gateway/upload_claim_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
     ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)

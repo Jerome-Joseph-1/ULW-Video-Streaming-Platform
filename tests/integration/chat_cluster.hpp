@@ -36,7 +36,7 @@
 
 namespace ulw::test {
 
-inline constexpr std::string_view kIssuer = "https://auth.test.askedin.com";
+inline constexpr std::string_view kIssuer = "https://auth.example.com";
 inline constexpr std::chrono::milliseconds kReadyCheckPeriod{250};
 inline constexpr std::array kUsers{"alice", "bob", "carol", "dave"};
 // Short, so that the presence tests wait seconds for a grace to run out, not the default ten.
@@ -358,7 +358,7 @@ protected:
     [[nodiscard]] std::string mint(const std::string& user) const {
         return key_
             ->mint({.issuer = std::string(kIssuer),
-                    .audience = "askedin-platform",
+                    .audience = "ulw-dev",
                     .subject = user,
                     .email = {},
                     .ttl = std::chrono::seconds(600)},

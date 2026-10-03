@@ -174,11 +174,12 @@ TEST_F(UploadReaperTest, TakesAtMostTheLimitAndTheEarliestExpiryFirst) {
 TEST_F(UploadReaperTest, IgnoresUploadsThatCompletedOrWereAbortedByTheirOwner) {
     const NewUpload committed = created();
     const NewUpload discarded = created();
-    Reply<core::ports::StoredUpload> claimed;
+    Reply<core::ports::ClaimedUpload> claimed;
     catalog->claim_upload(committed.upload.id, committed.upload.owner, claimed.callback());
-    ASSERT_TRUE(ulw::test::wait(*reactor, claimed));
+    const auto held = ulw::test::wait(*reactor, claimed);
+    ASSERT_TRUE(held);
     ASSERT_TRUE(call([&](auto done) {
-        catalog->record_progress(committed.upload.id, committed.video.id, 3 * kChunk,
+        catalog->record_progress(committed.upload.id, held->token, committed.video.id, 3 * kChunk,
                                  std::move(done));
     }));
     ASSERT_TRUE(call<core::VideoState>([&](auto done) {
@@ -197,16 +198,17 @@ TEST_F(UploadReaperTest, IgnoresUploadsThatCompletedOrWereAbortedByTheirOwner) {
 
 TEST_F(UploadReaperTest, SkipsAnUploadWhileItsOwnerHoldsTheClaimAndTakesItAfter) {
     const NewUpload u = created();
-    Reply<core::ports::StoredUpload> claimed;
+    Reply<core::ports::ClaimedUpload> claimed;
     catalog->claim_upload(u.upload.id, u.upload.owner, claimed.callback());
-    ASSERT_TRUE(ulw::test::wait(*reactor, claimed));
+    const auto held = ulw::test::wait(*reactor, claimed);
+    ASSERT_TRUE(held);
 
     auto busy = reaper->expire(after_ttl(), 10);
     ASSERT_TRUE(busy);
     EXPECT_TRUE(busy->empty());
     EXPECT_EQ(upload_state(u), "active");
 
-    catalog->release_upload(u.upload.id);
+    catalog->release_upload(u.upload.id, held->token);
     // The unlock goes out on the catalog's own session; the reactor sends it.
     std::size_t taken = 0;
     ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] {
