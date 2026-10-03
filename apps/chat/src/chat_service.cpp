@@ -922,7 +922,7 @@ void ChatService::on_member_removed(const core::RoomId& room, const core::UserId
         ++counters_.removals;
         answer(*c.client, "not_member", room);
     }
-    tell_members(room, user, false);
+    tell_members(room, user, "removed");
 }
 
 void ChatService::unconfirmed(const core::RoomId& room, const core::UserId& user) noexcept {

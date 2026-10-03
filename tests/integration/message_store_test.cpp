@@ -25,6 +25,7 @@
 #include <print>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -193,10 +194,15 @@ public:
     void on_member_added(const core::RoomId& room, const core::UserId& user) noexcept override {
         added.emplace_back(room, user);
     }
+    void on_member_role(const core::RoomId& room, const core::UserId& user,
+                        core::ports::MemberRole role) noexcept override {
+        roles.emplace_back(room, user, role);
+    }
     void on_members_resync() noexcept override { ++resyncs; }
 
     std::vector<std::pair<core::RoomId, core::UserId>> removed;
     std::vector<std::pair<core::RoomId, core::UserId>> added;
+    std::vector<std::tuple<core::RoomId, core::UserId, core::ports::MemberRole>> roles;
     int resyncs = 0;
 };
 
@@ -661,6 +667,9 @@ TEST_F(MessageStoreTest, AMemberListedInTheDatabaseIsHeardAsAnAddition) {
     ASSERT_TRUE(
         conn_->exec("DELETE FROM chat_members WHERE room_id = $1", Params{}.add_uuid(room.uuid())));
     ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return !heard.removed.empty(); }));
+    // The role granted is told as a role, not as a removal and an addition.
+    ASSERT_EQ(heard.roles.size(), 1U);
+    EXPECT_EQ(heard.roles[0], std::tuple(room, alice_, core::ports::MemberRole::Admin));
     ASSERT_EQ(heard.added.size(), 1U);
     EXPECT_EQ(heard.added[0], std::pair(room, alice_));
     ASSERT_EQ(heard.removed.size(), 1U);
@@ -715,6 +724,102 @@ TEST_F(MessageStoreTest, AUsersRoomsAreReadThroughTheirIndex) {
     });
     ASSERT_TRUE(rooms);
     EXPECT_EQ(rooms->size(), 40U);
+}
+
+// A change is answered only once it committed: a commit that fails answers unavailable, and the
+// list is as it was.
+TEST_F(MessageStoreTest, AChangeWhoseCommitFailsIsUnavailableAndListsNobody) {
+    ASSERT_TRUE(conn_->exec(
+        "CREATE FUNCTION refuse_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+        "IF NEW.user_id = 'fails-at-commit' THEN RAISE EXCEPTION 'refused'; END IF; "
+        "RETURN NULL; END $$"));
+    ASSERT_TRUE(conn_->exec("CREATE CONSTRAINT TRIGGER refuse_at_commit AFTER INSERT ON "
+                            "chat_members DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE "
+                            "FUNCTION refuse_at_commit()"));
+    const core::RoomId room = named_room("04");
+    ASSERT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->create_group(room, alice_, {}, std::move(done));
+              })->outcome,
+              MembershipOutcome::Done);
+    EXPECT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->add_members(room, alice_, {*core::UserId::parse("fails-at-commit")},
+                                      std::move(done));
+              }),
+              std::unexpected(core::ports::MessageStoreError::Unavailable));
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_members WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "1");
+}
+
+// What no writer here produces, read back, is Corrupt, never a guess: a role, a kind or a user
+// id the service does not know, as an operator could still write once the checks are dropped.
+TEST_F(MessageStoreTest, MembersRowsNoWriterHereProducesAreCorrupt) {
+    using core::ports::MessageStoreError;
+    const MessageResult<MembershipChange> corrupt{std::unexpected(MessageStoreError::Corrupt)};
+    ASSERT_TRUE(conn_->exec("ALTER TABLE chat_members DROP CONSTRAINT chat_members_role, "
+                            "DROP CONSTRAINT chat_members_user_id"));
+    ASSERT_TRUE(conn_->exec("ALTER TABLE chat_rooms DROP CONSTRAINT chat_rooms_kind_check, "
+                            "DROP CONSTRAINT chat_rooms_named_kind"));
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    const auto rooms = [&](const core::UserId& user) {
+        return ask<std::vector<core::ports::RoomEntry>>(
+            [&](auto done) { store_->rooms_of(user, std::nullopt, 10, std::move(done)); });
+    };
+    const auto roster = [&](const core::RoomId& room, const core::UserId& asker) {
+        return ask<core::ports::Roster>(
+            [&](auto done) { store_->roster(room, asker, std::nullopt, 10, std::move(done)); });
+    };
+
+    // A role nobody defined: the admin check, the listing and the roster refuse it.
+    const core::RoomId owned = named_room("04");
+    ASSERT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->create_group(owned, alice_, {bob}, std::move(done));
+              })->outcome,
+              MembershipOutcome::Done);
+    ASSERT_TRUE(conn_->exec("UPDATE chat_members SET role = 'owner' WHERE room_id = $1 AND "
+                            "user_id = $2",
+                            Params{}.add_uuid(owned.uuid()).add_text(alice_.view())));
+    EXPECT_EQ(ask<MembershipChange>(
+                  [&](auto done) { store_->add_members(owned, alice_, {bob}, std::move(done)); }),
+              corrupt);
+    EXPECT_EQ(ask<MembershipChange>(
+                  [&](auto done) { store_->expel(owned, alice_, bob, std::move(done)); }),
+              corrupt);
+    EXPECT_EQ(rooms(alice_), std::unexpected(MessageStoreError::Corrupt));
+    EXPECT_EQ(roster(owned, bob), std::unexpected(MessageStoreError::Corrupt));
+
+    // A member whose id is not a user id: the heir a leave would promote, the peer of a direct
+    // chat, a roster's entry, and who an add answers it added.
+    const core::RoomId heirs = named_room("04");
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'group_chat')",
+                            Params{}.add_uuid(heirs.uuid())));
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_members (room_id, user_id, role) VALUES "
+                            "($1, $2, 'admin'), ($1, 'a bad id', 'member')",
+                            Params{}.add_uuid(heirs.uuid()).add_text(bob.view())));
+    EXPECT_EQ(roster(heirs, bob), std::unexpected(MessageStoreError::Corrupt));
+    EXPECT_EQ(
+        ask<MembershipChange>([&](auto done) { store_->leave_room(heirs, bob, std::move(done)); }),
+        corrupt);
+    const core::RoomId direct = named_room("03");
+    const core::UserId carol = *core::UserId::parse("auth0|carol");
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'direct_chat')",
+                            Params{}.add_uuid(direct.uuid())));
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_members (room_id, user_id) VALUES "
+                            "($1, $2), ($1, 'b bad id')",
+                            Params{}.add_uuid(direct.uuid()).add_text(carol.view())));
+    EXPECT_EQ(rooms(carol), std::unexpected(MessageStoreError::Corrupt));
+
+    // A kind nobody defined.
+    const core::UserId dave = *core::UserId::parse("auth0|dave");
+    const core::RoomId odd = new_room();
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'party_chat')",
+                            Params{}.add_uuid(odd.uuid())));
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1, $2)",
+                            Params{}.add_uuid(odd.uuid()).add_text(dave.view())));
+    EXPECT_EQ(rooms(dave), std::unexpected(MessageStoreError::Corrupt));
+    EXPECT_EQ(
+        ask<MembershipChange>([&](auto done) { store_->leave_room(odd, dave, std::move(done)); }),
+        corrupt);
 }
 
 TEST_F(MessageStoreTest, BodiesAreByteaNeverTextAndNothingIndexesThem) {

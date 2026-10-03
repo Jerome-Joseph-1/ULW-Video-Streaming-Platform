@@ -720,6 +720,11 @@ public:
     void on_member_added(const core::RoomId& room, const core::UserId& user) noexcept override {
         changes.push_back(std::format("+ {} {}", room.to_string(), user.view()));
     }
+    void on_member_role(const core::RoomId& room, const core::UserId& user,
+                        core::ports::MemberRole role) noexcept override {
+        changes.push_back(std::format("* {} {} {}", room.to_string(),
+                                      role == MemberRole::Admin ? "admin" : "member", user.view()));
+    }
     void on_members_resync() noexcept override { ++resyncs; }
 
     std::vector<std::string> changes;
@@ -1000,6 +1005,44 @@ TEST_P(MembershipConformance, ARoomsMembersAreReadOnlyByOneOfThemAndPageInIdOrde
     EXPECT_EQ(roster(room, carol_, carol_, 2), (Roster{.asker_listed = true, .members = {}}));
 }
 
+TEST_P(MembershipConformance, AUserInTheMostRoomsOpensAndCreatesNoMoreButMayBeAdded) {
+    for (std::size_t i = 0; i < core::ports::kMaxRoomsPerUser; ++i) {
+        const core::RoomId room = core::RoomId::generate(clock_, random_);
+        ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(room, dave_, std::move(d)); }));
+    }
+    EXPECT_EQ(open_direct(named_room("03"), dave_, bob_), refused(MembershipOutcome::RoomLimit));
+    EXPECT_EQ(create_group(named_room("04"), dave_, {}), refused(MembershipOutcome::RoomLimit));
+    // Others can still list him, so nobody can shut him out of new rooms.
+    EXPECT_EQ(open_direct(named_room("03"), bob_, dave_), done({bob_, dave_}));
+    const core::RoomId room = group();
+    EXPECT_EQ(add(room, alice_, {dave_}), done({dave_}));
+}
+
+TEST_P(MembershipConformance, AGroupEveryoneLeftIsNotCreatedAgainOverItsHistory) {
+    const core::RoomId room = named_room("04");
+    backend_->open(room);
+    ASSERT_EQ(create_group(room, alice_, {}), done({alice_}));
+    ASSERT_TRUE(write(room, alice_, bytes("kept")));
+    ASSERT_EQ(leave(room, alice_), done({alice_}));
+    EXPECT_EQ(create_group(room, alice_, {bob_}), refused(MembershipOutcome::Gone));
+    EXPECT_EQ(members(room, std::nullopt, 10), std::vector<core::UserId>{});
+}
+
+// A caller asking for a full page and one more learns whether another page follows.
+TEST_P(MembershipConformance, ListingsAnswerOneEntryMoreThanAPage) {
+    const core::RoomId crowded = core::RoomId::generate(clock_, random_);
+    ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(crowded, alice_, std::move(d)); }));
+    for (std::size_t i = 0; i < core::ports::kMaxListPage + 1; ++i) {
+        const core::RoomId room = core::RoomId::generate(clock_, random_);
+        ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(room, alice_, std::move(d)); }));
+        const core::UserId member = user(std::format("u{:03}", i));
+        ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(crowded, member, std::move(d)); }));
+    }
+    EXPECT_EQ(rooms_of(alice_, std::nullopt, 1000)->size(), core::ports::kMaxListPage + 1);
+    EXPECT_EQ(roster(crowded, alice_, std::nullopt, 1000)->members.size(),
+              core::ports::kMaxListPage + 1);
+}
+
 // Every node hears every change, whoever made it: the listener is told of each user a change
 // listed or took off, and of nobody a refused or repeated change named.
 TEST_P(MembershipConformance, EveryChangeIsToldToTheListenerUserByUser) {
@@ -1018,7 +1061,7 @@ TEST_P(MembershipConformance, EveryChangeIsToldToTheListenerUserByUser) {
         "+ " + direct.to_string() + " auth0|alice", "+ " + direct.to_string() + " auth0|bob",
         "+ " + room.to_string() + " auth0|alice",   "+ " + room.to_string() + " auth0|bob",
         "+ " + room.to_string() + " auth0|carol",   "- " + room.to_string() + " auth0|carol",
-        "- " + room.to_string() + " auth0|alice"};
+        "- " + room.to_string() + " auth0|alice",   "* " + room.to_string() + " admin auth0|bob"};
     ASSERT_TRUE(ulw::test::pump_until(backend_->reactor(),
                                       [&] { return heard.changes.size() >= expected.size(); }));
     ulw::test::pump_pending(backend_->reactor());

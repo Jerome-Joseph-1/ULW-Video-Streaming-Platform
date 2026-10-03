@@ -50,7 +50,8 @@ them in the shape of the existing envelope. Six things had to be settled:
   `removed`; `leave` (`room`), answered `left`; `rooms` (optional `after`, `limit`), answered
   `rooms`; `members` (`room`, optional `after`, `limit`), answered `members`. None needs a join
   first. A refusal is an `error` with `not_member`, `not_admin`, `not_group`,
-  `too_many_members`, `self`, `rate_limited` (with `retry_after_ms`) or `unavailable`.
+  `too_many_members`, `room_limit`, `gone`, `self`, `rate_limited` (with `retry_after_ms`) or
+  `unavailable`.
 - **Named rooms.** A direct chat's room is a version 8 UUID tagged `0x03`, the rest SHA-256 over
   `ulw direct chat\n`, the two ids in byte order and a newline between them; a group chat's is
   tagged `0x04`, over `ulw group chat\n`, the creator, a newline and the request's id
@@ -65,21 +66,36 @@ them in the shape of the existing envelope. Six things had to be settled:
   again. Its pair never changes: `add_members`, `remove_member` and `leave` answer `not_group`.
   Opening a chat with oneself is `self`.
 - **Target users are not validated** beyond being user ids. A room with someone who never signs
-  in is rows nobody reads; the membership allowance bounds how many a user makes.
+  in is rows nobody reads; the per-user room cap below bounds how many a user makes.
+- **A group's id is not reused over its history.** A `create_group` that finds its room listing
+  nobody but holding messages (everyone left) lists nobody and answers `gone`: listing new
+  members would hand them the old history. The client creates the group under a new id.
 - **Roles.** `chat_members.role` is `member` or `admin` (migration 0014, default `member`, so
   every row from before and every operator insert without one is a member). A group's creator is
   its admin. Only an admin adds or removes others (`not_admin`); anyone listed may leave; an
   admin removing themselves is leaving. When the last admin leaves and anyone is left, the
   member whose id sorts first becomes admin in the same statement, so a group with members
-  always has one. Granting admin to more members is left to operators (`UPDATE chat_members SET
+  always has one. The `left` answer names the member promoted, and the role change is told to
+  everyone concerned as a `member` frame with `change` `promoted` (`demoted` for an operator
+  taking admin away). Granting admin to more members is left to operators (`UPDATE chat_members SET
   role = 'admin'`) until a client needs it.
 - **Caps.** A group holds at most 100 members (`kMaxGroupMembers`, a small group in ADR-0016's
   sense); an add that would pass it adds nobody (`too_many_members`). One create or add names at
   most 50 users (`malformed` past it). Listings page 1 to 100 entries, 50 by default, in byte
-  order of room id or user id, with `more` saying whether another page follows.
+  order of room id or user id, with `more` saying whether another page follows: the service
+  asks the store for one entry more than the page, and the stores answer up to
+  `kMaxListPage + 1`, so a full page of 100 still knows.
+- **A durable cap per user.** Whoever asks `open_direct` or `create_group` must be listed in
+  fewer than 1000 rooms (`kMaxRoomsPerUser`) for it to list anyone, or it answers
+  `room_limit`. It is counted in the database, through `chat_members_by_user`, inside the
+  change's transaction and under an advisory lock on the user (`kLockCreator`, taken before the
+  room's lock and only by these two changes, so no lock order inverts), so it holds across every
+  node and over any length of time. Being added by others is not bounded by it, so nobody can
+  shut someone else out of new rooms.
 - **Under the room's lock.** Each change is a transaction: `BEGIN`; for `open_direct` and
   `create_group`, the room recorded as its kind if nothing recorded it (`kEnsureRoom`); the
-  room's `chat_rooms` row locked `FOR UPDATE` (`kLockRoom`); one statement that checks the
+  room's `chat_rooms` row locked `FOR UPDATE` (`kLockRoom`), after the creator's advisory lock
+  for the two changes that may create a room; one statement that checks the
   asker's role, the room's kind and the cap against the list as it is now (READ COMMITTED gives
   each statement a fresh snapshot) and writes only if they pass; `COMMIT`. The answer goes out
   after the commit. A change only ever locks one room, so changes cannot deadlock one another.
@@ -87,8 +103,8 @@ them in the shape of the existing envelope. Six things had to be settled:
   ask, so a ticket is never issued on a membership a change has already taken away; nothing on
   any node caches a list.
 - **Notifications.** Migration 0014's trigger sends `+ <room> <user>` or `- <room> <user>` on
-  the `chat_members` channel for every row inserted, deleted or moved, however it changed; a
-  role change sends nothing. `PgMessageStore` listens there instead of on
+  the `chat_members` channel for every row inserted, deleted or moved, however it changed, and
+  `* <room> <role> <user>` for a row whose role alone changed. `PgMessageStore` listens there instead of on
   `chat_member_removed` (whose 0009 trigger stays for nodes from before, until none runs).
   Each node tells, with an unasked `member` frame (`room`, `user`, `change`), every socket of the
   user named and every socket in the room; a removal still takes the user's sockets out of the
@@ -106,22 +122,31 @@ them in the shape of the existing envelope. Six things had to be settled:
   removal never reaches them even before the Remove commit; a direct chat is always the same
   two; a group stays small enough for every commit to reach every member. Clients compare the
   MLS roster with `members` and treat a difference as a commit owed.
-- **Allowances.** Changes cost the user's membership allowance on the node: 20 at once, then one
-  each 3 s (`ServiceLimits::membership_burst`, `membership_interval`), past which a change is
+- **Allowances.** Changes cost the user's membership allowance: 20 at once, then one each 3 s
+  (`ServiceLimits::membership_burst`, `membership_interval`), past which a change is
   `rate_limited` with `retry_after_ms`. Listings are reads of the store and cost the join
-  allowance, as history pages do.
+  allowance, as history pages do. Like every chat allowance these are kept per node, in memory:
+  a user with sockets on N nodes gets N times them, and a node's restart refills them. They pace
+  load; what bounds the rows a user can make is the durable cap above.
 - **Metrics:** `directs_opened_total`, `groups_created_total`,
   `members_changed_total{change="added"|"removed"|"left"}`,
   `membership_refusals_total{reason=...}` and `member_events_total`.
-- **Migration 0014**, numbered after the live branches' 0011 to 0013: the `role` column and its
-  check (added `NOT VALID`, so no scan under the lock), the index `chat_members (user_id,
-  room_id)` for listings, the named-kind check (`NOT VALID`), and the trigger.
+- **Migration 0014**, after the live migrations 0011 to 0013 (the migrator refuses an older
+  version than the newest applied, so it never runs before them). The migrator runs a migration
+  in one transaction and holds every lock to its commit, so the order of its statements is the
+  order of its locks: first the index `chat_members (user_id, room_id)`, built under CREATE
+  INDEX's SHARE lock, during which member writes wait and reads (joins, history, listings) go
+  on; then the catalog-only changes, the `role` column with its default and the checks on
+  `chat_members` (role; user id at most 128 bytes with no white space) and `chat_rooms` (named
+  kind), all `NOT VALID` so nothing is scanned; then the trigger. Their ACCESS EXCLUSIVE locks,
+  which do stop reads, are taken last and held only for the moments until the commit. A unit
+  test keeps the index ahead of every ALTER. A later migration validates the checks.
 
 ## Consequences
 
 - Clients open conversations, make groups and manage them without an operator; the RUNBOOK's
   SQL remains for repairs and for granting admin.
-- A change is four or five round trips to Postgres holding one row lock, a few milliseconds; at
+- A change is four to six round trips to Postgres holding one row lock, a few milliseconds; at
   20 at once and one each 3 s per user, the lock is never the bottleneck of a room.
 - Every node hears every change and looks through its clients for those concerned, as it does
   for removals: a create of 51 users is 51 notifications, each a walk of at most 1,280 clients.
@@ -130,7 +155,7 @@ them in the shape of the existing envelope. Six things had to be settled:
   nodes on the new one; a member added by a new node's command reaches an old node's sockets as
   nothing (the old node never told of additions), which is what happened before.
 - Building `chat_members_by_user` holds a SHARE lock on `chat_members` for the length of the
-  build: member changes wait, joins do not. Deploy 0014 off-peak (RUNBOOK).
+  build: member changes wait, joins and other reads do not. Deploy 0014 off-peak (RUNBOOK).
 - A user id named by mistake gets a room the other person never sees; the product shows rooms
   only for ids it resolved.
 - Reopen if a group needs more than one admin managed by clients, if group size must grow past

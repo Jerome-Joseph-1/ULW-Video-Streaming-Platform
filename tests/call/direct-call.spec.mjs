@@ -1,11 +1,11 @@
-// 1:1 calls through the product, in Chrome: Alice opens a direct chat with Bob over chat
-// (open_direct, ADR-0096), each opens the chat WebSocket on a different node of a two-node
-// cluster, joins the room, asks for the call,
-// and take the ticket chat answers to LiveKit with the pinned livekit-client SDK, publishing the
-// fake camera and microphone. Each must decode the other's audio and video. A second device of
-// Alice's is refused by LiveKit (the call holds two), Carol is refused by chat (not a member);
-// when Bob leaves Alice sees him go, and Bob, back on a new socket, gets a fresh ticket and the
-// call resumes. Every ticket comes from chat_server; LiveKit's key is only in chat's environment
+// 1:1 calls through the product, in Chrome. Alice and Bob each open the chat WebSocket on a
+// different node of a two-node cluster; Alice opens their direct chat over chat (open_direct,
+// ADR-0096) and Bob hears he was listed. Both join the room, ask for the call, and take the
+// ticket chat answers to LiveKit with the pinned livekit-client SDK, publishing the fake camera
+// and microphone. Each must decode the other's audio and video. A second device of Alice's is
+// refused by LiveKit (the call holds two), Carol is refused by chat (not a member); when Bob
+// leaves Alice sees him go, and Bob, back on a new socket, gets a fresh ticket and the call
+// resumes. Every ticket comes from chat_server; LiveKit's key is only in chat's environment
 // (docs/integration/calls.md, ADR-0087).
 import { chromium, expect, test } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';

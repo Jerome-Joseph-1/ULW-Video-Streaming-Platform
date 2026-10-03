@@ -381,7 +381,7 @@ std::expected<Command, EnvelopeError> members_of(const core::json::Value& messag
     return list;
 }
 
-std::string_view kind_name(core::ports::RoomKind kind) noexcept {
+[[nodiscard]] std::string_view kind_name(core::ports::RoomKind kind) noexcept {
     switch (kind) {
     case core::ports::RoomKind::DirectChat:
         return "direct";
@@ -393,7 +393,7 @@ std::string_view kind_name(core::ports::RoomKind kind) noexcept {
     return "group";
 }
 
-std::string_view role_name(core::ports::MemberRole role) noexcept {
+[[nodiscard]] std::string_view role_name(core::ports::MemberRole role) noexcept {
     switch (role) {
     case core::ports::MemberRole::Member:
         return "member";
@@ -633,9 +633,13 @@ void write_removed(std::string& out, const core::RoomId& room, const core::UserI
     out += '}';
 }
 
-void write_left(std::string& out, const core::RoomId& room) {
+void write_left(std::string& out, const core::RoomId& room,
+                const std::optional<core::UserId>& promoted) {
     out += R"({"type":"left",)";
     append_room(out, room);
+    if (promoted) {
+        append_user(out, "promoted", *promoted);
+    }
     out += '}';
 }
 
@@ -677,11 +681,13 @@ void write_members(std::string& out, const core::RoomId& room,
 }
 
 void write_member_change(std::string& out, const core::RoomId& room, const core::UserId& user,
-                         bool added) {
+                         std::string_view change) {
     out += R"({"type":"member",)";
     append_room(out, room);
     append_user(out, "user", user);
-    out += added ? R"(,"change":"added"})" : R"(,"change":"removed"})";
+    out += R"(,"change":")";
+    out += change;
+    out += R"("})";
 }
 
 void write_error_with(std::string& out, std::string_view reason, const ErrorContext& context) {

@@ -17,6 +17,8 @@ the chat WebSocket: `open_direct`, `create_group`, `add_members`, `remove_member
 | Members were listed by operators in the database | Users open direct chats and create groups; a group's admin adds and removes members; anyone leaves a group |
 | A direct chat was any room id the operators listed two users in | `open_direct` names the pair's room: a version 8 id starting with `03`, the same whichever of the two asks. Rooms listed by operators keep working as before |
 | A removal was told to the removed user's sockets in the room (`error` `not_member`) | The same, and then a `member` frame with `change` `removed` to every socket of that user and every socket in the room; additions are told likewise |
+| Nothing told a group's members of a new admin | A `member` frame with `change` `promoted` (or `demoted`); `left` names who was promoted |
+| No limit on what one account could list | `open_direct` and `create_group` of a new room answer `room_limit` once the user is in 1000 rooms; a group everyone left that holds messages is `gone` to a create under its id |
 | A `join`'s `"kind"` was taken as given | For a room starting with `03` or `04` (version 8) the kind is the room's; a `"kind"` naming the other is `bad_room` |
 
 What to do:
@@ -26,7 +28,8 @@ What to do:
   act on them as [chat.md](chat.md#changing-member-lists) says (commit the change in MLS).
 - **Operators:** migration 0014 builds an index on `chat_members` that holds member changes (not
   joins) while it builds; deploy it off-peak (RUNBOOK). Watch
-  `membership_refusals_total{reason="unavailable"}`.
+  `membership_refusals_total{reason="unavailable"}`. 0014 must run after 0011 to 0013; the
+  release that carries it carries them (RUNBOOK).
 
 ## 2026-10-03: the subject claim is configured, and the audience is required
 

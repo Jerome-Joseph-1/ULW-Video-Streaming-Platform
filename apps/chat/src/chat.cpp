@@ -373,6 +373,8 @@ std::string ChatServer::render_metrics() const {
         "membership_refusals_total{{reason=\"not_admin\"}} {}\n"
         "membership_refusals_total{{reason=\"not_group\"}} {}\n"
         "membership_refusals_total{{reason=\"too_many_members\"}} {}\n"
+        "membership_refusals_total{{reason=\"room_limit\"}} {}\n"
+        "membership_refusals_total{{reason=\"gone\"}} {}\n"
         "membership_refusals_total{{reason=\"rate_limited\"}} {}\n"
         "membership_refusals_total{{reason=\"unavailable\"}} {}\n"
         "member_events_total {}\n",
@@ -395,8 +397,9 @@ std::string ChatServer::render_metrics() const {
         call.opens, calls_.rooms(), call.sfu_unavailable, call.sfu_refused, call.store_unavailable,
         chat.directs_opened, chat.groups_created, chat.members_added, chat.members_removed,
         chat.members_left, chat.membership_not_member, chat.membership_not_admin,
-        chat.membership_not_group, chat.membership_full, chat.membership_rate_limited,
-        chat.membership_unavailable, chat.member_events);
+        chat.membership_not_group, chat.membership_full, chat.membership_room_limit,
+        chat.membership_gone, chat.membership_rate_limited, chat.membership_unavailable,
+        chat.member_events);
 }
 
 } // namespace chat

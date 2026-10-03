@@ -23,7 +23,8 @@ using core::ports::MessageResult;
 
 // The users a change names, as the store takes them: each once, and never the one asking, who is
 // listed by the change itself (a create) or must be already (an add).
-std::vector<core::UserId> others(std::vector<core::UserId> users, const core::UserId& asker) {
+[[nodiscard]] std::vector<core::UserId> others(std::vector<core::UserId> users,
+                                               const core::UserId& asker) {
     std::ranges::sort(users, {}, &core::UserId::view);
     const auto [first, last] = std::ranges::unique(users);
     users.erase(first, last);
@@ -86,6 +87,14 @@ void ChatService::changed(ClientId id, const ErrorContext& context,
     case MembershipOutcome::Full:
         ++counters_.membership_full;
         refuse(*c->client, "too_many_members", context);
+        return;
+    case MembershipOutcome::RoomLimit:
+        ++counters_.membership_room_limit;
+        refuse(*c->client, "room_limit", context);
+        return;
+    case MembershipOutcome::Gone:
+        ++counters_.membership_gone;
+        refuse(*c->client, "gone", context);
         return;
     case MembershipOutcome::WrongKind:
         // A named room is recorded only as the kind its id names (migration 0014), so the store
@@ -257,8 +266,8 @@ void ChatService::leave_room(ClientId id, const LeaveRoom& leave) {
                 ++counters_.members_left;
             }
             changed(id, context, std::move(result),
-                    [room](std::string& out, const MembershipChange& /*change*/) {
-                        write_left(out, room);
+                    [room](std::string& out, const MembershipChange& change) {
+                        write_left(out, room, change.promoted);
                     });
         });
 }
@@ -346,21 +355,32 @@ void ChatService::on_member_added(const core::RoomId& room, const core::UserId& 
     if (core::ports::is_stream_chat(room)) {
         return;
     }
-    tell_members(room, user, true);
+    tell_members(room, user, "added");
+}
+
+void ChatService::on_member_role(const core::RoomId& room, const core::UserId& user,
+                                 core::ports::MemberRole role) noexcept {
+    if (core::ports::is_stream_chat(room)) {
+        return;
+    }
+    tell_members(room, user, role == core::ports::MemberRole::Admin ? "promoted" : "demoted");
 }
 
 void ChatService::tell_members(const core::RoomId& room, const core::UserId& user,
-                               bool added) noexcept {
+                               std::string_view change) noexcept {
     std::string out;
     try {
-        write_member_change(out, room, user, added);
+        write_member_change(out, room, user, change);
     } catch (const std::bad_alloc&) {
         // Nobody is told; the change itself stands, and a listing shows it.
         ++counters_.allocation_failures;
         return;
     }
     for (auto& [value, c] : clients_) {
-        if (c.user != user && std::ranges::find(c.rooms, room) == c.rooms.end()) {
+        // A join still waiting for the member list is not in the room: the answer may yet be
+        // no, and until it comes the client hears nothing of the room but its own user's changes.
+        if (c.user != user && (std::ranges::find(c.rooms, room) == c.rooms.end() ||
+                               std::ranges::find(c.admitting, room) != c.admitting.end())) {
             continue;
         }
         if (c.client->push(out)) {

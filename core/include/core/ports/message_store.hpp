@@ -141,7 +141,13 @@ inline constexpr std::size_t kMaxGroupMembers = 100;
 inline constexpr std::size_t kMaxMembersPerChange = 50;
 // A page of a user's rooms, or of a room's members with their roles: each entry is well under
 // 300 bytes on the client's socket, so a page stays inside a history page's share of its budget.
+// The stores answer one entry more than this at most, so that a caller asking for a full page
+// and one more can tell whether another page follows.
 inline constexpr std::size_t kMaxListPage = 100;
+// The rooms a user may be listed in and still open a direct chat or create a group: what one
+// account can make the database hold, whichever chat node it asks and however long it takes.
+// Being added by others is not bounded by it, so nobody can lock someone else out.
+inline constexpr std::size_t kMaxRoomsPerUser = 1000;
 
 // One of a user's rooms, as rooms_of lists them.
 struct RoomEntry {
@@ -186,6 +192,12 @@ enum class MembershipOutcome : std::uint8_t {
     Full,
     // open_direct or create_group of a room recorded as another kind.
     WrongKind,
+    // open_direct or create_group that would list a room for a user listed in
+    // kMaxRoomsPerUser rooms already.
+    RoomLimit,
+    // create_group of a room that lists nobody any more but holds messages: its members all
+    // left, and listing new ones would hand them the history. The request needs a new id.
+    Gone,
 };
 
 struct MembershipChange {
@@ -239,6 +251,9 @@ public:
     virtual void on_member_removed(const RoomId& room, const UserId& user) noexcept = 0;
     // `user` is on the member list of `room` now, whoever listed them and however.
     virtual void on_member_added(const RoomId& room, const UserId& user) noexcept = 0;
+    // `user`, on the member list of `room`, has `role` now.
+    virtual void on_member_role(const RoomId& room, const UserId& user,
+                                MemberRole role) noexcept = 0;
     // Changes may have gone unannounced (the store lost its way to hear them): whatever relies
     // on them must check the member lists it cares about again.
     virtual void on_members_resync() noexcept = 0;
@@ -313,13 +328,15 @@ public:
     // The direct chat of `user` and `peer` (distinct), at `room` (named_kind DirectChat): records
     // it and lists both when it lists nobody yet; otherwise changes nothing, so a member an
     // operator removed is not put back. NotMember when it lists others but not `user`, WrongKind
-    // when it is recorded as another kind.
+    // when it is recorded as another kind, RoomLimit when it would list it for a `user` already
+    // in kMaxRoomsPerUser rooms.
     virtual void open_direct(const RoomId& room, const UserId& user, const UserId& peer,
                              MessageCallback<MembershipChange> done) = 0;
     // A group chat at `room` (named_kind GroupChat), `creator` its admin and `members` (at most
     // kMaxMembersPerChange, distinct, without the creator) its members: when it lists nobody yet.
     // A repeat changes nothing and answers Done if the creator is still listed, NotMember if not;
-    // WrongKind when the room is recorded as another kind.
+    // WrongKind when the room is recorded as another kind; RoomLimit as for open_direct; Gone
+    // when it lists nobody but holds messages.
     virtual void create_group(const RoomId& room, const UserId& creator,
                               std::vector<UserId> members,
                               MessageCallback<MembershipChange> done) = 0;
@@ -338,11 +355,11 @@ public:
     virtual void leave_room(const RoomId& room, const UserId& user,
                             MessageCallback<MembershipChange> done) = 0;
     // The rooms `user` is listed in, in byte order of their ids from after `after`, at most
-    // min(limit, kMaxListPage).
+    // min(limit, kMaxListPage + 1).
     virtual void rooms_of(const UserId& user, std::optional<RoomId> after, std::size_t limit,
                           MessageCallback<std::vector<RoomEntry>> done) = 0;
     // The room's members and their roles, in byte order of their ids from after `after`, at most
-    // min(limit, kMaxListPage): only for `asker` while listed.
+    // min(limit, kMaxListPage + 1): only for `asker` while listed.
     virtual void roster(const RoomId& room, const UserId& asker, std::optional<UserId> after,
                         std::size_t limit, MessageCallback<Roster> done) = 0;
 };

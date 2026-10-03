@@ -152,7 +152,7 @@ Client to server:
 | `create_group` | `id`, optional `users` (at most 50) | A group chat with you as its admin and `users` as its members. `id` is a request id, as a message's (1 to 64 of `A-Z a-z 0-9 _ -`): the same `id` again, after `unavailable` say, names the same room and lists nobody more. Use a new `id` per group. |
 | `add_members` | `room`, `users` (1 to 50) | Lists `users` in a group chat you are an admin of. Those listed already are left as they are. |
 | `remove_member` | `room`, `user` | Takes `user` off a group chat you are an admin of. Naming yourself is `leave`. |
-| `leave` | `room` | Takes you off a group chat's list. When its last admin leaves, the remaining member whose id sorts first (bytewise) becomes its admin. Your sockets that joined the room leave it as for any removal (`error` `not_member`, then `member`), before or after the answer. |
+| `leave` | `room` | Takes you off a group chat's list. When its last admin leaves, the remaining member whose id sorts first (bytewise) becomes its admin, and `left` names them. Your sockets that joined the room leave it as for any removal (`error` `not_member`, then `member`), before or after the answer. |
 | `rooms` | optional `after` (a room id), `limit` (1 to 100, default 50) | The rooms you are listed in, in room id order (bytewise, not by activity); the next page is `after` the last one. |
 | `members` | `room`, optional `after` (a user id), `limit` (1 to 100, default 50) | The room's members and their roles, by user id; only for a member. |
 
@@ -164,10 +164,10 @@ Server to client:
 | `group` | `room`, `id` | The answer to `create_group`. |
 | `added` | `room`, `users` | The answer to `add_members`: who it listed, not those listed already. |
 | `removed` | `room`, `user` | The answer to `remove_member`. |
-| `left` | `room` | The answer to `leave`. |
+| `left` | `room`, `promoted` when you were its last admin | The answer to `leave`: `promoted` is the member who became the group's admin. |
 | `rooms` | `rooms` (objects of `room`, `kind`: `direct`, `group` or `live`; `role`: `member` or `admin`; and `peer`, the other member of a direct chat), `more` | A page of your rooms; `more` is `true` when another follows. |
 | `members` | `room`, `members` (objects of `user` and `role`), `more` | A page of the room's members. |
-| `member` | `room`, `user`, `change` (`added` or `removed`) | Unasked: `user` was listed in, or taken off, the room. Sent to every socket of `user` and to every socket that joined the room, however the list changed (a command, or an operator). |
+| `member` | `room`, `user`, `change` (`added`, `removed`, `promoted` or `demoted`) | Unasked: `user` was listed in, taken off, made admin of, or made a plain member of the room. Sent to every socket of `user` and to every socket that joined the room, however the list changed (a command, or an operator). A socket whose join of the room is still waiting for its answer hears only of its own user. |
 | `error` | `reason`, plus `room`, `id` (of a `create_group`) and `user` when the command named them, `retry_after_ms` for `rate_limited` | The command changed nothing. |
 
 As `user-1`:
@@ -198,9 +198,14 @@ As `user-1`:
   changes: `add_members`, `remove_member` and `leave` on one are `not_group`. A member an
   operator removed from a direct chat is not put back when the other opens it again.
 - **Size.** A group holds at most 100 members; an `add_members` that would pass that adds
-  nobody (`too_many_members`).
+  nobody (`too_many_members`). Once you are listed in 1000 rooms, `open_direct` and
+  `create_group` of a new room answer `room_limit` (others can still add you); leave some first.
+- **A group's `id` is used once.** When everyone has left a group that holds messages, a
+  `create_group` under its `id` answers `gone` and lists nobody, so that new members never get
+  the old history; use a new `id`.
 - **Allowance.** `open_direct`, `create_group`, `add_members`, `remove_member` and `leave` share
-  one allowance per user per node: 20 at once, then one each 3 s; past it they are
+  one allowance per user on each node (a user connected to several nodes has one on each): 20 at
+  once, then one each 3 s; past it they are
   `rate_limited` with `retry_after_ms`. `rooms` and `members` count with joins and history.
 - **End-to-end encrypted rooms.** The server's list decides who may join, send and read; the MLS
   group is your devices' (ADR-0016), and the server never reads a commit. When you add members,
@@ -258,6 +263,8 @@ As `user-1`:
 | `not_admin` | `add_members` or `remove_member` by a member who is not the group's admin | Do not retry |
 | `not_group` | `add_members`, `remove_member` or `leave` of a direct chat (or a stream's live chat) | Do not retry |
 | `too_many_members` | The group would hold more than 100 members | Remove members first |
+| `room_limit` | `open_direct` or `create_group` of a new room while you are listed in 1000 rooms | Leave some rooms first |
+| `gone` | `create_group` under the `id` of a group everyone left, which holds messages | Create it under a new `id` |
 | `not_callable`, `call_failed`, `calls_disabled` | A call was refused; see [calls.md](calls.md#errors) | As there |
 | `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive. For a member-list command: you are not on the room's list | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |

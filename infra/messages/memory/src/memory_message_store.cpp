@@ -239,7 +239,7 @@ using core::ports::MembershipOutcome;
 
 namespace {
 
-MembershipChange refusal(MembershipOutcome outcome) {
+[[nodiscard]] MembershipChange refusal(MembershipOutcome outcome) {
     return MembershipChange{.outcome = outcome, .changed = {}, .promoted = std::nullopt};
 }
 
@@ -253,16 +253,20 @@ void MemoryMessageStore::answer_change(MembershipChange change, bool added,
             // The listener hears of the change after its answer, as the durable store's
             // notifications come after its commit; here the two may arrive in one iteration.
             const std::vector<core::UserId> changed = change.changed;
+            const std::optional<core::UserId> promoted = change.promoted;
             done(std::move(change));
+            if (listener_ == nullptr) {
+                return;
+            }
             for (const core::UserId& user : changed) {
-                if (listener_ == nullptr) {
-                    break;
-                }
                 if (added) {
                     listener_->on_member_added(room, user);
                 } else {
                     listener_->on_member_removed(room, user);
                 }
+            }
+            if (promoted) {
+                listener_->on_member_role(room, *promoted, MemberRole::Admin);
             }
         });
 }
@@ -276,9 +280,18 @@ void MemoryMessageStore::create_listed(const core::RoomId& room, core::ports::Ro
         answer_change(refusal(MembershipOutcome::WrongKind), true, room, std::move(done));
         return;
     }
+    const auto rooms_of_asker = std::ranges::count_if(
+        members_, [&](const auto& entry) { return entry.second.contains(asker); });
+    const auto stored = rooms_.find(room);
+    const bool used = stored != rooms_.end() && !stored->second.messages.empty();
     Members& listed = members_[room];
     MembershipChange change = refusal(MembershipOutcome::Done);
-    if (listed.empty()) {
+    if (listed.empty() && kind == core::ports::RoomKind::GroupChat && used) {
+        change = refusal(MembershipOutcome::Gone);
+    } else if (listed.empty() &&
+               static_cast<std::size_t>(rooms_of_asker) >= core::ports::kMaxRoomsPerUser) {
+        change = refusal(MembershipOutcome::RoomLimit);
+    } else if (listed.empty()) {
         for (std::size_t i = 0; i < users.size(); ++i) {
             if (listed.try_emplace(users[i], i == 0 ? first_role : MemberRole::Member).second) {
                 change.changed.push_back(users[i]);
@@ -425,7 +438,7 @@ void MemoryMessageStore::rooms_of(const core::UserId& user, std::optional<core::
         found.emplace(key, entry);
     }
     std::vector<core::ports::RoomEntry> out;
-    const std::size_t rows = std::min(limit, core::ports::kMaxListPage);
+    const std::size_t rows = std::min(limit, core::ports::kMaxListPage + 1);
     for (const auto& [key, entry] : found) {
         if (out.size() == rows) {
             break;
@@ -443,7 +456,7 @@ void MemoryMessageStore::roster(const core::RoomId& room, const core::UserId& as
     core::ports::Roster out;
     if (const auto it = members_.find(room); it != members_.end() && it->second.contains(asker)) {
         out.asker_listed = true;
-        const std::size_t rows = std::min(limit, core::ports::kMaxListPage);
+        const std::size_t rows = std::min(limit, core::ports::kMaxListPage + 1);
         const Members& members = it->second;
         for (auto from = after ? members.upper_bound(*after) : members.begin();
              from != members.end() && out.members.size() < rows; ++from) {

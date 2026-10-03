@@ -66,11 +66,13 @@
 //   {"type":"group","room":"<uuid>","id":"<request id>"}   the answer to create_group
 //   {"type":"added","room":"<uuid>","users":[...]}   who add_members listed, not who already was
 //   {"type":"removed","room":"<uuid>","user":"<sub>"}   the answer to remove_member
-//   {"type":"left","room":"<uuid>"}   the answer to leave
+//   {"type":"left","room":"<uuid>"}   the answer to leave; "promoted":"<sub>" when the group's
+//       last admin left and that member became its admin
 //   {"type":"rooms","rooms":[{"room":..,"kind":"direct"|"group"|"live","role":"member"|"admin",
 //    "peer":"<sub>"}],"more":<bool>}   a page; "peer" for a direct chat's other member
 //   {"type":"members","room":"<uuid>","members":[{"user":..,"role":..}],"more":<bool>}
-//   {"type":"member","room":"<uuid>","user":"<sub>","change":"added"|"removed"}   unasked: a
+//   {"type":"member","room":"<uuid>","user":"<sub>",
+//    "change":"added"|"removed"|"promoted"|"demoted"}   unasked: a
 //       member list this connection's user is on, or a room it has joined, changed
 //   {"type":"error","reason":"<code>"}          with "room" and "id" when known, "user" for a
 //                                               watch, and "retry_after_ms" when the reason is
@@ -226,13 +228,16 @@ void write_direct(std::string& out, const core::RoomId& room, const core::UserId
 void write_group(std::string& out, const core::RoomId& room, const rt::MessageKey& id);
 void write_added(std::string& out, const core::RoomId& room, std::span<const core::UserId> users);
 void write_removed(std::string& out, const core::RoomId& room, const core::UserId& user);
-void write_left(std::string& out, const core::RoomId& room);
+// `promoted`: who became the group's admin because the leaver was its last.
+void write_left(std::string& out, const core::RoomId& room,
+                const std::optional<core::UserId>& promoted);
 void write_rooms(std::string& out, std::span<const core::ports::RoomEntry> rooms, bool more);
 void write_members(std::string& out, const core::RoomId& room,
                    std::span<const core::ports::MemberEntry> members, bool more);
-// Unasked: `user` was listed in, or taken off, the room's member list.
+// Unasked: `user` was listed in the room's member list ("added"), taken off it ("removed"), or
+// made its admin or a plain member again ("promoted", "demoted").
 void write_member_change(std::string& out, const core::RoomId& room, const core::UserId& user,
-                         bool added);
+                         std::string_view change);
 // A member-list command refused: whichever of the room, the request's id and the user named are
 // known, and when to ask again for rate_limited.
 struct ErrorContext {

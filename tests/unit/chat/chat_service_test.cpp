@@ -1736,4 +1736,27 @@ TEST_F(ChatServiceTest, AMemberEventToAClosingClientIsNotCounted) {
     EXPECT_EQ(service_->counters().member_events, 1U);
 }
 
+// A join still waiting for the room's member list is not in the room: its client hears of no
+// one else's change there, only its own user's.
+TEST_F(ChatServiceTest, AJoinStillWaitingForTheListHearsOnlyOfItsOwnUser) {
+    messages_.hold = true;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    messages_.watcher->on_member_added(room_id(), *core::UserId::parse("bob"));
+    messages_.watcher->on_member_role(room_id(), *core::UserId::parse("bob"),
+                                      core::ports::MemberRole::Admin);
+    EXPECT_TRUE(alice.take().empty()) << "a client not let in yet heard of the room";
+    messages_.watcher->on_member_added(room_id(), *core::UserId::parse("alice"));
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 1U);
+    EXPECT_EQ(seen(got[0]).user, "alice");
+    // Once let in, it hears of everyone's.
+    messages_.answer_admits({});
+    rooms_.admit();
+    alice.take();
+    messages_.watcher->on_member_added(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(seen(alice.take().at(0)).user, "bob");
+}
+
 } // namespace

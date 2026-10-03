@@ -167,6 +167,8 @@ struct ServiceCounters {
     std::uint64_t membership_not_admin = 0;
     std::uint64_t membership_not_group = 0;
     std::uint64_t membership_full = 0;
+    std::uint64_t membership_room_limit = 0;
+    std::uint64_t membership_gone = 0;
     std::uint64_t membership_rate_limited = 0;
     // Answered unavailable: the store could not be reached, or answered with what it cannot
     // have written.
@@ -241,6 +243,9 @@ public:
     void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
     // The user's clients here, and the clients here in the room, are told `member` `added`.
     void on_member_added(const core::RoomId& room, const core::UserId& user) noexcept override;
+    // The same, told `promoted` (made admin) or `demoted`.
+    void on_member_role(const core::RoomId& room, const core::UserId& user,
+                        core::ports::MemberRole role) noexcept override;
     // Every client's closed rooms are checked against the member lists again: each room and user
     // once, a few at a time, and a check that fails is asked again a second later, so that a
     // store that is still down loses no removal. A join still waiting for its member list is
@@ -331,8 +336,10 @@ private:
                  core::ports::MessageResult<core::ports::MembershipChange> result,
                  ChangeAnswer answered) noexcept;
     void refuse(IClient& client, std::string_view reason, const ErrorContext& context) noexcept;
-    // A `member` frame to the user's clients here and to every client here in the room.
-    void tell_members(const core::RoomId& room, const core::UserId& user, bool added) noexcept;
+    // A `member` frame to the user's clients here and to every client here in the room; a client
+    // still waiting for the room's member list is not in it yet, and hears only of its own user.
+    void tell_members(const core::RoomId& room, const core::UserId& user,
+                      std::string_view change) noexcept;
 
     IRooms& rooms_plane_;
     core::ports::IMessageStore& messages_;

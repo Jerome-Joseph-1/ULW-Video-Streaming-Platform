@@ -108,14 +108,14 @@ SELECT user_id FROM chat_members
  ORDER BY user_id
  LIMIT $3)sql";
 
-// Member lists their users change (ADR-0096). Each change runs in a transaction: BEGIN, then
-// kEnsureRoom for a room the change may create, then kLockRoom, which takes the room's chat_rooms
-// row FOR UPDATE, then the change's own statement, then COMMIT. Under READ COMMITTED every
-// statement takes a fresh snapshot, so the change reads the list as the previous holder of the
-// lock committed it: two adds cannot both pass the size cap, and an admin removed a moment ago
-// cannot add anyone. Everything a change checks it checks inside its own statement, and writes
-// only when the checks pass, so a refusal writes nothing and the transaction commits empty. The
-// lock is only ever taken on one room at a time, so these transactions cannot deadlock one
+// Member lists their users change (ADR-0096). Each change runs in a transaction: BEGIN, then for a
+// change that may create a room kLockCreator and kEnsureRoom, then kLockRoom, which takes the
+// room's chat_rooms row FOR UPDATE, then the change's own statement, then COMMIT. Under READ
+// COMMITTED every statement takes a fresh snapshot, so the change reads the list as the previous
+// holder of the lock committed it: two adds cannot both pass the size cap, and an admin removed a
+// moment ago cannot add anyone. Everything a change checks it checks inside its own statement, and
+// writes only when the checks pass, so a refusal writes nothing and the transaction commits empty.
+// The lock is only ever taken on one room at a time, so these transactions cannot deadlock one
 // another. Users travel as one text of ids separated by spaces, which no id contains.
 
 // Records the room as $2 when nothing recorded it. DO NOTHING: a kind already there stays, and
@@ -127,37 +127,61 @@ ON CONFLICT (room_id) DO NOTHING)sql";
 // The room's recorded kind, its row locked until the transaction ends; no row when none is.
 inline constexpr Sql kLockRoom = "SELECT kind FROM chat_rooms WHERE room_id = $1 FOR UPDATE";
 
+// Taken by a change that may create a room, before the room's own lock: serialises the changes
+// one user makes on every node, so that the count of rooms they are listed in (kOpenDirect,
+// kCreateGroup) cannot be passed by two creates at once. Key space 4 of the two-int advisory
+// locks; the directory's user lock is 3 (e2ee_directory.cpp). Only these changes take it, and
+// always first, so it never waits behind a room lock its holder needs.
+inline constexpr Sql kLockCreator = "SELECT pg_advisory_xact_lock(4, hashtext($1))";
+
 // A direct chat lists its pair when it lists nobody yet: when it was just recorded, or a join
-// recorded it before anyone opened it. A room that lists anyone is left as it is, so a member an
-// operator removed is not put back. $1 room, $2 the user asking, $3 the other. Answers whether $2
-// is listed now, and who was added.
+// recorded it before anyone opened it, and the user asking is listed in fewer than $4 rooms. A
+// room that lists anyone is left as it is, so a member an operator removed is not put back. $1
+// room, $2 the user asking, $3 the other. Answers whether $2 is listed now, who was added,
+// whether the room listed nobody, and whether $2 had room for one more.
 inline constexpr Sql kOpenDirect = R"sql(
 WITH listed AS (SELECT user_id FROM chat_members WHERE room_id = $1),
+fits AS (
+    SELECT (SELECT count(*) FROM (SELECT 1 FROM chat_members WHERE user_id = $2 LIMIT $4) AS c)
+           < $4 AS ok),
 added AS (
     INSERT INTO chat_members (room_id, user_id, role)
     SELECT $1, u, 'member' FROM unnest(ARRAY[$2, $3]) AS u
-     WHERE NOT EXISTS (SELECT 1 FROM listed)
+     WHERE NOT EXISTS (SELECT 1 FROM listed) AND (SELECT ok FROM fits)
     ON CONFLICT (room_id, user_id) DO NOTHING
     RETURNING user_id)
 SELECT EXISTS (SELECT 1 FROM listed WHERE user_id = $2)
            OR EXISTS (SELECT 1 FROM added WHERE user_id = $2),
-       (SELECT string_agg(user_id, ' ' ORDER BY user_id) FROM added))sql";
+       (SELECT string_agg(user_id, ' ' ORDER BY user_id) FROM added),
+       NOT EXISTS (SELECT 1 FROM listed),
+       (SELECT ok FROM fits),
+       false)sql";
 
-// A group chat lists its creator as admin and the others as members when it lists nobody yet;
-// a repeat of the create changes nothing. $1 room, $2 creator, $3 the others. Answers whether
-// the creator is listed now, and who was added.
+// A group chat lists its creator as admin and the others as members when it lists nobody yet,
+// holds no message, and the creator is listed in fewer than $4 rooms; a repeat of the create
+// changes nothing. A group whose members all left keeps its history, which a create under the
+// same id must not hand to whoever it lists. $1 room, $2 creator, $3 the others. Answers as
+// kOpenDirect, and whether the room holds messages.
 inline constexpr Sql kCreateGroup = R"sql(
 WITH listed AS (SELECT user_id FROM chat_members WHERE room_id = $1),
+fits AS (
+    SELECT (SELECT count(*) FROM (SELECT 1 FROM chat_members WHERE user_id = $2 LIMIT $4) AS c)
+           < $4 AS ok),
+used AS (SELECT EXISTS (SELECT 1 FROM chat_messages WHERE room_id = $1) AS held),
 added AS (
     INSERT INTO chat_members (room_id, user_id, role)
     SELECT $1, u, CASE WHEN u = $2 THEN 'admin' ELSE 'member' END
       FROM unnest(array_prepend($2, string_to_array($3, ' '))) AS u
-     WHERE NOT EXISTS (SELECT 1 FROM listed)
+     WHERE NOT EXISTS (SELECT 1 FROM listed) AND (SELECT ok FROM fits)
+       AND NOT (SELECT held FROM used)
     ON CONFLICT (room_id, user_id) DO NOTHING
     RETURNING user_id)
 SELECT EXISTS (SELECT 1 FROM listed WHERE user_id = $2)
            OR EXISTS (SELECT 1 FROM added WHERE user_id = $2),
-       (SELECT string_agg(user_id, ' ' ORDER BY user_id) FROM added))sql";
+       (SELECT string_agg(user_id, ' ' ORDER BY user_id) FROM added),
+       NOT EXISTS (SELECT 1 FROM listed),
+       (SELECT ok FROM fits),
+       (SELECT held FROM used))sql";
 
 // $3's users not listed yet join the group, if $5 (the room is a group chat), $2 is its admin
 // and the list stays within $4. Answers $2's role (NULL: not listed), whether the list fits, and

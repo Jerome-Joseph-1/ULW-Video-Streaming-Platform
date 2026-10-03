@@ -393,9 +393,12 @@ ids_of(std::optional<std::string_view> text) {
 // it back.
 class LockedChange : public Operation {
 public:
+    // `ensure`: the kind to record the room as when nothing has, for a change that may create
+    // it, made by `creator`, whose own lock it takes first.
     LockedChange(const core::RoomId& room, std::optional<core::ports::RoomKind> ensure,
+                 std::optional<core::UserId> creator,
                  MessageCallback<MembershipChange> done) noexcept
-        : room_(room), ensure_(ensure), done_(std::move(done)) {}
+        : room_(room), ensure_(ensure), creator_(creator), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept final {
         phase_ = Phase::Begin;
@@ -410,13 +413,14 @@ public:
         }
         switch (phase_) {
         case Phase::Begin:
-            if (ensure_) {
-                phase_ = Phase::Ensure;
-                return Statement{.sql = message_sql::kEnsureRoom,
-                                 .params =
-                                     Params{}.add_uuid(room_.uuid()).add_text(kind_text(*ensure_))};
+            if (creator_) {
+                phase_ = Phase::LockCreator;
+                return Statement{.sql = message_sql::kLockCreator,
+                                 .params = Params{}.add_text(creator_->view())};
             }
-            return lock();
+            return ensure();
+        case Phase::LockCreator:
+            return ensure();
         case Phase::Ensure:
             return lock();
         case Phase::Lock:
@@ -457,7 +461,16 @@ protected:
     [[nodiscard]] const core::RoomId& room() const noexcept { return room_; }
 
 private:
-    enum class Phase : std::uint8_t { Begin, Ensure, Lock, Work, Commit };
+    enum class Phase : std::uint8_t { Begin, LockCreator, Ensure, Lock, Work, Commit };
+
+    [[nodiscard]] Statement ensure() noexcept {
+        if (!ensure_) {
+            return lock();
+        }
+        phase_ = Phase::Ensure;
+        return Statement{.sql = message_sql::kEnsureRoom,
+                         .params = Params{}.add_uuid(room_.uuid()).add_text(kind_text(*ensure_))};
+    }
 
     [[nodiscard]] Statement lock() noexcept {
         phase_ = Phase::Lock;
@@ -488,30 +501,43 @@ private:
 
     core::RoomId room_;
     std::optional<core::ports::RoomKind> ensure_;
+    std::optional<core::UserId> creator_;
     MessageCallback<MembershipChange> done_;
     Phase phase_ = Phase::Begin;
     std::optional<MembershipChange> answer_;
 };
 
-// Who is listed now and who was added, as kOpenDirect and kCreateGroup answer.
+// Who is listed now and who was added, as kOpenDirect and kCreateGroup answer, or why nobody was:
+// a room that lists nobody yet stays so when it holds messages, or its creator has no room for
+// one more.
 [[nodiscard]] std::optional<MembershipChange> listed_and_added(const Result& r) {
     const auto listed = r.get(0, 0).and_then(parse_bool);
     auto added = ids_of(r.get(0, 1));
-    if (!listed || !added) {
+    const auto empty = r.get(0, 2).and_then(parse_bool);
+    const auto fits = r.get(0, 3).and_then(parse_bool);
+    const auto used = r.get(0, 4).and_then(parse_bool);
+    if (!listed || !added || !empty || !fits || !used) {
         return std::nullopt;
     }
-    if (!*listed) {
-        return refused(MembershipOutcome::NotMember);
+    if (*listed) {
+        return MembershipChange{.outcome = MembershipOutcome::Done,
+                                .changed = std::move(*added),
+                                .promoted = std::nullopt};
     }
-    return MembershipChange{
-        .outcome = MembershipOutcome::Done, .changed = std::move(*added), .promoted = std::nullopt};
+    if (*empty && *used) {
+        return refused(MembershipOutcome::Gone);
+    }
+    if (*empty && !*fits) {
+        return refused(MembershipOutcome::RoomLimit);
+    }
+    return refused(MembershipOutcome::NotMember);
 }
 
 class OpenDirect final : public LockedChange {
 public:
     OpenDirect(const core::RoomId& room, const core::UserId& user, const core::UserId& peer,
                MessageCallback<MembershipChange> done) noexcept
-        : LockedChange(room, core::ports::RoomKind::DirectChat, std::move(done)), user_(user),
+        : LockedChange(room, core::ports::RoomKind::DirectChat, user, std::move(done)), user_(user),
           peer_(peer) {}
 
 private:
@@ -519,10 +545,12 @@ private:
         if (kind != core::ports::RoomKind::DirectChat) {
             return refused(MembershipOutcome::WrongKind);
         }
-        return Statement{
-            .sql = message_sql::kOpenDirect,
-            .params =
-                Params{}.add_uuid(room().uuid()).add_text(user_.view()).add_text(peer_.view())};
+        return Statement{.sql = message_sql::kOpenDirect,
+                         .params = Params{}
+                                       .add_uuid(room().uuid())
+                                       .add_text(user_.view())
+                                       .add_text(peer_.view())
+                                       .add_int(as_int(core::ports::kMaxRoomsPerUser))};
     }
     [[nodiscard]] std::optional<MembershipChange> decode(const Result& r) noexcept override {
         try {
@@ -540,18 +568,20 @@ class CreateGroup final : public LockedChange {
 public:
     CreateGroup(const core::RoomId& room, const core::UserId& creator, std::string members,
                 MessageCallback<MembershipChange> done) noexcept
-        : LockedChange(room, core::ports::RoomKind::GroupChat, std::move(done)), creator_(creator),
-          members_(std::move(members)) {}
+        : LockedChange(room, core::ports::RoomKind::GroupChat, creator, std::move(done)),
+          creator_(creator), members_(std::move(members)) {}
 
 private:
     [[nodiscard]] Step work(std::optional<core::ports::RoomKind> kind) noexcept override {
         if (kind != core::ports::RoomKind::GroupChat) {
             return refused(MembershipOutcome::WrongKind);
         }
-        return Statement{
-            .sql = message_sql::kCreateGroup,
-            .params =
-                Params{}.add_uuid(room().uuid()).add_text(creator_.view()).add_text(members_)};
+        return Statement{.sql = message_sql::kCreateGroup,
+                         .params = Params{}
+                                       .add_uuid(room().uuid())
+                                       .add_text(creator_.view())
+                                       .add_text(members_)
+                                       .add_int(as_int(core::ports::kMaxRoomsPerUser))};
     }
     [[nodiscard]] std::optional<MembershipChange> decode(const Result& r) noexcept override {
         try {
@@ -589,7 +619,7 @@ class AddMembers final : public LockedChange {
 public:
     AddMembers(const core::RoomId& room, const core::UserId& actor, std::string users,
                MessageCallback<MembershipChange> done) noexcept
-        : LockedChange(room, std::nullopt, std::move(done)), actor_(actor),
+        : LockedChange(room, std::nullopt, std::nullopt, std::move(done)), actor_(actor),
           users_(std::move(users)) {}
 
 private:
@@ -637,7 +667,8 @@ class Expel final : public LockedChange {
 public:
     Expel(const core::RoomId& room, const core::UserId& actor, const core::UserId& user,
           MessageCallback<MembershipChange> done) noexcept
-        : LockedChange(room, std::nullopt, std::move(done)), actor_(actor), user_(user) {}
+        : LockedChange(room, std::nullopt, std::nullopt, std::move(done)), actor_(actor),
+          user_(user) {}
 
 private:
     [[nodiscard]] Step work(std::optional<core::ports::RoomKind> kind) noexcept override {
@@ -682,7 +713,7 @@ class Leave final : public LockedChange {
 public:
     Leave(const core::RoomId& room, const core::UserId& user,
           MessageCallback<MembershipChange> done) noexcept
-        : LockedChange(room, std::nullopt, std::move(done)), user_(user) {}
+        : LockedChange(room, std::nullopt, std::nullopt, std::move(done)), user_(user) {}
 
 private:
     [[nodiscard]] Step work(std::optional<core::ports::RoomKind> kind) noexcept override {
@@ -765,7 +796,7 @@ class RoomsOf final : public Operation {
 public:
     RoomsOf(const core::UserId& user, std::optional<core::RoomId> after, std::size_t limit,
             MessageCallback<std::vector<core::ports::RoomEntry>> done)
-        : user_(user), after_(after), limit_(std::min(limit, core::ports::kMaxListPage)),
+        : user_(user), after_(after), limit_(std::min(limit, core::ports::kMaxListPage + 1)),
           done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
@@ -831,7 +862,7 @@ public:
                std::optional<core::UserId> after, std::size_t limit,
                MessageCallback<core::ports::Roster> done)
         : room_(room), asker_(asker), after_(after),
-          limit_(std::min(limit, core::ports::kMaxListPage)), done_(std::move(done)) {}
+          limit_(std::min(limit, core::ports::kMaxListPage + 1)), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
         return Statement{.sql = message_sql::kRoster,
@@ -872,28 +903,49 @@ private:
 namespace {
 
 struct MemberNotice {
-    bool added = false;
+    enum class Change : std::uint8_t { Added, Removed, Role };
+    Change change = Change::Added;
     core::RoomId room;
     core::UserId user;
+    core::ports::MemberRole role = core::ports::MemberRole::Member;
 };
 
-// "+ <room> <user>" or "- <room> <user>", as notify_chat_members() (migration 0014) writes it.
+// "+ <room> <user>", "- <room> <user>" or "* <room> <role> <user>", as notify_chat_members()
+// (migration 0014) writes it.
 std::optional<MemberNotice> parse_notice(std::string_view payload) {
-    if (payload.size() < 2 || (payload[0] != '+' && payload[0] != '-') || payload[1] != ' ') {
+    if (payload.size() < 2 || payload[1] != ' ') {
         return std::nullopt;
     }
-    const bool added = payload[0] == '+';
+    MemberNotice::Change change = MemberNotice::Change::Added;
+    if (payload[0] == '-') {
+        change = MemberNotice::Change::Removed;
+    } else if (payload[0] == '*') {
+        change = MemberNotice::Change::Role;
+    } else if (payload[0] != '+') {
+        return std::nullopt;
+    }
+    core::ports::MemberRole role = core::ports::MemberRole::Member;
     payload.remove_prefix(2);
     const std::size_t space = payload.find(' ');
     if (space == std::string_view::npos) {
         return std::nullopt;
     }
     const auto room = core::RoomId::parse(payload.substr(0, space));
-    const auto user = core::UserId::parse(payload.substr(space + 1));
+    payload.remove_prefix(space + 1);
+    if (change == MemberNotice::Change::Role) {
+        const std::size_t role_end = payload.find(' ');
+        const auto named = role_of(payload.substr(0, role_end));
+        if (role_end == std::string_view::npos || !named) {
+            return std::nullopt;
+        }
+        role = *named;
+        payload.remove_prefix(role_end + 1);
+    }
+    const auto user = core::UserId::parse(payload);
     if (!room || !user) {
         return std::nullopt;
     }
-    return MemberNotice{.added = added, .room = *room, .user = *user};
+    return MemberNotice{.change = change, .room = *room, .user = *user, .role = role};
 }
 
 } // namespace
@@ -924,10 +976,16 @@ public:
             listener_->on_members_resync();
             return;
         }
-        if (notice->added) {
+        switch (notice->change) {
+        case MemberNotice::Change::Added:
             listener_->on_member_added(notice->room, notice->user);
-        } else {
+            return;
+        case MemberNotice::Change::Removed:
             listener_->on_member_removed(notice->room, notice->user);
+            return;
+        case MemberNotice::Change::Role:
+            listener_->on_member_role(notice->room, notice->user, notice->role);
+            return;
         }
     }
 

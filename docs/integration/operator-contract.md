@@ -340,7 +340,9 @@ one the client is on. For member lists changed by their users (ADR-0096), counte
 the asking client is on: `directs_opened_total` (direct chats whose pair an `open_direct`
 listed), `groups_created_total`, `members_changed_total{change="added"}`, `{change="removed"}`
 and `{change="left"}`, `membership_refusals_total{reason="not_member"}`, `{reason="not_admin"}`,
-`{reason="not_group"}`, `{reason="too_many_members"}`, `{reason="rate_limited"}` and
+`{reason="not_group"}`, `{reason="too_many_members"}`, `{reason="room_limit"}` (a user listed
+in 1000 rooms opening another), `{reason="gone"}` (a group id reused over an emptied group's
+history), `{reason="rate_limited"}` and
 `{reason="unavailable"}` (the database could not be reached, or held a named room recorded as
 another kind: alert if it rises while the database is healthy), and `member_events_total`
 (`member` frames this node sent when a list changed, whichever node changed it). Chat is a

@@ -298,11 +298,18 @@ TEST_F(MembershipTest, LeavingIsForAGroupAndItsLastAdminHandsOn) {
     const auto b = attach(bob, "bob");
     const core::RoomId room = group(a, alice);
     service_->leave_room(a, {.room = room});
-    EXPECT_EQ(next(alice), std::format(R"({{"type":"left","room":"{}"}})", room.to_string()));
-    settle(bob);
+    // Bob, first of those left, is its admin now, and everyone in the room hears so.
+    EXPECT_EQ(next(alice),
+              std::format(R"({{"type":"left","room":"{}","promoted":"bob"}})", room.to_string()));
+    const auto told = settle(bob);
+    EXPECT_NE(
+        std::ranges::find(
+            told, std::format(R"({{"type":"member","room":"{}","user":"bob","change":"promoted"}})",
+                              room.to_string())),
+        told.end());
     service_->list_members(b, {.room = room, .after = std::nullopt, .limit = 10});
     EXPECT_EQ(field(next(bob), "members"), "2");
-    // Bob, first of those left, is its admin now: he can remove carol.
+    // As admin he can remove carol.
     service_->remove_member(b, {.room = room, .user = user("carol")});
     EXPECT_EQ(field(next(bob), "type"), "removed");
     // Removing oneself is leaving.
@@ -431,6 +438,102 @@ TEST_F(MembershipTest, AClosingConnectionIsNotCountedAsTold) {
     settle(alice);
     // Alice's own addition was told; bob's socket was closing and took nothing.
     EXPECT_EQ(service_->counters().member_events, 1U);
+}
+
+// A page asks the store for one entry more than it shows: at the largest page, a 101st entry
+// says there is more.
+TEST_F(MembershipTest, AFullPageOfTheLargestSizeSaysWhetherMoreFollow) {
+    Client alice;
+    const auto a = attach(alice, "alice");
+    const core::RoomId crowded = *core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fd");
+    std::string text = crowded.to_string();
+    for (int i = 0; i < 101; ++i) {
+        text.replace(24, 12, std::format("{:012x}", i));
+        store_->add_member(*core::RoomId::parse(text), user("alice"),
+                           [](core::ports::MessageResult<void>) noexcept {});
+        store_->add_member(crowded, user(std::format("u{:03}", i)),
+                           [](core::ports::MessageResult<void>) noexcept {});
+    }
+    store_->add_member(crowded, user("alice"), [](core::ports::MessageResult<void>) noexcept {});
+    settle(alice);
+    service_->list_rooms(a, {.after = std::nullopt, .limit = chat::kMaxListLimit});
+    std::string page = next(alice);
+    EXPECT_EQ(field(page, "rooms"), "100");
+    EXPECT_EQ(field(page, "more"), "true");
+    service_->list_members(a, {.room = crowded, .after = std::nullopt, .limit = 100});
+    page = next(alice);
+    EXPECT_EQ(field(page, "members"), "100");
+    EXPECT_EQ(field(page, "more"), "true");
+    service_->list_members(a, {.room = crowded, .after = user("u099"), .limit = 100});
+    page = next(alice);
+    EXPECT_EQ(field(page, "members"), "1");
+    EXPECT_EQ(field(page, "more"), "false");
+}
+
+// What one account may make the database hold, whatever node it asks.
+TEST_F(MembershipTest, AUserInTheMostRoomsCreatesNoMore) {
+    Client alice;
+    const auto a = attach(alice, "alice");
+    std::string text = "01a0eb86-6cca-7dce-84cc-000000000000";
+    for (std::size_t i = 0; i < core::ports::kMaxRoomsPerUser; ++i) {
+        text.replace(24, 12, std::format("{:012x}", i));
+        store_->add_member(*core::RoomId::parse(text), user("alice"),
+                           [](core::ports::MessageResult<void>) noexcept {});
+    }
+    settle(alice);
+    service_->open_direct(a, {.user = user("bob")});
+    EXPECT_EQ(next(alice), R"({"type":"error","reason":"room_limit","user":"bob"})");
+    service_->create_group(a, {.id = *rt::MessageKey::parse("g"), .users = {}});
+    EXPECT_EQ(field(next(alice), "reason"), "room_limit");
+    EXPECT_EQ(service_->counters().membership_room_limit, 2U);
+    // Others may still add her.
+    Client bob;
+    const auto b = attach(bob, "bob");
+    service_->open_direct(b, {.user = user("alice")});
+    EXPECT_EQ(field(next(bob), "type"), "direct");
+}
+
+// A group everyone left keeps its history: creating it again under its id would hand that to
+// whoever the create lists.
+TEST_F(MembershipTest, AGroupEveryoneLeftIsNotCreatedAgainOverItsHistory) {
+    Client alice;
+    const auto a = attach(alice, "alice");
+    service_->create_group(a, {.id = *rt::MessageKey::parse("g"), .users = {}});
+    const core::RoomId room = *core::RoomId::parse(field(next(alice), "room"));
+    store_->append(room, 1, user("alice"), "m1", {std::byte{1}}, core::WallTime{},
+                   [](core::ports::MessageResult<std::uint64_t>) noexcept {});
+    service_->leave_room(a, {.room = room});
+    EXPECT_EQ(field(next(alice), "type"), "left");
+    service_->create_group(a, {.id = *rt::MessageKey::parse("g"), .users = {user("mallory")}});
+    EXPECT_EQ(next(alice), std::format(R"({{"type":"error","reason":"gone","id":"g"}})"));
+    EXPECT_EQ(service_->counters().membership_gone, 1U);
+}
+
+TEST_F(MembershipTest, AGroupsRoomRecordedAsADirectChatIsAnsweredUnavailable) {
+    Client alice;
+    const auto a = attach(alice, "alice");
+    const core::RoomId room = chat::group_room(user("alice"), *rt::MessageKey::parse("g"));
+    store_->admits(room, user("carol"), core::ports::RoomKind::DirectChat,
+                   [](core::ports::MessageResult<core::ports::Admission>) noexcept {});
+    settle(alice);
+    service_->create_group(a, {.id = *rt::MessageKey::parse("g"), .users = {}});
+    EXPECT_EQ(next(alice), R"({"type":"error","reason":"unavailable","id":"g"})");
+}
+
+// Who becomes an admin, or stops being one, is told as a change; a stream's chat has no list.
+TEST_F(MembershipTest, ARoleChangeIsToldAsPromotedOrDemoted) {
+    Client alice;
+    const auto a = attach(alice, "alice");
+    const core::RoomId room = group(a, alice);
+    service_->on_member_role(room, user("alice"), core::ports::MemberRole::Member);
+    service_->on_member_role(room, user("alice"), core::ports::MemberRole::Admin);
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 2U);
+    EXPECT_EQ(field(got[0], "change"), "demoted");
+    EXPECT_EQ(field(got[1], "change"), "promoted");
+    service_->on_member_role(*core::RoomId::parse("011b9ed0-d6b6-88e6-ac34-32d7070ba83b"),
+                             user("alice"), core::ports::MemberRole::Admin);
+    EXPECT_TRUE(alice.take().empty());
 }
 
 } // namespace

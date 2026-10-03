@@ -390,6 +390,57 @@ TEST_P(ChatSessionTest, ProbesAnswerAndUnknownPathsAreNotFound) {
     EXPECT_EQ(ulw::test::http_get(node_->port(), "/api/v1/videos").status, 404);
 }
 
+// Every member-list command reaches the service from the socket, and is counted (ADR-0096).
+TEST_P(ChatSessionTest, MemberListCommandsAreAnsweredOnTheSocketAndCounted) {
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    const auto answer = [&](const std::string& command) {
+        EXPECT_TRUE(alice->send_text(command));
+        // The answer, past any change the command told of.
+        for (;;) {
+            const auto text = alice->next_text(seconds(10));
+            if (!text) {
+                return std::string("no answer");
+            }
+            if (text->find(R"("type":"member")") == std::string::npos) {
+                return *text;
+            }
+        }
+    };
+    EXPECT_NE(answer(R"({"type":"open_direct","user":"bob"})").find(R"("type":"direct")"),
+              std::string::npos);
+    const std::string group = answer(R"({"type":"create_group","id":"g1","users":["bob"]})");
+    ASSERT_NE(group.find(R"("type":"group")"), std::string::npos) << group;
+    const std::string room = group.substr(group.find(R"("room":")") + 8, 36);
+    EXPECT_NE(answer(R"({"type":"add_members","room":")" + room + R"(","users":["carol"]})")
+                  .find(R"("users":["carol"])"),
+              std::string::npos);
+    EXPECT_NE(answer(R"({"type":"remove_member","room":")" + room + R"(","user":"carol"})")
+                  .find(R"("type":"removed")"),
+              std::string::npos);
+    EXPECT_NE(answer(R"({"type":"members","room":")" + room + R"("})").find(R"("more":false)"),
+              std::string::npos);
+    EXPECT_NE(answer(R"({"type":"rooms"})").find(R"("type":"rooms")"), std::string::npos);
+    EXPECT_NE(answer(R"({"type":"leave","room":")" + room + R"("})").find(R"("promoted":"bob")"),
+              std::string::npos);
+    const auto metrics = ulw::test::http_get(node_->port(), "/metrics").body;
+    for (const std::string_view line :
+         {"directs_opened_total 1\n", "groups_created_total 1\n",
+          "members_changed_total{change=\"added\"} 1\n",
+          "members_changed_total{change=\"removed\"} 1\n",
+          "members_changed_total{change=\"left\"} 1\n",
+          "membership_refusals_total{reason=\"not_member\"} 0\n",
+          "membership_refusals_total{reason=\"not_admin\"} 0\n",
+          "membership_refusals_total{reason=\"not_group\"} 0\n",
+          "membership_refusals_total{reason=\"too_many_members\"} 0\n",
+          "membership_refusals_total{reason=\"room_limit\"} 0\n",
+          "membership_refusals_total{reason=\"gone\"} 0\n",
+          "membership_refusals_total{reason=\"rate_limited\"} 0\n",
+          "membership_refusals_total{reason=\"unavailable\"} 0\n", "member_events_total "}) {
+        EXPECT_NE(metrics.find(line), std::string::npos) << line;
+    }
+}
+
 TEST_P(ChatSessionTest, AnUpgradeNeedsAValidToken) {
     EXPECT_EQ(refusal(""), "HTTP/1.1 401 Unauthorized");
     EXPECT_EQ(refusal("Authorization: Bearer forged\r\n"), "HTTP/1.1 401 Unauthorized");

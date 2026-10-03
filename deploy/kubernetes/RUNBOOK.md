@@ -313,13 +313,18 @@ COMMIT;
 DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user id>';
 ```
 
-`<user id>` is the token's subject claim (`JWT_SUBJECT_CLAIM`, docs/integration/auth.md). A
-member removed this way is cut off at once on every chat node, however the row goes (a DELETE,
-or an UPDATE that moves it to another room or user; one that leaves both as they were removes
-nobody): a trigger (migration 0014; 0009's for nodes from before it) notifies the nodes, each
-takes that user's sockets out of the room, and the client gets an `error` with `not_member` for
-it (docs/adr/0073); the user's other sockets, and everyone in the room, get a `member` frame.
-A member listed this way is told the same way. A room whose id starts with `03` or `04` and has
+`<user id>` is the token's subject claim (`JWT_SUBJECT_CLAIM`, docs/integration/auth.md): at
+most 128 bytes, with no white space (`chat_members_user_id`). A member removed this way is cut
+off at once on every chat node, however the row goes (a DELETE, or an UPDATE that moves it to
+another room or user; one that leaves both as they were removes nobody): a trigger (migration
+0014; 0009's for nodes from before it) notifies the nodes, each takes that user's sockets out of
+the room, and the client gets an `error` with `not_member` for it (docs/adr/0073); the user's
+other sockets, and everyone in the room, get a `member` frame. Their next join is refused. No
+restart is needed. If a node's listening session to Postgres was down when the row went, the
+node checks every closed room its clients are in once it listens again, four checks at a time
+and retrying each second while the database fails, so a removal made during a database outage
+takes effect once the node reconnects. `member_removals_total` counts the sockets taken out. A
+member listed this way is told the same way. A room whose id starts with `03` or `04` and has
 version 8 (third group starting with `8`) is a direct or group chat the service named: the
 database accepts it only as that kind (`chat_rooms_named_kind`).
 
@@ -329,11 +334,10 @@ migration 0014 (which has none):
 
 ```sql
 UPDATE chat_members SET role = 'admin' WHERE room_id = '<room uuid>' AND user_id = '<user id>';
-``` Their next join is
-refused. No restart is needed. If a node's listening session to Postgres was down when the row
-went, the node checks every closed room its clients are in once it listens again, four checks at
-a time and retrying each second while the database fails, so a removal made during a database
-outage takes effect once the node reconnects. `member_removals_total` counts the sockets taken out.
+```
+
+A role changed this way is told to the user's sockets and the room's as a `member` frame with
+`change` `promoted` (or `demoted`).
 
 A stream's live chat admits anyone, and only the server side opens one: a client's join can
 record a room only as closed, and a stream join is refused with `not_live` until the stream's
@@ -429,15 +433,28 @@ migration gives up and the init container runs it again (`lock_timeout`, docs/ad
 that waits past the chat service's request timeout is answered `unavailable`, and the client
 retries it.
 
-**Deploy the release that carries migration 0014 off-peak.** Its index on
-`chat_members (user_id, room_id)` is built without `CONCURRENTLY` too: until the migrate
-container commits it, every member added or removed, by a user's command or by an operator,
-waits; joins only read the table and do not. The build sorts every row of `chat_members`: check
-first with `SELECT count(*) FROM chat_members;`. Its other changes are catalog changes (a column
-with a default, two checks added `NOT VALID`, a trigger). Nodes from before it hear removals on
-the old channel and are told of no additions; once every chat node runs the new release,
-`DROP TRIGGER chat_member_removed ON chat_members; DROP TRIGGER chat_member_moved ON
-chat_members;` stops the old channel's duplicate notifications (a later migration does it).
+**Migration 0014 comes after 0011 to 0013.** The migrator refuses a migration older than the
+newest one applied, so the release that carries 0014 must also carry 0011 (live streams), 0012
+(a live chat closes) and 0013 (a stream's publisher left), and no database may be migrated to
+0014 by a build without them.
+
+**Deploy the release that carries migration 0014 off-peak.** The migrator runs it in one
+transaction and holds every lock it takes until the commit. It builds its index on
+`chat_members (user_id, room_id)` first, without `CONCURRENTLY`, under the SHARE lock that takes:
+for the length of the build every member added or removed, by a user's command or by an
+operator, waits; joins, history and everything else that only reads the table do not. The build
+sorts every row of `chat_members`: check first with `SELECT count(*) FROM chat_members;`. Only
+then does it alter `chat_members` and `chat_rooms` (a column with a default and three checks
+added `NOT VALID`, catalog changes that scan nothing) and create its trigger; their ACCESS
+EXCLUSIVE locks, which do stop reads, are held only for the moments until the commit. A member
+change or join that waits past the chat service's request timeout is answered `unavailable`,
+and the client retries it.
+
+Follow-ups once 0014 is everywhere: a later migration validates its `NOT VALID` checks
+(`chat_members_role`, `chat_members_user_id`, `chat_rooms_named_kind`) with `VALIDATE
+CONSTRAINT`, which scans under a lock that lets reads and writes go on; and, once no chat node
+older than 0014 runs, drops 0009's triggers (`chat_member_removed`, `chat_member_moved` on
+`chat_members`), which until then send every removal a second time on the old channel.
 
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside
 the cluster. If their addresses are stable, patch them in as an `ipBlock` on the 5432 and 443

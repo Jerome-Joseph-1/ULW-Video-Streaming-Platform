@@ -1506,12 +1506,20 @@ TEST_P(ChatClusterTest, AGroupsAdminChangesItsListAndEveryNodeActsOnIt) {
     // the change, before or after the answer: the notification and the commit's reply race.
     const std::size_t before_leave = alice->seen().size();
     ASSERT_TRUE(alice->send(R"({"type":"leave","room":")" + room + R"("})"));
-    ASSERT_TRUE(alice->wait_from(before_leave, [](const Seen& s) { return s.type == "left"; }));
+    const auto left =
+        alice->wait_from(before_leave, [](const Seen& s) { return s.type == "left"; });
+    ASSERT_TRUE(left);
+    EXPECT_NE(alice->seen()[*left].raw.find(R"("promoted":"bob")"), std::string::npos)
+        << alice->seen()[*left].raw;
     ASSERT_TRUE(alice->wait_from(before_leave, [&](const Seen& s) {
         return s.type == "error" && s.reason == "not_member" && s.room == room;
     }));
     ASSERT_TRUE(alice->wait_from(before_leave, [&](const Seen& s) {
         return s.type == "member" && s.user == "alice" && s.change == "removed";
+    }));
+    // Bob, on another node, hears it from the database as everyone in the room would.
+    ASSERT_TRUE(bob->wait_for([&](const Seen& s) {
+        return s.type == "member" && s.user == "bob" && s.change == "promoted";
     }));
     const auto now = ask(*bob, R"({"type":"members","room":")" + room + R"("})", "members");
     ASSERT_TRUE(now);

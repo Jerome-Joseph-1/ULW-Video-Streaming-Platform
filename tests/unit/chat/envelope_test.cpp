@@ -495,8 +495,11 @@ TEST(Envelope, MemberListRepliesAreTheDocumentedShapes) {
     chat::write_removed(out, room(), uid("bob"));
     EXPECT_EQ(out, R"({"type":"removed","room":")" + r + R"(","user":"bob"})");
     out.clear();
-    chat::write_left(out, room());
+    chat::write_left(out, room(), std::nullopt);
     EXPECT_EQ(out, R"({"type":"left","room":")" + r + R"("})");
+    out.clear();
+    chat::write_left(out, room(), uid("carol"));
+    EXPECT_EQ(out, R"({"type":"left","room":")" + r + R"(","promoted":"carol"})");
     out.clear();
     const std::vector<core::ports::RoomEntry> rooms{{.room = room(),
                                                      .kind = core::ports::RoomKind::DirectChat,
@@ -528,10 +531,10 @@ TEST(Envelope, MemberListRepliesAreTheDocumentedShapes) {
         R"({"type":"members","room":")" + r +
             R"(","members":[{"user":"alice","role":"admin"},{"user":"bob","role":"member"}],"more":false})");
     out.clear();
-    chat::write_member_change(out, room(), uid("bob"), true);
+    chat::write_member_change(out, room(), uid("bob"), "added");
     EXPECT_EQ(out, R"({"type":"member","room":")" + r + R"(","user":"bob","change":"added"})");
     out.clear();
-    chat::write_member_change(out, room(), uid("bob"), false);
+    chat::write_member_change(out, room(), uid("bob"), "removed");
     EXPECT_EQ(out, R"({"type":"member","room":")" + r + R"(","user":"bob","change":"removed"})");
     out.clear();
     chat::write_error_with(out, "rate_limited",
