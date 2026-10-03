@@ -300,4 +300,35 @@ TEST_F(WebhookServerTest, AnIdleOrStalledConnectionIsClosed) {
     }));
 }
 
+TEST_F(WebhookServerTest, ARequestTrickledInIsClosedAtItsDeadline) {
+    start(WebhookLimits{.idle_timeout = core::Millis{5'000},
+                        .request_timeout = core::Millis{10'000}});
+    const int fd = connect();
+    ASSERT_TRUE(pump_until(*reactor, [&] { return server->connections() == 1U; }));
+    const std::string request = post(kBody, livekit_token(kBody, now()));
+    // A byte every 4 s: never idle for 5 s, but 12 s in all.
+    for (std::size_t i = 0; i < 3; ++i) {
+        const std::string_view one = std::string_view(request).substr(i, 1);
+        ASSERT_EQ(ulw::test::write_some(fd, std::as_bytes(std::span(one))), 1U);
+        pump_pending(*reactor);
+        clock.advance(core::Millis{4'000});
+        pump_pending(*reactor);
+    }
+    EXPECT_TRUE(peer_closed(fd));
+    EXPECT_TRUE(sink.events.empty());
+}
+
+TEST_F(WebhookServerTest, EachRequestOnAConnectionHasADeadlineOfItsOwn) {
+    start(WebhookLimits{.idle_timeout = core::Millis{5'000},
+                        .request_timeout = core::Millis{10'000}});
+    const int fd = connect();
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(
+            exchange(fd, post(kBody, livekit_token(kBody, now()))).starts_with("HTTP/1.1 200"));
+        clock.advance(core::Millis{4'000});
+        pump_pending(*reactor);
+    }
+    EXPECT_EQ(sink.events.size(), 3U);
+}
+
 } // namespace

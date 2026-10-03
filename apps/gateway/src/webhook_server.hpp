@@ -28,6 +28,9 @@ struct WebhookLimits {
     std::size_t max_connections = 32;
     // An idle keep-alive connection, or a request that stalls, is closed after this.
     core::Millis idle_timeout{10'000};
+    // A request's whole head and body, from its first byte: a peer trickling a byte now and then
+    // keeps the idle timer from firing, but not this.
+    core::Millis request_timeout{10'000};
     // Requests a second, over all connections, and how many may come at once. LiveKit sends a
     // few events per participant and room; a busy hour of calls is tens a second at most, and
     // a refusal (429) is something LiveKit retries.

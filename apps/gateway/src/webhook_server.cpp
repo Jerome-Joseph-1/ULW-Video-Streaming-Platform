@@ -63,7 +63,12 @@ public:
         if (closed_ || finishing_) {
             return;
         }
-        arm(server_.limits_.idle_timeout);
+        const core::MonoTime now = server_.reactor_.now();
+        if (!deadline_) {
+            deadline_ = now + server_.limits_.request_timeout;
+        }
+        const auto left = std::chrono::duration_cast<core::Millis>(*deadline_ - now);
+        arm(std::max(core::Millis{0}, std::min(server_.limits_.idle_timeout, left)));
         handle(parser_.feed(bytes));
     }
 
@@ -141,6 +146,9 @@ private:
             if (!answer()) {
                 return;
             }
+            // The next request's time counts from its own first byte.
+            deadline_.reset();
+            arm(server_.limits_.idle_timeout);
             parser_.reset_for_next_request();
             result = parser_.resume();
         }
@@ -228,6 +236,8 @@ private:
     std::string body_;
     std::string authorization_;
     std::optional<std::chrono::seconds> retry_after_;
+    // When the request under way must be in.
+    std::optional<core::MonoTime> deadline_;
     bool keep_alive_ = true;
     bool too_large_ = false;
     bool finishing_ = false;
