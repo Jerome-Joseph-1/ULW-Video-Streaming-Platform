@@ -60,7 +60,7 @@ spec:
       ports:
         - port: 9201
           protocol: TCP
-    # LiveKit's server API (RoomService), for calls (docs/adr/0086); livekit's own policy
+    # LiveKit's server API (RoomService), for calls (docs/adr/0087); livekit's own policy
     # admits ULW's pods on that port.
     - to:
         - podSelector:

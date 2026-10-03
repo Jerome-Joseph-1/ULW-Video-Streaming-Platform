@@ -1,5 +1,5 @@
 // The signalling side of tests/call. chat_server's call handler issues 1:1 tickets over the room
-// WebSocket (apps/chat/src/call.cpp, docs/adr/0086; tests/integration/chat_cluster_test.cpp and
+// WebSocket (apps/chat/src/call.cpp, docs/adr/0087; tests/integration/chat_cluster_test.cpp and
 // the sandbox's call scenario take LiveKit through it); this harness drives the port directly
 // for what the handler does not do yet: other generations, closing one to put a member out,
 // publisher tickets and relays. Like the handler, it is one long-lived process that keeps the

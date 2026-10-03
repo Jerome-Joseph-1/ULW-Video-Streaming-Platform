@@ -63,7 +63,7 @@ done
 # The keys are the ones RUNBOOK.md lists, with sandbox values.
 kubectl -n stunner-system create secret generic stunner-secrets --from-literal=type=ephemeral \
     --from-literal="secret=$turn_secret" --dry-run=client -o yaml | apply_stdin
-# Chat's call handler signs tickets with the same pair (docs/adr/0086), and names Envoy's
+# Chat's call handler signs tickets with the same pair (docs/adr/0087), and names Envoy's
 # listener on this host as the URL clients reach LiveKit's /rtc route on.
 kubectl -n apps-stage create secret generic sfu-secrets --from-literal=ASKEDIN_ENV=stage \
     --from-literal="LIVEKIT_KEYS=$livekit_keys" --from-literal="TURN_HOST=$outside_gateway" \

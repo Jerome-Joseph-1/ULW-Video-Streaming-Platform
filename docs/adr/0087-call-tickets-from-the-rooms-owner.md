@@ -1,4 +1,4 @@
-# 0086. A call's ticket comes from the room's owner, asked over the node channel, in one generation
+# 0087. A call's ticket comes from the room's owner, asked over the node channel, in one generation
 
 Status: Accepted
 Date: 2026-10-03

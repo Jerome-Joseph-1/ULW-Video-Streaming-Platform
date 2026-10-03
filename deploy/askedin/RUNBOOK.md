@@ -361,7 +361,7 @@ including every room from before M19 (migration 0006), needs a new room id.
 
 The chat nodes speak a versioned channel to each other (docs/adr/0043), and a node refuses a
 peer of another version. A release that changes the version (M19 moves it from 2 to 3, the
-call handler from 3 to 4, docs/adr/0086) splits a
+call handler from 3 to 4, docs/adr/0087) splits a
 rolling update in two: until the last old pod is gone, old and new nodes cannot reach each
 other, rooms owned across the split are unreachable from the other side, and their joins and
 sends fail as `unavailable` (clients retry them). Roll such a release out with the chat
@@ -864,7 +864,7 @@ if [[ $NS == apps-stage ]]; then
 fi
 ```
 
-Chat's call handler (docs/adr/0086) signs tickets with the same pair LiveKit checks them with,
+Chat's call handler (docs/adr/0087) signs tickets with the same pair LiveKit checks them with,
 split out of `LIVEKIT_KEYS` into the last three keys, and calls LiveKit's server API at
 `http://livekit:7880` (a value in the chat Deployment). The chat Deployment reads all three
 from `sfu-secrets` as optional: in an environment without the secret (prod, until it runs

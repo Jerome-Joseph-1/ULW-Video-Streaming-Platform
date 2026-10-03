@@ -20,7 +20,7 @@ mock auth-service, as a browser's would through askedin-gateway:
               token is refused, a stream's live chat opened as the RUNBOOK opens it is joined
               by several sockets, and a message sent on one reaches every one of them, wherever
               Envoy put them; a pod beside chat cannot reach its node-channel port
-  call        a 1:1 call through chat (ADR-0050, ADR-0086): both members of a direct chat ask for
+  call        a 1:1 call through chat (ADR-0050, ADR-0087): both members of a direct chat ask for
               the call on the room WebSocket and get tickets naming the route; LiveKit, through
               the route, admits both into the room's one media room, the second seeing the first;
               a group chat has no call

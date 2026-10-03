@@ -101,7 +101,7 @@ spec:
                 secretKeyRef:
                   name: chat-secrets
                   key: ULW_NODE_SECRET
-            # Calls (docs/adr/0050, docs/adr/0086): RoomService of the LiveKit beside chat, and the
+            # Calls (docs/adr/0050, docs/adr/0087): RoomService of the LiveKit beside chat, and the
             # client URL and key pair from sfu-secrets, the pair LiveKit itself is configured with
             # (RUNBOOK.md, section 7). Optional: prod has no LiveKit and no sfu-secrets yet, and
             # without them chat starts with calls off and answers every call with calls_disabled.

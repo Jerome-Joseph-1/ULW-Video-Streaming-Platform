@@ -11,14 +11,14 @@ Calls go through LiveKit as the SFU (ADR-0020), with media entering the cluster 
 (ADR-0013), and are always relayed. The service does not expose LiveKit's server API: a client
 asks chat for a call on its room WebSocket ([chat.md](chat.md)), and the chat node that owns the
 room checks the asker is a member of the direct chat, opens the room's call on LiveKit and
-answers with a short-lived ticket (ADR-0050, ADR-0086). The client then connects with the
+answers with a short-lived ticket (ADR-0050, ADR-0087). The client then connects with the
 LiveKit JS SDK using that ticket, and LiveKit owns ICE, DTLS-SRTP, RTP and congestion control
 from there. TURN credentials come from LiveKit itself, in its answer to the SDK's join
 (ADR-0037): neither the service nor client code handles them.
 
 ## Which rooms have a call
 
-<!-- apps/chat/src/call.cpp (CallHandler::checked), apps/chat/src/call.hpp (kCallParticipants), docs/adr/0086-call-tickets-from-the-rooms-owner.md -->
+<!-- apps/chat/src/call.cpp (CallHandler::checked), apps/chat/src/call.hpp (kCallParticipants), docs/adr/0087-call-tickets-from-the-rooms-owner.md -->
 
 - A **direct chat** (`"kind":"direct"`, [chat.md](chat.md#member-lists)) has one call, for its
   members only. A group chat, a stream's live chat, or a room with no kind recorded has none
@@ -96,7 +96,7 @@ Each is an `error` with the `room` of the call.
 
 A removed member who is already connected to the call stays in it until they disconnect; they
 cannot get another ticket. Putting someone out of a call is planned with group calls
-(ADR-0050, ADR-0086).
+(ADR-0050, ADR-0087).
 
 ## Capacity
 

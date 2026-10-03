@@ -315,7 +315,7 @@ node repeated what it had said there), `jwks_keys_expired`, `auth_cache_drops_to
 `auth_cache_drop_pending` (as the gateway's),
 `unrecorded_joins_total` (refused joins of rooms with no kind recorded that recorded nothing,
 their user past the allowance: steady growth is someone walking room ids), and for calls
-(ADR-0086): `calls_enabled` (1 when LiveKit is configured), `call_tickets_total`,
+(ADR-0087): `calls_enabled` (1 when LiveKit is configured), `call_tickets_total`,
 `call_refusals_total{reason="not_member"}`, `{reason="not_callable"}` and `{reason="busy"}`,
 `call_rooms_opened_total` and `call_rooms` (media rooms opened, and handles kept, on the
 rooms this node owns), `call_errors_total{source="sfu",kind="unavailable"}` (LiveKit unreachable

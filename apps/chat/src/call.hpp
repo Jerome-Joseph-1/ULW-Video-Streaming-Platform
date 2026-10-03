@@ -25,7 +25,7 @@ namespace chat {
 inline constexpr std::uint16_t kCallParticipants = 2;
 // The generation a room's call runs in. A generation moves on only to put someone out, by the
 // owner's fenced write of the room's state (ADR-0050); this handler does not put anyone out
-// yet (ADR-0086), so every call stays in its first, and any owner opens the same media room for
+// yet (ADR-0087), so every call stays in its first, and any owner opens the same media room for
 // it.
 inline constexpr core::ports::MediaGeneration kCallGeneration{1};
 

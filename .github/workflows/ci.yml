@@ -150,7 +150,7 @@ jobs:
           cache-key: ${{ matrix.cc }}-${{ matrix.preset }}-integration
       - name: Start MinIO
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
-      # The chat cluster's calls go through it (docs/adr/0086); its Redis comes with it.
+      # The chat cluster's calls go through it (docs/adr/0087); its Redis comes with it.
       - name: Start LiveKit
         run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit
       - run: cmake --preset ${{ matrix.preset }} -DULW_CONFORMANCE_LIVE=ON
