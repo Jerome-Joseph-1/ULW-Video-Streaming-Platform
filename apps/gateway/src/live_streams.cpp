@@ -506,7 +506,7 @@ void LiveStreams::publisher_left(const core::LiveStreamId& id, LiveDone<Departur
         // A starting stream keeps its start window: a broadcaster may take a while to set an
         // encoder up, and its room comes and goes with the tickets meanwhile.
         if (found->state != LiveState::Live) {
-            finished(Departure::NotLive);
+            finished(found->state == LiveState::Ended ? Departure::Over : Departure::NotLive);
             return;
         }
         const core::LiveStreamId stream = found->id;
@@ -533,7 +533,7 @@ void LiveStreams::publisher_left(const core::LiveStreamId& id, LiveDone<Departur
                         }
                         // Someone else's end got there first: the owner's, or the sweep's.
                         if (!ended->ended) {
-                            finished(Departure::NotLive);
+                            finished(Departure::Over);
                             return;
                         }
                         ++counters_.ended.at(end_index(LiveEnd::PublisherLeft));

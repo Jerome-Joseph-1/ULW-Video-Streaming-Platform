@@ -323,6 +323,9 @@ void PublisherWatch::check(Followed& stream) noexcept {
                 ++counters_.ended;
                 forget(key);
                 return;
+            case Departure::Over:
+                forget(key);
+                return;
             case Departure::Present:
                 ++counters_.kept;
                 log_.info("live publisher still connected after its grace", {{"stream", key}});

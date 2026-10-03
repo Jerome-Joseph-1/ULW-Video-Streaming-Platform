@@ -85,8 +85,10 @@ enum class Departure : std::uint8_t {
     Ended,
     // The media server still has the publisher connected: it came back, or never left.
     Present,
-    // Not live: still starting, which only its start window ends, or ended already.
+    // Still starting, which only its start window ends.
     NotLive,
+    // Ended already, for another reason: the owner's end, or the sweep's.
+    Over,
 };
 
 struct LiveCounters {

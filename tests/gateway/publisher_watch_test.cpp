@@ -307,6 +307,7 @@ TEST_F(PublisherWatchTest, TheOwnersEndDuringTheGraceStands) {
     pump_pending(*reactor);
     EXPECT_EQ(row(id).ended_by, LiveEnd::Owner);
     EXPECT_EQ(watch->counters().ended, 0U);
+    EXPECT_EQ(watch->followed(), 0U) << "an ended stream is let go";
     // A late join afterwards starts nothing again.
     joined(id, "PA_late");
     pump_pending(*reactor);
