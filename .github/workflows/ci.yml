@@ -319,7 +319,7 @@ jobs:
       # an address that cannot resolve: if its cache layout ever stops matching this, the step
       # fails instead of downloading something unchecked.
       - name: Install the pinned SonarScanner CLI
-        if: steps.token.outputs.present == 'true'
+        if: ${{ !cancelled() && steps.token.outputs.present == 'true' && steps.build.outcome == 'success' }}
         run: |
           zip=$RUNNER_TEMP/sonar-scanner.zip
           curl -fsSL --proto '=https' --proto-redir '=https' --retry 5 --retry-all-errors \

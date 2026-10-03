@@ -1,7 +1,6 @@
 include(GoogleTest)
 
 # One executable per label keeps `ctest -L` meaningful and link times short.
-# PROPERTIES after the sources are set on every test the suite discovers.
 # PROPERTIES go on every test of the suite. SERIAL, a googletest filter, picks the tests that
 # must never overlap another test under ctest -j: they get RUN_SERIAL, the rest do not.
 function(ulw_add_test_suite name label)
@@ -372,8 +371,8 @@ target_compile_definitions(postgres_unit_tests
 # Against a live Postgres: ULW_TEST_DATABASE_URL, or the one deploy/local/compose.yaml runs.
 # Each test has a scratch database of its own, so the label runs under ctest -j; one test per
 # core opens up to about 130 sessions at once, which is why compose.yaml and ci.yml give the
-# server max_connections = 400. The pool test that docker-pauses that server would stall every other test using it, and its
-# measurement of the loop needs the runner to itself, so it runs alone.
+# server max_connections = 400. The pool test that docker-pauses that server would stall every
+# other test using it, so it runs alone.
 ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_catalog_test.cpp
     integration/postgres_harness.cpp
