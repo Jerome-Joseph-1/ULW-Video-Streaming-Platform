@@ -1,0 +1,44 @@
+# WebRTC media's way in (ADR-0013): one TURN listener on UDP 3479, which relays only to the
+# LiveKit endpoints the UDPRoute names. The operator creates the stunnerd Deployment and the
+# LoadBalancer Service for it in this namespace.
+#
+# 3479, not stage's 3478: both environments run on k8s-prod's one node, where ServiceLB
+# publishes each LoadBalancer Service on the node's address, and stage's Gateway already holds
+# UDP 3478 there; a second Service on the same port would stay pending. A separate Gateway (not
+# a second route on stage's) keeps prod's relay reaching prod's LiveKit only. If Askedin gives
+# prod an address of its own, 3478 on that address works too (RUNBOOK.md step 7, prod).
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: stunner
+  namespace: apps
+  labels:
+    app.kubernetes.io/part-of: ulw
+  annotations:
+    # The node delivers each client's packets with their source address intact, so STUNner
+    # answers with the address the client really has (XOR-MAPPED-ADDRESS). Under the default
+    # policy the node would masquerade them as its own.
+    stunner.l7mp.io/external-traffic-policy: local
+    # Only the TURN port faces clients; the health check stays inside the cluster.
+    stunner.l7mp.io/disable-health-check-expose: "true"
+spec:
+  gatewayClassName: stunner-gatewayclass
+  listeners:
+    - name: turn-udp
+      port: 3479
+      protocol: TURN-UDP
+---
+apiVersion: stunner.l7mp.io/v1
+kind: UDPRoute
+metadata:
+  name: livekit
+  namespace: apps
+  labels:
+    app.kubernetes.io/part-of: ulw
+spec:
+  parentRefs:
+    - name: stunner
+  rules:
+    - backendRefs:
+        - name: livekit
+          port: 7882
