@@ -8,10 +8,11 @@
 
 namespace http {
 
-// A browser sends Origin as scheme://host[:port], printable ASCII, lowercase, with no path, the
-// port 1-65535 without leading zeros and never the scheme's default; anything else could never
-// match one. Plain http is taken only for a
-// loopback host (localhost, 127.0.0.1, [::1]): elsewhere the cookie would cross the network in
+// A browser sends Origin as scheme://host[:port], printable ASCII, lowercase, with no path, an
+// IPv6 host in the URL standard's form (RFC 5952: no leading zeros, the first longest run of two
+// or more zero pieces as "::", no dotted IPv4 tail), the port 1-65535 without leading zeros and
+// never the scheme's default; anything else could never match one. Plain http is taken only for
+// a loopback host (localhost, 127.0.0.1, [::1]): elsewhere the cookie would cross the network in
 // the clear.
 [[nodiscard]] bool is_origin(std::string_view origin) noexcept;
 
@@ -19,7 +20,9 @@ namespace http {
 // entry is not one; "" is the empty list.
 [[nodiscard]] std::optional<std::vector<std::string>> parse_origin_list(std::string_view list);
 
-// Exact match: an allowed origin is compared byte for byte, as a browser writes it.
+// Exact match: an allowed origin is compared byte for byte, as a browser writes it. No side is
+// canonicalised: is_origin() admits only the spelling a browser sends, so another spelling of an
+// allowed host (an IPv6 literal with leading zeros, say) is not allowed.
 [[nodiscard]] bool origin_allowed(std::span<const std::string> allowed,
                                   std::string_view origin) noexcept;
 

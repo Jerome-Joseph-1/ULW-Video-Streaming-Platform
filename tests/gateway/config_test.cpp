@@ -344,16 +344,19 @@ TEST_F(ConfigTest, OriginsNoBrowserSendsAreRefused) {
     }
 }
 
-// The scheme is matched exactly, the authority follows a single "://", and an IPv6 literal holds
-// only hex digits, ':' and '.'.
+// The scheme is matched exactly, the authority follows a single "://", and an IPv6 literal is
+// written as a browser writes it (RFC 5952 form, no dotted IPv4 tail): another spelling of the
+// same address could never match, and is refused rather than listed.
 TEST_F(ConfigTest, OriginsWithAMalformedSchemeOrIpv6LiteralAreRefused) {
-    env["ULW_ALLOWED_ORIGINS"] = "https://[2001:db8::1],https://[::ffff:192.0.2.1]:8443";
+    env["ULW_ALLOWED_ORIGINS"] = "https://[2001:db8::1],https://[::ffff:c000:201]:8443";
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_EQ(config->limits.allowed_origins.size(), 2U);
-    for (const char* bad : {"HTTPS://a.example", "://a.example", "https:/a.example", "https:///a",
-                            "https://https://a", "https://[zz]", "https://[zz]:8443",
-                            "https://[::1%eth0]", "https://[a.example]"}) {
+    for (const char* bad :
+         {"HTTPS://a.example", "://a.example", "https:/a.example", "https:///a",
+          "https://https://a", "https://[zz]", "https://[zz]:8443", "https://[::1%eth0]",
+          "https://[a.example]", "https://[::ffff:192.0.2.1]:8443", "https://[0:0:0:0:0:0:0:1]",
+          "https://[2001:db8:0::1]", "https://[::01]", "https://[1::2::3]"}) {
         env["ULW_ALLOWED_ORIGINS"] = bad;
         EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
     }

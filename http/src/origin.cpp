@@ -1,6 +1,11 @@
 #include "http/origin.hpp"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <span>
 
 namespace http {
 
@@ -28,6 +33,96 @@ namespace {
         return std::nullopt;
     }
     return value;
+}
+
+// The pieces of a run of ':'-separated groups of one to four lowercase hex digits, appended to
+// `out` from `count`. False when a group is empty or too long, or the run holds too many.
+[[nodiscard]] bool parse_ipv6_groups(std::string_view text, std::array<std::uint16_t, 8>& out,
+                                     std::size_t& count) noexcept {
+    if (text.empty()) {
+        return true;
+    }
+    while (true) {
+        const std::size_t colon = text.find(':');
+        const std::string_view group = text.substr(0, colon);
+        if (group.empty() || group.size() > 4 || count == out.size()) {
+            return false;
+        }
+        unsigned value = 0;
+        for (const char c : group) {
+            if (c >= '0' && c <= '9') {
+                value = (value * 16) + static_cast<unsigned>(c - '0');
+            } else if (c >= 'a' && c <= 'f') {
+                value = (value * 16) + static_cast<unsigned>(c - 'a' + 10);
+            } else {
+                return false;
+            }
+        }
+        out.at(count++) = static_cast<std::uint16_t>(value);
+        if (colon == std::string_view::npos) {
+            return true;
+        }
+        text.remove_prefix(colon + 1);
+    }
+}
+
+// True when `literal` (without its brackets) is an IPv6 address written exactly as the URL
+// standard serialises it, which is how a browser writes the host in Origin: lowercase hex
+// without leading zeros, the first longest run of two or more zero pieces as "::", and no dotted
+// IPv4 tail. Origin is compared byte for byte, so any other spelling of the same address names
+// a host no browser sends and is refused rather than kept as an entry that never matches.
+[[nodiscard]] bool is_canonical_ipv6(std::string_view literal) noexcept {
+    std::array<std::uint16_t, 8> pieces{};
+    std::size_t count = 0;
+    const std::size_t gap = literal.find("::");
+    if (gap == std::string_view::npos) {
+        if (!parse_ipv6_groups(literal, pieces, count) || count != pieces.size()) {
+            return false;
+        }
+    } else {
+        // The pieces after "::" go at the end; the zeros between are already in place.
+        std::array<std::uint16_t, 8> tail{};
+        std::size_t tail_count = 0;
+        if (!parse_ipv6_groups(literal.substr(0, gap), pieces, count) ||
+            !parse_ipv6_groups(literal.substr(gap + 2), tail, tail_count) ||
+            count + tail_count >= pieces.size()) {
+            return false;
+        }
+        std::ranges::copy(std::span{tail}.first(tail_count),
+                          pieces.end() - static_cast<std::ptrdiff_t>(tail_count));
+    }
+    // The first longest run of at least two zero pieces is the one compressed.
+    std::size_t run_start = pieces.size();
+    std::size_t run_length = 1;
+    for (std::size_t i = 0; i < pieces.size();) {
+        std::size_t end = i;
+        while (end < pieces.size() && pieces.at(end) == 0) {
+            ++end;
+        }
+        if (end - i > run_length) {
+            run_start = i;
+            run_length = end - i;
+        }
+        i = end == i ? i + 1 : end;
+    }
+    // At most 8 groups of 4 digits and 7 separators.
+    std::array<char, 40> buffer{};
+    std::size_t length = 0;
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+        if (i == run_start) {
+            buffer.at(length++) = ':';
+            buffer.at(length++) = ':';
+            i += run_length - 1;
+            continue;
+        }
+        if (length != 0 && buffer.at(length - 1) != ':') {
+            buffer.at(length++) = ':';
+        }
+        const auto written =
+            std::to_chars(buffer.data() + length, buffer.data() + buffer.size(), pieces.at(i), 16);
+        length = static_cast<std::size_t>(written.ptr - buffer.data());
+    }
+    return literal == std::string_view{buffer.data(), length};
 }
 
 } // namespace
@@ -63,10 +158,7 @@ bool is_origin(std::string_view origin) noexcept {
         if (close == std::string_view::npos || close == 1) {
             return false;
         }
-        // An IPv6 literal (with an embedded IPv4 tail) holds hex digits, ':' and '.' only.
-        if (!std::ranges::all_of(rest.substr(1, close - 1), [](char c) {
-                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == ':' || c == '.';
-            })) {
+        if (!is_canonical_ipv6(rest.substr(1, close - 1))) {
             return false;
         }
         host_end = close + 1;

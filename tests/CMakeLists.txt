@@ -149,6 +149,7 @@ if(ULW_CONFORMANCE_LIVE)
 endif()
 ulw_add_test_suite(http_unit_tests unit
     unit/http/backpressure_test.cpp
+    unit/http/origin_test.cpp
     unit/http/parser_limits_test.cpp
     unit/http/request_framing_test.cpp
     unit/http/request_parser_test.cpp
