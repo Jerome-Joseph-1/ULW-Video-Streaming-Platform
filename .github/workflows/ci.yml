@@ -168,7 +168,7 @@ jobs:
       - run: cmake --build --preset ${{ matrix.preset }}
       # Every io_uring test process charges its rings to one locked-memory counter for the
       # runner's user (Linux 6.14 and later), so one test per core gets a host's 8 MiB per core
-      # (ADR-0087).
+      # (ADR-0090).
       - run: tools/memlock-per-core.sh ctest --test-dir build/${{ matrix.preset }} -L integration -j "$(nproc)" --output-on-failure
         env:
           # The job context exists only in steps, not in the job's own env.
@@ -284,7 +284,7 @@ jobs:
         run: cmake --build --preset coverage
       # Writes build/coverage/coverage/ (and llvm-cov-show.txt for the scan). The integration
       # label runs one test per core, as the integration job runs it (with a host's locked
-      # memory per core, ADR-0087); the unit label one at a time, as build-test runs it. The
+      # memory per core, ADR-0090); the unit label one at a time, as build-test runs it. The
       # floors are reported, not enforced (ADR-0080); a failing test fails the job, after the
       # scan below.
       - name: C++ coverage

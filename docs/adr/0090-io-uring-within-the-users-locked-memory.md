@@ -1,4 +1,4 @@
-# 0087. The io_uring reactor stays within its user's locked memory: zero copy only without a limit, and a host's limit per parallel test
+# 0090. The io_uring reactor stays within its user's locked memory: zero copy only without a limit, and a host's limit per parallel test
 
 Status: Accepted
 Date: 2026-10-03

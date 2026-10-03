@@ -5,7 +5,7 @@
 # ring's pages are charged to a locked-memory counter that all of a user's processes share,
 # checked against the limit of the process that creates the ring. 8 MiB is the kernel's and
 # systemd's default, and a host's worth for one test; a limit that is already higher is kept
-# (ADR-0087). Raising the hard limit needs sudo.
+# (ADR-0090). Raising the hard limit needs sudo.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
