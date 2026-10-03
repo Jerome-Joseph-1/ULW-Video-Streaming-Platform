@@ -141,7 +141,7 @@ All error bodies are empty.
 
 <!-- docs/adr/0028-segments-fetched-cross-origin-without-credentials.md -->
 
-The web app loads playlists same-origin (Askedin's route sends `/api/v1/videos` on the app
+The web app loads playlists same-origin (the operator's route sends `/api/v1/videos` on the app
 origin to the gateway), so the auth cookie goes with them. Segments come from the store's host,
 cross-origin, **without credentials**: the signature in the URL is the authorization. The
 production bucket needs this CORS rule, one origin per environment, no `AllowCredentials`:

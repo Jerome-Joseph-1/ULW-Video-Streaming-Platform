@@ -1,6 +1,6 @@
 # 0063. The gateway's memory: high at 600 MB, max at 700 MB
 
-Status: Accepted
+Status: Accepted, amended by 0088 (the limit is in `deploy/kubernetes/base/video-gateway`)
 Date: 2026-09-29
 
 ## Context

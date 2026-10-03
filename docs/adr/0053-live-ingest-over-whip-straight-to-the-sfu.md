@@ -1,6 +1,6 @@
 # 0053. Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder
 
-Status: Accepted
+Status: Accepted, amended by 0088 (egress and Redis ship in `deploy/kubernetes/base`, sized by the operator)
 Date: 2026-09-29
 Amends: ADR-0050 (a closed generation is not closed to its publisher tickets; room kinds;
 `IMediaRoom::relay`)

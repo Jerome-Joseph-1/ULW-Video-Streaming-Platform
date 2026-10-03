@@ -35,8 +35,8 @@ public:
 
 // How long keys stay trusted without a successful refetch (ULW_JWKS_MAX_STALE_HOURS). A day:
 // refetches are 15 minutes apart and retried every minute, so a day is an outage long past any
-// that would go unnoticed overnight, and a key Askedin withdrew during one stops verifying
-// within a day instead of never.
+// that would go unnoticed overnight, and a key the identity provider withdrew during one stops
+// verifying within a day instead of never.
 inline constexpr core::Millis kDefaultMaxKeyAge = std::chrono::hours(24);
 
 struct JwksConfig {

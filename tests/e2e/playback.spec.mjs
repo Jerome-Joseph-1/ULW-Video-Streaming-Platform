@@ -70,7 +70,7 @@ test('an upload plays to its end, switches rendition without a stall, and never 
 
   const requests = [];
   page.on('request', (r) => requests.push(r.url()));
-  // Same origin as the page, as behind the Askedin route: the cookie rides along on playlist
+  // Same origin as the page, as behind an operator's route: the cookie rides along on playlist
   // requests and never goes to the bucket.
   await context.addCookies([{ name: 'auth_token', value: stack.token, url: stack.origin }]);
   await page.goto(`${stack.origin}/?video=${video}`);

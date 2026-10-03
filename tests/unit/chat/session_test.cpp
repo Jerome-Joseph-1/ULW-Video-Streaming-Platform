@@ -51,7 +51,7 @@ using std::chrono::seconds;
 using ulw::test::WsClient;
 
 constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
-constexpr std::string_view kAllowed = "https://app.askedin.test";
+constexpr std::string_view kAllowed = "https://app.example.com";
 
 // Hands the server each connection as if it came from the peer `named` holds, while it holds
 // one: the loopback interface offers only 127.0.0.1, and on some hosts not even ::1.
@@ -892,9 +892,9 @@ TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
     EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
 }
 
-// SIGHUP is how Askedin's key rotation reaches chat_server (ADR-0082): the verifier is asked to
-// drop its keys and verdicts, /metrics counts it, and the gauge follows the verifier's pending
-// drop.
+// SIGHUP is how the identity provider's key rotation reaches chat_server (ADR-0082): the verifier
+// is asked to drop its keys and verdicts, /metrics counts it, and the gauge follows the verifier's
+// pending drop.
 TEST_P(ChatSessionTest, SighupRequestsAnAuthCacheDrop) {
     EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 0U);
     EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 0U);

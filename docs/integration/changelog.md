@@ -3,6 +3,24 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-03: the subject claim is configured, and the audience is required
+
+<!-- infra/auth/src/claims.cpp (subject_of), ops/src/dev_only.cpp (token_rules), docs/adr/0088-standalone-product.md -->
+
+ULW no longer assumes one identity provider. A change to [auth.md](auth.md) for operators;
+clients whose tokens carry `sub` are not affected.
+
+| Before | Now |
+|---|---|
+| A token without `sub` was read by its `id` claim | The user is the claim `ULW_JWT_SUBJECT_CLAIM` names, `sub` by default; no other claim stands in, so a token without it is `401` |
+| `JWT_AUDIENCE` defaulted to one provider's audience | Required whenever `JWKS_URL` is set: the gateway and chat exit `2` at startup without it. With a local development key set it defaults to `ulw-dev`, as `ulw_devtoken` mints |
+
+What to do:
+
+- **Operators:** set `JWT_AUDIENCE` to the audience your identity provider issues for ULW. If its
+  tokens name the user in a claim other than `sub`, set `ULW_JWT_SUBJECT_CLAIM` to that claim
+  before upgrading, or every such token is refused.
+
 ## 2026-10-03: a worker fault is no longer reported as the owner's bad file
 
 <!-- infra/ffmpeg/src/exit_code.cpp (refine), apps/worker/src/job_runner.cpp (public_reason) -->

@@ -1,26 +1,31 @@
-# STUNner and LiveKit in the sandbox cluster, from the Askedin manifests exactly as they ship,
-# with only what the sandbox must change patched below. up.sh applies it once STUNner's CRDs
-# are in; rendered with
+# STUNner and LiveKit in the sandbox cluster, from deploy/kubernetes exactly as it ships,
+# configured by ../local/config.env through the component every overlay uses, with only what the
+# sandbox must change patched below. up.sh applies it once STUNner's CRDs are in; rendered with
 #   kubectl kustomize --load-restrictor LoadRestrictionsNone deploy/stunner
 # because the manifests live outside this directory.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ../askedin/stunner/operator.yaml
-  - ../askedin/stunner/dataplane.yaml
-  - ../askedin/stunner/gatewayclass.yaml
-  - ../askedin/overlays/stage/stunner/gateway.yaml
-  - ../askedin/overlays/stage/livekit/deployment.yaml
-  - ../askedin/overlays/stage/livekit/service.yaml
-  - ../askedin/overlays/stage/livekit/httproute.yaml
-  - ../askedin/overlays/stage/livekit/networkpolicy.yaml
+  - ../kubernetes/cluster/stunner/operator.yaml
+  - ../kubernetes/cluster/stunner/dataplane.yaml
+  - ../kubernetes/cluster/stunner/gatewayclass.yaml
+  - ../kubernetes/base/stunner
+  - ../kubernetes/base/livekit
   # LiveKit's configuration names Redis, and LiveKit does not start without it. Egress, the
   # other user of Redis, is not run here: its image is ~5 GB, and the local call suite
   # (compose.yaml) covers the relay.
-  - ../askedin/overlays/stage/livekit-redis/deployment.yaml
-  - ../askedin/overlays/stage/livekit-redis/service.yaml
-  - ../askedin/overlays/stage/livekit-redis/networkpolicy.yaml
+  - ../kubernetes/base/livekit-redis
   - sandbox.yaml
+configMapGenerator:
+  - name: ulw-operator-config
+    envs:
+      - ../local/config.env
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"
+components:
+  - ../kubernetes/components/operator-config
 # up.sh loads each image into the node from a pull pinned by digest, filed under its tag only
 # (images.sh), so the pods name the tag, and never pull: a tag missing from the node would
 # otherwise fetch whatever the registry serves under it now.
@@ -49,10 +54,10 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
-  # Redis requests 50m on Askedin's node; one kind node on a 4-core runner has almost no CPU
+  # Redis requests 50m in the base; one kind node on a 4-core runner has almost no CPU
   # left to reserve once the gateways, the worker, chat, LiveKit and STUNner's dataplane hold
   # theirs (deploy/local/cluster/chat-patch.yaml says the same of chat), so the sandbox's Redis
-  # reserves next to nothing and runs on what is idle. Memory is left as the target has it.
+  # reserves next to nothing and runs on what is idle. Memory is left as the base has it.
   - target:
       kind: Deployment
       name: livekit-redis

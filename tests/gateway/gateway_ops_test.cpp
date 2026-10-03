@@ -173,9 +173,9 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
     EXPECT_TRUE(extra.empty()) << "families nobody documented: " << *extra.begin();
 }
 
-// SIGHUP is how Askedin's key rotation reaches the gateway (ADR-0082): the verifier is asked to
-// drop its keys and verdicts, and the request is counted and logged where an operator checks for
-// it; the gauge shows the drop pending until the verifier says a fetch completed it.
+// SIGHUP is how the identity provider's key rotation reaches the gateway (ADR-0082): the verifier
+// is asked to drop its keys and verdicts, and the request is counted and logged where an operator
+// checks for it; the gauge shows the drop pending until the verifier says a fetch completed it.
 TEST(GatewayMetrics, SighupRequestsAnAuthCacheDropAndSaysSo) {
     GatewayUnderTest gw(GatewayOptions{});
     EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drops_total"), 0);
