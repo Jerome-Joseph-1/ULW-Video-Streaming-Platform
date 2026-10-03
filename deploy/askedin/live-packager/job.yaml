@@ -6,7 +6,7 @@
 # applies it.
 #
 # The template's variables, filled with envsubst naming exactly these (RUNBOOK.md):
-#   ULW_NAMESPACE     apps-stage or apps
+#   ULW_NAMESPACE     the packagers' namespace: apps-stage-live or apps-live (ADR-0092)
 #   ULW_IMAGE_TAG     a commit SHA that publish-images.yml pushed from main
 #                     (ghcr.io/jerome-joseph-1/ulw-live-packager), best <sha>@sha256:<digest>
 #                     from its run's summary; prod always names one, stage may use main

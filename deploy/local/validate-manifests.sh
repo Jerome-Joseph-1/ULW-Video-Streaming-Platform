@@ -36,8 +36,8 @@ packager_job() {
         "$root/deploy/askedin/live-packager/job.yaml"
 }
 # Stage may follow main; prod names a commit published from main (RUNBOOK.md, step 9).
-packager_job apps-stage main >"$manifests/live-packager-stage.yaml"
-packager_job apps 0123456789abcdef0123456789abcdef01234567 >"$manifests/live-packager-prod.yaml"
+packager_job apps-stage-live main >"$manifests/live-packager-stage.yaml"
+packager_job apps-live 0123456789abcdef0123456789abcdef01234567 >"$manifests/live-packager-prod.yaml"
 # shellcheck disable=SC2016 # a literal ${
 if grep -n '\${' "$manifests"/live-packager-*.yaml; then
     echo "validate-manifests: live-packager/job.yaml has a variable RUNBOOK.md does not fill" >&2

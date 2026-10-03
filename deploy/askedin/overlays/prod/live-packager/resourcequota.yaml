@@ -1,0 +1,23 @@
+# How much the gateway's service account can start here, however it is driven (docs/adr/0092).
+# A stream is one Job and one pod, a tenth of a core and 256Mi requested, at most a core and
+# 512Mi (live-packager/job.yaml). Running pods are bounded by the streams the platform takes
+# (the gateway's ULW_LIVE_MAX_STREAMS) and one more, restarting; finished pods count for
+# nothing. A finished Job stays a day for its log (its TTL), so the Job and Secret counts bound
+# a day's worth of streams, 400, far past what the per-user hourly cap lets through, and stop a
+# runaway well before it fills etcd.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: live-packagers
+  namespace: apps-live
+  labels:
+    app.kubernetes.io/part-of: ulw
+spec:
+  hard:
+    count/jobs.batch: "400"
+    count/secrets: "404"
+    pods: "4"
+    requests.cpu: 400m
+    requests.memory: 1Gi
+    limits.cpu: "4"
+    limits.memory: 2048Mi

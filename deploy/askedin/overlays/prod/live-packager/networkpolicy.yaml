@@ -1,5 +1,5 @@
 # A packager's SRT listener is the only network-facing code of a stream (ADR-0046): it admits
-# LiveKit's recorder (egress) alone, on its UDP port. Egress ships in livekit-egress/; its
+# LiveKit's recorder (egress, in apps) alone, on its UDP port. Egress ships in livekit-egress/; its
 # pods carry app.kubernetes.io/name: livekit-egress, the label this policy admits. The
 # passphrase and stream id are checked at the SRT handshake anyway; this keeps everything else
 # from trying.
@@ -11,7 +11,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: live-packager
-  namespace: apps
+  namespace: apps-live
   labels:
     app.kubernetes.io/name: live-packager
     app.kubernetes.io/part-of: ulw
@@ -22,7 +22,10 @@ spec:
   policyTypes: ["Ingress", "Egress"]
   ingress:
     - from:
-        - podSelector:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: apps
+          podSelector:
             matchLabels:
               app.kubernetes.io/name: livekit-egress
       ports:
