@@ -95,6 +95,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
 | `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | The base sets the address to the pod's own, `$(POD_IP):9201`, and takes the secret from `CHAT_SECRET` (ADR-0083) |
+| `ULW_CALL_GROUP_PARTICIPANTS` | | | 3 to 16, default 8 | Devices in a group chat's call, the LiveKit room's cap ([calls.md](calls.md#group-calls)); ADR-0095 derives the default from the SFU's capacity. Out of range: chat exits `2` |
 | `LIVEKIT_API_KEY` | | | optional | Turns calls on (ADR-0087): unset or empty, chat starts with calls off and answers every `call` with `calls_disabled`, whatever the other three say. Set, the other three are required, or chat exits `2` naming the missing one. The base reads it from `SFU_SECRET`, as optional |
 | `LIVEKIT_API_SECRET` | | | with `LIVEKIT_API_KEY` | Secret: signs every ticket, and must be the one LiveKit holds for the key (`LIVEKIT_KEYS`). 32 to 256 bytes, checked at start (exit `2`) |
 | `LIVEKIT_API_URL` | | | with `LIVEKIT_API_KEY` | LiveKit's server API, `http://` or `https://`, checked at start (exit `2`); the base sets `http://livekit:7880` |
@@ -348,8 +349,19 @@ members' nodes, `call_events_pushed_total` (events written to sockets),
 `call_notices_unheard_total` (notices for a member with no socket on the node) and
 `call_notices_malformed_total`; and the room plane's unsequenced notices that carry them,
 `notices_total{stage="forwarded"}`, `{stage="fanned_out"}`, `{stage="heard"}` and
-`{stage="dropped"}` (no owner, an owner that let the room go, a lookup that failed). Chat is a
-draft ([chat.md](chat.md)).
+`{stage="dropped"}` (no owner, an owner that let the room go, a lookup that failed). Group calls
+and putting members out (ADR-0095), on the room's owner: `call_refusals_total{reason="expelled"}`
+and `{reason="call_full"}`, `call_rings_total{outcome="left"}` and `{outcome="emptied"}` (group
+calls ended because nobody was left in them), `call_expulsions_total`,
+`call_moves_total{reason="expel"}`, `{reason="removal"}` and `{reason="end"}` (media generations
+moved on by the owner's fenced write), `call_moves_failed_total{why="fenced"}` (the room had
+changed hands; nothing reached LiveKit) and `{why="unavailable"}` (the database did not answer;
+a removal's move is retried each second), `call_generations_closed_total`,
+`call_generations_closing` (old generations LiveKit has not closed yet: someone put out may still
+be connected; a value that stays up means LiveKit is not answering) and
+`call_generations_abandoned_total` (given up after 5 minutes), `call_occupancy_checks_total` and
+`call_occupancy_unavailable_total` (LiveKit asked whether a quiet group call still has anyone in
+it), and `call_resync_checks_total`. Chat is a draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

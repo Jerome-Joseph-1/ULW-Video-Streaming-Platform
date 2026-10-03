@@ -1,6 +1,6 @@
 # 0058. Group calls: interfaces now, implementation deferred
 
-Status: Accepted
+Status: Accepted, implemented by 0095
 Date: 2026-09-29
 Amends: ADR-0050 (adds one method to `IMediaRoom`)
 
