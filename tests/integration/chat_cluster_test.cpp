@@ -1413,7 +1413,6 @@ TEST_P(ChatClusterTest, ACallRingsTheOtherMembersEverySocketOnAnyNodeAndEndsOnce
     ASSERT_EQ(join_answer(*alice, direct), "joined");
     const std::string alice_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9a1";
     const std::string phone_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9b1";
-    const std::string laptop_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9b2";
     // A socket, and where in what it heard the next wait starts.
     using Ear = std::pair<Client*, std::size_t*>;
     std::size_t at_alice = alice->seen().size();

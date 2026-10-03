@@ -122,6 +122,7 @@ public:
 
     [[nodiscard]] std::vector<chat::RingEvent> events() const {
         std::vector<chat::RingEvent> out;
+        out.reserve(sent.size());
         for (const chat::CallNotice& n : sent) {
             out.push_back(n.event);
         }
@@ -681,7 +682,7 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     EXPECT_EQ(ticket_ask->user, request.user);
     EXPECT_EQ(ticket_ask->device, request.device);
 
-    ulw::test::FakeClock clock;
+    const ulw::test::FakeClock clock;
     ulw::test::FakeRandom random;
     const chat::CallId call = chat::CallId::generate(clock, random);
     for (const chat::CallSignal signal :

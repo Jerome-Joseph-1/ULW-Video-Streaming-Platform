@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <variant>
@@ -302,28 +303,40 @@ TEST(Envelope, ADeclineCancelOrEndNamesItsRoomAndCall) {
         {"call_decline", chat::CallSignal::Decline},
         {"call_cancel", chat::CallSignal::Cancel},
         {"call_end", chat::CallSignal::End}};
+    // The command `type` with `fields` after its type.
+    const auto command = [](const std::string& type,
+                            std::initializer_list<std::string_view> fields) {
+        std::string out = R"({"type":")";
+        out += type;
+        out += '"';
+        for (const std::string_view f : fields) {
+            out += ',';
+            out += f;
+        }
+        out += '}';
+        return out;
+    };
     for (const auto& [type, signal] : moves) {
-        const std::string head = R"({"type":")" + type + R"(",)";
-        const auto c = chat::parse_command(head + room_field + "," + call_field + "}");
+        const auto c = chat::parse_command(command(type, {room_field, call_field}));
         ASSERT_TRUE(c) << type;
         const auto& move = std::get<chat::CallMove>(*c);
         EXPECT_EQ(move.room, room());
         EXPECT_EQ(move.signal, signal);
         EXPECT_EQ(move.call.to_string(), "01a0eb86-6cca-7dce-84cc-3bb47615f9cc");
-        EXPECT_EQ(chat::parse_command(head + room_field + "}"),
+        EXPECT_EQ(chat::parse_command(command(type, {room_field})),
                   std::unexpected(EnvelopeError::Malformed));
-        EXPECT_EQ(chat::parse_command(head + room_field + R"(,"call":"ring-1"})"),
+        EXPECT_EQ(chat::parse_command(command(type, {room_field, R"("call":"ring-1")"})),
                   std::unexpected(EnvelopeError::BadCall));
-        EXPECT_EQ(chat::parse_command(head + room_field + "," + call_field + R"(,"device":"x"})"),
+        EXPECT_EQ(chat::parse_command(command(type, {room_field, call_field, R"("device":"x")"})),
                   std::unexpected(EnvelopeError::Malformed));
-        EXPECT_EQ(chat::parse_command(head + R"("room":"lobby",)" + call_field + "}"),
+        EXPECT_EQ(chat::parse_command(command(type, {R"("room":"lobby")", call_field})),
                   std::unexpected(EnvelopeError::BadRoom));
     }
     EXPECT_EQ(chat::reason(EnvelopeError::BadCall), "bad_call");
 }
 
 TEST(Envelope, CallEventsAreTheDocumentedShapes) {
-    ulw::test::FakeClock clock;
+    const ulw::test::FakeClock clock;
     ulw::test::FakeRandom random;
     const auto call = chat::CallId::generate(clock, random);
     const std::string call_text = call.to_string();
@@ -354,9 +367,12 @@ TEST(Envelope, CallEventsAreTheDocumentedShapes) {
                                      .from = alice,
                                      .by = bob,
                                      .expires_at = {}});
-        EXPECT_EQ(out, R"({"type":")" + type +
-                           R"(","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","call":")" +
-                           call_text + R"(","from":"auth0|alice","by":"auth0|bob"})");
+        std::string expected = R"({"type":")";
+        expected += type;
+        expected += R"(","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","call":")";
+        expected += call_text;
+        expected += R"(","from":"auth0|alice","by":"auth0|bob"})";
+        EXPECT_EQ(out, expected);
     }
     out.clear();
     chat::write_call_event(out, {.event = chat::RingEvent::Missed,

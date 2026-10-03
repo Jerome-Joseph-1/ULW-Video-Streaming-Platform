@@ -297,7 +297,7 @@ TEST_F(BoundedRingerTest, ACallPastTheCapIsBusyAndRingsNobody) {
 }
 
 TEST(CallNoticeCodec, ANoticeComesBackAsItWasSentAndAnythingElseIsRefused) {
-    ulw::test::FakeClock clock;
+    const ulw::test::FakeClock clock;
     ulw::test::FakeRandom random;
     const chat::CallNotice sent{.event = RingEvent::Declined,
                                 .to = user("auth0|alice"),
