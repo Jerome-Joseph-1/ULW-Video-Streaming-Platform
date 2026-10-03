@@ -1,6 +1,6 @@
 # 0079. SonarQube Cloud analysis in CI, with the compile database, on the Free plan
 
-Status: Accepted
+Status: Accepted, amended by 0086 (the scan runs in ci.yml's coverage job; sonar.yml removed)
 Date: 2026-10-02
 
 ## Context

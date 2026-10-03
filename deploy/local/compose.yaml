@@ -19,6 +19,9 @@ services:
     # postgres:16 (16.15), pinned by digest so every checkout tests against the same server.
     image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
     container_name: ulw-pg
+    # The integration label runs one test per core (ctest -j), which opens more sessions at
+    # once than the default 100; ci.yml raises its service container to the same.
+    command: ["postgres", "-c", "max_connections=400"]
     environment:
       POSTGRES_PASSWORD: testtest123
     ports:

@@ -1,14 +1,26 @@
 include(GoogleTest)
 
 # One executable per label keeps `ctest -L` meaningful and link times short.
-# PROPERTIES after the sources are set on every test the suite discovers.
+# PROPERTIES go on every test of the suite. SERIAL, a googletest filter, picks the tests that
+# must never overlap another test under ctest -j: they get RUN_SERIAL, the rest do not.
 function(ulw_add_test_suite name label)
-    cmake_parse_arguments(PARSE_ARGV 2 arg "" "" "PROPERTIES")
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "SERIAL" "PROPERTIES")
     ulw_add_executable(${name} ${arg_UNPARSED_ARGUMENTS})
     target_link_libraries(${name} PRIVATE GTest::gtest_main GTest::gmock)
-    gtest_discover_tests(${name}
-        PROPERTIES LABELS ${label} ${arg_PROPERTIES}
-        DISCOVERY_TIMEOUT 30)
+    if(arg_SERIAL)
+        gtest_discover_tests(${name}
+            TEST_FILTER "-${arg_SERIAL}"
+            PROPERTIES LABELS ${label} ${arg_PROPERTIES}
+            DISCOVERY_TIMEOUT 30)
+        gtest_discover_tests(${name}
+            TEST_FILTER "${arg_SERIAL}"
+            PROPERTIES LABELS ${label} RUN_SERIAL TRUE ${arg_PROPERTIES}
+            DISCOVERY_TIMEOUT 30)
+    else()
+        gtest_discover_tests(${name}
+            PROPERTIES LABELS ${label} ${arg_PROPERTIES}
+            DISCOVERY_TIMEOUT 30)
+    endif()
 endfunction()
 
 ulw_add_test_suite(core_unit_tests unit
@@ -357,7 +369,10 @@ target_compile_definitions(postgres_unit_tests
     PRIVATE ULW_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/migrations")
 
 # Against a live Postgres: ULW_TEST_DATABASE_URL, or the one deploy/local/compose.yaml runs.
-# The pool test docker-pauses that server, so under ctest -j no other test may be using it.
+# Each test has a scratch database of its own, so the label runs under ctest -j; one test per
+# core opens up to about 130 sessions at once, which is why compose.yaml and ci.yml give the
+# server max_connections = 400. The pool test that docker-pauses that server would stall every
+# other test using it, so it runs alone.
 ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_catalog_test.cpp
     integration/postgres_harness.cpp
@@ -366,7 +381,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
-    PROPERTIES RESOURCE_LOCK postgres)
+    SERIAL "*PoolTest.PausedDatabaseNeverStallsTheLoop*")
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
@@ -383,8 +398,7 @@ target_include_directories(reaper_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 # The reaper against the Postgres and MinIO of deploy/local/compose.yaml.
 ulw_add_test_suite(reaper_integration_tests integration
     integration/postgres_harness.cpp
-    integration/upload_reaper_live_test.cpp
-    PROPERTIES RESOURCE_LOCK postgres)
+    integration/upload_reaper_live_test.cpp)
 target_link_libraries(reaper_integration_tests PRIVATE
     ulw::reaper_lib ulw::pg_store ulw::storage_s3 ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
 target_include_directories(reaper_integration_tests
@@ -396,8 +410,7 @@ endif()
 # The room registry's store against a live Postgres, as the suite above.
 ulw_add_test_suite(room_store_integration_tests integration
     integration/postgres_harness.cpp
-    integration/room_store_test.cpp
-    PROPERTIES RESOURCE_LOCK postgres)
+    integration/room_store_test.cpp)
 target_link_libraries(room_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg_store
     PkgConfig::LIBPQ)
 target_include_directories(room_store_integration_tests
@@ -418,8 +431,7 @@ target_include_directories(message_store_conformance_tests
 ulw_add_test_suite(message_store_integration_tests integration
     integration/message_store_test.cpp
     integration/postgres_harness.cpp
-    integration/sequenced_append_test.cpp
-    PROPERTIES RESOURCE_LOCK postgres)
+    integration/sequenced_append_test.cpp)
 target_link_libraries(message_store_integration_tests PRIVATE ulw::pg_rooms ulw::pg_store
     PkgConfig::LIBPQ)
 target_include_directories(message_store_integration_tests
@@ -443,8 +455,7 @@ target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 ulw_add_test_suite(chat_cluster_tests integration
     integration/chat_cluster_test.cpp
     integration/postgres_harness.cpp
-    support/child_process.cpp
-    PROPERTIES RESOURCE_LOCK postgres)
+    support/child_process.cpp)
 target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::auth ulw::codec_ws
     ulw::net_lib ulw::os PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
@@ -460,8 +471,7 @@ if(ULW_BUILD_MLS)
     ulw_add_test_suite(chat_e2ee_tests integration
         integration/chat_e2ee_test.cpp
         integration/postgres_harness.cpp
-        support/child_process.cpp
-        PROPERTIES RESOURCE_LOCK postgres)
+        support/child_process.cpp)
     target_link_libraries(chat_e2ee_tests PRIVATE ulw::e2ee_mls ulw::pg_store ulw::devtoken
         ulw::auth ulw::codec_ws ulw::net_lib ulw::os PkgConfig::LIBPQ ZLIB::ZLIB)
     target_include_directories(chat_e2ee_tests
@@ -476,8 +486,7 @@ ulw_add_test_suite(gateway_process_tests integration
     integration/gateway_process_test.cpp
     integration/gateway_store_connections_test.cpp
     integration/postgres_harness.cpp
-    support/child_process.cpp
-    PROPERTIES RESOURCE_LOCK postgres)
+    support/child_process.cpp)
 target_link_libraries(gateway_process_tests PRIVATE
     ulw::pg_store ulw::devtoken ulw::os ulw::test_tls ulw::test_live_s3 PkgConfig::LIBPQ)
 target_include_directories(gateway_process_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
@@ -501,8 +510,7 @@ target_include_directories(e2ee_unit_tests
 ulw_add_test_suite(e2ee_integration_tests integration
     conformance/e2ee_directory_contract.cpp
     integration/postgres_e2ee_test.cpp
-    integration/postgres_harness.cpp
-    PROPERTIES RESOURCE_LOCK postgres)
+    integration/postgres_harness.cpp)
 target_link_libraries(e2ee_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(e2ee_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
     ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
@@ -623,8 +631,7 @@ if(ULW_BUILD_WORKER)
         integration/recording_remux_test.cpp
         integration/postgres_harness.cpp
         integration/worker_test.cpp
-        support/child_process.cpp
-        PROPERTIES RESOURCE_LOCK postgres)
+        support/child_process.cpp)
     target_link_libraries(worker_integration_tests PRIVATE
         ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
         ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
@@ -663,8 +670,7 @@ if(ULW_BUILD_WORKER)
     ulw_add_test_suite(live_recording_integration_tests integration
         integration/live_recording_test.cpp
         integration/postgres_harness.cpp
-        support/child_process.cpp
-        PROPERTIES RESOURCE_LOCK postgres)
+        support/child_process.cpp)
     target_link_libraries(live_recording_integration_tests PRIVATE
         ulw::ffmpeg_adapter ulw::pg_store ulw::storage_fs_transfer ulw::storage_s3
         ulw::test_live_s3 ulw::os PkgConfig::LIBPQ)
@@ -685,8 +691,7 @@ if(ULW_BUILD_WORKER)
     ulw_add_test_suite(playback_integration_tests integration
         integration/playback_test.cpp
         integration/postgres_harness.cpp
-        support/child_process.cpp
-        PROPERTIES RESOURCE_LOCK postgres)
+        support/child_process.cpp)
     target_link_libraries(playback_integration_tests PRIVATE
         ulw::ffmpeg_adapter ulw::pg_store ulw::storage_s3 ulw::test_live_s3 ulw::devtoken ulw::os
         PkgConfig::LIBPQ)

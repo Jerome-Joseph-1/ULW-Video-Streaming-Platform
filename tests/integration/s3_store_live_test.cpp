@@ -1,5 +1,6 @@
 // The S3 store's bucket-wide operations against a real MinIO, where a scripted peer would only
-// echo what the test assumed.
+// echo what the test assumed. In a bucket of each test's own: the sweep aborts every old session
+// in whatever bucket it is pointed at, which in the shared one would be other tests' sessions.
 #include "core/models/content_type.hpp"
 #include "core/models/storage_key.hpp"
 #include "infra/curl/multi.hpp"
@@ -31,6 +32,7 @@ protected:
                             "ULW_MINIO_ENDPOINT";
 #endif
         }
+        bucket_made_ = true;
         reactor_ = std::move(*net::make_reactor(net::ReactorKind::Epoll, clock_, 1024));
         multi_ = std::move(*infra::curl::Multi::create(*reactor_));
         store_ = std::move(*infra::storage::S3Store::create(
@@ -43,10 +45,17 @@ protected:
                                           .bucket = target_.bucket}));
     }
     void TearDown() override {
-        ulw::test::abort_uploads(target_, prefix_);
         store_.reset();
         multi_.reset();
         reactor_.reset();
+        if (bucket_made_) {
+            ulw::test::abort_uploads(target_, "");
+            const auto bucket = infra::s3util::Bucket::make(target_.profile, target_.bucket);
+            if (bucket) {
+                [[maybe_unused]] const auto dropped =
+                    ulw::test::send(target_, infra::curl::Method::Delete, bucket->root());
+            }
+        }
     }
 
     [[nodiscard]] std::optional<MultipartUpload> start(const std::string& name) {
@@ -67,7 +76,13 @@ protected:
         return it == open->end() ? std::nullopt : std::optional(*it);
     }
 
-    ulw::test::LiveS3 target_ = ulw::test::minio_from_env();
+    ulw::test::LiveS3 target_ = [] {
+        auto minio = ulw::test::minio_from_env();
+        minio.bucket = ulw::test::unique_prefix("reap");
+        minio.bucket.pop_back();
+        return minio;
+    }();
+    bool bucket_made_ = false;
     std::string prefix_ = ulw::test::unique_prefix("reap");
     os::SystemClock clock_;
     os::SystemRandom random_;
@@ -76,8 +91,8 @@ protected:
     std::unique_ptr<infra::storage::S3Store> store_;
 };
 
-// The reaper sweeps the whole bucket, so this test aborts any upload another run started before
-// its cutoff: it relies on the integration label running one test at a time.
+// The reaper sweeps the whole bucket: here the test's own, so nothing another test started is
+// in it.
 TEST_F(S3StoreLive, ReapingAbortsUploadsStartedBeforeTheCutoffAndKeepsLaterOnes) {
     const auto abandoned = start("abandoned");
     ASSERT_TRUE(abandoned);
