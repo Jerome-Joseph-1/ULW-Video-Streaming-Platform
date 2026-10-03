@@ -1,4 +1,4 @@
-# The stream service in the gateway (docs/adr/0091) starts each live stream's packager as a Job
+# The stream service in the gateway (docs/adr/0092) starts each live stream's packager as a Job
 # from live-packager/job.yaml, with the stream's SRT passphrase in a Secret of its own that the
 # Job then owns (so the Job's removal a day after it finishes takes the Secret along). This is
 # the account it does that with, and all it may do: make Jobs and Secrets in this namespace,

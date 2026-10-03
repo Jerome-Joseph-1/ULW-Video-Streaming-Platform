@@ -1,6 +1,6 @@
 # Live streams
 
-> **Draft.** [Starting a stream](#starting-a-stream) is served by the gateway (ADR-0091),
+> **Draft.** [Starting a stream](#starting-a-stream) is served by the gateway (ADR-0092),
 > [Publishing](#publishing) is settled by M30, [Watching a stream](#watching-a-stream) by M31 and
 > [When a stream ends](#when-a-stream-ends) by M33.
 
@@ -15,7 +15,7 @@ through `processing` to `ready`. Live chat is a chat room in lossy delivery mode
 
 ## Starting a stream
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0091-the-stream-service-lives-in-the-gateway.md -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0092-the-stream-service-lives-in-the-gateway.md -->
 
 The gateway's stream service starts a stream for the signed-in user, hands its owner publisher
 tickets, takes it live, and ends it. Every request is authenticated like the rest of the API

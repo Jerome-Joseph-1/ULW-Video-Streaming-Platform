@@ -127,7 +127,7 @@ struct Services {
     std::unique_ptr<infra::postgres::PgUploadCatalog> catalog;
     std::unique_ptr<gateway::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
-    // The stream service and what it drives, when live publishing is configured (ADR-0091).
+    // The stream service and what it drives, when live publishing is configured (ADR-0092).
     // LiveKit and the Kubernetes API get a multi of their own, as key fetches do, so that no
     // upload holding the store's connections delays a ticket.
     std::unique_ptr<infra::curl::Multi> live_multi;

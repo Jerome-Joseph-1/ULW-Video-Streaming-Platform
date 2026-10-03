@@ -19,7 +19,7 @@ using core::ports::PackagerError;
 using core::ports::PackagerState;
 
 // Every stream is generation 1 of its room for all its life: a stream is never moved on to a
-// new generation, it ends (ADR-0091), and a closed generation is the stream's end.
+// new generation, it ends (ADR-0092), and a closed generation is the stream's end.
 constexpr core::ports::MediaGeneration kGeneration{1};
 // 24 random bytes as hex: 48 characters, inside SRT's 10 to 79 (ADR-0046).
 constexpr std::size_t kPassphraseBytes = 24;

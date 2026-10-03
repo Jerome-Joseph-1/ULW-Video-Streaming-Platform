@@ -569,7 +569,7 @@ TEST_F(ConfigTest, OnlyTheConnectionStringTheStoreKeysAndLiveKitsSecretAreSecret
     }
 }
 
-// The stream service (ADR-0091): off unless LiveKit is named, and then complete.
+// The stream service (ADR-0092): off unless LiveKit is named, and then complete.
 class LiveConfigTest : public ConfigTest {
 protected:
     // Every live setting as a working deployment has them, whatever an earlier step set.

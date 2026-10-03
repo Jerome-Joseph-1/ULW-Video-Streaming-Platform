@@ -27,7 +27,7 @@ spec:
         app.kubernetes.io/part-of: ulw
     spec:
       # The stream service makes each live stream's packager Job with this account's token
-      # (live-rbac.yaml, docs/adr/0091); nothing else in the pod uses it.
+      # (live-rbac.yaml, docs/adr/0092); nothing else in the pod uses it.
       serviceAccountName: video-gateway
       automountServiceAccountToken: true
       enableServiceLinks: false
@@ -146,7 +146,7 @@ spec:
                 secretKeyRef:
                   name: video-gateway-secrets
                   key: JWT_ISSUER
-            # Live streams (docs/adr/0091, RUNBOOK step 9): LiveKit's server API in the
+            # Live streams (docs/adr/0092, RUNBOOK step 9): LiveKit's server API in the
             # cluster, the public host its tickets name (the /rtc and /whip routes of
             # livekit/httproute.yaml), the key pair egress uses too, and packagers as Jobs from
             # the template in the image, dialled by the relay through live-packager's headless

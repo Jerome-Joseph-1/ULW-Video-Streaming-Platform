@@ -1,4 +1,4 @@
-# What the gateway's stream service (docs/adr/0091) reaches besides what networkpolicy.yaml
+# What the gateway's stream service (docs/adr/0092) reaches besides what networkpolicy.yaml
 # allows, in a policy of its own so that it can go with the feature: LiveKit's server API, for
 # publisher tickets, relays and closing a stream's room, and the API server, to make each
 # stream's packager Job (live-rbac.yaml). Policies add up, so this widens video-gateway's egress

@@ -37,7 +37,7 @@ struct KubernetesConfig {
                                             std::string_view image_tag, std::string_view stream,
                                             std::string_view owner);
 
-// Packagers as Kubernetes Jobs, one per stream, made from the template (ADR-0083, ADR-0091)
+// Packagers as Kubernetes Jobs, one per stream, made from the template (ADR-0083, ADR-0092)
 // through the API server with the pod's service account, whose Role allows creating Jobs and
 // Secrets and reading Jobs in its namespace, nothing else. Starting one is three calls: the
 // stream's Secret (its SRT passphrase), the Job, then the Secret made the Job's dependent, so

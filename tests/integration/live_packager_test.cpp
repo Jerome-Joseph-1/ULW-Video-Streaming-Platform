@@ -503,7 +503,7 @@ TEST_F(LivePackagerTest, SigtermBeforeAnyPublisherLeavesNothingToEnd) {
     EXPECT_FALSE(stored("index.m3u8"));
 }
 
-// A stream service sets a wait for the relay's caller (ADR-0091): a packager nobody calls ends
+// A stream service sets a wait for the relay's caller (ADR-0092): a packager nobody calls ends
 // its stream by itself rather than waiting for a signal.
 TEST_F(LivePackagerTest, APackagerNobodyCallsEndsTheStreamAfterItsWait) {
     const auto packager = start_packager({.caller_wait = 1});

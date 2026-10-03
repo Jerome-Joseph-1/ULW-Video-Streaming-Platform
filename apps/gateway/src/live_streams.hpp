@@ -21,7 +21,7 @@
 
 namespace gateway {
 
-// The stream service (ADR-0091): starts a user's live stream, hands its owner publisher tickets,
+// The stream service (ADR-0092): starts a user's live stream, hands its owner publisher tickets,
 // starts the stream's packager and the relay to it when the owner goes live, ends it when the
 // owner asks, and notices when it has ended by itself. The rows live in Postgres, so any gateway
 // process can serve any request for any stream; nothing here is the only copy of anything.

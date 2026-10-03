@@ -1,4 +1,4 @@
-// The stream service's routes (ADR-0091) through a real gateway shard, over fakes of the
+// The stream service's routes (ADR-0092) through a real gateway shard, over fakes of the
 // service's store, media server and packagers.
 #include "core/util/json.hpp"
 

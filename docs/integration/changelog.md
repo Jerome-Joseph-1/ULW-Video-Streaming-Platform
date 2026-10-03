@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## 2026-10-03: live streams are started, taken live and ended through the gateway
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/live_streams.cpp, docs/adr/0091-the-stream-service-lives-in-the-gateway.md -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/live_streams.cpp, docs/adr/0092-the-stream-service-lives-in-the-gateway.md -->
 
 An addition; nothing that worked before changes. A broadcaster's client now gets its publisher
 tickets from five new endpoints ([live.md](live.md#starting-a-stream)): `POST /api/v1/live`,

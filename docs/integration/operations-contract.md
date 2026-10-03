@@ -19,7 +19,7 @@ page does not repeat it.
 | Seccomp profile | worker and live packager nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
 | Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on the environment's hostnames only, as the video and chat routes: `stage.askedin.com` on stage, `askedin.com` and `www.askedin.com` on prod, so a ticket must name one of its environment's hosts. `/twirp` is never routed (ADR-0050, ADR-0053). |
 | TURN port | Askedin (node firewall) | UDP 3478 (stage) and UDP 3479 (prod) open to the internet on k8s-prod's node; both environments share its address, so each has its own port and its own STUNner Gateway (RUNBOOK step 7). Nothing else: LiveKit's UDP 7882 stays inside the cluster. |
-| LiveKit server API and the Kubernetes API, from the gateway | live streams | The gateway's stream service (ADR-0091) calls LiveKit's server API (`LIVEKIT_API_URL`, port 7880 in the cluster) for tickets, relays and closing a stream's room, and, with `ULW_LIVE_PACKAGER=kubernetes`, the API server with its pod's service account to create each stream's packager Job and Secret. The account (`video-gateway`) needs a Role in the gateway's namespace with `create` on `jobs` and `secrets`, `get` on `jobs` and `patch` on `secrets`, and nothing else; its token is mounted (`automountServiceAccountToken: true`), and its NetworkPolicy lets it reach LiveKit's 7880 and the API server's 6443 (`deploy/askedin/overlays/*/video-gateway/live-*.yaml`, RUNBOOK step 9). The packager image's tag is the gateway's `ULW_LIVE_PACKAGER_IMAGE_TAG`. |
+| LiveKit server API and the Kubernetes API, from the gateway | live streams | The gateway's stream service (ADR-0092) calls LiveKit's server API (`LIVEKIT_API_URL`, port 7880 in the cluster) for tickets, relays and closing a stream's room, and, with `ULW_LIVE_PACKAGER=kubernetes`, the API server with its pod's service account to create each stream's packager Job and Secret. The account (`video-gateway`) needs a Role in the gateway's namespace with `create` on `jobs` and `secrets`, `get` on `jobs` and `patch` on `secrets`, and nothing else; its token is mounted (`automountServiceAccountToken: true`), and its NetworkPolicy lets it reach LiveKit's 7880 and the API server's 6443 (`deploy/askedin/overlays/*/video-gateway/live-*.yaml`, RUNBOOK step 9). The packager image's tag is the gateway's `ULW_LIVE_PACKAGER_IMAGE_TAG`. |
 | LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP 9000, `srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000`, ADR-0083), and its pods must be labelled `app.kubernetes.io/name: livekit-egress`, the only pods the packager's NetworkPolicy admits. It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Shipped as `deploy/askedin/overlays/{stage,prod}/livekit-egress/` (one concurrent stream on stage, two on prod) and `livekit-redis/` (ClusterIP, password in `sfu-secrets`, reachable from LiveKit and egress only); LiveKit names the same Redis. Prod's apply waits for the phase-6 tag (RUNBOOK step 7). |
 
 ### Environment, by name
@@ -115,7 +115,7 @@ libcurl's, and keeps its own `sslmode` settings.
 
 <!-- apps/gateway/src/config.cpp (load_live), apps/gateway/src/main.cpp (make_live), infra/packagers -->
 
-The gateway's stream service (ADR-0091) is on when `LIVEKIT_API_URL` is set, and then needs the
+The gateway's stream service (ADR-0092) is on when `LIVEKIT_API_URL` is set, and then needs the
 rest of these; with it unset none of them may be set, and the stream routes answer `404`. Its
 rows live in the gateway's database (`live_streams`, migration 0011).
 
@@ -139,7 +139,7 @@ The live packager (one process per stream, environment only; on Askedin one Job 
 `ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below),
 `ULW_FFMPEG` and `ULW_FFPROBE`. `ULW_LIVE_CALLER_WAIT_SECONDS` (0 to 86400, default 0: no limit)
 is how long it waits for its SRT caller before it ends the stream without one, as SIGUSR1 would;
-the Job template sets 60 (ADR-0091). It records an ended stream as a video (ADR-0055) when given both of these, and is
+the Job template sets 60 (ADR-0092). It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |
@@ -265,7 +265,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `live_playlist_single_flight_joins_total` | counter | Misses that waited on a store read another request had started instead of starting one |
 | `live_playlist_cache_evictions_total` | counter | Fresh copies dropped for the bounds (512 streams, 4 MiB) |
 | `live_playlist_cache_entries`, `live_playlist_cache_bytes` | gauge | Streams and bytes held |
-| `live_streams_created_total`, `live_tickets_issued_total`, `live_streams_went_live_total` | counter | The stream service (ADR-0091), when live streams are on: streams started, publisher tickets issued, streams first relayed to their packager |
+| `live_streams_created_total`, `live_tickets_issued_total`, `live_streams_went_live_total` | counter | The stream service (ADR-0092), when live streams are on: streams started, publisher tickets issued, streams first relayed to their packager |
 | `live_streams_ended_total{reason="owner"}`, `{reason="finished"}`, `{reason="failed"}`, `{reason="timeout"}` | counter | Streams ended, by why. `failed` (a packager that could not run) or `timeout` (never taken live, or past 13 h) rising is packagers or relays not working |
 | `live_dependency_failures_total{dependency="database"}`, `{dependency="media"}`, `{dependency="packager"}` | counter | Stream service calls that failed or were refused, by what failed: the database, LiveKit, or the packager runtime (the API server, or a packager not listening within 30 s) |
 | `live_sweeps_total` | counter | Looks at the unfinished streams, every 10 s per replica |

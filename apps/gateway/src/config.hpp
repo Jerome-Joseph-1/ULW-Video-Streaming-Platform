@@ -23,7 +23,7 @@ enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
 // (ADR-0001); TLS where the gateway faces clients itself.
 enum class Transport : std::uint8_t { Plain, Tls };
 
-// Where a stream's packager runs (ADR-0091): a child process of the gateway, for development
+// Where a stream's packager runs (ADR-0092): a child process of the gateway, for development
 // and the local stack, or a Kubernetes Job.
 enum class PackagerRuntime : std::uint8_t { Process, Kubernetes };
 

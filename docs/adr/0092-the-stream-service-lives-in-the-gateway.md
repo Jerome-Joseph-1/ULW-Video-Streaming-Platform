@@ -1,4 +1,4 @@
-# 0091. The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word
+# 0092. The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word
 
 Status: Accepted
 Date: 2026-10-03

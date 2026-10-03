@@ -267,7 +267,7 @@ jobs:
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
 
-  # Live publishing as a client does it (docs/adr/0091, tests/e2e/live-publish.e2e.mjs): a
+  # Live publishing as a client does it (docs/adr/0092, tests/e2e/live-publish.e2e.mjs): a
   # broadcaster's page starts a stream through the gateway, publishes Chromium's fake camera
   # over WHIP with the ticket the gateway issued, goes live; the gateway starts the packager
   # and LiveKit's recorder relays to it; a second user watches in hls.js; the broadcaster ends

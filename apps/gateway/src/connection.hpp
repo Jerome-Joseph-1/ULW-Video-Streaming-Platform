@@ -185,7 +185,7 @@ private:
     void fail_playlist(PlaylistFailure failure) noexcept;
     void start_live() noexcept;
     void start_bodiless() noexcept;
-    // The stream service's routes (ADR-0091).
+    // The stream service's routes (ADR-0092).
     void start_stream_route() noexcept;
     void create_stream(LiveStreams& live, const core::UserId& user) noexcept;
     // Status, ticket, start or end, by the route.

@@ -14,7 +14,7 @@
 
 namespace core::ports {
 
-// Where a live stream the stream service started stands (ADR-0091). It only moves forward:
+// Where a live stream the stream service started stands (ADR-0092). It only moves forward:
 // Starting (the owner has a publisher ticket, nothing is relayed yet), Live (the stream's
 // packager runs and the media server relays the publisher to it), Ended.
 enum class LiveState : std::uint8_t {
@@ -152,7 +152,7 @@ using PackagerStateDone =
     std::move_only_function<void(std::expected<PackagerState, PackagerError>) noexcept>;
 
 // Starts and watches one packager per stream: a process beside the gateway, or a Kubernetes Job
-// (ADR-0083, ADR-0091). A packager ends its stream by itself once its publisher goes, or once
+// (ADR-0083, ADR-0092). A packager ends its stream by itself once its publisher goes, or once
 // none has come for a while after it starts, so there is no call to stop one. Every member runs
 // on the reactor thread, and every callback there later, never from inside the call.
 class IPackagers {

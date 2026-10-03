@@ -71,7 +71,7 @@ constexpr std::array kSettings{
     // Read by the store's credential provider; here only to be checked for.
     ops::Setting{.env = "ULW_S3_ACCESS_KEY_ID", .key = "", .secret = true},
     ops::Setting{.env = "ULW_S3_SECRET_ACCESS_KEY", .key = "", .secret = true},
-    // The stream service (ADR-0091).
+    // The stream service (ADR-0092).
     ops::Setting{.env = "LIVEKIT_API_URL", .key = "live.livekit_api_url"},
     ops::Setting{.env = "LIVEKIT_CLIENT_URL", .key = "live.livekit_client_url"},
     ops::Setting{.env = "LIVEKIT_API_KEY", .key = "live.livekit_api_key"},
@@ -447,7 +447,7 @@ constexpr std::string_view kServiceAccountNamespace =
 constexpr std::size_t kMaxTemplate = std::size_t{64} * 1024;
 
 // What a packager started as a process is given besides its stream: the gateway's own store
-// and database, its scratch root, and where it listens (ADR-0091). Values, not the gateway's
+// and database, its scratch root, and where it listens (ADR-0092). Values, not the gateway's
 // whole environment, which holds the LiveKit secret.
 std::expected<void, ConfigError> load_process_runtime(const EnvLookup& env, const Config& config,
                                                       LiveConfig& live) {

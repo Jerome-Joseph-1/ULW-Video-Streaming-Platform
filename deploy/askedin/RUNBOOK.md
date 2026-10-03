@@ -13,7 +13,7 @@ What ships:
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
 | `overlays/{stage,prod}/chat/` | Deployment (3 replicas, docs/adr/0019), Service, HTTPRoute for its WebSocket (`/rt`), NetworkPolicy; secrets and Postgres settings in step 3 |
 | `overlays/{stage,prod}/live-packager/` | The headless Service that names each stream's packager in DNS, and the NetworkPolicy every packager runs under (step 9) |
-| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream by the gateway's stream service, which carries it in its image; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083, 0091) |
+| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream by the gateway's stream service, which carries it in its image; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083, 0092) |
 | `woodpecker.yml` | Kept for Askedin: builds and pushes the four images to git.askedin.com, which no overlay names any more, then `rollout restart`; the images now come prebuilt from GHCR (step 4) |
 | `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
 | `overlays/{stage,prod}/stunner/` | The TURN Gateway (UDP 3478 on stage, 3479 on prod) and the UDPRoute to LiveKit |
@@ -349,7 +349,7 @@ chat is open. A stream's chat room is named by the stream (docs/adr/0070), and v
 by the stream's name. Only such a room can be live: the database refuses any other id
 (`chat_rooms_live_is_a_stream`), since every chat node tells a live chat by its id alone. The
 gateway's stream service opens the chat of every stream it starts, in the statement that stores
-the stream (docs/adr/0091). A stream started by hand (step 9) needs its chat opened before its
+the stream (docs/adr/0092). A stream started by hand (step 9) needs its chat opened before its
 viewers arrive, as the service's role, with the stream's name for `<stream>`:
 
 ```sql
@@ -1202,7 +1202,7 @@ start with no keys and refuse every token (`503`) until a fetch succeeds, which 
 
 A live stream reaches viewers as HLS that its packager writes to the bucket (docs/adr/0046),
 from LiveKit's recorder (egress), which the gateway's stream service starts once the publisher's
-WHIP POST has succeeded and the broadcaster's client says so (docs/adr/0053, 0091). A packager
+WHIP POST has succeeded and the broadcaster's client says so (docs/adr/0053, 0092). A packager
 is one process per stream, so on the cluster it is one Job per stream, made from
 `live-packager/job.yaml` (docs/adr/0083) by the stream service. What it takes:
 

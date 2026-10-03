@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live publishing through the gateway's stream service, end to end (docs/adr/0091):
+# Live publishing through the gateway's stream service, end to end (docs/adr/0092):
 #   tests/e2e/live-publish-run.sh [build-dir, default build/ci] [playwright test arguments...]
 # Needs the Postgres and MinIO of deploy/local/compose.yaml, its LiveKit and egress (the calls
 # profile, started here if LIVEKIT_API_URL is not set and left running), ffmpeg and Node 20 or
