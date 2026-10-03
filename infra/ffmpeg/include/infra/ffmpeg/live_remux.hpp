@@ -61,9 +61,10 @@ struct LiveProbe {
 
 struct LiveRemuxConfig {
     // The ulw_sandbox helper the child is started through (ADR-0025).
+    // It runs the ffmpeg and ffprobe it was built with, and no other file (ADR-0089).
     std::filesystem::path sandbox;
-    std::string ffmpeg = "ffmpeg";
-    // PATH for the child, which gets no other environment.
+    // PATH for the child, which gets no other environment;
+    // nothing looks the program up in it.
     std::string search_path;
 };
 

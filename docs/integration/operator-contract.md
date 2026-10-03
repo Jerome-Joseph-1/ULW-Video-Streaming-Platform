@@ -93,7 +93,8 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_CONFIG` | optional TOML file | same | | See above |
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
-| `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks |
+| `ULW_SCRATCH_DIR`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks. The sandbox helper runs only the ffmpeg and ffprobe it was built with: `/usr/bin/ffmpeg` and `/usr/bin/ffprobe`, as the images install them, unless the image was built with the CMake variables `ULW_SANDBOX_FFMPEG` and `ULW_SANDBOX_FFPROBE` set to other absolute paths (ADR-0089). `PATH` is passed to the children but never used to find them. |
+| `ULW_FFMPEG`, `ULW_FFPROBE` | | refused | | Retired (ADR-0089). Any non-empty value, from the environment, `--ffmpeg-ffmpeg`/`--ffmpeg-ffprobe` or `ffmpeg.ffmpeg`/`ffmpeg.ffprobe` in `ULW_CONFIG`, stops the worker at startup (exit `2`), rather than being ignored; to run another ffmpeg, build the image with `ULW_SANDBOX_FFMPEG` and `ULW_SANDBOX_FFPROBE` |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | The base sets the address to the pod's own, `$(POD_IP):9201`, and takes the secret from `CHAT_SECRET` (ADR-0083) |
 | `LIVEKIT_API_KEY` | | | optional | Turns calls on (ADR-0087): unset or empty, chat starts with calls off and answers every `call` with `calls_disabled`, whatever the other three say. Set, the other three are required, or chat exits `2` naming the missing one. The base reads it from `SFU_SECRET`, as optional |
 | `LIVEKIT_API_SECRET` | | | with `LIVEKIT_API_KEY` | Secret: signs every ticket, and must be the one LiveKit holds for the key (`LIVEKIT_KEYS`). 32 to 256 bytes, checked at start (exit `2`) |
@@ -117,8 +118,8 @@ libcurl's, and keeps its own `sslmode` settings.
 
 The live packager (one process per stream, environment only; on Kubernetes one Job per stream
 from `deploy/kubernetes/live-packager/job.yaml`, ADR-0083) takes
-`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below),
-`ULW_FFMPEG` and `ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
+`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below) and
+`ULW_SANDBOX_BIN`, and refuses `ULW_FFMPEG` and `ULW_FFPROBE` as the worker does. It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |

@@ -17,6 +17,12 @@ namespace {
 constexpr std::string_view kDefaultScratch = "/var/cache/ulw-live";
 constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
 constexpr std::string_view kDefaultIngestHost = "127.0.0.1";
+// ULW_FFMPEG and ULW_FFPROBE named the programs once. The sandbox helper now runs only the ffmpeg
+// and ffprobe it was built with (docs/adr/0089), so a value given for either is refused rather
+// than ignored: the operator meant some other ffmpeg, and would not get it.
+constexpr std::string_view kRetiredProgram =
+    "no longer read: the ffmpeg and ffprobe run are fixed when ulw_sandbox is built "
+    "(ULW_SANDBOX_FFMPEG, ULW_SANDBOX_FFPROBE); unset it";
 
 // The playlist is rewritten once per segment and R2 takes one write per second per key
 // (ADR-0014), so a segment must last more than a second. Past 10 s the stream is not live to
@@ -203,6 +209,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!recording) {
         return std::unexpected(std::move(recording.error()));
     }
+    for (const std::string_view retired : {"ULW_FFMPEG", "ULW_FFPROBE"}) {
+        if (lookup(env, retired)) {
+            return error(retired, kRetiredProgram);
+        }
+    }
     return Config{.stream = std::move(*stream),
                   .ingest_host =
                       lookup(env, "ULW_LIVE_INGEST_HOST").value_or(std::string(kDefaultIngestHost)),
@@ -215,8 +226,6 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   // default, must not clear each other's.
                   .scratch = *scratch / *stream_text,
                   .sandbox = std::move(*sandbox),
-                  .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
-                  .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .segment_seconds = *segment,
                   .window_segments = *window,

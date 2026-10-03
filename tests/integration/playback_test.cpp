@@ -135,10 +135,10 @@ protected:
                                            .frame_rate = {.num = 30, .den = 1},
                                            .duration = core::Millis{6'000},
                                            .has_audio = true};
-        ASSERT_EQ(ulw::test::run_process(
-                      infra::ffmpeg::transcode_args("ffmpeg", clip, out_, media, ladder, 1))
-                      .exit_code,
-                  0);
+        ASSERT_EQ(
+            ulw::test::run_process(infra::ffmpeg::transcode_args(clip, out_, media, ladder, 1))
+                .exit_code,
+            0);
 
         auto store = infra::storage::S3Transfer::create({.credentials = minio_.credentials,
                                                          .clock = clock_,
