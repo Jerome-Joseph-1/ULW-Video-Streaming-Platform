@@ -29,6 +29,18 @@ struct Request {
     // MAX_TOTAL_CONNECTIONS waits unbounded and, if it waited too long, fails as soon as it
     // leaves the queue.
     std::chrono::milliseconds timeout{0};
+    // For a URL someone else chose (a browser's push endpoint): connect only to global unicast
+    // addresses (net::is_global_unicast), checked on every address the name resolves to, at
+    // the moment of connecting, so a name that resolves to a private address, or changes to one
+    // between a check and the connect, reaches nothing; and never through a proxy the
+    // environment names, whose own address is no check of where the request goes. Refused
+    // addresses fail the exchange with AddressRefused.
+    bool public_only = false;
+    // https:// only, whatever the URL says.
+    bool https_only = false;
+    // A PEM bundle of the certificate authorities to trust instead of the system's; empty for the
+    // system's. For tests, which serve a CA of their own.
+    std::string ca_file = {};
 };
 
 struct Response {
@@ -52,6 +64,8 @@ enum class FailureKind : std::uint8_t {
     BodyTooLarge,
     // Nothing reached the network: a malformed URL, an allocation failure, a refused option.
     Local,
+    // Request::public_only: every address the host resolved to is one it may not reach.
+    AddressRefused,
 };
 
 // An exchange that ended without a complete response. A response is never a failure,

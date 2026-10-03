@@ -45,6 +45,8 @@ std::expected<void, MediaError> classify(const curl::Result& result, IfAbsent ab
         switch (result.error().kind) {
         case curl::FailureKind::Tls:
         case curl::FailureKind::Local:
+        // Never asked for: LiveKit is the operator's own.
+        case curl::FailureKind::AddressRefused:
             return std::unexpected(MediaError::Refused);
         case curl::FailureKind::Resolve:
         case curl::FailureKind::Connect:

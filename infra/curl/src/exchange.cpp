@@ -1,5 +1,9 @@
 #include "exchange.hpp"
 
+#include "net/ip_address.hpp"
+
+#include <sys/socket.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -28,7 +32,10 @@ constexpr std::size_t kMaxErrorBody = std::size_t{64} << 10U;
 // S3 sends under 1 KiB of response headers; 16 KiB is the common server-side limit.
 constexpr std::size_t kMaxHeaderBytes = std::size_t{16} << 10U;
 
-FailureKind classify(CURLcode code, bool oversize) noexcept {
+FailureKind classify(CURLcode code, bool oversize, bool refused) noexcept {
+    if (refused && code == CURLE_COULDNT_CONNECT) {
+        return FailureKind::AddressRefused;
+    }
     switch (code) {
     case CURLE_COULDNT_RESOLVE_HOST:
     case CURLE_COULDNT_RESOLVE_PROXY:
@@ -142,7 +149,16 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     bool ok = true;
     const auto set = [&ok](CURLcode rc) { ok = ok && rc == CURLE_OK; };
     set(curl_easy_setopt(e, CURLOPT_URL, request.url.c_str()));
-    set(curl_easy_setopt(e, CURLOPT_PROTOCOLS_STR, "http,https"));
+    set(curl_easy_setopt(e, CURLOPT_PROTOCOLS_STR, request.https_only ? "https" : "http,https"));
+    if (request.public_only) {
+        // No proxy: the check below would vet the proxy's address, not the destination's.
+        set(curl_easy_setopt(e, CURLOPT_PROXY, ""));
+        set(curl_easy_setopt(e, CURLOPT_OPENSOCKETFUNCTION, &Exchange::on_open_socket));
+        set(curl_easy_setopt(e, CURLOPT_OPENSOCKETDATA, this));
+    }
+    if (!request.ca_file.empty()) {
+        set(curl_easy_setopt(e, CURLOPT_CAINFO, request.ca_file.c_str()));
+    }
     // Otherwise libcurl swaps signal handlers around every call, which races between threads;
     // with it, sends use MSG_NOSIGNAL instead.
     set(curl_easy_setopt(e, CURLOPT_NOSIGNAL, 1L));
@@ -211,7 +227,7 @@ Result Exchange::finish(CURLcode code) {
     const std::string_view detail =
         error_[0] != '\0' ? std::string_view(error_.data()) : curl_easy_strerror(code);
     return std::unexpected(
-        Failure{.kind = classify(code, oversize_), .detail = std::string(detail)});
+        Failure{.kind = classify(code, oversize_, refused_), .detail = std::string(detail)});
 }
 
 void Exchange::resume_body() noexcept {
@@ -259,6 +275,26 @@ std::size_t Exchange::on_body(char* data, std::size_t size, std::size_t count,
     }
     ex.response_.body.append(data, n);
     return n;
+}
+
+curl_socket_t Exchange::on_open_socket(void* self, curlsocktype purpose,
+                                       curl_sockaddr* address) noexcept {
+    auto& ex = *static_cast<Exchange*>(self);
+    // Only connections to the destination are opened here; libcurl opens no other kind for an
+    // HTTP request without a proxy.
+    if (purpose != CURLSOCKTYPE_IPCXN || address == nullptr) {
+        ex.refused_ = true;
+        return CURL_SOCKET_BAD;
+    }
+    const auto ip = net::address_of(&address->addr, address->addrlen);
+    if (!ip || !net::is_global_unicast(*ip)) {
+        // libcurl tries the next address the name resolved to, and fails the connect once none
+        // is left.
+        ex.refused_ = true;
+        return CURL_SOCKET_BAD;
+    }
+    // What libcurl's own opener does, with the descriptor closed on exec.
+    return ::socket(address->family, address->socktype | SOCK_CLOEXEC, address->protocol);
 }
 
 std::size_t Exchange::on_read(char* data, std::size_t size, std::size_t count,

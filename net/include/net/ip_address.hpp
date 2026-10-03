@@ -6,6 +6,8 @@
 #include <optional>
 #include <string_view>
 
+struct sockaddr;
+
 namespace net {
 
 // An IPv4 or IPv6 address, IPv4 held as its IPv4-mapped IPv6 form (::ffff:a.b.c.d), so a
@@ -70,6 +72,20 @@ private:
     // Over the 128-bit form: an IPv4 /16 is stored as /112.
     unsigned bits_ = 0;
 };
+
+// Whether a connection to `address` leaves for the public internet: false for anything a host
+// on a private network could reach but a stranger could not (loopback, RFC 1918, CGNAT,
+// link-local, unique local), for addresses no host has (unspecified, multicast, broadcast,
+// documentation, benchmarking, reserved), and for the transition prefixes that carry an IPv4
+// address inside IPv6 (NAT64, 6to4, Teredo, IPv4-compatible), which could reach any of those.
+// IPv6 must lie in 2000::/3, global unicast. What a server fetching a URL a client gave it may
+// connect to (the push services, docs/adr/0097).
+[[nodiscard]] bool is_global_unicast(const IpAddress& address) noexcept;
+
+// The address of an AF_INET or AF_INET6 socket address `length` bytes long; nullopt for any
+// other family or a length too short for its own.
+[[nodiscard]] std::optional<IpAddress> address_of(const sockaddr* address,
+                                                  std::size_t length) noexcept;
 
 // The address at the other end of a connected socket; nullopt once the peer has gone.
 [[nodiscard]] std::optional<IpAddress> peer_address(int fd) noexcept;

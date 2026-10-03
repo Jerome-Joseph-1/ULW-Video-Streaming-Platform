@@ -54,6 +54,9 @@ private:
                                void* self) noexcept;
     static std::size_t on_read(char* data, std::size_t size, std::size_t count,
                                void* self) noexcept;
+    // Request::public_only: opens the socket for a global unicast address only.
+    static curl_socket_t on_open_socket(void* self, curlsocktype purpose,
+                                        curl_sockaddr* address) noexcept;
 
     struct SlistFree {
         void operator()(curl_slist* list) const noexcept { curl_slist_free_all(list); }
@@ -74,6 +77,8 @@ private:
     IDownloadSink* sink_;
     bool paused_ = false;
     bool oversize_ = false;
+    // An address was refused under Request::public_only.
+    bool refused_ = false;
     Response response_;
 };
 

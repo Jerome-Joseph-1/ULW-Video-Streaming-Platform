@@ -24,6 +24,8 @@ Failed failed(const curl::Failure& failure) noexcept {
     case curl::FailureKind::Tls:
     case curl::FailureKind::BodyTooLarge:
     case curl::FailureKind::Local:
+    // Never asked for: the store is the operator's own.
+    case curl::FailureKind::AddressRefused:
         return {.error = StorageError::Permanent, .retry_after = std::nullopt};
     }
     return {.error = StorageError::Permanent, .retry_after = std::nullopt};
