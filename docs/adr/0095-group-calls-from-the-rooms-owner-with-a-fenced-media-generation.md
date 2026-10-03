@@ -36,7 +36,7 @@ What a group adds to a 1:1 call, on the owner:
 | Question | Option | Verdict |
 |---|---|---|
 | Where the generation lives | In memory on the owner | Rejected: a new owner would start again at 1 and re-create a generation closed to keep someone out |
-| | A column of `room_state`, read and moved on under the owner's generation (`media_generation`, migration 0015), through `IRoomStore::media_generation` and `RoomRouter::media_generation` | Accepted: the same fence as every owner write (ADR-0015); a deposed owner neither reads nor moves it, and a fenced step gives the room up like a fenced append |
+| | A column of `room_state`, read and moved on under the owner's generation (`media_generation`, migration 0014), through `IRoomStore::media_generation` and `RoomRouter::media_generation` | Accepted: the same fence as every owner write (ADR-0015); a deposed owner neither reads nor moves it, and a fenced step gives the room up like a fenced append |
 | When a new owner learns it | From the claim's answer | Rejected: the router would carry a call's number for every room it claims |
 | | A fenced read on the first ask after the node took the room, the handle keyed by the owner generation it was read under | Accepted: one indexed read per room and ownership |
 | Who may put someone out | Any member | Rejected: anyone could empty a call |
@@ -123,7 +123,7 @@ headers included), out over in 2.96 against 3, and 0.047 cores per call, under t
 
 ## Consequences
 
-- A release with this needs migration 0015 applied first (the gateway's init container does).
+- A release with this needs migration 0014 applied first (the gateway's init container does).
 - Expelling or removing one member reconnects everyone else in the call, once.
 - After an owner change the new owner knows no call (ADR-0091): a member removed while nobody
   has asked the new owner for a ticket stays in the media room until they leave; the first ticket

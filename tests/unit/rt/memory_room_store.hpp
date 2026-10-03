@@ -28,7 +28,7 @@ public:
         core::NodeId owner;
         std::uint64_t generation = 1;
         std::uint64_t last_seq = 0;
-        // room_state.media_generation (migrations/0015): from 1, moved on by its owner only.
+        // room_state.media_generation (migrations/0014): from 1, moved on by its owner only.
         std::uint64_t media_generation = 1;
         bool stale = false;
     };

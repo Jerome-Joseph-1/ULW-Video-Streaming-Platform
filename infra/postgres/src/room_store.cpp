@@ -154,7 +154,7 @@ UPDATE room_state SET last_seq = last_seq + 1
  WHERE room_id = $1 AND owner_generation = $2
 RETURNING last_seq, true)sql";
 
-// A room's media generation (migrations/0015), read or moved on under the owner's generation:
+// A room's media generation (migrations/0014), read or moved on under the owner's generation:
 // no row when another owner holds the room. Never touches last_seq.
 constexpr Sql kReadMediaGeneration = R"sql(
 SELECT media_generation FROM room_state WHERE room_id = $1 AND owner_generation = $2)sql";
