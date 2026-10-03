@@ -18,15 +18,110 @@ inputs:
 runs:
   using: composite
   steps:
+    # The self-hosted host runs four runners as one user, so up to four jobs at once share its
+    # apt and its home directory. apt-get install waits for dpkg's lock (DPkg::Lock::Timeout);
+    # apt-get update does not wait for the lists lock, which a peer job or apt's own timers may
+    # hold, so it is retried.
     - name: Install toolchain
       shell: bash
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq --no-install-recommends \
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          sudo apt-get update -qq && break
+          if (( attempt == 10 )); then
+            echo "::error::apt-get update failed 10 times, 15 s apart"
+            exit 1
+          fi
+          sleep 15
+        done
+        sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends \
           g++-14 clang-19 clang-tidy-19 clang-format-18 lld-19 libclang-rt-19-dev \
           ninja-build ccache mold jq pkg-config \
           libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev libjemalloc-dev zlib1g-dev ffmpeg \
           python3-yaml
+    # What a hosted image carries and a bare Ubuntu 24.04 host does not. Ubuntu's rustup (1.26)
+    # cannot install the toolchain rust-toolchain.toml names without being told it again, so
+    # rustup 1.29.1 is fetched, pinned by digest, once per host, under a lock its runners share.
+    # Its directory is on the runners' own PATH (their .path file), not added here: zizmor's
+    # github-env audit refuses an action that writes $GITHUB_PATH.
+    - name: Install what the hosted image has
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends \
+          cmake docker-compose-v2 build-essential
+        flock -w 900 "$HOME/.rustup-install.lock" bash -euo pipefail -c '
+          if [[ ! -x ~/.cargo/bin/rustup ]]; then
+            init=$(mktemp)
+            curl -sSfo "$init" https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init
+            echo "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71  $init" | sha256sum -c -
+            chmod +x "$init"
+            "$init" -y --no-modify-path --default-toolchain none --profile minimal
+            rm -f "$init"
+          fi
+        '
+        if [[ $(command -v rustup) != "$HOME/.cargo/bin/rustup" ]]; then
+          echo "::error::$HOME/.cargo/bin must be on the runner's PATH, ahead of any other rustup"
+          exit 1
+        fi
+    # The reactor's tests run under io_uring and epoll alike, and a host that refuses the
+    # reactor its ring fails every io_uring one with nothing but "Value of: r, Actual: false".
+    # The probe sets up a ring and buffer rings of the reactor's sizes, as the runner's user
+    # under the runner service's limits, and the job stops here naming the cause instead.
+    # One ring fitting is not enough on this host: its kernel charges each reactor's ring
+    # (about 400 KiB at 4096 entries) to the locked memory of the user that made it, and the
+    # four runners are one user, so every reactor in every concurrent job's tests draws on one
+    # budget. Under the default 8 MiB a few reactors in each run failed with ENOMEM ("Cannot
+    # allocate memory"), in whichever job came short. Only an unlimited budget holds whatever
+    # the four jobs open at once.
+    - name: Check that the host gives the reactor its io_uring
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        probe="$RUNNER_TEMP/io_uring_probe"
+        gcc -O2 tools/io_uring_probe.c -o "$probe" -luring
+        echo "kernel $(uname -r), user $(id -un), max locked memory $(ulimit -l) KiB"
+        if "$probe" | tee "$probe.out"; then
+          if [[ $(ulimit -l) != unlimited ]]; then
+            echo "::error::The runner's max locked memory is $(ulimit -l) KiB, shared by the four runners' jobs as one user, and kernel $(uname -r) charges every reactor's ring to it, so io_uring tests fail with ENOMEM whenever the jobs' reactors together pass it. The runner services need LimitMEMLOCK=infinity: docs/operations/soak.md, The self-hosted host."
+            exit 1
+          fi
+          exit 0
+        fi
+        if grep -q '^provided buffer ring.* NO$' "$probe.out"; then
+          echo "::error::Kernel $(uname -r) refuses every provided buffer ring (IORING_REGISTER_PBUF_RING answers EINVAL however the ring is set up), and the reactor receives into one, so every io_uring test would fail. Ubuntu 24.04's 6.8 kernel does this by 6.8.0-146; the host needs the HWE kernel: docs/operations/soak.md, The self-hosted host."
+          exit 1
+        fi
+        errno=$(sed -n 's/.*(errno \([0-9]*\)).*/\1/p' "$probe.out" | head -n1)
+        case "$errno" in
+          12)
+            echo "::error::io_uring refused the reactor's ring for memory (ENOMEM) under a max locked memory of $(ulimit -l) KiB. The runner services need a higher LimitMEMLOCK: docs/operations/soak.md, The self-hosted host."
+            ;;
+          1)
+            echo "::error::io_uring is refused to $(id -un) (EPERM): kernel.io_uring_disabled is $(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo absent). The host needs kernel.io_uring_disabled=0: docs/operations/soak.md, The self-hosted host."
+            ;;
+          *)
+            echo "::error::io_uring cannot give the reactor what it needs on kernel $(uname -r) (errno ${errno:-none}); the probe's report is above. docs/operations/soak.md, The self-hosted host, lists what the host must provide."
+            ;;
+        esac
+        exit 1
+    # On the self-hosted host the crate registry and the ccache live in the job's own
+    # workspace (.cargo-home, .ccache; git-ignored, and removed by the next checkout's clean),
+    # not the home its runners share: no job reads what a concurrent or an earlier one left
+    # there, and both come from and go to the Actions cache exactly as on a hosted runner, with
+    # its per-branch scoping. The cache paths are relative, so the host's runners all use one
+    # cache entry per key. Four jobs share the host's six cores and 12 GB: each builds with
+    # three jobs rather than Ninja's cores-plus-two, and nproc (coreutils), which honours
+    # OMP_NUM_THREADS, gives tools/run-clang-tidy.sh the same share.
+    - name: Keep this job's state to itself on the self-hosted host
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        {
+          echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo-home"
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache"
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=3"
+          echo "OMP_NUM_THREADS=3"
+        } >>"$GITHUB_ENV"
     # The worker runs ffmpeg in a network namespace of its own (ADR-0025). The runners'
     # AppArmor policy refuses unprivileged user namespaces, and the worker refuses to start
     # without its sandbox, so its tests would only skip.
@@ -44,8 +139,8 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
-          ~/.cargo/registry/index
-          ~/.cargo/registry/cache
+          ${{ runner.environment == 'self-hosted' && '.cargo-home' || '~/.cargo' }}/registry/index
+          ${{ runner.environment == 'self-hosted' && '.cargo-home' || '~/.cargo' }}/registry/cache
         key: cargo-registry-${{ hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock') }}
     # A cold build of the bridge takes minutes; cargo rebuilds what the lock file or the
     # sources changed.
@@ -58,33 +153,36 @@ runs:
         restore-keys: cargo-build-${{ inputs.cache-key }}-
     # rustup installs the release rust-toolchain.toml names, checked against the channel's
     # signed manifest; cargo fetch downloads exactly what Cargo.lock lists, checksums and all.
+    # rustup does not lock its own directory, so jobs sharing a host take turns.
     - name: Install the pinned Rust toolchain and fetch the bridge's crates
       if: hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock') != ''
       shell: bash
       working-directory: infra/e2ee/mls_ffi_bridge
       run: |
-        rustup toolchain install --no-self-update
+        flock -w 900 "$HOME/.rustup-install.lock" rustup toolchain install --no-self-update
         cargo fetch --locked
     - name: Restore ccache
       if: inputs.ccache != 'false' && inputs.ccache-save != 'false'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/.cache/ccache
+        path: ${{ runner.environment == 'self-hosted' && '.ccache' || '~/.cache/ccache' }}
         key: ccache-${{ inputs.cache-key }}-${{ github.sha }}
         restore-keys: ccache-${{ inputs.cache-key }}-
     - name: Restore ccache, not to be saved
       if: inputs.ccache != 'false' && inputs.ccache-save == 'false'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/.cache/ccache
+        path: ${{ runner.environment == 'self-hosted' && '.ccache' || '~/.cache/ccache' }}
         key: ccache-${{ inputs.cache-key }}-${{ github.sha }}
         restore-keys: ccache-${{ inputs.cache-key }}-
     # In ccache's own configuration file (~/.config/ccache/ccache.conf) rather than
-    # $GITHUB_ENV, which would hand every later step of the job whatever was written to it.
+    # $GITHUB_ENV, which would hand every later step of the job whatever was written to it. On
+    # the self-hosted host, CCACHE_DIR (above) makes that file $CCACHE_DIR/ccache.conf, the
+    # job's own, rather than the one its peers share.
     - name: Configure ccache
       if: inputs.ccache != 'false'
       shell: bash
       run: |
-        ccache --set-config=cache_dir="$HOME/.cache/ccache"
+        ccache --set-config=cache_dir="${CCACHE_DIR:-$HOME/.cache/ccache}"
         ccache --set-config=max_size=400M
         ccache --zero-stats

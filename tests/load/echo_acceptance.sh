@@ -6,7 +6,17 @@ set -euo pipefail
 build=$1
 reactor=$2
 secs=${3:-60}
-port=$((7200 + RANDOM % 500))
+# A port nothing listens on, below the ephemeral range: runs of this script, and other jobs,
+# may share a host. One taken between this check and the server's start fails start_server.
+port=
+for _ in $(seq 100); do
+    candidate=$((20000 + RANDOM % 10000))
+    if [[ -z $(ss -Htln "sport = :$candidate") ]]; then
+        port=$candidate
+        break
+    fi
+done
+[[ -n $port ]] || { echo "FAILED: no free port found" >&2; exit 1; }
 server=$build/tests/ulw_echo_server
 loadgen=$build/tests/ulw_loadgen
 
