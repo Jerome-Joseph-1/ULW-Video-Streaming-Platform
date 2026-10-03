@@ -4,18 +4,26 @@
 
 #include "sockaddr.hpp"
 
+#include <linux/capability.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <new>
 #include <poll.h>
+#include <string>
+#include <unistd.h>
 #include <utility>
 
 namespace net::detail {
@@ -87,6 +95,38 @@ bool is_transient_accept_error(int err) noexcept {
     default:
         return false;
     }
+}
+
+// The kernel honours CAP_IPC_LOCK only in the initial user namespace, whose uid_map maps every
+// id to itself; inside any other, capget reports a capability the charge ignores.
+[[nodiscard]] bool in_initial_user_namespace() noexcept {
+    std::ifstream map("/proc/self/uid_map");
+    std::uint64_t inside = 1;
+    std::uint64_t outside = 1;
+    std::uint64_t count = 0;
+    std::string rest;
+    return static_cast<bool>(map >> inside >> outside >> count) && inside == 0 && outside == 0 &&
+           count == 4'294'967'295U && !(map >> rest);
+}
+
+[[nodiscard]] bool has_ipc_lock() noexcept {
+    __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+    std::array<__user_cap_data_struct, _LINUX_CAPABILITY_U32S_3> caps{};
+    if (::syscall(SYS_capget, &header, caps.data()) != 0) {
+        return false;
+    }
+    return (caps[0].effective & (1U << static_cast<unsigned>(CAP_IPC_LOCK))) != 0 &&
+           in_initial_user_namespace();
+}
+
+// True where the kernel cannot refuse this process locked memory: an unlimited RLIMIT_MEMLOCK,
+// or CAP_IPC_LOCK.
+[[nodiscard]] bool locked_memory_is_uncharged() noexcept {
+    rlimit limit{};
+    if (::getrlimit(RLIMIT_MEMLOCK, &limit) == 0 && limit.rlim_cur == RLIM_INFINITY) {
+        return true;
+    }
+    return has_ipc_lock();
 }
 
 } // namespace
@@ -223,7 +263,17 @@ io_uring_sqe* UringReactor::next_sqe() noexcept {
 // Zero copy is only used where the kernel also says whether it managed it
 // (IORING_SEND_ZC_REPORT_USAGE, 6.2): 6.1 has SENDMSG_ZC but rejects the flag with EINVAL, and
 // the opcode probe cannot tell the two apart, so one real send to ourselves decides.
+//
+// The SQ and CQ rings are charged to the locked-memory counter their user shares across all its
+// processes since 6.14, checked against RLIMIT_MEMLOCK unless the process has CAP_IPC_LOCK. So
+// is every SENDMSG_ZC in flight since 6.15 (SEND_ZC since 6.0): two pages for a datagram, so
+// kMaxSendsInFlight of them are 8 MiB, the whole of the usual default limit. The burst below
+// (or a busy socket) could then refuse another reactor of the same user its ring with ENOMEM,
+// so zero copy is only tried where the limit is unlimited or the process is exempt from it.
 bool UringReactor::probe_zero_copy_send() noexcept {
+    if (!locked_memory_is_uncharged()) {
+        return false;
+    }
     io_uring_probe* probe = io_uring_get_probe_ring(&ring_);
     if (probe == nullptr) {
         return false;
@@ -246,9 +296,8 @@ bool UringReactor::probe_zero_copy_send() noexcept {
     probe_.msg.msg_namelen = sizeof(sockaddr_in);
     probe_.msg.msg_iov = &probe_.iov;
     probe_.msg.msg_iovlen = 1;
-    // As many sends at once as the reactor ever holds: on the 6.8 kernel of CI's runners a single
-    // zero-copy send succeeds while a burst of them to one socket fails some, so only a burst
-    // confirms zero copy is safe to use.
+    // As many sends at once as the reactor ever holds, so that a kernel which refuses some of a
+    // burst (where one send alone succeeds) is never trusted with zero copy.
     for (std::size_t i = 0; i < kMaxSendsInFlight; ++i) {
         io_uring_sqe* sqe = next_sqe();
         io_uring_prep_sendmsg_zc(sqe, fd->get(), &probe_.msg, 0);
