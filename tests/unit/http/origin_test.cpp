@@ -59,4 +59,50 @@ TEST(Origin, OnlyTheExactSpellingIsAllowed) {
     EXPECT_FALSE(http::parse_origin_list("https://[::1],https://[0:0:0:0:0:0:0:1]"));
 }
 
+// A host whose last label is a number is an IPv4 address to the URL standard, which writes it
+// as four decimal octets: 0x7f.1, 127.1, 010.0.0.1 and 10.0.0.1. are all written otherwise, and
+// a.0x1 or 256.0.0.1 is no URL at all, so none of them could ever match.
+TEST(Origin, Ipv4HostsAreFourDecimalOctets) {
+    for (const char* origin :
+         {"https://10.0.0.1", "https://192.0.2.255:8443", "https://0.0.0.0",
+          "http://127.0.0.1:8080", "https://1e3", "https://a.example1", "https://1.example"}) {
+        EXPECT_TRUE(http::is_origin(origin)) << origin;
+    }
+    for (const char* origin : {"https://010.0.0.1",
+                               "https://10.0.0.01",
+                               "https://10.00.0.1",
+                               "https://0x7f.1",
+                               "https://0x7f.0.0.1",
+                               "https://127.1",
+                               "https://127.0.1",
+                               "https://2130706433",
+                               "https://256.0.0.1",
+                               "https://1.2.3.256",
+                               "https://1.2.3.4.5",
+                               "https://10.0.0.1.",
+                               "https://10.0.0.1.:8443",
+                               "https://a.0x1",
+                               "https://example.123",
+                               "https://a.09",
+                               "https://0x",
+                               "https://1..2.3",
+                               "http://127.1",
+                               "http://0x7f.0.0.1:3000",
+                               "http://127.0.0.1."}) {
+        EXPECT_FALSE(http::is_origin(origin)) << origin;
+    }
+}
+
+// A browser lowercases a domain and leaves the scheme's default port out; both were already
+// refused. It keeps a trailing dot (https://a.example./ is sent as https://a.example.), so a
+// domain ending in one can match and is not refused.
+TEST(Origin, DomainsAreLowercaseWithoutTheDefaultPort) {
+    for (const char* origin : {"https://App.example", "https://a.EXAMPLE:8443",
+                               "https://a.example:443", "http://localhost:80"}) {
+        EXPECT_FALSE(http::is_origin(origin)) << origin;
+    }
+    EXPECT_TRUE(http::is_origin("https://a.example."));
+    EXPECT_TRUE(http::is_origin("https://a.example.:8443"));
+}
+
 } // namespace

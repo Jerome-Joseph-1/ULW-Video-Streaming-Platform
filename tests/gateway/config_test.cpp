@@ -326,19 +326,36 @@ TEST_F(ConfigTest, PlainHttpOriginsAreLoopbackOnlyAndDefaultPortsAreRefused) {
 }
 
 // Only a port, host and bytes a browser could write in Origin: the default port is caught by
-// value, and no prefix or userinfo dresses another host up as loopback.
+// value, no prefix or userinfo dresses another host up as loopback, and an IPv4 host is four
+// decimal octets.
 TEST_F(ConfigTest, OriginsNoBrowserSendsAreRefused) {
     env["ULW_ALLOWED_ORIGINS"] = "https://a.example:1,https://a.example:65535,https://[::1]";
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_EQ(config->limits.allowed_origins.size(), 3U);
-    for (const char* bad :
-         {"https://a.example:abc", "http://localhost:abc", "https://a:b:c",
-          "http://localhost:3000:4000", "http://[::1]:x", "https://a.example:0",
-          "https://a.example:65536", "https://a.example:123456", "http://localhost:0080",
-          "https://a.example:0443", "https://a.example\x01", "https://caf\xc3\xa9.example",
-          "https://a.example\t", "https://[]", "https://[]:443", "http://localhost.evil.example",
-          "http://localhost@evil.example", "http://127.0.0.1.evil.example"}) {
+    for (const char* bad : {"https://a.example:abc",
+                            "http://localhost:abc",
+                            "https://a:b:c",
+                            "http://localhost:3000:4000",
+                            "http://[::1]:x",
+                            "https://a.example:0",
+                            "https://a.example:65536",
+                            "https://a.example:123456",
+                            "http://localhost:0080",
+                            "https://a.example:0443",
+                            "https://a.example\x01",
+                            "https://caf\xc3\xa9.example",
+                            "https://a.example\t",
+                            "https://[]",
+                            "https://[]:443",
+                            "http://localhost.evil.example",
+                            "http://localhost@evil.example",
+                            "http://127.0.0.1.evil.example",
+                            "https://010.0.0.1",
+                            "https://0x7f.1",
+                            "https://127.1",
+                            "https://256.0.0.1",
+                            "https://10.0.0.1."}) {
         env["ULW_ALLOWED_ORIGINS"] = bad;
         EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
     }

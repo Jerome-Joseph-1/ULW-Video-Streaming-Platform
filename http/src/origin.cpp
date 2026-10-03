@@ -125,6 +125,66 @@ namespace {
     return literal == std::string_view{buffer.data(), length};
 }
 
+// Whether `label` parses as an IPv4 number in the URL standard: decimal, octal after a leading
+// 0, or hex after 0x, the prefix alone being zero.
+[[nodiscard]] bool is_ipv4_number(std::string_view label) noexcept {
+    if (label.empty()) {
+        return false;
+    }
+    if (label.starts_with("0x")) {
+        return std::ranges::all_of(label.substr(2), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        });
+    }
+    if (label.size() > 1 && label.front() == '0') {
+        return std::ranges::all_of(label.substr(1), [](char c) { return c >= '0' && c <= '7'; });
+    }
+    return std::ranges::all_of(label, [](char c) { return c >= '0' && c <= '9'; });
+}
+
+// The URL standard's "ends in a number": the last label, past one trailing dot, is all digits or
+// an IPv4 number. Such a host is an IPv4 address (or no URL at all), never a domain.
+[[nodiscard]] bool ends_in_a_number(std::string_view host) noexcept {
+    if (host.ends_with('.')) {
+        if (host.find('.') == host.size() - 1) {
+            return false;
+        }
+        host.remove_suffix(1);
+    }
+    const std::size_t dot = host.rfind('.');
+    const std::string_view last = dot == std::string_view::npos ? host : host.substr(dot + 1);
+    return (!last.empty() &&
+            std::ranges::all_of(last, [](char c) { return c >= '0' && c <= '9'; })) ||
+           is_ipv4_number(last);
+}
+
+// True when `host` is four decimal octets 0-255 without leading zeros, the only way a browser
+// writes an IPv4 host.
+[[nodiscard]] bool is_canonical_ipv4(std::string_view host) noexcept {
+    for (int octet = 0; octet < 4; ++octet) {
+        const std::size_t dot = host.find('.');
+        if ((octet == 3) != (dot == std::string_view::npos)) {
+            return false;
+        }
+        const std::string_view digits = host.substr(0, dot);
+        if (digits.empty() || digits.size() > 3 || (digits.size() > 1 && digits.front() == '0')) {
+            return false;
+        }
+        unsigned value = 0;
+        for (const char c : digits) {
+            if (c < '0' || c > '9') {
+                return false;
+            }
+            value = (value * 10) + static_cast<unsigned>(c - '0');
+        }
+        if (value > 255) {
+            return false;
+        }
+        host = dot == std::string_view::npos ? std::string_view{} : host.substr(dot + 1);
+    }
+    return true;
+}
+
 } // namespace
 
 bool is_origin(std::string_view origin) noexcept {
@@ -165,7 +225,10 @@ bool is_origin(std::string_view origin) noexcept {
     }
     host_end = std::min(host_end, rest.size());
     const std::string_view host = rest.substr(0, host_end);
-    if (host.empty() || (plain && !is_loopback(host))) {
+    // A host ending in a number is an IPv4 address, which a browser writes only one way; any
+    // other spelling (010.0.0.1, 0x7f.1, 127.1, 10.0.0.1.) or a number past 255 never matches.
+    if (host.empty() || (plain && !is_loopback(host)) ||
+        (!host.starts_with('[') && ends_in_a_number(host) && !is_canonical_ipv4(host))) {
         return false;
     }
     if (host_end == rest.size()) {
