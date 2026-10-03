@@ -39,16 +39,9 @@ has to disappear when the gateway that holds it does.
   active.
 - Advisory locks are reentrant within a session, so the catalog also keeps a map of its own
   claims and refuses a second claim of the same upload from the same process.
-- The claim is released when the request ends. It is a claim on appends. A
+- The claim is released when the request ends (`release_claim`). It is a claim on appends. A
   commit does not take it (ADR-0049); the reaper takes the transaction-level form of the same
   key and skips an upload whose claim is held.
-- A claim belongs to the request that took it. The connection keeps it in an `UploadClaim`
-  (`apps/gateway/src/upload_claim.hpp`) together with the number of that request, and every
-  release names a request: finishing a request releases its own claim, a catalog answer or
-  storage job that completes after its request ended releases nothing another request holds,
-  and closing the connection releases whatever is held. A debug build asserts that no claim is
-  held once a request finishes. `catalog_claims_held` counts the claims a gateway's requests
-  hold; with no PATCH running it is 0.
 - All claims of one process live on one connection. If that connection is lost every claim goes
   with it: claims in flight fail `Unavailable`, and `record_progress` under a lost claim fails
   `Conflict`. The holder claims again.
