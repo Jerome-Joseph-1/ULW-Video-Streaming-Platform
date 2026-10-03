@@ -92,13 +92,19 @@ bool derive(const detail::Scalar& ecdh_secret, const AuthSecret& auth, const Pub
     return ok;
 }
 
-std::expected<std::vector<std::uint8_t>, EceError> seal(EVP_PKEY* sender, const Salt& salt,
-                                                        const PublicKey& ua_public,
-                                                        const AuthSecret& auth,
-                                                        std::span<const std::uint8_t> plaintext) {
+std::expected<std::vector<std::uint8_t>, EceError>
+seal(EVP_PKEY* sender, const Salt& salt, const PublicKey& ua_public, const AuthSecret& auth,
+     std::span<const std::uint8_t> plaintext, std::size_t pad_to) {
     if (plaintext.size() > kMaxPlaintext) {
         return std::unexpected(EceError::TooLarge);
     }
+    // The record: the plaintext, its delimiter, then zeros up to the next multiple of pad_to,
+    // never past what one message holds.
+    std::size_t record = plaintext.size() + 1;
+    if (pad_to > 0) {
+        record = std::min(((record + pad_to - 1) / pad_to) * pad_to, kMaxPlaintext + 1);
+    }
+    const std::size_t padding = record - plaintext.size() - 1;
     const Pkey peer = detail::import_public(ua_public);
     if (!peer) {
         return std::unexpected(EceError::BadKey);
@@ -116,7 +122,7 @@ std::expected<std::vector<std::uint8_t>, EceError> seal(EVP_PKEY* sender, const 
     }
 
     std::vector<std::uint8_t> out;
-    out.reserve(kHeaderBytes + plaintext.size() + 1 + kTagBytes);
+    out.reserve(kHeaderBytes + record + kTagBytes);
     out.insert(out.end(), salt.begin(), salt.end());
     for (const unsigned shift : {24U, 16U, 8U, 0U}) {
         out.push_back(static_cast<std::uint8_t>((kRecordSize >> shift) & 0xffU));
@@ -130,7 +136,7 @@ std::expected<std::vector<std::uint8_t>, EceError> seal(EVP_PKEY* sender, const 
         return std::unexpected(EceError::Crypto);
     }
     const std::size_t start = out.size();
-    out.resize(start + plaintext.size() + 1 + kTagBytes);
+    out.resize(start + record + kTagBytes);
     int written = 0;
     int total = 0;
     if (EVP_EncryptUpdate(ctx.get(), out.data() + start, &written, plaintext.data(),
@@ -142,11 +148,19 @@ std::expected<std::vector<std::uint8_t>, EceError> seal(EVP_PKEY* sender, const 
         return std::unexpected(EceError::Crypto);
     }
     total += written;
+    if (padding > 0) {
+        const std::vector<std::uint8_t> zeros(padding, 0);
+        if (EVP_EncryptUpdate(ctx.get(), out.data() + start + total, &written, zeros.data(),
+                              static_cast<int>(zeros.size())) != 1) {
+            return std::unexpected(EceError::Crypto);
+        }
+        total += written;
+    }
     if (EVP_EncryptFinal_ex(ctx.get(), out.data() + start + total, &written) != 1) {
         return std::unexpected(EceError::Crypto);
     }
     total += written;
-    if (static_cast<std::size_t>(total) != plaintext.size() + 1 ||
+    if (static_cast<std::size_t>(total) != record ||
         EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, static_cast<int>(kTagBytes),
                             out.data() + start + total) != 1) {
         return std::unexpected(EceError::Crypto);
@@ -170,16 +184,17 @@ std::expected<KeyPair, EceError> generate_key_pair() noexcept {
     return KeyPair{.private_key = *priv, .public_key = *pub};
 }
 
-std::expected<std::vector<std::uint8_t>, EceError>
-encrypt(const PublicKey& ua_public, const AuthSecret& auth,
-        std::span<const std::uint8_t> plaintext) noexcept {
+std::expected<std::vector<std::uint8_t>, EceError> encrypt(const PublicKey& ua_public,
+                                                           const AuthSecret& auth,
+                                                           std::span<const std::uint8_t> plaintext,
+                                                           std::size_t pad_to) noexcept {
     try {
         const Pkey sender = detail::generate();
         Salt salt{};
         if (!sender || RAND_bytes(salt.data(), static_cast<int>(salt.size())) != 1) {
             return std::unexpected(EceError::Crypto);
         }
-        return seal(sender.get(), salt, ua_public, auth, plaintext);
+        return seal(sender.get(), salt, ua_public, auth, plaintext, pad_to);
     } catch (const std::bad_alloc&) {
         return std::unexpected(EceError::Crypto);
     }
@@ -187,13 +202,14 @@ encrypt(const PublicKey& ua_public, const AuthSecret& auth,
 
 std::expected<std::vector<std::uint8_t>, EceError>
 encrypt_with(const PrivateKey& as_private, const Salt& salt, const PublicKey& ua_public,
-             const AuthSecret& auth, std::span<const std::uint8_t> plaintext) noexcept {
+             const AuthSecret& auth, std::span<const std::uint8_t> plaintext,
+             std::size_t pad_to) noexcept {
     try {
         const Pkey sender = detail::import_private(as_private);
         if (!sender) {
             return std::unexpected(EceError::BadKey);
         }
-        return seal(sender.get(), salt, ua_public, auth, plaintext);
+        return seal(sender.get(), salt, ua_public, auth, plaintext, pad_to);
     } catch (const std::bad_alloc&) {
         return std::unexpected(EceError::Crypto);
     }

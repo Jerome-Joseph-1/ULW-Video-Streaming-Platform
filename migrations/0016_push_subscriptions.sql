@@ -21,13 +21,13 @@ CREATE UNIQUE INDEX push_subscriptions_endpoint ON push_subscriptions (endpoint)
 
 -- Saves a device's subscription in one statement: takes the endpoint from whoever held it,
 -- writes the device's row, and forgets the user's devices updated longest ago past p_max. The
--- per-user advisory lock (class 15, the migration's number, so no other lock shares its keys)
+-- per-user advisory lock (class 16, the migration's number, so no other lock shares its keys)
 -- keeps two saves of one user from each counting without the other and leaving p_max + 1.
 CREATE FUNCTION push_subscribe(p_user text, p_device uuid, p_endpoint text, p_p256dh bytea,
                                p_auth bytea, p_max integer) RETURNS void
 LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM pg_advisory_xact_lock(15, hashtext(p_user));
+    PERFORM pg_advisory_xact_lock(16, hashtext(p_user));
     DELETE FROM push_subscriptions
         WHERE endpoint = p_endpoint AND (user_id, device_id) <> (p_user, p_device);
     INSERT INTO push_subscriptions (user_id, device_id, endpoint, p256dh, auth)

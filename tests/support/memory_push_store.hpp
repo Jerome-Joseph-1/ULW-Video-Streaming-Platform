@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,6 +25,10 @@ public:
 
     void save(const core::UserId& user, const core::ports::PushSubscription& subscription,
               std::size_t max_per_user, core::ports::PushCallback<void> done) override {
+        if (throw_next) {
+            throw_next = false;
+            throw std::bad_alloc();
+        }
         ++saves;
         later([this, user, subscription, max_per_user, done = std::move(done)]() mutable noexcept {
             if (fail) {
@@ -53,6 +58,10 @@ public:
 
     void remove(const core::UserId& user, const core::DeviceId& device,
                 core::ports::PushCallback<void> done) override {
+        if (throw_next) {
+            throw_next = false;
+            throw std::bad_alloc();
+        }
         later([this, user, device, done = std::move(done)]() mutable noexcept {
             if (fail) {
                 done(std::unexpected(core::ports::PushStoreError::Unavailable));
@@ -115,6 +124,8 @@ public:
 
     std::vector<Row> rows;
     bool fail = false;
+    // The next save or remove throws, as a store out of memory would, asking nothing.
+    bool throw_next = false;
     std::size_t saves = 0;
     std::size_t lists = 0;
 

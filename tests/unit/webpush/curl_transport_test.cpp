@@ -153,7 +153,11 @@ TEST(OutcomeOf, MapsFailuresAndReadsOnlyDeltaSeconds) {
     EXPECT_EQ(with("HTTP/1.1 503 x\r\nRetry-After: 120\r\n\r\n"), core::Seconds{120});
     EXPECT_FALSE(with("HTTP/1.1 503 x\r\nRetry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n"));
     EXPECT_FALSE(with("HTTP/1.1 503 x\r\nRetry-After: -1\r\n\r\n"));
-    EXPECT_FALSE(with("HTTP/1.1 503 x\r\nRetry-After: 86401\r\n\r\n"));
+    // Past a day, however far, is a day and a second: the sender's "never".
+    EXPECT_EQ(with("HTTP/1.1 503 x\r\nRetry-After: 86401\r\n\r\n"), core::Seconds{86401});
+    EXPECT_EQ(with("HTTP/1.1 503 x\r\nRetry-After: 99999999999999999999\r\n\r\n"),
+              core::Seconds{86401});
+    EXPECT_EQ(with("HTTP/1.1 503 x\r\nRetry-After: 86400\r\n\r\n"), core::Seconds{86400});
     EXPECT_FALSE(with("HTTP/1.1 503 x\r\n\r\n"));
 }
 

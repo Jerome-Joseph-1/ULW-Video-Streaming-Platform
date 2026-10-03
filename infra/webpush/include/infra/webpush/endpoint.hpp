@@ -56,7 +56,8 @@ private:
 };
 
 struct Endpoint {
-    // As given.
+    // Canonical: the scheme and host in lower case, the default port left out, the path and
+    // query as given. What is stored and sent to.
     std::string url;
     // "https://<host>", the host in lower case: the VAPID token's audience.
     std::string origin;

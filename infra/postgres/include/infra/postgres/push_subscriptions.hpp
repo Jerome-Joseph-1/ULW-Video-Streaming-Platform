@@ -22,7 +22,7 @@ struct PushSubscriptionsConfig {
     core::Millis request_timeout{2000};
 };
 
-// IPushSubscriptions on Postgres (migrations/0015_push_subscriptions.sql), driven by the reactor.
+// IPushSubscriptions on Postgres (migrations/0016_push_subscriptions.sql), driven by the reactor.
 // Endpoints are capabilities: neither they nor anything derived from them reaches a log or an
 // error. The offload pool resolves host names and must be stopped before this is destroyed. Calls
 // outstanding at destruction are dropped unanswered.

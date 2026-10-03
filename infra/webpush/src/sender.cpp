@@ -1,6 +1,8 @@
 #include "infra/webpush/sender.hpp"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <chrono>
 #include <new>
 #include <utility>
@@ -34,8 +36,42 @@ std::string_view to_string(Urgency urgency) noexcept {
 }
 
 PushSender::PushSender(std::unique_ptr<IPushTransport> transport, const VapidKey& key,
-                       const core::ports::IClock& clock, SenderLimits limits)
-    : key_(key), clock_(clock), limits_(std::move(limits)), transport_(std::move(transport)) {}
+                       const core::ports::IClock& clock, core::ports::IRandom& random,
+                       SenderLimits limits)
+    : key_(key), clock_(clock), random_(random), limits_(std::move(limits)),
+      transport_(std::move(transport)) {}
+
+std::optional<std::string> PushSender::authorization(const std::string& audience) {
+    const core::WallTime now = clock_.wall_now();
+    if (const auto it = signed_.find(audience); it != signed_.end() && now < it->second.renew_at) {
+        return it->second.header;
+    }
+    auto header = key_.authorization(audience, limits_.subject, now + kVapidLifetime);
+    if (!header) {
+        return std::nullopt;
+    }
+    ++counters_.signatures;
+    if (signed_.size() >= kMaxAudiences && !signed_.contains(audience)) {
+        signed_.clear();
+    }
+    signed_.insert_or_assign(
+        audience,
+        Signed{.header = *header, .renew_at = now + kVapidLifetime - kVapidRefreshBefore});
+    return std::move(*header);
+}
+
+core::Millis PushSender::backoff(std::uint32_t attempts) noexcept {
+    core::Millis wait = limits_.first_backoff;
+    for (std::uint32_t i = 1; i < attempts && wait < limits_.max_backoff; ++i) {
+        wait = std::min(wait * 2, limits_.max_backoff);
+    }
+    // Half of it, and a random part of the other half.
+    std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+    random_.fill(bytes);
+    const auto half = static_cast<std::uint64_t>(wait.count() / 2);
+    const std::uint64_t draw = std::bit_cast<std::uint64_t>(bytes) % (half + 1);
+    return core::Millis{static_cast<core::Millis::rep>(half + draw)};
+}
 
 PushSender::~PushSender() {
     // The requests in flight go first, before the queues their callbacks would touch.
@@ -83,11 +119,9 @@ void PushSender::pump() noexcept {
     }
 }
 
-std::optional<PushRequest> PushSender::request_for(const Pending& pending,
-                                                   core::Seconds ttl) const {
+std::optional<PushRequest> PushSender::request_for(const Pending& pending, core::Seconds ttl) {
     const PushMessage& m = pending.message;
-    auto authorization =
-        key_.authorization(m.audience, limits_.subject, clock_.wall_now() + kVapidLifetime);
+    auto authorization = this->authorization(m.audience);
     if (!authorization) {
         return std::nullopt;
     }
@@ -153,14 +187,14 @@ void PushSender::finished(Pending pending, PushOutcome outcome) noexcept {
         }
     } else if (retryable(status)) {
         const core::MonoTime now = clock_.now();
-        core::Millis wait = limits_.first_backoff;
-        for (std::uint32_t i = 1; i < pending.attempts && wait < limits_.max_backoff; ++i) {
-            wait = std::min(wait * 2, limits_.max_backoff);
-        }
+        core::Millis wait = backoff(pending.attempts);
+        bool never = false;
         if (const std::optional<core::Seconds> after = outcome->retry_after) {
+            never = *after > core::Seconds{kMaxRetryAfter};
             wait = std::max<core::Millis>(wait, *after);
         }
-        if (pending.attempts >= limits_.max_attempts || now + wait >= pending.message.deadline) {
+        if (never || pending.attempts >= limits_.max_attempts ||
+            now + wait >= pending.message.deadline) {
             ++counters_.failed;
         } else {
             try {

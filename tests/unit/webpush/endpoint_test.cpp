@@ -31,6 +31,9 @@ TEST(PushHosts, TheDefaultsNameTheMajorBrowsersPushServices) {
     EXPECT_TRUE(hosts().allows("wns2-par02p.notify.windows.com"));
     EXPECT_TRUE(hosts().allows("FCM.GoogleAPIs.com"));
     EXPECT_FALSE(hosts().allows("notify.windows.com"));
+    // A label of one character is a label.
+    EXPECT_TRUE(hosts().allows("a.notify.windows.com"));
+    EXPECT_FALSE(hosts().allows(".notify.windows.com"));
     EXPECT_FALSE(hosts().allows("evilnotify.windows.com"));
     EXPECT_FALSE(hosts().allows("fcm.googleapis.com.evil.example"));
     EXPECT_FALSE(hosts().allows("googleapis.com"));
@@ -73,6 +76,18 @@ TEST(Endpoint, AcceptsTheMajorServicesEndpoints) {
     EXPECT_EQ(wns->origin, "https://wns2-bl2p.notify.windows.com");
     EXPECT_TRUE(check_endpoint("https://web.push.apple.com/QAbc-123", hosts()));
     EXPECT_TRUE(check_endpoint("HTTPS://updates.push.services.mozilla.com/wpush/v2/gAAA", hosts()));
+}
+
+TEST(Endpoint, TheUrlKeptIsCanonical) {
+    const auto e =
+        check_endpoint("HTTPS://WNS2-BL2P.Notify.Windows.com:443/w/?token=AbC%2B", hosts());
+    ASSERT_TRUE(e.has_value());
+    // Scheme and host in lower case, the default port gone, the path and query untouched.
+    EXPECT_EQ(e->url, "https://wns2-bl2p.notify.windows.com/w/?token=AbC%2B");
+    EXPECT_EQ(e->origin, "https://wns2-bl2p.notify.windows.com");
+    // Every spelling of one endpoint is the same text.
+    EXPECT_EQ(check_endpoint("https://wns2-bl2p.notify.windows.com/w/?token=AbC%2B", hosts())->url,
+              e->url);
 }
 
 TEST(Endpoint, RefusesAnythingButHttpsOn443) {
@@ -229,9 +244,10 @@ TEST(Endpoint, AnyPortIsForATestPushServiceOnly) {
     const auto local = infra::webpush::PushHosts::parse("localhost");
     ASSERT_TRUE(local.has_value());
     EXPECT_FALSE(infra::webpush::check_endpoint("https://localhost:8443/p", *local));
-    const auto any = infra::webpush::check_endpoint("https://localhost:8443/p", *local, true);
+    const auto any = infra::webpush::check_endpoint("https://LocalHost:8443/p", *local, true);
     ASSERT_TRUE(any.has_value());
     EXPECT_EQ(any->origin, "https://localhost:8443");
+    EXPECT_EQ(any->url, "https://localhost:8443/p");
     EXPECT_EQ(infra::webpush::check_endpoint("https://localhost:443/p", *local, true)->origin,
               "https://localhost");
     for (const std::string_view bad : {"https://localhost:/p", "https://localhost:08443/p",

@@ -56,17 +56,20 @@ enum class EceError : std::uint8_t {
 [[nodiscard]] std::expected<KeyPair, EceError> generate_key_pair() noexcept;
 
 // The body of a push message to the subscription (`ua_public`, `auth`): a fresh sender key and
-// salt every call, as RFC 8291 requires, the plaintext in one record with no padding past its
-// delimiter.
+// salt every call, as RFC 8291 requires, the plaintext in one record. With `pad_to`, the record
+// (plaintext and delimiter) is padded with zeros to the next multiple of it, at most what one
+// message holds, so that its length says less of what it carries (RFC 8291 section 4); 0 pads
+// nothing past the delimiter.
 [[nodiscard]] std::expected<std::vector<std::uint8_t>, EceError>
-encrypt(const PublicKey& ua_public, const AuthSecret& auth,
-        std::span<const std::uint8_t> plaintext) noexcept;
+encrypt(const PublicKey& ua_public, const AuthSecret& auth, std::span<const std::uint8_t> plaintext,
+        std::size_t pad_to = 0) noexcept;
 
 // encrypt() with the sender's key and the salt given: for the RFC's test vector, which a
 // message must reproduce exactly. Never reuse either in a real message.
 [[nodiscard]] std::expected<std::vector<std::uint8_t>, EceError>
 encrypt_with(const PrivateKey& as_private, const Salt& salt, const PublicKey& ua_public,
-             const AuthSecret& auth, std::span<const std::uint8_t> plaintext) noexcept;
+             const AuthSecret& auth, std::span<const std::uint8_t> plaintext,
+             std::size_t pad_to = 0) noexcept;
 
 // What the browser does: the plaintext of a message encrypted to (ua_private's public key,
 // auth). One record, as this side writes them. For tests and the test push service.

@@ -1,4 +1,4 @@
-// The Postgres push subscription store (migrations/0015_push_subscriptions.sql): what it keeps,
+// The Postgres push subscription store (migrations/0016_push_subscriptions.sql): what it keeps,
 // for whom, and what it forgets.
 #include "infra/postgres/push_subscriptions.hpp"
 #include "net/offload_pool.hpp"

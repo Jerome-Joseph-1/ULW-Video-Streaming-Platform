@@ -1,6 +1,6 @@
 # 0091. A call's ring lives on the room's owner and reaches each member through their presence room
 
-Status: Accepted
+Status: Accepted, amended by 0097 (a callee with no socket open is rung by Web Push)
 Date: 2026-10-03
 Amends: ADR-0035 (the node channel carries unsequenced notices; version 5); ADR-0087 (the first
 ticket of a call rings, and the call has decline, cancel and end)

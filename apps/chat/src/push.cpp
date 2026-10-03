@@ -14,6 +14,10 @@ namespace {
 
 using infra::webpush::EndpointError;
 
+// Every ring's plaintext is padded to a multiple of this, so a push service cannot tell callers
+// or rooms apart by the message's length: the event is about 200 bytes, a caller's id up to 128.
+constexpr std::size_t kPadBucket = 512;
+
 std::string_view endpoint_reason(EndpointError error) noexcept {
     switch (error) {
     case EndpointError::HostNotAllowed:
@@ -44,9 +48,37 @@ void Push::key(IClient& client) {
     client.push(out);
 }
 
-void Push::answer(ClientId id, std::string_view type, const core::DeviceId& device,
-                  core::ports::PushResult<void> result) noexcept {
+bool Push::may_write(const core::UserId& user) const noexcept {
+    if (writes_ >= deps_.limits.max_writes) {
+        return false;
+    }
+    const auto it = user_writes_.find(user);
+    return it == user_writes_.end() || it->second < deps_.limits.max_writes_per_user;
+}
+
+template <class Submit> void Push::write(const core::UserId& user, Submit submit) {
+    // The user's entry before the store hears of anything, so that once it has, counting cannot
+    // fail; and counted only once the store took the call, so that a call that throws leaves
+    // nothing counted that no answer would take back. The answer never comes from inside it.
+    std::size_t& mine = user_writes_[user];
+    try {
+        submit();
+    } catch (...) {
+        if (mine == 0) {
+            user_writes_.erase(user);
+        }
+        throw;
+    }
+    ++mine;
+    ++writes_;
+}
+
+void Push::answer(ClientId id, const core::UserId& user, std::string_view type,
+                  const core::DeviceId& device, core::ports::PushResult<void> result) noexcept {
     --writes_;
+    if (const auto it = user_writes_.find(user); it != user_writes_.end() && --it->second == 0) {
+        user_writes_.erase(it);
+    }
     if (!result) {
         ++counters_.store_failures;
     } else if (type == "push_subscribed") {
@@ -93,22 +125,23 @@ void Push::subscribe(ClientId id, const core::UserId& user, const PushSubscribe&
         refuse("bad_key");
         return;
     }
-    if (writes_ >= deps_.limits.max_writes) {
+    if (!may_write(user)) {
         ++counters_.busy;
         refuse("busy");
         return;
     }
-    ++writes_;
-    deps_.store.save(
-        user,
-        core::ports::PushSubscription{.device = subscribe.device,
-                                      .endpoint = subscribe.endpoint,
-                                      .p256dh = subscribe.p256dh,
-                                      .auth = subscribe.auth},
-        deps_.limits.max_per_user,
-        [this, id, device = subscribe.device](core::ports::PushResult<void> result) noexcept {
-            answer(id, "push_subscribed", device, result);
-        });
+    write(user, [&] {
+        deps_.store.save(user,
+                         core::ports::PushSubscription{.device = subscribe.device,
+                                                       .endpoint = std::move(endpoint->url),
+                                                       .p256dh = subscribe.p256dh,
+                                                       .auth = subscribe.auth},
+                         deps_.limits.max_per_user,
+                         [this, id, user, device = subscribe.device](
+                             core::ports::PushResult<void> result) noexcept {
+                             answer(id, user, "push_subscribed", device, result);
+                         });
+    });
 }
 
 void Push::unsubscribe(ClientId id, const core::UserId& user, const PushUnsubscribe& unsubscribe) {
@@ -116,19 +149,20 @@ void Push::unsubscribe(ClientId id, const core::UserId& user, const PushUnsubscr
     if (client == nullptr) {
         return;
     }
-    if (writes_ >= deps_.limits.max_writes) {
+    if (!may_write(user)) {
         ++counters_.busy;
         std::string out;
         write_push_error(out, "busy", unsubscribe.device);
         client->push(out);
         return;
     }
-    ++writes_;
-    deps_.store.remove(
-        user, unsubscribe.device,
-        [this, id, device = unsubscribe.device](core::ports::PushResult<void> result) noexcept {
-            answer(id, "push_unsubscribed", device, result);
-        });
+    write(user, [&] {
+        deps_.store.remove(user, unsubscribe.device,
+                           [this, id, user, device = unsubscribe.device](
+                               core::ports::PushResult<void> result) noexcept {
+                               answer(id, user, "push_unsubscribed", device, result);
+                           });
+    });
 }
 
 void Push::ringing(const CallPush& push) noexcept {
@@ -186,7 +220,7 @@ void Push::listed(
                 ++counters_.skipped;
                 continue;
             }
-            auto body = infra::webpush::encrypt(s.p256dh, s.auth, plaintext);
+            auto body = infra::webpush::encrypt(s.p256dh, s.auth, plaintext, kPadBucket);
             if (!body) {
                 ++counters_.skipped;
                 continue;

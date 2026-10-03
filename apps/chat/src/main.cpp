@@ -219,7 +219,7 @@ std::expected<void, std::string> make_push(const chat::Config& config, Services&
             *s.push_multi,
             infra::webpush::CurlTransportOptions{.public_only = !push.dev_allow_private,
                                                  .ca_file = push.dev_ca_file}),
-        *s.vapid, s.clock, sender_limits);
+        *s.vapid, s.clock, s.random, sender_limits);
     chat::PushLimits limits;
     limits.max_per_user = push.max_per_user.value_or(limits.max_per_user);
     s.push =

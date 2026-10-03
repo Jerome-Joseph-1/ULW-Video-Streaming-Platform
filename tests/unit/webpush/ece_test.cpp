@@ -162,4 +162,34 @@ TEST(Ece, AnEmptyPlaintextRoundTrips) {
     EXPECT_TRUE(plaintext->empty());
 }
 
+TEST(Ece, PaddingHidesTheLengthUpToTheBucket) {
+    const auto ua = generate_key_pair();
+    ASSERT_TRUE(ua.has_value());
+    const AuthSecret auth = b64_array<16>(kAuth);
+    for (const std::size_t n : {std::size_t{0}, std::size_t{40}, std::size_t{511}}) {
+        const std::vector<std::uint8_t> plain(n, 'c');
+        const auto message = encrypt(ua->public_key, auth, plain, 512);
+        ASSERT_TRUE(message.has_value()) << n;
+        // Every plaintext up to 511 bytes (the delimiter makes 512) is one size.
+        EXPECT_EQ(message->size(), kHeaderBytes + 512 + kTagBytes) << n;
+        const auto back = decrypt(ua->private_key, auth, *message);
+        ASSERT_TRUE(back.has_value());
+        EXPECT_EQ(*back, plain);
+    }
+    // One more fills the next bucket.
+    const auto bigger = encrypt(ua->public_key, auth, std::vector<std::uint8_t>(512, 'c'), 512);
+    ASSERT_TRUE(bigger.has_value());
+    EXPECT_EQ(bigger->size(), kHeaderBytes + 1024 + kTagBytes);
+    // Never past what one message holds.
+    const auto largest =
+        encrypt(ua->public_key, auth, std::vector<std::uint8_t>(kMaxPlaintext, 'c'), 512);
+    ASSERT_TRUE(largest.has_value());
+    EXPECT_EQ(largest->size(), 4096U);
+    // The RFC's vector is the unpadded case.
+    const auto vector = encrypt_with(b64_array<32>(kAsPrivate), b64_array<16>(kSalt),
+                                     b64_array<65>(kUaPublic), auth, text_bytes(kPlaintext), 0);
+    ASSERT_TRUE(vector.has_value());
+    EXPECT_EQ(*vector, b64(kMessage));
+}
+
 } // namespace

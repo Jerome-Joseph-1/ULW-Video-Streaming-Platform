@@ -14,8 +14,6 @@ namespace {
 
 // A push service's answer is a few hundred bytes; anything past this is not kept.
 constexpr std::size_t kMaxResponseBody = 4096;
-// A Retry-After longer than a day says "not today"; the message's deadline is far shorter.
-constexpr std::uint32_t kMaxRetryAfter = 86'400;
 
 } // namespace
 
@@ -86,11 +84,17 @@ PushOutcome outcome_of(const curl::Result& result) noexcept {
         return std::unexpected(PushFailure::Network);
     }
     PushResponse response{.status = result->status, .retry_after = std::nullopt};
-    // Delta-seconds only; an HTTP-date is left to the sender's own backoff.
+    // Delta-seconds only; an HTTP-date is left to the sender's own backoff. Digits too many for
+    // any integer are a wait past kMaxRetryAfter, which the sender takes as no retry.
     if (const auto value = result->header("retry-after")) {
-        if (const auto seconds = core::parse_integer<std::uint32_t>(*value);
-            seconds && *seconds <= kMaxRetryAfter) {
-            response.retry_after = core::Seconds{*seconds};
+        const bool digits =
+            !value->empty() && value->size() <= 32 &&
+            std::ranges::all_of(*value, [](char c) { return c >= '0' && c <= '9'; });
+        if (digits) {
+            const auto seconds = core::parse_integer<std::uint32_t>(*value);
+            response.retry_after =
+                core::Seconds{seconds ? std::min<std::uint32_t>(*seconds, kMaxRetryAfter + 1)
+                                      : kMaxRetryAfter + 1};
         }
     }
     return response;

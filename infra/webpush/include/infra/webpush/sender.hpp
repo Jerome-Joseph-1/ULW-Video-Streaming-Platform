@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ports/clock.hpp"
+#include "core/ports/random.hpp"
 #include "core/util/time.hpp"
 #include "infra/webpush/vapid.hpp"
 
@@ -13,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Delivery of encrypted push messages to push services (RFC 8030 section 5), on the reactor:
@@ -27,6 +29,11 @@ enum class Urgency : std::uint8_t { VeryLow, Low, Normal, High };
 
 [[nodiscard]] std::string_view to_string(Urgency urgency) noexcept;
 
+// A Retry-After longer than a day says "not today": the message is not retried at all.
+inline constexpr std::uint32_t kMaxRetryAfter = 86'400;
+// The VAPID header kept per push service is signed again this long before its token expires.
+inline constexpr core::Seconds kVapidRefreshBefore{3600};
+
 // One POST, complete: the transport adds nothing but what HTTP itself needs.
 struct PushRequest {
     std::string url;
@@ -37,7 +44,8 @@ struct PushRequest {
 
 struct PushResponse {
     int status = 0;
-    // Retry-After in delta-seconds, when the response carried it in that form.
+    // Retry-After in delta-seconds, when the response carried it in that form; anything past
+    // kMaxRetryAfter is kMaxRetryAfter + 1.
     std::optional<core::Seconds> retry_after;
 };
 
@@ -86,7 +94,9 @@ struct SenderLimits {
     std::size_t max_in_flight = 16;
     // Attempts per message, the first included.
     std::uint32_t max_attempts = 3;
-    // The wait before a retry the push service gave no Retry-After for, doubling each time.
+    // The wait before a retry the push service gave no Retry-After for, doubling each time, of
+    // which a random half is taken off (jitter), so a push service's outage does not bring every
+    // node back at the same moment.
     core::Millis first_backoff{1'000};
     core::Millis max_backoff{8'000};
     // The VAPID subject: "mailto:" or "https://".
@@ -111,6 +121,8 @@ struct SenderCounters {
     std::uint64_t expired = 0;
     // Not queued: the queue was full.
     std::uint64_t dropped = 0;
+    // VAPID tokens signed; one per push service while its header is reused.
+    std::uint64_t signatures = 0;
 };
 
 // Everything runs on the reactor thread; time is the injected clock's. Sends start as soon as a
@@ -120,7 +132,7 @@ public:
     using Gone = std::move_only_function<void(const std::string& endpoint) noexcept>;
 
     PushSender(std::unique_ptr<IPushTransport> transport, const VapidKey& key,
-               const core::ports::IClock& clock, SenderLimits limits);
+               const core::ports::IClock& clock, core::ports::IRandom& random, SenderLimits limits);
     ~PushSender();
     PushSender(const PushSender&) = delete;
     PushSender& operator=(const PushSender&) = delete;
@@ -147,11 +159,23 @@ private:
     void pump() noexcept;
     void send(Pending pending) noexcept;
     void finished(Pending pending, PushOutcome outcome) noexcept;
-    [[nodiscard]] std::optional<PushRequest> request_for(const Pending& pending,
-                                                         core::Seconds ttl) const;
+    [[nodiscard]] std::optional<PushRequest> request_for(const Pending& pending, core::Seconds ttl);
+
+    // The Authorization header per audience, until it is due to be signed again.
+    struct Signed {
+        std::string header;
+        core::WallTime renew_at;
+    };
+    // More push services than any allowlist names; past it the cache starts over.
+    static constexpr std::size_t kMaxAudiences = 64;
+
+    [[nodiscard]] std::optional<std::string> authorization(const std::string& audience);
+    [[nodiscard]] core::Millis backoff(std::uint32_t attempts) noexcept;
 
     const VapidKey& key_;
     const core::ports::IClock& clock_;
+    core::ports::IRandom& random_;
+    std::unordered_map<std::string, Signed> signed_;
     SenderLimits limits_;
     SenderCounters counters_;
     Gone gone_;

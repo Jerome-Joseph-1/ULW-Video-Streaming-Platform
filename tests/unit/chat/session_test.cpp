@@ -205,7 +205,7 @@ private:
         ulw::test::MemoryPushStore push_store;
         const auto vapid = infra::webpush::VapidKey::from_private(infra::webpush::PrivateKey{3});
         infra::webpush::PushSender sender(std::make_unique<ulw::test::FakePushTransport>(), *vapid,
-                                          clock, {.subject = "mailto:ops@example.com"});
+                                          clock, random, {.subject = "mailto:ops@example.com"});
         chat::PushDeps push_deps{.store = push_store,
                                  .sender = sender,
                                  .key = *vapid,

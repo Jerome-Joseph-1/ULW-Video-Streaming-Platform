@@ -5,11 +5,13 @@
 #include "push.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_push_transport.hpp"
+#include "support/fake_random.hpp"
 #include "support/memory_push_store.hpp"
 
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -72,9 +74,11 @@ protected:
         auto transport = std::make_unique<ulw::test::FakePushTransport>();
         transport_ = transport.get();
         sender_ = std::make_unique<infra::webpush::PushSender>(
-            std::move(transport), key_, clock_,
+            std::move(transport), key_, clock_, random_,
             infra::webpush::SenderLimits{.subject = "mailto:ops@example.com"});
-        make(chat::PushLimits{.max_per_user = 3, .max_writes = 2, .max_lookups = 2});
+        make(chat::PushLimits{
+            .max_per_user = 3, .max_writes = 3, .max_writes_per_user = 2, .max_lookups = 2});
+        clients_.clients[2] = &bob_;
         clients_.clients[1] = &alice_;
         auth_.fill(0x42);
     }
@@ -127,6 +131,7 @@ protected:
     }
 
     ulw::test::FakeClock clock_;
+    ulw::test::FakeRandom random_;
     infra::webpush::VapidKey key_;
     KeyPair ua_;
     infra::webpush::AuthSecret auth_{};
@@ -135,6 +140,7 @@ protected:
     std::unique_ptr<infra::webpush::PushSender> sender_;
     Clients clients_;
     RecordingClient alice_;
+    RecordingClient bob_;
     std::unique_ptr<chat::Push> push_;
 };
 
@@ -179,22 +185,68 @@ TEST_F(PushTest, RefusesEndpointsAndKeysBeforeTheStoreHearsOfThem) {
     EXPECT_EQ(push_->counters().refused, 4U);
 }
 
-TEST_F(PushTest, AtMostMaxWritesWaitForTheStore) {
+TEST_F(PushTest, WritesWaitingAreCappedPerUserAndPerNode) {
+    const std::string busy =
+        R"({"type":"error","reason":"busy","device":")" + std::string(kDevice) + R"("})";
     push_->subscribe(ClientId{1}, user("alice"), subscription());
     push_->subscribe(ClientId{1}, user("alice"), subscription());
+    // Two of alice's are waiting: her third, of either kind, is turned away.
     push_->subscribe(ClientId{1}, user("alice"), subscription());
     push_->unsubscribe(ClientId{1}, user("alice"), chat::PushUnsubscribe{.device = device()});
-    EXPECT_EQ(alice_.take(),
-              R"({"type":"error","reason":"busy","device":")" + std::string(kDevice) + R"("})");
-    EXPECT_EQ(alice_.take(),
-              R"({"type":"error","reason":"busy","device":")" + std::string(kDevice) + R"("})");
-    EXPECT_EQ(push_->counters().busy, 2U);
+    EXPECT_EQ(alice_.take(), busy);
+    EXPECT_EQ(alice_.take(), busy);
+    // Another user is not held up by her, until the node's three are waiting.
+    push_->unsubscribe(ClientId{2}, user("bob"), chat::PushUnsubscribe{.device = device()});
+    push_->unsubscribe(ClientId{2}, user("bob"), chat::PushUnsubscribe{.device = device()});
+    EXPECT_EQ(bob_.take(), busy);
+    EXPECT_EQ(push_->counters().busy, 3U);
     store_.flush();
     EXPECT_EQ(alice_.heard.size(), 2U);
+    EXPECT_EQ(bob_.heard.size(), 1U);
     alice_.heard.clear();
+    // Answered, they are counted no more.
+    push_->subscribe(ClientId{1}, user("alice"), subscription());
     push_->subscribe(ClientId{1}, user("alice"), subscription());
     store_.flush();
-    EXPECT_EQ(alice_.heard.size(), 1U);
+    EXPECT_EQ(alice_.heard.size(), 2U);
+    EXPECT_EQ(push_->counters().busy, 3U);
+}
+
+TEST_F(PushTest, AWriteTheStoreThrowsOnIsNotCounted) {
+    store_.throw_next = true;
+    EXPECT_THROW(push_->subscribe(ClientId{1}, user("alice"), subscription()), std::bad_alloc);
+    store_.throw_next = true;
+    EXPECT_THROW(
+        push_->unsubscribe(ClientId{1}, user("alice"), chat::PushUnsubscribe{.device = device()}),
+        std::bad_alloc);
+    // Nothing leaked: alice still has both her places.
+    push_->subscribe(ClientId{1}, user("alice"), subscription());
+    push_->subscribe(ClientId{1}, user("alice"), subscription());
+    EXPECT_EQ(push_->counters().busy, 0U);
+    store_.flush();
+    EXPECT_EQ(alice_.heard.size(), 2U);
+}
+
+TEST_F(PushTest, TheStoredEndpointIsCanonical) {
+    push_->subscribe(ClientId{1}, user("alice"),
+                     subscription("HTTPS://FCM.GoogleAPIs.com:443/fcm/send/abc:APA91"));
+    store_.flush();
+    ASSERT_EQ(store_.rows.size(), 1U);
+    EXPECT_EQ(store_.rows[0].subscription.endpoint, kEndpoint);
+}
+
+TEST_F(PushTest, EveryRingPushIsTheSameSizeWhoeverCalls) {
+    store_for("bob");
+    push_->ringing(ring());
+    auto long_caller = ring();
+    long_caller.from = user(std::string(100, 'z'));
+    push_->ringing(long_caller);
+    store_.flush();
+    ASSERT_EQ(transport_->posts.size(), 2U);
+    EXPECT_EQ(transport_->posts[0].request.body.size(), 86U + 512U + 16U);
+    EXPECT_EQ(transport_->posts[1].request.body.size(), transport_->posts[0].request.body.size());
+    EXPECT_NE(decrypted(transport_->posts[1].request).find(std::string(100, 'z')),
+              std::string::npos);
 }
 
 TEST_F(PushTest, AStoreFailureIsUnavailableAndAGoneClientHearsNothing) {

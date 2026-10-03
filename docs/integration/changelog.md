@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## 2026-10-03: incoming calls ring browsers with no socket open (Web Push)
 
-<!-- apps/chat/src/push.cpp, apps/chat/src/envelope.cpp (push_subscribe_of), migrations/0015_push_subscriptions.sql, docs/adr/0097-web-push-for-incoming-calls.md -->
+<!-- apps/chat/src/push.cpp, apps/chat/src/envelope.cpp (push_subscribe_of), migrations/0016_push_subscriptions.sql, docs/adr/0097-web-push-for-incoming-calls.md -->
 
 Not breaking; new and optional. Where the operator sets a VAPID key, chat answers three new
 socket commands (`push_key`, `push_subscribe`, `push_unsubscribe`), and a call that starts
@@ -18,10 +18,11 @@ What to do:
 - **Web clients** that want calls to ring in the background: add a service worker and the flow in
   calls.md (subscribe on every start, show the notification tagged with the call, answer by
   opening the app and asking for a ticket, unsubscribe on sign-out).
-- **Operators:** to turn it on, add `ULW_PUSH_VAPID_PRIVATE_KEY` to `CHAT_SECRET` (RUNBOOK step
-  3 generates one) and set `PUSH_VAPID_SUBJECT` and `PUSH_HOSTS` in config.env, which now
-  require both keys whether push is on or not. Chat sends to the push services over 443, which
-  the shipped NetworkPolicy already allows. Migration 0015 adds `push_subscriptions`.
+- **Operators:** nothing, unless you want push. To turn it on, add `ULW_PUSH_VAPID_PRIVATE_KEY`
+  and `ULW_PUSH_VAPID_SUBJECT` to `CHAT_SECRET` (RUNBOOK step 3 generates the key); both are
+  optional in the base, and config.env does not change. Chat sends to the major browsers' push
+  services over 443, which the shipped NetworkPolicy already allows. Migration 0016 adds
+  `push_subscriptions`.
 
 ## 2026-10-03: the subject claim is configured, and the audience is required
 

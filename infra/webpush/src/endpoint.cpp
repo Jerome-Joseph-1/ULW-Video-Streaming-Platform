@@ -110,9 +110,10 @@ bool PushHosts::allows(std::string_view host) const noexcept {
             return host.size() == entry.size() &&
                    std::ranges::equal(host, entry, [](char a, char b) { return lower(a) == b; });
         }
-        // "*.example.com" matches "a.example.com", never "example.com" or "aexample.com".
+        // "*.example.com" matches "a.example.com", never "example.com" or "aexample.com": the
+        // suffix keeps its leading dot, so one more character is a label of one.
         const std::string_view suffix = std::string_view(entry).substr(1);
-        return host.size() > suffix.size() + 1 &&
+        return host.size() > suffix.size() &&
                std::ranges::equal(host.substr(host.size() - suffix.size()), suffix,
                                   [](char a, char b) { return lower(a) == b; });
     });
@@ -166,7 +167,11 @@ std::expected<Endpoint, EndpointError> check_endpoint(std::string_view url, cons
         origin += ':';
         origin += port;
     }
-    return Endpoint{.url = std::string(url), .origin = std::move(origin)};
+    // One spelling per endpoint, so that the store's uniqueness and its 404/410 deletes see the
+    // same text whatever case the browser wrote the scheme and host in.
+    std::string canonical = origin;
+    canonical += rest.substr(path);
+    return Endpoint{.url = std::move(canonical), .origin = std::move(origin)};
 }
 
 std::string_view to_string(EndpointError error) noexcept {

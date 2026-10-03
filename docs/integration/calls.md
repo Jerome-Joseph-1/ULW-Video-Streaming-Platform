@@ -203,7 +203,7 @@ Errors, each with the `device` when the command named one:
 | `bad_endpoint` | Not `https://` on port 443, longer than 2048 bytes, an IP address, or not a URL | Fix the client: send the browser's endpoint as given |
 | `push_host_not_allowed` | The endpoint's push service is not one the operator allows | Do not retry; this browser's push service is not supported here |
 | `rate_limited` | More than 5 subscribes or unsubscribes on this socket at once, past one every 10 s (`retry_after_ms`) | Wait that long |
-| `busy`, `unavailable` | The node has too many writes waiting, or the database could not be reached | Retry after a few seconds |
+| `busy`, `unavailable` | You have 4 subscribes or unsubscribes waiting, the node 64, or the database could not be reached | Retry after a few seconds |
 
 **The client flow** (a web app; `sw.js` is its service worker):
 

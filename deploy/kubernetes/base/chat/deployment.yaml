@@ -125,9 +125,10 @@ spec:
                   name: sfu-secrets
                   key: LIVEKIT_API_SECRET
                   optional: true
-            # Web Push for incoming calls (docs/adr/0097): the VAPID private key from chat-secrets,
-            # optional; without it chat starts with push off and answers push commands
-            # push_disabled. The subject and the push service hosts come from config.env. The
+            # Web Push for incoming calls (docs/adr/0097): the VAPID private key and its contact
+            # subject from chat-secrets, both optional; without the key chat starts with push off
+            # and answers push commands push_disabled. The push service hosts are chat's default
+            # (the major browsers'); an overlay that needs others patches in ULW_PUSH_HOSTS. The
             # pushes leave on 443 (networkpolicy.yaml).
             - name: ULW_PUSH_VAPID_PRIVATE_KEY
               valueFrom:
@@ -136,9 +137,11 @@ spec:
                   key: ULW_PUSH_VAPID_PRIVATE_KEY
                   optional: true
             - name: ULW_PUSH_VAPID_SUBJECT
-              value: mailto:ops@example.com
-            - name: ULW_PUSH_HOSTS
-              value: fcm.googleapis.com,updates.push.services.mozilla.com,web.push.apple.com,*.notify.windows.com
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: ULW_PUSH_VAPID_SUBJECT
+                  optional: true
           # Memory (ADR-0036, ADR-0043, docs/integration/operator-contract.md): every queue
           # is bounded in bytes and admission bounds the rest, so the pod's memory cgroup,
           # which is also charged for the sockets' kernel buffers (64 KiB of send buffer each),

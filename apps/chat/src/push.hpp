@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 
 // Web Push for calls (ADR-0097): clients register a browser's push subscription per device over
 // the chat socket, and when a call starts ringing on the room's owner, every subscribed device
@@ -28,6 +29,9 @@ struct PushLimits {
     std::size_t max_per_user = 10;
     // Subscribes and unsubscribes waiting for the store, node-wide; past it one is answered busy.
     std::size_t max_writes = 64;
+    // Of those, one user's, across all their sockets on this node: a user's devices subscribe
+    // once each as their apps start, and a script with one token cannot take the node's.
+    std::size_t max_writes_per_user = 4;
     // Callees' subscription reads waiting for the store, node-wide; a ring past it pushes to
     // nobody (counted). A ring reads one list per callee: 256 is a burst of rings far beyond a
     // node's.
@@ -98,8 +102,11 @@ public:
 private:
     void listed(const CallPush& push, const core::UserId& callee,
                 core::ports::PushResult<std::vector<core::ports::PushSubscription>> list) noexcept;
-    void answer(ClientId id, std::string_view type, const core::DeviceId& device,
-                core::ports::PushResult<void> result) noexcept;
+    [[nodiscard]] bool may_write(const core::UserId& user) const noexcept;
+    // Hands the store a write with `submit`, counted against the user until its answer.
+    template <class Submit> void write(const core::UserId& user, Submit submit);
+    void answer(ClientId id, const core::UserId& user, std::string_view type,
+                const core::DeviceId& device, core::ports::PushResult<void> result) noexcept;
     void gone(const std::string& endpoint) noexcept;
 
     PushDeps deps_;
@@ -107,6 +114,8 @@ private:
     const core::ports::IClock& clock_;
     PushCounters counters_;
     std::size_t writes_ = 0;
+    // Writes waiting per user, for those that have any: at most max_writes entries.
+    std::unordered_map<core::UserId, std::size_t> user_writes_;
     std::size_t lookups_ = 0;
 };
 

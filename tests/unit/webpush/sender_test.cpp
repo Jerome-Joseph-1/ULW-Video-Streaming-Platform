@@ -4,6 +4,8 @@
 #include "support/fake_push_transport.hpp"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <deque>
 #include <gtest/gtest.h>
 #include <memory>
@@ -18,6 +20,18 @@ using namespace std::chrono_literals;
 
 using FakeTransport = ulw::test::FakePushTransport;
 using ulw::test::push_header;
+
+// Hands out one number, as the test sets it: the backoff's jitter is then known.
+class SetRandom final : public core::ports::IRandom {
+public:
+    void fill(std::span<std::byte> out) noexcept override {
+        const auto bytes = std::bit_cast<std::array<std::byte, sizeof value>>(value);
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            out[i] = bytes.at(i % bytes.size());
+        }
+    }
+    std::uint64_t value = 0;
+};
 
 class SenderTest : public ::testing::Test {
 protected:
@@ -36,7 +50,8 @@ protected:
     std::unique_ptr<PushSender> make(SenderLimits limits) {
         auto transport = std::make_unique<FakeTransport>();
         transport_ = transport.get();
-        return std::make_unique<PushSender>(std::move(transport), key_, clock_, std::move(limits));
+        return std::make_unique<PushSender>(std::move(transport), key_, clock_, random_,
+                                            std::move(limits));
     }
 
     PushMessage message(std::string endpoint = "https://fcm.googleapis.com/fcm/send/a",
@@ -49,6 +64,7 @@ protected:
     }
 
     ulw::test::FakeClock clock_;
+    SetRandom random_;
     VapidKey key_;
     FakeTransport* transport_ = nullptr;
     std::vector<std::string> gone_;
@@ -114,17 +130,17 @@ TEST_F(SenderTest, AServerErrorIsRetriedWithBackoffUpToTheAttemptLimit) {
     transport_->status(503);
     EXPECT_EQ(sender_->counters().retried, 1U);
     EXPECT_EQ(sender_->queued(), 1U);
-    // Not before its backoff.
-    clock_.advance(999ms);
+    // Not before its backoff: 1 s less a jitter of up to half, here all of it.
+    clock_.advance(499ms);
     sender_->tick();
     EXPECT_TRUE(transport_->posts.empty());
     clock_.advance(1ms);
     sender_->tick();
     ASSERT_EQ(transport_->posts.size(), 1U);
     // The second attempt's TTL is what is left.
-    EXPECT_EQ(push_header(transport_->posts.front().request, "TTL"), "44");
+    EXPECT_EQ(push_header(transport_->posts.front().request, "TTL"), "45");
     transport_->status(500);
-    clock_.advance(1'999ms);
+    clock_.advance(999ms);
     sender_->tick();
     EXPECT_TRUE(transport_->posts.empty());
     clock_.advance(1ms);
@@ -138,6 +154,68 @@ TEST_F(SenderTest, AServerErrorIsRetriedWithBackoffUpToTheAttemptLimit) {
     clock_.advance(60'000ms);
     sender_->tick();
     EXPECT_EQ(transport_->total, 3U);
+}
+
+TEST_F(SenderTest, TheJitterTakesAtMostHalfTheBackoffOff) {
+    // A draw of half the backoff takes nothing off.
+    random_.value = 500;
+    ASSERT_TRUE(sender_->enqueue(message()));
+    transport_->status(503);
+    clock_.advance(999ms);
+    sender_->tick();
+    EXPECT_TRUE(transport_->posts.empty());
+    clock_.advance(1ms);
+    sender_->tick();
+    ASSERT_EQ(transport_->posts.size(), 1U);
+    // Any draw lands between half the backoff and all of it.
+    random_.value = 0x9e3779b97f4a7c15ULL;
+    transport_->status(503);
+    clock_.advance(999ms);
+    sender_->tick();
+    EXPECT_TRUE(transport_->posts.empty());
+    clock_.advance(1'000ms);
+    sender_->tick();
+    EXPECT_EQ(transport_->posts.size(), 1U);
+}
+
+TEST_F(SenderTest, ARetryAfterPastADayIsNotRetried) {
+    ASSERT_TRUE(sender_->enqueue(message("https://fcm.googleapis.com/a", 48h)));
+    transport_->status(503, core::Seconds{kMaxRetryAfter + 1});
+    EXPECT_EQ(sender_->counters().failed, 1U);
+    EXPECT_EQ(sender_->counters().retried, 0U);
+    // A day exactly is waited for, the deadline allowing.
+    ASSERT_TRUE(sender_->enqueue(message("https://fcm.googleapis.com/b", 48h)));
+    transport_->status(503, core::Seconds{kMaxRetryAfter});
+    EXPECT_EQ(sender_->counters().retried, 1U);
+}
+
+TEST_F(SenderTest, TheVapidHeaderIsSignedOncePerPushServiceUntilAnHourBeforeItExpires) {
+    const auto authorization = [&] {
+        return std::string(push_header(transport_->posts.back().request, "Authorization").value());
+    };
+    ASSERT_TRUE(sender_->enqueue(message()));
+    const std::string first = authorization();
+    ASSERT_TRUE(sender_->enqueue(message("https://fcm.googleapis.com/fcm/send/b")));
+    EXPECT_EQ(authorization(), first);
+    EXPECT_EQ(sender_->counters().signatures, 1U);
+    transport_->status(201);
+    transport_->status(201);
+    // Another push service has its own.
+    PushMessage apple = message("https://web.push.apple.com/x");
+    apple.audience = "https://web.push.apple.com";
+    ASSERT_TRUE(sender_->enqueue(std::move(apple)));
+    EXPECT_NE(authorization(), first);
+    EXPECT_EQ(sender_->counters().signatures, 2U);
+    transport_->status(201);
+    // Kept until an hour before its 12 h are up, then signed again.
+    clock_.advance(std::chrono::hours(11) - 1s);
+    ASSERT_TRUE(sender_->enqueue(message()));
+    EXPECT_EQ(authorization(), first);
+    transport_->status(201);
+    clock_.advance(1s);
+    ASSERT_TRUE(sender_->enqueue(message()));
+    EXPECT_NE(authorization(), first);
+    EXPECT_EQ(sender_->counters().signatures, 3U);
 }
 
 TEST_F(SenderTest, TooManyRequestsWaitsForRetryAfter) {

@@ -105,7 +105,8 @@ protected:
                 *multi_,
                 infra::webpush::CurlTransportOptions{
                     .public_only = false, .ca_file = ulw::test::TestPki::shared().ca_file()}),
-            *vapid_, clock_, infra::webpush::SenderLimits{.subject = std::string(kSubject)});
+            *vapid_, clock_, random_,
+            infra::webpush::SenderLimits{.subject = std::string(kSubject)});
         push_ = std::make_unique<chat::Push>(
             chat::PushDeps{.store = *store_,
                            .sender = *sender_,

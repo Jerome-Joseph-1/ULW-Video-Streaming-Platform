@@ -251,13 +251,18 @@ kubectl -n "$NS" create secret generic chat-secrets \
   --from-file=ULW_PUSH_VAPID_PRIVATE_KEY=<(openssl ecparam -name prime256v1 -genkey -noout |
       openssl ec -outform DER 2>/dev/null | tail -c +8 | head -c 32 |
       base64 | tr '+/' '-_' | tr -d '=\n') \
+  --from-literal=ULW_PUSH_VAPID_SUBJECT="mailto:ops@example.com" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 `ULW_PUSH_VAPID_PRIVATE_KEY` is optional: it turns on Web Push for incoming calls
 (docs/adr/0097), the P-256 private key every push is signed with, as 43 characters of base64url
 (the command above cuts the scalar out of OpenSSL's key; `npx web-push generate-vapid-keys`
-prints the same form). Leave the line out and chat runs with push off. Generate it once per
+prints the same form), and `ULW_PUSH_VAPID_SUBJECT` the contact (`mailto:` or `https://`) the
+push services may use about this sender, required with the key. Leave both lines out and chat
+runs with push off. Chat sends only to the major browsers' push services (Chrome and the other
+Chromium browsers, Firefox, Safari, Edge); to allow others, patch `ULW_PUSH_HOSTS` into chat's
+container in your overlay (docs/integration/operator-contract.md). Generate it once per
 environment and keep it (running the command above again makes a new one; recreate the Secret
 from the saved value instead): browsers subscribe with its public half (chat hands it out, `push_key`
 in docs/integration/calls.md), so a new key silently orphans every subscription until each
@@ -486,8 +491,6 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `IMAGE_PULL_POLICY` | `Always` for a moving tag, `IfNotPresent` for a pinned one | the four images' pull policy |
 | `TURN_PORT` | STUNner's public UDP port (step 7) | the TURN listener, and the port LiveKit hands clients |
 | `VIDEO_GATEWAY_SECRET`, `VIDEO_WORKER_SECRET`, `CHAT_SECRET`, `SFU_SECRET`, `LIVE_PACKAGER_SECRET` | The names of the Secrets of step 3, 7 and 9 | every `secretKeyRef` |
-| `PUSH_VAPID_SUBJECT` | The contact (`mailto:` or `https://`) push services may use about this sender; used once `CHAT_SECRET` holds `ULW_PUSH_VAPID_PRIVATE_KEY` (docs/adr/0097) | `ULW_PUSH_VAPID_SUBJECT` |
-| `PUSH_HOSTS` | The push service hosts a browser's subscription may name: exact hosts or `*.domain`, comma-separated; the shipped list is Chrome's (FCM), Firefox's, Safari's and Edge's | `ULW_PUSH_HOSTS` |
 
 The file is plain `KEY=value` lines, no quotes and no spaces, so a shell can source it too (the
 packager's Job in step 9 is filled from it). `components/operator-config` copies each value

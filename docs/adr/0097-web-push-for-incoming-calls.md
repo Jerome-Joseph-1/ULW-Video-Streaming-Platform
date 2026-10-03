@@ -45,7 +45,7 @@ What a push needs, and what bounds it:
 | How clients register | A new authenticated HTTP endpoint on chat | Rejected: chat serves WebSockets only; a second authenticated surface is a second place to get auth wrong |
 | | Commands on the chat socket: `push_key`, `push_subscribe`, `push_unsubscribe` | Accepted: the socket is already authenticated, rate-limited and documented |
 | Where subscriptions live | Per user, in memory on some node | Rejected: the ring's owner is any node |
-| | Postgres, one row per (user, device), endpoint unique (migration 0015) | Accepted: the owner reads a callee's handful of rows by key |
+| | Postgres, one row per (user, device), endpoint unique (migration 0016) | Accepted: the owner reads a callee's handful of rows by key |
 | Endpoint SSRF | An allowlist of hosts alone | Rejected: a name on the list can still resolve to a private address (a DNS change, a hijacked record) |
 | | Resolve and check before connecting | Rejected: the connect resolves again, and the answer may differ (DNS rebinding) |
 | | Validate at subscribe and at send (https, 443, length, a name not an address, an operator allowlist of hosts), and check every address libcurl is about to connect to, in libcurl's open-socket callback; no proxy, no redirects | Accepted: the check is on the address actually connected to |
@@ -59,13 +59,15 @@ What a push needs, and what bounds it:
 - **Protocol.** Web Push as RFC 8030 (POST to the endpoint, `TTL`, `Urgency: high`,
   `Content-Encoding: aes128gcm`), RFC 8291 encryption (a fresh P-256 key and salt per message,
   one 4096-byte record), RFC 8292 VAPID (`Authorization: vapid t=<ES256 JWT>, k=<public key>`,
-  `aud` the endpoint's origin, `exp` 12 h ahead, `sub` the operator's contact). All on OpenSSL
+  `aud` the endpoint's origin, `exp` 12 h ahead, `sub` the operator's contact; one header per
+  push service, signed again an hour before it expires). Every plaintext is padded to a multiple
+  of 512 bytes, so a push's length does not tell callers or rooms apart. All on OpenSSL
   (`infra/webpush`); the encryption reproduces RFC 8291's example exactly (its section 5 request
   says `Content-Length: 145`; the body it shows is 144 bytes, which is what the vector checks).
 - **The key** is the operator's: `ULW_PUSH_VAPID_PRIVATE_KEY` in chat's Secret, a P-256 scalar in
   base64url, checked at start (exit 2, never quoted, never logged). Without it push is off and
   the commands answer `push_disabled`. Clients get its public half from `push_key`.
-- **Subscriptions** (`push_subscriptions`, migration 0015) are keyed by (user, device), the
+- **Subscriptions** (`push_subscriptions`, migration 0016) are keyed by (user, device), the
   endpoint unique. Saving is one function call (`push_subscribe`) under a per-user advisory
   lock: it takes the endpoint from whoever held it, writes the row and forgets the user's
   devices saved longest ago past the cap (10, `ULW_PUSH_MAX_SUBSCRIPTIONS_PER_USER`, 1 to 32).
@@ -83,17 +85,21 @@ What a push needs, and what bounds it:
   callee's subscriptions (256 reads waiting at most), encrypts the call_ringing event to each,
   and queues it on the `PushSender`: 1024 messages waiting, 16 POSTs at once on a libcurl multi
   of its own, each attempt's TTL what is left of the ring. Retries only for 5xx and 429, after
-  `Retry-After` or 1 s, 2 s, ..., three attempts, never past the ring's end; the sender's retries
+  `Retry-After` (more than a day: no retry) or a backoff of 1 s, 2 s, ... less a random half,
+  three attempts, never past the ring's end; the sender's retries
   run from the server's per-turn sweep, on the injected clock.
 - **Bounds and rates.** Subscribes and unsubscribes are 5 at once per socket, then one each
-  10 s, with 64 store writes waiting node-wide (`busy` past it).
+  10 s, with 4 store writes waiting per user and 64 node-wide (`busy` past either). An endpoint
+  is stored canonical (scheme and host in lower case, no default port), so one endpoint is one
+  row whatever its spelling.
 - **Metrics** with fixed labels: `push_subscriptions_total{op}`, `push_lookups_total{outcome}`,
   `push_messages_total{outcome}`, `push_sends_total{outcome}` (delivered, gone, rejected,
   failed, refused_address, expired, dropped), `push_retries_total`, `push_queue_depth`,
   `push_in_flight`, `push_store_failures_total`, `push_enabled`. No endpoint, key or user in a
   label or a log line.
-- **Operator surface.** The key in `CHAT_SECRET`; `PUSH_VAPID_SUBJECT` and `PUSH_HOSTS` in
-  config.env; egress on 443 (already open for the JWKS). Development only, behind
+- **Operator surface.** The key and the subject in `CHAT_SECRET`, both optional, so an
+  environment without push changes nothing; the host list is chat's default, which an overlay
+  may override by patching `ULW_PUSH_HOSTS`; egress on 443 (already open for the JWKS). Development only, behind
   `ULW_DEV_MODE=1` outside a pod: `ULW_DEV_PUSH_ALLOW_PRIVATE` (a loopback push service on any
   port) and `ULW_DEV_PUSH_CA_FILE`, which the integration test uses.
 
@@ -109,13 +115,15 @@ What a push needs, and what bounds it:
   re-subscribes (clients compare `push_key` with the key they subscribed with). The push
   services answer such pushes 401 or 403, counted as `rejected`.
 - A push service that offers only TLS 1.2 is refused like any other outbound HTTPS peer
-  (`failed`); the four default services speak TLS 1.3.
+  (`failed`); the floor is not lowered for one. The four default services, Edge's WNS
+  (`*.notify.windows.com`) included, negotiated TLS 1.3 when checked on 2026-10-03
+  (`openssl s_client -tls1_3`, the services' own certificates).
 - Pushes go from the room's owner, so every chat pod needs the egress. An owner change mid-ring
   sends nothing more: the push already left at the ring's start.
 - Direct messages are not pushed: their bodies are end-to-end encrypted or opaque to the server
   (ADR-0016), so a push could only say "a new message", and would need per-room rate limits and
   mute settings; reopen with a product decision on what such a notification says.
-- The migration is numbered 0015, after 0011 to 0014 of work landing alongside it: migrations
+- The migration is numbered 0016, after 0011 to 0015 of work landing alongside it: migrations
   run without gaps and only forward, so it merges after those, never before.
 - **Later options.** Native push for apps: FCM HTTP v1 (an OAuth service account per project)
   and APNs (a .p8 token key per team), each as another sender behind the same `Push`, with a
