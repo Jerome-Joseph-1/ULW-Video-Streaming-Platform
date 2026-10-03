@@ -107,6 +107,7 @@ async function goLive() {
   log('live_created', { id: stream.id });
   const fresh = async () => {
     const t = await api('POST', `/api/v1/live/${stream.id}/ticket`);
+    if (!t.ok) throw new Error(`ticket answered ${t.status}`);
     return `Bearer ${t.data.token}`;
   };
 
@@ -200,10 +201,13 @@ async function endLive() {
   if (!b) return;
   $('end-live').disabled = true;
   liveStatus('ending...');
-  const ended = await api('POST', `/api/v1/live/${b.id}/end`);
+  // The WHIP session first, with a fresh ticket while the stream still issues them; then the
+  // stream itself (either ends it; end is idempotent and says so).
   if (b.resource && b.fresh) {
-    await fetch(b.resource, { method: 'DELETE', headers: { authorization: await b.fresh().catch(() => '') } }).catch(() => {});
+    const auth = await b.fresh().catch(() => null);
+    if (auth) await fetch(b.resource, { method: 'DELETE', headers: { authorization: auth } }).catch(() => {});
   }
+  const ended = await api('POST', `/api/v1/live/${b.id}/end`);
   b.pc?.close();
   for (const t of b.media?.getTracks() ?? []) t.stop();
   $('live-preview').srcObject = null;
