@@ -79,6 +79,35 @@ public:
     int taken = 0;
 };
 
+// Answers asks with "<node>:" and the request, at once or when told to.
+class Owner final : public rt::IOwnerService {
+public:
+    explicit Owner(std::string node) : node_(std::move(node)) {}
+
+    void on_ask(const core::RoomId& /*room*/, std::span<const std::byte> request,
+                rt::OwnerAnswer answer) noexcept override {
+        asked.push_back(ulw::test::as_text(request));
+        if (hold) {
+            held.push_back(std::move(answer));
+            return;
+        }
+        answer(reply(asked.back()));
+    }
+
+    [[nodiscard]] std::vector<std::byte> reply(std::string_view request) const {
+        const std::string text = node_ + ":" + std::string(request);
+        const auto b = std::as_bytes(std::span{text});
+        return {b.begin(), b.end()};
+    }
+
+    bool hold = false;
+    std::vector<std::string> asked;
+    std::vector<rt::OwnerAnswer> held;
+
+private:
+    std::string node_;
+};
+
 // A test value, made up for these tests; real deployments take theirs from the environment.
 constexpr std::string_view kSecret = "unit-test-node-secret-000000000000000";
 
@@ -359,6 +388,22 @@ protected:
             return std::unexpected(RouteError::Unavailable);
         }
         return *result;
+    }
+
+    // The owner's answer as text, or the error.
+    std::expected<std::string, RouteError> ask(Node& node, Member& member, std::string_view text) {
+        std::optional<std::expected<std::vector<std::byte>, RouteError>> result;
+        const auto body = std::as_bytes(std::span{text});
+        node.router->ask_owner(room_, member, body,
+                               [&](auto r) noexcept { result = std::move(r); });
+        if (!pump([&] { return result.has_value(); })) {
+            ADD_FAILURE() << "ask never answered";
+            return std::unexpected(RouteError::Unavailable);
+        }
+        if (!*result) {
+            return std::unexpected(result->error());
+        }
+        return ulw::test::as_text(**result);
     }
 
     // Sends again while the node is still finding the room's new owner.
@@ -736,6 +781,73 @@ TEST_P(RoomRouterTest, SendingToARoomTheMemberHasNotJoinedIsRefused) {
     EXPECT_EQ(db_.rooms.at(room_).last_seq, 0U);
 }
 
+TEST_P(RoomRouterTest, AnAskIsAnsweredByTheRoomsOwnerWhicheverNodeTheMemberIsOn) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Owner on_a("chat-a");
+    Owner on_b("chat-b");
+    a.router->serve(&on_a);
+    b.router->serve(&on_b);
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    ASSERT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-a"));
+    EXPECT_EQ(ask(b, bob, "from bob"), "chat-a:from bob");
+    EXPECT_EQ(ask(a, alice, "from alice"), "chat-a:from alice");
+    EXPECT_EQ(on_a.asked, (std::vector<std::string>{"from bob", "from alice"}));
+    EXPECT_TRUE(on_b.asked.empty());
+    EXPECT_EQ(b.router->counters().forwarded, 1U);
+}
+
+TEST_P(RoomRouterTest, AnAskOfARoomNotJoinedOrOfAnOwnerWithNoServiceIsRefused) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    Member mallory;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    EXPECT_EQ(ask(b, mallory, "hi"), std::unexpected(RouteError::NotJoined));
+    // Nothing serves asks on the owner yet.
+    EXPECT_EQ(ask(b, bob, "hi"), std::unexpected(RouteError::Unavailable));
+    EXPECT_EQ(ask(a, alice, "hi"), std::unexpected(RouteError::Unavailable));
+    // An ask past the bound never leaves the node.
+    Owner on_a("chat-a");
+    a.router->serve(&on_a);
+    const std::string large(rt::kMaxOwnerMessage + 1, 'x');
+    EXPECT_EQ(ask(b, bob, large), std::unexpected(RouteError::Unavailable));
+    EXPECT_TRUE(on_a.asked.empty());
+}
+
+TEST_P(RoomRouterTest, AnAskWhoseMemberLeftIsAnsweredToNobody) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Owner on_a("chat-a");
+    on_a.hold = true;
+    a.router->serve(&on_a);
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    int answered = 0;
+    const auto body = std::as_bytes(std::span{std::string_view{"hi"}});
+    b.router->ask_owner(room_, bob, body, [&](auto) noexcept { ++answered; });
+    a.router->ask_owner(room_, alice, body, [&](auto) noexcept { ++answered; });
+    ASSERT_TRUE(pump([&] { return on_a.held.size() == 2; }));
+    b.router->leave(room_, bob);
+    a.router->leave(room_, alice);
+    for (rt::OwnerAnswer& answer : on_a.held) {
+        answer(on_a.reply("late"));
+    }
+    // The forwarded answer crosses the node channel before it is dropped.
+    Member carol;
+    ASSERT_TRUE(join(b, carol));
+    on_a.hold = false;
+    EXPECT_EQ(ask(b, carol, "after"), "chat-a:after");
+    EXPECT_EQ(answered, 0);
+}
+
 TEST_P(RoomRouterTest, AMemberWhoLeftReceivesNothingMore) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");
@@ -811,7 +923,7 @@ TEST_P(RoomRouterTest, AHelloOfAnotherVersionIsRefusedAsSuch) {
     peer.send(hello);
     EXPECT_TRUE(peer.hung_up());
     EXPECT_EQ(a.events.refused,
-              std::vector<std::string>{"version mismatch: peer speaks 1, this node 3"});
+              std::vector<std::string>{"version mismatch: peer speaks 1, this node 4"});
 }
 
 TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {
