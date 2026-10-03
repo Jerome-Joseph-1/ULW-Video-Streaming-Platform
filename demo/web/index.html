@@ -77,7 +77,10 @@
       <div class="card room">
         <div class="room-head">
           <h2 id="room-title">Pick a room</h2>
-          <label id="raw-toggle" hidden><input type="checkbox" id="show-raw"> show what the server stores</label>
+          <span id="raw-toggle" hidden>
+            <label><input type="checkbox" id="show-raw" data-testid="show-raw"> show what the server stores</label>
+            <button id="reset-e2ee" class="link" title="Make a new device for this user in this browser">reset encryption</button>
+          </span>
         </div>
         <div id="e2ee-banner" class="banner" hidden></div>
         <ol id="messages" class="messages" data-testid="messages"></ol>

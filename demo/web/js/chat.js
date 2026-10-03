@@ -74,6 +74,10 @@ export function initChat() {
     $('message').value = '';
   });
   $('show-raw').addEventListener('change', () => renderMessages());
+  $('reset-e2ee').addEventListener('click', () => {
+    e2ee.resetDevice();
+    location.reload();
+  });
 }
 
 // One room's messages are handled one at a time, in order: decryption is asynchronous.

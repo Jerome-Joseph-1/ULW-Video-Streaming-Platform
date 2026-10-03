@@ -54,7 +54,7 @@ async function openMls(mls, { user, room, members, post }) {
   let saving = Promise.resolve();
   let out = null;
   let lastId = null;
-  let groupTraffic = false;
+  let lastGroupSeq = 0;
   const keyPackages = [];
   const suite = mls.ciphersuite();
 
@@ -88,7 +88,7 @@ async function openMls(mls, { user, room, members, post }) {
         return null; // not an MLS message (the stand-in's, from before this build)
       }
       if (info.wireFormat === 'key_package') keyPackages.push(frame);
-      else groupTraffic = true;
+      else lastGroupSeq = frame.seq;
       out = null;
       mlsRoom.receive(frame);
       const result = out;
@@ -103,11 +103,12 @@ async function openMls(mls, { user, room, members, post }) {
 
     async ready() {
       if (mlsRoom.joined) return;
-      // The room's first member starts the group when there is none yet, and adds whoever
-      // asked before it existed; everyone else asks to be added.
-      if (members[0] === user && !groupTraffic) {
+      // The room's first member starts the group whenever its device is not in one, and adds
+      // whoever asked since the group traffic before it (an earlier group's, whose devices are
+      // gone: a demo restarted without --wipe); everyone else asks to be added.
+      if (members[0] === user) {
         mlsRoom.create();
-        for (const frame of keyPackages) if (frame.sender !== user) mlsRoom.receive(frame);
+        for (const frame of keyPackages) if (frame.sender !== user && frame.seq > lastGroupSeq) mlsRoom.receive(frame);
       } else {
         mlsRoom.announce();
       }
@@ -131,4 +132,10 @@ async function openMls(mls, { user, room, members, post }) {
       return lastId;
     },
   };
+}
+
+// Forgets this browser's MLS device for the user (a new one is made on the next load): the way
+// out when the group in the room was made by devices that are gone.
+export function resetDevice() {
+  store.set('mls-device', null);
 }
