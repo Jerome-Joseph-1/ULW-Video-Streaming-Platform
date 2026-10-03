@@ -569,6 +569,15 @@ if(ULW_BUILD_WORKER)
     # way, for the check the helper makes of the path it runs (program_check.hpp). Never
     # installed, and never copied into an image (deploy/docker/Dockerfile copies ulw_sandbox).
     # Usr-merged paths, as on Ubuntu 24.04 and Debian 13, where the trixie workflow runs it.
+    # The probe's path and the unexecutable file are in the build tree, so it is held to what
+    # the table takes (infra/ffmpeg/CMakeLists.txt).
+    ulw_sandbox_safe_path("${CMAKE_CURRENT_BINARY_DIR}" safe)
+    if(NOT safe)
+        message(FATAL_ERROR "The sandbox test helper's table names files in the build directory, "
+            "whose path must be absolute and made only of letters, digits and ._+- between its "
+            "slashes: \"${CMAKE_CURRENT_BINARY_DIR}\". Build elsewhere, or with "
+            "ULW_BUILD_TESTS=OFF.")
+    endif()
     set(ulw_test_programs "${CMAKE_CURRENT_BINARY_DIR}/sandbox_test_programs")
     set(ulw_not_executable "${ulw_test_programs}/not-executable")
     file(WRITE "${ulw_not_executable}" "#!/bin/sh\nexit 0\n")
@@ -594,7 +603,7 @@ if(ULW_BUILD_WORKER)
         not_executable "${ulw_not_executable}")
     add_executable(ulw_sandbox_test_helper ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src/sandbox_main.cpp)
     target_compile_features(ulw_sandbox_test_helper PRIVATE cxx_std_23)
-    target_include_directories(ulw_sandbox_test_helper PRIVATE ${ulw_test_programs}
+    target_include_directories(ulw_sandbox_test_helper PRIVATE ${ulw_test_programs}/$<CONFIG>
         ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${PROJECT_SOURCE_DIR}/core/include)
     target_link_libraries(ulw_sandbox_test_helper PRIVATE ulw_warnings)
 
@@ -612,7 +621,7 @@ if(ULW_BUILD_WORKER)
     # White-box tests of the adapter internals, the production helper's table, the production
     # helper itself and the test helper.
     target_include_directories(ffmpeg_unit_tests
-        PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${ULW_SANDBOX_PROGRAMS_DIR}
+        PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${ULW_SANDBOX_PROGRAMS_DIR}/$<CONFIG>
                 ${PROJECT_SOURCE_DIR}/tests)
     target_compile_definitions(ffmpeg_unit_tests
         PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
