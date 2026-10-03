@@ -22,14 +22,16 @@
 //
 // PROGRAM is run exactly as named, never looked up: it must be an absolute path in normal form
 // (no "." or ".." component, no doubled slash) to a regular file this process may
-// execute, symbolic links followed. A bare name is not searched for on PATH; the caller resolves
-// it (process.cpp), against the PATH it hands the program. Anything else is refused before any
-// confinement step, so a refusal never depends on what the sandbox would have let it see.
+// execute, symbolic links followed (program_check.hpp). A bare name is not searched for on PATH;
+// the caller resolves it (process.cpp), against the PATH it hands the program. Anything else is
+// refused before any confinement step, so a refusal never depends on what the sandbox would have
+// let it see.
 //
 // Exit codes of its own: 125 when a confinement step fails, 126 when PROGRAM is refused or
 // cannot be executed, 127 when it is not found (a bare name included, which names no file).
 #include "core/util/parse.hpp"
 
+#include "program_check.hpp"
 #include "seccomp_filter.hpp"
 
 #include <linux/capability.h>
@@ -37,7 +39,6 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
@@ -47,7 +48,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <expected>
 #include <fcntl.h>
 #include <filesystem>
 #include <format>
@@ -128,44 +128,6 @@ Options parse(std::span<char*> args) {
     }
     options.program.push_back(nullptr);
     return options;
-}
-
-struct Refusal {
-    int exit_code = kCannotExecute;
-    std::string reason;
-};
-
-// Whether `program` may be executed as named: see the top of this file.
-[[nodiscard]] std::expected<void, Refusal> check_program(std::string_view program) {
-    if (!program.contains('/')) {
-        return std::unexpected(
-            Refusal{.exit_code = kNotFound, .reason = "not a path, and no PATH is searched"});
-    }
-    const std::filesystem::path path(program);
-    if (!path.is_absolute()) {
-        return std::unexpected(Refusal{.reason = "not an absolute path"});
-    }
-    for (const auto& part : path) {
-        if (part == "..") {
-            return std::unexpected(Refusal{.reason = "has a .. component"});
-        }
-    }
-    if (path.lexically_normal() != path || program.contains("//")) {
-        return std::unexpected(Refusal{.reason = "not in normal form"});
-    }
-    struct stat status {};
-    if (::stat(path.c_str(), &status) != 0) {
-        const int error = errno;
-        return std::unexpected(Refusal{.exit_code = error == ENOENT ? kNotFound : kCannotExecute,
-                                       .reason = std::generic_category().message(error)});
-    }
-    if (!S_ISREG(status.st_mode)) {
-        return std::unexpected(Refusal{.reason = "not a regular file"});
-    }
-    if (::faccessat(AT_FDCWD, path.c_str(), X_OK, AT_EACCESS) != 0) {
-        return std::unexpected(Refusal{.reason = std::generic_category().message(errno)});
-    }
-    return {};
 }
 
 bool write_file(const char* path, std::string_view text) {
@@ -383,10 +345,10 @@ int end_like(int status) {
 int run(std::span<char*> args) {
     const Options options = parse(args);
     if (const char* program = options.program.front(); program != nullptr) {
-        if (const auto checked = check_program(program); !checked) {
+        if (const auto checked = infra::ffmpeg::sandbox::check_program(program); !checked) {
             std::println(stderr, "ulw_sandbox: refusing to run {}: {}", program,
                          checked.error().reason);
-            std::_Exit(checked.error().exit_code);
+            std::_Exit(checked.error().not_found ? kNotFound : kCannotExecute);
         }
     }
 
