@@ -355,9 +355,9 @@ void LiveStreams::await_packager(Stream stream, core::MonoTime deadline, LiveDon
 }
 
 void LiveStreams::relay(Stream stream, LiveDone<Stream> done) {
-    const core::RoomId room = room_of(stream.id);
+    const core::RoomId name = room_of(stream.id);
     deps_.sfu.open_room(
-        room, kGeneration, core::ports::MediaRoomKind::Stream, 0,
+        name, kGeneration, core::ports::MediaRoomKind::Stream, 0,
         [this, stream = std::move(stream),
          done = std::move(done)](std::expected<std::unique_ptr<core::ports::IMediaRoom>, MediaError>
                                      opened) mutable noexcept {
@@ -453,9 +453,9 @@ void LiveStreams::finish(const core::LiveStreamId& id, LiveEnd reason, LiveDone<
 // session, and the packager ends the playlist and records the stream (ADR-0053). A packager
 // that no relay ever reached ends the stream itself once its wait for a caller runs out.
 void LiveStreams::close_room(Stream stream, LiveDone<Stream> done) {
-    const core::RoomId room = room_of(stream.id);
+    const core::RoomId name = room_of(stream.id);
     deps_.sfu.open_room(
-        room, kGeneration, core::ports::MediaRoomKind::Stream, 0,
+        name, kGeneration, core::ports::MediaRoomKind::Stream, 0,
         [this, stream = std::move(stream),
          done = std::move(done)](std::expected<std::unique_ptr<core::ports::IMediaRoom>, MediaError>
                                      opened) mutable noexcept {

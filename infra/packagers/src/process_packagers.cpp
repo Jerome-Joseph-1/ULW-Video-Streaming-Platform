@@ -221,7 +221,7 @@ private:
     void forget_finished() {
         std::size_t finished = 0;
         for (const auto& [stream, child] : children_) {
-            finished += child->state() == PackagerState::Ready ? 0 : 1;
+            finished += child->state() == PackagerState::Ready ? 0U : 1U;
         }
         for (auto it = children_.begin(); it != children_.end() && finished > kRemembered;) {
             if (it->second->state() != PackagerState::Ready) {
