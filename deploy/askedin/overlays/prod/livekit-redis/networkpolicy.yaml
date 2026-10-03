@@ -1,0 +1,25 @@
+# LiveKit and its recorder, and nothing else; Redis itself starts no connection.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: livekit-redis
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: livekit-redis
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit-redis
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit-egress
+      ports:
+        - port: redis
+  egress: []
