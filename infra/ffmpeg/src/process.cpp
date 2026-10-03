@@ -4,7 +4,6 @@
 
 #include <sys/eventfd.h>
 #include <sys/resource.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
@@ -16,7 +15,6 @@
 #include <cstdint>
 #include <fcntl.h>
 #include <filesystem>
-#include <iterator>
 #include <optional>
 #include <poll.h>
 #include <spawn.h>
@@ -133,53 +131,6 @@ std::vector<char*> c_strings(std::vector<std::string>& strings) {
     return out;
 }
 
-// The search path execvp uses when the environment has none (glibc's _CS_PATH).
-constexpr std::string_view kDefaultSearchPath = "/bin:/usr/bin";
-
-// The helper runs its program exactly as named and searches no PATH (sandbox_main.cpp), so a
-// bare name such as "ffmpeg" is looked up here, where execvp used to look it up in the helper:
-// in each absolute directory of the PATH the program is handed, or execvp's default without
-// one. The first regular file we may execute wins; failing that, the first that exists, for the
-// helper to refuse as execvp would have (126); failing that the name stays bare, which the
-// helper reports as not found (127). A relative directory is skipped: in the sandbox it would
-// be read from the writable directory, which the program's input fills.
-std::string resolve_program(const std::string& name, const std::vector<std::string>& environment) {
-    if (name.empty() || name.contains('/')) {
-        return name;
-    }
-    std::string_view search = kDefaultSearchPath;
-    // The first, as the program's getenv would find it.
-    for (const std::string& entry : environment) {
-        if (entry.starts_with("PATH=")) {
-            search = std::string_view(entry).substr(std::string_view("PATH=").size());
-            break;
-        }
-    }
-    std::optional<std::string> present;
-    while (!search.empty()) {
-        const std::size_t colon = search.find(':');
-        const std::string_view dir = search.substr(0, colon);
-        search = colon == std::string_view::npos ? std::string_view{} : search.substr(colon + 1);
-        if (!dir.starts_with('/')) {
-            continue;
-        }
-        const std::string candidate =
-            (std::filesystem::path(dir).lexically_normal() / name).string();
-        struct stat status {};
-        if (::stat(candidate.c_str(), &status) != 0) {
-            continue;
-        }
-        if (S_ISREG(status.st_mode) &&
-            ::faccessat(AT_FDCWD, candidate.c_str(), X_OK, AT_EACCESS) == 0) {
-            return candidate;
-        }
-        if (!present) {
-            present = candidate;
-        }
-    }
-    return present.value_or(name);
-}
-
 std::vector<std::string> helper_argv(const Sandbox& sandbox, const Limits& limits,
                                      const Args& args) {
     std::vector<std::string> argv{sandbox.helper.string(),
@@ -195,11 +146,10 @@ std::vector<std::string> helper_argv(const Sandbox& sandbox, const Limits& limit
     if (!sandbox.syscall_filter) {
         argv.emplace_back("--no-syscall-filter");
     }
+    // The program by name ("ffmpeg", "ffprobe"): the helper runs the file it was built with
+    // for that name, and refuses a path (sandbox_main.cpp, docs/adr/0089).
     argv.emplace_back("--");
-    if (!args.empty()) {
-        argv.push_back(resolve_program(args.front(), sandbox.environment));
-        argv.insert(argv.end(), std::next(args.begin()), args.end());
-    }
+    argv.insert(argv.end(), args.begin(), args.end());
     return argv;
 }
 

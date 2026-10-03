@@ -61,8 +61,8 @@ std::expected<LiveRemuxResult, std::string> LiveRemuxer::run(const LiveRemuxJob&
                         .file_size_bytes = live_max_file_bytes(job.max_kbps, job.segment_seconds)};
     const LiveProbe probe = live_probe(job.max_kbps, job.segment_seconds);
     const auto child = run_sandboxed(
-        sandbox, limits, live_remux_args(config_.ffmpeg, job, probe), clock_,
-        [](std::string_view) {}, stop, job.input);
+        sandbox, limits, live_remux_args(job, probe), clock_, [](std::string_view) {}, stop,
+        job.input);
     if (!child) {
         return std::unexpected(child.error());
     }

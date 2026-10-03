@@ -147,9 +147,8 @@ TranscodeResult<MediaInfo> FfmpegTranscoder::probe(const fs::path& input, std::s
     const Sandbox sandbox{.helper = config_.sandbox,
                           .environment = {"PATH=" + config_.search_path}};
     std::string output;
-    auto child = run_sandboxed(sandbox, probe_budget(input.parent_path()),
-                               probe_args(config_.ffprobe, input), clock_,
-                               collect_into(output, kMaxProbeOutput), stop);
+    auto child = run_sandboxed(sandbox, probe_budget(input.parent_path()), probe_args(input),
+                               clock_, collect_into(output, kMaxProbeOutput), stop);
     if (!child) {
         return std::unexpected(spawn_error(std::move(child.error())));
     }
@@ -182,10 +181,9 @@ FfmpegTranscoder::run(const fs::path& input, const fs::path& out_dir, const Medi
             progress.on_progress(*encoded);
         }
     };
-    auto child = run_sandboxed(
-        sandbox, transcode_budget(media, out_dir),
-        transcode_args(config_.ffmpeg, input, out_dir, media, ladder, config_.threads), clock_,
-        on_stdout, stop);
+    auto child = run_sandboxed(sandbox, transcode_budget(media, out_dir),
+                               transcode_args(input, out_dir, media, ladder, config_.threads),
+                               clock_, on_stdout, stop);
     if (!child) {
         return std::unexpected(spawn_error(std::move(child.error())));
     }
@@ -239,9 +237,9 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
     std::optional<std::vector<std::string>> reference;
     for (const core::Rung& rung : ladder) {
         std::string output;
-        auto child = run_sandboxed(
-            sandbox, limits, keyframe_args(config_.ffprobe, out_dir / rung.name / "index.m3u8"),
-            clock_, collect_into(output, kMaxKeyframeOutput), stop);
+        auto child =
+            run_sandboxed(sandbox, limits, keyframe_args(out_dir / rung.name / "index.m3u8"),
+                          clock_, collect_into(output, kMaxKeyframeOutput), stop);
         if (!child) {
             return std::unexpected(spawn_error(std::move(child.error())));
         }
@@ -261,8 +259,8 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
     }
 
     auto child = run_sandboxed(
-        sandbox, limits, decode_args(config_.ffmpeg, out_dir / "master.m3u8"), clock_,
-        [](std::string_view) {}, stop);
+        sandbox, limits, decode_args(out_dir / "master.m3u8"), clock_, [](std::string_view) {},
+        stop);
     if (!child) {
         return std::unexpected(spawn_error(std::move(child.error())));
     }

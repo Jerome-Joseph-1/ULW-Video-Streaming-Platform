@@ -29,13 +29,11 @@ struct Config {
     // Workspaces go under it: ULW_SCRATCH_DIR/<node>, this worker's alone, which startup
     // clears.
     std::filesystem::path scratch;
-    // The ulw_sandbox helper; empty means the one installed beside this executable.
+    // The ulw_sandbox helper, which runs the ffmpeg and ffprobe it was built with and no other
+    // (docs/adr/0089); empty means the one installed beside this executable.
     std::filesystem::path sandbox;
-    // Absolute paths, or bare names looked up in search_path's absolute directories
-    // (infra/ffmpeg/src/process.cpp): the sandbox helper searches no PATH itself.
-    std::string ffmpeg;
-    std::string ffprobe;
-    // PATH for the sandboxed children, which inherit nothing else.
+    // PATH for the sandboxed children, which inherit nothing else. Nothing looks the programs
+    // up in it.
     std::string search_path;
     unsigned ffmpeg_threads = 1;
     ops::Level log_level = ops::Level::Info;
