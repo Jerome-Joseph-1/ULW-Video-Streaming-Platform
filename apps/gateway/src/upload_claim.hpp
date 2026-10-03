@@ -14,7 +14,9 @@ namespace gateway {
 // one upload, so this holds at most one claim. Every release names the request it is for, by
 // the number the connection gave that request: a completion that arrives after its request has
 // ended carries a number that is no longer current, and can release nothing a later request
-// holds. Whatever is still held when this goes is released then.
+// holds. The release that reaches the catalog names the grant too (ClaimToken), so it cannot
+// give back a later grant of the same upload either. Whatever is still held when this goes is
+// released then.
 //
 // `held` is the shard's count of claims held, which /metrics reports as catalog_claims_held.
 class UploadClaim {
@@ -27,9 +29,11 @@ public:
     UploadClaim(UploadClaim&&) = delete;
     UploadClaim& operator=(UploadClaim&&) = delete;
 
-    // The catalog granted `request` its claim on `upload`. A claim still held by another
-    // request is released first: one request's claim never outlives the next one's start.
-    void adopt(std::uint64_t request, const core::UploadId& upload) noexcept;
+    // The catalog granted `request` its claim on `upload`, the grant `token` names. A claim
+    // still held by another request is released first: one request's claim never outlives the
+    // next one's start.
+    void adopt(std::uint64_t request, const core::UploadId& upload,
+               core::ports::ClaimToken token) noexcept;
     // Releases the claim if `request` holds it. Any other request's claim is left as it is.
     void release(std::uint64_t request) noexcept;
     // Releases whatever is held, whoever holds it: the connection is closing.
@@ -44,6 +48,8 @@ private:
     struct Holder {
         std::uint64_t request;
         core::UploadId upload;
+        // Released by this, so a release never reaches a later grant of the same upload.
+        core::ports::ClaimToken token;
     };
 
     core::ports::IUploadCatalog& catalog_;

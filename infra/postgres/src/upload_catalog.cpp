@@ -21,6 +21,8 @@ namespace {
 using core::ports::CatalogCallback;
 using core::ports::CatalogError;
 using core::ports::CatalogResult;
+using core::ports::ClaimedUpload;
+using core::ports::ClaimToken;
 using core::ports::NewUpload;
 using core::ports::StoredUpload;
 
@@ -511,7 +513,7 @@ public:
     }
 
     void claim(const core::UploadId& id, const core::UserId& owner,
-               CatalogCallback<StoredUpload> done) {
+               CatalogCallback<ClaimedUpload> done) {
         if (const auto it = claims_.find(id); it != claims_.end()) {
             // Advisory locks are reentrant within a session, so the server would grant this
             // process a second claim; only this map can refuse it.
@@ -522,16 +524,22 @@ public:
             claims_.erase(it);
         }
         const std::int64_t key = lock_key(id);
-        claims_.emplace(id, Claim{.key = key, .session = 0, .state = ClaimState::Locking});
+        // A grant of its own: a holder of an earlier grant of this upload, lost with its
+        // session, must not be able to release this one.
+        const ClaimToken token{++last_token_};
+        claims_.emplace(
+            id, Claim{.key = key, .session = 0, .token = token, .state = ClaimState::Locking});
         locks_->submit(std::make_unique<TryLock>(
-            key, id, owner, [this, id, done = std::move(done)](Outcome outcome) mutable noexcept {
-                locked(id, std::move(outcome), std::move(done));
+            key, id, owner,
+            [this, id, token, done = std::move(done)](Outcome outcome) mutable noexcept {
+                locked(id, token, std::move(outcome), std::move(done));
             }));
     }
 
-    void release(const core::UploadId& id) noexcept {
+    void release(const core::UploadId& id, ClaimToken token) noexcept {
         const auto it = claims_.find(id);
-        if (it == claims_.end() || it->second.state != ClaimState::Held) {
+        if (it == claims_.end() || it->second.state != ClaimState::Held ||
+            it->second.token != token) {
             return;
         }
         const Claim claim = it->second;
@@ -554,20 +562,29 @@ private:
     struct Claim {
         std::int64_t key = 0;
         std::uint64_t session = 0;
+        ClaimToken token;
         ClaimState state = ClaimState::Locking;
     };
 
+    // The grant a lock or load answers for, or end() when it is no longer in the map.
+    [[nodiscard]] std::unordered_map<core::UploadId, Claim>::iterator
+    grant(const core::UploadId& id, ClaimToken token) noexcept {
+        const auto it = claims_.find(id);
+        return it != claims_.end() && it->second.token == token ? it : claims_.end();
+    }
+
     [[nodiscard]] std::uint64_t live_session() const noexcept { return locks_->sessions_lost(); }
 
-    void locked(const core::UploadId& id, Outcome outcome, CatalogCallback<StoredUpload> done) {
-        const auto it = claims_.find(id);
+    void locked(const core::UploadId& id, ClaimToken token, Outcome outcome,
+                CatalogCallback<ClaimedUpload> done) {
+        const auto it = grant(id, token);
         if (it == claims_.end()) {
             done(std::unexpected(CatalogError::Unavailable));
             return;
         }
         if (!outcome) {
             claims_.erase(it);
-            done(failure<StoredUpload>(outcome.error()));
+            done(failure<ClaimedUpload>(outcome.error()));
             return;
         }
         if (outcome->rows() == 0) {
@@ -585,13 +602,14 @@ private:
         it->second.state = ClaimState::Loading;
         main_->submit(std::make_unique<Query>(
             Statement{.sql = kFindUpload, .params = Params{}.add_uuid(id.uuid())},
-            [this, id, done = std::move(done)](Outcome row) mutable noexcept {
-                loaded(id, std::move(row), std::move(done));
+            [this, id, token, done = std::move(done)](Outcome row) mutable noexcept {
+                loaded(id, token, std::move(row), std::move(done));
             }));
     }
 
-    void loaded(const core::UploadId& id, Outcome outcome, CatalogCallback<StoredUpload> done) {
-        const auto it = claims_.find(id);
+    void loaded(const core::UploadId& id, ClaimToken token, Outcome outcome,
+                CatalogCallback<ClaimedUpload> done) {
+        const auto it = grant(id, token);
         if (it == claims_.end()) {
             done(std::unexpected(CatalogError::Unavailable));
             return;
@@ -607,11 +625,11 @@ private:
         if (!upload) {
             claims_.erase(it);
             unlock(claim.key);
-            done(std::move(upload));
+            done(std::unexpected(upload.error()));
             return;
         }
         it->second.state = ClaimState::Held;
-        done(std::move(upload));
+        done(ClaimedUpload{.stored = std::move(*upload), .token = token});
     }
 
     void unlock(std::int64_t key) {
@@ -625,6 +643,7 @@ private:
     std::unique_ptr<Pool> locks_;
     DeferredCalls deferred_;
     std::unordered_map<core::UploadId, Claim> claims_;
+    std::uint64_t last_token_ = 0;
 };
 
 std::expected<std::unique_ptr<PgUploadCatalog>, std::string>
@@ -671,12 +690,12 @@ void PgUploadCatalog::find_upload(const core::UploadId& id, CatalogCallback<Stor
 }
 
 void PgUploadCatalog::claim_upload(const core::UploadId& id, const core::UserId& owner,
-                                   CatalogCallback<StoredUpload> done) {
+                                   CatalogCallback<ClaimedUpload> done) {
     impl_->claim(id, owner, std::move(done));
 }
 
-void PgUploadCatalog::release_upload(const core::UploadId& id) noexcept {
-    impl_->release(id);
+void PgUploadCatalog::release_upload(const core::UploadId& id, ClaimToken token) noexcept {
+    impl_->release(id, token);
 }
 
 void PgUploadCatalog::record_progress(const core::UploadId& id, const core::VideoId& video,

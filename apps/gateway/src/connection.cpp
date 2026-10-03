@@ -677,19 +677,20 @@ void Connection::start_append() noexcept {
                                 });
 }
 
-void Connection::on_claimed(std::uint64_t request, const core::UploadId& upload,
-                            core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept {
+void Connection::on_claimed(
+    std::uint64_t request, const core::UploadId& upload,
+    core::ports::CatalogResult<core::ports::ClaimedUpload> result) noexcept {
     if (!serving(request)) {
         // The request ended while the claim was being taken. A claim granted to it goes
         // straight back, and nothing a later request holds is touched.
         if (result) {
-            deps().catalog.release_upload(upload);
+            deps().catalog.release_upload(upload, result->token);
         }
         return;
     }
     if (result) {
-        claim_.adopt(request, upload);
-        req_.upload = std::move(*result);
+        claim_.adopt(request, upload, result->token);
+        req_.upload = std::move(result->stored);
     }
     if (!result) {
         if (result.error() == CatalogError::Conflict) {
@@ -1163,18 +1164,19 @@ void Connection::complete() noexcept {
     case ControlOp::Discard:
         if (req_.upload_id) {
             ++pending_;
-            deps().catalog.abort_upload(*req_.upload_id,
-                                        [this](core::ports::CatalogResult<void> result) noexcept {
-                                            --pending_;
-                                            if (phase_ != Phase::Request) {
-                                                return;
-                                            }
-                                            if (!result) {
-                                                fail_catalog(result.error());
-                                                return;
-                                            }
-                                            respond({.status = Status::NoContent}, {});
-                                        });
+            deps().catalog.abort_upload(
+                *req_.upload_id,
+                [this, request = job.request](core::ports::CatalogResult<void> result) noexcept {
+                    --pending_;
+                    if (!serving(request)) {
+                        return;
+                    }
+                    if (!result) {
+                        fail_catalog(result.error());
+                        return;
+                    }
+                    respond({.status = Status::NoContent}, {});
+                });
         }
         return;
     case ControlOp::Playlist:

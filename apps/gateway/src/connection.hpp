@@ -176,7 +176,7 @@ private:
     void start_append() noexcept;
     void start_lookup() noexcept;
     void on_claimed(std::uint64_t request, const core::UploadId& upload,
-                    core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept;
+                    core::ports::CatalogResult<core::ports::ClaimedUpload> result) noexcept;
     void on_found(core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept;
     void on_video(core::ports::CatalogResult<core::VideoRecord> result) noexcept;
     void start_playlist(const core::VideoRecord& video) noexcept;

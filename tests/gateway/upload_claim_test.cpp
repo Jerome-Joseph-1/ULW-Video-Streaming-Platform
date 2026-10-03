@@ -1,8 +1,20 @@
+#include "infra/catalog/memory_catalog.hpp"
+#include "net/reactor_factory.hpp"
+#include "os/system_clock.hpp"
+#include "os/system_random.hpp"
+
+#include "../conformance/storage_harness.hpp"
+#include "support/reactor_harness.hpp"
 #include "upload_claim.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <gtest/gtest.h>
+#include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -11,6 +23,8 @@ namespace {
 
 using core::ports::CatalogCallback;
 using core::ports::CatalogError;
+using core::ports::ClaimedUpload;
+using core::ports::ClaimToken;
 using core::ports::StoredUpload;
 using gateway::UploadClaim;
 
@@ -24,10 +38,13 @@ public:
         done(std::unexpected(CatalogError::Unavailable));
     }
     void claim_upload(const core::UploadId& /*id*/, const core::UserId& /*owner*/,
-                      CatalogCallback<StoredUpload> done) override {
+                      CatalogCallback<ClaimedUpload> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
-    void release_upload(const core::UploadId& id) noexcept override { released.push_back(id); }
+    void release_upload(const core::UploadId& id, ClaimToken token) noexcept override {
+        released.push_back(id);
+        tokens.push_back(token);
+    }
     void record_progress(const core::UploadId& /*id*/, const core::VideoId& /*video*/,
                          std::uint64_t /*durable_offset*/, CatalogCallback<void> done) override {
         done(std::unexpected(CatalogError::Unavailable));
@@ -45,6 +62,7 @@ public:
     }
 
     std::vector<core::UploadId> released;
+    std::vector<ClaimToken> tokens;
 };
 
 core::UploadId upload(std::string_view text) {
@@ -53,12 +71,14 @@ core::UploadId upload(std::string_view text) {
 
 const core::UploadId kFirst = upload("0192f3c4-7a1b-7c2d-8e3f-0123456789ab");
 const core::UploadId kSecond = upload("0192f3c4-7a1b-7c2d-8e3f-0123456789ac");
+constexpr ClaimToken kOne{1};
+constexpr ClaimToken kTwo{2};
 
 TEST(UploadClaim, AReleaseForTheHolderGivesTheClaimBackOnce) {
     ReleaseLog catalog;
     std::size_t held = 0;
     UploadClaim claim(catalog, held);
-    claim.adopt(1, kFirst);
+    claim.adopt(1, kFirst, kOne);
     EXPECT_TRUE(claim.held());
     EXPECT_TRUE(claim.held_by(1));
     EXPECT_EQ(held, 1U);
@@ -75,9 +95,9 @@ TEST(UploadClaim, AStaleCompletionCannotReleaseALaterRequestsClaim) {
     ReleaseLog catalog;
     std::size_t held = 0;
     UploadClaim claim(catalog, held);
-    claim.adopt(1, kFirst);
+    claim.adopt(1, kFirst, kOne);
     claim.release(1);
-    claim.adopt(2, kSecond);
+    claim.adopt(2, kSecond, kTwo);
     claim.release(1);
     EXPECT_TRUE(claim.held_by(2));
     EXPECT_FALSE(claim.held_by(1));
@@ -94,8 +114,8 @@ TEST(UploadClaim, AClaimLeftByAFinishedRequestGoesWhenTheNextOneClaims) {
     ReleaseLog catalog;
     std::size_t held = 0;
     UploadClaim claim(catalog, held);
-    claim.adopt(1, kFirst);
-    claim.adopt(2, kSecond);
+    claim.adopt(1, kFirst, kOne);
+    claim.adopt(2, kSecond, kTwo);
     EXPECT_TRUE(claim.held_by(2));
     EXPECT_EQ(held, 1U);
     EXPECT_EQ(catalog.released, std::vector{kFirst});
@@ -107,7 +127,7 @@ TEST(UploadClaim, ReleasingAnyFreesWhoeverHoldsIt) {
     UploadClaim claim(catalog, held);
     claim.release_any();
     EXPECT_TRUE(catalog.released.empty());
-    claim.adopt(7, kFirst);
+    claim.adopt(7, kFirst, kOne);
     claim.release_any();
     EXPECT_FALSE(claim.held());
     EXPECT_EQ(held, 0U);
@@ -119,7 +139,7 @@ TEST(UploadClaim, AClaimStillHeldIsReleasedWhenItsHolderGoes) {
     std::size_t held = 0;
     {
         UploadClaim claim(catalog, held);
-        claim.adopt(3, kSecond);
+        claim.adopt(3, kSecond, kTwo);
         EXPECT_EQ(held, 1U);
     }
     EXPECT_EQ(held, 0U);
@@ -131,12 +151,89 @@ TEST(UploadClaim, ClaimsOnSeveralConnectionsShareOneCount) {
     std::size_t held = 0;
     UploadClaim a(catalog, held);
     UploadClaim b(catalog, held);
-    a.adopt(1, kFirst);
-    b.adopt(1, kSecond);
+    a.adopt(1, kFirst, kOne);
+    b.adopt(1, kSecond, kTwo);
     EXPECT_EQ(held, 2U);
     a.release(1);
     EXPECT_EQ(held, 1U);
     EXPECT_TRUE(b.held_by(1));
+}
+
+// The catalog is told which grant goes back, not only which upload.
+TEST(UploadClaim, AReleaseNamesTheGrantItGivesBack) {
+    ReleaseLog catalog;
+    std::size_t held = 0;
+    UploadClaim claim(catalog, held);
+    claim.adopt(1, kFirst, kOne);
+    claim.release(1);
+    claim.adopt(2, kFirst, kTwo);
+    claim.release(2);
+    EXPECT_EQ(catalog.released, (std::vector{kFirst, kFirst}));
+    EXPECT_EQ(catalog.tokens, (std::vector{kOne, kTwo}));
+}
+
+class MemoryCatalogClaims : public ::testing::Test {
+protected:
+    [[nodiscard]] core::ports::CatalogResult<ClaimedUpload> claim() {
+        std::optional<core::ports::CatalogResult<ClaimedUpload>> out;
+        catalog.claim_upload(id, owner, [&](auto r) noexcept { out = std::move(r); });
+        EXPECT_TRUE(ulw::test::pump_until(*reactor, [&] { return out.has_value(); }));
+        return out.value_or(std::unexpected(CatalogError::Unavailable));
+    }
+
+    os::SystemClock clock;
+    os::SystemRandom random;
+    std::unique_ptr<net::IReactor> reactor =
+        std::move(*net::make_reactor(ulw::test::reactor_kind_from_env(), clock, 64));
+    infra::catalog::MemoryCatalog catalog{*reactor};
+    core::UserId owner = *core::UserId::parse("alice");
+    core::VideoId video = core::VideoId::generate(clock, random);
+    core::UploadId id = core::UploadId::generate(clock, random);
+
+    void SetUp() override {
+        std::optional<core::ports::CatalogResult<void>> made;
+        catalog.create_upload(
+            core::ports::NewUpload{
+                .video = core::VideoRecord{.id = video,
+                                           .owner = owner,
+                                           .title = "trip",
+                                           .state = core::VideoState::Init,
+                                           .version = 0,
+                                           .error_reason = std::nullopt,
+                                           .duration = std::nullopt},
+                .upload =
+                    core::UploadRecord{.id = id,
+                                       .video_id = video,
+                                       .owner = owner,
+                                       .size_bytes = 1024,
+                                       .chunk_size = 1024,
+                                       .durable_offset = 0,
+                                       .state = core::UploadState::Active,
+                                       .expires_at = clock.wall_now() + std::chrono::hours(24)},
+                .backend_ref = "ingest-1",
+                .object_key = *core::StorageKey::parse("videos/" + video.to_string() + "/raw")},
+            [&](auto r) noexcept { made = r; });
+        ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return made.has_value(); }));
+        ASSERT_TRUE(*made);
+    }
+};
+
+// A holder whose grant was given back, and the upload claimed again, releases nothing with its
+// old token: the later grant stays held until its own token comes back.
+TEST_F(MemoryCatalogClaims, AReleaseWithAnEarlierGrantsTokenReleasesNothing) {
+    const auto first = claim();
+    ASSERT_TRUE(first);
+    catalog.release_upload(id, first->token);
+    EXPECT_EQ(catalog.claims(), 0U);
+    const auto second = claim();
+    ASSERT_TRUE(second);
+    EXPECT_NE(second->token, first->token);
+    catalog.release_upload(id, first->token);
+    EXPECT_EQ(catalog.claims(), 1U);
+    EXPECT_EQ(claim().error(), CatalogError::Conflict);
+    catalog.release_upload(id, second->token);
+    EXPECT_EQ(catalog.claims(), 0U);
+    EXPECT_TRUE(claim());
 }
 
 } // namespace

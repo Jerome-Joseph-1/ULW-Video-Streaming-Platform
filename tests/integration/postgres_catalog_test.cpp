@@ -20,6 +20,7 @@ namespace {
 
 using core::ports::CatalogError;
 using core::ports::CatalogResult;
+using core::ports::ClaimedUpload;
 using core::ports::NewUpload;
 using core::ports::StoredUpload;
 using infra::postgres::CatalogConfig;
@@ -106,9 +107,9 @@ protected:
     CatalogResult<void> create(PgUploadCatalog& c, const NewUpload& u) {
         return call<void>([&](auto done) { c.create_upload(u, std::move(done)); });
     }
-    CatalogResult<StoredUpload> claim(PgUploadCatalog& c, const core::UploadId& id,
-                                      const core::UserId& owner = tester()) {
-        return call<StoredUpload>([&](auto done) { c.claim_upload(id, owner, std::move(done)); });
+    CatalogResult<ClaimedUpload> claim(PgUploadCatalog& c, const core::UploadId& id,
+                                       const core::UserId& owner = tester()) {
+        return call<ClaimedUpload>([&](auto done) { c.claim_upload(id, owner, std::move(done)); });
     }
     CatalogResult<void> progress(const NewUpload& u, std::uint64_t offset) {
         return call<void>([&](auto done) {
@@ -394,14 +395,14 @@ TEST_P(CatalogTest, ClaimReturnsTheUploadAndRefusesASecondGateway) {
     ASSERT_TRUE(create(*catalog, u));
     const auto held = claim(*catalog, u.upload.id);
     ASSERT_TRUE(held) << core::ports::to_string(held.error());
-    EXPECT_EQ(held->object_key, u.object_key);
+    EXPECT_EQ(held->stored.object_key, u.object_key);
 
     other = make_catalog();
     ASSERT_TRUE(other);
     EXPECT_EQ(claim(*other, u.upload.id).error(), CatalogError::Conflict);
-    catalog->release_upload(u.upload.id);
+    catalog->release_upload(u.upload.id, held->token);
     // The unlock travels on another session than the next claim; wait for it to land.
-    CatalogResult<StoredUpload> taken = std::unexpected(CatalogError::Conflict);
+    CatalogResult<ClaimedUpload> taken = std::unexpected(CatalogError::Conflict);
     const bool claimed = ulw::test::pump_until(*reactor, [&] {
         taken = claim(*other, u.upload.id);
         return taken || taken.error() != CatalogError::Conflict;
@@ -426,20 +427,20 @@ TEST_P(CatalogTest, ClaimOutlivesTheOwnerItWasGiven) {
     // The port asks callers to keep only the callback's captures alive. The owner goes before
     // the statement is sent, and another id of the same length takes over its memory.
     auto owner = std::make_unique<core::UserId>(tester());
-    Reply<StoredUpload> reply;
+    Reply<ClaimedUpload> reply;
     catalog->claim_upload(u.upload.id, *owner, reply.callback());
     owner.reset();
     const auto intruder = std::make_unique<core::UserId>(*core::UserId::parse("auth0|intrud"));
     const auto held = ulw::test::wait(*reactor, reply);
     ASSERT_TRUE(held) << core::ports::to_string(held.error());
-    EXPECT_EQ(held->upload.owner, tester());
+    EXPECT_EQ(held->stored.upload.owner, tester());
 }
 
 TEST_P(CatalogTest, SecondClaimInOneProcessIsRefusedOnALaterIteration) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
     ASSERT_TRUE(claim(*catalog, u.upload.id));
-    Reply<StoredUpload> again;
+    Reply<ClaimedUpload> again;
     catalog->claim_upload(u.upload.id, u.upload.owner, again.callback());
     EXPECT_EQ(again.calls(), 0);
     EXPECT_EQ(ulw::test::wait(*reactor, again).error(), CatalogError::Conflict);
@@ -456,7 +457,7 @@ TEST_P(CatalogTest, KilledGatewayFreesItsClaimsAtOnce) {
 
     // Destroying it closes its sessions exactly as the kernel does for a killed process.
     other.reset();
-    CatalogResult<StoredUpload> taken = std::unexpected(CatalogError::Conflict);
+    CatalogResult<ClaimedUpload> taken = std::unexpected(CatalogError::Conflict);
     const bool claimed = ulw::test::pump_until(*reactor, [&] {
         taken = claim(*catalog, u.upload.id);
         return taken || taken.error() != CatalogError::Conflict;
@@ -489,6 +490,44 @@ TEST_P(CatalogTest, LosingTheLockSessionLosesEveryClaim) {
     EXPECT_TRUE(claim(*other, u.upload.id));
 }
 
+// The claim session is lost and the upload claimed again in the same process. The holder of
+// the lost grant still has its token, and its late release must not give back the new grant:
+// before releases named their grant, it did, and another gateway could then claim the upload
+// under a holder that believed it held it.
+TEST_P(CatalogTest, AReleaseFromTheHolderOfALostClaimLeavesTheNewClaimHeld) {
+    const NewUpload u = new_upload();
+    ASSERT_TRUE(create(*catalog, u));
+    const auto lost = claim(*catalog, u.upload.id);
+    ASSERT_TRUE(lost) << core::ports::to_string(lost.error());
+
+    auto conn = db->session();
+    ASSERT_EQ(scalar(conn,
+                     "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+                     "WHERE datname = current_database() AND application_name = 'ulw-claims'"),
+              "1");
+    CatalogResult<ClaimedUpload> again = std::unexpected(CatalogError::Unavailable);
+    ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] {
+        again = claim(*catalog, u.upload.id);
+        return again.has_value();
+    }));
+    EXPECT_NE(again->token, lost->token);
+
+    catalog->release_upload(u.upload.id, lost->token);
+    EXPECT_TRUE(progress(u, kChunk));
+    other = make_catalog();
+    ASSERT_TRUE(other);
+    EXPECT_EQ(claim(*other, u.upload.id).error(), CatalogError::Conflict);
+
+    catalog->release_upload(u.upload.id, again->token);
+    EXPECT_EQ(progress(u, 2 * kChunk).error(), CatalogError::Conflict);
+    CatalogResult<ClaimedUpload> taken = std::unexpected(CatalogError::Conflict);
+    ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] {
+        taken = claim(*other, u.upload.id);
+        return taken || taken.error() != CatalogError::Conflict;
+    }));
+    EXPECT_TRUE(taken);
+}
+
 TEST_P(CatalogTest, ClaimThatLoadsACorruptRowLetsGoOfItsLock) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
@@ -500,7 +539,7 @@ TEST_P(CatalogTest, ClaimThatLoadsACorruptRowLetsGoOfItsLock) {
     other = make_catalog();
     ASSERT_TRUE(other);
     // The unlock travels on another session than the next claim; wait for it to land.
-    CatalogResult<StoredUpload> seen = std::unexpected(CatalogError::Conflict);
+    CatalogResult<ClaimedUpload> seen = std::unexpected(CatalogError::Conflict);
     const bool settled = ulw::test::pump_until(*reactor, [&] {
         seen = claim(*other, u.upload.id);
         return seen || seen.error() != CatalogError::Conflict;

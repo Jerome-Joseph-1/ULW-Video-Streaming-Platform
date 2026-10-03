@@ -211,7 +211,6 @@ public:
     // Upload claims (ADR-0065) the shard's requests hold now; each connection's UploadClaim
     // keeps it.
     [[nodiscard]] std::size_t claims_held() const noexcept { return claims_held_; }
-    [[nodiscard]] std::size_t& claims_held_count() noexcept { return claims_held_; }
     [[nodiscard]] ViewRecorder& views() noexcept { return views_; }
     [[nodiscard]] LiveManifestCache& live() noexcept { return live_; }
     // From a chunk's first byte handed to the store to the store holding all of it durably.
@@ -243,6 +242,10 @@ public:
 
 private:
     class Discard;
+    // Only a connection's UploadClaim moves the count of claims held.
+    friend class Connection;
+
+    [[nodiscard]] std::size_t& claims_held_count() noexcept { return claims_held_; }
 
     struct ClientEntry {
         TokenBucket new_connections;

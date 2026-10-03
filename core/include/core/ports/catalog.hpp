@@ -44,6 +44,20 @@ struct StoredUpload {
     StorageKey object_key;
 };
 
+// One grant of a claim on an upload. Every grant a catalog makes has a token of its own, and a
+// release names the grant it gives back: a holder whose claim was lost and granted again, to it
+// or to anyone else, cannot release the newer grant with the older token.
+struct ClaimToken {
+    std::uint64_t value = 0;
+
+    friend bool operator==(const ClaimToken&, const ClaimToken&) = default;
+};
+
+struct ClaimedUpload {
+    StoredUpload stored;
+    ClaimToken token;
+};
+
 // Upload and video metadata as the gateway sees it. Every call is asynchronous: the gateway's
 // reactor thread issues it and continues.
 class IUploadCatalog {
@@ -59,8 +73,11 @@ public:
     // with NotFound, before any claim is taken, when `owner` does not own the upload: knowing
     // an upload's id must not be enough to lock its owner out.
     virtual void claim_upload(const UploadId& id, const UserId& owner,
-                              CatalogCallback<StoredUpload> done) = 0;
-    virtual void release_upload(const UploadId& id) noexcept = 0;
+                              CatalogCallback<ClaimedUpload> done) = 0;
+    // Gives back the grant `token` names. A token that no longer names the upload's current
+    // grant (released already, lost with its session, or replaced by a later claim) releases
+    // nothing.
+    virtual void release_upload(const UploadId& id, ClaimToken token) noexcept = 0;
 
     // Records a durable offset reached by the holder of the claim, and moves the video from
     // init to uploading on the first one. Offsets never move backwards.

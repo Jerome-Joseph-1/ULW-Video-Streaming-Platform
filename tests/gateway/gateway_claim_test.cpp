@@ -2,13 +2,13 @@
 // back however it ends, and catalog_claims_held, the gateway's count of them, comes back to 0.
 
 #include "core/util/json.hpp"
+#include "core/util/parse.hpp"
 
 #include "gateway_harness.hpp"
 #include "support/eventually.hpp"
 #include "support/http_client.hpp"
 #include "support/reactor_harness.hpp"
 
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
@@ -69,13 +69,12 @@ std::optional<std::uint64_t> scraped_claims(GatewayUnderTest& gw) {
     if (at == std::string::npos) {
         return std::nullopt;
     }
-    const char* first = text.data() + at + kSeries.size();
-    std::uint64_t v = 0;
-    const auto [end, ec] = std::from_chars(first, text.data() + text.size(), v);
-    if (ec != std::errc{} || end == first || *end != '\n') {
+    const std::string_view rest = std::string_view(text).substr(at + kSeries.size());
+    const std::size_t end = rest.find('\n');
+    if (end == std::string_view::npos) {
         return std::nullopt;
     }
-    return v;
+    return core::parse_integer<std::uint64_t>(rest.substr(0, end));
 }
 
 // The catalog's own claims, the gateway's count and the scraped gauge all agree on `n`.
@@ -102,7 +101,7 @@ TEST(GatewayClaims, TheGaugeCountsAChunkInFlightAndIsZeroOnceItCompletes) {
     const auto r = c.read_response();
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 204);
-    // Given back before the response left, in the same turn of the loop.
+    // Given back in the same turn of the loop that sent the response.
     EXPECT_TRUE(claims_are(gw, 0));
 }
 
@@ -193,13 +192,18 @@ TEST(GatewayClaims, TheGaugeReturnsToZeroWhenTheClientAbandonsTheChunk) {
     }
     EXPECT_TRUE(ulw::test::eventually([&] { return claims_are(gw, 0); }));
     HttpClient again(gw.endpoint());
-    EXPECT_EQ(patch(again, upload, 0, data)->status, 204);
+    const auto retried = patch(again, upload, 0, data);
+    ASSERT_TRUE(retried);
+    EXPECT_EQ(retried->status, 204);
     EXPECT_TRUE(claims_are(gw, 0));
 }
 
-// The catalog's answer to a claim reaches a request that has already ended: the claim it
-// grants goes straight back, and is never counted as held.
-TEST(GatewayClaims, AClaimGrantedAfterItsRequestEndedGoesStraightBack) {
+// A gauge and regression test, not a reproduction: the catalog's answer to a claim reaches a
+// request that has already ended, and the claim it grants goes straight back and is never
+// counted as held. The old code released it too, through the ended request; what decides
+// between old and new ownership is UploadClaim.AStaleCompletionCannotReleaseALaterRequestsClaim
+// in upload_claim_test.cpp.
+TEST(GatewayClaims, AClaimGrantedAfterItsRequestEndedIsGivenBackAndNeverCounted) {
     GatewayUnderTest gw(fake_store(true));
     const auto data = ulw::test::pattern(kMiB);
     HttpClient setup(gw.endpoint());
@@ -219,7 +223,9 @@ TEST(GatewayClaims, AClaimGrantedAfterItsRequestEndedGoesStraightBack) {
     // The idle setup connection went at its header timeout in the same stretch of time.
     EXPECT_TRUE(ulw::test::eventually([&] { return claims_are(gw, 0) && gw.connections() == 0; }));
     HttpClient again(gw.endpoint());
-    EXPECT_EQ(patch(again, *up, 0, data)->status, 204);
+    const auto retried = patch(again, *up, 0, data);
+    ASSERT_TRUE(retried);
+    EXPECT_EQ(retried->status, 204);
     EXPECT_TRUE(claims_are(gw, 0));
 }
 
@@ -262,10 +268,12 @@ TEST(GatewayClaims, TheGaugeReturnsToZeroWhenTheBackstopEndsTheChunk) {
     EXPECT_EQ(gw.counters().timeouts_backstop, 1U);
 }
 
-// The audit's sequence, end to end: a request whose storage job is still running is ended by
-// the backstop, and the job completes while another request holds a claim. The completion is
-// stale and must leave that claim alone.
-TEST(GatewayClaims, AStaleJobCompletionLeavesAnotherRequestsClaimHeld) {
+// A gauge and regression test, not a reproduction: a request whose storage job is still
+// running is ended by the backstop, and the job completes while a request on another
+// connection holds a claim. Claims are per connection, so the old code passed this too; the
+// stale release itself is decided by UploadClaim.AStaleCompletionCannotReleaseALaterRequestsClaim
+// in upload_claim_test.cpp.
+TEST(GatewayClaims, AStaleJobCompletionKeepsTheGaugeOnTheClaimStillHeld) {
     GatewayUnderTest gw(fake_store(true));
     gw.put_video(core::VideoRecord{.id = *core::VideoId::parse(kVideo),
                                    .owner = *core::UserId::parse("alice"),
