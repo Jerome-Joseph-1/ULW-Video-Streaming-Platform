@@ -2,8 +2,9 @@
 // of one browser can be two users.
 import { $, chat, demo, directory, el, loadDirectory, signIn } from './core.js';
 import { initVideos } from './videos.js';
-import { initChat } from './chat.js';
-import { initCalls } from './calls.js';
+import { initChat, syncRooms } from './chat.js';
+import { initCalls, refreshCalls } from './calls.js';
+import { relist, useRoomsApi } from './rooms.js';
 import { initLive } from './live.js';
 
 function showTab(name) {
@@ -19,11 +20,20 @@ async function start(user) {
   $('tabs').hidden = false;
   $('whoami').hidden = false;
   $('me').textContent = user;
+  await chat.connect();
+  await new Promise((resolve) => (chat.open ? resolve() : chat.addEventListener('open', resolve, { once: true })));
+  // The rooms chat lists, where it has the member-list commands; else web/rooms.json.
+  if (await useRoomsApi()) {
+    chat.addEventListener('member', async () => {
+      await relist();
+      syncRooms();
+      refreshCalls();
+    });
+  }
   initVideos();
   initChat();
   initCalls();
   initLive();
-  await chat.connect();
   let tab = 'videos';
   try { tab = new URLSearchParams(location.search).get('tab') ?? sessionStorage.getItem('ulw-demo:tab') ?? 'videos'; } catch { /* ignore */ }
   showTab(tab);
