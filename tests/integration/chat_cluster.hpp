@@ -93,7 +93,7 @@ struct Seen {
     std::string url;
     std::string token;
     std::uint64_t expires_at = 0;
-    // Of a ticket and a call's events (ADR-0092).
+    // Of a ticket and a call's events (ADR-0091).
     std::string call;
     std::string from;
     std::string by;

@@ -40,7 +40,7 @@
 //   {"type":"unwatch","user":"<sub>"}   stop; unanswered
 //   {"type":"call","room":"<uuid>","device":"<uuid>"}   a ticket to the room's call, for this
 //       device: the room must be a direct chat this connection has joined (ADR-0050). The first
-//       rings the other member; the other member's answers the ring (ADR-0092)
+//       rings the other member; the other member's answers the ring (ADR-0091)
 //   {"type":"call_decline"|"call_cancel"|"call_end","room":"<uuid>","call":"<uuid>"}   turn a
 //       ringing call down (a callee), give up ringing (the caller), or end an answered call
 //       (either member); answered with the event the other member hears

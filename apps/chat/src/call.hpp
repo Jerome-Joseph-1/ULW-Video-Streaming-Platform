@@ -22,7 +22,7 @@
 // SFU once, and answers with a ticket the client takes to the SFU itself. Offers, answers,
 // candidates and TURN credentials never pass through here (ADR-0037). The first ticket rings the
 // other member, and declining, cancelling and ending are asked of the owner the same way
-// (ring.hpp, ADR-0092).
+// (ring.hpp, ADR-0091).
 namespace chat {
 
 // A call is a direct chat's: two participants at most, each a device (ADR-0050). Group calls

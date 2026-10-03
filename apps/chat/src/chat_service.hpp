@@ -185,7 +185,7 @@ public:
     // A ticket to the room's call, from its owner (ADR-0050), for a client in the room. Charged
     // as a join: each costs the owner a store read and an SFU call.
     void call(ClientId id, const Call& call);
-    // Declines, cancels or ends the room's call, on its owner (ADR-0092), for a client in the
+    // Declines, cancels or ends the room's call, on its owner (ADR-0091), for a client in the
     // room. Charged as a join, as a ticket is: each costs the owner a store read.
     void call_move(ClientId id, const CallMove& move);
     // The client's connection has sent everything it had queued: a lossy client that fell

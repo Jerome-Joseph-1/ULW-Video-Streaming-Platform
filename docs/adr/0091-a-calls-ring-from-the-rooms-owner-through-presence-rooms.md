@@ -1,4 +1,4 @@
-# 0092. A call's ring lives on the room's owner and reaches each member through their presence room
+# 0091. A call's ring lives on the room's owner and reaches each member through their presence room
 
 Status: Accepted
 Date: 2026-10-03

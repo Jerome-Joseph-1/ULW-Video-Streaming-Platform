@@ -1,6 +1,6 @@
 # 0087. A call's ticket comes from the room's owner, asked over the node channel, in one generation
 
-Status: Accepted, amended by 0092 (the first ticket rings the other member; decline, cancel and end)
+Status: Accepted, amended by 0091 (the first ticket rings the other member; decline, cancel and end)
 Date: 2026-10-03
 Amends: ADR-0035 (the node channel carries asks a room's owner answers; version 4); ADR-0050
 (how the call handler reaches the owning node, and the generation before expulsion exists)

@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-// A call's ring (ADR-0092): the signal that tells a direct chat's other member a call is
+// A call's ring (ADR-0091): the signal that tells a direct chat's other member a call is
 // starting, and tells both how it ended before anyone was talking. It lives on the room's
 // owner, beside the call handler that issues the tickets (ADR-0087), and reaches each member's
 // sockets wherever they are connected through the member's presence room, which every node with

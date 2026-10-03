@@ -1434,7 +1434,7 @@ std::string move_command(const std::string& type, const std::string& room,
     return R"({"type":")" + type + R"(","room":")" + room + R"(","call":")" + call + R"("})";
 }
 
-// The M23 to M26 calls made usable (ADR-0092): alice, on one node, calls bob, connected to another
+// The M23 to M26 calls made usable (ADR-0091): alice, on one node, calls bob, connected to another
 // node twice and in no room at all. Every socket of both hears the ring, and how it ends: bob
 // answering on one device (the other stops ringing), then ending it; bob declining; alice
 // cancelling; and a ring nobody answers running out for both. Needs a LiveKit, as the tickets do.

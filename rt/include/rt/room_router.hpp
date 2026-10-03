@@ -225,7 +225,7 @@ public:
     void serve(IOwnerService* service) noexcept;
 
     // Hands `body` to the room's members on every node that has some, this one included,
-    // through the room's owner (ADR-0092): unsequenced, unstored, at most once to each node, and
+    // through the room's owner (ADR-0091): unsequenced, unstored, at most once to each node, and
     // best effort. Any node may notify, joined or not. A room nobody has joined anywhere has no
     // owner, and the notice goes nowhere: the owner is looked up without claiming the room. A
     // notice whose owner is changing hands, or whose node link fails, is lost; nothing says so

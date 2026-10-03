@@ -85,7 +85,7 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
 
 ## Ringing
 
-<!-- apps/chat/src/ring.hpp (RingLimits), apps/chat/src/ring.cpp (Ringer, ring_limited, answering), apps/chat/src/call_bell.cpp (CallBell::on_notice), apps/chat/src/envelope.cpp (write_call_event, call_move_of), docs/adr/0092-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md -->
+<!-- apps/chat/src/ring.hpp (RingLimits), apps/chat/src/ring.cpp (Ringer, ring_limited, answering), apps/chat/src/call_bell.cpp (CallBell::on_notice), apps/chat/src/envelope.cpp (write_call_event, call_move_of), docs/adr/0091-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md -->
 
 The room's owner keeps one call per direct chat, from the first ticket until it ends, and tells
 every open socket of **both** members, on any node, each time it changes. A socket hears these

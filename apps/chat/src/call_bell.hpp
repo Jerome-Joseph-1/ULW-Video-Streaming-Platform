@@ -30,7 +30,7 @@ struct BellId {
     friend bool operator==(BellId, BellId) = default;
 };
 
-// Where a call's ring reaches the sockets of a member on this node (ADR-0092): the room plane
+// Where a call's ring reaches the sockets of a member on this node (ADR-0091): the room plane
 // hands it the notices sent to the presence rooms this node is in (rt::INoticeListener), and
 // the bell pushes each, as its event, to every socket here of the member it names. Everything
 // runs on the reactor thread.

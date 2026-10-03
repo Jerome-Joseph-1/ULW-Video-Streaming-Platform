@@ -20,7 +20,7 @@ namespace rt::wire {
 
 // 2: Send and Deliver carry the client's message key. 3: a Reply may say Conflict. 4: Ask and
 // Answer carry what a room's owner answers for its members (a call's ticket, ADR-0050). 5: Notify
-// and Notice carry what any node hands a room's members, unsequenced (a call's ring, ADR-0092).
+// and Notice carry what any node hands a room's members, unsequenced (a call's ring, ADR-0091).
 inline constexpr std::uint8_t kVersion = 5;
 // The largest message a client may send (codec::ws::Decoder's 64 KiB, ADR-0029), plus room for
 // the other fields, which take at most 239 bytes (a Send: type, request, room, sender, key).

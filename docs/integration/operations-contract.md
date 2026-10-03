@@ -332,7 +332,7 @@ rooms this node owns), `call_errors_total{source="sfu",kind="unavailable"}` (Liv
 or overloaded: clients are told to retry), `{source="sfu",kind="refused"}` (LiveKit refused the
 request as made, a configuration fault: clients get `call_failed`) and
 `{source="store",kind="unavailable"}`. Each is counted on the node that owns the room, not the
-one the client is on. A call's ring (ADR-0092), also on the room's owner:
+one the client is on. A call's ring (ADR-0091), also on the room's owner:
 `call_refusals_total{reason="no_call"}` (declines, cancels and ends of a call that was not there
 to move), `call_refusals_total{reason="ring_limited"}` (tickets refused because their direct chat
 rang 5 times in a minute, or its caller was just declined), `calls_ringing_or_answered`, `call_rings_total{outcome="started"}`, `{outcome="answered"}`,

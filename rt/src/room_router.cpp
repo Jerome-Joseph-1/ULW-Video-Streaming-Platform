@@ -69,7 +69,7 @@ constexpr core::Millis kRecentKeysWindow{60'000};
 // (ADR-0035): still ten forward timeouts.
 constexpr std::size_t kRecentKeys = 32'768;
 // Rooms whose owner a notice is waiting to learn, each one read of the store's owners, and
-// notices each may hold meanwhile. A notice is a few hundred bytes (a call's ring, ADR-0092):
+// notices each may hold meanwhile. A notice is a few hundred bytes (a call's ring, ADR-0091):
 // 256 rooms of 8 hold at most 8 MiB at kMaxOwnerMessage, far less as sent. Past either, a
 // notice is dropped, as one whose owner cannot be reached is.
 constexpr std::size_t kMaxNoticeLookups = 256;
