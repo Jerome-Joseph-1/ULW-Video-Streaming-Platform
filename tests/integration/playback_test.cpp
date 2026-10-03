@@ -171,7 +171,7 @@ protected:
         std::ofstream(jwks) << key->public_jwks();
         const auto mint = [&](std::string subject) {
             return *key->mint({.issuer = std::string(kIssuer),
-                               .audience = "askedin-platform",
+                               .audience = "ulw-dev",
                                .subject = std::move(subject),
                                .email = {},
                                .ttl = seconds(600)},

@@ -196,6 +196,7 @@ jobs:
             ${{ runner.temp }}/${{ matrix.out }}/samples.csv
             ${{ runner.temp }}/${{ matrix.out }}/summary.txt
             ${{ runner.temp }}/${{ matrix.out }}/pids.json
+            ${{ runner.temp }}/${{ matrix.out }}/windows.json
             ${{ runner.temp }}/${{ matrix.out }}/*.log
           if-no-files-found: warn
           retention-days: 30
@@ -216,5 +217,8 @@ jobs:
             sudo pkill -f "^[^ ]*/${program}( |\$)" || true
           done
           sudo rm -rf "$OUT"
+          # The worker's scratch, which soak.py puts under /tmp when $OUT is out of the sandbox's
+          # reach (a home directory of mode 750); a cancelled soak never reaches its cleanup.
+          sudo find /tmp -maxdepth 1 -name 'ulw-soak-scratch-*' -exec rm -rf {} +
           docker compose -f deploy/local/compose.yaml down || true
           sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"

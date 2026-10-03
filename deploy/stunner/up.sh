@@ -59,20 +59,21 @@ kubectl wait --for=condition=Established --timeout=60s \
     crd/udproutes.stunner.l7mp.io >/dev/null
 
 apply_stdin() { kubectl apply -f - >/dev/null; }
-for ns in stunner-system apps-stage; do
+for ns in stunner-system ulw; do
     kubectl create namespace "$ns" --dry-run=client -o yaml | apply_stdin
 done
-# The keys are the ones RUNBOOK.md lists, with sandbox values.
+# The keys are the ones deploy/kubernetes/RUNBOOK.md (step 7) lists, with sandbox values.
 kubectl -n stunner-system create secret generic stunner-secrets --from-literal=type=ephemeral \
     --from-literal="secret=$turn_secret" --dry-run=client -o yaml | apply_stdin
 # Chat's call handler signs tickets with the same pair (docs/adr/0087), and names Envoy's
 # listener on this host as the URL clients reach LiveKit's /rtc route on.
-kubectl -n apps-stage create secret generic sfu-secrets --from-literal=ASKEDIN_ENV=stage \
+kubectl -n ulw create secret generic sfu-secrets \
     --from-literal="LIVEKIT_KEYS=$livekit_keys" --from-literal="TURN_HOST=$outside_gateway" \
-    --from-literal="TURN_SECRET=$turn_secret" --from-literal="LIVEKIT_API_KEY=${livekit_keys%%: *}" \
+    --from-literal="TURN_SECRET=$turn_secret" \
+    --from-literal="LIVEKIT_API_KEY=${livekit_keys%%: *}" \
     --from-literal="LIVEKIT_API_SECRET=${livekit_keys#*: }" \
-    --from-literal="LIVEKIT_CLIENT_URL=ws://127.0.0.1:18080" \
-    --from-literal="REDIS_PASSWORD=$redis_password" --dry-run=client -o yaml | apply_stdin
+    --from-literal="REDIS_PASSWORD=$redis_password" \
+    --from-literal="LIVEKIT_CLIENT_URL=ws://127.0.0.1:18080" --dry-run=client -o yaml | apply_stdin
 
 log "applying the operator, the Gateway and LiveKit"
 kubectl kustomize --load-restrictor LoadRestrictionsNone "$root/deploy/stunner" | apply_stdin
@@ -80,24 +81,24 @@ kubectl kustomize --load-restrictor LoadRestrictionsNone "$root/deploy/stunner" 
 kubectl -n stunner-system rollout status deployment/stunner-gateway-operator-controller-manager \
     --timeout=180s
 kubectl wait --for=condition=Accepted --timeout=120s gatewayclass/stunner-gatewayclass
-kubectl -n apps-stage wait --for=condition=Programmed --timeout=120s gateway/stunner
+kubectl -n ulw wait --for=condition=Programmed --timeout=120s gateway/stunner
 for condition in Accepted ResolvedRefs; do
-    kubectl -n apps-stage wait --timeout=120s udproutes.stunner.l7mp.io/livekit \
+    kubectl -n ulw wait --timeout=120s udproutes.stunner.l7mp.io/livekit \
         --for="jsonpath={.status.parents[0].conditions[?(@.type==\"$condition\")].status}=True"
 done
 # The operator creates the stunnerd Deployment, under the Gateway's name, once it has rendered
 # the Gateway's configuration.
-kubectl -n apps-stage wait --for=create --timeout=120s deployment/stunner
-kubectl -n apps-stage rollout status deployment/stunner --timeout=180s
+kubectl -n ulw wait --for=create --timeout=120s deployment/stunner
+kubectl -n ulw rollout status deployment/stunner --timeout=180s
 # A changed secret reaches Redis and LiveKit only through new pods; LiveKit needs Redis up.
-kubectl -n apps-stage rollout restart deployment/livekit-redis >/dev/null
-kubectl -n apps-stage rollout status deployment/livekit-redis --timeout=120s
-kubectl -n apps-stage rollout restart deployment/livekit >/dev/null
-kubectl -n apps-stage rollout status deployment/livekit --timeout=180s
+kubectl -n ulw rollout restart deployment/livekit-redis >/dev/null
+kubectl -n ulw rollout status deployment/livekit-redis --timeout=120s
+kubectl -n ulw rollout restart deployment/livekit >/dev/null
+kubectl -n ulw rollout status deployment/livekit --timeout=180s
 # Chat (when e2e-up.sh deployed it) reads sfu-secrets only at start: until its pods restart they
 # answer calls with calls_disabled.
-if kubectl -n apps-stage get deployment chat >/dev/null 2>&1; then
-    kubectl -n apps-stage rollout restart deployment/chat >/dev/null
-    kubectl -n apps-stage rollout status deployment/chat --timeout=300s
+if kubectl -n ulw get deployment chat >/dev/null 2>&1; then
+    kubectl -n ulw rollout restart deployment/chat >/dev/null
+    kubectl -n ulw rollout status deployment/chat --timeout=300s
 fi
 log "up: TURN on $outside_gateway:3478/udp, LiveKit signalling on http://$outside_gateway:17880"

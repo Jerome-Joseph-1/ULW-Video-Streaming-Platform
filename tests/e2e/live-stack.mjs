@@ -132,7 +132,7 @@ export async function startLiveStack({ seconds, segment = 2, window = 10 }) {
     id,
     token: stack.token,
     // What the player loads: the gateway's route on the page's own origin, as behind the
-    // Askedin route.
+    // operator's route.
     manifest: `${stack.origin}${route}`,
     // The same route asked of the gateway directly, for the run's own observer.
     gatewayManifest: `${stack.gateway}${route}`,

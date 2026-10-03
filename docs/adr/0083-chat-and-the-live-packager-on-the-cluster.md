@@ -1,6 +1,6 @@
 # 0083. Chat and the live packager on the cluster: a Deployment of three, and a Job per stream
 
-Status: Accepted, amended by 0085 (the images are published from main to GHCR, not pushed by Woodpecker)
+Status: Accepted, amended by 0085 (the images are published from main to GHCR, not pushed by Woodpecker) and 0088 (the manifests are `deploy/kubernetes`, configured per environment by `config.env`)
 Date: 2026-10-03
 Amends: ADR-0081 (chat_server now has an image, which links jemalloc); ADR-0053's "Deployment"
 (the packager's manifests ship; egress's still do not)

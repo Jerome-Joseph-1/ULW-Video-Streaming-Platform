@@ -1,6 +1,6 @@
 # 0072. Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check
 
-Status: Accepted
+Status: Accepted, amended by 0085 (this repository's own builds are `ghcr.io/jerome-joseph-1/ulw-...`) and 0088 (the pin rule checks `deploy/kubernetes` and its rendered overlays)
 Date: 2026-09-30
 
 ## Context

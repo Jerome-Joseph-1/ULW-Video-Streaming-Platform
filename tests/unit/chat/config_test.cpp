@@ -31,6 +31,7 @@ protected:
         {"ULW_DATABASE_URL", "postgresql://ulw@db/ulw"},
         {"JWKS_URL", "https://auth.example.test/.well-known/jwks.json"},
         {"JWT_ISSUER", "https://auth.example.test"},
+        {"JWT_AUDIENCE", "ulw-test-audience"},
     };
 };
 
@@ -42,7 +43,8 @@ TEST_F(ChatConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->node_address, "10.42.0.17:9201");
     EXPECT_EQ(config->node_secret, "test-only-node-secret-0123456789abcdef");
     EXPECT_EQ(config->reactor, net::ReactorKind::IoUring);
-    EXPECT_EQ(config->jwt_audience, "askedin-platform");
+    EXPECT_EQ(config->jwt_audience, "ulw-test-audience");
+    EXPECT_EQ(config->jwt_subject_claim, "sub");
     EXPECT_EQ(config->auth_cookie, "auth_token");
     EXPECT_TRUE(config->allowed_origins.empty());
 }
@@ -99,8 +101,8 @@ TEST_F(ChatConfigTest, AnExplicitNodeIdWinsOverTheHostname) {
 }
 
 TEST_F(ChatConfigTest, EachRequiredVariableIsNamedWhenMissing) {
-    for (const std::string name :
-         {"ULW_NODE_ADDRESS", "ULW_NODE_SECRET", "ULW_DATABASE_URL", "JWKS_URL", "JWT_ISSUER"}) {
+    for (const std::string name : {"ULW_NODE_ADDRESS", "ULW_NODE_SECRET", "ULW_DATABASE_URL",
+                                   "JWKS_URL", "JWT_ISSUER", "JWT_AUDIENCE"}) {
         const std::string saved = env.at(name);
         env.erase(name);
         EXPECT_EQ(refused_variable(), name);
@@ -185,10 +187,32 @@ TEST_F(ChatConfigTest, ADevelopmentKeySetReplacesTheJwksUrlButNotBoth) {
     env["ULW_DEV_MODE"] = "1";
     EXPECT_EQ(refused_variable(), "JWKS_URL");
     env.erase("JWKS_URL");
+    env.erase("JWT_AUDIENCE");
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_EQ(config->dev_jwks_file, "/etc/ulw/dev-jwks.json");
     EXPECT_TRUE(config->jwks_url.empty());
+    // What ulw_devtoken mints by default; a JWKS has no default (below).
+    EXPECT_EQ(config->jwt_audience, "ulw-dev");
+}
+
+TEST_F(ChatConfigTest, KeysFromAJwksNeedTheAudienceSaidOutright) {
+    env.erase("JWT_AUDIENCE");
+    const auto config = load();
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().variable, "JWT_AUDIENCE");
+    EXPECT_NE(config.error().reason.find("JWKS_URL"), std::string::npos) << config.error().reason;
+}
+
+TEST_F(ChatConfigTest, TheSubjectClaimIsSubUnlessNamed) {
+    env["ULW_JWT_SUBJECT_CLAIM"] = "user_id";
+    const auto named = load();
+    ASSERT_TRUE(named);
+    EXPECT_EQ(named->jwt_subject_claim, "user_id");
+    for (const char* bad : {"user id", "sub\"", "{sub}"}) {
+        env["ULW_JWT_SUBJECT_CLAIM"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_JWT_SUBJECT_CLAIM") << bad;
+    }
 }
 
 TEST_F(ChatConfigTest, KeysStayTrustedADayWithoutARefreshUnlessSetInHours) {
@@ -280,12 +304,12 @@ TEST_F(ChatConfigTest, ATrustedProxyBlockWiderThanASlash8OrASlash32IsWarnedAbout
 }
 
 TEST_F(ChatConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
-    env["ULW_ALLOWED_ORIGINS"] = "https://app.askedin.com,http://localhost:5173";
+    env["ULW_ALLOWED_ORIGINS"] = "https://app.example.com,http://localhost:5173";
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_EQ(config->allowed_origins,
-              (std::vector<std::string>{"https://app.askedin.com", "http://localhost:5173"}));
-    for (const char* bad : {"app.askedin.com", "https://app.askedin.com/", "https://App.test",
+              (std::vector<std::string>{"https://app.example.com", "http://localhost:5173"}));
+    for (const char* bad : {"app.example.com", "https://app.example.com/", "https://App.test",
                             "https://a.test,,https://b.test", "https://"}) {
         env["ULW_ALLOWED_ORIGINS"] = bad;
         EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
