@@ -40,6 +40,36 @@ spec:
                   key: JWKS_URL
             - name: ULW_TRUSTED_PROXIES
               value: "10.244.0.0/16"
+            # Live streams are off: the sandbox runs no LiveKit, holds no sfu-secrets and starts
+            # no packagers (tests/e2e/live-publish*.e2e.mjs run them on the host instead).
+            - name: LIVEKIT_API_URL
+              $patch: delete
+            - name: LIVEKIT_CLIENT_URL
+              $patch: delete
+            - name: LIVEKIT_API_KEY
+              $patch: delete
+            - name: LIVEKIT_API_SECRET
+              $patch: delete
+            - name: ULW_LIVE_PACKAGER
+              $patch: delete
+            - name: ULW_LIVE_PACKAGER_SRT
+              $patch: delete
+            - name: ULW_K8S_NAMESPACE
+              $patch: delete
+            - name: ULW_K8S_TOKEN_FILE
+              $patch: delete
+            - name: ULW_K8S_CA_FILE
+              $patch: delete
+            - name: ULW_LIVE_MAX_STREAMS
+              $patch: delete
+            - name: ULW_LIVE_JOB_TEMPLATE
+              $patch: delete
+            - name: ULW_LIVE_PACKAGER_IMAGE_TAG
+              $patch: delete
+            - name: ULW_LIVE_WEBHOOK_PORT
+              $patch: delete
+            - name: ULW_LIVE_PUBLISHER_GRACE_SECONDS
+              $patch: delete
           volumeMounts:
             - name: sandbox-ca
               mountPath: /etc/ssl/certs/ca-certificates.crt
