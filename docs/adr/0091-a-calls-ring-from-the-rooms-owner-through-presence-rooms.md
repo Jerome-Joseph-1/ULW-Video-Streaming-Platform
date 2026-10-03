@@ -113,8 +113,7 @@ What a ring needs, and what the system gives today:
 
 - A release that carries this moves the node channel from version 4 to 5: roll it out with the
   chat Deployment's strategy set to `Recreate` (deploy/kubernetes/RUNBOOK.md, section 3). If it
-  ships in the same
-  release as ADR-0087's version 4, that one Recreate covers both.
+  ships in the same release as ADR-0087's version 4, that one Recreate covers both.
 - Every ring event costs one notice per member, and a read of the owner of each member's
   presence room on the ringing node (it routes none of those rooms). A call is a handful of
   events. The reads are not cached: the re-announcement every 15 s alone is two reads per ringing
