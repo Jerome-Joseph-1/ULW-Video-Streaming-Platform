@@ -316,6 +316,27 @@ class TestCommandTest(Workspace):
         self.assertIn("lists the tests", self.refused([program, "--gtest_list_tests"]))
         self.assertIn("writes a file", self.refused([program, "--gtest_output=xml:/x"]))
 
+    def test_a_flag_file_is_refused(self):
+        # A flag file holds flags of its own, --gtest_list_tests and --gtest_output among
+        # them, which would pass unchecked.
+        program = str(self.executable("build/t"))
+        self.write("build/flags", "--gtest_list_tests\n")
+        self.assertIn("reads flags from a file",
+                      self.refused([program, f"--gtest_flagfile={self.dir / 'build/flags'}"]))
+        self.assertIn("reads flags from a file", self.refused([program, "--gtest_flagfile"]))
+
+    def test_refused_googletest_variables_in_the_environment_are_refused(self):
+        # The test command inherits the environment, so a GTEST_* variable set there reaches
+        # the test binary, or each one ctest runs, as the flag would.
+        program = str(self.executable("build/t"))
+        for name in ("GTEST_FLAGFILE", "GTEST_LIST_TESTS", "GTEST_OUTPUT"):
+            with self.subTest(name=name), mock.patch.dict(os.environ, {name: "x"}):
+                self.assertIn(f"the environment sets {name}", self.refused([program]))
+                self.assertIn(f"the environment sets {name}", self.refused(["ctest", "-Q"]))
+        with mock.patch.dict(os.environ, {"GTEST_COLOR": "no"}):
+            argv, _ = mutate.test_command([program], self.dir / "build")
+            self.assertEqual(argv, [program])
+
 
 class FakeBuildAndTest:
     """Stands in for mutate.run. ninja fails when the source holds a negated condition; the test

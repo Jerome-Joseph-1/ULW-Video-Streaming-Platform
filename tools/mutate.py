@@ -30,9 +30,10 @@ file:line:operator:index, stable for a given source.
 
 The test command is a test binary inside the repository or the build tree, given only
 googletest flags (passed to it as the GTEST_* variables googletest reads in their place) other
-than --gtest_list_tests and --gtest_output, or ctest with the options in CTEST_FLAGS, run in
-the build tree; anything else, and a --files path outside the working directory, is refused
-with exit 2. --sample takes the mutants whose sha256 of seed and id sorts first.
+than --gtest_list_tests, --gtest_output and --gtest_flagfile, none of which the environment
+may set either, or ctest with the options in CTEST_FLAGS, run in the build tree; anything
+else, and a --files path outside the working directory, is refused with exit 2. --sample
+takes the mutants whose sha256 of seed and id sorts first.
 
 Mutants build with CCACHE_READONLY so they do not fill the cache; the restored source hits it.
 """
@@ -74,6 +75,10 @@ GTEST_FLAG = re.compile(r"--gtest_([a-z_]+)(?:=(.*))?", re.DOTALL)
 # build tree (--test-dir).
 CTEST_FLAGS = ("--output-on-failure", "--stop-on-failure", "-Q", "--quiet", "-V", "--verbose",
                "--no-tests=error", "--schedule-random")
+# The googletest flags a test command may not set: listing runs no test, so every mutant would
+# survive; an output file is a path written outside pathguard's reach; a flag file holds flags
+# of its own, these among them, that would pass unchecked.
+REFUSED_GTEST_FLAGS = ("list_tests", "output", "flagfile")
 
 
 def mask(lines):
@@ -143,7 +148,11 @@ def test_command(cmd, build_dir):
     adds: ctest in the build tree with options from CTEST_FLAGS, or an executable inside the
     repository or the build tree with googletest flags, which become GTEST_* variables.
     Anything else exits 2, so no argument reaches a program as an option it was not meant to
-    take."""
+    take; so does an inherited environment that sets a refused flag's variable, which the test
+    binary, or each one ctest runs, would read as the flag."""
+    for name in REFUSED_GTEST_FLAGS:
+        if "GTEST_" + name.upper() in os.environ:
+            refuse(f"the environment sets GTEST_{name.upper()}")
     if cmd[0] == "ctest":
         argv = ["ctest", "--test-dir", str(build_dir)]
         for arg in cmd[1:]:
@@ -163,10 +172,8 @@ def test_command(cmd, build_dir):
         flag = GTEST_FLAG.fullmatch(arg)
         if not flag:
             refuse(f"{arg!r} is not a googletest flag")
-        # Listing runs no test, so every mutant would survive; an output file is a path
-        # written outside pathguard's reach.
-        if flag.group(1) in ("list_tests", "output"):
-            refuse(f"{arg!r} lists the tests or writes a file")
+        if flag.group(1) in REFUSED_GTEST_FLAGS:
+            refuse(f"{arg!r} lists the tests, writes a file or reads flags from a file")
         # A flag without a value is a boolean one set, as googletest reads it.
         flags["GTEST_" + flag.group(1).upper()] = "1" if flag.group(2) is None else flag.group(2)
     return [str(program)], flags
