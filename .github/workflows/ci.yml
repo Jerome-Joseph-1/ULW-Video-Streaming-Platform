@@ -150,18 +150,26 @@ jobs:
           cache-key: ${{ matrix.cc }}-${{ matrix.preset }}-integration
       - name: Start MinIO
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      # The chat cluster's calls go through it (docs/adr/0087); its Redis comes with it.
+      - name: Start LiveKit
+        run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit
       - run: cmake --preset ${{ matrix.preset }} -DULW_CONFORMANCE_LIVE=ON
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --test-dir build/${{ matrix.preset }} -L integration --output-on-failure
         env:
           # The job context exists only in steps, not in the job's own env.
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          # deploy/local/compose.yaml's fake key pair, as tests/call/run.sh uses it.
+          LIVEKIT_API_URL: http://127.0.0.1:7880
+          LIVEKIT_CLIENT_URL: ws://127.0.0.1:7880
+          LIVEKIT_API_KEY: ulw-dev-key
+          LIVEKIT_API_SECRET: ulw-dev-secret-testtest123-not-a-real-secret
       - name: storage conformance on both reactors
         run: |
           ULW_REACTOR=io_uring ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
           ULW_REACTOR=epoll ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
       - if: failure()
-        run: docker compose -f deploy/local/compose.yaml logs minio
+        run: docker compose -f deploy/local/compose.yaml --profile calls logs minio livekit
 
   # Line and branch coverage of the unit and integration labels, each top-level directory
   # compared with its floor in tools/coverage-floors.txt (ADR-0080). The table is the step

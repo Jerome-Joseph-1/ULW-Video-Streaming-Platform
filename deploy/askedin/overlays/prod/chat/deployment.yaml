@@ -103,6 +103,30 @@ spec:
                 secretKeyRef:
                   name: chat-secrets
                   key: ULW_NODE_SECRET
+            # Calls (docs/adr/0050, docs/adr/0087): RoomService of the LiveKit beside chat, and the
+            # client URL and key pair from sfu-secrets, the pair LiveKit itself is configured with
+            # (RUNBOOK.md, section 7). Optional: prod has no LiveKit and no sfu-secrets yet, and
+            # without them chat starts with calls off and answers every call with calls_disabled.
+            - name: LIVEKIT_API_URL
+              value: http://livekit:7880
+            - name: LIVEKIT_CLIENT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_CLIENT_URL
+                  optional: true
+            - name: LIVEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_API_KEY
+                  optional: true
+            - name: LIVEKIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_API_SECRET
+                  optional: true
           # Memory (ADR-0036, ADR-0043, docs/integration/operations-contract.md): every queue
           # is bounded in bytes and admission bounds the rest, so the pod's memory cgroup,
           # which is also charged for the sockets' kernel buffers (64 KiB of send buffer each),

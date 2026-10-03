@@ -10,6 +10,7 @@
 #include "ops/root.hpp"
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <utility>
 
@@ -170,6 +171,30 @@ std::expected<ClientLimits, ConfigError> client_limits(const EnvLookup& env) {
     return out;
 }
 
+// Optional as a whole, all or nothing once the key is given: the key is what a deployment
+// without LiveKit leaves out (its secret does not exist), so the URLs alone, which an overlay may
+// set for every environment, configure nothing. The adapter checks the values (make_sfu).
+std::expected<std::optional<CallsConfig>, ConfigError> calls_config(const EnvLookup& env) {
+    auto key = lookup(env, "LIVEKIT_API_KEY");
+    if (!key) {
+        return std::nullopt;
+    }
+    CallsConfig out{.api_url = {}, .client_url = {}, .api_key = std::move(*key), .api_secret = {}};
+    const std::array<std::pair<std::string_view, std::string*>, 3> required{{
+        {"LIVEKIT_API_URL", &out.api_url},
+        {"LIVEKIT_CLIENT_URL", &out.client_url},
+        {"LIVEKIT_API_SECRET", &out.api_secret},
+    }};
+    for (const auto& [name, into] : required) {
+        auto value = lookup(env, name);
+        if (!value) {
+            return error(name, "not set, but LIVEKIT_API_KEY is");
+        }
+        *into = std::move(*value);
+    }
+    return out;
+}
+
 } // namespace
 
 std::vector<unsigned> wide_trusted_proxies(const ClientLimits& limits) {
@@ -266,6 +291,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!limits) {
         return std::unexpected(std::move(limits.error()));
     }
+    auto calls = calls_config(env);
+    if (!calls) {
+        return std::unexpected(std::move(calls.error()));
+    }
     const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
     if (!allow_root) {
         return error("ULW_ALLOW_ROOT", "expected 0 or 1");
@@ -287,6 +316,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .allowed_origins = std::move(*allowed),
                   .presence_grace = *grace,
                   .client_limits = std::move(*limits),
+                  .calls = std::move(*calls),
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
                   .allow_root = *allow_root};
 }

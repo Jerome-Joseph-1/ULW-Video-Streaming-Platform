@@ -367,7 +367,8 @@ recorded kind never changes, so a room that was joined, listed or created before
 including every room from before M19 (migration 0006), needs a new room id.
 
 The chat nodes speak a versioned channel to each other (docs/adr/0043), and a node refuses a
-peer of another version. A release that changes the version (M19 moves it from 2 to 3) splits a
+peer of another version. A release that changes the version (M19 moves it from 2 to 3, the
+call handler from 3 to 4, docs/adr/0087) splits a
 rolling update in two: until the last old pod is gone, old and new nodes cannot reach each
 other, rooms owned across the split are unreachable from the other side, and their joins and
 sends fail as `unavailable` (clients retry them). Roll such a release out with the chat
@@ -854,6 +855,9 @@ TURN_SECRET              32+ random bytes, base64; the same value in both files
 TURN_HOST                where browsers reach STUNner: the node's public IP, or a DNS name for it
 LIVEKIT_KEYS             "<api key>: <api secret>", the secret at least 32 characters
 REDIS_PASSWORD           32+ random characters, letters and digits; LiveKit's and egress's Redis
+LIVEKIT_CLIENT_URL       wss://<a hostname of askedin-gateway>, where browsers reach LiveKit's
+                         /rtc route (overlays/stage/livekit/httproute.yaml); every call ticket
+                         names it
 ```
 
 STUNner's secret is created by a script of its own, `scripts/create-turn-secret.sh`, run once
@@ -897,18 +901,22 @@ if [[ $NS == apps-stage ]]; then
     --from-literal=REDIS_PASSWORD="$REDIS_PASSWORD" \
     --from-literal=TURN_HOST="$TURN_HOST" \
     --from-literal=TURN_SECRET="$TURN_SECRET" \
+    --from-literal=LIVEKIT_CLIENT_URL="$LIVEKIT_CLIENT_URL" \
     --dry-run=client -o yaml | kubectl apply -f -
 fi
 ```
 
-The call service gets the same `LIVEKIT_KEYS` pair once it ships. Add Redis, LiveKit and egress
-to the rollout-restart list, in that order (LiveKit does not start without Redis); STUNner
-rereads its secret by itself:
+Chat's call handler (docs/adr/0087) signs tickets with the same pair LiveKit checks them with,
+split out of `LIVEKIT_KEYS`, and calls LiveKit's server API at `http://livekit:7880` (a value in
+the chat Deployment). The chat Deployment reads them and `LIVEKIT_CLIENT_URL` from `sfu-secrets`
+as optional: without the secret chat starts with calls off and answers every call with
+`calls_disabled`. Add Redis, LiveKit, egress and chat to the rollout-restart list, Redis first
+(LiveKit does not start without it); STUNner rereads its secret by itself:
 
 ```sh
 kubectl -n "$NS" rollout restart deployment/livekit-redis
 kubectl -n "$NS" rollout status deployment/livekit-redis
-kubectl -n "$NS" rollout restart deployment/livekit deployment/livekit-egress
+kubectl -n "$NS" rollout restart deployment/livekit deployment/livekit-egress deployment/chat
 ```
 
 To rotate `TURN_SECRET`: change it in both env files, run `scripts/create-turn-secret.sh`, then
@@ -962,6 +970,23 @@ TURN_SECRET=$(set -a; . ./.env.stage; printf '%s' "$TURN_SECRET") \
 
 The secret goes in through the environment, read from the env file, so it never reaches the
 command line or the shell history.
+
+Calls through chat (docs/integration/calls.md). Each chat pod's first log line names where
+tickets send clients, and its metrics say calls are on:
+
+```sh
+kubectl -n apps-stage logs deploy/chat | grep -m1 '"msg":"listening"'   # "calls":"wss://...", not "off"
+kubectl -n apps-stage port-forward deploy/chat 19101:9101 >/dev/null & sleep 2
+curl -s localhost:19101/metrics | grep calls_enabled                       # calls_enabled 1
+kill %1
+```
+
+Then, from a page of an allowed origin signed in as a member of a direct chat (or a native
+client with its bearer token): `join` the room, send `{"type":"call","room":"<room>",
+"device":"<uuid>"}` and expect a `ticket` whose `url` is `LIVEKIT_CLIENT_URL`;
+`room.connect(url, token)` with `livekit-client` must succeed, and a second member's must show
+the first as a participant. `call_errors_total` stays at 0 on every pod; a growing
+`{source="sfu",kind="refused"}` means chat and LiveKit hold different key pairs.
 
 It only sends STUN and TURN requests. Expect `binding.mapped` to be the machine's public
 address (compare `curl -s https://ifconfig.me`): anything else means the node masquerades

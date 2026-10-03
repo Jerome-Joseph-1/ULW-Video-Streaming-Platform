@@ -315,8 +315,15 @@ that died), `presence_gaps_total` (seqs a presence room skipped at this node, af
 node repeated what it had said there), `jwks_keys_expired`, `auth_cache_drops_total` and
 `auth_cache_drop_pending` (as the gateway's),
 `unrecorded_joins_total` (refused joins of rooms with no kind recorded that recorded nothing,
-their user past the allowance: steady growth is someone walking room ids). Chat is a draft
-([chat.md](chat.md)).
+their user past the allowance: steady growth is someone walking room ids), and for calls
+(ADR-0087): `calls_enabled` (1 when LiveKit is configured), `call_tickets_total`,
+`call_refusals_total{reason="not_member"}`, `{reason="not_callable"}` and `{reason="busy"}`,
+`call_rooms_opened_total` and `call_rooms` (media rooms opened, and handles kept, on the
+rooms this node owns), `call_errors_total{source="sfu",kind="unavailable"}` (LiveKit unreachable
+or overloaded: clients are told to retry), `{source="sfu",kind="refused"}` (LiveKit refused the
+request as made, a configuration fault: clients get `call_failed`) and
+`{source="store",kind="unavailable"}`. Each is counted on the node that owns the room, not the
+one the client is on. Chat is a draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

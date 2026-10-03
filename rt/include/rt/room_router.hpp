@@ -62,6 +62,28 @@ using JoinCallback =
 using SendCallback =
     std::move_only_function<void(std::expected<std::uint64_t, RouteError>) noexcept>;
 
+// A request a room's owner answers itself, for the room's members wherever they are (the call
+// handler's tickets, ADR-0050): opaque bytes there, opaque bytes back, at most this many each
+// way. Small: a few names out, a URL and a token back.
+inline constexpr std::size_t kMaxOwnerMessage = 4096;
+// How long a member's node waits for the owner's answer: the owner's own work may be a store
+// read and two calls to another service, each with its own timeout of a few seconds.
+inline constexpr core::Millis kOwnerAskTimeout{15'000};
+
+using OwnerAnswer =
+    std::move_only_function<void(std::expected<std::vector<std::byte>, RouteError>) noexcept>;
+
+// What answers asks on the room's owner. Called on the reactor thread, only while this node
+// owns the room. `answer` may be called later, once, from any callback on the reactor thread,
+// and never after the router is destroyed: whoever holds it drops it first. An answer larger
+// than kMaxOwnerMessage reaches the asker as Unavailable.
+class IOwnerService {
+public:
+    virtual ~IOwnerService() = default;
+    virtual void on_ask(const core::RoomId& room, std::span<const std::byte> request,
+                        OwnerAnswer answer) noexcept = 0;
+};
+
 // What the router reports for the log and the metrics. Called on the reactor thread.
 class IRouterEvents {
 public:
@@ -165,6 +187,16 @@ public:
     // sequenced again: the answer is the seq it got the first time.
     void send(const core::RoomId& room, IMember& from, const core::UserId& sender,
               const MessageKey& key, std::vector<std::byte> body, SendCallback done);
+
+    // Asks the room's owner, which answers through its IOwnerService, for a member that has
+    // joined the room here: NotJoined otherwise, as for send. Unavailable when the owner cannot
+    // be reached, has no service, or does not answer within kOwnerAskTimeout. Like a send, the
+    // answer is dropped if the member leaves the room first. `request` is at most
+    // kMaxOwnerMessage bytes.
+    void ask_owner(const core::RoomId& room, IMember& from, std::span<const std::byte> request,
+                   OwnerAnswer done);
+    // Who answers asks for the rooms this node owns; nullptr (the start) answers Unavailable.
+    void serve(IOwnerService* service) noexcept;
 
     // For a drain: stops owning rooms and makes them claimable at once.
     void release_rooms(StoreCallback<void> done);
