@@ -38,9 +38,13 @@ platform ever runs through the helper are ffmpeg and ffprobe, from the image's o
   name not in the table is not found (127). Both come before any confinement step, as the path
   checks did. `check_program` still vets the table's path, as defence in depth (126, or 127 for a
   file that is not there).
-- `ULW_SANDBOX_FFMPEG` and `ULW_SANDBOX_FFPROBE` must be absolute paths in normal form, without
-  quotes, backslashes or generator expressions; configure fails otherwise. They are the only way
-  to point the platform at another ffmpeg: build the image with them set.
+- `ULW_SANDBOX_FFMPEG` and `ULW_SANDBOX_FFPROBE` must be absolute paths in normal form made only
+  of letters, digits and `._+-` between their slashes; configure fails otherwise. They are the
+  only way to point the platform at another ffmpeg: build the image with them set (the
+  Dockerfile's build arguments of the same names, which also set the path the runtime stage
+  checks for). The table is generated per configuration (`<dir>/$<CONFIG>/`), so
+  multi-config generators work; the test helper's table, which names files in the build tree,
+  makes configure fail when the build directory's path has any other character.
 - The adapter's command lines name the programs `ffmpeg` and `ffprobe` (`kFfmpeg`, `kFfprobe` in
   `infra/ffmpeg/src/command.hpp`). `TranscoderConfig`, `RecordingRemuxConfig` and
   `LiveRemuxConfig` lose their program paths, and `process.cpp` its `PATH` lookup.
