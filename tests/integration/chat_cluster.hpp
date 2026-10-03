@@ -164,9 +164,23 @@ public:
     template <class Pred>
     std::optional<Seen> wait_for(Pred pred,
                                  std::chrono::milliseconds limit = std::chrono::seconds(15)) {
-        for (const Seen& s : seen_) {
-            if (pred(s)) {
-                return s;
+        const auto at = wait_from(0, pred, limit);
+        if (!at) {
+            return std::nullopt;
+        }
+        return seen_[*at];
+    }
+
+    // Where in seen() the first message from `from` on that matches `pred` is, reading until
+    // one arrives. Each message is looked at once: a caller that waits again from what it was
+    // given, or from what it had before it sent, costs what is new, not all it has heard.
+    template <class Pred>
+    std::optional<std::size_t>
+    wait_from(std::size_t from, Pred pred,
+              std::chrono::milliseconds limit = std::chrono::seconds(15)) {
+        for (std::size_t i = from; i < seen_.size(); ++i) {
+            if (pred(seen_[i])) {
+                return i;
             }
         }
         const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -180,8 +194,8 @@ public:
             if (!keep(*text)) {
                 return std::nullopt;
             }
-            if (pred(seen_.back())) {
-                return seen_.back();
+            if (seen_.size() > from && pred(seen_.back())) {
+                return seen_.size() - 1;
             }
         }
         return std::nullopt;

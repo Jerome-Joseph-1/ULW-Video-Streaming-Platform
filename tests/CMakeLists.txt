@@ -444,6 +444,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/envelope_test.cpp
     unit/chat/key_fetcher_test.cpp
     unit/chat/live_chat_test.cpp
+    unit/chat/memory_store_access_test.cpp
     unit/chat/presence_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)

@@ -287,7 +287,12 @@ each line directly.
 
 Worker: no HTTP port. Liveness is a heartbeat file, `<ULW_SCRATCH_DIR>/heartbeat-<node>`,
 touched at least every 20 s; the shipped probe restarts the pod after two minutes without a
-touch. The worker exposes no metrics yet.
+touch. The worker exposes no metrics yet. Alert on its `error` line `transcoder refused its own
+files` (with `worker_files_refused_total`): the sandboxed ffprobe or ffmpeg could not open the
+source the worker fetched or write the output directory it was given, a fault in the scratch
+directory's permissions or mounts, not in the upload. Every job on that worker will fail the
+same way; each is given back to the queue and retried, and its video fails only after the job's
+attempts run out.
 
 <!-- apps/chat/src/session.cpp (route), apps/chat/src/chat.cpp (render_metrics) -->
 

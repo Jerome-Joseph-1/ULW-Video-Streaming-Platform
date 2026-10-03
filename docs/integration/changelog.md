@@ -21,6 +21,19 @@ What to do:
   tokens name the user in a claim other than `sub`, set `ULW_JWT_SUBJECT_CLAIM` to that claim
   before upgrading, or every such token is refused.
 
+## 2026-10-03: a worker fault is no longer reported as the owner's bad file
+
+<!-- infra/ffmpeg/src/exit_code.cpp (refine), apps/worker/src/job_runner.cpp (public_reason) -->
+
+Not breaking; nothing to do. When the transcoder could not read the uploaded file or write its
+output for a reason on our side (file permissions or a read-only mount on the worker), the
+video went to `failed` at once with `error_reason` `the file could not be decoded as video`.
+Such a job is now retried like the other transient worker faults, and only if every attempt
+fails does the video go to `failed`, with `error_reason`
+`the transcoder could not read its working files`. A file that really cannot be decoded is
+reported as before. As [videos-and-playback.md](videos-and-playback.md) says, show
+`error_reason` or log it, and do not parse it.
+
 ## 2026-09-30: the cookie is accepted only from trusted pages (security fix)
 
 <!-- apps/gateway/src/connection.cpp (cookie_request_trusted), docs/adr/0078-the-cookie-is-believed-only-from-trusted-pages.md -->

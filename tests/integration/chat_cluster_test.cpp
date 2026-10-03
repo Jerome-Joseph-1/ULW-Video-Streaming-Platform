@@ -27,10 +27,13 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -984,8 +987,9 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     // 900 messages of 2000 bytes, about 2.6 MiB for each viewer: rounds of one message per
     // sender, each round read by everyone but the slow viewers before the next, so that no
     // one else is ever behind. A send the room or the user turns away as rate_limited is tried
-    // again in the next round, with a new id since it was never sequenced; the room's allowance
-    // (40, then 20 a second on each node) sets the pace.
+    // again, with a new id since it was never sequenced, once the refusal's retry_after_ms has
+    // passed, and first on its node; the room's allowance (40, then 20 a second on each node)
+    // sets the pace.
     constexpr std::size_t kMessages = 900;
     // Past the first half, the room keeps its most and the slow viewers are long behind.
     constexpr std::size_t kSettled = 450;
@@ -1006,13 +1010,33 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     std::uint64_t settled_seq = 0;
     std::size_t sampled = 0;
     std::vector<Resident> samples;
+    // Where each of the others' last wait for the head found it. Every wait looks only at what
+    // is new: going through all a client had heard for each frame it read made this process,
+    // not the nodes, set the pace, until under ASan on a loaded runner 90 messages took longer
+    // than stall_timeout and the slow viewers were rightly closed between two of their reads.
+    std::map<const Client*, std::size_t> found;
+    for (auto* group : {&senders, &viewers}) {
+        for (auto& c : *group) {
+            found[c.get()] = 0;
+        }
+    }
+    // A node that turned a send away is not sent to again until the refusal's retry_after_ms has
+    // passed: the allowance it ran out of has a token then. Its refused sender goes first, so
+    // that no other sender on the node takes that token before it. A send has two allowances,
+    // its user's and then the room's, and a refusal names the wait for the one that ran out, so
+    // the other may refuse the retry once; a third refusal in a row means a limit did not lift
+    // when the node said it would.
+    using Clock = std::chrono::steady_clock;
+    std::array<Clock::time_point, 3> not_before{};
+    std::array<std::size_t, 3> first_on{};
+    std::array<bool, 3> waited{};
+    std::array<int, 3> refused_after_wait{};
     while (acked < kMessages) {
-        // A node that turned one send away turns away the rest of the round's too: they are
-        // not tried, which keeps the retrying down to a few sends a round.
         std::array<bool, 3> refused{};
-        for (std::size_t s = 0; s < senders.size(); ++s) {
-            const std::size_t node = s / 10;
-            if (refused.at(node)) {
+        for (std::size_t turn = 0; turn < senders.size(); ++turn) {
+            const std::size_t node = turn / 10;
+            const std::size_t s = (node * 10) + ((first_on.at(node) + turn) % 10);
+            if (refused.at(node) || Clock::now() < not_before.at(node)) {
                 continue;
             }
             if (!holding[s] && next < kMessages) {
@@ -1027,38 +1051,75 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
                 ids[s] = std::format("m{}-{}", *holding[s], attempts);
             }
             ++attempts;
+            // The answer is the first for this id after the send: an id sent again after
+            // unavailable has its earlier answer before it.
+            const std::size_t before = senders[s]->seen().size();
             ASSERT_TRUE(senders[s]->send(send_command(live, body(*holding[s]), ids[s])));
-            const std::size_t answers = senders[s]->count([&](const Seen& seen) {
+            const auto at = senders[s]->wait_from(before, [&](const Seen& seen) {
                 return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
             });
-            ASSERT_TRUE(senders[s]->wait_for([&](const Seen&) {
-                return senders[s]->count([&](const Seen& seen) {
-                    return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
-                }) > answers;
-            })) << ids[s];
-            const Seen answer =
-                *std::ranges::find_last_if(senders[s]->seen(), [&](const Seen& seen) {
-                     return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
-                 }).begin();
+            ASSERT_TRUE(at) << ids[s];
+            const Seen answer = senders[s]->seen()[*at];
+            const bool after_wait = std::exchange(waited.at(node), false);
             if (answer.type == "sent") {
+                refused_after_wait.at(node) = 0;
                 head = std::max(head, answer.seq);
                 holding[s].reset();
                 ids[s].clear();
                 ++acked;
             } else if (answer.reason == "rate_limited") {
+                refused_after_wait.at(node) = after_wait ? refused_after_wait.at(node) + 1 : 0;
+                ASSERT_LT(refused_after_wait.at(node), 2)
+                    << senders[s]->name() << " was turned away again after waiting out both "
+                    << "allowances' retry_after_ms: the rate limit never lifted";
+                ASSERT_TRUE(answer.retry_after_ms) << ids[s];
                 refused.at(node) = true;
+                waited.at(node) = true;
+                first_on.at(node) = s % 10;
+                not_before.at(node) =
+                    Clock::now() + std::chrono::milliseconds(*answer.retry_after_ms);
                 ids[s].clear();
             } else {
                 ASSERT_EQ(answer.reason, "unavailable") << ids[s];
             }
         }
-        ASSERT_LT(attempts, 200'000U) << "the rate limit never lifted";
+        // When every node with something to send is waiting out a refusal, the soonest of them
+        // is waited for on its refused sender's connection, taking in what arrives meanwhile.
+        const auto pending = [&](std::size_t n) {
+            return next < kMessages ||
+                   std::ranges::any_of(std::span(holding).subspan(n * 10, 10),
+                                       [](const auto& h) { return h.has_value(); });
+        };
+        const bool any_sendable =
+            std::ranges::any_of(std::array<std::size_t, 3>{0, 1, 2}, [&](std::size_t n) {
+                return pending(n) && Clock::now() >= not_before.at(n);
+            });
+        if (!any_sendable && acked < kMessages) {
+            std::size_t n = 3;
+            for (std::size_t k = 0; k < 3; ++k) {
+                if (pending(k) && (n == 3 || not_before.at(k) < not_before.at(n))) {
+                    n = k;
+                }
+            }
+            ASSERT_LT(n, 3U);
+            Client& refused_sender = *senders[(n * 10) + first_on.at(n)];
+            const auto left =
+                std::chrono::ceil<std::chrono::milliseconds>(not_before.at(n) - Clock::now());
+            if (left.count() > 0) {
+                refused_sender.wait_from(
+                    refused_sender.seen().size(), [](const Seen&) { return false; }, left);
+                ASSERT_EQ(refused_sender.ending(), "open") << refused_sender.name();
+            }
+        }
         for (auto* group : {&senders, &viewers}) {
             for (auto& c : *group) {
-                ASSERT_TRUE(c->wait_for([&](const Seen& seen) {
+                // What came before the last round's head came before this one's too.
+                std::size_t& from = found.at(c.get());
+                const auto at = c->wait_from(from, [&](const Seen& seen) {
                     return seen.type == "message" && seen.seq >= head;
-                })) << c->name()
-                    << " never got seq " << head;
+                });
+                ASSERT_TRUE(at) << c->name() << " never got seq " << head;
+                from = *at;
             }
         }
         if (acked / kReadEvery > reads) {
