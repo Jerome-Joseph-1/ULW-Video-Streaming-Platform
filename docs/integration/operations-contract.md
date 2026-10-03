@@ -214,6 +214,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `connections_rejected_total{reason="ip_rate"}` | counter | Reset at accept: the address opened more than `ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND` |
 | `connections_current` | gauge | |
 | `uploads_in_flight` | gauge | Chunk uploads holding an admission slot |
+| `catalog_claims_held` | gauge | Upload claims (ADR-0065) held by PATCHes in flight; 0 whenever no PATCH is running |
 | `admission_rejections_total` | counter | PATCHes answered `429` or `503` by admission |
 | `rate_limited_total{limit="ip_requests"}` | counter | `429`: a client behind the proxy had `ULW_MAX_CONNECTIONS_PER_IP` unauthenticated requests in flight |
 | `rate_limited_total{limit="user_requests"}` | counter | `429`: a user over `ULW_REQUESTS_PER_USER_PER_MINUTE` |
