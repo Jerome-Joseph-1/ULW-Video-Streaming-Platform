@@ -64,6 +64,29 @@ misconfigurations:
       ConfigMap in stunner-system.
     expired_at: 2027-09-01
 
+  # The gateway's stream service creates each live stream's packager Job, and the Secret that
+  # holds the stream's SRT passphrase, through the API server (docs/adr/0092): that is its whole
+  # Role, in the packagers' own namespace only, with no get, list, update or delete of Secrets.
+  # RBAC cannot narrow a create by resourceNames, as the name is not known when it is
+  # authorized; the ValidatingAdmissionPolicy beside it (base/live-packager/admission-policy.yaml,
+  # checked by deploy/local/check-live-admission.py) holds every Job it creates to the packager's
+  # image and shape and every Secret to live-packager-<stream>, owned by that stream's Job.
+  - id: KSV-0048
+    paths: &live-packager-role
+      - deploy/kubernetes/base/live-packager/rbac/role-ulw-live-video-gateway-live-packagers.yaml
+      - rendered/deploy-kubernetes-overlays-staging/role-ulw-staging-live-video-gateway-live-packagers.yaml
+      - rendered/deploy-kubernetes-overlays-production/role-ulw-live-video-gateway-live-packagers.yaml
+      - rendered/deploy-local-cluster/role-ulw-live-video-gateway-live-packagers.yaml
+    statement: &live-packager-role-statement >-
+      The stream service's Role creates packager Jobs and their passphrase Secrets in the
+      packagers' namespace only (ADR-0092); create cannot be narrowed by resourceNames, and the
+      admission policy holds what it creates to a packager's shape and its own Secret.
+    expired_at: 2027-09-01
+  - id: KSV-0113
+    paths: *live-packager-role
+    statement: *live-packager-role-statement
+    expired_at: 2027-09-01
+
   # Kubernetes runs the images and ignores HEALTHCHECK; the manifests' startup, readiness and
   # liveness probes are the health checks.
   - id: DS-0026

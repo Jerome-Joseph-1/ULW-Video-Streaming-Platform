@@ -397,6 +397,8 @@ TEST(KubernetesPackagersConfig, RefusesWhatCouldNotWork) {
     auto bad = good;
     bad.api_url = "kubernetes.default.svc";
     EXPECT_FALSE(KubernetesPackagers::create(*reactor, *multi, *pool, reactor_clock, bad));
+    bad.api_url = "http://kubernetes.default.svc";
+    EXPECT_FALSE(KubernetesPackagers::create(*reactor, *multi, *pool, reactor_clock, bad));
     // Each value goes into a YAML scalar: nothing that would end one, or name what it should not.
     const std::vector<std::pair<std::string JobValues::*, std::string>> refused{
         {&JobValues::namespace_name, "Apps"},
