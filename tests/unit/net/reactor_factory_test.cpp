@@ -9,6 +9,7 @@
 #include <linux/seccomp.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
@@ -19,11 +20,16 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
+#include <grp.h>
 #include <gtest/gtest.h>
 #include <liburing.h>
 #include <memory>
+#include <optional>
 #include <poll.h>
+#include <pwd.h>
 #include <string>
+#include <system_error>
 #include <unistd.h>
 #include <vector>
 
@@ -127,8 +133,8 @@ TEST(ReactorFactory, IoUringRefusedBySeccompFallsBackToEpoll) {
     EXPECT_EQ(static_cast<FallbackOutcome>(WEXITSTATUS(status)), FallbackOutcome::FellBackToEpoll);
 }
 
-// CAP_IPC_LOCK exempts a process from the locked-memory charge, so root drops it to be charged
-// as CI's runner is.
+// CAP_IPC_LOCK exempts a process from the locked-memory charge (and the reactor then probes zero
+// copy), so a process that has it drops it to be charged as CI's runner is.
 bool drop_ipc_lock() {
     __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
     std::array<__user_cap_data_struct, _LINUX_CAPABILITY_U32S_3> caps{};
@@ -156,7 +162,9 @@ enum class LockedMemoryOutcome : std::uint8_t {
     ReactorRefused,
     CapabilityKept,
     LimitUnavailable,
-    ObserverUnavailable
+    ObserverUnavailable,
+    UserBusy,
+    UidUnavailable
 };
 
 const char* describe(LockedMemoryOutcome outcome) {
@@ -173,6 +181,10 @@ const char* describe(LockedMemoryOutcome outcome) {
         return "RLIMIT_MEMLOCK could not be set";
     case LockedMemoryOutcome::ObserverUnavailable:
         return "the observer failed";
+    case LockedMemoryOutcome::UserBusy:
+        return "the user's other processes already held most of its locked memory";
+    case LockedMemoryOutcome::UidUnavailable:
+        return "no unused uid could be taken";
     }
     return "unknown";
 }
@@ -185,6 +197,52 @@ bool set_locked_limit(rlim_t soft) {
     limit.rlim_cur = soft;
     limit.rlim_max = std::max(limit.rlim_max, soft);
     return ::setrlimit(RLIMIT_MEMLOCK, &limit) == 0;
+}
+
+// A uid no account names and no process runs as, from a range far above any allocated one:
+// its locked-memory counter is this test's alone.
+std::optional<uid_t> unused_uid() {
+    constexpr uid_t kFirst = 2'000'000'000;
+    constexpr uid_t kCandidates = 64;
+    const auto start = static_cast<uid_t>(::getpid()) % 1'000'000;
+    for (uid_t i = 0; i < kCandidates; ++i) {
+        const uid_t uid = kFirst + ((start + i * 15'485'863U) % 100'000'000U);
+        if (::getpwuid(uid) != nullptr) {
+            continue;
+        }
+        std::error_code ec;
+        bool taken = false;
+        for (const auto& entry : std::filesystem::directory_iterator("/proc", ec)) {
+            struct stat st {};
+            if (::stat(entry.path().c_str(), &st) == 0 && st.st_uid == uid) {
+                taken = true;
+                break;
+            }
+        }
+        if (!ec && !taken) {
+            return uid;
+        }
+    }
+    return std::nullopt;
+}
+
+// Root becomes an unused uid, which also leaves CAP_IPC_LOCK behind: other tests of root's, or
+// other jobs of a runner's user on the same host, then share no counter with this one. Another
+// user drops CAP_IPC_LOCK, should it have it.
+LockedMemoryOutcome be_charged_alone() {
+    if (::geteuid() != 0) {
+        return drop_ipc_lock() ? LockedMemoryOutcome::LeftRoom
+                               : LockedMemoryOutcome::CapabilityKept;
+    }
+    const auto uid = unused_uid();
+    if (!uid) {
+        return LockedMemoryOutcome::UidUnavailable;
+    }
+    if (::setgroups(0, nullptr) != 0 || ::setresgid(*uid, *uid, *uid) != 0 ||
+        ::setresuid(*uid, *uid, *uid) != 0) {
+        return LockedMemoryOutcome::UidUnavailable;
+    }
+    return LockedMemoryOutcome::LeftRoom;
 }
 
 // Another process of the same user, under kObserverLimit: the counter it is checked against is
@@ -205,6 +263,11 @@ LockedMemoryOutcome observe(int stop, int ready) {
     bool working = true;
     for (bool first = true; working; first = false) {
         const int rc = io_uring_register_buffers(&ring, &iov, 1);
+        if (first && rc == -ENOMEM) {
+            // Before any reactor started: the counter is someone else's to explain.
+            io_uring_queue_exit(&ring);
+            return LockedMemoryOutcome::UserBusy;
+        }
         if (rc == 0) {
             working = io_uring_unregister_buffers(&ring) == 0;
         } else {
@@ -228,11 +291,12 @@ LockedMemoryOutcome observe(int stop, int ready) {
 }
 
 LockedMemoryOutcome start_reactors_while_observed() {
-    if (!drop_ipc_lock()) {
-        return LockedMemoryOutcome::CapabilityKept;
-    }
+    // Raising the hard limit needs root's CAP_SYS_RESOURCE, so the limit comes first.
     if (!set_locked_limit(kLockedLimit)) {
         return LockedMemoryOutcome::LimitUnavailable;
+    }
+    if (const auto alone = be_charged_alone(); alone != LockedMemoryOutcome::LeftRoom) {
+        return alone;
     }
     std::array<int, 2> stop{};
     std::array<int, 2> ready{};
@@ -263,8 +327,13 @@ LockedMemoryOutcome start_reactors_while_observed() {
     }
     ::close(stop[1]);
     int status = 0;
-    if (::waitpid(observer, &status, 0) != observer || !WIFEXITED(status) || !watching) {
+    if (::waitpid(observer, &status, 0) != observer || !WIFEXITED(status)) {
         return LockedMemoryOutcome::ObserverUnavailable;
+    }
+    if (!watching) {
+        const auto observed = static_cast<LockedMemoryOutcome>(WEXITSTATUS(status));
+        return observed == LockedMemoryOutcome::UserBusy ? observed
+                                                         : LockedMemoryOutcome::ObserverUnavailable;
     }
     if (!created) {
         return LockedMemoryOutcome::ReactorRefused;
@@ -273,10 +342,10 @@ LockedMemoryOutcome start_reactors_while_observed() {
 }
 
 // Since 6.14 every ring's pages are charged to a locked-memory counter that all of a user's
-// processes share, as is every zero-copy send in flight. A reactor that takes that counter to
-// the limit, even for a moment, refuses every other reactor of its user its ring with ENOMEM:
+// processes share, as is every SENDMSG_ZC in flight since 6.15. A reactor that takes that counter
+// to the limit, even for a moment, refuses every other reactor of its user its ring with ENOMEM:
 // another test's under ctest -j, or another shard's. Starting one charges its rings and no
-// more. The limit and the capability change for good, so they change in a child.
+// more. The limit, the capability and the uid change for good, so they change in a child.
 TEST(ReactorFactory, StartingAnIoUringReactorChargesTheUsersLockedMemoryOnlyItsRings) {
     const pid_t pid = ::fork();
     ASSERT_GE(pid, 0);
@@ -289,6 +358,10 @@ TEST(ReactorFactory, StartingAnIoUringReactorChargesTheUsersLockedMemoryOnlyItsR
     const auto outcome = static_cast<LockedMemoryOutcome>(WEXITSTATUS(status));
     if (outcome == LockedMemoryOutcome::LimitUnavailable) {
         GTEST_SKIP() << "the hard RLIMIT_MEMLOCK is below 8 MiB and cannot be raised";
+    }
+    if (outcome == LockedMemoryOutcome::UserBusy) {
+        GTEST_SKIP() << "this user's other processes already hold more than 6 MiB of locked "
+                        "memory, so the test cannot tell a reactor's charge from theirs";
     }
     EXPECT_EQ(outcome, LockedMemoryOutcome::LeftRoom) << describe(outcome);
 }
