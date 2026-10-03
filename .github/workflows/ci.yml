@@ -20,10 +20,16 @@ env:
   UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
   TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
 
+# Where each job runs: the self-hosted host for pushes, the nightly, manual runs and pull
+# requests from branches of this repository; a hosted runner for pull requests from forks, whose
+# code must never run on that host. Its four runners take up to four jobs at once and keep their
+# state between jobs, so jobs that publish a fixed host port, start deploy/local/compose.yaml's
+# fixed-name containers, or change the host beyond the setup action's sysctls stay on
+# ubuntu-24.04 whatever the event (each says which).
 jobs:
   build-test:
     name: build-test (${{ matrix.compiler }}/${{ matrix.preset }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +41,16 @@ jobs:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
     steps:
+      # A self-hosted runner keeps its workspace between jobs, and the root step below leaves
+      # root's files in it (and, if cancelled there, possibly root's servers running), which
+      # would stop the checkout from cleaning it. Processes are matched by their executable's
+      # path in this runner's own workspace, so the host's other runners' jobs are left alone.
+      - name: Clear what an earlier job on this runner left as root
+        if: runner.environment == 'self-hosted'
+        run: |
+          sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$GITHUB_WORKSPACE/*" \
+            -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill -KILL || true
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -64,7 +80,7 @@ jobs:
       - run: ccache --show-stats
 
   tsan:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     env:
       CC: clang-19
       CXX: clang++-19
@@ -81,7 +97,7 @@ jobs:
 
   reactor-matrix:
     name: reactor-matrix (${{ matrix.reactor }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +131,8 @@ jobs:
   # pool test docker-pauses the Postgres every other catalog and queue test is using, and the
   # reaper test aborts every upload in the shared bucket older than its cutoff, conformance
   # runs included, which is also why those come after the integration label, not beside it.
+  # Hosted only: Postgres on fixed host port 15432, MinIO by its fixed container name on 9000,
+  # and the pool test pauses the Postgres; jobs sharing a host would collide on all three.
   integration:
     name: integration (${{ matrix.preset }})
     runs-on: ubuntu-24.04
@@ -173,6 +191,7 @@ jobs:
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       contains(github.event.pull_request.labels.*.name, 'coverage')
+    # Hosted only: Postgres on fixed host port 55432 and MinIO, as integration.
     runs-on: ubuntu-24.04
     # Unmeasured: set from the first run's duration (ADR-0080).
     timeout-minutes: 90
@@ -229,6 +248,7 @@ jobs:
   # log or table. M22's on the same cluster: 1000 MLS messages stored as ciphertext gzip cannot
   # shrink, and no plaintext anywhere. The tests are parameterised over both reactors, so one
   # run covers io_uring and epoll.
+  # Hosted only: Postgres on fixed host port 15432 and the nodes on fixed ports.
   cluster:
     runs-on: ubuntu-24.04
     services:
@@ -260,6 +280,8 @@ jobs:
   # M30's acceptance (tests/call/ingest.spec.mjs, ADR-0053): WHIP publishers, GStreamer's
   # whipsink among them, against the LiveKit, Redis and egress of deploy/local/compose.yaml, and a
   # relayed stream through to the live packager's playlist.
+  # Hosted only: LiveKit, Redis and egress on the host's network, on fixed ports and with
+  # fixed container names.
   ingest:
     runs-on: ubuntu-24.04
     env:
@@ -301,7 +323,7 @@ jobs:
 
   lint:
     name: boundaries + format + tidy
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     # The full-tree tidy on main took 59-88 min (runner speed varies); well past that is a hang.
     timeout-minutes: 150
     env:
@@ -328,8 +350,9 @@ jobs:
       # The bridge's own checks, the generated C header's drift check among them.
       - name: OpenMLS bridge (rustfmt, clippy, cargo test)
         working-directory: infra/e2ee/mls_ffi_bridge
+        # rustup does not lock its own directory, so jobs sharing a host take turns.
         run: |
-          rustup component add rustfmt clippy
+          flock -w 900 "$HOME/.rustup-install.lock" rustup component add rustfmt clippy
           cargo fmt --check
           cargo clippy --locked --offline --all-targets -- -D warnings
           cargo test --locked --offline
@@ -355,7 +378,7 @@ jobs:
   # reactor. run.sh pins the image by digest and fails on any verdict outside its allowlist.
   autobahn:
     name: autobahn (${{ matrix.reactor }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -373,7 +396,23 @@ jobs:
           cache-key: gcc-ci
       - run: cmake --preset ci
       - run: cmake --build --preset ci --target ulw_ws_echo_server
+      # Not run.sh's fixed 9001: both reactors' jobs, and other runs', may share a host. A port
+      # nothing listens on, below the ephemeral range as tests/support/reserve_port.hpp picks
+      # them; one taken in between fails the run at the server's start, not silently.
+      - name: Pick the echo server's port
+        id: port
+        run: |
+          for _ in $(seq 100); do
+            port=$((20000 + RANDOM % 10000))
+            if [[ -z $(ss -Htln "sport = :$port") ]]; then
+              echo "port=$port" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          exit 1
       - run: tests/autobahn/run.sh build/ci
+        env:
+          ULW_AUTOBAHN_PORT: ${{ steps.port.outputs.port }}
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -385,7 +424,7 @@ jobs:
   # label already replays the committed corpora on every build.
   fuzz:
     name: fuzz (${{ matrix.target }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -444,7 +483,7 @@ jobs:
   # Every commit, not just the tip: a secret that was committed and then removed is still one.
   # Allowlist entries are in .gitleaks.toml, each scoped to a rule and a file.
   secrets:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     env:
       GITLEAKS_VERSION: 8.30.1
       # From gitleaks_8.30.1_checksums.txt in the release, linux_x64 line.
@@ -466,10 +505,12 @@ jobs:
   # Offline: every manifest against pinned schemas (deploy/local/tools.sh). The server-side
   # dry run against the sandbox cluster is a step of e2e.yml, where a cluster exists.
   manifests:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: sudo apt-get install -y -qq --no-install-recommends python3-yaml
+      - run: >-
+          sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends
+          python3-yaml
       - run: deploy/local/validate-manifests.sh

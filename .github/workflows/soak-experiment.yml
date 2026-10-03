@@ -129,27 +129,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # What a hosted image carries and a bare Ubuntu 24.04 host does not. Ubuntu's rustup
-      # (1.26) cannot install the toolchain rust-toolchain.toml names without being told it
-      # again, so rustup 1.29.1 is fetched, pinned by digest.
-      - name: Install what the hosted image has
-        if: inputs.runner == 'self-hosted'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends cmake docker-compose-v2 build-essential
-          if [[ ! -x ~/.cargo/bin/rustup ]]; then
-            curl -sSfo "$RUNNER_TEMP/rustup-init" https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init
-            echo "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71  $RUNNER_TEMP/rustup-init" | sha256sum -c -
-            chmod +x "$RUNNER_TEMP/rustup-init"
-            "$RUNNER_TEMP/rustup-init" -y --no-modify-path --default-toolchain none --profile minimal
-            rm -f "$RUNNER_TEMP/rustup-init"
-          fi
-          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      # On the self-hosted runner the setup installs what a hosted image carries and a bare
+      # host does not, rustup among them, into this directory.
+      - if: inputs.runner == 'self-hosted'
+        run: echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
       - uses: ./.github/actions/setup
         with:
           cache-key: gcc-ci
       # The soaks create and drop their database with psql.
-      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
+      - run: >-
+          sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends
+          postgresql-client
       # The gateway soak's store, on the address and keys its defaults name.
       - name: Start MinIO
         if: matrix.kind == 'gateway'
@@ -207,13 +197,14 @@ jobs:
         env:
           OUT: ${{ runner.temp }}/${{ matrix.out }}
         run: |
-          # By the command line's first word: pkill -x sees only a name's first 15 characters,
-          # and transcode_worker has 16; anchored, the pattern matches no other command line
-          # that merely mentions the program. ulw_sandbox is the worker's child, started by its
-          # full path; the ffmpeg in it is started as plain `ffmpeg`, which no anchored path
-          # names, and is killed with it (pid 1 of its namespace dies with the helper).
-          for program in chat_server gateway_server transcode_worker ulw_sandbox; do
-            sudo pkill -f "^[^ ]*/${program}( |\$)" || true
+          # By the executable's path, in this job's workspace (the build) or its scratch (the
+          # soak's copies): the host's other runners run the same programs for CI, and a match
+          # by name would kill theirs. ulw_sandbox is the worker's child, started by its full
+          # path; the ffmpeg in it is the system's, and is killed with it (pid 1 of its
+          # namespace dies with the helper).
+          for dir in "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
+            sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$dir/*" \
+              -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill || true
           done
           sudo rm -rf "$OUT"
           docker compose -f deploy/local/compose.yaml down || true
