@@ -224,7 +224,8 @@ private:
     // (Close). `answer` is the asker's, empty for a removal, which is retried until done.
     struct Move {
         MediaStepNeeded step = MediaStepNeeded::Move;
-        CallId call;
+        // None for a member removed while this node knows no call in the room.
+        std::optional<CallId> call;
         std::optional<core::UserId> by;
         std::optional<core::UserId> subject;
         rt::OwnerAnswer answer;
@@ -271,6 +272,9 @@ private:
     // The group call's caller ending it for everyone, or putting someone out.
     void moderate(const core::RoomId& room, const CallSignalRequest& request,
                   rt::OwnerAnswer& answer) noexcept;
+    // Moves the media generation on to put `move.subject` out when the SFU has a device of
+    // theirs in it (or cannot say); otherwise only tells everyone, and answers.
+    void move_if_connected(const core::RoomId& room, CallKind kind, Move move) noexcept;
     // Queues a move and runs the room's queue.
     void enqueue(const core::RoomId& room, CallKind kind, Move move) noexcept;
     // Runs what the room's entry has waiting, in order: its generation read (again, after a

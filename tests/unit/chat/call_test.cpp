@@ -885,6 +885,37 @@ TEST_F(GroupCallHandlerTest, PuttingOutSomeoneWithNoTicketMovesNothing) {
     EXPECT_EQ(answers_.back().outcome, CallOutcome::Expelled);
 }
 
+TEST_F(GroupCallHandlerTest, PuttingOutSomeoneStillConnectedFromBeforeMovesAllTheSame) {
+    // Carol has no ticket in this call, but a connection the SFU still holds: from a call this
+    // node never knew, one an earlier owner ticketed.
+    const chat::CallId call = ticket("alice");
+    sfu_.connected = {in_call("carol", kOtherDevice)};
+    move("alice", chat::CallSignal::Expel, call, kRoom, "carol");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    // An SFU that cannot say is taken to hold them.
+    sfu_.listing_error = MediaError::Unavailable;
+    ask("bob");
+    sfu_.open();
+    sfu_.issue();
+    move("alice", chat::CallSignal::Expel, call, kRoom, "dave");
+    EXPECT_EQ(sfu_.closed, (std::vector<std::uint64_t>{1, 2}));
+}
+
+TEST_F(GroupCallHandlerTest, AMemberRemovedFromARoomWithNoCallKnownHereIsPutOutIfConnected) {
+    const chat::CallId call = ticket("alice");
+    move("alice", chat::CallSignal::Leave, call);
+    ASSERT_EQ(handler_->calls(), 0U);
+    plane_.sent.clear();
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(sfu_.closes, 0);
+    sfu_.connected = {in_call("bob", kDevice)};
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    // No call to tell anyone of.
+    EXPECT_TRUE(plane_.sent.empty());
+}
+
 TEST_F(GroupCallHandlerTest, OnlyTheCallerExpelsOrEnds) {
     const chat::CallId call = ticket("alice");
     ASSERT_EQ(ticket("bob"), call);

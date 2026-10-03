@@ -270,16 +270,6 @@ void CallHandler::moderate(const core::RoomId& room, const CallSignalRequest& re
         finish(answer, {.outcome = CallOutcome::NoCall, .ticket = std::nullopt});
         return;
     }
-    if (*step == MediaStepNeeded::None) {
-        // Put out before it had a ticket: there is no media room to keep it out of, and its
-        // tickets are refused from now on.
-        ringer_.moved(room, request.call, request.user, *request.target);
-        finish(answer, {.outcome = CallOutcome::Done,
-                        .ticket = std::nullopt,
-                        .call = request.call,
-                        .caller = request.user});
-        return;
-    }
     if (retired_.size() >= limits_.max_retired) {
         ++counters_.busy;
         finish(answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
@@ -291,12 +281,58 @@ void CallHandler::moderate(const core::RoomId& room, const CallSignalRequest& re
         finish(answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
         return;
     }
-    enqueue(room, CallKind::Group,
-            Move{.step = *step,
-                 .call = request.call,
-                 .by = request.user,
-                 .subject = request.target,
-                 .answer = std::move(answer)});
+    Move move{.step = *step,
+              .call = request.call,
+              .by = request.user,
+              .subject = request.target,
+              .answer = std::move(answer)};
+    if (*step == MediaStepNeeded::None) {
+        // No ticket in this call; but a device may still be connected from before this node
+        // owned the room, which only the SFU knows.
+        move_if_connected(room, CallKind::Group, std::move(move));
+        return;
+    }
+    enqueue(room, CallKind::Group, std::move(move));
+}
+
+void CallHandler::move_if_connected(const core::RoomId& room, CallKind kind, Move move) noexcept {
+    const auto it = rooms_.find(room);
+    if (it == rooms_.end() || !it->second.media || it->second.busy) {
+        // Nothing here to ask with: moved all the same, which costs everyone a reconnect.
+        move.step = MediaStepNeeded::Move;
+        enqueue(room, kind, std::move(move));
+        return;
+    }
+    try {
+        auto slot = std::make_shared<Move>(std::move(move));
+        it->second.media->participants(
+            [this, room, kind, slot](
+                std::expected<std::vector<core::ports::MediaParticipant>, core::ports::MediaError>
+                    listed) noexcept {
+                Move& m = *slot;
+                const bool connected = !listed || std::ranges::any_of(*listed, [&](const auto& p) {
+                    return m.subject && p.user == *m.subject;
+                });
+                if (connected) {
+                    m.step = MediaStepNeeded::Move;
+                    enqueue(room, kind, std::move(m));
+                    return;
+                }
+                // Put out before it had a ticket or a connection: its tickets are refused from
+                // now on, and there is no media room to keep it out of.
+                if (m.call && m.subject) {
+                    ringer_.moved(room, *m.call, m.by, *m.subject);
+                }
+                if (m.answer) {
+                    finish(m.answer, {.outcome = CallOutcome::Done,
+                                      .ticket = std::nullopt,
+                                      .call = m.call,
+                                      .caller = m.by});
+                }
+            });
+    } catch (const std::bad_alloc&) {
+        // The move, if any part of it is left, answers nothing; the asker times out.
+    }
 }
 
 bool CallHandler::callable(const core::ports::MessageResult<core::ports::RoomAccess>& access,
@@ -584,10 +620,10 @@ void CallHandler::advanced(const core::RoomId& room,
     } else {
         ++counters_.moves_expel;
     }
-    if (move.step == MediaStepNeeded::Close) {
-        ringer_.ended(room, move.call, move.by);
-    } else if (move.subject) {
-        ringer_.moved(room, move.call, move.by, *move.subject);
+    if (move.call && move.step == MediaStepNeeded::Close) {
+        ringer_.ended(room, *move.call, move.by);
+    } else if (move.call && move.subject) {
+        ringer_.moved(room, *move.call, move.by, *move.subject);
     }
     if (move.answer) {
         finish(move.answer, {.outcome = CallOutcome::Done,
@@ -932,13 +968,29 @@ void CallHandler::on_member_removed(const core::RoomId& room, const core::UserId
         return;
     }
     const auto call = ringer_.call_of(room);
+    const auto entry = rooms_.find(room);
     if (!call) {
+        // No call this node knows of; one it ticketed lately may still hold the member.
+        if (entry != rooms_.end() && entry->second.media) {
+            move_if_connected(room, entry->second.kind,
+                              Move{.step = MediaStepNeeded::None,
+                                   .call = std::nullopt,
+                                   .by = std::nullopt,
+                                   .subject = user,
+                                   .answer = nullptr});
+        }
         return;
     }
     const CallKind kind = ringer_.kind_of(room).value_or(CallKind::Direct);
     const MediaStepNeeded step = ringer_.removed(room, user);
     switch (step) {
     case MediaStepNeeded::None:
+        move_if_connected(room, kind,
+                          Move{.step = step,
+                               .call = *call,
+                               .by = std::nullopt,
+                               .subject = user,
+                               .answer = nullptr});
         return;
     case MediaStepNeeded::Move:
     case MediaStepNeeded::Close:
