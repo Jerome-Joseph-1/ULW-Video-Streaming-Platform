@@ -38,6 +38,7 @@ std::expected<void, RemuxError> recording_verdict(const ChildExit& child,
     case core::ports::TranscodeFailure::Sandbox:
     case core::ports::TranscodeFailure::SyscallBlocked:
     case core::ports::TranscodeFailure::Unverified:
+    case core::ports::TranscodeFailure::Inaccessible:
         break;
     }
     std::string detail = std::string(program) + " exited " + std::to_string(child.exit_code);

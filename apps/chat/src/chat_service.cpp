@@ -1,5 +1,6 @@
 #include "chat_service.hpp"
 
+#include "call.hpp"
 #include "log.hpp"
 
 #include <algorithm>
@@ -22,6 +23,10 @@ constexpr core::Millis kSweepEvery{1'000};
 // A resync's member checks asked at once: the message store's pool (MessageStoreConfig), so
 // that joins and history reads queued behind them wait for at most one check each.
 constexpr std::size_t kRechecksInFlight = 4;
+
+// A retry of a call that found the SFU or the owner unreachable: about what a store or SFU
+// hiccup takes to clear, long enough not to pile asks onto an owner that is struggling.
+constexpr core::Millis kCallRetry{2'000};
 
 // What a lossy client behind from `behind` is still owed of a room whose latest seq is `head`:
 // dropped for it when it leaves or joins again before it is sent them.
@@ -481,6 +486,85 @@ void ChatService::history(ClientId id, const History& history) {
         messages_.history_after(history.room, *history.after, history.limit, std::move(done));
     } else {
         messages_.history_before(history.room, history.before, history.limit, std::move(done));
+    }
+}
+
+void ChatService::call(ClientId id, const Call& call) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    Room* r = find(call.room);
+    if (r == nullptr || !r->joined ||
+        std::ranges::find(r->subscribers, id, &Room::Subscriber::id) == r->subscribers.end()) {
+        answer(*c->client, reason(rt::RouteError::NotJoined), call.room);
+        return;
+    }
+    if (!admit_join(c->user)) {
+        answer(*c->client, "busy", call.room);
+        return;
+    }
+    rooms_plane_.ask_owner(
+        call.room, *r, encode_request({.user = c->user, .device = call.device}),
+        [this, id,
+         room = call.room](std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
+            called(id, room, std::move(result));
+        });
+}
+
+void ChatService::called(ClientId id, const core::RoomId& room,
+                         std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    try {
+        std::string out;
+        if (!result) {
+            const rt::RouteError error = result.error();
+            const bool retry =
+                error == rt::RouteError::Unavailable || error == rt::RouteError::Fenced;
+            write_call_error(out, retry ? "unavailable" : reason(error), room,
+                             retry ? std::optional(kCallRetry) : std::nullopt);
+            c->client->push(out);
+            return;
+        }
+        const auto answer = decode_answer(*result);
+        // decode_answer gives every Ticket its ticket; checked here all the same.
+        if (!answer || (answer->outcome == CallOutcome::Ticket && !answer->ticket)) {
+            write_call_error(out, "unavailable", room, kCallRetry);
+            c->client->push(out);
+            return;
+        }
+        switch (answer->outcome) {
+        case CallOutcome::Ticket:
+            if (const auto& ticket = answer->ticket) {
+                write_ticket(out, room, *ticket);
+            }
+            break;
+        case CallOutcome::NotMember:
+            write_call_error(out, "not_member", room, std::nullopt);
+            break;
+        case CallOutcome::NotCallable:
+            write_call_error(out, "not_callable", room, std::nullopt);
+            break;
+        case CallOutcome::Unavailable:
+            write_call_error(out, "unavailable", room, kCallRetry);
+            break;
+        case CallOutcome::Failed:
+            write_call_error(out, "call_failed", room, std::nullopt);
+            break;
+        case CallOutcome::Disabled:
+            write_call_error(out, "calls_disabled", room, std::nullopt);
+            break;
+        case CallOutcome::Busy:
+            write_call_error(out, "busy", room, std::nullopt);
+            break;
+        }
+        c->client->push(out);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        c->client->allocation_failed();
     }
 }
 
