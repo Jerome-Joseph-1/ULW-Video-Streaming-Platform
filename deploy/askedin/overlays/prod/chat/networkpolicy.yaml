@@ -60,9 +60,8 @@ spec:
       ports:
         - port: 9201
           protocol: TCP
-    # LiveKit's server API (RoomService), for calls (docs/adr/0087). Prod runs no LiveKit yet,
-    # so this matches no pod until it does; its policy must then admit ULW's pods on that port,
-    # as stage's does.
+    # LiveKit's server API (RoomService), for calls (docs/adr/0087); overlays/prod/livekit's
+    # policy admits ULW's pods on that port, as stage's does.
     - to:
         - podSelector:
             matchLabels:

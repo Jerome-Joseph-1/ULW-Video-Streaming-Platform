@@ -185,7 +185,9 @@ protected:
 
     [[nodiscard]] fs::path clip() const { return files_.path() / "clip.mp4"; }
 
-    // What the gateway's commit leaves: a video in processing and its transcode job queued.
+    // What the gateway's commit leaves: a video in processing and its transcode job queued, and
+    // the workers told (NOTIFY job_available), so an idle one claims it at once rather than at
+    // the end of its poll interval.
     core::VideoId queue_video(core::ports::IObjectTransfer& store) {
         return queue_video(store, clip(), "req-1");
     }
@@ -202,6 +204,7 @@ protected:
             conn_->exec("INSERT INTO jobs (video_id, kind, source_key, request_id) "
                         "VALUES ($1, 'transcode', $2, $3)",
                         Params{}.add_uuid(video.uuid()).add_text(source).add_text(request_id)));
+        EXPECT_TRUE(conn_->exec("NOTIFY job_available"));
         return video;
     }
 

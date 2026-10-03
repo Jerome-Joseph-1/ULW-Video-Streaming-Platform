@@ -1,6 +1,7 @@
-# Media reaches LiveKit only from STUNner's relay; signalling only through Envoy's data plane
-# and, for the server API, from ULW's own pods beside it. A client that learnt the pod's
-# address from an ICE candidate still cannot send to it.
+# Media reaches LiveKit only from STUNner's relay and from egress, the recorder of a live
+# stream, which joins rooms as a client from inside the cluster; signalling only through
+# Envoy's data plane and, for the server API, from ULW's own pods beside it (egress among
+# them). A client that learnt the pod's address from an ICE candidate still cannot send to it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -21,6 +22,9 @@ spec:
         - podSelector:
             matchLabels:
               stunner.l7mp.io/related-gateway-name: stunner
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit-egress
       ports:
         - port: rtc-udp
           protocol: UDP

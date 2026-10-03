@@ -43,7 +43,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: chat
-          image: git.askedin.com/askedin/askedin-monorepo/chat:master
+          # Prod never follows :main: set a SHA publish-images.yml published from main,
+          # best as <sha>@sha256:<digest> from its run's summary (RUNBOOK.md, 4a).
+          image: ghcr.io/jerome-joseph-1/ulw-chat:<sha>
           imagePullPolicy: Always
           ports:
             - name: http
@@ -103,8 +105,8 @@ spec:
                   key: ULW_NODE_SECRET
             # Calls (docs/adr/0050, docs/adr/0087): RoomService of the LiveKit beside chat, and the
             # client URL and key pair from sfu-secrets, the pair LiveKit itself is configured with
-            # (RUNBOOK.md, section 7). Optional: prod has no LiveKit and no sfu-secrets yet, and
-            # without them chat starts with calls off and answers every call with calls_disabled.
+            # (RUNBOOK.md, section 7). Optional: until prod's sfu-secrets exists, chat starts
+            # with calls off and answers every call with calls_disabled.
             - name: LIVEKIT_API_URL
               value: http://livekit:7880
             - name: LIVEKIT_CLIENT_URL

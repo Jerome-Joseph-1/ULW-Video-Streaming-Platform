@@ -6,7 +6,7 @@
 # Go analyser maps that back to the file through the module's go.mod. The modules use the
 # standard library only, so nothing is fetched: GOPROXY=off and GOTOOLCHAIN=local make a module
 # that started to need a download, or a newer toolchain, fail here rather than fetch one.
-# Needs go on PATH (CI: the golang image, pinned by digest in sonar.yml).
+# Needs go on PATH (CI: the golang image, pinned by digest in ci.yml's coverage job).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 out=$(realpath -m "$1")
