@@ -4,9 +4,10 @@
 #   instead of the overlay's value, and its certificate is checked against the sandbox CA, as
 #   for video-gateway (gateway-patch.yaml);
 # - kind's pod network is 10.244.0.0/16, not K3s's 10.42.0.0/16;
-# - one kind node on a 4-core runner cannot set aside a quarter core for each of three chat pods
-#   beside everything else the sandbox runs, so it asks for less. Memory is left as the target
-#   has it.
+# - one kind node on a 4-core runner has almost no CPU left to reserve once the gateways, the
+#   worker, LiveKit and STUNner's dataplane hold theirs (50m for each chat pod already left
+#   STUNner unschedulable), so chat reserves next to nothing and runs on what is idle. Memory is
+#   left as the target has it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,7 +30,7 @@ spec:
               value: "10.244.0.0/16"
           resources:
             requests:
-              cpu: 50m
+              cpu: 10m
           volumeMounts:
             - name: sandbox-ca
               mountPath: /etc/ssl/certs/ca-certificates.crt
