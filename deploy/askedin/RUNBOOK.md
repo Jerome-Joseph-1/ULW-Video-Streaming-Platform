@@ -1,4 +1,4 @@
-# Deploying the VOD plane on Askedin
+# Deploying ULW on Askedin
 
 For the person with access to Askedin's cluster. Nothing in this repository applies these files
 to it; every command below is yours to run. Stage first, prod the same way a release later.
@@ -11,13 +11,18 @@ What ships:
 | `overlays/{stage,prod}/video-worker/` | Deployment (1 replica), NetworkPolicy; no Service, no route |
 | `overlays/{stage,prod}/upload-reaper/` | CronJob (every 15 minutes) and NetworkPolicy; the gateway image's `ulw_reaper` (step 3a) |
 | `seccomp/ulw-worker.json` | The worker's seccomp profile, installed on the node (step 2) |
-| `woodpecker.yml` | Builds and pushes both images, then `rollout restart`; never applies a manifest |
+| `overlays/{stage,prod}/chat/` | Deployment (3 replicas, docs/adr/0019), Service, HTTPRoute for its WebSocket (`/rt`), NetworkPolicy; secrets and Postgres settings in step 3 |
+| `overlays/{stage,prod}/live-packager/` | The headless Service that names each stream's packager in DNS, and the NetworkPolicy every packager runs under (step 9) |
+| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083) |
+| `woodpecker.yml` | Builds and pushes the four images (video-gateway, video-worker, chat, live-packager), then `rollout restart`; never applies a manifest |
 | `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
 | `overlays/stage/stunner/` | The TURN Gateway on UDP 3478 and the UDPRoute to LiveKit |
 | `overlays/stage/livekit/` | LiveKit (1 replica), Service, HTTPRoute for its signalling (`/rtc`), NetworkPolicy |
 
-`chat` and `live-packager` have no overlays yet: their binaries do not exist. The realtime plane
-(STUNner and LiveKit) is stage only until its phase is tagged there; step 7.
+The realtime plane (STUNner and LiveKit) is stage only until its phase is tagged there; step 7.
+Live streams need LiveKit's egress and the Redis it shares with LiveKit, which no overlay has
+yet, and a stream service to start each stream's packager, which does not exist yet: until both
+do, a packager is started by hand (step 9).
 
 Open decisions, yours: whether this builds inside the Askedin monorepo or pushes from this
 repository (the image names `git.askedin.com/askedin/askedin-monorepo/<svc>` assume the
@@ -67,8 +72,9 @@ pod its default AppArmor profile, which denies `mount`. On such a node watch the
 start; a `mount /proc` error in its log means the worker needs its own AppArmor profile
 (`securityContext.appArmorProfile`) before it can run.
 
-The gateway's NetworkPolicy admits only Envoy's data plane, found by labels. Confirm them, or
-edit `overlays/*/video-gateway/networkpolicy.yaml` before the first apply:
+The gateway's and chat's NetworkPolicies admit only Envoy's data plane, found by labels.
+Confirm them, or edit `overlays/*/video-gateway/networkpolicy.yaml` and
+`overlays/*/chat/networkpolicy.yaml` before the first apply:
 
 ```sh
 kubectl get pods -A -l app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway \
@@ -117,7 +123,8 @@ kubectl get svc -n envoy-gateway-system -l app.kubernetes.io/component=proxy \
 ```
 
 If the pods are elsewhere, set `ULW_TRUSTED_PROXIES` in both
-`overlays/*/video-gateway/deployment.yaml` to the block that holds them before the first apply.
+`overlays/*/video-gateway/deployment.yaml` and both `overlays/*/chat/deployment.yaml` to the
+block that holds them before the first apply.
 With the wrong block every client counts as Envoy: the gateway resets Envoy's connections past
 20 and `connections_rejected_total{reason="ip_connections"}` climbs. With a proxy more or fewer
 in front than `ULW_TRUSTED_PROXY_HOPS` says, clients are counted as the wrong address; step 5.4
@@ -125,8 +132,9 @@ checks which one the gateway sees.
 
 `chat_server` holds each client address to a share of its connections too (20 open sockets, 80
 from one IPv6 /48, 10 new ones a second, and 16 sockets per user; docs/adr/0076), and reads the
-same `ULW_TRUSTED_PROXIES` and `ULW_TRUSTED_PROXY_HOPS`. When chat is served behind Envoy, set
-both on its Deployment exactly as on the gateway's. Without them every WebSocket arrives from
+same `ULW_TRUSTED_PROXIES` and `ULW_TRUSTED_PROXY_HOPS`; `overlays/*/chat/deployment.yaml` sets
+both exactly as the gateway's, so change them in both places together. Without them every
+WebSocket arrives from
 Envoy's pods, so all clients together share Envoy's 20 sockets per address: the 21st client
 through an Envoy pod is reset at accept, and
 `connections_rejected_total{reason="ip_connections"}` on the chat node climbs while its
@@ -157,16 +165,22 @@ files must be readable by that user.
 
 Check the node has room. Both environments run on k8s-prod's 8 vCPU / 24 GB, and the new
 requests are, per environment, 2 x 500m CPU and 2 x 600Mi for the gateways plus the worker's
-2Gi, and 1 CPU / 10Gi of scratch (stage) or 2 CPU / 30Gi (prod) for the worker: 5 CPU, 6.4Gi of
-memory and 40Gi of ephemeral storage for both. Compare with what is already allocated:
+2Gi, 1 CPU / 10Gi of scratch (stage) or 2 CPU / 30Gi (prod) for the worker, and 3 x 250m CPU and
+3 x 832Mi for chat: 6.5 CPU, 11.3Gi of memory and 40Gi of ephemeral storage for both. Each live
+stream adds a packager's 100m CPU, 256Mi of memory and 256Mi of ephemeral storage while it runs
+(step 9). Compare with what is already allocated:
 
 ```sh
 kubectl describe nodes | sed -n '/Allocated resources/,/Events/p'
 df -h /var/lib/kubelet                 # the scratch emptyDirs live here
 ```
 
-If the node cannot take it, lower the prod worker's CPU request before the first prod apply;
-the gateways' memory requests are the budget of docs/adr/0027 and should not move.
+If the node cannot take it, lower the prod worker's CPU request, or chat's (its quarter core per
+pod is not measured; `overlays/*/chat/deployment.yaml` says so), before the first prod apply.
+The gateways' memory requests are the budget of docs/adr/0027 and chat's the worst case of
+docs/adr/0036; neither should move. A single node also means three chat pods share one failure
+domain: ADR-0019's point about a drain taking two of them at once becomes all three, and no
+PodDisruptionBudget is shipped, since on one node it would only stop the drain.
 
 Check that the JWKS host speaks TLS 1.3. The gateway, the worker and chat refuse any https
 server that does not (docs/integration/operations-contract.md), so a JWKS host stuck on TLS
@@ -189,7 +203,8 @@ Once per node, and again whenever `seccomp/ulw-worker.json` changes:
 sudo install -D -m 0644 seccomp/ulw-worker.json /var/lib/kubelet/seccomp/profiles/ulw-worker.json
 ```
 
-Without it the worker pod stays in `CreateContainerError`.
+Without it the worker pod stays in `CreateContainerError`, and so does every live packager
+(step 9), which runs ffmpeg under the same sandbox and profile.
 
 ## 3. Secrets
 
@@ -205,6 +220,7 @@ VIDEO_GATEWAY_R2_SECRET_ACCESS_KEY
 VIDEO_WORKER_R2_ACCESS_KEY_ID         R2 token for the worker: object read and write on the bucket
 VIDEO_WORKER_R2_SECRET_ACCESS_KEY
 VIDEO_JWT_ISSUER                      .env.stage only: the iss Askedin's stage auth-service puts in its tokens
+VIDEO_CHAT_NODE_SECRET                32+ random bytes, base64 (openssl rand -base64 48); docs/adr/0035
 ```
 
 `JWKS_URL` is no longer a secret: the overlays set Askedin's for each environment, and prod's
@@ -241,17 +257,32 @@ kubectl -n "$NS" create secret generic video-worker-secrets \
   --from-literal=ULW_S3_ACCESS_KEY_ID="$VIDEO_WORKER_R2_ACCESS_KEY_ID" \
   --from-literal=ULW_S3_SECRET_ACCESS_KEY="$VIDEO_WORKER_R2_SECRET_ACCESS_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n "$NS" create secret generic chat-secrets \
+  --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
+  --from-literal=ULW_DATABASE_URL="$VIDEO_DATABASE_URL" \
+  --from-literal=ULW_NODE_SECRET="$VIDEO_CHAT_NODE_SECRET" \
+  --from-literal=JWT_ISSUER="${VIDEO_JWT_ISSUER:-}" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Add both deployments to the script's `kubectl rollout restart` list, so a secret change reaches
-them:
+Chat uses the gateway's database and role: its tables come from the same migrations, which the
+gateway's init container applies (docs/adr/0031).
+
+Add the three deployments to the script's `kubectl rollout restart` list, so a secret change
+reaches them:
 
 ```sh
-kubectl -n "$NS" rollout restart deployment/video-gateway deployment/video-worker
+kubectl -n "$NS" rollout restart deployment/video-gateway deployment/video-worker deployment/chat
 ```
 
-The worker gets no JWT settings at all. Prod's gateway does not read `JWT_ISSUER` from the
-secret, so the empty value `.env.prod` leaves there is never used.
+The chat nodes refuse each other unless they hold the same `ULW_NODE_SECRET`, so a new value
+must reach every pod: the restart above rolls them one at a time, and while old and new pods
+overlap, rooms owned across the two are unreachable from the other side and their joins and
+sends fail as `unavailable` (clients retry). To rotate it without that, scale chat to 0 and back
+to 3 instead of the restart.
+
+The worker gets no JWT settings at all. Prod's gateway and chat do not read `JWT_ISSUER` from
+the secret, so the empty value `.env.prod` leaves there is never used.
 
 The role and database on k8s-prod's Postgres, once, as a superuser (psql prompts for the
 password with `\password`; it never goes on a command line):
@@ -410,9 +441,9 @@ is on the internet. If the host's address is stable, add it as an `ipBlock` to t
    `apps-stage` (`rollout restart` and `rollout status`). The image steps run the buildx plugin,
    which Woodpecker 3 runs privileged only when the server lists it: add the exact reference
    from `woodpecker.yml` (tag and digest) to the server's `WOODPECKER_PLUGINS_PRIVILEGED`.
-2. Push to `development`. Woodpecker pushes `video-gateway:development` and
-   `video-worker:development`; the restart step fails on the first run because the deployments
-   do not exist yet. That is expected.
+2. Push to `development`. Woodpecker pushes `video-gateway:development`,
+   `video-worker:development`, `chat:development` and `live-packager:development`; the restart
+   step fails on the first run because the deployments do not exist yet. That is expected.
 3. Bootstrap stage once:
 
    ```sh
@@ -420,7 +451,7 @@ is on the internet. If the host's address is stable, add it as an `ipBlock` to t
    ```
 
    `--with-deployments` applies every service's `deployment.yaml` in the stage overlay, not
-   just these two. Any service whose live image or replica count was changed outside git (a
+   just these three. Any service whose live image or replica count was changed outside git (a
    `kubectl set image`, a manual scale) is reset to what git says. Check first with
    `kubectl -n apps-stage diff -f <each other service's deployment.yaml>`, and run it when a
    reset would not hurt.
@@ -442,12 +473,12 @@ manifests, then deploys exactly that digest. Nothing in `woodpecker.yml` does th
 two things only you can set up, a Woodpecker secret allowed to push to the monorepo branch
 ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist:
 
-1. Put a `kustomization.yaml` in each of `overlays/{stage,prod}/video-gateway`, `video-worker`
-   and `upload-reaper`, listing that directory's manifests under `resources:` and the image under
-   `images:`. ArgoCD renders a directory with a `kustomization.yaml` through kustomize on its
-   own. Change `imagePullPolicy: Always` to `IfNotPresent`: a digest never changes, so there is
-   nothing to pull again.
-2. Add a step to `woodpecker.yml` after both image steps, in place of `rollout-restart`: resolve
+1. Put a `kustomization.yaml` in each of `overlays/{stage,prod}/video-gateway`, `video-worker`,
+   `upload-reaper` and `chat`, listing that directory's manifests under `resources:` and the
+   image under `images:`. ArgoCD renders a directory with a `kustomization.yaml` through
+   kustomize on its own. Change `imagePullPolicy: Always` to `IfNotPresent`: a digest never
+   changes, so there is nothing to pull again.
+2. Add a step to `woodpecker.yml` after the image steps, in place of `rollout-restart`: resolve
    the digest of the tag just pushed under the commit's SHA (not the branch tag, which a
    concurrent build may have moved), write it with kustomize, and commit it. With `crane` and
    `kustomize` in an image pinned by tag and digest like every other step:
@@ -460,8 +491,10 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
    esac
    gw=git.askedin.com/askedin/askedin-monorepo/video-gateway
    wk=git.askedin.com/askedin/askedin-monorepo/video-worker
+   ch=git.askedin.com/askedin/askedin-monorepo/chat
    gw_digest=$(crane digest "$gw:$CI_COMMIT_SHA")
    wk_digest=$(crane digest "$wk:$CI_COMMIT_SHA")
+   ch_digest=$(crane digest "$ch:$CI_COMMIT_SHA")
    git config user.name "<pipeline commit name>"      # fill in
    git config user.email "<pipeline commit email>"    # fill in
    # The monorepo's clone URL, assumed from the registry path: confirm it. The token is read
@@ -473,6 +506,7 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
      (cd "$overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
      (cd "$overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
      (cd "$overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
+     (cd "$overlays/$env/chat" && kustomize edit set image "$ch=$ch@$ch_digest")
      # Already pinned (a rerun, or the branch holds this digest): nothing to commit.
      git diff --quiet || git commit -qam "deploy: video images $CI_COMMIT_SHA [skip ci]"
    }
@@ -510,7 +544,7 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
    the same base. So the step fetches the branch, and if a code commit (one whose message lacks
    `[skip ci]`) has landed after `$CI_COMMIT_SHA`, it stops without pinning, because that newer
    build pins itself. Otherwise only digest commits landed, from builds of this commit or older
-   ones, and it redoes its three edits on the fetched tree, commits and pushes, up to three
+   ones, and it redoes its four edits on the fetched tree, commits and pushes, up to three
    times. The edits are regenerated rather than replayed, so a shallow clone (Woodpecker's
    default) is enough: the fetch brings the commits after the clone's, and the check reads only
    the range after `$CI_COMMIT_SHA`, which the clone has. The rule holds only while every commit
@@ -519,6 +553,9 @@ ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist
    (`git rev-list ... "$CI_COMMIT_SHA..HEAD" -- <the video paths>`). The `exit`s end the step,
    so the snippet is the step's last command.
    Drop the restricted kubeconfig then: the pipeline no longer touches the cluster.
+   The live packager is not pinned this way: its Job template is filled in per stream, so
+   whatever starts a stream names the image, and should name it by the digest of the build it
+   means (`crane digest .../live-packager:<sha>`) rather than by the branch tag (step 9).
 3. Rollback (section 6) becomes one of:
    - `kustomize edit set image` to the digest of `<good sha>`, committed with `[skip ci]`;
    - a revert of the digest commit, whose message must also carry `[skip ci]`
@@ -540,19 +577,21 @@ kubectl -n apps-stage get pods -o \
 
 ### Image builds and the worker's ffmpeg
 
-The two images come from different distributions (docs/adr/0074): `video-gateway` is Ubuntu
-24.04 with its packages from snapshot.ubuntu.com, `video-worker` is Debian 13 (trixie) with its
-packages, ffmpeg among them, from snapshot.debian.org; both images' binaries are built on
-Ubuntu, since only Ubuntu's glibc lets them carry the CET marks the hardening check requires.
-On the worker those marks are a static property only: Debian's own `libc.so.6` is unmarked, so
-the kernel does not enable a shadow stack for the worker's processes. And because the worker's
-binaries run on trixie's libraries, the Ubuntu release they are built on must not have a newer
-glibc or libstdc++ than trixie; the trixie workflow fails if they stop loading there.
-Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org over
-http for the worker's bootstrap of ca-certificates (signed and checked for freshness), and
-Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes its CA as the
-build secret `ca-bundle`. The pipeline itself is unchanged: `target: worker` still builds the
-worker image.
+The images come from two distributions (docs/adr/0074): `video-gateway` and `chat` are Ubuntu
+24.04 with their packages from snapshot.ubuntu.com (chat adds the jemalloc it links,
+docs/adr/0081), `video-worker` and `live-packager` are Debian 13 (trixie) with their packages,
+ffmpeg among them, from snapshot.debian.org, one stage shared by both; every image's binaries
+are built on Ubuntu, since only Ubuntu's glibc lets them carry the CET marks the hardening
+check requires. On the Debian images those marks are a static property only: Debian's own
+`libc.so.6` is unmarked, so the kernel does not enable a shadow stack for their processes. And
+because their binaries run on trixie's libraries, the Ubuntu release they are built on must not
+have a newer glibc or libstdc++ than trixie; the trixie workflow fails if they stop loading
+there. Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org
+over http for the Debian stage's bootstrap of ca-certificates (signed and checked for
+freshness), and Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes
+its CA as the build secret `ca-bundle`. Each image is one `target:` of `deploy/docker/Dockerfile`
+(`gateway`, `worker`, `chat`, `live-packager`); a bump of the worker's ffmpeg below reaches the
+live packager's image too.
 
 #### Updating the worker's ffmpeg
 
@@ -592,8 +631,9 @@ otherwise bump at least monthly.
    space limit is a finding for docs/adr/0074 before it is a bump. The trixie workflow runs both
    on every pull request that touches the Dockerfile, so its log shows them too.
 6. Open the pull request, then dispatch the e2e workflow on its branch (Actions, e2e, "Run
-   workflow"): pull requests do not run it. Its sandbox job builds the worker image, runs the
-   VOD flow through it, checks the release binaries' hardening and runs the Trivy gate. Deploy
+   workflow"): pull requests do not run it. Its sandbox job builds the worker and live-packager
+   images, runs the VOD flow through the worker, checks the release binaries' hardening and runs
+   the Trivy gate over both. Deploy
    as usual (step 4).
 
 ## 5. Verify on stage (M14)
@@ -601,11 +641,19 @@ otherwise bump at least monthly.
 1. ArgoCD shows the stage application Synced and Healthy; then:
 
    ```sh
-   kubectl -n apps-stage get deploy video-gateway video-worker      # 2/2 and 1/1
+   kubectl -n apps-stage get deploy video-gateway video-worker chat # 2/2, 1/1 and 3/3
    kubectl -n apps-stage logs deploy/video-gateway -c migrate        # "applied …" or "schema is up to date"
-   kubectl -n apps-stage get httproute video-gateway \
-     -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}'   # True
+   for route in video-gateway chat; do
+     kubectl -n apps-stage get httproute "$route" \
+       -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}{"\n"}'   # True
+   done
+   kubectl -n apps-stage logs -l app.kubernetes.io/name=chat --prefix | grep '"listening"'
    ```
+
+   Each chat pod's `listening` line names `"allocator":"jemalloc 5.3.0-..."` (docs/adr/0081)
+   and its `node_address`, the pod's own IP and port 9201. A chat Deployment stuck below 3/3
+   with `/readyz` answering 503 is usually a node that cannot publish its address or reach the
+   database: its log says which.
 
    A route with `Accepted` missing or False is the stage 404 trap: check `parentRefs` names
    namespace `apps`.
@@ -669,6 +717,21 @@ otherwise bump at least monthly.
    record `kubectl -n apps-stage top pod -l app.kubernetes.io/name=video-gateway` at rest and
    after step 2, and compare it with the sandbox report. The limit and its derivation are in
    `overlays/*/video-gateway/deployment.yaml`.
+6. Chat through the route. The sandbox's `chat` scenario (`make e2e-test`) joins a stream's live
+   chat from six sockets across the three nodes and checks one message reaches them all; on
+   stage, check the upgrade with a real token, kept in a file so it stays off the command line
+   (`Authorization: Bearer <token>` on one line):
+
+   ```sh
+   curl -si --http1.1 --max-time 3 -H @stage-token.header -H 'Upgrade: websocket' \
+     -H 'Connection: Upgrade' -H 'Sec-WebSocket-Version: 13' \
+     -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" https://<stage host>/rt | head -1
+   ```
+
+   It must print `HTTP/1.1 101 Switching Protocols` (curl then times out holding the socket,
+   which is expected); without the header line it is `401`. A `404` means the route is not
+   attached (`parentRefs`, as above). From a page on `https://stage.askedin.com` the cookie
+   works too; from any other origin it is `403` (docs/integration/chat.md).
 
 ## 6. Rollback
 
@@ -678,10 +741,16 @@ pushed every build under its commit SHA:
 ```sh
 crane tag git.askedin.com/askedin/askedin-monorepo/video-gateway:<good sha> development
 crane tag git.askedin.com/askedin/askedin-monorepo/video-worker:<good sha> development
+crane tag git.askedin.com/askedin/askedin-monorepo/chat:<good sha> development
+crane tag git.askedin.com/askedin/askedin-monorepo/live-packager:<good sha> development
 kubectl -n apps-stage rollout restart deployment/video-gateway
 kubectl -n apps-stage rollout status deployment/video-gateway
 kubectl -n apps-stage rollout restart deployment/video-worker
+kubectl -n apps-stage rollout restart deployment/chat
 ```
+
+Packagers already running keep their build; streams started after the retag pull the good one.
+A rollback across a change of chat's node-channel version is a `Recreate` too (step 3).
 
 (`docker pull`, `docker tag`, `docker push` do the same as `crane tag`.) Migrations only add
 (docs/adr/0031), so the older build runs against the newer schema; the database is never rolled
@@ -689,7 +758,9 @@ back. For prod, the tag is `master` and the namespace `apps`. Revert the commit 
 too, or the next push redeploys it.
 
 To take the plane out entirely: delete the HTTPRoute first (uploads stop at the edge), then
-scale both deployments to 0. Uploads in progress resume once it is back.
+scale both deployments to 0. Uploads in progress resume once it is back. Chat the same way: its
+HTTPRoute, then `deployment/chat` to 0; clients reconnect and resume from their last seq once it
+is back.
 
 ## 7. The realtime plane: STUNner and LiveKit (stage)
 
@@ -863,8 +934,8 @@ stunnerd Deployment and Service when its Gateway goes. If nothing else uses STUN
 ## 8. Askedin signing key rotation
 
 Askedin's auth-service rotates its RSA signing key with no overlap: one transaction creates the
-new key and deactivates the old one, and the old `kid` leaves the JWKS at once. The gateway (and
-chat, once deployed) caches the key set and remembers verified tokens for up to 15 minutes each,
+new key and deactivates the old one, and the old `kid` leaves the JWKS at once. The gateway and
+chat each cache the key set and remembers verified tokens for up to 15 minutes each,
 so left alone it accepts tokens under the old key for up to 15 minutes after a rotation
 (docs/integration/auth.md, Key rotation). SIGHUP refetches the key set at once and, when that
 fetch succeeds, replaces the keys and forgets every remembered token (docs/adr/0082).
@@ -877,25 +948,145 @@ NS=apps-stage   # apps for prod
 for pod in $(kubectl -n "$NS" get pods -l app.kubernetes.io/name=video-gateway -o name); do
   kubectl -n "$NS" exec "$pod" -c gateway -- sh -c 'kill -HUP 1'
 done
+for pod in $(kubectl -n "$NS" get pods -l app.kubernetes.io/name=chat -o name); do
+  kubectl -n "$NS" exec "$pod" -c chat -- sh -c 'kill -HUP 1'
+done
 ```
 
-`gateway_server` is PID 1 in its container, and the image's `sh` has `kill` built in. Then check
-that every pod took it: each logs `auth cache drop requested` once, its `auth_cache_drops_total`
-on `/metrics` went up by one, and its `auth_cache_drop_pending` is back to 0 (the fetch that
-completes the drop normally lands well under a second later).
+`gateway_server` and `chat_server` are PID 1 in their containers, and the images' `sh` has
+`kill` built in. Then check that every pod took it: each logs `auth cache drop requested`
+once, its `auth_cache_drops_total` on `/metrics` went up by one, and its
+`auth_cache_drop_pending` is back to 0 (the fetch that completes the drop normally lands well
+under a second later).
 
 ```sh
 kubectl -n "$NS" logs -l app.kubernetes.io/name=video-gateway -c gateway --since=5m | grep 'auth cache drop requested'
+kubectl -n "$NS" logs -l app.kubernetes.io/name=chat -c chat --since=5m | grep 'auth cache drop requested'
 ```
 
 A pod that did not log it still accepts old tokens until its next refetch; signal it again, or
-restart the deployment instead (`kubectl -n "$NS" rollout restart deployment/video-gateway`),
-which also clears both caches but drains every connection and takes longer. Do the same for
-`chat_server` once chat has an overlay: it handles SIGHUP the same way.
+restart the deployment instead (`kubectl -n "$NS" rollout restart deployment/video-gateway`, or
+`deployment/chat`), which also clears both caches but drains every connection and takes longer.
+Chat sockets already open are not closed by the drop; each still ends with its own token
+(docs/integration/auth.md).
 
 If Askedin's JWKS cannot be reached, the SIGHUP drops nothing yet: `auth_cache_drop_pending`
 stays at 1 and tokens under the old key keep working until a fetch succeeds, which then
 completes the drop. That is the right trade for a routine rotation. For a suspected key
-compromise during a JWKS outage, use `kubectl -n "$NS" rollout restart deployment/video-gateway`
-instead: new pods start with no keys and refuse every token (`503`) until a fetch succeeds,
-which fails closed.
+compromise during a JWKS outage, use
+`kubectl -n "$NS" rollout restart deployment/video-gateway deployment/chat` instead: new pods
+start with no keys and refuse every token (`503`) until a fetch succeeds, which fails closed.
+
+## 9. Live streams: the packager (stage)
+
+A live stream reaches viewers as HLS that its packager writes to the bucket (docs/adr/0046),
+from LiveKit's recorder (egress), which the stream service starts once the publisher's WHIP
+POST has succeeded (docs/adr/0053). A packager is one process per stream, so on the cluster it
+is one Job per stream, made from `live-packager/job.yaml` (docs/adr/0083). What is not here
+yet, and is needed before a stream can go out:
+
+- **LiveKit egress and its Redis** (docs/integration/operations-contract.md): no overlay ships
+  them. Egress's pods must carry `app.kubernetes.io/name: livekit-egress`, the only pods the
+  packager's NetworkPolicy admits, and LiveKit must be pointed at the same Redis.
+- **The stream service**, which makes each stream's Job and Secret, calls the relay with the
+  stream's passphrase, and records the stream's chat live (step 3). Until it exists, the steps
+  below start a packager by hand.
+
+The relay's packager address (the SFU adapter's `packager_srt`, ADR-0053) is
+`srt://{stream}.live-packager.apps-stage.svc.cluster.local:9000` on stage, and `.apps.` in
+place of `.apps-stage.` on prod: `overlays/*/live-packager/service.yaml` gives each packager pod
+that name.
+
+### Secrets and the database role
+
+New keys for `.env.stage` and `.env.prod` (names only):
+
+```
+VIDEO_LIVE_DATABASE_URL               postgresql://… for the ulw database, as the role below
+VIDEO_LIVE_R2_ACCESS_KEY_ID           R2 token for the packager: object read and write on the bucket
+VIDEO_LIVE_R2_SECRET_ACCESS_KEY
+```
+
+The packager needs only a few rights on the database (docs/integration/operations-contract.md),
+so it gets a role of its own rather than the gateway's. Once, as a superuser, after the
+gateway's migrations have run (`ulw_prod_live` and `ulw_prod` for prod):
+
+```sql
+CREATE ROLE ulw_stage_live LOGIN;
+\password ulw_stage_live
+\connect ulw_stage
+SET ROLE ulw_stage;   -- the tables' owner grants on them
+GRANT SELECT, INSERT ON live_recordings TO ulw_stage_live;
+GRANT SELECT (id), INSERT ON videos TO ulw_stage_live;
+GRANT INSERT ON jobs TO ulw_stage_live;
+GRANT USAGE ON SEQUENCE jobs_id_seq TO ulw_stage_live;
+```
+
+Lines for `scripts/create-k8s-secrets.sh`:
+
+```sh
+kubectl -n "$NS" create secret generic live-packager-secrets \
+  --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
+  --from-literal=ULW_DATABASE_URL="$VIDEO_LIVE_DATABASE_URL" \
+  --from-literal=ULW_R2_ACCOUNT_ID="$VIDEO_R2_ACCOUNT_ID" \
+  --from-literal=ULW_BUCKET="$VIDEO_R2_BUCKET" \
+  --from-literal=ULW_S3_ACCESS_KEY_ID="$VIDEO_LIVE_R2_ACCESS_KEY_ID" \
+  --from-literal=ULW_S3_SECRET_ACCESS_KEY="$VIDEO_LIVE_R2_SECRET_ACCESS_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Nothing to restart: each packager reads the secret when its Job starts.
+
+The bucket keeps a stream's segments under `live/<stream>/`, and the recording is read back from
+them after the stream ends, so they need an expiry of days, not hours (operations-contract.md).
+Add a rule beside step 3a's, merged into the same `lifecycle.json`; the number of days is yours:
+
+```json
+{
+  "ID": "expire-live-segments",
+  "Status": "Enabled",
+  "Filter": { "Prefix": "live/" },
+  "Expiration": { "Days": 7 }
+}
+```
+
+### Start a stream's packager by hand
+
+The stream id names the Job and the pod's DNS record, so it must be a DNS label here: lowercase
+letters, digits and `-`, 1 to 63 (ADR-0053). The passphrase is the stream's own, 10 to 79
+characters, and goes only into its Secret and the relay request:
+
+```sh
+NS=apps-stage TAG=development          # apps and master for prod
+STREAM=launch-2026
+OWNER=<the broadcaster's Askedin user id (sub)>
+kubectl -n "$NS" create secret generic "live-packager-$STREAM" \
+  --from-file=ULW_LIVE_SRT_PASSPHRASE=<(openssl rand -hex 24 | tr -d '\n')
+ULW_NAMESPACE=$NS ULW_IMAGE_TAG=$TAG ULW_STREAM_ID=$STREAM ULW_STREAM_OWNER=$OWNER \
+  envsubst '${ULW_NAMESPACE} ${ULW_IMAGE_TAG} ${ULW_STREAM_ID} ${ULW_STREAM_OWNER}' \
+  < live-packager/job.yaml | kubectl apply -f -
+kubectl -n "$NS" logs -f "job/$STREAM"
+```
+
+Name the four variables to `envsubst` exactly as above: the template also holds `$(POD_IP)`,
+which is Kubernetes' to expand, not the shell's. The log's first line names the stream, the
+storage and `ingest=<pod IP>:9000`; from then on the packager waits for its one SRT caller. The
+gateway serves the stream's playlist at `GET /api/v1/live/launch-2026/index.m3u8` once the first
+segment is stored (docs/integration/live.md).
+
+The stream ends when its caller goes; the packager then writes `EXT-X-ENDLIST`, queues the
+recording as a video and logs `recording: queued as video <id>`, and the Job completes. To end
+it from the cluster instead, send the packager SIGUSR1
+(`kubectl -n "$NS" exec "job/$STREAM" -c packager -- sh -c 'kill -USR1 1'`; `live_packager`
+is PID 1 in its container). A SIGTERM (a node drain, a
+`kubectl delete pod`) drains instead: the process exits 0, the Job counts as complete, and the
+stream is left to be continued by a new packager for the same stream id, which whoever started
+the stream must start (the template's `backoffLimit` restarts only failures). The Job and its
+pod are removed a day after they finish; delete the stream's Secret with them:
+
+```sh
+kubectl -n "$NS" delete secret "live-packager-$STREAM"
+```
+
+Every packager runs ffmpeg under the worker's sandbox, so it needs what step 1 checks for the
+worker (user namespaces) and step 2's seccomp profile on the node it lands on.
