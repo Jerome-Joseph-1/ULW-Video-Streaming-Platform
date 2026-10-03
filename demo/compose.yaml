@@ -258,8 +258,11 @@ services:
         redis:
           address: 127.0.0.1:6379
         rtc:
-          # The browser is on this machine: candidates name loopback and the published ports.
-          node_ip: 127.0.0.1
+          # The browser is on this machine. LiveKit offers two candidates on the same port: its
+          # container address, which a Linux host reaches directly (Docker 28 does not carry UDP
+          # sent to a 127.0.0.1-published port to the container), and loopback, which reaches it
+          # through the published ports where the container network is out of reach (Docker
+          # Desktop on macOS and Windows). Egress, in the same namespace, uses either.
           use_external_ip: false
           enable_loopback_candidate: true
           tcp_port: ${DEMO_RTC_TCP_PORT:-7881}
