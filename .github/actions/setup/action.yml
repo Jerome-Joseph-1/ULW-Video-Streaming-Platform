@@ -70,10 +70,14 @@ runs:
         if "$probe" | tee "$probe.out"; then
           exit 0
         fi
+        if grep -q '^provided buffer ring.* NO$' "$probe.out"; then
+          echo "::error::Kernel $(uname -r) refuses every provided buffer ring (IORING_REGISTER_PBUF_RING answers EINVAL however the ring is set up), and the reactor receives into one, so every io_uring test would fail. Ubuntu 24.04's 6.8 kernel does this by 6.8.0-146; the host needs the HWE kernel: docs/operations/soak.md, The self-hosted host."
+          exit 1
+        fi
         errno=$(sed -n 's/.*(errno \([0-9]*\)).*/\1/p' "$probe.out" | head -n1)
         case "$errno" in
           12)
-            echo "::error::io_uring refused the reactor's ring for memory (ENOMEM) under a max locked memory of $(ulimit -l) KiB. The runner services need LimitMEMLOCK=infinity: docs/operations/soak.md, The self-hosted host."
+            echo "::error::io_uring refused the reactor's ring for memory (ENOMEM) under a max locked memory of $(ulimit -l) KiB. The runner services need a higher LimitMEMLOCK: docs/operations/soak.md, The self-hosted host."
             ;;
           1)
             echo "::error::io_uring is refused to $(id -un) (EPERM): kernel.io_uring_disabled is $(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo absent). The host needs kernel.io_uring_disabled=0: docs/operations/soak.md, The self-hosted host."
