@@ -30,10 +30,14 @@ file:line:operator:index, stable for a given source.
 
 The test command is a test binary inside the repository or the build tree, given only
 googletest flags (passed to it as the GTEST_* variables googletest reads in their place) other
-than --gtest_list_tests, --gtest_output and --gtest_flagfile, none of which the environment
-may set either, or ctest with the options in CTEST_FLAGS, run in the build tree; anything
-else, and a --files path outside the working directory, is refused with exit 2. --sample
-takes the mutants whose sha256 of seed and id sorts first.
+than --gtest_list_tests, --gtest_output, --gtest_flagfile and the sharding flags
+(--gtest_total_shards, --gtest_shard_index, --gtest_shard_status_file), or ctest with the
+options in CTEST_FLAGS, run in the build tree; anything else, and a --files path outside the
+working directory, is refused with exit 2. So is an environment that sets what those flags
+would (GTEST_LIST_TESTS, GTEST_OUTPUT, GTEST_FLAGFILE, GTEST_TOTAL_SHARDS, GTEST_SHARD_INDEX,
+GTEST_SHARD_STATUS_FILE) or XML_OUTPUT_FILE, TEST_PREMATURE_EXIT_FILE or TESTBRIDGE_TEST_ONLY,
+which the test binary, or each one ctest runs, would read: a file written, or a run narrowed to
+a subset. --sample takes the mutants whose sha256 of seed and id sorts first.
 
 Mutants build with CCACHE_READONLY so they do not fill the cache; the restored source hits it.
 """
@@ -77,8 +81,16 @@ CTEST_FLAGS = ("--output-on-failure", "--stop-on-failure", "-Q", "--quiet", "-V"
                "--no-tests=error", "--schedule-random")
 # The googletest flags a test command may not set: listing runs no test, so every mutant would
 # survive; an output file is a path written outside pathguard's reach; a flag file holds flags
-# of its own, these among them, that would pass unchecked.
-REFUSED_GTEST_FLAGS = ("list_tests", "output", "flagfile")
+# of its own, these among them, that would pass unchecked; a shard runs only part of the suite,
+# so a mutant would be judged on a subset, and its status file is another path written.
+REFUSED_GTEST_FLAGS = ("list_tests", "output", "flagfile", "total_shards", "shard_index",
+                       "shard_status_file")
+# The environment variables googletest reads that the test command must not inherit: each
+# refused flag's GTEST_* form, and those with no flag of their own. XML_OUTPUT_FILE (the default
+# --gtest_output) and TEST_PREMATURE_EXIT_FILE are files it writes; TESTBRIDGE_TEST_ONLY
+# replaces --gtest_filter, so the mutants would run against a subset the command does not show.
+REFUSED_TEST_ENV = (*("GTEST_" + flag.upper() for flag in REFUSED_GTEST_FLAGS),
+                    "XML_OUTPUT_FILE", "TEST_PREMATURE_EXIT_FILE", "TESTBRIDGE_TEST_ONLY")
 
 
 def mask(lines):
@@ -150,9 +162,9 @@ def test_command(cmd, build_dir):
     Anything else exits 2, so no argument reaches a program as an option it was not meant to
     take; so does an inherited environment that sets a refused flag's variable, which the test
     binary, or each one ctest runs, would read as the flag."""
-    for name in REFUSED_GTEST_FLAGS:
-        if "GTEST_" + name.upper() in os.environ:
-            refuse(f"the environment sets GTEST_{name.upper()}")
+    for name in REFUSED_TEST_ENV:
+        if name in os.environ:
+            refuse(f"the environment sets {name}")
     if cmd[0] == "ctest":
         argv = ["ctest", "--test-dir", str(build_dir)]
         for arg in cmd[1:]:
@@ -173,7 +185,8 @@ def test_command(cmd, build_dir):
         if not flag:
             refuse(f"{arg!r} is not a googletest flag")
         if flag.group(1) in REFUSED_GTEST_FLAGS:
-            refuse(f"{arg!r} lists the tests, writes a file or reads flags from a file")
+            refuse(f"{arg!r} lists the tests, writes a file, reads flags from a file or runs a "
+                   "shard")
         # A flag without a value is a boolean one set, as googletest reads it.
         flags["GTEST_" + flag.group(1).upper()] = "1" if flag.group(2) is None else flag.group(2)
     return [str(program)], flags

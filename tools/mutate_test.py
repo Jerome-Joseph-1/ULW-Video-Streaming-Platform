@@ -325,11 +325,22 @@ class TestCommandTest(Workspace):
                       self.refused([program, f"--gtest_flagfile={self.dir / 'build/flags'}"]))
         self.assertIn("reads flags from a file", self.refused([program, "--gtest_flagfile"]))
 
+    def test_sharding_flags_are_refused(self):
+        # A shard runs a subset of the tests, so a mutant would be judged on part of the suite;
+        # the status file is a path written outside pathguard's reach.
+        program = str(self.executable("build/t"))
+        for arg in ("--gtest_total_shards=2", "--gtest_shard_index=0",
+                    "--gtest_shard_status_file=/x"):
+            with self.subTest(arg=arg):
+                self.assertIn("runs a shard", self.refused([program, arg]))
+
     def test_refused_googletest_variables_in_the_environment_are_refused(self):
         # The test command inherits the environment, so a GTEST_* variable set there reaches
         # the test binary, or each one ctest runs, as the flag would.
         program = str(self.executable("build/t"))
-        for name in ("GTEST_FLAGFILE", "GTEST_LIST_TESTS", "GTEST_OUTPUT"):
+        for name in ("GTEST_FLAGFILE", "GTEST_LIST_TESTS", "GTEST_OUTPUT", "XML_OUTPUT_FILE",
+                     "TEST_PREMATURE_EXIT_FILE", "GTEST_SHARD_STATUS_FILE",
+                     "TESTBRIDGE_TEST_ONLY", "GTEST_TOTAL_SHARDS", "GTEST_SHARD_INDEX"):
             with self.subTest(name=name), mock.patch.dict(os.environ, {name: "x"}):
                 self.assertIn(f"the environment sets {name}", self.refused([program]))
                 self.assertIn(f"the environment sets {name}", self.refused(["ctest", "-Q"]))
