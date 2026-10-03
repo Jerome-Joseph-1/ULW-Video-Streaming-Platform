@@ -596,14 +596,255 @@ TEST(DescriptorBudget, TwoDescriptorsPerConnectionAfterTheReserve) {
     EXPECT_FALSE(gateway::check_descriptor_budget(limits, 0));
 }
 
-TEST_F(ConfigTest, OnlyTheConnectionStringAndTheStoreKeysAreSecretAndTheKeysEnvOnly) {
+TEST_F(ConfigTest, OnlyTheConnectionStringTheStoreKeysAndLiveKitsSecretAreSecret) {
     for (const ops::Setting& s : gateway::settings()) {
         const bool store_key =
             s.env == "ULW_S3_ACCESS_KEY_ID" || s.env == "ULW_S3_SECRET_ACCESS_KEY";
-        // The kubelet's, read to know the process runs in a pod; nobody configures it.
-        EXPECT_EQ(s.key.empty(), store_key || s.env == "KUBERNETES_SERVICE_HOST") << s.env;
-        EXPECT_EQ(s.secret, store_key || s.env == "ULW_DATABASE_URL") << s.env;
+        // The kubelet's, read to know the process runs in a pod, and PATH, passed on to a
+        // packager the gateway starts: nobody configures either.
+        EXPECT_EQ(s.key.empty(), store_key || s.env == "KUBERNETES_SERVICE_HOST" || s.env == "PATH")
+            << s.env;
+        EXPECT_EQ(s.secret,
+                  store_key || s.env == "ULW_DATABASE_URL" || s.env == "LIVEKIT_API_SECRET")
+            << s.env;
     }
+}
+
+// The stream service (ADR-0092): off unless LiveKit is named, and then complete.
+class LiveConfigTest : public ConfigTest {
+protected:
+    // Every live setting as a working deployment has them, whatever an earlier step set.
+    void live(std::string_view runtime) {
+        std::erase_if(env, [](const auto& e) {
+            return e.first.starts_with("LIVEKIT_") || e.first.starts_with("ULW_LIVE_") ||
+                   e.first.starts_with("ULW_K8S_");
+        });
+        env["LIVEKIT_API_URL"] = "http://livekit:7880";
+        env["LIVEKIT_CLIENT_URL"] = "wss://media.example.test";
+        env["LIVEKIT_API_KEY"] = "fake-key";
+        env["LIVEKIT_API_SECRET"] = "fake-secret-testtest123-testtest123";
+        env["ULW_LIVE_PACKAGER_SRT"] = "srt://{stream}.live-packager.apps.svc.cluster.local:9000";
+        env["ULW_LIVE_PACKAGER"] = std::string(runtime);
+        if (runtime == "process") {
+            env["ULW_LIVE_PACKAGER_BIN"] = "/opt/ulw/live_packager";
+            env["ULW_LIVE_PACKAGER_SCRATCH_DIR"] = "/var/cache/ulw-live";
+            env["ULW_LIVE_MAX_STREAMS"] = "1";
+        } else {
+            std::ofstream(template_file()) << "metadata:\n  name: ${ULW_STREAM_ID}\n";
+            env["ULW_LIVE_JOB_TEMPLATE"] = template_file();
+            env["ULW_LIVE_PACKAGER_IMAGE_TAG"] = "main";
+            env["ULW_K8S_NAMESPACE"] = "apps-test";
+        }
+    }
+    [[nodiscard]] std::string template_file() const { return (dir.path() / "job.yaml").string(); }
+
+    ulw::test::TempDir dir{"ulw-live-config"};
+};
+
+TEST_F(LiveConfigTest, LiveStreamsAreOffUnlessLiveKitIsNamed) {
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->live.enabled);
+    for (const char* stray : {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER", "ULW_LIVE_PACKAGER_SRT"}) {
+        auto with = env;
+        env[stray] = "x";
+        EXPECT_EQ(refused_variable(), stray);
+        env = with;
+    }
+}
+
+TEST_F(LiveConfigTest, TheProcessRuntimeHandsAPackagerTheGatewaysStoreAndDatabaseOnly) {
+    live("process");
+    env["PATH"] = "/usr/bin:/bin";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    const gateway::LiveConfig& l = config->live;
+    EXPECT_TRUE(l.enabled);
+    EXPECT_EQ(l.runtime, gateway::PackagerRuntime::Process);
+    EXPECT_EQ(l.packager_binary, "/opt/ulw/live_packager");
+    EXPECT_EQ(l.settings.max_streams, 1U);
+    EXPECT_EQ(l.settings.segment, core::Seconds{2});
+    const std::vector<std::string> expected{
+        "ULW_STORAGE=r2",
+        "ULW_R2_ACCOUNT_ID=0123456789abcdef0123456789abcdef",
+        "ULW_BUCKET=ulw-media",
+        "ULW_S3_ACCESS_KEY_ID=AKIAEXAMPLE",
+        "ULW_S3_SECRET_ACCESS_KEY=example-secret",
+        "ULW_DATABASE_URL=postgresql://ulw@db/ulw",
+        "ULW_SCRATCH_DIR=/var/cache/ulw-live",
+        "ULW_LIVE_INGEST_PORT=9000",
+        "ULW_LIVE_SEGMENT_SECONDS=2",
+        "ULW_LIVE_CALLER_WAIT_SECONDS=60",
+        "PATH=/usr/bin:/bin",
+    };
+    EXPECT_EQ(l.packager_environment, expected);
+    // LiveKit's secret is logged redacted.
+    const std::string all = effective_log(*config);
+    EXPECT_EQ(all.find("fake-secret-testtest123"), std::string::npos) << all;
+    EXPECT_NE(all.find(R"("name":"ULW_LIVE_PACKAGER","value":"process")"), std::string::npos);
+}
+
+TEST_F(LiveConfigTest, TheProcessRuntimeFollowsTheStoreItIsGiven) {
+    live("process");
+    env.erase("ULW_R2_ACCOUNT_ID");
+    env["ULW_STORAGE"] = "minio";
+    env["ULW_S3_ENDPOINT"] = "http://127.0.0.1:9000";
+    const auto minio = load();
+    ASSERT_TRUE(minio);
+    EXPECT_EQ(minio->live.packager_environment.at(1), "ULW_S3_ENDPOINT=http://127.0.0.1:9000");
+    env["ULW_STORAGE"] = "fs";
+    env["ULW_FS_ROOT"] = "/srv/ulw";
+    const auto fs = load();
+    ASSERT_TRUE(fs);
+    EXPECT_EQ(fs->live.packager_environment.at(1), "ULW_FS_ROOT=/srv/ulw");
+    EXPECT_EQ(fs->live.packager_environment.at(2), "ULW_DATABASE_URL=postgresql://ulw@db/ulw");
+}
+
+TEST_F(LiveConfigTest, TheProcessRuntimeRunsOneStreamAtATime) {
+    live("process");
+    env["ULW_LIVE_MAX_STREAMS"] = "2";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_MAX_STREAMS");
+    env["ULW_LIVE_MAX_STREAMS"] = "1";
+    env["ULW_LIVE_PACKAGER_BIN"] = "live_packager";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER_BIN");
+    env["ULW_LIVE_PACKAGER_BIN"] = "/opt/ulw/live_packager";
+    env["ULW_LIVE_PACKAGER_SCRATCH_DIR"] = "scratch";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER_SCRATCH_DIR");
+    env.erase("ULW_LIVE_PACKAGER_SCRATCH_DIR");
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER_SCRATCH_DIR");
+}
+
+TEST_F(LiveConfigTest, TheKubernetesRuntimeReadsItsTemplate) {
+    live("kubernetes");
+    env["ULW_LIVE_MAX_STREAMS"] = "2";
+    env["ULW_K8S_API_URL"] = "https://10.43.0.1";
+    env["ULW_K8S_TOKEN_FILE"] = "/run/token";
+    env["ULW_K8S_CA_FILE"] = "/run/ca.crt";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    const gateway::LiveConfig& l = config->live;
+    EXPECT_EQ(l.runtime, gateway::PackagerRuntime::Kubernetes);
+    EXPECT_EQ(l.job_template, "metadata:\n  name: ${ULW_STREAM_ID}\n");
+    EXPECT_EQ(l.image_tag, "main");
+    EXPECT_EQ(l.k8s_namespace, "apps-test");
+    EXPECT_EQ(l.k8s_api_url, "https://10.43.0.1");
+    EXPECT_EQ(l.k8s_token_file, "/run/token");
+    EXPECT_EQ(l.k8s_ca_file, "/run/ca.crt");
+    EXPECT_EQ(l.settings.max_streams, 2U);
+    EXPECT_EQ(l.pull_policy, "IfNotPresent");
+    EXPECT_EQ(l.packager_secret, "live-packager-secrets");
+    EXPECT_NE(effective_log(*config).find(R"("name":"ULW_K8S_NAMESPACE","value":"apps-test")"),
+              std::string::npos);
+    env["ULW_LIVE_PACKAGER_PULL_POLICY"] = "Always";
+    env["ULW_LIVE_PACKAGER_SECRET"] = "packager-keys";
+    const auto named = load();
+    ASSERT_TRUE(named) << named.error().variable << ": " << named.error().reason;
+    EXPECT_EQ(named->live.pull_policy, "Always");
+    EXPECT_EQ(named->live.packager_secret, "packager-keys");
+}
+
+TEST_F(LiveConfigTest, TheKubernetesRuntimeRefusesWhatCouldNotWork) {
+    live("kubernetes");
+    std::ofstream(template_file()) << "metadata:\n  name: fixed\n";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_JOB_TEMPLATE");
+    env["ULW_LIVE_JOB_TEMPLATE"] = (dir.path() / "missing.yaml").string();
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_JOB_TEMPLATE");
+    live("kubernetes");
+    env.erase("ULW_LIVE_PACKAGER_IMAGE_TAG");
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER_IMAGE_TAG");
+    live("kubernetes");
+    env["ULW_K8S_API_URL"] = "kubernetes.default.svc";
+    EXPECT_EQ(refused_variable(), "ULW_K8S_API_URL");
+    live("kubernetes");
+    env["ULW_LIVE_PACKAGER_PULL_POLICY"] = "Sometimes";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER_PULL_POLICY");
+    live("kubernetes");
+    env.erase("ULW_K8S_NAMESPACE");
+    // No service account here to name one.
+    EXPECT_EQ(refused_variable(), "ULW_K8S_NAMESPACE");
+    // A Job on another node cannot reach the gateway's directory.
+    live("kubernetes");
+    env.erase("ULW_R2_ACCOUNT_ID");
+    env["ULW_STORAGE"] = "fs";
+    env["ULW_FS_ROOT"] = "/srv/ulw";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER");
+}
+
+TEST_F(LiveConfigTest, EveryLiveSettingIsChecked) {
+    const std::vector<std::pair<std::string, std::string>> bad{
+        {"LIVEKIT_API_URL", "livekit:7880"},
+        {"LIVEKIT_CLIENT_URL", "https://media.example.test"},
+        {"ULW_LIVE_PACKAGER_SRT", "udp://packager:9000"},
+        {"ULW_LIVE_PACKAGER", "docker"},
+        {"ULW_LIVE_SEGMENT_SECONDS", "1"},
+        {"ULW_LIVE_MAX_STREAMS", "0"},
+        {"ULW_LIVE_START_WINDOW_SECONDS", "59"},
+        {"ULW_LIVE_PACKAGER_PORT", "0"},
+    };
+    for (const auto& [name, value] : bad) {
+        live("process");
+        env[name] = value;
+        EXPECT_EQ(refused_variable(), name) << value;
+    }
+    for (const char* missing : {"LIVEKIT_CLIENT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
+                                "ULW_LIVE_PACKAGER_SRT", "ULW_LIVE_PACKAGER"}) {
+        live("process");
+        env.erase(missing);
+        EXPECT_EQ(refused_variable(), missing);
+    }
+    live("process");
+    env["ULW_LIVE_START_WINDOW_SECONDS"] = "120";
+    env["ULW_LIVE_SEGMENT_SECONDS"] = "4";
+    const auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->live.settings.start_window, core::Seconds{120});
+    EXPECT_EQ(config->live.settings.segment, core::Seconds{4});
+}
+
+TEST_F(LiveConfigTest, StreamsAreLimitedPerUserAndAtMostWhatOneSweepLooksAt) {
+    live("kubernetes");
+    const auto defaults = load();
+    ASSERT_TRUE(defaults) << defaults.error().variable << ": " << defaults.error().reason;
+    EXPECT_EQ(defaults->live.settings.streams_per_user_per_hour, 6U);
+    EXPECT_EQ(defaults->live.settings.start_window, core::Seconds{120});
+    EXPECT_TRUE(defaults->live.broadcaster_claim.empty());
+    env["ULW_LIVE_STREAMS_PER_USER_PER_HOUR"] = "20";
+    env["ULW_LIVE_MAX_STREAMS"] = "64";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->live.settings.streams_per_user_per_hour, 20U);
+    EXPECT_EQ(config->live.settings.max_streams, 64U);
+    EXPECT_NE(
+        effective_log(*config).find(R"("name":"ULW_LIVE_STREAMS_PER_USER_PER_HOUR","value":"20")"),
+        std::string::npos);
+    for (const char* bad : {"0", "1001"}) {
+        env["ULW_LIVE_STREAMS_PER_USER_PER_HOUR"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_STREAMS_PER_USER_PER_HOUR") << bad;
+    }
+    env["ULW_LIVE_STREAMS_PER_USER_PER_HOUR"] = "20";
+    env["ULW_LIVE_MAX_STREAMS"] = "65";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_MAX_STREAMS");
+}
+
+TEST_F(LiveConfigTest, TheBroadcasterClaimIsANameAndAValue) {
+    live("process");
+    env["ULW_LIVE_BROADCASTER_CLAIM"] = "roles=broadcaster";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->live.broadcaster_claim, "roles");
+    EXPECT_EQ(config->live.broadcaster_value, "broadcaster");
+    EXPECT_NE(effective_log(*config).find(
+                  R"("name":"ULW_LIVE_BROADCASTER_CLAIM","value":"roles=broadcaster")"),
+              std::string::npos);
+    for (const char* bad : {"roles", "=broadcaster", "roles="}) {
+        env["ULW_LIVE_BROADCASTER_CLAIM"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_BROADCASTER_CLAIM") << bad;
+    }
+}
+
+TEST_F(LiveConfigTest, TheBroadcasterClaimMeansNothingWithLiveStreamsOff) {
+    env["ULW_LIVE_BROADCASTER_CLAIM"] = "roles=broadcaster";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_BROADCASTER_CLAIM");
 }
 
 TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {

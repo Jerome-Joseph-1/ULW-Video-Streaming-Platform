@@ -1,0 +1,136 @@
+# Live streams through the gateway (docs/adr/0092, RUNBOOK.md step 9). An overlay lists this
+# after components/operator-config to turn them on:
+#   components:
+#     - ../../components/operator-config
+#     - ../../components/live-streams
+# It gives the gateway LiveKit's server API and key pair, the packagers' settings, its account's
+# token and the egress to reach LiveKit and the API server, all from config.env. Without it the
+# gateway runs with live streams off (its stream routes answer 404), and the packagers'
+# namespace, Role and admission policy in base/live-packager grant nothing. It needs LiveKit,
+# egress and their Redis (RUNBOOK.md, step 7) and a Kubernetes v1.35 or later cluster.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - networkpolicy.yaml
+patches:
+  # By kind and name: components/operator-config, before this, has set its namespace.
+  - path: deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: video-gateway
+replacements:
+  # Where this component's own policy goes.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NAMESPACE
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: video-gateway-live
+        fieldPaths:
+          - metadata.namespace
+      # LiveKit's Service, in the same namespace.
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_API_URL].value
+        options:
+          delimiter: "."
+          index: 1
+  # What a ticket names: wss://<PUBLIC_HOSTNAME>, where the /rtc and /whip routes answer.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.PUBLIC_HOSTNAME
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_CLIENT_URL].value
+        options:
+          delimiter: "/"
+          index: 2
+  # LiveKit's key pair, from the realtime plane's Secret.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SFU_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_API_KEY].valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_API_SECRET].valueFrom.secretKeyRef.name
+  # The packagers' namespace: where Jobs go, and the relay's address of each.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_NAMESPACE
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_K8S_NAMESPACE].value
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_PACKAGER_SRT].value
+        options:
+          delimiter: "."
+          index: 2
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_MAX_STREAMS
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_MAX_STREAMS].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_BROADCASTER_CLAIM
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_BROADCASTER_CLAIM].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_PACKAGER_IMAGE_TAG
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_PACKAGER_IMAGE_TAG].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.IMAGE_PULL_POLICY
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_PACKAGER_PULL_POLICY].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_PACKAGER_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_PACKAGER_SECRET].value

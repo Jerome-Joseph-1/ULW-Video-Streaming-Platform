@@ -1,0 +1,23 @@
+# Live stream packagers run in a namespace of their own (LIVE_NAMESPACE, docs/adr/0092): the
+# gateway's service account may create Jobs and Secrets here and nowhere else, an admission
+# policy holds what it creates to a packager's shape (admission-policy.yaml), a quota bounds how
+# many run (resourcequota.yaml), and nothing but a packager's own traffic crosses its edge
+# (networkpolicy.yaml, default-deny.yaml). Pod Security is enforced at "baseline" and warned and
+# audited at "restricted": a packager meets every rule of "restricted" (non-root, every
+# capability dropped, no privilege escalation, a Localhost seccomp profile, emptyDir volumes
+# only) but one. Its sandbox needs procMount Unmasked (ADR-0032), which "restricted" refuses
+# whatever the pod, and "baseline" admits only in a user namespace of the pod's own (hostUsers
+# false), as a packager's is, from Kubernetes v1.35 on; before it "baseline" refuses Unmasked
+# whatever the pod, and every packager would be refused, so live needs a v1.35 or later cluster
+# (RUNBOOK.md, step 9). Checked against kube-apiserver v1.37.0 with a server-side dry run of the
+# Job template: "restricted" refuses its pod for procMount alone.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ulw-live
+  labels:
+    app.kubernetes.io/part-of: ulw
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

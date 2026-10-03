@@ -72,6 +72,32 @@ constexpr std::array kSettings{
     // Read by the store's credential provider; here only to be checked for.
     ops::Setting{.env = "ULW_S3_ACCESS_KEY_ID", .key = "", .secret = true},
     ops::Setting{.env = "ULW_S3_SECRET_ACCESS_KEY", .key = "", .secret = true},
+    // The stream service (ADR-0092).
+    ops::Setting{.env = "LIVEKIT_API_URL", .key = "live.livekit_api_url"},
+    ops::Setting{.env = "LIVEKIT_CLIENT_URL", .key = "live.livekit_client_url"},
+    ops::Setting{.env = "LIVEKIT_API_KEY", .key = "live.livekit_api_key"},
+    ops::Setting{.env = "LIVEKIT_API_SECRET", .key = "live.livekit_api_secret", .secret = true},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_SRT", .key = "live.packager_srt"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER", .key = "live.packager"},
+    ops::Setting{.env = "ULW_LIVE_SEGMENT_SECONDS", .key = "live.segment_seconds"},
+    ops::Setting{.env = "ULW_LIVE_MAX_STREAMS", .key = "live.max_streams"},
+    ops::Setting{.env = "ULW_LIVE_START_WINDOW_SECONDS", .key = "live.start_window_seconds"},
+    ops::Setting{.env = "ULW_LIVE_STREAMS_PER_USER_PER_HOUR",
+                 .key = "live.streams_per_user_per_hour"},
+    ops::Setting{.env = "ULW_LIVE_BROADCASTER_CLAIM", .key = "live.broadcaster_claim"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_BIN", .key = "live.packager_bin"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_SCRATCH_DIR", .key = "live.packager_scratch_dir"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_PORT", .key = "live.packager_port"},
+    ops::Setting{.env = "ULW_LIVE_JOB_TEMPLATE", .key = "live.job_template"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_IMAGE_TAG", .key = "live.packager_image_tag"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_PULL_POLICY", .key = "live.packager_pull_policy"},
+    ops::Setting{.env = "ULW_LIVE_PACKAGER_SECRET", .key = "live.packager_secret"},
+    ops::Setting{.env = "ULW_K8S_API_URL", .key = "live.k8s_api_url"},
+    ops::Setting{.env = "ULW_K8S_NAMESPACE", .key = "live.k8s_namespace"},
+    ops::Setting{.env = "ULW_K8S_TOKEN_FILE", .key = "live.k8s_token_file"},
+    ops::Setting{.env = "ULW_K8S_CA_FILE", .key = "live.k8s_ca_file"},
+    // Not a setting: passed on to a packager the gateway starts as a process.
+    ops::Setting{.env = "PATH", .key = ""},
 };
 
 // S3 and R2 refuse a part under 5 MiB unless it is the last, and above 5 GiB.
@@ -408,6 +434,267 @@ std::expected<void, ConfigError> load_limits(const EnvLookup& env, Config& confi
     return {};
 }
 
+// A small text file read once at start: the Job template, the pod's namespace.
+std::optional<std::string> read_small_file(const std::string& path, std::size_t limit) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::nullopt;
+    }
+    std::string out;
+    std::array<char, 4096> buf{};
+    while (in) {
+        in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+        out.append(buf.data(), static_cast<std::size_t>(in.gcount()));
+        if (out.size() > limit) {
+            return std::nullopt;
+        }
+    }
+    if (!in.eof()) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+constexpr std::string_view kServiceAccountNamespace =
+    "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+// A Job manifest is a few KiB; 64 KiB is not a template anyone meant.
+constexpr std::size_t kMaxTemplate = std::size_t{64} * 1024;
+
+// What a packager started as a process is given besides its stream: the gateway's own store
+// and database, its scratch root, and where it listens (ADR-0092). Values, not the gateway's
+// whole environment, which holds the LiveKit secret.
+std::expected<void, ConfigError> load_process_runtime(const EnvLookup& env, const Config& config,
+                                                      LiveConfig& live) {
+    auto binary = required(env, "ULW_LIVE_PACKAGER_BIN");
+    if (!binary) {
+        return std::unexpected(std::move(binary.error()));
+    }
+    if (!binary->starts_with('/')) {
+        return error("ULW_LIVE_PACKAGER_BIN", "not an absolute path");
+    }
+    auto scratch = required(env, "ULW_LIVE_PACKAGER_SCRATCH_DIR");
+    if (!scratch) {
+        return std::unexpected(std::move(scratch.error()));
+    }
+    if (!scratch->starts_with('/')) {
+        return error("ULW_LIVE_PACKAGER_SCRATCH_DIR", "not an absolute path");
+    }
+    // One port for every packager: one stream at a time, which ULW_LIVE_MAX_STREAMS must say.
+    const auto port = number<std::uint16_t>(env, "ULW_LIVE_PACKAGER_PORT", 9000, 1, 65'535);
+    if (!port) {
+        return std::unexpected(port.error());
+    }
+    if (live.settings.max_streams != 1) {
+        return error("ULW_LIVE_MAX_STREAMS",
+                     "must be 1 with ULW_LIVE_PACKAGER=process: every packager takes one port");
+    }
+    std::vector<std::string> lines;
+    const auto add = [&lines](std::string_view name, std::string_view value) {
+        lines.push_back(std::string(name) + "=" + std::string(value));
+    };
+    switch (config.storage) {
+    case StorageBackend::R2:
+        add("ULW_STORAGE", "r2");
+        add("ULW_R2_ACCOUNT_ID", config.storage_location);
+        break;
+    case StorageBackend::Minio:
+        add("ULW_STORAGE", "minio");
+        add("ULW_S3_ENDPOINT", config.storage_location);
+        break;
+    case StorageBackend::Filesystem:
+        add("ULW_STORAGE", "fs");
+        add("ULW_FS_ROOT", config.storage_location);
+        break;
+    }
+    if (config.storage != StorageBackend::Filesystem) {
+        add("ULW_BUCKET", config.bucket);
+        for (const std::string_view key : {"ULW_S3_ACCESS_KEY_ID", "ULW_S3_SECRET_ACCESS_KEY"}) {
+            add(key, lookup(env, key).value_or(""));
+        }
+    }
+    add("ULW_DATABASE_URL", config.database_url);
+    add("ULW_SCRATCH_DIR", *scratch);
+    add("ULW_LIVE_INGEST_PORT", std::to_string(*port));
+    add("ULW_LIVE_SEGMENT_SECONDS", std::to_string(live.settings.segment.count()));
+    add("ULW_LIVE_CALLER_WAIT_SECONDS", "60");
+    if (const auto path = lookup(env, "PATH")) {
+        add("PATH", *path);
+    }
+    live.packager_binary = std::move(*binary);
+    live.packager_environment = std::move(lines);
+    return {};
+}
+
+std::expected<void, ConfigError> load_kubernetes_runtime(const EnvLookup& env, const Config& config,
+                                                         LiveConfig& live) {
+    // A packager Job reaches the gateway's store over the network, never its directory.
+    if (config.storage == StorageBackend::Filesystem) {
+        return error("ULW_LIVE_PACKAGER", "kubernetes needs ULW_STORAGE r2 or minio, not fs");
+    }
+    auto path = required(env, "ULW_LIVE_JOB_TEMPLATE");
+    if (!path) {
+        return std::unexpected(std::move(path.error()));
+    }
+    auto text = read_small_file(*path, kMaxTemplate);
+    if (!text) {
+        return error("ULW_LIVE_JOB_TEMPLATE", "unreadable, or larger than 64 KiB");
+    }
+    if (!text->contains("${ULW_STREAM_ID}")) {
+        return error("ULW_LIVE_JOB_TEMPLATE", "names no ${ULW_STREAM_ID}");
+    }
+    auto tag = required(env, "ULW_LIVE_PACKAGER_IMAGE_TAG");
+    if (!tag) {
+        return std::unexpected(std::move(tag.error()));
+    }
+    live.job_template_file = std::move(*path);
+    live.job_template = std::move(*text);
+    live.image_tag = std::move(*tag);
+    if (auto policy = lookup(env, "ULW_LIVE_PACKAGER_PULL_POLICY")) {
+        if (*policy != "Always" && *policy != "IfNotPresent" && *policy != "Never") {
+            return error("ULW_LIVE_PACKAGER_PULL_POLICY", "must be Always, IfNotPresent or Never");
+        }
+        live.pull_policy = std::move(*policy);
+    }
+    if (auto secret = lookup(env, "ULW_LIVE_PACKAGER_SECRET")) {
+        live.packager_secret = std::move(*secret);
+    }
+    if (auto url = lookup(env, "ULW_K8S_API_URL")) {
+        if (!url->starts_with("https://") && !url->starts_with("http://")) {
+            return error("ULW_K8S_API_URL", "must be an http or https URL");
+        }
+        live.k8s_api_url = std::move(*url);
+    }
+    if (auto token = lookup(env, "ULW_K8S_TOKEN_FILE")) {
+        live.k8s_token_file = std::move(*token);
+    }
+    if (auto ca = lookup(env, "ULW_K8S_CA_FILE")) {
+        live.k8s_ca_file = std::move(*ca);
+    }
+    // The pod's own namespace, from its service account, unless named.
+    auto ns = lookup(env, "ULW_K8S_NAMESPACE");
+    if (!ns) {
+        ns = read_small_file(std::string(kServiceAccountNamespace), 253);
+    }
+    while (ns && !ns->empty() && (ns->back() == '\n' || ns->back() == ' ')) {
+        ns->pop_back();
+    }
+    if (!ns || ns->empty()) {
+        return error("ULW_K8S_NAMESPACE", "not set, and the service account names none");
+    }
+    live.k8s_namespace = std::move(*ns);
+    return {};
+}
+
+// How many streams, for how long, and who may start one.
+std::expected<void, ConfigError> load_live_limits(const EnvLookup& env, LiveConfig& live) {
+    // The packager's own bounds (ADR-0046).
+    const auto segment = number<std::uint32_t>(env, "ULW_LIVE_SEGMENT_SECONDS", 2, 2, 10);
+    if (!segment) {
+        return std::unexpected(segment.error());
+    }
+    // At most what one sweep looks at, so that every unfinished stream is looked at each time.
+    const auto streams = number<std::uint32_t>(
+        env, "ULW_LIVE_MAX_STREAMS", 2, 1, static_cast<std::uint32_t>(LiveSettings{}.sweep_batch));
+    if (!streams) {
+        return std::unexpected(streams.error());
+    }
+    // A minute is one ticket; a day is a stream nobody meant.
+    const auto window =
+        number<std::uint32_t>(env, "ULW_LIVE_START_WINDOW_SECONDS", 120, 60, 86'400);
+    if (!window) {
+        return std::unexpected(window.error());
+    }
+    const auto per_user =
+        number<std::uint32_t>(env, "ULW_LIVE_STREAMS_PER_USER_PER_HOUR", 6, 1, 1'000);
+    if (!per_user) {
+        return std::unexpected(per_user.error());
+    }
+    if (const auto claim = lookup(env, "ULW_LIVE_BROADCASTER_CLAIM")) {
+        const std::size_t eq = claim->find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 == claim->size()) {
+            return error("ULW_LIVE_BROADCASTER_CLAIM", "expected <claim>=<value>");
+        }
+        live.broadcaster_claim = claim->substr(0, eq);
+        live.broadcaster_value = claim->substr(eq + 1);
+    }
+    live.settings.segment = core::Seconds{*segment};
+    live.settings.max_streams = *streams;
+    live.settings.start_window = core::Seconds{*window};
+    live.settings.streams_per_user_per_hour = *per_user;
+    return {};
+}
+
+std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config) {
+    LiveConfig& live = config.live;
+    auto api = lookup(env, "LIVEKIT_API_URL");
+    if (!api) {
+        // Off: nothing else of it may be set, or a deployment would believe it publishes.
+        for (const std::string_view name :
+             {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER", "ULW_LIVE_PACKAGER_SRT",
+              "ULW_LIVE_BROADCASTER_CLAIM"}) {
+            if (lookup(env, name)) {
+                return error(name, "set, but LIVEKIT_API_URL is not");
+            }
+        }
+        return {};
+    }
+    if (!api->starts_with("http://") && !api->starts_with("https://")) {
+        return error("LIVEKIT_API_URL", "must be an http or https URL");
+    }
+    auto client = required(env, "LIVEKIT_CLIENT_URL");
+    if (!client) {
+        return std::unexpected(std::move(client.error()));
+    }
+    if (!client->starts_with("ws://") && !client->starts_with("wss://")) {
+        return error("LIVEKIT_CLIENT_URL", "must be a ws or wss URL");
+    }
+    auto key = required(env, "LIVEKIT_API_KEY");
+    if (!key) {
+        return std::unexpected(std::move(key.error()));
+    }
+    auto secret = required(env, "LIVEKIT_API_SECRET");
+    if (!secret) {
+        return std::unexpected(std::move(secret.error()));
+    }
+    auto srt = required(env, "ULW_LIVE_PACKAGER_SRT");
+    if (!srt) {
+        return std::unexpected(std::move(srt.error()));
+    }
+    if (!srt->starts_with("srt://")) {
+        return error("ULW_LIVE_PACKAGER_SRT", "must be srt://<host>:<port>");
+    }
+    if (auto r = load_live_limits(env, live); !r) {
+        return r;
+    }
+    const std::string runtime = lookup(env, "ULW_LIVE_PACKAGER").value_or("");
+    if (runtime == "process") {
+        live.runtime = PackagerRuntime::Process;
+        if (auto r = load_process_runtime(env, config, live); !r) {
+            return r;
+        }
+    } else if (runtime == "kubernetes") {
+        live.runtime = PackagerRuntime::Kubernetes;
+        if (auto r = load_kubernetes_runtime(env, config, live); !r) {
+            return r;
+        }
+    } else {
+        return error("ULW_LIVE_PACKAGER", "expected process or kubernetes");
+    }
+    live.enabled = true;
+    live.livekit_api_url = std::move(*api);
+    live.livekit_client_url = std::move(*client);
+    live.livekit_api_key = std::move(*key);
+    live.livekit_api_secret = std::move(*secret);
+    live.packager_srt = std::move(*srt);
+    return {};
+}
+
+// ULW_LIVE_BROADCASTER_CLAIM as it was given.
+std::string broadcaster_setting(const LiveConfig& live) {
+    return live.broadcaster_claim.empty() ? std::string{}
+                                          : live.broadcaster_claim + "=" + live.broadcaster_value;
+}
+
 } // namespace
 
 std::span<const ops::Setting> settings() noexcept {
@@ -469,6 +756,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
         return error("ULW_ALLOW_ROOT", "expected 0 or 1");
     }
     config.allow_root = *allow_root;
+    if (auto r = load_live(env, config); !r) {
+        return std::unexpected(std::move(r.error()));
+    }
     return config;
 }
 
@@ -503,7 +793,16 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     for (const std::string& origin : config.limits.allowed_origins) {
         origins += (origins.empty() ? "" : ",") + origin;
     }
-    const std::array<std::pair<std::string_view, std::string>, 34> values{{
+    const LiveConfig& live = config.live;
+    const auto live_value = [&live](std::string value) {
+        return live.enabled ? std::move(value) : std::string{};
+    };
+    const bool process = live.enabled && live.runtime == PackagerRuntime::Process;
+    const bool kubernetes = live.enabled && live.runtime == PackagerRuntime::Kubernetes;
+    const auto k8s_value = [kubernetes](std::string value) {
+        return kubernetes ? std::move(value) : std::string{};
+    };
+    const std::array<std::pair<std::string_view, std::string>, 53> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -543,6 +842,27 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_ALLOWED_ORIGINS", origins},
         {"ULW_ALLOW_SAME_SITE", config.limits.allow_same_site ? "1" : ""},
         {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
+        {"LIVEKIT_API_URL", live.livekit_api_url},
+        {"LIVEKIT_CLIENT_URL", live.livekit_client_url},
+        {"LIVEKIT_API_KEY", live.livekit_api_key},
+        {"LIVEKIT_API_SECRET", live.livekit_api_secret},
+        {"ULW_LIVE_PACKAGER_SRT", live.packager_srt},
+        {"ULW_LIVE_PACKAGER", live_value(process ? "process" : "kubernetes")},
+        {"ULW_LIVE_SEGMENT_SECONDS", live_value(std::to_string(live.settings.segment.count()))},
+        {"ULW_LIVE_MAX_STREAMS", live_value(std::to_string(live.settings.max_streams))},
+        {"ULW_LIVE_STREAMS_PER_USER_PER_HOUR",
+         live_value(std::to_string(live.settings.streams_per_user_per_hour))},
+        {"ULW_LIVE_BROADCASTER_CLAIM", broadcaster_setting(live)},
+        {"ULW_LIVE_START_WINDOW_SECONDS",
+         live_value(std::to_string(live.settings.start_window.count()))},
+        {"ULW_LIVE_PACKAGER_BIN", live.packager_binary},
+        {"ULW_LIVE_JOB_TEMPLATE", live.job_template_file},
+        {"ULW_LIVE_PACKAGER_IMAGE_TAG", live.image_tag},
+        {"ULW_LIVE_PACKAGER_PULL_POLICY", k8s_value(live.pull_policy)},
+        {"ULW_LIVE_PACKAGER_SECRET", k8s_value(live.packager_secret)},
+        {"ULW_K8S_API_URL", k8s_value(live.k8s_api_url)},
+        {"ULW_K8S_NAMESPACE", live.k8s_namespace},
+        {"ULW_K8S_TOKEN_FILE", k8s_value(live.k8s_token_file)},
     }};
     for (const auto& [variable, value] : values) {
         if (value.empty()) {

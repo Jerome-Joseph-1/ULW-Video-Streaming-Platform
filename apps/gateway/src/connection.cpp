@@ -361,6 +361,13 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     case RouteId::LivePlaylist:
         count_playlist(gw().counters(), match->id);
         [[fallthrough]];
+    // The stream service's requests carry nothing: the token says who asks, the path which
+    // stream.
+    case RouteId::CreateStream:
+    case RouteId::StreamStatus:
+    case RouteId::StreamTicket:
+    case RouteId::StartStream:
+    case RouteId::EndStream:
     case RouteId::UploadOffset:
     case RouteId::CancelUpload:
     case RouteId::CommitUpload:
@@ -549,17 +556,30 @@ void Connection::advance() noexcept {
     case RouteId::GetVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
-        if (req_.message_complete && !req_.started) {
-            req_.started = true;
-            start_lookup();
-        }
-        return;
     case RouteId::LivePlaylist:
+    case RouteId::CreateStream:
+    case RouteId::StreamStatus:
+    case RouteId::StreamTicket:
+    case RouteId::StartStream:
+    case RouteId::EndStream:
         if (req_.message_complete && !req_.started) {
             req_.started = true;
-            start_live();
+            start_bodiless();
         }
         return;
+    }
+}
+
+// The requests that carry no body start once their head is in.
+void Connection::start_bodiless() noexcept {
+    if (req_.route == RouteId::LivePlaylist) {
+        start_live();
+    } else if (req_.route == RouteId::CreateStream || req_.route == RouteId::StreamStatus ||
+               req_.route == RouteId::StreamTicket || req_.route == RouteId::StartStream ||
+               req_.route == RouteId::EndStream) {
+        start_stream_route();
+    } else {
+        start_lookup();
     }
 }
 
@@ -924,6 +944,11 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
     case RouteId::LivePlaylist:
+    case RouteId::CreateStream:
+    case RouteId::StreamStatus:
+    case RouteId::StreamTicket:
+    case RouteId::StartStream:
+    case RouteId::EndStream:
     case RouteId::Healthz:
     case RouteId::Readyz:
     case RouteId::Metrics:
@@ -1057,6 +1082,26 @@ void Connection::on_live_playlist(
     if (phase_ != Phase::Request) {
         return;
     }
+    if (req_.route == RouteId::StreamStatus) {
+        const core::ports::LiveStream* stream = get(req_.stream);
+        if (stream == nullptr) {
+            fail(Status::InternalServerError);
+            return;
+        }
+        // The packager ends the playlist the moment the stream ends; the row follows it here,
+        // or at the next sweep. A playlist not there yet, or unreadable, says nothing.
+        if (answer && answer->ended && deps().live_streams != nullptr) {
+            deps().live_streams->playlist_ended(stream->id);
+            core::ports::LiveStream ended = *stream;
+            ended.state = core::ports::LiveState::Ended;
+            ended.ended_at = deps().clock.wall_now();
+            ended.ended_by = core::ports::LiveEnd::Finished;
+            respond_stream(Status::Ok, ended, nullptr);
+            return;
+        }
+        respond_stream(Status::Ok, *stream, nullptr);
+        return;
+    }
     if (!answer) {
         fail_playlist(answer.error());
         return;
@@ -1069,6 +1114,196 @@ void Connection::on_live_playlist(
              .content_type = "application/vnd.apple.mpegurl",
              .cache_control = answer->ended ? "private, max-age=60" : "private, no-cache"},
             answer->body);
+}
+
+namespace {
+
+std::int64_t unix_seconds(core::WallTime t) noexcept {
+    return std::chrono::floor<std::chrono::seconds>(t.time_since_epoch()).count();
+}
+
+void append_time(std::string& json, const std::optional<core::WallTime>& t) {
+    json += t ? std::to_string(unix_seconds(*t)) : "null";
+}
+
+void append_ticket(std::string& json, const core::ports::MediaTicket& ticket) {
+    json += R"({"url":)";
+    core::json::append_string(json, ticket.endpoint);
+    json += R"(,"token":)";
+    core::json::append_string(json, ticket.credential);
+    json += R"(,"expires_at":)";
+    json += std::to_string(unix_seconds(ticket.expires_at));
+    json += '}';
+}
+
+} // namespace
+
+// The stream id in the path is a stream service id (a UUID); anything else is no such stream.
+// The owner of each action is the token's user: only they may publish, go live or end it.
+void Connection::start_stream_route() noexcept {
+    LiveStreams* live = deps().live_streams;
+    const core::ports::Claims* claims = get(req_.claims);
+    if (live == nullptr || claims == nullptr || !req_.route) {
+        fail(live == nullptr ? Status::NotFound : Status::InternalServerError);
+        return;
+    }
+    if (req_.route == RouteId::CreateStream) {
+        // A deployment may keep broadcasting to the users a claim names
+        // (ULW_LIVE_BROADCASTER_CLAIM); everything else stays open to any signed-in user.
+        if (!claims->may_broadcast) {
+            fail(Status::Forbidden);
+            return;
+        }
+        create_stream(*live, claims->subject);
+        return;
+    }
+    const auto id = core::LiveStreamId::parse(req_.params[0]);
+    if (!id) {
+        fail(Status::NotFound);
+        return;
+    }
+    act_on_stream(*live, *id, claims->subject);
+}
+
+void Connection::create_stream(LiveStreams& live, const core::UserId& user) noexcept {
+    ++pending_;
+    live.create(user, [this](std::expected<StartedStream, LiveFailure> r) noexcept {
+        --pending_;
+        if (phase_ != Phase::Request) {
+            return;
+        }
+        if (!r) {
+            fail_live(r.error());
+            return;
+        }
+        respond_stream(r->created ? Status::Created : Status::Ok, r->stream, &r->ticket);
+    });
+}
+
+void Connection::act_on_stream(LiveStreams& live, const core::LiveStreamId& id,
+                               const core::UserId& user) noexcept {
+    const auto answer_stream =
+        [this](std::expected<core::ports::LiveStream, LiveFailure> r) noexcept {
+            --pending_;
+            if (phase_ != Phase::Request) {
+                return;
+            }
+            if (!r) {
+                fail_live(r.error());
+                return;
+            }
+            if (req_.route == RouteId::StreamStatus) {
+                on_stream_status(*r);
+                return;
+            }
+            respond_stream(Status::Ok, *r, nullptr);
+        };
+    ++pending_;
+    if (req_.route == RouteId::StreamStatus) {
+        live.status(id, answer_stream);
+    } else if (req_.route == RouteId::StartStream) {
+        live.go_live(id, user, answer_stream);
+    } else if (req_.route == RouteId::EndStream) {
+        live.end(id, user, answer_stream);
+    } else {
+        live.ticket(id, user,
+                    [this](std::expected<core::ports::MediaTicket, LiveFailure> r) noexcept {
+                        --pending_;
+                        if (phase_ != Phase::Request) {
+                            return;
+                        }
+                        if (!r) {
+                            fail_live(r.error());
+                            return;
+                        }
+                        std::string json;
+                        append_ticket(json, *r);
+                        // A credential: no cache may keep it.
+                        respond({.status = Status::Ok,
+                                 .content_type = "application/json",
+                                 .cache_control = "no-store"},
+                                json);
+                    });
+    }
+}
+
+// A live stream's row can lag its end by a sweep: the playlist, which the packager ends at
+// once, is asked too, through the cache every viewer's player already reads.
+void Connection::on_stream_status(const core::ports::LiveStream& stream) noexcept {
+    if (stream.state != core::ports::LiveState::Live) {
+        respond_stream(Status::Ok, stream, nullptr);
+        return;
+    }
+    req_.stream = stream;
+    ++pending_;
+    gw().live().get(stream.id.to_string(), *this);
+}
+
+void Connection::respond_stream(http::Status status, const core::ports::LiveStream& stream,
+                                const core::ports::MediaTicket* ticket) noexcept {
+    const core::ports::Claims* claims = get(req_.claims);
+    const bool owner = claims != nullptr && claims->subject == stream.owner;
+    const std::string id = stream.id.to_string();
+    std::string json = R"({"id":")" + id + R"(","state":")";
+    json += core::ports::to_string(stream.state);
+    json += R"(","playlist":"/api/v1/live/)" + id + R"(/index.m3u8","created_at":)";
+    append_time(json, stream.created_at);
+    json += R"(,"live_at":)";
+    append_time(json, stream.live_at);
+    json += R"(,"ended_at":)";
+    append_time(json, stream.ended_at);
+    json += R"(,"ended_by":)";
+    if (stream.ended_by) {
+        core::json::append_string(json, core::ports::to_string(*stream.ended_by));
+    } else {
+        json += "null";
+    }
+    // The recording is the owner's video like any upload (live.md); nobody else learns of it.
+    if (owner) {
+        json += R"(,"video_id":)";
+        if (stream.recording) {
+            core::json::append_string(json, stream.recording->to_string());
+        } else {
+            json += "null";
+        }
+    }
+    if (ticket != nullptr) {
+        json += R"(,"publish":)";
+        append_ticket(json, *ticket);
+    }
+    json += '}';
+    // The owner's view and a ticket are the owner's alone; a status is stale in seconds.
+    respond({.status = status, .content_type = "application/json", .cache_control = "no-store"},
+            json);
+}
+
+void Connection::fail_live(LiveFailure failure) noexcept {
+    switch (failure) {
+    case LiveFailure::NotFound:
+        fail(Status::NotFound);
+        return;
+    case LiveFailure::Ended:
+        fail(Status::Conflict);
+        return;
+    case LiveFailure::Full:
+        // Streams end; a minute is about how soon one might.
+        req_.retry_after = std::chrono::seconds{60};
+        fail(Status::ServiceUnavailable);
+        return;
+    case LiveFailure::RateLimited:
+        // The hour the count looks back over moves on; a stream's worth of it is a few minutes.
+        req_.retry_after = std::chrono::seconds{600};
+        fail(Status::TooManyRequests);
+        return;
+    case LiveFailure::Unavailable:
+        req_.retry_after = std::chrono::seconds{2};
+        fail(Status::ServiceUnavailable);
+        return;
+    case LiveFailure::Internal:
+        fail(Status::InternalServerError);
+        return;
+    }
+    fail(Status::InternalServerError);
 }
 
 void Connection::submit(ControlOp op) noexcept {
