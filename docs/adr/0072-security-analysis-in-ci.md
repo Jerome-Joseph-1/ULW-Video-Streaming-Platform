@@ -171,7 +171,7 @@ snapshot's versions; the image scan covers them. Rust's toolchain is pinned by
 |---|---|---|
 | `tools/security/osv-scanner.toml` | osv-scanner | `id`, `reason`, `ignoreUntil` |
 | `tools/security/trivyignore.yaml` | Trivy config and image | `id`, `statement`, `expired_at`, and `paths` (a misconfiguration: the one resource's file) or `purls` (a vulnerability: the binary packages', and within 92 days) |
-| `tools/security/trivy-data/registries.yaml` | Trivy KSV-0125 | the registries the manifests may name, each with why. docker.io is trusted whole only because `deploy/local/check-image-pins.py` (in `validate-manifests.sh`) fails any image not named by `@sha256` digest, and any the sandbox loads into kind by tag whose tag `deploy/local/images.sh` does not pin to a digest. Its exemptions hold only where they can occur: `ghcr.io/jerome-joseph-1/ulw-...` (this repository's builds, published by `publish-images.yml` and named by `main`) under `deploy/askedin`, and `ulw/...` (the sandbox's builds, never pulled) in `compose.yaml`, `kind.yaml` and the sandbox's renderings. `deploy/askedin` holds no kustomization; `validate-manifests.sh` fails if one appears unrendered. `tools/security/security_tools_test.py` tests the checker, the allowlist rules and the report's matching |
+| `tools/security/trivy-data/registries.yaml` | Trivy KSV-0125 | the registries the manifests may name, each with why. docker.io is trusted whole only because `deploy/local/check-image-pins.py` (in `validate-manifests.sh`) fails any image not named by `@sha256` digest, and any the sandbox loads into kind by tag whose tag `deploy/local/images.sh` does not pin to a digest. Its exemptions hold only where they can occur: `git.askedin.com/askedin/askedin-monorepo/...` (this repository's builds, by branch name) under `deploy/askedin`, and `ulw/...` (the sandbox's builds, never pulled) in `compose.yaml`, `kind.yaml` and the sandbox's renderings. `deploy/askedin` holds no kustomization; `validate-manifests.sh` fails if one appears unrendered. `tools/security/security_tools_test.py` tests the checker, the allowlist rules and the report's matching |
 | `.github/zizmor.yml` | zizmor | a disabled audit, with why and when to revisit |
 
 `tools/security/check-allowlists.py` runs before each scan and fails an entry without a
@@ -241,3 +241,7 @@ cppcheck is not added. Reopen if clang-tidy is dropped, or a cppcheck release pa
   `third_party/README.md`.
 - Upgrading a scanner is a change to `tools/security/tools.sh` (version, SHA-256, URL), and for
   CodeQL to the action's SHA; both are reviewed like any dependency.
+- 2026-10-03: this repository's own builds are now `ghcr.io/jerome-joseph-1/ulw-...`,
+  published from main by `publish-images.yml`, not `git.askedin.com/askedin/askedin-monorepo/...`;
+  the allowlist table's exemption for them follows, and under `overlays/prod/` they must name a
+  commit SHA or a digest, never `main` (ADR-0085).
