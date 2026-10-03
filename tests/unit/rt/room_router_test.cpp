@@ -857,18 +857,34 @@ TEST_P(RoomRouterTest, AnAskTheOwnerSitsOnIsUnavailableAfterTheAskTimeoutNotTheF
     a.router->ask_owner(room_, alice, body, [&](auto r) noexcept { local = std::move(r); });
     ASSERT_TRUE(pump([&] { return on_a.held.size() == 2; }));
 
+    // Each router's next tick checks the deadlines against the clock as it now reads.
+    const auto tick_on_both = [&] {
+        const std::uint64_t a_ticks = a.router->counters().ticks;
+        const std::uint64_t b_ticks = b.router->counters().ticks;
+        return pump([&] {
+            return a.router->counters().ticks > a_ticks && b.router->counters().ticks > b_ticks;
+        });
+    };
+
     // Past a send's forward timeout: an ask takes longer than that, and is still waited for.
-    // Two of the routers' ticks (250 ms each) are given to notice.
     skewed.advance(rt::kOwnerAskTimeout / 2);
-    const auto ticked = std::chrono::steady_clock::now() + std::chrono::milliseconds(600);
-    pump([&] { return std::chrono::steady_clock::now() > ticked; });
+    ASSERT_TRUE(tick_on_both());
     EXPECT_FALSE(forwarded.has_value());
     EXPECT_FALSE(local.has_value());
+    EXPECT_EQ(b.router->counters().forward_timeouts, 0U);
 
     skewed.advance(rt::kOwnerAskTimeout / 2 + core::Millis{1'000});
     ASSERT_TRUE(pump([&] { return forwarded.has_value() && local.has_value(); }));
     EXPECT_EQ(*forwarded, std::unexpected(RouteError::Unavailable));
     EXPECT_EQ(*local, std::unexpected(RouteError::Unavailable));
+    // Answered by the deadlines, not by a link that went down: the forwarded ask by its link's,
+    // the owner's own by the router's, and the link between the nodes is still up.
+    EXPECT_EQ(b.router->counters().forward_timeouts, 1U);
+    EXPECT_EQ(a.router->counters().ask_timeouts, 1U);
+    EXPECT_EQ(b.router->counters().peers_lost, 0U);
+    EXPECT_EQ(a.router->counters().peers_lost, 0U);
+    EXPECT_TRUE(b.events.lost.empty());
+    EXPECT_TRUE(a.events.lost.empty());
     // The service's late answers reach nobody.
     for (rt::OwnerAnswer& answer : on_a.held) {
         answer(on_a.reply("late"));

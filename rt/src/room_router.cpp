@@ -863,6 +863,7 @@ public:
             late.push_back(std::move(entry.second.done));
             return true;
         });
+        counters_.ask_timeouts += late.size();
         for (OwnerAnswer& done : late) {
             done(std::unexpected(RouteError::Unavailable));
         }
@@ -1114,6 +1115,7 @@ private:
     }
 
     void tick() {
+        ++counters_.ticks;
         const core::MonoTime now = clock_.now();
         inbound_.for_each_live([&](Inbound& in) {
             if (in.handshake_overdue(now)) {

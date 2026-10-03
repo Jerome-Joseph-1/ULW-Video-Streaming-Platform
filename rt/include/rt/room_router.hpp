@@ -151,6 +151,12 @@ struct RouterCounters {
     std::uint64_t slow_peers = 0;
     // Sends answered with the seq their key already had, instead of being sequenced again.
     std::uint64_t duplicates = 0;
+    // Asks of members here that no answer reached before kOwnerAskTimeout and that the router's
+    // own deadline answered: those the owner's service was to answer on this node itself (a
+    // forwarded one is counted in forward_timeouts, by its link's deadline, which is the same).
+    std::uint64_t ask_timeouts = 0;
+    // Turns of the router's tick, which checks every deadline: four a second.
+    std::uint64_t ticks = 0;
 };
 
 // One node's share of the room plane (ADR-0015, ADR-0035). Members join rooms here, wherever
