@@ -418,10 +418,13 @@ void Session::read_frames(net::BorrowedBytes bytes) {
     codec::ws::Decoded decoded = decoder_.feed(bytes);
     std::size_t control = 0;
     for (const codec::ws::Frame& frame : decoded.frames) {
-        if (codec::ws::is_control(frame.opcode) && !within_control_budget(++control)) {
-            ++server_.counters().control_floods;
-            close_with(kPolicyViolation);
-            return;
+        if (codec::ws::is_control(frame.opcode)) {
+            ++control;
+            if (!within_control_budget(control)) {
+                ++server_.counters().control_floods;
+                close_with(kPolicyViolation);
+                return;
+            }
         }
         switch (frame.opcode) {
         case codec::ws::Opcode::Text:

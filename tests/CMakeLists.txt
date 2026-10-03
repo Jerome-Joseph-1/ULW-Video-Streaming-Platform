@@ -31,10 +31,12 @@ target_compile_definitions(core_unit_tests PRIVATE ULW_EXPECTED_VERSION="${PROJE
 
 ulw_add_test_suite(os_unit_tests unit
     unit/os/limits_test.cpp
+    unit/os/private_dir_test.cpp
     unit/os/privileges_test.cpp
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
+target_include_directories(os_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(ops_unit_tests unit
     unit/ops/async_log_test.cpp
@@ -315,9 +317,10 @@ target_link_libraries(test_stalled_resolver PRIVATE ulw_sanitize ${CMAKE_DL_LIBS
 ulw_add_test_suite(curl_unit_tests unit
     unit/curl/fetcher_test.cpp
     unit/curl/http_test.cpp
-    unit/curl/multi_test.cpp)
+    unit/curl/multi_test.cpp
+    unit/curl/tls_floor_test.cpp)
 target_link_libraries(curl_unit_tests PRIVATE ulw::curl_multi ulw::test_http_server
-    test_stalled_resolver)
+    test_stalled_resolver ulw::test_tls)
 target_include_directories(curl_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(storage_s3_unit_tests unit

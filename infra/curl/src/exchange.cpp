@@ -94,10 +94,30 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     const auto local = [](std::string detail) {
         return std::unexpected(Failure{.kind = FailureKind::Local, .detail = std::move(detail)});
     };
-    easy_.reset(curl_easy_init());
-    if (!easy_) {
+    CURL* const e = curl_easy_init();
+    if (e == nullptr) {
         return local("curl_easy_init failed");
     }
+    // The TLS versions are set on the new handle before anything else, and a handle that refuses
+    // them is freed here, so no path through this keeps a handle without them. TLS 1.3 at least,
+    // whatever the host's OpenSSL configuration allows: libcurl's own default floor is TLS 1.0, and
+    // a distribution's openssl.cnf raises it to 1.2 at most. Every host the services call over
+    // https (Askedin's JWKS, R2, an https MinIO) must speak TLS 1.3
+    // (docs/integration/operations-contract.md): it drops TLS 1.2's static-RSA and CBC suites and
+    // renegotiation, and encrypts the certificate. The maximum is TLS 1.3 by name, the newest any
+    // TLS library offers, rather than CURL_SSLVERSION_MAX_DEFAULT, whose value is TLS 1.0 shifted
+    // into the maximum's bits. The option is read as a long. libcurl 8.5 declares the two values in
+    // separate enums, where or-ing them is a deprecated conversion, so each becomes a long by
+    // implicit conversion first, which also holds whatever integer type another release gives them,
+    // without a cast that could be useless there.
+    constexpr long kTlsMin = CURL_SSLVERSION_TLSv1_3;
+    constexpr long kTlsMax = CURL_SSLVERSION_MAX_TLSv1_3;
+    constexpr long kTlsVersions = kTlsMin | kTlsMax;
+    if (curl_easy_setopt(e, CURLOPT_SSLVERSION, kTlsVersions) != CURLE_OK) {
+        curl_easy_cleanup(e);
+        return local("curl refused the tls versions");
+    }
+    easy_.reset(e);
     const auto append = [this](const char* line) {
         curl_slist* const head = header_list_.release();
         curl_slist* const grown = curl_slist_append(head, line);
@@ -119,7 +139,6 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
         return local("curl_slist_append failed");
     }
 
-    CURL* const e = easy_.get();
     bool ok = true;
     const auto set = [&ok](CURLcode rc) { ok = ok && rc == CURLE_OK; };
     set(curl_easy_setopt(e, CURLOPT_URL, request.url.c_str()));
