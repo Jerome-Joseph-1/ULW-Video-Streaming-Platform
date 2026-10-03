@@ -114,6 +114,8 @@ std::string_view to_string(LiveStoreError e) noexcept {
         return "not found";
     case LiveStoreError::Full:
         return "too many unfinished streams";
+    case LiveStoreError::TooMany:
+        return "too many streams created by the owner";
     case LiveStoreError::Unavailable:
         return "stream store unavailable";
     case LiveStoreError::Corrupt:

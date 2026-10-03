@@ -49,6 +49,10 @@ struct LiveConfig {
     std::string k8s_namespace;
     std::string k8s_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token";
     std::string k8s_ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+    // ULW_LIVE_BROADCASTER_CLAIM, "<claim>=<value>": who may start a stream. Empty: anyone
+    // signed in.
+    std::string broadcaster_claim;
+    std::string broadcaster_value;
     LiveSettings settings;
 };
 

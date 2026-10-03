@@ -743,6 +743,52 @@ TEST_F(LiveConfigTest, EveryLiveSettingIsChecked) {
     EXPECT_EQ(config->live.settings.segment, core::Seconds{4});
 }
 
+TEST_F(LiveConfigTest, StreamsAreLimitedPerUserAndAtMostWhatOneSweepLooksAt) {
+    live("kubernetes");
+    const auto defaults = load();
+    ASSERT_TRUE(defaults) << defaults.error().variable << ": " << defaults.error().reason;
+    EXPECT_EQ(defaults->live.settings.streams_per_user_per_hour, 6U);
+    EXPECT_EQ(defaults->live.settings.start_window, core::Seconds{120});
+    EXPECT_TRUE(defaults->live.broadcaster_claim.empty());
+    env["ULW_LIVE_STREAMS_PER_USER_PER_HOUR"] = "20";
+    env["ULW_LIVE_MAX_STREAMS"] = "64";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->live.settings.streams_per_user_per_hour, 20U);
+    EXPECT_EQ(config->live.settings.max_streams, 64U);
+    EXPECT_NE(
+        effective_log(*config).find(R"("name":"ULW_LIVE_STREAMS_PER_USER_PER_HOUR","value":"20")"),
+        std::string::npos);
+    for (const char* bad : {"0", "1001"}) {
+        env["ULW_LIVE_STREAMS_PER_USER_PER_HOUR"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_STREAMS_PER_USER_PER_HOUR") << bad;
+    }
+    env["ULW_LIVE_STREAMS_PER_USER_PER_HOUR"] = "20";
+    env["ULW_LIVE_MAX_STREAMS"] = "65";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_MAX_STREAMS");
+}
+
+TEST_F(LiveConfigTest, TheBroadcasterClaimIsANameAndAValue) {
+    live("process");
+    env["ULW_LIVE_BROADCASTER_CLAIM"] = "roles=broadcaster";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->live.broadcaster_claim, "roles");
+    EXPECT_EQ(config->live.broadcaster_value, "broadcaster");
+    EXPECT_NE(effective_log(*config).find(
+                  R"("name":"ULW_LIVE_BROADCASTER_CLAIM","value":"roles=broadcaster")"),
+              std::string::npos);
+    for (const char* bad : {"roles", "=broadcaster", "roles="}) {
+        env["ULW_LIVE_BROADCASTER_CLAIM"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_BROADCASTER_CLAIM") << bad;
+    }
+}
+
+TEST_F(LiveConfigTest, TheBroadcasterClaimMeansNothingWithLiveStreamsOff) {
+    env["ULW_LIVE_BROADCASTER_CLAIM"] = "roles=broadcaster";
+    EXPECT_EQ(refused_variable(), "ULW_LIVE_BROADCASTER_CLAIM");
+}
+
 TEST_F(ConfigTest, TheEffectiveConfigurationIsLoggedWithTheSecretRedacted) {
     env["ULW_DATABASE_URL"] = "postgresql://ulw:hunter2@db/ulw";
     env["ULW_LISTEN_PORT"] = "9000";

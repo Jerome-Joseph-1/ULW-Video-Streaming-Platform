@@ -217,6 +217,21 @@ TEST_F(GatewayStreams, FailuresAnswerAsDocumented) {
     EXPECT_EQ(send("POST", "/api/v1/live/" + id + "/start", kAlice).status, 503);
 }
 
+TEST_F(GatewayStreams, OnlyATokenCarryingTheBroadcasterClaimStartsAStream) {
+    // "viewer." tokens verify without what ULW_LIVE_BROADCASTER_CLAIM asks for.
+    EXPECT_EQ(send("POST", "/api/v1/live", "viewer.alice").status, 403);
+    const std::string id = create();
+    // Watching needs nothing of the kind.
+    EXPECT_EQ(send("GET", "/api/v1/live/" + id, "viewer.bob").status, 200);
+}
+
+TEST_F(GatewayStreams, AUserPastTheHourlyCountIsToldToWait) {
+    gw.with_live([](LiveFakes& f) { f.store.fail = core::ports::LiveStoreError::TooMany; });
+    const HttpResponse r = send("POST", "/api/v1/live", kAlice);
+    EXPECT_EQ(r.status, 429);
+    EXPECT_EQ(r.header("retry-after"), "600");
+}
+
 TEST_F(GatewayStreams, RequestsCarryNoBodyAndNeedAToken) {
     EXPECT_EQ(send("POST", "/api/v1/live", kAlice, R"({"title":"x"})").status, 400);
     EXPECT_EQ(send("POST", "/api/v1/live", "").status, 401);

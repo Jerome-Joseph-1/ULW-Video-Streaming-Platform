@@ -10,6 +10,7 @@
 #include "postgres_harness.hpp"
 #include "support/reactor_harness.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -44,7 +45,7 @@ core::WallTime at_seconds(std::int64_t s) {
     return core::WallTime{std::chrono::seconds{s}};
 }
 
-class LiveStreamsTest : public ::testing::Test {
+class PgLiveStreamsTest : public ::testing::Test {
 protected:
     void SetUp() override {
         ScratchDatabase::open(db);
@@ -79,14 +80,16 @@ protected:
         return std::move(*r);
     }
 
-    LiveResult<CreatedLiveStream> create(std::string_view owner, std::uint32_t max = 10,
-                                         std::int64_t at = 1'767'225'600) {
+    LiveResult<CreatedLiveStream> create(std::string_view owner, std::int64_t max = 10,
+                                         std::int64_t at = 1'767'225'600,
+                                         std::int64_t per_hour = 100) {
         std::optional<LiveResult<CreatedLiveStream>> r;
         store->create({.id = core::LiveStreamId::generate(clock, random),
                        .owner = user(owner),
                        .passphrase = std::string(kPassphrase),
                        .at = at_seconds(at)},
-                      max, [&](auto x) noexcept { r = std::move(x); });
+                      {.max_unfinished = max, .per_owner_per_hour = per_hour},
+                      [&](auto x) noexcept { r = std::move(x); });
         return wait(r);
     }
 
@@ -122,7 +125,7 @@ protected:
     std::unique_ptr<PgLiveStreams> store;
 };
 
-TEST_F(LiveStreamsTest, AStreamIsStoredStartingAndItsLiveChatIsOpened) {
+TEST_F(PgLiveStreamsTest, AStreamIsStoredStartingAndItsLiveChatIsOpened) {
     const auto made = create("auth0|alice");
     ASSERT_TRUE(made) << core::ports::to_string(made.error());
     EXPECT_TRUE(made->created);
@@ -143,7 +146,7 @@ TEST_F(LiveStreamsTest, AStreamIsStoredStartingAndItsLiveChatIsOpened) {
               "stream_live_chat");
 }
 
-TEST_F(LiveStreamsTest, AnOwnerHasOneUnfinishedStreamAndThePlatformAFewAtMost) {
+TEST_F(PgLiveStreamsTest, AnOwnerHasOneUnfinishedStreamAndThePlatformAFewAtMost) {
     const auto first = create("alice");
     ASSERT_TRUE(first);
     const auto again = create("alice");
@@ -164,7 +167,64 @@ TEST_F(LiveStreamsTest, AnOwnerHasOneUnfinishedStreamAndThePlatformAFewAtMost) {
     EXPECT_NE(next->stream.id, first->stream.id);
 }
 
-TEST_F(LiveStreamsTest, AStreamGoesLiveOnceAndEndsOnce) {
+TEST_F(PgLiveStreamsTest, AnOwnerCreatesOnlySoManyStreamsAnHour) {
+    for (int i = 0; i < 3; ++i) {
+        const auto made = create("alice", 10, 1'767'225'600 + (i * 60), 3);
+        ASSERT_TRUE(made);
+        ASSERT_TRUE(end(made->stream.id, LiveEnd::Owner, 1'767'225'610 + (i * 60)));
+    }
+    EXPECT_EQ(create("alice", 10, 1'767'225'800, 3), std::unexpected(LiveStoreError::TooMany));
+    // Others are not held to alice's count, and alice is free again an hour after her first.
+    EXPECT_TRUE(create("bob", 10, 1'767'225'800, 3));
+    EXPECT_TRUE(create("alice", 10, 1'767'229'201, 3));
+}
+
+TEST_F(PgLiveStreamsTest, ConcurrentCreatesNeverPassTheCapTogether) {
+    // Six owners at once, against a cap of two, on four sessions.
+    std::vector<std::optional<LiveResult<CreatedLiveStream>>> answers(6);
+    for (std::size_t i = 0; i < answers.size(); ++i) {
+        store->create({.id = core::LiveStreamId::generate(clock, random),
+                       .owner = user("racer-" + std::to_string(i)),
+                       .passphrase = std::string(kPassphrase),
+                       .at = at_seconds(1'767'225'600)},
+                      {.max_unfinished = 2, .per_owner_per_hour = 100},
+                      [&answers, i](auto x) noexcept { answers[i] = std::move(x); });
+    }
+    ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] {
+        return std::ranges::all_of(answers, [](const auto& a) { return a.has_value(); });
+    }));
+    std::size_t created = 0;
+    std::size_t full = 0;
+    for (const auto& a : answers) {
+        created += *a ? 1U : 0U;
+        full += !*a && a->error() == LiveStoreError::Full ? 1U : 0U;
+    }
+    EXPECT_EQ(created, 2U);
+    EXPECT_EQ(full, 4U);
+}
+
+TEST_F(PgLiveStreamsTest, AStreamsEndClosesItsLiveChat) {
+    const auto made = create("alice");
+    ASSERT_TRUE(made);
+    auto conn = db->session();
+    const auto closed = [&] {
+        return scalar(conn,
+                      "SELECT closed_at IS NOT NULL FROM chat_rooms "
+                      "WHERE room_id = live_chat_room($1::uuid::text)",
+                      Params{}.add_uuid(made->stream.id.uuid()));
+    };
+    EXPECT_EQ(closed(), "f");
+    ASSERT_TRUE(end(made->stream.id, LiveEnd::Owner, 1'767'225'700));
+    EXPECT_EQ(closed(), "t");
+    // The chat store reads it as closed now: a viewer's join is refused.
+    EXPECT_EQ(scalar(conn,
+                     "SELECT CASE WHEN closed_at IS NULL THEN kind ELSE 'group_chat' END "
+                     "FROM chat_rooms WHERE room_id = live_chat_room($1::uuid::text)",
+                     Params{}.add_uuid(made->stream.id.uuid())),
+              "group_chat");
+}
+
+TEST_F(PgLiveStreamsTest, AStreamGoesLiveOnceAndEndsOnce) {
     const auto made = create("alice");
     ASSERT_TRUE(made);
     const core::LiveStreamId id = made->stream.id;
@@ -192,7 +252,7 @@ TEST_F(LiveStreamsTest, AStreamGoesLiveOnceAndEndsOnce) {
     EXPECT_EQ(mark_live(id, 1'767'225'900)->state, LiveState::Ended);
 }
 
-TEST_F(LiveStreamsTest, AStreamNeverLiveEndsWithoutALiveTime) {
+TEST_F(PgLiveStreamsTest, AStreamNeverLiveEndsWithoutALiveTime) {
     const auto made = create("alice");
     ASSERT_TRUE(made);
     const auto ended = end(made->stream.id, LiveEnd::Timeout, 1'767'226'200);
@@ -201,14 +261,14 @@ TEST_F(LiveStreamsTest, AStreamNeverLiveEndsWithoutALiveTime) {
     EXPECT_FALSE(ended->stream.live_at);
 }
 
-TEST_F(LiveStreamsTest, UnknownStreamsAreNotFound) {
+TEST_F(PgLiveStreamsTest, UnknownStreamsAreNotFound) {
     const auto id = core::LiveStreamId::generate(clock, random);
     EXPECT_EQ(find(id), std::unexpected(LiveStoreError::NotFound));
     EXPECT_EQ(mark_live(id, 1), std::unexpected(LiveStoreError::NotFound));
     EXPECT_EQ(end(id, LiveEnd::Owner, 1), std::unexpected(LiveStoreError::NotFound));
 }
 
-TEST_F(LiveStreamsTest, TheRecordingIsTheVideoThePackagerQueued) {
+TEST_F(PgLiveStreamsTest, TheRecordingIsTheVideoThePackagerQueued) {
     const auto made = create("alice");
     ASSERT_TRUE(made);
     ASSERT_TRUE(end(made->stream.id, LiveEnd::Finished, 1'767'225'700));
@@ -221,7 +281,7 @@ TEST_F(LiveStreamsTest, TheRecordingIsTheVideoThePackagerQueued) {
     EXPECT_EQ(found->recording, video);
 }
 
-TEST_F(LiveStreamsTest, TheUnfinishedAreListedOldestFirst) {
+TEST_F(PgLiveStreamsTest, TheUnfinishedAreListedOldestFirst) {
     const auto a = create("a", 10, 1'767'225'603);
     const auto b = create("b", 10, 1'767'225'601);
     const auto c = create("c", 10, 1'767'225'602);
@@ -238,7 +298,7 @@ TEST_F(LiveStreamsTest, TheUnfinishedAreListedOldestFirst) {
     EXPECT_EQ(unfinished(0), std::unexpected(LiveStoreError::NotFound));
 }
 
-TEST_F(LiveStreamsTest, TheSchemaRefusesARowThatBreaksTheRules) {
+TEST_F(PgLiveStreamsTest, TheSchemaRefusesARowThatBreaksTheRules) {
     auto conn = db->session();
     // An ended stream without a reason, and a live one without a time.
     EXPECT_FALSE(conn.exec("INSERT INTO live_streams (id, owner_id, state, srt_passphrase, "
@@ -251,7 +311,7 @@ TEST_F(LiveStreamsTest, TheSchemaRefusesARowThatBreaksTheRules) {
                            "VALUES (gen_random_uuid(), 'x', 'short', now())"));
 }
 
-TEST_F(LiveStreamsTest, ACorruptRowIsReportedAsSuch) {
+TEST_F(PgLiveStreamsTest, ACorruptRowIsReportedAsSuch) {
     auto conn = db->session();
     const auto id = core::LiveStreamId::generate(clock, random);
     // An owner id the domain refuses.

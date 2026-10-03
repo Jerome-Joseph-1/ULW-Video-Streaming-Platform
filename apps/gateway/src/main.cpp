@@ -218,7 +218,10 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
 }
 
 std::expected<void, std::string> make_verifier(const gateway::Config& config, Services& s) {
-    infra::auth::ClaimRules rules{.issuer = config.jwt_issuer, .audience = config.jwt_audience};
+    infra::auth::ClaimRules rules{.issuer = config.jwt_issuer,
+                                  .audience = config.jwt_audience,
+                                  .broadcaster_claim = config.live.broadcaster_claim,
+                                  .broadcaster_value = config.live.broadcaster_value};
     if (!config.dev_jwks_file.empty()) {
         auto local = infra::auth::Ed25519LocalVerifier::create(config.dev_jwks, std::move(rules));
         if (!local) {

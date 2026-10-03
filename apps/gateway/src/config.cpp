@@ -81,6 +81,9 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_LIVE_SEGMENT_SECONDS", .key = "live.segment_seconds"},
     ops::Setting{.env = "ULW_LIVE_MAX_STREAMS", .key = "live.max_streams"},
     ops::Setting{.env = "ULW_LIVE_START_WINDOW_SECONDS", .key = "live.start_window_seconds"},
+    ops::Setting{.env = "ULW_LIVE_STREAMS_PER_USER_PER_HOUR",
+                 .key = "live.streams_per_user_per_hour"},
+    ops::Setting{.env = "ULW_LIVE_BROADCASTER_CLAIM", .key = "live.broadcaster_claim"},
     ops::Setting{.env = "ULW_LIVE_PACKAGER_BIN", .key = "live.packager_bin"},
     ops::Setting{.env = "ULW_LIVE_PACKAGER_SCRATCH_DIR", .key = "live.packager_scratch_dir"},
     ops::Setting{.env = "ULW_LIVE_PACKAGER_PORT", .key = "live.packager_port"},
@@ -557,13 +560,53 @@ std::expected<void, ConfigError> load_kubernetes_runtime(const EnvLookup& env, L
     return {};
 }
 
+// How many streams, for how long, and who may start one.
+std::expected<void, ConfigError> load_live_limits(const EnvLookup& env, LiveConfig& live) {
+    // The packager's own bounds (ADR-0046).
+    const auto segment = number<std::uint32_t>(env, "ULW_LIVE_SEGMENT_SECONDS", 2, 2, 10);
+    if (!segment) {
+        return std::unexpected(segment.error());
+    }
+    // At most what one sweep looks at, so that every unfinished stream is looked at each time.
+    const auto streams = number<std::uint32_t>(
+        env, "ULW_LIVE_MAX_STREAMS", 2, 1, static_cast<std::uint32_t>(LiveSettings{}.sweep_batch));
+    if (!streams) {
+        return std::unexpected(streams.error());
+    }
+    // A minute is one ticket; a day is a stream nobody meant.
+    const auto window =
+        number<std::uint32_t>(env, "ULW_LIVE_START_WINDOW_SECONDS", 120, 60, 86'400);
+    if (!window) {
+        return std::unexpected(window.error());
+    }
+    const auto per_user =
+        number<std::uint32_t>(env, "ULW_LIVE_STREAMS_PER_USER_PER_HOUR", 6, 1, 1'000);
+    if (!per_user) {
+        return std::unexpected(per_user.error());
+    }
+    if (const auto claim = lookup(env, "ULW_LIVE_BROADCASTER_CLAIM")) {
+        const std::size_t eq = claim->find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 == claim->size()) {
+            return error("ULW_LIVE_BROADCASTER_CLAIM", "expected <claim>=<value>");
+        }
+        live.broadcaster_claim = claim->substr(0, eq);
+        live.broadcaster_value = claim->substr(eq + 1);
+    }
+    live.settings.segment = core::Seconds{*segment};
+    live.settings.max_streams = *streams;
+    live.settings.start_window = core::Seconds{*window};
+    live.settings.streams_per_user_per_hour = *per_user;
+    return {};
+}
+
 std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config) {
     LiveConfig& live = config.live;
     auto api = lookup(env, "LIVEKIT_API_URL");
     if (!api) {
         // Off: nothing else of it may be set, or a deployment would believe it publishes.
         for (const std::string_view name :
-             {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER", "ULW_LIVE_PACKAGER_SRT"}) {
+             {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER", "ULW_LIVE_PACKAGER_SRT",
+              "ULW_LIVE_BROADCASTER_CLAIM"}) {
             if (lookup(env, name)) {
                 return error(name, "set, but LIVEKIT_API_URL is not");
             }
@@ -595,24 +638,9 @@ std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config)
     if (!srt->starts_with("srt://")) {
         return error("ULW_LIVE_PACKAGER_SRT", "must be srt://<host>:<port>");
     }
-    // The packager's own bounds (ADR-0046).
-    const auto segment = number<std::uint32_t>(env, "ULW_LIVE_SEGMENT_SECONDS", 2, 2, 10);
-    if (!segment) {
-        return std::unexpected(segment.error());
+    if (auto r = load_live_limits(env, live); !r) {
+        return r;
     }
-    const auto streams = number<std::uint32_t>(env, "ULW_LIVE_MAX_STREAMS", 2, 1, 10'000);
-    if (!streams) {
-        return std::unexpected(streams.error());
-    }
-    // A minute is one ticket; a day is a stream nobody meant.
-    const auto window =
-        number<std::uint32_t>(env, "ULW_LIVE_START_WINDOW_SECONDS", 600, 60, 86'400);
-    if (!window) {
-        return std::unexpected(window.error());
-    }
-    live.settings.segment = core::Seconds{*segment};
-    live.settings.max_streams = *streams;
-    live.settings.start_window = core::Seconds{*window};
     const std::string runtime = lookup(env, "ULW_LIVE_PACKAGER").value_or("");
     if (runtime == "process") {
         live.runtime = PackagerRuntime::Process;
@@ -634,6 +662,12 @@ std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config)
     live.livekit_api_secret = std::move(*secret);
     live.packager_srt = std::move(*srt);
     return {};
+}
+
+// ULW_LIVE_BROADCASTER_CLAIM as it was given.
+std::string broadcaster_setting(const LiveConfig& live) {
+    return live.broadcaster_claim.empty() ? std::string{}
+                                          : live.broadcaster_claim + "=" + live.broadcaster_value;
 }
 
 } // namespace
@@ -740,7 +774,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     };
     const bool process = live.enabled && live.runtime == PackagerRuntime::Process;
     const bool kubernetes = live.enabled && live.runtime == PackagerRuntime::Kubernetes;
-    const std::array<std::pair<std::string_view, std::string>, 48> values{{
+    const std::array<std::pair<std::string_view, std::string>, 50> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -787,6 +821,9 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_LIVE_PACKAGER", live_value(process ? "process" : "kubernetes")},
         {"ULW_LIVE_SEGMENT_SECONDS", live_value(std::to_string(live.settings.segment.count()))},
         {"ULW_LIVE_MAX_STREAMS", live_value(std::to_string(live.settings.max_streams))},
+        {"ULW_LIVE_STREAMS_PER_USER_PER_HOUR",
+         live_value(std::to_string(live.settings.streams_per_user_per_hour))},
+        {"ULW_LIVE_BROADCASTER_CLAIM", broadcaster_setting(live)},
         {"ULW_LIVE_START_WINDOW_SECONDS",
          live_value(std::to_string(live.settings.start_window.count()))},
         {"ULW_LIVE_PACKAGER_BIN", live.packager_binary},
