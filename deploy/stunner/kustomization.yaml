@@ -14,6 +14,12 @@ resources:
   - ../askedin/overlays/stage/livekit/service.yaml
   - ../askedin/overlays/stage/livekit/httproute.yaml
   - ../askedin/overlays/stage/livekit/networkpolicy.yaml
+  # LiveKit's configuration names Redis, and LiveKit does not start without it. Egress, the
+  # other user of Redis, is not run here: its image is ~5 GB, and the local call suite
+  # (compose.yaml) covers the relay.
+  - ../askedin/overlays/stage/livekit-redis/deployment.yaml
+  - ../askedin/overlays/stage/livekit-redis/service.yaml
+  - ../askedin/overlays/stage/livekit-redis/networkpolicy.yaml
   - sandbox.yaml
 # up.sh loads each image into the node from a pull pinned by digest, filed under its tag only
 # (images.sh), so the pods name the tag, and never pull: a tag missing from the node would
@@ -23,6 +29,8 @@ images:
     newTag: "1.2.1"
   - name: docker.io/livekit/livekit-server
     newTag: v1.13.7
+  - name: docker.io/library/redis
+    newTag: 7.4.6-alpine
 patches:
   - target:
       kind: Dataplane
@@ -36,11 +44,22 @@ patches:
         value: Never
   - target:
       kind: Deployment
-      name: stunner-gateway-operator-controller-manager|livekit
+      name: stunner-gateway-operator-controller-manager|livekit|livekit-redis
     patch: |-
       - op: replace
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
+  # Redis requests 50m on Askedin's node; one kind node on a 4-core runner has almost no CPU
+  # left to reserve once the gateways, the worker, chat, LiveKit and STUNner's dataplane hold
+  # theirs (deploy/local/cluster/chat-patch.yaml says the same of chat), so the sandbox's Redis
+  # reserves next to nothing and runs on what is idle. Memory is left as the target has it.
+  - target:
+      kind: Deployment
+      name: livekit-redis
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 10m
   # The kind node has no load balancer: the TURN listener is a NodePort, which kind.yaml
   # publishes on the outside network as 198.18.0.1:3478. That is the address clients use, so
   # the Gateway names it; STUNner reports a Gateway Programmed only once it knows one.

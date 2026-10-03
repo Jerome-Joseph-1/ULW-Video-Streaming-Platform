@@ -16,17 +16,24 @@ What ships:
 | `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083) |
 | `woodpecker.yml` | Builds and pushes the four images (video-gateway, video-worker, chat, live-packager), then `rollout restart`; never applies a manifest |
 | `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
-| `overlays/stage/stunner/` | The TURN Gateway on UDP 3478 and the UDPRoute to LiveKit |
-| `overlays/stage/livekit/` | LiveKit (1 replica), Service, HTTPRoute for its signalling (`/rtc`), NetworkPolicy |
+| `overlays/{stage,prod}/stunner/` | The TURN Gateway (UDP 3478 on stage, 3479 on prod) and the UDPRoute to LiveKit |
+| `overlays/{stage,prod}/livekit/` | LiveKit (1 replica), Service, HTTPRoute for its signalling (`/rtc`) and WHIP (`/whip`), NetworkPolicy |
+| `overlays/{stage,prod}/livekit-redis/` | Redis (1 replica, nothing persisted), ClusterIP Service, NetworkPolicy: LiveKit's bus to egress |
+| `overlays/{stage,prod}/livekit-egress/` | LiveKit's recorder (1 replica), NetworkPolicy; no Service: it relays live streams to their packagers (step 9) |
 
-The realtime plane (STUNner and LiveKit) is stage only until its phase is tagged there; step 7.
-Live streams need LiveKit's egress and the Redis it shares with LiveKit, which no overlay has
-yet, and a stream service to start each stream's packager, which does not exist yet: until both
-do, a packager is started by hand (step 9).
+The realtime plane is stage only until its phase is tagged there: STUNner, LiveKit and its
+Redis with phase-4 (one-to-one calls), egress with phase-6 (live). Its prod overlays ship, but
+apply each only after its phase tag, and after the steps only Askedin can take (a public UDP
+port, a DNS name, prod's own keys): step 7, "Prod".
+Live streams also need a stream service to start each stream's packager, which does not exist
+yet: until it does, a packager is started by hand (step 9).
 
 Open decisions, yours: whether this builds inside the Askedin monorepo or pushes from this
 repository (the image names `git.askedin.com/askedin/askedin-monorepo/<svc>` assume the
-monorepo), and stage's `JWT_ISSUER`. Askedin's `JWKS_URL` for each environment and prod's
+monorepo), stage's `JWT_ISSUER`, and stage's host. Every stage HTTPRoute (`video-gateway`,
+`chat`, `livekit`) names `stage.askedin.com` in `hostnames:`, **unconfirmed**: the stage web
+app's origin, assumed to be its host; change those three files if stage is served elsewhere
+(prod's routes name `askedin.com` and `www.askedin.com`). Askedin's `JWKS_URL` for each environment and prod's
 `JWT_ISSUER` are set in the overlays (docs/integration/auth.md, Askedin); stage's issuer stays in
 the secret until it is read from the live one (step 3). Askedin's key rotation needs a step on
 their side that reaches ULW: step 8.
@@ -457,8 +464,10 @@ is on the internet. If the host's address is stable, add it as an `ipBlock` to t
    reset would not hurt.
 4. From then on ArgoCD syncs the manifests and Woodpecker only restarts.
 
-The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
-`askedin-gateway`. If the video plane gets a hostname of its own, add `hostnames:` to both
+The route serves `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` on the environment's
+hostnames only: `stage.askedin.com` on stage, `askedin.com` and `www.askedin.com` on prod. Both
+environments attach to the one `askedin-gateway`, so a route without `hostnames:` would answer
+the other environment's host too. If the video plane gets a hostname of its own, add it to both
 `httproute.yaml` files.
 
 ### 4a. Deploying by digest
@@ -643,7 +652,7 @@ otherwise bump at least monthly.
    ```sh
    kubectl -n apps-stage get deploy video-gateway video-worker chat # 2/2, 1/1 and 3/3
    kubectl -n apps-stage logs deploy/video-gateway -c migrate        # "applied …" or "schema is up to date"
-   for route in video-gateway chat; do
+   for route in video-gateway chat livekit; do
      kubectl -n apps-stage get httproute "$route" \
        -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}{"\n"}'   # True
    done
@@ -656,7 +665,10 @@ otherwise bump at least monthly.
    database: its log says which.
 
    A route with `Accepted` missing or False is the stage 404 trap: check `parentRefs` names
-   namespace `apps`.
+   namespace `apps`. A route is also not Accepted (`NoMatchingListenerHostname`) when none of its
+   `hostnames` falls within a listener hostname of `askedin-gateway`: check the listeners cover
+   the apex `askedin.com` as well as `www.askedin.com` and `stage.askedin.com` (a `*.askedin.com`
+   listener does not match the apex).
 2. An end-to-end run with a real stage token (from a browser session's `auth_token_stage`
    cookie):
 
@@ -762,7 +774,7 @@ scale both deployments to 0. Uploads in progress resume once it is back. Chat th
 HTTPRoute, then `deployment/chat` to 0; clients reconnect and resume from their last seq once it
 is back.
 
-## 7. The realtime plane: STUNner and LiveKit (stage)
+## 7. The realtime plane: STUNner and LiveKit
 
 Media from browsers enters through STUNner, a TURN server run as a Gateway API implementation
 beside Envoy Gateway (docs/adr/0013); LiveKit is the SFU behind it (docs/adr/0020). LiveKit hands
@@ -815,6 +827,7 @@ New keys for `.env.stage` and `.env.prod` (names only):
 TURN_SECRET              32+ random bytes, base64; the same value in both files
 TURN_HOST                where browsers reach STUNner: the node's public IP, or a DNS name for it
 LIVEKIT_KEYS             "<api key>: <api secret>", the secret at least 32 characters
+REDIS_PASSWORD           32+ random characters, letters and digits; LiveKit's and egress's Redis
 ```
 
 STUNner's secret is created by a script of its own, `scripts/create-turn-secret.sh`, run once
@@ -843,25 +856,33 @@ kubectl -n stunner-system create secret generic stunner-secrets \
 The secret carries no `ASKEDIN_ENV`: it belongs to neither environment. `stunner-system` must
 exist first (the operator step below creates it).
 
-Lines for `scripts/create-k8s-secrets.sh`, per environment as usual; only stage runs LiveKit so
-far, so guard them until prod does:
+Lines for `scripts/create-k8s-secrets.sh`, per environment as usual. Until prod's LiveKit is
+deployed (below, "Prod"), guard them to stage; drop the guard in the same change that adds
+`overlays/prod/livekit/` to the monorepo:
 
 ```sh
 if [[ $NS == apps-stage ]]; then
+  # Egress takes the pair as two values; both come from LIVEKIT_KEYS, so they cannot disagree.
   kubectl -n "$NS" create secret generic sfu-secrets \
     --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
     --from-literal=LIVEKIT_KEYS="$LIVEKIT_KEYS" \
+    --from-literal=LIVEKIT_API_KEY="${LIVEKIT_KEYS%%: *}" \
+    --from-literal=LIVEKIT_API_SECRET="${LIVEKIT_KEYS#*: }" \
+    --from-literal=REDIS_PASSWORD="$REDIS_PASSWORD" \
     --from-literal=TURN_HOST="$TURN_HOST" \
     --from-literal=TURN_SECRET="$TURN_SECRET" \
     --dry-run=client -o yaml | kubectl apply -f -
 fi
 ```
 
-The call service gets the same `LIVEKIT_KEYS` pair once it ships. Add LiveKit to the
-rollout-restart list; STUNner rereads its secret by itself:
+The call service gets the same `LIVEKIT_KEYS` pair once it ships. Add Redis, LiveKit and egress
+to the rollout-restart list, in that order (LiveKit does not start without Redis); STUNner
+rereads its secret by itself:
 
 ```sh
-kubectl -n "$NS" rollout restart deployment/livekit
+kubectl -n "$NS" rollout restart deployment/livekit-redis
+kubectl -n "$NS" rollout status deployment/livekit-redis
+kubectl -n "$NS" rollout restart deployment/livekit deployment/livekit-egress
 ```
 
 To rotate `TURN_SECRET`: change it in both env files, run `scripts/create-turn-secret.sh`, then
@@ -884,9 +905,10 @@ kubectl apply -f stunner/dataplane.yaml -f stunner/gatewayclass.yaml
 ```
 
 Do not install the chart's own Gateway API CRDs: Envoy Gateway owns them, and a second copy at
-another version would fight it. Then copy `overlays/stage/stunner/` and `overlays/stage/livekit/`
-into the monorepo's stage overlay tree like the others; ArgoCD applies them. The LiveKit
-Deployment pulls `livekit/livekit-server` by digest, so Woodpecker has nothing to build for it.
+another version would fight it. Then copy `overlays/stage/stunner/`, `overlays/stage/livekit/`
+and `overlays/stage/livekit-redis/` (and `overlays/stage/livekit-egress/` for live streams)
+into the monorepo's stage overlay tree like the others; ArgoCD applies them. LiveKit, Redis and
+egress are pulled by digest, so Woodpecker has nothing to build for them.
 
 ### Verify on stage
 
@@ -895,8 +917,14 @@ kubectl get gatewayclass stunner-gatewayclass                 # ACCEPTED True
 kubectl -n apps-stage get gateway stunner                     # PROGRAMMED True, ADDRESS the node's
 kubectl -n apps-stage get udproutes.stunner.l7mp.io livekit \
   -o jsonpath='{.status.parents[0].conditions[*].type}={.status.parents[0].conditions[*].status}'
-kubectl -n apps-stage get deploy stunner livekit              # 1/1 each
+kubectl -n apps-stage get deploy stunner livekit livekit-redis livekit-egress   # 1/1 each
+kubectl -n apps-stage logs deploy/livekit-egress | head      # connected to Redis, no errors
 ```
+
+Egress has not run in the sandbox cluster (its image is ~5 GB; the local call suite runs it
+under compose), so its pod settings here (uid 10001 with an empty home directory, a read-only
+root filesystem, the service started without the image's PulseAudio entrypoint) are first
+proven on stage: a stream relayed per step 9 whose playlist appears is the check.
 
 From a machine outside the cluster (a laptop on another network), with the stage secret:
 
@@ -919,8 +947,9 @@ the `forbid` peer an error, and `wrong_password` and `expired` errors (400 or 40
 
 ArgoCD owns the stage overlays, so anything deleted by hand comes back at the next sync. Revert
 or remove the overlay on `development` first: take out `overlays/stage/stunner/` to stop media
-(STUNner then relays to nothing and calls stop at once), and `overlays/stage/livekit/` as well
-to remove the plane. Once ArgoCD has synced, check both are gone:
+(STUNner then relays to nothing and calls stop at once), and `overlays/stage/livekit/`,
+`livekit-redis/` and `livekit-egress/` as well to remove the plane. Once ArgoCD has synced,
+check they are gone:
 
 ```sh
 kubectl -n apps-stage get gateway,udproutes.stunner.l7mp.io,deploy -l app.kubernetes.io/part-of=ulw
@@ -930,6 +959,142 @@ To stop media before the sync lands, delete the UDPRoute by hand as well
 (`kubectl -n apps-stage delete udproutes.stunner.l7mp.io livekit`). The operator removes the
 stunnerd Deployment and Service when its Gateway goes. If nothing else uses STUNner, delete
 `stunner/*.yaml` and the CRDs last; they are not in any overlay.
+
+### Prod
+
+Prod runs the same plane from `overlays/prod/stunner/`, `overlays/prod/livekit/`,
+`overlays/prod/livekit-redis/` and `overlays/prod/livekit-egress/`, in `apps`. **Apply none of
+it before its phase is tagged on stage**: STUNner, LiveKit and Redis after phase-4 (one-to-one
+calls), egress after phase-6 (live), each once stage has passed "Verify on stage" above. Until
+then the prod overlays stay out of the monorepo's prod tree. What differs from stage, and why:
+
+- **TURN on UDP 3479, not 3478** (docs/adr/0084). Stage and prod share k8s-prod's one node,
+  ServiceLB publishes each LoadBalancer Service on that node's address, and stage's Gateway
+  already holds UDP 3478 there; a second Service on 3478 would stay pending. Prod gets a
+  Gateway of its own rather than a route on stage's, so its relay reaches prod's LiveKit only.
+  LiveKit's `rtc.turn_servers` names 3479 to match.
+- **Signalling on Askedin's prod hostnames.** Prod's HTTPRoute names `askedin.com` and
+  `www.askedin.com`, stage's `stage.askedin.com`, as every ULW route does (step 4): both attach
+  to the one `askedin-gateway`, and each answers its own environment's hosts only. A call or
+  publisher ticket for prod must name one of prod's hosts.
+- **Its own LiveKit keys and `TURN_HOST`**, in `sfu-secrets` in `apps`; the TURN secret is the
+  cluster's one, the same value as stage's (Secrets, above).
+- **LiveKit the same size as stage**: one replica, 500m CPU and 256Mi requested, 2 CPU and 1Gi
+  at most: about 126 concurrent 1:1 calls (docs/integration/calls.md, Capacity). STUNner's
+  pods come from the cluster's one `Dataplane`, so prod's stunnerd is sized as stage's (500m,
+  128Mi). Redis is stage's too (50m, 64Mi).
+- **Egress for two concurrent streams** where stage takes one: a 5-core limit, since egress
+  admits a stream only while 2 of its cores are idle under its 80% ceiling, and 768Mi
+  requested, 1536Mi at most (~300 MB per stream, docs/adr/0053). Raise the limit by 2.5 cores
+  per further concurrent stream, if the node has them.
+
+Nothing in prod's chat, gateway or packager overlays changes for it: no ULW service reads
+LiveKit's address or keys yet. The call and stream services, when they ship, read the same
+`LIVEKIT_KEYS` pair and LiveKit's in-cluster address, `http://livekit.apps.svc.cluster.local:7880`
+(`.apps-stage.` on stage).
+
+Owner steps, all Askedin's, in this order:
+
+1. **Capacity.** Prod's calls plane requests 1.05 CPU and 448Mi more on the node (LiveKit
+   500m/256Mi, stunnerd 500m/128Mi, Redis 50m/64Mi), and egress 1 CPU and 768Mi more (and up
+   to 5 CPU while streams run). Stage's plane takes 1.05 CPU and 448Mi, and 1 CPU and 512Mi for
+   its egress. Check against step 1's numbers before applying:
+
+   ```sh
+   kubectl describe nodes | sed -n '/Allocated resources/,/Events/p'
+   ```
+
+2. **The port.** Nothing may hold UDP 3479 yet; open it to the internet on k8s-prod's firewall,
+   and nothing else (LiveKit's 7882 stays inside the cluster, as on stage):
+
+   ```sh
+   kubectl get svc -A | grep -w 3479        # must print nothing
+   # on k8s-prod, persisted in its firewall configuration:
+   iptables -A INPUT -p udp --dport 3479 -j ACCEPT
+   ```
+
+   If stage needed the NodePort fix of "Check the cluster first", prod needs it too, on a port
+   of its own, with both annotations in `overlays/prod/stunner/gateway.yaml`:
+
+   ```sh
+   kubectl -n apps annotate gateway stunner --overwrite \
+     stunner.l7mp.io/service-type=NodePort 'stunner.l7mp.io/nodeport={"turn-udp": 31479}'
+   iptables -t nat -A PREROUTING -p udp --dport 3479 -j REDIRECT --to-ports 31479
+   ```
+
+   If Askedin would rather give prod an address of its own, prod can keep 3478 on that address:
+   set `spec.addresses` on `overlays/prod/stunner/gateway.yaml`'s Gateway to it, put the
+   listener and `rtc.turn_servers` in `overlays/prod/livekit/deployment.yaml` back to 3478,
+   and open 3478 on that address instead.
+
+3. **A DNS name for TURN** (optional; the node's public IP works as `TURN_HOST` too). An A
+   record such as `turn.askedin.com` pointing at k8s-prod's public address. TURN over UDP needs
+   no certificate. Find the address with:
+
+   ```sh
+   kubectl get nodes -o wide          # EXTERNAL-IP, or the address the firewall publishes
+   ```
+
+4. **Prod's keys in `.env.prod`** (`TURN_SECRET` is already there, equal to stage's; see
+   Secrets). Generate a key pair of prod's own, never stage's:
+
+   ```sh
+   printf 'LIVEKIT_KEYS="%s: %s"\n' "API$(openssl rand -hex 6)" "$(openssl rand -base64 36)" >> .env.prod
+   printf 'REDIS_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env.prod
+   echo 'TURN_HOST=<turn.askedin.com or the node public IP>' >> .env.prod
+   ```
+
+   Then drop the `apps-stage` guard from `create-k8s-secrets.sh` (Secrets, above) and run it
+   for prod, which creates `sfu-secrets` in `apps`:
+
+   ```sh
+   scripts/create-k8s-secrets.sh          # as you run it for prod (NS=apps)
+   kubectl -n apps get secret sfu-secrets -o jsonpath='{.data}' | python3 -c \
+     'import json,sys; print(sorted(json.load(sys.stdin)))'
+   # ['ASKEDIN_ENV', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET', 'LIVEKIT_KEYS', 'REDIS_PASSWORD',
+   #  'TURN_HOST', 'TURN_SECRET']
+   ```
+
+   Run `scripts/create-turn-secret.sh` again only if `TURN_SECRET` changed; it refuses when
+   the two env files disagree.
+
+5. **Apply**, after the phase tag (above). Copy `overlays/prod/stunner/`,
+   `overlays/prod/livekit/` and `overlays/prod/livekit-redis/` into the monorepo's prod overlay
+   tree after phase-4, and `overlays/prod/livekit-egress/` after phase-6; ArgoCD applies them
+   on `master`. Add Redis, LiveKit and egress to prod's rollout-restart list, as on stage.
+
+6. **Verify**, as on stage, with `apps` for `apps-stage` and port 3479:
+
+   ```sh
+   kubectl -n apps get gateway stunner                     # PROGRAMMED True, ADDRESS the node's
+   kubectl -n apps get udproutes.stunner.l7mp.io livekit \
+     -o jsonpath='{.status.parents[0].conditions[*].type}={.status.parents[0].conditions[*].status}'
+   kubectl -n apps get deploy stunner livekit livekit-redis   # 1/1 each; livekit-egress too after phase-6
+   kubectl -n apps get httproute livekit \
+     -o jsonpath='{.status.parents[0].conditions[*].type}={.status.parents[0].conditions[*].status}'
+   ```
+
+   From a machine outside the cluster:
+
+   ```sh
+   TURN_SECRET=$(set -a; . ./.env.prod; printf '%s' "$TURN_SECRET") \
+     tests/cluster/turn_probe.py <TURN_HOST> 3479 \
+     --permit <prod livekit pod IP> --forbid <stage livekit pod IP> --forbid 127.0.0.1 \
+     --forbid <node IP>
+   ```
+
+   The stage LiveKit pod must be forbidden: prod's relay reaches only prod's LiveKit. Expect
+   the same results as on stage otherwise. Then the signalling route, which must answer
+   LiveKit, not 404:
+
+   ```sh
+   curl -s -o /dev/null -w '%{http_code}\n' https://askedin.com/rtc/validate   # LiveKit's 401, not 404
+   ```
+
+Rollback is stage's with `apps` and `master`: take `overlays/prod/stunner/` (and
+`overlays/prod/livekit/`, `livekit-redis/` and `livekit-egress/`) out of the prod overlay tree,
+and to stop media before the sync lands, `kubectl -n apps delete udproutes.stunner.l7mp.io
+livekit`. Stage is untouched by either.
 
 ## 8. Askedin signing key rotation
 
@@ -985,9 +1150,11 @@ POST has succeeded (docs/adr/0053). A packager is one process per stream, so on 
 is one Job per stream, made from `live-packager/job.yaml` (docs/adr/0083). What is not here
 yet, and is needed before a stream can go out:
 
-- **LiveKit egress and its Redis** (docs/integration/operations-contract.md): no overlay ships
-  them. Egress's pods must carry `app.kubernetes.io/name: livekit-egress`, the only pods the
-  packager's NetworkPolicy admits, and LiveKit must be pointed at the same Redis.
+- **LiveKit egress and its Redis**: `overlays/*/livekit-egress/` and `overlays/*/livekit-redis/`
+  (step 7). Egress's pods carry `app.kubernetes.io/name: livekit-egress`, the only pods the
+  packager's NetworkPolicy admits, and LiveKit's configuration names the same Redis. Stage's
+  egress takes one stream at a time, prod's two; a further one is refused (`Unavailable` from
+  the relay) until one ends.
 - **The stream service**, which makes each stream's Job and Secret, calls the relay with the
   stream's passphrase, and records the stream's chat live (step 3). Until it exists, the steps
   below start a packager by hand.

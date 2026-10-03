@@ -1,0 +1,17 @@
+# ClusterIP only: nothing outside the cluster reaches Redis, and inside it only LiveKit and
+# egress (networkpolicy.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit-redis
+  namespace: apps-stage
+  labels:
+    app.kubernetes.io/name: livekit-redis
+    app.kubernetes.io/part-of: ulw
+spec:
+  selector:
+    app.kubernetes.io/name: livekit-redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

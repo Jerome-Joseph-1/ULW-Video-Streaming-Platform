@@ -7,7 +7,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: livekit
-  namespace: apps-stage
+  namespace: apps
   labels:
     app.kubernetes.io/name: livekit
     app.kubernetes.io/part-of: ulw
@@ -15,10 +15,12 @@ spec:
   parentRefs:
     - name: askedin-gateway
       namespace: apps
-  # Stage's host, unconfirmed by Askedin (RUNBOOK.md, open decisions): stage and prod share
-  # askedin-gateway, so a route without hostnames would also answer prod's.
+  # Askedin's prod origins (docs/integration/auth.md, Askedin): stage and prod share
+  # askedin-gateway, so a route without hostnames would also answer stage's. A call or
+  # publisher ticket for prod must name one of these hosts.
   hostnames:
-    - stage.askedin.com
+    - askedin.com
+    - www.askedin.com
   rules:
     - matches:
         - path:

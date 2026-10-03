@@ -22,7 +22,8 @@ docker image rm "${built_images[@]}" "$eg_image" "${eg_image%:*}@$eg_digest" "$e
     "${kube_router_image%:*}@$kube_router_digest" "$metrics_server_image" \
     "${ULW_METRICS_SERVER_REPO:-$metrics_server_repo}@$metrics_server_digest" \
     "$stunner_operator_image" "${stunner_operator_image%:*}@$stunner_operator_digest" \
-    "$stunnerd_image" "${stunnerd_image%:*}@$stunnerd_digest" "$livekit_image" "$probe_image" \
+    "$stunnerd_image" "${stunnerd_image%:*}@$stunnerd_digest" "$livekit_image" \
+    "$livekit_redis_image" "$probe_image" \
     >/dev/null 2>&1 || true
 docker network rm "$outside_network" >/dev/null 2>&1 || true
 rm -rf "$here/.state"
