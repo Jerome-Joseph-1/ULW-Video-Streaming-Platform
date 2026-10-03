@@ -97,6 +97,30 @@ spec:
                 secretKeyRef:
                   name: chat-secrets
                   key: ULW_NODE_SECRET
+            # Calls (docs/adr/0050, docs/adr/0086): RoomService of the LiveKit beside chat, and the
+            # client URL and key pair from sfu-secrets, the pair LiveKit itself is configured with
+            # (RUNBOOK.md, section 7). Optional: without that secret, or without its LiveKit keys,
+            # chat starts with calls off and answers every call with calls_disabled.
+            - name: LIVEKIT_API_URL
+              value: http://livekit:7880
+            - name: LIVEKIT_CLIENT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_CLIENT_URL
+                  optional: true
+            - name: LIVEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_API_KEY
+                  optional: true
+            - name: LIVEKIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_API_SECRET
+                  optional: true
             # Stage's issuer is not confirmed yet, so it stays in the secret, as the gateway's
             # does (docs/integration/auth.md, Askedin).
             - name: JWT_ISSUER
