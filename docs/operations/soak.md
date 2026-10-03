@@ -42,12 +42,18 @@ After the verdict, and from `--rejudge`, the summary prints, for information onl
   marks, and the fitted slope over the last 4, 2 and 1 h (with its upper end per request),
   which tells a plateau from a steady tail;
 - each load path's count (videos made ready or failed, with the reasons, playlists fetched,
-  store faults that reached the fetch, resumes, cancellations), marked when one never ran;
+  store faults that reached the fetch, commits, resumes, cancellations, saturations refused by
+  the gateway's limit, slow clients ended by a timer), marked when one never ran;
 - every 5xx: the clients' by the action that got it, and the gateway's, from `gateway.log`, by
   route and status, marked when it fell inside a saturation or a store fault. Both make 5xx by
   design: while the saturation holds every upload slot, any chunk request, the soak's own
   uploads and resumes included, gets 503; a ready video whose media playlist is missing from
   the store gets 500. A 5xx outside both is listed with its time.
+
+A run in which any of those load paths (all but failed videos) never ran is reported
+`INVALID: load path never exercised: ...` below its verdict and exits 2: it did not apply the
+load it names, so its verdict on RSS and descriptors, printed unchanged, is not evidence either
+way. At cleanup the soak empties and deletes its MinIO bucket, as it drops its database.
 
 ## On a runner
 

@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import soak  # noqa: E402
-from soak import coverage_report, errors_report, judge, shape_report  # noqa: E402
+from soak import coverage_report, errors_report, judge, shape_report, unexercised  # noqa: E402
 
 REQUESTS_PER_MIN = 1_500
 
@@ -104,9 +104,63 @@ class CoverageReport(unittest.TestCase):
         self.assertIn("NOT EXERCISED", line_with(lines, "videos made ready"))
         self.assertIn("NOT EXERCISED", line_with(lines, "media playlists fetched"))
         self.assertIn("NOT EXERCISED", line_with(lines, "store faults"))
+        self.assertIn("NOT EXERCISED", line_with(lines, "saturations"))
         self.assertNotIn("NOT EXERCISED", line_with(lines, "videos failed"))
         self.assertIn("  video_failed: transcoding failed: 3", lines)
         self.assertIn("  store_fault_skipped_no_ready_video: 2", lines)
+
+
+class Validity(unittest.TestCase):
+    FULL = {"videos_ready_total": 5, "playlists": 9, "store_missing_500": 1,
+            "uploads_committed": 5, "resumes_completed": 2, "cancels": 1,
+            "saturation_total_503": 3, "slow_header_ended": 1}
+
+    def test_a_run_that_exercised_every_path_is_valid(self):
+        self.assertEqual(unexercised(self.FULL), [])
+
+    def test_failed_videos_are_reported_but_not_required(self):
+        self.assertEqual(unexercised({**self.FULL, "videos_failed": 0}), [])
+
+    def test_each_required_path_at_zero_makes_the_run_invalid(self):
+        for key, name in [("videos_ready_total", "videos made ready"),
+                          ("playlists", "media playlists fetched"),
+                          ("store_missing_500", "store faults that fetched a deleted playlist"),
+                          ("saturation_total_503", "saturations refused by the gateway's limit"),
+                          ("slow_header_ended", "slow clients ended by a timer")]:
+            self.assertEqual(unexercised({**self.FULL, key: 0}), [name], key)
+
+    def test_the_runs_on_the_runner_whose_probes_all_failed_are_invalid(self):
+        # Run 37108394263's totals, abridged: no video ready, so no playlist or store fault.
+        totals = {"cancels": 1755, "resumes_completed": 3480, "saturation_total_503": 348,
+                  "slow_header_ended": 360, "uploads_committed": 1741}
+        self.assertEqual(unexercised(totals), ["videos made ready", "media playlists fetched",
+                                               "store faults that fetched a deleted playlist"])
+
+
+class BucketCleanup(unittest.TestCase):
+    """delete_bucket() against a fake store: every key on every listing page, then the bucket."""
+
+    NS = "http://s3.amazonaws.com/doc/2006-03-01/"
+
+    def page(self, keys, token=None):
+        contents = "".join(f"<Contents><Key>{k}</Key></Contents>" for k in keys)
+        more = f"<IsTruncated>true</IsTruncated><NextContinuationToken>{token}" \
+               "</NextContinuationToken>" if token else "<IsTruncated>false</IsTruncated>"
+        return f'<ListBucketResult xmlns="{self.NS}">{contents}{more}</ListBucketResult>'
+
+    def test_every_object_on_every_page_goes_before_the_bucket(self):
+        stack = soak.Stack.__new__(soak.Stack)
+        stack.bucket = "ulw-soak-x"
+        pages = {"ulw-soak-x?list-type=2": self.page(["a/1", "a/2 b"], token="t+1"),
+                 "ulw-soak-x?list-type=2&continuation-token=t%2B1": self.page(["c"])}
+        calls = []
+        stack.s3_body = lambda path: pages[path]
+        stack.s3 = lambda method, path: calls.append((method, path)) or "204"
+        self.assertEqual(stack.delete_bucket(), "204")
+        self.assertEqual(sorted(calls[:-1]), [("DELETE", "ulw-soak-x/a/1"),
+                                              ("DELETE", "ulw-soak-x/a/2%20b"),
+                                              ("DELETE", "ulw-soak-x/c")])
+        self.assertEqual(calls[-1], ("DELETE", "ulw-soak-x"))
 
 
 @unittest.skipUnless(os.geteuid() == 0, "the sandbox's view is root's without capabilities")

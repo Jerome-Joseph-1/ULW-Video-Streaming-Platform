@@ -10,7 +10,8 @@ stayed flat.
     tests/soak/soak.py --rejudge /some/dir/samples.csv      # a finished run, again
 
 The binaries are copied into <out>/bin first, so a rebuild of the tree does not change what a
-run in progress is measuring. Exit status: 0 flat, 1 not flat, 2 the run itself failed.
+run in progress is measuring. Exit status: 0 flat, 1 not flat, 2 the run itself failed or is
+invalid (a load path in load_paths() never ran, so the verdict is not evidence either way).
 
 The load:
   clients     --clients threads, each a keep-alive TLS connection, choosing from MIX a few
@@ -99,7 +100,10 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from xml.etree import ElementTree
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -122,7 +126,10 @@ MIX = [("playlist", 45), ("status", 15), ("offset", 10), ("bad", 30)]
 ISSUER = "ulw-soak"
 USERS = ["alice", "bob", "carol", "dave"]
 HOLDERS = ["sat1", "sat2", "sat3", "sat4"]
-# Its own user, so a slow body never takes one of the saturation holders' slots.
+# Its own user, so a slow body never counts against a saturation holder's per-user limit of
+# three. It does take one of the gateway's UPLOAD_SLOTS for as long as it lasts (up to ~80 s),
+# so a saturation that starts meanwhile finds a slot already gone: its last hold is refused
+# with 503 (no client counts it; gateway.log does) and so is its final ask, as intended.
 SLOW_USER = "slowpoke"
 
 
@@ -174,6 +181,36 @@ class Stack:
             ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-X", method,
              "--aws-sigv4", "aws:amz:us-east-1:s3", "--user", f"{self.access}:{self.secret}",
              f"{self.minio}/{path}"], capture_output=True, text=True, check=True).stdout
+
+    def s3_body(self, path):
+        return subprocess.run(
+            ["curl", "-sS", "--fail", "--aws-sigv4", "aws:amz:us-east-1:s3", "--user",
+             f"{self.access}:{self.secret}", f"{self.minio}/{path}"],
+            capture_output=True, text=True, check=True).stdout
+
+    def delete_bucket(self):
+        """Empties the run's bucket and removes it, so runs do not pile up in MinIO."""
+        keys = []
+        token = None
+        while True:
+            query = "list-type=2" + (f"&continuation-token={urllib.parse.quote(token, safe='')}"
+                                     if token else "")
+            listing = ElementTree.fromstring(self.s3_body(f"{self.bucket}?{query}"))
+            ns = {"s3": listing.tag.split("}")[0].strip("{")} if "}" in listing.tag else {}
+            find = (lambda e, tag: e.findall(f"s3:{tag}", ns)) if ns else \
+                (lambda e, tag: e.findall(tag))
+            keys += [c.findtext("s3:Key" if ns else "Key", namespaces=ns)
+                     for c in find(listing, "Contents")]
+            truncated = (listing.findtext("s3:IsTruncated" if ns else "IsTruncated",
+                                          namespaces=ns) or "") == "true"
+            token = listing.findtext("s3:NextContinuationToken" if ns
+                                     else "NextContinuationToken", namespaces=ns)
+            if not truncated or not token:
+                break
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda k: self.s3(
+                "DELETE", f"{self.bucket}/{urllib.parse.quote(k)}"), keys))
+        return self.s3("DELETE", self.bucket)
 
     def prepare(self):
         subprocess.run(["psql", self.admin_url, "-qc", f"CREATE DATABASE {self.name}"],
@@ -294,6 +331,12 @@ class Stack:
         subprocess.run(["psql", self.admin_url, "-qc",
                         f"DROP DATABASE IF EXISTS {self.name} WITH (FORCE)"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            code = self.delete_bucket()
+            if code != "204":
+                log(f"deleting bucket {self.bucket}: HTTP {code}")
+        except (subprocess.CalledProcessError, ElementTree.ParseError) as e:
+            log(f"deleting bucket {self.bucket}: {e!r}")
         if self.scratch_is_temporary:
             shutil.rmtree(self.scratch, ignore_errors=True)
 
@@ -987,18 +1030,33 @@ def errors_report(totals, windows, gateway_log):
     return lines
 
 
+def load_paths(totals):
+    """(name, count, required) for each path of the load; a required one at 0 never ran."""
+    return [("videos made ready", totals.get("videos_ready_total", 0), True),
+            ("videos failed", totals.get("videos_failed", 0), False),
+            ("media playlists fetched", totals.get("playlists", 0), True),
+            ("store faults that fetched a deleted playlist",
+             sum(v for k, v in totals.items() if k.startswith("store_missing_")), True),
+            ("uploads committed", totals.get("uploads_committed", 0), True),
+            ("resumes completed", totals.get("resumes_completed", 0), True),
+            ("cancels", totals.get("cancels", 0), True),
+            ("saturations refused by the gateway's limit",
+             totals.get("saturation_total_503", 0), True),
+            ("slow clients ended by a timer",
+             sum(totals.get(f"slow_{k}_ended", 0) for k in ["header", "idle", "rate"]), True)]
+
+
+def unexercised(totals):
+    """The required load paths that never ran. A run with any is not evidence either way:
+    main() reports it INVALID (exit 2), apart from the RSS and fd verdict."""
+    return [name for name, n, required in load_paths(totals) if required and n == 0]
+
+
 def coverage_report(totals):
     """Lines saying whether each load path ran, so a run that silently skipped one shows."""
-    checks = [("videos made ready", totals.get("videos_ready_total", 0)),
-              ("videos failed", totals.get("videos_failed", 0)),
-              ("media playlists fetched", totals.get("playlists", 0)),
-              ("store faults that fetched a deleted playlist",
-               sum(v for k, v in totals.items() if k.startswith("store_missing_"))),
-              ("resumes completed", totals.get("resumes_completed", 0)),
-              ("cancels", totals.get("cancels", 0))]
     lines = ["load paths:"]
-    for name, n in checks:
-        missing = n == 0 and name != "videos failed"
+    for name, n, required in load_paths(totals):
+        missing = required and n == 0
         lines.append(f"  {name}: {n}{'  NOT EXERCISED' if missing else ''}")
     lines += [f"  {k}: {v}" for k, v in sorted(totals.items())
               if k.startswith(("video_", "store_fault_skipped"))]
@@ -1160,11 +1218,17 @@ def main():
         errors_report(totals, stack.windows, out / "gateway.log")
     if failure:
         summary.append(f"FAILED: {failure}")
+    # The verdict on RSS and descriptors (and a clean exit), unchanged; a run that failed or
+    # left a load path unexercised is then marked apart from it, and exits 2 whatever it says.
     verdict = "PASS" if passed and not failure and all(v == 0 for v in codes.values()) else "FAIL"
     summary.append(f"verdict: {verdict}")
+    missing = unexercised(totals) if not failure else []
+    if missing:
+        summary.append("INVALID: load path never exercised: " + ", ".join(missing) +
+                       "; the verdict above is not evidence either way")
     (out / "summary.txt").write_text("\n".join(summary) + "\n")
     print("\n".join(summary), flush=True)
-    if failure:
+    if failure or missing:
         return 2
     return 0 if verdict == "PASS" else 1
 
