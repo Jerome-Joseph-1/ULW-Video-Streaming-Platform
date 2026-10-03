@@ -948,7 +948,8 @@ the `forbid` peer an error, and `wrong_password` and `expired` errors (400 or 40
 ArgoCD owns the stage overlays, so anything deleted by hand comes back at the next sync. Revert
 or remove the overlay on `development` first: take out `overlays/stage/stunner/` to stop media
 (STUNner then relays to nothing and calls stop at once), and `overlays/stage/livekit/`,
-`livekit-redis/` and `livekit-egress/` as well to remove the plane. Once ArgoCD has synced, check both are gone:
+`livekit-redis/` and `livekit-egress/` as well to remove the plane. Once ArgoCD has synced,
+check they are gone:
 
 ```sh
 kubectl -n apps-stage get gateway,udproutes.stunner.l7mp.io,deploy -l app.kubernetes.io/part-of=ulw
@@ -1091,8 +1092,9 @@ Owner steps, all Askedin's, in this order:
    ```
 
 Rollback is stage's with `apps` and `master`: take `overlays/prod/stunner/` (and
-`overlays/prod/livekit/`, `livekit-redis/` and `livekit-egress/`) out of the prod overlay tree, and to stop media before the sync lands,
-`kubectl -n apps delete udproutes.stunner.l7mp.io livekit`. Stage is untouched by either.
+`overlays/prod/livekit/`, `livekit-redis/` and `livekit-egress/`) out of the prod overlay tree,
+and to stop media before the sync lands, `kubectl -n apps delete udproutes.stunner.l7mp.io
+livekit`. Stage is untouched by either.
 
 ## 8. Askedin signing key rotation
 
