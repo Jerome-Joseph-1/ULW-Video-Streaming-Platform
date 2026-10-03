@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -204,7 +205,23 @@ public:
         });
     }
 
+    void present(const core::RoomId& room, core::ports::MediaGeneration generation,
+                 const core::UserId& user, const core::DeviceId& device,
+                 core::ports::PresenceDone done) override {
+        const std::string who = std::string(user.view()) + "/" + device.to_string();
+        calls.push_back("present " + room.to_string() + ":" +
+                        std::to_string(std::to_underlying(generation)) + " " + who);
+        std::expected<bool, core::ports::MediaError> answer = connected.contains(who);
+        if (fail_present) {
+            answer = std::unexpected(*fail_present);
+        }
+        later_.post([done = std::move(done), answer]() mutable noexcept { done(answer); });
+    }
+
     std::vector<std::string> calls;
+    // "<user>/<device>" of everyone connected, as present() answers.
+    std::set<std::string> connected;
+    std::optional<core::ports::MediaError> fail_present;
     std::optional<core::ports::MediaError> fail_open;
     std::optional<core::ports::MediaError> fail_join;
     std::optional<core::ports::MediaError> fail_relay;

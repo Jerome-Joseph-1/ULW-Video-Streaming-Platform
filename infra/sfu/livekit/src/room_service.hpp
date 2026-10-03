@@ -52,9 +52,10 @@ public:
     // included.
     void call(std::string_view method, std::string body, const Grant& grant, IfAbsent absent,
               core::ports::MediaDone done);
-    // As call, for a method whose answer the caller reads, within its own limits.
+    // As call, for a method whose answer the caller reads, within its own limits. With
+    // IfAbsent::Succeed, LiveKit's not_found is answered as an empty body.
     void fetch(std::string_view method, std::string body, const Grant& grant,
-               const CallLimits& limits, AnswerDone done);
+               const CallLimits& limits, AnswerDone done, IfAbsent absent = IfAbsent::Fail);
 
     // `done` runs later with `error`, and nothing is sent.
     void fail(core::ports::MediaError error, AnswerDone done);

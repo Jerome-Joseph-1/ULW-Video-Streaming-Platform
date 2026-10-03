@@ -152,8 +152,8 @@ void RoomService::call(std::string_view method, std::string body, const Grant& g
 }
 
 void RoomService::fetch(std::string_view method, std::string body, const Grant& grant,
-                        const CallLimits& limits, AnswerDone done) {
-    start(method, std::move(body), grant, IfAbsent::Fail, limits, std::move(done));
+                        const CallLimits& limits, AnswerDone done, IfAbsent absent) {
+    start(method, std::move(body), grant, absent, limits, std::move(done));
 }
 
 void RoomService::start(std::string_view method, std::string body, const Grant& grant,
