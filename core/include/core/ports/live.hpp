@@ -151,6 +151,8 @@ enum class PackagerState : std::uint8_t {
 enum class PackagerError : std::uint8_t {
     // The runtime that starts packagers did not answer, or is busy; a retry may succeed.
     Unavailable,
+    // The runtime runs as many packagers as its quota allows; one may finish in minutes.
+    Full,
     // It refused the request as made (credentials, permissions, a bad template); a retry
     // cannot succeed until the configuration changes.
     Refused,

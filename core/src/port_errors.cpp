@@ -144,6 +144,8 @@ std::string_view to_string(PackagerError e) noexcept {
     switch (e) {
     case PackagerError::Unavailable:
         return "packager runtime unavailable";
+    case PackagerError::Full:
+        return "packager runtime at its quota";
     case PackagerError::Refused:
         return "packager runtime refused the request";
     }

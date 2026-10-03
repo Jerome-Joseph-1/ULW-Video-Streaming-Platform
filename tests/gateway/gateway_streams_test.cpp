@@ -214,7 +214,14 @@ TEST_F(GatewayStreams, FailuresAnswerAsDocumented) {
         f.packagers.fail_start = core::ports::PackagerError::Unavailable;
     });
     const std::string id = text_at(json_of(send("POST", "/api/v1/live", kAlice)), "id");
-    EXPECT_EQ(send("POST", "/api/v1/live/" + id + "/start", kAlice).status, 503);
+    r = send("POST", "/api/v1/live/" + id + "/start", kAlice);
+    EXPECT_EQ(r.status, 503);
+    EXPECT_EQ(r.header("retry-after"), "2");
+    // The cluster's quota spent is the platform full, as the stream count is.
+    gw.with_live([](LiveFakes& f) { f.packagers.fail_start = core::ports::PackagerError::Full; });
+    r = send("POST", "/api/v1/live/" + id + "/start", kAlice);
+    EXPECT_EQ(r.status, 503);
+    EXPECT_EQ(r.header("retry-after"), "60");
 }
 
 TEST_F(GatewayStreams, OnlyATokenCarryingTheBroadcasterClaimStartsAStream) {

@@ -33,8 +33,10 @@ spec:
   # The longest stream is 12 h (ULW_LIVE_MAX_HOURS), and its recording is copied far faster
   # than real time; an hour more is a packager that is stuck.
   activeDeadlineSeconds: 46800
-  # Kept a day after it ends, for its log ("recording: queued as video <id>").
-  ttlSecondsAfterFinished: 86400
+  # Kept an hour after it ends, for its log ("recording: queued as video <id>"). The recording
+  # is queued before the process exits, so a finished Job's work is done; an hour keeps the
+  # namespace's Job count (its quota) to the streams of the last hour or so, not of a day.
+  ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:

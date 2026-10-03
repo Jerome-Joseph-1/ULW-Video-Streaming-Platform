@@ -42,6 +42,7 @@ constexpr std::size_t kMaxToken = std::size_t{16} * 1024;
 constexpr core::Millis kTokenReuse{60'000};
 
 constexpr int kOk = 200;
+constexpr int kForbidden = 403;
 constexpr int kNotFound = 404;
 constexpr int kConflict = 409;
 constexpr int kTooManyRequests = 429;
@@ -56,6 +57,12 @@ PackagerError classify(const curl::Result& result) noexcept {
                    : PackagerError::Unavailable;
     }
     const int status = result->status;
+    // The namespace's ResourceQuota spent: as many packagers as the platform takes are there
+    // already, which the API server answers 403 Forbidden with "exceeded quota" in its Status
+    // message (k8s.io/apiserver's quota admission). Any other 403 is the Role or the token.
+    if (status == kForbidden && result->body.find("exceeded quota") != std::string::npos) {
+        return PackagerError::Full;
+    }
     // Unauthorized or forbidden is the Role or the token; a 4xx otherwise the template.
     return status == kTooManyRequests || status >= kServerErrors ? PackagerError::Unavailable
                                                                  : PackagerError::Refused;
