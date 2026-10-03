@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <format>
 #include <iterator>
 #include <utility>
@@ -152,7 +153,9 @@ std::string_view state_name(core::VideoState s) noexcept {
 
 } // namespace
 
-Connection::Connection(Handle handle, Gateway& gateway) : handle_(handle), gateway_(gateway) {}
+Connection::Connection(Handle handle, Gateway& gateway)
+    : handle_(handle), gateway_(gateway),
+      claim_(gateway.deps().catalog, gateway.claims_held_count()) {}
 
 Connection::~Connection() {
     release_slot();
@@ -224,6 +227,8 @@ std::optional<core::Millis> Connection::check_body_rate(core::MonoTime t) noexce
 
 // Every response carries the id, including one for a request that never parsed.
 void Connection::begin_request() noexcept {
+    // The last request's claim went when it finished.
+    assert(!claim_.held() && "a request began while a claim was held");
     phase_ = Phase::Request;
     ++request_seq_;
     request_started_ = now();
@@ -685,20 +690,27 @@ void Connection::start_append() noexcept {
     }
     req_.bytes_charged = req_.content_length;
     ++pending_;
-    deps().catalog.claim_upload(*id, claims->subject, [this](auto result) noexcept {
-        --pending_;
-        on_claimed(std::move(result));
-    });
+    deps().catalog.claim_upload(*id, claims->subject,
+                                [this, request = request_seq_, upload = *id](auto result) noexcept {
+                                    --pending_;
+                                    on_claimed(request, upload, std::move(result));
+                                });
 }
 
-void Connection::on_claimed(core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept {
-    if (result) {
-        req_.claimed = true;
-        req_.upload = std::move(*result);
-    }
-    if (phase_ != Phase::Request) {
-        release_claim();
+void Connection::on_claimed(
+    std::uint64_t request, const core::UploadId& upload,
+    core::ports::CatalogResult<core::ports::ClaimedUpload> result) noexcept {
+    if (!serving(request)) {
+        // The request ended while the claim was being taken. A claim granted to it goes
+        // straight back, and nothing a later request holds is touched.
+        if (result) {
+            deps().catalog.release_upload(upload, result->token);
+        }
         return;
+    }
+    if (result) {
+        claim_.adopt(request, upload, result->token);
+        req_.upload = std::move(result->stored);
     }
     if (!result) {
         if (result.error() == CatalogError::Conflict) {
@@ -714,18 +726,15 @@ void Connection::on_claimed(core::ports::CatalogResult<core::ports::StoredUpload
     const core::ports::StoredUpload* stored = get(req_.upload);
     const std::uint64_t* offset = get(req_.upload_offset);
     if (claims == nullptr || stored == nullptr || offset == nullptr) {
-        release_claim();
         fail(Status::InternalServerError);
         return;
     }
     const core::UploadRecord& up = stored->upload;
     if (expired(up, deps().clock.wall_now())) {
-        release_claim();
         fail(Status::Gone);
         return;
     }
     if (up.state != core::UploadState::Active) {
-        release_claim();
         fail(Status::Conflict, up.durable_offset);
         return;
     }
@@ -741,24 +750,20 @@ void Connection::on_claimed(core::ports::CatalogResult<core::ports::StoredUpload
 void Connection::begin_append(std::uint64_t at) noexcept {
     const core::ports::StoredUpload* stored = get(req_.upload);
     if (stored == nullptr) {
-        release_claim();
         fail(Status::InternalServerError);
         return;
     }
     const core::UploadRecord& up = stored->upload;
     if (req_.content_length > up.size_bytes - at) {
-        release_claim();
         fail(Status::BadRequest);
         return;
     }
     if (req_.content_length == 0) {
-        release_claim();
         respond({.status = Status::NoContent, .upload_offset = at}, {});
         return;
     }
     auto session = deps().store.open(ingest_id(*stored), at, *this);
     if (!session) {
-        release_claim();
         fail_storage(session.error());
         return;
     }
@@ -808,7 +813,6 @@ void Connection::on_ingest_progress() noexcept {
     case core::ports::IngestState::Failed: {
         const StorageError error = session_->error().value_or(StorageError::Transient);
         session_.reset();
-        release_claim();
         fail_storage(error);
         return;
     }
@@ -831,18 +835,18 @@ void Connection::on_durable() noexcept {
     session_.reset();
     const core::UploadId* id = get(req_.upload_id);
     const core::ports::StoredUpload* stored = get(req_.upload);
-    if (id == nullptr || stored == nullptr) {
-        release_claim();
+    // Recorded under this request's own grant: one that has been lost records nothing.
+    const auto token = claim_.token_of(request_seq_);
+    if (id == nullptr || stored == nullptr || !token) {
         fail(Status::InternalServerError);
         return;
     }
     ++pending_;
     deps().catalog.record_progress(
-        *id, stored->upload.video_id, offset,
-        [this, offset](core::ports::CatalogResult<void> result) noexcept {
+        *id, *token, stored->upload.video_id, offset,
+        [this, offset, request = request_seq_](core::ports::CatalogResult<void> result) noexcept {
             --pending_;
-            release_claim();
-            if (phase_ != Phase::Request) {
+            if (!serving(request)) {
                 return;
             }
             if (!result) {
@@ -1375,12 +1379,13 @@ void Connection::complete() noexcept {
     --pending_;
     job_running_ = false;
     ControlJob job = std::exchange(job_, ControlJob{});
-    if (phase_ != Phase::Request || job.request != request_seq_) {
+    if (!serving(job.request)) {
         if (job.op == ControlOp::Create && job.created && *job.created) {
             // The request is gone; nothing will ever reference this ingest.
             gw().abandon(**job.created);
         }
-        release_claim();
+        // The request's claim went when it ended. Whatever the connection serves now holds a
+        // claim of its own, which this completion has no part in.
         return;
     }
     switch (job.op) {
@@ -1396,18 +1401,19 @@ void Connection::complete() noexcept {
     case ControlOp::Discard:
         if (req_.upload_id) {
             ++pending_;
-            deps().catalog.abort_upload(*req_.upload_id,
-                                        [this](core::ports::CatalogResult<void> result) noexcept {
-                                            --pending_;
-                                            if (phase_ != Phase::Request) {
-                                                return;
-                                            }
-                                            if (!result) {
-                                                fail_catalog(result.error());
-                                                return;
-                                            }
-                                            respond({.status = Status::NoContent}, {});
-                                        });
+            deps().catalog.abort_upload(
+                *req_.upload_id,
+                [this, request = job.request](core::ports::CatalogResult<void> result) noexcept {
+                    --pending_;
+                    if (!serving(request)) {
+                        return;
+                    }
+                    if (!result) {
+                        fail_catalog(result.error());
+                        return;
+                    }
+                    respond({.status = Status::NoContent}, {});
+                });
         }
         return;
     case ControlOp::Playlist:
@@ -1420,7 +1426,6 @@ void Connection::complete() noexcept {
 
 void Connection::on_offset(ControlJob job) noexcept {
     if (!job.offset || !*job.offset) {
-        release_claim();
         fail_storage(job.offset ? job.offset->error() : StorageError::Permanent);
         return;
     }
@@ -1432,13 +1437,12 @@ void Connection::on_offset(ControlJob job) noexcept {
     const std::uint64_t* offset = get(req_.upload_offset);
     const core::UploadId* id = get(req_.upload_id);
     const core::ports::StoredUpload* stored = get(req_.upload);
-    if (offset == nullptr || id == nullptr || stored == nullptr) {
-        release_claim();
+    const auto token = claim_.token_of(request_seq_);
+    if (offset == nullptr || id == nullptr || stored == nullptr || !token) {
         fail(Status::InternalServerError);
         return;
     }
     if (*offset != durable) {
-        release_claim();
         fail(Status::Conflict, durable);
         return;
     }
@@ -1446,15 +1450,13 @@ void Connection::on_offset(ControlJob job) noexcept {
     // commit or a HEAD after this request agrees with both.
     ++pending_;
     deps().catalog.record_progress(
-        *id, stored->upload.video_id, durable,
-        [this, durable](core::ports::CatalogResult<void> result) noexcept {
+        *id, *token, stored->upload.video_id, durable,
+        [this, durable, request = request_seq_](core::ports::CatalogResult<void> result) noexcept {
             --pending_;
-            if (phase_ != Phase::Request) {
-                release_claim();
+            if (!serving(request)) {
                 return;
             }
             if (!result) {
-                release_claim();
                 fail_catalog(result.error());
                 return;
             }
@@ -1695,6 +1697,10 @@ void Connection::record_response(http::Status status) noexcept {
 }
 
 void Connection::finish_request() noexcept {
+    // A request gives its claim back when it ends, by whichever path it ends.
+    release_claim();
+    // Only the request that just ended could have held one.
+    assert(!claim_.held() && "a request finished while a claim was held");
     req_ = Request{};
     staging_.clear();
     staging_head_ = 0;
@@ -1783,11 +1789,7 @@ void Connection::release_client_holds() noexcept {
 }
 
 void Connection::release_claim() noexcept {
-    const core::UploadId* id = get(req_.upload_id);
-    if (req_.claimed && id != nullptr) {
-        deps().catalog.release_upload(*id);
-    }
-    req_.claimed = false;
+    claim_.release(request_seq_);
 }
 
 void Connection::linger() noexcept {
@@ -1817,7 +1819,8 @@ void Connection::close() noexcept {
         session_->abort();
         session_.reset();
     }
-    release_claim();
+    // Whoever holds it: nothing on this connection will be served again.
+    claim_.release_any();
     release_slot();
     release_client_holds();
     settle_upload_bytes();

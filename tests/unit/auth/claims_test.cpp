@@ -55,7 +55,7 @@ TEST_F(ClaimsTest, ATokenThatMeetsEveryRuleYieldsItsClaims) {
 }
 
 TEST_F(ClaimsTest, TheIssuerMustMatchExactly) {
-    EXPECT_EQ(error_of(test_payload({{"iss", R"("https://id.askedin.test/")"}})),
+    EXPECT_EQ(error_of(test_payload({{"iss", R"("https://id.example.com/")"}})),
               AuthError::WrongIssuer);
     EXPECT_EQ(error_of(test_payload({{"iss", R"("https://evil.test")"}})), AuthError::WrongIssuer);
     EXPECT_EQ(error_of(test_payload({{"iss", std::nullopt}})), AuthError::WrongIssuer);
@@ -63,15 +63,16 @@ TEST_F(ClaimsTest, TheIssuerMustMatchExactly) {
 }
 
 TEST_F(ClaimsTest, TheAudienceMayBeOneStringOrAnArrayHoldingOurs) {
-    EXPECT_TRUE(check(test_payload({{"aud", R"(["other","askedin-platform"])"}})).has_value());
-    EXPECT_EQ(error_of(test_payload({{"aud", R"("askedin-platform-stage")"}})),
+    EXPECT_TRUE(check(test_payload({{"aud", R"(["other","ulw-test-audience"])"}})).has_value());
+    EXPECT_EQ(error_of(test_payload({{"aud", R"("ulw-test-audience-stage")"}})),
               AuthError::WrongAudience);
     EXPECT_EQ(error_of(test_payload({{"aud", R"(["other","another"])"}})),
               AuthError::WrongAudience);
     EXPECT_EQ(error_of(test_payload({{"aud", "[]"}})), AuthError::WrongAudience);
     EXPECT_EQ(error_of(test_payload({{"aud", std::nullopt}})), AuthError::WrongAudience);
-    EXPECT_EQ(error_of(test_payload({{"aud", R"(["askedin-platform",7])"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(test_payload({{"aud", R"({"aud":"askedin-platform"})"}})),
+    EXPECT_EQ(error_of(test_payload({{"aud", R"(["ulw-test-audience",7])"}})),
+              AuthError::Malformed);
+    EXPECT_EQ(error_of(test_payload({{"aud", R"({"aud":"ulw-test-audience"})"}})),
               AuthError::Malformed);
 }
 
@@ -87,7 +88,7 @@ TEST_F(ClaimsTest, NotBeforeAllowsTheSkewAndNotOneSecondMore) {
     EXPECT_TRUE(check(test_payload({{"nbf", numeric_date(-3600)}})).has_value());
 }
 
-// Askedin's contract asks for exp and nbf only (docs/integration/auth.md), so issued-at is
+// The token contract asks for exp and nbf only (docs/integration/auth.md), so issued-at is
 // never consulted: a token minted by a skewed issuer clock still verifies while nbf/exp allow.
 TEST_F(ClaimsTest, IssuedAtIsNotConsultedWhateverItSays) {
     EXPECT_TRUE(check(test_payload({{"iat", numeric_date(30)}})).has_value());
@@ -110,17 +111,11 @@ TEST_F(ClaimsTest, ExpiryIsRequiredAndMustBeAnIntegerTheClockCanHold) {
     EXPECT_EQ(error_of(test_payload({{"nbf", R"("soon")"}})), AuthError::Malformed);
 }
 
-TEST_F(ClaimsTest, TheSubjectFallsBackToAskedinsIdClaim) {
-    const auto by_string = check(test_payload({{"sub", std::nullopt}, {"id", R"("u-42")"}}));
-    ASSERT_TRUE(by_string.has_value());
-    EXPECT_EQ(by_string->subject.view(), "u-42");
-    const auto by_number =
-        check(test_payload({{"sub", std::nullopt}, {"id", "18446744073709551615"}}));
-    ASSERT_TRUE(by_number.has_value());
-    EXPECT_EQ(by_number->subject.view(), "18446744073709551615");
-    const auto sub_wins = check(test_payload({{"id", R"("u-42")"}}));
-    ASSERT_TRUE(sub_wins.has_value());
-    EXPECT_EQ(sub_wins->subject.view(), "alice");
+TEST_F(ClaimsTest, NoOtherClaimStandsInForAMissingSubject) {
+    EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}, {"id", R"("u-42")"}})),
+              AuthError::MissingSubject);
+    EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}, {"user_id", R"("u-42")"}})),
+              AuthError::MissingSubject);
 }
 
 TEST_F(ClaimsTest, WithNoBroadcasterRuleEveryTokenMayBroadcast) {
@@ -154,8 +149,6 @@ TEST_F(ClaimsTest, TheBroadcasterRuleTakesAStringAnArrayHoldingItOrTrue) {
 TEST_F(ClaimsTest, AnAbsentOrEmptySubjectIsMissing) {
     EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}})), AuthError::MissingSubject);
     EXPECT_EQ(error_of(test_payload({{"sub", R"("")"}})), AuthError::MissingSubject);
-    EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}, {"id", R"("")"}})),
-              AuthError::MissingSubject);
 }
 
 TEST_F(ClaimsTest, ASubjectOutsideTheUserIdFormIsMalformed) {
@@ -163,9 +156,60 @@ TEST_F(ClaimsTest, ASubjectOutsideTheUserIdFormIsMalformed) {
     EXPECT_EQ(error_of(test_payload({{"sub", R"("alice\nsmith")"}})), AuthError::Malformed);
     EXPECT_EQ(error_of(test_payload({{"sub", '"' + std::string(129, 'a') + '"'}})),
               AuthError::Malformed);
+    // RFC 7519 makes `sub` a string, so a number there is malformed.
     EXPECT_EQ(error_of(test_payload({{"sub", "42"}})), AuthError::Malformed);
-    EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}, {"id", "-1"}})), AuthError::Malformed);
     EXPECT_TRUE(check(test_payload({{"sub", '"' + std::string(128, 'a') + '"'}})).has_value());
+}
+
+// ULW_JWT_SUBJECT_CLAIM: an identity provider that names its users in a claim of its own.
+class ConfiguredSubjectClaimTest : public ClaimsTest {
+protected:
+    [[nodiscard]] core::ports::VerifyResult check_with(std::string_view claim,
+                                                       const std::string& json) const {
+        ClaimRules rules = kRules;
+        rules.subject_claim = std::string(claim);
+        return check_claims(json, rules, clock_.wall_now());
+    }
+};
+
+TEST_F(ConfiguredSubjectClaimTest, TheConfiguredClaimNamesTheUser) {
+    const auto by_string = check_with("user_id", test_payload({{"user_id", R"("u-42")"}}));
+    ASSERT_TRUE(by_string.has_value());
+    EXPECT_EQ(by_string->subject.view(), "u-42");
+    const auto by_number =
+        check_with("user_id", test_payload({{"user_id", "18446744073709551615"}}));
+    ASSERT_TRUE(by_number.has_value());
+    EXPECT_EQ(by_number->subject.view(), "18446744073709551615");
+    // A namespaced claim, as some providers name their custom ones.
+    const auto namespaced = check_with("https://example.com/uid",
+                                       test_payload({{"https://example.com/uid", R"("b7")"}}));
+    ASSERT_TRUE(namespaced.has_value());
+    EXPECT_EQ(namespaced->subject.view(), "b7");
+}
+
+TEST_F(ConfiguredSubjectClaimTest, SubDoesNotStandInForTheConfiguredClaim) {
+    // test_payload carries sub "alice"; with another claim configured it is not the subject.
+    const auto r = check_with("user_id", test_payload());
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error(), AuthError::MissingSubject);
+    const auto chosen = check_with("user_id", test_payload({{"user_id", R"("u-42")"}}));
+    ASSERT_TRUE(chosen.has_value());
+    EXPECT_EQ(chosen->subject.view(), "u-42");
+}
+
+TEST_F(ConfiguredSubjectClaimTest, TheConfiguredClaimIsCheckedAsSubIs) {
+    const auto error_with = [this](const std::string& value) {
+        const auto r = check_with("user_id", test_payload({{"user_id", value}}));
+        EXPECT_FALSE(r.has_value()) << value;
+        return r ? AuthError::Malformed : r.error();
+    };
+    EXPECT_EQ(error_with(R"("")"), AuthError::MissingSubject);
+    EXPECT_EQ(error_with("-1"), AuthError::Malformed);
+    EXPECT_EQ(error_with("1.5"), AuthError::Malformed);
+    EXPECT_EQ(error_with("18446744073709551616"), AuthError::Malformed);
+    EXPECT_EQ(error_with("true"), AuthError::Malformed);
+    EXPECT_EQ(error_with(R"({"id":"u-42"})"), AuthError::Malformed);
+    EXPECT_EQ(error_with(R"("alice smith")"), AuthError::Malformed);
 }
 
 TEST_F(ClaimsTest, EmailIsOptionalButMustBeAPrintableString) {

@@ -111,3 +111,6 @@ the listener is up (readiness for traffic is `/readyz`'s), and `WATCHDOG=1` from
 - Several replicas report the same `jobs_oldest_queued_seconds`; dashboards take the max.
 - Adding a thread that counts means an atomic or a shard of its own, never a shared counter
   written from two threads.
+- 2026-10-03: fields are now counted at their exact escaped size, not the worst case, which had
+  left out a 150-byte error from a line with room for it; a field still goes in whole or not at
+  all. See `ops/src/log.cpp`.

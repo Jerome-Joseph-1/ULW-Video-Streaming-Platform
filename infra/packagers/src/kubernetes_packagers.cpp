@@ -24,11 +24,30 @@ namespace {
 using core::ports::PackagerError;
 using core::ports::PackagerState;
 
-constexpr std::string_view kNamespace = "${ULW_NAMESPACE}";
-constexpr std::string_view kImageTag = "${ULW_IMAGE_TAG}";
 constexpr std::string_view kStreamId = "${ULW_STREAM_ID}";
 constexpr std::string_view kOwner = "${ULW_STREAM_OWNER}";
-constexpr std::array kPlaceholders{kNamespace, kImageTag, kStreamId, kOwner};
+
+// JobValues' placeholders, by field.
+struct Placeholder {
+    std::string_view text;
+    std::string JobValues::*field;
+};
+constexpr std::array kValues{
+    Placeholder{.text = "${LIVE_NAMESPACE}", .field = &JobValues::namespace_name},
+    Placeholder{.text = "${LIVE_PACKAGER_IMAGE_TAG}", .field = &JobValues::image_tag},
+    Placeholder{.text = "${IMAGE_PULL_POLICY}", .field = &JobValues::pull_policy},
+    Placeholder{.text = "${STORAGE}", .field = &JobValues::storage},
+    Placeholder{.text = "${R2_ACCOUNT_ID}", .field = &JobValues::r2_account_id},
+    Placeholder{.text = "${S3_ENDPOINT}", .field = &JobValues::s3_endpoint},
+    Placeholder{.text = "${BUCKET}", .field = &JobValues::bucket},
+    Placeholder{.text = "${LIVE_PACKAGER_SECRET}", .field = &JobValues::packager_secret},
+};
+
+bool known_placeholder(std::string_view at) {
+    return at.starts_with(kStreamId) || at.starts_with(kOwner) ||
+           std::ranges::any_of(kValues,
+                               [&](const Placeholder& p) { return at.starts_with(p.text); });
+}
 
 // The API server answers from etcd in milliseconds; 10 s is a server or a path that is gone,
 // and a caller waiting on a start can still report it while the owner waits.
@@ -168,9 +187,7 @@ std::expected<void, std::string> check_job_template(std::string_view text) {
     }
     for (std::size_t at = text.find("${"); at != std::string_view::npos;
          at = text.find("${", at + 2)) {
-        const bool known = std::ranges::any_of(
-            kPlaceholders, [&](std::string_view p) { return text.substr(at).starts_with(p); });
-        if (!known) {
+        if (!known_placeholder(text.substr(at))) {
             const std::size_t end = text.find('}', at);
             return std::unexpected(
                 "the job template has a placeholder this does not fill: " +
@@ -180,9 +197,59 @@ std::expected<void, std::string> check_job_template(std::string_view text) {
     return {};
 }
 
-std::string fill_job_template(std::string_view text, std::string_view namespace_name,
-                              std::string_view image_tag, std::string_view stream,
-                              std::string_view owner) {
+std::expected<void, std::string> check_job_values(const JobValues& values) {
+    const auto lower_digit = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    };
+    const auto label = [&](std::string_view s) {
+        return !s.empty() && s.size() <= 63 && s.front() != '-' && s.back() != '-' &&
+               std::ranges::all_of(s, [&](char c) { return lower_digit(c) || c == '-'; });
+    };
+    // A DNS subdomain, as a Secret's or a bucket's name is.
+    const auto subdomain = [&](std::string_view s) {
+        return !s.empty() && s.size() <= 253 && lower_digit(s.front()) && lower_digit(s.back()) &&
+               std::ranges::all_of(s,
+                                   [&](char c) { return lower_digit(c) || c == '-' || c == '.'; });
+    };
+    if (!label(values.namespace_name)) {
+        return std::unexpected("the namespace is not a DNS label");
+    }
+    const bool tag_ok = !values.image_tag.empty() && values.image_tag.size() <= 256 &&
+                        std::ranges::all_of(values.image_tag, [](char c) {
+                            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                   (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' ||
+                                   c == ':' || c == '@';
+                        });
+    if (!tag_ok) {
+        return std::unexpected("the image tag is not [A-Za-z0-9._:@-]");
+    }
+    if (values.pull_policy != "Always" && values.pull_policy != "IfNotPresent" &&
+        values.pull_policy != "Never") {
+        return std::unexpected("the pull policy is not Always, IfNotPresent or Never");
+    }
+    if (values.storage != "r2" && values.storage != "minio") {
+        return std::unexpected("a packager Job's store is r2 or minio");
+    }
+    if (!std::ranges::all_of(values.r2_account_id, lower_digit)) {
+        return std::unexpected("the R2 account id is not [a-z0-9]");
+    }
+    // Inside double quotes in the template: nothing that ends or escapes the scalar.
+    const bool endpoint_ok = std::ranges::all_of(
+        values.s3_endpoint, [](char c) { return c > ' ' && c < 0x7f && c != '"' && c != '\\'; });
+    if (!endpoint_ok) {
+        return std::unexpected("the S3 endpoint holds a character a YAML scalar cannot");
+    }
+    if (!subdomain(values.bucket)) {
+        return std::unexpected("the bucket is not [a-z0-9.-]");
+    }
+    if (!subdomain(values.packager_secret)) {
+        return std::unexpected("the packager's Secret is not a DNS subdomain");
+    }
+    return {};
+}
+
+std::string fill_job_template(std::string_view text, const JobValues& values,
+                              std::string_view stream, std::string_view owner) {
     std::string out;
     out.reserve(text.size() + 256);
     while (!text.empty()) {
@@ -192,12 +259,11 @@ std::string fill_job_template(std::string_view text, std::string_view namespace_
             break;
         }
         text.remove_prefix(at);
-        if (text.starts_with(kNamespace)) {
-            out.append(namespace_name);
-            text.remove_prefix(kNamespace.size());
-        } else if (text.starts_with(kImageTag)) {
-            out.append(image_tag);
-            text.remove_prefix(kImageTag.size());
+        const auto* value = std::ranges::find_if(
+            kValues, [&](const Placeholder& p) { return text.starts_with(p.text); });
+        if (value != kValues.end()) {
+            out.append(values.*(value->field));
+            text.remove_prefix(value->text.size());
         } else if (text.starts_with(kStreamId)) {
             out.append(stream);
             text.remove_prefix(kStreamId.size());
@@ -235,8 +301,8 @@ public:
             });
             return;
         }
-        std::string job = fill_job_template(config_.job_template, config_.namespace_name,
-                                            config_.image_tag, stream, spec.owner.view());
+        std::string job =
+            fill_job_template(config_.job_template, config_.job, stream, spec.owner.view());
         create_job(stream, std::move(job), spec.passphrase, std::move(done));
     }
 
@@ -318,10 +384,10 @@ private:
     };
 
     [[nodiscard]] std::string secrets_path() const {
-        return "/api/v1/namespaces/" + config_.namespace_name + "/secrets";
+        return "/api/v1/namespaces/" + config_.job.namespace_name + "/secrets";
     }
     [[nodiscard]] std::string jobs_path() const {
-        return "/apis/batch/v1/namespaces/" + config_.namespace_name + "/jobs";
+        return "/apis/batch/v1/namespaces/" + config_.job.namespace_name + "/jobs";
     }
     [[nodiscard]] std::string job_path(std::string_view stream) const {
         return jobs_path() + "/" + std::string(stream);
@@ -519,23 +585,8 @@ KubernetesPackagers::create(net::IReactor& reactor, curl::Multi& multi, net::Off
     if (!config.api_url.starts_with("https://") && !config.api_url.starts_with("http://")) {
         return std::unexpected("the API server's URL must be http:// or https://");
     }
-    const auto label = [](std::string_view s) {
-        return !s.empty() && s.size() <= 63 && s.front() != '-' && s.back() != '-' &&
-               std::ranges::all_of(s, [](char c) {
-                   return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
-               });
-    };
-    if (!label(config.namespace_name)) {
-        return std::unexpected("the namespace is not a DNS label");
-    }
-    const bool tag_ok = !config.image_tag.empty() && config.image_tag.size() <= 256 &&
-                        std::ranges::all_of(config.image_tag, [](char c) {
-                            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                                   (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' ||
-                                   c == ':' || c == '@';
-                        });
-    if (!tag_ok) {
-        return std::unexpected("the image tag is not [A-Za-z0-9._:@-]");
+    if (auto values = check_job_values(config.job); !values) {
+        return std::unexpected(std::move(values.error()));
     }
     if (auto checked = check_job_template(config.job_template); !checked) {
         return std::unexpected(std::move(checked.error()));

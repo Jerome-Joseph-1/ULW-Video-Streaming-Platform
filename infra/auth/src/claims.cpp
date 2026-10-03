@@ -76,30 +76,27 @@ std::expected<void, AuthError> check_audience(const core::json::Value& claims,
     return std::unexpected(AuthError::WrongAudience);
 }
 
-// `sub`, or Askedin's own `id` where a token has no `sub`. Nothing pins down the JSON type of
-// `id`, so a non-negative integer is taken in its decimal form as well as a string.
-std::expected<core::UserId, AuthError> subject_of(const core::json::Value& claims) {
+// The claim `subject_claim` names (`sub` by default). `sub` is a string (RFC 7519 section
+// 4.1.2); a claim of the identity provider's own may also hold a non-negative integer, which is
+// taken in its decimal form, since nothing pins down its JSON type.
+std::expected<core::UserId, AuthError> subject_of(const core::json::Value& claims,
+                                                  std::string_view subject_claim) {
     std::array<char, 20> digits{};
     std::string_view text;
-    if (const core::json::Value* sub = claims.find("sub")) {
-        const std::optional<std::string_view> s = sub->as_string();
-        if (!s) {
-            return std::unexpected(AuthError::Malformed);
-        }
-        text = *s;
-    } else if (const core::json::Value* id = claims.find("id")) {
-        if (const std::optional<std::string_view> s = id->as_string()) {
-            text = *s;
-        } else if (const std::optional<std::uint64_t> n = id->as_u64()) {
-            // 20 digits hold any 64-bit value, so the conversion cannot run out of room.
-            const std::to_chars_result r =
-                std::to_chars(digits.data(), digits.data() + digits.size(), *n);
-            text = {digits.data(), static_cast<std::size_t>(r.ptr - digits.data())};
-        } else {
-            return std::unexpected(AuthError::Malformed);
-        }
-    } else {
+    const core::json::Value* subject = claims.find(subject_claim);
+    if (subject == nullptr) {
         return std::unexpected(AuthError::MissingSubject);
+    }
+    if (const std::optional<std::string_view> s = subject->as_string()) {
+        text = *s;
+    } else if (const std::optional<std::uint64_t> n = subject->as_u64();
+               n && subject_claim != "sub") {
+        // 20 digits hold any 64-bit value, so the conversion cannot run out of room.
+        const std::to_chars_result r =
+            std::to_chars(digits.data(), digits.data() + digits.size(), *n);
+        text = {digits.data(), static_cast<std::size_t>(r.ptr - digits.data())};
+    } else {
+        return std::unexpected(AuthError::Malformed);
     }
     const auto user = core::UserId::parse(text);
     if (!user) {
@@ -185,7 +182,7 @@ VerifyResult check_claims(std::string_view payload, const ClaimRules& rules, cor
         }
     }
 
-    auto subject = subject_of(*doc);
+    auto subject = subject_of(*doc, rules.subject_claim);
     if (!subject) {
         return std::unexpected(subject.error());
     }

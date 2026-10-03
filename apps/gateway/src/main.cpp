@@ -220,6 +220,7 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
 std::expected<void, std::string> make_verifier(const gateway::Config& config, Services& s) {
     infra::auth::ClaimRules rules{.issuer = config.jwt_issuer,
                                   .audience = config.jwt_audience,
+                                  .subject_claim = config.jwt_subject_claim,
                                   .broadcaster_claim = config.live.broadcaster_claim,
                                   .broadcaster_value = config.live.broadcaster_value};
     if (!config.dev_jwks_file.empty()) {
@@ -249,6 +250,32 @@ std::expected<void, std::string> make_verifier(const gateway::Config& config, Se
                             std::chrono::duration_cast<std::chrono::hours>(age).count()}});
             }});
     return {};
+}
+
+// The Job template's values (deploy/kubernetes/live-packager/job.yaml): the packagers'
+// namespace, image and Secret, and the gateway's own store.
+infra::packagers::JobValues live_job_values(const gateway::Config& config) {
+    const gateway::LiveConfig& live = config.live;
+    infra::packagers::JobValues values;
+    values.namespace_name = live.k8s_namespace;
+    values.image_tag = live.image_tag;
+    values.pull_policy = live.pull_policy;
+    values.bucket = config.bucket;
+    values.packager_secret = live.packager_secret;
+    switch (config.storage) {
+    case gateway::StorageBackend::R2:
+        values.storage = "r2";
+        values.r2_account_id = config.storage_location;
+        break;
+    case gateway::StorageBackend::Minio:
+        values.storage = "minio";
+        values.s3_endpoint = config.storage_location;
+        break;
+    // Refused with the kubernetes runtime (config.cpp); left empty, the Job is refused too.
+    case gateway::StorageBackend::Filesystem:
+        break;
+    }
+    return values;
 }
 
 std::expected<void, std::string> make_live(const gateway::Config& config, Services& s) {
@@ -283,11 +310,10 @@ std::expected<void, std::string> make_live(const gateway::Config& config, Servic
         auto packagers = infra::packagers::KubernetesPackagers::create(
             *s.reactor, *s.live_multi, *s.pool, s.clock,
             {.api_url = live.k8s_api_url,
-             .namespace_name = live.k8s_namespace,
              .token_file = live.k8s_token_file,
              .ca_file = live.k8s_ca_file,
              .job_template = live.job_template,
-             .image_tag = live.image_tag});
+             .job = live_job_values(config)});
         if (!packagers) {
             return std::unexpected(std::move(packagers.error()));
         }

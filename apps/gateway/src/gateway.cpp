@@ -230,10 +230,10 @@ void Gateway::on_signal(net::Signal signal) noexcept {
     }
 }
 
-// After Askedin rotates its signing key, which withdraws the old one at once, its tokens must
-// stop verifying here as soon as the key set can be read rather than when the cache would next
-// refetch (ADR-0082). This requests the drop and starts the fetch, on the loop like any other;
-// the drop completes when a fetch succeeds, and until then the cached keys keep answering.
+// After the identity provider rotates its signing key, which withdraws the old one at once, its
+// tokens must stop verifying here as soon as the key set can be read rather than when the cache
+// would next refetch (ADR-0082). This requests the drop and starts the fetch, on the loop like any
+// other; the drop completes when a fetch succeeds, and until then the cached keys keep answering.
 void Gateway::drop_auth_caches() noexcept {
     deps_.verifier.drop_caches();
     ++counters_.auth_cache_drops;
@@ -416,6 +416,7 @@ std::string Gateway::render_metrics() {
              c.rejected_ip_rate);
     e.gauge("connections_current", "Connections open now.", connections_.size());
     e.gauge("uploads_in_flight", "Chunk uploads holding an admission slot.", upload_slots_);
+    e.gauge("catalog_claims_held", "Upload claims held by requests in flight.", claims_held_);
     e.counter("admission_rejections_total",
               "Chunk uploads refused a slot, for the user's limit or the process's.",
               c.admission_rejections);

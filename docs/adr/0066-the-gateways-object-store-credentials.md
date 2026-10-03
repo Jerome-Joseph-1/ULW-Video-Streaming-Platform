@@ -1,6 +1,6 @@
 # 0066. What the gateway's object-store credentials may do
 
-Status: Accepted
+Status: Accepted, amended by 0088 (the reaper's CronJob is in `deploy/kubernetes/base/upload-reaper`)
 Date: 2026-09-29
 
 ## Context

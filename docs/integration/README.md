@@ -1,7 +1,7 @@
 # Integration guide
 
-For Askedin's app and backend teams: everything needed to upload and play video through the ULW
-service, and where the realtime features stand. Each page cites the source it was checked
+For the teams building apps and backends on a ULW deployment: everything needed to upload and
+play video through the service, and where the realtime features stand. Each page cites the source it was checked
 against in HTML comments, for maintainers.
 
 ## What the service offers
@@ -9,10 +9,10 @@ against in HTML comments, for maintainers.
 - **Resumable uploads** of video files up to 50 GiB, in 8 MiB chunks, straight to object
   storage. An interrupted upload continues from the last durable byte.
 - **Transcoding** to HLS (fMP4, H.264 and AAC) at 1080p, 720p and 360p, never above the source.
-- **Playback** through rewritten HLS playlists; the segment bytes come from R2 over presigned
-  URLs and never pass through the service.
-- **Identity** from Askedin: the same JWT the apps already hold, verified against Askedin's
-  JWKS. There are no ULW accounts.
+- **Playback** through rewritten HLS playlists; the segment bytes come from the object store
+  (R2 or any S3-compatible store) over presigned URLs and never pass through the service.
+- **Identity** from the operator's identity provider: the same JWT the apps already hold,
+  verified against the provider's JWKS. There are no ULW accounts.
 - **Realtime** (chat, calls, live streams, end-to-end encryption): in progress; see the drafts.
 
 ## Pages
@@ -22,7 +22,7 @@ against in HTML comments, for maintainers.
 | [auth.md](auth.md) | Accepted tokens, the user id, rejections | Stable |
 | [uploads.md](uploads.md) | Upload endpoints, resume, limits, errors, a curl walkthrough | Stable |
 | [videos-and-playback.md](videos-and-playback.md) | Video states, playlists, presigned segments, CORS, players | Stable |
-| [operations-contract.md](operations-contract.md) | What the platform provides; health, readiness, metrics | Stable |
+| [operator-contract.md](operator-contract.md) | What the operator provides; settings, health, readiness, metrics | Stable |
 | [versioning.md](versioning.md) | Compatibility and how changes are announced | Stable (policy is a proposal) |
 | [changelog.md](changelog.md) | Changes to the Stable pages a client may have to act on | Stable |
 | [chat.md](chat.md) | WebSocket endpoint, envelope, resume, history and member lists | Draft until phase 2 |
@@ -36,21 +36,20 @@ at their top merges.
 
 ## Base URLs and environments
 
-The ops team fills these in.
+Each deployment's operator fills these in for its apps; deploy/kubernetes/RUNBOOK.md has where
+each value is set (most of them in the environment's `config.env`).
 
-| | Stage | Prod |
-|---|---|---|
-| App origin (`<APP_ORIGIN>`) | `https://stage.askedin.com`, unconfirmed | `https://askedin.com`, `https://www.askedin.com` |
-| Video API (`$GW`) | `https://stage.askedin.com`, unconfirmed (paths `/api/v1/uploads`, `/api/v1/videos`, `/api/v1/live`) | `https://askedin.com`, `https://www.askedin.com` |
-| Segment host (R2) | `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` | same form, prod bucket |
-| Chat (`wss://<CHAT_HOST>/rt`) | not deployed yet | not deployed yet |
-| Token cookie | `auth_token_stage` | `auth_token` |
-| `JWT_ISSUER` | `https://auth-stage.askedin.com/auth`, unconfirmed ([auth.md](auth.md#askedin)) | `https://auth.askedin.com` |
-| `JWKS_URL` | `https://auth-stage.askedin.com/.well-known/jwks.json` | `https://auth.askedin.com/.well-known/jwks.json` |
-| `JWT_AUDIENCE` | `askedin-platform` | `askedin-platform` |
+| | Value |
+|---|---|
+| App origin (`<APP_ORIGIN>`) | The web app's origin, listed in `ALLOWED_ORIGINS`, e.g. `https://video.example.com` |
+| Video API (`$GW`) | The public host the routes answer (`PUBLIC_HOSTNAME`), paths `/api/v1/uploads`, `/api/v1/videos`, `/api/v1/live` |
+| Segment host | The object store the presigned URLs name: `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`, or `S3_ENDPOINT` |
+| Chat (`wss://<CHAT_HOST>/rt`) | The same public host, path `/rt` |
+| Token cookie | `AUTH_COOKIE` (default `auth_token`) |
+| `JWT_ISSUER`, `JWKS_URL`, `JWT_AUDIENCE` | The identity provider's ([auth.md](auth.md#configuring-an-identity-provider)) |
 
-The video API is routed on Askedin's shared Envoy Gateway by path prefix on each environment's
-app hosts above, so it answers on the app origin: a web page can call `/api/v1/...`
+The Kubernetes deployment routes the video API on the operator's Gateway by path prefix on the
+app's own host, so it answers on the app origin: a web page can call `/api/v1/...`
 same-origin with its cookie.
 
 ## Quickstart: upload a file and play it

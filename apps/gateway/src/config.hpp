@@ -19,7 +19,7 @@ namespace gateway {
 
 enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
 
-// Plain in the Askedin deployment, where Envoy terminates TLS in front of the gateway
+// Plain in the Kubernetes deployment, where Envoy terminates TLS in front of the gateway
 // (ADR-0001); TLS where the gateway faces clients itself.
 enum class Transport : std::uint8_t { Plain, Tls };
 
@@ -45,6 +45,10 @@ struct LiveConfig {
     std::string job_template_file;
     std::string job_template;
     std::string image_tag;
+    // ULW_LIVE_PACKAGER_PULL_POLICY and ULW_LIVE_PACKAGER_SECRET: the template's
+    // ${IMAGE_PULL_POLICY} and ${LIVE_PACKAGER_SECRET}; its store is the gateway's own.
+    std::string pull_policy = "IfNotPresent";
+    std::string packager_secret = "live-packager-secrets";
     std::string k8s_api_url = "https://kubernetes.default.svc";
     std::string k8s_namespace;
     std::string k8s_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token";
@@ -73,13 +77,17 @@ struct Config {
     std::string storage_location;
     std::string bucket;
     std::string database_url;
-    // Exactly one of the two: Askedin's JWKS, or a local key set for offline development.
+    // Exactly one of the two: the identity provider's JWKS, or a local key set for offline
+    // development.
     std::string jwks_url;
     std::string dev_jwks_file;
     // Its contents, read and checked by load_config.
     std::string dev_jwks;
     std::string jwt_issuer;
+    // Required with jwks_url; ops::kDevAudience by default with a local key set.
     std::string jwt_audience;
+    // ULW_JWT_SUBJECT_CLAIM: the claim that names the user, `sub` by default.
+    std::string jwt_subject_claim = "sub";
     // The size every chunk but an upload's last has, and the object store's part size.
     std::uint64_t chunk_size = std::uint64_t{8} << 20U;
     ops::Level log_level = ops::Level::Info;

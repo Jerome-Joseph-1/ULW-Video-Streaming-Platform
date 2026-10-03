@@ -1,0 +1,9 @@
+# One part of the base; deploy/kubernetes/RUNBOOK.md says what each part holds.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - httproute.yaml
+  - networkpolicy.yaml
+  - service.yaml
+  - serviceaccount.yaml

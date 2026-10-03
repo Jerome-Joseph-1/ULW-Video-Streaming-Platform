@@ -2,10 +2,10 @@
 """End-to-end checks of the VOD plane in the sandbox cluster (deploy/local/e2e-up.sh).
 
 Every request goes through Envoy's HTTPRoute at 127.0.0.1:18080 with a token minted by the
-mock auth-service, as a browser's would through askedin-gateway:
+mock auth-service, as a browser's would through an operator's Gateway:
 
   auth        each signing algorithm, the cookie, key rotation, refusals, and the
-              askedin-gateway stand-in replacing forged x-user-* headers with the token's
+              edge stand-in replacing forged x-user-* headers with the token's
   upload      a clip uploaded chunk by chunk, transcoded by the worker, reaching ready
   playback    the master and every media playlist through the route, and every init and media
               segment from the object store at the presigned URLs they carry, none from the
@@ -34,8 +34,8 @@ kubectl only ever runs against the sandbox: deploy/local/.state/kubeconfig with 
 kind-ulw-e2e, whose API server must be on 127.0.0.1, checked before anything runs. The
 caller's KUBECONFIG is ignored.
 
-Against a real deployment (deploy/askedin/RUNBOOK.md), ULW_E2E_URL names the Gateway
-(https://host) and ULW_E2E_TOKEN a token its auth-service issued. Only upload and playback may
+Against a real deployment (deploy/kubernetes/RUNBOOK.md), ULW_E2E_URL names the Gateway
+(https://host) and ULW_E2E_TOKEN a token its identity provider issued. Only upload and playback may
 run there, only when named, and nothing calls kubectl: the scenarios that delete pods, start
 pods or drive the mock auth-service are refused.
 """
@@ -63,7 +63,7 @@ SANDBOX_URL = "http://127.0.0.1:18080"
 # e2e-up.sh publishes MinIO here; presigned URLs name it minio:9000, as the pods do.
 SANDBOX_STORE = {"minio:9000": ("127.0.0.1", 19000)}
 REAL_TARGET_SCENARIOS = {"upload", "playback"}
-NAMESPACE = "apps-stage"
+NAMESPACE = "ulw"
 # The sandbox's Postgres container (e2e-up.sh), where the chat scenario opens a stream's chat.
 SANDBOX_PG = "ulw-e2e-pg"
 # A clip at 1280x720 transcodes to two rungs (720p, 360p) in well under a minute on the
@@ -164,7 +164,7 @@ def mint(subject, alg="ES256"):
     status, headers, data = request("POST", f"/mock-auth/token?sub={subject}&alg={alg}"
                                     f"&email={subject}@ulw-sandbox.test")
     check(status == 200, f"mint {alg}: {status} {data!r}")
-    check("auth_token_stage=" in headers.get("set-cookie", ""), "mint set no stage cookie")
+    check("auth_token=" in headers.get("set-cookie", ""), "mint set no cookie")
     return json.loads(data)["token"]
 
 
@@ -181,7 +181,7 @@ def kubectl(*args, check_rc=True):
 
 def sandbox_sql(sql):
     """Runs `sql` in the sandbox's Postgres as its superuser, as the RUNBOOK's statements run on
-    Askedin's; only ever against the sandbox, like kubectl."""
+    an operator's; only ever against the sandbox, like kubectl."""
     if not KUBECTL_ALLOWED:
         raise Refused("SQL is only run against the sandbox")
     result = subprocess.run(["docker", "exec", SANDBOX_PG, "psql", "-U", "postgres", "-qAt",
@@ -266,30 +266,30 @@ def commit_and_wait_ready(token, upload):
         time.sleep(2)
 
 
-def check_askedin_gateway_stand_in(subject, token):
-    """The askedin-gateway stand-in (deploy/local/cluster/askedin-identity.yaml) drops
-    x-user-* headers a client sends and injects the token's own; /askedin-service/whoami
-    echoes what arrived behind it."""
+def check_edge_stand_in(subject, token):
+    """The edge stand-in (deploy/local/cluster/edge-identity.yaml) drops x-user-* headers a
+    client sends and injects the token's own; /identity-echo/whoami echoes what arrived behind
+    it."""
     forged = {"x-user-id": "someone-else", "x-user-email": "someone-else@ulw-sandbox.test"}
-    status, _, data = request("GET", "/askedin-service/whoami", token, headers=forged)
+    status, _, data = request("GET", "/identity-echo/whoami", token, headers=forged)
     check(status == 200, f"whoami with a token: {status} {data!r}")
     seen = json.loads(data)
     check(seen == {"x-user-id": [subject], "x-user-email": [f"{subject}@ulw-sandbox.test"]},
           f"behind the stand-in, expected only the token's identity, got {seen}")
-    status, _, data = request("GET", "/askedin-service/whoami", headers=forged)
+    status, _, data = request("GET", "/identity-echo/whoami", headers=forged)
     check(status == 401, f"whoami with forged headers and no token: {status} {data!r}")
 
 
 def check_cookie_writes(token):
-    """The stage overlay's ULW_ALLOWED_ORIGINS lets the web app write with the cookie, as the
-    browser sends it: Origin on every POST, PATCH and DELETE (ADR-0078). Another page's
-    Origin is refused."""
-    cookie = f"auth_token_stage={token}"
+    """The sandbox's ULW_ALLOWED_ORIGINS (ALLOWED_ORIGINS in deploy/local/config.env) lets the
+    web app write with the cookie, as the browser sends it: Origin on every POST, PATCH and
+    DELETE (ADR-0078). Another page's Origin is refused."""
+    cookie = f"auth_token={token}"
     body = {"filename": "cookie.mp4", "size_bytes": 1, "content_type": "video/mp4"}
     status, _, data = request("POST", "/api/v1/uploads", body=body, cookie=cookie,
                               headers={"Origin": "https://elsewhere.example"})
     check(status == 403, f"cookie create from another origin: expected 403, got {status} {data!r}")
-    page = {"Origin": "https://stage.askedin.com", "Sec-Fetch-Site": "same-origin"}
+    page = {"Origin": "https://sandbox.ulw.test", "Sec-Fetch-Site": "same-origin"}
     status, _, data = request("POST", "/api/v1/uploads", body=body, cookie=cookie, headers=page)
     check(status == 201, f"cookie create from the web app: expected 201, got {status} {data!r}")
     upload_id = json.loads(data)["upload_id"]
@@ -305,7 +305,7 @@ def scenario_auth():
         status, _, _ = request("GET", missing, mint(subject, alg))
         check(status == 404, f"{alg} token: expected 404 for an unknown video, got {status}")
     token = mint(subject)
-    status, _, _ = request("GET", missing, cookie=f"auth_token_stage={token}")
+    status, _, _ = request("GET", missing, cookie=f"auth_token={token}")
     check(status == 404, f"cookie token: expected 404, got {status}")
     status, _, _ = request("GET", missing)
     check(status == 401, f"no token: expected 401, got {status}")
@@ -315,7 +315,7 @@ def scenario_auth():
     tampered = f"{signed}.{'B' if signature[0] == 'A' else 'A'}{signature[1:]}"
     status, _, _ = request("GET", missing, tampered)
     check(status == 401, f"tampered signature: expected 401, got {status}")
-    check_askedin_gateway_stand_in(subject, token)
+    check_edge_stand_in(subject, token)
     check_cookie_writes(token)
     # The live prefix reaches the gateway (its 401), not Envoy's unmatched-route 404.
     status, _, _ = request("GET", f"/api/v1/live/{uuid.uuid4().hex}/index.m3u8")

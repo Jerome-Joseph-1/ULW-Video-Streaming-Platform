@@ -1,0 +1,73 @@
+# A production environment: the base configured by config.env, with every image of this
+# repository pinned to a published commit (deploy/local/check-image-pins.py checks the rendered
+# overlay) and more room for the worker and for live streams (RUNBOOK.md, step 4).
+#   kubectl apply -k deploy/kubernetes/overlays/production
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+# The operator configuration, read by the component below and never applied itself.
+configMapGenerator:
+  - name: ulw-operator-config
+    envs:
+      - config.env
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"
+components:
+  - ../../components/operator-config
+  # Live streams through the gateway stay off until the operator turns them on (RUNBOOK.md,
+  # step 9): with egress applied and LIVE_BROADCASTER_CLAIM set, list
+  #   - ../../components/live-streams
+patches:
+  # The worker reserves two of the four cores its x264 threads can use, and 30 GiB of scratch
+  # takes sources up to 10 GiB (base/video-worker/deployment.yaml says how).
+  - target:
+      kind: Deployment
+      name: video-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "2"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/ephemeral-storage
+        value: 30Gi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/ephemeral-storage
+        value: 32Gi
+      - op: replace
+        path: /spec/template/spec/volumes/0/emptyDir/sizeLimit
+        value: 30Gi
+  # Two concurrent live streams where the base takes one: egress admits a stream only while 2 of
+  # its cores are idle under its 80% ceiling, so a 5-core limit admits two, and ~300 MB a stream
+  # (docs/adr/0053). Raise the limit by 2.5 cores per further concurrent stream.
+  - target:
+      kind: Deployment
+      name: livekit-egress
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 768Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "5"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 1536Mi
+  # Room for the two concurrent streams egress takes here (LIVE_MAX_STREAMS), one more
+  # restarting, and the Jobs of about an hour of streams (base/live-packager/resourcequota.yaml).
+  - target:
+      kind: ResourceQuota
+      name: live-packagers
+    patch: |-
+      - op: replace
+        path: /spec/hard
+        value:
+          count/jobs.batch: "600"
+          count/secrets: "604"
+          pods: "4"
+          requests.cpu: 400m
+          requests.memory: 1Gi
+          limits.cpu: "4"
+          limits.memory: 2048Mi

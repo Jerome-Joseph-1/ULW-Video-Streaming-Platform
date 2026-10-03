@@ -12,7 +12,7 @@
 -- Migrations run in a transaction, so the index cannot be built CONCURRENTLY: the build holds a
 -- SHARE lock on chat_rooms until the migration commits, and every statement that may write the
 -- table waits for it, which is every join of a closed room (kAdmits), every member listing and
--- every live chat opened. Deploy it off-peak (deploy/askedin/RUNBOOK.md).
+-- every live chat opened. Deploy it off-peak (deploy/kubernetes/RUNBOOK.md).
 ALTER TABLE chat_rooms ADD COLUMN recorded_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX chat_rooms_recorded_at ON chat_rooms (recorded_at, room_id);
 CREATE TABLE chat_rooms_forget_cursor (

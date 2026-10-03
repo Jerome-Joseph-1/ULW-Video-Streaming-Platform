@@ -233,8 +233,10 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
     const Limits limits = transcode_budget(media, out_dir);
     // What a checking child's failure means: its input is our output, so anything it refuses
     // is our output failing verification.
-    const std::array ours{out_dir};
-    const auto failed_check = [&ours](const ChildExit& child, std::string_view what) {
+    // `read` is what the checking child was given to open.
+    const auto failed_check = [](const ChildExit& child, std::string_view what,
+                                 const fs::path& read) {
+        const std::array ours{read};
         auto kind = refine(classify(child.exit_code, child.signal, child.ending)
                                .value_or(TranscodeFailure::Unverified),
                            child.exit_code, child.stderr_tail, ours);
@@ -254,7 +256,8 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
             return std::unexpected(spawn_error(std::move(child.error())));
         }
         if (child->exit_code != 0 || child->ending != Ending::Exited) {
-            return std::unexpected(failed_check(*child, "ffprobe " + rung.name));
+            return std::unexpected(
+                failed_check(*child, "ffprobe " + rung.name, out_dir / rung.name / "index.m3u8"));
         }
         auto keyframes = parse_keyframes(output);
         if (!keyframes || keyframes->empty()) {
@@ -275,7 +278,7 @@ TranscodeResult<void> FfmpegTranscoder::verify(const fs::path& out_dir, const Me
         return std::unexpected(spawn_error(std::move(child.error())));
     }
     if (child->exit_code != 0 || child->ending != Ending::Exited) {
-        return std::unexpected(failed_check(*child, "decode check"));
+        return std::unexpected(failed_check(*child, "decode check", out_dir / "master.m3u8"));
     }
     // -v error prints nothing at all for a clean decode.
     if (child->stderr_bytes != 0) {

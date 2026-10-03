@@ -158,7 +158,7 @@ answer `409` for an upload the reaper has already aborted.
 | Concurrent `PATCH`es per gateway instance | 448 | `503`, `Retry-After: 5` |
 | Requests per user, per gateway instance | 300 a minute, up to 300 at once | `429`, `Retry-After` until the next is allowed (at most 1 s once used up) |
 | Upload bytes per user, per gateway instance | 100 GiB a day, refilled evenly (1.2 MiB/s) | `429`, `Retry-After` until this `PATCH`'s `Content-Length` fits |
-| Requests in flight per client address before authentication, through Askedin's Envoy | 20 | `429`, `Retry-After: 1` |
+| Requests in flight per client address before authentication, through the operator's Envoy | 20 | `429`, `Retry-After: 1` |
 | Connections per client address, direct | 20 open, 10 new a second | Reset at accept, no response |
 | Connections per gateway instance | 448 | Closed at accept, no response |
 | Request head | Complete within 10 s | Connection closed |
@@ -184,7 +184,7 @@ evenly, so a client that waits `Retry-After` seconds finds the request allowed. 
 allowance is sized for two 50 GiB uploads a day; an ordinary uploader never meets the request
 allowance (a 100 Mbit/s uplink sends 90 chunks a minute).
 
-A client address is the connecting address, or behind Askedin's Envoy the address Envoy saw
+A client address is the connecting address, or behind the operator's Envoy the address Envoy saw
 (the gateway reads `X-Forwarded-For` from Envoy only; a client's own `X-Forwarded-For` entries
 are ignored). An IPv6 client counts by its /64. Through Envoy the address limit covers only
 requests not yet authenticated; once a token is verified the user's own limits apply instead,
