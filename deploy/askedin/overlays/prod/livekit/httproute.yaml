@@ -3,11 +3,6 @@
 # POST /whip/v1 starts a live stream's ingest session, PATCH and DELETE on the session's
 # /whip/v1/<id> trickle candidates and end it. Its server API (/twirp) stays inside the cluster:
 # only the call and stream services call it.
-#
-# Prod names its hostnames, Askedin's prod origins (docs/integration/auth.md, Askedin): stage's
-# route names none and so matches every hostname of the same askedin-gateway, and a route that
-# names the hostname takes precedence over it there, so prod's clients reach prod's LiveKit
-# whichever route is older. A call or publisher ticket for prod must name one of these hosts.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -20,6 +15,9 @@ spec:
   parentRefs:
     - name: askedin-gateway
       namespace: apps
+  # Askedin's prod origins (docs/integration/auth.md, Askedin): stage and prod share
+  # askedin-gateway, so a route without hostnames would also answer stage's. A call or
+  # publisher ticket for prod must name one of these hosts.
   hostnames:
     - askedin.com
     - www.askedin.com

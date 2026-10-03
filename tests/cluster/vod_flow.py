@@ -276,6 +276,24 @@ def check_askedin_gateway_stand_in(subject, token):
     check(status == 401, f"whoami with forged headers and no token: {status} {data!r}")
 
 
+def check_cookie_writes(token):
+    """The stage overlay's ULW_ALLOWED_ORIGINS lets the web app write with the cookie, as the
+    browser sends it: Origin on every POST, PATCH and DELETE (ADR-0078). Another page's
+    Origin is refused."""
+    cookie = f"auth_token_stage={token}"
+    body = {"filename": "cookie.mp4", "size_bytes": 1, "content_type": "video/mp4"}
+    status, _, data = request("POST", "/api/v1/uploads", body=body, cookie=cookie,
+                              headers={"Origin": "https://elsewhere.example"})
+    check(status == 403, f"cookie create from another origin: expected 403, got {status} {data!r}")
+    page = {"Origin": "https://stage.askedin.com", "Sec-Fetch-Site": "same-origin"}
+    status, _, data = request("POST", "/api/v1/uploads", body=body, cookie=cookie, headers=page)
+    check(status == 201, f"cookie create from the web app: expected 201, got {status} {data!r}")
+    upload_id = json.loads(data)["upload_id"]
+    status, _, data = request("DELETE", f"/api/v1/uploads/{upload_id}", cookie=cookie,
+                              headers=page)
+    check(status == 204, f"cookie cancel from the web app: expected 204, got {status} {data!r}")
+
+
 def scenario_auth():
     subject = f"auth-{uuid.uuid4().hex[:8]}"
     missing = f"/api/v1/videos/{unknown_video_id()}"
@@ -294,6 +312,10 @@ def scenario_auth():
     status, _, _ = request("GET", missing, tampered)
     check(status == 401, f"tampered signature: expected 401, got {status}")
     check_askedin_gateway_stand_in(subject, token)
+    check_cookie_writes(token)
+    # The live prefix reaches the gateway (its 401), not Envoy's unmatched-route 404.
+    status, _, _ = request("GET", f"/api/v1/live/{uuid.uuid4().hex}/index.m3u8")
+    check(status == 401, f"live playlist with no token: expected the gateway's 401, got {status}")
     # New kids are unknown to the gateway's cache: it must refetch the key set, not refuse.
     # It refetches for an unseen kid only 10 s after its last fetch (kUnseenKidFetchSpacing in
     # infra/auth/src/jwks_verifier.cpp), and this scenario's first requests just made one; a
