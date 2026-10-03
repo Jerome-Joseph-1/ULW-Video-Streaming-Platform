@@ -76,8 +76,12 @@ test('end-to-end encrypted chat: the server holds only ciphertext', async () => 
   const { alice, bob } = pages;
   await alice.locator(`#rooms li[data-room="${ROOM.encrypted}"]`).click();
   await bob.locator(`#rooms li[data-room="${ROOM.encrypted}"]`).click();
-  await expect(alice.locator('#e2ee-banner')).toContainText('encrypted to', { timeout: 30_000 });
-  await expect(bob.locator('#e2ee-banner')).toContainText('encrypted to', { timeout: 30_000 });
+  // Both devices in the group (MLS: alice starts it, bob asks, alice adds him and he joins).
+  for (const page of [alice, bob]) {
+    await page.waitForFunction((room) => window.demo.e2ee?.[room]?.().complete === true, ROOM.encrypted, { timeout: 60_000 });
+  }
+  const label = await alice.locator('#e2ee-banner').textContent();
+  test.info().annotations.push({ type: 'e2ee', description: label.includes('MLS (RFC 9420)') ? 'MLS (OpenMLS in WebAssembly)' : 'the stand-in cipher (no MLS client in this build)' });
   const secret = `the launch code is ${Date.now()}`;
   await alice.locator('#message').fill(secret);
   await alice.locator('#message').press('Enter');
@@ -85,10 +89,11 @@ test('end-to-end encrypted chat: the server holds only ciphertext', async () => 
   const stored = await bob.evaluate((room) => window.demo.roomText(room), ROOM.encrypted);
   const mine = stored.find((m) => m.text === secret);
   expect(mine.sender).toBe('alice');
-  // The body chat stored and relayed, decoded: no plaintext in it.
-  const body = Buffer.from(mine.raw, 'base64url').toString('utf8');
-  expect(body).not.toContain(secret);
-  expect(JSON.parse(body).t).toBe('e2ee');
+  // The body chat stored and relayed: no plaintext in it.
+  const body = Buffer.from(mine.raw, 'base64url');
+  expect(body.toString('latin1')).not.toContain(secret);
+  // And the sender's own window shows it too (from what it sent: MLS cannot decrypt its own).
+  await expect(alice.locator('#messages')).toContainText(secret);
 });
 
 test('a 1:1 call rings, is answered, and ends', async () => {
@@ -135,7 +140,15 @@ test('a group call', async () => {
     test.info().annotations.push({ type: 'skip', description: "this build's chat has no group calls (feat/group-calls)" });
     return;
   }
-  for (const page of [bob, carol]) await page.locator('#groups button[data-group-call]').first().click();
+  // Joining may ring the others (a group call's ring); answering joins it as the button does.
+  for (const page of [bob, carol]) {
+    if (await page.locator('#ring').isVisible().catch(() => false) ||
+        await page.locator('#ring').waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false)) {
+      await page.locator('#answer').click();
+    } else {
+      await page.locator('#groups button[data-group-call]').first().click();
+    }
+  }
   for (const page of [alice, bob, carol]) {
     await page.waitForFunction(() => window.demo.call.remotes === 2 && window.demo.call.remoteVideo === 2, null, { timeout: 40_000 });
   }
