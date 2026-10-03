@@ -57,9 +57,10 @@ TEST_F(LiveRecordingsTest, AStreamBecomesAVideoInProcessingWithAQueuedTranscodeJ
 
     EXPECT_EQ(recordings.find("s1"), recorded);
     EXPECT_EQ(scalar(*conn_,
-                     "SELECT concat_ws(' ', owner_id, state, title) FROM videos WHERE id = $1",
+                     "SELECT concat_ws(' ', owner_id, state, version, title) FROM videos "
+                     "WHERE id = $1",
                      Params{}.add_uuid(first.video.uuid())),
-              "auth0|streamer processing Live stream s1");
+              "auth0|streamer processing 1 Live stream s1");
     EXPECT_EQ(scalar(*conn_,
                      "SELECT concat_ws(' ', kind, state, source_key, request_id) FROM jobs "
                      "WHERE video_id = $1",
