@@ -46,7 +46,7 @@ spec:
           localhostProfile: profiles/ulw-worker.json
       containers:
         - name: worker
-          image: git.askedin.com/askedin/askedin-monorepo/video-worker:development
+          image: ghcr.io/jerome-joseph-1/ulw-video-worker:main
           imagePullPolicy: Always
           env:
             - name: ULW_STORAGE

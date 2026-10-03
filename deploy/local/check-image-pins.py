@@ -9,8 +9,8 @@ Every `image:` value in the files (Kubernetes manifests, compose, kind and Woodp
 must carry @sha256:<64 hex>, with these exceptions, each only where it can occur:
 
   --askedin  what Askedin runs (deploy/askedin): this repository's own builds,
-             git.askedin.com/askedin/askedin-monorepo/..., which Woodpecker pushes under the
-             branch's name (deploy/askedin/woodpecker.yml) and the overlays follow by that name.
+             ghcr.io/jerome-joseph-1/ulw-..., which .github/workflows/publish-images.yml pushes
+             under the commit's SHA and `main`, and the overlays follow by `main`.
   --host     what the host runs directly (compose.yaml, kind.yaml): ulw/..., the sandbox's own
              builds, never pulled.
   --sandbox  the sandbox's kustomizations as rendered: ulw/... likewise; and an upstream image is
@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tools"))
 from pathguard import inside  # noqa: E402
 
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
-MONOREPO = "git.askedin.com/askedin/askedin-monorepo/"
+OWN_BUILD = "ghcr.io/jerome-joseph-1/ulw-"
 SANDBOX_BUILD = "ulw/"
 
 
@@ -66,7 +66,7 @@ def check(askedin, host, sandbox, tags: set[str]) -> list[str]:
     errors = []
     for path in askedin:
         for image in file_images(path):
-            if not image.startswith(MONOREPO) and not DIGEST.search(image):
+            if not image.startswith(OWN_BUILD) and not DIGEST.search(image):
                 errors.append(f"{path}: {image} is not pinned by digest (@sha256:...)")
     for path in host:
         for image in file_images(path):

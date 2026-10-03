@@ -1,3 +1,9 @@
+# Superseded for images: the overlays now pull ghcr.io/jerome-joseph-1/ulw-<service>, which
+# this repository's .github/workflows/publish-images.yml builds, checks and pushes from main
+# (RUNBOOK.md, step 4). The image steps below push to git.askedin.com, which no overlay names any
+# more; only `rollout-restart` still matters, to roll the deployments onto a new `:main`. Kept
+# for Askedin, who may still run it.
+#
 # Builds and pushes the images (video-gateway, video-worker, chat, live-packager), then restarts
 # the deployments that run them. It never applies a manifest: ArgoCD owns those, from master
 # (namespace apps) and development (apps-stage). The overlays name each image by the branch tag

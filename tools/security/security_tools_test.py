@@ -133,13 +133,19 @@ class ImagePinsTest(unittest.TestCase):
         rc, _ = self.run_check([self.manifest("b.yaml", "ulw/video-gateway:e2e")], host, sandbox)
         self.assertEqual(rc, 1)
 
-    def test_the_monorepo_exemption_is_only_for_askedin(self):
+    def test_the_own_build_exemption_is_only_for_askedin(self):
         askedin, _, sandbox = self.ok_files()
-        own = "git.askedin.com/askedin/askedin-monorepo/video-gateway:master"
+        own = "ghcr.io/jerome-joseph-1/ulw-video-gateway:main"
         rc, _ = self.run_check(askedin, [self.manifest("c.yaml", own)], sandbox)
         self.assertEqual(rc, 1)
         rc, _ = self.run_check([self.manifest("d.yaml", own)], *self.ok_files()[1:])
         self.assertEqual(rc, 0)
+
+    def test_another_ghcr_image_needs_a_digest(self):
+        _, host, sandbox = self.ok_files()
+        for image in ("ghcr.io/someone-else/ulw-video-gateway:main", "ghcr.io/jerome-joseph-1/x:1"):
+            rc, _ = self.run_check([self.manifest("e.yaml", image)], host, sandbox)
+            self.assertEqual(rc, 1, image)
 
     def test_a_sandbox_tag_needs_a_pinned_digest(self):
         askedin, host, _ = self.ok_files()

@@ -42,7 +42,7 @@ spec:
       # the old image keeps working against the new schema until it is replaced.
       initContainers:
         - name: migrate
-          image: git.askedin.com/askedin/askedin-monorepo/video-gateway:master
+          image: ghcr.io/jerome-joseph-1/ulw-video-gateway:main
           imagePullPolicy: Always
           command: ["/usr/local/bin/ulw_migrate"]
           env:
@@ -71,7 +71,7 @@ spec:
               drop: ["ALL"]
       containers:
         - name: gateway
-          image: git.askedin.com/askedin/askedin-monorepo/video-gateway:master
+          image: ghcr.io/jerome-joseph-1/ulw-video-gateway:main
           imagePullPolicy: Always
           ports:
             - name: http

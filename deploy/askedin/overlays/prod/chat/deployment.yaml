@@ -43,7 +43,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: chat
-          image: git.askedin.com/askedin/askedin-monorepo/chat:master
+          image: ghcr.io/jerome-joseph-1/ulw-chat:main
           imagePullPolicy: Always
           ports:
             - name: http
