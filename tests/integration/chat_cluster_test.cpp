@@ -27,6 +27,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -1006,6 +1007,16 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
     std::uint64_t settled_seq = 0;
     std::size_t sampled = 0;
     std::vector<Resident> samples;
+    // Where each of the others' last wait for the head found it. Every wait looks only at what
+    // is new: going through all a client had heard for each frame it read made this process,
+    // not the nodes, set the pace, until under ASan on a loaded runner 90 messages took longer
+    // than stall_timeout and the slow viewers were rightly closed between two of their reads.
+    std::map<const Client*, std::size_t> found;
+    for (auto* group : {&senders, &viewers}) {
+        for (auto& c : *group) {
+            found[c.get()] = 0;
+        }
+    }
     while (acked < kMessages) {
         // A node that turned one send away turns away the rest of the round's too: they are
         // not tried, which keeps the retrying down to a few sends a round.
@@ -1027,19 +1038,15 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
                 ids[s] = std::format("m{}-{}", *holding[s], attempts);
             }
             ++attempts;
+            // The answer is the first for this id after the send: an id sent again after
+            // unavailable has its earlier answer before it.
+            const std::size_t before = senders[s]->seen().size();
             ASSERT_TRUE(senders[s]->send(send_command(live, body(*holding[s]), ids[s])));
-            const std::size_t answers = senders[s]->count([&](const Seen& seen) {
+            const auto at = senders[s]->wait_from(before, [&](const Seen& seen) {
                 return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
             });
-            ASSERT_TRUE(senders[s]->wait_for([&](const Seen&) {
-                return senders[s]->count([&](const Seen& seen) {
-                    return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
-                }) > answers;
-            })) << ids[s];
-            const Seen answer =
-                *std::ranges::find_last_if(senders[s]->seen(), [&](const Seen& seen) {
-                     return (seen.type == "sent" || seen.type == "error") && seen.id == ids[s];
-                 }).begin();
+            ASSERT_TRUE(at) << ids[s];
+            const Seen answer = senders[s]->seen()[*at];
             if (answer.type == "sent") {
                 head = std::max(head, answer.seq);
                 holding[s].reset();
@@ -1055,10 +1062,13 @@ TEST_P(ChatClusterTest, SlowViewersCostTheirNodeNoMemoryAndOthersMissNothing) {
         ASSERT_LT(attempts, 200'000U) << "the rate limit never lifted";
         for (auto* group : {&senders, &viewers}) {
             for (auto& c : *group) {
-                ASSERT_TRUE(c->wait_for([&](const Seen& seen) {
+                // What came before the last round's head came before this one's too.
+                std::size_t& from = found.at(c.get());
+                const auto at = c->wait_from(from, [&](const Seen& seen) {
                     return seen.type == "message" && seen.seq >= head;
-                })) << c->name()
-                    << " never got seq " << head;
+                });
+                ASSERT_TRUE(at) << c->name() << " never got seq " << head;
+                from = *at;
             }
         }
         if (acked / kReadEvery > reads) {
