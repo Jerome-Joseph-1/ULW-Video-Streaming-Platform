@@ -201,6 +201,58 @@ TEST_F(MakePrivateDir, RefusesAParentThatIsASymbolicLink) {
     EXPECT_FALSE(fs::exists(target / "node-1"));
 }
 
+TEST_F(MakePrivateDir, RefusingAMissingParentMakesNothing) {
+    const fs::path root = tmp.path() / "scratch";
+    const auto made = os::make_private_dir(root / "node-1", os::MissingParent::Refuse);
+    ASSERT_FALSE(made);
+    EXPECT_EQ(made.error(), root.string() + ": " + reason(ENOENT));
+    EXPECT_FALSE(fs::exists(root));
+}
+
+TEST_F(MakePrivateDir, RefusingAMissingParentStillMakesTheDirectoryInAnExistingOne) {
+    const fs::path dir = tmp.path() / "node-1";
+    const ::mode_t saved = ::umask(0);
+    const auto made = os::make_private_dir(dir, os::MissingParent::Refuse);
+    ::umask(saved);
+    ASSERT_TRUE(made) << made.error();
+    EXPECT_EQ(mode_of(dir), 0700U);
+}
+
+TEST_F(MakePrivateDir, CheckPrivateParentAcceptsADirectoryOfOurOwn) {
+    const auto held = os::check_private_parent(tmp.path());
+    EXPECT_TRUE(held) << held.error();
+}
+
+TEST_F(MakePrivateDir, CheckPrivateParentRefusesASymbolicLink) {
+    const fs::path root = tmp.path() / "scratch";
+    fs::create_directory_symlink(tmp.path(), root);
+    const auto held = os::check_private_parent(root);
+    ASSERT_FALSE(held);
+    EXPECT_EQ(held.error(),
+              root.string() + ": not a directory (a symbolic link or a file is in its place)");
+}
+
+TEST_F(MakePrivateDir, CheckPrivateParentRefusesADirectoryAnotherUserOwns) {
+    fs::path parent;
+    if (::geteuid() == 0) {
+        parent = tmp.path() / "theirs";
+        ASSERT_EQ(::mkdir(parent.c_str(), 0700), 0);
+        ASSERT_EQ(::chown(parent.c_str(), 65534, 65534), 0);
+    } else {
+        parent = someone_elses_directory();
+        if (parent.empty()) {
+            GTEST_SKIP() << "not root, and no directory of another user's to try instead";
+        }
+    }
+    struct stat st {};
+    ASSERT_EQ(::lstat(parent.c_str(), &st), 0) << parent;
+    const auto held = os::check_private_parent(parent);
+    ASSERT_FALSE(held);
+    EXPECT_EQ(held.error(), parent.string() + ": owned by uid " + std::to_string(st.st_uid) +
+                                ", neither this process's user nor root, who alone may hold the "
+                                "directory it keeps its own in");
+}
+
 TEST_F(MakePrivateDir, RefusesAPathEndingInASlash) {
     // open("link/", O_DIRECTORY | O_NOFOLLOW) would follow the link.
     const fs::path target = tmp.path() / "elsewhere";

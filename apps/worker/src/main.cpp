@@ -211,8 +211,8 @@ int run(std::span<const std::string_view> args) {
         return fail(log, "block signals", std::generic_category().message(rc));
     }
 
-    // Owner-only, and refused if someone else made it first: it holds every job's source and
-    // renditions, and its default is under the shared /var/tmp.
+    // Owner-only, and refused if someone else made it first, or if the scratch root it is kept in
+    // is a symbolic link or another user's: it holds every job's source and renditions.
     if (auto scratch = os::make_private_dir(config->scratch); !scratch) {
         return fail(log, "ULW_SCRATCH_DIR", scratch.error());
     }

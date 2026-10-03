@@ -48,35 +48,53 @@ std::expected<Directory, std::string> open_directory(int at, const std::filesyst
     return Directory{.fd = std::move(fd), .owner = st.st_uid};
 }
 
-} // namespace
-
-std::expected<void, std::string> make_private_dir(const std::filesystem::path& dir) {
-    // "link/" would be opened through the link, O_NOFOLLOW or not.
-    if (!dir.has_filename()) {
-        return refuse(dir, "names no directory (empty, or it ends in '/')");
-    }
-    const std::filesystem::path parent = dir.has_parent_path() ? dir.parent_path() : ".";
-    std::filesystem::path at;
-    for (const std::filesystem::path& part : parent) {
-        at /= part;
-        if (::mkdir(at.c_str(), S_IRWXU) != 0 && errno != EEXIST) {
-            return refuse_errno(at, errno);
-        }
-    }
-    // Whoever owns the parent can rename our directory away and put another in its place, so it
-    // must be ours or root's: a Kubernetes emptyDir, the image's own directory or a PrivateTmp
-    // qualifies, one another user made first in a shared /var/tmp does not. Its mode is not
-    // checked: a root-owned parent that anyone may write, without the sticky bit, is accepted,
-    // because that is what a kubelet-made emptyDir is (0777, or 2777 with an fsGroup), and in a
-    // pod no other user shares it.
-    const auto parent_dir = open_directory(AT_FDCWD, parent, parent);
+// The parent of a private directory, opened, or why it cannot hold one.
+std::expected<Directory, std::string> open_private_parent(const std::filesystem::path& parent) {
+    // A Kubernetes emptyDir, the image's own directory or a PrivateTmp qualifies, one another
+    // user made first in a shared directory does not. Its mode is not checked: a root-owned
+    // parent that anyone may write, without the sticky bit, is accepted, because that is what a
+    // kubelet-made emptyDir is (0777, or 2777 with an fsGroup), and in a pod no other user
+    // shares it.
+    auto parent_dir = open_directory(AT_FDCWD, parent, parent);
     if (!parent_dir) {
-        return std::unexpected(parent_dir.error());
+        return std::unexpected(std::move(parent_dir.error()));
     }
     if (parent_dir->owner != ::geteuid() && parent_dir->owner != 0) {
         return refuse(parent, "owned by uid " + std::to_string(parent_dir->owner) +
                                   ", neither this process's user nor root, who alone may hold "
                                   "the directory it keeps its own in");
+    }
+    return parent_dir;
+}
+
+} // namespace
+
+std::expected<void, std::string> check_private_parent(const std::filesystem::path& parent) {
+    if (auto held = open_private_parent(parent); !held) {
+        return std::unexpected(std::move(held.error()));
+    }
+    return {};
+}
+
+std::expected<void, std::string> make_private_dir(const std::filesystem::path& dir,
+                                                  MissingParent missing) {
+    // "link/" would be opened through the link, O_NOFOLLOW or not.
+    if (!dir.has_filename()) {
+        return refuse(dir, "names no directory (empty, or it ends in '/')");
+    }
+    const std::filesystem::path parent = dir.has_parent_path() ? dir.parent_path() : ".";
+    if (missing == MissingParent::Make) {
+        std::filesystem::path at;
+        for (const std::filesystem::path& part : parent) {
+            at /= part;
+            if (::mkdir(at.c_str(), S_IRWXU) != 0 && errno != EEXIST) {
+                return refuse_errno(at, errno);
+            }
+        }
+    }
+    const auto parent_dir = open_private_parent(parent);
+    if (!parent_dir) {
+        return std::unexpected(parent_dir.error());
     }
     const std::filesystem::path name = dir.filename();
     if (::mkdirat(parent_dir->fd.get(), name.c_str(), S_IRWXU) != 0 && errno != EEXIST) {

@@ -90,7 +90,7 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_CONFIG` | optional TOML file | same | | See above |
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
-| `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/tmp/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a PrivateTmp one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks |
+| `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | Chat has no Askedin overlay yet |
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
@@ -108,10 +108,8 @@ libcurl's, and keeps its own `sslmode` settings.
 <!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
 
 The live packager (one process per stream, environment only, no Askedin overlay yet) takes
-`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (default
-`/var/tmp/ulw-live`; checked, and the stream's directory in it made 0700, as the worker's
-is, before what an earlier run left there is removed), `ULW_FFMPEG`
-and `ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
+`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below),
+`ULW_FFMPEG` and `ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |
@@ -139,7 +137,12 @@ it starts: a directory of mode 0700 owned by the user it runs as, made by what d
 systemd unit's `CacheDirectory=ulw-live`, as `deploy/systemd/ulw-worker.service` does for the
 worker, or an image's `install -d -o <uid> -g <gid> -m 0700`). The packager makes only
 `<ULW_SCRATCH_DIR>/<stream>` inside it; without the root it exits `1` at startup, naming
-`ULW_SCRATCH_DIR` and the missing directory.
+`ULW_SCRATCH_DIR` and the missing directory. It also exits `1`, naming the directory and why,
+when the root is a symbolic link or owned by a user other than its own or root, or when
+`<ULW_SCRATCH_DIR>/<stream>` is another user's directory; all of this is checked before
+anything in the root is removed. The stream's directory is made, or kept, 0700, and emptied of
+what an earlier run left; a symbolic link or a file in its place is removed, a link without
+being followed.
 
 While it records it holds one upload part in memory, 16 MiB at the default
 `ULW_LIVE_MAX_KBPS` and up to 65 MiB at its 100 Mbit/s ceiling (the part grows with
