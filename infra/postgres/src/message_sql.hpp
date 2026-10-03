@@ -67,8 +67,12 @@ inline constexpr Sql kRemoveMember = "DELETE FROM chat_members WHERE room_id = $
 // statement's snapshot. Each probe is one primary-key lookup. $4 is false when the room is not to
 // be recorded (Recording::Skipped): the kind comes back null, and the join is answered by the
 // kind it asked for.
+// A stream's chat that has closed (closed_at, migration 0012) reads as a closed room with no
+// members: its kind is still recorded, so nothing is written, and a join is refused.
 inline constexpr Sql kAdmits = R"sql(
-WITH recorded AS (SELECT kind FROM chat_rooms WHERE room_id = $1),
+WITH recorded AS (
+    SELECT CASE WHEN closed_at IS NULL THEN kind ELSE 'group_chat' END AS kind
+      FROM chat_rooms WHERE room_id = $1),
 created AS (
     INSERT INTO chat_rooms (room_id, kind)
     SELECT $1, $3
@@ -78,9 +82,11 @@ created AS (
 SELECT coalesce((SELECT kind FROM recorded), (SELECT kind FROM created)),
        EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
 
-// The room's recorded kind (NULL when none is) and whether the user is listed: nothing written.
+// The room's recorded kind (NULL when none is; a closed stream's chat as closed, as kAdmits
+// reads it) and whether the user is listed: nothing written.
 inline constexpr Sql kAccess = R"sql(
-SELECT (SELECT kind FROM chat_rooms WHERE room_id = $1),
+SELECT (SELECT CASE WHEN closed_at IS NULL THEN kind ELSE 'group_chat' END
+          FROM chat_rooms WHERE room_id = $1),
        EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
 
 // Records the room as open unless its id is not a stream's (version 8, tagged 0x01 in its first

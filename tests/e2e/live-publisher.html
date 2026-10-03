@@ -1,0 +1,116 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ULW live publisher (e2e)</title>
+<!--
+  A broadcaster's client as docs/integration/live.md describes it, from a plain
+  RTCPeerConnection: start a stream on the gateway, POST the WHIP offer with its ticket, set the
+  answer's ICE servers, trickle the candidates with a fresh ticket, go live, and end it. Every
+  gateway request goes to this page's own origin, which passes /api to the gateway; the WHIP
+  requests go to the media server the ticket names.
+-->
+<video id="preview" muted playsinline autoplay></video>
+<script type="module">
+const state = { steps: [], errors: [] };
+window.publisher = { state };
+
+async function api(token, method, path) {
+  const response = await fetch(path, { method, headers: { authorization: `Bearer ${token}` } });
+  const body = response.headers.get('content-type') === 'application/json'
+    ? await response.json() : null;
+  state.steps.push({ method, path, status: response.status });
+  return { status: response.status, body };
+}
+
+// With start: false the page never calls start or end, as an encoder with a fixed token does
+// not: the media server's webhooks take the stream live and end it (ADR-0093).
+window.publish = async (token, { start = true } = {}) => {
+  const created = await api(token, 'POST', '/api/v1/live');
+  if (created.status !== 201) return { created: created.status };
+  const stream = created.body;
+  const fresh = async () => {
+    const ticket = await api(token, 'POST', `/api/v1/live/${stream.id}/ticket`);
+    return `Bearer ${ticket.body.token}`;
+  };
+
+  const media = await navigator.mediaDevices.getUserMedia({ audio: true,
+    video: { width: 640, height: 360, frameRate: 30 } });
+  document.getElementById('preview').srcObject = media;
+  const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
+  window.connection = pc;
+  for (const track of media.getTracks()) pc.addTransceiver(track, { direction: 'sendonly' });
+  const offer = await pc.createOffer();
+  // Offer first, then the ICE servers from the answer's Link headers, then gathering.
+  const posted = await fetch(stream.publish.url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/sdp', authorization: `Bearer ${stream.publish.token}` },
+    body: offer.sdp,
+  });
+  state.steps.push({ method: 'POST', path: 'whip', status: posted.status });
+  if (posted.status !== 201) return { id: stream.id, whip: posted.status };
+  const iceServers = (posted.headers.get('link') ?? '').split(',')
+    .map((link) => /^\s*<([^>]+)>\s*;\s*rel="?ice-server"?(.*)$/.exec(link))
+    .filter((link) => link !== null)
+    .map(([, urls, params]) => ({
+      urls,
+      username: /username="([^"]*)"/.exec(params)?.[1],
+      credential: /credential="([^"]*)"/.exec(params)?.[1],
+    }));
+  pc.setConfiguration({ bundlePolicy: 'max-bundle', iceServers });
+  const candidates = [];
+  const gathered = new Promise((resolve) => pc.addEventListener('icecandidate', (e) => {
+    if (e.candidate?.candidate) candidates.push(e.candidate);
+    if (!e.candidate || e.candidate.protocol === 'udp') resolve();
+  }));
+  await pc.setLocalDescription(offer);
+  await pc.setRemoteDescription({ type: 'answer', sdp: await posted.text() });
+  await gathered;
+
+  // Every WHIP request after the POST carries a fresh ticket.
+  const first = pc.getTransceivers()[0];
+  const attribute = (name) => offer.sdp.split('\r\n').find((l) => l.startsWith(`a=${name}:`));
+  const fragment = [attribute('ice-ufrag'), attribute('ice-pwd'),
+    `m=${first.sender.track.kind} 9 UDP/TLS/RTP/SAVPF 0`, `a=mid:${first.mid}`,
+    ...candidates.filter((c) => c.sdpMid === first.mid).map((c) => `a=${c.candidate}`), ''];
+  const resource = new URL(posted.headers.get('location'), stream.publish.url).href;
+  const patched = await fetch(resource, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/trickle-ice-sdpfrag',
+      'if-match': posted.headers.get('etag'), authorization: await fresh() },
+    body: fragment.join('\r\n'),
+  });
+  state.steps.push({ method: 'PATCH', path: 'whip', status: patched.status });
+  await new Promise((resolve) => {
+    const check = () => (pc.connectionState === 'connected' ? resolve() : null);
+    pc.addEventListener('connectionstatechange', check);
+    check();
+  });
+
+  // A client that vanishes: no WHIP DELETE, no end; the peer connection just goes.
+  window.dropPublisher = () => {
+    pc.close();
+    for (const track of media.getTracks()) track.stop();
+  };
+  // How a WHIP client stops on its own (RFC 9725): DELETE its session, with a fresh ticket.
+  // No call to the gateway's end.
+  window.closePublisher = async () => {
+    const deleted = await fetch(resource, { method: 'DELETE', headers: { authorization: await fresh() } });
+    state.steps.push({ method: 'DELETE', path: 'whip', status: deleted.status });
+    window.dropPublisher();
+    return deleted.status;
+  };
+  if (!start) {
+    return { id: stream.id, stream, whip: posted.status, patched: patched.status };
+  }
+
+  // The POST was answered and the media flows: go live.
+  const live = await api(token, 'POST', `/api/v1/live/${stream.id}/start`);
+  window.endStream = async () => {
+    const ended = await api(token, 'POST', `/api/v1/live/${stream.id}/end`);
+    pc.close();
+    for (const track of media.getTracks()) track.stop();
+    return ended;
+  };
+  return { id: stream.id, stream, whip: posted.status, patched: patched.status,
+    start: live.status, live: live.body };
+};
+</script>

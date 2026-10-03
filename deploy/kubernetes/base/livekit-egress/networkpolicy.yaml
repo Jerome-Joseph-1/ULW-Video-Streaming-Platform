@@ -51,8 +51,12 @@ spec:
       ports:
         - port: 6379
           protocol: TCP
+    # Each stream's packager, in the packagers' own namespace (docs/adr/0092).
     - to:
-        - podSelector:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ulw-live
+          podSelector:
             matchLabels:
               app.kubernetes.io/name: live-packager
       ports:

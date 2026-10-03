@@ -16,6 +16,8 @@ namespace {
 // without it (docs/integration/operator-contract.md).
 constexpr std::string_view kDefaultScratch = "/var/cache/ulw-live";
 constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
+// A day: past it a caller that has not come is not coming.
+constexpr std::uint32_t kMaxCallerWaitSeconds = 86'400;
 constexpr std::string_view kDefaultIngestHost = "127.0.0.1";
 
 // The playlist is rewritten once per segment and R2 takes one write per second per key
@@ -199,6 +201,12 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!kbps) {
         return std::unexpected(kbps.error());
     }
+    // 0, the default, waits for as long as it takes; a stream service sets it (ADR-0092).
+    const auto caller_wait =
+        bounded<std::uint32_t>(env, "ULW_LIVE_CALLER_WAIT_SECONDS", 0, 0, kMaxCallerWaitSeconds);
+    if (!caller_wait) {
+        return std::unexpected(caller_wait.error());
+    }
     auto recording = load_recording(env);
     if (!recording) {
         return std::unexpected(std::move(recording.error()));
@@ -222,6 +230,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .window_segments = *window,
                   .max_duration = core::Seconds{static_cast<std::int64_t>(*hours) * 3600},
                   .max_kbps = *kbps,
+                  .caller_wait = core::Seconds{*caller_wait},
                   .recording = std::move(*recording)};
 }
 

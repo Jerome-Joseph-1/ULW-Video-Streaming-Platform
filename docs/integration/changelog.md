@@ -3,6 +3,56 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-03: a live stream goes live and ends when its publisher does
+
+<!-- apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md -->
+
+An addition; nothing that worked before changes. Where the media server reports to the
+gateway (deployments with live streams on), a stream goes live as soon as its publisher's
+first track arrives, and ends about 10 s after its publisher disconnects and does not come back
+([live.md](live.md#starting-a-stream)).
+
+| Before | Now |
+|---|---|
+| A stream went live only through `POST /api/v1/live/{id}/start` | It also goes live by itself when its publisher publishes; `start` still works and is harmless |
+| A publisher that vanished left its stream `live` until its packager had exited and the sweep saw it (`finished`) | It is `ended` about 10 s after the publisher left, with `ended_by` `publisher_left` |
+| `ended_by` was `owner`, `finished`, `failed` or `timeout` | It may also be `publisher_left` |
+
+What to do:
+
+- **Broadcaster clients:** nothing required. Encoders with a fixed token (OBS) no longer need a
+  page to call `start` or `end`.
+- **Clients reading `ended_by`:** accept `publisher_left`, and treat any value you do not know as
+  an ended stream.
+- **Operators:** LiveKit's configuration names the gateway's webhook listener, which no route
+  exposes (RUNBOOK, step 9).
+
+## 2026-10-03: live streams are started, taken live and ended through the gateway
+
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/live_streams.cpp, docs/adr/0092-the-stream-service-lives-in-the-gateway.md -->
+
+An addition; nothing that worked before changes. A broadcaster's client now gets its publisher
+tickets from five new endpoints ([live.md](live.md#starting-a-stream)): `POST /api/v1/live`,
+`POST /api/v1/live/{id}/ticket`, `POST /api/v1/live/{id}/start`, `POST /api/v1/live/{id}/end`
+and `GET /api/v1/live/{id}`.
+
+| Before | Now |
+|---|---|
+| "How a client asks for its publisher ticket is not served yet" | `POST /api/v1/live` answers a stream with its first ticket, and `POST /api/v1/live/{id}/ticket` a fresh one |
+| A published stream reached viewers only when an operator started its packager and relay | `POST /api/v1/live/{id}/start`, after the WHIP POST's `201`, does both |
+| No endpoint mapped a stream to its recording | `GET /api/v1/live/{id}` answers the owner `video_id` |
+
+What to do:
+
+- **Broadcaster clients:** follow the flow in [live.md](live.md#starting-a-stream): create,
+  POST the offer, `start`, a fresh ticket before every later WHIP request, then DELETE or `end`.
+  One unfinished stream per user, a few started an hour (`429` past them), and, where the
+  deployment names a broadcaster claim, only users holding it (`403` for others).
+- **Viewer clients:** nothing changes for the playlist. `GET /api/v1/live/{id}` says whether a
+  stream is `starting`, `live` or `ended`.
+- **Operators:** the gateway needs LiveKit's API key and the packager settings, and on the
+  cluster a service account that may create the packagers' Jobs (RUNBOOK, step 9).
+
 ## 2026-10-03: the subject claim is configured, and the audience is required
 
 <!-- infra/auth/src/claims.cpp (subject_of), ops/src/dev_only.cpp (token_rules), docs/adr/0088-standalone-product.md -->

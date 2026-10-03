@@ -145,7 +145,9 @@ list never said no: join again.
   `room` is refused with `bad_room`: a live chat is joined only by its stream.
 - **Open once the stream's chat is opened.** The server side records a stream's room live
   before viewers join (RUNBOOK, "Chat rooms"). Until then a stream join is refused with
-  `not_live`; retry when the stream is on air. Once open it admits anyone signed in.
+  `not_live`; retry when the stream is on air. Once open it admits anyone signed in, until the
+  stream ends: then it closes to new joins (`not_live` again), while sockets already in it stay
+  until they leave (ADR-0092).
 - **Always lossy.** Every viewer is lossy, whatever its `delivery`, and is never closed for being
   behind. A viewer more than 64 KiB behind is sent nothing new until its connection has caught
   up; then it is sent what it missed, oldest first, but only the newest 64 messages of it. The
