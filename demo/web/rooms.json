@@ -1,0 +1,10 @@
+{
+  "users": ["alice", "bob", "carol"],
+  "rooms": [
+    {"id": "10000000-0000-4000-8000-000000000001", "kind": "direct", "name": "alice + bob", "members": ["alice", "bob"]},
+    {"id": "10000000-0000-4000-8000-000000000002", "kind": "direct", "name": "alice + carol", "members": ["alice", "carol"]},
+    {"id": "10000000-0000-4000-8000-000000000003", "kind": "direct", "name": "bob + carol", "members": ["bob", "carol"]},
+    {"id": "20000000-0000-4000-8000-000000000001", "kind": "group", "name": "team", "members": ["alice", "bob", "carol"]},
+    {"id": "30000000-0000-4000-8000-000000000001", "kind": "group", "name": "encrypted (alice + bob)", "members": ["alice", "bob"], "e2ee": true}
+  ]
+}

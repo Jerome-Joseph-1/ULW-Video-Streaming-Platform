@@ -18,6 +18,14 @@ on:
         description: Also run the sandbox cluster job (false runs the build-tree jobs alone)
         type: boolean
         default: true
+      demo:
+        description: Also run the laptop demo's smoke test (demo/, every tab in headless Chrome)
+        type: boolean
+        default: false
+      demo_build:
+        description: Build the demo's images from this ref rather than pull the published :main ones
+        type: boolean
+        default: false
   schedule:
     - cron: "43 3 * * *"
   push:
@@ -294,3 +302,34 @@ jobs:
           name: call-capacity
           path: call-capacity
           if-no-files-found: warn
+
+  # The laptop demo (demo/README.md) as its owner starts it, then every tab driven in headless
+  # Chrome with fake media (demo/smoke). Manual runs only, with demo=true; demo_build=true tests
+  # the dispatched ref's own images instead of the published :main ones.
+  demo:
+    if: github.event_name == 'workflow_dispatch' && inputs.demo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      # The worker's and the packager's sandbox make user namespaces, which Ubuntu 24.04's
+      # AppArmor refuses to a process without host capabilities (as the sandbox job explains).
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: demo/smoke/run.sh
+        timeout-minutes: 60
+        env:
+          DEMO_BUILD: ${{ inputs.demo_build && '1' || '0' }}
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-smoke
+          path: |
+            demo/smoke/results
+            demo/smoke/report
+          if-no-files-found: ignore
