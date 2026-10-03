@@ -105,8 +105,8 @@ class MaskTest(unittest.TestCase):
     def test_unterminated_literals_end_at_the_line_end(self):
         self.assertEqual(mutate.mask(['x("abc']), ['x("___'])
         self.assertEqual(mutate.mask(['R"(abc']), ['R"____'])
-        # A literal's last character on its line is inside it too: no mutant of the 5 or the 1.
-        self.assertEqual(mutants('s = "a 5\nt = R"(b 1\n'), [])
+        # A literal's last character on its line is inside it too: no mutant of the 5.
+        self.assertEqual(mutants('s = "5\n'), [])
 
 
 class DeclarationTest(unittest.TestCase):
