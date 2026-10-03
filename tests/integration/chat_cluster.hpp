@@ -41,6 +41,8 @@ inline constexpr std::chrono::milliseconds kReadyCheckPeriod{250};
 inline constexpr std::array kUsers{"alice", "bob", "carol", "dave"};
 // Short, so that the presence tests wait seconds for a grace to run out, not the default ten.
 inline constexpr std::chrono::milliseconds kGrace{2'000};
+// Short, so that the call test waits seconds for a ring nobody answers to run out.
+inline constexpr std::chrono::milliseconds kRingTimeout{3'000};
 
 // The LiveKit server calls go to, as tests/call/run.sh names it: LIVEKIT_API_URL,
 // LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET, all four or none. With them the
@@ -91,6 +93,10 @@ struct Seen {
     std::string url;
     std::string token;
     std::uint64_t expires_at = 0;
+    // Of a ticket and a call's events (ADR-0092).
+    std::string call;
+    std::string from;
+    std::string by;
 };
 
 inline std::optional<Seen> parse_seen(const std::string& text) {
@@ -115,7 +121,10 @@ inline std::optional<Seen> parse_seen(const std::string& text) {
            .status = string("status"),
            .url = string("url"),
            .token = string("token"),
-           .expires_at = 0};
+           .expires_at = 0,
+           .call = string("call"),
+           .from = string("from"),
+           .by = string("by")};
     if (const core::json::Value* expires = json->find("expires_at")) {
         s.expires_at = expires->as_u64().value_or(0);
     }
@@ -308,6 +317,7 @@ protected:
             "ULW_NODE_SECRET=" + node_secret_, "ULW_DATABASE_URL=" + db_->conninfo(),
             "ULW_DEV_JWKS_FILE=" + jwks, "ULW_DEV_MODE=1", "JWT_ISSUER=" + std::string(kIssuer),
             "ULW_PRESENCE_GRACE_MS=" + std::to_string(kGrace.count()),
+            "ULW_CALL_RING_TIMEOUT_MS=" + std::to_string(kRingTimeout.count()),
             "ULW_REACTOR=" +
                 std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),
             // Some runs start tests as root; this suite is not about that.

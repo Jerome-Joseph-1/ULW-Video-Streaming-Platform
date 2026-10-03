@@ -26,6 +26,7 @@
 #include <format>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -1366,6 +1367,156 @@ TEST_P(ChatClusterTest, ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsT
     const auto group = call_answer(*again, room_, alice_device);
     ASSERT_TRUE(group);
     EXPECT_EQ(group->reason, "not_callable");
+}
+
+// Waits for `client` to hear `type` for `call` (any call when empty) after the `from`th thing it
+// heard; where it heard it, so that the next wait starts past it.
+std::optional<std::size_t> heard(Client& client, std::size_t from, const std::string& type,
+                                 const std::string& call = {}) {
+    return client.wait_from(
+        from, [&](const Seen& s) { return s.type == type && (call.empty() || s.call == call); });
+}
+
+// A call's decline, cancel or end on the room WebSocket.
+std::string move_command(const std::string& type, const std::string& room,
+                         const std::string& call) {
+    return R"({"type":")" + type + R"(","room":")" + room + R"(","call":")" + call + R"("})";
+}
+
+// The M23 to M26 calls made usable (ADR-0092): alice, on one node, calls bob, connected to another
+// node twice and in no room at all. Every socket of both hears the ring, and how it ends: bob
+// answering on one device (the other stops ringing), then ending it; bob declining; alice
+// cancelling; and a ring nobody answers running out for both. Needs a LiveKit, as the tickets do.
+TEST_P(ChatClusterTest, ACallRingsTheOtherMembersEverySocketOnAnyNodeAndEndsOnceForBoth) {
+    if (ulw::test::livekit_environment().empty()) {
+        GTEST_SKIP() << "no LiveKit: set LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY "
+                        "and LIVEKIT_API_SECRET";
+    }
+    const std::string direct = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(direct, {"alice", "bob"}, "direct_chat"));
+    auto alice = connect(nodes_[0], 0);
+    auto phone = connect(nodes_[1], 1);
+    auto laptop = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && phone && laptop);
+    // Each hears the other come online: both nodes are then in both presence rooms the ring's
+    // notices travel through.
+    const auto online = [](const std::string& who) {
+        return [who](const Seen& s) {
+            return (s.type == "watching" || s.type == "presence") && s.user == who &&
+                   s.status == "online";
+        };
+    };
+    ASSERT_TRUE(alice->send(R"({"type":"watch","user":"bob"})"));
+    ASSERT_TRUE(phone->send(R"({"type":"watch","user":"alice"})"));
+    ASSERT_TRUE(alice->wait_for(online("bob")));
+    ASSERT_TRUE(phone->wait_for(online("alice")));
+    ASSERT_EQ(join_answer(*alice, direct), "joined");
+    const std::string alice_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9a1";
+    const std::string phone_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9b1";
+    const std::string laptop_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9b2";
+    // A socket, and where in what it heard the next wait starts.
+    using Ear = std::pair<Client*, std::size_t*>;
+    std::size_t at_alice = alice->seen().size();
+    std::size_t at_phone = phone->seen().size();
+    std::size_t at_laptop = laptop->seen().size();
+    // Every wait below starts past what that client last matched.
+    const auto expect = [](Client& c, std::size_t& at, const std::string& type,
+                           const std::string& call) -> std::optional<Seen> {
+        const auto where = heard(c, at, type, call);
+        if (!where) {
+            ADD_FAILURE() << c.name() << " never heard " << type;
+            return std::nullopt;
+        }
+        at = *where + 1;
+        return c.seen()[*where];
+    };
+
+    // 1. Alice calls; bob answers on his phone; the laptop stops ringing; alice ends it.
+    const auto ticket = call_answer(*alice, direct, alice_device);
+    ASSERT_TRUE(ticket);
+    ASSERT_EQ(ticket->type, "ticket") << ticket->reason;
+    const std::string first = ticket->call;
+    ASSERT_FALSE(first.empty()) << "the ticket names no call";
+    for (const auto& [client, at] : std::initializer_list<Ear>{
+             {laptop.get(), &at_laptop}, {phone.get(), &at_phone}, {alice.get(), &at_alice}}) {
+        const auto ringing = expect(*client, *at, "call_ringing", first);
+        ASSERT_TRUE(ringing);
+        EXPECT_EQ(ringing->room, direct);
+        EXPECT_EQ(ringing->from, "alice");
+        EXPECT_GE(ringing->expires_at, ticket->expires_at - 60 + 2);
+    }
+    // The phone was in no room: it joins the direct chat to answer.
+    ASSERT_EQ(join_answer(*phone, direct), "joined");
+    const auto answer = call_answer(*phone, direct, phone_device);
+    ASSERT_TRUE(answer);
+    ASSERT_EQ(answer->type, "ticket") << answer->reason;
+    EXPECT_EQ(answer->call, first);
+    for (const auto& [client, at] :
+         std::initializer_list<Ear>{{alice.get(), &at_alice}, {laptop.get(), &at_laptop}}) {
+        const auto answered = expect(*client, *at, "call_answered", first);
+        ASSERT_TRUE(answered);
+        EXPECT_EQ(answered->by, "bob");
+    }
+    ASSERT_TRUE(alice->send(move_command("call_end", direct, first)));
+    for (const auto& [client, at] : std::initializer_list<Ear>{
+             {laptop.get(), &at_laptop}, {phone.get(), &at_phone}, {alice.get(), &at_alice}}) {
+        const auto ended = expect(*client, *at, "call_ended", first);
+        ASSERT_TRUE(ended);
+        EXPECT_EQ(ended->by, "alice");
+    }
+
+    // 2. Alice calls again: a new call, which bob declines from the laptop.
+    const auto again = call_answer(*alice, direct, alice_device);
+    ASSERT_TRUE(again && again->type == "ticket");
+    const std::string second = again->call;
+    EXPECT_NE(second, first);
+    ASSERT_TRUE(expect(*laptop, at_laptop, "call_ringing", second));
+    ASSERT_TRUE(expect(*phone, at_phone, "call_ringing", second));
+    ASSERT_EQ(join_answer(*laptop, direct), "joined");
+    ASSERT_TRUE(laptop->send(move_command("call_decline", direct, second)));
+    for (const auto& [client, at] : std::initializer_list<Ear>{
+             {alice.get(), &at_alice}, {phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
+        const auto declined = expect(*client, *at, "call_declined", second);
+        ASSERT_TRUE(declined);
+        EXPECT_EQ(declined->by, "bob");
+    }
+    // Declining twice finds nothing to decline.
+    ASSERT_TRUE(laptop->send(move_command("call_decline", direct, second)));
+    const auto twice =
+        laptop->wait_from(at_laptop, [](const Seen& s) { return s.type == "error"; });
+    ASSERT_TRUE(twice);
+    EXPECT_EQ(laptop->seen()[*twice].reason, "no_call");
+
+    // 3. Alice calls and gives up before anyone answers.
+    const auto third = call_answer(*alice, direct, alice_device);
+    ASSERT_TRUE(third && third->type == "ticket");
+    ASSERT_TRUE(expect(*phone, at_phone, "call_ringing", third->call));
+    ASSERT_TRUE(alice->send(move_command("call_cancel", direct, third->call)));
+    for (const auto& [client, at] :
+         std::initializer_list<Ear>{{phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
+        const auto cancelled = expect(*client, *at, "call_cancelled", third->call);
+        ASSERT_TRUE(cancelled);
+        EXPECT_EQ(cancelled->by, "alice");
+    }
+
+    // 4. Nobody answers: after the ring timeout both are told it was missed, once.
+    const auto fourth = call_answer(*alice, direct, alice_device);
+    ASSERT_TRUE(fourth && fourth->type == "ticket");
+    for (const auto& [client, at] : std::initializer_list<Ear>{
+             {alice.get(), &at_alice}, {phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
+        ASSERT_TRUE(expect(*client, *at, "call_missed", fourth->call));
+    }
+
+    // The ring is the owner's (chat-1, where alice joined first): every notice went from it,
+    // through the presence rooms, to the nodes the members are on.
+    EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"started\"}"), 4U);
+    EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"answered\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"declined\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"cancelled\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"missed\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"ended\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[1], "call_rings_total{outcome=\"started\"}"), 0U);
+    EXPECT_GE(metric(nodes_[1], "call_events_pushed_total"), 10U);
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatClusterTest,
