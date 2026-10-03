@@ -421,3 +421,82 @@ replacements:
           name: livekit-egress
         fieldPaths:
           - spec.template.spec.containers.*.env.*.valueFrom.secretKeyRef.name
+  # The packagers' own namespace (docs/adr/0092): its resources, the Namespace itself, and where
+  # egress dials a packager and the admission policy is bound.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_NAMESPACE
+    targets:
+      - select:
+          namespace: ulw-live
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: Namespace
+          name: ulw-live
+        fieldPaths:
+          - metadata.name
+      - select:
+          kind: NetworkPolicy
+          name: livekit-egress
+        fieldPaths:
+          - spec.egress.3.to.0.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]
+      - select:
+          kind: ValidatingAdmissionPolicyBinding
+        fieldPaths:
+          - spec.matchResources.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]
+  # The gateway's namespace, where the packagers' policies and grants name its pods and account:
+  # egress's pods dial in, the gateway's account is bound, and the admission policy holds that
+  # account (system:serviceaccount:<NAMESPACE>:video-gateway). The policy is cluster-scoped, so
+  # it and its binding are named after the environment: <NAMESPACE>-live-packagers.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NAMESPACE
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: live-packager
+        fieldPaths:
+          - spec.ingress.0.from.0.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]
+      - select:
+          kind: RoleBinding
+          name: video-gateway-live-packagers
+        fieldPaths:
+          - subjects.0.namespace
+      - select:
+          kind: ValidatingAdmissionPolicy
+        fieldPaths:
+          - spec.matchConditions.0.expression
+        options:
+          delimiter: ":"
+          index: 2
+      - select:
+          kind: ValidatingAdmissionPolicy
+        fieldPaths:
+          - metadata.name
+        options:
+          delimiter: "-"
+          index: 0
+      - select:
+          kind: ValidatingAdmissionPolicyBinding
+        fieldPaths:
+          - metadata.name
+          - spec.policyName
+        options:
+          delimiter: "-"
+          index: 0
+  # The packagers' Secret, the one besides its own stream's that a packager may read.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_PACKAGER_SECRET
+    targets:
+      - select:
+          kind: ValidatingAdmissionPolicy
+        fieldPaths:
+          - spec.variables.[name=sharedSecret].expression
+        options:
+          delimiter: "'"
+          index: 1

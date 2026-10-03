@@ -109,6 +109,9 @@ constexpr CallLimits kStartRelayLimits{.timeout = core::Millis{5000},
 // Each EgressInfo is about 3 KiB; a room's active relays are one, a few during a hand-over.
 constexpr CallLimits kListRelayLimits{.timeout = core::Millis{5000},
                                       .max_response = std::size_t{64} * 1024};
+// One ParticipantInfo, its tracks and their codecs: a few KiB.
+constexpr CallLimits kPresenceLimits{.timeout = core::Millis{5000},
+                                     .max_response = std::size_t{64} * 1024};
 
 [[nodiscard]] bool valid_stream_id(std::string_view id) noexcept {
     return !id.empty() && id.size() <= kMaxStreamId && std::ranges::all_of(id, [](char c) {
@@ -296,6 +299,47 @@ std::string identity_of(const core::UserId& user, const core::DeviceId& device) 
     return identity;
 }
 
+// A room id never holds ':', so every generation of every room has a name of its own.
+std::string room_name(const core::RoomId& room, core::ports::MediaGeneration generation) {
+    std::string name = room.to_string();
+    name += ':';
+    name += std::to_string(std::to_underlying(generation));
+    return name;
+}
+
+// A GetParticipant answer: the participant, unless LiveKit already counts it gone; or, passed
+// through as success, LiveKit's not_found for the participant or for its room.
+[[nodiscard]] std::expected<bool, MediaError> connected(std::string_view answer) {
+    const auto info = core::json::parse(answer);
+    if (!info) {
+        return std::unexpected(MediaError::Unavailable);
+    }
+    const core::json::Value* code = info->find("code");
+    if (code != nullptr && code->as_string() == "not_found") {
+        return false;
+    }
+    if (info->find("identity") == nullptr) {
+        return std::unexpected(MediaError::Unavailable);
+    }
+    const core::json::Value* state = info->find("state");
+    return state == nullptr || state->as_string() != "DISCONNECTED";
+}
+
+// A ListRooms answer for one name: whether the room is there.
+[[nodiscard]] std::expected<bool, MediaError> room_listed(std::string_view answer) {
+    const auto info = core::json::parse(answer);
+    const core::json::Value* rooms = info ? info->find("rooms") : nullptr;
+    // protojson leaves an empty list out.
+    if (info && rooms == nullptr && info->as_object() != nullptr) {
+        return false;
+    }
+    if (rooms == nullptr || rooms->as_array() == nullptr) {
+        return std::unexpected(MediaError::Unavailable);
+    }
+    return !rooms->as_array()->empty();
+}
+
+constexpr Grant kListRooms{.permission = Permission::ListRooms, .room = {}, .identity = {}};
 constexpr Grant kCreateRooms{.permission = Permission::CreateRooms, .room = {}, .identity = {}};
 constexpr Grant kRecordRooms{.permission = Permission::RecordRoom, .room = {}, .identity = {}};
 
@@ -515,10 +559,7 @@ public:
 
     void open_room(const core::RoomId& room, core::ports::MediaGeneration generation,
                    MediaRoomKind kind, std::uint16_t max_participants, OpenDone done) override {
-        // A room id never holds ':', so every generation of every room has a name of its own.
-        std::string name = room.to_string();
-        name += ':';
-        name += std::to_string(std::to_underlying(generation));
+        std::string name = room_name(room, generation);
         std::string body = create_room_body(name, max_participants);
         service_.call(
             "RoomService/CreateRoom", std::move(body), kCreateRooms, IfAbsent::Fail,
@@ -530,6 +571,52 @@ public:
                 }
                 done(std::make_unique<LiveKitRoom>(service_, relays_, endpoints_, std::move(name),
                                                    kind, max_participants));
+            });
+    }
+
+    void present(const core::RoomId& room, core::ports::MediaGeneration generation,
+                 const core::UserId& user, const core::DeviceId& device,
+                 core::ports::PresenceDone done) override {
+        std::string name = room_name(room, generation);
+        std::string list = R"({"names":[)";
+        core::json::append_string(list, name);
+        list += "]}";
+        // The room first, by name: GetParticipant in a room no node holds answers unavailable
+        // (LiveKit v1.13.7 routes it to the room's node), not not_found. Neither call opens the
+        // room, so one LiveKit has dropped stays dropped.
+        service_.fetch(
+            "RoomService/ListRooms", std::move(list), kListRooms, kPresenceLimits,
+            [this, name = std::move(name), identity = identity_of(user, device),
+             done = std::move(done)](Answer listed) mutable noexcept {
+                if (!listed) {
+                    done(std::unexpected(listed.error()));
+                    return;
+                }
+                const auto exists = room_listed(*listed);
+                if (!exists || !*exists) {
+                    done(exists ? std::expected<bool, MediaError>(false)
+                                : std::unexpected(exists.error()));
+                    return;
+                }
+                std::string body = R"({"room":)";
+                core::json::append_string(body, name);
+                body += R"(,"identity":)";
+                core::json::append_string(body, identity);
+                body += '}';
+                // IfAbsent::Succeed hands LiveKit's not_found over as an answer, for connected()
+                // to read.
+                service_.fetch(
+                    "RoomService/GetParticipant", std::move(body),
+                    Grant{.permission = Permission::AdminRoom, .room = name, .identity = {}},
+                    kPresenceLimits,
+                    [done = std::move(done)](Answer answer) mutable noexcept {
+                        if (!answer) {
+                            done(std::unexpected(answer.error()));
+                            return;
+                        }
+                        done(connected(*answer));
+                    },
+                    IfAbsent::Succeed);
             });
     }
 

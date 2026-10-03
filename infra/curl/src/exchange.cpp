@@ -188,12 +188,20 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
         set(curl_easy_setopt(e, CURLOPT_READDATA, this));
         break;
     case Method::Post:
+    case Method::Patch:
         set(curl_easy_setopt(e, CURLOPT_POST, 1L));
         set(curl_easy_setopt(e, CURLOPT_POSTFIELDSIZE_LARGE,
                              static_cast<curl_off_t>(upload_left_)));
         set(curl_easy_setopt(e, CURLOPT_READFUNCTION, &Exchange::on_read));
         set(curl_easy_setopt(e, CURLOPT_READDATA, this));
+        // A POST's body and framing under another method's name.
+        if (request.method == Method::Patch) {
+            set(curl_easy_setopt(e, CURLOPT_CUSTOMREQUEST, "PATCH"));
+        }
         break;
+    }
+    if (!request.ca_file.empty()) {
+        set(curl_easy_setopt(e, CURLOPT_CAINFO, request.ca_file.c_str()));
     }
     if (!ok) {
         return local("curl option refused");

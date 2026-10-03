@@ -20,6 +20,8 @@ it.
 | Seccomp profile | worker and live packager nodes | `cluster/seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
 | Envoy routes to LiveKit | Envoy | `/rtc` (the call SDK's WebSocket, no request timeout) and `/whip` (live ingest, RFC 9725; one short request each) to LiveKit's port 7880, on the environment's `PUBLIC_HOSTNAME` only, as the video and chat routes, so a ticket must name that host. `/twirp` is never routed (ADR-0050, ADR-0053). |
 | TURN port | the operator (firewall) | `TURN_PORT` (UDP, 3478 by default) open to the internet on the address STUNner's LoadBalancer Service gets. Environments that share one address each need their own port and their own STUNner Gateway (RUNBOOK step 7, ADR-0084). Nothing else: LiveKit's UDP 7882 stays inside the cluster. |
+| LiveKit server API and the Kubernetes API, from the gateway | live streams | The gateway's stream service (ADR-0092) calls LiveKit's server API (`LIVEKIT_API_URL`, port 7880 in the cluster) for tickets, relays and closing a stream's room, and, with `ULW_LIVE_PACKAGER=kubernetes`, the API server with its pod's service account to create each stream's packager Job and Secret. Packagers run in a namespace of their own (`LIVE_NAMESPACE`) with a quota, a default-deny NetworkPolicy plus the packager's own, and Pod Security enforced at `baseline` (warned at `restricted`), which admits a packager's unmasked `/proc` from Kubernetes v1.35 on. The account (`video-gateway`, in `NAMESPACE`) has a Role there and nowhere else: `create` and `get` on `jobs`, `create` on `secrets`. A ValidatingAdmissionPolicy bound to that account and namespace admits only a packager Job of the template's shape and the stream's own Secret (`deploy/kubernetes/base/live-packager/`, checked by `deploy/local/check-live-admission.py`). Its token is projected into the gateway's container alone, the pod's automount staying off, and its NetworkPolicy lets it reach LiveKit's 7880 and the API server's 6443 (`components/live-streams`, which turns live streams on; RUNBOOK step 9). The packager image's tag is the gateway's `ULW_LIVE_PACKAGER_IMAGE_TAG` (`LIVE_PACKAGER_IMAGE_TAG`). |
+| LiveKit's webhooks, to the gateway | live streams | LiveKit posts room and participant events, signed with the API key it shares with the gateway (its configuration's `webhook.api_key` and `webhook.urls`, `base/livekit/deployment.yaml`), to the gateway's second listener, `ULW_LIVE_WEBHOOK_PORT` (8081), at `/livekit/webhook` (ADR-0093). With `components/live-streams`, that port is behind its own ClusterIP Service, `video-gateway-hooks`, which no HTTPRoute names, and a NetworkPolicy admitting LiveKit's pods (`app.kubernetes.io/name: livekit`) only. It must never be routed from the internet. Without the component LiveKit's sends to it fail and are dropped, which changes nothing else. |
 | LiveKit egress and Redis | live streams | Before live streams launch: LiveKit egress v1.14.1 and a Redis that LiveKit and egress both use as their bus. Egress must reach each packager's SRT port (UDP 9000, `srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000`, ADR-0083), and its pods must be labelled `app.kubernetes.io/name: livekit-egress`, the only pods the packager's NetworkPolicy admits. It uses up to a core and 300 MB per concurrent stream (ADR-0053), and admits a stream only while its configured cost, 2 cores by default, is idle; size it for both. Shipped as `deploy/kubernetes/base/livekit-egress/` (one concurrent stream; two in `overlays/production`) and `livekit-redis/` (ClusterIP, password in `SFU_SECRET`, reachable from LiveKit and egress only); LiveKit names the same Redis (RUNBOOK step 7). |
 
 ### Environment, by name
@@ -116,10 +118,39 @@ libcurl's, and keeps its own `sslmode` settings.
 
 <!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
 
+<!-- apps/gateway/src/config.cpp (load_live), apps/gateway/src/main.cpp (make_live), infra/packagers -->
+
+The gateway's stream service (ADR-0092) is on when `LIVEKIT_API_URL` is set, and then needs the
+rest of these; with it unset none of them may be set, and the stream routes answer `404`. Its
+rows live in the gateway's database (`live_streams`, migration 0011).
+
+| Variable | Gateway | Notes |
+|---|---|---|
+| `LIVEKIT_API_URL` | turns live streams on | LiveKit's server API as the gateway reaches it: `https://`, or `http://` to loopback or a cluster Service (`http://livekit:7880`, `*.svc`, `*.svc.cluster.local`) |
+| `LIVEKIT_CLIENT_URL` | required with it | What tickets name, `wss://<public host>` (`ws://` to loopback only, for development); the WHIP URL is this with `https://` and `/whip/v1` |
+| `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | required with it | Secret (the secret, 32 to 256 bytes): one of LiveKit's `keys` |
+| `ULW_LIVE_PACKAGER_SRT` | required with it | Where the relay calls a packager: `srt://{stream}.live-packager.<namespace>.svc.cluster.local:9000` on the cluster, `srt://127.0.0.1:<port>` for the process runtime |
+| `ULW_LIVE_PACKAGER` | `process` or `kubernetes`, required with it | Where packagers run |
+| `ULW_LIVE_SEGMENT_SECONDS` | 2 to 10, default 2 | The relay's keyframe interval; must equal the packager's `ULW_LIVE_SEGMENT_SECONDS` |
+| `ULW_LIVE_MAX_STREAMS` | 1 to 64, default 2 | Unfinished streams on the platform at once; more are `503`. Set it to what egress takes (`LIVE_MAX_STREAMS`: one with the base's egress, two with `overlays/production`'s); `1` with `process`. At most what one sweep looks at, 64 |
+| `ULW_LIVE_START_WINDOW_SECONDS` | 60 to 86400, default 120 | A stream not taken live in this long is ended (`timeout`) |
+| `ULW_LIVE_STREAMS_PER_USER_PER_HOUR` | 1 to 1000, default 6 | Streams one user may start in an hour, however they end; more are `429` |
+| `ULW_LIVE_BROADCASTER_CLAIM` | `<claim>=<value>`, default none | Who may start a stream: a token whose claim of that name is the value (a string equal to it, an array holding it, or `true` for `true`). Unset: any signed-in user. Others are `403` on `POST /api/v1/live` and may still watch |
+| `ULW_LIVE_JOB_TEMPLATE` | with `kubernetes` | The Job template, read at start; the image carries it at `/usr/local/share/ulw/live-packager-job.yaml` |
+| `ULW_LIVE_PACKAGER_IMAGE_TAG` | with `kubernetes` | The packager image's tag the template names (`${LIVE_PACKAGER_IMAGE_TAG}`); a pinned environment's `<sha>@sha256:<digest>` (RUNBOOK 4a) |
+| `ULW_LIVE_PACKAGER_PULL_POLICY` | with `kubernetes`: `Always`, `IfNotPresent` (default) or `Never` | The template's `${IMAGE_PULL_POLICY}` |
+| `ULW_LIVE_PACKAGER_SECRET` | with `kubernetes`, default `live-packager-secrets` | The template's `${LIVE_PACKAGER_SECRET}`: the Secret, in the packagers' namespace, with the packager's database URL and store keys. The template's `${STORAGE}`, `${R2_ACCOUNT_ID}`, `${S3_ENDPOINT}` and `${BUCKET}` are the gateway's own store, `r2` or `minio` (`fs` is refused with `kubernetes`) |
+| `ULW_K8S_API_URL`, `ULW_K8S_NAMESPACE`, `ULW_K8S_TOKEN_FILE`, `ULW_K8S_CA_FILE` | with `kubernetes`, optional | Default to the in-cluster API server and the pod's service account (its namespace, token and CA); the API server's URL is `https://` (`http://` to loopback only). `components/live-streams` names the packagers' namespace (`LIVE_NAMESPACE`, the template's `${LIVE_NAMESPACE}`) and the projected token's files. A packager counts as listening once its Job reports a ready pod (`status.ready`): its container started, which binds the SRT listener at once; the relay's caller retries its handshake for seconds |
+| `ULW_LIVE_WEBHOOK_PORT` | 1 to 65535, optional, not `ULW_LISTEN_PORT` | The listener for LiveKit's webhooks (ADR-0093), serving `POST /livekit/webhook` only, each request verified with `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`. Unset: no listener, and streams go live and end through the owner's `start` and `end` and the sweep alone. Never expose it through the public route |
+| `ULW_LIVE_PUBLISHER_GRACE_SECONDS` | 1 to 300, default 10 | With webhooks: how long a live stream's publisher may be gone (a full reconnect) before LiveKit is asked whether it is, and the stream ended `publisher_left` if not |
+| `ULW_LIVE_PACKAGER_BIN`, `ULW_LIVE_PACKAGER_SCRATCH_DIR`, `ULW_LIVE_PACKAGER_PORT` | with `process` | The `live_packager` binary (absolute, with `ulw_sandbox` beside it), its scratch root, and the one ingest port every packager takes (default 9000). Each packager gets the gateway's store and database settings, and `PATH`; nothing else of its environment |
+
 The live packager (one process per stream, environment only; on Kubernetes one Job per stream
 from `deploy/kubernetes/live-packager/job.yaml`, ADR-0083) takes
 `ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below),
-`ULW_FFMPEG` and `ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
+`ULW_FFMPEG` and `ULW_FFPROBE`. `ULW_LIVE_CALLER_WAIT_SECONDS` (0 to 86400, default 0: no limit)
+is how long it waits for its SRT caller before it ends the stream without one, as SIGUSR1 would;
+the Job template sets 60 (ADR-0092). It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |
@@ -246,6 +277,16 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `live_playlist_single_flight_joins_total` | counter | Misses that waited on a store read another request had started instead of starting one |
 | `live_playlist_cache_evictions_total` | counter | Fresh copies dropped for the bounds (512 streams, 4 MiB) |
 | `live_playlist_cache_entries`, `live_playlist_cache_bytes` | gauge | Streams and bytes held |
+| `live_streams_created_total`, `live_tickets_issued_total`, `live_streams_went_live_total` | counter | The stream service (ADR-0092), when live streams are on: streams started, publisher tickets issued, streams first relayed to their packager |
+| `live_streams_ended_total{reason="owner"}`, `{reason="finished"}`, `{reason="failed"}`, `{reason="timeout"}`, `{reason="publisher_left"}` | counter | Streams ended, by why. `failed` (a packager that could not run) or `timeout` (never taken live, or past 13 h) rising is packagers or relays not working; `publisher_left` is LiveKit's word that the publisher went, confirmed after the grace (ADR-0093) |
+| `live_webhooks_total{outcome="accepted"}`, `{outcome="refused"}`, `{outcome="limited"}`, `{outcome="bad_request"}` | counter | With `ULW_LIVE_WEBHOOK_PORT`: LiveKit's webhook requests, by what became of them |
+| `live_webhook_refusals_total{reason=...}` | counter | Webhooks refused before they were read: `no_authorization`, `malformed`, `algorithm`, `signature`, `unknown_key`, `no_expiry`, `expired`, `not_yet_valid`, `body_hash`, `too_large`. `signature` or `unknown_key` rising is LiveKit and the gateway holding different keys, or someone else posting |
+| `live_webhook_connections_refused_total` | counter | Webhook connections closed on accept, 32 being open |
+| `live_webhook_starts_total`, `live_webhook_start_failures_total` | counter | Go-live attempts made because LiveKit said a stream's publisher joined, and those a dependency refused or could not answer |
+| `live_publisher_departures_total`, `live_publisher_returns_total`, `live_publisher_kept_total`, `live_publisher_check_failures_total` | counter | Publishers gone (a grace began), back within it, still connected at LiveKit when it ran out, and checks LiveKit could not answer |
+| `live_publisher_streams_followed` | gauge | Streams whose publisher this replica follows (at most 1024) |
+| `live_dependency_failures_total{dependency="database"}`, `{dependency="media"}`, `{dependency="packager"}` | counter | Stream service calls that failed or were refused, by what failed: the database, LiveKit, or the packager runtime (the API server, or a packager not listening within 30 s) |
+| `live_sweeps_total` | counter | Looks at the unfinished streams, every 10 s per replica |
 | `playlists_rejected_total` | counter | A stored playlist broke a rewriting rule (a worker bug); the viewer got `500` |
 | `presign_failures_total` | counter | A segment URL could not be signed; the viewer got `500` |
 | `view_events_recorded_total`, `view_events_dropped_total`, `view_batches_failed_total` | counter | Master-playlist fetches recorded as views |

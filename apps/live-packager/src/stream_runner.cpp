@@ -7,6 +7,7 @@
 #include "watch.hpp"
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -206,13 +207,36 @@ Outcome run_stream(Publisher& publisher, infra::srt::IngestListener& listener,
                                       [&stop_all]() noexcept { stop_all.request_stop(); });
     const std::stop_callback on_end(stops.end, [&stop_all]() noexcept { stop_all.request_stop(); });
 
+    // The wait for a caller has its own limit when one is set: a relay that never came, or one
+    // that went with a run this one restarted, leaves nobody to end the stream otherwise.
+    std::atomic<bool> waited_out{false};
+    std::optional<std::jthread> give_up;
+    if (settings.caller_wait.count() > 0) {
+        give_up.emplace(
+            [&stop_all, &waited_out, wait = settings.caller_wait](const std::stop_token& cancel) {
+                std::mutex m;
+                std::condition_variable_any cv;
+                std::unique_lock lock(m);
+                const bool woken = cv.wait_for(lock, cancel, wait, [] { return false; });
+                if (!woken && !cancel.stop_requested()) {
+                    waited_out = true;
+                    stop_all.request_stop();
+                }
+            });
+    }
     auto accepted = listener.accept(stop_all.get_token());
+    // Stops and joins the timer: whatever it decided is settled from here on.
+    give_up.reset();
     if (!accepted) {
         log("ingest: {}", accepted.error());
         return Outcome::Failed;
     }
     std::optional<infra::srt::Session> session = std::move(*accepted);
     if (!session) {
+        if (waited_out && !stops.drain.stop_requested() && !stops.end.stop_requested()) {
+            log("no publisher connected in {} s; ending the stream", settings.caller_wait.count());
+            return end_without_media(publisher, stops, false, false);
+        }
         log("stopped before a publisher connected");
         return end_without_media(publisher, stops, true, false);
     }

@@ -110,6 +110,16 @@ protected:
         return std::move(*got);
     }
 
+    std::expected<bool, MediaError> presence(MediaGeneration generation = MediaGeneration{1}) {
+        std::optional<std::expected<bool, MediaError>> got;
+        sfu->present(*core::RoomId::parse(kRoom), generation, *core::UserId::parse("streamer"),
+                     *core::DeviceId::parse(kDevice),
+                     [&](std::expected<bool, MediaError> r) noexcept { got = r; });
+        EXPECT_FALSE(got.has_value()) << "callback ran inside present()";
+        EXPECT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
+        return got.value_or(std::unexpected(MediaError::Unavailable));
+    }
+
     template <class Start> DoneResult wait(Start start) {
         std::optional<DoneResult> got;
         start([&](DoneResult r) noexcept { got = r; });
@@ -814,6 +824,107 @@ TEST_P(LiveKitSfuTest, ACallbackMayDestroyTheSfu) {
                    });
     ASSERT_TRUE(pump_until(*reactor, [&] { return called; }));
     EXPECT_EQ(sfu, nullptr);
+}
+
+// Lists the room as there (or answers `rooms`), and answers GetParticipant with `status` and
+// `body`.
+HttpTestServer participant_server(int status, std::string body,
+                                  std::string rooms = R"({"rooms":[{"sid":"RM_1","name":"r"}]})") {
+    return HttpTestServer(
+        [status, body = std::move(body), rooms = std::move(rooms)](const ServedRequest& request) {
+            if (request.path().ends_with("/ListRooms")) {
+                return Reply{.status = 200, .headers = {}, .body = rooms};
+            }
+            return Reply{.status = status, .headers = {}, .body = body};
+        });
+}
+
+TEST_P(LiveKitSfuTest, PresenceAsksForTheParticipantWithoutOpeningItsRoom) {
+    auto server = participant_server(
+        200, R"({"sid":"PA_1","identity":"streamer/0192f3a4-0000-7000-8000-00000000000d",)"
+             R"("state":"ACTIVE"})");
+    start(server.base_url());
+    EXPECT_EQ(presence(MediaGeneration{3}), true);
+
+    // The room by name, then the participant, and no CreateRoom: asking must not bring a dropped
+    // room back.
+    const auto requests = server.requests();
+    ASSERT_EQ(requests.size(), 2U);
+    EXPECT_EQ(requests[0].path(), "/twirp/livekit.RoomService/ListRooms");
+    const auto listed = body_of(requests[0]);
+    ASSERT_NE(listed.find("names"), nullptr);
+    ASSERT_EQ(listed.find("names")->as_array()->size(), 1U);
+    EXPECT_EQ(listed.find("names")->as_array()->at(0).as_string(), std::string(kRoom) + ":3");
+    EXPECT_EQ(bool_at(claims_of(requests[0]), "video", "roomList"), true);
+    EXPECT_EQ(requests[1].path(), "/twirp/livekit.RoomService/GetParticipant");
+    const auto body = body_of(requests[1]);
+    EXPECT_EQ(string_at(body, "room"), std::string(kRoom) + ":3");
+    EXPECT_EQ(string_at(body, "identity"), "streamer/" + std::string(kDevice));
+    const auto claims = claims_of(requests[1]);
+    EXPECT_EQ(string_at(claims, "video", "room"), std::string(kRoom) + ":3");
+    EXPECT_EQ(bool_at(claims, "video", "roomAdmin"), true);
+    EXPECT_EQ(bool_at(claims, "video", "roomCreate"), std::nullopt);
+    EXPECT_EQ(bool_at(claims, "video", "roomJoin"), std::nullopt);
+}
+
+TEST_P(LiveKitSfuTest, AParticipantOrRoomThatIsGoneIsAbsent) {
+    auto server = participant_server(404, R"({"code":"not_found","msg":"participant not found"})");
+    start(server.base_url());
+    EXPECT_EQ(presence(), false);
+}
+
+TEST_P(LiveKitSfuTest, ARoomThatIsGoneHasNobodyAndItsParticipantIsNotAskedFor) {
+    // LiveKit answers GetParticipant in a room no node holds as unavailable, so the room is
+    // looked for first; protojson leaves the empty list out.
+    for (const std::string_view rooms : {R"({"rooms":[]})", "{}"}) {
+        auto server =
+            participant_server(503, R"({"code":"unavailable","msg":"x"})", std::string(rooms));
+        start(server.base_url());
+        EXPECT_EQ(presence(), false) << rooms;
+        EXPECT_EQ(server.requests().size(), 1U);
+        sfu.reset();
+    }
+}
+
+TEST_P(LiveKitSfuTest, AParticipantLiveKitCountsDisconnectedIsAbsent) {
+    auto server =
+        participant_server(200, R"({"sid":"PA_1","identity":"streamer/x","state":"DISCONNECTED"})");
+    start(server.base_url());
+    EXPECT_EQ(presence(), false);
+}
+
+TEST_P(LiveKitSfuTest, PresenceFailsByWhetherARetryCanHelp) {
+    {
+        auto server = participant_server(503, R"({"code":"unavailable","msg":"x"})");
+        start(server.base_url());
+        EXPECT_EQ(presence(), std::unexpected(MediaError::Unavailable));
+        sfu.reset();
+    }
+    {
+        auto server = participant_server(401, R"({"code":"unauthenticated","msg":"x"})");
+        start(server.base_url());
+        EXPECT_EQ(presence(), std::unexpected(MediaError::Refused));
+        sfu.reset();
+    }
+    {
+        // A 404 that is not LiveKit's not_found (a proxy's, a wrong path) says nothing.
+        auto server = participant_server(404, "not here");
+        start(server.base_url());
+        EXPECT_EQ(presence(), std::unexpected(MediaError::Refused));
+        sfu.reset();
+    }
+    {
+        auto server = participant_server(200, "[]");
+        start(server.base_url());
+        EXPECT_EQ(presence(), std::unexpected(MediaError::Unavailable));
+        sfu.reset();
+    }
+    {
+        auto server = participant_server(200, "{}", R"({"rooms":7})");
+        start(server.base_url());
+        EXPECT_EQ(presence(), std::unexpected(MediaError::Unavailable));
+        sfu.reset();
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, LiveKitSfuTest,

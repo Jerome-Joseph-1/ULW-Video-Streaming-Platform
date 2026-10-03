@@ -268,6 +268,55 @@ jobs:
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml logs minio
 
+  # Live publishing as a client does it (docs/adr/0092, tests/e2e/live-publish.e2e.mjs): a
+  # broadcaster's page starts a stream through the gateway, publishes Chromium's fake camera
+  # over WHIP with the ticket the gateway issued, goes live; the gateway starts the packager
+  # and LiveKit's recorder relays to it; a second user watches in hls.js; the broadcaster ends
+  # it, and its recording becomes a video the worker makes ready. A second run never calls start
+  # or end: LiveKit's webhooks to the gateway take the stream live and, once the page drops its
+  # connection, end it (docs/adr/0093).
+  live-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    services:
+      postgres:
+        # Same digest as deploy/local/compose.yaml.
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_PASSWORD: testtest123
+        ports: ["15432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
+          --health-retries 15
+    env:
+      CC: gcc-14
+      CXX: g++-14
+      ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:15432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-14-ci-live-publish
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
+      - name: Start MinIO, LiveKit and its recorder
+        run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait minio livekit egress
+      - run: cmake --preset ci
+      - run: >-
+          cmake --build --preset ci --target gateway_server transcode_worker live_packager
+          ulw_sandbox ulw_devtoken ulw_migrate
+      - run: tests/e2e/live-publish-run.sh build/ci
+        timeout-minutes: 20
+        env:
+          LIVEKIT_API_URL: http://127.0.0.1:7880
+      - if: failure()
+        run: docker compose -f deploy/local/compose.yaml --profile calls logs livekit egress minio
+
   # Brief section 14's call capacity: the pinned LiveKit carrying 1:1 calls from SDK clients on
   # this runner, its egress per call and CPU per call against the derivation (brief 8.1,
   # ADR-0012). Independent of the sandbox cluster; the SFU runs in a container of its own.

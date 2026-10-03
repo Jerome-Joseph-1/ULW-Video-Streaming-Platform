@@ -125,6 +125,9 @@ public:
     virtual void close(MediaDone done) = 0;
 };
 
+// Whether a participant is connected: true while it is, false once it has gone or its room has.
+using PresenceDone = std::move_only_function<void(std::expected<bool, MediaError>) noexcept>;
+
 // Every member runs on the reactor thread, and every callback runs there later, never from
 // inside the call that was given it. Rooms must not outlive their ISfu; destroying the ISfu
 // drops the callbacks still pending.
@@ -137,6 +140,11 @@ public:
     // Idempotent for one generation. `max_participants` 0 means no limit of the room's own.
     virtual void open_room(const RoomId& room, MediaGeneration generation, MediaRoomKind kind,
                            std::uint16_t max_participants, OpenDone done) = 0;
+    // Whether that device of that user is connected to the generation's room now, as the media
+    // server itself sees it. It never opens the room: a room that is gone holds nobody, and
+    // asking must not bring it back (ADR-0093).
+    virtual void present(const RoomId& room, MediaGeneration generation, const UserId& user,
+                         const DeviceId& device, PresenceDone done) = 0;
 };
 
 } // namespace core::ports

@@ -341,7 +341,8 @@ int run() {
                           .segment_seconds = config->segment_seconds,
                           .listed_segments = live::listed_segments(config->window_segments),
                           .max_kbps = config->max_kbps,
-                          .max_duration = config->max_duration},
+                          .max_duration = config->max_duration,
+                          .caller_wait = config->caller_wait},
                          {.drain = drain.get_token(), .end = end.get_token()});
     live::log("stopped");
     const bool drained = drain.stop_requested() && !end.stop_requested();

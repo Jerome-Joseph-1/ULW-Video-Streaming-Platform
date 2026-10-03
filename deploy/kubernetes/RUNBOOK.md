@@ -15,21 +15,22 @@ What ships:
 
 | Path | What |
 |---|---|
-| `base/video-gateway/` | Deployment (2 replicas, migrations in its init container), Service, HTTPRoute + BackendTrafficPolicy, NetworkPolicy |
+| `base/video-gateway/` | Deployment (2 replicas, migrations in its init container), Service, HTTPRoute + BackendTrafficPolicy, NetworkPolicy, and its own ServiceAccount (no token mounted unless live streams are on) |
 | `base/video-worker/` | Deployment (1 replica), NetworkPolicy; no Service, no route |
 | `base/upload-reaper/` | CronJob (every 15 minutes) and NetworkPolicy; the gateway image's `ulw_reaper` (step 3a) |
 | `base/chat/` | Deployment (3 replicas, docs/adr/0019), Service, HTTPRoute for its WebSocket (`/rt`), NetworkPolicy |
-| `base/live-packager/` | The headless Service that names each stream's packager in DNS, and the NetworkPolicy every packager runs under (step 9) |
+| `base/live-packager/` | The packagers' own namespace (`LIVE_NAMESPACE`) with its quota, default-deny and packager NetworkPolicies, the headless Service that names each stream's packager in DNS, the gateway's Role there, and the admission policy that holds what the gateway creates there to a packager's shape (step 9) |
 | `base/stunner/` | The TURN Gateway (UDP `TURN_PORT`) and the UDPRoute to LiveKit |
 | `base/livekit/` | LiveKit (1 replica), Service, HTTPRoute for its signalling (`/rtc`) and WHIP (`/whip`), NetworkPolicy |
 | `base/livekit-redis/` | Redis (1 replica, nothing persisted), ClusterIP Service, NetworkPolicy: LiveKit's bus to egress |
 | `base/livekit-egress/` | LiveKit's recorder (1 replica), NetworkPolicy; no Service: it relays live streams to their packagers (step 9) |
 | `components/operator-config/` | The kustomize component that copies each `config.env` value into the manifests that use it |
-| `overlays/staging/` | An example environment that follows the `main` build: `kustomization.yaml` and its `config.env` |
-| `overlays/production/` | An example environment pinned to a published commit, with room for a larger worker and two live streams |
+| `components/live-streams/` | The component that turns live streams through the gateway on: LiveKit's API and key pair, the packagers' settings, the account's token and the egress to reach LiveKit and the API server (step 9) |
+| `overlays/staging/` | An example environment that follows the `main` build, live streams on: `kustomization.yaml` and its `config.env` |
+| `overlays/production/` | An example environment pinned to a published commit, with room for a larger worker and two live streams, which stay off until its operator turns them on (step 9) |
 | `cluster/stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
 | `cluster/seccomp/ulw-worker.json` | The worker's seccomp profile, installed on each node (step 2) |
-| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream; in no kustomization, so applying an overlay never creates one (step 9, docs/adr/0083) |
+| `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream by the gateway, which carries it in its image, or by hand; in no kustomization, so applying an overlay never creates one (step 9, docs/adr/0083, 0092) |
 
 The base carries example values (namespace `ulw`, `video.example.com`, `id.example.com`) only so
 that it is a valid set of manifests; an overlay replaces every one of them from its
@@ -37,14 +38,17 @@ that it is a valid set of manifests; an overlay replaces every one of them from 
 base in a kind cluster with a `config.env` of its own (`make e2e-up`), which is the closest thing
 to a rehearsal this repository offers.
 
-Live streams also need a stream service to start each stream's packager, which does not exist
-yet: until it does, a packager is started by hand (step 9).
+Live streams run through the gateway's stream service, which starts each stream's packager as
+a Job in the packagers' own namespace, where an overlay lists `components/live-streams`
+(`overlays/staging` does; step 9).
 
 ## 1. Check the cluster
 
 ULW needs:
 
-- Kubernetes v1.33 or later, with pods in user namespaces (below);
+- Kubernetes v1.33 or later, with pods in user namespaces (below); v1.35 or later for live
+  streams, whose packagers' Pod Security admits their sandbox's unmasked `/proc` only from then
+  on (step 9);
 - [Envoy Gateway](https://gateway.envoyproxy.io) v1.x and a Gateway API `Gateway` the routes
   attach to (`GATEWAY_NAME` in `GATEWAY_NAMESPACE`), with a listener for `PUBLIC_HOSTNAME` that
   terminates TLS. The gateway's route uses Envoy Gateway's `BackendTrafficPolicy`; another
@@ -59,7 +63,7 @@ The worker gives each ffmpeg its own namespaces (docs/adr/0032), which needs pod
 namespaces. On each node:
 
 ```sh
-kubectl version                        # server v1.33 or later
+kubectl version                        # server v1.33 or later; v1.35 or later for live (step 9)
 uname -r                               # 6.3 or later (idmapped mounts on overlayfs)
 containerd --version; runc --version   # containerd 2.x, runc 1.2 or later
 ```
@@ -461,7 +465,8 @@ is required (a missing one fails the build), and every value shipped is an examp
 
 | Key | What | Used as |
 |---|---|---|
-| `NAMESPACE` | The namespace everything runs in | every resource's namespace; `<namespace>` in the packagers' DNS names |
+| `NAMESPACE` | The namespace everything runs in but the packagers | every resource's namespace; the gateway's account the packagers' Role and admission policy name; the admission policy's name, `<NAMESPACE>-live-packagers`, cluster-wide |
+| `LIVE_NAMESPACE` | The live packagers' own namespace, `<NAMESPACE>-live` in the examples (step 9) | its resources' namespace; `<namespace>` in the packagers' DNS names; where the gateway makes their Jobs |
 | `GATEWAY_NAME`, `GATEWAY_NAMESPACE` | Your Gateway API Gateway | the HTTPRoutes' `parentRefs` |
 | `PUBLIC_HOSTNAME` | The host clients reach: the web app's own, so `/api`, `/rt` and `/rtc` are same-origin | the HTTPRoutes' `hostnames` |
 | `POD_CIDR` | The cluster's pod network | `ULW_TRUSTED_PROXIES` of the gateway and chat; the block the worker and packagers may not reach |
@@ -472,14 +477,16 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `VIDEO_GATEWAY_IMAGE_TAG`, `VIDEO_WORKER_IMAGE_TAG`, `CHAT_IMAGE_TAG`, `LIVE_PACKAGER_IMAGE_TAG` | Which build runs: `main`, a commit SHA, or `<sha>@sha256:<digest>` (4a) | each image's tag |
 | `IMAGE_PULL_POLICY` | `Always` for a moving tag, `IfNotPresent` for a pinned one | the four images' pull policy |
 | `TURN_PORT` | STUNner's public UDP port (step 7) | the TURN listener, and the port LiveKit hands clients |
-| `VIDEO_GATEWAY_SECRET`, `VIDEO_WORKER_SECRET`, `CHAT_SECRET`, `SFU_SECRET`, `LIVE_PACKAGER_SECRET` | The names of the Secrets of step 3, 7 and 9 | every `secretKeyRef` |
+| `VIDEO_GATEWAY_SECRET`, `VIDEO_WORKER_SECRET`, `CHAT_SECRET`, `SFU_SECRET`, `LIVE_PACKAGER_SECRET` | The names of the Secrets of step 3, 7 and 9 | every `secretKeyRef`; the one Secret besides its own stream's a packager may read |
+| `LIVE_MAX_STREAMS`, `LIVE_BROADCASTER_CLAIM` | With `components/live-streams` only: how many streams run at once, and who may start one (`<claim>=<value>`, empty for every signed-in user; step 9) | `ULW_LIVE_MAX_STREAMS`, `ULW_LIVE_BROADCASTER_CLAIM` |
 
 The file is plain `KEY=value` lines, no quotes and no spaces, so a shell can source it too (the
 packager's Job in step 9 is filled from it). `components/operator-config` copies each value
 into the manifests; read it to see exactly where. What `config.env` does not cover (replica
 counts, resources, the per-client limits, an extra hostname, a hop count) you change with
 kustomize patches in your overlay, as `overlays/production` patches the worker's and egress's
-resources.
+resources. Live streams are a component of their own (`components/live-streams`, step 9),
+listed after `operator-config` in an overlay that runs them.
 
 Your overlay can live in your own repository instead, against a pinned commit of this one:
 
@@ -1012,24 +1019,130 @@ JWKS outage, use `kubectl -n "$NS" rollout restart deployment/video-gateway depl
 instead: new pods start with no keys and refuse every token (`503`) until a fetch succeeds,
 which fails closed.
 
-## 9. Live streams: the packager
+## 9. Live streams: the stream service and the packager
 
 A live stream reaches viewers as HLS that its packager writes to the bucket (docs/adr/0046),
-from LiveKit's recorder (egress), which the stream service starts once the publisher's WHIP
-POST has succeeded (docs/adr/0053). A packager is one process per stream, so on the cluster it
-is one Job per stream, made from `live-packager/job.yaml` (docs/adr/0083). What it needs:
+from LiveKit's recorder (egress), which the gateway's stream service starts once the publisher's
+WHIP POST has succeeded and the broadcaster's client says so (docs/adr/0053, 0092). A packager
+is one process per stream, so on the cluster it is one Job per stream, made from
+`live-packager/job.yaml` (docs/adr/0083) by the stream service. What it takes:
 
+- **Kubernetes v1.35 or later.** The packagers' namespace enforces Pod Security `baseline`,
+  which admits the packager's `procMount: Unmasked` only in a user namespace of the pod's own
+  (`hostUsers: false`, as a packager's is), and only from v1.35 on: before it, `baseline`
+  refuses `Unmasked` whatever the pod, and every packager would be refused. Check
+  `kubectl version` (server) before turning live streams on.
 - **LiveKit egress and its Redis** (step 7). Egress's pods carry
   `app.kubernetes.io/name: livekit-egress`, the only pods the packager's NetworkPolicy admits,
-  and LiveKit's configuration names the same Redis. A stream past egress's capacity is refused
-  (`Unavailable` from the relay) until one ends.
-- **The stream service**, which makes each stream's Job and Secret, calls the relay with the
-  stream's passphrase, and records the stream's chat live (step 3). It does not exist yet; until
-  it does, the steps below start a packager by hand.
+  and LiveKit's configuration names the same Redis. Egress takes one stream at a time in the
+  base, two with `overlays/production`'s resources; a further one is refused (`Unavailable`
+  from the relay) until one ends, which is why `LIVE_MAX_STREAMS` should say the same.
+- **The stream service**, in the gateway (docs/integration/live.md, "Starting a stream"), on
+  where the overlay lists `components/live-streams` after `components/operator-config`. It
+  stores each stream (`live_streams`, migration 0011, run by the gateway's init container),
+  hands its owner publisher tickets, opens the stream's live chat, makes the stream's Job and
+  Secret (`live-packager-<stream>`, the SRT passphrase, owned by the Job), relays the publisher
+  to it, and ends the stream. It runs as the gateway's own service account
+  (`base/video-gateway/serviceaccount.yaml`, its token projected into the gateway's container
+  alone by the component), which may do one thing: in the packagers' namespace,
+  `LIVE_NAMESPACE`, create Jobs and Secrets and read Jobs back
+  (`base/live-packager/rbac.yaml`). `base/live-packager/admission-policy.yaml` (a
+  ValidatingAdmissionPolicy and its binding, cluster-scoped, named `<NAMESPACE>-live-packagers`)
+  holds what it creates there to a packager's shape: the packager's image and nothing else, no
+  host namespaces, no token, no Secret but `LIVE_PACKAGER_SECRET` and the stream's own, no
+  command or arguments, the stream's own name and DNS name, no node or priority class, and
+  Secrets named exactly `live-packager-<stream>` and owned by that stream's Job. The
+  component's NetworkPolicy lets the gateway reach LiveKit's API (7880) and the API server
+  (6443). The Job is the template in the gateway's image, built from this repository's
+  `live-packager/job.yaml` (a change to it ships with the gateway), filled with
+  `LIVE_NAMESPACE`, `LIVE_PACKAGER_IMAGE_TAG`, `IMAGE_PULL_POLICY`, `LIVE_PACKAGER_SECRET` and
+  the gateway's own store.
+- **The packagers' namespace**, `base/live-packager/namespace.yaml`, with a quota
+  (`resourcequota.yaml`: running pods to the streams the platform takes, and about an hour's
+  Jobs and Secrets, a finished Job being removed an hour after it ends; a start past the quota
+  is answered `503` with `Retry-After`, as the platform full; `overlays/production` raises it
+  for two streams), a default-deny NetworkPolicy beside the packager's own (`default-deny.yaml`,
+  `networkpolicy.yaml`: SRT in from egress in `NAMESPACE`; DNS, Postgres and the object store
+  out), and Pod Security enforced at `baseline`, warned and audited at `restricted`, which a
+  packager meets but for its `procMount`. These ship in the base whether or not live streams are
+  on, and grant nothing until the component gives the gateway its token. Whoever applies the
+  overlay must be allowed to create the namespace and the cluster-scoped admission policy and
+  binding.
 
-The relay's packager address (the SFU adapter's `packager_srt`, ADR-0053) is
-`srt://{stream}.live-packager.<NAMESPACE>.svc.cluster.local:9000`: `base/live-packager/service.yaml`
-gives each packager pod that name.
+The relay's packager address (the gateway's `ULW_LIVE_PACKAGER_SRT`, ADR-0053) is
+`srt://{stream}.live-packager.<LIVE_NAMESPACE>.svc.cluster.local:9000`, which the component sets:
+`base/live-packager/service.yaml` gives each packager pod that name.
+
+### Turning live streams on
+
+The gateway takes LiveKit's key pair from `SFU_SECRET` (step 7), the same values egress uses, so
+there is no gateway key to add. In the overlay's `config.env`, set `LIVE_MAX_STREAMS` to what
+egress takes and `LIVE_BROADCASTER_CLAIM` to who may broadcast (`<claim>=<value>`,
+docs/integration/live.md): empty, every signed-in user may start a stream, which suits a
+staging environment's testers and seldom a production one. Then list the component in the
+overlay's `kustomization.yaml` and apply it (step 4):
+
+```yaml
+components:
+  - ../../components/operator-config
+  - ../../components/live-streams
+```
+
+Check after the rollout that the account works, and that it can do nothing more:
+
+```sh
+set -a; . overlays/<env>/config.env; set +a
+AS=--as=system:serviceaccount:$NAMESPACE:video-gateway
+for verb in "create jobs" "get jobs" "create secrets"; do
+  kubectl -n "$LIVE_NAMESPACE" auth can-i $verb $AS     # yes
+done
+for verb in "get secrets" "list jobs" "delete jobs" "patch secrets" "create pods/exec"; do
+  kubectl -n "$LIVE_NAMESPACE" auth can-i $verb $AS     # no
+done
+kubectl -n "$NAMESPACE" auth can-i create jobs $AS     # no: nothing in the gateway's own namespace
+kubectl -n "$NAMESPACE" logs deploy/video-gateway | grep -m1 '"name":"ULW_LIVE_PACKAGER"'
+```
+
+The admission policy is checked, case by case, with a server-side dry run of the template and of
+every way it must refuse (nothing is stored), and Pod Security with the template's own dry run,
+which must answer with no `baseline` refusal (a `restricted` warning for `procMount` is
+expected). From the repository's root, with the overlay's directory under
+`deploy/kubernetes/overlays/`:
+
+```sh
+python3 deploy/local/check-live-admission.py <env> -- kubectl
+```
+
+A stream then runs without anyone on the cluster: the broadcaster's client starts it, publishes,
+goes live and ends it; `kubectl -n "$LIVE_NAMESPACE" get jobs -l app.kubernetes.io/name=live-packager`
+lists its packagers, and each Job's log ends `recording: queued as video <id>`. The gateway's
+`live_streams_ended_total{reason="failed"}` or `{reason="timeout"}` rising means packagers that
+did not start or relays that never reached them: look at the Jobs' events and logs, and at
+egress's.
+
+**LiveKit's webhooks** (docs/adr/0093) take a stream live when its publisher publishes and end
+it (`publisher_left`) once the publisher has been gone for `ULW_LIVE_PUBLISHER_GRACE_SECONDS`
+(10), so an encoder with a fixed token, or a client that crashed, needs nobody to call `start`
+or `end`. LiveKit posts them, signed with `SFU_SECRET`'s `LIVEKIT_API_KEY`, to the gateway's
+second listener (`ULW_LIVE_WEBHOOK_PORT`, 8081): the Service `video-gateway-hooks`, which no
+HTTPRoute names, admitted by the component's `hooks.yaml` NetworkPolicy from LiveKit's pods
+only. LiveKit's configuration names it in its `webhook` block (`base/livekit/deployment.yaml`).
+Check after a rollout that they arrive and are believed:
+
+```sh
+kubectl -n "$NAMESPACE" logs deploy/livekit | grep -m3 '"sent webhook"'        # statusCode 200
+kubectl -n "$NAMESPACE" exec deploy/video-gateway -- wget -qO- 127.0.0.1:8080/metrics \
+  | grep -E '^live_webhooks_total|^live_webhook_refusals_total'
+```
+
+`live_webhook_refusals_total{reason="signature"}` or `{reason="unknown_key"}` rising means
+LiveKit signs with a key the gateway does not have: both read the same pair from `SFU_SECRET`.
+LiveKit's own log saying `failed to send webhook` means the Service, the port or the policy is
+wrong (or the component is off); streams then still go live through `start` and end through
+`end` and the sweep, as before.
+
+To turn live streams off again, take the component out of the overlay and apply it:
+the stream routes answer `404`, and streams already running end with their publishers.
 
 ### Secrets and the database role
 
@@ -1049,10 +1162,11 @@ GRANT USAGE ON SEQUENCE jobs_id_seq TO ulw_live;
 ```
 
 Its Secret (`LIVE_PACKAGER_SECRET`, `live-packager-secrets` by default), with a store token of
-its own (object read and write on the bucket):
+its own (object read and write on the bucket), in the packagers' namespace, where every packager
+runs; apply the overlay first, which creates the namespace:
 
 ```sh
-kubectl -n "$NS" create secret generic live-packager-secrets \
+kubectl -n "$LIVE_NAMESPACE" create secret generic "$LIVE_PACKAGER_SECRET" \
   --from-literal=ULW_DATABASE_URL="$LIVE_DATABASE_URL" \
   --from-literal=ULW_S3_ACCESS_KEY_ID="$LIVE_STORE_KEY_ID" \
   --from-file=ULW_S3_SECRET_ACCESS_KEY=<(printf '%s' "$LIVE_STORE_SECRET") \
@@ -1076,6 +1190,9 @@ Add a rule beside step 3a's, merged into the same `lifecycle.json`; the number o
 
 ### Start a stream's packager by hand
 
+For a stream the stream service did not start (a test from the cluster, or a stream to record
+again): the service never touches it, and nothing ends it but its publisher or SIGUSR1.
+
 The stream id names the Job and the pod's DNS record, so it must be a DNS label here: lowercase
 letters, digits and `-`, 1 to 63 (ADR-0053). The passphrase is the stream's own, 10 to 79
 characters, and goes only into its Secret and the relay request. The template takes the
@@ -1085,13 +1202,13 @@ environment's values from its `config.env`:
 set -a; . overlays/<env>/config.env; set +a
 STREAM=launch-2026
 OWNER=<the broadcaster's user id (the token's subject)>
-kubectl -n "$NAMESPACE" create secret generic "live-packager-$STREAM" \
+kubectl -n "$LIVE_NAMESPACE" create secret generic "live-packager-$STREAM" \
   --from-file=ULW_LIVE_SRT_PASSPHRASE=<(openssl rand -hex 24 | tr -d '\n')
-ULW_STREAM_ID=$STREAM ULW_STREAM_OWNER=$OWNER envsubst '${NAMESPACE} ${LIVE_PACKAGER_IMAGE_TAG}
+ULW_STREAM_ID=$STREAM ULW_STREAM_OWNER=$OWNER envsubst '${LIVE_NAMESPACE} ${LIVE_PACKAGER_IMAGE_TAG}
   ${IMAGE_PULL_POLICY} ${STORAGE} ${R2_ACCOUNT_ID} ${S3_ENDPOINT} ${BUCKET}
   ${LIVE_PACKAGER_SECRET} ${ULW_STREAM_ID} ${ULW_STREAM_OWNER}' \
   < live-packager/job.yaml | kubectl apply -f -
-kubectl -n "$NAMESPACE" logs -f "job/$STREAM"
+kubectl -n "$LIVE_NAMESPACE" logs -f "job/$STREAM"
 ```
 
 Name the variables to `envsubst` exactly as above: the template also holds `$(POD_IP)`, which is
@@ -1103,15 +1220,16 @@ is stored (docs/integration/live.md).
 The stream ends when its caller goes; the packager then writes `EXT-X-ENDLIST`, queues the
 recording as a video and logs `recording: queued as video <id>`, and the Job completes. To end
 it from the cluster instead, send the packager SIGUSR1
-(`kubectl -n "$NAMESPACE" exec "job/$STREAM" -c packager -- sh -c 'kill -USR1 1'`;
+(`kubectl -n "$LIVE_NAMESPACE" exec "job/$STREAM" -c packager -- sh -c 'kill -USR1 1'`;
 `live_packager` is PID 1 in its container). A SIGTERM (a node drain, a `kubectl delete pod`)
 drains instead: the process exits 0, the Job counts as complete, and the stream is left to be
 continued by a new packager for the same stream id, which whoever started the stream must start
-(the template's `backoffLimit` restarts only failures). The Job and its pod are removed a day
-after they finish; delete the stream's Secret with them:
+(the template's `backoffLimit` restarts only failures). The Job and its pod are removed an hour
+after they finish; delete the stream's Secret with them (the stream service's own Secrets are the
+Job's dependents and go with it):
 
 ```sh
-kubectl -n "$NAMESPACE" delete secret "live-packager-$STREAM"
+kubectl -n "$LIVE_NAMESPACE" delete secret "live-packager-$STREAM"
 ```
 
 Every packager runs ffmpeg under the worker's sandbox, so it needs what step 1 checks for the

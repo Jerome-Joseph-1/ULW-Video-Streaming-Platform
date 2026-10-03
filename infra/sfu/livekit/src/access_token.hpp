@@ -28,6 +28,11 @@ enum class Permission : std::uint8_t {
     // Egress.StartParticipantEgress: LiveKit's recorder joins `room` and sends one participant
     // on.
     RecordRoom,
+    // RoomService.GetParticipant in `room`: who is connected there, and nothing about any other
+    // room.
+    AdminRoom,
+    // RoomService.ListRooms: which rooms exist, for asking about one without recreating it.
+    ListRooms,
 };
 
 struct Grant {
