@@ -1464,7 +1464,27 @@ TEST_P(ChatClusterTest, ACallRingsTheOtherMembersEverySocketOnAnyNodeAndEndsOnce
         EXPECT_EQ(ended->by, "alice");
     }
 
-    // 2. Alice calls again: a new call, which bob declines from the laptop.
+    // 2. Alice calls and gives up before anyone answers.
+    const auto cancelled_call = call_answer(*alice, direct, alice_device);
+    ASSERT_TRUE(cancelled_call && cancelled_call->type == "ticket");
+    ASSERT_TRUE(expect(*phone, at_phone, "call_ringing", cancelled_call->call));
+    ASSERT_TRUE(alice->send(move_command("call_cancel", direct, cancelled_call->call)));
+    for (const auto& [client, at] :
+         std::initializer_list<Ear>{{phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
+        const auto cancelled = expect(*client, *at, "call_cancelled", cancelled_call->call);
+        ASSERT_TRUE(cancelled);
+        EXPECT_EQ(cancelled->by, "alice");
+    }
+
+    // 3. Nobody answers: after the ring timeout both are told it was missed, once.
+    const auto missed_call = call_answer(*alice, direct, alice_device);
+    ASSERT_TRUE(missed_call && missed_call->type == "ticket");
+    for (const auto& [client, at] : std::initializer_list<Ear>{
+             {alice.get(), &at_alice}, {phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
+        ASSERT_TRUE(expect(*client, *at, "call_missed", missed_call->call));
+    }
+
+    // 4. Alice calls again: a new call, which bob declines from the laptop.
     const auto again = call_answer(*alice, direct, alice_device);
     ASSERT_TRUE(again && again->type == "ticket");
     const std::string second = again->call;
@@ -1486,25 +1506,14 @@ TEST_P(ChatClusterTest, ACallRingsTheOtherMembersEverySocketOnAnyNodeAndEndsOnce
     ASSERT_TRUE(twice);
     EXPECT_EQ(laptop->seen()[*twice].reason, "no_call");
 
-    // 3. Alice calls and gives up before anyone answers.
-    const auto third = call_answer(*alice, direct, alice_device);
-    ASSERT_TRUE(third && third->type == "ticket");
-    ASSERT_TRUE(expect(*phone, at_phone, "call_ringing", third->call));
-    ASSERT_TRUE(alice->send(move_command("call_cancel", direct, third->call)));
-    for (const auto& [client, at] :
-         std::initializer_list<Ear>{{phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
-        const auto cancelled = expect(*client, *at, "call_cancelled", third->call);
-        ASSERT_TRUE(cancelled);
-        EXPECT_EQ(cancelled->by, "alice");
-    }
-
-    // 4. Nobody answers: after the ring timeout both are told it was missed, once.
-    const auto fourth = call_answer(*alice, direct, alice_device);
-    ASSERT_TRUE(fourth && fourth->type == "ticket");
-    for (const auto& [client, at] : std::initializer_list<Ear>{
-             {alice.get(), &at_alice}, {phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
-        ASSERT_TRUE(expect(*client, *at, "call_missed", fourth->call));
-    }
+    // Declined, alice may not ring bob again straight away; nothing rings, and she is told when.
+    const auto too_soon = call_answer(*alice, direct, alice_device);
+    ASSERT_TRUE(too_soon);
+    EXPECT_EQ(too_soon->type, "error");
+    EXPECT_EQ(too_soon->reason, "ring_limited");
+    ASSERT_TRUE(too_soon->retry_after_ms);
+    EXPECT_GT(*too_soon->retry_after_ms, 20'000U);
+    EXPECT_LE(*too_soon->retry_after_ms, 30'000U);
 
     // The ring is the owner's (chat-1, where alice joined first): every notice went from it,
     // through the presence rooms, to the nodes the members are on.
@@ -1514,6 +1523,7 @@ TEST_P(ChatClusterTest, ACallRingsTheOtherMembersEverySocketOnAnyNodeAndEndsOnce
     EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"cancelled\"}"), 1U);
     EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"missed\"}"), 1U);
     EXPECT_EQ(metric(nodes_[0], "call_rings_total{outcome=\"ended\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "call_refusals_total{reason=\"ring_limited\"}"), 1U);
     EXPECT_EQ(metric(nodes_[1], "call_rings_total{outcome=\"started\"}"), 0U);
     EXPECT_GE(metric(nodes_[1], "call_events_pushed_total"), 10U);
 }
