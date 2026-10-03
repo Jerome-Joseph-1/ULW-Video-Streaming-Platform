@@ -3,6 +3,31 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-03: live streams are started, taken live and ended through the gateway
+
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/live_streams.cpp, docs/adr/0091-the-stream-service-lives-in-the-gateway.md -->
+
+An addition; nothing that worked before changes. A broadcaster's client now gets its publisher
+tickets from five new endpoints ([live.md](live.md#starting-a-stream)): `POST /api/v1/live`,
+`POST /api/v1/live/{id}/ticket`, `POST /api/v1/live/{id}/start`, `POST /api/v1/live/{id}/end`
+and `GET /api/v1/live/{id}`.
+
+| Before | Now |
+|---|---|
+| "How a client asks for its publisher ticket is not served yet" | `POST /api/v1/live` answers a stream with its first ticket, and `POST /api/v1/live/{id}/ticket` a fresh one |
+| A published stream reached viewers only when an operator started its packager and relay | `POST /api/v1/live/{id}/start`, after the WHIP POST's `201`, does both |
+| No endpoint mapped a stream to its recording | `GET /api/v1/live/{id}` answers the owner `video_id` |
+
+What to do:
+
+- **Broadcaster clients:** follow the flow in [live.md](live.md#starting-a-stream): create,
+  POST the offer, `start`, a fresh ticket before every later WHIP request, then DELETE or `end`.
+  One unfinished stream per user.
+- **Viewer clients:** nothing changes for the playlist. `GET /api/v1/live/{id}` says whether a
+  stream is `starting`, `live` or `ended`.
+- **Operators:** the gateway needs LiveKit's API key and the packager settings, and on the
+  cluster a service account that may create the packagers' Jobs (RUNBOOK, step 9).
+
 ## 2026-09-30: the cookie is accepted only from trusted pages (security fix)
 
 <!-- apps/gateway/src/connection.cpp (cookie_request_trusted), docs/adr/0078-the-cookie-is-believed-only-from-trusted-pages.md -->
