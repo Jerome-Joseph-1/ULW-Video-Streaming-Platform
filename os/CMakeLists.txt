@@ -1,5 +1,6 @@
 ulw_add_library(os
     src/limits.cpp
+    src/private_dir.cpp
     src/privileges.cpp
     src/system_clock.cpp
     src/system_random.cpp

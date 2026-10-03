@@ -182,6 +182,19 @@ docs/adr/0036; neither should move. A single node also means three chat pods sha
 domain: ADR-0019's point about a drain taking two of them at once becomes all three, and no
 PodDisruptionBudget is shipped, since on one node it would only stop the drain.
 
+Check that the JWKS host speaks TLS 1.3. The gateway, the worker and chat refuse any https
+server that does not (docs/integration/operations-contract.md), so a JWKS host stuck on TLS
+1.2 leaves every request `503` until it is fixed. From any machine:
+
+```sh
+openssl s_client -tls1_3 -connect auth.askedin.com:443 -servername auth.askedin.com </dev/null \
+    2>&1 | grep -E '^ *Protocol *:|New, TLSv1.3'
+```
+
+It must print TLSv1.3; a handshake failure means the host has to enable TLS 1.3 before this
+deploys. Use the host of the real `JWKS_URL` if it is not auth.askedin.com. R2 needs no check:
+Cloudflare serves TLS 1.3.
+
 ## 2. Install the worker's seccomp profile on k8s-prod
 
 Once per node, and again whenever `seccomp/ulw-worker.json` changes:
