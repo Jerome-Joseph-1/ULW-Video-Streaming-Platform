@@ -106,11 +106,9 @@ public:
            Level threshold) noexcept
         : sink_(sink), clock_(clock), service_(service), threshold_(threshold) {}
 
-    [[nodiscard]] bool enabled(Level level) const noexcept {
-        return level >= threshold_.load(std::memory_order_relaxed);
-    }
+    [[nodiscard]] bool enabled(Level level) const noexcept { return level >= threshold_.load(); }
     // The threshold comes from configuration, which is only read after the logger exists.
-    void set_threshold(Level level) noexcept { threshold_.store(level, std::memory_order_relaxed); }
+    void set_threshold(Level level) noexcept { threshold_.store(level); }
     [[nodiscard]] std::uint64_t dropped() const noexcept { return sink_.dropped(); }
 
     void log(Level level, std::string_view event, std::initializer_list<Field> fields) noexcept;

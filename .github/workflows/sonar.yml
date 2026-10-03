@@ -5,9 +5,10 @@ name: sonar
 # tests run, and the analysis reads that build's compile database and the llvm-cov report, so
 # the analyser sees the same flags, system headers and generated headers as the compiler and
 # the quality gate sees measured coverage. The Python checks' unit tests run under coverage.py
-# for the Python report. Automatic Analysis must be off in the project's settings: while it is
-# on, SonarQube Cloud refuses this scan. Advisory: the quality gate is reported on the
-# dashboard and the pull request, never waited on here.
+# for the Python report, and the Go module's tests with -coverprofile for the Go report.
+# Automatic Analysis must be off in the project's settings: while it is on, SonarQube Cloud
+# refuses this scan. Advisory: the quality gate is reported on the dashboard and the pull
+# request, never waited on here.
 on:
   push:
     branches: [main]
@@ -50,6 +51,9 @@ jobs:
       # index for noble/universe lists the same hash).
       PYTHON_COVERAGE_VERSION: 7.4.4+dfsg1-0ubuntu2
       PYTHON_COVERAGE_SHA256: 259a4bb007428b0ac613cf2784153fe6e26c225e86b8be29583e6f52fecd370b
+      # The Go toolchain the mock-auth image builds with: deploy/local/mock-auth/Dockerfile's
+      # golang image, by the same tag and digest.
+      GOLANG_IMAGE: golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
       SONAR_SCANNER_VERSION: 8.1.0.6389
       # The linux-x64 zip's SHA-256: the scan action's own sonar-scanner-version file at the
       # pinned commit, Maven Central's .sha256, and a local download all agree. The action's
@@ -120,6 +124,15 @@ jobs:
       - name: Python coverage
         if: ${{ !cancelled() && steps.token.outputs.present == 'true' }}
         run: tools/coverage-python.sh build/coverage-python.xml
+      # Every Go module's tests (tools/coverage-go.sh) in the pinned golang image, as the
+      # runner's user and without a network, so nothing is fetched; writes build/coverage-go.out.
+      # The checkout is mounted at its own path, so the script sees the paths the scan sees.
+      - name: Go coverage
+        if: ${{ !cancelled() && steps.token.outputs.present == 'true' }}
+        run: |
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e GOPATH=/tmp/go -e GOCACHE=/tmp/go-build \
+            -v "$PWD:$PWD" -w "$PWD" "$GOLANG_IMAGE" tools/coverage-go.sh build/coverage-go.out
       # The scanner is fetched here, checked against its SHA-256, and placed where the scan
       # action's tool cache looks (sonar-scanner-cli/<version as semver>/linux-x64 plus a
       # .complete marker), so the action never downloads it. The action is told to fetch from

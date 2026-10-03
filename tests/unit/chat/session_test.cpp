@@ -4,6 +4,7 @@
 #include "infra/messages/memory_message_store.hpp"
 #include "net/ip_address.hpp"
 #include "net/reactor_factory.hpp"
+#include "net/signals.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
@@ -144,6 +145,13 @@ public:
     // seen it.
     std::atomic<bool> expire_keys = false;
     std::atomic<bool> keys_expired = false;
+    // Delivers SIGHUP to the server on the node's next turn; `verifier_drops` then counts the
+    // verifier's drop_caches() calls.
+    std::atomic<bool> sighup = false;
+    // What the verifier reports as drop_pending(), applied on the node's next turn.
+    std::atomic<bool> drop_pending = false;
+    std::atomic<bool> drop_pending_seen = false;
+    std::atomic<std::size_t> verifier_drops = 0;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -237,6 +245,12 @@ private:
                 verifier.expired = expire_keys;
                 keys_expired = verifier.expired;
             }
+            if (sighup.exchange(false)) {
+                server->on_signal(net::Signal::Reload);
+            }
+            verifier_drops = verifier.drops;
+            verifier.drop_requested = drop_pending;
+            drop_pending_seen = verifier.drop_requested;
             key_waiters = verifier.waiting();
             http_parsers = server->http_parsers();
             ++turns_;
@@ -425,6 +439,42 @@ TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
                   R"(","seq":1,"sender":"alice","id":"m5","body":"aGkgInRoZXJlIg"})");
     EXPECT_EQ(alice->next_text(seconds(10)),
               R"({"type":"sent","room":")" + std::string(kRoom) + R"(","id":"m5","seq":1})");
+}
+
+// Every frame is encoded into one buffer the server keeps, and every message's text into one
+// the service keeps: a large message leaves nothing of itself in a smaller one sent after it.
+TEST_P(ChatSessionTest, AMessageAfterALargerOneIsSentExactlyToEveryMember) {
+    auto alice = open_as("alice");
+    auto bob = open_as("bob");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    const std::string join = R"({"type":"join","room":")" + std::string(kRoom) + R"("})";
+    ASSERT_TRUE(alice->send_text(join));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+    ASSERT_TRUE(bob->send_text(join));
+    EXPECT_EQ(bob->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+    const std::string large =
+        infra::auth::encode_base64url(std::string(std::size_t{24} * 1024, 'L'));
+    const std::string small = "cw";
+    std::uint64_t seq = 0;
+    for (const std::string* body : {&large, &small, &large, &small}) {
+        ++seq;
+        const std::string id = "m" + std::to_string(seq);
+        ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
+                                     R"(","id":")" + id + R"(","body":")" + *body + R"("})"));
+        const std::string message = R"({"type":"message","room":")" + std::string(kRoom) +
+                                    R"(","seq":)" + std::to_string(seq) +
+                                    R"(,"sender":"alice","id":")" + id + R"(","body":")" + *body +
+                                    R"("})";
+        EXPECT_EQ(alice->next_text(seconds(10)), message) << id;
+        EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"sent","room":")" + std::string(kRoom) +
+                                                     R"(","id":")" + id + R"(","seq":)" +
+                                                     std::to_string(seq) + "}")
+            << id;
+        EXPECT_EQ(bob->next_text(seconds(10)), message) << id;
+    }
 }
 
 TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
@@ -840,6 +890,23 @@ TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
     node_->expire_keys = false;
     ASSERT_TRUE(ulw::test::eventually([&] { return !node_->keys_expired.load(); }));
     EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
+}
+
+// SIGHUP is how Askedin's key rotation reaches chat_server (ADR-0082): the verifier is asked to
+// drop its keys and verdicts, /metrics counts it, and the gauge follows the verifier's pending
+// drop.
+TEST_P(ChatSessionTest, SighupRequestsAnAuthCacheDrop) {
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 0U);
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 0U);
+    node_->sighup = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->verifier_drops.load() == 1; }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 1U);
+    node_->drop_pending = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->drop_pending_seen.load(); }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 1U);
+    node_->drop_pending = false;
+    ASSERT_TRUE(ulw::test::eventually([&] { return !node_->drop_pending_seen.load(); }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 0U);
 }
 
 // Both viewers fall behind a sender that never stops. One never reads again, and is reset once it

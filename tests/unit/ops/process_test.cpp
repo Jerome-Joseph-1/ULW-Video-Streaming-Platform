@@ -61,4 +61,9 @@ TEST(DisableCoreDumps, LeavesNoCoreLimitAndAProcessNobodyMayReadOrAttachTo) {
     EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
+// The unit tests link no jemalloc, so they allocate with glibc's malloc and there is no version.
+TEST(JemallocVersion, IsEmptyInAProcessThatAllocatesWithGlibc) {
+    EXPECT_TRUE(ops::jemalloc_version().empty());
+}
+
 } // namespace

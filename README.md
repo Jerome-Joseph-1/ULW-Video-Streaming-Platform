@@ -6,14 +6,19 @@ FFmpeg HLS transcode worker, and a realtime plane for chat, calls and live strea
 ## Build and test
 
 Needs GCC 14 or Clang 19 (Clang 18 lacks `std::expected` in libstdc++; ADR-0022), CMake 3.28+,
-Ninja, and development packages for OpenSSL 3, libcurl, libpq and liburing 2.5+.
+Ninja, jq (`tools/run-clang-tidy.sh`), and development packages for OpenSSL 3, libcurl, libpq
+and liburing 2.5+. The OpenMLS bridge (`ULW_BUILD_MLS`) needs Rust and cargo, at the toolchain
+pinned in `infra/e2ee/mls_ffi_bridge/rust-toolchain.toml`; `-DULW_BUILD_MLS=OFF` skips it.
+jemalloc is linked into `chat_server` only (ADR-0081) and skipped under sanitizers;
+`-DULW_JEMALLOC=OFF` skips it.
 
 ```sh
 cmake --preset dev && cmake --build --preset dev && ctest --preset dev
 ```
 
-Presets: `dev`, `debug`, `asan`, `tsan`, `ci` (warnings are errors), `release` (LTO), `fuzz`
-(clang). Test presets: `unit`, `tsan-unit`, `conformance`, `integration`. Checks:
+Presets: `dev`, `debug`, `asan`, `tsan`, `ci` (warnings are errors), `coverage` (clang-19,
+source-based coverage), `release` (LTO), `fuzz` (clang). Test presets: `dev`, `ci`, `unit` (the
+`asan` build), `tsan-unit`, `conformance`, `integration`. Checks:
 
 ```sh
 tools/check-boundaries.sh   # layering rules
@@ -21,6 +26,7 @@ tools/check-format.sh       # clang-format; --fix to apply
 tools/run-clang-tidy.sh build/dev [files...]
 python3 tools/check-docs.py # ADR numbering and sections, route/doc coverage
 tools/e2ee_diagnostic_check.sh [<base> <head>]  # chat service and router unchanged, phase-2..phase-3
+                                                # (without arguments, a no-op until both tags are pushed)
 ```
 
 Security checks (ADR-0072; the scanners are fetched, pinned, into `tools/security/.tools`):
@@ -35,10 +41,13 @@ tools/security/lint-workflows.sh         # actionlint and zizmor over .github/
 
 SonarQube Cloud analyses the repository in CI (`.github/workflows/sonar.yml`, ADR-0079) on the
 Free plan, with the `coverage` preset's compile database and measured coverage: `llvm-cov` over
-the unit and integration labels (`COVERAGE_SONAR=1 tools/coverage.sh build/coverage unit
-integration`) and coverage.py over the Python unit tests (`tools/coverage-python.sh
-build/coverage-python.xml`); settings are in `sonar-project.properties`.
-It is advisory, and needs the `SONAR_TOKEN` secret and Automatic Analysis turned off in the
+the unit and integration labels (`COVERAGE_ENFORCE=0 COVERAGE_SONAR=1 tools/coverage.sh
+build/coverage unit integration`), coverage.py over the Python unit tests
+(`tools/coverage-python.sh build/coverage-python.xml`) and the Go modules' tests
+(`tools/coverage-go.sh build/coverage-go.out`); settings are in `sonar-project.properties`.
+It is advisory (`sonar.qualitygate.wait=false`): the quality gate, whose new-code condition is
+80% coverage, is reported on the dashboard and the pull request and never fails the job. It
+needs the `SONAR_TOKEN` secret and Automatic Analysis turned off in the
 project's settings. Pull requests from forks get no secrets, so no analysis. If the repository ever becomes private, delete `SONAR_TOKEN` to stay free:
 the job then skips itself.
 
@@ -46,6 +55,7 @@ the job then skips itself.
 
 ```sh
 docker compose -f deploy/local/compose.yaml up -d --wait   # Postgres 16 and MinIO on loopback
+docker compose -f deploy/local/compose.yaml --profile calls up -d --wait   # also LiveKit, Redis, egress
 ULW_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:55432/postgres \
     build/dev/apps/migrate/ulw_migrate
 ```
@@ -59,15 +69,17 @@ cluster (needs Docker): `make e2e-up`, `make e2e-test`, `make e2e-down`; also `m
 ## Architecture
 
 ```
-client -> Envoy -> gateway_server ---- Postgres (catalog, job queue, chat rooms)
+client -> Envoy -> gateway_server ---- Postgres (catalog, job queue)
                      |  presigned URLs   S3 / R2 (raw uploads, HLS renditions)
                      v
         transcode_worker <- job queue     ulw_reaper (CronJob: abandoned uploads)
                      |
                      +-> ffmpeg (sandboxed subprocess)
 
-client -> Envoy -> chat_server x N  (one owner node per room, nodes forward to it)
-client -> STUNner -> LiveKit (SFU: ICE, DTLS, SRTP)      ingest -> live_packager -> R2 (HLS)
+client -> Envoy -> chat_server x N ---- Postgres (chat rooms, messages)
+                    (one owner node per room, nodes forward to it)
+client -> STUNner -> LiveKit (SFU: ICE, DTLS, SRTP)
+publisher -WHIP-> LiveKit -egress (SRT)-> live_packager -> R2 (HLS)   (ADR-0053)
 ```
 
 Binaries live in `apps/`: `gateway_server` (uploads, catalog, playback), `transcode_worker`,
@@ -89,3 +101,4 @@ Layering, ports and adapters, enforced by `tools/check-boundaries.sh`:
 - [`docs/adr/`](docs/adr/README.md) architecture decisions, one per file, immutable
 - [`docs/integration/`](docs/integration/README.md) the contract for Askedin's app and backend teams
 - [`docs/operations/`](docs/operations/soak.md) soak procedure and results
+- [`docs/operations/testing.md`](docs/operations/testing.md) mutation testing of the unit suites

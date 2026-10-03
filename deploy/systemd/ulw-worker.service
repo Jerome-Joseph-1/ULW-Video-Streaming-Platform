@@ -45,8 +45,11 @@ MemoryHigh=1800M
 MemoryMax=2G
 MemorySwapMax=0
 
-# The scratch workspace, /var/tmp/ulw-worker, lives in the private /var/tmp, which is on disk
-# and removed with the service; the worker sweeps what a crash left behind anyway.
+# The scratch workspace, /var/cache/ulw-worker, is on disk, made by systemd for the service's
+# user alone and writable under ProtectSystem=strict; the worker sweeps what a crash left
+# behind.
+CacheDirectory=ulw-worker
+CacheDirectoryMode=0700
 NoNewPrivileges=yes
 # The whole filesystem is read-only to the service: these units are for an object store (R2 or
 # MinIO). The filesystem backend, for development, needs its root writable:

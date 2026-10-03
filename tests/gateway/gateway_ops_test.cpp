@@ -135,6 +135,7 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         {"tls_handshake_failures_total", "counter"},
         {"certificate_reloads_total", "counter"},
         {"certificate_reload_failures_total", "counter"},
+        {"auth_cache_drops_total", "counter"},
         {"playlist_requests_total", "counter"},
         {"playlists_rejected_total", "counter"},
         {"presign_failures_total", "counter"},
@@ -150,6 +151,7 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         {"view_batches_failed_total", "counter"},
         {"jobs_oldest_queued_seconds", "gauge"},
         {"jwks_keys_expired", "gauge"},
+        {"auth_cache_drop_pending", "gauge"},
         {"store_paging_errors_total", "counter"},
         {"log_messages_dropped_total", "counter"},
         {"open_fds", "gauge"},
@@ -168,6 +170,31 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         }
     }
     EXPECT_TRUE(extra.empty()) << "families nobody documented: " << *extra.begin();
+}
+
+// SIGHUP is how Askedin's key rotation reaches the gateway (ADR-0082): the verifier is asked to
+// drop its keys and verdicts, and the request is counted and logged where an operator checks for
+// it; the gauge shows the drop pending until the verifier says a fetch completed it.
+TEST(GatewayMetrics, SighupRequestsAnAuthCacheDropAndSaysSo) {
+    GatewayUnderTest gw(GatewayOptions{});
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drops_total"), 0);
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drop_pending"), 0);
+    gw.sighup();
+    EXPECT_EQ(gw.verifier_drops(), 1U);
+    EXPECT_EQ(gw.counters().auth_cache_drops, 1U);
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drops_total"), 1);
+    EXPECT_TRUE(ulw::test::eventually([&] {
+        return gw.log()
+                   .events("auth cache drop requested; completes on the next successful key fetch")
+                   .size() == 1;
+    }));
+    gw.set_drop_pending(true);
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drop_pending"), 1);
+    gw.set_drop_pending(false);
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drop_pending"), 0);
+    gw.sighup();
+    EXPECT_EQ(gw.verifier_drops(), 2U);
+    EXPECT_EQ(value_of(parse_exposition(scrape(gw)), "auth_cache_drops_total"), 2);
 }
 
 TEST(GatewayMetrics, CountersFollowTheTrafficTheyCount) {

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <climits>
 #include <poll.h>
+#include <stop_token>
 #include <unistd.h>
 #include <utility>
 
@@ -36,7 +37,7 @@ AsyncLogSink::~AsyncLogSink() {
 }
 
 std::uint64_t AsyncLogSink::close() noexcept {
-    if (!closed_.exchange(true, std::memory_order_relaxed)) {
+    if (!closed_.exchange(true)) {
         thread_.request_stop();
         const std::uint64_t one = 1;
         // An eventfd write only fails when its counter would overflow, which one write cannot do.
@@ -50,8 +51,8 @@ void AsyncLogSink::write(std::string_view line) noexcept {
     bool was_empty = false;
     {
         const std::scoped_lock lock(mutex_);
-        if (closed_.load(std::memory_order_relaxed) || queued_.size() + line.size() > capacity_) {
-            dropped_.fetch_add(1, std::memory_order_relaxed);
+        if (closed_.load() || queued_.size() + line.size() > capacity_) {
+            dropped_.fetch_add(1);
             return;
         }
         was_empty = queued_.empty();
@@ -111,18 +112,23 @@ bool AsyncLogSink::write_out(std::optional<core::MonoTime>& deadline, const std:
     if (rest.empty()) {
         return true;
     }
-    dropped_.fetch_add(static_cast<std::uint64_t>(std::ranges::count(rest, '\n')),
-                       std::memory_order_relaxed);
+    dropped_.fetch_add(static_cast<std::uint64_t>(std::ranges::count(rest, '\n')));
     return false;
 }
 
 void AsyncLogSink::drain(const std::stop_token& stop) {
+    // Taking the mutex before notifying means the stop cannot land between a wait's check of
+    // the predicate and its sleep.
+    const std::stop_callback wake_on_stop(stop, [this] {
+        { const std::scoped_lock lock(mutex_); }
+        wake_.notify_one();
+    });
     std::optional<core::MonoTime> deadline;
     while (true) {
         {
             std::unique_lock lock(mutex_);
             // The stop is only honoured once nothing is queued, so the destructor flushes.
-            wake_.wait(lock, stop, [this] { return !queued_.empty(); });
+            wake_.wait(lock, [this, &stop] { return !queued_.empty() || stop.stop_requested(); });
             if (queued_.empty()) {
                 return;
             }
@@ -133,8 +139,7 @@ void AsyncLogSink::drain(const std::stop_token& stop) {
         if (!whole) {
             // The reader stalled past the deadline; what is still queued goes the same way.
             const std::scoped_lock lock(mutex_);
-            dropped_.fetch_add(static_cast<std::uint64_t>(std::ranges::count(queued_, '\n')),
-                               std::memory_order_relaxed);
+            dropped_.fetch_add(static_cast<std::uint64_t>(std::ranges::count(queued_, '\n')));
             queued_.clear();
             if (stop.stop_requested()) {
                 return;

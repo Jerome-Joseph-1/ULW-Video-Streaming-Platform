@@ -61,11 +61,11 @@ struct Endpoints {
     std::string packager;
 };
 
+// RFC 6455 section 3: ws and wss URIs are http and https ones under other names, so the WHIP
+// endpoint is the client URL, checked to be ws or wss by make_sfu, with "ws" read as "http".
 std::string whip_url(std::string_view client_url) {
-    const bool secure = client_url.starts_with("wss://");
-    std::string url = secure ? "https://" : "http://";
-    url += client_url.substr(secure ? std::string_view("wss://").size()
-                                    : std::string_view("ws://").size());
+    std::string url = "http";
+    url += client_url.substr(std::string_view("ws").size());
     while (url.ends_with('/')) {
         url.pop_back();
     }

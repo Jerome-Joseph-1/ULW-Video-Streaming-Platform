@@ -120,7 +120,11 @@ TEST(OffloadQueue, StopReleasesAnIdleWorker) {
     const std::stop_source stop;
     Job never;
     net::IOffloadJob* taken = &never;
-    std::jthread worker([&] { taken = queue.pop(stop.get_token()); });
+    // pop() leaves the stop wakeup to its caller, as the pool's workers register it.
+    std::jthread worker([&] {
+        const std::stop_callback wake_on_stop(stop.get_token(), [&queue] { queue.wake_all(); });
+        taken = queue.pop(stop.get_token());
+    });
     stop.request_stop();
     worker.join();
     EXPECT_EQ(taken, nullptr);

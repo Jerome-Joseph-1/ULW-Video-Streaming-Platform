@@ -6,6 +6,7 @@ ulw_add_library(live_packager_lib
     src/publisher.cpp
     src/recorder.cpp
     src/recording_plan.cpp
+    src/scratch.cpp
     src/segment_tracker.cpp
     src/stream_id.cpp
     src/stream_runner.cpp

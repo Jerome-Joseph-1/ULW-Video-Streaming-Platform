@@ -549,6 +549,35 @@ TEST_F(PublisherTest, AnEndedByTheDiskRefusedIsNeitherUploadedNorFollowedByTheEn
     EXPECT_FALSE(stored_playlist().ended);
 }
 
+// The same for the playlist, the last object the end writes: one the disk cut short must not
+// replace the stored playlist. Files are held to two bytes, so ended_by ("1\n") goes through
+// and only the playlist is refused, at its close.
+TEST_F(PublisherTest, APlaylistTheDiskRefusedIsNotUploadedOverTheStoredOne) {
+    {
+        auto publisher = open();
+        ASSERT_TRUE(publisher);
+        publisher->begin_epoch(kFirstMedia);
+        segments(0, 0, 2);
+        ASSERT_TRUE(publisher->pump(ffmpeg_playlist(0, 0, 2, init(0))));
+    }
+    const std::string before = stored("index.m3u8");
+    ASSERT_FALSE(before.empty());
+    auto publisher = open();
+    ASSERT_TRUE(publisher);
+    ASSERT_EQ(publisher->epoch(), 1U);
+
+    live::FinishResult finished;
+    {
+        const FileSizeLimit two_bytes(2);
+        ASSERT_TRUE(two_bytes.applied());
+        finished = publisher->finish({});
+    }
+    EXPECT_EQ(stored("ended_by"), "1\n");
+    EXPECT_FALSE(finished.ended);
+    EXPECT_EQ(finished.problem, PublishError::UploadFailed);
+    EXPECT_EQ(stored("index.m3u8"), before);
+}
+
 TEST_F(PublisherTest, AStaleRunCannotOverwriteTheNewerEndersEpoch) {
     auto stale = open();
     ASSERT_TRUE(stale);

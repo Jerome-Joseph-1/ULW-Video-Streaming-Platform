@@ -156,7 +156,8 @@ kubectl -n apps-stage create configmap sandbox-ca --from-file=ca.crt="$pki/ca.cr
     --dry-run=client -o yaml | apply_stdin
 kubectl -n auth create secret tls mock-auth-tls --cert="$pki/mock-auth.crt" \
     --key="$pki/mock-auth.key" --dry-run=client -o yaml | apply_stdin
-# The keys are the ones RUNBOOK.md lists for .env.stage, with sandbox values.
+# The keys are the ones RUNBOOK.md lists for .env.stage, with sandbox values, and JWKS_URL, which
+# the stage overlay sets to Askedin's and gateway-patch.yaml points back here at the mock.
 for service in video-gateway video-worker; do
     extra=()
     if [[ $service == video-gateway ]]; then

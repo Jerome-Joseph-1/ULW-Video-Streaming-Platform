@@ -30,7 +30,8 @@ runs:
         sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends \
           g++-14 clang-19 clang-tidy-19 clang-format-18 lld-19 libclang-rt-19-dev \
           ninja-build ccache mold jq pkg-config \
-          libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev zlib1g-dev ffmpeg python3-yaml
+          libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev libjemalloc-dev zlib1g-dev ffmpeg \
+          python3-yaml
     # What a hosted image carries and a bare Ubuntu 24.04 host does not. Ubuntu's rustup (1.26)
     # cannot install the toolchain rust-toolchain.toml names without being told it again, so
     # rustup 1.29.1 is fetched, pinned by digest, once per host, under a lock its runners share.

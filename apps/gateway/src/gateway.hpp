@@ -151,6 +151,9 @@ struct Counters {
     std::uint64_t requests = 0;
     std::uint64_t certificate_reloads = 0;
     std::uint64_t certificate_reload_failures = 0;
+    // SIGHUPs that requested a drop of the cached JWKS keys and remembered verified tokens;
+    // each completes on the next successful key fetch (ADR-0082).
+    std::uint64_t auth_cache_drops = 0;
     std::uint64_t playlists_master = 0;
     std::uint64_t playlists_media = 0;
     std::uint64_t playlists_live = 0;
@@ -245,6 +248,9 @@ private:
         TokenBucket upload_bytes;
     };
 
+    // SIGHUP: refetches the JWKS, and asks the verifier to forget its keys and every
+    // remembered verified token once that fetch succeeds.
+    void drop_auth_caches() noexcept;
     // Refuses a direct peer at its limits, before a byte of it is read or a handshake begun.
     [[nodiscard]] std::optional<ClientHold> admit_peer(const net::IpAddress& peer) noexcept;
     [[nodiscard]] UserEntry* user_entry(const core::UserId& user) noexcept;

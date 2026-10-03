@@ -239,6 +239,9 @@ void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey
 }
 
 void write_message(std::string& out, const rt::Message& message) {
+    // Grown once, to its final size: a message is up to tens of KiB, and a string doubling its
+    // way there leaves every smaller copy behind as a hole in the heap.
+    out.reserve(out.size() + message_wire_size(message.body.size()));
     out += R"({"type":"message",)";
     append_room(out, message.room);
     std::format_to(std::back_inserter(out), R"(,"seq":{},"sender":)", message.seq);
@@ -251,7 +254,7 @@ void write_message(std::string& out, const rt::Message& message) {
     const std::span<const unsigned char> octets{
         reinterpret_cast<const unsigned char*>(message.body.data()), message.body.size()};
     // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
-    out += infra::auth::encode_base64url(octets);
+    infra::auth::append_base64url(out, octets);
     out += R"("})";
 }
 

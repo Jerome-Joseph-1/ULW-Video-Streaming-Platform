@@ -13,7 +13,7 @@ page does not repeat it.
 | Postgres log settings | chat | Bound parameters stay out of the server log: `log_parameter_max_length_on_error = 0` (the default), and `log_parameter_max_length = 0` whenever statement logging is on (`log_statement` `mod` or `all`, `log_min_duration_statement`, `log_min_duration_sample`, `log_transaction_sample_rate`), with `auto_explain.log_parameter_max_length = 0` if auto_explain is loaded. Otherwise chat message bodies, plaintext or ciphertext, are written to the log (ADR-0054). RUNBOOK step 3 sets them on the database. |
 | R2 bucket | gateway, worker | One bucket per environment. Lifecycle rule: abort incomplete multipart uploads after 7 days. CORS rule for the app origin, no credentials (ADR-0028, rule text in [videos-and-playback.md](videos-and-playback.md#cors)). |
 | R2 API tokens | gateway, worker | One per component (ADR-0066). The gateway's token must allow, on `videos/<video id>/raw` and `videos/<video id>/hls/...`: CreateMultipartUpload, UploadPart, ListParts, CompleteMultipartUpload, AbortMultipartUpload (which must be permitted), HeadObject, GetObject (playlists it rewrites, and presigned GET for segments and init) and PutObject. The upload reaper runs with the gateway's secret and additionally needs ListMultipartUploads (bucket level), ListObjectsV2 and DeleteObject. |
-| Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS (`JWKS_URL` must be `https://`). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
+| Askedin JWKS | gateway, chat | Reachable from the pods over HTTPS with TLS 1.3 (`JWKS_URL` must be `https://`; a server offering only TLS 1.2 or older is refused, see below). If it is unreachable and no cached key fits a token, requests get `503`, not `401` ([auth.md](auth.md)). |
 | DNS and TLS | Envoy | TLS terminates at Askedin's Envoy Gateway; the service speaks plain HTTP behind it (ADR-0001). The HTTPRoute sends `/api/v1/uploads` and `/api/v1/videos` to the gateway. |
 | Envoy route timeout | Envoy | None (`request: 0s`). A chunk may take up to 1024 s at the gateway's minimum rate, and the gateway enforces its own timeouts. Upstream idle timeout below the gateway's 10 s keep-alive timeout (5 s in the shipped `BackendTrafficPolicy`). |
 | Seccomp profile | worker nodes | `seccomp/ulw-worker.json` installed on the node (RUNBOOK step 2). |
@@ -57,14 +57,14 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_DATABASE_URL` | required | required | required | Secret |
 | `ULW_STORAGE` | `r2` (default), `minio`, `fs` | same | | |
 | `ULW_R2_ACCOUNT_ID` | with `r2` | with `r2` | | Secret |
-| `ULW_S3_ENDPOINT` | with `minio` | with `minio` | | |
+| `ULW_S3_ENDPOINT` | with `minio` | with `minio` | | `https://` anywhere the network between them is not the host's own. `http://` is accepted for the sandbox's MinIO or one on the same host: requests are signed, so the keys never cross, but the objects and signed URLs do, in the clear. An `https://` endpoint must speak TLS 1.3. `r2` is always `https://`, and Cloudflare serves TLS 1.3 |
 | `ULW_BUCKET` | with `r2`/`minio` | same | | Secret |
 | `ULW_S3_ACCESS_KEY_ID`, `ULW_S3_SECRET_ACCESS_KEY` | with `r2`/`minio` | same | | Secret, separate tokens per component |
-| `JWKS_URL` | required (or `ULW_DEV_JWKS_FILE`) | never set | required (or `ULW_DEV_JWKS_FILE`) | Secret by convention |
-| `JWT_ISSUER` | required | never set | required | Secret by convention |
+| `JWKS_URL` | required (or `ULW_DEV_JWKS_FILE`) | never set | required (or `ULW_DEV_JWKS_FILE`) | Not secret: Askedin's are set in the overlays ([auth.md](auth.md#askedin)) |
+| `JWT_ISSUER` | required | never set | required | Prod's is set in its overlay; stage's stays in the gateway's secret until it is confirmed ([auth.md](auth.md#askedin)) |
 | `JWT_AUDIENCE` | default `askedin-platform` | | same | |
 | `ULW_AUTH_COOKIE` | default `auth_token` | | same | `auth_token_stage` on stage |
-| `ULW_ALLOWED_ORIGINS` | comma-separated `scheme://host[:port]`, default none | | same | Pages whose requests may carry the cookie. Gateway: required in `Origin` for a cookie `POST`, `PATCH` or `DELETE`; with none set, the cookie serves only same-origin `GET` and `HEAD`. Chat: required for a cookie socket. Set it to the web app's origin before the cookie is used for uploads. `http://` only for `localhost`, `127.0.0.1` or `[::1]`; an explicit default port (`:443`, `:80`) is refused. Only same-origin pages (and same-site ones with `ULW_ALLOW_SAME_SITE=1`) get through, since `Sec-Fetch-Site` is checked first ([auth.md](auth.md#cookies-and-other-sites)). |
+| `ULW_ALLOWED_ORIGINS` | comma-separated `scheme://host[:port]`, default none | | same | Pages whose requests may carry the cookie. Gateway: required in `Origin` for a cookie `POST`, `PATCH` or `DELETE`; with none set, the cookie serves only same-origin `GET` and `HEAD`. Chat: required for a cookie socket. Set it to the web app's origin before the cookie is used for uploads. `http://` only for `localhost`, `127.0.0.1` or `[::1]`; an explicit default port (`:443`, `:80`) is refused, and so is a host not written as a browser writes it: a domain in uppercase, an IPv4 address other than four decimal octets (`10.0.0.1`, not `010.0.0.1`, `0x7f.1`, `127.1` or `10.0.0.1.`), or an IPv6 one not in RFC 5952 form (`[2001:db8::1]`, not `[2001:0db8:0:0:0:0:0:1]` or `[::ffff:192.0.2.1]`). Only same-origin pages (and same-site ones with `ULW_ALLOW_SAME_SITE=1`) get through, since `Sec-Fetch-Site` is checked first ([auth.md](auth.md#cookies-and-other-sites)). |
 | `ULW_ALLOW_SAME_SITE` | `0` (default) or `1` | | | `1` lets pages on a sibling subdomain (`Sec-Fetch-Site: same-site`) send the cookie: set it only when the web app is served from one. |
 | `ULW_JWKS_MAX_STALE_HOURS` | 1 to 168, default 24 | | same | How long the keys stay trusted while every JWKS refetch fails; past it every token is refused and `jwks_keys_expired` is `1` ([auth.md](auth.md)) |
 | `ULW_DEV_MODE` | `0` (default) or `1` | | same | `1` marks a development run, which `ULW_DEV_JWKS_FILE` needs; that file is refused in a Kubernetes pod whatever this says. Never set in stage or production |
@@ -90,16 +90,26 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_CONFIG` | optional TOML file | same | | See above |
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
-| `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | |
+| `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | Chat has no Askedin overlay yet |
 
 The Kubernetes secret names and the lines that create them are in the RUNBOOK, section 3.
 
+<!-- infra/curl/src/exchange.cpp -->
+
+Every https request the services make goes through libcurl with TLS 1.3 only (minimum and
+maximum); a later TLS version needs a code change. That covers the JWKS fetch, R2 or a MinIO
+given an `https://` endpoint, and LiveKit's API when it is `https://`.
+A server that offers only TLS 1.2 or older fails the handshake, logged as a network error,
+whatever the host's OpenSSL configuration allows. Askedin checks its JWKS host before deploying
+(RUNBOOK step 1); Cloudflare serves R2 over TLS 1.3. The database connection is libpq's, not
+libcurl's, and keeps its own `sslmode` settings.
+
 <!-- apps/live-packager/src/config.cpp, apps/live-packager/src/main.cpp -->
 
 The live packager (one process per stream, environment only, no Askedin overlay yet) takes
-`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR`, `ULW_FFMPEG` and
-`ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
+`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below),
+`ULW_FFMPEG` and `ULW_FFPROBE`. It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |
@@ -121,6 +131,18 @@ yet, and the next start records it. Run it with a
 restart on failure: a packager killed between the end and the job, or unable to reach the store
 or the database then, records the stream on its next start. Started for a stream that has
 already ended, it takes no publisher and only records.
+
+Its scratch root, `ULW_SCRATCH_DIR`, is `/var/cache/ulw-live` unless set, and must exist before
+it starts: a directory of mode 0700 owned by the user it runs as, made by what deploys it (a
+systemd unit's `CacheDirectory=ulw-live`, as `deploy/systemd/ulw-worker.service` does for the
+worker, or an image's `install -d -o <uid> -g <gid> -m 0700`). The packager makes only
+`<ULW_SCRATCH_DIR>/<stream>` inside it; without the root it exits `1` at startup, naming
+`ULW_SCRATCH_DIR` and the missing directory. It also exits `1`, naming the directory and why,
+when the root is a symbolic link or owned by a user other than its own or root, or when
+`<ULW_SCRATCH_DIR>/<stream>` is another user's directory; all of this is checked before
+anything in the root is removed. The stream's directory is made, or kept, 0700, and emptied of
+what an earlier run left; a symbolic link or a file in its place is removed, a link without
+being followed.
 
 While it records it holds one upload part in memory, 16 MiB at the default
 `ULW_LIVE_MAX_KBPS` and up to 65 MiB at its 100 Mbit/s ceiling (the part grows with
@@ -204,6 +226,8 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `tls_handshakes_in_flight` | gauge | Only with `ULW_TRANSPORT=tls` |
 | `tls_handshake_failures_total` | counter | |
 | `certificate_reloads_total`, `certificate_reload_failures_total` | counter | SIGHUP certificate reloads |
+| `auth_cache_drops_total` | counter | SIGHUPs that requested a drop of the cached JWKS keys and remembered verified tokens, each logged as `auth cache drop requested; completes on the next successful key fetch` (ADR-0082, [auth.md](auth.md#key-rotation)) |
+| `auth_cache_drop_pending` | gauge | `1` from a SIGHUP until a key fetch succeeds and completes the drop; the cached keys keep answering meanwhile. Stuck at `1` means the JWKS cannot be fetched |
 | `playlist_requests_total{kind="master"}`, `{kind="media"}`, `{kind="live"}` | counter | |
 | `live_playlist_cache_hits_total` | counter | Live playlist requests answered from the cache: a fresh copy, or a stream remembered as absent for 1 s (ADR-0059) |
 | `live_playlist_cache_misses_total` | counter | Live playlist requests that found no fresh copy; each started a store read or joined one |
@@ -286,7 +310,8 @@ database, each settled by taking the user's sockets out of the room with `unavai
 logged), `presence_expired_total`
 (announcements and watching nodes dropped because they stopped being renewed, normally a node
 that died), `presence_gaps_total` (seqs a presence room skipped at this node, after which the
-node repeated what it had said there), `jwks_keys_expired` (as the gateway's),
+node repeated what it had said there), `jwks_keys_expired`, `auth_cache_drops_total` and
+`auth_cache_drop_pending` (as the gateway's),
 `unrecorded_joins_total` (refused joins of rooms with no kind recorded that recorded nothing,
 their user past the allowance: steady growth is someone walking room ids). Chat is a draft
 ([chat.md](chat.md)).
@@ -306,6 +331,17 @@ finish for up to 30 s, then cuts off what remains. A client whose chunk was cut 
 `HEAD` ([uploads.md](uploads.md#resuming)). Give the pod a termination grace period above 30 s
 (the shipped Deployment uses 45 s): the drain's 30 s, the health probe finishing (it stops when
 the drain begins) and the 2 s log flush fit inside it.
+
+## SIGHUP
+
+<!-- apps/gateway/src/gateway.cpp, apps/chat/src/chat.cpp (on_signal) -->
+
+On SIGHUP the gateway and chat_server fetch the key set again at once and, when that fetch
+succeeds, replace their cached JWKS keys and forget every remembered verified token (ADR-0082);
+until then the cached keys keep answering. Send it to every pod after Askedin rotates its
+signing key ([auth.md](auth.md#key-rotation)). The gateway also rereads its certificate and
+key when `ULW_TRANSPORT=tls`. Nothing else changes and no connection is closed. `gateway_server`
+is PID 1 in its image, so `kill -HUP 1` from a shell in the container reaches it.
 
 ## Core dumps
 

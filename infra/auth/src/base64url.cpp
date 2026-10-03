@@ -54,9 +54,8 @@ template <class Out, class Make> bool decode_into(std::string_view text, Out& ou
 
 } // namespace
 
-std::string encode_base64url(std::span<const unsigned char> bytes) {
-    std::string out;
-    out.reserve((bytes.size() * 4 + 2) / 3);
+void append_base64url(std::string& out, std::span<const unsigned char> bytes) {
+    out.reserve(out.size() + (((bytes.size() * 4) + 2) / 3));
     std::size_t i = 0;
     for (; i + 3 <= bytes.size(); i += 3) {
         const std::uint32_t v =
@@ -68,7 +67,7 @@ std::string encode_base64url(std::span<const unsigned char> bytes) {
     }
     const std::size_t rest = bytes.size() - i;
     if (rest == 0) {
-        return out;
+        return;
     }
     std::uint32_t v = std::uint32_t{bytes[i]} << 16U;
     if (rest == 2) {
@@ -79,6 +78,11 @@ std::string encode_base64url(std::span<const unsigned char> bytes) {
     if (rest == 2) {
         out.push_back(kAlphabet[(v >> 6U) & 0x3FU]);
     }
+}
+
+std::string encode_base64url(std::span<const unsigned char> bytes) {
+    std::string out;
+    append_base64url(out, bytes);
     return out;
 }
 

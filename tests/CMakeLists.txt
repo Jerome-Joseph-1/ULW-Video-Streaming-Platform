@@ -31,10 +31,12 @@ target_compile_definitions(core_unit_tests PRIVATE ULW_EXPECTED_VERSION="${PROJE
 
 ulw_add_test_suite(os_unit_tests unit
     unit/os/limits_test.cpp
+    unit/os/private_dir_test.cpp
     unit/os/privileges_test.cpp
     unit/os/system_random_test.cpp
     unit/os/unique_fd_test.cpp)
 target_link_libraries(os_unit_tests PRIVATE ulw::os)
+target_include_directories(os_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(ops_unit_tests unit
     unit/ops/async_log_test.cpp
@@ -149,6 +151,7 @@ if(ULW_CONFORMANCE_LIVE)
 endif()
 ulw_add_test_suite(http_unit_tests unit
     unit/http/backpressure_test.cpp
+    unit/http/origin_test.cpp
     unit/http/parser_limits_test.cpp
     unit/http/request_framing_test.cpp
     unit/http/request_parser_test.cpp
@@ -220,6 +223,11 @@ set_tests_properties(chat_soak_judge PROPERTIES LABELS unit)
 add_test(NAME coverage_report
     COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/coverage_report_test.py)
 set_tests_properties(coverage_report PROPERTIES LABELS unit)
+
+# The mutation driver on tiny sources, with the build and the test binary faked: tools/mutate.py.
+add_test(NAME mutation_driver
+    COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/mutate_test.py)
+set_tests_properties(mutation_driver PROPERTIES LABELS unit)
 
 ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
 target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
@@ -310,9 +318,10 @@ target_link_libraries(test_stalled_resolver PRIVATE ulw_sanitize ${CMAKE_DL_LIBS
 ulw_add_test_suite(curl_unit_tests unit
     unit/curl/fetcher_test.cpp
     unit/curl/http_test.cpp
-    unit/curl/multi_test.cpp)
+    unit/curl/multi_test.cpp
+    unit/curl/tls_floor_test.cpp)
 target_link_libraries(curl_unit_tests PRIVATE ulw::curl_multi ulw::test_http_server
-    test_stalled_resolver)
+    test_stalled_resolver ulw::test_tls)
 target_include_directories(curl_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 ulw_add_test_suite(storage_s3_unit_tests unit
@@ -439,7 +448,8 @@ target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw
     ulw::net_lib ulw::os PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
-target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
+target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>"
+    ULW_EXPECT_JEMALLOC=$<BOOL:${ULW_LINKS_JEMALLOC}>)
 add_dependencies(chat_cluster_tests chat_server)
 
 # The M22 acceptance on the same cluster: MLS messages through it, stored as ciphertext gzip
@@ -597,6 +607,7 @@ if(ULW_BUILD_WORKER)
         unit/live_packager/publisher_test.cpp
         unit/live_packager/recorder_test.cpp
         unit/live_packager/recording_plan_test.cpp
+        unit/live_packager/scratch_test.cpp
         unit/live_packager/segment_tracker_test.cpp
         unit/live_packager/stream_id_test.cpp
         unit/live_packager/watch_test.cpp)

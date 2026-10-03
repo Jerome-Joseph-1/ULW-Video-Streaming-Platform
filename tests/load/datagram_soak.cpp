@@ -190,7 +190,7 @@ void serve(net::ReactorKind kind, std::size_t max_fds, std::promise<SocketAddr>&
     echo.id = *id;
     (*reactor)->start_receiving_datagrams(*id);
     ready.set_value(addr);
-    while (!stop.load(std::memory_order_relaxed)) {
+    while (!stop.load()) {
         (*reactor)->run_once(core::Millis{100});
     }
     report = {.stats = (*reactor)->datagram_stats(*id),

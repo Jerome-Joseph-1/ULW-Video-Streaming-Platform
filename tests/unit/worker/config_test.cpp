@@ -43,7 +43,7 @@ TEST_F(WorkerConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->storage_location, "0123456789abcdef0123456789abcdef");
     EXPECT_EQ(config->bucket, "ulw-media");
     EXPECT_EQ(config->node.view(), "transcode-worker-7d9f-x2x");
-    EXPECT_EQ(config->scratch, "/var/tmp/ulw-worker/transcode-worker-7d9f-x2x");
+    EXPECT_EQ(config->scratch, "/var/cache/ulw-worker/transcode-worker-7d9f-x2x");
     EXPECT_TRUE(config->sandbox.empty());
     EXPECT_EQ(config->ffmpeg, "ffmpeg");
     EXPECT_EQ(config->ffprobe, "ffprobe");

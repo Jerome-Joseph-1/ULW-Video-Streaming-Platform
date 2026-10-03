@@ -248,8 +248,21 @@ private:
         return true;
     }
 
+    // Bytes from `from` to the string's closing quote, or to the end of the text if it has none.
+    [[nodiscard]] std::size_t source_length(std::size_t from) const noexcept {
+        std::size_t i = from;
+        while (i < text_.size() && text_[i] != '"') {
+            i += text_[i] == '\\' ? std::size_t{2} : std::size_t{1};
+        }
+        return std::min(i, text_.size()) - from;
+    }
+
     bool string(std::string& out) {
         ++pos_;
+        // No escape decodes to more bytes than it is written with, so the source's length is
+        // enough: one allocation instead of a doubling string, whose every smaller copy a body
+        // of tens of KiB would leave behind as a hole in the heap.
+        out.reserve(out.size() + source_length(pos_));
         for (;;) {
             if (pos_ >= text_.size()) {
                 return set_error("unterminated string");
