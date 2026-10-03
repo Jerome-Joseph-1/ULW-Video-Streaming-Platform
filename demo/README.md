@@ -86,19 +86,26 @@ call asks).
    - Point out: segments come straight from the store on signed URLs; only alice can see this
      video.
 2. **Chat and presence (1.5 min)**, tab **Chat** in both windows.
+   - The rooms are already there: where chat has the member-list commands
+     (feat/chat-rooms-api), each page opened a direct chat with every other user and alice's
+     page created the **team** group (alice, bob, carol) and the encrypted room (alice, bob)
+     when she signed in, all through chat itself; on a build without them, the seeded rooms.
    - In A, the **People** list shows bob online (green). Click the **bob** room in both
      windows. Type in A, press Enter: it appears in B at once. Reply from B.
-   - Close B for a moment and reopen it (or reload): history is back, and bob goes offline
-     and online for alice after the 10 s grace.
-3. **End-to-end encrypted chat (1.5 min)**, still **Chat**.
-   - In A open **encrypted (alice + bob)** (the lock) first, then in B. Alice's browser starts
-     the MLS group; bob's asks to join with a key package; alice's adds him and he joins from
-     the welcome. The banner shows the MLS epoch and that it is encrypted to 2 devices.
+   - Reload B: history is back, and bob goes offline and online for alice after the 10 s grace.
+3. **End-to-end encrypted chat (2 min)**, still **Chat**.
+   - In A open **encrypted (alice + bob)** (the lock), then in B. Alice's browser starts the
+     MLS group. Bob's device asks to join with a key package, and a card appears at the top of
+     A's Chat tab: "bob asks to add the device bob/... Its fingerprint: ...". Compare it with
+     the fingerprint B's banner shows for its own device ("This device: ..."), then click
+     **Approve**. Bob's device joins from the welcome; both banners list the two devices and
+     their fingerprints.
    - Send a message from B; A reads it. Tick **show what the server stores**: under each
      message is the body chat stored, an MLS ciphertext. The chat server never had a key.
-   - The banner names the encryption: MLS (RFC 9420) ciphersuite 1, OpenMLS compiled to
-     WebAssembly (clients/web-mls). A build without that client falls back to a WebCrypto
-     stand-in, and the banner then says "demo cipher, not MLS".
+   - The banner names the encryption: MLS (RFC 9420) ciphersuite 1
+     (MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519), OpenMLS compiled to WebAssembly
+     (clients/web-mls). A checkout without that client falls back to a WebCrypto stand-in, and
+     the banner then says "demo cipher, not MLS".
 4. **1:1 call with ringing (2 min)**, tab **Calls**.
    - In A click **Call** next to bob. B rings wherever it is, with **Answer** and **Decline**
      and a ring tone. Click **Answer**: both see each other.
@@ -145,8 +152,11 @@ To start over with an empty catalog: `demo/down.sh --wipe && demo/up.sh`.
   not the cookie, so two users can share one browser. A browser cannot put a header on a
   WebSocket, so the page passes it as `/rt?token=`, and the web proxy turns it into the header
   and strips it (nginx/default.conf; nothing logs it).
-- **Rooms.** No API creates rooms or member lists yet (feat/chat-rooms-api); `db/seed.sql`
-  lists them, and `web/rooms.json` tells the page.
+- **Rooms.** Where chat has the member-list commands (feat/chat-rooms-api), the page uses
+  them (`web/js/rooms.js`): `open_direct` with each other user, alice's `create_group` for
+  the team and the encrypted room, `rooms` and `members` to list them, and `member` frames to
+  follow changes; `db/seed.sql` then does nothing. On a build without them, `db/seed.sql`
+  lists the rooms in the database and `web/rooms.json` names them for the page.
 - **Ringing.** Where chat rings (feat/call-ring), the page uses it: `call_ringing`,
   `call_answered` and the rest. Where it does not, the page rings through the direct chat
   itself with messages of its own, as docs/integration/calls.md says to.

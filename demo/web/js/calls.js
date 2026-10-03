@@ -23,6 +23,11 @@ export function initCalls() {
   renderContacts();
   renderGroups();
   $('hangup').addEventListener('click', () => hangUp());
+  $('end-for-all').addEventListener('click', () => {
+    if (call?.kind !== 'group' || !call.callId) return;
+    chat.send({ type: 'call_end', room: call.room, call: call.callId });
+    endCall('you ended the call for everyone');
+  });
   $('answer').addEventListener('click', () => answer());
   $('decline').addEventListener('click', () => decline());
   $('toggle-mic').addEventListener('click', async () => {
@@ -50,7 +55,7 @@ export function initCalls() {
     }
     showRing({ room: m.room, callId: m.call, from: m.from, mode: 'server', expires: m.expires_at * 1000 });
   });
-  for (const type of ['call_answered', 'call_declined', 'call_cancelled', 'call_missed', 'call_ended']) {
+  for (const type of ['call_answered', 'call_declined', 'call_cancelled', 'call_missed', 'call_ended', 'call_moved', 'call_left']) {
     chat.addEventListener(type, (e) => onCallEvent(type, e.m));
   }
   // The page's own ring, where chat does not ring.
@@ -133,6 +138,23 @@ async function startCall(peer) {
   setTimeout(() => { if (call === mine && call.state === 'calling') hangUp('no answer'); }, 46_000);
 }
 
+async function rejoinGroup(why) {
+  const c = call;
+  if (!c) return;
+  setState('connecting', why);
+  const old = c.lk;
+  c.lk = null;
+  await old?.disconnect();
+  try {
+    const ticket = await ticketFor(c.room);
+    if (call !== c) return;
+    await connect(ticket);
+    setState('in-call', 'in the group call');
+  } catch (e) {
+    endCall(`could not rejoin: ${e.message}`);
+  }
+}
+
 async function startGroupCall(r) {
   if (call) { toast('already in a call'); return; }
   call = { room: r.id, role: 'member', kind: 'group', state: 'connecting', mode: 'server' };
@@ -170,7 +192,7 @@ async function connect(ticket) {
   lk.on(RoomEvent.TrackSubscribed, () => renderTiles());
   lk.on(RoomEvent.TrackUnsubscribed, () => renderTiles());
   lk.on(RoomEvent.LocalTrackPublished, () => renderTiles());
-  lk.on(RoomEvent.Disconnected, () => { if (call?.lk === lk) endCall('disconnected'); });
+  lk.on(RoomEvent.Disconnected, () => { if (call && call.lk === lk) endCall('disconnected'); });
   await lk.connect(onThisHost(ticket.url), ticket.token);
   try {
     await lk.localParticipant.enableCameraAndMicrophone();
@@ -221,6 +243,17 @@ function onCallEvent(type, m) {
     }
   }
   if (call?.callId !== m.call) return;
+  if (call.kind === 'group') {
+    // A group call (feat/group-calls): it goes on as people come and go; a move to a new
+    // generation (someone put out) takes everyone else to it with a fresh ticket.
+    if (type === 'call_moved') {
+      if (m.expelled === session.user) endCall(`${m.by} put you out of the call`);
+      else rejoinGroup(`${m.expelled ?? 'someone'} was put out; reconnecting`);
+    }
+    if (type === 'call_left' && m.by !== session.user) toast(`${m.by} left the call`);
+    if (type === 'call_ended') endCall(m.by && m.by !== session.user ? `${m.by} ended the call` : 'the call ended');
+    return;
+  }
   if (type === 'call_answered' && call.role === 'caller') setState(call.lk?.remoteParticipants.size ? 'in-call' : 'connecting', `${m.by} answered`);
   if (type === 'call_declined' && m.by !== session.user) endCall(`${m.by} declined`);
   if (type === 'call_missed') endCall('no answer');
@@ -291,7 +324,8 @@ async function hangUp(reason = 'call ended') {
   const c = call;
   if (!c) return;
   if (c.kind === 'group' && c.callId) {
-    // Group calls (feat/group-calls): leave the call; it goes on for the others.
+    // Group calls (feat/group-calls): leave the call; it goes on for the others, and the last
+    // one out ends it.
     chat.send({ type: 'call_leave', room: c.room, call: c.callId });
   } else if (c.kind === 'direct' && c.callId) {
     const answered = c.state === 'in-call' || c.role === 'callee' || c.answered;
@@ -327,6 +361,7 @@ function setState(state, detail) {
 
 function showPanel(title) {
   $('call-panel').hidden = false;
+  $('end-for-all').hidden = !(call?.kind === 'group');
   $('call-title').textContent = title;
   $('call-status').textContent = '';
   $('toggle-mic').textContent = 'Mute';
