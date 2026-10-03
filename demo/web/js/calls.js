@@ -68,6 +68,12 @@ export function initCalls() {
   });
 }
 
+// The rooms changed (chat's member-list commands): redraw who can be called.
+export function refreshCalls() {
+  renderContacts();
+  renderGroups();
+}
+
 function renderContacts() {
   const list = $('contacts');
   list.replaceChildren();

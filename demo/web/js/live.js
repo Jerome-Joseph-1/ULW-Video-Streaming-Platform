@@ -240,19 +240,30 @@ async function watch(id) {
   $('live-messages').replaceChildren();
   $('live-composer').hidden = false;
   const video = $('live-player');
-  const hls = attachHls(video, `/api/v1/live/${id}/index.m3u8`, {
+  const src = `/api/v1/live/${id}/index.m3u8`;
+  viewer = { id, joining: true };
+  // A stream just taken live has no playlist for a few seconds (404, live.md), and hls.js does
+  // not retry a 404: wait for the first one here.
+  for (let i = 0; i < 60; ++i) {
+    const r = await api('GET', src).catch(() => null);
+    if (r?.ok) break;
+    if (viewer?.id !== id) return;
+    $('viewer-status').textContent = `waiting for the stream's first segments (${r?.status ?? 'no answer'})...`;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  await refreshPlaybackToken();
+  const hls = attachHls(video, src, {
     liveSyncDurationCount: 2,
     liveMaxLatencyDurationCount: 5,
-    // A stream about to start answers 404 for a few seconds (live.md).
-    manifestLoadPolicy: { default: { maxTimeToFirstByteMs: 10_000, maxLoadTimeMs: 20_000,
-      timeoutRetry: { maxNumRetry: 10, retryDelayMs: 1000, maxRetryDelayMs: 2000 },
-      errorRetry: { maxNumRetry: 30, retryDelayMs: 1000, maxRetryDelayMs: 2000 } } },
   });
-  viewer = { id, hls, joining: true };
+  viewer.hls = hls;
   demo.live.viewer = { id, playing: false };
   hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
   hls.on(Hls.Events.ERROR, (_, data) => {
-    if (data.fatal) $('viewer-status').textContent = `playback error: ${data.details}`;
+    log('live_hls_error', { details: data.details, fatal: data.fatal, status: data.response?.code });
+    if (!data.fatal) return;
+    $('viewer-status').textContent = `playback error: ${data.details}`;
+    if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
   });
   video.addEventListener('playing', () => {
     demo.live.viewer.playing = true;

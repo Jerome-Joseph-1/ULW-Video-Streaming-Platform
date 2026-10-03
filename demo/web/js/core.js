@@ -200,6 +200,7 @@ demo.chat = chat;
 
 // The demo's rooms and who is in them (rooms.json; db/seed.sql lists the same members).
 export const directory = { users: [], rooms: [] };
+demo.directory = directory;
 export async function loadDirectory() {
   const r = await fetch('rooms.json');
   Object.assign(directory, await r.json());

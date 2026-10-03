@@ -15,10 +15,25 @@ demo.rooms = rooms;
 // is false for what history brought back.
 export function onAppMessage(fn) { appListeners.add(fn); }
 
-export function initChat() {
-  for (const meta of myRooms()) {
-    rooms.set(meta.id, { meta, messages: new Map(), loading: false, buffer: [], unread: 0, session: null, loaded: false });
+function addRoom(meta) {
+  if (rooms.has(meta.id)) {
+    rooms.get(meta.id).meta = meta;
+    return false;
   }
+  rooms.set(meta.id, { meta, messages: new Map(), loading: true, buffer: [], unread: 0, session: null, loaded: false });
+  return true;
+}
+
+// Rooms chat lists now that were not there before (a `member` frame): add and join them.
+export function syncRooms() {
+  for (const meta of myRooms()) {
+    if (addRoom(meta) && chat.open) chat.join(meta.id, meta.kind);
+  }
+  renderRooms();
+}
+
+export function initChat() {
+  for (const meta of myRooms()) addRoom(meta);
   for (const user of directory.users) if (user !== session.user) chat.watch(user);
   renderRooms();
   renderPeople();
@@ -79,6 +94,10 @@ export function initChat() {
     $('message').value = '';
   });
   $('show-raw').addEventListener('change', () => renderMessages());
+  // Already connected (the page waits for chat before it starts the tabs): join now.
+  if (chat.open) {
+    for (const r of rooms.values()) chat.join(r.meta.id, r.meta.kind);
+  }
   $('reset-e2ee').addEventListener('click', () => {
     e2ee.resetDevice();
     location.reload();

@@ -4,10 +4,15 @@
 // before feat/live-publish) is checked to say so on the page, and annotated as skipped.
 import { test, expect } from '@playwright/test';
 
-const ROOM = {
-  aliceBob: '10000000-0000-4000-8000-000000000001',
-  encrypted: '30000000-0000-4000-8000-000000000001',
-};
+// The rooms, as alice's page lists them: the seeded ones (web/rooms.json), or those chat's
+// member-list commands opened (feat/chat-rooms-api).
+const ROOM = {};
+async function findRooms(page) {
+  const rooms = await page.evaluate(() => window.demo.directory.rooms);
+  ROOM.aliceBob = rooms.find((r) => r.kind === 'direct' && r.members.includes('bob')).id;
+  ROOM.encrypted = rooms.find((r) => r.e2ee).id;
+  test.info().annotations.push({ type: 'rooms', description: (await page.evaluate(() => window.demo.roomsApi)) ? "chat's member-list commands" : 'seeded (db/seed.sql)' });
+}
 
 test.describe.configure({ mode: 'serial' });
 
@@ -60,6 +65,7 @@ test('upload, transcode and play a video', async () => {
 
 test('chat between two users, with presence', async () => {
   const { alice, bob } = pages;
+  await findRooms(alice);
   await tab(alice, 'chat');
   await tab(bob, 'chat');
   await expect(alice.locator('#people [data-presence="bob"]')).toHaveClass(/online/);
