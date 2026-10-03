@@ -85,6 +85,17 @@ many: splitting work across more jobs makes runs queue.
     (`tests/support/child_process.hpp`); the cluster's pinned ports apply only when
     `ULW_CHAT_CLUSTER_PORTS` is set, which only the `cluster` job does, running alone.
   - Files: scratch and output directories are `mkdtemp` directories per test.
+  - Locked memory: the kernel charges each io_uring ring to its user's `RLIMIT_MEMLOCK`, about
+    410 KiB for the reactor's 4096 entries, summed over every process the user runs, and keeps a
+    ring charged for a moment after its process exits. The runner's 8 MiB is about 20 rings: four
+    IoUring tests at once, three chat_server nodes each, and the rings of the tests that just
+    ended went past it, and the next reactor failed with ENOMEM (`reactor: Cannot allocate
+    memory`) or, in a server under test, fell back to epoll. Measured unprivileged on 4 cores:
+    with 10 rings held, 170 of 300 back-to-back processes opening two rings each were refused,
+    none with 200 ms between them. The parallel steps lift the limit (`sudo prlimit --pid $$
+    --memlock=unlimited:unlimited`) before ctest; a bound sized from live rings would not cover
+    the ones still charged after exit. Root is not charged (`CAP_IPC_LOCK`), so a run as root
+    never sees it; a developer running the label under `-j` unprivileged lifts it the same way.
   The conformance label still runs one test at a time, after the integration label.
 - **The worker test** queues its jobs the way the gateway's commit does, with `NOTIFY
   job_available`: the same 51 jobs and every assertion, in 34-47 s under `-j4` locally instead of 275 s.
