@@ -1,4 +1,4 @@
-# 0079. SIGHUP drops the auth caches
+# 0082. SIGHUP drops the auth caches
 
 Status: Accepted
 Date: 2026-10-02

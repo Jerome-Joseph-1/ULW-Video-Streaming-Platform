@@ -232,7 +232,7 @@ void Gateway::on_signal(net::Signal signal) noexcept {
 
 // After Askedin rotates its signing key, which withdraws the old one at once, its tokens must
 // stop verifying here as soon as the key set can be read rather than when the cache would next
-// refetch (ADR-0079). This requests the drop and starts the fetch, on the loop like any other;
+// refetch (ADR-0082). This requests the drop and starts the fetch, on the loop like any other;
 // the drop completes when a fetch succeeds, and until then the cached keys keep answering.
 void Gateway::drop_auth_caches() noexcept {
     deps_.verifier.drop_caches();

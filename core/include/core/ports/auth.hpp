@@ -60,7 +60,7 @@ public:
     // so that every token is refused until one succeeds. A fixed key set never is.
     [[nodiscard]] virtual bool keys_expired() const noexcept { return false; }
     // Asks for the cached key set and every verified token it remembers to be forgotten (on
-    // SIGHUP, after the issuer rotated its key: ADR-0079), and starts a refresh at once. The drop
+    // SIGHUP, after the issuer rotated its key: ADR-0082), and starts a refresh at once. The drop
     // is requested, not done: it completes on the next successful refresh, which replaces the
     // keys and forgets the remembered tokens in one step. Until then tokens are answered from
     // what is cached, as before; a failed refresh leaves the drop pending for the next one. On

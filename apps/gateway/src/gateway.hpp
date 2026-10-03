@@ -152,7 +152,7 @@ struct Counters {
     std::uint64_t certificate_reloads = 0;
     std::uint64_t certificate_reload_failures = 0;
     // SIGHUPs that requested a drop of the cached JWKS keys and remembered verified tokens;
-    // each completes on the next successful key fetch (ADR-0079).
+    // each completes on the next successful key fetch (ADR-0082).
     std::uint64_t auth_cache_drops = 0;
     std::uint64_t playlists_master = 0;
     std::uint64_t playlists_media = 0;

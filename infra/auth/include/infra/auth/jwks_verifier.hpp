@@ -60,7 +60,7 @@ struct JwksConfig {
 //    fetches.
 //  - A verified token is remembered by its digest for 15 minutes, never past its expiry.
 //  - drop_caches() refetches at once, for an issuer that withdraws a key without overlap
-//    (ADR-0079). The keys and verdicts in hand keep answering until a fetch succeeds; that
+//    (ADR-0082). The keys and verdicts in hand keep answering until a fetch succeeds; that
 //    fetch then replaces the keys and forgets every remembered verdict and unknown kid. A
 //    failed fetch leaves the drop pending, retried with backoff counted afresh.
 //  - Keys not refreshed for max_key_age are dropped, with every remembered verdict: tokens are

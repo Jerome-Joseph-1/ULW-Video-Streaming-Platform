@@ -204,7 +204,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `tls_handshakes_in_flight` | gauge | Only with `ULW_TRANSPORT=tls` |
 | `tls_handshake_failures_total` | counter | |
 | `certificate_reloads_total`, `certificate_reload_failures_total` | counter | SIGHUP certificate reloads |
-| `auth_cache_drops_total` | counter | SIGHUPs that requested a drop of the cached JWKS keys and remembered verified tokens, each logged as `auth cache drop requested; completes on the next successful key fetch` (ADR-0079, [auth.md](auth.md#key-rotation)) |
+| `auth_cache_drops_total` | counter | SIGHUPs that requested a drop of the cached JWKS keys and remembered verified tokens, each logged as `auth cache drop requested; completes on the next successful key fetch` (ADR-0082, [auth.md](auth.md#key-rotation)) |
 | `auth_cache_drop_pending` | gauge | `1` from a SIGHUP until a key fetch succeeds and completes the drop; the cached keys keep answering meanwhile. Stuck at `1` means the JWKS cannot be fetched |
 | `playlist_requests_total{kind="master"}`, `{kind="media"}`, `{kind="live"}` | counter | |
 | `live_playlist_cache_hits_total` | counter | Live playlist requests answered from the cache: a fresh copy, or a stream remembered as absent for 1 s (ADR-0059) |
@@ -315,7 +315,7 @@ the drain begins) and the 2 s log flush fit inside it.
 <!-- apps/gateway/src/gateway.cpp, apps/chat/src/chat.cpp (on_signal) -->
 
 On SIGHUP the gateway and chat_server fetch the key set again at once and, when that fetch
-succeeds, replace their cached JWKS keys and forget every remembered verified token (ADR-0079);
+succeeds, replace their cached JWKS keys and forget every remembered verified token (ADR-0082);
 until then the cached keys keep answering. Send it to every pod after Askedin rotates its
 signing key ([auth.md](auth.md#key-rotation)). The gateway also rereads its certificate and
 key when `ULW_TRANSPORT=tls`. Nothing else changes and no connection is closed. `gateway_server`

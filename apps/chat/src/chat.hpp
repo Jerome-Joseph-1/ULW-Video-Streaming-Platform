@@ -146,7 +146,7 @@ struct Counters {
     std::uint64_t limited_ip_upgrades = 0;
     std::uint64_t limited_user_sessions = 0;
     // SIGHUPs that requested a drop of the cached JWKS keys and remembered verified tokens;
-    // each completes on the next successful key fetch (ADR-0079).
+    // each completes on the next successful key fetch (ADR-0082).
     std::uint64_t auth_cache_drops = 0;
 };
 

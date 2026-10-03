@@ -856,7 +856,7 @@ TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
     EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
 }
 
-// SIGHUP is how Askedin's key rotation reaches chat_server (ADR-0079): the verifier is asked to
+// SIGHUP is how Askedin's key rotation reaches chat_server (ADR-0082): the verifier is asked to
 // drop its keys and verdicts, /metrics counts it, and the gauge follows the verifier's pending
 // drop.
 TEST_P(ChatSessionTest, SighupRequestsAnAuthCacheDrop) {

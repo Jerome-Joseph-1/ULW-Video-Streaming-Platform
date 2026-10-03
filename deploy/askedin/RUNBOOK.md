@@ -854,7 +854,7 @@ new key and deactivates the old one, and the old `kid` leaves the JWKS at once. 
 chat, once deployed) caches the key set and remembers verified tokens for up to 15 minutes each,
 so left alone it accepts tokens under the old key for up to 15 minutes after a rotation
 (docs/integration/auth.md, Key rotation). SIGHUP refetches the key set at once and, when that
-fetch succeeds, replaces the keys and forgets every remembered token (docs/adr/0079).
+fetch succeeds, replaces the keys and forgets every remembered token (docs/adr/0082).
 
 Askedin's rotation runbook restarts the services that verify its tokens. Add ULW to it: once the
 rotation has committed, in the same environment (`apps-stage` for stage, `apps` for prod):

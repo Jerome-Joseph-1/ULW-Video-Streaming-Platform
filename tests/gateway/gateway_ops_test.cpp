@@ -172,7 +172,7 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
     EXPECT_TRUE(extra.empty()) << "families nobody documented: " << *extra.begin();
 }
 
-// SIGHUP is how Askedin's key rotation reaches the gateway (ADR-0079): the verifier is asked to
+// SIGHUP is how Askedin's key rotation reaches the gateway (ADR-0082): the verifier is asked to
 // drop its keys and verdicts, and the request is counted and logged where an operator checks for
 // it; the gauge shows the drop pending until the verifier says a fetch completed it.
 TEST(GatewayMetrics, SighupRequestsAnAuthCacheDropAndSaysSo) {

@@ -115,7 +115,7 @@ public:
 
     // Refetch first, then swap: the keys and verdicts in hand keep answering until a fetch
     // succeeds, and that fetch replaces the keys and forgets every verdict and unknown kid at
-    // once (ADR-0079). So a drop never leaves the process without keys: a JWKS outage during
+    // once (ADR-0082). So a drop never leaves the process without keys: a JWKS outage during
     // one changes nothing until it ends. A fetch already in flight is replaced, since its answer
     // may predate the rotation that prompted the drop, and the backoff starts again from its
     // first step. fetch() only queues the request, so nothing here blocks the loop.

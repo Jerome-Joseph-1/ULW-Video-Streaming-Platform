@@ -151,7 +151,7 @@ Caching and refresh:
 - A key withdrawn from the set therefore goes on verifying, and the tokens it verified go on
   being accepted, until the next successful refetch: up to 15 minutes, or sooner if a token with
   an unseen `kid` triggers a fetch first.
-- SIGHUP requests a drop of the auth caches (gateway and chat; ADR-0079): a fetch starts at
+- SIGHUP requests a drop of the auth caches (gateway and chat; ADR-0082): a fetch starts at
   once, replacing one in flight, with the retry backoff counted from 1 s again. Refetch first,
   then swap: while it runs, the cached keys and remembered tokens go on answering as before, and
   when it succeeds it replaces the key set and forgets every remembered verified token and
