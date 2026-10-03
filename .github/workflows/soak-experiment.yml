@@ -8,9 +8,9 @@ name: soak-experiment
 # off at 6 h, build included, so there `hours` stops at 4.9, the most that leaves the job its
 # 45 minutes for setup and the build under the 355 it is given; on the self-hosted runner it
 # goes to 22, which keeps the job under the 24 h its token lives (the artifact upload at the end
-# needs it) and the second job of `both`, queued behind the first, under the 24 h a queued job
-# waits. It starts at 0.5: the judges skip the first 15 minutes and need ten samples after
-# them.
+# needs it) and the second job of `both`, queued behind the first (max-parallel below), under
+# the 24 h a queued job waits. It starts at 0.5: the judges skip the first 15 minutes and need
+# ten samples after them.
 
 on:
   workflow_dispatch:
@@ -102,6 +102,10 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.job-minutes) }}
     strategy:
       fail-fast: false
+      # One leg at a time on the self-hosted host: it has several runners, and the chat and
+      # gateway legs of `both` would collide there on Postgres's 15432, compose project `local`
+      # and its ulw-minio, which each leg's cleanup takes down. Hosted legs get a machine each.
+      max-parallel: ${{ inputs.runner == 'self-hosted' && 1 || 2 }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     # As ci.yml's integration job: the digest of deploy/local/compose.yaml and its password,
     # on 15432, below the ephemeral port range (ci.yml says why), which ULW_TEST_DATABASE_URL
@@ -123,9 +127,17 @@ jobs:
       ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:15432/postgres
     steps:
       # A self-hosted runner keeps its workspace between jobs; the soak runs as root (below), so
-      # anything an earlier one left there would stop the checkout from cleaning it.
+      # anything an earlier one left there would stop the checkout from cleaning it. As ci.yml's
+      # first step: processes by their executable's real path in this runner's own directories.
       - if: inputs.runner == 'self-hosted'
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+        run: |
+          workspace=$(realpath -m "$GITHUB_WORKSPACE")
+          temp=$(realpath -m "$RUNNER_TEMP")
+          for dir in "$workspace" "$temp"; do
+            sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$dir/*" \
+              -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill -KILL || true
+          done
+          sudo chown -R "$(id -u):$(id -g)" "$workspace" "$temp"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -202,7 +214,7 @@ jobs:
           # by name would kill theirs. ulw_sandbox is the worker's child, started by its full
           # path; the ffmpeg in it is the system's, and is killed with it (pid 1 of its
           # namespace dies with the helper).
-          for dir in "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
+          for dir in "$(realpath -m "$GITHUB_WORKSPACE")" "$(realpath -m "$RUNNER_TEMP")"; do
             sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$dir/*" \
               -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill || true
           done

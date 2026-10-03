@@ -41,17 +41,45 @@ the verdict, for `--rejudge` or a closer look. A hosted job ends at 6 h, build i
 6 h acceptance soak runs on the self-hosted runner.
 
 The soak runs as root on either: the services are undumpable (`ops::disable_core_dumps`), so
-only root reads the `/proc/<pid>/fd` it samples. The self-hosted runner is a dedicated Ubuntu
-24.04 host whose runner user has Docker and password-less sudo; the job installs what a hosted
-image has and the host lacks (cmake, docker compose, rustup 1.29.1 by digest), and leaves
-nothing root-owned in its workspace and no service running. The runner user's sudo rule must be
-`ALL`, since the job passes environment to sudo. The setup action's two sysctls (unprivileged
-user namespaces allowed, 28 bits of mmap randomisation) stay set on that host until it reboots;
-it runs nothing else. Postgres is published on loopback only: a published port would bypass the
-host's firewall. Anyone who can dispatch a workflow at any ref runs that ref's code as root on
-the host, so it holds nothing else; one soak runs there at a time. The workflow's concurrency
-group is per runner kind, so it also serialises hosted runs: a second dispatch for the same kind
-waits for the first, and a third replaces the one still pending, which is then cancelled.
+only root reads the `/proc/<pid>/fd` it samples. On the self-hosted host the setup action
+installs what a hosted image has and the host lacks (cmake, docker compose, rustup 1.29.1 by
+digest), and the job leaves nothing root-owned in its workspace and stops what it started: its
+processes are found by their executable's path in its own runner's directories, never by name,
+since the host's other runners run the same programs for CI. Postgres is published on loopback
+only: a published port would bypass the host's firewall. One soak runs on the host at a time,
+and the two legs of `both` run one after the other there (`max-parallel`), since they share
+15432, compose project `local` and its `ulw-minio`. The workflow's concurrency group is per
+runner kind, so it also serialises hosted runs: a second dispatch for the same kind waits for
+the first, and a third replaces the one still pending, which is then cancelled.
+
+### The self-hosted host
+
+The host is not dedicated to the soak: `ci.yml` runs its trusted jobs there as well (pushes to
+`main`, the nightly, manual runs, and pull requests from branches of this repository; never a
+fork's), up to four at once beside a soak, which shares the host's cores with them. Jobs that
+publish a fixed host port or start `deploy/local/compose.yaml`'s fixed-name containers stay on
+hosted runners. What the workflows rely on:
+
+- Ubuntu 24.04 on a virtual machine (not a container), with the `universe` archive enabled,
+  Docker, git 2.18 or later, curl, python3 and iproute2 (`ss`).
+- Four runner instances for this repository, each with the label `self-hosted`, all running as
+  the user `github-runner`, which is in the `docker` group and has password-less sudo for `ALL`
+  (the jobs pass environment to sudo).
+- `/home/github-runner/.cargo/bin` first on each runner's PATH, in its `.path` file (restart the
+  runner after editing it). The setup action installs rustup there if it is missing and fails if
+  another `rustup` comes first.
+- The setup action's two sysctls, `kernel.apparmor_restrict_unprivileged_userns=0` (the worker's
+  sandbox) and `vm.mmap_rnd_bits=28` (the sanitizers), which every job sets again; to keep them
+  across reboots, put them in a file under `/etc/sysctl.d/`. Both weaken the host's defaults,
+  one more reason it holds nothing else.
+- Under Settings, Actions, General, "Require approval for all external contributors" for fork
+  pull requests. The workflows send a fork's pull request to a hosted runner, but the fork can
+  edit the workflow and its `runs-on`; only the approval keeps its code off the host.
+- Room on disk for each runner's workspace and build tree, the toolchains and Docker's images,
+  pruned from time to time.
+
+Anyone who can push a branch to this repository, or dispatch a workflow at any ref, runs that
+ref's code as root on the host, so it holds nothing else.
 
 ## Runs
 

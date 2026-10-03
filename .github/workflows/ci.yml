@@ -41,16 +41,24 @@ jobs:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
     steps:
-      # A self-hosted runner keeps its workspace between jobs, and the root step below leaves
-      # root's files in it (and, if cancelled there, possibly root's servers running), which
-      # would stop the checkout from cleaning it. Processes are matched by their executable's
-      # path in this runner's own workspace, so the host's other runners' jobs are left alone.
-      - name: Clear what an earlier job on this runner left as root
+      # First in every job that may run on the self-hosted host, before the checkout (which a
+      # local action would need), so defined once here and repeated by its YAML alias. A
+      # self-hosted runner keeps its workspace between jobs, and an earlier job may have left
+      # root's files there (build-test's root step, autobahn's container) or, if cancelled,
+      # root's processes running; either would stop the checkout from cleaning it. Processes
+      # are matched by their executable's real path in this runner's own workspace and scratch,
+      # so the host's other runners' jobs are left alone.
+      - &clear-runner
+        name: Clear what an earlier job on this runner left
         if: runner.environment == 'self-hosted'
         run: |
-          sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$GITHUB_WORKSPACE/*" \
-            -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill -KILL || true
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          workspace=$(realpath -m "$GITHUB_WORKSPACE")
+          temp=$(realpath -m "$RUNNER_TEMP")
+          for dir in "$workspace" "$temp"; do
+            sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$dir/*" \
+              -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill -KILL || true
+          done
+          sudo chown -R "$(id -u):$(id -g)" "$workspace" "$temp"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -85,6 +93,7 @@ jobs:
       CC: clang-19
       CXX: clang++-19
     steps:
+      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -107,6 +116,7 @@ jobs:
       CXX: g++-14
       ULW_REACTOR: ${{ matrix.reactor }}
     steps:
+      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -330,6 +340,7 @@ jobs:
       CC: clang-19
       CXX: clang++-19
     steps:
+      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -388,6 +399,7 @@ jobs:
       CXX: g++-14
       ULW_REACTOR: ${{ matrix.reactor }}
     steps:
+      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -413,6 +425,10 @@ jobs:
       - run: tests/autobahn/run.sh build/ci
         env:
           ULW_AUTOBAHN_PORT: ${{ steps.port.outputs.port }}
+      # The suite's container runs as root and writes its reports into the workspace.
+      - name: Hand the reports back to the runner's user
+        if: always() && runner.environment == 'self-hosted'
+        run: sudo chown -R "$(id -u):$(id -g)" build/ci/autobahn || true
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -433,6 +449,7 @@ jobs:
       CC: clang-19
       CXX: clang++-19
     steps:
+      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -489,6 +506,7 @@ jobs:
       # From gitleaks_8.30.1_checksums.txt in the release, linux_x64 line.
       GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
+      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -507,6 +525,7 @@ jobs:
   manifests:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
     steps:
+      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

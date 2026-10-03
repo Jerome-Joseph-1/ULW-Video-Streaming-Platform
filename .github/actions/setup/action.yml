@@ -21,7 +21,10 @@ runs:
       run: |
         for attempt in 1 2 3 4 5 6 7 8 9 10; do
           sudo apt-get update -qq && break
-          (( attempt < 10 )) || exit 1
+          if (( attempt == 10 )); then
+            echo "::error::apt-get update failed 10 times, 15 s apart"
+            exit 1
+          fi
           sleep 15
         done
         sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends \
@@ -54,19 +57,20 @@ runs:
           exit 1
         fi
     # On the self-hosted host the crate registry and the ccache live in the job's own
-    # $RUNNER_TEMP, which the runner empties before each job: no job reads what a concurrent or
-    # an earlier one left there, and both come from and go to the Actions cache exactly as on a
-    # hosted runner, with its per-branch scoping, rather than one shared home. Four jobs share
-    # the host's six cores and 12 GB: each builds with three jobs rather than Ninja's
-    # cores-plus-two, and nproc (coreutils), which honours OMP_NUM_THREADS, gives
-    # tools/run-clang-tidy.sh the same share.
+    # workspace (.cargo-home, .ccache; git-ignored, and removed by the next checkout's clean),
+    # not the home its runners share: no job reads what a concurrent or an earlier one left
+    # there, and both come from and go to the Actions cache exactly as on a hosted runner, with
+    # its per-branch scoping. The cache paths are relative, so the host's runners all use one
+    # cache entry per key. Four jobs share the host's six cores and 12 GB: each builds with
+    # three jobs rather than Ninja's cores-plus-two, and nproc (coreutils), which honours
+    # OMP_NUM_THREADS, gives tools/run-clang-tidy.sh the same share.
     - name: Keep this job's state to itself on the self-hosted host
       if: runner.environment == 'self-hosted'
       shell: bash
       run: |
         {
-          echo "CARGO_HOME=$RUNNER_TEMP/cargo"
-          echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+          echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo-home"
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache"
           echo "CMAKE_BUILD_PARALLEL_LEVEL=3"
           echo "OMP_NUM_THREADS=3"
         } >>"$GITHUB_ENV"
@@ -87,8 +91,8 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
-          ${{ runner.environment == 'self-hosted' && format('{0}/cargo', runner.temp) || '~/.cargo' }}/registry/index
-          ${{ runner.environment == 'self-hosted' && format('{0}/cargo', runner.temp) || '~/.cargo' }}/registry/cache
+          ${{ runner.environment == 'self-hosted' && '.cargo-home' || '~/.cargo' }}/registry/index
+          ${{ runner.environment == 'self-hosted' && '.cargo-home' || '~/.cargo' }}/registry/cache
         key: cargo-registry-${{ hashFiles('infra/e2ee/mls_ffi_bridge/Cargo.lock') }}
     # A cold build of the bridge takes minutes; cargo rebuilds what the lock file or the
     # sources changed.
@@ -113,7 +117,7 @@ runs:
       if: inputs.ccache != 'false'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ runner.environment == 'self-hosted' && format('{0}/ccache', runner.temp) || '~/.cache/ccache' }}
+        path: ${{ runner.environment == 'self-hosted' && '.ccache' || '~/.cache/ccache' }}
         key: ccache-${{ inputs.cache-key }}-${{ github.sha }}
         restore-keys: ccache-${{ inputs.cache-key }}-
     # In ccache's own configuration file (~/.config/ccache/ccache.conf) rather than
