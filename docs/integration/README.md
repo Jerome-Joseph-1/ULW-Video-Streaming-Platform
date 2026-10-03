@@ -41,7 +41,7 @@ The ops team fills these in.
 | | Stage | Prod |
 |---|---|---|
 | App origin (`<APP_ORIGIN>`) | `https://<STAGE_APP_HOST>` | `https://<PROD_APP_HOST>` |
-| Video API (`$GW`) | `https://<STAGE_HOST>` (paths `/api/v1/uploads`, `/api/v1/videos`) | `https://<PROD_HOST>` |
+| Video API (`$GW`) | `https://<STAGE_HOST>` (paths `/api/v1/uploads`, `/api/v1/videos`, `/api/v1/live`) | `https://<PROD_HOST>` |
 | Segment host (R2) | `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` | same form, prod bucket |
 | Chat (`wss://<CHAT_HOST>/rt`) | not deployed yet | not deployed yet |
 | Token cookie | `auth_token_stage` | `auth_token` |

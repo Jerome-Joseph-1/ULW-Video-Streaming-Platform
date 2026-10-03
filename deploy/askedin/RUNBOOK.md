@@ -457,7 +457,7 @@ is on the internet. If the host's address is stable, add it as an `ipBlock` to t
    reset would not hurt.
 4. From then on ArgoCD syncs the manifests and Woodpecker only restarts.
 
-The route serves `/api/v1/uploads` and `/api/v1/videos` on every hostname of
+The route serves `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` on every hostname of
 `askedin-gateway`. If the video plane gets a hostname of its own, add `hostnames:` to both
 `httproute.yaml` files.
 
