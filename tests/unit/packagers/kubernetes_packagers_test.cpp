@@ -280,6 +280,16 @@ TEST_F(KubernetesPackagersTest, FailuresAreUnavailableOrRefusedByWhatARetryCould
     ASSERT_TRUE(start());
 }
 
+TEST_F(KubernetesPackagersTest, PackagersDestroyedWhileTheTokenIsReadLeaveThePoolSafe) {
+    std::optional<std::expected<PackagerState, PackagerError>> r;
+    packagers->state(*core::LiveStreamId::parse(kStream), [&](auto x) noexcept { r = x; });
+    ASSERT_EQ(pool->in_flight(), 1U);
+    // The token's job is on the pool; its owner goes before it completes.
+    packagers.reset();
+    EXPECT_TRUE(ulw::test::pump_until(*reactor, [&] { return pool->in_flight() == 0; }));
+    EXPECT_FALSE(r.has_value());
+}
+
 TEST_F(KubernetesPackagersTest, AnUnreachableServerIsUnavailable) {
     pool.reset();
     packagers.reset();
