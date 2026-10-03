@@ -129,6 +129,8 @@ export async function openSession({ user, room, members, post }) {
       return payloads.receive({ sender: frame.sender, seq: frame.seq, payload: body.p });
     },
     ready: () => payloads.ready(),
+    sendFailed: async () => {},
+    members: () => [],
     state() {
       const s = payloads.state();
       return { canSend: s.canSend, complete: !s.detail.startsWith('waiting'), detail: s.detail };

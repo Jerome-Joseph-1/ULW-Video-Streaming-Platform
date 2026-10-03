@@ -76,7 +76,18 @@ test('end-to-end encrypted chat: the server holds only ciphertext', async () => 
   const { alice, bob } = pages;
   await alice.locator(`#rooms li[data-room="${ROOM.encrypted}"]`).click();
   await bob.locator(`#rooms li[data-room="${ROOM.encrypted}"]`).click();
-  // Both devices in the group (MLS: alice starts it, bob asks, alice adds him and he joins).
+  // Both devices in the group. MLS: alice starts it, bob's device asks with a key package, alice
+  // approves it from the card showing its fingerprint, and bob joins from the welcome.
+  const card = alice.locator('#e2ee-asks [data-approval="bob"]');
+  const bothIn = () => Promise.all([alice, bob].map((page) => page.evaluate((room) => window.demo.e2ee?.[room]?.().complete === true, ROOM.encrypted)))
+    .then((s) => s.every(Boolean));
+  for (let i = 0; i < 60 && !(await bothIn()); ++i) {
+    if (await card.first().isVisible().catch(() => false)) {
+      await expect(card.first()).toContainText(/[0-9a-f]{4} [0-9a-f]{4}/);
+      await card.first().getByRole('button', { name: 'Approve' }).click();
+    }
+    await alice.waitForTimeout(1000);
+  }
   for (const page of [alice, bob]) {
     await page.waitForFunction((room) => window.demo.e2ee?.[room]?.().complete === true, ROOM.encrypted, { timeout: 60_000 });
   }

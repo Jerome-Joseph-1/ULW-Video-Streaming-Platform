@@ -3,7 +3,7 @@
 //   {t:'text', text}          a message
 // The encrypted room's bodies belong to e2ee.js (MLS messages, or the stand-in's envelope).
 //   {t:'ring' | 'live', ...}  the page's own signals, handed to calls.js and live.js
-import { $, chat, decodeBody, demo, directory, el, log, myRooms, presenceDot, roomById, sendBody, session, store } from './core.js';
+import { $, chat, decodeBody, demo, directory, el, log, myRooms, presenceDot, roomById, sendBody, session, store, toast } from './core.js';
 import * as e2ee from './e2ee.js';
 
 const rooms = new Map(); // id -> { meta, messages: Map(seq -> view), loading, buffer, unread, session }
@@ -51,6 +51,11 @@ export function initChat() {
     queue(r, () => finishLoading(r));
   });
   chat.addEventListener('error', (e) => {
+    const r = rooms.get(e.m.room);
+    // A refused send in the encrypted room goes back to MLS, which retries or drops it.
+    if (r?.session && e.m.id) {
+      setTimeout(() => r.session.sendFailed(e.m.id, e.m.reason), e.m.retry_after_ms ?? 500);
+    }
     if (e.m.room && rooms.has(e.m.room) && e.m.reason !== 'not_callable') {
       system(rooms.get(e.m.room), `chat said: ${e.m.reason}`);
     }
@@ -92,7 +97,9 @@ async function finishLoading(r) {
   r.loaded = true;
   if (r.meta.e2ee && !r.session) {
     r.session = await e2ee.openSession({ user: session.user, room: r.meta.id, members: r.meta.members,
-      post: (id, body) => chat.send({ type: 'send', room: r.meta.id, id, body }) });
+      post: (id, body) => chat.send({ type: 'send', room: r.meta.id, id, body }),
+      approve: (ask, signal) => askApproval(r, ask, signal),
+      onEvent: () => { if (current === r.meta.id) updateBanner(r); } });
     demo.e2ee = demo.e2ee ?? {};
     demo.e2ee[r.meta.id] = () => r.session.state();
   }
@@ -201,8 +208,37 @@ function renderMessages() {
 function updateBanner(r) {
   if (!r.meta.e2ee) return;
   const state = r.session?.state();
-  $('e2ee-banner').textContent = `End-to-end encrypted: ${r.session?.label ?? 'loading the encryption'}. ` +
-    `The chat server only stores and relays ciphertext. ${state ? state.detail : ''}`;
+  const banner = $('e2ee-banner');
+  banner.replaceChildren(
+    el('div', {}, `End-to-end encrypted: ${r.session?.label ?? 'loading the encryption'}. ` +
+      `The chat server only stores and relays ciphertext. ${state ? state.detail : ''}`));
+  if (r.session?.fingerprint) {
+    banner.append(el('div', { class: 'fp' }, `This device: ${r.session.device}, fingerprint ${r.session.fingerprint}`));
+  }
+  const members = r.session?.members() ?? [];
+  if (members.length) {
+    banner.append(el('div', { class: 'fp' }, 'Group members:'),
+      ...members.map((m) => el('div', { class: 'fp' }, `  ${m.identity}  ${m.fingerprint}`)));
+  }
+}
+
+// MLS asks the group's first member about each device that wants in: a card with its
+// fingerprint, to compare with what that device's page shows, and Approve or Deny.
+function askApproval(r, ask, signal) {
+  toast(`${ask.chatSender} asks to join "${r.meta.name}": approve it in Chat`);
+  return new Promise((resolve) => {
+    const card = el('div', { class: 'ask card', dataset: { approval: ask.chatSender } },
+      el('div', {}, `${ask.chatSender} asks to add the device ${ask.identity} to "${r.meta.name}". Its fingerprint:`),
+      el('div', { class: 'fp big' }, ask.fingerprintText),
+      el('div', { class: 'muted' }, `Compare it with the fingerprint ${ask.chatSender}'s window shows in this room.`));
+    const decide = (yes) => { card.remove(); log('e2ee_decided', { who: ask.chatSender, yes }); resolve(yes); };
+    card.append(el('div', { class: 'row' },
+      el('button', { class: 'primary', dataset: { testid: 'approve' }, onclick: () => decide(true) }, 'Approve'),
+      el('button', { class: 'danger', onclick: () => decide(false) }, 'Deny')));
+    $('e2ee-asks').append(card);
+    // Withdrawn: the same user's device asked again since.
+    signal?.addEventListener('abort', () => { card.remove(); resolve(false); });
+  });
 }
 
 function appendMessage(view, scroll = true) {
