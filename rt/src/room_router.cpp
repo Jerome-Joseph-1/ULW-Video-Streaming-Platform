@@ -948,7 +948,7 @@ public:
         if (it == notice_lookups_.end()) {
             return;
         }
-        std::vector<std::vector<std::byte>> waiting = std::move(it->second);
+        const std::vector<std::vector<std::byte>> waiting = std::move(it->second);
         notice_lookups_.erase(it);
         std::optional<Ownership> owner;
         if (owners) {
