@@ -466,6 +466,7 @@ target_include_directories(message_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/call_bell_test.cpp
     unit/chat/call_test.cpp
     unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
@@ -476,6 +477,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/memory_store_access_test.cpp
     unit/chat/named_rooms_test.cpp
     unit/chat/presence_test.cpp
+    unit/chat/ring_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
 target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os

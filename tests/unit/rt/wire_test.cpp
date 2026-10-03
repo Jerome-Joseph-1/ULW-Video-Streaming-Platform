@@ -147,6 +147,24 @@ TEST_F(WireTest, AnAskAndItsAnswerComeBackAsTheyWereSent) {
     EXPECT_TRUE(refused.body.empty());
 }
 
+TEST_F(WireTest, ANotifyAndANoticeComeBackAsTheyWereSent) {
+    const auto body = bytes("ring \x00 ring");
+    std::vector<std::byte> out;
+    wire::encode_notify(out, room_, body);
+    wire::encode_notice(out, room_, {});
+    const auto frames = decode_all(out);
+    ASSERT_EQ(frames.size(), 2U);
+    const auto& notify = std::get<wire::Notify>(frames[0]);
+    EXPECT_EQ(notify.room, room_);
+    EXPECT_EQ(text(notify.body), text(body));
+    const auto& notice = std::get<wire::Notice>(frames[1]);
+    EXPECT_EQ(notice.room, room_);
+    EXPECT_TRUE(notice.body.empty());
+    // Without a whole room there is nothing to hand to anyone.
+    EXPECT_EQ(error_of(raw(11, "not a room")), wire::DecodeError::Malformed);
+    EXPECT_EQ(error_of(raw(12, "")), wire::DecodeError::Malformed);
+}
+
 TEST_F(WireTest, AnAnswerWithAStatusNobodyDefinedIsMalformed) {
     std::string answer(8, '\0');
     answer += '\x06';
@@ -201,7 +219,7 @@ TEST_F(WireTest, AZeroLengthIsRefused) {
 TEST_F(WireTest, AnUnknownTypeIsRefused) {
     EXPECT_EQ(error_of(raw(0, "")), wire::DecodeError::UnknownType);
     wire::Decoder fresh;
-    fresh.feed(raw(11, ""));
+    fresh.feed(raw(13, ""));
     EXPECT_EQ(fresh.next(), std::unexpected(wire::DecodeError::UnknownType));
 }
 

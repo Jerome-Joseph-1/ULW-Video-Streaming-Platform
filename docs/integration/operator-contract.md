@@ -377,7 +377,20 @@ rooms this node owns), `call_errors_total{source="sfu",kind="unavailable"}` (Liv
 or overloaded: clients are told to retry), `{source="sfu",kind="refused"}` (LiveKit refused the
 request as made, a configuration fault: clients get `call_failed`) and
 `{source="store",kind="unavailable"}`. Each is counted on the node that owns the room, not the
-one the client is on. For member lists changed by their users (ADR-0096), counted on the node
+one the client is on. A call's ring (ADR-0091), also on the room's owner:
+`call_refusals_total{reason="no_call"}` (declines, cancels and ends of a call that was not there
+to move), `call_refusals_total{reason="ring_limited"}` (tickets refused because their direct chat
+rang 5 times in a minute, or its caller was just declined), `calls_ringing_or_answered`, `call_rings_total{outcome="started"}`, `{outcome="answered"}`,
+`{outcome="declined"}`, `{outcome="cancelled"}`, `{outcome="missed"}`, `{outcome="ended"}`,
+`{outcome="orphaned"}` (forgotten without a word because the node no longer owns the room) and
+`{outcome="busy"}` (tickets refused past 4096 calls), `{outcome="graced"}` (rings held past
+their timeout for a callee's ticket being issued), and `call_notices_sent_total`; on the
+members' nodes, `call_events_pushed_total` (events written to sockets),
+`call_notices_unheard_total` (notices for a member with no socket on the node) and
+`call_notices_malformed_total`; and the room plane's unsequenced notices that carry them,
+`notices_total{stage="forwarded"}`, `{stage="fanned_out"}`, `{stage="heard"}` and
+`{stage="dropped"}` (no owner, an owner that let the room go, a lookup that failed).
+For member lists changed by their users (ADR-0096), counted on the node
 the asking client is on: `directs_opened_total` (direct chats whose pair an `open_direct`
 listed), `groups_created_total`, `members_changed_total{change="added"}`, `{change="removed"}`
 and `{change="left"}`, `membership_refusals_total{reason="not_member"}`, `{reason="not_admin"}`,

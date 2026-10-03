@@ -5,10 +5,13 @@
 #include "live_chat.hpp"
 #include "named_rooms.hpp"
 #include "presence_room.hpp"
+#include "support/fake_clock.hpp"
+#include "support/fake_random.hpp"
 
 #include <algorithm>
 #include <format>
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <variant>
@@ -293,6 +296,105 @@ TEST(Envelope, ACallNamesItsRoomAndTheAskingDevice) {
         chat::parse_command(R"({"type":"call","device":"01a0eb86-6cca-7dce-84cc-3bb47615f9aa"})"),
         std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::reason(EnvelopeError::BadDevice), "bad_device");
+}
+
+TEST(Envelope, ADeclineCancelOrEndNamesItsRoomAndCall) {
+    const std::string room_field = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
+    const std::string call_field = R"("call":"01a0eb86-6cca-7dce-84cc-3bb47615f9cc")";
+    const std::vector<std::pair<std::string, chat::CallSignal>> moves{
+        {"call_decline", chat::CallSignal::Decline},
+        {"call_cancel", chat::CallSignal::Cancel},
+        {"call_end", chat::CallSignal::End}};
+    // The command `type` with `fields` after its type.
+    const auto command = [](const std::string& type,
+                            std::initializer_list<std::string_view> fields) {
+        std::string out = R"({"type":")";
+        out += type;
+        out += '"';
+        for (const std::string_view f : fields) {
+            out += ',';
+            out += f;
+        }
+        out += '}';
+        return out;
+    };
+    for (const auto& [type, signal] : moves) {
+        const auto c = chat::parse_command(command(type, {room_field, call_field}));
+        ASSERT_TRUE(c) << type;
+        const auto& move = std::get<chat::CallMove>(*c);
+        EXPECT_EQ(move.room, room());
+        EXPECT_EQ(move.signal, signal);
+        EXPECT_EQ(move.call.to_string(), "01a0eb86-6cca-7dce-84cc-3bb47615f9cc");
+        EXPECT_EQ(chat::parse_command(command(type, {room_field})),
+                  std::unexpected(EnvelopeError::Malformed));
+        EXPECT_EQ(chat::parse_command(command(type, {room_field, R"("call":"ring-1")"})),
+                  std::unexpected(EnvelopeError::BadCall));
+        EXPECT_EQ(chat::parse_command(command(type, {room_field, call_field, R"("device":"x")"})),
+                  std::unexpected(EnvelopeError::Malformed));
+        EXPECT_EQ(chat::parse_command(command(type, {R"("room":"lobby")", call_field})),
+                  std::unexpected(EnvelopeError::BadRoom));
+    }
+    EXPECT_EQ(chat::reason(EnvelopeError::BadCall), "bad_call");
+}
+
+TEST(Envelope, CallEventsAreTheDocumentedShapes) {
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    const auto call = chat::CallId::generate(clock, random);
+    const std::string call_text = call.to_string();
+    const auto alice = *core::UserId::parse("auth0|alice");
+    const auto bob = *core::UserId::parse("auth0|bob");
+    std::string out;
+    chat::write_call_event(out, {.event = chat::RingEvent::Ringing,
+                                 .to = bob,
+                                 .room = room(),
+                                 .call = call,
+                                 .from = alice,
+                                 .by = std::nullopt,
+                                 .expires_at = core::WallTime{core::Millis{1'790'000'045'500}}});
+    EXPECT_EQ(out,
+              R"({"type":"call_ringing","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","call":")" +
+                  call_text + R"(","from":"auth0|alice","expires_at":1790000045})");
+    const std::vector<std::pair<chat::RingEvent, std::string>> ended{
+        {chat::RingEvent::Answered, "call_answered"},
+        {chat::RingEvent::Declined, "call_declined"},
+        {chat::RingEvent::Cancelled, "call_cancelled"},
+        {chat::RingEvent::Ended, "call_ended"}};
+    for (const auto& [event, type] : ended) {
+        out.clear();
+        chat::write_call_event(out, {.event = event,
+                                     .to = alice,
+                                     .room = room(),
+                                     .call = call,
+                                     .from = alice,
+                                     .by = bob,
+                                     .expires_at = {}});
+        std::string expected = R"({"type":")";
+        expected += type;
+        expected += R"(","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","call":")";
+        expected += call_text;
+        expected += R"(","from":"auth0|alice","by":"auth0|bob"})";
+        EXPECT_EQ(out, expected);
+    }
+    out.clear();
+    chat::write_call_event(out, {.event = chat::RingEvent::Missed,
+                                 .to = alice,
+                                 .room = room(),
+                                 .call = call,
+                                 .from = alice,
+                                 .by = std::nullopt,
+                                 .expires_at = {}});
+    EXPECT_EQ(out,
+              R"({"type":"call_missed","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","call":")" +
+                  call_text + R"(","from":"auth0|alice"})");
+    out.clear();
+    chat::write_ticket(out, room(),
+                       {.endpoint = "wss://m", .credential = "t", .expires_at = core::WallTime{}},
+                       call);
+    EXPECT_EQ(
+        out,
+        R"({"type":"ticket","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","url":"wss://m","token":"t","expires_at":0,"call":")" +
+            call_text + R"("})");
 }
 
 TEST(Envelope, RepliesAreTheDocumentedShapes) {

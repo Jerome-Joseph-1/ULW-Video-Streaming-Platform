@@ -49,6 +49,7 @@ Client to server:
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 | `call` | `room`, `device` (a UUID the client keeps per device) | A ticket to the room's 1:1 call, for a direct chat this connection has joined. See [calls.md](calls.md). |
+| `call_decline`, `call_cancel`, `call_end` | `room`, `call` | Turn a ringing call down (the callee), give up ringing (the caller), or end an answered call (either member), for a direct chat this connection has joined. See [calls.md](calls.md#ringing). |
 | `open_direct`, `create_group`, `add_members`, `remove_member`, `leave`, `rooms`, `members` | See [Changing member lists](#changing-member-lists) | A user's direct and group chats, and who is in them. |
 
 Server to client:
@@ -59,7 +60,8 @@ Server to client:
 | `sent` | `room`, `id`, `seq` | The message was sequenced as `seq`. A resend with the same `id` gets the same answer. |
 | `message` | `room`, `seq`, `sender`, `id`, `body` | A message in the room, your own included, live, resumed or from history. `sender` is the poster's user id ([auth.md](auth.md)). |
 | `history` | `room`, `count` | Ends the answer to a `history` command, after its `count` messages. `0`: nothing more in that direction. |
-| `ticket` | `room`, `url`, `token`, `expires_at` | The answer to `call`: connect LiveKit's SDK to `url` with `token` before `expires_at` (Unix seconds). See [calls.md](calls.md). |
+| `ticket` | `room`, `url`, `token`, `expires_at`, `call` when the ticket belongs to a call | The answer to `call`: connect LiveKit's SDK to `url` with `token` before `expires_at` (Unix seconds). See [calls.md](calls.md). |
+| `call_ringing`, `call_answered`, `call_declined`, `call_cancelled`, `call_missed`, `call_ended` | `room`, `call`, `from`; `expires_at` (ringing) or `by` (the others but missed) | Unasked, on every socket of both members of a direct chat, joined to the room or not: a call rings, or how it went. See [calls.md](calls.md#ringing). |
 | `direct`, `group`, `added`, `removed`, `left`, `rooms`, `members`, `member` | See [Changing member lists](#changing-member-lists) | Answers to the member-list commands, and `member`, sent unasked when a list you are on, or of a room you joined, changes. |
 | `error` | `reason`, plus `room` and `id` when known, `retry_after_ms` for `rate_limited` and for a call's `unavailable` | A command failed. |
 
@@ -267,7 +269,8 @@ As `user-1`:
 | `too_many_members` | The group would hold more than 100 members | Remove members first |
 | `room_limit` | `open_direct` or `create_group` of a new room while you are listed in 1000 rooms | Leave some rooms first |
 | `gone` | `create_group` under the `id` of a group everyone left, which holds messages | Create it under a new `id` |
-| `not_callable`, `call_failed`, `calls_disabled` | A call was refused; see [calls.md](calls.md#errors) | As there |
+| `bad_call` | A `call_decline`, `call_cancel` or `call_end` whose `call` is not a canonical lowercase UUID | Fix the client |
+| `not_callable`, `call_failed`, `calls_disabled`, `no_call`, `ring_limited` | A call was refused; see [calls.md](calls.md#errors) | As there |
 | `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive. For a member-list command: you are not on the room's list | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |

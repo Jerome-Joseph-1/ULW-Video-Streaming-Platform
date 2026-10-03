@@ -82,7 +82,7 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(std::move(limits)), rooms_(deps.router),
       chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
       presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
-      calls_(deps.messages, deps.sfu, deps.clock, limits_.calls),
+      calls_(deps.messages, deps.sfu, rooms_, deps.clock, deps.random, limits_.calls),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
                http::AddressHash{http::SeededHash(seed(deps_.random))}),
@@ -91,6 +91,7 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       blocks_(limits_.max_connections + 1, http::AddressHash{http::SeededHash(seed(deps_.random))}),
       sessions_(limits_.max_connections) {
     deps_.router.serve(&calls_);
+    deps_.router.hear(&bell_);
 }
 
 ChatServer::~ChatServer() {
@@ -98,6 +99,7 @@ ChatServer::~ChatServer() {
     // service, which would otherwise ask it what a resync still owes.
     chat_.stop();
     deps_.router.serve(nullptr);
+    deps_.router.hear(nullptr);
     deps_.reactor.cancel_timer(drain_timer_);
     sessions_.for_each_live([](Session& s) { s.close(); });
     reap();
@@ -302,6 +304,8 @@ std::string ChatServer::render_metrics() const {
     const ServiceCounters& chat = chat_.counters();
     const PresenceCounters& presence = presence_.counters();
     const CallCounters& call = calls_.counters();
+    const RingCounters& ring = calls_.ring_counters();
+    const BellCounters& bell = bell_.counters();
     return std::format(
         "connections_accepted_total {}\n"
         "connections_rejected_total{{reason=\"capacity\"}} {}\n"
@@ -364,6 +368,26 @@ std::string ChatServer::render_metrics() const {
         "call_errors_total{{source=\"sfu\",kind=\"unavailable\"}} {}\n"
         "call_errors_total{{source=\"sfu\",kind=\"refused\"}} {}\n"
         "call_errors_total{{source=\"store\",kind=\"unavailable\"}} {}\n"
+        "call_refusals_total{{reason=\"no_call\"}} {}\n"
+        "call_refusals_total{{reason=\"ring_limited\"}} {}\n"
+        "calls_ringing_or_answered {}\n"
+        "call_rings_total{{outcome=\"started\"}} {}\n"
+        "call_rings_total{{outcome=\"answered\"}} {}\n"
+        "call_rings_total{{outcome=\"declined\"}} {}\n"
+        "call_rings_total{{outcome=\"cancelled\"}} {}\n"
+        "call_rings_total{{outcome=\"missed\"}} {}\n"
+        "call_rings_total{{outcome=\"ended\"}} {}\n"
+        "call_rings_total{{outcome=\"orphaned\"}} {}\n"
+        "call_rings_total{{outcome=\"busy\"}} {}\n"
+        "call_rings_total{{outcome=\"graced\"}} {}\n"
+        "call_notices_sent_total {}\n"
+        "call_events_pushed_total {}\n"
+        "call_notices_unheard_total {}\n"
+        "call_notices_malformed_total {}\n"
+        "notices_total{{stage=\"forwarded\"}} {}\n"
+        "notices_total{{stage=\"fanned_out\"}} {}\n"
+        "notices_total{{stage=\"heard\"}} {}\n"
+        "notices_total{{stage=\"dropped\"}} {}\n"
         "directs_opened_total {}\n"
         "groups_created_total {}\n"
         "members_changed_total{{change=\"added\"}} {}\n"
@@ -395,6 +419,10 @@ std::string ChatServer::render_metrics() const {
         c.auth_cache_drops, deps_.verifier.drop_pending() ? 1 : 0, chat.unrecorded_joins,
         calls_.enabled() ? 1 : 0, call.tickets, call.not_member, call.not_callable, call.busy,
         call.opens, calls_.rooms(), call.sfu_unavailable, call.sfu_refused, call.store_unavailable,
+        call.no_call, ring.limited, calls_.calls(), ring.started, ring.answered, ring.declined,
+        ring.cancelled, ring.missed, ring.ended, ring.orphaned, ring.busy, ring.graced,
+        ring.notices, bell.pushed, bell.unheard, bell.malformed, router.notices_forwarded,
+        router.notices_fanned_out, router.notices_heard, router.notices_dropped,
         chat.directs_opened, chat.groups_created, chat.members_added, chat.members_removed,
         chat.members_left, chat.membership_not_member, chat.membership_not_admin,
         chat.membership_not_group, chat.membership_full, chat.membership_room_limit,

@@ -424,6 +424,26 @@ void append_users(std::string& out, std::span<const core::UserId> users) {
     out += ']';
 }
 
+std::expected<Command, EnvelopeError> call_move_of(const core::json::Value& message,
+                                                   CallSignal signal) {
+    if (!only(message, {"type", "room", "call"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    const auto text = string_of(message, "call");
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto call = CallId::parse(*text);
+    if (!call) {
+        return std::unexpected(EnvelopeError::BadCall);
+    }
+    return CallMove{.room = *room, .signal = signal, .call = *call};
+}
+
 void append_room(std::string& out, const core::RoomId& room) {
     std::array<char, core::Uuid::kTextLength> text{};
     room.format_to(text);
@@ -482,6 +502,15 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     }
     if (name == "members") {
         return members_of(*message);
+    }
+    if (name == "call_decline") {
+        return call_move_of(*message, CallSignal::Decline);
+    }
+    if (name == "call_cancel") {
+        return call_move_of(*message, CallSignal::Cancel);
+    }
+    if (name == "call_end") {
+        return call_move_of(*message, CallSignal::End);
     }
     if (name == "watch" || name == "unwatch") {
         const auto user = user_of(*message);
@@ -584,7 +613,7 @@ void write_rate_limited(std::string& out, const core::RoomId& room, const rt::Me
 }
 
 void write_ticket(std::string& out, const core::RoomId& room,
-                  const core::ports::MediaTicket& ticket) {
+                  const core::ports::MediaTicket& ticket, const std::optional<CallId>& call) {
     out += R"({"type":"ticket",)";
     append_room(out, room);
     out += R"(,"url":)";
@@ -592,8 +621,56 @@ void write_ticket(std::string& out, const core::RoomId& room,
     out += R"(,"token":)";
     core::json::append_string(out, ticket.credential);
     std::format_to(
-        std::back_inserter(out), R"(,"expires_at":{}}})",
+        std::back_inserter(out), R"(,"expires_at":{})",
         std::chrono::duration_cast<core::Seconds>(ticket.expires_at.time_since_epoch()).count());
+    if (call) {
+        out += R"(,"call":")";
+        out += call->to_string();
+        out += '"';
+    }
+    out += '}';
+}
+
+void write_call_event(std::string& out, const CallNotice& notice) {
+    std::string_view type = "call_ringing";
+    switch (notice.event) {
+    case RingEvent::Ringing:
+        type = "call_ringing";
+        break;
+    case RingEvent::Answered:
+        type = "call_answered";
+        break;
+    case RingEvent::Declined:
+        type = "call_declined";
+        break;
+    case RingEvent::Cancelled:
+        type = "call_cancelled";
+        break;
+    case RingEvent::Missed:
+        type = "call_missed";
+        break;
+    case RingEvent::Ended:
+        type = "call_ended";
+        break;
+    }
+    out += R"({"type":")";
+    out += type;
+    out += R"(",)";
+    append_room(out, notice.room);
+    out += R"(,"call":")";
+    out += notice.call.to_string();
+    out += R"(","from":)";
+    core::json::append_string(out, notice.from.view());
+    if (notice.event == RingEvent::Ringing) {
+        std::format_to(
+            std::back_inserter(out), R"(,"expires_at":{})",
+            std::chrono::duration_cast<core::Seconds>(notice.expires_at.time_since_epoch())
+                .count());
+    } else if (notice.by) {
+        out += R"(,"by":)";
+        core::json::append_string(out, notice.by->view());
+    }
+    out += '}';
 }
 
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
@@ -723,6 +800,8 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "bad_user";
     case EnvelopeError::BadDevice:
         return "bad_device";
+    case EnvelopeError::BadCall:
+        return "bad_call";
     }
     return "malformed";
 }
