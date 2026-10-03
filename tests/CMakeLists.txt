@@ -216,6 +216,11 @@ add_test(NAME chat_soak_judge
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/soak/chat_soak_test.py)
 set_tests_properties(chat_soak_judge PROPERTIES LABELS unit)
 
+# The coverage summary and floor check on synthetic llvm-cov exports: tools/coverage_report.py.
+add_test(NAME coverage_report
+    COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/coverage_report_test.py)
+set_tests_properties(coverage_report PROPERTIES LABELS unit)
+
 ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
 target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
 add_test(NAME ws_fuzz_corpus COMMAND ws_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/ws)
