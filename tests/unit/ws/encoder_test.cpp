@@ -110,6 +110,49 @@ TEST(WsEncoder, RefusesAFragmentedControlFrame) {
               std::unexpected(EncodeError::ControlFragmented));
 }
 
+TEST(WsEncoder, WritesAHeldPayloadAsTheSameFrame) {
+    for (const std::size_t size : {std::size_t{0}, std::size_t{125}, std::size_t{126},
+                                   std::size_t{65535}, std::size_t{65536}}) {
+        Bytes payload(size);
+        for (std::size_t i = 0; i < size; ++i) {
+            payload[i] = static_cast<std::byte>(i * 7);
+        }
+        Bytes out;
+        ASSERT_TRUE(encode(Opcode::Text, true, payload, out)) << size;
+        EXPECT_EQ(out, encoded(message(Opcode::Text, payload))) << size;
+    }
+    Bytes out;
+    ASSERT_TRUE(encode(Opcode::Text, false, text("Hel"), out));
+    ASSERT_TRUE(encode(Opcode::Continuation, true, text("lo"), out));
+    EXPECT_EQ(out, bytes({0x01, 0x03, 0x48, 0x65, 0x6c, 0x80, 0x02, 0x6c, 0x6f}));
+}
+
+TEST(WsEncoder, RefusesAHeldPayloadThatNoFrameCouldCarry) {
+    Bytes out;
+    EXPECT_EQ(encode(Opcode::Ping, true, Bytes(126), out),
+              std::unexpected(EncodeError::ControlTooLong));
+    EXPECT_EQ(encode(Opcode::Pong, false, Bytes{}, out),
+              std::unexpected(EncodeError::ControlFragmented));
+    // A reason needs a status, which this form has none of.
+    EXPECT_EQ(encode(Opcode::Close, true, text("bye"), out),
+              std::unexpected(EncodeError::InvalidClose));
+    EXPECT_TRUE(out.empty());
+    ASSERT_TRUE(encode(Opcode::Close, true, Bytes{}, out));
+    EXPECT_EQ(out, bytes({0x88, 0x00}));
+}
+
+TEST(WsEncoder, AppendsFrameAfterFrameToOneBuffer) {
+    Bytes out;
+    Bytes expected;
+    for (std::size_t i = 0; i < 64; ++i) {
+        const Bytes payload(i * 100, std::byte{0x2a});
+        ASSERT_TRUE(encode(Opcode::Binary, true, payload, out));
+        const Bytes one = encoded(message(Opcode::Binary, payload));
+        expected.insert(expected.end(), one.begin(), one.end());
+    }
+    EXPECT_EQ(out, expected);
+}
+
 TEST(WsClientEncoder, WritesTheMaskedHelloOfRfc6455) {
     FixedKeys keys{bytes({0x37, 0xfa, 0x21, 0x3d})};
     ClientEncoder encoder{keys};

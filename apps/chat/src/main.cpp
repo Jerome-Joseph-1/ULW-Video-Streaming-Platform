@@ -272,11 +272,13 @@ int run() {
     core::json::append_string(keys, config->dev_jwks_file.empty()
                                         ? config->jwks_url
                                         : "DEVELOPMENT " + config->dev_jwks_file);
+    const std::string_view jemalloc = ops::jemalloc_version();
     chat::log_event(
         R"("level":"info","msg":"listening","version":"{}","git":"{}","node":"{}","port":{},)"
-        R"("node_address":"{}","reactor":"{}{}","keys":{})",
+        R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}")",
         info.version, info.git_sha, config->node.view(), config->port, config->node_address,
-        net::to_string(choice->kind), choice->fell_back_from_io_uring ? " (fallback)" : "", keys);
+        net::to_string(choice->kind), choice->fell_back_from_io_uring ? " (fallback)" : "", keys,
+        jemalloc.empty() ? "default" : "jemalloc ", jemalloc);
 
     while (!s.server->finished()) {
         s.reactor->run_once(kLoopTick);

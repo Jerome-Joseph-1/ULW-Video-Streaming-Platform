@@ -134,6 +134,13 @@ restart on failure: a packager killed between the end and the job, or unable to 
 or the database then, records the stream on its next start. Started for a stream that has
 already ended, it takes no publisher and only records.
 
+Its scratch root, `ULW_SCRATCH_DIR`, is `/var/cache/ulw-live` unless set, and must exist before
+it starts: a directory of mode 0700 owned by the user it runs as, made by what deploys it (a
+systemd unit's `CacheDirectory=ulw-live`, as `deploy/systemd/ulw-worker.service` does for the
+worker, or an image's `install -d -o <uid> -g <gid> -m 0700`). The packager makes only
+`<ULW_SCRATCH_DIR>/<stream>` inside it; without the root it exits `1` at startup, naming
+`ULW_SCRATCH_DIR` and the missing directory.
+
 While it records it holds one upload part in memory, 16 MiB at the default
 `ULW_LIVE_MAX_KBPS` and up to 65 MiB at its 100 Mbit/s ceiling (the part grows with
 `ULW_LIVE_MAX_KBPS` times `ULW_LIVE_MAX_HOURS`), beside two copying ffmpeg children of about

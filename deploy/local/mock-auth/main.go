@@ -1,12 +1,14 @@
 // mock-auth stands in for Askedin's auth-service inside the sandbox cluster. It signs tokens
 // the way the real service does (the claims our verifier reads, the stage cookie) and publishes
 // its keys at /.well-known/jwks.json, which the gateway fetches over https exactly as it would
-// fetch Askedin's. It holds an RS256, an ES256 and an Ed25519 key, so every algorithm the
-// verifier accepts is exercised through the cluster, and rotates all three on demand.
+// fetch Askedin's. It signs with every algorithm the gateway accepts, each with a key of its own
+// whose JWK names that algorithm: an RSA key for RS256, another for PS256, an EC P-256 key for
+// ES256 and an Ed25519 key for EdDSA, so each is exercised through the cluster. It rotates all
+// four on demand.
 //
 //	GET  /.well-known/jwks.json   current keys and the generation before them
 //	POST /token?sub=&email=&alg=&ttl=
-//	                              {"token":...} plus the cookie; alg is RS256, ES256 or EdDSA
+//	                              {"token":...} plus the cookie; alg is RS256, PS256, ES256 or EdDSA
 //	POST /rotate                  new keys; tokens signed before stay valid for one rotation
 //	GET  /healthz
 //	GET  /whoami                  the x-user-* headers it was sent, as JSON; the sandbox routes
@@ -55,7 +57,9 @@ func thumbprint(members string) string {
 	return b64.EncodeToString(sum[:])
 }
 
-func newRSA() (signingKey, error) {
+// An RSA key signs for one algorithm only, and its JWK says which, so the gateway sees a token
+// whose alg does not fit the key's refused rather than verified with the wrong padding.
+func newRSA(alg string, sign func(*rsa.PrivateKey, []byte) ([]byte, error)) (signingKey, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return signingKey{}, err
@@ -64,13 +68,27 @@ func newRSA() (signingKey, error) {
 	e := b64.EncodeToString(big.NewInt(int64(key.E)).Bytes())
 	kid := thumbprint(`{"e":"` + e + `","kty":"RSA","n":"` + n + `"}`)
 	return signingKey{
-		kid: kid,
-		alg: "RS256",
-		jwk: map[string]string{"kty": "RSA", "n": n, "e": e},
-		sign: func(digest, _ []byte) ([]byte, error) {
-			return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest)
-		},
+		kid:  kid,
+		alg:  alg,
+		jwk:  map[string]string{"kty": "RSA", "n": n, "e": e},
+		sign: func(digest, _ []byte) ([]byte, error) { return sign(key, digest) },
 	}, nil
+}
+
+// RS256 pads with PKCS #1 v1.5. The gateway accepts it, as it accepts PS256, so the sandbox
+// signs with both.
+func newRS256() (signingKey, error) {
+	return newRSA("RS256", func(key *rsa.PrivateKey, digest []byte) ([]byte, error) {
+		return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest)
+	})
+}
+
+func newPS256() (signingKey, error) {
+	return newRSA("PS256", func(key *rsa.PrivateKey, digest []byte) ([]byte, error) {
+		// RFC 7518 section 3.5: the salt is as long as the hash.
+		options := rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash}
+		return rsa.SignPSS(rand.Reader, key, crypto.SHA256, digest, &options)
+	})
 }
 
 func newEC() (signingKey, error) {
@@ -118,7 +136,7 @@ func newEd25519() (signingKey, error) {
 
 func newGeneration() (map[string]signingKey, error) {
 	generation := map[string]signingKey{}
-	for _, generate := range []func() (signingKey, error){newRSA, newEC, newEd25519} {
+	for _, generate := range []func() (signingKey, error){newRS256, newPS256, newEC, newEd25519} {
 		key, err := generate()
 		if err != nil {
 			return nil, err
@@ -174,7 +192,7 @@ func (i *issuer) mint(alg, subject, email string, ttl time.Duration) (string, er
 	key, ok := i.current[alg]
 	i.mu.Unlock()
 	if !ok {
-		return "", errors.New("alg must be RS256, ES256 or EdDSA")
+		return "", errors.New("alg must be RS256, PS256, ES256 or EdDSA")
 	}
 	header, err := json.Marshal(map[string]string{"alg": key.alg, "typ": "JWT", "kid": key.kid})
 	if err != nil {

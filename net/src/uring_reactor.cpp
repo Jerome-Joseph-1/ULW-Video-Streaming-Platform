@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <poll.h>
 #include <utility>
 
@@ -542,7 +543,14 @@ void UringReactor::send(ConnId conn, std::span<const std::byte> bytes) noexcept 
         deferred_errors_.push_back({.conn = conn, .err = ENOBUFS});
         return;
     }
-    s->sendq.append(bytes, pool_);
+    // A chunk that cannot be had fails this connection, not the process.
+    try {
+        s->sendq.append(bytes, pool_);
+    } catch (const std::bad_alloc&) {
+        fail(conn.fd, *s);
+        deferred_errors_.push_back({.conn = conn, .err = ENOMEM});
+        return;
+    }
     if (!s->send_armed) {
         arm_send(conn.fd, *s);
     }
@@ -899,7 +907,13 @@ void UringReactor::on_recv(int fd, Slot& s, int res, std::span<const std::byte> 
                 return;
             }
         } else {
-            s.parked.append(data, pool_);
+            try {
+                s.parked.append(data, pool_);
+            } catch (const std::bad_alloc&) {
+                fail(fd, s);
+                deferred_errors_.push_back({.conn = ConnId{.fd = fd, .gen = gen}, .err = ENOMEM});
+                return;
+            }
         }
     } else if (res == 0) {
         s.eof = true;

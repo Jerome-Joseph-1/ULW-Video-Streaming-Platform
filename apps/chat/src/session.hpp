@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -101,8 +102,10 @@ private:
     [[nodiscard]] bool within_control_budget(std::size_t in_this_read) noexcept;
     void command(const codec::ws::Frame& frame);
 
-    void send_text(const std::string& text);
+    void send_text(std::string_view text);
     void send_frame(const codec::ws::Frame& frame);
+    // Sends one encoded frame and watches the backlog it leaves.
+    void transmit(std::span<const std::byte> frame);
     void close_with(codec::ws::CloseCode code);
     void abandon() noexcept;
     void watch_output() noexcept;

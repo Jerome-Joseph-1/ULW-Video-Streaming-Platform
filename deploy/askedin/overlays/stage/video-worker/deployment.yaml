@@ -52,7 +52,7 @@ spec:
             - name: ULW_STORAGE
               value: r2
             - name: ULW_SCRATCH_DIR
-              value: /var/tmp/ulw-worker
+              value: /var/cache/ulw-worker
             # x264 threads. Four held the full 1080p ladder at 556 MB resident and 0.73x
             # realtime (apps/worker/src/config.cpp); the CPU limit below matches it.
             - name: ULW_FFMPEG_THREADS
@@ -112,7 +112,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - find /var/tmp/ulw-worker -maxdepth 1 -name 'heartbeat-*' -mmin -2 | grep -q .
+                - find /var/cache/ulw-worker -maxdepth 1 -name 'heartbeat-*' -mmin -2 | grep -q .
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 5
@@ -125,7 +125,7 @@ spec:
             procMount: Unmasked
           volumeMounts:
             - name: scratch
-              mountPath: /var/tmp/ulw-worker
+              mountPath: /var/cache/ulw-worker
       volumes:
         - name: scratch
           emptyDir:

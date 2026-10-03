@@ -16,6 +16,7 @@ namespace {
 
 constexpr std::uint16_t kHttpPort = 80;
 constexpr std::uint16_t kHttpsPort = 443;
+constexpr std::string_view kSchemeEnd = "://";
 
 bool is_lower_alnum(char c) noexcept {
     return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
@@ -58,19 +59,33 @@ bool is_r2_account_id(std::string_view s) noexcept {
 
 } // namespace
 
+std::string_view to_string(Scheme scheme) noexcept {
+    switch (scheme) {
+    case Scheme::Http:
+        return "http";
+    case Scheme::Https:
+        return "https";
+    }
+    return "https";
+}
+
 std::expected<Endpoint, ProfileError> parse_endpoint(std::string_view url) {
     Endpoint e;
-    if (url.starts_with("https://")) {
+    const std::size_t scheme_end = url.find(kSchemeEnd);
+    if (scheme_end == std::string_view::npos) {
+        return std::unexpected(ProfileError::InvalidEndpoint);
+    }
+    const std::string_view scheme = url.substr(0, scheme_end);
+    if (scheme == to_string(Scheme::Https)) {
         e.scheme = Scheme::Https;
         e.port = kHttpsPort;
-        url.remove_prefix(std::string_view("https://").size());
-    } else if (url.starts_with("http://")) {
+    } else if (scheme == to_string(Scheme::Http)) {
         e.scheme = Scheme::Http;
         e.port = kHttpPort;
-        url.remove_prefix(std::string_view("http://").size());
     } else {
         return std::unexpected(ProfileError::InvalidEndpoint);
     }
+    url.remove_prefix(scheme_end + kSchemeEnd.size());
     const std::size_t colon = url.find(':');
     const std::string_view host = url.substr(0, colon);
     if (!is_hostname(host)) {

@@ -8,7 +8,6 @@
 #include "infra/srt/ingest.hpp"
 #include "infra/storage/fs_transfer.hpp"
 #include "infra/storage/s3_transfer.hpp"
-#include "os/private_dir.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 
@@ -17,6 +16,7 @@
 #include "ops/process.hpp"
 #include "publisher.hpp"
 #include "recorder.hpp"
+#include "scratch.hpp"
 #include "stream_runner.hpp"
 
 #include <csignal>
@@ -35,7 +35,6 @@
 #include <system_error>
 #include <thread>
 #include <utility>
-#include <vector>
 
 namespace {
 
@@ -51,37 +50,6 @@ std::optional<std::string> read_env(std::string_view name) {
 int fail(std::string_view what, std::string_view why) {
     std::println(stderr, "live_packager: {}: {}", what, why);
     return EXIT_FAILURE;
-}
-
-// The stream's scratch directory, emptied, and the media directory in it. Owner-only, and
-// refused if it is a link, someone else's, or kept in a directory someone else owns, since its
-// default is under the shared /var/tmp; checked before anything in it is removed. What an
-// earlier run left is not needed: the store has the stream's state.
-[[nodiscard]] std::expected<fs::path, std::string> fresh_scratch(const fs::path& scratch) {
-    if (auto made = os::make_private_dir(scratch); !made) {
-        return std::unexpected(std::move(made.error()));
-    }
-    std::error_code ec;
-    std::vector<fs::path> left;
-    for (auto it = fs::directory_iterator(scratch, ec); !ec && it != fs::directory_iterator();
-         it.increment(ec)) {
-        left.push_back(it->path());
-    }
-    for (const fs::path& entry : left) {
-        // remove_all takes a link away without following it.
-        if (!ec) {
-            fs::remove_all(entry, ec);
-        }
-    }
-    if (ec) {
-        return std::unexpected(ec.message());
-    }
-    fs::path media_dir = scratch / "media";
-    fs::create_directories(media_dir, ec);
-    if (ec) {
-        return std::unexpected(ec.message());
-    }
-    return media_dir;
 }
 
 std::string_view to_string(live::StorageBackend backend) noexcept {
@@ -260,11 +228,10 @@ int run() {
         return fail("block signals", std::generic_category().message(rc));
     }
 
-    const auto media = fresh_scratch(config->scratch);
-    if (!media) {
-        return fail("ULW_SCRATCH_DIR", media.error());
+    if (const auto cleared = live::clear_scratch(config->scratch); !cleared) {
+        return fail("ULW_SCRATCH_DIR", cleared.error());
     }
-    const fs::path& media_dir = *media;
+    const fs::path media_dir = config->scratch / "media";
     std::error_code ec;
     fs::path sandbox = config->sandbox;
     if (sandbox.empty()) {

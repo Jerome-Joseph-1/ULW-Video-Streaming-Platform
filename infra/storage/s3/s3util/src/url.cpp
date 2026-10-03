@@ -85,8 +85,8 @@ std::string canonical_query(std::span<const QueryParam> query) {
 }
 
 std::string to_url(const RequestTarget& target) {
-    std::string url = target.scheme == Scheme::Https ? "https://" : "http://";
-    url.append(target.host).append(uri_encode_path(target.path));
+    std::string url(to_string(target.scheme));
+    url.append("://").append(target.host).append(uri_encode_path(target.path));
     if (!target.query.empty()) {
         url.append(1, '?').append(canonical_query(target.query));
     }

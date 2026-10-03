@@ -383,7 +383,11 @@ int run(std::span<const std::string_view> args) {
         return refuse(boot, config.error().variable, config.error().reason);
     }
     boot.set_threshold(config->log_level);
-    boot.info("starting", {{"version", info.version}, {"git_sha", info.git_sha}});
+    const std::string_view jemalloc = ops::jemalloc_version();
+    boot.info("starting", {{"version", info.version},
+                           {"git_sha", info.git_sha},
+                           {"allocator", jemalloc.empty() ? "default" : "jemalloc"},
+                           {"allocator_version", jemalloc}});
     gateway::log_effective(*config, *layers, boot);
     // Before any thread exists, so every thread inherits the mask.
     if (auto r = net::block_shutdown_signals(); !r) {

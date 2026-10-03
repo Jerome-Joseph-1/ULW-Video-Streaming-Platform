@@ -54,9 +54,7 @@ public:
     [[nodiscard]] std::uint64_t close() noexcept;
 
     void write(std::string_view line) noexcept override;
-    [[nodiscard]] std::uint64_t dropped() const noexcept override {
-        return dropped_.load(std::memory_order_relaxed);
-    }
+    [[nodiscard]] std::uint64_t dropped() const noexcept override { return dropped_.load(); }
 
 private:
     void drain(const std::stop_token& stop);
@@ -71,7 +69,7 @@ private:
     // Wakes the thread from a wait for the reader when the sink is being destroyed.
     os::UniqueFd stopping_;
     std::mutex mutex_;
-    std::condition_variable_any wake_;
+    std::condition_variable wake_;
     // Filled by writers under the mutex; swapped with `out_` by the thread, which then writes
     // `out_` without holding it.
     std::vector<char> queued_;

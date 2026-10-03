@@ -218,6 +218,11 @@ add_test(NAME chat_soak_judge
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/soak/chat_soak_test.py)
 set_tests_properties(chat_soak_judge PROPERTIES LABELS unit)
 
+# The coverage summary and floor check on synthetic llvm-cov exports: tools/coverage_report.py.
+add_test(NAME coverage_report
+    COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/coverage_report_test.py)
+set_tests_properties(coverage_report PROPERTIES LABELS unit)
+
 ulw_add_executable(ws_fuzz_replay fuzz/ws_fuzz.cpp fuzz/replay_main.cpp)
 target_link_libraries(ws_fuzz_replay PRIVATE ulw::codec_ws)
 add_test(NAME ws_fuzz_corpus COMMAND ws_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/ws)
@@ -437,7 +442,8 @@ target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw
     ulw::net_lib ulw::os PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
-target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
+target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>"
+    ULW_EXPECT_JEMALLOC=$<BOOL:${ULW_LINKS_JEMALLOC}>)
 add_dependencies(chat_cluster_tests chat_server)
 
 # The M22 acceptance on the same cluster: MLS messages through it, stored as ciphertext gzip
@@ -595,6 +601,7 @@ if(ULW_BUILD_WORKER)
         unit/live_packager/publisher_test.cpp
         unit/live_packager/recorder_test.cpp
         unit/live_packager/recording_plan_test.cpp
+        unit/live_packager/scratch_test.cpp
         unit/live_packager/segment_tracker_test.cpp
         unit/live_packager/stream_id_test.cpp
         unit/live_packager/watch_test.cpp)

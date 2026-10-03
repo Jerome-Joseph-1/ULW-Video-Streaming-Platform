@@ -39,9 +39,11 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_S3_SECRET_ACCESS_KEY", .key = "", .secret = true},
 };
 
-// /var/tmp rather than /tmp: it survives reboots and is disk, where /tmp is often a tmpfs
-// sized in megabytes, and a workspace holds a whole upload.
-constexpr std::string_view kDefaultScratch = "/var/tmp/ulw-worker";
+// A workspace holds a whole upload, so it is on disk, where /tmp is often a tmpfs sized in
+// megabytes. Under /var/cache, which only root can write to, rather than a shared directory
+// such as /var/tmp, where another user could make the directory first: systemd creates it for
+// the service (CacheDirectory=), the image at build time.
+constexpr std::string_view kDefaultScratch = "/var/cache/ulw-worker";
 constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
 // A number of our own: the host's core count says nothing of the container's CPU quota, and
 // x264's memory grows with its threads. Four held the full ladder of a 1080p source at 556 MB
