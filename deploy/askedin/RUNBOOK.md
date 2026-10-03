@@ -21,7 +21,10 @@ What ships:
 
 Open decisions, yours: whether this builds inside the Askedin monorepo or pushes from this
 repository (the image names `git.askedin.com/askedin/askedin-monorepo/<svc>` assume the
-monorepo), and the real `JWKS_URL` and `JWT_ISSUER`.
+monorepo), and stage's `JWT_ISSUER`. Askedin's `JWKS_URL` for each environment and prod's
+`JWT_ISSUER` are set in the overlays (docs/integration/auth.md, Askedin); stage's issuer stays in
+the secret until it is read from the live one (step 3). Askedin's key rotation needs a step on
+their side that reaches ULW: step 8.
 
 ## 1. Check the cluster can run the worker
 
@@ -188,9 +191,21 @@ VIDEO_GATEWAY_R2_ACCESS_KEY_ID        R2 token for the gateway: object read and 
 VIDEO_GATEWAY_R2_SECRET_ACCESS_KEY
 VIDEO_WORKER_R2_ACCESS_KEY_ID         R2 token for the worker: object read and write on the bucket
 VIDEO_WORKER_R2_SECRET_ACCESS_KEY
-VIDEO_JWKS_URL                        https://… Askedin's JWKS; must be https
-VIDEO_JWT_ISSUER                      the iss Askedin's auth-service puts in its tokens
+VIDEO_JWT_ISSUER                      .env.stage only: the iss Askedin's stage auth-service puts in its tokens
 ```
+
+`JWKS_URL` is no longer a secret: the overlays set Askedin's for each environment, and prod's
+overlay sets `JWT_ISSUER` (`https://auth.askedin.com`) too, so `.env.prod` needs no
+`VIDEO_JWT_ISSUER`. Stage's is not confirmed: Askedin's deployment template says
+`https://auth-stage.askedin.com/auth`, but `iss` is compared byte for byte and a wrong value
+refuses every token, so read the live one first and put exactly that in `.env.stage`:
+
+```sh
+kubectl -n apps-stage get secret auth-service-secrets -o jsonpath='{.data.ISSUER}' | base64 -d
+```
+
+Once it is confirmed it can move into the stage overlay as prod's has (docs/integration/auth.md,
+Askedin, then says so too).
 
 Lines for `scripts/create-k8s-secrets.sh`, after it has sourced the env file and set `$NS`
 (`apps` or `apps-stage`) and `$ASKEDIN_ENV`:
@@ -203,8 +218,7 @@ kubectl -n "$NS" create secret generic video-gateway-secrets \
   --from-literal=ULW_BUCKET="$VIDEO_R2_BUCKET" \
   --from-literal=ULW_S3_ACCESS_KEY_ID="$VIDEO_GATEWAY_R2_ACCESS_KEY_ID" \
   --from-literal=ULW_S3_SECRET_ACCESS_KEY="$VIDEO_GATEWAY_R2_SECRET_ACCESS_KEY" \
-  --from-literal=JWKS_URL="$VIDEO_JWKS_URL" \
-  --from-literal=JWT_ISSUER="$VIDEO_JWT_ISSUER" \
+  --from-literal=JWT_ISSUER="${VIDEO_JWT_ISSUER:-}" \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NS" create secret generic video-worker-secrets \
   --from-literal=ASKEDIN_ENV="$ASKEDIN_ENV" \
@@ -223,7 +237,8 @@ them:
 kubectl -n "$NS" rollout restart deployment/video-gateway deployment/video-worker
 ```
 
-The worker gets no JWT settings at all.
+The worker gets no JWT settings at all. Prod's gateway does not read `JWT_ISSUER` from the
+secret, so the empty value `.env.prod` leaves there is never used.
 
 The role and database on k8s-prod's Postgres, once, as a superuser (psql prompts for the
 password with `\password`; it never goes on a command line):
@@ -831,3 +846,43 @@ To stop media before the sync lands, delete the UDPRoute by hand as well
 (`kubectl -n apps-stage delete udproutes.stunner.l7mp.io livekit`). The operator removes the
 stunnerd Deployment and Service when its Gateway goes. If nothing else uses STUNner, delete
 `stunner/*.yaml` and the CRDs last; they are not in any overlay.
+
+## 8. Askedin signing key rotation
+
+Askedin's auth-service rotates its RSA signing key with no overlap: one transaction creates the
+new key and deactivates the old one, and the old `kid` leaves the JWKS at once. The gateway (and
+chat, once deployed) caches the key set and remembers verified tokens for up to 15 minutes each,
+so left alone it accepts tokens under the old key for up to 15 minutes after a rotation
+(docs/integration/auth.md, Key rotation). SIGHUP refetches the key set at once and, when that
+fetch succeeds, replaces the keys and forgets every remembered token (docs/adr/0082).
+
+Askedin's rotation runbook restarts the services that verify its tokens. Add ULW to it: once the
+rotation has committed, in the same environment (`apps-stage` for stage, `apps` for prod):
+
+```sh
+NS=apps-stage   # apps for prod
+for pod in $(kubectl -n "$NS" get pods -l app.kubernetes.io/name=video-gateway -o name); do
+  kubectl -n "$NS" exec "$pod" -c gateway -- sh -c 'kill -HUP 1'
+done
+```
+
+`gateway_server` is PID 1 in its container, and the image's `sh` has `kill` built in. Then check
+that every pod took it: each logs `auth cache drop requested` once, its `auth_cache_drops_total`
+on `/metrics` went up by one, and its `auth_cache_drop_pending` is back to 0 (the fetch that
+completes the drop normally lands well under a second later).
+
+```sh
+kubectl -n "$NS" logs -l app.kubernetes.io/name=video-gateway -c gateway --since=5m | grep 'auth cache drop requested'
+```
+
+A pod that did not log it still accepts old tokens until its next refetch; signal it again, or
+restart the deployment instead (`kubectl -n "$NS" rollout restart deployment/video-gateway`),
+which also clears both caches but drains every connection and takes longer. Do the same for
+`chat_server` once chat has an overlay: it handles SIGHUP the same way.
+
+If Askedin's JWKS cannot be reached, the SIGHUP drops nothing yet: `auth_cache_drop_pending`
+stays at 1 and tokens under the old key keep working until a fetch succeeds, which then
+completes the drop. That is the right trade for a routine rotation. For a suspected key
+compromise during a JWKS outage, use `kubectl -n "$NS" rollout restart deployment/video-gateway`
+instead: new pods start with no keys and refuse every token (`503`) until a fetch succeeds,
+which fails closed.

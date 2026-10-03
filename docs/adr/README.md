@@ -85,3 +85,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0079](0079-sonarqube-cloud-analysis-in-ci.md) | SonarQube Cloud analysis in CI, with the compile database, on the Free plan | Accepted |
 | [0080](0080-coverage-floor.md) | Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory | Accepted |
 | [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted |
+| [0082](0082-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted |

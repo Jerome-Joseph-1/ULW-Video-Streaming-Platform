@@ -4,6 +4,7 @@
 #include "infra/messages/memory_message_store.hpp"
 #include "net/ip_address.hpp"
 #include "net/reactor_factory.hpp"
+#include "net/signals.hpp"
 #include "net/socket.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
@@ -144,6 +145,13 @@ public:
     // seen it.
     std::atomic<bool> expire_keys = false;
     std::atomic<bool> keys_expired = false;
+    // Delivers SIGHUP to the server on the node's next turn; `verifier_drops` then counts the
+    // verifier's drop_caches() calls.
+    std::atomic<bool> sighup = false;
+    // What the verifier reports as drop_pending(), applied on the node's next turn.
+    std::atomic<bool> drop_pending = false;
+    std::atomic<bool> drop_pending_seen = false;
+    std::atomic<std::size_t> verifier_drops = 0;
 
 private:
     // An io_uring reactor belongs to the thread that made it, so everything is made here.
@@ -237,6 +245,12 @@ private:
                 verifier.expired = expire_keys;
                 keys_expired = verifier.expired;
             }
+            if (sighup.exchange(false)) {
+                server->on_signal(net::Signal::Reload);
+            }
+            verifier_drops = verifier.drops;
+            verifier.drop_requested = drop_pending;
+            drop_pending_seen = verifier.drop_requested;
             key_waiters = verifier.waiting();
             http_parsers = server->http_parsers();
             ++turns_;
@@ -876,6 +890,23 @@ TEST_P(ChatSessionTest, TheKeysExpiredGaugeFollowsTheVerifier) {
     node_->expire_keys = false;
     ASSERT_TRUE(ulw::test::eventually([&] { return !node_->keys_expired.load(); }));
     EXPECT_EQ(metric(node_->port(), "jwks_keys_expired"), 0U);
+}
+
+// SIGHUP is how Askedin's key rotation reaches chat_server (ADR-0082): the verifier is asked to
+// drop its keys and verdicts, /metrics counts it, and the gauge follows the verifier's pending
+// drop.
+TEST_P(ChatSessionTest, SighupRequestsAnAuthCacheDrop) {
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 0U);
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 0U);
+    node_->sighup = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->verifier_drops.load() == 1; }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drops_total"), 1U);
+    node_->drop_pending = true;
+    ASSERT_TRUE(ulw::test::eventually([&] { return node_->drop_pending_seen.load(); }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 1U);
+    node_->drop_pending = false;
+    ASSERT_TRUE(ulw::test::eventually([&] { return !node_->drop_pending_seen.load(); }));
+    EXPECT_EQ(metric(node_->port(), "auth_cache_drop_pending"), 0U);
 }
 
 // Both viewers fall behind a sender that never stops. One never reads again, and is reset once it

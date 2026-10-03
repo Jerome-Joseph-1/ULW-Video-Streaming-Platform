@@ -353,6 +353,20 @@ void GatewayUnderTest::reload_certificate() {
     }
 }
 
+void GatewayUnderTest::sighup() {
+    on_loop([&] { loop_->gateway->on_signal(net::Signal::Reload); });
+}
+
+std::size_t GatewayUnderTest::verifier_drops() {
+    std::size_t out = 0;
+    on_loop([&] { out = loop_->verifier.drops; });
+    return out;
+}
+
+void GatewayUnderTest::set_drop_pending(bool pending) {
+    on_loop([&] { loop_->verifier.drop_requested = pending; });
+}
+
 void GatewayUnderTest::put_video(const core::VideoRecord& video) {
     on_loop([&] { loop_->catalog->put_video(video); });
 }
