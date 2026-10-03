@@ -54,6 +54,9 @@ using VideoId = UuidId<struct VideoTag>;
 using UploadId = UuidId<struct UploadTag>;
 using RoomId = UuidId<struct RoomTag>;
 using DeviceId = UuidId<struct DeviceTag>;
+// A live stream the stream service started (ADR-0091). Its text form is also the stream's name
+// everywhere else: the packager's, the playlist's and the live chat's, and a DNS label.
+using LiveStreamId = UuidId<struct LiveStreamTag>;
 
 // The `sub` claim of the external identity provider, verbatim; there is no local user table to
 // mint ids from. Stored inline because every authenticated request parses one.

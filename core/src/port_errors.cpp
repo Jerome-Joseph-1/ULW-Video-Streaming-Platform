@@ -1,6 +1,7 @@
 #include "core/ports/auth.hpp"
 #include "core/ports/catalog.hpp"
 #include "core/ports/e2ee.hpp"
+#include "core/ports/live.hpp"
 #include "core/ports/media.hpp"
 
 namespace core::ports {
@@ -79,6 +80,72 @@ std::string_view to_string(MediaError e) noexcept {
         return "media operation not implemented";
     }
     return "unknown media error";
+}
+
+std::string_view to_string(LiveState s) noexcept {
+    switch (s) {
+    case LiveState::Starting:
+        return "starting";
+    case LiveState::Live:
+        return "live";
+    case LiveState::Ended:
+        return "ended";
+    }
+    return "ended";
+}
+
+std::string_view to_string(LiveEnd e) noexcept {
+    switch (e) {
+    case LiveEnd::Owner:
+        return "owner";
+    case LiveEnd::Finished:
+        return "finished";
+    case LiveEnd::Failed:
+        return "failed";
+    case LiveEnd::Timeout:
+        return "timeout";
+    }
+    return "failed";
+}
+
+std::string_view to_string(LiveStoreError e) noexcept {
+    switch (e) {
+    case LiveStoreError::NotFound:
+        return "not found";
+    case LiveStoreError::Full:
+        return "too many unfinished streams";
+    case LiveStoreError::Unavailable:
+        return "stream store unavailable";
+    case LiveStoreError::Corrupt:
+        return "corrupt stream record";
+    }
+    return "unknown stream store error";
+}
+
+std::string_view to_string(PackagerState s) noexcept {
+    switch (s) {
+    case PackagerState::Absent:
+        return "absent";
+    case PackagerState::Starting:
+        return "starting";
+    case PackagerState::Ready:
+        return "ready";
+    case PackagerState::Finished:
+        return "finished";
+    case PackagerState::Failed:
+        return "failed";
+    }
+    return "absent";
+}
+
+std::string_view to_string(PackagerError e) noexcept {
+    switch (e) {
+    case PackagerError::Unavailable:
+        return "packager runtime unavailable";
+    case PackagerError::Refused:
+        return "packager runtime refused the request";
+    }
+    return "unknown packager error";
 }
 
 } // namespace core::ports
