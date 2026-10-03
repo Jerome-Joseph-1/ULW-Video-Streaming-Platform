@@ -99,6 +99,16 @@ enum class Admission : std::uint8_t {
     return member ? Admission::Admitted : Admission::NotMember;
 }
 
+// What a room is recorded as, and whether a user is on its member list: what a call's handler
+// checks on the room's owner before it hands out a ticket (ADR-0050). Unlike admits, it records
+// nothing and widens nothing: a room with no kind recorded has no kind here.
+struct RoomAccess {
+    std::optional<RoomKind> kind;
+    bool member = false;
+
+    friend bool operator==(const RoomAccess&, const RoomAccess&) = default;
+};
+
 // Whether a join of a room with no kind recorded may record one. Skipped answers exactly as
 // Allowed would, and writes nothing: how the chat service bounds the rows a user's joins create.
 enum class Recording : std::uint8_t { Allowed, Skipped };
@@ -189,6 +199,9 @@ public:
                 MessageCallback<Admission> done) {
         admits(room, user, asked, Recording::Allowed, std::move(done));
     }
+    // The room's recorded kind and whether `user` is listed in it, read only.
+    virtual void access(const RoomId& room, const UserId& user,
+                        MessageCallback<RoomAccess> done) = 0;
     // Records the room as a stream's live chat, which admits anyone: a server-side step (the
     // stream's owner opening its chat), never a client's. Conflict, and nothing recorded, when the
     // room is not a stream's chat (is_stream_chat), lists members, is recorded as another kind,

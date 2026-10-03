@@ -1,6 +1,7 @@
 #include "core/util/json.hpp"
 #include "infra/auth/base64url.hpp"
 
+#include "call.hpp"
 #include "chat_service.hpp"
 #include "support/fake_clock.hpp"
 
@@ -71,6 +72,21 @@ public:
                          .done = std::move(done)});
     }
 
+    void ask_owner(const core::RoomId& room, rt::IMember& from, std::span<const std::byte> request,
+                   rt::OwnerAnswer done) override {
+        asks.push_back({.room = room,
+                        .member = &from,
+                        .request = {request.begin(), request.end()},
+                        .done = std::move(done)});
+    }
+
+    struct Asking {
+        core::RoomId room;
+        rt::IMember* member;
+        std::vector<std::byte> request;
+        rt::OwnerAnswer done;
+    };
+
     // Answers the oldest join, and returns the member it made.
     rt::IMember& admit(std::expected<std::uint64_t, RouteError> result = 0) {
         Joining j = std::move(joins.front());
@@ -81,6 +97,7 @@ public:
 
     std::vector<Joining> joins;
     std::vector<Sending> sends;
+    std::vector<Asking> asks;
     std::vector<core::RoomId> left;
 };
 
@@ -137,6 +154,12 @@ public:
             return;
         }
         done(answer);
+    }
+    void access(const core::RoomId& /*room*/, const core::UserId& user,
+                core::ports::MessageCallback<core::ports::RoomAccess> done) override {
+        done(core::ports::RoomAccess{.kind = core::ports::RoomKind::DirectChat,
+                                     .member =
+                                         std::ranges::find(refused, user.view()) == refused.end()});
     }
     void record_live(const core::RoomId& /*room*/,
                      core::ports::MessageCallback<void> done) override {
@@ -1512,6 +1535,102 @@ TEST_F(ChatServiceTest, ADetachedClientIsToldNothingMoreEvenOfItsOwnSends) {
     deliver(room, 1);
     EXPECT_TRUE(alice.got.empty());
     EXPECT_EQ(seqs(bob.take()), std::vector<std::uint64_t>{1});
+}
+
+constexpr std::string_view kDevice = "01a0eb86-6cca-7dce-84cc-3bb47615f9aa";
+
+std::vector<std::byte> answer(chat::CallOutcome outcome,
+                              std::optional<core::ports::MediaTicket> ticket = std::nullopt) {
+    return chat::encode_answer({.outcome = outcome, .ticket = std::move(ticket)});
+}
+
+TEST_F(ChatServiceTest, ACallIsAskedOfTheRoomsOwnerAndItsTicketHandedToTheClient) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    const chat::Call call{.room = room_id(), .device = *core::DeviceId::parse(kDevice)};
+    // Not in the room yet: nothing is asked.
+    service_->call(a, call);
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
+    EXPECT_TRUE(rooms_.asks.empty());
+    join(a);
+    const rt::IMember& member = rooms_.admit();
+    alice.take();
+
+    service_->call(a, call);
+    ASSERT_EQ(rooms_.asks.size(), 1U);
+    EXPECT_EQ(rooms_.asks[0].room, room_id());
+    EXPECT_EQ(rooms_.asks[0].member, &member);
+    const auto request = chat::decode_request(rooms_.asks[0].request);
+    ASSERT_TRUE(request);
+    EXPECT_EQ(request->user.view(), "alice");
+    EXPECT_EQ(request->device.to_string(), kDevice);
+    rooms_.asks[0].done(answer(chat::CallOutcome::Ticket,
+                               core::ports::MediaTicket{.endpoint = "wss://media.test",
+                                                        .credential = "jwt",
+                                                        .expires_at = core::WallTime{
+                                                            std::chrono::seconds{1'790'000'060}}}));
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 1U);
+    const auto json = core::json::parse(got[0]);
+    ASSERT_TRUE(json);
+    EXPECT_EQ(json->find("type")->as_string(), "ticket");
+    EXPECT_EQ(json->find("room")->as_string(), kRoom);
+    EXPECT_EQ(json->find("url")->as_string(), "wss://media.test");
+    EXPECT_EQ(json->find("token")->as_string(), "jwt");
+    EXPECT_EQ(json->find("expires_at")->as_u64(), 1'790'000'060U);
+}
+
+TEST_F(ChatServiceTest, ACallTheOwnerRefusesOrCannotAnswerIsAnErrorWithARetryHintWhenOneHelps) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    const chat::Call call{.room = room_id(), .device = *core::DeviceId::parse(kDevice)};
+    const std::vector<std::pair<std::expected<std::vector<std::byte>, RouteError>, std::string>>
+        cases{
+            {answer(chat::CallOutcome::NotMember), "not_member"},
+            {answer(chat::CallOutcome::NotCallable), "not_callable"},
+            {answer(chat::CallOutcome::Unavailable), "unavailable"},
+            {answer(chat::CallOutcome::Failed), "call_failed"},
+            {answer(chat::CallOutcome::Disabled), "calls_disabled"},
+            {answer(chat::CallOutcome::Busy), "busy"},
+            {std::unexpected(RouteError::Unavailable), "unavailable"},
+            {std::unexpected(RouteError::Busy), "busy"},
+            {std::vector<std::byte>{std::byte{9}}, "unavailable"},
+        };
+    for (const auto& [result, reason] : cases) {
+        service_->call(a, call);
+        ASSERT_FALSE(rooms_.asks.empty());
+        auto done = std::move(rooms_.asks.back().done);
+        rooms_.asks.pop_back();
+        done(result);
+        const Seen s = seen(alice.take().at(0));
+        EXPECT_EQ(s.type, "error");
+        EXPECT_EQ(s.reason, reason);
+        // Only what a retry may cure says when to retry.
+        EXPECT_EQ(s.retry_after_ms.has_value(), reason == "unavailable") << reason;
+    }
+}
+
+TEST_F(ChatServiceTest, ACallIsChargedAsAJoinAndADetachedClientHearsNoAnswer) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    const chat::Call call{.room = room_id(), .device = *core::DeviceId::parse(kDevice)};
+    // The join took one of the 64.
+    for (int i = 0; i < 63; ++i) {
+        service_->call(a, call);
+    }
+    EXPECT_EQ(rooms_.asks.size(), 63U);
+    service_->call(a, call);
+    EXPECT_EQ(rooms_.asks.size(), 63U);
+    EXPECT_EQ(seen(alice.take().back()).reason, "busy");
+    service_->detach(a);
+    rooms_.asks[0].done(answer(chat::CallOutcome::NotMember));
+    EXPECT_TRUE(alice.got.empty());
 }
 
 TEST_F(ChatServiceTest, ClientsJoinAtMostTheirShareOfRoomsAndUsersAtMostTheirRate) {

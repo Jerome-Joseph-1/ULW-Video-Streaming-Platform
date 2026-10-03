@@ -10,6 +10,7 @@
 #include "net/slab.hpp"
 #include "rt/room_router.hpp"
 
+#include "call.hpp"
 #include "chat_service.hpp"
 #include "presence.hpp"
 #include "token_bucket.hpp"
@@ -98,6 +99,9 @@ struct Limits {
     std::size_t trusted_proxy_hops = 1;
     ServiceLimits service;
     PresenceLimits presence;
+    // Initialised, as trusted_proxies is, so that a designated initializer may leave it out.
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    CallLimits calls = {};
 };
 
 // Who may open a socket: the cookie that carries the token, and the pages allowed to use it.
@@ -115,6 +119,9 @@ struct Deps {
     const core::ports::IClock& clock;
     // Seeds the per-client tables' hashes, which clients choose the keys of.
     core::ports::IRandom& random;
+    // The SFU calls are answered with (ADR-0050); null when calls are not configured, and every
+    // call is then answered calls_disabled. Must outlive the server.
+    core::ports::ISfu* sfu = nullptr;
 };
 
 struct Counters {
@@ -182,6 +189,10 @@ public:
               const rt::MessageKey& key, std::vector<std::byte> body,
               rt::SendCallback done) override {
         router_.send(room, from, sender, key, std::move(body), std::move(done));
+    }
+    void ask_owner(const core::RoomId& room, rt::IMember& from, std::span<const std::byte> request,
+                   rt::OwnerAnswer done) override {
+        router_.ask_owner(room, from, request, std::move(done));
     }
 
 private:
@@ -283,6 +294,9 @@ private:
     // Sessions detach from both as they close, so they outlive them.
     ChatService chat_;
     Presence presence_;
+    // Answers the router's asks for the rooms this node owns; the router is told to stop asking
+    // before it goes.
+    CallHandler calls_;
     http::BoundedTable<net::IpAddress, ClientEntry, http::AddressHash> clients_;
     http::BoundedTable<core::UserId, UserEntry, http::ViewHash> users_;
     http::BoundedTable<net::IpAddress, BlockEntry, http::AddressHash> blocks_;

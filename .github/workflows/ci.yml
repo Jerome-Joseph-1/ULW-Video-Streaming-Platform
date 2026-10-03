@@ -164,18 +164,35 @@ jobs:
           test "$(docker exec "$PG" psql -U postgres -tAc 'SHOW max_connections')" = 400
       - name: Start MinIO
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+      # The chat cluster's calls go through it (docs/adr/0087); its Redis comes with it.
+      - name: Start LiveKit
+        run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait livekit
       - run: cmake --preset ${{ matrix.preset }} -DULW_CONFORMANCE_LIVE=ON
       - run: cmake --build --preset ${{ matrix.preset }}
-      - run: ctest --test-dir build/${{ matrix.preset }} -L integration -j "$(nproc)" --output-on-failure
+      # Without the locked-memory limit lifted, one test per core runs out of it: the kernel
+      # charges every io_uring ring (about 410 KiB at the reactor's 4096 entries) to the user's
+      # RLIMIT_MEMLOCK, 8 MiB on the runner, so about 20 rings for all of that user's processes
+      # together, and a ring stays charged for a moment after its process exits. A reactor that
+      # cannot get a ring fails with ENOMEM (an IoUring test) or falls back to epoll (a server
+      # under test). The limit is the sum over the user, so no bound sized from one test holds;
+      # nothing here measures it.
+      - run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          ctest --test-dir build/${{ matrix.preset }} -L integration -j "$(nproc)" --output-on-failure
         env:
           # The job context exists only in steps, not in the job's own env.
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          # deploy/local/compose.yaml's fake key pair, as tests/call/run.sh uses it.
+          LIVEKIT_API_URL: http://127.0.0.1:7880
+          LIVEKIT_CLIENT_URL: ws://127.0.0.1:7880
+          LIVEKIT_API_KEY: ulw-dev-key
+          LIVEKIT_API_SECRET: ulw-dev-secret-testtest123-not-a-real-secret
       - name: storage conformance on both reactors
         run: |
           ULW_REACTOR=io_uring ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
           ULW_REACTOR=epoll ctest --test-dir build/${{ matrix.preset }} -L conformance --output-on-failure
       - if: failure()
-        run: docker compose -f deploy/local/compose.yaml logs minio
+        run: docker compose -f deploy/local/compose.yaml --profile calls logs minio livekit
 
   # Line and branch coverage of the unit and integration labels, each top-level directory
   # compared with its floor in tools/coverage-floors.txt (ADR-0080), and the SonarQube Cloud
@@ -283,8 +300,12 @@ jobs:
       # label runs one test per core, as the integration job runs it; the unit label one at a
       # time, as build-test runs it. The floors are reported, not enforced (ADR-0080); a
       # failing test fails the job, after the scan below.
+      # The integration label one test per core needs the locked-memory limit lifted, as in
+      # the integration job.
       - name: C++ coverage
-        run: tools/coverage.sh build/coverage unit integration
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          tools/coverage.sh build/coverage unit integration
         env:
           ULW_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
           COVERAGE_PARALLEL: integration

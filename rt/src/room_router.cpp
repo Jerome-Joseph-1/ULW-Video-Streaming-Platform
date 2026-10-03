@@ -69,7 +69,9 @@ constexpr core::Millis kRecentKeysWindow{60'000};
 // (ADR-0035): still ten forward timeouts.
 constexpr std::size_t kRecentKeys = 32'768;
 
-using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq) noexcept>;
+// A Reply carries a seq, an Answer a body; each leaves the other empty.
+using RequestDone = std::move_only_function<void(wire::Status, std::uint64_t seq,
+                                                 std::span<const std::byte> body) noexcept>;
 
 // Whether a node-channel connection's output is getting through to the other node (ADR-0071).
 // It stands in for the kernel's user timeout, which Linux counts from the first probe of a shut
@@ -332,6 +334,10 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 router_.on_forwarded(handle_, f->request, f->room, f->sender, f->key, f->body);
                 return true;
             }
+            if (const auto* f = std::get_if<wire::Ask>(&frame)) {
+                router_.on_ask(handle_, f->request, f->room, f->body);
+                return true;
+            }
             return false;
         }
 
@@ -375,9 +381,10 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 });
         }
 
-        void request(std::uint64_t request, std::span<const std::byte> frame, RequestDone done) {
+        void request(std::uint64_t request, std::span<const std::byte> frame, RequestDone done,
+                     core::Millis timeout = kForwardTimeout) {
             pending_.push_back({.request = request,
-                                .deadline = router_.clock_.now() + kForwardTimeout,
+                                .deadline = router_.clock_.now() + timeout,
                                 .done = std::move(done)});
             send(frame);
         }
@@ -420,7 +427,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
             std::vector<Pending> failed = std::move(pending_);
             pending_.clear();
             for (Pending& p : failed) {
-                p.done(wire::Status::Unavailable, 0);
+                p.done(wire::Status::Unavailable, 0, {});
             }
         }
 
@@ -568,7 +575,17 @@ class RoomRouter::Impl final : public IRegistryObserver,
                 }
                 RequestDone done = std::move(it->done);
                 pending_.erase(it);
-                done(f->status, f->seq);
+                done(f->status, f->seq, {});
+                return true;
+            }
+            if (const auto* f = std::get_if<wire::Answer>(&frame)) {
+                const auto it = std::ranges::find(pending_, f->request, &Pending::request);
+                if (it == pending_.end()) {
+                    return true;
+                }
+                RequestDone done = std::move(it->done);
+                pending_.erase(it);
+                done(f->status, 0, f->body);
                 return true;
             }
             if (const auto* f = std::get_if<wire::Deliver>(&frame)) {
@@ -703,6 +720,9 @@ public:
         std::erase_if(sends_, [&](const auto& entry) {
             return entry.second.room == room && entry.second.member == &member;
         });
+        std::erase_if(asks_, [&](const auto& entry) {
+            return entry.second.room == room && entry.second.member == &member;
+        });
         drop_if_empty(room);
     }
 
@@ -751,7 +771,8 @@ public:
         link(owner->node)
             .request(request, frame,
                      [this, room, done = pending(room, from, std::move(done))](
-                         wire::Status status, std::uint64_t seq) mutable noexcept {
+                         wire::Status status, std::uint64_t seq,
+                         std::span<const std::byte> /*body*/) mutable noexcept {
                          if (status == wire::Status::Ok) {
                              done(seq);
                              return;
@@ -778,6 +799,110 @@ public:
             sends_.erase(it);
             answer(result);
         };
+    }
+
+    void ask_owner(const core::RoomId& room, IMember& from, std::span<const std::byte> request,
+                   OwnerAnswer done) {
+        const auto it = local_.find(room);
+        if (it == local_.end() ||
+            std::ranges::find(it->second.members, &from) == it->second.members.end()) {
+            done(std::unexpected(RouteError::NotJoined));
+            return;
+        }
+        if (request.size() > kMaxOwnerMessage) {
+            done(std::unexpected(RouteError::Unavailable));
+            return;
+        }
+        if (registry_.owned(room)) {
+            answer_here(room, request, asking(room, from, std::move(done)));
+            return;
+        }
+        const std::optional<Ownership> owner =
+            registry_.known_owner(room).or_else([&] { return it->second.owner; });
+        if (!owner || owner->node == config_.self) {
+            done(std::unexpected(RouteError::Unavailable));
+            return;
+        }
+        std::vector<std::byte> frame;
+        const std::uint64_t id = next_request_++;
+        wire::encode_ask(frame, id, room, request);
+        ++counters_.forwarded;
+        link(owner->node)
+            .request(
+                id, frame,
+                [this, room, done = asking(room, from, std::move(done))](
+                    wire::Status status, std::uint64_t /*seq*/,
+                    std::span<const std::byte> body) mutable noexcept {
+                    if (status != wire::Status::Ok) {
+                        if (status == wire::Status::NotOwner) {
+                            lost_owner(room);
+                        }
+                        done(std::unexpected(route_error(status)));
+                        return;
+                    }
+                    try {
+                        done(std::vector<std::byte>(body.begin(), body.end()));
+                    } catch (const std::bad_alloc&) {
+                        ++counters_.allocation_failures;
+                        done(std::unexpected(RouteError::Unavailable));
+                    }
+                },
+                kOwnerAskTimeout);
+    }
+
+    void serve(IOwnerService* service) noexcept { service_ = service; }
+
+    // Answers the asks past their deadline Unavailable, once they are out of asks_: an answer
+    // may ask again.
+    void expire_asks(core::MonoTime now) {
+        std::vector<OwnerAnswer> late;
+        std::erase_if(asks_, [&](auto& entry) {
+            if (entry.second.deadline > now) {
+                return false;
+            }
+            late.push_back(std::move(entry.second.done));
+            return true;
+        });
+        counters_.ask_timeouts += late.size();
+        for (OwnerAnswer& done : late) {
+            done(std::unexpected(RouteError::Unavailable));
+        }
+    }
+
+    // Holds `done` for an ask by `member`, as pending() holds a send's.
+    OwnerAnswer asking(const core::RoomId& room, IMember& member, OwnerAnswer done) {
+        const std::uint64_t id = next_send_++;
+        asks_.emplace(id, PendingAsk{.room = room,
+                                     .member = &member,
+                                     .done = std::move(done),
+                                     .deadline = clock_.now() + kOwnerAskTimeout});
+        return [this, id](std::expected<std::vector<std::byte>, RouteError> result) noexcept {
+            const auto it = asks_.find(id);
+            if (it == asks_.end()) {
+                return;
+            }
+            OwnerAnswer answer = std::move(it->second.done);
+            asks_.erase(it);
+            answer(std::move(result));
+        };
+    }
+
+    // This node owns the room: its service answers, or nobody does.
+    void answer_here(const core::RoomId& room, std::span<const std::byte> request,
+                     OwnerAnswer done) {
+        if (service_ == nullptr) {
+            done(std::unexpected(RouteError::Unavailable));
+            return;
+        }
+        service_->on_ask(
+            room, request,
+            [done = std::move(done)](
+                std::expected<std::vector<std::byte>, RouteError> result) mutable noexcept {
+                if (result && result->size() > kMaxOwnerMessage) {
+                    result = std::unexpected(RouteError::Unavailable);
+                }
+                done(std::move(result));
+            });
     }
 
     void release_rooms(StoreCallback<void> done) {
@@ -924,6 +1049,15 @@ private:
         SendCallback done;
     };
 
+    struct PendingAsk {
+        core::RoomId room;
+        IMember* member;
+        OwnerAnswer done;
+        // Answered Unavailable then, whoever was to answer: the owner's own service, which may
+        // be this node's, or another node over the channel.
+        core::MonoTime deadline;
+    };
+
     // A room with members on this node.
     struct LocalRoom {
         std::vector<IMember*> members;
@@ -981,6 +1115,7 @@ private:
     }
 
     void tick() {
+        ++counters_.ticks;
         const core::MonoTime now = clock_.now();
         inbound_.for_each_live([&](Inbound& in) {
             if (in.handshake_overdue(now)) {
@@ -1007,8 +1142,9 @@ private:
         }
         counters_.forward_timeouts += expired.size();
         for (RequestDone& done : expired) {
-            done(wire::Status::Unavailable, 0);
+            done(wire::Status::Unavailable, 0, {});
         }
+        expire_asks(now);
         if (now < next_beat_) {
             return;
         }
@@ -1152,7 +1288,8 @@ private:
         wire::encode_subscribe(frame, request, room);
         link(owner.node)
             .request(request, frame,
-                     [this, room, owner](wire::Status status, std::uint64_t seq) noexcept {
+                     [this, room, owner](wire::Status status, std::uint64_t seq,
+                                         std::span<const std::byte> /*body*/) noexcept {
                          subscribed(room, owner, status, seq);
                      });
     }
@@ -1511,6 +1648,66 @@ private:
         });
     }
 
+    void on_ask(net::Slab<Inbound>::Handle peer, std::uint64_t request, const core::RoomId& room,
+                std::span<const std::byte> body) {
+        if (registry_.owned(room)) {
+            answer_ask(peer, request, room, body);
+            return;
+        }
+        if (draining_) {
+            answer(peer, request, wire::Status::NotOwner, {});
+            return;
+        }
+        if (!advertised_) {
+            answer(peer, request, wire::Status::Unavailable, {});
+            return;
+        }
+        // As for a forwarded send: the asker found this node in the store, and a restart under
+        // the same name takes the room again.
+        registry_.resolve(room, [this, peer, request, room,
+                                 copy = std::vector<std::byte>(body.begin(), body.end())](
+                                    StoreResult<Ownership> owner) noexcept {
+            if (registry_.owned(room)) {
+                answer_ask(peer, request, room, copy);
+                return;
+            }
+            answer(peer, request, owner ? wire::Status::NotOwner : wire::Status::Unavailable, {});
+        });
+    }
+
+    void answer_ask(net::Slab<Inbound>::Handle peer, std::uint64_t request,
+                    const core::RoomId& room, std::span<const std::byte> body) {
+        if (body.size() > kMaxOwnerMessage) {
+            answer(peer, request, wire::Status::Unavailable, {});
+            return;
+        }
+        answer_here(room, body,
+                    [this, peer,
+                     request](std::expected<std::vector<std::byte>, RouteError> result) noexcept {
+                        if (!result) {
+                            answer(peer, request, wire_status(result.error()), {});
+                            return;
+                        }
+                        answer(peer, request, wire::Status::Ok, *result);
+                    });
+    }
+
+    void answer(net::Slab<Inbound>::Handle peer, std::uint64_t request, wire::Status status,
+                std::span<const std::byte> body) noexcept {
+        Inbound* in = inbound_.get(peer);
+        if (in == nullptr) {
+            return;
+        }
+        try {
+            std::vector<std::byte> frame;
+            wire::encode_answer(frame, request, status, body);
+            in->send(frame);
+        } catch (const std::bad_alloc&) {
+            // The asker times out and says Unavailable, as for a lost answer.
+            ++counters_.allocation_failures;
+        }
+    }
+
     void reply(net::Slab<Inbound>::Handle peer, std::uint64_t request, wire::Status status,
                std::uint64_t seq) {
         Inbound* in = inbound_.get(peer);
@@ -1616,7 +1813,10 @@ private:
     std::uint64_t next_request_ = 1;
     // Sends of members here not answered yet, by their own id.
     std::unordered_map<std::uint64_t, PendingSend> sends_;
+    // Asks of members here not answered yet, numbered from next_send_ too.
+    std::unordered_map<std::uint64_t, PendingAsk> asks_;
     std::uint64_t next_send_ = 1;
+    IOwnerService* service_ = nullptr;
     std::uint64_t next_link_ = 1;
     net::TimerId timer_;
     core::MonoTime next_beat_;
@@ -1650,6 +1850,15 @@ void RoomRouter::leave(const core::RoomId& room, IMember& member) noexcept {
 void RoomRouter::send(const core::RoomId& room, IMember& from, const core::UserId& sender,
                       const MessageKey& key, std::vector<std::byte> body, SendCallback done) {
     impl_->send(room, from, sender, key, std::move(body), std::move(done));
+}
+
+void RoomRouter::ask_owner(const core::RoomId& room, IMember& from,
+                           std::span<const std::byte> request, OwnerAnswer done) {
+    impl_->ask_owner(room, from, request, std::move(done));
+}
+
+void RoomRouter::serve(IOwnerService* service) noexcept {
+    impl_->serve(service);
 }
 
 void RoomRouter::release_rooms(StoreCallback<void> done) {
