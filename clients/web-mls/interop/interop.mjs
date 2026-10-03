@@ -31,7 +31,10 @@ function browserDevice(socket, room, client) {
     device.mls = new MlsRoom({
         client,
         room,
+        user: socket.user,
         send: (id, body) => socket.send(room, id, body),
+        // The checks here are about the wire, not who may join: every device is welcome.
+        approveKeyPackage: () => true,
         onMessage: (m) => device.received.push(m),
         onEvent: (e) => device.events.push(e),
         onState: (s) => (device.state = s),
@@ -90,7 +93,7 @@ async function roomOne(db) {
     await Promise.all([sa, sb, sc].map((s) => s.join(room)));
 
     const a = browserDevice(sa, room, new MlsClient(utf8("web-a")));
-    a.mls.create();
+    await a.mls.create();
     const b = await NativeDevice.create("ffi-b");
 
     // The native device asks to be added; the browser adds it and posts the welcome.
@@ -107,7 +110,7 @@ async function roomOne(db) {
 
     // Both ways, at the size whose framing the C++ test pins.
     const fromA = longText("web-a");
-    a.mls.sendText(fromA);
+    await a.mls.sendText(fromA);
     const seen = await sb.message(room, (f) => f.sender === "web-a" &&
         inspect(fromBase64url(f.body)).contentType === "application", "web-a's message");
     const body = fromBase64url(seen.body);
@@ -122,7 +125,7 @@ async function roomOne(db) {
 
     // A second browser device announces itself; the first adds it; the bridge follows.
     const c = browserDevice(sc, room, new MlsClient(utf8("web-c")));
-    c.mls.announce();
+    await c.mls.announce();
     await c.until(() => c.mls.joined, "web-c never joined");
     const commit = sb.frames.find((f) => f.type === "message" && f.sender === "web-a" &&
         inspect(fromBase64url(f.body)).contentType === "commit" &&
@@ -135,7 +138,7 @@ async function roomOne(db) {
     await sb.sendAndWait(room, await b.encrypt(fromB2));
     await a.heard(fromB2);
     await c.heard(fromB2);
-    c.mls.sendText("web-c to everyone");
+    await c.mls.sendText("web-c to everyone");
     const fromC = await sb.message(room, (f) => f.sender === "web-c" &&
         inspect(fromBase64url(f.body)).contentType === "application", "web-c's message");
     assert.equal((await b.process(fromBase64url(fromC.body))).plaintext, "web-c to everyone");
@@ -183,7 +186,7 @@ async function roomTwo(db) {
     };
 
     let a = browserDevice(sa, room, new MlsClient(utf8("web-a")));
-    a.mls.announce();
+    await a.mls.announce();
     await addFrom("web-a");
     await a.until(() => a.mls.joined, "web-a never joined from the bridge's welcome");
     assert.equal(a.mls.group.epoch, 1);
@@ -192,7 +195,7 @@ async function roomTwo(db) {
     const fromB = longText("ffi-b");
     await sb.sendAndWait(room, await b.encrypt(fromB));
     assert.equal((await a.heard(fromB)).sender, "ffi-b");
-    a.mls.sendText("web-a back to ffi-b");
+    await a.mls.sendText("web-a back to ffi-b");
     const fromA = await sb.message(room, (f) => f.sender === "web-a" &&
         inspect(fromBase64url(f.body)).contentType === "application", "web-a's message");
     assert.deepEqual(await b.process(fromBase64url(fromA.body)), { kind: "application", plaintext: "web-a back to ffi-b" });
@@ -209,7 +212,7 @@ async function roomTwo(db) {
 
     // A second browser device; the first follows the bridge's commit.
     const c = browserDevice(sc, room, new MlsClient(utf8("web-c")));
-    c.mls.announce();
+    await c.mls.announce();
     await addFrom("web-c");
     await c.until(() => c.mls.joined, "web-c never joined");
     await a.until(() => a.mls.group.epoch === 2, "web-a never followed the bridge's commit");
@@ -217,7 +220,7 @@ async function roomTwo(db) {
     await sb.sendAndWait(room, await b.encrypt("three of us"));
     await a.heard("three of us");
     await c.heard("three of us");
-    c.mls.sendText("web-c here");
+    await c.mls.sendText("web-c here");
     await a.heard("web-c here");
     const fromC = await sb.message(room, (f) => f.sender === "web-c" &&
         inspect(fromBase64url(f.body)).contentType === "application", "web-c's message");

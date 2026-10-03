@@ -43,6 +43,61 @@ export class AddResult {
 if (Symbol.dispose) AddResult.prototype[Symbol.dispose] = AddResult.prototype.free;
 
 /**
+ * A group member: `{leaf, identity, fingerprint}`.
+ */
+export class Member {
+    static __wrap(ptr) {
+        const obj = Object.create(Member.prototype);
+        obj.__wbg_ptr = ptr;
+        MemberFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        MemberFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_member_free(ptr, 0);
+    }
+    /**
+     * SHA-256 of its signature public key, hex.
+     * @returns {string}
+     */
+    get fingerprint() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.member_fingerprint(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get identity() {
+        const ret = wasm.member_identity(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    get leaf() {
+        const ret = wasm.member_leaf(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) Member.prototype[Symbol.dispose] = Member.prototype.free;
+
+/**
  * What a room message's body is, read without keys.
  */
 export class MessageInfo {
@@ -84,6 +139,19 @@ export class MessageInfo {
         return ret[0] === 0 ? undefined : ret[1];
     }
     /**
+     * A key package's signature key fingerprint: SHA-256, hex.
+     * @returns {string | undefined}
+     */
+    get fingerprint() {
+        const ret = wasm.messageinfo_fingerprint(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]);
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
+    /**
      * A public or private message's group id.
      * @returns {Uint8Array | undefined}
      */
@@ -110,6 +178,19 @@ export class MessageInfo {
         return v1;
     }
     /**
+     * A key package's KeyPackageRef, hex: the same package always has the same one.
+     * @returns {string | undefined}
+     */
+    get keyPackageRef() {
+        const ret = wasm.messageinfo_keyPackageRef(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]);
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
+    /**
      * `key_package`, `welcome`, `private_message`, `public_message` or `group_info`.
      * @returns {string}
      */
@@ -129,7 +210,8 @@ export class MessageInfo {
 if (Symbol.dispose) MessageInfo.prototype[Symbol.dispose] = MessageInfo.prototype.free;
 
 /**
- * A device: its identity, signature key, key packages and groups.
+ * A device: its identity, signature key, key packages and groups. Each group has one state
+ * in memory however many `MlsGroup` handles reach it, so two handles never diverge.
  */
 export class MlsClient {
     static __wrap(ptr) {
@@ -147,6 +229,16 @@ export class MlsClient {
     free() {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_mlsclient_free(ptr, 0);
+    }
+    /**
+     * The application's bytes kept with the state (mls-room.js uses them).
+     * @returns {Uint8Array}
+     */
+    get appData() {
+        const ret = wasm.mlsclient_appData(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
     }
     /**
      * A new group, at epoch 0, with this device its only member. The chat convention is the
@@ -178,6 +270,28 @@ export class MlsClient {
         return v1;
     }
     /**
+     * SHA-256 of this device's signature public key, hex, for comparing out of band.
+     * @returns {string}
+     */
+    get fingerprint() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.mlsclient_fingerprint(this.__wbg_ptr);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * @returns {Uint8Array}
      */
     get identity() {
@@ -202,14 +316,18 @@ export class MlsClient {
     }
     /**
      * Joins the group a Welcome invites this device into; throws `rejected` when the welcome
-     * is for other devices.
+     * is for other devices, is for a group other than `expectedGroupId` (when given), or for
+     * a group this device is in already. A refused welcome leaves nothing behind.
      * @param {Uint8Array} welcome
+     * @param {Uint8Array | null} [expected_group_id]
      * @returns {MlsGroup}
      */
-    joinGroup(welcome) {
+    joinGroup(welcome, expected_group_id) {
         const ptr0 = passArray8ToWasm0(welcome, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.mlsclient_joinGroup(this.__wbg_ptr, ptr0, len0);
+        var ptr1 = isLikeNone(expected_group_id) ? 0 : passArray8ToWasm0(expected_group_id, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.mlsclient_joinGroup(this.__wbg_ptr, ptr0, len0, ptr1, len1);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -257,6 +375,14 @@ export class MlsClient {
         MlsClientFinalization.register(this, this.__wbg_ptr, this);
         return this;
     }
+    /**
+     * @param {Uint8Array} data
+     */
+    set appData(data) {
+        const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.mlsclient_set_appData(this.__wbg_ptr, ptr0, len0);
+    }
 }
 if (Symbol.dispose) MlsClient.prototype[Symbol.dispose] = MlsClient.prototype.free;
 
@@ -280,6 +406,14 @@ export class MlsGroup {
     free() {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_mlsgroup_free(ptr, 0);
+    }
+    /**
+     * Whether the group can still be used: false once a commit removed this device.
+     * @returns {boolean}
+     */
+    get active() {
+        const ret = wasm.mlsgroup_active(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * Commits adding the devices whose key packages are given (an array of Uint8Array).
@@ -326,7 +460,8 @@ export class MlsGroup {
         return ret;
     }
     /**
-     * Deletes the group's state from the client's store; the handle is unusable afterwards.
+     * Deletes the group's state from the client's store; every handle to it is unusable
+     * afterwards.
      */
     forget() {
         const ptr = this.__destroy_into_raw();
@@ -359,11 +494,14 @@ export class MlsGroup {
         return ret >>> 0;
     }
     /**
-     * Members' identities, in leaf order.
-     * @returns {Uint8Array[]}
+     * The members, in leaf order: `[{leaf, identity, fingerprint}]`.
+     * @returns {Member[]}
      */
     members() {
         const ret = wasm.mlsgroup_members(this.__wbg_ptr);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
         var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]);
         wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
         return v1;
@@ -455,7 +593,23 @@ export class Received {
         return v1;
     }
     /**
-     * The identity in the sender's credential.
+     * The commit removed this device; the group can no longer be used.
+     * @returns {boolean}
+     */
+    get selfRemoved() {
+        const ret = wasm.received_selfRemoved(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * The sender's leaf index.
+     * @returns {number | undefined}
+     */
+    get senderLeaf() {
+        const ret = wasm.received_senderLeaf(this.__wbg_ptr);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
+     * The identity in the sender's credential: for a commit, the committer's.
      * @returns {Uint8Array}
      */
     get sender() {
@@ -536,12 +690,12 @@ function __wbg_get_imports() {
             const ret = arg0.length;
             return ret;
         },
-        __wbg_msCrypto_bd5a034af96bcba6: function(arg0) {
-            const ret = arg0.msCrypto;
+        __wbg_member_new: function(arg0) {
+            const ret = Member.__wrap(arg0);
             return ret;
         },
-        __wbg_new_from_slice_9a868026ffa4208a: function(arg0, arg1) {
-            const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
+        __wbg_msCrypto_bd5a034af96bcba6: function(arg0) {
+            const ret = arg0.msCrypto;
             return ret;
         },
         __wbg_new_with_length_3da0ad195f6f63ba: function(arg0) {
@@ -623,6 +777,9 @@ function __wbg_get_imports() {
 const AddResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_addresult_free(ptr, 1));
+const MemberFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_member_free(ptr, 1));
 const MessageInfoFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_messageinfo_free(ptr, 1));

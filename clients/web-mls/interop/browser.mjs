@@ -46,15 +46,31 @@ function serveSite() {
     cleanups.push(() => server.close());
 }
 
+function pageUrl(room, user) {
+    const hash = new URLSearchParams({ chat: `ws://127.0.0.1:${PORT}/rt`, room, device: "laptop", token: mint(user) });
+    return `${origin}/example.html#${hash}`;
+}
+
 async function openDevice(browser, room, user) {
     const context = await browser.newContext();
     const page = await context.newPage();
     page.on("pageerror", (e) => log(`${user} page error:`, e.message));
-    const hash = new URLSearchParams({ chat: `ws://127.0.0.1:${PORT}/rt`, room, device: user, token: mint(user) });
-    await page.goto(`${origin}/example.html#${hash}`);
+    await page.goto(pageUrl(room, user));
     await page.click("#connect");
     await page.waitForFunction(() => /Connected as|In the group/.test(document.getElementById("status").textContent));
     return page;
+}
+
+// Approves the next device the page asks about, checking what it shows.
+async function approveNext(page, identity, fingerprint) {
+    const card = page.locator(".ask").first();
+    await card.waitFor({ timeout: 10000 });
+    const shown = await card.textContent();
+    assert.ok(shown.includes(identity), shown);
+    if (fingerprint) {
+        assert.ok(shown.replace(/\s/g, "").includes(fingerprint), "the page shows the device's fingerprint");
+    }
+    await card.locator("button.approve").click();
 }
 
 async function say(page, text) {
@@ -89,6 +105,8 @@ run(async () => {
     await alice.click("#create");
     await inGroup(alice, 1);
     await bob.click("#announce");
+    const bobFingerprint = (await bob.textContent("#me")).split("fingerprint ")[1].replace(/\s/g, "");
+    await approveNext(alice, "bob/laptop", bobFingerprint);
     await inGroup(bob, 2);
     log("bob's browser joined alice's group through the room");
     await say(alice, "hello bob, from alice's browser");
@@ -102,7 +120,9 @@ run(async () => {
     await sc.open();
     await sc.join(room);
     const carol = await NativeDevice.create("ffi-carol");
-    await sc.sendAndWait(room, await carol.keyPackage());
+    const carolPackage = await carol.keyPackage();
+    await sc.sendAndWait(room, carolPackage);
+    await approveNext(alice, "ffi-carol", mls.inspect(carolPackage).fingerprint);
     const welcome = await sc.message(room, (f) => f.sender === "alice" &&
         mls.inspect(mls.fromBase64url(f.body)).wireFormat === "welcome", "alice's welcome");
     await carol.call("join", Buffer.from(mls.fromBase64url(welcome.body)).toString("hex"));
@@ -116,6 +136,14 @@ run(async () => {
     await sees(alice, "native says hi");
     await sees(bob, "native says hi");
     log("the bridge's device joined from the page's welcome and reads and writes");
+
+    // A second tab of bob's device is refused while the first holds it.
+    const second = await bob.context().newPage();
+    await second.goto(pageUrl(room, "bob"));
+    await second.click("#connect");
+    await second.waitForFunction(() => /open in another tab/.test(document.getElementById("status").textContent));
+    await second.close();
+    log("a second tab of the same device was refused");
 
     // Bob reloads: his device comes back from IndexedDB, still in the group.
     await bob.reload();

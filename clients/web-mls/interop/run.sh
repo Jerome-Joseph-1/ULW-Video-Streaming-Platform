@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The interop check (ADR-0099): the WebAssembly client in dist/ and the FFI bridge's own code
+# The interop check (ADR-0098): the WebAssembly client in dist/ and the FFI bridge's own code
 # share MLS groups through a real chat_server on a scratch Postgres database. It builds the
 # bridge (cargo, offline, from its Cargo.lock, as CMake does) and ffi_peer, then runs
-# interop.mjs under Node 22 or later. With --browser it also runs browser.mjs: example.html in
+# room.test.mjs (mls-room.js against an in-memory room) and interop.mjs under Node 22 or later. With --browser it also runs browser.mjs: example.html in
 # two Chromium contexts through Playwright (which must be installed, with its Chromium).
 #
 #   ULW_TEST_DATABASE_URL  an admin URL of a Postgres to make the scratch database in
@@ -28,6 +28,7 @@ cc -std=c11 -D_GNU_SOURCE -O1 -Wall -Wextra -Werror -I "$bridge/include" \
     -o "$work/ffi_peer"
 
 export ULW_FFI_PEER="$work/ffi_peer"
+node --test "$here/room.test.mjs"
 node "$here/interop.mjs"
 if [[ "${1:-}" == "--browser" ]]; then
     node "$here/browser.mjs"
