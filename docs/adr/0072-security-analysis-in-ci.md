@@ -66,17 +66,21 @@ ccache is off for that build, because CodeQL sees only the compiler invocations 
 the setup action neither restores nor saves a ccache for the job (`ccache: "false"`), so no
 empty cache is saved under its key. Its configuration file keeps `security-extended`. CodeQL
 extracts a manual C++ build by tracing every compiler that runs after `codeql-action/init`, and
-`paths-ignore` does not filter what the trace extracts: the first runs, with `build/**`
-ignored, still reported an alert in a CMake `try_compile` probe under `build/`. So the job
+`paths-ignore` does not filter what the trace extracts. So the job
 keeps out of the trace what is not ours by running it before `init`: the configure, whose
 probes are compiler runs, and the build of the FetchContent dependencies (`llhttp_static`,
 `srt_static`), which are upstream's and whose advisories the `dependencies` job tracks. The
 traced `cmake --build` then compiles exactly the first-party translation units of
 `compile_commands.json`, the migrations embedded in `bundled_migrations.cpp` among them, and no
 dependency's; first-party sources still read the dependencies' headers as they include them.
-Building the dependencies untraced keeps them out of the database, where a filter over the
-uploaded SARIF would analyse them and then drop the alerts, at the cost of a third-party action
-in a job that holds `security-events: write`.
+Building the dependencies untraced keeps them out of the database. A filter over the uploaded
+SARIF would analyse them and then drop the alerts, and would need a third-party action in a job
+that holds `security-events: write`.
+
+Amended 2026-10-03: the first runs showed that `paths-ignore: build/**` did not take effect for
+the traced C++ build: they reported an alert in a CMake `try_compile` probe under `build/`. The
+configuration dropped `paths-ignore`, and the job moved the configure and the dependencies'
+build ahead of `init`, as above.
 
 zizmor runs with the job's own token (`GH_TOKEN`, `contents: read`), which turns on its online
 audits of every pinned action: `impostor-commit` (the SHA is in that action's repository, not
