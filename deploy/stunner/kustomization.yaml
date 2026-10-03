@@ -65,6 +65,18 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/resources/requests/cpu
         value: 10m
+  # LiveKit's 500m is sized for the calls a real node carries; the sandbox's checks place one
+  # or two. With it the node's 4000m was reserved to the last millicore, and up.sh's restart of
+  # chat, which surges a fourth pod before retiring one, stayed Pending ("Insufficient cpu")
+  # until its rollout timed out. 100m leaves room for that surge. The limit stays the base's,
+  # so LiveKit still runs on whatever is idle.
+  - target:
+      kind: Deployment
+      name: livekit
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m
   # The kind node has no load balancer: the TURN listener is a NodePort, which kind.yaml
   # publishes on the outside network as 198.18.0.1:3478. That is the address clients use, so
   # the Gateway names it; STUNner reports a Gateway Programmed only once it knows one.
