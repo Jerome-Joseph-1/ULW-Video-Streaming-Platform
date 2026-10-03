@@ -89,7 +89,6 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085, deployment by 0088 |
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted, amended by 0088 |
 | [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted, amended by 0088 |
-| [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted, amended by 0098 |
+| [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted |
 | [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted |
 | [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
-| [0098](0098-quick-and-batch-ci-lanes.md) | CI runs a quick lane on pull requests and the full suite on batches and main | Accepted, amends 0086 |

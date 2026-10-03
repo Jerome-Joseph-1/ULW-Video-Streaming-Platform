@@ -1,6 +1,6 @@
 # 0086. Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core
 
-Status: Accepted, amended by 0098 (coverage runs on pull requests that change code; batch/** pushes measure without scanning)
+Status: Accepted
 Date: 2026-10-03
 
 ## Context

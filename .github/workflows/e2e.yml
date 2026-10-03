@@ -21,8 +21,8 @@ on:
         default: true
   schedule:
     - cron: "43 3 * * *"
-  # Every push to main as well (docs/adr/0098): the commits a green batch squash-merges. The
-  # concurrency group below queues at most one run behind the current one.
+  # Every push to main as well (docs/operations/ci-lanes.md): the commits a green batch
+  # squash-merges. The concurrency group below queues at most one run behind the current one.
   push:
     branches: [main]
     tags: ["phase-*"]

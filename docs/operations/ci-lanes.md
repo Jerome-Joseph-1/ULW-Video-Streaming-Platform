@@ -1,10 +1,9 @@
-# 0098. CI runs a quick lane on pull requests and the full suite on batches and main
+# CI lanes and batch merging
 
-Status: Accepted
-Date: 2026-10-03
-Amends: ADR-0086 (when the coverage job runs and scans)
+How `.github/workflows/ci.yml` splits its jobs between pull requests and batches, why, and how
+the merge loop lands pull requests. The coverage job's triggers here refine ADR-0086's.
 
-## Context
+## Why
 
 ci.yml ran its 20 jobs on every pull request and every push to main: three `build-test`
 configurations, `tsan`, two `reactor-matrix`, two `integration`, `coverage` (with the SonarQube
@@ -30,7 +29,7 @@ The owner requires SonarQube Cloud's 80% gate on new code to be real coverage: t
 decided on the pull request's analysis, which reads the coverage the `coverage` job measures for
 that pull request (sonar-project.properties, ADR-0079, ADR-0086).
 
-## Options
+## Options considered
 
 | Option | Why it was tempting | Verdict |
 |---|---|---|
@@ -41,7 +40,7 @@ that pull request (sonar-project.properties, ADR-0079, ADR-0086).
 | dorny/paths-filter for the path filters | Familiar | Rejected: a third-party action and its pin for what one `git diff` and a `case` do |
 | Move CodeQL off pull requests | One fewer job per pull request | Rejected: it is one job, about ten minutes, and its value is the alert on the pull request |
 
-## Decision
+## The lanes
 
 **Two lanes in ci.yml**, chosen by the first job, `changes`:
 
@@ -114,7 +113,7 @@ the gate waits for; a `batch/**` run never satisfies it.
   action is proved by its batch (or a manual run on its branch), not by its quick lane.
 - Squash-merging a batch of N pushes N commits to main. ci.yml's concurrency keeps one main run
   going and replaces a waiting one, so the first and last commits get full runs and the ones
-  between may be cancelled; publish-images.yml behaves the same way (ADR-0085). The last
+  between may be cancelled; publish-images.yml behaves the same way (docs/adr/0085). The last
   commit's tree is the tested batch tree, so the commit that is published and that `main` points
   at is one that ran the full suite.
 - Each `batch/**` push saves its own ccache entries; actions/cache lets a branch restore main's
