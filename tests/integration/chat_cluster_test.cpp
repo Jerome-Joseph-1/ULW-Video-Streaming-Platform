@@ -1227,6 +1227,137 @@ TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePasswor
     }
 }
 
+// A call's ticket, as the room WebSocket answers a call (docs/integration/calls.md): the ticket,
+// or an error.
+std::optional<Seen> call_answer(Client& client, const std::string& room,
+                                const std::string& device) {
+    const auto answers = [&](const Seen& s) {
+        return s.room == room && (s.type == "ticket" || s.type == "error");
+    };
+    // This call's answer, not one an earlier call of the client's got.
+    std::size_t earlier = client.count(answers);
+    if (!client.send(R"({"type":"call","room":")" + room + R"(","device":")" + device + R"("})")) {
+        return std::nullopt;
+    }
+    return client.wait_for([&](const Seen& s) {
+        if (!answers(s)) {
+            return false;
+        }
+        if (earlier > 0) {
+            --earlier;
+            return false;
+        }
+        return true;
+    });
+}
+
+// LIVEKIT_CLIENT_URL, what every ticket names; empty when unset.
+std::string livekit_client_url() {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
+    const char* url = std::getenv("LIVEKIT_CLIENT_URL");
+    return url == nullptr ? std::string() : std::string(url);
+}
+
+// The port LiveKit's client URL names, which this test reaches it on: ws://127.0.0.1:<port>.
+std::uint16_t livekit_port() {
+    const std::string url = livekit_client_url();
+    return core::parse_integer<std::uint16_t>(url.substr(url.rfind(':') + 1)).value_or(0);
+}
+
+// A client on LiveKit's signalling socket, with what LiveKit sent it first once its ticket
+// admitted it: the join response (protobuf, whose strings appear as they are). nullopt when
+// LiveKit refused the ticket, with its status line in `refusal`.
+struct RtcClient {
+    ulw::test::WsClient socket;
+    std::string join;
+};
+
+std::optional<RtcClient> rtc_join(const std::string& token, std::string* refusal) {
+    auto rtc = ulw::test::WsClient::connect(
+        livekit_port(), "/rtc?access_token=" + token + "&auto_subscribe=1&sdk=js&protocol=15", "",
+        refusal);
+    if (!rtc) {
+        return std::nullopt;
+    }
+    while (auto frame = rtc->next_frame(std::chrono::seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Binary) {
+            return RtcClient{.socket = std::move(*rtc), .join = std::move(frame->second)};
+        }
+    }
+    return std::nullopt;
+}
+
+// M23 to M26 through chat (ADR-0050): each member of a direct chat asks for the call on the room
+// WebSocket of whichever node it is on; the room's owner answers both, and LiveKit admits each
+// ticket into the same room, where the second finds the first. Needs a LiveKit
+// (LIVEKIT_API_URL and the rest, as tests/call/run.sh sets them); skipped without one.
+TEST_P(ChatClusterTest, ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsToOneRoom) {
+    if (ulw::test::livekit_environment().empty()) {
+        GTEST_SKIP() << "no LiveKit: set LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY "
+                        "and LIVEKIT_API_SECRET";
+    }
+    const std::string direct = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(direct, {"alice", "bob"}, "direct_chat"));
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    // Alice's join makes chat-1 the room's owner; bob's node forwards his call to it.
+    ASSERT_EQ(join_answer(*alice, direct), "joined");
+    ASSERT_EQ(join_answer(*bob, direct), "joined");
+    // Fixed and distinct: two devices are two participants only if their ids differ.
+    const std::string alice_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9a1";
+    const std::string bob_device = "01a0eb86-6cca-7dce-84cc-3bb47615f9b1";
+    const auto issued = std::chrono::duration_cast<seconds>(clock_.wall_now().time_since_epoch());
+    const auto a = call_answer(*alice, direct, alice_device);
+    const auto b = call_answer(*bob, direct, bob_device);
+    ASSERT_TRUE(a && b);
+    ASSERT_EQ(a->type, "ticket") << a->reason;
+    ASSERT_EQ(b->type, "ticket") << b->reason;
+    EXPECT_EQ(a->url, livekit_client_url());
+    EXPECT_EQ(b->url, a->url);
+    // A minute to connect with (ADR-0050).
+    EXPECT_GE(a->expires_at, static_cast<std::uint64_t>(issued.count()) + 59);
+    EXPECT_LE(a->expires_at, static_cast<std::uint64_t>(issued.count()) + 61);
+    EXPECT_EQ(metric(nodes_[0], "call_tickets_total"), 2U);
+    EXPECT_EQ(metric(nodes_[1], "call_tickets_total"), 0U);
+    EXPECT_EQ(metric(nodes_[0], "call_rooms_opened_total"), 1U);
+
+    std::string refusal;
+    const auto first = rtc_join(a->token, &refusal);
+    ASSERT_TRUE(first) << "LiveKit refused alice's ticket: " << refusal;
+    EXPECT_NE(first->join.find(direct + ":1"), std::string::npos);
+    EXPECT_NE(first->join.find("alice/" + alice_device), std::string::npos);
+    const auto second = rtc_join(b->token, &refusal);
+    ASSERT_TRUE(second) << "LiveKit refused bob's ticket: " << refusal;
+    EXPECT_NE(second->join.find(direct + ":1"), std::string::npos);
+    EXPECT_NE(second->join.find("bob/" + bob_device), std::string::npos);
+    EXPECT_NE(second->join.find("alice/" + alice_device), std::string::npos)
+        << "bob's join response does not name alice as already in the room";
+
+    // A call is two participants: a third device, with a ticket of its own, is refused.
+    const auto third = call_answer(*alice, direct, "01a0eb86-6cca-7dce-84cc-3bb47615f9a2");
+    ASSERT_TRUE(third);
+    ASSERT_EQ(third->type, "ticket") << third->reason;
+    EXPECT_FALSE(rtc_join(third->token, &refusal)) << "LiveKit admitted a third participant";
+
+    // The ticket is what admits: one with its signature altered is refused.
+    // The signature's first character: all six of its bits are the signature's, where the
+    // last character's lowest two are padding.
+    std::string forged = a->token;
+    char& signed_char = forged.at(forged.rfind('.') + 1);
+    signed_char = signed_char == 'A' ? 'B' : 'A';
+    EXPECT_FALSE(rtc_join(forged, &refusal));
+    EXPECT_NE(refusal.find(" 401"), std::string::npos) << refusal;
+
+    // A group chat has no call (ADR-0058).
+    auto again = connect(nodes_[2], 0);
+    ASSERT_TRUE(again);
+    ASSERT_NO_FATAL_FAILURE(join(*again));
+    const auto group = call_answer(*again, room_, alice_device);
+    ASSERT_TRUE(group);
+    EXPECT_EQ(group->reason, "not_callable");
+}
+
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatClusterTest,
                          ::testing::Values(net::ReactorKind::IoUring, net::ReactorKind::Epoll),
                          ulw::test::reactor_name);

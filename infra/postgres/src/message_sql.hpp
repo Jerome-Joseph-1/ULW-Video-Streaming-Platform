@@ -78,6 +78,11 @@ created AS (
 SELECT coalesce((SELECT kind FROM recorded), (SELECT kind FROM created)),
        EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
 
+// The room's recorded kind (NULL when none is) and whether the user is listed: nothing written.
+inline constexpr Sql kAccess = R"sql(
+SELECT (SELECT kind FROM chat_rooms WHERE room_id = $1),
+       EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
+
 // Records the room as open unless its id is not a stream's (version 8, tagged 0x01 in its first
 // byte, ADR-0070), it lists
 // members, or the room plane already created it as another kind, and answers with the kind it is

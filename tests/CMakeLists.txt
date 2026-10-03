@@ -426,6 +426,7 @@ target_include_directories(message_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/call_test.cpp
     unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
     unit/chat/envelope_test.cpp

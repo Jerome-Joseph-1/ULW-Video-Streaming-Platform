@@ -1,6 +1,10 @@
-// The signalling side of tests/call, until the call handler carries it over the room WebSocket.
-// Like the handler, it is one long-lived process that keeps the rooms it opened: it reads one
-// command per line on stdin, runs it through the SFU port, and answers with one line on stdout.
+// The signalling side of tests/call. chat_server's call handler issues 1:1 tickets over the room
+// WebSocket (apps/chat/src/call.cpp, docs/adr/0086; tests/integration/chat_cluster_test.cpp and
+// the sandbox's call scenario take LiveKit through it); this harness drives the port directly
+// for what the handler does not do yet: other generations, closing one to put a member out,
+// publisher tickets and relays. Like the handler, it is one long-lived process that keeps the
+// rooms it opened: it reads one command per line on stdin, runs it through the SFU port, and
+// answers with one line on stdout.
 //
 //   open <room-id> <generation> <max-participants> <call|stream>  -> ok
 //   join <room-id> <generation> <user> <device-id> <member|publisher>  -> the ticket, as JSON
