@@ -14,7 +14,7 @@ What ships:
 | `overlays/{stage,prod}/chat/` | Deployment (3 replicas, docs/adr/0019), Service, HTTPRoute for its WebSocket (`/rt`), NetworkPolicy; secrets and Postgres settings in step 3 |
 | `overlays/{stage,prod}/live-packager/` | The headless Service that names each stream's packager in DNS, and the NetworkPolicy every packager runs under (step 9) |
 | `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream; not in the overlays, so ArgoCD never applies it (step 9, docs/adr/0083) |
-| `woodpecker.yml` | Builds and pushes the four images (video-gateway, video-worker, chat, live-packager), then `rollout restart`; never applies a manifest |
+| `woodpecker.yml` | Kept for Askedin: builds and pushes the four images to git.askedin.com, which no overlay names any more, then `rollout restart`; the images now come prebuilt from GHCR (step 4) |
 | `stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
 | `overlays/{stage,prod}/stunner/` | The TURN Gateway (UDP 3478 on stage, 3479 on prod) and the UDPRoute to LiveKit |
 | `overlays/{stage,prod}/livekit/` | LiveKit (1 replica), Service, HTTPRoute for its signalling (`/rtc`) and WHIP (`/whip`), NetworkPolicy |
@@ -28,9 +28,9 @@ port, a DNS name, prod's own keys): step 7, "Prod".
 Live streams also need a stream service to start each stream's packager, which does not exist
 yet: until it does, a packager is started by hand (step 9).
 
-Open decisions, yours: whether this builds inside the Askedin monorepo or pushes from this
-repository (the image names `git.askedin.com/askedin/askedin-monorepo/<svc>` assume the
-monorepo), stage's `JWT_ISSUER`, and stage's host. Every stage HTTPRoute (`video-gateway`,
+The images are built and published by this repository, public on GitHub's container registry
+as `ghcr.io/jerome-joseph-1/ulw-<svc>` (step 4); Askedin only pulls and deploys them. Open
+decisions, yours: stage's `JWT_ISSUER`, and stage's host. Every stage HTTPRoute (`video-gateway`,
 `chat`, `livekit`) names `stage.askedin.com` in `hostnames:`, **unconfirmed**: the stage web
 app's origin, assumed to be its host; change those three files if stage is served elsewhere
 (prod's routes name `askedin.com` and `www.askedin.com`). Askedin's `JWKS_URL` for each environment and prod's
@@ -409,17 +409,17 @@ them into `lifecycle.json`. The same rule is in the dashboard under the bucket's
 lifecycle rules, as "Abort incomplete multipart uploads" with prefix `videos/` and 7 days.
 
 The reaper is `overlays/{stage,prod}/upload-reaper/`: a CronJob running the gateway image's
-`ulw_reaper` every 15 minutes with the gateway's secret (the same `:development` / `:master`
-image and `imagePullPolicy: Always` as the gateway, so the reaper's SQL and lock key match the
-build the gateways run), and a NetworkPolicy that lets it reach cluster DNS, Postgres (5432) and
-the store (443) and nothing else. It aborts uploads past their `expires_at`, fails their videos
-with "upload expired", releases their storage sessions, removes any object a finished commit
-left at their key, and aborts sessions older than the uploads' lifetime that no upload owns
-(docs/adr/0049). It also forgets direct and group chat rooms that a refused join recorded more
-than a day ago and nothing used since (no members, never on the room plane), however old; a
-stream's live chat is never forgotten. It looks at 10,000 rooms a pass at most, from where the
-last pass stopped, and starts over from the oldest once it reaches the cutoff
-(`chat_rooms_forget_cursor`, docs/adr/0075). Each pass prints
+`ulw_reaper` every 15 minutes with the gateway's secret (the same image as the gateway, `:main`
+on stage and the gateway's pinned build on prod, with `imagePullPolicy: Always`, so the reaper's
+SQL and lock key match the build the gateways run), and a NetworkPolicy that lets it reach
+cluster DNS, Postgres (5432) and the store (443) and nothing else. It aborts uploads past their
+`expires_at`, fails their videos with "upload expired", releases their storage sessions, removes
+any object a finished commit left at their key, and aborts sessions older than the uploads'
+lifetime that no upload owns (docs/adr/0049). It also forgets direct and group chat rooms that a
+refused join recorded more than a day ago and nothing used since (no members, never on the room
+plane), however old; a stream's live chat is never forgotten. It looks at 10,000 rooms a pass at
+most, from where the last pass stopped, and starts over from the oldest once it reaches the
+cutoff (`chat_rooms_forget_cursor`, docs/adr/0075). Each pass prints
 `reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run`,
 `reaper_parts_orphaned_last_run` and `reaper_chat_rooms_forgotten_last_run` on stdout, as
 gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
@@ -439,19 +439,78 @@ retries it.
 The NetworkPolicy allows ports, not addresses, because Postgres runs on the node's host and R2
 is on the internet. If the host's address is stable, add it as an `ipBlock` to the 5432 rule.
 
-## 4. Pipeline and first deploy
+## 4. Images and first deploy
 
-1. Copy `overlays/stage/*` and `overlays/prod/*` into the monorepo's overlay tree, and
-   `woodpecker.yml` into its pipeline directory. Give Woodpecker the secrets `registry_user`,
-   `registry_password` and `kubeconfig`; the kubeconfig's user needs only `get`, `list`, `watch`
-   and `patch` on deployments and `get`, `list`, `watch` on replicasets, in `apps` and
-   `apps-stage` (`rollout restart` and `rollout status`). The image steps run the buildx plugin,
-   which Woodpecker 3 runs privileged only when the server lists it: add the exact reference
-   from `woodpecker.yml` (tag and digest) to the server's `WOODPECKER_PLUGINS_PRIVILEGED`.
-2. Push to `development`. Woodpecker pushes `video-gateway:development`,
-   `video-worker:development`, `chat:development` and `live-packager:development`; the restart
-   step fails on the first run because the deployments do not exist yet. That is expected.
-3. Bootstrap stage once:
+The images come prebuilt from GitHub's container registry; Askedin only pulls and deploys them.
+`.github/workflows/publish-images.yml` in this repository builds the four Dockerfile targets
+for every push to `main`, checks them as the e2e sandbox does (the release binaries' hardening
+and Trivy's image gate; either failing stops it), waits for that commit's `ci` run to succeed,
+and only then pushes:
+
+| Image | Dockerfile target | Runs |
+|---|---|---|
+| `ghcr.io/jerome-joseph-1/ulw-video-gateway` | `gateway` | video-gateway (and its migrate init container), upload-reaper |
+| `ghcr.io/jerome-joseph-1/ulw-video-worker` | `worker` | video-worker |
+| `ghcr.io/jerome-joseph-1/ulw-chat` | `chat` | chat |
+| `ghcr.io/jerome-joseph-1/ulw-live-packager` | `live-packager` | each stream's Job (step 9) |
+
+Each is tagged with the full commit SHA and with `main`, never `latest` (docs/adr/0085). A SHA
+tag is pushed once and always resolves to the same digest: publishing a commit again reuses
+what was published. `main` moves for all four images together, only after all four SHA tags
+are pushed, and only to main's tip. The run's summary lists each image as
+`ghcr.io/jerome-joseph-1/ulw-<service>:<sha>@sha256:<digest>`, ready to pin (4a). Each digest
+carries a build provenance attestation from the run that first pushed it; a later run of the
+same commit reuses the digest and attests nothing
+(`gh attestation verify oci://ghcr.io/jerome-joseph-1/ulw-chat@sha256:... --repo
+Jerome-Joseph-1/ULW-Video-Streaming-Platform`). If a run fails while moving `main`, `main` may
+point at this build for only some images: re-run the job, which is safe because a SHA tag is
+never pushed again.
+
+**Stage follows `:main`; prod never does.** Stage's overlays name `:main` with
+`imagePullPolicy: Always`, as they named the branch tags before, so a restart runs the newest
+published build. Prod's overlays ship with the placeholder `:<sha>`, which does not pull: before
+prod is first synced, and for every prod deploy after, set each prod image to a SHA published
+from main, preferably as `<sha>@sha256:<digest>` copied from that run's summary (4a), normally
+the build already verified on stage. `deploy/local/check-image-pins.py` fails a prod overlay
+in this repository that names one of these images by `:main` or any other moving tag.
+
+Not every commit on main is published. Publishes run one at a time and only one waits; a newer
+push to main replaces the waiting one, so an intermediate commit of a burst of merges may be
+skipped (`main` still reaches the newest). A publish also stops if the commit's `ci` run fails,
+and re-running `ci` does not start it again. In either case, a commit already on main is
+published, again or for the first time, from Actions, publish-images, "Run workflow" (from
+`main`) with its SHA as `ref`, once its `ci` run has succeeded.
+
+`woodpecker.yml` stays for Askedin, who may still run it, but its image steps are no longer
+needed: nothing pulls what they push. If Woodpecker keeps running, only its `rollout-restart`
+step does anything useful.
+
+Owner steps, once (the repository's owner, on github.com):
+
+1. Merge to `main` and let the first publish-images run finish (Actions, publish-images). A
+   push to GHCR from a workflow creates each package linked to this repository, private.
+2. Make each package public, so the cluster pulls without credentials. For each of
+   `ulw-video-gateway`, `ulw-video-worker`, `ulw-chat` and `ulw-live-packager`: open
+   `https://github.com/users/jerome-joseph-1/packages/container/package/<name>`, then
+   Package settings, Danger Zone, Change visibility, Public, and type the name to confirm.
+   Public cannot be made private again. While there, "Manage Actions access" should list this
+   repository with the Write role (it does when the workflow created the package); without it
+   the next publish is refused.
+3. Check an anonymous pull works, from a machine not logged in to ghcr.io:
+
+   ```sh
+   docker logout ghcr.io
+   docker pull ghcr.io/jerome-joseph-1/ulw-video-gateway:main
+   ```
+
+Askedin's steps (the person with access to the cluster):
+
+1. Copy `overlays/stage/*` and `overlays/prod/*` into the monorepo's overlay tree, and in the
+   prod copy replace every `:<sha>` with the build to run (4a); prod cannot sync until then.
+   The images are public, so no pull secret and no registry credential is needed; the nodes
+   need to reach `ghcr.io` and `pkg-containers.githubusercontent.com` over https, which serves
+   the layers.
+2. Bootstrap stage once:
 
    ```sh
    scripts/apply-k8s-overlay.sh stage --with-deployments
@@ -462,7 +521,21 @@ is on the internet. If the host's address is stable, add it as an `ipBlock` to t
    `kubectl set image`, a manual scale) is reset to what git says. Check first with
    `kubectl -n apps-stage diff -f <each other service's deployment.yaml>`, and run it when a
    reset would not hurt.
-4. From then on ArgoCD syncs the manifests and Woodpecker only restarts.
+3. From then on ArgoCD syncs the manifests. To run a newer published build on stage, restart,
+   gateway first (its init container migrates the schema before the new pods serve):
+
+   ```sh
+   NS=apps-stage
+   kubectl -n "$NS" rollout restart deployment/video-gateway
+   kubectl -n "$NS" rollout status deployment/video-gateway --timeout=10m
+   kubectl -n "$NS" rollout restart deployment/video-worker
+   kubectl -n "$NS" rollout restart deployment/chat
+   ```
+
+   Prod is not restarted onto a new build: a prod deploy is a commit in the monorepo that sets
+   prod's images to the new `<sha>@sha256:<digest>` (4a), which ArgoCD syncs, the gateway's
+   init container migrating first. To hold stage on one build, set its images the same way. A
+   `kubectl set image` alone is undone by ArgoCD's next sync.
 
 The route serves `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` on the environment's
 hostnames only: `stage.askedin.com` on stage, `askedin.com` and `www.askedin.com` on prod. Both
@@ -472,112 +545,59 @@ the other environment's host too. If the video plane gets a hostname of its own,
 
 ### 4a. Deploying by digest
 
-The overlays name the images by branch tag (`:development`, `:master`) with
-`imagePullPolicy: Always`. A tag is mutable: whoever can push to the registry can change what
-the next restart, reschedule or node drain runs, and two gateway pods started a minute apart can
-run different builds. LiveKit, which is not built here, is already pinned by digest. Ours cannot
-be written into the manifests at commit time, because the digest only exists once the pipeline
-has built that very commit. So the pipeline has to write it, and ArgoCD, which owns the
-manifests, then deploys exactly that digest. Nothing in `woodpecker.yml` does this yet: it needs
-two things only you can set up, a Woodpecker secret allowed to push to the monorepo branch
-ArgoCD follows, and ArgoCD rendering the overlay with kustomize. Once both exist:
+`:main` is mutable: each publish moves it, so a restart, reschedule or node drain can change what
+runs, and two gateway pods started a minute apart can run different builds. That is accepted
+on stage only. Prod always names a published commit: its SHA tag, which publish-images never
+moves once pushed, and preferably its digest too, as `<sha>@sha256:<digest>`, which the
+runtime pulls by digest while the SHA keeps it readable. LiveKit, which is not built here, is
+already pinned by digest. Ours cannot be written into this repository's overlays at commit
+time, because the digest only exists once publish-images has built that very commit; so prod's
+overlays here carry the placeholder `:<sha>`, and you set it in the monorepo's copy, which
+ArgoCD then deploys exactly.
 
-1. Put a `kustomization.yaml` in each of `overlays/{stage,prod}/video-gateway`, `video-worker`,
-   `upload-reaper` and `chat`, listing that directory's manifests under `resources:` and the
-   image under `images:`. ArgoCD renders a directory with a `kustomization.yaml` through
-   kustomize on its own. Change `imagePullPolicy: Always` to `IfNotPresent`: a digest never
-   changes, so there is nothing to pull again.
-2. Add a step to `woodpecker.yml` after the image steps, in place of `rollout-restart`: resolve
-   the digest of the tag just pushed under the commit's SHA (not the branch tag, which a
-   concurrent build may have moved), write it with kustomize, and commit it. With `crane` and
-   `kustomize` in an image pinned by tag and digest like every other step:
+1. Take the images from the publish run's summary for the commit you mean to deploy (Actions,
+   publish-images, the run, Summary, "Published images"), each as `<sha>@sha256:<digest>`, or
+   resolve them from its SHA tag; both give the same `sha256:...`. The commit must be on main
+   and its run must have succeeded (a skipped commit has no images; see step 4):
 
    ```sh
-   overlays=<path to overlays/ in the monorepo>   # fill in: the directory holding stage and prod
-   case "$CI_COMMIT_BRANCH" in
-     master) env=prod ;;
-     development) env=stage ;;
-   esac
-   gw=git.askedin.com/askedin/askedin-monorepo/video-gateway
-   wk=git.askedin.com/askedin/askedin-monorepo/video-worker
-   ch=git.askedin.com/askedin/askedin-monorepo/chat
-   gw_digest=$(crane digest "$gw:$CI_COMMIT_SHA")
-   wk_digest=$(crane digest "$wk:$CI_COMMIT_SHA")
-   ch_digest=$(crane digest "$ch:$CI_COMMIT_SHA")
-   git config user.name "<pipeline commit name>"      # fill in
-   git config user.email "<pipeline commit email>"    # fill in
-   # The monorepo's clone URL, assumed from the registry path: confirm it. The token is read
-   # from the environment on each call, never written to .git/config.
-   git remote add deploy https://git.askedin.com/askedin/askedin-monorepo.git
-   git config credential.helper \
-     '!f() { echo "username=<push user>"; echo "password=$DEPLOY_PUSH_TOKEN"; }; f'
-   pin() {
-     (cd "$overlays/$env/video-gateway" && kustomize edit set image "$gw=$gw@$gw_digest")
-     (cd "$overlays/$env/upload-reaper" && kustomize edit set image "$gw=$gw@$gw_digest")
-     (cd "$overlays/$env/video-worker" && kustomize edit set image "$wk=$wk@$wk_digest")
-     (cd "$overlays/$env/chat" && kustomize edit set image "$ch=$ch@$ch_digest")
-     # Already pinned (a rerun, or the branch holds this digest): nothing to commit.
-     git diff --quiet || git commit -qam "deploy: video images $CI_COMMIT_SHA [skip ci]"
-   }
-   pin
-   for attempt in 1 2 3; do
-     git push deploy "HEAD:$CI_COMMIT_BRANCH" && exit 0
-     # Non-fast-forward: start again from the branch as it is now, not from a rebase.
-     git fetch deploy "$CI_COMMIT_BRANCH" && git checkout -q FETCH_HEAD || exit 1
-     # A code commit after this one builds and pins its own digest; leave it to that build.
-     newer=$(git rev-list -1 --fixed-strings --invert-grep --grep='[skip ci]' \
-       "$CI_COMMIT_SHA..HEAD")
-     [ -z "$newer" ] || exit 0
-     pin
+   SHA=<full commit sha on main>
+   for svc in video-gateway video-worker chat live-packager; do
+     echo "ghcr.io/jerome-joseph-1/ulw-$svc:$SHA@$(crane digest "ghcr.io/jerome-joseph-1/ulw-$svc:$SHA")"
    done
-   exit 1
    ```
 
-   Fill in `overlays` for the monorepo's layout, the commit identity and push user, and confirm
-   the remote URL. The token comes from a Woodpecker secret, named in the step and never written
-   into the file:
+2. In the monorepo's prod copy (or stage's, to hold stage on one build), replace each image's
+   tag with that service's `<sha>@sha256:<digest>`: `video-gateway/deployment.yaml` (both the
+   `migrate` and `gateway` containers) and `upload-reaper/cronjob.yaml` take the gateway's,
+   `video-worker/deployment.yaml` the worker's, `chat/deployment.yaml` chat's:
 
-   ```yaml
-   environment:
-     DEPLOY_PUSH_TOKEN:
-       from_secret: deploy_push_token
+   ```sh
+   env=prod                                # or stage
+   SHA=<full commit sha on main>
+   r=ghcr.io/jerome-joseph-1
+   pin() {  # pin FILE SERVICE DIGEST (sha256:..., without the @, which pin adds)
+     sed -i -E "s#($r/ulw-$2):[^ ]+\$#\1:$SHA@$3#" "overlays/$env/$1"
+   }
+   pin video-gateway/deployment.yaml video-gateway sha256:<gateway digest>
+   pin upload-reaper/cronjob.yaml video-gateway sha256:<gateway digest>
+   pin video-worker/deployment.yaml video-worker sha256:<worker digest>
+   pin chat/deployment.yaml chat sha256:<chat digest>
+   grep -rn "image: $r/" "overlays/$env"   # every one now names $SHA@sha256:...
    ```
 
-   Woodpecker checks out the commit as a detached HEAD, so the push names the branch,
-   `HEAD:$CI_COMMIT_BRANCH`; a bare `git push` has no branch to push. The commit carries
-   `[skip ci]`, so it does not build again; ArgoCD sees the new digest and rolls the deployments
-   itself, the gateway's init container migrating first as today.
+   This is GNU sed; on macOS, BSD sed needs `sed -i '' -E` in `pin`.
 
-   When the push is refused because the branch moved, a rebase would always conflict if the
-   commit that landed is another build's digest commit: both edit the same `digest:` lines from
-   the same base. So the step fetches the branch, and if a code commit (one whose message lacks
-   `[skip ci]`) has landed after `$CI_COMMIT_SHA`, it stops without pinning, because that newer
-   build pins itself. Otherwise only digest commits landed, from builds of this commit or older
-   ones, and it redoes its four edits on the fetched tree, commits and pushes, up to three
-   times. The edits are regenerated rather than replayed, so a shallow clone (Woodpecker's
-   default) is enough: the fetch brings the commits after the clone's, and the check reads only
-   the range after `$CI_COMMIT_SHA`, which the clone has. The rule holds only while every commit
-   on the branch runs this pipeline: if the monorepo's pipeline filters on paths (`when: path:`),
-   a commit outside them never pins, so limit the check to the same paths
-   (`git rev-list ... "$CI_COMMIT_SHA..HEAD" -- <the video paths>`). The `exit`s end the step,
-   so the snippet is the step's last command.
-   Drop the restricted kubeconfig then: the pipeline no longer touches the cluster.
-   The live packager is not pinned this way: its Job template is filled in per stream, so
-   whatever starts a stream names the image, and should name it by the digest of the build it
-   means (`crane digest .../live-packager:<sha>`) rather than by the branch tag (step 9).
-3. Rollback (section 6) becomes one of:
-   - `kustomize edit set image` to the digest of `<good sha>`, committed with `[skip ci]`;
-   - a revert of the digest commit, whose message must also carry `[skip ci]`
-     (`git revert --no-edit <commit>`, then `git commit --amend` to add it). Without it the
-     revert builds the branch's HEAD, the bad code, and the new digest step pins it again;
-   - a revert of the bad code itself, which builds and pins a good image the normal way.
+   Change `imagePullPolicy: Always` to `IfNotPresent` in the pinned overlays: a digest never
+   changes, so there is nothing to pull again. Commit; ArgoCD rolls the deployments itself, the
+   gateway's init container migrating first as today. A deploy is then a commit of new digests,
+   and a rollback (section 6) a commit of old ones.
+3. The live packager is not pinned this way: its Job template is filled in per stream, so
+   whatever starts a stream names the image. On prod it is always the live-packager's
+   `<sha>@sha256:<digest>` from the same run (step 9), never `main`.
 
-   Any of these instead of a retag and a restart. Before a rollback by digest, cancel or wait
-   out any pipeline still running on the branch: one that finishes afterwards sees the rollback
-   as another build's digest commit and pins its own image over it.
-
-Until then, what a pod runs is at least recorded. This prints each pod's resolved digest, which
-must match `crane digest <image>:<sha>` of the commit you meant to deploy:
+On stage, which follows `:main`, what a pod runs is at least recorded. This prints each pod's
+resolved digest, which must match the summary's digest for the commit you meant to deploy:
 
 ```sh
 kubectl -n apps-stage get pods -o \
@@ -595,10 +615,10 @@ check requires. On the Debian images those marks are a static property only: Deb
 `libc.so.6` is unmarked, so the kernel does not enable a shadow stack for their processes. And
 because their binaries run on trixie's libraries, the Ubuntu release they are built on must not
 have a newer glibc or libstdc++ than trixie; the trixie workflow fails if they stop loading
-there. Woodpecker's builder needs to reach both snapshot services over https, deb.debian.org
-over http for the Debian stage's bootstrap of ca-certificates (signed and checked for
-freshness), and Docker Hub for both base images. A builder behind a TLS-inspecting proxy passes
-its CA as the build secret `ca-bundle`. Each image is one `target:` of `deploy/docker/Dockerfile`
+there. publish-images builds on GitHub's hosted runners, which reach both snapshot services
+over https, deb.debian.org over http for the Debian stage's bootstrap of ca-certificates (signed
+and checked for freshness), and Docker Hub for both base images. A builder elsewhere behind a
+TLS-inspecting proxy passes its CA as the build secret `ca-bundle`. Each image is one `target:` of `deploy/docker/Dockerfile`
 (`gateway`, `worker`, `chat`, `live-packager`); a bump of the worker's ffmpeg below reaches the
 live packager's image too.
 
@@ -747,27 +767,33 @@ otherwise bump at least monthly.
 
 ## 6. Rollback
 
-The overlays pull the branch tag, so a rollback is a retag and a restart. Woodpecker also
-pushed every build under its commit SHA:
+Prod is always pinned (4a), so a prod rollback is a commit of the good build's
+`<sha>@sha256:<digest>` in the monorepo's prod overlay, from that build's publish run summary,
+which ArgoCD deploys. Stage, which follows `:main`, is pointed at the good build the same way:
+every publish is kept under its full SHA, which never moves, so set each image from `main` to
+`<good sha>@sha256:<digest>` (a SHA on main whose publish-images run succeeded) in the monorepo's
+stage overlay, commit, and let ArgoCD sync. In a hurry, and knowing ArgoCD's next sync undoes it:
 
 ```sh
-crane tag git.askedin.com/askedin/askedin-monorepo/video-gateway:<good sha> development
-crane tag git.askedin.com/askedin/askedin-monorepo/video-worker:<good sha> development
-crane tag git.askedin.com/askedin/askedin-monorepo/chat:<good sha> development
-crane tag git.askedin.com/askedin/askedin-monorepo/live-packager:<good sha> development
-kubectl -n apps-stage rollout restart deployment/video-gateway
-kubectl -n apps-stage rollout status deployment/video-gateway
-kubectl -n apps-stage rollout restart deployment/video-worker
-kubectl -n apps-stage rollout restart deployment/chat
+NS=apps-stage                       # apps for prod
+r=ghcr.io/jerome-joseph-1
+kubectl -n "$NS" set image deployment/video-gateway migrate="$r/ulw-video-gateway:<good sha>" \
+  gateway="$r/ulw-video-gateway:<good sha>"
+kubectl -n "$NS" rollout status deployment/video-gateway
+kubectl -n "$NS" set image deployment/video-worker worker="$r/ulw-video-worker:<good sha>"
+kubectl -n "$NS" set image deployment/chat chat="$r/ulw-chat:<good sha>"
+kubectl -n "$NS" set image cronjob/upload-reaper reaper="$r/ulw-video-gateway:<good sha>"
 ```
 
-Packagers already running keep their build; streams started after the retag pull the good one.
+Packagers already running keep their build; start new streams with
+`TAG=<good sha>@sha256:<digest>`, the live-packager's (step 9).
 A rollback across a change of chat's node-channel version is a `Recreate` too (step 3).
 
-(`docker pull`, `docker tag`, `docker push` do the same as `crane tag`.) Migrations only add
-(docs/adr/0031), so the older build runs against the newer schema; the database is never rolled
-back. For prod, the tag is `master` and the namespace `apps`. Revert the commit on the branch
-too, or the next push redeploys it.
+Migrations only add (docs/adr/0031), so the older build runs against the newer schema; the
+database is never rolled back. Revert the bad commit on this repository's `main` too: its
+revert publishes a good `:main`, and until then a restart of anything on stage still on `:main`
+runs the bad build again; then set stage back to `main` and pin prod to the revert's build
+when it is verified.
 
 To take the plane out entirely: delete the HTTPRoute first (uploads stop at the edge), then
 scale both deployments to 0. Uploads in progress resume once it is back. Chat the same way: its
@@ -908,7 +934,7 @@ Do not install the chart's own Gateway API CRDs: Envoy Gateway owns them, and a 
 another version would fight it. Then copy `overlays/stage/stunner/`, `overlays/stage/livekit/`
 and `overlays/stage/livekit-redis/` (and `overlays/stage/livekit-egress/` for live streams)
 into the monorepo's stage overlay tree like the others; ArgoCD applies them. LiveKit, Redis and
-egress are pulled by digest, so Woodpecker has nothing to build for them.
+egress are pulled by digest, so there is nothing to build for them.
 
 ### Verify on stage
 
@@ -1224,7 +1250,7 @@ letters, digits and `-`, 1 to 63 (ADR-0053). The passphrase is the stream's own,
 characters, and goes only into its Secret and the relay request:
 
 ```sh
-NS=apps-stage TAG=development          # apps and master for prod
+NS=apps-stage TAG=main                 # prod: NS=apps TAG=<sha>@sha256:<digest> (4a)
 STREAM=launch-2026
 OWNER=<the broadcaster's Askedin user id (sub)>
 kubectl -n "$NS" create secret generic "live-packager-$STREAM" \

@@ -46,7 +46,9 @@ spec:
           localhostProfile: profiles/ulw-worker.json
       containers:
         - name: worker
-          image: git.askedin.com/askedin/askedin-monorepo/video-worker:master
+          # Prod never follows :main: set a SHA publish-images.yml published from main,
+          # best as <sha>@sha256:<digest> from its run's summary (RUNBOOK.md, 4a).
+          image: ghcr.io/jerome-joseph-1/ulw-video-worker:<sha>
           imagePullPolicy: Always
           env:
             - name: ULW_STORAGE

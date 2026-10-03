@@ -35,8 +35,9 @@ packager_job() {
         -e 's/\${ULW_STREAM_OWNER}/0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d/g' \
         "$root/deploy/askedin/live-packager/job.yaml"
 }
-packager_job apps-stage development >"$manifests/live-packager-stage.yaml"
-packager_job apps master >"$manifests/live-packager-prod.yaml"
+# Stage may follow main; prod names a commit published from main (RUNBOOK.md, step 9).
+packager_job apps-stage main >"$manifests/live-packager-stage.yaml"
+packager_job apps 0123456789abcdef0123456789abcdef01234567 >"$manifests/live-packager-prod.yaml"
 # shellcheck disable=SC2016 # a literal ${
 if grep -n '\${' "$manifests"/live-packager-*.yaml; then
     echo "validate-manifests: live-packager/job.yaml has a variable RUNBOOK.md does not fill" >&2

@@ -1,7 +1,8 @@
 # The registries the manifests may name, for Trivy's KSV-0125 (docs/adr/0072), in place of its
 # default list of cloud providers' registries:
-#   git.askedin.com  Askedin's registry, where Woodpecker pushes the images this repository
-#                    builds (deploy/askedin/woodpecker.yml);
+#   ghcr.io          GitHub's registry, where .github/workflows/publish-images.yml pushes the
+#                    images this repository builds (ghcr.io/jerome-joseph-1/ulw-*); anything
+#                    else there must be pinned by digest, as for docker.io below;
 #   docker.io        the upstream images: STUNner, LiveKit, Envoy, kube-router. Trusting the
 #                    whole registry is safe only because no reference can move:
 #                    deploy/local/check-image-pins.py (run by validate-manifests.sh, in CI)
@@ -13,6 +14,6 @@
 #                    registry.
 ksv0125:
   trusted_registries:
-    - git.askedin.com
+    - ghcr.io
     - docker.io
     - ulw

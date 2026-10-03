@@ -34,7 +34,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0028](0028-segments-fetched-cross-origin-without-credentials.md) | Viewers fetch segments cross-origin, without credentials | Accepted |
 | [0029](0029-websocket-messages-own-their-payload.md) | WebSocket messages own their payload | Accepted |
 | [0030](0030-container-images-on-ubuntu-from-a-dated-snapshot.md) | Container images build and run on Ubuntu 24.04 from a dated snapshot | Accepted |
-| [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted |
+| [0031](0031-schema-migrations-in-the-gateways-init-container.md) | Schema migrations run in the gateway's init container | Accepted, image publishing amended by 0085 |
 | [0032](0032-worker-pods-in-their-own-user-namespace.md) | The worker pod runs in its own user namespace with a derived seccomp profile | Accepted |
 | [0033](0033-sdp-parsed-strictly-and-serialized-exactly.md) | SDP is parsed strictly into a typed model that serializes back exactly | Accepted |
 | [0034](0034-rtp-and-rtcp-read-in-place.md) | RTP and RTCP are read in place, for tooling and tests | Accepted |
@@ -75,7 +75,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0069](0069-chat-soak-flatness-per-command-delivery-and-connection.md) | Chat soak flatness judged per command, delivery and connection | Accepted |
 | [0070](0070-live-chat-lossy-and-bounded.md) | A stream's live chat: joined by the stream, lossy for every viewer, bounded everywhere | Accepted |
 | [0071](0071-slow-readers-are-not-reset-by-the-kernel.md) | Slow readers are not reset by the kernel: the gateway and the node channel bound their own peers | Accepted |
-| [0072](0072-security-analysis-in-ci.md) | Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check | Accepted |
+| [0072](0072-security-analysis-in-ci.md) | Security analysis in CI: CodeQL, osv-scanner, Trivy, workflow lint, hardening check | Accepted, own-build registry exemption amended by 0085 |
 | [0073](0073-a-chat-socket-ends-with-its-token-and-its-membership.md) | A chat socket ends with its token, and a room with its membership | Accepted |
 | [0074](0074-ffmpeg-from-debian-security.md) | The worker's ffmpeg comes from Debian 13's security archive | Accepted |
 | [0075](0075-unused-chat-room-records-are-forgotten.md) | A chat room's record that nothing used is forgotten | Accepted |
@@ -86,5 +86,6 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0080](0080-coverage-floor.md) | Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory | Accepted |
 | [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted |
 | [0082](0082-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted |
-| [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted |
+| [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085 |
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted |
+| [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted |

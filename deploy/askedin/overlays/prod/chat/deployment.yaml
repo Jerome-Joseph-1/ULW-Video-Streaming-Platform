@@ -43,7 +43,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: chat
-          image: git.askedin.com/askedin/askedin-monorepo/chat:master
+          # Prod never follows :main: set a SHA publish-images.yml published from main,
+          # best as <sha>@sha256:<digest> from its run's summary (RUNBOOK.md, 4a).
+          image: ghcr.io/jerome-joseph-1/ulw-chat:<sha>
           imagePullPolicy: Always
           ports:
             - name: http
