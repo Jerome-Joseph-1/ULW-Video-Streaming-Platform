@@ -40,7 +40,7 @@ The ops team fills these in.
 
 | | Stage | Prod |
 |---|---|---|
-| App origin (`<APP_ORIGIN>`) | `https://<STAGE_APP_HOST>` | `https://<PROD_APP_HOST>` |
+| App origin (`<APP_ORIGIN>`) | `https://stage.askedin.com`, unconfirmed | `https://askedin.com`, `https://www.askedin.com` |
 | Video API (`$GW`) | `https://stage.askedin.com`, unconfirmed (paths `/api/v1/uploads`, `/api/v1/videos`, `/api/v1/live`) | `https://askedin.com`, `https://www.askedin.com` |
 | Segment host (R2) | `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` | same form, prod bucket |
 | Chat (`wss://<CHAT_HOST>/rt`) | not deployed yet | not deployed yet |

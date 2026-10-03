@@ -57,6 +57,9 @@ with an `Authorization` header is not checked: other sites cannot make the brows
   web app's own origin must therefore be in `ULW_ALLOWED_ORIGINS` for it to upload with the
   cookie. With no list set, the cookie works only for `GET` and `HEAD` from the gateway's own
   origin.
+- Cookie writes work only same-origin, with the API on the page's own host: a page on
+  `askedin.com` calling `www.askedin.com`, or the reverse, gets `403` unless
+  `ULW_ALLOW_SAME_SITE=1` is set.
 - `ULW_ALLOWED_ORIGINS` entries are `scheme://host[:port]`, lowercase, exactly as a browser
   writes `Origin`. `http://` is accepted only for `localhost`, `127.0.0.1` and `[::1]` (a dev
   server); any other `http://` entry stops the gateway at startup. An entry naming the scheme's

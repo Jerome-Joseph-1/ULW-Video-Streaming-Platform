@@ -648,7 +648,7 @@ otherwise bump at least monthly.
    ```sh
    kubectl -n apps-stage get deploy video-gateway video-worker chat # 2/2, 1/1 and 3/3
    kubectl -n apps-stage logs deploy/video-gateway -c migrate        # "applied …" or "schema is up to date"
-   for route in video-gateway chat; do
+   for route in video-gateway chat livekit; do
      kubectl -n apps-stage get httproute "$route" \
        -o jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}{"\n"}'   # True
    done
@@ -661,7 +661,10 @@ otherwise bump at least monthly.
    database: its log says which.
 
    A route with `Accepted` missing or False is the stage 404 trap: check `parentRefs` names
-   namespace `apps`.
+   namespace `apps`. A route is also not Accepted (`NoMatchingListenerHostname`) when none of its
+   `hostnames` falls within a listener hostname of `askedin-gateway`: check the listeners cover
+   the apex `askedin.com` as well as `www.askedin.com` and `stage.askedin.com` (a `*.askedin.com`
+   listener does not match the apex).
 2. An end-to-end run with a real stage token (from a browser session's `auth_token_stage`
    cookie):
 
