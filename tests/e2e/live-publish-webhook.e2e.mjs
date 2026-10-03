@@ -1,16 +1,20 @@
 // ADR-0093 acceptance: a stream whose client never calls start or end, as an encoder with a fixed
 // token, or a client that crashes. The broadcaster's page creates a stream and publishes over
 // WHIP, and nothing more: LiveKit's webhooks to the gateway's own listener take it live. The
-// page then drops its peer connection without a WHIP DELETE: the stream ends with nobody asking,
-// and its recording becomes a video that plays.
+// page then closes its WHIP session (a DELETE, as RFC 9725 has a client stop) and never calls
+// the gateway's end: the stream ends with nobody asking it to, and its recording becomes a video
+// that plays.
 //
-// Two ends race there, and both are right. The packager ends the playlist once it has had no
-// media for 5 segments (10 s), and exits after recording; the sweep then ends the row `finished`.
-// LiveKit notices the vanished publisher by its own timeout, about as late, and after the grace
-// the gateway, having asked LiveKit, ends the row `publisher_left`. A crashed client meets the
-// same race in production, so the run takes either, and checks that the webhooks saw the
-// departure. tests/integration/live_webhook_test.cpp ends a stream `publisher_left` against the
-// same LiveKit with nothing to race it.
+// Two ends race there, and both are right. LiveKit reports the publisher gone at once, and after
+// the grace the gateway, having asked LiveKit, ends the row `publisher_left`. LiveKit's recorder
+// ends with the publisher, the packager ends the playlist and exits after recording, and the
+// sweep then ends the row `finished`, unless the first got there. The run takes either, and
+// checks that the webhooks saw the departure; tests/integration/live_webhook_test.cpp ends a
+// stream `publisher_left` against the same LiveKit with nothing to race it.
+//
+// A client that vanishes without the DELETE is not this run: LiveKit notices it only by its own
+// timeout, while the packager, sent nothing, ends the playlist 5 segments (10 s) in and exits
+// counting the stall a failure, so the sweep ends the row `failed` first (ADR-0093).
 //
 // LiveKit must post its webhooks to this gateway: deploy/local/compose.yaml's LiveKit posts to
 // 127.0.0.1:7890, the port used here unless ULW_E2E_WEBHOOK_PORT names another.
@@ -104,9 +108,9 @@ test('a stream published over WHIP goes live and ends by the media server\'s wor
         return playlist.ok ? (await playlist.text()).split('#EXTINF').length - 1 : 0;
       }, { timeout: 60_000, intervals: [500] }).toBeGreaterThanOrEqual(kSegments);
 
-      // The client vanishes without a word. Only the playlist and /metrics are read until the
-      // end is in, so no status request ends the row on the playlist's word.
-      await publisherPage.evaluate(() => window.dropPublisher());
+      // The client closes its session, and nothing else. Only the playlist and /metrics are read
+      // until the end is in, so no status request ends the row on the playlist's word.
+      expect([200, 204]).toContain(await publisherPage.evaluate(() => window.closePublisher()));
       await expect.poll(async () => {
         const playlist = await api('GET', `${route}/index.m3u8`, owner);
         return playlist.ok && (await playlist.text()).includes('#EXT-X-ENDLIST');

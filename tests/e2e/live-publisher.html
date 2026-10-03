@@ -90,6 +90,14 @@ window.publish = async (token, { start = true } = {}) => {
     pc.close();
     for (const track of media.getTracks()) track.stop();
   };
+  // How a WHIP client stops on its own (RFC 9725): DELETE its session, with a fresh ticket.
+  // No call to the gateway's end.
+  window.closePublisher = async () => {
+    const deleted = await fetch(resource, { method: 'DELETE', headers: { authorization: await fresh() } });
+    state.steps.push({ method: 'DELETE', path: 'whip', status: deleted.status });
+    window.dropPublisher();
+    return deleted.status;
+  };
   if (!start) {
     return { id: stream.id, stream, whip: posted.status, patched: patched.status };
   }

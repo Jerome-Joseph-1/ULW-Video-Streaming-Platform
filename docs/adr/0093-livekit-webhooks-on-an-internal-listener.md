@@ -125,11 +125,14 @@ is a conditional write, so the first reason stands.
 - A stream goes live within a second or two of its publisher's first track, even if nobody calls
   `start`, and ends `publisher_left` about the grace after LiveKit reports its publisher gone,
   instead of `finished` once its packager has exited after recording (minutes, as a Job). A
-  publisher that vanishes without leaving is reported by LiveKit's own timeout, about as late as
-  the packager ends the playlist for want of media (5 segments, 10 s); where the packager also
+  publisher that closes its session (a WHIP DELETE) is reported at once; where the packager
   exits within seconds (the process runtime of the local stack and the browser suite) the sweep
-  can end the row `finished` first. A status request that sees the playlist ended first ends it
-  `finished` too, as before. Each is a departed publisher; clients must accept either.
+  can still end the row `finished` first. A publisher that vanishes without closing is reported
+  only by LiveKit's own timeout, and the packager, sent nothing meanwhile, ends the playlist 5
+  segments (10 s) in and exits counting the stall a failure: the sweep then ends the row `failed`
+  before the webhook's grace has begun (seen in the browser suite's run). A status request that
+  sees the playlist ended first ends it `finished`, as before. Each is a departed publisher;
+  clients must accept any of them.
 - The gateway trusts LiveKit's key pair to say who publishes; whoever holds that secret can
   already mint publisher tickets, so this adds no new party to trust.
 - A replay within a token's five minutes can repeat a start (idempotent) or a departure, whose end
