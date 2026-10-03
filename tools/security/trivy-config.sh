@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Trivy's misconfiguration checks over what deploy/ ships and runs (docs/adr/0072): the
-# Kubernetes manifests and Dockerfiles as they are, and the sandbox's two kustomizations as
-# rendered, since their patches are not manifests on their own. The checks are the ones built
+# Kubernetes manifests and Dockerfiles as they are, and the example overlays and the sandbox's
+# two kustomizations as rendered, since their patches and config are not manifests on their own. The checks are the ones built
 # into the pinned Trivy release; --skip-check-update keeps them from being replaced by whatever
 # the registry serves today. Any finding, of any severity, not in tools/security/trivyignore.yaml
 # (or past its expired_at there) fails.
@@ -13,16 +13,19 @@ trivy=$(tools/security/tools.sh trivy)/trivy
 kubectl=$(deploy/local/tools.sh)/kubectl
 python3 tools/security/check-allowlists.py
 
-# The two kustomizations are rendered and split one resource to a file, so the allowlist can
-# name a single resource (a path is all it can scope by). Their raw directories are left out:
-# the patches are fragments, and every resource they list is in the rendering.
+# The kustomizations are rendered and split one resource to a file, so the allowlist can name a
+# single resource (a path is all it can scope by). Their raw directories are left out: the
+# patches are fragments, and every resource they list is in the rendering. deploy/kubernetes's
+# base is also scanned as written, as an operator may apply its own overlay of it.
 scan=build/security/trivy-config
 rm -rf "$scan"
 mkdir -p "$scan/deploy"
 # Trivy takes one directory, so what it checks is copied into one, at the same paths.
-git ls-files -z deploy | grep -zv '^deploy/local/cluster/\|^deploy/stunner/' \
+git ls-files -z deploy |
+    grep -zv '^deploy/local/cluster/\|^deploy/stunner/\|^deploy/kubernetes/overlays/' \
     | xargs -0 cp --parents -t "$scan"
-for kustomization in deploy/local/cluster deploy/stunner; do
+for kustomization in deploy/kubernetes/overlays/staging deploy/kubernetes/overlays/production \
+    deploy/local/cluster deploy/stunner; do
     "$kubectl" kustomize --load-restrictor LoadRestrictionsNone "$kustomization" |
         python3 tools/security/split-resources.py "$scan/rendered/${kustomization//\//-}"
 done

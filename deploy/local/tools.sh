@@ -16,15 +16,13 @@ pins=(
      https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl"
     "kubeconform.tar.gz v0.8.0 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
      https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz"
-    "woodpecker-cli.tar.gz v3.18.0 23e9b44eaa9dead25f39ad7ac69407f69769e1a8ce98795667bd3109c009ded7
-     https://github.com/woodpecker-ci/woodpecker/releases/download/v3.18.0/woodpecker-cli_linux_amd64.tar.gz"
     "envoy-gateway.yaml v1.9.2 0412a72907e57ff9b73c56a7bf6df5190bf0f6e4f8bb4bba34e38630bbab5778
      https://github.com/envoyproxy/gateway/releases/download/v1.9.2/install.yaml"
     # metrics-server, for the load check's kubectl top (metrics-server.sh installs it).
     "metrics-server.yaml v0.9.0 1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b
      https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"
     # STUNner's CRDs, from its Helm chart at the v1.2.1 tag (deploy/stunner/up.sh). The chart's
-    # other templates are rendered in deploy/askedin/stunner/; its Gateway API CRDs are not
+    # other templates are rendered in deploy/kubernetes/cluster/stunner/; its Gateway API CRDs are not
     # used, since Envoy Gateway's install.yaml above carries a release of its own.
     "stunner-crds.yaml v1.2.1 720ab0c18e0e51b8cee18259685061e03cc0d3d01e90a0c0fc20c5144351b279
      https://raw.githubusercontent.com/l7mp/stunner-helm/08555494a2fdb53c0f8a0146cfa1c951dbb83f1b/helm/stunner/crds/stunner-crds.yaml"
@@ -82,9 +80,7 @@ for pin in "${pins[@]}"; do
 done
 
 chmod 0755 "$tools/kind" "$tools/kubectl"
-for tool in kubeconform woodpecker-cli; do
-    if [[ ! -x $tools/$tool || $tools/$tool -ot $tools/$tool.tar.gz ]]; then
-        tar -xzmf "$tools/$tool.tar.gz" -C "$tools" "$tool"
-    fi
-done
+if [[ ! -x $tools/kubeconform || $tools/kubeconform -ot $tools/kubeconform.tar.gz ]]; then
+    tar -xzmf "$tools/kubeconform.tar.gz" -C "$tools" kubeconform
+fi
 echo "$tools"

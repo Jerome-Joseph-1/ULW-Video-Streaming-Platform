@@ -1,33 +1,20 @@
-# What the sandbox changes in the stage chat Deployment, and why:
-# - images come from the node, never a registry;
-# - the mock auth-service stands in for Askedin's, so JWKS_URL comes from the sandbox's secret
-#   instead of the overlay's value, and its certificate is checked against the sandbox CA, as
-#   for video-gateway (gateway-patch.yaml);
-# - kind's pod network is 10.244.0.0/16, not K3s's 10.42.0.0/16;
+# What the sandbox changes in chat beyond its config.env (../config.env), and why:
+# - the mock auth-service's certificate is checked against the sandbox CA, as for video-gateway
+#   (gateway-patch.yaml);
 # - one kind node on a 4-core runner has almost no CPU left to reserve once the gateways, the
 #   worker, LiveKit and STUNner's dataplane hold theirs (50m for each chat pod already left
 #   STUNner unschedulable), so chat reserves next to nothing and runs on what is idle. Memory is
-#   left as the target has it.
+#   left as the base has it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: chat
-  namespace: apps-stage
+  namespace: ulw
 spec:
   template:
     spec:
       containers:
         - name: chat
-          imagePullPolicy: Never
-          env:
-            - name: JWKS_URL
-              value: null
-              valueFrom:
-                secretKeyRef:
-                  name: chat-secrets
-                  key: JWKS_URL
-            - name: ULW_TRUSTED_PROXIES
-              value: "10.244.0.0/16"
           resources:
             requests:
               cpu: 10m

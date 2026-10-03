@@ -18,7 +18,7 @@ import vod_flow  # noqa: E402
 
 # An address that resolves nowhere (RFC 6761): a guard that let a call through would hang or
 # fail on DNS, never reach a machine.
-UNROUTABLE = "https://k8s-prod.askedin.invalid:6443"
+UNROUTABLE = "https://prod-cluster.example.invalid:6443"
 
 
 def kubeconfig(directory, server, context="kind-ulw-e2e"):
@@ -82,7 +82,7 @@ class GuardTest(unittest.TestCase):
         for scenario in ("netpol", "pod-kill"):
             message = self.run_main(fake, scenario)
             self.assertIn("refusing", message)
-            self.assertIn("k8s-prod.askedin.invalid", message)
+            self.assertIn("prod-cluster.example.invalid", message)
         self.assertEqual(self.calls, [])
 
     def test_a_missing_sandbox_kubeconfig_is_refused_even_with_one_in_the_environment(self):
@@ -105,7 +105,7 @@ class GuardTest(unittest.TestCase):
             self.assertEqual(args[1:5], ["--kubeconfig", str(sandbox), "--context", "kind-ulw-e2e"])
 
     def test_a_real_target_runs_only_the_http_scenarios_and_only_when_named(self):
-        os.environ["ULW_E2E_URL"] = "https://stage.askedin.invalid"
+        os.environ["ULW_E2E_URL"] = "https://staging.example.invalid"
         os.environ["ULW_E2E_TOKEN"] = "not-a-real-token"
         sandbox = kubeconfig(self.dir, "https://127.0.0.1:41234")
         for argv in ([], ["pod-kill"], ["netpol"], ["auth"], ["upload", "pod-kill"]):
@@ -113,7 +113,7 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
         names, url, token = vod_flow.plan(["upload", "playback"], os.environ)
         self.assertEqual((names, url, token),
-                         (["upload", "playback"], "https://stage.askedin.invalid",
+                         (["upload", "playback"], "https://staging.example.invalid",
                           "not-a-real-token"))
 
     def test_kubectl_refuses_when_the_target_is_not_the_sandbox(self):
@@ -129,7 +129,7 @@ class GuardTest(unittest.TestCase):
                 self.assertRaises(SystemExit) as exit_:
             stunner_check.main()
         self.assertIn("refusing", str(exit_.exception.code))
-        self.assertIn("k8s-prod.askedin.invalid", str(exit_.exception.code))
+        self.assertIn("prod-cluster.example.invalid", str(exit_.exception.code))
         self.assertEqual(self.calls, [])
 
 

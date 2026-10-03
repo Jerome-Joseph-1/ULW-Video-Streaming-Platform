@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Brings up the sandbox replica of Askedin's cluster on this machine, from scratch: a kind
-# cluster, Postgres and MinIO beside it (as they run beside K3s on k8s-prod), Envoy Gateway,
-# the mock auth-service, the stage overlays of video-gateway, video-worker and chat built from
-# this checkout (and the live packager's image, which runs no pod here), and STUNner with
+# Brings up a sandbox operator's cluster on this machine, from scratch: a kind cluster, Postgres
+# and MinIO beside it (as an operator's often run outside the cluster), Envoy Gateway, the mock
+# auth-service, and deploy/kubernetes's video-gateway, video-worker and chat, configured by
+# config.env and built from this checkout (and the live packager's image, which runs no pod here), and STUNner with
 # LiveKit behind it (deploy/stunner/up.sh). Rerunning rebuilds the images and reapplies
 # everything; e2e-down.sh removes it.
-# Nothing here knows how to reach Askedin's infrastructure.
+# Nothing here knows how to reach any real operator's infrastructure.
 #
 #   ULW_BUILDER    build with this docker buildx builder instead of the default one; the images
 #                  then reach the node as OCI archives and never enter the local image store
@@ -38,8 +38,7 @@ pg=ulw-e2e-pg
 minio=ulw-e2e-minio
 # Throwaway credentials; they guard containers reachable only from this machine.
 password=testtest123
-bucket=ulw-e2e
-issuer=https://auth.ulw-sandbox.test
+bucket=ulw-e2e                        # config.env's BUCKET
 
 log() { echo "e2e-up: $*" >&2; }
 
@@ -48,10 +47,10 @@ mkdir -p "$state/images" "$state/pki"
 create_cluster
 require_sandbox
 
-# The worker's seccomp profile, where the target's runbook installs it on k8s-prod.
+# The worker's seccomp profile, where deploy/kubernetes/RUNBOOK.md (step 2) installs it.
 node=$cluster-control-plane
 docker exec "$node" mkdir -p /var/lib/kubelet/seccomp/profiles
-docker cp "$root/deploy/askedin/seccomp/ulw-worker.json" \
+docker cp "$root/deploy/kubernetes/cluster/seccomp/ulw-worker.json" \
     "$node:/var/lib/kubelet/seccomp/profiles/ulw-worker.json"
 
 # On a host with DMI (any cloud VM, the CI runners among them) kind's entrypoint bind-mounts
@@ -101,7 +100,7 @@ pinned "$envoy_image" "$envoy_digest"
 pinned "$kube_router_image" "$kube_router_digest"
 
 # start NAME DOCKER_RUN_ARGS... runs a backing service on the kind network, where the node
-# reaches it as k8s-prod reaches its host's services; its data is a tmpfs and goes with it.
+# reaches it as an operator's cluster reaches services outside it; its data is a tmpfs and goes with it.
 start() {
     local name=$1
     shift
@@ -152,39 +151,29 @@ kubectl apply --server-side --force-conflicts -f "$tools/envoy-gateway.yaml" >/d
 kubectl -n envoy-gateway-system rollout status deployment/envoy-gateway --timeout=180s
 
 apply_stdin() { kubectl apply -f - >/dev/null; }
-for ns in apps apps-stage auth; do
+for ns in gateway-system ulw auth; do
     kubectl create namespace "$ns" --dry-run=client -o yaml | apply_stdin
 done
-kubectl -n apps-stage create configmap sandbox-ca --from-file=ca.crt="$pki/ca.crt" \
+kubectl -n ulw create configmap sandbox-ca --from-file=ca.crt="$pki/ca.crt" \
     --dry-run=client -o yaml | apply_stdin
 kubectl -n auth create secret tls mock-auth-tls --cert="$pki/mock-auth.crt" \
     --key="$pki/mock-auth.key" --dry-run=client -o yaml | apply_stdin
-# The keys are the ones RUNBOOK.md lists for .env.stage, with sandbox values, and JWKS_URL, which
-# the stage overlay sets to Askedin's and gateway-patch.yaml points back here at the mock.
+# The keys deploy/kubernetes/RUNBOOK.md (step 3) lists, with sandbox values; everything else
+# comes from config.env.
 for service in video-gateway video-worker; do
-    extra=()
-    if [[ $service == video-gateway ]]; then
-        extra=(--from-literal="JWKS_URL=https://mock-auth.auth.svc.cluster.local/.well-known/jwks.json"
-            --from-literal="JWT_ISSUER=$issuer")
-    fi
-    kubectl -n apps-stage create secret generic "$service-secrets" \
-        --from-literal=ASKEDIN_ENV=stage \
+    kubectl -n ulw create secret generic "$service-secrets" \
         --from-literal="ULW_DATABASE_URL=postgresql://postgres:$password@postgres:5432/postgres" \
-        --from-literal=ULW_S3_ENDPOINT=http://minio:9000 \
-        --from-literal="ULW_BUCKET=$bucket" \
         --from-literal=ULW_S3_ACCESS_KEY_ID=ulw-e2e \
         --from-literal="ULW_S3_SECRET_ACCESS_KEY=$password" \
-        "${extra[@]}" --dry-run=client -o yaml | apply_stdin
+        --dry-run=client -o yaml | apply_stdin
 done
-# Chat's, as RUNBOOK.md lists them, with a node secret made for this run.
-kubectl -n apps-stage create secret generic chat-secrets \
-    --from-literal=ASKEDIN_ENV=stage \
+# Chat's, with a node secret made for this run.
+kubectl -n ulw create secret generic chat-secrets \
     --from-literal="ULW_DATABASE_URL=postgresql://postgres:$password@postgres:5432/postgres" \
-    --from-literal="ULW_NODE_SECRET=$(openssl rand -base64 48)" \
-    --from-literal="JWKS_URL=https://mock-auth.auth.svc.cluster.local/.well-known/jwks.json" \
-    --from-literal="JWT_ISSUER=$issuer" --dry-run=client -o yaml | apply_stdin
+    --from-literal="ULW_NODE_SECRET=$(openssl rand -base64 48)" --dry-run=client -o yaml |
+    apply_stdin
 
-log "applying the sandbox and the stage overlays"
+log "applying the sandbox and deploy/kubernetes/base"
 kubectl kustomize --load-restrictor LoadRestrictionsNone "$here/cluster" | apply_stdin
 
 # endpoint NAME PORT_NAME PORT CONTAINER points Service NAME at a backing container.
@@ -196,7 +185,7 @@ apiVersion: discovery.k8s.io/v1
 kind: EndpointSlice
 metadata:
   name: $1
-  namespace: apps-stage
+  namespace: ulw
   labels:
     kubernetes.io/service-name: $1
 addressType: IPv4
@@ -212,16 +201,16 @@ endpoint minio s3 9000 "$minio"
 
 # The images are rebuilt on every run under the same tag, so pods from an earlier run would
 # keep the old ones.
-kubectl -n apps-stage rollout restart deployment/video-gateway deployment/video-worker \
+kubectl -n ulw rollout restart deployment/video-gateway deployment/video-worker \
     deployment/chat >/dev/null
 kubectl -n auth rollout status deployment/mock-auth --timeout=120s
-kubectl -n apps-stage rollout status deployment/video-gateway --timeout=300s
-kubectl -n apps-stage rollout status deployment/video-worker --timeout=300s
+kubectl -n ulw rollout status deployment/video-gateway --timeout=300s
+kubectl -n ulw rollout status deployment/video-worker --timeout=300s
 # Chat's tables come from the gateway's init container, so a chat pod that started before it
 # had migrated waits unready (or restarts) until they exist.
-kubectl -n apps-stage rollout status deployment/chat --timeout=300s
+kubectl -n ulw rollout status deployment/chat --timeout=300s
 kubectl -n envoy-gateway-system wait --for=condition=Available deployment \
-    --selector=gateway.envoyproxy.io/owning-gateway-name=askedin-gateway --timeout=180s
+    --selector=gateway.envoyproxy.io/owning-gateway-name=public-gateway --timeout=180s
 # Envoy takes a moment to program the routes after its pod is ready.
 curl -fsS -o /dev/null --retry 60 --retry-all-errors --retry-delay 1 \
     -X POST "http://127.0.0.1:18080/mock-auth/token?sub=probe"

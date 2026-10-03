@@ -82,12 +82,12 @@ class RefusalTest(unittest.TestCase):
         os.environ["KUBECONFIG"] = str(fake)
         message = self.run_main(fake)
         self.assertIn("refusing", message)
-        self.assertIn("k8s-prod.askedin.invalid", message)
+        self.assertIn("prod-cluster.example.invalid", message)
         self.assertEqual(self.calls, [])
         self.assertEqual(self.connections, [])
 
     def test_a_real_target_in_the_environment_is_ignored_and_only_the_sandbox_is_addressed(self):
-        os.environ["ULW_E2E_URL"] = "https://stage.askedin.invalid"
+        os.environ["ULW_E2E_URL"] = "https://staging.example.invalid"
         os.environ["ULW_E2E_TOKEN"] = "not-a-real-token"
         sandbox = guard_test.kubeconfig(self.dir, "https://127.0.0.1:41234")
         message = self.run_main(sandbox)
@@ -95,7 +95,7 @@ class RefusalTest(unittest.TestCase):
         self.assertTrue(self.calls)
         for args in self.calls:
             self.assertEqual(args[1:5], ["--kubeconfig", str(sandbox), "--context", "kind-ulw-e2e"])
-        self.assertNotIn("stage.askedin.invalid", " ".join(" ".join(c) for c in self.calls))
+        self.assertNotIn("staging.example.invalid", " ".join(" ".join(c) for c in self.calls))
         self.assertEqual(self.connections, [])
 
     def test_a_missing_sandbox_kubeconfig_is_refused(self):
