@@ -114,7 +114,9 @@ claim_from(core::ports::IObjectTransfer& store, const PublisherConfig& config, s
     {
         std::ofstream out(file, std::ios::binary | std::ios::trunc);
         out << "claimed\n";
-        if (!out) {
+        // As for the playlist: a write the disk refuses shows only when the buffer goes out.
+        out.close();
+        if (out.fail()) {
             return std::unexpected(PublishError::ClaimFailed);
         }
     }
@@ -293,7 +295,9 @@ std::expected<void, PublishError> Publisher::publish_playlist(const MediaPlaylis
     {
         std::ofstream out(file, std::ios::binary | std::ios::trunc);
         out << render_media_playlist(playlist);
-        if (!out) {
+        // As for ended_by: a write the disk refuses shows only when the buffer goes out.
+        out.close();
+        if (out.fail()) {
             return std::unexpected(PublishError::UploadFailed);
         }
     }
