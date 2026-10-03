@@ -4,10 +4,13 @@ name: restart-runner
 # pick up a change to its environment (its .path, for one: docs/operations/soak.md). Dispatched
 # by hand; only writers can dispatch, and every run stays in the Actions history.
 #
-# The job runs on whichever self-hosted runner takes it, which may be the one it restarts, so the
-# restart is handed to systemd for 15 s later: the job has ended by then and its own runner, if
-# it is the target, comes back idle. A runner in the middle of another job (a 6 h soak, say) is
-# refused unless `force` is set, because a restart cancels that job.
+# A runner in the middle of a job (a 6 h soak, say) is refused unless `force` is set, because a
+# restart cancels that job; busy means a Runner.Worker in the runner service's cgroup, which holds
+# whichever bin.<version> a self-updated runner runs from. Another runner is restarted at once.
+# The job runs on whichever self-hosted runner takes it, so when that is the target the restart is
+# handed to a systemd timer 15 s on, after this job has ended; it checks again then and skips the
+# restart if the runner has taken a new job meanwhile, unless `force` is set. A forced restart
+# stops the runner's listener; a job's processes that outlive it for 30 s stay in its cgroup.
 
 on:
   workflow_dispatch:
@@ -38,28 +41,45 @@ jobs:
           FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
-          units=$(systemctl list-units --type=service --all --no-legend 'actions.runner.*' |
+          units=$(systemctl list-units --plain --type=service --all --no-legend 'actions.runner.*' |
               awk '{print $1}')
           case "$TARGET" in
             1) unit=$(grep -vE -- '-[234]\.service$' <<<"$units" || true) ;;
             2 | 3 | 4) unit=$(grep -E -- "-${TARGET}\.service\$" <<<"$units" || true) ;;
-            *) echo "::error::no runner $TARGET"; exit 1 ;;
+            *) echo "::error::the runner input must be 1, 2, 3 or 4"; exit 1 ;;
           esac
-          if [[ $(wc -l <<<"$unit") -ne 1 || -z $unit ]]; then
+          if [[ -z $unit || $(wc -l <<<"$unit") -ne 1 ]]; then
             echo "::error::expected one service for runner $TARGET, found: ${unit:-none}"
             exit 1
           fi
+          # Exit status 0 when the unit's cgroup holds a Runner.Worker, that is, a job is running.
+          # A stopped or failed runner runs nothing; a running one whose cgroup cannot be read
+          # counts as busy, so the check fails closed. Defined once and passed to the delayed
+          # check as text, with the unit as an argument.
+          busy='[[ $(systemctl show -p ActiveState --value "$1") == active ]] || exit 1
+            cg=$(systemctl show -p ControlGroup --value "$1")
+            [[ -n $cg && -r /sys/fs/cgroup$cg/cgroup.procs ]] || exit 0
+            while read -r pid; do
+              [[ $(cat "/proc/$pid/comm" 2>/dev/null) == Runner.Worker ]] && exit 0
+            done <"/sys/fs/cgroup$cg/cgroup.procs"
+            exit 1'
           dir=$(realpath -m "$(systemctl show -p WorkingDirectory --value "$unit")")
           self=$(realpath -m "$RUNNER_WORKSPACE/../..")
-          # A runner busy with a job has a Runner.Worker; this job's own counts only when the
-          # target is this runner, and then the restart waits for the job to end.
-          if [[ $dir != "$self" ]] && pgrep -f "^$dir/bin/Runner.Worker( |\$)" >/dev/null; then
-            if [[ $FORCE != true ]]; then
-              echo "::error::runner $TARGET ($unit) is running a job; dispatch with force to cancel it"
-              exit 1
+          if [[ $dir != "$self" ]]; then
+            if bash -c "$busy" busy "$unit"; then
+              if [[ $FORCE != true ]]; then
+                echo "::error::runner $TARGET ($unit) is running a job; dispatch with force to cancel it"
+                exit 1
+              fi
+              echo "::warning::runner $TARGET is running a job, which the restart cancels"
             fi
-            echo "::warning::runner $TARGET is running a job, which the restart cancels"
+            sudo systemctl restart "$unit"
+            echo "runner $TARGET ($unit) restarted"
+          else
+            sudo systemd-run --quiet --collect --on-active=15 --timer-property=AccuracySec=1s \
+                --unit="restart-runner-$TARGET-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+                /usr/bin/bash -c 'if [[ $2 != true ]] && bash -c "$3" busy "$1"; then
+                  echo "runner $1 took a new job; not restarted"; else systemctl restart "$1"; fi' \
+                restart "$unit" "$FORCE" "$busy"
+            echo "runner $TARGET ($unit) is this job's runner: it restarts 15 s after this job"
           fi
-          sudo systemd-run --quiet --on-active=15 --unit="restart-runner-$TARGET-$GITHUB_RUN_ID" \
-              /usr/bin/systemctl restart "$unit"
-          echo "runner $TARGET ($unit, $dir) restarts in 15 s"
