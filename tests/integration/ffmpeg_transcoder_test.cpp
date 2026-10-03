@@ -342,4 +342,41 @@ TEST_F(TranscoderTest, AFileThatIsNotMediaIsRejected) {
     EXPECT_EQ(media.error().kind, TranscodeFailure::Rejected);
 }
 
+// The soak's self-hosted runs: a source the sandboxed ffprobe may not open (there, root without
+// capabilities behind a home directory of mode 750; here, a file of mode 000, which neither the
+// owner nor a capability-less root may read) is the host's fault, not the upload's.
+TEST_F(TranscoderTest, ASourceTheSandboxMayNotReadIsInaccessibleNotRejected) {
+    ASSERT_TRUE(ulw::test::make_clip(source(), {.size = "320x240", .rate = "25", .seconds = 1}));
+    fs::permissions(source(), fs::perms::none);
+    const auto media = transcoder_.probe(source(), {});
+    ASSERT_FALSE(media);
+    EXPECT_EQ(media.error().kind, TranscodeFailure::Inaccessible) << media.error().detail;
+    EXPECT_NE(media.error().detail.find("Permission denied"), std::string::npos)
+        << media.error().detail;
+
+    const MediaInfo claimed{.width = 320,
+                            .height = 240,
+                            .frame_rate = {.num = 25, .den = 1},
+                            .duration = core::Millis{1000},
+                            .has_audio = false};
+    const auto stats =
+        transcoder_.run(source(), out(), claimed, core::choose_ladder(240), progress_, {});
+    ASSERT_FALSE(stats);
+    EXPECT_EQ(stats.error().kind, TranscodeFailure::Inaccessible) << stats.error().detail;
+    fs::permissions(source(), fs::perms::owner_read | fs::perms::owner_write);
+}
+
+TEST_F(TranscoderTest, AnOutputDirectoryTheSandboxMayNotWriteIsInaccessible) {
+    ASSERT_TRUE(ulw::test::make_clip(source(), {.size = "320x240", .rate = "25", .seconds = 1}));
+    const auto media = transcoder_.probe(source(), {});
+    ASSERT_TRUE(media) << media.error().detail;
+    fs::create_directories(out());
+    fs::permissions(out(), fs::perms::owner_read | fs::perms::owner_exec);
+    const auto stats =
+        transcoder_.run(source(), out(), *media, core::choose_ladder(media->height), progress_, {});
+    fs::permissions(out(), fs::perms::owner_all);
+    ASSERT_FALSE(stats);
+    EXPECT_EQ(stats.error().kind, TranscodeFailure::Inaccessible) << stats.error().detail;
+}
+
 } // namespace

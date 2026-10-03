@@ -9,8 +9,11 @@
 # With COVERAGE_SONAR=1 it also writes <build-dir>/coverage/llvm-cov-show.txt, the `llvm-cov
 # show` text report SonarQube Cloud reads (sonar.cfamily.llvm-cov.reportPath, ADR-0079).
 #
-# Every label runs one test at a time, as CI's other jobs run them: several suites time servers
-# and the database, and a busy runner would change what they measure.
+# A label runs one test at a time unless COVERAGE_PARALLEL names it (space-separated): then one
+# test per core (ctest -j), which is safe only for a label whose tests that must not overlap
+# another carry RUN_SERIAL or a RESOURCE_LOCK (tests/CMakeLists.txt, ADR-0086). Profiles from
+# concurrent processes do not clobber each other: each binary writes to a pool of files named by
+# its own signature (%8m), merged under a lock.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 root=$PWD
@@ -33,10 +36,14 @@ enforce=${COVERAGE_ENFORCE:-1}
 sonar=${COVERAGE_SONAR:-0}
 [[ $sonar == 0 || $sonar == 1 ]] || { echo "coverage: COVERAGE_SONAR is 0 or 1" >&2; exit 2; }
 
+parallel=" ${COVERAGE_PARALLEL:-} "
+
 failed=0
 for label in "${labels[@]}"; do
+    jobs=1
+    [[ $parallel == *" $label "* ]] && jobs=$(nproc)
     # The same per-test limit as the ci test preset.
-    ctest --test-dir "$build_dir" -L "^${label}\$" -j 1 --timeout 600 --no-tests=error \
+    ctest --test-dir "$build_dir" -L "^${label}\$" -j "$jobs" --timeout 600 --no-tests=error \
         --output-on-failure || failed=1
 done
 

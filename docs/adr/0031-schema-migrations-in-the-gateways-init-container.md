@@ -1,6 +1,6 @@
 # 0031. Schema migrations run in the gateway's init container
 
-Status: Accepted
+Status: Accepted, amended by 0085 (GitHub Actions publishes the images; Woodpecker no longer pushes them)
 Date: 2026-09-29
 
 ## Context

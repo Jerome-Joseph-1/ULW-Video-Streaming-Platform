@@ -1,6 +1,6 @@
 # 0080. Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory
 
-Status: Accepted
+Status: Accepted, amended by 0086 (also on pull requests from this repository)
 Date: 2026-09-30
 
 ## Context

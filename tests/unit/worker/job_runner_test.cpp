@@ -197,6 +197,43 @@ TEST_F(JobRunnerTest, ARejectedInputFailsTheJobWithoutARerun) {
     EXPECT_TRUE(scratch_is_empty());
 }
 
+TEST_F(JobRunnerTest, AnUndecodableSourceFailsTheJobAtTheProbeAndBlamesTheFile) {
+    transcoder.probe_failure = failure(TranscodeFailure::Rejected);
+    EXPECT_EQ(run(), JobOutcome::Failed);
+    EXPECT_EQ(transcoder.runs, 0);
+    EXPECT_EQ(writes(), std::vector<std::string>{
+                            "queue fail permanent the file could not be decoded as video"});
+    EXPECT_TRUE(lines.events("transcoder refused its own files").empty());
+}
+
+TEST_F(JobRunnerTest, ASourceTheSandboxCannotReadGivesTheJobBackAndNeverBlamesTheFile) {
+    // ffprobe exits 1 either way; the adapter tells a refusal of our own file apart.
+    transcoder.probe_failure =
+        TranscodeError{.kind = TranscodeFailure::Inaccessible,
+                       .exit_code = 1,
+                       .detail = "ffprobe exited 1: /scratch/job-7/source: Permission denied"};
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_EQ(transcoder.runs, 0);
+    EXPECT_EQ(writes(),
+              std::vector<std::string>{
+                  "queue fail retryable the transcoder could not read its working files"});
+    const auto refused = lines.events("transcoder refused its own files");
+    ASSERT_EQ(refused.size(), 1U);
+    EXPECT_NE(refused[0].find(R"("level":"error")"), std::string::npos) << refused[0];
+    EXPECT_NE(refused[0].find(R"("step":"probe")"), std::string::npos) << refused[0];
+    EXPECT_NE(refused[0].find("Permission denied"), std::string::npos) << refused[0];
+    EXPECT_TRUE(scratch_is_empty());
+}
+
+TEST_F(JobRunnerTest, AnOutputDirectoryTheSandboxCannotWriteGivesTheJobBack) {
+    transcoder.run_failures.push_back(failure(TranscodeFailure::Inaccessible));
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_EQ(transcoder.runs, 1);
+    EXPECT_EQ(writes(),
+              std::vector<std::string>{
+                  "queue fail retryable the transcoder could not read its working files"});
+}
+
 TEST_F(JobRunnerTest, AKilledTranscoderGivesTheJobBack) {
     transcoder.run_failures.push_back(failure(TranscodeFailure::Killed, 137));
     EXPECT_EQ(run(), JobOutcome::Requeued);
@@ -446,6 +483,8 @@ TEST(Disposition, FollowsTheExitCodeRules) {
               Disposition::FailPermanently);
     EXPECT_EQ(worker::disposition(TranscodeFailure::Killed, false), Disposition::Requeue);
     EXPECT_EQ(worker::disposition(TranscodeFailure::Sandbox, false), Disposition::Requeue);
+    EXPECT_EQ(worker::disposition(TranscodeFailure::Inaccessible, false), Disposition::Requeue);
+    EXPECT_EQ(worker::disposition(TranscodeFailure::Inaccessible, true), Disposition::Requeue);
     EXPECT_EQ(worker::disposition(TranscodeFailure::Rejected, false), Disposition::FailPermanently);
     EXPECT_EQ(worker::disposition(TranscodeFailure::OverBudget, false),
               Disposition::FailPermanently);

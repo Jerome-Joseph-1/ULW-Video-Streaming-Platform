@@ -47,6 +47,35 @@ TEST_F(ChatConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_TRUE(config->allowed_origins.empty());
 }
 
+TEST_F(ChatConfigTest, CallsAreOffUnlessTheLiveKitKeyIsSetAndThenNeedAllFour) {
+    // The URLs alone, as an overlay may set them where no LiveKit secret exists, turn nothing on.
+    env["LIVEKIT_API_URL"] = "http://livekit:7880";
+    env["LIVEKIT_CLIENT_URL"] = "wss://media.example.test";
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->calls);
+    env["LIVEKIT_API_KEY"] = "";
+    ASSERT_TRUE(load());
+    EXPECT_FALSE(load()->calls);
+
+    env["LIVEKIT_API_KEY"] = "test-key";
+    EXPECT_EQ(refused_variable(), "LIVEKIT_API_SECRET");
+    env["LIVEKIT_API_SECRET"] = "test-only-livekit-secret-0123456789abcdef";
+    config = load();
+    ASSERT_TRUE(config) << config.error().variable;
+    ASSERT_TRUE(config->calls);
+    EXPECT_EQ(config->calls->api_url, "http://livekit:7880");
+    EXPECT_EQ(config->calls->client_url, "wss://media.example.test");
+    EXPECT_EQ(config->calls->api_key, "test-key");
+    EXPECT_EQ(config->calls->api_secret, "test-only-livekit-secret-0123456789abcdef");
+    for (const char* name : {"LIVEKIT_API_URL", "LIVEKIT_CLIENT_URL"}) {
+        const std::string kept = env[name];
+        env.erase(name);
+        EXPECT_EQ(refused_variable(), name);
+        env[name] = kept;
+    }
+}
+
 TEST_F(ChatConfigTest, StayingRootIsAnExplicitChoiceAndTheUserToBecomeOptional) {
     const auto defaults = load();
     ASSERT_TRUE(defaults);

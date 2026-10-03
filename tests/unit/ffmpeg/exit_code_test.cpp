@@ -1,7 +1,12 @@
 #include "exit_code.hpp"
 
+#include <array>
+#include <cerrno>
 #include <csignal>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <string_view>
+#include <utility>
 
 namespace {
 
@@ -74,6 +79,93 @@ TEST(ExitCode, WhatWeKilledIsClassifiedByWhyWeKilledIt) {
     EXPECT_EQ(killed_by(SIGTERM, Ending::Stopped), TranscodeFailure::Stopped);
     EXPECT_EQ(killed_by(SIGKILL, Ending::TimedOut), TranscodeFailure::OverBudget);
     EXPECT_EQ(classify(0, kExited, Ending::Stopped), TranscodeFailure::Stopped);
+}
+
+// What ffprobe 6.1 prints for a source it cannot open, and for one it cannot decode.
+const std::filesystem::path kSource = "/scratch/soak-worker/job-1/source";
+const std::filesystem::path kOut = "/scratch/soak-worker/job-1/hls";
+constexpr std::string_view kDenied = "/scratch/soak-worker/job-1/source: Permission denied\n";
+constexpr std::string_view kUndecodable =
+    "/scratch/soak-worker/job-1/source: Invalid data found when processing input\n";
+
+TEST(Refusal, ASourceTheProgramMayNotOpenIsOursNotTheInputs) {
+    const std::array ours{kSource};
+    EXPECT_TRUE(infra::ffmpeg::refused_our_file(kDenied, ours));
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Rejected, 1, kDenied, ours),
+              TranscodeFailure::Inaccessible);
+}
+
+TEST(Refusal, AnUndecodableSourceIsStillRejected) {
+    const std::array ours{kSource};
+    EXPECT_FALSE(infra::ffmpeg::refused_our_file(kUndecodable, ours));
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Rejected, 1, kUndecodable, ours),
+              TranscodeFailure::Rejected);
+}
+
+TEST(Refusal, APathTheInputNamesIsNotOurs) {
+    // A manifest naming a file the sandbox cannot read: the upload's doing.
+    const std::array ours{kSource, kOut};
+    EXPECT_FALSE(infra::ffmpeg::refused_our_file("/etc/shadow: Permission denied\n", ours));
+    // Nor is a sibling whose name merely starts with ours.
+    EXPECT_FALSE(infra::ffmpeg::refused_our_file(
+        "/scratch/soak-worker/job-1/source2: Permission denied\n", ours));
+}
+
+TEST(Refusal, AnOutputUnderOurDirectoryAndEveryAccessErrorCount) {
+    const std::array ours{kSource, kOut};
+    EXPECT_TRUE(infra::ffmpeg::refused_our_file(
+        "frame=1\n[hls @ 0x1] Failed to open file '/scratch/soak-worker/job-1/hls/720p/"
+        "init.mp4': Read-only file system\r\nmore\n",
+        ours));
+    EXPECT_TRUE(infra::ffmpeg::refused_our_file(
+        "/scratch/soak-worker/job-1/hls/master.m3u8: Operation not permitted", ours));
+}
+
+TEST(Refusal, OnlyARejectionIsRefined) {
+    // A crash or a kill keeps its own disposition whatever the program said before it.
+    const std::array ours{kSource};
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Crashed, 128 + SIGSEGV, kDenied, ours),
+              TranscodeFailure::Crashed);
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Sandbox, 125, kDenied, ours),
+              TranscodeFailure::Sandbox);
+}
+
+// The sandbox helper's refusals of the program it was built to run (docs/adr/0089): a name not
+// in its table, or a built-in path it may not execute, which it reports with the path and the
+// access error. Those are the host's, as Sandbox, before any refinement looks at the text.
+TEST(Refusal, TheHelpersRefusalOfItsBuiltInProgramIsASandboxFailure) {
+    const std::array ours{kSource, kOut, std::filesystem::path("/usr/bin")};
+    constexpr std::string_view kNotBuiltIn =
+        "ulw_sandbox: refusing to run ffmpeg7: not a program this helper was built to run\n";
+    constexpr std::string_view kNotExecutable =
+        "ulw_sandbox: refusing to run ffmpeg: /usr/bin/ffmpeg: Permission denied\n";
+    for (const auto& [code, text] : {std::pair{infra::ffmpeg::kProgramNotFound, kNotBuiltIn},
+                                     std::pair{infra::ffmpeg::kCannotExecute, kNotExecutable}}) {
+        const auto kind = classify(code, kExited, Ending::Exited);
+        ASSERT_EQ(kind, TranscodeFailure::Sandbox) << text;
+        EXPECT_EQ(infra::ffmpeg::refine(*kind, code, text, ours), TranscodeFailure::Sandbox)
+            << text;
+    }
+}
+
+TEST(Refusal, FfmpegsExitForAnAccessErrorIsOursWhateverItPrinted) {
+    // ffmpeg 6.1 on an unreadable input and on an output directory it may not write.
+    const std::array ours{kSource, kOut};
+    constexpr std::string_view kInput = "[in#0 @ 0x1] Error opening input: Permission denied\n"
+                                        "Error opening input files: Permission denied\n";
+    constexpr std::string_view kOutput = "[hls @ 0x1] Failed to open segment 'init.mp4'\n"
+                                         "[out#0/hls @ 0x2] Nothing was written into output file\n";
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Rejected, 256 - EACCES, kInput, ours),
+              TranscodeFailure::Inaccessible);
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Rejected, 256 - EACCES, kOutput, ours),
+              TranscodeFailure::Inaccessible);
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Rejected, 256 - EROFS, kOutput, ours),
+              TranscodeFailure::Inaccessible);
+    // Invalid data (183) and EINVAL (234) stay the input's.
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Rejected, 183, kUndecodable, ours),
+              TranscodeFailure::Rejected);
+    EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Rejected, 234, "Invalid argument\n", ours),
+              TranscodeFailure::Rejected);
 }
 
 } // namespace

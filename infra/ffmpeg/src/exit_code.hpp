@@ -3,7 +3,10 @@
 #include "core/ports/transcoder.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <optional>
+#include <span>
+#include <string_view>
 
 namespace infra::ffmpeg {
 
@@ -31,5 +34,24 @@ inline constexpr int kProgramNotFound = 127;
 // 256 minus an error code: 183 for invalid data, 234 for EINVAL), so it rejects the input.
 [[nodiscard]] std::optional<core::ports::TranscodeFailure> classify(int exit_code, int signal,
                                                                     Ending ending) noexcept;
+
+// Whether a line of `stderr_tail` says the program was refused one of `ours` (or a path under
+// one): it names the path and ends with the access error's strerror text, as ffmpeg and
+// ffprobe print a file they cannot open. A path the input itself names (a manifest's) is not
+// ours, so an input cannot pass its own failure off as ours.
+[[nodiscard]] bool refused_our_file(std::string_view stderr_tail,
+                                    std::span<const std::filesystem::path> ours) noexcept;
+
+// `kind` as classify() gave it, made Inaccessible when the program was refused a file of ours:
+// what reads as the input's rejection is then the host's fault. ffprobe exits 1 for every
+// error, so for it the evidence is the line naming one of `ours`; ffmpeg 6.1 names neither
+// its input nor its outputs on the line with the error ("Error opening input files:
+// Permission denied", "Failed to open segment 'init.mp4'"), but exits with 256 minus the
+// errno: 243 for EACCES, 226 for EROFS. The source formats it may read (kSourceFormats) name
+// no other file, so only its own input and outputs can be refused. EPERM (255) is left out:
+// that is also ffmpeg's exit after a signal.
+[[nodiscard]] core::ports::TranscodeFailure
+refine(core::ports::TranscodeFailure kind, int exit_code, std::string_view stderr_tail,
+       std::span<const std::filesystem::path> ours) noexcept;
 
 } // namespace infra::ffmpeg
