@@ -73,24 +73,32 @@ misconfigurations:
     expired_at: 2027-09-01
 
   # kube-router is the sandbox cluster's NetworkPolicy enforcer and nothing else: it programs
-  # the kind node's iptables and ipsets from the host network, as root, privileged, with host
-  # paths mounted, in kube-system, like any CNI's node daemon. It never ships; Askedin's cluster
-  # enforces policy with its own CNI (RUNBOOK.md).
-  - id: KSV-0001
+  # the kind node's iptables and ipsets from the host network, as root, with the xtables lock
+  # mounted from the host, in kube-system, like any CNI's node daemon. It never ships;
+  # Askedin's cluster enforces policy with its own CNI (RUNBOOK.md).
+  - id: KSV-0009
     paths: &kube-router [rendered/deploy-local-cluster/daemonset-kube-system-kube-router.yaml]
     statement: &kube-router-statement >-
       Sandbox-only NetworkPolicy enforcer: programs the kind node's iptables from the host
-      network, which needs a privileged root container with host paths; it never ships.
+      network, which needs a root container with the host's xtables lock; it never ships.
     expired_at: 2027-09-01
-  - {id: KSV-0003, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
-  - {id: KSV-0004, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
-  - {id: KSV-0009, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
+  # It drops every capability and adds back the two netfilter needs, in place of privileged:
+  # NET_ADMIN for iptables and ipset, and NET_RAW for iptables in legacy mode, which reads and
+  # writes its tables through a raw socket. The image's iptables-wrapper picks legacy or nft by
+  # the rules the node already has, so legacy has to keep working.
+  - id: KSV-0022
+    paths: *kube-router
+    statement: &kube-router-caps >-
+      Sandbox-only NetworkPolicy enforcer: NET_ADMIN programs iptables and ipsets, and NET_RAW
+      is legacy iptables' raw socket to its tables; every other capability is dropped.
+    expired_at: 2027-09-01
+  - {id: KSV-0106, paths: *kube-router, statement: *kube-router-caps, expired_at: 2027-09-01}
+  - {id: KSV-0119, paths: *kube-router, statement: *kube-router-caps, expired_at: 2027-09-01}
   - {id: KSV-0011, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0012, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0014, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0015, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0016, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
-  - {id: KSV-0017, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0018, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0020, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0021, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
@@ -98,5 +106,4 @@ misconfigurations:
   - {id: KSV-0030, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0037, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0104, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
-  - {id: KSV-0106, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}
   - {id: KSV-0118, paths: *kube-router, statement: *kube-router-statement, expired_at: 2027-09-01}

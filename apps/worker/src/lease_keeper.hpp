@@ -64,7 +64,7 @@ private:
     // What the jobs row last took; the keeper's thread alone touches it.
     std::optional<std::uint8_t> written_;
     std::mutex mutex_;
-    std::condition_variable_any wake_;
+    std::condition_variable wake_;
     // Last: the thread must stop before anything it uses is destroyed.
     std::jthread thread_;
 };

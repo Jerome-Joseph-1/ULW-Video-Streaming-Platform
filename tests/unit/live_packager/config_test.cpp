@@ -46,7 +46,7 @@ TEST_F(LiveConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->max_duration, core::Seconds{12 * 3600});
     EXPECT_EQ(config->srt_passphrase, "a passphrase of 24 chars");
     EXPECT_EQ(config->max_kbps, 20'000U);
-    EXPECT_EQ(config->scratch, "/var/tmp/ulw-live/show-1");
+    EXPECT_EQ(config->scratch, "/var/cache/ulw-live/show-1");
     EXPECT_TRUE(config->sandbox.empty());
 }
 

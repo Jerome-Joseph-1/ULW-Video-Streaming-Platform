@@ -439,7 +439,8 @@ target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw
     ulw::net_lib ulw::os PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
-target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>")
+target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>"
+    ULW_EXPECT_JEMALLOC=$<BOOL:${ULW_LINKS_JEMALLOC}>)
 add_dependencies(chat_cluster_tests chat_server)
 
 # The M22 acceptance on the same cluster: MLS messages through it, stored as ciphertext gzip
@@ -597,6 +598,7 @@ if(ULW_BUILD_WORKER)
         unit/live_packager/publisher_test.cpp
         unit/live_packager/recorder_test.cpp
         unit/live_packager/recording_plan_test.cpp
+        unit/live_packager/scratch_test.cpp
         unit/live_packager/segment_tracker_test.cpp
         unit/live_packager/stream_id_test.cpp
         unit/live_packager/watch_test.cpp)

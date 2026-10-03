@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <mutex>
+#include <stop_token>
 #include <utility>
 
 namespace worker {
@@ -80,12 +82,19 @@ bool LeaseKeeper::beat() {
 // soon as it runs again, which is when a zombie must find out it lost the lease.
 void LeaseKeeper::run(const std::stop_token& stop) {
     using Clock = std::chrono::steady_clock;
+    // Taking the mutex before notifying means the stop cannot land between the wait's check of
+    // the predicate and its sleep.
+    const std::stop_callback wake_on_stop(stop, [this] {
+        { const std::scoped_lock lock(mutex_); }
+        wake_.notify_one();
+    });
     auto next_beat = Clock::now() + intervals_.heartbeat;
     auto next_progress = Clock::now() + intervals_.progress;
     while (true) {
         {
             std::unique_lock lock(mutex_);
-            wake_.wait_until(lock, stop, std::min(next_beat, next_progress), [] { return false; });
+            wake_.wait_until(lock, std::min(next_beat, next_progress),
+                             [&stop] { return stop.stop_requested(); });
         }
         if (stop.stop_requested()) {
             return;

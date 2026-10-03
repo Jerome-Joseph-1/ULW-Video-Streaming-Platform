@@ -235,6 +235,11 @@ public:
     [[nodiscard]] Presence& presence() noexcept { return presence_; }
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
     void retire(net::Slab<Session>::Handle handle) noexcept;
+    // Where a session encodes a frame before the reactor copies it into its send queue: one
+    // buffer for every session on this reactor's thread, which keeps the capacity of the
+    // largest frame sent (a message of the largest body chat accepts), so that frames of tens
+    // of KiB do not each take and leave a block of the heap.
+    [[nodiscard]] std::vector<std::byte>& frame_buffer() noexcept { return frame_buffer_; }
 
     // A slot counted against an address or a user, held until given back.
     using Hold = std::uint32_t;
@@ -272,6 +277,8 @@ private:
     Access access_;
     Limits limits_;
     Counters counters_;
+    // Declared before the sessions, which use it until they are destroyed.
+    std::vector<std::byte> frame_buffer_;
     RouterRooms rooms_;
     // Sessions detach from both as they close, so they outlive them.
     ChatService chat_;

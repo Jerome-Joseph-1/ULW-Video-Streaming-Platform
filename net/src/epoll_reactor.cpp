@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <new>
 #include <ranges>
 #include <span>
 
@@ -260,7 +261,13 @@ void EpollReactor::send(ConnId conn, std::span<const std::byte> bytes) noexcept 
             return;
         }
     }
-    s->sendq.append(bytes, pool_);
+    // A chunk that cannot be had fails this connection, not the process.
+    try {
+        s->sendq.append(bytes, pool_);
+    } catch (const std::bad_alloc&) {
+        fail(conn.fd, *s, ENOMEM);
+        return;
+    }
     update_events(conn.fd, *s);
 }
 

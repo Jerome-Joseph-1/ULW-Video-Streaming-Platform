@@ -75,12 +75,16 @@
       body: offer.sdp,
     });
     if (created.status !== 201) return { created: created.status };
-    const iceServers = [...(created.headers.get('link') ?? '').matchAll(
-      /<([^>]+)>\s*;\s*rel="?ice-server"?([^,]*)/g)].map(([, urls, params]) => ({
-      urls,
-      username: /username="([^"]*)"/.exec(params)?.[1],
-      credential: /credential="([^"]*)"/.exec(params)?.[1],
-    }));
+    // One link per comma-separated entry, each matched from its start: a pattern searched for
+    // across the whole header would rescan it from every '<'.
+    const iceServers = (created.headers.get('link') ?? '').split(',')
+      .map((link) => /^\s*<([^>]+)>\s*;\s*rel="?ice-server"?(.*)$/.exec(link))
+      .filter((link) => link !== null)
+      .map(([, urls, params]) => ({
+        urls,
+        username: /username="([^"]*)"/.exec(params)?.[1],
+        credential: /credential="([^"]*)"/.exec(params)?.[1],
+      }));
     pc.setConfiguration({ bundlePolicy: 'max-bundle', iceServers });
 
     // Gathering here does not always report its end, so the first UDP candidate is what waits.
