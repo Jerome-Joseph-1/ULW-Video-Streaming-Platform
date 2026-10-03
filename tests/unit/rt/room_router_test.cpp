@@ -304,6 +304,23 @@ struct Tuning {
     std::optional<core::Millis> peer_stall_timeout = std::nullopt;
     // The store refuses to record the node, which then never becomes ready.
     bool refuse_advertise = false;
+    // The router's clock, when not the fixture's.
+    const core::ports::IClock* clock = nullptr;
+};
+
+// The system's clock, moved on by the test: a router given it sees its deadlines pass without
+// the test waiting them out. Its reactor keeps the real clock, so ticks still come.
+class SkewedClock final : public core::ports::IClock {
+public:
+    [[nodiscard]] core::MonoTime now() const noexcept override { return real_.now() + skew_; }
+    [[nodiscard]] core::WallTime wall_now() const noexcept override {
+        return real_.wall_now() + skew_;
+    }
+    void advance(core::Millis d) noexcept { skew_ += d; }
+
+private:
+    os::SystemClock real_;
+    core::Millis skew_{0};
 };
 
 class RoomRouterTest : public ::testing::TestWithParam<ReactorKind> {
@@ -338,7 +355,8 @@ protected:
         config.max_rooms = tuning.max_rooms.value_or(config.max_rooms);
         config.revalidate_every = tuning.revalidate_every.value_or(config.revalidate_every);
         config.peer_stall_timeout = tuning.peer_stall_timeout.value_or(config.peer_stall_timeout);
-        node->router = std::make_unique<rt::RoomRouter>(*reactor_, *node->store, clock_, random_,
+        const core::ports::IClock& clock = tuning.clock != nullptr ? *tuning.clock : clock_;
+        node->router = std::make_unique<rt::RoomRouter>(*reactor_, *node->store, clock, random_,
                                                         std::move(config), node->events);
         EXPECT_TRUE(node->router->start(std::move(*listener)));
         Node& out = *node;
@@ -818,6 +836,45 @@ TEST_P(RoomRouterTest, AnAskOfARoomNotJoinedOrOfAnOwnerWithNoServiceIsRefused) {
     const std::string large(rt::kMaxOwnerMessage + 1, 'x');
     EXPECT_EQ(ask(b, bob, large), std::unexpected(RouteError::Unavailable));
     EXPECT_TRUE(on_a.asked.empty());
+}
+
+TEST_P(RoomRouterTest, AnAskTheOwnerSitsOnIsUnavailableAfterTheAskTimeoutNotTheForwardOne) {
+    SkewedClock skewed;
+    Node& a = start("chat-a", kSecret, Tuning{.clock = &skewed});
+    Node& b = start("chat-b", kSecret, Tuning{.clock = &skewed});
+    Owner on_a("chat-a");
+    on_a.hold = true;
+    a.router->serve(&on_a);
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    // One ask forwarded, one answered on the owner itself; the service answers neither.
+    std::optional<std::expected<std::vector<std::byte>, RouteError>> forwarded;
+    std::optional<std::expected<std::vector<std::byte>, RouteError>> local;
+    const auto body = std::as_bytes(std::span{std::string_view{"hi"}});
+    b.router->ask_owner(room_, bob, body, [&](auto r) noexcept { forwarded = std::move(r); });
+    a.router->ask_owner(room_, alice, body, [&](auto r) noexcept { local = std::move(r); });
+    ASSERT_TRUE(pump([&] { return on_a.held.size() == 2; }));
+
+    // Past a send's forward timeout: an ask takes longer than that, and is still waited for.
+    // Two of the routers' ticks (250 ms each) are given to notice.
+    skewed.advance(rt::kOwnerAskTimeout / 2);
+    const auto ticked = std::chrono::steady_clock::now() + std::chrono::milliseconds(600);
+    pump([&] { return std::chrono::steady_clock::now() > ticked; });
+    EXPECT_FALSE(forwarded.has_value());
+    EXPECT_FALSE(local.has_value());
+
+    skewed.advance(rt::kOwnerAskTimeout / 2 + core::Millis{1'000});
+    ASSERT_TRUE(pump([&] { return forwarded.has_value() && local.has_value(); }));
+    EXPECT_EQ(*forwarded, std::unexpected(RouteError::Unavailable));
+    EXPECT_EQ(*local, std::unexpected(RouteError::Unavailable));
+    // The service's late answers reach nobody.
+    for (rt::OwnerAnswer& answer : on_a.held) {
+        answer(on_a.reply("late"));
+    }
+    ulw::test::pump_pending(*reactor_);
+    EXPECT_EQ(*forwarded, std::unexpected(RouteError::Unavailable));
 }
 
 TEST_P(RoomRouterTest, AnAskWhoseMemberLeftIsAnsweredToNobody) {
