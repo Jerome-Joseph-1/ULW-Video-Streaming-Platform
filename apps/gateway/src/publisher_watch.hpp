@@ -97,6 +97,7 @@ private:
 
     void joined(Followed& stream, const core::UserId& owner, const std::string& session) noexcept;
     void left(Followed& stream, const std::string& session) noexcept;
+    void room_finished(const WebhookEvent& event) noexcept;
     void room_gone(Followed& stream) noexcept;
     void start(Followed& stream) noexcept;
     void check(Followed& stream) noexcept;
@@ -104,6 +105,8 @@ private:
     void forget(const std::string& key) noexcept;
     [[nodiscard]] Followed* follow(const core::LiveStreamId& id) noexcept;
     [[nodiscard]] Followed* find(const std::string& key) noexcept;
+    // Only the following of the stream that began at `epoch`.
+    [[nodiscard]] Followed* find(const std::string& key, std::uint64_t epoch) noexcept;
 
     net::IReactor& reactor_;
     LiveStreams& live_;
@@ -113,6 +116,7 @@ private:
     std::map<std::string, std::unique_ptr<Followed>, std::less<>> streams_;
     // Orders the streams by when they were last heard of, for making room.
     std::uint64_t stamp_ = 0;
+    std::uint64_t epoch_ = 0;
     // Callbacks from the stream service check this before touching anything here.
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };

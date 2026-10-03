@@ -27,8 +27,8 @@ struct PublisherWatch::Followed final : public net::ITimerHandler {
         RetryCheck,
     };
 
-    Followed(PublisherWatch& watch, core::LiveStreamId stream) noexcept
-        : watch_(watch), id(stream), key(stream.to_string()) {}
+    Followed(PublisherWatch& watch, core::LiveStreamId stream, std::uint64_t made) noexcept
+        : watch_(watch), id(stream), key(stream.to_string()), epoch(made) {}
     ~Followed() override { cancel(); }
     Followed(const Followed&) = delete;
     Followed& operator=(const Followed&) = delete;
@@ -55,11 +55,26 @@ struct PublisherWatch::Followed final : public net::ITimerHandler {
     [[nodiscard]] bool waiting_for(Wait what) const noexcept { return timer_ && wait == what; }
     [[nodiscard]] bool idle() const noexcept { return !timer_ && !starting && !checking; }
 
+    void retire(std::string session) {
+        if (std::ranges::contains(gone, session)) {
+            return;
+        }
+        if (gone.size() >= kGoneSessions) {
+            gone.erase(gone.begin());
+        }
+        gone.push_back(std::move(session));
+    }
+
     const core::LiveStreamId id;
     const std::string key;
+    // Which following of the stream this is: a callback for an earlier one, forgotten and
+    // followed again since, finds another epoch and touches nothing.
+    const std::uint64_t epoch;
     std::optional<core::UserId> owner;
-    // Sessions joined and not seen leaving, and sessions seen leaving.
-    std::vector<std::string> present;
+    // The publisher's session now. LiveKit holds one session per identity, so a join of a new
+    // one replaces the old, whose leave may never reach this replica (ADR-0093).
+    std::optional<std::string> current;
+    // Sessions seen leaving or replaced.
     std::vector<std::string> gone;
     Wait wait = Wait::Grace;
     bool starting = false;
@@ -92,6 +107,12 @@ PublisherWatch::Followed* PublisherWatch::find(const std::string& key) noexcept 
     return it == streams_.end() ? nullptr : it->second.get();
 }
 
+PublisherWatch::Followed* PublisherWatch::find(const std::string& key,
+                                               std::uint64_t epoch) noexcept {
+    Followed* s = find(key);
+    return s != nullptr && s->epoch == epoch ? s : nullptr;
+}
+
 PublisherWatch::Followed* PublisherWatch::follow(const core::LiveStreamId& id) noexcept {
     const std::string key = id.to_string();
     if (Followed* known = find(key)) {
@@ -117,7 +138,7 @@ PublisherWatch::Followed* PublisherWatch::follow(const core::LiveStreamId& id) n
         }
         streams_.erase(oldest);
     }
-    auto made = std::make_unique<Followed>(*this, id);
+    auto made = std::make_unique<Followed>(*this, id, ++epoch_);
     made->used = ++stamp_;
     Followed* followed = made.get();
     streams_.emplace(key, std::move(made));
@@ -153,21 +174,42 @@ void PublisherWatch::on_event(const WebhookEvent& event) noexcept {
         }
         return;
     }
-    case WebhookEventKind::RoomFinished: {
-        const auto stream = stream_of_room(event.room);
-        if (!stream) {
-            ++counters_.ignored;
-            return;
-        }
-        if (Followed* followed = follow(*stream)) {
-            room_gone(*followed);
-        }
+    case WebhookEventKind::RoomFinished:
+        room_finished(event);
         return;
-    }
     case WebhookEventKind::Other:
         ++counters_.ignored;
         return;
     }
+}
+
+void PublisherWatch::room_finished(const WebhookEvent& event) noexcept {
+    const auto stream = stream_of_room(event.room);
+    if (!stream) {
+        ++counters_.ignored;
+        return;
+    }
+    if (Followed* followed = find(stream->to_string())) {
+        room_gone(*followed);
+        return;
+    }
+    // A room this replica heard nothing about: a call's room that happens to be named like
+    // a stream's, or a stream whose publisher's events went to another replica. One row
+    // read tells them apart, before any grace is armed.
+    live_.status(*stream, [this, alive = std::weak_ptr<bool>(alive_), id = *stream](
+                              std::expected<core::ports::LiveStream, LiveFailure> r) noexcept {
+        const auto held = alive.lock();
+        if (!held || !*held) {
+            return;
+        }
+        if (!r || r->state != core::ports::LiveState::Live) {
+            ++counters_.ignored;
+            return;
+        }
+        if (Followed* followed = follow(id)) {
+            room_gone(*followed);
+        }
+    });
 }
 
 void PublisherWatch::joined(Followed& stream, const core::UserId& owner,
@@ -177,9 +219,14 @@ void PublisherWatch::joined(Followed& stream, const core::UserId& owner,
         return;
     }
     stream.owner = owner;
-    const bool known = std::ranges::contains(stream.present, session);
+    const bool known = stream.current == session;
     if (!known) {
-        stream.present.push_back(session);
+        if (stream.current) {
+            // Replaced: LiveKit has dropped the old session, wherever its leave went.
+            stream.retire(std::move(*stream.current));
+        }
+        stream.current = session;
+        stream.live = false;
     }
     if (stream.waiting_for(Followed::Wait::Grace) ||
         stream.waiting_for(Followed::Wait::RetryCheck)) {
@@ -197,14 +244,14 @@ void PublisherWatch::joined(Followed& stream, const core::UserId& owner,
 }
 
 void PublisherWatch::left(Followed& stream, const std::string& session) noexcept {
-    std::erase(stream.present, session);
-    if (!std::ranges::contains(stream.gone, session)) {
-        if (stream.gone.size() >= kGoneSessions) {
-            stream.gone.erase(stream.gone.begin());
-        }
-        stream.gone.push_back(session);
+    stream.retire(session);
+    // An older session's leave, while a newer one is connected, changes nothing; a leave of the
+    // current one, or of one this replica never saw join, starts the grace.
+    if (stream.current && *stream.current != session) {
+        return;
     }
-    if (!stream.present.empty() || stream.waiting_for(Followed::Wait::Grace)) {
+    stream.current.reset();
+    if (stream.waiting_for(Followed::Wait::Grace)) {
         return;
     }
     stream.live = false;
@@ -217,13 +264,10 @@ void PublisherWatch::left(Followed& stream, const std::string& session) noexcept
 }
 
 void PublisherWatch::room_gone(Followed& stream) noexcept {
-    for (std::string& session : stream.present) {
-        if (stream.gone.size() >= kGoneSessions) {
-            stream.gone.erase(stream.gone.begin());
-        }
-        stream.gone.push_back(std::move(session));
+    if (stream.current) {
+        stream.retire(std::move(*stream.current));
+        stream.current.reset();
     }
-    stream.present.clear();
     if (stream.waiting_for(Followed::Wait::Grace)) {
         return;
     }
@@ -236,7 +280,7 @@ void PublisherWatch::room_gone(Followed& stream) noexcept {
 void PublisherWatch::on_timer(Followed& stream) noexcept {
     switch (stream.wait) {
     case Followed::Wait::RetryStart:
-        if (!stream.present.empty()) {
+        if (stream.current.has_value()) {
             start(stream);
         }
         return;
@@ -254,53 +298,54 @@ void PublisherWatch::start(Followed& stream) noexcept {
     stream.starting = true;
     ++stream.start_attempts;
     ++counters_.starts;
-    live_.go_live(stream.id, *stream.owner,
-                  [this, alive = std::weak_ptr<bool>(alive_), key = stream.key](
-                      std::expected<core::ports::LiveStream, LiveFailure> r) noexcept {
-                      const auto held = alive.lock();
-                      Followed* s = held && *held ? find(key) : nullptr;
-                      if (s == nullptr) {
-                          return;
-                      }
-                      s->starting = false;
-                      if (r) {
-                          s->live = !s->present.empty();
-                          s->start_attempts = 0;
-                      } else {
-                          switch (r.error()) {
-                          // Not ours to start (no such stream, or the identity's user is not its
-                          // owner), or over: nothing more to follow.
-                          case LiveFailure::NotFound:
-                          case LiveFailure::Ended:
-                              forget(key);
-                              return;
-                          case LiveFailure::Unavailable:
-                              ++counters_.start_failures;
-                              if (!s->present.empty() && s->start_attempts < settings_.attempts &&
-                                  !s->waiting()) {
-                                  s->arm(Followed::Wait::RetryStart, settings_.retry);
-                              }
-                              break;
-                          case LiveFailure::Full:
-                          case LiveFailure::RateLimited:
-                          case LiveFailure::Internal:
-                              ++counters_.start_failures;
-                              log_.warn("live stream not started from a webhook",
-                                        {{"stream", key}, {"error", to_string(r.error())}});
-                              break;
-                          }
-                      }
-                      if (s->check_after_start) {
-                          s->check_after_start = false;
-                          if (s->present.empty() && !s->waiting()) {
-                              check(*s);
-                          }
-                      }
-                  });
+    live_.go_live(
+        stream.id, *stream.owner,
+        [this, alive = std::weak_ptr<bool>(alive_), key = stream.key,
+         epoch = stream.epoch](std::expected<core::ports::LiveStream, LiveFailure> r) noexcept {
+            const auto held = alive.lock();
+            Followed* s = held && *held ? find(key, epoch) : nullptr;
+            if (s == nullptr) {
+                return;
+            }
+            s->starting = false;
+            if (r) {
+                s->live = s->current.has_value();
+                s->start_attempts = 0;
+            } else {
+                switch (r.error()) {
+                // Not ours to start (no such stream, or the identity's user is not its
+                // owner), or over: nothing more to follow.
+                case LiveFailure::NotFound:
+                case LiveFailure::Ended:
+                    forget(key);
+                    return;
+                case LiveFailure::Unavailable:
+                    ++counters_.start_failures;
+                    if (s->current.has_value() && s->start_attempts < settings_.attempts &&
+                        !s->waiting()) {
+                        s->arm(Followed::Wait::RetryStart, settings_.retry);
+                    }
+                    break;
+                case LiveFailure::Full:
+                case LiveFailure::RateLimited:
+                case LiveFailure::Internal:
+                    ++counters_.start_failures;
+                    log_.warn("live stream not started from a webhook",
+                              {{"stream", key}, {"error", to_string(r.error())}});
+                    break;
+                }
+            }
+            if (s->check_after_start) {
+                s->check_after_start = false;
+                if (!s->current && !s->waiting()) {
+                    check(*s);
+                }
+            }
+        });
 }
 
 void PublisherWatch::check(Followed& stream) noexcept {
-    if (!stream.present.empty() || stream.checking) {
+    if (stream.current.has_value() || stream.checking) {
         return;
     }
     // A start under way would mark the stream live after this looked: look once it answers.
@@ -310,53 +355,54 @@ void PublisherWatch::check(Followed& stream) noexcept {
     }
     stream.checking = true;
     ++stream.check_attempts;
-    live_.publisher_left(stream.id, [this, alive = std::weak_ptr<bool>(alive_), key = stream.key](
-                                        std::expected<Departure, LiveFailure> r) noexcept {
-        const auto held = alive.lock();
-        Followed* s = held && *held ? find(key) : nullptr;
-        if (s == nullptr) {
-            return;
-        }
-        s->checking = false;
-        if (r) {
-            switch (*r) {
-            case Departure::Ended:
-                ++counters_.ended;
-                forget(key);
-                return;
-            case Departure::Over:
-                forget(key);
-                return;
-            case Departure::Present:
-                ++counters_.kept;
-                log_.info("live publisher still connected after its grace", {{"stream", key}});
-                s->check_attempts = 0;
-                return;
-            case Departure::NotLive:
-                s->check_attempts = 0;
+    live_.publisher_left(
+        stream.id, [this, alive = std::weak_ptr<bool>(alive_), key = stream.key,
+                    epoch = stream.epoch](std::expected<Departure, LiveFailure> r) noexcept {
+            const auto held = alive.lock();
+            Followed* s = held && *held ? find(key, epoch) : nullptr;
+            if (s == nullptr) {
                 return;
             }
-            return;
-        }
-        switch (r.error()) {
-        case LiveFailure::NotFound:
-        case LiveFailure::Ended:
-            forget(key);
-            return;
-        case LiveFailure::Unavailable:
-        case LiveFailure::Full:
-        case LiveFailure::RateLimited:
-        case LiveFailure::Internal:
-            ++counters_.check_failures;
-            if (s->present.empty() && s->check_attempts < settings_.attempts && !s->waiting()) {
-                s->arm(Followed::Wait::RetryCheck, settings_.retry);
+            s->checking = false;
+            if (r) {
+                switch (*r) {
+                case Departure::Ended:
+                    ++counters_.ended;
+                    forget(key);
+                    return;
+                case Departure::Over:
+                    forget(key);
+                    return;
+                case Departure::Present:
+                    ++counters_.kept;
+                    log_.info("live publisher still connected after its grace", {{"stream", key}});
+                    s->check_attempts = 0;
+                    return;
+                case Departure::NotLive:
+                    s->check_attempts = 0;
+                    return;
+                }
                 return;
             }
-            log_.warn("live publisher's departure left to the sweep",
-                      {{"stream", key}, {"error", to_string(r.error())}});
-            return;
-        }
-    });
+            switch (r.error()) {
+            case LiveFailure::NotFound:
+            case LiveFailure::Ended:
+                forget(key);
+                return;
+            case LiveFailure::Unavailable:
+            case LiveFailure::Full:
+            case LiveFailure::RateLimited:
+            case LiveFailure::Internal:
+                ++counters_.check_failures;
+                if (!s->current && s->check_attempts < settings_.attempts && !s->waiting()) {
+                    s->arm(Followed::Wait::RetryCheck, settings_.retry);
+                    return;
+                }
+                log_.warn("live publisher's departure left to the sweep",
+                          {{"stream", key}, {"error", to_string(r.error())}});
+                return;
+            }
+        });
 }
 
 } // namespace gateway

@@ -245,6 +245,39 @@ TEST_F(PublisherWatchTest, ALateJoinOfASessionSeenLeavingChangesNothing) {
     EXPECT_TRUE(packagers->started.size() == 1U) << "the late join started nothing";
 }
 
+// Two replicas behind one Service: this one hears s1 join, s1's leave goes to the other, then
+// this one hears s2 join and leave. LiveKit holds one session per identity, so s2 replaced s1,
+// and s2's leave is the publisher's departure here too.
+TEST_F(PublisherWatchTest, ALeaveHeardByAnotherReplicaDoesNotHoldTheGraceBack) {
+    const auto id = create_live();
+    joined(id, "PA_s1");
+    pump_pending(*reactor);
+    joined(id, "PA_s2");
+    pump_pending(*reactor);
+    left(id, "PA_s2");
+    EXPECT_TRUE(watch->in_grace(id));
+    advance(kGrace);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return row(id).state == LiveState::Ended; }));
+    EXPECT_EQ(row(id).ended_by, LiveEnd::PublisherLeft);
+    // And s1's leave, delivered here late after all, changes nothing either way.
+    left(id, "PA_s1");
+    pump_pending(*reactor);
+}
+
+TEST_F(PublisherWatchTest, AnOlderSessionsLateLeaveDoesNotEndTheNewOne) {
+    const auto id = create_live();
+    joined(id, "PA_s1");
+    pump_pending(*reactor);
+    joined(id, "PA_s2");
+    left(id, "PA_s1");
+    EXPECT_FALSE(watch->in_grace(id));
+    // A replaced session's own join, late, is stale.
+    joined(id, "PA_s1");
+    EXPECT_EQ(watch->counters().stale, 1U);
+    advance(kGrace);
+    EXPECT_EQ(row(id).state, LiveState::Live);
+}
+
 TEST_F(PublisherWatchTest, LeavesDeliveredTwiceStartOneGrace) {
     const auto id = create_live();
     left(id);
@@ -281,6 +314,26 @@ TEST_F(PublisherWatchTest, ARoomThatFinishedEndsItsLiveStream) {
     advance(kGrace);
     ASSERT_TRUE(pump_until(*reactor, [&] { return row(id).state == LiveState::Ended; }));
     EXPECT_EQ(row(id).ended_by, LiveEnd::PublisherLeft);
+}
+
+TEST_F(PublisherWatchTest, ARoomFinishedThatIsNoLiveStreamsArmsNoGrace) {
+    // A call's room named like a stream's room: no such row.
+    const auto call = core::LiveStreamId::generate(clock, random);
+    watch->on_event(WebhookEvent{
+        .kind = WebhookEventKind::RoomFinished, .id = "EV_c", .room = call.to_string() + ":1"});
+    pump_pending(*reactor);
+    EXPECT_FALSE(watch->in_grace(call));
+    EXPECT_EQ(watch->followed(), 0U);
+    EXPECT_EQ(watch->counters().ignored, 1U);
+    // A live stream whose publisher's events all went to another replica: followed from here.
+    const auto id = create_live();
+    watch->on_event(WebhookEvent{
+        .kind = WebhookEventKind::RoomFinished, .id = "EV_r", .room = id.to_string() + ":1"});
+    ASSERT_TRUE(pump_until(*reactor, [&] { return watch->in_grace(id); }));
+    advance(kGrace);
+    ASSERT_TRUE(pump_until(*reactor, [&] { return row(id).state == LiveState::Ended; }));
+    EXPECT_EQ(row(id).ended_by, LiveEnd::PublisherLeft);
+    EXPECT_EQ(count_calls("present"), 1U);
 }
 
 TEST_F(PublisherWatchTest, AStreamStillStartingKeepsItsStartWindow) {
