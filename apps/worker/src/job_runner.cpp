@@ -74,6 +74,8 @@ std::string_view public_reason(TranscodeFailure failure) noexcept {
         return "the transcoder sandbox is unavailable";
     case TranscodeFailure::Unverified:
         return "the transcoded output failed verification";
+    case TranscodeFailure::Inaccessible:
+        return "the transcoder could not read its working files";
     }
     return "transcoding failed";
 }
@@ -128,6 +130,7 @@ Disposition disposition(TranscodeFailure failure, bool reran) noexcept {
         return reran ? Disposition::FailPermanently : Disposition::RerunOnce;
     case TranscodeFailure::Killed:
     case TranscodeFailure::Sandbox:
+    case TranscodeFailure::Inaccessible:
         return Disposition::Requeue;
     case TranscodeFailure::Stopped:
         return Disposition::Abandon;
@@ -327,6 +330,16 @@ private:
     JobOutcome transcode_failure(std::string_view step, const TranscodeError& error,
                                  const Workspace& workspace) {
         log().warn("step failed", {{"job", id()}, {"step", step}, {"error", error.detail}});
+        if (error.kind == TranscodeFailure::Inaccessible) {
+            // The host's fault, not the upload's: every job on this worker will hit it until an
+            // operator fixes the scratch directory's permissions or mounts.
+            static std::atomic<std::uint64_t> total{0};
+            log().error("transcoder refused its own files",
+                        {{"job", id()},
+                         {"step", step},
+                         {"worker_files_refused_total", ++total},
+                         {"error", error.detail}});
+        }
         if (error.kind != TranscodeFailure::Stopped) {
             if (const auto left = deps_.free_space(workspace.dir()); left && *left < kNearlyFull) {
                 log().warn("scratch disk filled up", {{"job", id()}, {"free_bytes", *left}});
