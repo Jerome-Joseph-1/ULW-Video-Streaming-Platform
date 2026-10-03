@@ -10,7 +10,8 @@ Ninja, jq (`tools/run-clang-tidy.sh`), and development packages for OpenSSL 3, l
 and liburing 2.5+. The OpenMLS bridge (`ULW_BUILD_MLS`) needs Rust and cargo, at the toolchain
 pinned in `infra/e2ee/mls_ffi_bridge/rust-toolchain.toml`; `-DULW_BUILD_MLS=OFF` skips it.
 jemalloc is linked into `chat_server` only (ADR-0081) and skipped under sanitizers;
-`-DULW_JEMALLOC=OFF` skips it.
+`-DULW_JEMALLOC=OFF` skips it. `gateway_server` keeps glibc's malloc, set at startup to one
+arena and a fixed 128 KiB mmap threshold (ADR-0094).
 
 ```sh
 cmake --preset dev && cmake --build --preset dev && ctest --preset dev

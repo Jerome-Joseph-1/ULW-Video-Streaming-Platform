@@ -15,6 +15,13 @@ The soak sets `ULW_ALLOW_ROOT=1` for the processes it starts, since a developmen
 as root, and both services refuse root otherwise (ADR-0052). Started by hand as root, either
 service needs `ULW_ALLOW_ROOT=1`, or `ULW_RUN_AS_USER` naming the user to become.
 
+The gateway sets its own malloc at startup (one arena, a fixed 128 KiB mmap and trim threshold,
+ADR-0094), and its `starting` line in `gateway.log` says what it ran with. The soak passes the
+gateway none of its own environment beyond what it names, so an experiment with
+`GLIBC_TUNABLES` or `MALLOC_*` (which replace the gateway's settings whole) needs a wrapper
+script at `apps/gateway/gateway_server` of a `--build` directory that sets them and execs the
+real binary. Check the `starting` line before reading such a run.
+
 `--rejudge` prints two verdicts: the per-unit criterion in force (the RSS slope's 95% upper end
 per request, per chunk request, per upload session and per job, against production ceilings),
 and the per-hour criterion it replaced. Pass `--clients` as the run used it; it sets the

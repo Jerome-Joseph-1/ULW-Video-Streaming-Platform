@@ -276,6 +276,17 @@ Tokens, keys, signed URLs, request targets, headers and bodies are never logged.
 writes one `request` line per response (request id, method, route name, status, milliseconds,
 body length): `info`, `warn` for a 5xx, `debug` for probes and scrapes.
 
+The gateway's first line, `starting`, carries `"allocator"`: what its malloc runs with
+(ADR-0094). Normally `"glibc arena_max=1 mmap_threshold=131072 trim_threshold=131072"`, set
+by the gateway itself before it starts a thread. An operator who sets glibc's malloc in the
+environment (`MALLOC_ARENA_MAX`, `MALLOC_ARENA_TEST`, `MALLOC_MMAP_THRESHOLD_`,
+`MALLOC_TRIM_THRESHOLD_`, `MALLOC_TOP_PAD_`, `MALLOC_MMAP_MAX_`, or a `glibc.malloc.*` entry
+in `GLIBC_TUNABLES`) gets those instead, all of the gateway's own left out, and the field lists
+them (`"glibc MALLOC_ARENA_MAX=2"`); `"jemalloc"` and `"sanitizer"` mean a build or preload
+whose allocator ignores glibc's settings. The shipped units and manifests set none of these;
+the gateway's memory bounds (ADR-0063) were measured with its own settings. A `mallopt` that
+glibc refuses stops the gateway at startup: `startup failed`, step `allocator`.
+
 The gateway never waits for its log reader: lines go to a 256 KiB buffer that a thread of its
 own writes out. When the reader falls behind and the buffer is full, lines are dropped and
 counted in `log_messages_dropped_total`. At exit it flushes for at most 2 s and, if any line was

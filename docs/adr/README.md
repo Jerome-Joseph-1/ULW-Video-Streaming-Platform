@@ -84,10 +84,11 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0078](0078-the-cookie-is-believed-only-from-trusted-pages.md) | The gateway believes the auth cookie only from pages it trusts | Accepted |
 | [0079](0079-sonarqube-cloud-analysis-in-ci.md) | SonarQube Cloud analysis in CI, with the compile database, on the Free plan | Accepted, amended by 0086 |
 | [0080](0080-coverage-floor.md) | Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory | Accepted, amended by 0086 |
-| [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted |
+| [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted, gateway's malloc amended by 0094 |
 | [0082](0082-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted |
 | [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085 |
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted |
 | [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted |
 | [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted |
 | [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted |
+| [0094](0094-gateway-malloc-one-arena-and-a-fixed-mmap-threshold.md) | gateway_server's malloc: one arena and a fixed 128 KiB mmap threshold, set at startup | Accepted |
