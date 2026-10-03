@@ -176,7 +176,7 @@ list never said no: join again.
 | `bad_stream` | `stream` is not a stream name | Fix the client |
 | `bad_device` | A call's `device` is not a canonical lowercase UUID | Fix the client |
 | `bad_call` | A `call_decline`, `call_cancel` or `call_end` whose `call` is not a canonical lowercase UUID | Fix the client |
-| `not_callable`, `call_failed`, `calls_disabled`, `no_call` | A call was refused; see [calls.md](calls.md#errors) | As there |
+| `not_callable`, `call_failed`, `calls_disabled`, `no_call`, `ring_limited` | A call was refused; see [calls.md](calls.md#errors) | As there |
 | `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |

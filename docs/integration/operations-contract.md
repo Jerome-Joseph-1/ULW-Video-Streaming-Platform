@@ -329,10 +329,12 @@ request as made, a configuration fault: clients get `call_failed`) and
 `{source="store",kind="unavailable"}`. Each is counted on the node that owns the room, not the
 one the client is on. A call's ring (ADR-0092), also on the room's owner:
 `call_refusals_total{reason="no_call"}` (declines, cancels and ends of a call that was not there
-to move), `calls_ringing_or_answered`, `call_rings_total{outcome="started"}`, `{outcome="answered"}`,
+to move), `call_refusals_total{reason="ring_limited"}` (tickets refused because their direct chat
+rang 5 times in a minute, or its caller was just declined), `calls_ringing_or_answered`, `call_rings_total{outcome="started"}`, `{outcome="answered"}`,
 `{outcome="declined"}`, `{outcome="cancelled"}`, `{outcome="missed"}`, `{outcome="ended"}`,
 `{outcome="orphaned"}` (forgotten without a word because the node no longer owns the room) and
-`{outcome="busy"}` (tickets refused past 4096 calls), and `call_notices_sent_total`; on the
+`{outcome="busy"}` (tickets refused past 4096 calls), `{outcome="graced"}` (rings held past
+their timeout for a callee's ticket being issued), and `call_notices_sent_total`; on the
 members' nodes, `call_events_pushed_total` (events written to sockets),
 `call_notices_unheard_total` (notices for a member with no socket on the node) and
 `call_notices_malformed_total`; and the room plane's unsequenced notices that carry them,

@@ -44,6 +44,11 @@ What a ring needs, and what the system gives today:
 | | The callee's ticket | Accepted |
 | Timeouts | A timer per call | Rejected: the handler already runs after every turn of the loop (its sweep); one ordered set of deadlines is cheaper and keeps the clock injected |
 | | Deadlines in an ordered set, read by the handler's sweep | Accepted |
+| Ringing as often as a client likes | Allowed: each ring needs a ticket, already counted with joins | Rejected: a loop of ticket and cancel rings the other member every 2 s for as long as the join allowance lasts, which at one a second is forever |
+| | Per room on the owner: at most 5 ring starts a minute, and 30 s before a declined caller may ring the same member again, refused `ring_limited` with `retry_after_ms` | Accepted: the owner decides every ring already; the room is the pair being rung, whoever calls |
+| An answer arriving at the ring's timeout | Rung out at the timeout, whatever is in flight | Rejected: a callee who answers a second before `expires_at` waits on the SFU for up to 10 s and loses the call to `call_missed` |
+| | Mark the call answered when the callee's ask arrives, roll back if the SFU fails | Rejected: the caller would hear `call_answered` and then, on a failure, a second ending |
+| | A callee's ask arriving before the timeout holds the ring up to 10 s past it, until its ticket answers it | Accepted: nothing is announced until it is true; an ask that never becomes a ticket rings out at the end of the grace |
 | An owner change mid-ring | Move the state with the room | Rejected: ADR-0087 deferred the stored generation for want of anything that moves it; moving ring state is the same order of work for a 45 s window |
 | | The deposed owner forgets its calls without a word; clients stop ringing at `expires_at` | Accepted |
 
@@ -80,6 +85,17 @@ What a ring needs, and what the system gives today:
   another, checked before the SFU is asked and again when the ticket is issued); at most seven
   members rung per call, from a list read up to eight; the router's notice lookups above. The
   answer layouts change (layout 2): an ask says what it asks, a ticket names its call.
+- **Ring rate.** Per room, on the owner: at most 5 rings start within a minute
+  (`RingLimits::rings_per_window`, `ring_window`), and a caller whose call a callee declined may
+  not ring the room again for 30 s (`decline_cooldown`); the callee may call back at once. A ticket
+  past either is refused before the member list or the SFU is asked, and checked again when the
+  ticket is issued: `ring_limited` with `retry_after_ms`, counted as
+  `call_refusals_total{reason="ring_limited"}`. Each room's recent ring starts are remembered
+  (16384 rooms at most, forgotten once no limit needs them; past it a ring is `busy`).
+- **Answer grace.** A callee's ticket ask that reaches the owner before the ring's timeout holds
+  the call up to 10 s past it (`answer_grace`): its ticket answers the call when the SFU issues
+  it. An ask that fails rings out at the end of the grace (`call_rings_total{outcome="graced"}`
+  counts the held rings).
 - **Owner changes.** A node that no longer owns a room forgets its calls at their next
   deadline without a word (`call_rings_total{outcome="orphaned"}`). The new owner knows none:
   a decline or cancel is `no_call`, and the callee's ticket rings the caller as a new call, which
@@ -95,7 +111,13 @@ What a ring needs, and what the system gives today:
   release as ADR-0087's version 4, that one Recreate covers both.
 - Every ring event costs one notice per member, and a read of the owner of each member's
   presence room on the ringing node (it routes none of those rooms). A call is a handful of
-  events.
+  events. The reads are not cached: the re-announcement every 15 s alone is two reads per ringing
+  call, so at the cap of 4096 ringing calls an owner makes about 550 owner reads a second
+  (4096 x 2 / 15), each one indexed row. Cache the owners (with the router's revalidation) if
+  that becomes real load.
+- `call_end` takes effect while the owner holds the answered call, 120 s past its last ticket;
+  later it is `no_call`, which a client takes as done. The other member learns of a hang-up from
+  LiveKit (`ParticipantDisconnected`) either way.
 - A member who comes back to an answered call after its 120 s hold rings the other, who is in
   the call: calls.md tells clients already connected to a room's call to answer such a ring by
   asking for a ticket. LiveKit's room events (participant left, room finished) would let the

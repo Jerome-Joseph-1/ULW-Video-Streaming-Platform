@@ -71,10 +71,13 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
 
    The ticket is used once. After the connect LiveKit keeps the connection's credential fresh
    itself, and the SDK reconnects with it after a network change; do not store the ticket.
-5. To leave, `room.disconnect()` and send `call_end` ([Ringing](#ringing)): the other member's
-   other devices hear `call_ended`, and the next call rings again at once. LiveKit tells the
-   other member's connected device itself (`ParticipantDisconnected`), within about 20 s when a
-   device vanishes without leaving.
+5. To leave, `room.disconnect()` and send `call_end` ([Ringing](#ringing)). The other member
+   learns of the hang-up from LiveKit (`ParticipantDisconnected`, within about 20 s when a device
+   vanishes without leaving), whatever chat says. `call_end` takes effect only while chat still
+   holds the answered call, which is 2 minutes past the last ticket asked in it: then the other
+   member's other devices hear `call_ended`, and the next call rings at once. After that the call
+   is already forgotten and `call_end` is answered `no_call`, which here means it is already
+   done: nothing to show, nothing to retry.
 6. To come back (the SDK gave up reconnecting, the app restarted, or `room.connect` failed after
    `expires_at`), ask chat for a new ticket (step 2). A connect refused with "room does not
    exist" means the call's room stood empty long enough for LiveKit to drop it: ask again, and
@@ -82,7 +85,7 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
 
 ## Ringing
 
-<!-- apps/chat/src/ring.hpp (RingLimits), apps/chat/src/ring.cpp (Ringer), apps/chat/src/call_bell.cpp (CallBell::on_notice), apps/chat/src/envelope.cpp (write_call_event, call_move_of), docs/adr/0092-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md -->
+<!-- apps/chat/src/ring.hpp (RingLimits), apps/chat/src/ring.cpp (Ringer, ring_limited, answering), apps/chat/src/call_bell.cpp (CallBell::on_notice), apps/chat/src/envelope.cpp (write_call_event, call_move_of), docs/adr/0092-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md -->
 
 The room's owner keeps one call per direct chat, from the first ticket until it ends, and tells
 every open socket of **both** members, on any node, each time it changes. A socket hears these
@@ -113,12 +116,14 @@ Client to server, on a socket that joined the room (`not_joined` otherwise):
 |---|---|---|---|
 | `call_decline` | `room`, `call` | The callee, while it rings | Turn it down: everyone hears `call_declined` |
 | `call_cancel` | `room`, `call` | The caller, while it rings | Give up: everyone hears `call_cancelled` |
-| `call_end` | `room`, `call` | Either member, once answered | End it: everyone hears `call_ended` |
+| `call_end` | `room`, `call` | Either member, once answered, within 2 minutes of the call's last ticket | End it: everyone hears `call_ended`. Later the call is already forgotten, and this is `no_call` |
 
 Each is answered on the socket that sent it with the event everyone hears, or an
 [error](#errors): `no_call` when the room has no such call in a state you may move it from
-(already ended, answered for a decline or a cancel, still ringing for an end, or someone else's
-to cancel). Each is checked against the member list on the room's owner, like a ticket, and
+(already ended or forgotten, answered for a decline or a cancel, still ringing for an end, or
+someone else's to cancel). For `call_end` it means the call is already over as far as chat
+knows: chat forgets an answered call 2 minutes after its last ticket, while LiveKit may still
+carry it. Treat it as done. Each is checked against the member list on the room's owner, like a ticket, and
 counted with joins.
 
 **Client states.** The caller: *calling* from the ticket (connect to LiveKit at once and wait
@@ -131,6 +136,13 @@ ticket (`call`) and connect: that is `call_answered` for everyone; to decline, `
 
 What the ring does not cover:
 
+- **Ringing too often.** A direct chat starts at most 5 rings a minute, whoever calls, and a
+  caller whose call was declined may not ring that member again for 30 s (the declining member
+  may call back at once). A ticket past either is refused `ring_limited` before anything rings.
+- **Answering at the last moment.** A callee's ticket asked before `expires_at` holds the ring
+  up to 10 s past it while LiveKit issues it, so the answer is not lost to `call_missed`: the
+  caller may hear `call_answered` a few seconds after `expires_at`, and the callee's own
+  devices should keep the call they answered even past `expires_at`.
 - **A member with no socket open hears nothing**: there are no push notifications yet. A
   device that connects while the call still rings hears the next announcement, within 15 s.
 - **Rejoining.** Asking for a ticket again within 2 minutes of the last one in an answered call
@@ -156,7 +168,8 @@ Each is an `error` with the `room` of the call.
 | `not_callable` | The room is not a direct chat | Do not retry: group calls are not available |
 | `unavailable` | LiveKit, the member list or the room's owner could not be reached; `retry_after_ms` says when to ask again | Wait that long, then ask again |
 | `busy` | The call allowance (counted with joins: a burst of 64, then one a second per user) or the room's owner is at its limit (asks in flight, or 4096 calls ringing or answered) | Back off and retry |
-| `no_call` | A `call_decline`, `call_cancel` or `call_end` for a call the room does not have in that state ([Ringing](#ringing)) | Stop showing the call |
+| `no_call` | A `call_decline`, `call_cancel` or `call_end` for a call the room does not have in that state ([Ringing](#ringing)): for `call_end`, usually an answered call chat already forgot (2 minutes after its last ticket) | Treat the call as done; do not retry. The other member learns of a hang-up from LiveKit |
+| `ring_limited` | The ticket would ring the other member, and this direct chat may not ring yet: it rang 5 times in the last minute, or the other member declined your call less than 30 s ago. `retry_after_ms` says when it may | Do not ring again before then; tell the user. Nothing was rung and no ticket issued |
 | `call_failed` | LiveKit refused the request as made: a fault on the service's side | Retry much later; report it |
 | `calls_disabled` | Calls are not configured on this deployment | Do not retry |
 
