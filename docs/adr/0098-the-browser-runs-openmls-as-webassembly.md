@@ -1,4 +1,4 @@
-# 0099. The browser runs the bridge's OpenMLS as WebAssembly, built in a pinned image
+# 0098. The browser runs the bridge's OpenMLS as WebAssembly, built in a pinned image
 
 Status: Accepted
 Date: 2026-10-04

@@ -516,7 +516,7 @@ jobs:
           cargo fmt --check
           cargo clippy --locked --offline --all-targets -- -D warnings
           cargo test --locked --offline
-      # The browser client (ADR-0099): the same checks, natively and for wasm32, and its room
+      # The browser client (ADR-0098): the same checks, natively and for wasm32, and its room
       # logic against an in-memory room. Its lock adds crates the bridge's fetch does not cover.
       - name: Browser MLS client (rustfmt, clippy, cargo test, room tests)
         if: matrix.shard == 0
@@ -685,7 +685,7 @@ jobs:
       - run: sudo apt-get install -y -qq --no-install-recommends python3-yaml
       - run: deploy/local/validate-manifests.sh
 
-  # The browser client's dist/ is committed (ADR-0099); rebuilt in its pinned image it must
+  # The browser client's dist/ is committed (ADR-0098); rebuilt in its pinned image it must
   # match, byte for byte.
   web-mls-dist:
     runs-on: ubuntu-24.04

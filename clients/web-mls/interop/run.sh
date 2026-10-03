@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The interop check (ADR-0099): the WebAssembly client in dist/ and the FFI bridge's own code
+# The interop check (ADR-0098): the WebAssembly client in dist/ and the FFI bridge's own code
 # share MLS groups through a real chat_server on a scratch Postgres database. It builds the
 # bridge (cargo, offline, from its Cargo.lock, as CMake does) and ffi_peer, then runs
 # room.test.mjs (mls-room.js against an in-memory room) and interop.mjs under Node 22 or later. With --browser it also runs browser.mjs: example.html in

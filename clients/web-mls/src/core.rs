@@ -482,7 +482,7 @@ impl Client {
     /// are merged (the room has already ordered them). Refused (`Rejected`), and left
     /// unapplied: a standalone proposal, which nothing here sends and which would otherwise
     /// ride along with the next commit; and a commit that adds members made by anyone but
-    /// the group's first member, the one the room convention lets add (ADR-0099). A member
+    /// the group's first member, the one the room convention lets add (ADR-0098). A member
     /// never processes its own messages.
     pub fn process(&self, group: &mut MlsGroup, message: &[u8]) -> Result<Received> {
         let protocol_message = MlsMessageIn::tls_deserialize_exact(message)

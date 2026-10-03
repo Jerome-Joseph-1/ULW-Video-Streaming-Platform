@@ -17,10 +17,10 @@ discard the rest. Multi-device key management is a known gap.
 
 ## Browser client
 
-<!-- clients/web-mls/src/core.rs, clients/web-mls/src/wasm.rs, clients/web-mls/js/mls-room.js, clients/web-mls/build.sh, clients/web-mls/interop/, docs/adr/0099-the-browser-runs-openmls-as-webassembly.md -->
+<!-- clients/web-mls/src/core.rs, clients/web-mls/src/wasm.rs, clients/web-mls/js/mls-room.js, clients/web-mls/build.sh, clients/web-mls/interop/, docs/adr/0098-the-browser-runs-openmls-as-webassembly.md -->
 
 `clients/web-mls` is OpenMLS 0.9.0 compiled to WebAssembly: the library, version, ciphersuite
-and message forms of the FFI bridge the native harnesses use (ADR-0044, ADR-0099), so browser
+and message forms of the FFI bridge the native harnesses use (ADR-0044, ADR-0098), so browser
 and native devices share groups. Its build is committed in `clients/web-mls/dist/`; a page needs
 nothing else.
 

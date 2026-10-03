@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds dist/: the client as WebAssembly with its JavaScript glue, in a Docker image whose every
 # input is pinned (Dockerfile.build: the rust image by digest, the wasm32 standard library and
-# wasm-bindgen by SHA-256), so the only thing the machine needs is Docker (ADR-0099). Crates are
+# wasm-bindgen by SHA-256), so the only thing the machine needs is Docker (ADR-0098). Crates are
 # pinned by Cargo.lock, by version and SHA-256 (cargo build --locked).
 # The output is the same bytes on every run; dist/SHA256SUMS records them, and `./build.sh
 # --check` rebuilds into a scratch directory and fails if anything differs from dist/.

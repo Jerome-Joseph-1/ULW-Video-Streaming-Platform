@@ -1,4 +1,4 @@
-# The image build.sh builds dist/ in (ADR-0099). Every input is pinned: the rust image by
+# The image build.sh builds dist/ in (ADR-0098). Every input is pinned: the rust image by
 # digest (rustc 1.94.1, the FFI bridge's), and the two downloads by the SHA-256 Docker checks
 # before using them: the wasm32 standard library for that rustc (its hash as the release's
 # channel manifest, channel-rust-1.94.1.toml, lists it) and the wasm-bindgen 0.2.129 release
