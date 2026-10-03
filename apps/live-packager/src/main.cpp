@@ -16,6 +16,7 @@
 #include "ops/process.hpp"
 #include "publisher.hpp"
 #include "recorder.hpp"
+#include "scratch.hpp"
 #include "stream_runner.hpp"
 
 #include <csignal>
@@ -226,14 +227,11 @@ int run() {
         return fail("block signals", std::generic_category().message(rc));
     }
 
-    // What an earlier run left is not needed: the store has the stream's state.
-    std::error_code ec;
-    fs::remove_all(config->scratch, ec);
-    const fs::path media_dir = config->scratch / "media";
-    fs::create_directories(media_dir, ec);
-    if (ec) {
-        return fail("ULW_SCRATCH_DIR", ec.message());
+    if (const auto cleared = live::clear_scratch(config->scratch); !cleared) {
+        return fail("ULW_SCRATCH_DIR", cleared.error());
     }
+    const fs::path media_dir = config->scratch / "media";
+    std::error_code ec;
     fs::path sandbox = config->sandbox;
     if (sandbox.empty()) {
         sandbox = fs::read_symlink("/proc/self/exe", ec).parent_path() / "ulw_sandbox";

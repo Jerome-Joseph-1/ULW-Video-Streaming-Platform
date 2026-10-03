@@ -1,5 +1,7 @@
 #include "job_queue.hpp"
 
+#include <mutex>
+
 namespace net::detail {
 
 void JobQueue::push(IOffloadJob& job) {
@@ -10,10 +12,14 @@ void JobQueue::push(IOffloadJob& job) {
     ready_.notify_one();
 }
 
+void JobQueue::wake_all() noexcept {
+    { const std::scoped_lock lock(mutex_); }
+    ready_.notify_all();
+}
+
 IOffloadJob* JobQueue::pop(const std::stop_token& stop) {
     std::unique_lock lock(mutex_);
-    // Once stop is requested wait() returns whether jobs remain, not whether to take one.
-    ready_.wait(lock, stop, [this] { return !jobs_.empty(); });
+    ready_.wait(lock, [this, &stop] { return !jobs_.empty() || stop.stop_requested(); });
     if (stop.stop_requested()) {
         return nullptr;
     }

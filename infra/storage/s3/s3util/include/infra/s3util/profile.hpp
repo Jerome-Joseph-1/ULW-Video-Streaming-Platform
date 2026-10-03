@@ -11,6 +11,9 @@ namespace infra::s3util {
 
 enum class Scheme : std::uint8_t { Http, Https };
 
+// The scheme's name, as a URL spells it before "://". Plain HTTP is for a local MinIO only.
+[[nodiscard]] std::string_view to_string(Scheme scheme) noexcept;
+
 enum class Addressing : std::uint8_t { PathStyle, VirtualHosted };
 
 enum class ProfileError : std::uint8_t {

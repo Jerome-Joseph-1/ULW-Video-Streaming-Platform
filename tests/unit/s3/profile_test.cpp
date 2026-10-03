@@ -12,6 +12,7 @@ using infra::s3util::parse_endpoint;
 using infra::s3util::ProfileError;
 using infra::s3util::S3Profile;
 using infra::s3util::Scheme;
+using infra::s3util::to_string;
 
 TEST(S3Profile, MinioIsPathStyleInTheDefaultRegionOnTheGivenEndpoint) {
     const auto p = S3Profile::minio("http://minio.internal:9000");
@@ -51,6 +52,11 @@ TEST(S3Profile, RejectsAccountIdsThatAreNotThirtyTwoLowercaseHexDigits) {
     }
 }
 
+TEST(Endpoint, SpellsEachSchemeAsAUrlDoes) {
+    EXPECT_EQ(to_string(Scheme::Http), "http");
+    EXPECT_EQ(to_string(Scheme::Https), "https");
+}
+
 TEST(Endpoint, LeavesTheSchemeDefaultPortOutOfTheAuthority) {
     const auto https = parse_endpoint("https://storage.example:443");
     ASSERT_TRUE(https.has_value());
@@ -71,6 +77,10 @@ TEST(Endpoint, RejectsAnythingButSchemeHostAndPort) {
     for (const std::string_view e : {"",
                                      "minio:9000",
                                      "ftp://minio",
+                                     "://minio",
+                                     "httpss://minio",
+                                     " http://minio",
+                                     "https:/minio",
                                      "http://",
                                      "https://:9000",
                                      "http://minio:",

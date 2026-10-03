@@ -80,11 +80,13 @@ GitHub App, so the job needs no `pull-requests` scope.
   environment and event.
 - **`sonar-project.properties`.** Organisation `jerome-joseph-1`, project key
   `Jerome-Joseph-1_ULW-Video-Streaming-Platform`. The source and test split is the one
-  `.sonarcloud.properties` had: `tests/**` and `**/*_test.py` as tests and the rest as sources.
+  `.sonarcloud.properties` had: `tests/**` and `**/*_test.py` as tests and the rest as sources,
+  and `**/*_test.go` with them (the Go tests sit beside their package, as Python's do; counted
+  as sources, a test file would be held to coverage itself and would never be covered).
   `build/` and the vendored tarballs in `third_party/` are left out; files git ignores are left
   out by the scanner. The compile database, whose `-std=c++23` sets the analysed standard; C and
   C++ files the coverage preset does not compile (the fuzz targets, `tools/io_uring_probe.c`) are
-  not analysed. The two coverage reports. `sonar.qualitygate.wait=false`. No thread count: the
+  not analysed. The three coverage reports. `sonar.qualitygate.wait=false`. No thread count: the
   analyser uses every core by default.
 - **`.sonarcloud.properties` is removed.** Only Automatic Analysis reads it; with CI analysis it
   would be a second, ignored copy of the settings.
@@ -118,6 +120,12 @@ measured coverage instead.
   24.04's `python3-coverage` 7.4.4+dfsg1-0ubuntu2, fetched with `apt-get download` and checked
   against the .deb's SHA-256 before it is installed. `llvm-19` is pinned to the installed
   clang-19's version, as in ci.yml.
+- **Go.** `tools/coverage-go.sh` runs the tests of every tracked Go module (today
+  `deploy/local/mock-auth`) with `-coverprofile` and writes `build/coverage-go.out`
+  (`sonar.go.coverage.reportPaths`); the profile names files by import path, which the Go
+  analyser maps back through the module's `go.mod`. It runs in the golang image the mock-auth
+  Dockerfile builds with, by the same tag and digest, as the runner's user and with no network;
+  `GOTOOLCHAIN=local` and `GOPROXY=off` make a module that would need a download fail instead.
 - **A failing test** fails the job, but the scan still runs (it needs only the build), so the
   dashboard keeps its analysis; coverage from such a run is lower than the truth.
 

@@ -10,7 +10,11 @@ namespace live {
 
 namespace {
 
-constexpr std::string_view kDefaultScratch = "/var/tmp/ulw-live";
+// Under /var/cache, which only root can write to, rather than a shared directory such as
+// /var/tmp, where another user could make the directory first. So the packager does not make
+// it: the deployment does, 0700 and owned by the packager's user, and startup refuses to run
+// without it (docs/integration/operations-contract.md).
+constexpr std::string_view kDefaultScratch = "/var/cache/ulw-live";
 constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
 constexpr std::string_view kDefaultIngestHost = "127.0.0.1";
 
