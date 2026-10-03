@@ -280,7 +280,9 @@ jobs:
   # broadcaster's page starts a stream through the gateway, publishes Chromium's fake camera
   # over WHIP with the ticket the gateway issued, goes live; the gateway starts the packager
   # and LiveKit's recorder relays to it; a second user watches in hls.js; the broadcaster ends
-  # it, and its recording becomes a video the worker makes ready.
+  # it, and its recording becomes a video the worker makes ready. A second run never calls start
+  # or end: LiveKit's webhooks to the gateway take the stream live and, once the page drops its
+  # connection, end it (docs/adr/0093).
   live-publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 50

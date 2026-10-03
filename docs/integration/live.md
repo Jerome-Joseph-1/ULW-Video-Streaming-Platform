@@ -16,7 +16,7 @@ closed to new joins once it ends.
 
 ## Starting a stream
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0092-the-stream-service-lives-in-the-gateway.md -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0092-the-stream-service-lives-in-the-gateway.md, migrations/0013_live_streams_publisher_left.sql, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md -->
 
 The gateway's stream service starts a stream for the signed-in user, hands its owner publisher
 tickets, takes it live, and ends it. Every request is authenticated like the rest of the API
@@ -41,7 +41,7 @@ The stream, as every one of these answers it (`Cache-Control: no-store`):
 | `state` | `starting` (tickets issued, nothing relayed yet), `live` (its packager runs and the publisher is relayed to it) or `ended`. It only moves forward |
 | `playlist` | Where viewers watch: `/api/v1/live/{id}/index.m3u8` ([Watching a stream](#watching-a-stream)) |
 | `created_at`, `live_at`, `ended_at` | Unix seconds, or `null` until then |
-| `ended_by` | `null` until it ends; then `owner` (ended with `end`), `finished` (the publisher went: a WHIP DELETE, the media server dropping it, 12 hours, or a broken stream), `failed` (its packager could not run) or `timeout` (not taken live within 2 minutes of `POST /api/v1/live`, or past 13 hours) |
+| `ended_by` | `null` until it ends; then `owner` (ended with `end`), `publisher_left` (the media server said the publisher left, and it was still gone 10 s later), `finished` (the publisher went: a WHIP DELETE, the media server dropping it, 12 hours, or a broken stream), `failed` (its packager could not run) or `timeout` (not taken live within 2 minutes of `POST /api/v1/live`, or past 13 hours). Treat any value not listed here as an end you need not act on |
 | `video_id` | The owner only: the recording's video once it is queued, else `null` ([When a stream ends](#when-a-stream-ends)). Absent for anyone else |
 | `publish` | `POST /api/v1/live` only: the first publisher ticket |
 
@@ -62,11 +62,20 @@ The flow:
    publisher to it; the answer is the stream, `live`. Call it within 30 s of the POST's `201`:
    the media server's recorder looks for the publisher that long. It is idempotent: retry it on
    `503` or a lost answer. A stream nobody takes live within 2 minutes is ended (`timeout`).
+   Where the media server reports to the gateway (ADR-0093; where live streams are on), the stream also goes
+   live by itself as soon as the publisher's first track arrives, so an encoder with a fixed
+   token (OBS) needs nobody to call `start`; calling it as well is harmless, and its answer is
+   the client's confirmation.
 4. Before every WHIP request after the POST (each PATCH, an ICE restart, the DELETE), `POST
    /api/v1/live/{id}/ticket` for a fresh ticket.
 5. To stop, DELETE the WHIP session with a fresh ticket, or `POST /api/v1/live/{id}/end`, or
    both. Either ends the stream, and its playlist gets `EXT-X-ENDLIST` within a second or two.
-   `end` answers the ended stream, and is idempotent.
+   `end` answers the ended stream, and is idempotent. A publisher that disconnects without
+   either (a crash, a lost network) ends its stream too: its playlist ends once the media
+   server drops it, and where the media server reports to the gateway the stream is `ended`
+   (`publisher_left`) about 10 s later, unless the publisher has reconnected by then. A
+   reconnect is a new WHIP POST with a fresh ticket; the stream's playlist does not resume
+   after it has ended.
 6. Poll `GET /api/v1/live/{id}` for `video_id`; then follow the video as any other
    (`GET /api/v1/videos/{video_id}`).
 

@@ -12,6 +12,8 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 resources:
   - networkpolicy.yaml
+  # LiveKit's webhooks (docs/adr/0093): the listener's Service and who may reach it.
+  - hooks.yaml
 patches:
   # By kind and name: components/operator-config, before this, has set its namespace.
   - path: deployment-patch.yaml
@@ -28,6 +30,16 @@ replacements:
       - select:
           kind: NetworkPolicy
           name: video-gateway-live
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: NetworkPolicy
+          name: video-gateway-hooks
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: Service
+          name: video-gateway-hooks
         fieldPaths:
           - metadata.namespace
       # LiveKit's Service, in the same namespace.

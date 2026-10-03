@@ -13,6 +13,10 @@ spec:
     spec:
       containers:
         - name: gateway
+          ports:
+            # LiveKit's webhooks only (hooks.yaml, docs/adr/0093); no route reaches it.
+            - name: hooks
+              containerPort: 8081
           env:
             - name: LIVEKIT_API_URL
               value: http://livekit.ulw.svc.cluster.local:7880
@@ -54,6 +58,13 @@ spec:
               value: /var/run/ulw/kube-api/token
             - name: ULW_K8S_CA_FILE
               value: /var/run/ulw/kube-api/ca.crt
+            # LiveKit's webhooks take a stream live when its publisher publishes and end it once
+            # the publisher has been gone for the grace (docs/adr/0093), on a listener of their
+            # own that only LiveKit's pods reach (hooks.yaml).
+            - name: ULW_LIVE_WEBHOOK_PORT
+              value: "8081"
+            - name: ULW_LIVE_PUBLISHER_GRACE_SECONDS
+              value: "10"
           volumeMounts:
             - name: kube-api
               mountPath: /var/run/ulw/kube-api
