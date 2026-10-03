@@ -53,7 +53,8 @@ public:
     void call(std::string_view method, std::string body, const Grant& grant, IfAbsent absent,
               core::ports::MediaDone done);
     // As call, for a method whose answer the caller reads, within its own limits. With
-    // IfAbsent::Succeed, LiveKit's not_found is answered as an empty body.
+    // IfAbsent::Succeed, LiveKit's not_found is a success whose body is that error's own
+    // (`{"code":"not_found",...}`), for the caller to tell from a real answer.
     void fetch(std::string_view method, std::string body, const Grant& grant,
                const CallLimits& limits, AnswerDone done, IfAbsent absent = IfAbsent::Fail);
 
