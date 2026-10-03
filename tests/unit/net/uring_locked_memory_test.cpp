@@ -13,9 +13,9 @@
 #include <expected>
 #include <fstream>
 #include <gtest/gtest.h>
-#include <iterator>
 #include <string>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 
@@ -108,7 +108,10 @@ TEST(UringLockedMemory, TheFactsReadAreTheProcesssOwn) {
     EXPECT_EQ(*read.effective_caps, caps[0].effective);
 
     std::ifstream map("/proc/self/uid_map");
-    const std::string expected(std::istreambuf_iterator<char>(map), {});
+    std::string expected;
+    for (std::string line; std::getline(map, line);) {
+        expected += line + '\n';
+    }
     EXPECT_EQ(read.uid_map, expected);
     EXPECT_FALSE(read.uid_map.empty());
 }

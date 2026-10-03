@@ -19,7 +19,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <iterator>
 #include <memory>
 #include <new>
 #include <poll.h>
@@ -111,17 +110,21 @@ LockedMemoryFacts read_locked_memory_facts() noexcept {
     rlimit limit{};
     __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
     std::array<__user_cap_data_struct, _LINUX_CAPABILITY_U32S_3> caps{};
-    std::ifstream map("/proc/self/uid_map");
-    return LockedMemoryFacts{
+    LockedMemoryFacts facts{
         .memlock_limit = ::getrlimit(RLIMIT_MEMLOCK, &limit) == 0
                              ? std::expected<rlim_t, int>(limit.rlim_cur)
                              : std::unexpected(errno),
         .effective_caps = ::syscall(SYS_capget, &header, caps.data()) == 0
                               ? std::expected<std::uint32_t, int>(caps[0].effective)
                               : std::unexpected(errno),
-        .uid_map =
-            std::string(std::istreambuf_iterator<char>(map), std::istreambuf_iterator<char>()),
+        .uid_map = {},
     };
+    std::ifstream map("/proc/self/uid_map");
+    for (std::string line; std::getline(map, line);) {
+        facts.uid_map += line;
+        facts.uid_map += '\n';
+    }
+    return facts;
 }
 
 bool is_initial_user_namespace(std::string_view uid_map) noexcept {
