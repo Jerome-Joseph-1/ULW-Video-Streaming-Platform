@@ -28,6 +28,8 @@ public:
         core::NodeId owner;
         std::uint64_t generation = 1;
         std::uint64_t last_seq = 0;
+        // room_state.media_generation (migrations/0011): from 1, moved on by its owner only.
+        std::uint64_t media_generation = 1;
         bool stale = false;
     };
 
@@ -181,6 +183,21 @@ public:
                    db_.keys.emplace(key, ++r.last_seq);
                    return Answer{r.last_seq};
                });
+    }
+
+    void media_generation(const core::RoomId& room, std::uint64_t generation, rt::MediaStep step,
+                          rt::StoreCallback<std::optional<std::uint64_t>> done) override {
+        answer("", std::move(done), [this, room, generation, step] {
+            using Answer = rt::StoreResult<std::optional<std::uint64_t>>;
+            const auto it = db_.rooms.find(room);
+            if (it == db_.rooms.end() || it->second.generation != generation) {
+                return Answer{std::nullopt};
+            }
+            if (step == rt::MediaStep::Advance) {
+                ++it->second.media_generation;
+            }
+            return Answer{it->second.media_generation};
+        });
     }
 
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,

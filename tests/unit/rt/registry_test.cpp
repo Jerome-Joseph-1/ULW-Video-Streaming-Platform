@@ -13,6 +13,8 @@
 
 namespace {
 
+using MediaAnswer = rt::StoreResult<std::optional<std::uint64_t>>;
+
 using rt::AppendError;
 using rt::OwnedRoom;
 using rt::Ownership;
@@ -152,6 +154,43 @@ TEST_F(RegistryTest, AFencedAppendEndsOwnershipAtOnceAndIsReported) {
     // No second write under the old generation, and none retried.
     EXPECT_FALSE(registry_.append(room, message_, [](auto) noexcept {}));
     EXPECT_TRUE(store_.appends.empty());
+}
+
+TEST_F(RegistryTest, TheMediaGenerationIsReadAndMovedOnUnderTheOwnersGeneration) {
+    const core::RoomId room = new_room();
+    EXPECT_FALSE(registry_.media_generation(room, rt::MediaStep::Read, [](auto) noexcept {}));
+    EXPECT_TRUE(store_.media.empty());
+    own(room, 4);
+    std::optional<rt::StoreResult<std::optional<std::uint64_t>>> result;
+    ASSERT_TRUE(
+        registry_.media_generation(room, rt::MediaStep::Advance, [&](auto r) noexcept { result = r; }));
+    ASSERT_EQ(store_.media.size(), 1U);
+    EXPECT_EQ(store_.media.front().generation, 4U);
+    EXPECT_EQ(store_.media.front().step, rt::MediaStep::Advance);
+    FakeRoomStore::take(store_.media).done(MediaAnswer{std::optional<std::uint64_t>{7}});
+    EXPECT_EQ(result, MediaAnswer{std::optional<std::uint64_t>{7}});
+    EXPECT_EQ(registry_.owned(room), 4U);
+
+    // The store not answering says nothing of the room's owner.
+    ASSERT_TRUE(
+        registry_.media_generation(room, rt::MediaStep::Read, [&](auto r) noexcept { result = r; }));
+    FakeRoomStore::take(store_.media).done(std::unexpected(rt::StoreError::Unavailable));
+    EXPECT_EQ(result, std::unexpected(rt::StoreError::Unavailable));
+    EXPECT_EQ(registry_.owned(room), 4U);
+    EXPECT_TRUE(observer_.fences.empty());
+}
+
+TEST_F(RegistryTest, AFencedMediaGenerationEndsOwnershipAsAnyOwnerWriteDoes) {
+    const core::RoomId room = new_room();
+    own(room, 2);
+    std::optional<rt::StoreResult<std::optional<std::uint64_t>>> result;
+    ASSERT_TRUE(
+        registry_.media_generation(room, rt::MediaStep::Advance, [&](auto r) noexcept { result = r; }));
+    FakeRoomStore::take(store_.media).done(MediaAnswer{std::optional<std::uint64_t>{}});
+    EXPECT_EQ(result, MediaAnswer{std::optional<std::uint64_t>{}});
+    EXPECT_FALSE(registry_.owned(room));
+    ASSERT_EQ(observer_.fences.size(), 1U);
+    EXPECT_EQ(observer_.fences[0].write, OwnerWrite::MediaGeneration);
 }
 
 TEST_F(RegistryTest, EveryFencedWriteInFlightIsReportedNotJustTheFirst) {

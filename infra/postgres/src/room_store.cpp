@@ -154,6 +154,15 @@ UPDATE room_state SET last_seq = last_seq + 1
  WHERE room_id = $1 AND owner_generation = $2
 RETURNING last_seq, true)sql";
 
+// A room's media generation (migrations/0011), read or moved on under the owner's generation:
+// no row when another owner holds the room. Never touches last_seq.
+constexpr Sql kReadMediaGeneration = R"sql(
+SELECT media_generation FROM room_state WHERE room_id = $1 AND owner_generation = $2)sql";
+constexpr Sql kAdvanceMediaGeneration = R"sql(
+UPDATE room_state SET media_generation = media_generation + 1
+ WHERE room_id = $1 AND owner_generation = $2
+RETURNING media_generation)sql";
+
 // '-infinity' is older than any staleness bound, so the rooms are claimable at once.
 constexpr Sql kRelease = R"sql(
 UPDATE room_assignments SET heartbeat_at = '-infinity'
@@ -491,6 +500,47 @@ private:
     StoreCallback<std::optional<std::uint64_t>> done_;
 };
 
+class MediaGeneration final : public Operation {
+public:
+    MediaGeneration(const core::RoomId& room, std::uint64_t generation, rt::MediaStep step,
+                    StoreCallback<std::optional<std::uint64_t>> done)
+        : room_(room), generation_(generation), step_(step), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = step_ == rt::MediaStep::Advance ? kAdvanceMediaGeneration
+                                                                : kReadMediaGeneration,
+                         .params = Params{}.add_uuid(room_.uuid()).add_int(as_int(generation_))};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(StoreError::Unavailable));
+            return std::nullopt;
+        }
+        if (outcome->rows() == 0) {
+            done_(std::optional<std::uint64_t>{});
+            return std::nullopt;
+        }
+        const auto media = generation_at(*outcome, 0, 0);
+        if (!media) {
+            done_(std::unexpected(StoreError::Corrupt));
+            return std::nullopt;
+        }
+        done_(std::optional<std::uint64_t>{*media});
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(StoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    std::uint64_t generation_;
+    rt::MediaStep step_;
+    StoreCallback<std::optional<std::uint64_t>> done_;
+};
+
 class Advertise final : public Operation {
 public:
     Advertise(const core::NodeId& node, std::string address, const core::Uuid& incarnation,
@@ -743,6 +793,13 @@ void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
     }
     impl_->pool().submit(
         std::make_unique<AppendMessage>(room, generation, message, std::move(done)));
+}
+
+void PgRoomStore::media_generation(const core::RoomId& room, std::uint64_t generation,
+                                   rt::MediaStep step,
+                                   StoreCallback<std::optional<std::uint64_t>> done) {
+    impl_->pool().submit(
+        std::make_unique<MediaGeneration>(room, generation, step, std::move(done)));
 }
 
 void PgRoomStore::release(const core::NodeId& node, std::vector<OwnedRoom> rooms,

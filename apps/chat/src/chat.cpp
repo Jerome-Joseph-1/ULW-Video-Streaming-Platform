@@ -31,6 +31,8 @@ std::string_view write_name(rt::OwnerWrite write) noexcept {
         return "append";
     case rt::OwnerWrite::Heartbeat:
         return "heartbeat";
+    case rt::OwnerWrite::MediaGeneration:
+        return "media_generation";
     }
     return "append";
 }
