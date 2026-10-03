@@ -143,12 +143,11 @@ namespace {
 }
 
 // The URL standard's "ends in a number": the last label, past one trailing dot, is all digits or
-// an IPv4 number. Such a host is an IPv4 address (or no URL at all), never a domain.
+// an IPv4 number. Such a host is an IPv4 address (or no URL at all), never a domain; a single
+// label counts too, so "1." and "0x7f." are 0.0.0.1 and 0.0.0.127 to a browser. Only an empty
+// last label ("." or "a..") is not a number.
 [[nodiscard]] bool ends_in_a_number(std::string_view host) noexcept {
     if (host.ends_with('.')) {
-        if (host.find('.') == host.size() - 1) {
-            return false;
-        }
         host.remove_suffix(1);
     }
     const std::size_t dot = host.rfind('.');

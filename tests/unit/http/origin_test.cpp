@@ -88,7 +88,15 @@ TEST(Origin, Ipv4HostsAreFourDecimalOctets) {
                                "https://1..2.3",
                                "http://127.1",
                                "http://0x7f.0.0.1:3000",
-                               "http://127.0.0.1."}) {
+                               "http://127.0.0.1.",
+                               "https://1.",
+                               "https://127.",
+                               "https://0.",
+                               "https://0x7f.",
+                               "https://07.",
+                               "https://0x.",
+                               "https://127.:8443",
+                               "http://127."}) {
         EXPECT_FALSE(http::is_origin(origin)) << origin;
     }
 }
@@ -103,6 +111,8 @@ TEST(Origin, DomainsAreLowercaseWithoutTheDefaultPort) {
     }
     EXPECT_TRUE(http::is_origin("https://a.example."));
     EXPECT_TRUE(http::is_origin("https://a.example.:8443"));
+    EXPECT_TRUE(http::is_origin("https://localhost."));
+    EXPECT_TRUE(http::is_origin("https://1e3."));
 }
 
 } // namespace

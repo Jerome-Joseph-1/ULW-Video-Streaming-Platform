@@ -355,7 +355,10 @@ TEST_F(ConfigTest, OriginsNoBrowserSendsAreRefused) {
                             "https://0x7f.1",
                             "https://127.1",
                             "https://256.0.0.1",
-                            "https://10.0.0.1."}) {
+                            "https://10.0.0.1.",
+                            "https://1.",
+                            "https://127.",
+                            "https://0x7f."}) {
         env["ULW_ALLOWED_ORIGINS"] = bad;
         EXPECT_EQ(refused_variable(), "ULW_ALLOWED_ORIGINS") << bad;
     }
