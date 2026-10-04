@@ -40,7 +40,7 @@ What a group adds to a 1:1 call, on the owner:
 | When a new owner learns it | From the claim's answer | Rejected: the router would carry a call's number for every room it claims |
 | | A fenced read on the first ask after the node took the room, the handle keyed by the owner generation it was read under | Accepted: one indexed read per room and ownership |
 | Who is refused after being put out | Remembered on the owner, in memory | Rejected: a new owner would admit the one put out again on their next ask |
-| | Stored per (room, media generation) in `room_media_expelled`, written in the same fenced statement as the move and returned by the fenced read; carried to the next generation by an expulsion, dropped by the end of the call | Accepted: no extra round trip, and the same fence |
+| | Stored per (room, media generation) in `room_media_expelled`, written in the same fenced statement as the move and returned by the fenced read; carried to the next generation by an expulsion; dropped by the end of the call: `call_end` starts the next generation with an empty list, and a call that ends without a move (missed, nobody left, the SFU silent three times) clears the list of the generation as it stands, a fenced write that moves nothing, so whoever was put out may start or join the next call | Accepted: no extra round trip, and the same fence |
 | Who may put someone out | Any member | Rejected: anyone could empty a call |
 | | The group chat's admins | Deferred: the member lists have no roles yet |
 | | The call's caller, and the member list: a member removed from the chat is put out by the owner | Accepted |
@@ -91,7 +91,8 @@ What a group adds to a 1:1 call, on the owner:
   caller may `call_end` it for everyone (a generation move with no successor) and
   `call_expel` a member (a generation move; `call_moved` with `expelled` to everyone, the one put
   out included); a member removed from the chat is put out the same way by the owner, with no
-  `by`. The target must be a member of the chat. Whoever was put out is refused `expelled` while
+  `by`. The target must be a member of the chat; once 64 are put out of a generation, a further
+  `call_expel` is answered `busy`. Whoever was put out is refused `expelled` while
   the call lasts, by this owner and by any later one (the stored list). A target holding a
   ticket this owner issued within its lifetime (60 s), or a device the SFU still lists, or
   any target when the SFU cannot say, moves the generation; otherwise nothing moved: the
@@ -100,7 +101,8 @@ What a group adds to a 1:1 call, on the owner:
   (room, user) is removed once per generation.
 - **Occupancy.** An answered group call nobody asked a ticket of for 120 s asks the SFU who is
   connected, then every 30 s; nobody ends it (`call_ended`, no `by`), and so do three checks in a
-  row the SFU could not answer. The answer starts from `ListRooms`: a generation LiveKit does not
+  row the SFU could not answer (a check skipped while the generation is being written does not
+  count; a generation this owner moved to and ticketed nobody into holds nobody). The answer starts from `ListRooms`: a generation LiveKit does not
   list has nobody in it, whatever `ListParticipants` says of it.
 - **Direct chats.** Unchanged, but for one thing: a member removed from a direct chat during its
   call ends it (generation moved with no successor, `call_ended` with no `by`), which ADR-0087

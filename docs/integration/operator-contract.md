@@ -419,7 +419,8 @@ be connected; a value that stays up means LiveKit is not answering) and
 `call_generations_abandoned_total` (given up after 5 minutes), `call_occupancy_checks_total` and
 `call_occupancy_unavailable_total` (LiveKit asked whether a quiet group call still has anyone in
 it), `call_resync_checks_total`, `call_expulsions_kept_total` (put out of a call they were not
-in: stored, nothing moved) and `call_announcements_dropped_total` (`call_moved` or `call_ended`
+in: stored, nothing moved), `call_expulsions_cleared_total` (who was put out forgotten
+when a call ended without a move: missed, or nobody left in it) and `call_announcements_dropped_total` (`call_moved` or `call_ended`
 never sent because the room changed hands before the old generation's close was done). Chat is a draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that

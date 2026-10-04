@@ -177,31 +177,45 @@ gone AS (
      WHERE e.room_id = $1 AND e.media_generation < moved.media_generation - 1),
 listed AS (
     INSERT INTO room_media_expelled (room_id, media_generation, user_id)
-    SELECT $1, moved.media_generation, e.user_id
-      FROM moved JOIN room_media_expelled e
-        ON e.room_id = $1 AND e.media_generation = moved.media_generation - 1
-     WHERE $4
-    UNION
-    SELECT $1, moved.media_generation, $5 FROM moved WHERE $5 <> ''
-    LIMIT $3
+    SELECT c.room_id, c.media_generation, c.user_id
+      FROM (SELECT $1::uuid AS room_id, moved.media_generation, e.user_id
+              FROM moved JOIN room_media_expelled e
+                ON e.room_id = $1 AND e.media_generation = moved.media_generation - 1
+             WHERE $4
+            UNION
+            SELECT $1::uuid, moved.media_generation, $5 FROM moved WHERE $5 <> '') c
+     ORDER BY c.user_id = $5 DESC
+     LIMIT $3
     ON CONFLICT DO NOTHING
     RETURNING user_id)
 SELECT moved.media_generation, listed.user_id FROM moved LEFT JOIN listed ON true)sql";
-// Someone put out of the generation as it stands, fenced as any owner write; answered as a read.
+// Someone put out of the generation as it stands, which does not move: fenced as any owner
+// write, by the row lock its no-op UPDATE takes (a claim that commits first leaves no row to
+// match), and answered as a read. The list is kept when $4, or else started again with $5; a
+// list already at $3 takes nobody more (the caller refuses before that).
 constexpr Sql kExpelMediaGeneration = R"sql(
-WITH added AS (
+WITH fenced AS (
+    UPDATE room_state SET media_generation = media_generation
+     WHERE room_id = $1 AND owner_generation = $2
+    RETURNING media_generation),
+kept AS (
+    SELECT e.user_id FROM room_media_expelled e JOIN fenced
+        ON e.room_id = $1 AND e.media_generation = fenced.media_generation
+     WHERE $4),
+cleared AS (
+    DELETE FROM room_media_expelled e USING fenced
+     WHERE NOT $4 AND e.room_id = $1 AND e.media_generation = fenced.media_generation
+       AND e.user_id <> $5),
+fits AS (
+    SELECT $5::text AS user_id WHERE $5 <> '' AND (SELECT count(*) FROM kept) < $3),
+added AS (
     INSERT INTO room_media_expelled (room_id, media_generation, user_id)
-    SELECT room_id, media_generation, $5 FROM room_state
-     WHERE room_id = $1 AND owner_generation = $2 AND $4 AND $5 <> ''
+    SELECT $1, fenced.media_generation, fits.user_id FROM fenced, fits
     ON CONFLICT DO NOTHING)
-SELECT s.media_generation, e.user_id
-  FROM room_state s
-  LEFT JOIN room_media_expelled e
-         ON e.room_id = s.room_id AND e.media_generation = s.media_generation
- WHERE s.room_id = $1 AND s.owner_generation = $2
-UNION
-SELECT s.media_generation, $5 FROM room_state s
- WHERE s.room_id = $1 AND s.owner_generation = $2 AND $5 <> ''
+SELECT fenced.media_generation, listed.user_id
+  FROM fenced
+  LEFT JOIN (SELECT user_id FROM kept UNION SELECT user_id FROM fits) listed ON true
+ ORDER BY listed.user_id = $5 DESC
  LIMIT $3)sql";
 
 // '-infinity' is older than any staleness bound, so the rooms are claimable at once.
@@ -578,7 +592,8 @@ public:
     }
 
     // The generation of the first row, and the user of every row that has one.
-    static StoreResult<std::optional<rt::MediaState>> decode(const Result& r) noexcept {
+    [[nodiscard]] static StoreResult<std::optional<rt::MediaState>>
+    decode(const Result& r) noexcept {
         if (r.rows() == 0) {
             return std::optional<rt::MediaState>{};
         }

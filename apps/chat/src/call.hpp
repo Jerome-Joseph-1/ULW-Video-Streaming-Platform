@@ -173,6 +173,8 @@ struct CallCounters {
     // Members put out of a generation that did not move (no device of theirs in it), and moves
     // a deposed owner did not tell of.
     std::uint64_t expulsions_kept = 0;
+    // Lists of who was put out cleared at the end of a call that moved nothing to end.
+    std::uint64_t expulsions_cleared = 0;
     std::uint64_t announcements_dropped = 0;
     // Group calls' occupancy asked of the SFU, and the answers it could not give.
     std::uint64_t occupancy_checks = 0;
@@ -236,6 +238,9 @@ private:
         std::optional<core::UserId> by;
         std::optional<core::UserId> subject;
         rt::OwnerAnswer answer;
+        // A group call ended without a move of its own (missed, emptied): who was put out of it
+        // is cleared from the generation, which does not move (step None, no subject).
+        bool clear = false;
     };
     // A room's media room on the SFU, opened once per generation and reused for every ask. While
     // its generation is read, its media room opened or its generation moved (`busy`), asks and
@@ -248,6 +253,8 @@ private:
         std::uint64_t owner_generation = 0;
         // The generation is to be read again before anything else: a move's outcome is unknown.
         bool reread = false;
+        // `generation` is one this owner moved to, so every ticket for it is this owner's.
+        bool minted = false;
         std::unique_ptr<core::ports::IMediaRoom> media;
         bool busy = false;
         std::vector<Waiter> waiting;
@@ -302,6 +309,8 @@ private:
     // it (a ticket of theirs lately, or the SFU lists one or cannot say); otherwise an expulsion
     // is kept with the generation as it stands, and a removal needs nothing.
     void move_if_connected(const core::RoomId& room, CallKind kind, Move move) noexcept;
+    // The ringer ended a group call without a move: whoever was put out of it may come back.
+    void group_ended(const core::RoomId& room) noexcept;
     // Queues a move and runs the room's queue.
     void enqueue(const core::RoomId& room, CallKind kind, Move move) noexcept;
     // Runs what the room's entry has waiting, in order: its generation read (again, after a
