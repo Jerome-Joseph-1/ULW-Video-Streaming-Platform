@@ -50,6 +50,48 @@ TEST(ServiceClaim, AClaimWithoutAScopeIsRefused) {
     EXPECT_EQ(r.error().variable, "ULW_SERVICE_CLAIM");
 }
 
+// What every shipped config.env carries until the operator sets a scope: the service is off,
+// and the process starts.
+TEST(ServiceClaim, TheDefaultClaimWithoutAScopeIsOff) {
+    const auto off = read_service_claim("scope", std::nullopt);
+    ASSERT_TRUE(off);
+    EXPECT_EQ(off->claim, "scope");
+    EXPECT_TRUE(off->value.empty());
+}
+
+TEST(ServiceClaim, AClientIdIsReadAndCheckedInAzpOrClientId) {
+    const auto on = read_service_claim(std::nullopt, "ulw:admin", "ulw-backend");
+    ASSERT_TRUE(on);
+    EXPECT_EQ(on->client_id, "ulw-backend");
+    const auto bad = read_service_claim(std::nullopt, "ulw:admin", "has space");
+    ASSERT_FALSE(bad);
+    EXPECT_EQ(bad.error().variable, "ULW_SERVICE_CLIENT_ID");
+    const auto names = [](std::string_view json, std::string_view client) {
+        const auto doc = core::json::parse(json);
+        return doc && infra::auth::names_client(*doc, client);
+    };
+    EXPECT_TRUE(names(R"({"azp":"ulw-backend"})", "ulw-backend"));
+    EXPECT_TRUE(names(R"({"client_id":"ulw-backend"})", "ulw-backend"));
+    EXPECT_TRUE(names(R"({})", ""));
+    EXPECT_FALSE(names(R"({"azp":"web-app"})", "ulw-backend"));
+    EXPECT_FALSE(names(R"({"azp":["ulw-backend"]})", "ulw-backend"));
+    EXPECT_FALSE(names(R"({})", "ulw-backend"));
+
+    ClaimRules rules = ulw::test::kTestRules;
+    rules.service_claim = "scope";
+    rules.service_value = "ulw:admin";
+    rules.service_client_id = "ulw-backend";
+    const ulw::test::FakeClock clock;
+    const auto check = [&](std::initializer_list<ulw::test::ClaimChange> changes) {
+        const auto claims = check_claims(test_payload(changes), rules, clock.wall_now());
+        EXPECT_TRUE(claims.has_value());
+        return claims && claims->is_service;
+    };
+    EXPECT_TRUE(check({{"scope", R"("ulw:admin")"}, {"azp", R"("ulw-backend")"}}));
+    EXPECT_FALSE(check({{"scope", R"("ulw:admin")"}, {"azp", R"("web-app")"}}));
+    EXPECT_FALSE(check({{"scope", R"("ulw:admin")"}}));
+}
+
 TEST(ServiceClaim, RefusesClaimNamesNoProviderUsesForScopes) {
     using namespace std::string_view_literals;
     for (const std::string_view bad : {"iss"sv, "aud"sv, "exp"sv, "nbf"sv, "iat"sv, "jti"sv,

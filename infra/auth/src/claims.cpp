@@ -151,7 +151,8 @@ bool is_service(const core::json::Value& doc, const ClaimRules& rules) noexcept 
         return false;
     }
     const core::json::Value* claim = doc.find(rules.service_claim);
-    return claim != nullptr && claim_holds(*claim, rules.service_value);
+    return claim != nullptr && claim_holds(*claim, rules.service_value) &&
+           names_client(doc, rules.service_client_id);
 }
 
 } // namespace
