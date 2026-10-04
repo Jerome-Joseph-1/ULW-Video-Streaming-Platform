@@ -32,6 +32,7 @@ pins = load("check_image_pins", ROOT / "deploy" / "local" / "check-image-pins.py
 report = load("trivy_report", HERE / "trivy-report.py")
 split = load("split_resources", HERE / "split-resources.py")
 pathguard = load("pathguard", ROOT / "tools" / "pathguard.py")
+admission = load("check_live_admission", ROOT / "deploy" / "local" / "check-live-admission.py")
 
 SOON = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
 PAST = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
@@ -403,6 +404,97 @@ class PathGuardRootsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(pathguard.inside(pathlib.Path(d) / "x"),
                              pathlib.Path(os.path.realpath(d)) / "x")
+
+
+class LiveAdmissionCommandLineTest(unittest.TestCase):
+    """check-live-admission.py runs only kubectl, with options of its own: the overlay is an
+    entry of the overlays directory, a context one kubectl's kubeconfig lists, and nothing else
+    on the command line reaches kubectl."""
+
+    def run_main(self, *argv):
+        err = io.StringIO()
+        with mock.patch.object(admission.subprocess, "run") as run, redirect_stderr(err):
+            try:
+                code = admission.main(list(argv))
+            except SystemExit as exit_:
+                code = exit_.code
+        return code, run, err.getvalue()
+
+    def test_an_overlay_is_an_entry_of_the_overlays_directory(self):
+        entry = admission.overlay_dir("staging")
+        self.assertEqual(entry, admission.KUBE / "overlays" / "staging")
+        self.assertIn(entry, list((admission.KUBE / "overlays").iterdir()))
+
+    def test_an_overlay_not_listed_is_refused(self):
+        for name in ("nope", "../overlays/staging", "staging/", "/etc", "base/../staging", ""):
+            with self.subTest(name=name):
+                code, run, err = self.run_main(name)
+                self.assertEqual(code, 2)
+                self.assertIn("no overlay", err)
+                run.assert_not_called()
+
+    def test_a_program_or_flags_on_the_command_line_are_refused(self):
+        for argv in (["staging", "--", "kubectl"],
+                     ["staging", "--", "/bin/sh", "-c", "id"],
+                     ["staging", "--kubeconfig=/tmp/x"],
+                     ["staging", "--as=system:admin"],
+                     ["staging", "--sandbox", "--context", "kind-ulw-e2e"],
+                     ["staging", "--cont", "x"]):
+            with self.subTest(argv=argv):
+                code, run, _ = self.run_main(*argv)
+                self.assertEqual(code, 2)
+                run.assert_not_called()
+
+    def test_a_context_must_be_one_the_kubeconfig_lists(self):
+        listing = subprocess_result(stdout="kind-ulw-e2e\nprod\n")
+        with mock.patch.object(admission, "kubectl_on_path", return_value="/usr/bin/kubectl"), \
+                mock.patch.object(admission.subprocess, "run", return_value=listing) as run:
+            self.assertEqual(admission.kubectl_command(False, "prod"),
+                             ["/usr/bin/kubectl", "--context", "prod"])
+            self.assertEqual(run.call_args.args[0],
+                             ["/usr/bin/kubectl", "config", "get-contexts", "-o", "name"])
+            with self.assertRaises(admission.Refused):
+                admission.kubectl_command(False, "staging")
+            run.reset_mock()
+            for name in ("prod --as=system:admin", "-prod", "--token=x", "prod\nx", "a;b"):
+                with self.subTest(name=name), self.assertRaises(admission.Refused):
+                    admission.kubectl_command(False, name)
+            run.assert_not_called()
+
+    def test_kubectl_is_the_one_on_path_with_no_options(self):
+        with mock.patch.object(admission.shutil, "which", return_value="/usr/bin/kubectl"):
+            self.assertEqual(admission.kubectl_command(False, None), ["/usr/bin/kubectl"])
+        with mock.patch.object(admission.shutil, "which", return_value=None), \
+                self.assertRaises(admission.Refused):
+            admission.kubectl_command(False, None)
+
+    def test_the_sandbox_names_its_own_kubectl_and_context(self):
+        with mock.patch.object(admission.Path, "is_file", return_value=True):
+            command = admission.kubectl_command(True, None)
+        self.assertEqual(command, [str(admission.SANDBOX_KUBECTL), "--kubeconfig",
+                                   str(admission.SANDBOX_KUBECONFIG), "--context", "kind-ulw-e2e"])
+        with self.assertRaises(admission.Refused):
+            admission.kubectl_command(True, "prod")
+
+    def test_namespaces_must_be_dns_labels(self):
+        self.assertEqual(admission.dns_label({"NAMESPACE": "ulw-live"}, "NAMESPACE"), "ulw-live")
+        for value in ("", "UPPER", "-lead", "trail-", "a b", "a;b", "x" * 64, "ns\nx"):
+            with self.subTest(value=value), self.assertRaises(admission.Refused):
+                admission.dns_label({"NAMESPACE": value}, "NAMESPACE")
+        with self.assertRaises(admission.Refused):
+            admission.dns_label({}, "NAMESPACE")
+
+    def test_every_overlay_names_its_namespaces_as_dns_labels(self):
+        for entry in (admission.KUBE / "overlays").iterdir():
+            if (entry / "config.env").is_file():
+                config = admission.config_env(entry)
+                with self.subTest(overlay=entry.name):
+                    admission.dns_label(config, "NAMESPACE")
+                    admission.dns_label(config, "LIVE_NAMESPACE")
+
+
+def subprocess_result(returncode=0, stdout="", stderr=""):
+    return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 if __name__ == "__main__":

@@ -3,16 +3,21 @@
 admission-policy.yaml, docs/adr/0092) against a real API server: what the gateway's service
 account may create in the packagers' namespace, and what it may not.
 
-    deploy/local/check-live-admission.py <overlay> -- <kubectl command...>
+    deploy/local/check-live-admission.py <overlay> [--context <name>]
+    deploy/local/check-live-admission.py <overlay> --sandbox
 
-<overlay> names deploy/kubernetes/overlays/<overlay>, whose config.env gives the namespaces and
-fills the template. The kubectl command must reach an API server (the sandbox's, or a bare
-kube-apiserver) as a user who may impersonate, with that overlay's namespaces, its
-live-packager part and the gateway's service account applied (RUNBOOK.md, step 9). Every check
-is a server-side dry run, so nothing is stored. The template is live-packager/job.yaml, filled
-in as the gateway fills it; each refused case changes it, or the Secret, in one way the policy
-must refuse.
+<overlay> names a directory under deploy/kubernetes/overlays, whose config.env gives the
+namespaces and fills the template. The API server (a cluster's, or a bare kube-apiserver) is
+reached by the kubectl on PATH, with its own kubeconfig (KUBECONFIG, or ~/.kube/config) and its
+current context, or the context --context names, which must be one that kubeconfig lists.
+--sandbox uses the sandbox's own kubectl, kubeconfig and context instead (deploy/local/
+sandbox.sh). Nothing else on the command line reaches kubectl. Its user must be one who may
+impersonate, with that overlay's namespaces, its live-packager part and the gateway's service
+account applied (RUNBOOK.md, step 9). Every check is a server-side dry run, so nothing is stored.
+The template is live-packager/job.yaml, filled in as the gateway fills it; each refused case
+changes it, or the Secret, in one way the policy must refuse.
 """
+import argparse
 import copy
 import json
 import re
@@ -32,10 +37,10 @@ STREAM = "0192f3a4-0000-7000-8000-0000000000aa"
 REFUSED_BEFORE = {"the node's network", "the node's pids", "privileged"}
 
 
-def config_env(overlay: str) -> dict[str, str]:
+def config_env(overlay: Path) -> dict[str, str]:
     """The overlay's config.env, KEY=value lines, as kustomize and a shell read it."""
     values = {}
-    text = (KUBE / "overlays" / overlay / "config.env").read_text(encoding="utf-8")
+    text = (overlay / "config.env").read_text(encoding="utf-8")
     for line in text.splitlines():
         if line and not line.startswith("#"):
             key, _, value = line.partition("=")
@@ -155,54 +160,117 @@ def secret_cases(base: dict):
     yield "a Secret of another type", token
 
 
-# What the command line may name: an overlay directory, a kubectl binary and kubectl's own
-# --flag or --flag=value options (the server, a token, a kubeconfig), nothing that kubectl would
-# read as another verb or file. A namespace is a DNS label.
-OVERLAY = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
-FLAG = re.compile(r"^--[a-z][a-z0-9-]*(=[^\s]+)?$")
-LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+# A namespace is a DNS label (RFC 1123); a context's name starts with no '-' and holds no space
+# or shell character (an EKS or GKE context's ':', '/', '@' and '_' are kept).
+LABEL = re.compile(r"\A([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\Z")
+CONTEXT = re.compile(r"\A([A-Za-z0-9][A-Za-z0-9._@:/-]{0,252})\Z")
+# The sandbox's kubectl, kubeconfig and context, as deploy/local/sandbox.sh and tools.sh name
+# them.
+SANDBOX_KUBECTL = ROOT / "deploy/local/.tools/kubectl"
+SANDBOX_KUBECONFIG = ROOT / "deploy/local/.state/kubeconfig"
+SANDBOX_CONTEXT = "kind-ulw-e2e"
 
 
-def kubectl_command(args: list[str]) -> list[str] | None:
-    """The kubectl to run, as an absolute path, and its flags; None for anything else."""
-    if not args or Path(args[0]).name != "kubectl":
-        return None
-    binary = shutil.which(args[0])
-    if binary is None or not all(FLAG.match(flag) for flag in args[1:]):
-        return None
-    return [str(Path(binary).resolve()), *args[1:]]
+class Refused(Exception):
+    """A command line or an overlay this script will not run with."""
 
 
-def dry_run(kubectl: list[str], gateway: str, manifest: dict) -> subprocess.CompletedProcess:
+def overlay_dir(name: str) -> Path:
+    """The overlay directory whose entry is named exactly name, taken from the directory's own
+    listing, so the path is never built from the command line's string."""
+    for entry in sorted((KUBE / "overlays").iterdir()):
+        if entry.name == name and (entry / "config.env").is_file():
+            return entry
+    raise Refused(f"no overlay of that name under {KUBE / 'overlays'}")
+
+
+def dns_label(config: dict[str, str], key: str) -> str:
+    match = LABEL.match(config.get(key, ""))
+    if match is None:
+        raise Refused("NAMESPACE and LIVE_NAMESPACE must be DNS labels")
+    return match.group(1)
+
+
+def kubectl_on_path() -> str:
+    found = shutil.which("kubectl")
+    if found is None:
+        raise Refused("no kubectl on PATH")
+    return str(Path(found).resolve())
+
+
+def contexts(kubectl: str) -> list[str]:
+    """The contexts kubectl's own kubeconfig lists."""
+    done = subprocess.run([kubectl, "config", "get-contexts", "-o", "name"],
+                          capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise Refused(f"kubectl config get-contexts: {done.stderr.strip()}")
+    return [line for line in done.stdout.splitlines() if CONTEXT.match(line)]
+
+
+def kubectl_command(sandbox: bool, context: str | None) -> list[str]:
+    """kubectl and its fixed options. No value is the command line's own: the program is the
+    one on PATH (or the sandbox's), and a context is the entry of kubectl's own listing that
+    matches the name asked for."""
+    if sandbox:
+        if context is not None:
+            raise Refused("--sandbox names its own context")
+        if not SANDBOX_KUBECTL.is_file() or not SANDBOX_KUBECONFIG.is_file():
+            raise Refused("the sandbox's kubectl or kubeconfig is missing; run make e2e-up first")
+        return [str(SANDBOX_KUBECTL), "--kubeconfig", str(SANDBOX_KUBECONFIG),
+                "--context", SANDBOX_CONTEXT]
+    kubectl = kubectl_on_path()
+    if context is None:
+        return [kubectl]
+    if CONTEXT.match(context) is None:
+        raise Refused("a context is a name kubectl's kubeconfig lists")
+    for known in contexts(kubectl):
+        if known == context:
+            return [kubectl, "--context", known]
+    raise Refused("kubectl's kubeconfig lists no context of that name")
+
+
+def parse(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="check-live-admission.py", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
+    parser.add_argument("overlay")
+    where = parser.add_mutually_exclusive_group()
+    where.add_argument("--context")
+    where.add_argument("--sandbox", action="store_true")
+    return parser.parse_args(argv)
+
+
+def dry_run(kubectl: list[str], manifest: dict,
+            gateway: str | None = None) -> subprocess.CompletedProcess:
+    impersonate = [f"--as={gateway}"] if gateway else []
     return subprocess.run(
-        [*kubectl, f"--as={gateway}", "create", "--dry-run=server", "-o", "name", "-f", "-"],
+        [*kubectl, *impersonate, "create", "--dry-run=server", "-o", "name", "-f", "-"],
         input=json.dumps(manifest), capture_output=True, text=True, check=False)
 
 
-def main() -> int:
-    kubectl = kubectl_command(sys.argv[3:])
-    if (len(sys.argv) < 4 or sys.argv[2] != "--" or kubectl is None
-            or not OVERLAY.match(sys.argv[1])
-            or not (KUBE / "overlays" / sys.argv[1] / "config.env").is_file()):
-        print(__doc__, file=sys.stderr)
+def main(argv: list[str] | None = None) -> int:
+    args = parse(sys.argv[1:] if argv is None else argv)
+    try:
+        overlay = overlay_dir(args.overlay)
+        config = config_env(overlay)
+        namespace = dns_label(config, "NAMESPACE")
+        live = dns_label(config, "LIVE_NAMESPACE")
+        kubectl = kubectl_command(args.sandbox, args.context)
+    except Refused as refused:
+        print(f"check-live-admission: {refused}", file=sys.stderr)
         return 2
-    config = config_env(sys.argv[1])
-    if not LABEL.match(config["NAMESPACE"]) or not LABEL.match(config["LIVE_NAMESPACE"]):
-        print("check-live-admission: NAMESPACE and LIVE_NAMESPACE must be DNS labels",
-              file=sys.stderr)
-        return 2
-    live = config["LIVE_NAMESPACE"]
-    gateway = f"system:serviceaccount:{config['NAMESPACE']}:video-gateway"
+    config = {**config, "NAMESPACE": namespace, "LIVE_NAMESPACE": live}
+    gateway = f"system:serviceaccount:{namespace}:video-gateway"
     failures = []
     job = job_template(config)
     for name, manifest in (("the template's Job", job), ("the stream's Secret", secret(live))):
-        done = dry_run(kubectl, gateway, manifest)
+        done = dry_run(kubectl, manifest, gateway)
         if done.returncode != 0:
             failures.append(f"{name}: refused: {done.stderr.strip()}")
         else:
             print(f"admitted: {name}")
     for name, manifest in [*job_cases(job), *secret_cases(secret(live))]:
-        done = dry_run(kubectl, gateway, manifest)
+        done = dry_run(kubectl, manifest, gateway)
         if done.returncode == 0:
             failures.append(f"{name}: admitted")
         elif "ValidatingAdmissionPolicy" not in done.stderr and name not in REFUSED_BEFORE:
@@ -212,8 +280,7 @@ def main() -> int:
     # Anyone else is not held to it: an operator's by-hand start goes through as it always did.
     unbound = copy.deepcopy(job)
     container(unbound)["image"] = "docker.io/library/busybox"
-    done = subprocess.run([*kubectl, "create", "--dry-run=server", "-o", "name", "-f", "-"],
-                          input=json.dumps(unbound), capture_output=True, text=True, check=False)
+    done = dry_run(kubectl, unbound)
     if done.returncode != 0:
         failures.append(f"another user's Job: refused: {done.stderr.strip()}")
     else:

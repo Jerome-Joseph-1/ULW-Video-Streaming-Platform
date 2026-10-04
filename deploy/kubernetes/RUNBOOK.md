@@ -1101,11 +1101,18 @@ The admission policy is checked, case by case, with a server-side dry run of the
 every way it must refuse (nothing is stored), and Pod Security with the template's own dry run,
 which must answer with no `baseline` refusal (a `restricted` warning for `procMount` is
 expected). From the repository's root, with the overlay's directory under
-`deploy/kubernetes/overlays/`:
+`deploy/kubernetes/overlays/`, the `kubectl` on `PATH` and its kubeconfig (`KUBECONFIG`, or
+`~/.kube/config`) at the cluster:
 
 ```sh
-python3 deploy/local/check-live-admission.py <env> -- kubectl
+python3 deploy/local/check-live-admission.py <env>                    # its current context
+python3 deploy/local/check-live-admission.py <env> --context <context> # one its kubeconfig lists
+python3 deploy/local/check-live-admission.py <env> --sandbox           # the sandbox's own
 ```
+
+The script takes no program or kubectl option from its command line: the overlay must be an
+entry of that directory, the context one `kubectl config get-contexts` lists, and the overlay's
+`NAMESPACE` and `LIVE_NAMESPACE` DNS labels; anything else is refused before kubectl runs.
 
 A stream then runs without anyone on the cluster: the broadcaster's client starts it, publishes,
 goes live and ends it; `kubectl -n "$LIVE_NAMESPACE" get jobs -l app.kubernetes.io/name=live-packager`
