@@ -1,0 +1,37 @@
+name: deploy-vps
+
+on:
+  push:
+    branches: [deploy/vps]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  survey:
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Survey the host (read only)
+        run: |
+          set -u
+          echo "public ip: $(curl -fsS --max-time 10 https://api.ipify.org || echo unknown)"
+          uname -m; uname -r; nproc; free -m
+          df -h / /var/lib/docker /opt 2>/dev/null || true
+          docker version --format 'docker {{.Server.Version}} {{.Server.Arch}}'
+          docker compose version
+          docker info --format 'root={{.DockerRootDir}} driver={{.Driver}} cgroup={{.CgroupVersion}}'
+          docker system df || true
+          docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' || true
+          sudo -n ufw status verbose || echo "ufw: not available"
+          sudo -n ss -ltnup | awk 'NR==1 || /:(80|443|3478|5349|78[0-9][0-9]|79[0-9][0-9]) /' || true
+          ls -la /opt || true
+          id; echo "workspace: $GITHUB_WORKSPACE"
+          which node npm || true
+          dpkg -l | grep -E 'libnss3|libgbm1|libasound' || true
