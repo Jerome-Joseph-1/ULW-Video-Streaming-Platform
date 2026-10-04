@@ -1,6 +1,6 @@
 // The page: pick a user, then the four tabs. Each window signs in on its own, so two windows
 // of one browser can be two users.
-import { $, chat, config, demo, directory, el, loadConfig, loadDirectory, signIn } from './core.js';
+import { $, chat, config, demo, directory, el, loadDirectory, oidcConfig, signIn, usesOidc } from './core.js';
 import * as oidc from './oidc.js';
 import { initVideos } from './videos.js';
 import { initChat, syncRooms } from './chat.js';
@@ -42,11 +42,10 @@ async function start(who) {
 }
 
 async function main() {
-  await loadConfig();
   await loadDirectory();
   for (const b of document.querySelectorAll('#tabs button')) b.addEventListener('click', () => showTab(b.dataset.tab));
   if (config.label !== undefined) $('label').textContent = config.label;
-  if (config.auth === 'oidc') return mainOidc();
+  if (usesOidc()) return mainOidc();
   $('switch-user').addEventListener('click', () => {
     try { sessionStorage.removeItem('ulw-demo:user'); } catch { /* ignore */ }
     location.href = location.pathname;
@@ -64,11 +63,11 @@ async function main() {
 // A real identity provider: its sign-in page decides who this window is (oidc.js).
 async function mainOidc() {
   $('switch-user').textContent = 'sign out';
-  $('switch-user').addEventListener('click', () => oidc.logout(config));
+  $('switch-user').addEventListener('click', () => oidc.logout(oidcConfig));
   $('picker-title').textContent = 'Sign in';
   $('picker-note').textContent = 'Sign in to upload and watch, chat, call and go live. Another user? Use another browser or a private window.';
-  if (await oidc.complete(config) || oidc.current()) return start();
-  $('user-buttons').append(el('button', { class: 'primary', id: 'sign-in', onclick: () => oidc.login(config) }, 'Sign in'));
+  if (await oidc.complete(oidcConfig) || oidc.current()) return start();
+  $('user-buttons').append(el('button', { class: 'primary', id: 'sign-in', onclick: () => oidc.login(oidcConfig) }, 'Sign in'));
 }
 
 main().catch((e) => {

@@ -1,12 +1,11 @@
-// Sign-in with an OpenID Connect provider (config.json's `auth: "oidc"`): the authorization code
+// Sign-in with an OpenID Connect provider (config.js's `auth: "oidc"`): the authorization code
 // flow with PKCE (RFC 7636, S256) for a public client, written against WebCrypto and fetch so
 // the page has no dependency for it. The tokens live in this window's sessionStorage only; the
 // access token goes to the gateway as the bearer header and to chat as the WebSocket's ?token=
 // (core.js), and is renewed with the refresh token a minute before it expires.
 //
-// config.json (served by the deployment, deploy/vps/Caddyfile):
-//   { "auth": "oidc", "issuer": "https://<host>/auth/realms/ulw", "clientId": "ulw-web",
-//     "userClaim": "preferred_username" }
+// Each function takes core.js's oidcConfig: { issuer, clientId, userClaim }, from config.js's
+// oidcIssuer, oidcClientId and oidcUserClaim (build/web-config.sh; deploy/vps/deploy.sh).
 
 const PENDING = 'ulw-oidc:pending';
 const TOKENS = 'ulw-oidc:tokens';

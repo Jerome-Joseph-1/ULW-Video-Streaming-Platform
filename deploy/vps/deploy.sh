@@ -33,13 +33,15 @@ sudo install -m 0644 "$root/deploy/kubernetes/cluster/seccomp/ulw-worker.json" "
 sed "s|__ULW_HOST__|$host|g" "$here/keycloak/ulw-realm.json.template" |
     sudo install -m 0644 /dev/stdin "$dir/keycloak/ulw-realm.json"
 
-# The web app and the OpenMLS client, replaced whole; config.json says to sign in on Keycloak.
+# The web app and the OpenMLS client, replaced whole.
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cp -a "$root/demo/web" "$stage/web"
 cp -a "$root/clients/web-mls/dist" "$stage/web-mls"
-printf '{"auth":"oidc","label":"","issuer":"https://%s/auth/realms/ulw","clientId":"ulw-web","userClaim":"preferred_username"}\n' \
-    "$host" >"$stage/web/config.json"
+# config.js as demo/build/web-config.sh writes it: the API and chat on this origin, sign-in on
+# Keycloak.
+printf '%s\nwindow.ULW_CONFIG = {"auth":"oidc","oidcIssuer":"https://%s/auth/realms/ulw","oidcClientId":"ulw-web","oidcUserClaim":"preferred_username","label":""};\n' \
+    '// Written by deploy/vps/deploy.sh.' "$host" >"$stage/web/config.js"
 chmod -R a+rX "$stage"
 for d in web web-mls; do
     sudo rm -rf "$dir/$d.new"
@@ -125,7 +127,7 @@ done
 compose ps --format 'table {{.Service}}\t{{.State}}\t{{.Health}}'
 
 # From outside the namespace, through the published port and the real certificate.
-for path in /api/v1/readyz /auth/realms/ulw/.well-known/openid-configuration /config.json /; do
+for path in /api/v1/readyz /auth/realms/ulw/.well-known/openid-configuration /config.js /; do
     code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "https://$host$path")
     echo "deploy: GET https://$host$path -> $code"
     [[ $code == 200 ]] || exit 1

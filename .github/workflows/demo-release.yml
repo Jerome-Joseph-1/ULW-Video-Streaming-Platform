@@ -1,0 +1,222 @@
+name: demo-release
+
+# The laptop demo as published images: demo/release/compose.yaml runs with nothing but Docker
+# (demo/README.md, "Pull and run"). Every image it names is built here from one commit, the stack
+# is brought up from that compose file exactly as the owner will (local images, no build, no
+# checkout mounts), demo/smoke drives every tab, and only when it reports 7 passed are the images
+# pushed to ghcr.io/jerome-joseph-1 as demo-<sha12> and demo. Never main or latest.
+#
+# The images are tagged with the commit they are built from: the last commit that changed
+# anything but demo/release/ and demo/README.md, so that pinning that tag in compose.yaml (its
+# ULW_DEMO_TAG default) does not itself make a new build. The run checks that the compose file
+# pins exactly that tag, so what it tests is what the owner pulls.
+on:
+  push:
+    branches: [demo/release]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: demo-release
+  cancel-in-progress: false
+
+env:
+  NAMESPACE: ghcr.io/jerome-joseph-1
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      tag: ${{ steps.commit.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Resolve the build commit and check the compose file pins it
+        id: commit
+        run: |
+          sha=$(git log -1 --format=%H -- . ':(exclude)demo/release' ':(exclude)demo/README.md')
+          # The tree built here is that commit's in everything the images are made from.
+          git diff --quiet "$sha" HEAD -- . ':(exclude)demo/release' ':(exclude)demo/README.md'
+          tag=demo-${sha:0:12}
+          pinned=$(sed -n 's/.*\${ULW_DEMO_TAG:-\([^}]*\)}.*/\1/p' demo/release/compose.yaml | sort -u)
+          echo "build commit $sha, tag $tag; compose.yaml pins: $pinned"
+          if [[ $pinned != "$tag" ]]; then
+            echo "::error::demo/release/compose.yaml pins '$pinned', but this build is $tag: set its ULW_DEMO_TAG default to $tag"
+            exit 1
+          fi
+          cmp demo/release/seccomp.json demo/seccomp/ulw-worker.json
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Build the images
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+          TAG: ${{ steps.commit.outputs.tag }}
+        run: |
+          created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          labels=(--label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+                  --label "org.opencontainers.image.revision=$SHA"
+                  --label "org.opencontainers.image.created=$created")
+          for pair in gateway:video-gateway worker:video-worker chat:chat live-packager:live-packager; do
+            echo "::group::ulw-${pair#*:}"
+            docker buildx build --file deploy/docker/Dockerfile --target "${pair%%:*}" \
+              --build-arg "ULW_GIT_SHA=$SHA" "${labels[@]}" \
+              --label "org.opencontainers.image.title=ulw-${pair#*:}" \
+              --load --tag "$NAMESPACE/ulw-${pair#*:}:$TAG" .
+            echo "::endgroup::"
+          done
+          echo "::group::ulw-demo-gateway-live"
+          docker buildx build --file demo/build/gateway.Dockerfile \
+            --build-arg "GATEWAY_IMAGE=$NAMESPACE/ulw-video-gateway:$TAG" \
+            --build-arg "PACKAGER_IMAGE=$NAMESPACE/ulw-live-packager:$TAG" \
+            "${labels[@]}" --label "org.opencontainers.image.title=ulw-demo-gateway-live" \
+            --load --tag "$NAMESPACE/ulw-demo-gateway-live:$TAG" demo/build
+          echo "::endgroup::"
+          for name in web auth seed; do
+            echo "::group::ulw-demo-$name"
+            docker buildx build --file "demo/build/$name.Dockerfile" \
+              "${labels[@]}" --label "org.opencontainers.image.title=ulw-demo-$name" \
+              --load --tag "$NAMESPACE/ulw-demo-$name:$TAG" .
+            echo "::endgroup::"
+          done
+          docker images --filter "reference=$NAMESPACE/*:$TAG"
+      # The worker's and the packager's sandbox make user namespaces, which Ubuntu 24.04's
+      # AppArmor refuses to a process without host capabilities (as e2e.yml's demo job explains).
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # As the owner runs it: only compose.yaml and seccomp.json in a directory of their own, no
+      # build, nothing from the checkout. Our images are local, so compose pulls only the
+      # third-party ones.
+      - name: Start demo/release/compose.yaml
+        run: |
+          dir=$RUNNER_TEMP/owner
+          mkdir -p "$dir"
+          cp demo/release/compose.yaml demo/release/seccomp.json "$dir"/
+          cd "$dir"
+          docker compose config --images
+          docker compose up -d --pull missing
+          deadline=$((SECONDS + 600))
+          until [[ $(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q web)") == healthy ]]; do
+            for svc in migrate seed; do
+              state=$(docker compose ps -a --format '{{.State}} {{.ExitCode}}' "$svc" 2>/dev/null || true)
+              if [[ $state == exited* && $state != *" 0" ]]; then
+                docker compose logs --tail 60 "$svc"
+                echo "::error::$svc failed"
+                exit 1
+              fi
+            done
+            if ((SECONDS > deadline)); then
+              docker compose ps -a
+              echo "::error::not healthy after 10 minutes"
+              exit 1
+            fi
+            sleep 3
+          done
+          docker compose ps -a
+      - name: Smoke test
+        timeout-minutes: 40
+        env:
+          DEMO_SKIP_UP: "1"
+        run: |
+          set -o pipefail
+          demo/smoke/run.sh 2>&1 | tee "$RUNNER_TEMP/smoke.log"
+          grep -Eq '^ *7 passed' "$RUNNER_TEMP/smoke.log" || { echo "::error::smoke did not report 7 passed"; exit 1; }
+      - name: Stack logs
+        if: failure()
+        working-directory: ${{ runner.temp }}/owner
+        run: |
+          docker compose ps -a || true
+          docker compose logs --no-color --tail 200 || true
+      - name: Save the tested images
+        env:
+          TAG: ${{ steps.commit.outputs.tag }}
+        run: |
+          images=()
+          for name in video-gateway video-worker chat live-packager demo-gateway-live demo-web demo-auth demo-seed; do
+            images+=("$NAMESPACE/ulw-$name:$TAG")
+          done
+          docker save "${images[@]}" | gzip -1 > "$RUNNER_TEMP/demo-release-images.tar.gz"
+          du -h "$RUNNER_TEMP/demo-release-images.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-release-images
+          path: ${{ runner.temp }}/demo-release-images.tar.gz
+          retention-days: 2
+          compression-level: 0
+          if-no-files-found: error
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-release-smoke
+          path: |
+            demo/smoke/results
+            demo/smoke/report
+          if-no-files-found: ignore
+
+  push:
+    needs: test
+    if: github.repository == 'Jerome-Joseph-1/ULW-Video-Streaming-Platform'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read # the tested images, from the test job's artifact
+      packages: write # the push to ghcr.io
+    env:
+      TAG: ${{ needs.test.outputs.tag }}
+    steps:
+      - name: Load the tested images
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n demo-release-images -D "$RUNNER_TEMP"
+          docker load -i "$RUNNER_TEMP/demo-release-images.tar.gz"
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Push demo-<sha12> and demo
+        run: |
+          [[ $TAG =~ ^demo-[0-9a-f]{12}$ ]]
+          {
+            echo "### Demo release images"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for name in video-gateway video-worker chat live-packager demo-gateway-live demo-web demo-auth demo-seed; do
+            repo=$NAMESPACE/ulw-$name
+            docker tag "$repo:$TAG" "$repo:demo"
+            docker push --quiet "$repo:$TAG"
+            docker push --quiet "$repo:demo"
+            digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$repo:$TAG" | grep "^$repo@" | head -n1)
+            echo "$repo:$TAG $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      # What the owner's laptop sees: each image pulled with no credentials. A new package
+      # starts private; this lists any that still need "Change visibility" to public.
+      - name: Check the images pull anonymously
+        run: |
+          docker logout ghcr.io
+          private=()
+          for name in video-gateway video-worker chat live-packager demo-gateway-live demo-web demo-auth demo-seed; do
+            if docker manifest inspect "$NAMESPACE/ulw-$name:$TAG" >/dev/null 2>&1; then
+              echo "public: ulw-$name"
+            else
+              echo "::warning::not pullable without credentials: ulw-$name (make the package public)"
+              private+=("ulw-$name")
+            fi
+          done
+          if ((${#private[@]})); then
+            {
+              echo
+              echo "Not public yet (Package settings > Change visibility > Public): ${private[*]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

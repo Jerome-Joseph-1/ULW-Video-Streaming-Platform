@@ -4,7 +4,7 @@
 //
 // There is no endpoint that lists streams, so the page announces its own in the team room
 // ({t:'live'} messages) and checks each announced id with GET /api/v1/live/{id}.
-import { $, api, chat, decodeBody, demo, el, log, myRooms, onThisHost, sendBody, session, toast, utf8, b64url } from './core.js';
+import { $, api, apiUrl, chat, decodeBody, demo, el, log, myRooms, onThisHost, sendBody, session, toast, utf8, b64url } from './core.js';
 import { onAppMessage } from './chat.js';
 import { addVideo, attachHls, refreshPlaybackToken } from './videos.js';
 
@@ -244,7 +244,7 @@ async function watch(id) {
   $('live-messages').replaceChildren();
   $('live-composer').hidden = false;
   const video = $('live-player');
-  const src = `/api/v1/live/${id}/index.m3u8`;
+  const src = apiUrl(`/api/v1/live/${id}/index.m3u8`);
   viewer = { id, joining: true };
   // A stream just taken live has no playlist for a few seconds (404, live.md), and hls.js does
   // not retry a 404: wait for the first one here.

@@ -67,7 +67,7 @@
 		file_server
 	}
 
-	# The web app (demo/web), with the config.json deploy.sh writes: sign in on Keycloak.
+	# The web app (demo/web), with the config.js deploy.sh writes: sign in on Keycloak.
 	handle {
 		header Cache-Control no-cache
 		root * /srv/web
