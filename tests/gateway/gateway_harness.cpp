@@ -52,6 +52,10 @@ struct GatewayUnderTest::Loop final : net::IReadyHandler {
     core::ports::IObjectAdmin* admin = nullptr;
     std::unique_ptr<infra::catalog::MemoryCatalog> catalog;
     FakeVerifier verifier;
+    std::unique_ptr<FakeLiveStore> live_store;
+    std::unique_ptr<FakeSfu> sfu;
+    std::unique_ptr<FakePackagers> packagers;
+    std::unique_ptr<gateway::LiveStreams> live;
     std::unique_ptr<gateway::Gateway> gateway;
     std::filesystem::path root;
 
@@ -192,6 +196,19 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     }
     }
     l.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*l.reactor);
+    if (options.live_streams) {
+        l.live_store = std::make_unique<FakeLiveStore>(*l.reactor);
+        l.sfu = std::make_unique<FakeSfu>(*l.reactor);
+        l.packagers = std::make_unique<FakePackagers>(*l.reactor);
+        l.live = std::make_unique<gateway::LiveStreams>(gateway::LiveDeps{.reactor = *l.reactor,
+                                                                          .store = *l.live_store,
+                                                                          .sfu = *l.sfu,
+                                                                          .packagers = *l.packagers,
+                                                                          .clock = *l.clock,
+                                                                          .random = l.random,
+                                                                          .log = l.log},
+                                                        options.live_settings);
+    }
     l.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *l.reactor,
                                                                  .transports = *l.transports,
                                                                  .pool = *l.pool,
@@ -203,7 +220,8 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
                                                                  .clock = *l.clock,
                                                                  .random = l.random,
                                                                  .log = l.log,
-                                                                 .health = l.health},
+                                                                 .health = l.health,
+                                                                 .live_streams = l.live.get()},
                                                    options.limits);
     auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
     port_ = *net::local_port(listener->get());
@@ -224,6 +242,10 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
     // The pool first: a job it is running points at a connection the gateway owns.
     l.pool.reset();
     l.gateway.reset();
+    l.live.reset();
+    l.packagers.reset();
+    l.sfu.reset();
+    l.live_store.reset();
     l.fs.reset();
     l.fake.reset();
     // Its sessions went with the gateway's connections; its transfers with them.
@@ -243,6 +265,15 @@ void GatewayUnderTest::on_loop(std::function<void()> fn) {
     auto done = task.get_future();
     loop_->post(std::move(task));
     done.get();
+}
+
+void GatewayUnderTest::with_live(const std::function<void(LiveFakes&)>& fn) {
+    on_loop([&] {
+        Loop& l = *loop_;
+        LiveFakes fakes{
+            .store = *l.live_store, .sfu = *l.sfu, .packagers = *l.packagers, .service = *l.live};
+        fn(fakes);
+    });
 }
 
 void GatewayUnderTest::set_plan(const infra::storage::FaultPlan& plan) {

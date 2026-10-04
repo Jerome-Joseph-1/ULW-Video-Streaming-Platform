@@ -56,6 +56,12 @@ pins=(
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/cronjob-batch-v1.json"
     "schemas/job-batch-v1.json a6f9a32 1dbe7c98d227ab2614d85d4e70c2d04872239bb91c4ed30abc2cfadccef40e4b
      https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/job-batch-v1.json"
+    "schemas/resourcequota-v1.json a6f9a32 9546ed313e622ea84a0ab1ec7ef7e683f05acfbfe97beb746f0b5be6407691df
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/resourcequota-v1.json"
+    "schemas/validatingadmissionpolicy-admissionregistration-v1.json a6f9a32 6f694e5637b097f781139af4fc466afa63b992d3dc55d28808028c99746be35e
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/validatingadmissionpolicy-admissionregistration-v1.json"
+    "schemas/validatingadmissionpolicybinding-admissionregistration-v1.json a6f9a32 829b6a2fabcad663ba303c13e493a9b8c18a5737b0ca91c45dc0cf49a24c3927
+     https://raw.githubusercontent.com/yannh/kubernetes-json-schema/a6f9a32d2ccb64b6e4f5b41419b9c2e8ee0cce18/v1.37.0-standalone-strict/validatingadmissionpolicybinding-admissionregistration-v1.json"
 )
 
 verified() {
