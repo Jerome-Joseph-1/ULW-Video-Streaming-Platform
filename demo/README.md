@@ -9,6 +9,32 @@ http://localhost:8080. Cameras and microphones work there without HTTPS because 
 Not for any real deployment: the passwords and keys are throwaway, anyone who can open the page
 can sign in as any demo user, and every port listens on 127.0.0.1 only.
 
+## Pull and run
+
+Needs only Docker with Compose v2: no git, no checkout, no build. `demo/release/compose.yaml`
+names images that `demo-release.yml` built from one commit, tested together with the smoke test
+and published (tag `demo-274b4439d10a`). In an empty directory:
+
+```sh
+mkdir ulw-demo && cd ulw-demo
+curl -fsSLO https://raw.githubusercontent.com/Jerome-Joseph-1/ULW-Video-Streaming-Platform/demo/release/demo/release/compose.yaml
+curl -fsSLO https://raw.githubusercontent.com/Jerome-Joseph-1/ULW-Video-Streaming-Platform/demo/release/demo/release/seccomp.json
+docker compose pull
+docker compose up -d
+```
+
+Then open http://localhost:8080. The first start takes a minute or two; `docker compose ps`
+shows `web` as `healthy` once everything is ready. Keep `seccomp.json` beside `compose.yaml` and
+run compose in that directory: it is the transcoder's sandbox profile.
+
+```sh
+docker compose down      # stop; videos and messages are kept
+docker compose down -v   # stop and forget everything (videos, messages, keys)
+```
+
+On a Linux host with Ubuntu 24.04's AppArmor, the transcoder's sandbox also needs
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (Docker Desktop needs nothing).
+
 ## Start and stop
 
 Needs only Docker (Docker Desktop on macOS or Windows, or Docker Engine on Linux) with Compose v2.
