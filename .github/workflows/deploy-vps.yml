@@ -84,20 +84,6 @@ jobs:
           echo "chrome=$chrome" >>"$GITHUB_OUTPUT"
           echo "dir=$ULW_E2E_CACHE" >>"$GITHUB_OUTPUT"
 
-      - name: Watch the media ports (diagnostics)
-        run: |
-          pid=$(docker inspect -f '{{.State.Pid}}' ulw-prod-netns-1)
-          sudo nsenter -t "$pid" -n ss -uanp | grep -E ':(7802|3478) ' || true
-          sudo nsenter -t "$pid" -n ip -br addr || true
-          sudo iptables -t nat -S 2>/dev/null | grep -E '7802|3478|DOCKER -i|OUTPUT|PREROUTING' || true
-          sudo nft list ruleset 2>/dev/null | grep -nE '7802|3478' | head -20 || true
-          docker info --format '{{json .}}' | grep -o '"FirewallBackend":{[^}]*}' || true
-          command -v tcpdump || echo "no tcpdump"
-          if command -v tcpdump >/dev/null; then
-            sudo nohup timeout 600 nsenter -t "$pid" -n tcpdump -lni any -q 'udp port 7802 or tcp port 7801' >"$RUNNER_TEMP/media.txt" 2>&1 &
-            sudo nohup timeout 600 tcpdump -lni any -q 'udp port 7802 or tcp port 7801' >"$RUNNER_TEMP/media-host.txt" 2>&1 &
-          fi
-
       - name: Smoke (sign in, upload and play, chat, a 1:1 call)
         env:
           HOST: ${{ steps.host.outputs.host }}
@@ -114,7 +100,9 @@ jobs:
                        npx --no-install playwright test --reporter=list \
                          --grep "upload, transcode|chat between two users|1:1 call rings|declined call"'
 
-      - name: Smoke (encrypted chat, group call, live)
+      # The whole suite, which the encrypted chat needs (it finds its rooms in the chat test):
+      # reported, not gating the deploy.
+      - name: Smoke (every tab, encrypted chat, group call and live included)
         continue-on-error: true
         env:
           HOST: ${{ steps.host.outputs.host }}
@@ -126,14 +114,11 @@ jobs:
               -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc -e ULW_E2E_CHROME="$CHROME" \
               -v "$CHROME_DIR:$CHROME_DIR:ro" \
               -v "$GITHUB_WORKSPACE/demo/smoke:/smoke" -w /smoke "$PLAYWRIGHT_IMAGE" \
-              bash -c 'npx --no-install playwright test --reporter=list \
-                         --grep "encrypted chat|a group call|go live"'
+              bash -c 'npx --no-install playwright test --reporter=list'
 
       - name: What the failed smoke's pages showed
         if: failure()
         run: |
-          echo "== media in the namespace"; head -40 "$RUNNER_TEMP/media.txt" || true
-          echo "== media on the host"; head -60 "$RUNNER_TEMP/media-host.txt" || true
           for f in demo/smoke/results/*/error-context.md; do
             [[ -f $f ]] && { echo "== $f"; head -c 6000 "$f"; echo; }
           done
