@@ -42,8 +42,8 @@ enum class CallOutcome : std::uint8_t {
     Ticket = 0,
     // The asker is not on the room's member list.
     NotMember = 1,
-    // The room is not a direct chat: a group chat (group calls are not offered, ADR-0058), a
-    // stream's live chat, or a room with no kind recorded.
+    // The room is neither a direct chat nor a group chat (ADR-0095): a stream's live chat, or a
+    // room with no kind recorded.
     NotCallable = 2,
     // The SFU or the member list could not be reached; a retry may succeed.
     Unavailable = 3,
@@ -115,8 +115,8 @@ public:
     [[nodiscard]] virtual std::optional<std::uint64_t>
     owner_generation(const core::RoomId& room) const noexcept = 0;
     // May answer inside the call, when the answer is known at once.
-    virtual void media_generation(const core::RoomId& room, rt::MediaStep step,
-                                  rt::StoreCallback<std::optional<std::uint64_t>> done) = 0;
+    virtual void media_generation(const core::RoomId& room, const rt::MediaChange& change,
+                                  rt::StoreCallback<std::optional<rt::MediaState>> done) = 0;
 };
 
 struct CallLimits {
@@ -139,6 +139,8 @@ struct CallLimits {
     // close_retry_for.
     std::size_t max_retired = 1'024;
     core::Millis close_retry_for{300'000};
+    // A close that has not answered by then is taken as lost, and tried again.
+    core::Millis close_attempt{30'000};
 };
 
 struct CallCounters {
@@ -168,6 +170,12 @@ struct CallCounters {
     // Old media rooms closed after a move, and given up on after close_retry_for.
     std::uint64_t retired_closed = 0;
     std::uint64_t retired_abandoned = 0;
+    // Members put out of a generation that did not move (no device of theirs in it), and moves
+    // a deposed owner did not tell of.
+    std::uint64_t expulsions_kept = 0;
+    // Lists of who was put out cleared at the end of a call that moved nothing to end.
+    std::uint64_t expulsions_cleared = 0;
+    std::uint64_t announcements_dropped = 0;
     // Group calls' occupancy asked of the SFU, and the answers it could not give.
     std::uint64_t occupancy_checks = 0;
     std::uint64_t occupancy_unavailable = 0;
@@ -227,7 +235,8 @@ private:
         CallKind kind = CallKind::Direct;
     };
     // A media generation to move on from: to put `subject` out (Move), or to end a group call
-    // (Close). `answer` is the asker's, empty for a removal, which is retried until done.
+    // (Close); or, None, `subject` put out of the generation as it stands (no device of theirs
+    // in it). `answer` is the asker's, empty for a removal, which is retried until done.
     struct Move {
         MediaStepNeeded step = MediaStepNeeded::Move;
         // None for a member removed while this node knows no call in the room.
@@ -235,6 +244,9 @@ private:
         std::optional<core::UserId> by;
         std::optional<core::UserId> subject;
         rt::OwnerAnswer answer;
+        // A group call ended without a move of its own (missed, emptied): who was put out of it
+        // is cleared from the generation, which does not move (step None, no subject).
+        bool clear = false;
     };
     // A room's media room on the SFU, opened once per generation and reused for every ask. While
     // its generation is read, its media room opened or its generation moved (`busy`), asks and
@@ -245,12 +257,23 @@ private:
         // before it is read.
         std::uint64_t generation = 0;
         std::uint64_t owner_generation = 0;
+        // The generation is to be read again before anything else: a move's outcome is unknown.
+        bool reread = false;
+        // `generation` is one this owner moved to, so every ticket for it is this owner's.
+        bool minted = false;
         std::unique_ptr<core::ports::IMediaRoom> media;
         bool busy = false;
         std::vector<Waiter> waiting;
         std::deque<Move> moves;
         // A removal's move the store could not take is tried again no sooner than this.
         core::MonoTime stalled_until;
+        // Who is put out of `generation`, as the store keeps it with the generation.
+        std::vector<core::UserId> expelled;
+        // Tickets issued in `generation` lately, by user: a device of theirs may be connected
+        // without the SFU listing it yet. Cleared with each move.
+        std::vector<std::pair<core::UserId, core::MonoTime>> ticketed;
+        // Members whose removal is queued for `generation`: one move each.
+        std::vector<core::UserId> removing;
         // Joins asked of `media` and not answered yet: the entry is kept while there are any.
         std::size_t joining = 0;
         core::MonoTime used;
@@ -265,10 +288,15 @@ private:
         std::unique_ptr<core::ports::IMediaRoom> media;
         std::size_t joining = 0;
         bool closing = false;
+        // The close in flight, and when it is taken as lost: its answer may never come.
+        std::uint32_t attempt = 0;
+        core::MonoTime attempt_deadline;
         core::MonoTime next_try;
         core::MonoTime give_up;
-        // The move that retired it, told to everyone and answered once the SFU says the room is
-        // gone (or could not say, the first time).
+        // The owner generation it was retired under: a deposed owner says nothing of it.
+        std::uint64_t owner_generation = 0;
+        // The move that retired it, told to everyone once the SFU says the room is gone, or
+        // could not be reached the first time (the asker was answered at the write).
         std::optional<Move> pending;
     };
 
@@ -281,18 +309,27 @@ private:
     // The group call's caller ending it for everyone, or putting someone out.
     void moderate(const core::RoomId& room, const CallSignalRequest& request,
                   rt::OwnerAnswer& answer) noexcept;
-    // Moves the media generation on to put `move.subject` out when the SFU has a device of
-    // theirs in it (or cannot say); otherwise only tells everyone, and answers.
+    void moderated(const core::RoomId& room, const CallSignalRequest& request,
+                   rt::OwnerAnswer& answer) noexcept;
+    // Moves the media generation on to put `move.subject` out when a device of theirs may be in
+    // it (a ticket of theirs lately, or the SFU lists one or cannot say); otherwise an expulsion
+    // is kept with the generation as it stands, and a removal needs nothing.
     void move_if_connected(const core::RoomId& room, CallKind kind, Move move) noexcept;
+    // The ringer ended a group call without a move: whoever was put out of it may come back.
+    void group_ended(const core::RoomId& room) noexcept;
     // Queues a move and runs the room's queue.
     void enqueue(const core::RoomId& room, CallKind kind, Move move) noexcept;
     // Runs what the room's entry has waiting, in order: its generation read (again, after a
     // change of owner), a move, its media room's open, then the asks.
     void pump(const core::RoomId& room) noexcept;
     void read(const core::RoomId& room,
-              rt::StoreResult<std::optional<std::uint64_t>> result) noexcept;
+              rt::StoreResult<std::optional<rt::MediaState>> result) noexcept;
     void advanced(const core::RoomId& room,
-                  rt::StoreResult<std::optional<std::uint64_t>> result) noexcept;
+                  rt::StoreResult<std::optional<rt::MediaState>> result) noexcept;
+    // Whether `user` was put out of the generation the entry holds, or had a ticket of it lately.
+    [[nodiscard]] static bool expelled_from(const Entry& entry, const core::UserId& user) noexcept;
+    void remember_ticket(const core::RoomId& room, const core::UserId& user) noexcept;
+    [[nodiscard]] bool ticketed_lately(const Entry& entry, const core::UserId& user) const noexcept;
     // This node does not own the room (any more): everything waiting is answered Unavailable,
     // and the entry dropped without closing anything; the new owner holds the generation.
     void drop(const core::RoomId& room) noexcept;
@@ -302,11 +339,12 @@ private:
     void retire(const core::RoomId& room, std::uint64_t generation,
                 std::unique_ptr<core::ports::IMediaRoom> media, std::size_t joining,
                 Move move) noexcept;
-    // Tells everyone of a move, and answers who asked for it.
-    void announce(const core::RoomId& room, Move& move) noexcept;
+    // Tells everyone of a move.
+    void announce(const core::RoomId& room, const Move& move) noexcept;
     void announce_retired(Retired& retired) noexcept;
     void close_retired() noexcept;
-    void retired_closed(std::uint64_t id, std::expected<void, core::ports::MediaError> r) noexcept;
+    void retired_closed(std::uint64_t id, std::uint32_t attempt,
+                        std::expected<void, core::ports::MediaError> r) noexcept;
     // A join asked of `generation` was answered.
     void joined(const core::RoomId& room, std::uint64_t generation) noexcept;
     void counted(const core::RoomId& room, std::uint64_t generation, Waiter waiter,

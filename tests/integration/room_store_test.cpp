@@ -101,9 +101,19 @@ protected:
         });
     }
 
+    // The generation alone, as most of the tests below look at it.
     StoreResult<std::optional<std::uint64_t>> media(const core::RoomId& room,
                                                     std::uint64_t generation, rt::MediaStep step) {
-        return ask<std::optional<std::uint64_t>>(
+        const auto state = change(room, generation, rt::MediaChange{.step = step});
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        return state->transform([](const rt::MediaState& s) { return s.generation; });
+    }
+
+    StoreResult<std::optional<rt::MediaState>>
+    change(const core::RoomId& room, std::uint64_t generation, const rt::MediaChange& step) {
+        return ask<std::optional<rt::MediaState>>(
             [&](auto done) { store_->media_generation(room, generation, step, std::move(done)); });
     }
 
@@ -291,6 +301,172 @@ TEST_P(RoomStoreTest, AMediaGenerationStartsAtOneAndOnlyItsOwnerMovesItOn) {
     EXPECT_EQ(media(room, 2, rt::MediaStep::Advance), Seq{3});
     // Moving it is no message: the room's count stands.
     EXPECT_EQ(last_seq(room), "0");
+}
+
+TEST_P(RoomStoreTest, WhoIsPutOutMovesWithTheGenerationAndOutlivesTheOwner) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    const auto bob = *core::UserId::parse("bob");
+    const auto dave = *core::UserId::parse("dave");
+    const auto put_out = [&](std::uint64_t owner, std::optional<core::UserId> who, bool carry) {
+        return change(
+            room, owner,
+            rt::MediaChange{.step = rt::MediaStep::Advance, .carry = carry, .expel = who});
+    };
+    const auto users = [](const StoreResult<std::optional<rt::MediaState>>& r) {
+        std::vector<std::string> out;
+        if (r && *r) {
+            for (const core::UserId& u : (*r)->expelled) {
+                out.emplace_back(u.view());
+            }
+        }
+        std::ranges::sort(out);
+        return out;
+    };
+    EXPECT_EQ(users(put_out(1, dave, true)), std::vector<std::string>{"dave"});
+    EXPECT_EQ(users(put_out(1, bob, true)), (std::vector<std::string>{"bob", "dave"}));
+    // The owner dies; the next one reads the generation with who is out of it.
+    go_quiet(room);
+    ASSERT_EQ(resolve(room, b_), (Ownership{.node = b_, .generation = 2}));
+    const auto read = change(room, 2, rt::MediaChange{.step = rt::MediaStep::Read});
+    ASSERT_TRUE(read && *read);
+    EXPECT_EQ((*read)->generation, 3U);
+    EXPECT_EQ(users(read), (std::vector<std::string>{"bob", "dave"}));
+    // The deposed owner puts nobody out.
+    EXPECT_EQ(put_out(1, *core::UserId::parse("carol"), true),
+              (StoreResult<std::optional<rt::MediaState>>{std::nullopt}));
+    // A call ended for everyone starts the next generation with nobody out, and older lists go.
+    const auto fresh = put_out(2, std::nullopt, false);
+    ASSERT_TRUE(fresh && *fresh);
+    EXPECT_EQ((*fresh)->generation, 4U);
+    EXPECT_TRUE((*fresh)->expelled.empty());
+    EXPECT_EQ(scalar(*conn_,
+                     "SELECT count(*) FROM room_media_expelled WHERE room_id = $1 "
+                     "AND media_generation < 3",
+                     Params{}.add_uuid(room.uuid())),
+              "0");
+    EXPECT_EQ(last_seq(room), "0");
+}
+
+TEST_P(RoomStoreTest, AnExpulsionAloneKeepsTheGenerationAndAddsToWhoIsOut) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    const auto expel = [&](std::uint64_t owner, std::string_view who) {
+        return change(room, owner,
+                      rt::MediaChange{.step = rt::MediaStep::Expel,
+                                      .carry = true,
+                                      .expel = *core::UserId::parse(who)});
+    };
+    const auto bob = expel(1, "bob");
+    ASSERT_TRUE(bob && *bob);
+    EXPECT_EQ((*bob)->generation, 1U);
+    EXPECT_EQ((*bob)->expelled, std::vector<core::UserId>{*core::UserId::parse("bob")});
+    // Twice is once.
+    const auto again = expel(1, "bob");
+    ASSERT_TRUE(again && *again);
+    EXPECT_EQ((*again)->expelled.size(), 1U);
+    const auto dave = expel(1, "dave");
+    ASSERT_TRUE(dave && *dave);
+    EXPECT_EQ((*dave)->expelled.size(), 2U);
+    // Only the owner writes it.
+    EXPECT_EQ(expel(2, "carol"), (StoreResult<std::optional<rt::MediaState>>{std::nullopt}));
+    EXPECT_EQ(media(room, 1, rt::MediaStep::Read), Seq{1});
+}
+
+TEST_P(RoomStoreTest, AnExpulsionWaitsOnAClaimInFlightAndIsFencedByIt) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    // Another node's claim, not committed yet: it holds room_state's row.
+    ASSERT_TRUE(conn_->exec("BEGIN"));
+    ASSERT_TRUE(conn_->exec(
+        "UPDATE room_state SET owner_generation = owner_generation + 1 WHERE room_id = $1",
+        Params{}.add_uuid(room.uuid())));
+    std::optional<StoreResult<std::optional<rt::MediaState>>> answer;
+    store_->media_generation(room, 1,
+                             rt::MediaChange{.step = rt::MediaStep::Expel,
+                                             .carry = true,
+                                             .expel = *core::UserId::parse("bob")},
+                             [&answer](StoreResult<std::optional<rt::MediaState>> r) noexcept {
+                                 answer = std::move(r);
+                             });
+    // The expulsion waits on the row, as an append would.
+    auto watcher = db_->session();
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] {
+        return answer.has_value() ||
+               scalar(watcher,
+                      "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                      "AND query LIKE '%room_media_expelled%'") != "0";
+    }));
+    EXPECT_FALSE(answer.has_value()) << "the expulsion did not wait for the claim";
+    ASSERT_TRUE(conn_->exec("COMMIT"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answer.has_value(); }));
+    EXPECT_EQ(*answer, (StoreResult<std::optional<rt::MediaState>>{std::nullopt}));
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM room_media_expelled WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "0");
+}
+
+TEST_P(RoomStoreTest, AFullListKeepsWhoIsPutOutNow) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    for (std::size_t i = 0; i < rt::kMaxMediaExpelled; ++i) {
+        const auto r =
+            change(room, 1,
+                   rt::MediaChange{.step = rt::MediaStep::Expel,
+                                   .carry = true,
+                                   .expel = *core::UserId::parse("user" + std::to_string(i))});
+        ASSERT_TRUE(r && *r);
+    }
+    // Past the cap an expulsion alone adds nobody; a move keeps the new one first.
+    const auto past = change(room, 1,
+                             rt::MediaChange{.step = rt::MediaStep::Expel,
+                                             .carry = true,
+                                             .expel = *core::UserId::parse("late")});
+    ASSERT_TRUE(past && *past);
+    EXPECT_EQ((*past)->expelled.size(), rt::kMaxMediaExpelled);
+    const auto moved = change(room, 1,
+                              rt::MediaChange{.step = rt::MediaStep::Advance,
+                                              .carry = true,
+                                              .expel = *core::UserId::parse("last")});
+    ASSERT_TRUE(moved && *moved);
+    EXPECT_EQ((*moved)->expelled.size(), rt::kMaxMediaExpelled);
+    EXPECT_NE(std::ranges::find((*moved)->expelled, *core::UserId::parse("last")),
+              (*moved)->expelled.end());
+    // Started again: an expulsion that does not carry the list keeps only its own.
+    const auto fresh = change(room, 1,
+                              rt::MediaChange{.step = rt::MediaStep::Expel,
+                                              .carry = false,
+                                              .expel = *core::UserId::parse("last")});
+    ASSERT_TRUE(fresh && *fresh);
+    EXPECT_EQ((*fresh)->expelled, std::vector{*core::UserId::parse("last")});
+    const auto read = change(room, 1, rt::MediaChange{.step = rt::MediaStep::Read});
+    ASSERT_TRUE(read && *read);
+    EXPECT_EQ(**read, **fresh);
+}
+
+TEST_P(RoomStoreTest, AnExpelledUserTheStoreCannotParseIsCorrupt) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    ASSERT_TRUE(conn_->exec("INSERT INTO room_media_expelled (room_id, media_generation, user_id) "
+                            "VALUES ($1, 1, 'not a user')",
+                            Params{}.add_uuid(room.uuid())));
+    EXPECT_EQ(
+        change(room, 1, rt::MediaChange{.step = rt::MediaStep::Read}),
+        (StoreResult<std::optional<rt::MediaState>>{std::unexpected(rt::StoreError::Corrupt)}));
+}
+
+TEST_P(RoomStoreTest, AStoreThatCannotReachItsDatabaseAnswersTheGenerationUnavailable) {
+    auto store = PgRoomStore::create(*reactor_, *offload_,
+                                     {.conninfo = "host=127.0.0.1 port=1 connect_timeout=1"});
+    if (!store) {
+        GTEST_SKIP() << "the store refuses an unreachable database up front: " << store.error();
+    }
+    std::optional<StoreResult<std::optional<rt::MediaState>>> answer;
+    (*store)->media_generation(new_room(), 1, rt::MediaChange{.step = rt::MediaStep::Read},
+                               [&answer](auto r) noexcept { answer = std::move(r); });
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answer.has_value(); }));
+    EXPECT_EQ(*answer, (StoreResult<std::optional<rt::MediaState>>{
+                           std::unexpected(rt::StoreError::Unavailable)}));
 }
 
 TEST_P(RoomStoreTest, ARoomNobodyResolvedHasNoMediaGeneration) {

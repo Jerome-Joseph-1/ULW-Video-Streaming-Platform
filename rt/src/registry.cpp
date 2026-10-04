@@ -130,15 +130,15 @@ bool RoomRegistry::append(const core::RoomId& room, const Outgoing& message, App
     return true;
 }
 
-bool RoomRegistry::media_generation(const core::RoomId& room, MediaStep step,
-                                    StoreCallback<std::optional<std::uint64_t>> done) {
+bool RoomRegistry::media_generation(const core::RoomId& room, const MediaChange& change,
+                                    StoreCallback<std::optional<MediaState>> done) {
     const auto generation = owned(room);
     if (!generation) {
         return false;
     }
-    store_.media_generation(room, *generation, step,
+    store_.media_generation(room, *generation, change,
                             [this, room, generation = *generation, done = std::move(done)](
-                                StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
+                                StoreResult<std::optional<MediaState>> r) mutable noexcept {
                                 if (r && !*r) {
                                     fenced(room, generation, OwnerWrite::MediaGeneration);
                                 }

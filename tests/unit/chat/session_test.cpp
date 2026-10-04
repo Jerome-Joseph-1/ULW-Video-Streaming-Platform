@@ -464,34 +464,34 @@ TEST_P(ChatSessionTest, EveryMetricsLineIsANameAndANumberAndEveryFeatureHasItsLi
     auto sorted = names;
     std::ranges::sort(sorted);
     EXPECT_EQ(std::ranges::adjacent_find(sorted), sorted.end()) << "a name appears twice";
-    for (const std::string_view name : {
-             // Calls and their ring (ADR-0087, ADR-0091).
-             "call_tickets_total", "call_refusals_total{reason=\"no_call\"}",
-             "call_refusals_total{reason=\"ring_limited\"}", "calls_ringing_or_answered",
-             "call_rings_total{outcome=\"graced\"}", "call_notices_malformed_total",
-             "notices_total{stage=\"dropped\"}",
-             // Group calls (ADR-0095).
-             "call_refusals_total{reason=\"expelled\"}",
-             "call_refusals_total{reason=\"call_full\"}", "call_rings_total{outcome=\"left\"}",
-             "call_rings_total{outcome=\"emptied\"}", "call_expulsions_total",
-             "call_moves_total{reason=\"expel\"}", "call_moves_total{reason=\"removal\"}",
-             "call_moves_total{reason=\"end\"}", "call_moves_failed_total{why=\"fenced\"}",
-             "call_moves_failed_total{why=\"unavailable\"}", "call_generations_closed_total",
-             "call_generations_abandoned_total", "call_generations_closing",
-             "call_occupancy_checks_total", "call_occupancy_unavailable_total",
-             "call_resync_checks_total",
-             // Member lists (ADR-0096).
-             "directs_opened_total", "groups_created_total",
-             "members_changed_total{change=\"added\"}", "members_changed_total{change=\"removed\"}",
-             "members_changed_total{change=\"left\"}",
-             "membership_refusals_total{reason=\"not_member\"}",
-             "membership_refusals_total{reason=\"not_admin\"}",
-             "membership_refusals_total{reason=\"not_group\"}",
-             "membership_refusals_total{reason=\"too_many_members\"}",
-             "membership_refusals_total{reason=\"room_limit\"}",
-             "membership_refusals_total{reason=\"gone\"}",
-             "membership_refusals_total{reason=\"rate_limited\"}",
-             "membership_refusals_total{reason=\"unavailable\"}", "member_events_total"}) {
+    for (const std::string_view name :
+         {// Calls and their ring (ADR-0087, ADR-0091).
+          "call_tickets_total", "call_refusals_total{reason=\"no_call\"}",
+          "call_refusals_total{reason=\"ring_limited\"}", "calls_ringing_or_answered",
+          "call_rings_total{outcome=\"graced\"}", "call_notices_malformed_total",
+          "notices_total{stage=\"dropped\"}",
+          // Group calls (ADR-0095).
+          "call_refusals_total{reason=\"expelled\"}", "call_refusals_total{reason=\"call_full\"}",
+          "call_rings_total{outcome=\"left\"}", "call_rings_total{outcome=\"emptied\"}",
+          "call_expulsions_total", "call_moves_total{reason=\"expel\"}",
+          "call_moves_total{reason=\"removal\"}", "call_moves_total{reason=\"end\"}",
+          "call_moves_failed_total{why=\"fenced\"}", "call_moves_failed_total{why=\"unavailable\"}",
+          "call_generations_closed_total", "call_generations_abandoned_total",
+          "call_generations_closing", "call_occupancy_checks_total",
+          "call_occupancy_unavailable_total", "call_resync_checks_total",
+          "call_expulsions_kept_total", "call_expulsions_cleared_total",
+          "call_announcements_dropped_total",
+          // Member lists (ADR-0096).
+          "directs_opened_total", "groups_created_total", "members_changed_total{change=\"added\"}",
+          "members_changed_total{change=\"removed\"}", "members_changed_total{change=\"left\"}",
+          "membership_refusals_total{reason=\"not_member\"}",
+          "membership_refusals_total{reason=\"not_admin\"}",
+          "membership_refusals_total{reason=\"not_group\"}",
+          "membership_refusals_total{reason=\"too_many_members\"}",
+          "membership_refusals_total{reason=\"room_limit\"}",
+          "membership_refusals_total{reason=\"gone\"}",
+          "membership_refusals_total{reason=\"rate_limited\"}",
+          "membership_refusals_total{reason=\"unavailable\"}", "member_events_total"}) {
         EXPECT_NE(std::ranges::find(names, name), names.end()) << name;
     }
 }

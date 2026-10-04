@@ -37,7 +37,7 @@ TEST(StorageError, EveryEnumeratorHasItsOwnMessage) {
 }
 
 TEST(MediaError, EveryEnumeratorHasItsOwnMessage) {
-    expect_distinct_messages(MediaError::NotImplemented, "unknown media error");
+    expect_distinct_messages(MediaError::Remains, "unknown media error");
 }
 
 } // namespace

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <set>
 #include <span>
@@ -98,6 +99,8 @@ inline constexpr std::size_t kMaxGroupCallees = 32;
 // out of it; a ticket past either is answered busy.
 inline constexpr std::size_t kMaxGroupJoined = 64;
 inline constexpr std::size_t kMaxExpelled = 32;
+// A group call whose occupancy the SFU could not tell this many checks in a row ends.
+inline constexpr std::uint32_t kMaxUnansweredChecks = 3;
 
 struct RingLimits {
     // How long a call rings with nobody answering before both members are told it was missed.
@@ -252,8 +255,10 @@ public:
     // is no longer `call`.
     void ended(const core::RoomId& room, const CallId& call,
                const std::optional<core::UserId>& by) noexcept;
+    // `everyone` false: nothing moved (no device of theirs was in the call), and only `subject`
+    // is told.
     void moved(const core::RoomId& room, const CallId& call, const std::optional<core::UserId>& by,
-               const core::UserId& subject) noexcept;
+               const core::UserId& subject, bool everyone = true) noexcept;
     // The id of the room's call, if it has one, and whose it is.
     [[nodiscard]] std::optional<CallId> call_of(const core::RoomId& room) const noexcept;
     [[nodiscard]] std::optional<CallKind> kind_of(const core::RoomId& room) const noexcept;
@@ -265,10 +270,17 @@ public:
     // Group calls whose occupancy is due to be checked (RingLimits::occupancy_check), taken by
     // the call handler, which asks the SFU and answers occupied().
     [[nodiscard]] std::vector<std::pair<core::RoomId, CallId>> take_checks();
+    // Told of each group call that ends without a media generation move of its own (missed,
+    // emptied, given up on), once the ringer has forgotten it: the owner then clears who was put
+    // out of it (ADR-0095). Not told of a call the caller ended, nor of one a deposed owner drops.
+    using GroupEnded = std::move_only_function<void(const core::RoomId&) noexcept>;
+    void on_group_ended(GroupEnded hook) noexcept { group_ended_ = std::move(hook); }
     // Whether anyone is connected to the call's media room: nobody ends it (call_ended), and
     // nullopt (the SFU did not answer) asks again at the next check.
-    void occupied(const core::RoomId& room, const CallId& call,
-                  std::optional<bool> anyone) noexcept;
+    // `asked` false: the SFU was not asked (nothing to ask with yet, or the media generation
+    // is being written), which does not count toward kMaxUnansweredChecks.
+    void occupied(const core::RoomId& room, const CallId& call, std::optional<bool> anyone,
+                  bool asked = true) noexcept;
     // A callee declines, the caller cancels, or a member of an answered call ends it. Answers
     // the call's caller when it did, nullopt when the room has no such call for this member to
     // end that way.
@@ -296,8 +308,10 @@ private:
         std::vector<core::UserId> joined = {};
         // Put out of the call while it lasts.
         std::vector<core::UserId> expelled = {};
-        // A group call's occupancy is being asked of the SFU.
+        // A group call's occupancy is being asked of the SFU, and how many checks in a row it
+        // could not answer.
         bool checking = false;
+        std::uint32_t unanswered = 0;
         core::MonoTime ring_deadline;
         core::WallTime expires_at;
         core::MonoTime next_announce;
@@ -336,6 +350,8 @@ private:
     // Everyone a group call's events go to: its caller, callees and members in it.
     [[nodiscard]] static std::vector<core::UserId> members(const Call& call);
     void forget(Calls::iterator it) noexcept;
+    // forget(), for a group call ending without a move: the hook is told after.
+    void forget_ended(Calls::iterator it) noexcept;
     // Tells every member of the call, the caller included, on every node they are connected to.
     void announce(const core::RoomId& room, const Call& call, RingEvent event,
                   const std::optional<core::UserId>& by) noexcept;
@@ -363,6 +379,7 @@ private:
     core::MonoTime next_prune_;
     // Group calls due an occupancy check, until the call handler takes them.
     std::vector<std::pair<core::RoomId, CallId>> checks_;
+    GroupEnded group_ended_;
 };
 
 } // namespace chat
