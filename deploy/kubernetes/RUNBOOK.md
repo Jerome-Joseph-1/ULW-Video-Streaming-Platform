@@ -519,7 +519,7 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `POD_CIDR` | The cluster's pod network | `ULW_TRUSTED_PROXIES` of the gateway and chat; the block the worker and packagers may not reach |
 | `JWKS_URL`, `JWT_ISSUER`, `JWT_AUDIENCE` | The identity provider (docs/integration/auth.md) | the gateway's and chat's settings of the same names |
 | `JWT_SUBJECT_CLAIM` | The claim that names the user, `sub` unless your provider uses another | `ULW_JWT_SUBJECT_CLAIM` |
-| `SERVICE_CLAIM`, `SERVICE_SCOPE` | Which tokens are your backend's, for the grants API (docs/integration/auth.md, "Service tokens"): the claim (`scope` by default) and the value only your backend's client-credentials client is granted. Empty `SERVICE_SCOPE`: no token is, and the API answers 403 | the gateway's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE` |
+| `SERVICE_CLAIM`, `SERVICE_SCOPE` | Which tokens are your backend's, for chat's service API (docs/integration/auth.md, "Service tokens"; step 10): the claim (`scope` by default) and the value only your backend's client-credentials client is granted. Empty `SERVICE_SCOPE`: no token is, and chat has no service API | chat's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE` |
 | `AUTH_COOKIE`, `ALLOWED_ORIGINS` | The token cookie, and the web app's pages that may use it | `ULW_AUTH_COOKIE`, `ULW_ALLOWED_ORIGINS` |
 | `STORAGE`, `R2_ACCOUNT_ID`, `S3_ENDPOINT`, `BUCKET` | The object store: `r2` with an account id, or `minio` (any S3-compatible store) with an endpoint; the unused one empty | `ULW_STORAGE` and the rest, for the gateway, worker, reaper and packagers |
 | `VIDEO_GATEWAY_IMAGE_TAG`, `VIDEO_WORKER_IMAGE_TAG`, `CHAT_IMAGE_TAG`, `LIVE_PACKAGER_IMAGE_TAG` | Which build runs: `main`, a commit SHA, or `<sha>@sha256:<digest>` (4a) | each image's tag |
@@ -1352,12 +1352,12 @@ arrives in the `roles` array: `SERVICE_CLAIM=roles`, `SERVICE_SCOPE=ulw.admin`.
 
 In `config.env`, `SERVICE_CLAIM` (the claim, `scope` unless your provider uses `roles` or
 another) and `SERVICE_SCOPE` (`ulw:admin` above): `components/operator-config` copies them to
-chat's `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE`, as to the gateway's, since both read the
-backend's tokens the same way (docs/integration/auth.md, "Service tokens"). With
-`SERVICE_SCOPE` empty, no token is the service's. To also pin the client, set chat's
-`ULW_SERVICE_CLIENT_ID` to `ulw-backend` (Keycloak puts it in `azp`; Okta and RFC 9068 tokens in
-`client_id`): a token holding the scope but issued to any other client is then refused. Then
-open chat's port with a kustomize patch
+chat's `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE` (docs/integration/auth.md, "Service
+tokens"). With
+`SERVICE_SCOPE` empty, no token is the service's. Chat also requires the client itself,
+`ULW_SERVICE_CLIENT_ID`, with its port: `ulw-backend` (Keycloak puts it in `azp`; Okta and RFC
+9068 tokens in `client_id`), so that a token holding the scope but issued to any other client is
+refused. Then open chat's port with a kustomize patch
 in your overlay (the base sets no port, so the API is off, and self-service is off, until you
 do):
 
@@ -1373,6 +1373,9 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value: {name: ULW_SERVICE_PORT, value: "9301"}
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: ULW_SERVICE_CLIENT_ID, value: ulw-backend}
 ```
 
 and, beside it, a ClusterIP Service no HTTPRoute names, and a NetworkPolicy that admits your
@@ -1418,7 +1421,7 @@ addresses, for example with Envoy Gateway's `SecurityPolicy`:
 #         principal: {clientCIDRs: ["203.0.113.0/24"]}   # the backend's egress
 ```
 
-and set `ULW_SERVICE_CLIENT_ID` as well. Keep
+as well as the client id chat already requires. Keep
 `ULW_CHAT_SELF_SERVICE` unset (off). A demo whose web client opens chats itself needs
 `ULW_CHAT_SELF_SERVICE=on` (`value: "on"` in the same patch) and no service API.
 

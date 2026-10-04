@@ -16,7 +16,8 @@ tagged.
 | Any signed-in user could `open_direct` with, `create_group` with, or `add_members` anyone whose id they knew | Only with `ULW_CHAT_SELF_SERVICE=on`. Off, the default, the three answer `not_allowed`; `leave`, an admin's `remove_member`, `rooms` and `members` are unchanged |
 | Operators listed members in SQL | Also, an operator's backend lists them through chat's [service API](chat.md#the-service-api), with a client-credentials token that `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE` mark as the service's ([auth.md](auth.md#service-tokens)) |
 | Anyone signed in could `watch` anyone | Only someone who shares a direct or group chat with the user; otherwise `not_shared`. A watch whose shared chat goes is dropped with an unasked `error` `not_shared` (or `unavailable`) naming the user |
-| A `watch` was answered at once | After one read of the database: `watching` comes a round trip later |
+| A `watch` was answered at once | After one read of the database: `watching` comes a round trip later; a watch refused is refused again from memory until either user is listed somewhere |
+| A direct chat's pair could never be undone | The service API's `close_direct` unlists both (an unfriend, a block); users still cannot leave a direct chat themselves |
 
 What to do:
 
@@ -27,7 +28,8 @@ What to do:
 - **Operators:** decide between self-service and the service API (RUNBOOK, step 10). A demo
   whose web client opens chats itself needs `ULW_CHAT_SELF_SERVICE=on`. For the service API, set
   up the backend's client in the identity provider, then `ULW_SERVICE_PORT` and
-  `SERVICE_CLAIM`/`SERVICE_SCOPE` in config.env, `ULW_SERVICE_PORT` on chat, a Service and a
+  `SERVICE_CLAIM`/`SERVICE_SCOPE` in config.env, `ULW_SERVICE_PORT` and `ULW_SERVICE_CLIENT_ID`
+  on chat, a Service and a
   NetworkPolicy for the backend; watch
   `service_api_answers_total{result="forbidden"}`.
 

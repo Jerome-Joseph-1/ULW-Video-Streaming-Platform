@@ -213,8 +213,14 @@ As `user-1`:
   exists: resolve people to ids in your own directory, and never send a name typed by the user.
 - **Roles.** A group's creator is its admin; everyone else is a member, and so are both people
   of a direct chat. Only an admin adds or removes others (`not_admin`). A direct chat's pair never
-  changes: `add_members`, `remove_member` and `leave` on one are `not_group`. A member an
-  operator removed from a direct chat is not put back when the other opens it again.
+  changes: `add_members`, `remove_member` and `leave` on one are `not_group`, so neither of the
+  two can leave it alone; ending one (an unfriend, a block) is the product's, through the service
+  API's `close_direct`, which unlists both. A member an operator removed from a direct chat is
+  not put back when the other opens it again.
+- **Self-service on means anyone can reach anyone.** With `ULW_CHAT_SELF_SERVICE=on`, any
+  signed-in user can `open_direct` anyone whose id they know, and so watch their presence and
+  call them; and since `open_direct` lists a pair again once a closed chat lists nobody, nothing
+  keeps a closed (blocked) pair apart. Run it on only where that is acceptable.
 - **Size.** A group holds at most 100 members; an `add_members` that would pass that adds
   nobody (`too_many_members`). Once you are listed in 1000 rooms, `open_direct` and
   `create_group` of a new room answer `room_limit` (others can still add you); leave some first.
@@ -362,7 +368,7 @@ Server to client:
 |---|---|---|
 | `watching` | `user`, `status` (`online` or `offline`) | The answer to `watch`: what the node knows now. |
 | `presence` | `user`, `status` (`online` or `offline`) | The user's status changed. Sent once per change, to every connection watching them. |
-| `error` | `reason`, `user` | The watch was refused (below), or, unasked, a watch was dropped: `not_shared` once you no longer share a chat with `user`, `unavailable` when that could not be checked after a list changed. |
+| `error` | `reason`, `user` | The watch was refused (below), or, unasked, a watch was dropped: `not_shared` once you no longer share a chat with `user`. |
 
 ```json
 {"type":"watch","user":"user-42"}
@@ -394,16 +400,22 @@ Errors for `watch` and `unwatch`:
 | `bad_user` | `user` is not a user id | Fix the client |
 | `watching_self` | `user` is the connection's own user | Nothing to watch: the connection is online |
 | `not_shared` | You share no direct or group chat with `user`; unasked, you no longer do | Do not retry until you share one |
-| `unavailable` | The database could not say whether you share a chat; unasked, it could not after a list changed | Watch again |
+| `unavailable` | The database could not say whether you share a chat | Watch again |
 | `too_many_watches` | This connection already watches 128 users, those still being checked included | Unwatch some first |
-| `busy` | This node watches as many users as it takes, or this user started watching users no connection on this node was watching (unwatching and watching again counts each time) faster than 128 at once and then 1 a second | Back off and retry |
+| `busy` | This user asked the database about watches faster than 128 at once and then 2 a second (every watch not answered from memory counts, whether or not anyone on the node watches that user already, and unwatching and watching again counts each time), or, after the database let it in, this node watches as many users as it takes | Back off and retry |
 
 Room ids of UUID version 8 (the third group starts with `8`) whose first byte is `02` (the id
 starts with `02`) are reserved for presence: `join`, `send` or `history` naming one is refused
 with `bad_room`. Presence events are never stored.
 
 A `watch` costs one read of the database, by index, on the watcher's node; a removal costs one
-read per connection on each node whose watches involve the user removed. Watching the same user
+read per connection on each node whose watches involve the user removed. A watch the database
+refused is refused again from memory, without asking, until either user is listed in any chat
+(or the node resyncs). When the database cannot answer about a watch already let in (after a
+removal, or a resync), the watch stays held, telling nothing, and is asked again after 1 s, 2 s,
+4 s and so on up to every 30 s, until the database answers: it is never let through on doubt, and
+never dropped for an outage. After a resync, every watch on the node is held at once and asked
+about 32 connections at a time, every 100 ms. Watching the same user
 again while the first is checked is answered once per `watch` (16 at most) when the check
 comes back.
 
@@ -420,12 +432,12 @@ routed from the internet; reach it from the backend's network only
 
 **Authentication.** `Authorization: Bearer <token>`, a token from the same identity provider as
 users', verified the same way ([auth.md](auth.md)): signature, `iss`, `aud`, `exp`. It must also
-be the service's by `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE` (its `scope` holding `ulw:admin`,
-say), the same settings the gateway reads, which the backend gets
-from the provider's client-credentials grant ([auth.md](auth.md#service-tokens)). No cookie is
-read, and there is no shared secret. A missing or invalid token is `401` with
-`WWW-Authenticate: Bearer`; a valid token without the claim (a user's) is `403`; a key set that
-cannot be fetched is `503`.
+be the service's by `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE` (its `scope` holding
+`ulw:admin`, say), issued to the client `ULW_SERVICE_CLIENT_ID` names (in `azp` or `client_id`),
+which the backend gets from the provider's client-credentials grant
+([auth.md](auth.md#service-tokens)). No cookie is read, and there is no shared secret. A missing
+or invalid token is `401` with `WWW-Authenticate: Bearer`; a valid token that is not the
+service's (a user's) is `403`; a key set that cannot be fetched is `503`.
 
 **Requests.** `POST /service/v1/<operation>` with a JSON object body, at most 16 KiB; unknown
 fields are refused. Answers are JSON, `Content-Type: application/json`. Connections are kept
@@ -435,8 +447,9 @@ alive; requests on one connection are answered in order, one at a time.
 |---|---|---|
 | `open_direct` | `users`: exactly two user ids | `{"type":"direct","room":..,"users":[as given],"added":[who it listed]}`. The pair's direct chat, the room `open_direct` names for either of them; the first time it lists both, after that it changes nothing (`added` empty). |
 | `create_group` | `creator`, `id` (a request id: 1 to 64 of `A-Z a-z 0-9 _ -`), optional `users` (at most 50) | `{"type":"group","room":..,"id":..,"added":[...]}`. The group the creator's own `create_group` with that `id` names, the creator its admin; repeated with the same `id`, the same room, listing nobody more. |
-| `add_members` | `room`, `users` (1 to 50) | `{"type":"added","room":..,"users":[who it listed]}`. As the group's admin would, without being on the list; those listed already are left as they are. |
-| `remove_member` | `room`, `user` | `{"type":"removed","room":..,"user":..}`, with `"promoted":<user>` when the user was the group's last admin and the member whose id sorts first became admin, as for a `leave`. The user's sockets are out of the room at once, on every node. |
+| `add_members` | `room`, `users` (1 to 50) | `{"type":"added","room":..,"users":[who it listed]}`. As the group's admin would, without being on the list; those listed already are left as they are. Only into a group someone created: the `room` must be a group's id (`04`, else `bad_room`), the group must list someone (`404` `no_room` when nothing recorded it or it lists nobody), and one whose members all left over its history is `409` `gone`. |
+| `remove_member` | `room`, `user` | `{"type":"removed","room":..,"user":..,"removed":[the user, or nobody]}`, with `"promoted":<user>` when the user was the group's last admin and the member whose id sorts first became admin, as for a `leave`. The user's sockets are out of the room at once, on every node. Idempotent: a user not listed (any more), or a room nothing recorded, answers `200` with `"removed":[]`. |
+| `close_direct` | `room` (a direct chat's id, `03`, else `bad_room`) | `{"type":"closed","room":..,"removed":[who it unlisted]}`. Takes a direct chat apart (an unfriend, a block): both of the pair unlisted under the room's lock, so their sockets leave the room at once on every node and their watches of each other are dropped (`not_shared`) unless they share another chat. Idempotent: `"removed":[]` when it lists nobody. The history stays; a later `open_direct` lists the pair again in the same room, history included. |
 | `rooms` | `user`, optional `after` (a room id), `limit` (1 to 100, default 50) | `{"type":"rooms","rooms":[{"room","kind","role","peer"}],"more":..}`, as the socket's `rooms` answers that user. |
 | `members` | `room`, optional `after` (a user id), `limit` (1 to 100, default 50) | `{"type":"members","room":..,"members":[{"user","role"}],"more":..}` for any room; a room nobody is listed in answers no members. |
 
@@ -469,18 +482,27 @@ Errors are `{"type":"error","reason":..}`:
 |---|---|---|
 | `400` | `not_json`, `malformed`, `bad_room`, `bad_user`, `bad_id`, `self` | The body is not one of the operation's: not JSON, a missing, unknown or mistyped field, a list too long, a room that is not a canonical lowercase UUID (or is a presence room), a user or request id out of form, `open_direct` naming one user twice |
 | `401` | `unauthorized` | No bearer token, or one that fails verification |
-| `403` | `forbidden` | A valid token without the service claim |
-| `404` | `not_found`, `no_room`, `not_member` | Another path; `add_members` of a room nothing recorded; `remove_member` of a user not listed (nothing changed: a removal repeated after a lost answer gets this) |
+| `403` | `forbidden` | A valid token that is not the service's: without the service claim, or issued to another client than `ULW_SERVICE_CLIENT_ID` |
+| `404` | `not_found`, `no_room` | Another path; `add_members` of a group nothing recorded or that lists nobody |
 | `405` | `method_not_allowed` | Not `POST` (`Allow: POST`) |
 | `409` | `not_group`, `too_many_members`, `room_limit`, `gone`, `not_member` | As the socket's commands: a direct chat's pair, the 100-member cap, the creator or first user in 1000 rooms, a group `id` whose group everyone left and that holds messages, a direct chat that lists others than the pair or a repeated create whose creator left |
 | `413` | `too_large` | A body over 16 KiB |
-| `429` | `rate_limited`, with `retry_after_ms` and `Retry-After` | Past the node's rate (below) |
+| `429` | `rate_limited`, with `retry_after_ms` and `Retry-After` | Past the service's rate, or past the failures' budget of the caller's address (below) |
 | `503` | `unavailable`, with `Retry-After: 1` | The database or the key set could not be reached; retry, the same request again (changes are idempotent) |
 
-A refusal at the head (`404`, `405`, `413`, `429`, a request that is not HTTP) closes the
-connection after the answer; the others keep it.
+A refusal at the head (`404`, `405`, `413`, a request that is not HTTP) and a `429` for spent
+failures close the connection after the answer; the others keep it.
 
-**Limits.** Per node: 100 requests at once, then 50 a second, from all connections together; 32
-connections open at once (more are closed at accept); 30 s idle, 10 s to send a whole request.
-Three nodes take 150 changes a second in all, each a transaction holding one room's row for
-milliseconds, far past a product's sign-ups and invitations.
+**Limits.** Per node:
+
+- **The service's rate:** 100 requests at once, then 50 a second, taken only by requests whose
+  token is the service's, once it is verified: nobody else can spend it. Three nodes take 150
+  changes a second in all, each a transaction holding one room's row for milliseconds, far past
+  a product's sign-ups and invitations.
+- **Failures, per caller address:** every request is charged one before its token is verified
+  and given it back once the token is the service's; 20 at once, then 5 a second. Past it, every
+  request from that address is answered `429` before its token is looked at, so a stranger can
+  neither verify tokens without end nor touch the backend's rate.
+- **Connections:** 32 open at once, at most 8 from one address (more are closed at accept). A
+  connection must send its first byte within 5 s, then a whole request within 10 s of its first
+  byte; an idle one is closed after 30 s.
