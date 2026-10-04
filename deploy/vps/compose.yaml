@@ -297,11 +297,15 @@ services:
         redis:
           address: 127.0.0.1:6379
         rtc:
-          # Browsers reach the media ports on the host's public address; egress, in this
-          # namespace, uses the loopback candidate.
+          # Browsers reach the media ports on the host's public address, which Docker forwards
+          # to the namespace's address on the `ulw` network; egress, in the namespace, takes the
+          # same way back in. One local address only, so the public one maps to it unambiguously
+          # (with loopback as well, the agent answered on the wrong socket and no check succeeded).
           node_ip: ${ULW_PUBLIC_IP:?}
           use_external_ip: false
-          enable_loopback_candidate: true
+          ips:
+            includes:
+              - 10.213.77.10/32
           tcp_port: 7801
           udp_port: 7802
         turn:
