@@ -45,7 +45,7 @@ packager_job() {
 import os
 import sys
 
-NAMES = ["NAMESPACE", "LIVE_PACKAGER_IMAGE_TAG", "IMAGE_PULL_POLICY", "STORAGE", "R2_ACCOUNT_ID",
+NAMES = ["LIVE_NAMESPACE", "LIVE_PACKAGER_IMAGE_TAG", "IMAGE_PULL_POLICY", "STORAGE", "R2_ACCOUNT_ID",
          "S3_ENDPOINT", "BUCKET", "LIVE_PACKAGER_SECRET", "ULW_STREAM_ID", "ULW_STREAM_OWNER"]
 with open(sys.argv[1], encoding="utf-8") as f:
     text = f.read()

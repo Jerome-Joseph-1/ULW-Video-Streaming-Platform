@@ -28,6 +28,9 @@ struct RunSettings {
     std::uint32_t listed_segments = 0;
     std::uint32_t max_kbps = 0;
     core::Seconds max_duration{};
+    // Zero waits for the publisher until a stop; otherwise a publisher that has not come in
+    // this long ends the stream without one, as SIGUSR1 would.
+    core::Seconds caller_wait{0};
 };
 
 struct StopRequests {

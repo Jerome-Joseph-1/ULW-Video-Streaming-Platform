@@ -122,6 +122,28 @@ std::expected<std::string, AuthError> email_of(const core::json::Value& claims) 
     return std::string(*text);
 }
 
+// The broadcaster rule, read leniently: a claim that is absent or of another shape is simply not
+// a match, never a refusal of the token, which still serves everything else.
+bool matches(const core::json::Value& doc, const ClaimRules& rules) {
+    if (rules.broadcaster_claim.empty()) {
+        return true;
+    }
+    const core::json::Value* claim = doc.find(rules.broadcaster_claim);
+    if (claim == nullptr) {
+        return false;
+    }
+    if (claim->as_string() == rules.broadcaster_value) {
+        return true;
+    }
+    if (const auto flag = claim->as_bool()) {
+        return *flag && rules.broadcaster_value == "true";
+    }
+    const auto* items = claim->as_array();
+    return items != nullptr && std::ranges::any_of(*items, [&](const core::json::Value& item) {
+               return item.as_string() == rules.broadcaster_value;
+           });
+}
+
 } // namespace
 
 VerifyResult check_claims(std::string_view payload, const ClaimRules& rules, core::WallTime now) {
@@ -168,7 +190,10 @@ VerifyResult check_claims(std::string_view payload, const ClaimRules& rules, cor
     if (!email) {
         return std::unexpected(email.error());
     }
-    return Claims{.subject = *subject, .email = std::move(*email), .expires_at = *expires_at};
+    return Claims{.subject = *subject,
+                  .email = std::move(*email),
+                  .expires_at = *expires_at,
+                  .may_broadcast = matches(*doc, rules)};
 }
 
 VerifyResult authenticate(const CompactJws& jws, const PublicKey& key, const ClaimRules& rules,
