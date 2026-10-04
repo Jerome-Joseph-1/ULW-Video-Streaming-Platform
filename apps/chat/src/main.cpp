@@ -198,6 +198,34 @@ std::optional<int> make_clients(const chat::Config& config, Services& s) {
     return std::nullopt;
 }
 
+// The server's limits: its own, with what the configuration overrides.
+chat::Limits limits_of(const chat::Config& config) {
+    chat::Limits chat_limits;
+    if (const std::optional<core::Millis> grace = config.presence_grace) {
+        chat_limits.presence.grace = *grace;
+    }
+    if (const std::optional<core::Millis> ring = config.ring_timeout) {
+        chat_limits.calls.ring.ring_timeout = *ring;
+    }
+    const chat::ClientLimits& per_client = config.client_limits;
+    chat_limits.max_connections_per_ip =
+        per_client.max_connections_per_ip.value_or(chat_limits.max_connections_per_ip);
+    // Four /64s' worth, whatever the per-address cap was set to, and never past the node's own
+    // cap, the most the variable may be set to (ADR-0076).
+    constexpr std::size_t kSlash64sPerBlock = 4;
+    chat_limits.max_connections_per_ip_block =
+        per_client.max_connections_per_ip_block.value_or(std::min(
+            kSlash64sPerBlock * chat_limits.max_connections_per_ip, chat_limits.max_connections));
+    chat_limits.new_connections_per_ip_per_second =
+        per_client.new_connections_per_ip_per_second.value_or(
+            chat_limits.new_connections_per_ip_per_second);
+    chat_limits.max_sessions_per_user =
+        per_client.max_sessions_per_user.value_or(chat_limits.max_sessions_per_user);
+    chat_limits.trusted_proxies = per_client.trusted_proxies;
+    chat_limits.trusted_proxy_hops = per_client.trusted_proxy_hops;
+    return chat_limits;
+}
+
 int run() {
     const auto info = core::build_info();
     // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
@@ -280,26 +308,7 @@ int run() {
         return fail("register the node listener", errno_text(r.error()));
     }
 
-    chat::Limits chat_limits;
-    if (const std::optional<core::Millis> grace = config->presence_grace) {
-        chat_limits.presence.grace = *grace;
-    }
-    const chat::ClientLimits& per_client = config->client_limits;
-    chat_limits.max_connections_per_ip =
-        per_client.max_connections_per_ip.value_or(chat_limits.max_connections_per_ip);
-    // Four /64s' worth, whatever the per-address cap was set to, and never past the node's own
-    // cap, the most the variable may be set to (ADR-0076).
-    constexpr std::size_t kSlash64sPerBlock = 4;
-    chat_limits.max_connections_per_ip_block =
-        per_client.max_connections_per_ip_block.value_or(std::min(
-            kSlash64sPerBlock * chat_limits.max_connections_per_ip, chat_limits.max_connections));
-    chat_limits.new_connections_per_ip_per_second =
-        per_client.new_connections_per_ip_per_second.value_or(
-            chat_limits.new_connections_per_ip_per_second);
-    chat_limits.max_sessions_per_user =
-        per_client.max_sessions_per_user.value_or(chat_limits.max_sessions_per_user);
-    chat_limits.trusted_proxies = per_client.trusted_proxies;
-    chat_limits.trusted_proxy_hops = per_client.trusted_proxy_hops;
+    const chat::Limits chat_limits = limits_of(*config);
     s.server = std::make_unique<chat::ChatServer>(
         chat::Deps{.node = config->node,
                    .reactor = *s.reactor,
