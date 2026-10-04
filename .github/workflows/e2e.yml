@@ -362,7 +362,7 @@ jobs:
   demo:
     if: github.event_name == 'workflow_dispatch' && inputs.demo
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -378,6 +378,58 @@ jobs:
         timeout-minutes: 60
         env:
           DEMO_BUILD: ${{ inputs.demo_build && '1' || '0' }}
+      # With demo_build, the images just tested go into one archive for a laptop to load
+      # (demo/load.sh), as the owner's fallback to pulling published images; publish-images.yml
+      # stays the only way to the registry. The run then loads it back into a clean Docker and
+      # tests again, as the owner would.
+      - name: Save the demo's images
+        id: images
+        if: inputs.demo_build
+        run: |
+          sha=$(git rev-parse --short=12 HEAD)
+          tag=local-$sha
+          archive=demo-images-$sha.tar.gz
+          images=()
+          for name in video-gateway video-worker chat live-packager; do
+            images+=("ghcr.io/jerome-joseph-1/ulw-$name:$tag")
+          done
+          docker save "${images[@]}" | gzip -1 > "$archive"
+          size=$(du -h "$archive" | cut -f1)
+          {
+            echo "archive=$archive"
+            echo "name=demo-images-$sha"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Demo images"
+            echo
+            echo "\`$archive\`, $size: the four images tagged \`$tag\`, built from $sha."
+            echo
+            echo "\`gh run download $GITHUB_RUN_ID -n demo-images-$sha\`, then \`demo/load.sh $archive\` and \`ULW_TAG=$tag demo/up.sh\` in a checkout of $sha."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$archive: $size"
+      - name: Load the archive into a clean Docker and test again
+        if: inputs.demo_build
+        timeout-minutes: 30
+        env:
+          ARCHIVE: ${{ steps.images.outputs.archive }}
+          ULW_TAG: ${{ steps.images.outputs.tag }}
+        run: |
+          demo/down.sh --wipe
+          for name in video-gateway video-worker chat live-packager; do
+            docker rmi "ghcr.io/jerome-joseph-1/ulw-$name:$ULW_TAG"
+          done
+          docker rmi ulw-demo/gateway-live:local || true
+          demo/load.sh "$ARCHIVE"
+          demo/smoke/run.sh
+      - if: inputs.demo_build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.images.outputs.name }}
+          path: ${{ steps.images.outputs.archive }}
+          retention-days: 2
+          compression-level: 0
+          if-no-files-found: error
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
