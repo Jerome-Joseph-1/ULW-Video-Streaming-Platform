@@ -97,7 +97,7 @@ void ChatService::changed(ClientId id, const ErrorContext& context,
         refuse(*c->client, "gone", context);
         return;
     case MembershipOutcome::WrongKind:
-        // A named room is recorded only as the kind its id names (migration 0014), so the store
+        // A named room is recorded only as the kind its id names (migration 0015), so the store
         // has answered what nothing here can have written.
         ++counters_.membership_unavailable;
         refuse(*c->client, "unavailable", context);

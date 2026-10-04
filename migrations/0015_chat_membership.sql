@@ -3,7 +3,7 @@
 -- and a member leaving. Until now only operators changed the lists, in SQL (RUNBOOK section 3);
 -- they still may, and everything below holds for their statements as much as for the service's.
 --
--- Applied after 0011 to 0013 (the live stream migrations): the migrator refuses a version older
+-- Applied after 0011 to 0014 (live streams, group calls): the migrator refuses a version older
 -- than the newest applied, so this file must never reach a database before them.
 --
 -- Order matters: the migrator runs this file in one transaction, and every lock a statement takes

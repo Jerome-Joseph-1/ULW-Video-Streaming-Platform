@@ -321,7 +321,7 @@ DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user id>'
 most 128 bytes, with no white space (`chat_members_user_id`). A member removed this way is cut
 off at once on every chat node, however the row goes (a DELETE, or an UPDATE that moves it to
 another room or user; one that leaves both as they were removes nobody): a trigger (migration
-0014; 0009's for nodes from before it) notifies the nodes, each takes that user's sockets out of
+0015; 0009's for nodes from before it) notifies the nodes, each takes that user's sockets out of
 the room, and the client gets an `error` with `not_member` for it (docs/adr/0073); the user's
 other sockets, and everyone in the room, get a `member` frame. Their next join is refused. No
 restart is needed. If a node's listening session to Postgres was down when the row went, the
@@ -334,7 +334,7 @@ database accepts it only as that kind (`chat_rooms_named_kind`).
 
 A member's `role` is `member` (the default) or `admin`; a group's creator is its admin, and only
 admins add or remove others. To give a group another admin, or one to a group listed before
-migration 0014 (which has none):
+migration 0015 (which has none):
 
 ```sql
 UPDATE chat_members SET role = 'admin' WHERE room_id = '<room uuid>' AND user_id = '<user id>';
@@ -438,12 +438,12 @@ migration gives up and the init container runs it again (`lock_timeout`, docs/ad
 that waits past the chat service's request timeout is answered `unavailable`, and the client
 retries it.
 
-**Migration 0014 comes after 0011 to 0013.** The migrator refuses a migration older than the
-newest one applied, so the release that carries 0014 must also carry 0011 (live streams), 0012
-(a live chat closes) and 0013 (a stream's publisher left), and no database may be migrated to
-0014 by a build without them.
+**Migration 0015 comes after 0011 to 0014.** The migrator refuses a migration older than the
+newest one applied, so the release that carries 0015 must also carry 0011 (live streams), 0012
+(a live chat closes), 0013 (a stream's publisher left) and 0014 (group calls), and no database
+may be migrated to 0015 by a build without them.
 
-**Deploy the release that carries migration 0014 off-peak.** The migrator runs it in one
+**Deploy the release that carries migration 0015 off-peak.** The migrator runs it in one
 transaction and holds every lock it takes until the commit. It builds its index on
 `chat_members (user_id, room_id)` first, without `CONCURRENTLY`, under the SHARE lock that takes:
 for the length of the build every member added or removed, by a user's command or by an
@@ -455,10 +455,10 @@ EXCLUSIVE locks, which do stop reads, are held only for the moments until the co
 change or join that waits past the chat service's request timeout is answered `unavailable`,
 and the client retries it.
 
-Follow-ups once 0014 is everywhere: a later migration validates its `NOT VALID` checks
+Follow-ups once 0015 is everywhere: a later migration validates its `NOT VALID` checks
 (`chat_members_role`, `chat_members_user_id`, `chat_rooms_named_kind`) with `VALIDATE
 CONSTRAINT`, which scans under a lock that lets reads and writes go on; and, once no chat node
-older than 0014 runs, drops 0009's triggers (`chat_member_removed`, `chat_member_moved` on
+older than 0015 runs, drops 0009's triggers (`chat_member_removed`, `chat_member_moved` on
 `chat_members`), which until then send every removal a second time on the old channel.
 
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside

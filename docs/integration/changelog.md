@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## 2026-10-03: clients open direct chats and manage group chats themselves
 
-<!-- apps/chat/src/membership.cpp, apps/chat/src/envelope.cpp, migrations/0014_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
+<!-- apps/chat/src/membership.cpp, apps/chat/src/envelope.cpp, migrations/0015_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
 
 Additive to [chat.md](chat.md); nothing breaks for a client that does not use it. New commands on
 the chat WebSocket: `open_direct`, `create_group`, `add_members`, `remove_member`, `leave`,
@@ -26,10 +26,11 @@ What to do:
 - **Clients:** to start a conversation, send `open_direct` and join the room it answers, instead
   of asking an operator. Ignore `member` frames you do not use; in end-to-end encrypted rooms,
   act on them as [chat.md](chat.md#changing-member-lists) says (commit the change in MLS).
-- **Operators:** migration 0014 builds an index on `chat_members` that holds member changes (not
+- **Operators:** migration 0015 builds an index on `chat_members` that holds member changes (not
   joins) while it builds; deploy it off-peak (RUNBOOK). Watch
-  `membership_refusals_total{reason="unavailable"}`. 0014 must run after 0011 to 0013; the
+  `membership_refusals_total{reason="unavailable"}`. 0015 must run after 0011 to 0014; the
   release that carries it carries them (RUNBOOK).
+
 ## 2026-10-03: a live stream goes live and ends when its publisher does
 
 <!-- apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md -->

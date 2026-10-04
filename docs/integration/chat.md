@@ -139,7 +139,7 @@ list never said no: join again.
 
 ### Changing member lists
 
-<!-- apps/chat/src/membership.cpp, apps/chat/src/named_rooms.cpp, apps/chat/src/envelope.cpp, infra/postgres/src/message_sql.hpp (kOpenDirect, kCreateGroup, kAddMembers, kExpel, kLeave, kRoomsFirst, kRoster), migrations/0014_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
+<!-- apps/chat/src/membership.cpp, apps/chat/src/named_rooms.cpp, apps/chat/src/envelope.cpp, infra/postgres/src/message_sql.hpp (kOpenDirect, kCreateGroup, kAddMembers, kExpel, kLeave, kRoomsFirst, kRoster), migrations/0015_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
 
 A signed-in user opens direct chats, creates group chats and manages them on the same WebSocket.
 None of these needs a `join` first; join the room afterwards to send and read it. Every answer

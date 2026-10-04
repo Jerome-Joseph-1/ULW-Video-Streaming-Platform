@@ -911,7 +911,7 @@ struct MemberNotice {
 };
 
 // "+ <room> <user>", "- <room> <user>" or "* <room> <role> <user>", as notify_chat_members()
-// (migration 0014) writes it.
+// (migration 0015) writes it.
 std::optional<MemberNotice> parse_notice(std::string_view payload) {
     if (payload.size() < 2 || payload[1] != ' ') {
         return std::nullopt;

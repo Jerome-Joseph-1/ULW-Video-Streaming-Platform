@@ -397,7 +397,7 @@ TEST_F(TightMembership, ChangesPastTheAllowanceAreRefusedWithWhenToAskAgain) {
 }
 
 // A named room recorded as another kind can only be a store that was written past its
-// constraints (migration 0014): the client is answered unavailable, as for a store it cannot read.
+// constraints (migration 0015): the client is answered unavailable, as for a store it cannot read.
 TEST_F(MembershipTest, ADirectChatRecordedAsAGroupIsAnsweredUnavailable) {
     Client alice;
     const auto a = attach(alice, "alice");

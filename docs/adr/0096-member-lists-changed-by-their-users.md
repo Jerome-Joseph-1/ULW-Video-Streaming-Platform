@@ -58,7 +58,7 @@ them in the shape of the existing envelope. Six things had to be settled:
   (`apps/chat/src/named_rooms.cpp`, `core::ports::NamedRoom`). Such a room is only ever its
   kind: a join of it asks for that kind whatever it says (`"kind"` naming the other is
   `bad_room`), the room plane creates an unrecorded one as it (`kind_of_unrecorded`), and the
-  database refuses anything else (`chat_rooms_named_kind`, migration 0014). Nobody can take a
+  database refuses anything else (`chat_rooms_named_kind`, migration 0015). Nobody can take a
   pair's room by recording its id first as a group chat.
 - **A direct chat** lists its pair when it lists nobody yet (just recorded, or recorded by a
   refused join before anyone opened it); otherwise it changes nothing and answers whether the
@@ -70,7 +70,7 @@ them in the shape of the existing envelope. Six things had to be settled:
 - **A group's id is not reused over its history.** A `create_group` that finds its room listing
   nobody but holding messages (everyone left) lists nobody and answers `gone`: listing new
   members would hand them the old history. The client creates the group under a new id.
-- **Roles.** `chat_members.role` is `member` or `admin` (migration 0014, default `member`, so
+- **Roles.** `chat_members.role` is `member` or `admin` (migration 0015, default `member`, so
   every row from before and every operator insert without one is a member). A group's creator is
   its admin. Only an admin adds or removes others (`not_admin`); anyone listed may leave; an
   admin removing themselves is leaving. When the last admin leaves and anyone is left, the
@@ -102,7 +102,7 @@ them in the shape of the existing envelope. Six things had to be settled:
   The call handler's `access` read on the room's owner (ADR-0087) reads the same rows at each
   ask, so a ticket is never issued on a membership a change has already taken away; nothing on
   any node caches a list.
-- **Notifications.** Migration 0014's trigger sends `+ <room> <user>` or `- <room> <user>` on
+- **Notifications.** Migration 0015's trigger sends `+ <room> <user>` or `- <room> <user>` on
   the `chat_members` channel for every row inserted, deleted or moved, however it changed, and
   `* <room> <role> <user>` for a row whose role alone changed. `PgMessageStore` listens there instead of on
   `chat_member_removed` (whose 0009 trigger stays for nodes from before, until none runs).
@@ -131,8 +131,8 @@ them in the shape of the existing envelope. Six things had to be settled:
 - **Metrics:** `directs_opened_total`, `groups_created_total`,
   `members_changed_total{change="added"|"removed"|"left"}`,
   `membership_refusals_total{reason=...}` and `member_events_total`.
-- **Migration 0014**, after the live migrations 0011 to 0013 (the migrator refuses an older
-  version than the newest applied, so it never runs before them). The migrator runs a migration
+- **Migration 0015**, after 0011 to 0014 (live streams, then group calls; the migrator refuses
+  a version older than the newest applied, so it never runs before them). The migrator runs a migration
   in one transaction and holds every lock to its commit, so the order of its statements is the
   order of its locks: first the index `chat_members (user_id, room_id)`, built under CREATE
   INDEX's SHARE lock, during which member writes wait and reads (joins, history, listings) go
@@ -151,11 +151,11 @@ them in the shape of the existing envelope. Six things had to be settled:
 - Every node hears every change and looks through its clients for those concerned, as it does
   for removals: a create of 51 users is 51 notifications, each a walk of at most 1,280 clients.
   The allowance bounds it at about 17 notifications a second per user at the burst's end.
-- A rolling deploy that brings 0014 has old nodes hear removals on the old channel and new
+- A rolling deploy that brings 0015 has old nodes hear removals on the old channel and new
   nodes on the new one; a member added by a new node's command reaches an old node's sockets as
   nothing (the old node never told of additions), which is what happened before.
 - Building `chat_members_by_user` holds a SHARE lock on `chat_members` for the length of the
-  build: member changes wait, joins and other reads do not. Deploy 0014 off-peak (RUNBOOK).
+  build: member changes wait, joins and other reads do not. Deploy 0015 off-peak (RUNBOOK).
 - A user id named by mistake gets a room the other person never sees; the product shows rooms
   only for ids it resolved.
 - Reopen if a group needs more than one admin managed by clients, if group size must grow past

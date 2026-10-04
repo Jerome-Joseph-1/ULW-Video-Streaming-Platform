@@ -33,7 +33,7 @@ TEST(BundledMigrations, CarryEachFileByteForByte) {
     }
 }
 
-// The migrator holds every lock a migration takes until it commits (ADR-0031). 0014 builds its
+// The migrator holds every lock a migration takes until it commits (ADR-0031). 0015 builds its
 // index on chat_members before any ALTER TABLE, so that the build runs under CREATE INDEX's SHARE
 // lock (reads proceed, writes wait) and the ALTERs' ACCESS EXCLUSIVE locks last only until the
 // commit right after them, not through the build.

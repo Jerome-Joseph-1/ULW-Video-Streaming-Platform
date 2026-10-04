@@ -243,7 +243,7 @@ promoted AS (
     RETURNING user_id)
 SELECT EXISTS (SELECT 1 FROM listed), (SELECT user_id FROM promoted))sql";
 
-// A user's rooms by room id, through chat_members_by_user (0014), with each room's kind (NULL
+// A user's rooms by room id, through chat_members_by_user (0015), with each room's kind (NULL
 // when none is recorded) and, for a direct chat, the other member listed. The first page has no
 // cursor. $1 user, $2 row limit, $3 the room to page after. A view, as the history pages are,
 // so that a test can EXPLAIN it.
