@@ -35,8 +35,8 @@ public:
     struct MediaGeneration {
         core::RoomId room;
         std::uint64_t generation;
-        rt::MediaStep step;
-        rt::StoreCallback<std::optional<std::uint64_t>> done;
+        rt::MediaChange change;
+        rt::StoreCallback<std::optional<rt::MediaState>> done;
     };
     struct Lookup {
         core::NodeId node;
@@ -70,10 +70,11 @@ public:
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override {
         appends.push_back({.room = room, .generation = generation, .done = std::move(done)});
     }
-    void media_generation(const core::RoomId& room, std::uint64_t generation, rt::MediaStep step,
-                          rt::StoreCallback<std::optional<std::uint64_t>> done) override {
+    void media_generation(const core::RoomId& room, std::uint64_t generation,
+                          const rt::MediaChange& change,
+                          rt::StoreCallback<std::optional<rt::MediaState>> done) override {
         media.push_back(
-            {.room = room, .generation = generation, .step = step, .done = std::move(done)});
+            {.room = room, .generation = generation, .change = change, .done = std::move(done)});
     }
     void release(const core::NodeId& /*node*/, std::vector<rt::OwnedRoom> rooms,
                  rt::StoreCallback<void> done) override {

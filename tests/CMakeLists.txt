@@ -490,9 +490,10 @@ ulw_add_test_suite(chat_cluster_tests integration
     integration/postgres_harness.cpp
     support/child_process.cpp)
 target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::auth ulw::codec_ws
-    ulw::net_lib ulw::os PkgConfig::LIBPQ)
+    ulw::net_lib ulw::os ulw::sfu_livekit ulw::test_tls PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
-    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src
+    ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src)
 target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>"
     ULW_EXPECT_JEMALLOC=$<BOOL:${ULW_LINKS_JEMALLOC}>)
 add_dependencies(chat_cluster_tests chat_server)

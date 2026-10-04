@@ -98,6 +98,8 @@ inline constexpr std::size_t kMaxGroupCallees = 32;
 // out of it; a ticket past either is answered busy.
 inline constexpr std::size_t kMaxGroupJoined = 64;
 inline constexpr std::size_t kMaxExpelled = 32;
+// A group call whose occupancy the SFU could not tell this many checks in a row ends.
+inline constexpr std::uint32_t kMaxUnansweredChecks = 3;
 
 struct RingLimits {
     // How long a call rings with nobody answering before both members are told it was missed.
@@ -252,8 +254,10 @@ public:
     // is no longer `call`.
     void ended(const core::RoomId& room, const CallId& call,
                const std::optional<core::UserId>& by) noexcept;
+    // `everyone` false: nothing moved (no device of theirs was in the call), and only `subject`
+    // is told.
     void moved(const core::RoomId& room, const CallId& call, const std::optional<core::UserId>& by,
-               const core::UserId& subject) noexcept;
+               const core::UserId& subject, bool everyone = true) noexcept;
     // The id of the room's call, if it has one, and whose it is.
     [[nodiscard]] std::optional<CallId> call_of(const core::RoomId& room) const noexcept;
     [[nodiscard]] std::optional<CallKind> kind_of(const core::RoomId& room) const noexcept;
@@ -296,8 +300,10 @@ private:
         std::vector<core::UserId> joined = {};
         // Put out of the call while it lasts.
         std::vector<core::UserId> expelled = {};
-        // A group call's occupancy is being asked of the SFU.
+        // A group call's occupancy is being asked of the SFU, and how many checks in a row it
+        // could not answer.
         bool checking = false;
+        std::uint32_t unanswered = 0;
         core::MonoTime ring_deadline;
         core::WallTime expires_at;
         core::MonoTime next_announce;

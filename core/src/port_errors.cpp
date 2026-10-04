@@ -78,6 +78,8 @@ std::string_view to_string(MediaError e) noexcept {
         return "media room closed";
     case MediaError::NotImplemented:
         return "media operation not implemented";
+    case MediaError::Remains:
+        return "media room still there after its close";
     }
     return "unknown media error";
 }

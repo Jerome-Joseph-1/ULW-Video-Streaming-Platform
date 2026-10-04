@@ -432,12 +432,14 @@ std::string ChatServer::render_metrics() const {
                        "call_generations_closing {}\n"
                        "call_occupancy_checks_total {}\n"
                        "call_occupancy_unavailable_total {}\n"
-                       "call_resync_checks_total {}\n",
+                       "call_resync_checks_total {}\n"
+                       "call_expulsions_kept_total {}\n"
+                       "call_announcements_dropped_total {}\n",
                        call.expelled, call.full, ring.left, ring.emptied, ring.expelled,
                        call.moves_expel, call.moves_removal, call.moves_end, call.moves_fenced,
                        call.moves_unavailable, call.retired_closed, call.retired_abandoned,
                        calls_.retired(), call.occupancy_checks, call.occupancy_unavailable,
-                       call.resync_checks);
+                       call.resync_checks, call.expulsions_kept, call.announcements_dropped);
 }
 
 } // namespace chat

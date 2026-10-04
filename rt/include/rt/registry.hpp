@@ -96,8 +96,8 @@ public:
     // Reads or moves on the room's media generation, fenced on the generation this node owns
     // it under: nullopt when the room changed hands. false, and nothing is asked, when this node
     // does not own the room.
-    [[nodiscard]] bool media_generation(const core::RoomId& room, MediaStep step,
-                                        StoreCallback<std::optional<std::uint64_t>> done);
+    [[nodiscard]] bool media_generation(const core::RoomId& room, const MediaChange& change,
+                                        StoreCallback<std::optional<MediaState>> done);
 
     // Rooms with members on this node. Their owners are kept cached and watched: when one goes
     // quiet for kOwnerStaleAfter, this node takes the room over.

@@ -936,13 +936,14 @@ public:
         return registry_.owned(room);
     }
 
-    void media_generation(const core::RoomId& room, MediaStep step,
-                          StoreCallback<std::optional<std::uint64_t>> done) {
+    void media_generation(const core::RoomId& room, const MediaChange& change,
+                          StoreCallback<std::optional<MediaState>> done) {
         if (!registry_.owned(room)) {
-            done(std::optional<std::uint64_t>{});
+            done(std::optional<MediaState>{});
             return;
         }
-        [[maybe_unused]] const bool asked = registry_.media_generation(room, step, std::move(done));
+        [[maybe_unused]] const bool asked =
+            registry_.media_generation(room, change, std::move(done));
     }
 
     // The node a notice of a room goes to: this one's idea of its owner, if it has one.
@@ -2054,9 +2055,9 @@ std::optional<std::uint64_t> RoomRouter::owner_generation(const core::RoomId& ro
     return impl_->owner_generation(room);
 }
 
-void RoomRouter::media_generation(const core::RoomId& room, MediaStep step,
-                                  StoreCallback<std::optional<std::uint64_t>> done) {
-    impl_->media_generation(room, step, std::move(done));
+void RoomRouter::media_generation(const core::RoomId& room, const MediaChange& change,
+                                  StoreCallback<std::optional<MediaState>> done) {
+    impl_->media_generation(room, change, std::move(done));
 }
 
 bool RoomRouter::owns(const core::RoomId& room) const noexcept {

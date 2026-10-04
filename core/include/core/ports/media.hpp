@@ -24,6 +24,10 @@ enum class MediaError : std::uint8_t {
     // The media server supports the call, but this adapter does not implement it (ADR-0058).
     // Permanent for the build: retrying cannot help.
     NotImplemented,
+    // A close found the room still there after deleting it, as often as it tries: something
+    // keeps bringing it back. A later close may succeed; until then the room may admit whoever
+    // holds a credential for it.
+    Remains,
 };
 
 [[nodiscard]] std::string_view to_string(MediaError e) noexcept;
@@ -122,6 +126,8 @@ public:
                        RelayDone done) = 0;
     // Ends this generation for everyone in it; members' tickets and refreshed credentials stop
     // admitting anyone. Closing a generation the media server has already dropped succeeds.
+    // Succeeds only once the media server no longer lists the room; `Remains` when it still
+    // does after every try.
     virtual void close(MediaDone done) = 0;
 };
 

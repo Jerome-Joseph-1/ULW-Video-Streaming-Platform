@@ -242,13 +242,13 @@ public:
     // The generation this node owns the room under, as far as it knows (owns() above).
     [[nodiscard]] std::optional<std::uint64_t>
     owner_generation(const core::RoomId& room) const noexcept;
-    // The room's media generation, read or moved on (MediaStep) by an owner write fenced on
+    // The room's media generation, read or moved on (MediaChange) by an owner write fenced on
     // this node's ownership of the room (ADR-0050, ADR-0095): nullopt when this node does not
     // own the room, or no longer does (the store fenced it, and nothing was written; the room
     // is given up as after any fenced write). Unavailable when the store did not answer, and
     // an Advance may or may not have happened.
-    void media_generation(const core::RoomId& room, MediaStep step,
-                          StoreCallback<std::optional<std::uint64_t>> done);
+    void media_generation(const core::RoomId& room, const MediaChange& change,
+                          StoreCallback<std::optional<MediaState>> done);
 
     // For a drain: stops owning rooms and makes them claimable at once.
     void release_rooms(StoreCallback<void> done);
