@@ -155,10 +155,6 @@ TEST_P(VideoAccessTest, EveryExistingAndNewVideoIsPrivate) {
     EXPECT_FALSE(v->viewer.granted);
     EXPECT_EQ(access(id, "alice"), core::VideoAccess::Owner);
     EXPECT_EQ(access(id, "bob"), core::VideoAccess::None);
-    const auto plain =
-        call<core::VideoRecord>([&](auto done) { catalog->find_video(id, std::move(done)); });
-    ASSERT_TRUE(plain);
-    EXPECT_EQ(plain->visibility, core::Visibility{});
 }
 
 TEST_P(VideoAccessTest, AnUnknownOrDeletedVideoIsNotFound) {
@@ -231,9 +227,28 @@ TEST_P(VideoAccessTest, ARoomsCurrentMembersSeeItAndARemovedOneLosesIt) {
                           "'bob'",
                           Params{}.add_uuid(room(kOtherRoom).uuid()).add_uuid(room().uuid())));
     EXPECT_EQ(access(id, "bob"), core::VideoAccess::None);
-    // The owner leaving the room takes nothing from the members, nor from the owner.
+}
+
+TEST_P(VideoAccessTest, TheOwnerLeavingTheRoomStopsTheShare) {
+    const auto id = add_video();
+    list_member("alice");
+    list_member("bob");
+    ASSERT_TRUE(set(id, "alice", core::Visibility::room(room())));
+    EXPECT_EQ(access(id, "bob"), core::VideoAccess::Viewer);
     unlist_member("alice");
+    EXPECT_FALSE(view(id, "bob")->viewer.room_member);
+    EXPECT_EQ(access(id, "bob"), core::VideoAccess::None);
     EXPECT_EQ(access(id, "alice"), core::VideoAccess::Owner);
+    // Listed again, the owner shares into the room again; the visibility never changed.
+    list_member("alice");
+    EXPECT_EQ(access(id, "bob"), core::VideoAccess::Viewer);
+}
+
+TEST_P(VideoAccessTest, AGrantForAVideoDeletedMeanwhileIsNotFound) {
+    const auto id = add_video();
+    auto conn = db->session();
+    ASSERT_TRUE(conn.exec("DELETE FROM videos WHERE id = $1", Params{}.add_uuid(id.uuid())));
+    EXPECT_EQ(grant(id, "bob").error(), CatalogError::NotFound);
 }
 
 TEST_P(VideoAccessTest, AGrantOpensAPrivateVideoUntilItIsRevoked) {
@@ -325,6 +340,16 @@ TEST_P(VideoAccessTest, TheSchemaRefusesWhatTheApiNeverWrites) {
     EXPECT_FALSE(
         conn.exec("INSERT INTO video_grants (video_id, user_id) VALUES ($1, 'a b')", video));
     EXPECT_FALSE(conn.exec("INSERT INTO video_grants (video_id, user_id) VALUES ($1, '')", video));
+    // Exactly core::UserId's characters: no slash or non-ASCII, at most 128.
+    EXPECT_FALSE(
+        conn.exec("INSERT INTO video_grants (video_id, user_id) VALUES ($1, 'a/b')", video));
+    EXPECT_FALSE(
+        conn.exec("INSERT INTO video_grants (video_id, user_id) VALUES ($1, 'café')", video));
+    EXPECT_FALSE(conn.exec(
+        "INSERT INTO video_grants (video_id, user_id) VALUES ($1, repeat('u', 129))", video));
+    EXPECT_TRUE(conn.exec("INSERT INTO video_grants (video_id, user_id) "
+                          "VALUES ($1, 'auth0|A.b_c:d@e+f-' || repeat('u', 110))",
+                          video));
     EXPECT_FALSE(conn.exec("INSERT INTO video_grants (video_id, user_id) VALUES "
                            "(gen_random_uuid(), 'bob')"));
     // A row the API could not have written reads as corrupt rather than as private.

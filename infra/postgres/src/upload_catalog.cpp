@@ -49,20 +49,18 @@ SELECT id, video_id, owner_id, size_bytes, chunk_size, durable_offset, state,
        (extract(epoch FROM expires_at) * 1000000)::bigint, backend_ref, object_key
   FROM uploads WHERE id = $1)sql";
 
-constexpr Sql kFindVideo = R"sql(
-SELECT id, owner_id, title, state, version, error_reason, duration_ms, visibility,
-       visibility_room
-  FROM videos WHERE id = $1 AND deleted_at IS NULL)sql";
-
-// The video and what the viewer ($2) is to it, in one statement (ADR-0097). Both lookups go by
-// a primary key: chat_members (room_id, user_id) and video_grants (video_id, user_id). The
-// owner needs neither, and gets false for both.
+// The video and what the viewer ($2) is to it, in one statement (ADR-0097). Every lookup goes
+// by a primary key: chat_members (room_id, user_id) and video_grants (video_id, user_id). A
+// room shares the video only while it lists both the viewer and the owner: an owner who left
+// the room no longer shares into it. The owner needs neither, and gets false for both.
 constexpr Sql kFindVideoFor = R"sql(
 SELECT v.id, v.owner_id, v.title, v.state, v.version, v.error_reason, v.duration_ms,
        v.visibility, v.visibility_room,
        v.owner_id <> $2 AND v.visibility = 'room'
            AND EXISTS (SELECT 1 FROM chat_members m
-                        WHERE m.room_id = v.visibility_room AND m.user_id = $2),
+                        WHERE m.room_id = v.visibility_room AND m.user_id = $2)
+           AND EXISTS (SELECT 1 FROM chat_members o
+                        WHERE o.room_id = v.visibility_room AND o.user_id = v.owner_id),
        v.owner_id <> $2
            AND EXISTS (SELECT 1 FROM video_grants g WHERE g.video_id = v.id AND g.user_id = $2)
   FROM videos v WHERE v.id = $1 AND v.deleted_at IS NULL)sql";
@@ -936,14 +934,6 @@ void PgUploadCatalog::abort_upload(const core::UploadId& id, CatalogCallback<voi
     impl_->main_pool().submit(std::make_unique<AbortUpload>(id, std::move(done)));
 }
 
-void PgUploadCatalog::find_video(const core::VideoId& id, CatalogCallback<core::VideoRecord> done) {
-    impl_->main_pool().submit(std::make_unique<Query>(
-        Statement{.sql = kFindVideo, .params = Params{}.add_uuid(id.uuid())},
-        [done = std::move(done)](Outcome outcome) mutable noexcept {
-            done(outcome ? decode_video(*outcome) : failure<core::VideoRecord>(outcome.error()));
-        }));
-}
-
 void PgUploadCatalog::find_video_for(const core::VideoId& id, const core::UserId& viewer,
                                      CatalogCallback<core::ports::VideoView> done) {
     impl_->main_pool().submit(std::make_unique<VideoUserQuery>(
@@ -966,6 +956,12 @@ void PgUploadCatalog::grant_access(const core::VideoId& id, const core::UserId& 
     impl_->main_pool().submit(std::make_unique<VideoUserQuery>(
         kGrantAccess, id, user.view(), std::nullopt,
         [done = std::move(done)](Outcome outcome) mutable noexcept {
+            // The foreign key refused the row: the video was deleted between the statement's
+            // look and its insert, which is a video that does not exist.
+            if (!outcome && outcome.error() == DbError::Constraint) {
+                done(std::unexpected(CatalogError::NotFound));
+                return;
+            }
             done(decode_video_count(outcome));
         }));
 }

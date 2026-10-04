@@ -312,6 +312,8 @@ target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
     ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# config_test.cpp loads the settings the shipped manifests and config.env files give.
+target_compile_definitions(gateway_tests PRIVATE ULW_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
 # The gateway over the S3 store and the MinIO of deploy/local/compose.yaml.
 ulw_add_test_suite(gateway_store_integration_tests integration

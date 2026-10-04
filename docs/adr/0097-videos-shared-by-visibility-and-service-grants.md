@@ -47,7 +47,10 @@ What had to be settled:
 | Visibility in a separate table | Keeps `videos` untouched | Rejected: one row per video either way; columns on `videos` come in the same read with nothing joined |
 | Grants that override `init` and `uploading` | Simpler rule | Rejected: what exists of an upload is the uploader's until committed |
 | Answer `403` to a user who may not see a video | Clearer to a client | Rejected: it tells them the id exists; `404` for both, and `403` only to someone who may see the video but not change it |
-| A service role in a separate claim name per service | Each service decides | Rejected: one pair of settings, `ULW_SERVICE_CLAIM` (default `scope`) and `ULW_SERVICE_SCOPE`, parsed in the auth library for every service that takes service calls |
+| A service role in a separate claim name per service | Each service decides | Rejected: one set of settings, `ULW_SERVICE_CLAIM` (default `scope`), `ULW_SERVICE_SCOPE` and `ULW_SERVICE_CLIENT_ID`, parsed in the auth library for every service that takes service calls |
+| A share that outlives the owner's membership of the room | The members keep what they had | Rejected: a user who left a room should not keep publishing into it; the read requires the owner listed too, and the share resumes if they are listed again |
+| Accept a service token from the cookie too | One code path | Rejected: a browser attaches the cookie to requests other pages make; the backend sends a bearer header, so only that header can carry a service token |
+| Service API only inside the cluster (no public route) | Smaller surface | Rejected as the default: the operator's backend usually runs outside the cluster; the route is shipped, and the RUNBOOK shows how to restrict it by address or by Envoy's own JWT check |
 | Restrict live streams' viewing to the same rule | Consistent | Rejected for now: a stream has no visibility, and ADR-0059 makes it a broadcast; its recording, once a video, follows this ADR |
 
 ## Decision
@@ -59,9 +62,12 @@ What had to be settled:
   the video is unlisted, or if it is shared with a room `chat_members` lists them in.
 - **One read per request.** `IUploadCatalog::find_video_for(video, viewer)` returns the video and
   the viewer's facts from one statement: the `videos` row by primary key, `EXISTS` on
-  `chat_members` by its primary key `(room_id, user_id)`, and `EXISTS` on `video_grants` by its
-  primary key `(video_id, user_id)`. Nothing is cached: a member taken off the room's list, or
-  a grant revoked, loses the video at their next request, on every replica. The metadata route
+  `chat_members` by its primary key `(room_id, user_id)` for the viewer and again for the owner,
+  and `EXISTS` on `video_grants` by its primary key `(video_id, user_id)`. Nothing is cached: a
+  member taken off the room's list, or a grant revoked, gets no new playlist from their next
+  request on, on every replica. Segment URLs a playlist already handed out stay valid until
+  their presign lifetime ends (`max(2 x duration, 1 hour)`, at most 7 days, ADR-0024): a
+  revocation stops new playlists, not URLs already issued. The metadata route
   and both playlist routes call it and then `access_of`; `None` is the same empty `404` as a
   missing video. The media playlist, and so every presigned segment URL, is only built after
   the check passes. A recording's video is a video like any other, private until its
@@ -76,9 +82,11 @@ What had to be settled:
   second read tells a room the owner is not in (`403` `not_member`) from a video that is not
   theirs (`404`). A cookie PATCH is held to the same rules as a cookie upload: an allowed
   `Origin` and `Content-Type: application/json` (ADR-0078).
-- **Room semantics.** "Current members": the check reads `chat_members` at each request. A
-  room's list is chat's to change (ADR-0096); the owner leaving the room takes nothing from the
-  members (the owner may set the video private). A stream's live chat lists nobody, so a video
+- **Room semantics.** "Current members": the check reads `chat_members` at each request, and a
+  room shares the video only while it lists the owner as well as the viewer. A room's list is
+  chat's to change (ADR-0096). When the owner leaves the room the share stops for everyone in
+  it; the visibility stays `room:<id>`, so it resumes if the owner is listed again, and the
+  owner can set another visibility at any time. A stream's live chat lists nobody, so a video
   shared with one is seen by nobody but its owner.
 - **Grants.** `video_grants (video_id, user_id, granted_at)`, primary key `(video_id, user_id)`,
   user ids bytewise as in `chat_members`, deleted with their video. The service API:
@@ -90,11 +98,23 @@ What had to be settled:
 - **Service authentication.** A token is the service's when its claim `ULW_SERVICE_CLAIM` names
   (default `scope`) holds `ULW_SERVICE_SCOPE`: a string equal to it or listing it among
   space-separated values (OAuth's `scope`), an array with such a string, or `true` for `true`
-  (`infra::auth::claim_holds`). `infra::auth::read_service_claim` validates both settings for
-  every service; `ClaimRules::service_claim`/`service_value` carry them, and
+  (`infra::auth::claim_holds`); and, when `ULW_SERVICE_CLIENT_ID` is set (recommended), its
+  `azp` is that client (or, for a token without `azp`, its `client_id` is), so only the
+  backend's client-credentials client qualifies (`infra::auth::is_service_token`).
+  `infra::auth::read_service_claim` validates the three settings for every service;
+  `ClaimRules::service_claim`/`service_value`/`service_client_id` carry them, and
   `Claims::is_service` is the verdict. Without `ULW_SERVICE_SCOPE` no token is a service's and
-  the service routes answer `403` to all. A service token is otherwise an ordinary token: its
-  subject is charged the per-user request limits like any user's.
+  the service routes answer `403` to all; the claim left unset or at `scope` then means "off",
+  so the shipped configuration starts, while a claim of another name or a client id without a
+  scope stops the process (exit 2). The service routes take the token only from the
+  `Authorization` header: a service token in the cookie is `403`. A service token is otherwise
+  an ordinary token: its subject is charged the per-user request limits like any user's.
+- **The public route.** The shipped HTTPRoute sends `/api/v1/service/videos` to the gateway,
+  because the operator's backend usually calls from outside the cluster. Only a bearer service
+  token passes the gateway's check; an operator whose backend has fixed addresses, or runs in
+  the cluster, can narrow it further: an Envoy Gateway SecurityPolicy on that rule with an IP
+  allowlist or Envoy's own JWT check, or no route at all (RUNBOOK, and the commented example in
+  `base/video-gateway/httproute.yaml`).
 - **Errors.** The new routes answer refusals with `{"error":"<code>"}`: `not_found`, `forbidden`,
   `not_member`, `bad_visibility`, `bad_user`, `bad_query`. A `404` on the existing read routes
   stays empty, as a missing video's does.
@@ -106,7 +126,11 @@ What had to be settled:
   `videos`: every lookup goes by a primary key. A later migration validates the checks.
 - **Live streams** keep their rule: any signed-in viewer may watch a stream's playlist
   (ADR-0059), and only the owner sees its recording through the stream status. Making a stream
-  follow a visibility needs the stream to carry one; it is left for a later decision.
+  follow a visibility needs the stream to carry one; it is left for a later decision. Until
+  then the live tail is exposed: anyone signed in who learns a stream's id can watch it while
+  it is live, and so see what its recording will show before the broadcaster shares (or
+  declines to share) the recording. A follow-up gives a stream a visibility of its own, checked
+  on `GET /api/v1/live/{id}/index.m3u8` as here.
 - **Not done here:** a listing of videos (there is no listing route; one would apply
   `access_of` per row, or filter in SQL by the same three tests), and notifying a viewer when a
   video is shared with them.
@@ -114,12 +138,15 @@ What had to be settled:
 ## Consequences
 
 - A playlist request costs the same one round trip it did; the statement adds two primary-key
-  probes. No state in any gateway, so replicas never disagree and a revocation is immediate.
+  probes. No state in any gateway, so replicas never disagree, and a revocation takes effect at
+  the next playlist request; segment URLs already issued last until their presign lifetime
+  ends.
 - The gateway reads `chat_members`, so chat's table is now part of the gateway's contract: a
   change to its key or its meaning is a change to video access. The two share one database and
   role already; a deployment that split them would have to replicate membership first.
 - The owner's PATCH may be refused for a room the owner left a moment ago; the client shows
-  `not_member` and offers the rooms it lists (`rooms` on chat).
+  `not_member` and offers the rooms it lists (`rooms` on chat). Leaving a room stops sharing
+  every video shared into it, which a client should say before the user leaves.
 - Viewer counts include viewers other than the owner from now on: every master fetch is a view.
 - Migration 0016 takes `videos`' SHARE ROW EXCLUSIVE lock for the foreign key, then its ACCESS
   EXCLUSIVE lock for the ALTER, both only until its commit; uploads' progress writes and the

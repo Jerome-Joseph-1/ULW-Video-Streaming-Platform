@@ -144,6 +144,9 @@ private:
         std::optional<http::Method> method;
         bool keep_alive = true;
         bool authenticated = false;
+        // The token came in the Authorization header, not the cookie: only such a token may be
+        // the service's (ADR-0097).
+        bool bearer = false;
         bool message_complete = false;
         bool started = false;
         bool finishing = false;

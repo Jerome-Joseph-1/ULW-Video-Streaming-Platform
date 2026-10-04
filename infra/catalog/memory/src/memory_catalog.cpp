@@ -1,7 +1,6 @@
 #include "infra/catalog/memory_catalog.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <string>
 #include <utility>
 
@@ -11,7 +10,8 @@ using core::ports::CatalogCallback;
 using core::ports::CatalogError;
 using core::ports::StoredUpload;
 
-MemoryCatalog::MemoryCatalog(net::IReactor& reactor) : reactor_(reactor) {}
+MemoryCatalog::MemoryCatalog(net::IReactor& reactor, const core::ports::IClock& clock)
+    : reactor_(reactor), clock_(clock) {}
 
 MemoryCatalog::~MemoryCatalog() {
     reactor_.cancel_timer(timer_);
@@ -189,22 +189,6 @@ void MemoryCatalog::abort_upload(const core::UploadId& id, CatalogCallback<void>
     defer([done = std::move(done), result]() mutable noexcept { done(result); });
 }
 
-void MemoryCatalog::find_video(const core::VideoId& id, CatalogCallback<core::VideoRecord> done) {
-    if (refused(done)) {
-        return;
-    }
-    const auto it = videos_.find(id);
-    core::ports::CatalogResult<core::VideoRecord> result =
-        it == videos_.end() ? std::unexpected(CatalogError::NotFound)
-                            : core::ports::CatalogResult<core::VideoRecord>(it->second);
-    if (find_video_error_) {
-        result = std::unexpected(*find_video_error_);
-    }
-    defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
-        done(std::move(result));
-    });
-}
-
 void MemoryCatalog::find_video_for(const core::VideoId& id, const core::UserId& viewer,
                                    CatalogCallback<core::ports::VideoView> done) {
     if (refused(done)) {
@@ -218,8 +202,9 @@ void MemoryCatalog::find_video_for(const core::VideoId& id, const core::UserId& 
         const auto granted = grants_.find(id);
         result = core::ports::VideoView{
             .video = video,
-            .viewer = {.room_member =
-                           room && members_.contains({*room, std::string(viewer.view())}),
+            .viewer = {.room_member = room &&
+                                      members_.contains({*room, std::string(viewer.view())}) &&
+                                      members_.contains({*room, std::string(video.owner.view())}),
                        .granted = granted != grants_.end() &&
                                   granted->second.contains(std::string(viewer.view()))}};
     }
@@ -263,7 +248,7 @@ void MemoryCatalog::grant_access(const core::VideoId& id, const core::UserId& us
     } else {
         grants_[id].try_emplace(
             std::string(user.view()),
-            core::ports::VideoGrant{.user = user, .granted_at = std::chrono::system_clock::now()});
+            core::ports::VideoGrant{.user = user, .granted_at = clock_.wall_now()});
     }
     defer([done = std::move(done), result]() mutable noexcept { done(result); });
 }

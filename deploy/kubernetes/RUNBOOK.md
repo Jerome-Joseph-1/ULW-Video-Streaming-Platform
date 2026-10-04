@@ -547,7 +547,7 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `POD_CIDR` | The cluster's pod network | `ULW_TRUSTED_PROXIES` of the gateway and chat; the block the worker and packagers may not reach |
 | `JWKS_URL`, `JWT_ISSUER`, `JWT_AUDIENCE` | The identity provider (docs/integration/auth.md) | the gateway's and chat's settings of the same names |
 | `JWT_SUBJECT_CLAIM` | The claim that names the user, `sub` unless your provider uses another | `ULW_JWT_SUBJECT_CLAIM` |
-| `SERVICE_CLAIM`, `SERVICE_SCOPE` | Which tokens are your backend's, for the grants API (docs/integration/auth.md, "Service tokens"): the claim (`scope` by default) and the value only your backend's client-credentials client is granted. Empty `SERVICE_SCOPE`: no token is, and the API answers 403 | the gateway's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE` |
+| `SERVICE_CLAIM`, `SERVICE_SCOPE`, `SERVICE_CLIENT_ID` | Which tokens are your backend's, for the grants API (docs/integration/auth.md, "Service tokens"): the claim (empty for `scope`), the value only your backend's client-credentials client is granted, and that client's id (recommended; matched against `azp`). Empty `SERVICE_SCOPE`: no token is, and the API answers 403; then leave the other two empty | the gateway's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE`, `ULW_SERVICE_CLIENT_ID` |
 | `AUTH_COOKIE`, `ALLOWED_ORIGINS` | The token cookie, and the web app's pages that may use it | `ULW_AUTH_COOKIE`, `ULW_ALLOWED_ORIGINS` |
 | `STORAGE`, `R2_ACCOUNT_ID`, `S3_ENDPOINT`, `BUCKET` | The object store: `r2` with an account id, or `minio` (any S3-compatible store) with an endpoint; the unused one empty | `ULW_STORAGE` and the rest, for the gateway, worker, reaper and packagers |
 | `VIDEO_GATEWAY_IMAGE_TAG`, `VIDEO_WORKER_IMAGE_TAG`, `CHAT_IMAGE_TAG`, `LIVE_PACKAGER_IMAGE_TAG` | Which build runs: `main`, a commit SHA, or `<sha>@sha256:<digest>` (4a) | each image's tag |
@@ -611,6 +611,16 @@ The routes serve `/api/v1/uploads`, `/api/v1/videos`, `/api/v1/live` and
 (chat), and `/rtc` and `/whip` (LiveKit) on `PUBLIC_HOSTNAME` only. Environments often attach to
 one shared Gateway, so a route without `hostnames:` would answer the other environments' hosts
 too. To serve a second host, patch it into the three HTTPRoutes' `spec.hostnames`.
+
+`/api/v1/service/videos` is your backend's grants API (docs/adr/0097). It is routed publicly
+because a backend usually calls from outside the cluster, and the gateway admits only a bearer
+token whose `SERVICE_SCOPE` (and `SERVICE_CLIENT_ID`) is your backend's; with `SERVICE_SCOPE`
+empty it answers 403 to everyone. To narrow it: if your backend has fixed egress addresses, move
+that rule into an HTTPRoute of its own and attach an Envoy Gateway SecurityPolicy allowing only
+them (the commented example in `base/video-gateway/httproute.yaml`); if it runs in the cluster,
+delete the rule in your overlay, have it call the `video-gateway` Service directly, and add an
+ingress rule for its pods to the gateway's NetworkPolicy (`base/video-gateway/networkpolicy.yaml`
+admits only Envoy's proxies on the HTTP port).
 
 ### 4a. Deploying by digest
 

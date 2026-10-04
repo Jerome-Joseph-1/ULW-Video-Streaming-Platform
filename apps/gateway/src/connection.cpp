@@ -395,8 +395,8 @@ http::HeadVerdict Connection::authenticate_head(const http::RequestHead& head) n
     // Authorization wins over the cookie, so without one the token is the cookie. Checked before
     // the token is verified: a request some other page made is refused whatever it carries, and
     // charges none of the user's quota.
-    if (!http::find_header(head.headers, "authorization") &&
-        !cookie_request_trusted(head, req_.route, gw().limits())) {
+    req_.bearer = http::find_header(head.headers, "authorization").has_value();
+    if (!req_.bearer && !cookie_request_trusted(head, req_.route, gw().limits())) {
         ++gw().counters().cross_site_rejections;
         return http::HeadVerdict::reject(Status::Forbidden);
     }
@@ -1139,16 +1139,18 @@ void Connection::on_visibility_set(std::uint64_t request,
     respond_json(Status::Ok, video_json(*result, core::VideoAccess::Owner));
 }
 
-// The operator's backend, by its token's service claim (ULW_SERVICE_CLAIM, ULW_SERVICE_SCOPE).
-// Any other token is refused before anything about the video is looked at; the service may
-// learn that a video does not exist.
+// The operator's backend, by its token's service claim (ULW_SERVICE_CLAIM, ULW_SERVICE_SCOPE,
+// ULW_SERVICE_CLIENT_ID), and only in the Authorization header: a browser attaches the cookie to
+// requests other pages make, and the backend has no reason to send one. Any other request is
+// refused before anything about the video is looked at; the service may learn that a video
+// does not exist.
 void Connection::start_service_route() noexcept {
     const core::ports::Claims* claims = get(req_.claims);
     if (claims == nullptr) {
         fail(Status::InternalServerError);
         return;
     }
-    if (!claims->is_service) {
+    if (!claims->is_service || !req_.bearer) {
         fail_with(Status::Forbidden, "forbidden");
         return;
     }

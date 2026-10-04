@@ -8,8 +8,9 @@
 namespace core {
 
 // What the catalog found about one viewer of one video, in the same read as the video itself
-// (ADR-0097): whether chat_members lists them in the room the video is shared with, and whether
-// the operator's backend granted them the video.
+// (ADR-0097): whether chat_members lists them in the room the video is shared with, while it
+// still lists the video's owner there too (an owner who left a room no longer shares into it),
+// and whether the operator's backend granted them the video.
 struct ViewerFacts {
     bool room_member = false;
     bool granted = false;

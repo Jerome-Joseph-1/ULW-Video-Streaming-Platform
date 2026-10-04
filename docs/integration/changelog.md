@@ -16,6 +16,7 @@ change but one new field in its own video object.
 |---|---|
 | Only the owner could see or play a video | The owner sets its visibility: `private` (the default), `unlisted` (any signed-in user with the id) or `room:<room id>` (the room's current members), with `PATCH /api/v1/videos/{id}` |
 | Nobody could give a single user a video | The operator's backend grants and revokes it, with `POST`/`DELETE /api/v1/service/videos/{id}/grants/{user}`, and lists grants with `GET /api/v1/service/videos/{id}/grants`, under a token whose `ULW_SERVICE_CLAIM` holds `ULW_SERVICE_SCOPE` |
+| Nothing about a chat room reached videos | A video shared with a room is seen by its members while the room also lists the owner: leaving the room stops the share |
 | The owner's video object had no `visibility` | It has one; anyone else who may see the video gets the object without `visibility` and without `error_reason` |
 | Every master fetch was the owner's view | Every master fetch is still a view, now also by viewers other than the owner |
 
@@ -27,7 +28,9 @@ What to do:
 - **Operators:** migration 0016 must run after 0015 (RUNBOOK); it is quick and scans nothing. To
   let your backend grant videos, set `SERVICE_SCOPE` (and `SERVICE_CLAIM` if your provider
   puts scopes elsewhere than `scope`) to a value only your backend's client-credentials client
-  is granted; the HTTPRoute now also sends `/api/v1/service/videos` to the gateway.
+  is granted, and `SERVICE_CLIENT_ID` to that client's id. The backend sends its token as
+  `Authorization: Bearer`. The HTTPRoute now also sends `/api/v1/service/videos` to the gateway
+  for a backend outside the cluster; the RUNBOOK shows how to restrict it.
 
 ## 2026-10-04: group calls
 

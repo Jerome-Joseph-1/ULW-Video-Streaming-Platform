@@ -963,3 +963,71 @@ TEST_F(ConfigTest, AServiceClaimOrScopeThatCannotWorkIsRefused) {
 }
 
 } // namespace
+
+namespace {
+
+// What the shipped configuration sets: the gateway Deployment's own values, as every overlay's
+// config.env then replaces them (components/operator-config). Each must start the gateway.
+std::map<std::string, std::string> service_env_shipped(const std::string& config_env) {
+    std::map<std::string, std::string> out;
+    std::ifstream deployment(std::string(ULW_SOURCE_DIR) +
+                             "/deploy/kubernetes/base/video-gateway/deployment.yaml");
+    EXPECT_TRUE(deployment);
+    std::string line;
+    std::string name;
+    while (std::getline(deployment, line)) {
+        const auto at = line.find("- name: ULW_SERVICE_");
+        if (at != std::string::npos) {
+            name = line.substr(at + 8);
+            continue;
+        }
+        const auto value = line.find("value: ");
+        if (!name.empty() && value != std::string::npos) {
+            std::string v = line.substr(value + 7);
+            out[name] = v == "\"\"" ? "" : v;
+        }
+        name.clear();
+    }
+    std::ifstream overlay(std::string(ULW_SOURCE_DIR) + "/" + config_env);
+    EXPECT_TRUE(overlay) << config_env;
+    while (std::getline(overlay, line)) {
+        if (line.starts_with("SERVICE_")) {
+            const auto eq = line.find('=');
+            out["ULW_" + line.substr(0, eq)] = line.substr(eq + 1);
+        }
+    }
+    return out;
+}
+
+TEST_F(ConfigTest, TheShippedServiceSettingsStartTheGatewayWithServiceCallsOff) {
+    for (const char* config_env :
+         {"deploy/kubernetes/overlays/production/config.env",
+          "deploy/kubernetes/overlays/staging/config.env", "deploy/local/config.env"}) {
+        const auto shipped = service_env_shipped(config_env);
+        EXPECT_EQ(shipped.size(), 3U) << config_env;
+        for (const auto& [name, value] : shipped) {
+            env[name] = value;
+        }
+        const auto config = load();
+        ASSERT_TRUE(config) << config_env << ": " << config.error().variable << ": "
+                            << config.error().reason;
+        EXPECT_TRUE(config->service_value.empty()) << config_env;
+    }
+}
+
+TEST_F(ConfigTest, TheDefaultClaimWithoutAScopeIsOff) {
+    env["ULW_SERVICE_CLAIM"] = "scope";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_TRUE(config->service_value.empty());
+    env["ULW_SERVICE_CLIENT_ID"] = "backend";
+    EXPECT_EQ(refused_variable(), "ULW_SERVICE_CLIENT_ID");
+    env["ULW_SERVICE_SCOPE"] = "ulw:admin";
+    const auto bound = load();
+    ASSERT_TRUE(bound) << bound.error().variable << ": " << bound.error().reason;
+    EXPECT_EQ(bound->service_client_id, "backend");
+    EXPECT_NE(effective_log(*bound).find(R"("name":"ULW_SERVICE_CLIENT_ID","value":"backend")"),
+              std::string::npos);
+}
+
+} // namespace

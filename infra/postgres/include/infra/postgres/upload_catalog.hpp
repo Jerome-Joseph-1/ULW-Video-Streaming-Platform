@@ -74,8 +74,6 @@ public:
                        const std::string& request_id,
                        core::ports::CatalogCallback<core::VideoState> done) override;
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
-    void find_video(const core::VideoId& id,
-                    core::ports::CatalogCallback<core::VideoRecord> done) override;
     void find_video_for(const core::VideoId& id, const core::UserId& viewer,
                         core::ports::CatalogCallback<core::ports::VideoView> done) override;
     void set_visibility(const core::VideoId& id, const core::UserId& owner,

@@ -195,7 +195,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
         break;
     }
     }
-    l.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*l.reactor);
+    l.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*l.reactor, *l.clock);
     if (options.live_streams) {
         l.live_store = std::make_unique<FakeLiveStore>(*l.reactor);
         l.sfu = std::make_unique<FakeSfu>(*l.reactor);

@@ -121,8 +121,6 @@ public:
                                const std::string& request_id, CatalogCallback<VideoState> done) = 0;
     virtual void abort_upload(const UploadId& id, CatalogCallback<void> done) = 0;
 
-    virtual void find_video(const VideoId& id, CatalogCallback<VideoRecord> done) = 0;
-
     // Who may see a video (ADR-0097). Every read a viewer's request makes goes through
     // find_video_for and core::access_of; nothing is cached, so a member taken off the room's
     // list, or a grant revoked, loses the video at their next request.

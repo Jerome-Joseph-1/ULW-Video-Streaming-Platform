@@ -170,6 +170,7 @@ TEST_F(GatewayAccess, AnUnlistedVideoPlaysForAnyoneSignedIn) {
 
 TEST_F(GatewayAccess, ARoomsVideoPlaysForItsMembersAndNobodyElse) {
     publish(core::VideoState::Ready, in_room());
+    gw_.add_member(kRoom, "alice");
     gw_.add_member(kRoom, "bob");
     gw_.add_member(kOtherRoom, "carol");
     expect_playable_by(kBob);
@@ -179,6 +180,7 @@ TEST_F(GatewayAccess, ARoomsVideoPlaysForItsMembersAndNobodyElse) {
 
 TEST_F(GatewayAccess, TakingAMemberOffTheRoomsListTakesTheVideoAtTheirNextRequest) {
     publish(core::VideoState::Ready, in_room());
+    gw_.add_member(kRoom, "alice");
     gw_.add_member(kRoom, "bob");
     expect_playable_by(kBob);
     gw_.remove_member(kRoom, "bob");
@@ -186,6 +188,16 @@ TEST_F(GatewayAccess, TakingAMemberOffTheRoomsListTakesTheVideoAtTheirNextReques
     // And listing them again gives it back: nothing is cached either way.
     gw_.add_member(kRoom, "bob");
     expect_playable_by(kBob);
+}
+
+TEST_F(GatewayAccess, TheOwnerLeavingTheRoomStopsSharingIntoIt) {
+    publish(core::VideoState::Ready, in_room());
+    gw_.add_member(kRoom, "alice");
+    gw_.add_member(kRoom, "bob");
+    expect_playable_by(kBob);
+    gw_.remove_member(kRoom, "alice");
+    expect_hidden_from(kBob);
+    expect_playable_by(kAlice);
 }
 
 TEST_F(GatewayAccess, AViewerSeesNeitherTheVisibilityNorWhyTheVideoFailed) {
@@ -208,6 +220,7 @@ TEST_F(GatewayAccess, AViewerSeesNeitherTheVisibilityNorWhyTheVideoFailed) {
 TEST_F(GatewayAccess, AnUploadInProgressStaysTheUploadersWhateverIsSharedOrGranted) {
     for (const core::VideoState state : {core::VideoState::Init, core::VideoState::Uploading}) {
         publish(state, in_room());
+        gw_.add_member(kRoom, "alice");
         gw_.add_member(kRoom, "bob");
         ASSERT_EQ(service("POST", grants_path("bob"))->status, 204);
         expect_hidden_from(kBob);
@@ -399,6 +412,24 @@ TEST_F(GatewayAccess, OnlyTheServicesTokenMayUseTheServiceApi) {
     }
     expect_hidden_from(kBob);
     EXPECT_EQ(service("GET", grants_path(), "")->status, 401);
+}
+
+TEST_F(GatewayAccess, AServiceTokenInTheCookieIsNotTheService) {
+    publish(core::VideoState::Ready, {});
+    const std::map<std::string, std::string> cookie{
+        {"Cookie", "auth_token=service.backend"},
+        {"Origin", std::string(ulw::test::kAllowedOrigin)}};
+    for (const auto& [method, path] :
+         std::initializer_list<std::pair<std::string_view, std::string>>{
+             {"POST", grants_path("bob")},
+             {"DELETE", grants_path("bob")},
+             {"GET", grants_path()}}) {
+        const auto r = client_.request(method, path, "", {}, cookie);
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 403) << method;
+        EXPECT_EQ(r->body, R"({"error":"forbidden"})");
+    }
+    expect_hidden_from(kBob);
 }
 
 TEST_F(GatewayAccess, AServiceRequestCarriesNoBody) {

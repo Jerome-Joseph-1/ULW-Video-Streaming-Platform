@@ -124,9 +124,14 @@ protected:
     CatalogResult<void> abort(const NewUpload& u) {
         return call<void>([&](auto done) { catalog->abort_upload(u.upload.id, std::move(done)); });
     }
+    // The video as its owner's request reads it.
     CatalogResult<core::VideoRecord> video(const core::VideoId& id) {
-        return call<core::VideoRecord>(
-            [&](auto done) { catalog->find_video(id, std::move(done)); });
+        auto view = call<core::ports::VideoView>(
+            [&](auto done) { catalog->find_video_for(id, tester(), std::move(done)); });
+        if (!view) {
+            return std::unexpected(view.error());
+        }
+        return std::move(view->video);
     }
     CatalogResult<StoredUpload> upload(const core::UploadId& id) {
         return call<StoredUpload>([&](auto done) { catalog->find_upload(id, std::move(done)); });

@@ -19,15 +19,15 @@
 
 -- One row per user the operator's backend granted a video to. User ids compare bytewise ("C"),
 -- as chat_members' do, so that pages of grants follow the order the service compares them in.
--- At most 128 bytes and no white space, as the service parses them (core::UserId); an
--- operator's INSERT is held to the same. The table is new, so the check is validated at once.
+-- 1 to 128 of exactly the characters the service parses a user id from (core::UserId,
+-- is_subject_char: A-Z a-z 0-9 . _ : @ | + -); an operator's INSERT is held to the same. The
+-- table is new, so the check is validated at once.
 CREATE TABLE video_grants (
     video_id   uuid NOT NULL REFERENCES videos (id) ON DELETE CASCADE,
     user_id    text COLLATE "C" NOT NULL,
     granted_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (video_id, user_id),
-    CONSTRAINT video_grants_user_id
-        CHECK (length(user_id) BETWEEN 1 AND 128 AND user_id !~ '\s')
+    CONSTRAINT video_grants_user_id CHECK (user_id ~ '^[A-Za-z0-9._:@|+-]{1,128}$')
 );
 
 -- A user's grants without reading the whole table: to revoke everything a user holds when the

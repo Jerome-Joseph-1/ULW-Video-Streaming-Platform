@@ -151,7 +151,7 @@ Every video has a **visibility**, which its owner sets:
 |---|---|
 | `private` | Nobody. Every video starts so, a live stream's recording included. |
 | `unlisted` | Any signed-in user who has the video id. |
-| `room:<room id>` | The current members of that chat room, direct or group: whoever chat lists in it ([chat.md](chat.md#changing-member-lists)) at the moment of each request. Someone taken off the list loses the video at their next request; someone added gains it. |
+| `room:<room id>` | The current members of that chat room, direct or group: whoever chat lists in it ([chat.md](chat.md#changing-member-lists)) at the moment of each request, while it also lists the owner. Someone taken off the list loses the video at their next request; someone added gains it. When the owner leaves the room, nobody in it sees the video any more; listed again, the owner shares into it again. |
 
 On top of any visibility, the operator's backend may **grant** a video to single users
 ([Service API](#service-api-grants)); a grant lasts until it is revoked.
@@ -182,8 +182,8 @@ The owner only. The body is JSON, `Content-Type: application/json`, at most 4 Ki
 
 `visibility` is `private`, `unlisted` or `room:<room id>`, the room id a lowercase canonical UUID.
 A room must be one the owner is a member of at that moment (a direct chat they are one of the
-two of, or a group they are listed in); the owner leaving the room later takes nothing from its
-members. A cookie request needs an allowed `Origin`, as an upload's create does
+two of, or a group they are listed in). Leaving the room later stops the share for everyone in it,
+until the owner is listed again or sets another visibility. A cookie request needs an allowed `Origin`, as an upload's create does
 ([auth.md](auth.md#cookies-and-other-sites)).
 
 Refusals carry a JSON body, `{"error":"<code>"}`:
@@ -200,10 +200,11 @@ Refusals carry a JSON body, `{"error":"<code>"}`:
 ### Service API: grants
 
 For the operator's backend only: a token whose claim `ULW_SERVICE_CLAIM` (default `scope`) holds
-`ULW_SERVICE_SCOPE` ([auth.md](auth.md#service-tokens)), typically one the backend obtains from
-the identity provider with the client-credentials grant. Any other token is `403` `forbidden`
-on all three, before anything about the video is looked at; with `ULW_SERVICE_SCOPE` unset, every
-token is.
+`ULW_SERVICE_SCOPE` and, when `ULW_SERVICE_CLIENT_ID` is set, that was issued to that client
+([auth.md](auth.md#service-tokens)), typically one the backend obtains from the identity provider
+with the client-credentials grant. It must come in the `Authorization: Bearer` header: the cookie
+never carries a service token. Any other request is `403` `forbidden` on all three, before
+anything about the video is looked at; with `ULW_SERVICE_SCOPE` unset, every one is.
 
 | Endpoint | Success | Errors |
 |---|---|---|

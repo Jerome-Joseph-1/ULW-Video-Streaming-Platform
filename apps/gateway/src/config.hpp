@@ -97,6 +97,8 @@ struct Config {
     // service API (ADR-0097). No value: no token is, and that API answers 403 to all.
     std::string service_claim = "scope";
     std::string service_value;
+    // ULW_SERVICE_CLIENT_ID: with it, only tokens issued to that client (azp, or client_id).
+    std::string service_client_id;
     // The size every chunk but an upload's last has, and the object store's part size.
     std::uint64_t chunk_size = std::uint64_t{8} << 20U;
     ops::Level log_level = ops::Level::Info;

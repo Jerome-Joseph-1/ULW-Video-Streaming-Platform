@@ -70,6 +70,7 @@ constexpr std::array kSettings{
     // The operator's backend's tokens (ADR-0097).
     ops::Setting{.env = "ULW_SERVICE_CLAIM", .key = "auth.service_claim"},
     ops::Setting{.env = "ULW_SERVICE_SCOPE", .key = "auth.service_scope"},
+    ops::Setting{.env = "ULW_SERVICE_CLIENT_ID", .key = "auth.service_client_id"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
     ops::Setting{.env = "ULW_ALLOWED_ORIGINS", .key = "auth.allowed_origins"},
     ops::Setting{.env = "ULW_ALLOW_SAME_SITE", .key = "auth.allow_same_site"},
@@ -307,12 +308,14 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
     config.jwt_subject_claim = std::move(rules->subject_claim);
     const auto claim = lookup(env, "ULW_SERVICE_CLAIM");
     const auto scope = lookup(env, "ULW_SERVICE_SCOPE");
-    auto service = infra::auth::read_service_claim(claim, scope);
+    const auto client = lookup(env, "ULW_SERVICE_CLIENT_ID");
+    auto service = infra::auth::read_service_claim(claim, scope, client);
     if (!service) {
         return error(service.error().variable, service.error().reason);
     }
     config.service_claim = std::move(service->claim);
     config.service_value = std::move(service->value);
+    config.service_client_id = std::move(service->client_id);
     config.limits.auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token");
     if (const auto list = lookup(env, "ULW_ALLOWED_ORIGINS")) {
         auto origins = http::parse_origin_list(*list);
@@ -915,7 +918,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     for (const std::string& origin : config.limits.allowed_origins) {
         origins += (origins.empty() ? "" : ",") + origin;
     }
-    const std::array<std::pair<std::string_view, std::string>, 36> values{{
+    const std::array<std::pair<std::string_view, std::string>, 37> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -953,6 +956,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_JWT_SUBJECT_CLAIM", config.jwt_subject_claim},
         {"ULW_SERVICE_CLAIM", config.service_value.empty() ? "" : config.service_claim},
         {"ULW_SERVICE_SCOPE", config.service_value},
+        {"ULW_SERVICE_CLIENT_ID", config.service_client_id},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},
         {"ULW_ALLOWED_ORIGINS", origins},
         {"ULW_ALLOW_SAME_SITE", config.limits.allow_same_site ? "1" : ""},
