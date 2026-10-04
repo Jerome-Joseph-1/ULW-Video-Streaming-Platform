@@ -252,6 +252,18 @@ TEST_F(PgLiveStreamsTest, AStreamGoesLiveOnceAndEndsOnce) {
     EXPECT_EQ(mark_live(id, 1'767'225'900)->state, LiveState::Ended);
 }
 
+TEST_F(PgLiveStreamsTest, APublisherWhoLeftIsAReasonTheRowKeeps) {
+    const auto made = create("auth0|left");
+    ASSERT_TRUE(made);
+    const auto ended = end(made->stream.id, LiveEnd::PublisherLeft, 1'767'226'200);
+    ASSERT_TRUE(ended);
+    EXPECT_TRUE(ended->ended);
+    EXPECT_EQ(ended->stream.ended_by, LiveEnd::PublisherLeft);
+    const auto again = end(made->stream.id, LiveEnd::Owner, 1'767'226'300);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->stream.ended_by, LiveEnd::PublisherLeft);
+}
+
 TEST_F(PgLiveStreamsTest, AStreamNeverLiveEndsWithoutALiveTime) {
     const auto made = create("alice");
     ASSERT_TRUE(made);

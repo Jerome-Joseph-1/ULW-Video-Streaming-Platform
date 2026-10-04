@@ -126,7 +126,10 @@ TEST_F(LiveServiceTest, AStreamsTicketsPublishIntoItsOwnRoomAsItsOneIdentityUnti
     const auto started = wait(created);
     ASSERT_TRUE(started) << gateway::to_string(started.error());
     const std::string id = started->stream.id.to_string();
-    EXPECT_EQ(started->ticket.endpoint, "http://127.0.0.1:7880/whip/v1");
+    // The client URL as http, and LiveKit's WHIP path.
+    std::string whip = env_or("LIVEKIT_CLIENT_URL", "ws://127.0.0.1:7880");
+    whip.replace(0, 2, "http");
+    EXPECT_EQ(started->ticket.endpoint, whip + "/whip/v1");
     const auto token = ulw::test::read_token(started->ticket.credential, kSecret);
     ASSERT_TRUE(token);
     EXPECT_EQ(ulw::test::string_at(token->claims, "video", "room"), id + ":1");
