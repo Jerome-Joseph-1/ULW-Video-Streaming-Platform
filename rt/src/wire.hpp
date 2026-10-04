@@ -19,8 +19,9 @@
 namespace rt::wire {
 
 // 2: Send and Deliver carry the client's message key. 3: a Reply may say Conflict. 4: Ask and
-// Answer carry what a room's owner answers for its members (a call's ticket, ADR-0050).
-inline constexpr std::uint8_t kVersion = 4;
+// Answer carry what a room's owner answers for its members (a call's ticket, ADR-0050). 5: Notify
+// and Notice carry what any node hands a room's members, unsequenced (a call's ring, ADR-0091).
+inline constexpr std::uint8_t kVersion = 5;
 // The largest message a client may send (codec::ws::Decoder's 64 KiB, ADR-0029), plus room for
 // the other fields, which take at most 239 bytes (a Send: type, request, room, sender, key).
 inline constexpr std::size_t kMaxBody = std::size_t{64} * 1024;
@@ -58,6 +59,11 @@ enum class Type : std::uint8_t {
     Ask = 9,
     // Owner to dialer: the outcome of an Ask, and the owner's answer when it is Ok.
     Answer = 10,
+    // Any node to the room's owner: hand this to the room's members wherever they are. Not
+    // answered; an owner that does not hold the room drops it.
+    Notify = 11,
+    // Owner to dialer: a Notify for a room the dialer subscribed to, for its members there.
+    Notice = 12,
 };
 
 enum class Status : std::uint8_t {
@@ -128,8 +134,18 @@ struct Answer {
     std::span<const std::byte> body;
 };
 
+// Notify and Notice: a room and a body, the body a view as Send's; at most kMaxBody.
+struct Notify {
+    core::RoomId room;
+    std::span<const std::byte> body;
+};
+struct Notice {
+    core::RoomId room;
+    std::span<const std::byte> body;
+};
+
 using Frame = std::variant<Hello, Challenge, Proof, Subscribe, Unsubscribe, Send, Reply, Deliver,
-                           Ask, Answer>;
+                           Ask, Answer, Notify, Notice>;
 
 void encode_hello(std::vector<std::byte>& out, const core::NodeId& node, const Nonce& nonce);
 void encode_challenge(std::vector<std::byte>& out, const core::NodeId& node, const Nonce& nonce,
@@ -150,6 +166,11 @@ void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::
 void encode_ask(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
                 std::span<const std::byte> body);
 void encode_answer(std::vector<std::byte>& out, std::uint64_t request, Status status,
+                   std::span<const std::byte> body);
+// Bodies above kMaxBody are the caller's bug, as for encode_send.
+void encode_notify(std::vector<std::byte>& out, const core::RoomId& room,
+                   std::span<const std::byte> body);
+void encode_notice(std::vector<std::byte>& out, const core::RoomId& room,
                    std::span<const std::byte> body);
 
 enum class DecodeError : std::uint8_t {
