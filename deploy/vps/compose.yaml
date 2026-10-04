@@ -84,6 +84,9 @@ services:
       - "7802:7802/udp"
       - "3478:3478/udp"
       - "5349:5349/tcp"
+      # TURN relay addresses: the SFU sends to a client's relay on the public address, which
+      # reaches this namespace only through a published port.
+      - "30000-30049:30000-30049/udp"
 
   caddy:
     <<: *in-netns
@@ -306,6 +309,8 @@ services:
           domain: ${ULW_HOST:?}
           udp_port: 3478
           tls_port: 5349
+          relay_range_start: 30000
+          relay_range_end: 30049
           external_tls: false
           cert_file: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${ULW_HOST:?}/${ULW_HOST:?}.crt
           key_file: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${ULW_HOST:?}/${ULW_HOST:?}.key

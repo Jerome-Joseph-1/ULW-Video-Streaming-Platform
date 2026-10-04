@@ -16,8 +16,8 @@ published images. It runs on the project's own host (the one with the self-hoste
 | `/auth/` | Keycloak: sign-in, tokens, key set, admin console (`/auth/admin/`) |
 
 Published ports, and opened in ufw by the deploy when ufw is active: 80/tcp, 443/tcp, 443/udp
-(HTTP/3), 7801/tcp (LiveKit ICE over TCP), 7802/udp (LiveKit's UDP mux), 3478/udp (TURN) and
-5349/tcp (TURN over TLS). Postgres, MinIO, Redis, LiveKit's API, the gateway's webhook port and
+(HTTP/3), 7801/tcp (LiveKit ICE over TCP), 7802/udp (LiveKit's UDP mux), 3478/udp (TURN),
+5349/tcp (TURN over TLS) and 30000-30049/udp (TURN relay addresses, 50 allocations at once). Postgres, MinIO, Redis, LiveKit's API, the gateway's webhook port and
 Keycloak's database and management port have no host port.
 
 ## Signing in

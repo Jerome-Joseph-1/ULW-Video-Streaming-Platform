@@ -54,6 +54,9 @@ jobs:
           IP: ${{ steps.host.outputs.ip }}
         run: deploy/vps/deploy.sh "$IP" "$ULW_IMAGE_GATEWAY" "$ULW_IMAGE_WORKER" "$ULW_IMAGE_CHAT"
 
+      # The browsers run in a container on Docker's default bridge, so they reach the public
+      # address as an outside client does (through the published ports), not over the host's
+      # own loopback path, which Docker does not carry UDP on.
       # Playwright's own Chromium has no H.264 or AAC, which the platform's renditions are: the
       # browser is the Chrome for Testing build the repository's suites pin (fetch-chrome.sh),
       # run inside the Playwright image for its libraries.
@@ -88,7 +91,7 @@ jobs:
           CHROME_DIR: ${{ steps.chrome.outputs.dir }}
         run: |
           docker pull --quiet "$PLAYWRIGHT_IMAGE" >/dev/null
-          docker run --rm --name "ulw-prod-smoke-$GITHUB_RUN_ID" --network host --ipc host \
+          docker run --rm --name "ulw-prod-smoke-$GITHUB_RUN_ID" --ipc host \
               --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
               -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc -e ULW_E2E_CHROME="$CHROME" \
               -v "$CHROME_DIR:$CHROME_DIR:ro" \
@@ -104,7 +107,7 @@ jobs:
           CHROME: ${{ steps.chrome.outputs.chrome }}
           CHROME_DIR: ${{ steps.chrome.outputs.dir }}
         run: |
-          docker run --rm --name "ulw-prod-smoke-extra-$GITHUB_RUN_ID" --network host --ipc host \
+          docker run --rm --name "ulw-prod-smoke-extra-$GITHUB_RUN_ID" --ipc host \
               --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
               -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc -e ULW_E2E_CHROME="$CHROME" \
               -v "$CHROME_DIR:$CHROME_DIR:ro" \

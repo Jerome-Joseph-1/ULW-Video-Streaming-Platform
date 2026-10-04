@@ -100,7 +100,7 @@ compose config --quiet
 
 # The firewall: the public ports compose.yaml publishes, when ufw is on. Nothing else changes.
 if sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
-    for rule in 80/tcp 443/tcp 443/udp 7801/tcp 7802/udp 3478/udp 5349/tcp; do
+    for rule in 80/tcp 443/tcp 443/udp 7801/tcp 7802/udp 3478/udp 5349/tcp 30000:30049/udp; do
         sudo ufw allow "$rule" comment 'ulw-prod' >/dev/null
         echo "deploy: ufw allows $rule"
     done
