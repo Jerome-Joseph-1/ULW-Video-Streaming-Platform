@@ -22,9 +22,9 @@ concurrency:
 
 env:
   # The tested build demo-release.yml published (demo-<12-digit commit>), by tag and digest.
-  ULW_IMAGE_GATEWAY: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:demo-274b4439d10a@sha256:fa782b05e4dccdd097bf36bd1a0c9c88c9b97e7f4bc295747474e54207eb4317
-  ULW_IMAGE_WORKER: ghcr.io/jerome-joseph-1/ulw-video-worker:demo-274b4439d10a@sha256:15c5818ec1e1d0948acca1da84af2eba527ad896d317a0e0eada676b4431d656
-  ULW_IMAGE_CHAT: ghcr.io/jerome-joseph-1/ulw-chat:demo-274b4439d10a@sha256:1d4a8c238bc0d869cf9ea9fc07af229d84c220afcd3aa1fa2ec0e248a5f4b2f2
+  ULW_IMAGE_GATEWAY: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:demo-2d552eb4dc94@sha256:7563494b0840d7741ec90b6fa731e4cba53a90f43d45481ca0c564bb229ee2e0
+  ULW_IMAGE_WORKER: ghcr.io/jerome-joseph-1/ulw-video-worker:demo-2d552eb4dc94@sha256:9e1e0006a60a733a43dd7f9305c5c2a4034142efae8d8a12bc6f29122a04984e
+  ULW_IMAGE_CHAT: ghcr.io/jerome-joseph-1/ulw-chat:demo-2d552eb4dc94@sha256:6c76f805e7a873c615df9de8261feee6e2d7fbff202c0feb3a1aedc188b180d0
   # mcr.microsoft.com/playwright:v1.56.1-noble, the version demo/smoke/package-lock.json pins,
   # with its browsers and their libraries, so nothing is installed on the host.
   PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright@sha256:f1e7e01021efd65dd1a2c56064be399f3e4de00fd021ac561325f2bfbb2b837a

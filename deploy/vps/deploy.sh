@@ -23,7 +23,7 @@ root=$(cd "$here/../.." && pwd)
 dir=/opt/ulw
 
 echo "deploy: https://$host into $dir"
-sudo install -d -m 0755 -o root -g root "$dir" "$dir/keycloak"
+sudo install -d -m 0755 -o root -g root "$dir" "$dir/keycloak" "$dir/site"
 
 # The files compose.yaml names, from this checkout.
 sudo install -m 0644 "$here/compose.yaml" "$dir/compose.yaml"
@@ -37,21 +37,28 @@ sed "s|__ULW_HOST__|$host|g" "$here/keycloak/ulw-realm.json.template" |
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cp -a "$root/demo/web" "$stage/web"
-cp -a "$root/clients/web-mls/dist" "$stage/web-mls"
+cp -a "$root/clients/web-mls/dist" "$stage/mls"
 # config.js as demo/build/web-config.sh writes it: the API and chat on this origin, sign-in on
 # Keycloak.
 printf '%s\nwindow.ULW_CONFIG = {"auth":"oidc","oidcIssuer":"https://%s/auth/realms/ulw","oidcClientId":"ulw-web","oidcUserClaim":"preferred_username","label":""};\n' \
     '// Written by deploy/vps/deploy.sh.' "$host" >"$stage/web/config.js"
 chmod -R a+rX "$stage"
-for d in web web-mls; do
-    sudo rm -rf "$dir/$d.new"
-    sudo cp -a "$stage/$d" "$dir/$d.new"
-    sudo chown -R root:root "$dir/$d.new"
-    sudo rm -rf "$dir/$d.old"
-    if sudo test -e "$dir/$d"; then sudo mv "$dir/$d" "$dir/$d.old"; fi
-    sudo mv "$dir/$d.new" "$dir/$d"
-    sudo rm -rf "$dir/$d.old"
+for d in web mls; do
+    sudo rm -rf "$dir/site/$d.new" "$dir/site/$d.old"
+    sudo cp -a "$stage/$d" "$dir/site/$d.new"
+    sudo chown -R root:root "$dir/site/$d.new"
+    if sudo test -e "$dir/site/$d"; then sudo mv "$dir/site/$d" "$dir/site/$d.old"; fi
+    sudo mv "$dir/site/$d.new" "$dir/site/$d"
+    sudo rm -rf "$dir/site/$d.old"
 done
+# Left by the first deploys, which mounted these directly.
+sudo rm -rf "$dir/web" "$dir/web-mls"
+
+# The ffmpeg sandbox (ulw_sandbox) makes a user namespace, which Ubuntu 24.04 can refuse to
+# unprivileged processes (kernel.apparmor_restrict_unprivileged_userns=1). Reported here, never
+# changed: README.md, "Host settings". The smoke's transcode shows whether the sandbox runs.
+echo "deploy: kernel.apparmor_restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+echo "deploy: kernel.unprivileged_userns_clone=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo absent)"
 
 # Secrets: once, on this host only. Hex, so they need no quoting in URLs or YAML.
 if ! sudo test -s "$dir/.env"; then

@@ -93,8 +93,9 @@ services:
       ULW_HOST: ${ULW_HOST:?}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./web:/srv/web:ro
-      - ./web-mls:/srv/mls:ro
+      # The page and the OpenMLS client (site/web, site/mls), which each deploy replaces whole:
+      # the parent is mounted, so a replaced directory is seen without a restart.
+      - ./site:/srv:ro
       - caddy-data:/data
       - caddy-config:/config
     healthcheck:
