@@ -4,6 +4,7 @@
 #include "core/ports/clock.hpp"
 #include "core/ports/message_store.hpp"
 #include "core/util/time.hpp"
+#include "net/ip_address.hpp"
 #include "net/reactor.hpp"
 #include "os/unique_fd.hpp"
 
@@ -24,6 +25,12 @@ struct ServiceApiLimits {
     // The operator's backend keeps a few connections alive, one request at a time on each; past
     // this many open at once a new one is closed at accept.
     std::size_t max_connections = 32;
+    // Of those, from one peer address: a client that opens connections in a loop takes only its
+    // own share, and the backend's few are never crowded out by it.
+    std::size_t max_connections_per_address = 8;
+    // A connection that sends nothing at all within this of being accepted is closed: the
+    // backend writes its request at once.
+    core::Millis first_byte_timeout{5'000};
     // An idle keep-alive connection is closed after this; a request must be in, head and body,
     // this long after its first byte.
     core::Millis idle_timeout{30'000};
@@ -35,8 +42,14 @@ struct ServiceApiLimits {
     // chat node, is far past a product's sign-ups and invitations, and keeps a runaway script to
     // a few hundred transactions a second across a three-node deployment, each holding one
     // room's row for milliseconds.
+    // Taken only by requests whose token is the service's: nobody else can spend it.
     std::uint32_t burst = 100;
     std::uint32_t per_second = 50;
+    // Requests whose token fails, or is not the service's, per peer address: each costs a
+    // verification. The backend's requests never spend it; past it, every request from that
+    // address is answered 429 before its token is looked at, until it refills.
+    std::uint32_t failure_burst = 20;
+    std::uint32_t failures_per_second = 5;
 };
 
 struct ServiceApiCounters {
@@ -83,6 +96,9 @@ public:
     ServiceApi& operator=(ServiceApi&&) = delete;
 
     void on_accept(os::UniqueFd conn) noexcept override;
+    // on_accept once the peer's address is read; public for a test to name a peer the loopback
+    // interface cannot be.
+    void accept_from(os::UniqueFd conn, const net::IpAddress& peer) noexcept;
     // Destroys connections the reactor has let go of. Call after each run_once.
     void reap() noexcept;
     // Closes every connection and accepts no more: for a drain.
@@ -103,6 +119,11 @@ private:
     ServiceApiLimits limits_;
     ServiceApiCounters counters_;
     TokenBucket bucket_;
+    // Failures' budgets, per peer address: one client failing its tokens in a loop spends its
+    // own, never the backend's. Only addresses with a connection open, or with a budget not yet
+    // full again, are kept.
+    [[nodiscard]] TokenBucket& failures_of(const net::IpAddress& peer);
+    std::vector<std::pair<net::IpAddress, TokenBucket>> failures_;
     std::uint64_t next_id_ = 1;
     bool stopped_ = false;
     std::vector<std::unique_ptr<Connection>> connections_;

@@ -334,10 +334,17 @@ void MemoryMessageStore::add_members(const core::RoomId& room, const core::ports
         }
     }
     MembershipChange change = refusal(MembershipOutcome::Done);
+    const bool empty = found == members_.end() || found->second.empty();
+    const auto stored = rooms_.find(room);
+    const bool held = stored != rooms_.end() && !stored->second.messages.empty();
     if (recorded == kinds_.end() || !role) {
         change = refusal(MembershipOutcome::NotMember);
     } else if (recorded->second != core::ports::RoomKind::GroupChat) {
         change = refusal(MembershipOutcome::NotGroup);
+    } else if (empty) {
+        // Only the service gets here with nobody listed: a group nobody created, or one whose
+        // members all left over its history.
+        change = refusal(held ? MembershipOutcome::Gone : MembershipOutcome::NotMember);
     } else if (*role != MemberRole::Admin) {
         change = refusal(MembershipOutcome::NotAdmin);
     } else {
@@ -381,6 +388,21 @@ void MemoryMessageStore::expel(const core::RoomId& room, const core::UserId& act
         change = refusal(MembershipOutcome::NotAdmin);
     } else if (listed->second.erase(user) != 0) {
         change.changed.push_back(user);
+    }
+    answer_change(std::move(change), false, room, std::move(done));
+}
+
+void MemoryMessageStore::close_direct(const core::RoomId& room,
+                                      MessageCallback<MembershipChange> done) {
+    const auto recorded = kinds_.find(room);
+    MembershipChange change = refusal(MembershipOutcome::Done);
+    if (recorded != kinds_.end() && recorded->second != core::ports::RoomKind::DirectChat) {
+        change = refusal(MembershipOutcome::NotGroup);
+    } else if (const auto listed = members_.find(room); listed != members_.end()) {
+        for (const auto& [user, role] : listed->second) {
+            change.changed.push_back(user);
+        }
+        listed->second.clear();
     }
     answer_change(std::move(change), false, room, std::move(done));
 }

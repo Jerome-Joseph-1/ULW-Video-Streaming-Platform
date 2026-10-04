@@ -190,8 +190,9 @@ SELECT EXISTS (SELECT 1 FROM listed WHERE user_id = $2)
        (SELECT held FROM used))sql";
 
 // $3's users not listed yet join the group, if $5 (the room is a group chat), $2 is its admin
-// or $6 (the operator's service asks, with $2 empty) and the list stays within $4. Answers $2's
-// role (NULL: not listed), whether the list fits, and who was added.
+// or $6 (the operator's service asks, with $2 empty), the group lists someone, and the list
+// stays within $4. Answers $2's role (NULL: not listed), whether the list fits, who was added,
+// whether the group lists nobody, and whether it holds messages (read only for the service).
 inline constexpr Sql kAddMembers = R"sql(
 WITH actor AS (SELECT role FROM chat_members WHERE room_id = $1 AND user_id = $2),
 fresh AS (
@@ -204,10 +205,18 @@ added AS (
     INSERT INTO chat_members (room_id, user_id, role)
     SELECT $1, u, 'member' FROM fresh
      WHERE $5 AND ($6 OR (SELECT role FROM actor) = 'admin') AND (SELECT ok FROM fits)
+       AND EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1)
     ON CONFLICT (room_id, user_id) DO NOTHING
     RETURNING user_id)
 SELECT (SELECT role FROM actor), (SELECT ok FROM fits),
-       (SELECT string_agg(user_id, ' ' ORDER BY user_id) FROM added))sql";
+       (SELECT string_agg(user_id, ' ' ORDER BY user_id) FROM added),
+       NOT EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1),
+       $6 AND EXISTS (SELECT 1 FROM chat_messages WHERE room_id = $1))sql";
+
+// A direct chat's pair unlisted, by the operator's backend: the room's kind was read under its
+// lock first. Answers who was removed.
+inline constexpr Sql kCloseDirect = R"sql(
+DELETE FROM chat_members WHERE room_id = $1 RETURNING user_id)sql";
 
 // $3 leaves the group's list, if $4 (the room is a group chat) and $2 is its admin. $2 is not
 // $3 (that is a leave), and stays an admin, so nobody needs promoting. Answers $2's role and
@@ -289,9 +298,10 @@ SELECT a.listed, p.user_id, p.role
 
 // Which of $2's users (ids separated by spaces) share a direct or group chat with $1: whose
 // presence $1 may see (ADR-0096). $1's rooms through chat_members_by_user, each probed for the
-// others by primary key. A room with no kind recorded is a group chat, as a join records it; a
-// stream's live chat lists nobody, and is left out by its kind all the same.
-inline constexpr Sql kSharedWith = R"sql(
+// others by primary key: at most kMaxRoomsPerUser rooms, each one probe for the few asked about.
+// A room with no kind recorded is a group chat, as a join records it; a stream's live chat lists
+// nobody, and is left out by its kind all the same. A view, so that a test can EXPLAIN it.
+inline constexpr std::string_view kSharedWithText = R"sql(
 SELECT DISTINCT o.user_id
   FROM chat_members m
   JOIN chat_members o ON o.room_id = m.room_id
@@ -301,5 +311,7 @@ SELECT DISTINCT o.user_id
    AND o.user_id <> $1
    AND (r.kind IS NULL OR r.kind IN ('direct_chat', 'group_chat'))
  ORDER BY o.user_id)sql";
+// NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
+inline constexpr Sql kSharedWith = kSharedWithText.data();
 
 } // namespace infra::postgres::message_sql

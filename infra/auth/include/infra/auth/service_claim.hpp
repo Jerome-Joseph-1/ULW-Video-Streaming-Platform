@@ -9,7 +9,7 @@
 
 namespace infra::auth {
 
-// Which tokens are the operator's own backend rather than a user (ADR-0097): those whose claim
+// Which tokens are the operator's own backend rather than a user (ADR-0096): those whose claim
 // ULW_SERVICE_CLAIM names (`scope` by default) holds the value ULW_SERVICE_SCOPE gives, as a
 // token from the identity provider's client-credentials grant does. Shared by every service
 // that takes service calls, under the same two settings.

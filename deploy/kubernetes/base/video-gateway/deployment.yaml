@@ -112,12 +112,6 @@ spec:
               value: ulw
             - name: ULW_JWT_SUBJECT_CLAIM
               value: sub
-            # The operator's backend's tokens (SERVICE_CLAIM, SERVICE_SCOPE in config.env;
-            # ADR-0097). No scope: no token is the service's, and its API answers 403.
-            - name: ULW_SERVICE_CLAIM
-              value: scope
-            - name: ULW_SERVICE_SCOPE
-              value: ""
             - name: ULW_AUTH_COOKIE
               value: auth_token
             # The web app's pages. A browser sends Origin on every cookie POST, PATCH and DELETE;

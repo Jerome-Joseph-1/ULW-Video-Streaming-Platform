@@ -639,7 +639,16 @@ private:
     }
     [[nodiscard]] std::optional<MembershipChange> decode(const Result& r) noexcept override {
         try {
-            // The service acts as the group's admin wherever it is not listed.
+            // The service acts as the group's admin wherever it is not listed, of a group that
+            // lists someone.
+            const auto empty = r.get(0, 3).and_then(parse_bool);
+            const auto held = r.get(0, 4).and_then(parse_bool);
+            if (!empty || !held) {
+                return std::nullopt;
+            }
+            if (!actor_ && group_ && *empty) {
+                return refused(*held ? MembershipOutcome::Gone : MembershipOutcome::NotMember);
+            }
             const auto refusal = actor_ ? admin_refusal(r.get(0, 0), group_)
                                         : std::optional(group_ ? MembershipOutcome::Done
                                                                : MembershipOutcome::NotGroup);
@@ -712,6 +721,38 @@ private:
     core::UserId actor_;
     core::UserId user_;
     bool group_ = false;
+};
+
+class CloseDirect final : public LockedChange {
+public:
+    CloseDirect(const core::RoomId& room, MessageCallback<MembershipChange> done) noexcept
+        : LockedChange(room, std::nullopt, std::nullopt, std::move(done)) {}
+
+private:
+    [[nodiscard]] Step work(std::optional<core::ports::RoomKind> kind) noexcept override {
+        if (!kind) {
+            return refused(MembershipOutcome::Done);
+        }
+        if (*kind != core::ports::RoomKind::DirectChat) {
+            return refused(MembershipOutcome::NotGroup);
+        }
+        return Statement{.sql = message_sql::kCloseDirect,
+                         .params = Params{}.add_uuid(room().uuid())};
+    }
+    [[nodiscard]] std::optional<MembershipChange> decode(const Result& r) noexcept override {
+        try {
+            auto gone = decode_members(r);
+            if (!gone) {
+                return std::nullopt;
+            }
+            std::ranges::sort(*gone, {}, &core::UserId::view);
+            return MembershipChange{.outcome = MembershipOutcome::Done,
+                                    .changed = std::move(*gone),
+                                    .promoted = std::nullopt};
+        } catch (const std::bad_alloc&) {
+            return std::nullopt;
+        }
+    }
 };
 
 class Leave final : public LockedChange {
@@ -1165,6 +1206,11 @@ void PgMessageStore::expel(const core::RoomId& room, const core::UserId& actor,
         return;
     }
     impl_->pool().submit(std::make_unique<Expel>(room, actor, user, std::move(done)));
+}
+
+void PgMessageStore::close_direct(const core::RoomId& room,
+                                  MessageCallback<MembershipChange> done) {
+    impl_->pool().submit(std::make_unique<CloseDirect>(room, std::move(done)));
 }
 
 void PgMessageStore::leave_room(const core::RoomId& room, const core::UserId& user,

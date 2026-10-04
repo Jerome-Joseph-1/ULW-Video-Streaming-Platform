@@ -13,7 +13,7 @@ namespace ulw::test {
 // fails as if the key server were unreachable. "forever.<sub>" expires at the latest instant a
 // token's exp can name (the wall clock's last whole second but one). "viewer.<sub>" verifies
 // but does not carry what the deployment asks of a broadcaster. "service.<sub>" is the
-// operator's backend (ULW_SERVICE_SCOPE, ADR-0097). Dots, not
+// operator's backend (ULW_SERVICE_SCOPE, ADR-0096). Dots, not
 // colons, so the tokens pass the gateway's check that a token looks like a compact JWS.
 class FakeVerifier final : public core::ports::IJwtVerifier {
 public:

@@ -79,6 +79,8 @@ TEST_F(ChatConfigTest, TheServiceApiNeedsItsPortAndAScope) {
     env["ULW_SERVICE_PORT"] = "9102";
     EXPECT_EQ(refused_variable(), "ULW_SERVICE_SCOPE");
     env["ULW_SERVICE_SCOPE"] = "ulw:admin";
+    EXPECT_EQ(refused_variable(), "ULW_SERVICE_CLIENT_ID");
+    env["ULW_SERVICE_CLIENT_ID"] = "ulw-backend";
     config = load();
     ASSERT_TRUE(config) << config.error().variable;
     ASSERT_TRUE(config->service_api);

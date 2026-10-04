@@ -23,7 +23,7 @@ struct Claims {
     // where it asks nothing.
     bool may_broadcast = true;
     // Whether the token is the operator's backend, by the claim the deployment names for it
-    // (ADR-0097); false where it names none.
+    // (ADR-0096); false where it names none.
     bool is_service = false;
 };
 

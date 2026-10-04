@@ -1595,11 +1595,11 @@ TEST_P(ChatClusterTest, PresenceIsSeenOnlyAcrossASharedChatAndARemovalEndsItOnEv
     EXPECT_GE(metric(nodes_[1], "presence_watches_revoked_total"), 1U);
     EXPECT_GE(metric(nodes_[2], "presence_refusals_total{reason=\"not_shared\"}"), 1U);
 
-    // The operator's backend lists dave in the group through another node's service API: from
-    // then on he may watch her.
-    const auto added =
-        ulw::test::service_post(nodes_[0].service_port, "add_members",
-                                R"({"room":")" + room_ + R"(","users":["dave"]})", mint_service());
+    // The operator's backend makes a group of alice and dave through another node's service API:
+    // from then on he may watch her, though he was refused before.
+    const auto added = ulw::test::service_post(
+        nodes_[0].service_port, "create_group",
+        R"({"creator":"alice","id":"pair","users":["dave"]})", mint_service());
     ASSERT_EQ(added.status, 200) << added.body;
     ASSERT_TRUE(dave->wait_for([](const Seen& s) {
         return s.type == "member" && s.user == "dave" && s.change == "added";
@@ -1665,11 +1665,29 @@ TEST_P(ChatClusterTest, TheServiceApiListsAndUnlistsThroughAnyNodeAndEveryNodeTe
     EXPECT_EQ(rooms.status, 200);
     EXPECT_NE(rooms.body.find(room), std::string::npos) << rooms.body;
     EXPECT_EQ(rooms.body.find(team), std::string::npos) << rooms.body;
+
+    // Alice watches dave, whom she shares the direct chat with; the backend then takes the chat
+    // apart (an unfriend): both are out of the room at once, and her watch is dropped, on the
+    // nodes they are on, whichever node the backend asked.
+    ASSERT_TRUE(alice->send(R"({"type":"watch","user":"dave"})"));
+    ASSERT_TRUE(
+        alice->wait_for([](const Seen& s) { return s.type == "watching" && s.user == "dave"; }));
+    const auto closed = ulw::test::service_post(nodes_[1].service_port, "close_direct",
+                                                R"({"room":")" + room + R"("})", mint_service());
+    ASSERT_EQ(closed.status, 200) << closed.body;
+    EXPECT_NE(closed.body.find(R"("removed":["alice","dave"])"), std::string::npos) << closed.body;
+    ASSERT_TRUE(dave->wait_for([&](const Seen& s) {
+        return s.type == "error" && s.reason == "not_member" && s.room == room;
+    }));
+    ASSERT_TRUE(alice->wait_for([](const Seen& s) {
+        return s.type == "error" && s.reason == "not_shared" && s.user == "dave";
+    }));
+    EXPECT_EQ(join_again(*dave, room), "not_member");
     std::uint64_t changes = 0;
     for (const Node& n : nodes_) {
         changes += metric(n, "service_api_answers_total{result=\"changed\"}");
     }
-    EXPECT_EQ(changes, 3U);
+    EXPECT_EQ(changes, 4U);
 }
 
 TEST_P(ChatClusterTest, ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsToOneRoom) {

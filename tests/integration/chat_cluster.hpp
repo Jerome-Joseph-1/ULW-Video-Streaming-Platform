@@ -281,6 +281,8 @@ struct Node {
 // tokens carry, as a client-credentials grant gives them.
 inline constexpr std::string_view kServiceScopeSetting = "ulw:admin";
 inline constexpr std::string_view kServiceScope = "openid ulw:admin";
+// The backend's client (ULW_SERVICE_CLIENT_ID), named in its tokens' azp.
+inline constexpr std::string_view kServiceClient = "ulw-backend";
 
 // A POST to a chat node's service API, closing the connection after the answer.
 inline PlainResponse service_post(std::uint16_t port, std::string_view op, std::string_view body,
@@ -389,6 +391,7 @@ protected:
             // The suite's users manage their own lists, as a demo's do; the operator's backend
             // has its API beside them (ADR-0096).
             "ULW_CHAT_SELF_SERVICE=on", "ULW_SERVICE_SCOPE=" + std::string(kServiceScopeSetting),
+            "ULW_SERVICE_CLIENT_ID=" + std::string(kServiceClient),
             "ULW_REACTOR=" +
                 std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),
             // Some runs start tests as root; this suite is not about that.
@@ -448,7 +451,8 @@ protected:
                     .subject = "service-account-backend",
                     .email = {},
                     .ttl = std::chrono::seconds(600),
-                    .scope = std::string(kServiceScope)},
+                    .scope = std::string(kServiceScope),
+                    .client = std::string(kServiceClient)},
                    clock_.wall_now())
             .value_or("");
     }

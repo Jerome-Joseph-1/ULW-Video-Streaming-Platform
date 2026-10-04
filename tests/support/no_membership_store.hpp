@@ -34,6 +34,10 @@ public:
                core::ports::MessageCallback<core::ports::MembershipChange> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
+    void close_direct(const core::RoomId& /*room*/,
+                      core::ports::MessageCallback<core::ports::MembershipChange> done) override {
+        done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
     void leave_room(const core::RoomId& /*room*/, const core::UserId& /*user*/,
                     core::ports::MessageCallback<core::ports::MembershipChange> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));

@@ -175,6 +175,10 @@ std::expected<std::string, DevKeyError> DevKey::mint(const MintRequest& request,
         payload += R"(,"scope":)";
         core::json::append_string(payload, request.scope);
     }
+    if (!request.client.empty()) {
+        payload += R"(,"azp":)";
+        core::json::append_string(payload, request.client);
+    }
     payload += R"(,"iat":)";
     payload += std::to_string(iat);
     payload += R"(,"exp":)";

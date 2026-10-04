@@ -255,6 +255,11 @@ std::expected<void, ConfigError> load_service(const EnvLookup& env, Config& conf
     if (config.service_value.empty()) {
         return error("ULW_SERVICE_SCOPE", "not set, but ULW_SERVICE_PORT is");
     }
+    // A scope alone admits whichever client the provider grants it to; the port admits the
+    // backend's own client only.
+    if (config.service_client_id.empty()) {
+        return error("ULW_SERVICE_CLIENT_ID", "not set, but ULW_SERVICE_PORT is");
+    }
     config.service_api = ServiceApiConfig{.port = *port};
     return {};
 }
