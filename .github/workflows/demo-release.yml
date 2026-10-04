@@ -3,8 +3,9 @@ name: demo-release
 # The laptop demo as published images: demo/release/compose.yaml runs with nothing but Docker
 # (demo/README.md, "Pull and run"). Every image it names is built here from one commit, the stack
 # is brought up from that compose file exactly as the owner will (local images, no build, no
-# checkout mounts), demo/smoke drives every tab, and only when it reports 7 passed are the images
-# pushed to ghcr.io/jerome-joseph-1 as demo-<sha12> and demo. Never main or latest.
+# checkout mounts), demo/smoke drives every tab, and only when it reports 10 passed (smoke.spec
+# and calls.spec) are the images pushed to ghcr.io/jerome-joseph-1 as demo-<sha12> and demo.
+# Never main or latest.
 #
 # The images are tagged with the commit they are built from: the last commit that changed
 # anything but demo/release/ and demo/README.md, so that pinning that tag in compose.yaml (its
@@ -129,7 +130,7 @@ jobs:
         run: |
           set -o pipefail
           demo/smoke/run.sh 2>&1 | tee "$RUNNER_TEMP/smoke.log"
-          grep -Eq '^ *7 passed' "$RUNNER_TEMP/smoke.log" || { echo "::error::smoke did not report 7 passed"; exit 1; }
+          grep -Eq '^ *10 passed' "$RUNNER_TEMP/smoke.log" || { echo "::error::smoke did not report 10 passed"; exit 1; }
       - name: Stack logs
         if: failure()
         working-directory: ${{ runner.temp }}/owner
