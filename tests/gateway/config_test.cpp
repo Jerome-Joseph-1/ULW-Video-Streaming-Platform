@@ -983,7 +983,7 @@ std::map<std::string, std::string> service_env_shipped(const std::string& config
         }
         const auto value = line.find("value: ");
         if (!name.empty() && value != std::string::npos) {
-            std::string v = line.substr(value + 7);
+            const std::string v = line.substr(value + 7);
             out[name] = v == "\"\"" ? "" : v;
         }
         name.clear();
@@ -1020,8 +1020,14 @@ TEST_F(ConfigTest, TheDefaultClaimWithoutAScopeIsOff) {
     const auto config = load();
     ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
     EXPECT_TRUE(config->service_value.empty());
+    // A client id alone changes nothing: no scope, no service.
     env["ULW_SERVICE_CLIENT_ID"] = "backend";
+    const auto unscoped = load();
+    ASSERT_TRUE(unscoped) << unscoped.error().variable << ": " << unscoped.error().reason;
+    EXPECT_TRUE(unscoped->service_value.empty());
+    env["ULW_SERVICE_CLIENT_ID"] = "has space";
     EXPECT_EQ(refused_variable(), "ULW_SERVICE_CLIENT_ID");
+    env["ULW_SERVICE_CLIENT_ID"] = "backend";
     env["ULW_SERVICE_SCOPE"] = "ulw:admin";
     const auto bound = load();
     ASSERT_TRUE(bound) << bound.error().variable << ": " << bound.error().reason;

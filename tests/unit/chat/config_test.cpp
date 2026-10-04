@@ -49,6 +49,72 @@ TEST_F(ChatConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_TRUE(config->allowed_origins.empty());
 }
 
+// ADR-0096: users manage member lists themselves only where the operator says so.
+TEST_F(ChatConfigTest, SelfServiceIsOffUnlessSetOnAndTakesOnlyOnOrOff) {
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->self_service);
+    env["ULW_CHAT_SELF_SERVICE"] = "on";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_TRUE(config->self_service);
+    env["ULW_CHAT_SELF_SERVICE"] = "off";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->self_service);
+    for (const char* bad : {"1", "true", "ON", "yes"}) {
+        env["ULW_CHAT_SELF_SERVICE"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_CHAT_SELF_SERVICE") << bad;
+    }
+}
+
+// The service claim is read as the gateway reads it (infra/auth/service_claim.hpp); the port
+// needs a scope to admit anyone.
+TEST_F(ChatConfigTest, TheServiceApiNeedsItsPortAndAScope) {
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->service_api);
+    EXPECT_EQ(config->service_claim, "scope");
+    EXPECT_EQ(config->service_value, "");
+    env["ULW_SERVICE_PORT"] = "9102";
+    EXPECT_EQ(refused_variable(), "ULW_SERVICE_SCOPE");
+    env["ULW_SERVICE_SCOPE"] = "ulw:admin";
+    config = load();
+    ASSERT_TRUE(config) << config.error().variable;
+    ASSERT_TRUE(config->service_api);
+    EXPECT_EQ(config->service_api->port, 9102);
+    EXPECT_EQ(config->service_claim, "scope");
+    EXPECT_EQ(config->service_value, "ulw:admin");
+    env["ULW_SERVICE_CLAIM"] = "roles";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->service_claim, "roles");
+    for (const char* bad : {"0", "65536", "port", "9101", "9201"}) {
+        env["ULW_SERVICE_PORT"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_SERVICE_PORT") << bad;
+    }
+    // A scope without a port is no API, but still the shared setting.
+    env.erase("ULW_SERVICE_PORT");
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->service_api);
+    env["ULW_SERVICE_SCOPE"] = "ulw admin";
+    EXPECT_EQ(refused_variable(), "ULW_SERVICE_SCOPE");
+    env["ULW_SERVICE_SCOPE"] = "ulw:admin";
+    env["ULW_SERVICE_CLIENT_ID"] = "ulw-backend";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->service_client_id, "ulw-backend");
+    env.erase("ULW_SERVICE_SCOPE");
+    EXPECT_EQ(refused_variable(), "ULW_SERVICE_CLAIM") << "a claim other than scope, no scope";
+    // What every shipped config.env carries until a scope is set: off, and chat starts.
+    env["ULW_SERVICE_CLAIM"] = "scope";
+    env["ULW_SERVICE_SCOPE"] = "";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_TRUE(config->service_value.empty());
+}
+
 TEST_F(ChatConfigTest, CallsAreOffUnlessTheLiveKitKeyIsSetAndThenNeedAllFour) {
     // The URLs alone, as an overlay may set them where no LiveKit secret exists, turn nothing on.
     env["LIVEKIT_API_URL"] = "http://livekit:7880";

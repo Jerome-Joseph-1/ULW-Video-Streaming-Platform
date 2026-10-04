@@ -141,6 +141,8 @@ export async function startChat({ origin, nodes: count = 2, env: extra = {} }) {
       ULW_DEV_MODE: '1',
       JWT_ISSUER: issuer,
       ULW_ALLOWED_ORIGINS: origin,
+      // The calls open their direct chats themselves (open_direct), as a demo does.
+      ULW_CHAT_SELF_SERVICE: 'on',
       ...livekit,
       ...rootAllowed,
       ...extra,

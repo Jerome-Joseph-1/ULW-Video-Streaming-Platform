@@ -141,20 +141,28 @@ list never said no: join again.
 
 ### Changing member lists
 
-<!-- apps/chat/src/membership.cpp, apps/chat/src/named_rooms.cpp, apps/chat/src/envelope.cpp, infra/postgres/src/message_sql.hpp (kOpenDirect, kCreateGroup, kAddMembers, kExpel, kLeave, kRoomsFirst, kRoster), migrations/0015_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
+<!-- apps/chat/src/membership.cpp, apps/chat/src/named_rooms.cpp, apps/chat/src/envelope.cpp, apps/chat/src/config.cpp (ULW_CHAT_SELF_SERVICE), infra/postgres/src/message_sql.hpp (kOpenDirect, kCreateGroup, kAddMembers, kExpel, kLeave, kRoomsFirst, kRoster), migrations/0015_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
 
-A signed-in user opens direct chats, creates group chats and manages them on the same WebSocket.
-None of these needs a `join` first; join the room afterwards to send and read it. Every answer
-goes to the connection that asked; what changed reaches the users concerned on their own
-sockets, on every node, as an unasked `member` frame.
+A signed-in user manages their direct and group chats on the same WebSocket. None of these
+commands needs a `join` first; join the room afterwards to send and read it. Every answer goes to
+the connection that asked; what changed reaches the users concerned on their own sockets, on
+every node, as an unasked `member` frame.
+
+**Who may start a conversation is the operator's choice** (`ULW_CHAT_SELF_SERVICE`,
+[operator-contract.md](operator-contract.md)). Off, the default, users cannot reach someone just
+by knowing their id: `open_direct`, `create_group` and `add_members` are answered `not_allowed`,
+and the embedding product lists people through [the service API](#the-service-api) once its own
+request-and-accept step allows it. `leave`, an admin's `remove_member`, `rooms` and `members` work
+either way. On, users do all of it themselves, as the commands below describe; that suits a demo
+or a closed community, where anyone signed in may reach anyone.
 
 Client to server:
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `open_direct` | `user` | The direct chat of you and `user`. The first time, it lists you both; after that it is the same room, whichever of you asks, and changes nothing. |
-| `create_group` | `id`, optional `users` (at most 50) | A group chat with you as its admin and `users` as its members. `id` is a request id, as a message's (1 to 64 of `A-Z a-z 0-9 _ -`): the same `id` again, after `unavailable` say, names the same room and lists nobody more. Use a new `id` per group. |
-| `add_members` | `room`, `users` (1 to 50) | Lists `users` in a group chat you are an admin of. Those listed already are left as they are. |
+| `open_direct` | `user` | The direct chat of you and `user`. The first time, it lists you both; after that it is the same room, whichever of you asks, and changes nothing. With self-service off: `not_allowed`. |
+| `create_group` | `id`, optional `users` (at most 50) | A group chat with you as its admin and `users` as its members. `id` is a request id, as a message's (1 to 64 of `A-Z a-z 0-9 _ -`): the same `id` again, after `unavailable` say, names the same room and lists nobody more. Use a new `id` per group. With self-service off: `not_allowed`. |
+| `add_members` | `room`, `users` (1 to 50) | Lists `users` in a group chat you are an admin of. Those listed already are left as they are. With self-service off: `not_allowed`. |
 | `remove_member` | `room`, `user` | Takes `user` off a group chat you are an admin of. Naming yourself is `leave`. |
 | `leave` | `room` | Takes you off a group chat's list. When its last admin leaves, the remaining member whose id sorts first (bytewise) becomes its admin, and `left` names them. Your sockets that joined the room leave it as for any removal (`error` `not_member`, then `member`), before or after the answer. |
 | `rooms` | optional `after` (a room id), `limit` (1 to 100, default 50) | The rooms you are listed in, in room id order (bytewise, not by activity); the next page is `after` the last one. |
@@ -186,12 +194,18 @@ As `user-1`:
 ```
 
 - **Rooms are named by what they are for.** A direct chat's room id is derived from its two user
-  ids, a group's from its creator and the `create_group` `id`: version 8 UUIDs whose first byte
-  is `03` (direct) or `04` (group), then the first 15 bytes of SHA-256 over `ulw direct chat`,
-  a newline, the two user ids in bytewise order with a newline between them (for a group:
-  `ulw group chat`, a newline, the creator's id, a newline, the request's `id`), with the version
-  and variant bits set. Alice and Bob's room (`alice`, `bob`) is
-  `032768cd-63d3-8415-bc35-024bab6c3653`. Use the room the answer names rather than computing it.
+  ids, a group's from its creator and the `create_group` `id`. Take SHA-256 over the name: for a
+  direct chat, `ulw direct chat`, a newline, then the two user ids in bytewise order with a
+  newline between them (no newline at the end); for a group, `ulw group chat`, a newline, the
+  creator's id, a newline and the request's `id`. Keep the digest's first 16 bytes, replace the
+  first of them with the tag (`03` direct, `04` group), then set the version and variant bits as
+  RFC 9562 does for version 8: the high four bits of byte 6 become `1000`, the high two bits of
+  byte 8 become `10`. So the id is the tag followed by bytes 1 to 15 of the digest, not by its
+  first 15 (unlike a stream's chat, below). Alice and Bob's room (`alice`, `bob`): the digest
+  begins `952768cd63d33415bc35024bab6c3653`, and the room is
+  `032768cd-63d3-8415-bc35-024bab6c3653`. The same ids name the same room whether a user's
+  command or [the service API](#the-service-api) lists it. Use the room the answer names rather
+  than computing it.
   A `join` of such a room asks for its kind whatever it says, and is `bad_room` if `"kind"`
   names the other.
 - **Who you name.** A user id is the identity provider's subject for that person
@@ -266,6 +280,7 @@ As `user-1`:
 | `bad_device` | A call's `device` is not a canonical lowercase UUID | Fix the client |
 | `bad_user` | A `user`, an entry of `users` or a `members` `after` is not a user id | Fix the client |
 | `self` | `open_direct` with your own user id | Nothing to open |
+| `not_allowed` | `open_direct`, `create_group` or `add_members` where the operator turned self-service off (`ULW_CHAT_SELF_SERVICE`, the default) | Do not retry; ask the product, whose backend lists people ([The service API](#the-service-api)) |
 | `not_admin` | `add_members` or `remove_member` by a member who is not the group's admin | Do not retry |
 | `not_group` | `add_members`, `remove_member` or `leave` of a direct chat (or a stream's live chat) | Do not retry |
 | `too_many_members` | The group would hold more than 100 members | Remove members first |
@@ -317,12 +332,22 @@ As `user-1`:
 
 ## Presence
 
-<!-- apps/chat/src/presence.hpp (PresenceLimits), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), docs/adr/0056-presence-over-the-room-plane.md -->
+<!-- apps/chat/src/presence.hpp (PresenceLimits, IPresenceAccess), apps/chat/src/presence.cpp (watch, checked, recheck, on_member_removed), apps/chat/src/envelope.hpp, apps/chat/src/session.cpp (command), infra/postgres/src/message_sql.hpp (kSharedWith), docs/adr/0056-presence-over-the-room-plane.md, docs/adr/0096-member-lists-changed-by-their-users.md -->
 
 A client can watch other users and hear when they come online and go offline. A user is online
 while they have at least one open socket to any chat node, and for a grace of 10 s after their
 last one closes: a page reload or a reconnect, even through another node, within the grace is
 never reported. Nothing needs to be joined first.
+
+**Only someone who shares a chat with the user may watch them** (ADR-0096): a direct or a group
+chat both are listed in now. A stream's live chat lists nobody and shares nothing. The node the
+watcher is connected to asks the database before it answers, so a `watch` of someone you share no
+chat with is refused with `not_shared`, and nothing of that user's presence reaches you. When
+someone is taken off a list (by a command, the service API or an operator), every node holds back,
+at once, every watch involving them, watching or watched, and asks again; a watch that no longer
+rests on a shared chat is dropped, and its connection is sent an unasked `error` `not_shared`
+naming the user. A watch still shared carries on, with a `presence` for anything that changed
+while it was held back. Adding someone to a chat does not start a watch: watch again.
 
 Client to server:
 
@@ -337,7 +362,7 @@ Server to client:
 |---|---|---|
 | `watching` | `user`, `status` (`online` or `offline`) | The answer to `watch`: what the node knows now. |
 | `presence` | `user`, `status` (`online` or `offline`) | The user's status changed. Sent once per change, to every connection watching them. |
-| `error` | `reason`, `user` | The watch was refused (below). |
+| `error` | `reason`, `user` | The watch was refused (below), or, unasked, a watch was dropped: `not_shared` once you no longer share a chat with `user`, `unavailable` when that could not be checked after a list changed. |
 
 ```json
 {"type":"watch","user":"user-42"}
@@ -368,12 +393,94 @@ Errors for `watch` and `unwatch`:
 | `malformed` | Missing `user`, or another field | Fix the client |
 | `bad_user` | `user` is not a user id | Fix the client |
 | `watching_self` | `user` is the connection's own user | Nothing to watch: the connection is online |
-| `too_many_watches` | This connection already watches 128 users | Unwatch some first |
+| `not_shared` | You share no direct or group chat with `user`; unasked, you no longer do | Do not retry until you share one |
+| `unavailable` | The database could not say whether you share a chat; unasked, it could not after a list changed | Watch again |
+| `too_many_watches` | This connection already watches 128 users, those still being checked included | Unwatch some first |
 | `busy` | This node watches as many users as it takes, or this user started watching users no connection on this node was watching (unwatching and watching again counts each time) faster than 128 at once and then 1 a second | Back off and retry |
 
 Room ids of UUID version 8 (the third group starts with `8`) whose first byte is `02` (the id
 starts with `02`) are reserved for presence: `join`, `send` or `history` naming one is refused
 with `bad_room`. Presence events are never stored.
 
-Anyone signed in may watch anyone: there is no check of who may see whose presence yet. That is
-an open item before production ([ADR-0056](../adr/0056-presence-over-the-room-plane.md)).
+A `watch` costs one read of the database, by index, on the watcher's node; a removal costs one
+read per connection on each node whose watches involve the user removed. Watching the same user
+again while the first is checked is answered once per `watch` (16 at most) when the check
+comes back.
+
+## The service API
+
+<!-- apps/chat/src/service_api.hpp, apps/chat/src/service_api.cpp, apps/chat/src/config.cpp (ULW_SERVICE_PORT), infra/auth/src/service_claim.cpp (read_service_claim, claim_holds), infra/auth/src/claims.cpp (is_service), docs/adr/0096-member-lists-changed-by-their-users.md -->
+
+The embedding product's backend lists and unlists people itself, after its own request and
+accept, rather than letting users do it (`ULW_CHAT_SELF_SERVICE=off`, the default). Chat serves it
+plain HTTP/1.1 on a port of its own, `ULW_SERVICE_PORT`, on every node: any node will do, and
+every node tells the users concerned of a change, as for their own commands. The port is not
+routed from the internet; reach it from the backend's network only
+([operator-contract.md](operator-contract.md), RUNBOOK step 10).
+
+**Authentication.** `Authorization: Bearer <token>`, a token from the same identity provider as
+users', verified the same way ([auth.md](auth.md)): signature, `iss`, `aud`, `exp`. It must also
+be the service's by `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE` (its `scope` holding `ulw:admin`,
+say), the same settings the gateway reads, which the backend gets
+from the provider's client-credentials grant ([auth.md](auth.md#service-tokens)). No cookie is
+read, and there is no shared secret. A missing or invalid token is `401` with
+`WWW-Authenticate: Bearer`; a valid token without the claim (a user's) is `403`; a key set that
+cannot be fetched is `503`.
+
+**Requests.** `POST /service/v1/<operation>` with a JSON object body, at most 16 KiB; unknown
+fields are refused. Answers are JSON, `Content-Type: application/json`. Connections are kept
+alive; requests on one connection are answered in order, one at a time.
+
+| Operation | Body | Answer (`200`) |
+|---|---|---|
+| `open_direct` | `users`: exactly two user ids | `{"type":"direct","room":..,"users":[as given],"added":[who it listed]}`. The pair's direct chat, the room `open_direct` names for either of them; the first time it lists both, after that it changes nothing (`added` empty). |
+| `create_group` | `creator`, `id` (a request id: 1 to 64 of `A-Z a-z 0-9 _ -`), optional `users` (at most 50) | `{"type":"group","room":..,"id":..,"added":[...]}`. The group the creator's own `create_group` with that `id` names, the creator its admin; repeated with the same `id`, the same room, listing nobody more. |
+| `add_members` | `room`, `users` (1 to 50) | `{"type":"added","room":..,"users":[who it listed]}`. As the group's admin would, without being on the list; those listed already are left as they are. |
+| `remove_member` | `room`, `user` | `{"type":"removed","room":..,"user":..}`, with `"promoted":<user>` when the user was the group's last admin and the member whose id sorts first became admin, as for a `leave`. The user's sockets are out of the room at once, on every node. |
+| `rooms` | `user`, optional `after` (a room id), `limit` (1 to 100, default 50) | `{"type":"rooms","rooms":[{"room","kind","role","peer"}],"more":..}`, as the socket's `rooms` answers that user. |
+| `members` | `room`, optional `after` (a user id), `limit` (1 to 100, default 50) | `{"type":"members","room":..,"members":[{"user","role"}],"more":..}` for any room; a room nobody is listed in answers no members. |
+
+Changes go through exactly the database statements users' commands do, under the room's lock:
+the same kinds (a direct chat's pair never changes), the 100-member cap, the 1000-room cap on
+`open_direct`'s first user and `create_group`'s creator, the same history rule for a reused group
+`id`, and the same `member` frames to every socket concerned. Calls and joins still need
+membership; the API changes who is listed, nothing else.
+
+```http
+POST /service/v1/open_direct HTTP/1.1
+Host: chat-service.ulw.svc
+Authorization: Bearer eyJhbGciOi...
+Content-Type: application/json
+Content-Length: 30
+
+{"users":["user-1","user-42"]}
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"type":"direct","room":"03db1b2d-a8da-8387-a668-3abc70b6953e","users":["user-1","user-42"],"added":["user-1","user-42"]}
+```
+
+Errors are `{"type":"error","reason":..}`:
+
+| Status | `reason` | When |
+|---|---|---|
+| `400` | `not_json`, `malformed`, `bad_room`, `bad_user`, `bad_id`, `self` | The body is not one of the operation's: not JSON, a missing, unknown or mistyped field, a list too long, a room that is not a canonical lowercase UUID (or is a presence room), a user or request id out of form, `open_direct` naming one user twice |
+| `401` | `unauthorized` | No bearer token, or one that fails verification |
+| `403` | `forbidden` | A valid token without the service claim |
+| `404` | `not_found`, `no_room`, `not_member` | Another path; `add_members` of a room nothing recorded; `remove_member` of a user not listed (nothing changed: a removal repeated after a lost answer gets this) |
+| `405` | `method_not_allowed` | Not `POST` (`Allow: POST`) |
+| `409` | `not_group`, `too_many_members`, `room_limit`, `gone`, `not_member` | As the socket's commands: a direct chat's pair, the 100-member cap, the creator or first user in 1000 rooms, a group `id` whose group everyone left and that holds messages, a direct chat that lists others than the pair or a repeated create whose creator left |
+| `413` | `too_large` | A body over 16 KiB |
+| `429` | `rate_limited`, with `retry_after_ms` and `Retry-After` | Past the node's rate (below) |
+| `503` | `unavailable`, with `Retry-After: 1` | The database or the key set could not be reached; retry, the same request again (changes are idempotent) |
+
+A refusal at the head (`404`, `405`, `413`, `429`, a request that is not HTTP) closes the
+connection after the answer; the others keep it.
+
+**Limits.** Per node: 100 requests at once, then 50 a second, from all connections together; 32
+connections open at once (more are closed at accept); 30 s idle, 10 s to send a whole request.
+Three nodes take 150 changes a second in all, each a transaction holding one room's row for
+milliseconds, far past a product's sign-ups and invitations.

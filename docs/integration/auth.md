@@ -140,8 +140,8 @@ is refused `403`), and is the service's when its claim `ULW_SERVICE_CLAIM` (defa
 - an array with a string that does either (`"roles": ["ulw:admin"]`);
 - `true`, when `ULW_SERVICE_SCOPE` is `true`.
 
-and, when `ULW_SERVICE_CLIENT_ID` is set, its `azp` (or, for a token without `azp`, its
-`client_id`, RFC 9068) is that client.
+and, when `ULW_SERVICE_CLIENT_ID` is set, its `azp` (OpenID Connect) or its `client_id` (RFC 9068)
+names that client.
 
 **Set `ULW_SERVICE_CLIENT_ID`** to the backend's client id. Choose a scope only the backend's
 client is ever granted, too: an identity provider that lets a signed-in user ask for any scope
@@ -164,7 +164,7 @@ are what every ULW service that takes service calls uses.
 | `ULW_AUTH_COOKIE` | Optional, default `auth_token`. |
 | `ULW_SERVICE_CLAIM` | Optional, default `scope`: the claim that marks the operator's backend ([Service tokens](#service-tokens)). 1 to 64 of `A-Z a-z 0-9 _ . : / -`, and not `iss`, `aud`, `exp`, `nbf`, `iat` or `jti`. Without `ULW_SERVICE_SCOPE`, `scope` (or unset) means service calls are off; any other name stops the process at startup. |
 | `ULW_SERVICE_SCOPE` | Optional, default none: the value that claim must hold, such as `ulw:admin`. 1 to 128 printable ASCII characters, no spaces. Unset: no token is a service's, and the service API answers `403` to all. |
-| `ULW_SERVICE_CLIENT_ID` | Optional, recommended: the backend's client id; only tokens whose `azp` (or, without one, `client_id`) is this are the service's. 1 to 128 printable ASCII characters, no spaces. Set without `ULW_SERVICE_SCOPE`, it stops the process at startup. |
+| `ULW_SERVICE_CLIENT_ID` | Optional, recommended: the backend's client id; only tokens whose `azp` or `client_id` is this are the service's. 1 to 128 printable ASCII characters, no spaces. Without `ULW_SERVICE_SCOPE` it changes nothing: service calls are off. |
 | `ULW_JWKS_MAX_STALE_HOURS` | Optional, 1 to 168, default 24: how long keys stay trusted while every refetch fails (below). |
 | `ULW_DEV_JWKS_FILE` | Development only: a local Ed25519 key set instead of `JWKS_URL`. Setting both is a startup error. It is refused (exit 2) unless `ULW_DEV_MODE=1`, and refused regardless inside a Kubernetes pod (`KUBERNETES_SERVICE_HOST` set, as the kubelet does in every container), so a key set left in a real deployment's configuration stops the process instead of being trusted. The gateway and chat server both apply this. The first log line prints `keys=DEVELOPMENT <file>` so it cannot go unnoticed. |
 | `ULW_DEV_MODE` | `0` or `1`, default `0`. `1` says this is a development run, which development-only settings such as `ULW_DEV_JWKS_FILE` need. |
@@ -293,3 +293,11 @@ Authentication happens after routing and after the per-route header checks, so a
 answers `404`, a wrong method `405`, and a malformed `Upload-Offset` `400`, whatever the token.
 
 `/api/v1/healthz`, `/api/v1/readyz` and `/metrics` need no token.
+
+Chat's service API ([chat.md](chat.md#the-service-api), on chat's own `ULW_SERVICE_PORT`) takes
+service tokens as [Service tokens](#service-tokens) describes, read from the same two settings,
+and only from `Authorization: Bearer`, never the cookie. It answers `401` (with
+`WWW-Authenticate: Bearer`) for a missing or failing token, `403` for a valid token that is not
+the service's, and `503` when the key set cannot be fetched, each with a JSON body naming the
+reason. Setting up the backend's client in an identity provider, step by step:
+deploy/kubernetes/RUNBOOK.md, step 10.

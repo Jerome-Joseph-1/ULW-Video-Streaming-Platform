@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -163,6 +164,71 @@ private:
     std::vector<Dropping> dropping_;
 };
 
+// Who shares a direct or group chat with whom, as the message store would answer it: everyone
+// with everyone unless `everyone` is cleared, then the pairs in `pairs`. Each answer is read when
+// asked, as the store reads it, and waits for settle(), as the store's come on a later turn of
+// the loop; while `holding`, they wait for release().
+class Shares final : public chat::IPresenceAccess {
+public:
+    void shared_with(const core::UserId& user, std::vector<core::UserId> others,
+                     core::ports::MessageCallback<std::vector<core::UserId>> done) override {
+        ++asked;
+        core::ports::MessageResult<std::vector<core::UserId>> answer =
+            std::unexpected(core::ports::MessageStoreError::Unavailable);
+        if (!failing) {
+            std::vector<core::UserId> out;
+            for (const core::UserId& other : others) {
+                if (other != user && shared(user.view(), other.view())) {
+                    out.push_back(other);
+                }
+            }
+            answer = std::move(out);
+        }
+        pending_.push_back({.answer = std::move(answer), .done = std::move(done)});
+    }
+
+    [[nodiscard]] bool shared(std::string_view a, std::string_view b) const {
+        return everyone ||
+               pairs.contains({std::string(std::min(a, b)), std::string(std::max(a, b))});
+    }
+    void share(std::string_view a, std::string_view b) {
+        pairs.emplace(std::string(std::min(a, b)), std::string(std::max(a, b)));
+    }
+    void unshare(std::string_view a, std::string_view b) {
+        pairs.erase({std::string(std::min(a, b)), std::string(std::max(a, b))});
+    }
+
+    void settle() {
+        if (!holding) {
+            release();
+        }
+    }
+
+    // Answers everything asked so far.
+    void release() {
+        std::vector<Pending> now = std::move(pending_);
+        pending_.clear();
+        for (Pending& p : now) {
+            p.done(std::move(p.answer));
+        }
+    }
+
+    [[nodiscard]] std::size_t waiting() const noexcept { return pending_.size(); }
+
+    bool everyone = true;
+    bool holding = false;
+    bool failing = false;
+    std::size_t asked = 0;
+    std::set<std::pair<std::string, std::string>> pairs;
+
+private:
+    struct Pending {
+        core::ports::MessageResult<std::vector<core::UserId>> answer;
+        core::ports::MessageCallback<std::vector<core::UserId>> done;
+    };
+    std::vector<Pending> pending_;
+};
+
 struct Event {
     std::string type;
     std::string user;
@@ -221,7 +287,7 @@ protected:
     }
 
     void add_node(std::string_view name, chat::PresenceLimits limits = {}) {
-        nodes_.push_back(std::make_unique<chat::Presence>(plane_, *reactor_, clock_,
+        nodes_.push_back(std::make_unique<chat::Presence>(plane_, shares_, *reactor_, clock_,
                                                           *core::NodeId::parse(name), limits));
     }
 
@@ -232,6 +298,7 @@ protected:
         for (int i = 0; i < 16; ++i) {
             reactor_->run_once(Millis{0});
             plane_.settle();
+            shares_.settle();
         }
     }
 
@@ -262,6 +329,7 @@ protected:
     ulw::test::FakeClock clock_;
     std::unique_ptr<net::IReactor> reactor_;
     Plane plane_;
+    Shares shares_;
     std::vector<std::unique_ptr<chat::Presence>> nodes_;
 };
 
@@ -406,6 +474,7 @@ TEST_F(PresenceTest, AWatcherArrivingAfterTheUserConnectedHearsThatTheyAreOnline
     // A second watcher on the same node is answered from what the node knows.
     Watcher carol;
     node(1).watch(connect(1, carol, "carol"), user("alice"));
+    run();
     EXPECT_EQ(carol.take(), std::vector{watching("alice", "online")});
 }
 
@@ -451,6 +520,7 @@ TEST_F(PresenceTest, ANodeThatStopsRenewingIsForgottenAfterTheExpiryAndOnlyThen)
 TEST_F(PresenceTest, AFailedAnnouncementIsSentAgainAndStillReportedOnce) {
     Watcher bob;
     node(1).watch(connect(1, bob, "bob"), user("alice"));
+    run();
     ASSERT_EQ(bob.take(), std::vector{watching("alice", "offline")});
     plane_.failing = 2;
     Watcher alice;
@@ -495,6 +565,7 @@ TEST_F(PresenceTest, WatchesPastTheLimitsAreRefusedNamingTheUser) {
     Watcher carol;
     const auto c = connect(0, carol, "carol");
     node(0).watch(c, user("u1"));
+    run();
     EXPECT_EQ(carol.take(), std::vector{watching("u1", "offline")})
         << "a room already here is free";
     node(0).watch(c, user("u9"));
@@ -599,6 +670,7 @@ TEST_F(PresenceTest, AWatcherWhoseAcksAreLostIsProbedAgainAndNeverSeesAFalseOffl
     const core::RoomId room = chat::presence_room(user("alice"));
     Watcher bob;
     node(1).watch(connect(1, bob, "bob"), user("alice"));
+    run();
     Watcher alice;
     connect(0, alice, "alice");
     ASSERT_EQ(bob.take(), (std::vector{watching("alice", "offline"), presence("alice", "online")}));
@@ -609,6 +681,213 @@ TEST_F(PresenceTest, AWatcherWhoseAcksAreLostIsProbedAgainAndNeverSeesAFalseOffl
     advance(Millis{900'000});
     EXPECT_TRUE(bob.got.empty());
     EXPECT_GE(node(0).counters().gaps, 1U);
+}
+
+// Who may see whose presence (ADR-0096): those who share a direct or group chat, now.
+
+Event refused(std::string_view who, std::string_view reason) {
+    return {.type = "error", .user = std::string(who), .status = {}, .reason = std::string(reason)};
+}
+
+// Any group chat's id: the removals below name the room they came from, which presence does not
+// look at beyond its kind.
+const core::RoomId kGroup = *core::RoomId::parse("04ff0817-879c-8a63-b5a8-9ebacad5d927");
+
+TEST_F(PresenceTest, AWatchOfSomeoneWhoSharesNoChatIsRefusedAndCostsNoEvent) {
+    shares_.everyone = false;
+    Watcher alice;
+    connect(0, alice, "alice");
+    Watcher bob;
+    const auto b = connect(1, bob, "bob");
+    node(1).watch(b, user("alice"));
+    EXPECT_TRUE(bob.got.empty()) << "nothing before the store answers";
+    run();
+    EXPECT_EQ(bob.take(), std::vector{refused("alice", "not_shared")});
+    EXPECT_EQ(sent(), 0U) << "no hello: the watch was never let in";
+    EXPECT_EQ(plane_.members(chat::presence_room(user("alice"))), 1U) << "alice's own node only";
+    EXPECT_EQ(node(1).counters().not_shared, 1U);
+    // Once they share a chat, the same watch is let in.
+    shares_.share("alice", "bob");
+    node(1).watch(b, user("alice"));
+    run();
+    EXPECT_EQ(bob.take(), (std::vector{watching("alice", "offline"), presence("alice", "online")}));
+}
+
+TEST_F(PresenceTest, ARemovalHoldsTheWatchBackAndDropsItOnceNoChatIsShared) {
+    shares_.everyone = false;
+    shares_.share("alice", "bob");
+    Watcher bob;
+    const auto b = connect(1, bob, "bob");
+    node(1).watch(b, user("alice"));
+    run();
+    Watcher alice;
+    const auto a = connect(0, alice, "alice");
+    ASSERT_EQ(bob.take(), (std::vector{watching("alice", "offline"), presence("alice", "online")}));
+    // Bob is taken off their only shared chat; every node hears it, and presence holds his
+    // watch back at once, before the store has answered again.
+    shares_.holding = true;
+    shares_.unshare("alice", "bob");
+    node(1).on_member_removed(kGroup, user("bob"));
+    node(0).detach(a);
+    run();
+    advance(kGrace + Millis{1'000});
+    EXPECT_TRUE(bob.got.empty()) << "nothing while held";
+    shares_.release();
+    run();
+    EXPECT_EQ(bob.take(), std::vector{refused("alice", "not_shared")});
+    EXPECT_EQ(node(1).counters().revoked, 1U);
+    connect(0, alice, "alice");
+    advance(Millis{2'000});
+    EXPECT_TRUE(bob.got.empty()) << "the watch is gone";
+}
+
+TEST_F(PresenceTest, TheRemovedUsersWatchesAndWatchersAreBothCheckedAgain) {
+    shares_.everyone = false;
+    shares_.share("alice", "bob");
+    shares_.share("bob", "carol");
+    Watcher alice;
+    Watcher bob;
+    Watcher carol;
+    const auto a = connect(0, alice, "alice");
+    const auto b = connect(0, bob, "bob");
+    const auto c = connect(0, carol, "carol");
+    node(0).watch(a, user("bob"));
+    node(0).watch(b, user("carol"));
+    node(0).watch(c, user("bob"));
+    run();
+    for (Watcher* w : {&alice, &bob, &carol}) {
+        w->take();
+    }
+    const std::size_t before = shares_.asked;
+    // Bob leaves the group he shared with carol: his own watch of carol and carol's of him are in
+    // doubt; alice's of bob as well, since nothing here knows which room she shared with him.
+    shares_.unshare("bob", "carol");
+    node(0).on_member_removed(kGroup, user("bob"));
+    run();
+    EXPECT_EQ(shares_.asked - before, 3U);
+    EXPECT_TRUE(alice.got.empty());
+    EXPECT_EQ(bob.take(), std::vector{refused("carol", "not_shared")});
+    EXPECT_EQ(carol.take(), std::vector{refused("bob", "not_shared")});
+    // A stream's live chat lists nobody: a removal from one changes nothing here.
+    node(0).on_member_removed(*core::RoomId::parse("011b9ed0-d6b6-88e6-ac34-32d7070ba83b"),
+                              user("alice"));
+    run();
+    EXPECT_EQ(shares_.asked - before, 3U);
+}
+
+TEST_F(PresenceTest, AHeldWatchStillSharedComesBackWithWhatChangedMeanwhile) {
+    Watcher bob;
+    const auto b = connect(1, bob, "bob");
+    node(1).watch(b, user("alice"));
+    run();
+    ASSERT_EQ(bob.take(), std::vector{watching("alice", "offline")});
+    shares_.holding = true;
+    node(1).on_member_removed(kGroup, user("alice"));
+    Watcher alice;
+    connect(0, alice, "alice");
+    EXPECT_TRUE(bob.got.empty());
+    shares_.release();
+    run();
+    EXPECT_EQ(bob.take(), std::vector{presence("alice", "online")});
+    // Watched again while held: answered once let back in, with the state it then has.
+    node(1).on_members_resync();
+    node(1).watch(b, user("alice"));
+    node(1).watch(b, user("alice"));
+    EXPECT_TRUE(bob.got.empty());
+    shares_.release();
+    run();
+    EXPECT_EQ(bob.take(), (std::vector{watching("alice", "online"), watching("alice", "online")}));
+    EXPECT_EQ(node(1).counters().revoked, 0U);
+}
+
+TEST_F(PresenceTest, ARemovalWhileAWatchIsAskedAsksAgainBeforeLettingItIn) {
+    shares_.everyone = false;
+    shares_.share("alice", "bob");
+    shares_.holding = true;
+    Watcher bob;
+    const auto b = connect(1, bob, "bob");
+    node(1).watch(b, user("alice"));
+    // Read as shared; then bob is removed before the answer arrives.
+    shares_.unshare("alice", "bob");
+    node(1).on_member_removed(kGroup, user("bob"));
+    shares_.release();
+    run();
+    EXPECT_TRUE(bob.got.empty()) << "the answer may predate the removal: asked again";
+    EXPECT_EQ(shares_.waiting(), 1U);
+    shares_.release();
+    run();
+    EXPECT_EQ(bob.take(), std::vector{refused("alice", "not_shared")});
+    EXPECT_EQ(sent(), 0U);
+}
+
+TEST_F(PresenceTest, AResyncChecksEveryWatchAgain) {
+    shares_.everyone = false;
+    shares_.share("alice", "bob");
+    shares_.share("alice", "carol");
+    Watcher alice;
+    const auto a = connect(2, alice, "alice");
+    node(2).watch(a, user("bob"));
+    node(2).watch(a, user("carol"));
+    run();
+    ASSERT_EQ(alice.take().size(), 2U);
+    shares_.unshare("alice", "carol");
+    node(2).on_members_resync();
+    run();
+    EXPECT_EQ(alice.take(), std::vector{refused("carol", "not_shared")});
+    Watcher bob;
+    connect(0, bob, "bob");
+    EXPECT_EQ(alice.take(), std::vector{presence("bob", "online")});
+}
+
+TEST_F(PresenceTest, AStoreThatCannotSayRefusesTheWatchAndDropsAWatchInDoubt) {
+    Watcher bob;
+    const auto b = connect(1, bob, "bob");
+    node(1).watch(b, user("carol"));
+    run();
+    ASSERT_EQ(bob.take(), std::vector{watching("carol", "offline")});
+    shares_.failing = true;
+    node(1).watch(b, user("alice"));
+    run();
+    EXPECT_EQ(bob.take(), std::vector{refused("alice", "unavailable")});
+    node(1).on_member_removed(kGroup, user("carol"));
+    run();
+    EXPECT_EQ(bob.take(), std::vector{refused("carol", "unavailable")});
+    EXPECT_EQ(node(1).counters().revoked, 1U);
+}
+
+TEST_F(PresenceTest, AWatchUnwatchedOrAClientGoneWhileAskedIsAnsweredNothing) {
+    shares_.holding = true;
+    Watcher bob;
+    const auto b = connect(1, bob, "bob");
+    node(1).watch(b, user("alice"));
+    node(1).unwatch(b, user("alice"));
+    Watcher carol;
+    const auto c = connect(1, carol, "carol");
+    node(1).watch(c, user("alice"));
+    node(1).detach(c);
+    shares_.release();
+    run();
+    EXPECT_TRUE(bob.got.empty());
+    EXPECT_TRUE(carol.got.empty());
+    EXPECT_EQ(sent(), 0U);
+    EXPECT_EQ(node(1).rooms(), 2U) << "bob's own, and carol's in her grace: none for alice";
+}
+
+TEST_F(PresenceTest, PendingWatchesCountAgainstTheClientsLimit) {
+    nodes_.clear();
+    chat::PresenceLimits limits;
+    limits.max_watches_per_client = 2;
+    add_node("chat-1", limits);
+    shares_.holding = true;
+    Watcher bob;
+    const auto b = connect(0, bob, "bob");
+    node(0).watch(b, user("u1"));
+    node(0).watch(b, user("u2"));
+    node(0).watch(b, user("u3"));
+    EXPECT_EQ(bob.take(), std::vector{refused("u3", "too_many_watches")});
+    shares_.release();
+    run();
+    EXPECT_EQ(bob.take(), (std::vector{watching("u1", "offline"), watching("u2", "offline")}));
 }
 
 } // namespace

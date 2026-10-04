@@ -93,7 +93,11 @@ std::string field(const std::string& text, std::string_view key) {
 
 class MembershipTest : public ::testing::Test {
 protected:
-    explicit MembershipTest(chat::ServiceLimits limits = {}) : limits_(limits) {}
+    // Users manage their own lists here (ULW_CHAT_SELF_SERVICE=on), unless a fixture turns it
+    // off before SetUp.
+    explicit MembershipTest(chat::ServiceLimits limits = {}) : limits_(limits) {
+        limits_.self_service = true;
+    }
 
     void SetUp() override {
         auto reactor = net::make_reactor(net::ReactorKind::Epoll, system_clock_, 64);
@@ -354,6 +358,59 @@ TEST_F(MembershipTest, AUsersRoomsArePagedWithWhatTheyAre) {
     service_->list_members(d, {.room = mine, .after = std::nullopt, .limit = 50});
     EXPECT_EQ(next(dave), std::format(R"({{"type":"error","reason":"not_member","room":"{}"}})",
                                       mine.to_string()));
+}
+
+// ULW_CHAT_SELF_SERVICE=off, the default (ADR-0096): the embedding product lists people through
+// the service API; users may still leave, admins remove, and everyone read their lists.
+class NoSelfService : public MembershipTest {
+protected:
+    NoSelfService() { limits_.self_service = false; }
+};
+
+TEST_F(NoSelfService, OpeningCreatingAndAddingAreNotAllowedAndChangeNothing) {
+    Client alice;
+    const auto a = attach(alice, "alice");
+    for (int i = 0; i < 30; ++i) {
+        service_->open_direct(a, {.user = user("bob")});
+    }
+    const auto refusals = alice.take();
+    ASSERT_EQ(refusals.size(), 30U) << "refused at once, before the allowance or the store";
+    EXPECT_EQ(refusals.front(), R"({"type":"error","reason":"not_allowed","user":"bob"})");
+    service_->create_group(a, {.id = *rt::MessageKey::parse("g1"), .users = {user("bob")}});
+    EXPECT_EQ(alice.take(),
+              std::vector<std::string>{R"({"type":"error","reason":"not_allowed","id":"g1"})"});
+    const core::RoomId room = chat::group_room(user("alice"), *rt::MessageKey::parse("g1"));
+    service_->add_members(a, {.room = room, .users = {user("bob")}});
+    EXPECT_EQ(alice.take(),
+              std::vector{std::format(R"({{"type":"error","reason":"not_allowed","room":"{}"}})",
+                                      room.to_string())});
+    EXPECT_EQ(service_->counters().membership_not_allowed, 32U);
+    EXPECT_EQ(service_->counters().membership_rate_limited, 0U);
+    service_->list_rooms(a, {.after = std::nullopt, .limit = 10});
+    EXPECT_EQ(next(alice), R"({"type":"rooms","rooms":[],"more":false})");
+}
+
+TEST_F(NoSelfService, MembersTheServiceListedStillLeaveAndAnAdminStillRemoves) {
+    Client alice;
+    Client bob;
+    const auto a = attach(alice, "alice");
+    const auto b = attach(bob, "bob");
+    const core::RoomId room = chat::group_room(user("alice"), *rt::MessageKey::parse("g1"));
+    // As the service API lists them: the store's own change, under the same lock and rules.
+    bool listed = false;
+    store_->create_group(room, user("alice"), {user("bob"), user("carol")},
+                         [&](core::ports::MessageResult<core::ports::MembershipChange> r) noexcept {
+                             listed = r && r->outcome == core::ports::MembershipOutcome::Done;
+                         });
+    settle(alice);
+    ASSERT_TRUE(listed);
+    service_->list_members(b, {.room = room, .after = std::nullopt, .limit = 10});
+    EXPECT_EQ(field(next(bob), "type"), "members");
+    service_->remove_member(a, {.room = room, .user = user("carol")});
+    EXPECT_EQ(field(next(alice), "type"), "removed");
+    service_->leave_room(b, {.room = room});
+    EXPECT_EQ(field(next(bob), "type"), "left");
+    EXPECT_EQ(service_->counters().membership_not_allowed, 0U);
 }
 
 class TightMembership : public MembershipTest {

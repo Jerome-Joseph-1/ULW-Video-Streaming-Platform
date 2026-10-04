@@ -68,9 +68,8 @@ effective configuration, secrets as `<redacted>`.
 | `JWT_ISSUER` | required | never set | required | `JWT_ISSUER` in config.env |
 | `JWT_AUDIENCE` | required with `JWKS_URL`; with `ULW_DEV_JWKS_FILE` default `ulw-dev` | | same | `JWT_AUDIENCE` in config.env. No default against a JWKS: the process exits `2` without it |
 | `ULW_JWT_SUBJECT_CLAIM` | claim name, default `sub` | | same | `JWT_SUBJECT_CLAIM` in config.env: the claim that names the user ([auth.md](auth.md#how-the-user-id-is-derived)). 1 to 64 of `A-Z a-z 0-9 _ . : / -`, never `iss`, `aud`, `exp`, `nbf`, `iat` or `jti` |
-| `ULW_SERVICE_CLAIM` | claim name, default `scope` | | | `SERVICE_CLAIM` in config.env: the claim that marks the operator's backend's tokens ([auth.md](auth.md#service-tokens), ADR-0097). 1 to 64 of `A-Z a-z 0-9 _ . : / -`, never `iss`, `aud`, `exp`, `nbf`, `iat` or `jti`. Without `ULW_SERVICE_SCOPE`, empty or `scope` means off; any other name is refused |
-| `ULW_SERVICE_SCOPE` | default none | | | `SERVICE_SCOPE` in config.env: the value that claim must hold (a string equal to it or listing it among space-separated values, or an array with one), e.g. `ulw:admin`. 1 to 128 printable ASCII, no spaces. Unset: no token is the service's and `/api/v1/service/...` answers `403` to all. Use a value only the backend's client-credentials client is granted. Only from the `Authorization` header, never the cookie |
-| `ULW_SERVICE_CLIENT_ID` | default none | | | `SERVICE_CLIENT_ID` in config.env, recommended: only tokens whose `azp` (or, without one, `client_id`) is this client are the service's. Refused without `ULW_SERVICE_SCOPE` |
+| `ULW_SERVICE_CLAIM` | claim name, default `scope` | | same | `SERVICE_CLAIM` in config.env: the claim that marks the operator's backend's tokens ([auth.md](auth.md#service-tokens), ADR-0097). 1 to 64 of `A-Z a-z 0-9 _ . : / -`, never `iss`, `aud`, `exp`, `nbf`, `iat` or `jti`. Without `ULW_SERVICE_SCOPE`, empty or `scope` means off; any other name is refused |
+| `ULW_SERVICE_SCOPE` | default none | | same | `SERVICE_SCOPE` in config.env: the value that claim must hold (a string equal to it or listing it among space-separated values, or an array with one), e.g. `ulw:admin`. 1 to 128 printable ASCII, no spaces. Unset: no token is the service's and `/api/v1/service/...` answers `403` to all. Use a value only the backend's client-credentials client is granted. Only from the `Authorization` header, never the cookie |
 | `ULW_AUTH_COOKIE` | default `auth_token` | | same | `AUTH_COOKIE` in config.env |
 | `ULW_ALLOWED_ORIGINS` | comma-separated `scheme://host[:port]`, default none | | same | Pages whose requests may carry the cookie. Gateway: required in `Origin` for a cookie `POST`, `PATCH` or `DELETE`; with none set, the cookie serves only same-origin `GET` and `HEAD`. Chat: required for a cookie socket. Set it to the web app's origin before the cookie is used for uploads. `http://` only for `localhost`, `127.0.0.1` or `[::1]`; an explicit default port (`:443`, `:80`) is refused, and so is a host not written as a browser writes it: a domain in uppercase, an IPv4 address other than four decimal octets (`10.0.0.1`, not `010.0.0.1`, `0x7f.1`, `127.1` or `10.0.0.1.`), or an IPv6 one not in RFC 5952 form (`[2001:db8::1]`, not `[2001:0db8:0:0:0:0:0:1]` or `[::ffff:192.0.2.1]`). Only same-origin pages (and same-site ones with `ULW_ALLOW_SAME_SITE=1`) get through, since `Sec-Fetch-Site` is checked first ([auth.md](auth.md#cookies-and-other-sites)). |
 | `ULW_ALLOW_SAME_SITE` | `0` (default) or `1` | | | `1` lets pages on a sibling subdomain (`Sec-Fetch-Site: same-site`) send the cookie: set it only when the web app is served from one. |
@@ -98,6 +97,9 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_CONFIG` | optional TOML file | same | | See above |
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
+| `ULW_CHAT_SELF_SERVICE` | | | `on` or `off`, default `off` | Whether users open direct chats (`open_direct`), create groups (`create_group`) and add members (`add_members`) over the socket themselves (ADR-0096). `off`: those three are answered `not_allowed`, and the operator's backend lists people through the service API instead; `leave`, an admin's `remove_member` and the listings stay with users. Turn it `on` only where any signed-in user may reach any other whose id they know (a demo, a closed community). Anything else: chat exits `2` |
+| `ULW_SERVICE_PORT` | | | optional, 1 to 65535, not the client or node port | Chat's service API for the operator's backend ([chat.md](chat.md#the-service-api)): plain HTTP on this port, on every interface. Unset: no service API. Requires `ULW_SERVICE_SCOPE` (exit `2` without it); chat reads `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE` as the gateway does, and its service API admits only tokens they mark as the service's ([auth.md](auth.md#service-tokens)). Reach it only from the backend (a ClusterIP Service and a NetworkPolicy; RUNBOOK, step 10) |
+| `ULW_SERVICE_CLIENT_ID` | optional, recommended, 1 to 128 printable ASCII, no spaces | | same | When set, a service token must also name this client in `azp` (OpenID Connect, Keycloak) or `client_id` (RFC 9068, Okta), besides holding `ULW_SERVICE_SCOPE`: a second check that the scope was granted to the backend's client and no other. Read by `infra/auth/service_claim.hpp`, as the other two. The gateway applies it to its grants API (ADR-0097); `SERVICE_CLIENT_ID` in config.env sets both |
 | `ULW_SCRATCH_DIR`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks. The sandbox helper runs only the ffmpeg and ffprobe it was built with: `/usr/bin/ffmpeg` and `/usr/bin/ffprobe`, as the images install them, unless the image was built with the CMake variables `ULW_SANDBOX_FFMPEG` and `ULW_SANDBOX_FFPROBE` set to other absolute paths (ADR-0089). `PATH` is passed to the children but never used to find them. |
 | `ULW_FFMPEG`, `ULW_FFPROBE` | | refused | | Retired (ADR-0089). Any non-empty value, from the environment, `--ffmpeg-ffmpeg`/`--ffmpeg-ffprobe` or `ffmpeg.ffmpeg`/`ffmpeg.ffprobe` in `ULW_CONFIG`, stops the worker at startup (exit `2`), rather than being ignored; to run another ffmpeg, build the image with `ULW_SANDBOX_FFMPEG` and `ULW_SANDBOX_FFPROBE` |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | The base sets the address to the pod's own, `$(POD_IP):9201`, and takes the secret from `CHAT_SECRET` (ADR-0083) |
@@ -420,8 +422,22 @@ in 1000 rooms opening another), `{reason="gone"}` (a group id reused over an emp
 history), `{reason="rate_limited"}` and
 `{reason="unavailable"}` (the database could not be reached, or held a named room recorded as
 another kind: alert if it rises while the database is healthy), and `member_events_total`
-(`member` frames this node sent when a list changed, whichever node changed it). Chat is a
-draft ([chat.md](chat.md)).
+(`member` frames this node sent when a list changed, whichever node changed it), and
+`membership_refusals_total{reason="not_allowed"}` (`open_direct`, `create_group` and
+`add_members` refused because `ULW_CHAT_SELF_SERVICE` is off: a client still offering them).
+Who may see whose presence (ADR-0096), on the watcher's node: `presence_checks_total` (the
+database asked whether two users share a chat: one per watch, and one per client whose watches a
+removal or a resync put in doubt), `presence_refusals_total{reason="not_shared"}` (watches
+refused) and `presence_watches_revoked_total` (watches dropped after a removal, or after a
+resync the database could not answer). The service API (ADR-0096), on the node that answered:
+`service_api_connections_total`, `service_api_connections_refused_total` (closed at accept: 32
+open, or draining), `service_api_connections_current`, `service_api_requests_total`, and
+`service_api_answers_total{result="changed"}`, `{result="read"}`, `{result="unauthorized"}`
+(401: no bearer token, or one that fails verification), `{result="forbidden"}` (403: a valid token
+without the service claim; a user trying the port), `{result="rate_limited"}` (429),
+`{result="bad_request"}` (another path, method or body), `{result="refused"}` (409 or 404: the
+change the database refused) and `{result="unavailable"}` (503). Chat is a draft
+([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

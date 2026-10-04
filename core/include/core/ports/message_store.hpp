@@ -211,6 +211,30 @@ struct MembershipChange {
     friend bool operator==(const MembershipChange&, const MembershipChange&) = default;
 };
 
+// Who changes or reads a member list (ADR-0096): a user, held to their own place on the list, or
+// the operator's backend through chat's service API, which adds to and reads any group's list as
+// its admin would without being on it. A user converts implicitly, so that every call a user makes
+// reads as before.
+class Actor {
+public:
+    Actor(const UserId& user) : user_(user) {}
+
+    [[nodiscard]] static Actor service() noexcept { return Actor{}; }
+
+    // The user acting; nullopt for the service.
+    [[nodiscard]] const std::optional<UserId>& user() const noexcept { return user_; }
+    [[nodiscard]] bool is_service() const noexcept { return !user_.has_value(); }
+
+private:
+    Actor() noexcept = default;
+
+    std::optional<UserId> user_;
+};
+
+// The users one shared_with call asks about at most: a user's watches on one node (16 sockets of
+// 128 watches, apps/chat/src/presence.hpp).
+inline constexpr std::size_t kMaxSharedAsked = 2048;
+
 // Whether a join of a room with no kind recorded may record one. Skipped answers exactly as
 // Allowed would, and writes nothing: how the chat service bounds the rows a user's joins create.
 enum class Recording : std::uint8_t { Allowed, Skipped };
@@ -341,9 +365,10 @@ public:
                               std::vector<UserId> members,
                               MessageCallback<MembershipChange> done) = 0;
     // `users` (at most kMaxMembersPerChange, distinct) listed in the group chat by its admin
-    // `actor`; those already listed are left as they are. Full when the group would pass
-    // kMaxGroupMembers, and then nobody is added.
-    virtual void add_members(const RoomId& room, const UserId& actor, std::vector<UserId> users,
+    // `actor`, or by the service; those already listed are left as they are. Full when the group
+    // would pass kMaxGroupMembers, and then nobody is added. For the service, NotMember means the
+    // room is not recorded at all.
+    virtual void add_members(const RoomId& room, const Actor& actor, std::vector<UserId> users,
                              MessageCallback<MembershipChange> done) = 0;
     // `user` taken off the group chat's list by its admin `actor`; someone not listed changes
     // nothing. `actor` itself leaves as leave_room does.
@@ -359,9 +384,16 @@ public:
     virtual void rooms_of(const UserId& user, std::optional<RoomId> after, std::size_t limit,
                           MessageCallback<std::vector<RoomEntry>> done) = 0;
     // The room's members and their roles, in byte order of their ids from after `after`, at most
-    // min(limit, kMaxListPage + 1): only for `asker` while listed.
-    virtual void roster(const RoomId& room, const UserId& asker, std::optional<UserId> after,
+    // min(limit, kMaxListPage + 1): only for `asker` while listed, and always for the service
+    // (which reads as listed).
+    virtual void roster(const RoomId& room, const Actor& asker, std::optional<UserId> after,
                         std::size_t limit, MessageCallback<Roster> done) = 0;
+    // Which of `others` (at most kMaxSharedAsked) share a direct or group chat with `user` now,
+    // each once and in byte order of their ids: whose presence `user` may see (ADR-0056 as
+    // amended by ADR-0096). A stream's live chat lists nobody and shares nothing; `user` is never
+    // in the answer.
+    virtual void shared_with(const UserId& user, std::vector<UserId> others,
+                             MessageCallback<std::vector<UserId>> done) = 0;
 };
 
 } // namespace core::ports

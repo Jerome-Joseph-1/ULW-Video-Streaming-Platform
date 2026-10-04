@@ -82,9 +82,10 @@ ServiceLimits service_limits(const Limits& limits) noexcept {
 
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(std::move(limits)), rooms_(deps.router),
-      chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
-      presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
+      shared_(deps.messages), chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
+      presence_(rooms_, shared_, deps.reactor, deps.clock, deps.node, limits_.presence),
       calls_(deps.messages, deps.sfu, rooms_, deps.clock, deps.random, limits_.calls),
+      service_api_(deps.reactor, deps.clock, deps.verifier, deps.messages, limits_.service_api),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
                http::AddressHash{http::SeededHash(seed(deps_.random))}),
@@ -95,6 +96,7 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     deps_.router.serve(&calls_);
     deps_.router.hear(&bell_);
     chat_.also_tell(&calls_);
+    chat_.also_tell(&presence_);
 }
 
 ChatServer::~ChatServer() {
@@ -267,6 +269,7 @@ void ChatServer::begin_drain() noexcept {
     draining_ = true;
     deps_.reactor.stop_listening();
     sessions_.for_each_live([](Session& s) { s.drain(); });
+    service_api_.stop();
     // A release that fails leaves the rooms to go stale, which costs the other nodes
     // rt::kOwnerStaleAfter; the drain goes on either way.
     deps_.router.release_rooms([this](rt::StoreResult<void>) noexcept { released_ = true; });
@@ -281,6 +284,7 @@ void ChatServer::on_timeout() noexcept {
 
 void ChatServer::reap() noexcept {
     sessions_.reap([this](Session& s) { return deps_.reactor.is_quiescent(s.conn()); });
+    service_api_.reap();
     deps_.router.reap();
     chat_.sweep();
     calls_.sweep();
@@ -310,6 +314,7 @@ std::string ChatServer::render_metrics() const {
     const CallCounters& call = calls_.counters();
     const RingCounters& ring = calls_.ring_counters();
     const BellCounters& bell = bell_.counters();
+    const ServiceApiCounters& api = service_api_.counters();
     return std::format("connections_accepted_total {}\n"
                        "connections_rejected_total{{reason=\"capacity\"}} {}\n"
                        "connections_rejected_total{{reason=\"socket\"}} {}\n"
@@ -456,13 +461,34 @@ std::string ChatServer::render_metrics() const {
                        "membership_refusals_total{{reason=\"gone\"}} {}\n"
                        "membership_refusals_total{{reason=\"rate_limited\"}} {}\n"
                        "membership_refusals_total{{reason=\"unavailable\"}} {}\n"
-                       "member_events_total {}\n",
+                       "member_events_total {}\n"
+                       "membership_refusals_total{{reason=\"not_allowed\"}} {}\n",
                        chat.directs_opened, chat.groups_created, chat.members_added,
                        chat.members_removed, chat.members_left, chat.membership_not_member,
                        chat.membership_not_admin, chat.membership_not_group, chat.membership_full,
                        chat.membership_room_limit, chat.membership_gone,
                        chat.membership_rate_limited, chat.membership_unavailable,
-                       chat.member_events);
+                       chat.member_events, chat.membership_not_allowed) +
+           // Who may see whose presence, and the operator's service API (ADR-0096).
+           std::format("presence_checks_total {}\n"
+                       "presence_refusals_total{{reason=\"not_shared\"}} {}\n"
+                       "presence_watches_revoked_total {}\n"
+                       "service_api_connections_total {}\n"
+                       "service_api_connections_refused_total {}\n"
+                       "service_api_connections_current {}\n"
+                       "service_api_requests_total {}\n"
+                       "service_api_answers_total{{result=\"changed\"}} {}\n"
+                       "service_api_answers_total{{result=\"read\"}} {}\n"
+                       "service_api_answers_total{{result=\"unauthorized\"}} {}\n"
+                       "service_api_answers_total{{result=\"forbidden\"}} {}\n"
+                       "service_api_answers_total{{result=\"rate_limited\"}} {}\n"
+                       "service_api_answers_total{{result=\"bad_request\"}} {}\n"
+                       "service_api_answers_total{{result=\"refused\"}} {}\n"
+                       "service_api_answers_total{{result=\"unavailable\"}} {}\n",
+                       presence.checks, presence.not_shared, presence.revoked, api.connections,
+                       api.refused_connections, service_api_.connections(), api.requests,
+                       api.changes, api.reads, api.unauthorized, api.forbidden, api.limited,
+                       api.bad_requests, api.refused, api.unavailable);
 }
 
 } // namespace chat

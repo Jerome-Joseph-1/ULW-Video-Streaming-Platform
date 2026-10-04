@@ -531,3 +531,34 @@ replacements:
         options:
           delimiter: "'"
           index: 1
+  # ULW_SERVICE_CLAIM and ULW_SERVICE_SCOPE of chat, as the gateway's (ADR-0096).
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SERVICE_CLAIM
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_SERVICE_CLAIM].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SERVICE_SCOPE
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_SERVICE_SCOPE].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SERVICE_CLIENT_ID
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_SERVICE_CLIENT_ID].value

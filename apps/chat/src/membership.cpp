@@ -46,6 +46,15 @@ std::expected<void, core::Millis> ChatService::admit_membership(const core::User
     return {};
 }
 
+bool ChatService::self_service(IClient& client, const ErrorContext& context) noexcept {
+    if (limits_.self_service) {
+        return true;
+    }
+    ++counters_.membership_not_allowed;
+    refuse(client, "not_allowed", context);
+    return false;
+}
+
 void ChatService::refuse(IClient& client, std::string_view reason,
                          const ErrorContext& context) noexcept {
     try {
@@ -122,6 +131,9 @@ void ChatService::open_direct(ClientId id, const OpenDirect& open) {
         .room = std::nullopt, .id = std::nullopt, .user = open.user, .retry_after = std::nullopt};
     // No user table to look the peer up in (ADR-0018): any user id may be named, and a room with
     // someone who never signs in is two rows nobody reads.
+    if (!self_service(*c->client, context)) {
+        return;
+    }
     if (open.user == c->user) {
         refuse(*c->client, "self", context);
         return;
@@ -157,6 +169,9 @@ void ChatService::create_group(ClientId id, CreateGroup create) {
     }
     const ErrorContext context{
         .room = std::nullopt, .id = create.id, .user = std::nullopt, .retry_after = std::nullopt};
+    if (!self_service(*c->client, context)) {
+        return;
+    }
     if (const auto admitted = admit_membership(c->user); !admitted) {
         ++counters_.membership_rate_limited;
         refuse(*c->client, "rate_limited",
@@ -188,6 +203,9 @@ void ChatService::add_members(ClientId id, AddMembers add) {
     }
     const ErrorContext context{
         .room = add.room, .id = std::nullopt, .user = std::nullopt, .retry_after = std::nullopt};
+    if (!self_service(*c->client, context)) {
+        return;
+    }
     if (const auto admitted = admit_membership(c->user); !admitted) {
         ++counters_.membership_rate_limited;
         refuse(*c->client, "rate_limited",

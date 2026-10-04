@@ -617,9 +617,9 @@ admin_refusal(std::optional<std::string_view> role_text, bool group) noexcept {
 
 class AddMembers final : public LockedChange {
 public:
-    AddMembers(const core::RoomId& room, const core::UserId& actor, std::string users,
+    AddMembers(const core::RoomId& room, const core::ports::Actor& actor, std::string users,
                MessageCallback<MembershipChange> done) noexcept
-        : LockedChange(room, std::nullopt, std::nullopt, std::move(done)), actor_(actor),
+        : LockedChange(room, std::nullopt, std::nullopt, std::move(done)), actor_(actor.user()),
           users_(std::move(users)) {}
 
 private:
@@ -631,14 +631,18 @@ private:
         return Statement{.sql = message_sql::kAddMembers,
                          .params = Params{}
                                        .add_uuid(room().uuid())
-                                       .add_text(actor_.view())
+                                       .add_text(actor_ ? actor_->view() : std::string_view{})
                                        .add_text(users_)
                                        .add_int(as_int(core::ports::kMaxGroupMembers))
-                                       .add_bool(group_)};
+                                       .add_bool(group_)
+                                       .add_bool(!actor_)};
     }
     [[nodiscard]] std::optional<MembershipChange> decode(const Result& r) noexcept override {
         try {
-            const auto refusal = admin_refusal(r.get(0, 0), group_);
+            // The service acts as the group's admin wherever it is not listed.
+            const auto refusal = actor_ ? admin_refusal(r.get(0, 0), group_)
+                                        : std::optional(group_ ? MembershipOutcome::Done
+                                                               : MembershipOutcome::NotGroup);
             const auto fits = r.get(0, 1).and_then(parse_bool);
             auto added = ids_of(r.get(0, 2));
             if (!refusal || !fits || !added) {
@@ -658,7 +662,8 @@ private:
         }
     }
 
-    core::UserId actor_;
+    // nullopt: the service.
+    std::optional<core::UserId> actor_;
     std::string users_;
     bool group_ = false;
 };
@@ -858,19 +863,20 @@ private:
 // Binds the asker and the cursor, which must outlive the statement.
 class RosterRead final : public Operation {
 public:
-    RosterRead(const core::RoomId& room, const core::UserId& asker,
+    RosterRead(const core::RoomId& room, const core::ports::Actor& asker,
                std::optional<core::UserId> after, std::size_t limit,
                MessageCallback<core::ports::Roster> done)
-        : room_(room), asker_(asker), after_(after),
+        : room_(room), asker_(asker.user()), after_(after),
           limit_(std::min(limit, core::ports::kMaxListPage + 1)), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
         return Statement{.sql = message_sql::kRoster,
                          .params = Params{}
                                        .add_uuid(room_.uuid())
-                                       .add_text(asker_.view())
+                                       .add_text(asker_ ? asker_->view() : std::string_view{})
                                        .add_text(after_ ? after_->view() : std::string_view{})
-                                       .add_int(as_int(limit_))};
+                                       .add_int(as_int(limit_))
+                                       .add_bool(!asker_)};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -892,10 +898,46 @@ public:
 
 private:
     core::RoomId room_;
-    core::UserId asker_;
+    // nullopt: the service.
+    std::optional<core::UserId> asker_;
     std::optional<core::UserId> after_;
     std::size_t limit_;
     MessageCallback<core::ports::Roster> done_;
+};
+
+// Binds the user and the others, which must outlive the statement.
+class SharedWith final : public Operation {
+public:
+    SharedWith(const core::UserId& user, std::string others,
+               MessageCallback<std::vector<core::UserId>> done) noexcept
+        : user_(user), others_(std::move(others)), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = message_sql::kSharedWith,
+                         .params = Params{}.add_text(user_.view()).add_text(others_)};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+            return std::nullopt;
+        }
+        try {
+            done_(decode_members(*outcome));
+        } catch (const std::bad_alloc&) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+        }
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::UserId user_;
+    std::string others_;
+    MessageCallback<std::vector<core::UserId>> done_;
 };
 
 } // namespace
@@ -1109,7 +1151,7 @@ void PgMessageStore::create_group(const core::RoomId& room, const core::UserId& 
         std::make_unique<CreateGroup>(room, creator, joined_ids(members), std::move(done)));
 }
 
-void PgMessageStore::add_members(const core::RoomId& room, const core::UserId& actor,
+void PgMessageStore::add_members(const core::RoomId& room, const core::ports::Actor& actor,
                                  std::vector<core::UserId> users,
                                  MessageCallback<MembershipChange> done) {
     impl_->pool().submit(
@@ -1136,10 +1178,19 @@ void PgMessageStore::rooms_of(const core::UserId& user, std::optional<core::Room
     impl_->pool().submit(std::make_unique<RoomsOf>(user, after, limit, std::move(done)));
 }
 
-void PgMessageStore::roster(const core::RoomId& room, const core::UserId& asker,
+void PgMessageStore::roster(const core::RoomId& room, const core::ports::Actor& asker,
                             std::optional<core::UserId> after, std::size_t limit,
                             MessageCallback<core::ports::Roster> done) {
     impl_->pool().submit(std::make_unique<RosterRead>(room, asker, after, limit, std::move(done)));
+}
+
+void PgMessageStore::shared_with(const core::UserId& user, std::vector<core::UserId> others,
+                                 MessageCallback<std::vector<core::UserId>> done) {
+    if (others.size() > core::ports::kMaxSharedAsked) {
+        others.erase(others.begin() + static_cast<std::ptrdiff_t>(core::ports::kMaxSharedAsked),
+                     others.end());
+    }
+    impl_->pool().submit(std::make_unique<SharedWith>(user, joined_ids(others), std::move(done)));
 }
 
 } // namespace infra::postgres

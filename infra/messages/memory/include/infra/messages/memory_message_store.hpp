@@ -67,7 +67,7 @@ public:
     void create_group(const core::RoomId& room, const core::UserId& creator,
                       std::vector<core::UserId> members,
                       core::ports::MessageCallback<core::ports::MembershipChange> done) override;
-    void add_members(const core::RoomId& room, const core::UserId& actor,
+    void add_members(const core::RoomId& room, const core::ports::Actor& actor,
                      std::vector<core::UserId> users,
                      core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void expel(const core::RoomId& room, const core::UserId& actor, const core::UserId& user,
@@ -76,9 +76,11 @@ public:
                     core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void rooms_of(const core::UserId& user, std::optional<core::RoomId> after, std::size_t limit,
                   core::ports::MessageCallback<std::vector<core::ports::RoomEntry>> done) override;
-    void roster(const core::RoomId& room, const core::UserId& asker,
+    void roster(const core::RoomId& room, const core::ports::Actor& asker,
                 std::optional<core::UserId> after, std::size_t limit,
                 core::ports::MessageCallback<core::ports::Roster> done) override;
+    void shared_with(const core::UserId& user, std::vector<core::UserId> others,
+                     core::ports::MessageCallback<std::vector<core::UserId>> done) override;
 
     void on_timeout() noexcept override;
 

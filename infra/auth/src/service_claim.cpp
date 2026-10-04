@@ -51,8 +51,16 @@ bool lists(std::string_view text, std::string_view value) noexcept {
 } // namespace
 
 std::expected<ServiceClaim, ServiceClaimRefusal>
-read_service_claim(std::optional<std::string_view> claim, std::optional<std::string_view> scope) {
+read_service_claim(std::optional<std::string_view> claim, std::optional<std::string_view> scope,
+                   std::optional<std::string_view> client_id) {
     ServiceClaim out;
+    if (client_id) {
+        if (client_id->size() > kMaxValue || !std::ranges::all_of(*client_id, value_char)) {
+            return refuse("ULW_SERVICE_CLIENT_ID",
+                          "expected 1 to 128 printable ASCII characters without spaces");
+        }
+        out.client_id = std::string(*client_id);
+    }
     if (claim) {
         if (claim->size() > kMaxClaimName || !std::ranges::all_of(*claim, claim_name_char)) {
             return refuse("ULW_SERVICE_CLAIM",
@@ -69,7 +77,7 @@ read_service_claim(std::optional<std::string_view> claim, std::optional<std::str
         out.claim = std::string(*claim);
     }
     if (!scope) {
-        if (claim) {
+        if (claim && *claim != ServiceClaim{}.claim) {
             return refuse("ULW_SERVICE_CLAIM", "set, but ULW_SERVICE_SCOPE is not");
         }
         return out;
@@ -80,6 +88,17 @@ read_service_claim(std::optional<std::string_view> claim, std::optional<std::str
     }
     out.value = std::string(*scope);
     return out;
+}
+
+bool names_client(const core::json::Value& claims, std::string_view client_id) noexcept {
+    if (client_id.empty()) {
+        return true;
+    }
+    return std::ranges::any_of(std::array<std::string_view, 2>{"azp", "client_id"},
+                               [&](std::string_view name) {
+                                   const core::json::Value* v = claims.find(name);
+                                   return v != nullptr && v->as_string() == client_id;
+                               });
 }
 
 bool claim_holds(const core::json::Value& claim, std::string_view value) noexcept {

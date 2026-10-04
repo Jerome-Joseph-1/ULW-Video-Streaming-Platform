@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 #include "core/ports/clock.hpp"
+#include "core/ports/message_store.hpp"
 #include "net/reactor.hpp"
 #include "rt/room_router.hpp"
 
@@ -65,6 +66,24 @@ struct PresenceCounters {
     // it had said there.
     std::uint64_t gaps = 0;
     std::uint64_t allocation_failures = 0;
+    // Who-may-see-whom checks asked of the store (ADR-0096): one per watch asked for, and one per
+    // client whose watches a removal or a resync put in doubt.
+    std::uint64_t checks = 0;
+    // Watches refused because the two share no direct or group chat, and watches dropped because
+    // they no longer do (or the store could not say so after a removal or a resync).
+    std::uint64_t not_shared = 0;
+    std::uint64_t revoked = 0;
+};
+
+// Who may see whose presence (ADR-0096): only someone who shares a direct or group chat with the
+// user, now. The message store in chat_server (IMessageStore::shared_with), a fake in tests.
+class IPresenceAccess {
+public:
+    virtual ~IPresenceAccess() = default;
+    // Which of `others` share a direct or group chat with `user`. Answered once, on the reactor
+    // thread, never inside the call.
+    virtual void shared_with(const core::UserId& user, std::vector<core::UserId> others,
+                             core::ports::MessageCallback<std::vector<core::UserId>> done) = 0;
 };
 
 struct PresenceClientId {
@@ -94,12 +113,21 @@ struct PresenceClientId {
 // sees a gap in the room's seqs says again what it had said there (a hello, an announcement),
 // since whoever missed it with it cannot know.
 //
+// Who may watch whom is decided here, at the watching node, for its own clients (ADR-0096): a
+// watch is let in only once the store says the two share a direct or group chat, and nothing of
+// the user reaches the client before. A removal from any member list (the store's notification,
+// which every node hears) holds back at once every watch of this node's clients that involves the
+// user removed, by either side, until the store says again; those no longer shared are dropped,
+// and their clients told `not_shared`. A resync holds back and checks every watch.
+//
 // Everything runs on the reactor thread; time comes from the injected clock, deadlines from
 // one timer on the reactor.
-class Presence final : public net::ITimerHandler {
+class Presence final : public net::ITimerHandler, public core::ports::IMemberListener {
 public:
-    Presence(IRooms& rooms, net::IReactor& reactor, const core::ports::IClock& clock,
-             const core::NodeId& self, PresenceLimits limits);
+    // `access` answers who may see whom; its answers must not reach a destroyed Presence (in
+    // chat_server the store is destroyed first, dropping what it still owes).
+    Presence(IRooms& rooms, IPresenceAccess& access, net::IReactor& reactor,
+             const core::ports::IClock& clock, const core::NodeId& self, PresenceLimits limits);
     // Leaves every room; the room plane must outlive it.
     ~Presence() override;
     Presence(const Presence&) = delete;
@@ -111,11 +139,21 @@ public:
     // is detached.
     [[nodiscard]] PresenceClientId attach(IClient& client, const core::UserId& user);
     void detach(PresenceClientId id) noexcept;
-    // Answers `watching` with what this node knows now; `presence` follows each change.
+    // Answers `watching` with what this node knows now, once the store says the two share a
+    // direct or group chat (`not_shared` otherwise); `presence` follows each change.
     void watch(PresenceClientId id, const core::UserId& user);
     void unwatch(PresenceClientId id, const core::UserId& user);
 
     void on_timeout() noexcept override;
+
+    // Every watch here that involves `user`, watching or watched, is held back and checked again.
+    void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
+    void on_member_added(const core::RoomId& /*room*/,
+                         const core::UserId& /*user*/) noexcept override {}
+    void on_member_role(const core::RoomId& /*room*/, const core::UserId& /*user*/,
+                        core::ports::MemberRole /*role*/) noexcept override {}
+    // Every watch here is held back and checked again.
+    void on_members_resync() noexcept override;
 
     [[nodiscard]] const PresenceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
@@ -124,11 +162,28 @@ private:
     struct Room;
     enum class Kind : std::uint8_t;
 
+    // A watch the store is being asked about: one the client asked for and that is not let in
+    // yet (fresh), or one let in earlier and held back since a removal or a resync.
+    struct Check {
+        core::UserId user;
+        // Tells this ask from an earlier one of the same user, whose answer is then ignored.
+        std::uint64_t seq = 0;
+        bool fresh = true;
+        // A removal or a resync came while it was asked: asked again once answered.
+        bool stale = false;
+        // Watches of the user the client asked for again while this was asked, each owed an
+        // answer of its own, as a watch asked twice is answered twice (at most kMaxOwed).
+        std::uint32_t answers_owed = 0;
+        // What a held watch's client was last told.
+        bool told_online = false;
+    };
+
     struct Client {
         IClient* client;
         core::UserId user;
         // Rooms with this client in their `local`, which keeps them from being erased.
         std::vector<Room*> watching;
+        std::vector<Check> checks;
     };
 
     [[nodiscard]] static std::optional<Kind> kind_of(std::byte b) noexcept;
@@ -145,10 +200,33 @@ private:
     void tell(IClient& client, std::string_view type, const Room& room) noexcept;
     [[nodiscard]] static bool idle(const Room& room) noexcept;
     void drop_watch(Room& room, PresenceClientId id) noexcept;
+    // Asks the store about `users` for the client: `fresh` watches it asked for, or watches it has
+    // whose basis a removal or a resync put in doubt, held back until the answer.
+    void ask(PresenceClientId id, Client& client, std::vector<core::UserId> users);
+    void checked(PresenceClientId id,
+                 const std::vector<std::pair<core::UserId, std::uint64_t>>& asked,
+                 const core::ports::MessageResult<std::vector<core::UserId>>& result) noexcept;
+    // The client's watch of `*only`, or every watch it has when `only` is null, held back and
+    // asked about again; checks in flight for them are asked again once answered.
+    void recheck(PresenceClientId id, Client& client, const core::UserId* only) noexcept;
+    // The check `asked` named, taken off the client's list to be answered; nullopt when it is
+    // gone, asked again since, or stale (then queued in `again` to be asked anew).
+    [[nodiscard]] std::optional<Check> settle(Client& client, const core::UserId& user,
+                                              std::uint64_t seq, std::vector<core::UserId>& again);
+    // A fresh watch answered: let in, or refused `not_shared` (`unavailable` when not answered).
+    void let_in(PresenceClientId id, Client& client, const Check& check, bool answered,
+                bool allowed);
+    // A held watch answered: let back, with what changed while held, or dropped.
+    void let_back(PresenceClientId id, Client& client, const Check& check, bool answered,
+                  bool allowed);
+    // A fresh watch the store let in: registered, and answered `watching`.
+    void start_watch(PresenceClientId id, Client& client, const core::UserId& user);
+    [[nodiscard]] static bool held(const Room& room, PresenceClientId id) noexcept;
     void wake(Room& room) noexcept;
     void arm(core::MonoTime at) noexcept;
 
     IRooms& rooms_plane_;
+    IPresenceAccess& access_;
     net::IReactor& reactor_;
     const core::ports::IClock& clock_;
     PresenceLimits limits_;
@@ -157,6 +235,7 @@ private:
     std::uint64_t tag_;
     std::uint64_t next_key_ = 1;
     std::uint64_t next_client_ = 1;
+    std::uint64_t next_check_ = 1;
     PresenceCounters counters_;
     std::unordered_map<std::uint64_t, Client> clients_;
     std::unordered_map<core::UserId, std::unique_ptr<Room>> rooms_;

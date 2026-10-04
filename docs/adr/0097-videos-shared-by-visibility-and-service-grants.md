@@ -99,14 +99,15 @@ What had to be settled:
   (default `scope`) holds `ULW_SERVICE_SCOPE`: a string equal to it or listing it among
   space-separated values (OAuth's `scope`), an array with such a string, or `true` for `true`
   (`infra::auth::claim_holds`); and, when `ULW_SERVICE_CLIENT_ID` is set (recommended), its
-  `azp` is that client (or, for a token without `azp`, its `client_id` is), so only the
-  backend's client-credentials client qualifies (`infra::auth::is_service_token`).
+  `azp` or its `client_id` names that client, so only the backend's client-credentials client
+  qualifies (`infra::auth::names_client`).
   `infra::auth::read_service_claim` validates the three settings for every service;
   `ClaimRules::service_claim`/`service_value`/`service_client_id` carry them, and
   `Claims::is_service` is the verdict. Without `ULW_SERVICE_SCOPE` no token is a service's and
   the service routes answer `403` to all; the claim left unset or at `scope` then means "off",
-  so the shipped configuration starts, while a claim of another name or a client id without a
-  scope stops the process (exit 2). The service routes take the token only from the
+  so the shipped configuration starts (a client id without a scope is ignored), while a claim of
+  another name without a scope stops the process (exit 2). The helper is shared with chat's
+  service API (ADR-0096), which reads the same three settings. The service routes take the token only from the
   `Authorization` header: a service token in the cookie is `403`. A service token is otherwise
   an ordinary token: its subject is charged the per-user request limits like any user's.
 - **The public route.** The shipped HTTPRoute sends `/api/v1/service/videos` to the gateway,

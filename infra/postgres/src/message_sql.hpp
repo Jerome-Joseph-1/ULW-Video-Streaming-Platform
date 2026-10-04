@@ -190,8 +190,8 @@ SELECT EXISTS (SELECT 1 FROM listed WHERE user_id = $2)
        (SELECT held FROM used))sql";
 
 // $3's users not listed yet join the group, if $5 (the room is a group chat), $2 is its admin
-// and the list stays within $4. Answers $2's role (NULL: not listed), whether the list fits, and
-// who was added.
+// or $6 (the operator's service asks, with $2 empty) and the list stays within $4. Answers $2's
+// role (NULL: not listed), whether the list fits, and who was added.
 inline constexpr Sql kAddMembers = R"sql(
 WITH actor AS (SELECT role FROM chat_members WHERE room_id = $1 AND user_id = $2),
 fresh AS (
@@ -203,7 +203,7 @@ fits AS (
 added AS (
     INSERT INTO chat_members (room_id, user_id, role)
     SELECT $1, u, 'member' FROM fresh
-     WHERE $5 AND (SELECT role FROM actor) = 'admin' AND (SELECT ok FROM fits)
+     WHERE $5 AND ($6 OR (SELECT role FROM actor) = 'admin') AND (SELECT ok FROM fits)
     ON CONFLICT (room_id, user_id) DO NOTHING
     RETURNING user_id)
 SELECT (SELECT role FROM actor), (SELECT ok FROM fits),
@@ -271,18 +271,35 @@ SELECT m.room_id, r.kind, m.role,
  ORDER BY m.room_id
  LIMIT $2)sql";
 
-// A page of the room's members and roles, for $2 only while listed. Always one row at least:
-// the first column says whether $2 is listed, and a page with nobody (past the end, or for
-// someone not listed) is one row of NULLs beside it. $3 the id to page after ('' sorts before
-// every id), $4 the row limit.
+// A page of the room's members and roles, for $2 only while listed, or for the operator's
+// service ($5, with $2 empty), which reads as listed. Always one row at least: the first column
+// says whether $2 is listed, and a page with nobody (past the end, or for someone not listed) is
+// one row of NULLs beside it. $3 the id to page after ('' sorts before every id), $4 the row
+// limit.
 inline constexpr Sql kRoster = R"sql(
 SELECT a.listed, p.user_id, p.role
-  FROM (SELECT EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2) AS listed) a
+  FROM (SELECT $5 OR EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2)
+               AS listed) a
   LEFT JOIN LATERAL (
        SELECT user_id, role FROM chat_members
         WHERE room_id = $1 AND user_id > $3
         ORDER BY user_id
         LIMIT $4) p ON a.listed
  ORDER BY p.user_id)sql";
+
+// Which of $2's users (ids separated by spaces) share a direct or group chat with $1: whose
+// presence $1 may see (ADR-0096). $1's rooms through chat_members_by_user, each probed for the
+// others by primary key. A room with no kind recorded is a group chat, as a join records it; a
+// stream's live chat lists nobody, and is left out by its kind all the same.
+inline constexpr Sql kSharedWith = R"sql(
+SELECT DISTINCT o.user_id
+  FROM chat_members m
+  JOIN chat_members o ON o.room_id = m.room_id
+  LEFT JOIN chat_rooms r ON r.room_id = m.room_id
+ WHERE m.user_id = $1
+   AND o.user_id = ANY (string_to_array($2, ' '))
+   AND o.user_id <> $1
+   AND (r.kind IS NULL OR r.kind IN ('direct_chat', 'group_chat'))
+ ORDER BY o.user_id)sql";
 
 } // namespace infra::postgres::message_sql

@@ -24,7 +24,7 @@ public:
                       core::ports::MessageCallback<core::ports::MembershipChange> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
-    void add_members(const core::RoomId& /*room*/, const core::UserId& /*actor*/,
+    void add_members(const core::RoomId& /*room*/, const core::ports::Actor& /*actor*/,
                      std::vector<core::UserId> /*users*/,
                      core::ports::MessageCallback<core::ports::MembershipChange> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
@@ -43,9 +43,13 @@ public:
                   core::ports::MessageCallback<std::vector<core::ports::RoomEntry>> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
-    void roster(const core::RoomId& /*room*/, const core::UserId& /*asker*/,
+    void roster(const core::RoomId& /*room*/, const core::ports::Actor& /*asker*/,
                 std::optional<core::UserId> /*after*/, std::size_t /*limit*/,
                 core::ports::MessageCallback<core::ports::Roster> done) override {
+        done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
+    void shared_with(const core::UserId& /*user*/, std::vector<core::UserId> /*others*/,
+                     core::ports::MessageCallback<std::vector<core::UserId>> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
 };

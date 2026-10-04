@@ -24,6 +24,12 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
   call too, of up to 8 devices ([Group calls](#group-calls)). A stream's live chat, or a room
   with no kind recorded, has none
   (`not_callable`).
+- **Who can call whom** is who is listed together. With self-service off
+  (`ULW_CHAT_SELF_SERVICE`, the default), users cannot list anyone themselves: the product's
+  backend opens the direct chat or makes the group through
+  [the service API](chat.md#the-service-api), and only then can its members call each other. The
+  rooms are the same ones `open_direct` and `create_group` would name, and a call still needs
+  its asker on the list at the moment of asking.
 - A direct chat's call holds **two participants**. A participant is a device: each member on one device. A
   second device of the same member takes the other member's place, and LiveKit refuses a third.
 - The first ticket of a call **rings** the other member on every socket they have open, on

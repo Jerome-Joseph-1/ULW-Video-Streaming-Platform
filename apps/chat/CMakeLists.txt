@@ -12,6 +12,7 @@ ulw_add_library(chat_lib
     src/presence.cpp
     src/presence_room.cpp
     src/ring.cpp
+    src/service_api.cpp
     src/sha256.cpp
     src/session.cpp
     src/token_bucket.cpp)
