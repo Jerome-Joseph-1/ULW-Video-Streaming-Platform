@@ -54,66 +54,98 @@ emulation" should be on.
 
 ## Demo day
 
-Everything below runs on the presenting laptop: Docker Desktop (macOS or Windows) or Docker
-Engine (Linux), git, and Chrome. Run plan A or B the evening before; the first start downloads
-about 2.5 GB.
+The plan is the image archive a CI run built from `demo/integration` and tested twice (plan B
+below is the primary plan): not every feature is on `main` yet. Everything runs on the
+presenting laptop.
 
-**On Docker Desktop first:** Settings > Resources: 4 CPUs, 6 GB memory or more, 10 GB of free
-disk image space. On an Apple Silicon Mac, Settings > General: "Use Rosetta for x86_64/amd64
-emulation on Apple Silicon" on (our images are amd64).
+**Build for the demo:** `<sha12>` is the 12-digit commit and `<RUN>` the `e2e` run id; the
+run's summary lists the archive `demo-images-<sha12>` (about 250 MB, kept 2 days from the run).
+A run qualifies when it is a green `e2e` run of `demo/integration` dispatched with `demo` and
+`demo_build` ticked, `sandbox` unticked: both smoke runs say `7 passed`.
 
-### Plan A: main, pinned to a checked build
+### Prerequisites (the evening before)
 
-Use this once the features are merged to `main`. `<SHA>` is the full 40-digit commit we name
-for the demo: a `main` commit whose `publish-images` run succeeded and whose demo smoke run was
-green.
+- **Docker Desktop** (macOS or Windows) or Docker Engine with Compose v2 (Linux). In Docker
+  Desktop, Settings > Resources: **4 CPUs, 6 GB memory** or more, and 10 GB of free disk image
+  space.
+- **Apple Silicon Mac:** Settings > General, "Use Rosetta for x86_64/amd64 emulation on Apple
+  Silicon" on. Our images are amd64 and run emulated: everything works, transcodes are a few
+  times slower, so keep demo clips under a minute.
+- **git**, and the **GitHub CLI logged in** (`gh auth status` shows your account; if not,
+  `gh auth login`). Without `gh`, download the archive from the run's page while signed in to
+  GitHub (Summary > Artifacts > `demo-images-<sha12>`), then unzip it.
+- **Chrome**, plus a second Chrome profile or another browser (Firefox, Edge) for carol.
+- Ports 8080, 9900, 7881 (TCP) and 7882 (UDP) free on the laptop.
 
-```sh
-git clone https://github.com/Jerome-Joseph-1/ULW-Video-Streaming-Platform.git ulw && cd ulw
-git checkout <SHA>
-ULW_TAG=<SHA> demo/up.sh
-```
+### Plan B (primary): the tested images, from the archive
 
-`up.sh` checks the machine first (Docker running, memory, free ports, disk), pulls the images of
-exactly that build, starts everything, waits until it is ready and prints the URL. What `main`
-does not have yet, the page says so in place (for example "group calls arrive with
-feat/group-calls"); everything else works.
-
-### Plan B: the images a CI run built and tested, from an archive
-
-Use this if the features are not all on `main` by the morning. `<RUN>` is the run id and
-`<sha12>` the 12-digit commit we name: an `e2e` run of `demo/integration` with `demo_build`,
-green, whose summary lists the archive (`demo-images-<sha12>`, about 250 MB, kept 2 days).
+Copy and paste, in a terminal, the evening before (the first start also downloads about 2 GB of
+third-party images):
 
 ```sh
 git clone https://github.com/Jerome-Joseph-1/ULW-Video-Streaming-Platform.git ulw && cd ulw
 git checkout <sha12>
-gh run download <RUN> -n demo-images-<sha12>     # or: the run's page > Artifacts > demo-images-<sha12>, then unzip
+gh run download <RUN> -R Jerome-Joseph-1/ULW-Video-Streaming-Platform -n demo-images-<sha12>
 demo/load.sh demo-images-<sha12>.tar.gz
 ULW_TAG=local-<sha12> demo/up.sh
 ```
 
-The archive holds the four images the run built from that commit and tested twice (once as
-built, once loaded back from the archive). `up.sh` uses them as they are and pulls only the
-third-party images (Postgres, MinIO, LiveKit, Redis, egress, nginx, node), all pinned by digest.
-Without `gh`, download the artifact from the run's page while signed in to GitHub.
+`gh run download` puts `demo-images-<sha12>.tar.gz` in the current directory (from the run's
+page you get a zip: unzip it there). `load.sh` loads the four images the run built from that
+commit (gateway, worker, chat, live packager), tagged `local-<sha12>`; `up.sh` uses them as
+they are, never pulls them, and pulls only the third-party images (Postgres, MinIO, LiveKit,
+Redis, egress, nginx, node), all pinned by digest. It checks the machine first (Docker running,
+memory, free ports, disk), waits until everything is ready and prints "The demo is up". Keep the
+checkout at `<sha12>`: the page and the browser's MLS client come from it and match the images.
 
-### Both plans, on the day
+Once it is up, run the [10-minute demo](#the-10-minute-demo) once as a rehearsal, then stop it
+with `demo/down.sh`. The archive expires 2 days after the run; once loaded, the images stay in
+Docker, so download and load it the evening before.
 
-1. Thirty minutes before: `demo/up.sh` with the same `ULW_TAG` as above (a minute when the
-   images are already there). It prints "The demo is up".
-2. Start clean if you rehearsed: `demo/down.sh --wipe`, then `up.sh` again, and in Chrome
-   clear the site's data for localhost:8080 (the address bar's site icon > Site settings >
-   Delete data). That forgets the rehearsal's videos, messages and the browsers' MLS devices.
-3. Open http://localhost:8080 in a normal Chrome window (alice) and in an Incognito window
-   (bob), side by side. Allow the camera and microphone in each. For the group call, a third
-   window as carol: a second Chrome profile, or another browser.
-4. Run [the 10-minute demo](#the-10-minute-demo) below.
-5. Afterwards: `demo/down.sh`.
+### Plan A (secondary): main, pinned
+
+Only if the features are all on `main`: a `main` commit whose `publish-images` run succeeded and
+whose demo smoke run was green, its full 40-digit SHA as `<SHA>`:
+
+```sh
+git checkout <SHA>
+ULW_TAG=<SHA> demo/up.sh
+```
+
+### 30 minutes before
+
+1. Docker Desktop running, with the resources above. Close heavy apps; disconnect any VPN.
+2. In the checkout (still at `<sha12>`): `demo/down.sh --wipe` to forget the rehearsal's
+   videos, messages and encrypted room, then `ULW_TAG=local-<sha12> demo/up.sh`. About a
+   minute; it prints "The demo is up: http://localhost:8080".
+3. Clear the rehearsal's browser data in every browser and profile you will use: on
+   http://localhost:8080, the address bar's site icon > Site settings > Delete data (or close
+   the Incognito window). This forgets each browser's MLS devices, which must match the wiped
+   server.
+4. Open the three windows (below), sign in, allow the camera and microphone in each.
+5. Have a short video at hand (an `.mp4` or `.mov`, under a minute), or plan to use the page's
+   **Make a 6 s test clip**.
+6. Quick check: alice's **People** list shows bob and carol online (green).
+
+### Browser profiles
+
+Each user needs a browser of its own, because each keeps its own sign-in and MLS device:
+
+| User | Window |
+|---|---|
+| **alice** | A normal Chrome window: http://localhost:8080, click **alice** |
+| **bob** | A Chrome Incognito window: http://localhost:8080, click **bob** |
+| **carol** | A second Chrome profile (profile icon > Add), or another browser: http://localhost:8080, click **carol** |
+
+Put alice and bob side by side; carol is needed only for the group call. Always
+`http://localhost:8080`, not a LAN address: browsers allow cameras only on localhost or HTTPS.
+
+### After the demo
+
+`demo/down.sh` (keeps the videos and messages), or `demo/down.sh --wipe` (forgets them).
 
 If something misbehaves during the demo, move on to the next part; each tab stands on its own.
-Calls or live with no picture usually mean a VPN is intercepting local UDP: disconnect it. The
-Troubleshooting table below covers the rest.
+The [Troubleshooting](#troubleshooting) table covers the usual causes.
 
 ## What is running
 
@@ -133,73 +165,70 @@ Troubleshooting table below covers the rest.
 
 ## The 10-minute demo
 
-Before the audience arrives: run `demo/up.sh`, open http://localhost:8080 in two windows side
-by side (window A and window B; a normal and a private window also works). In A click
-**alice**, in B click **bob**. Have a short video file at hand (any `.mp4` or `.mov`), or use
-the page's test clip. Allow the camera and microphone in both windows when asked (the first
-call asks).
+Set up as in [30 minutes before](#30-minutes-before): alice in a normal Chrome window, bob in
+an Incognito window side by side, carol in another profile or browser, each signed in with the
+camera and microphone allowed.
 
-1. **Upload and watch (2 min)**, window A (alice), tab **Upload & Watch**.
-   - Click **Choose file** and pick your clip, or click **Make a 6 s test clip** (Chrome or
-     Safari).
+1. **Upload and playback (2 min)**, alice, tab **Upload & Watch**.
+   - Click **Choose file** and pick your clip, or click **Make a 6 s test clip**.
    - Click **Upload**. The bar fills chunk by chunk. To show that uploads resume, click
      **Pause** halfway, then **Resume**: it asks the gateway where it stands and continues.
    - Under **My videos** the clip goes `uploading`, `processing`, `ready`. Click **Play**: HLS
      plays, with its renditions listed under the player.
    - Point out: segments come straight from the store on signed URLs; only alice can see this
      video.
-2. **Chat and presence (1.5 min)**, tab **Chat** in both windows.
-   - The rooms are already there: where chat has the member-list commands
-     (feat/chat-rooms-api), each page opened a direct chat with every other user and alice's
-     page created the **team** group (alice, bob, carol) and the encrypted room (alice, bob)
-     when she signed in, all through chat itself; on a build without them, the seeded rooms.
-   - In A, the **People** list shows bob online (green). Click the **bob** room in both
-     windows. Type in A, press Enter: it appears in B at once. Reply from B.
-   - Reload B: history is back, and bob goes offline and online for alice after the 10 s grace.
-3. **End-to-end encrypted chat (2 min)**, still **Chat**.
-   - In A open **encrypted (alice + bob)** (the lock), then in B. Alice's browser starts the
-     MLS group. Bob's device asks to join with a key package, and a card appears at the top of
-     A's Chat tab: "bob asks to add the device bob/... Its fingerprint: ...". Compare it with
-     the fingerprint B's banner shows for its own device ("This device: ..."), then click
-     **Approve**. Bob's device joins from the welcome; both banners list the two devices and
-     their fingerprints.
-   - Send a message from B; A reads it. Tick **show what the server stores**: under each
+2. **Chat and presence (1 min)**, tab **Chat** in alice and bob.
+   - The rooms are already there: each page opened a direct chat with every other user, and
+     alice's page created the **team** group (alice, bob, carol) and the encrypted room (alice,
+     bob), all through chat itself.
+   - In alice, **People** shows bob online (green). Click the **bob** room in alice and the
+     **alice** room in bob. Type in alice, press Enter: it appears in bob at once. Reply from bob.
+   - Reload bob: the history is back, and bob goes offline and online for alice after the
+     10 s grace.
+3. **MLS encrypted room with Approve (2 min)**, still **Chat**.
+   - In alice open **encrypted (alice + bob)** (the lock), then in bob. Alice's browser starts
+     the MLS group. Bob's device asks to join, and a card appears at the top of alice's Chat
+     tab: "bob asks to add the device bob/... Its fingerprint: ...". Compare it with the
+     fingerprint bob's banner shows for its own device ("This device: ..."), then click
+     **Approve**. Bob's device joins; both banners list the two devices and their fingerprints.
+   - Send a message from bob; alice reads it. Tick **show what the server stores**: under each
      message is the body chat stored, an MLS ciphertext. The chat server never had a key.
    - The banner names the encryption: MLS (RFC 9420) ciphersuite 1
-     (MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519), OpenMLS compiled to WebAssembly
-     (clients/web-mls). A checkout without that client falls back to a WebCrypto stand-in, and
-     the banner then says "demo cipher, not MLS".
-4. **1:1 call with ringing (2 min)**, tab **Calls**.
-   - In A click **Call** next to bob. B rings wherever it is, with **Answer** and **Decline**
-     and a ring tone. Click **Answer**: both see each other.
-   - Try **Mute** and **Camera off**, then **Hang up** in A; B's call ends too.
-   - Optional: call again and **Decline** in B: A stops calling.
-5. **Group call (1 min)**, tab **Calls**, a third window as **carol**.
-   - In each window click **Join group call** next to **team**: a grid of three.
-   - On a build whose chat has no group calls yet, the button says so (they arrive with
-     `feat/group-calls`).
-6. **Live streaming (2 min)**, tab **Live**.
-   - In A click **Go live**. The camera preview starts; the status turns `LIVE` in a few
+     (MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519), OpenMLS compiled to WebAssembly.
+4. **1:1 call with ringing (1.5 min)**, tab **Calls** in alice and bob.
+   - In alice click **Call** next to bob. Bob's window rings, whatever tab it is on: "alice is
+     calling", with a ring tone, **Answer** and **Decline**. Click **Answer**: both see each
+     other.
+   - Try **Mute** and **Camera off**, then **Hang up** in alice; bob's call ends too.
+   - Optional: call again and **Decline** in bob: alice stops calling.
+5. **Group call of three with ringing (1.5 min)**, tab **Calls** in all three windows.
+   - In alice click **Join group call** next to **team**. Bob and carol ring ("alice is
+     calling"); click **Answer** in each: a grid of three.
+   - **Hang up** in carol: the call goes on for alice and bob. Then **End for everyone** in
+     alice ends it for all.
+6. **Live: go live, watch, end, the recording (2 min)**, tab **Live** in alice and bob.
+   - In alice click **Go live**. The camera preview starts; the status turns `LIVE` in a few
      seconds.
-   - In B, the stream shows under **Watch** (alice's stream, `live`). Click **Watch**: it plays
-     a few seconds behind, with the delay shown, and a live chat beside it.
-   - In A click **End stream**. B's player ends. A's status says the recording is in
-     **Upload & Watch**: open that tab, the recording goes `processing`, then `ready`; click
+   - In bob, the stream shows under **Watch** (alice's stream, `live`). Click **Watch**: it
+     plays a few seconds behind, with the delay shown, and a live chat beside it.
+   - In alice click **End stream**. Bob's player ends. Alice's status says the recording is in
+     **Upload & Watch**: open that tab; the recording goes `processing`, then `ready`. Click
      **Play**.
-   - On a build without the stream service (before `feat/live-publish`, #141), **Go live**
-     says so instead.
 
-To start over with an empty catalog: `demo/down.sh --wipe && demo/up.sh`.
+To start over with an empty catalog: `demo/down.sh --wipe`, clear the site's data in each
+browser, and `ULW_TAG=local-<sha12> demo/up.sh` again.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | `up.sh` says a port is in use (`bind: address already in use`) | Something else has 8080, 9900, 7881 or 7882. Pick others: `DEMO_PORT=8090 DEMO_S3_PORT=9910 demo/up.sh` (`DEMO_RTC_TCP_PORT`, `DEMO_RTC_UDP_PORT` likewise). Use the same values for `down.sh`. |
+| `gh run download` says no artifact matches, or the run page lists none | The archive expired (2 days after its run) or the name is wrong: it is `demo-images-` and the 12-digit commit. Images already loaded stay in Docker: `docker image ls 'ghcr.io/jerome-joseph-1/*'` lists them, and `ULW_TAG=local-<sha12> demo/up.sh` still works. Otherwise use plan A. |
+| `up.sh` says an image "is not here: load the archive first" | Run `demo/load.sh demo-images-<sha12>.tar.gz` first, and use the same `<sha12>` in `ULW_TAG=local-<sha12>`. |
 | `up.sh` waits for a long time | `docker compose -f demo/compose.yaml ps -a` shows what is not up; `docker compose -f demo/compose.yaml logs <service>` says why. The first start's image downloads are the usual cause. |
 | Videos stay `processing`, and `docker compose -f demo/compose.yaml logs worker` shows it restarting with an `unshare` error from `ulw_sandbox` | The worker's ffmpeg sandbox needs user namespaces. On Ubuntu 23.10 or later as the host: `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, then `docker compose -f demo/compose.yaml restart worker gateway`. Docker Desktop needs nothing. |
 | A clip fails with "the file could not be decoded as video" | A WebM recorded by Firefox has no duration; use Chrome or Safari for the test clip, or upload a real file. |
-| Calls connect but show no video, or live never turns `LIVE` | The media ports (7881 TCP, 7882 UDP) must reach Docker. A VPN or a firewall that intercepts loopback UDP can block them; disconnect the VPN. Check `docker compose -f demo/compose.yaml logs livekit`. |
+| Calls connect but show no video, or live never turns `LIVE` | Usually a VPN: disconnect it (and quit its app if it filters even when disconnected), then reload the windows. The media ports (7881 TCP, 7882 UDP) must reach Docker; a firewall that intercepts loopback UDP blocks them too. Check `docker compose -f demo/compose.yaml logs livekit`. |
 | No camera or microphone | Use `http://localhost:8080` (not a LAN address: browsers allow cameras only on localhost or HTTPS), and allow them in the address bar. On macOS also allow the browser under System Settings > Privacy & Security > Camera and Microphone. |
 | Both windows show the same user | Each window keeps its own user; a window opened from another (Cmd+click) may copy it. Click **switch user**, or open `http://localhost:8080/?user=bob`. |
 | Live: "busy" | The demo runs one live stream at a time. End the other (its owner's **End stream**), or wait about 2 minutes for an abandoned one to time out. |
