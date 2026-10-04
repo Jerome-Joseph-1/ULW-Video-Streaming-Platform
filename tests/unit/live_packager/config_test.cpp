@@ -185,7 +185,17 @@ TEST_F(LiveConfigTest, EmptyValuesCountAsUnset) {
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_EQ(config->ingest_host, "127.0.0.1");
-    EXPECT_EQ(config->ffmpeg, "ffmpeg");
+}
+
+// The sandbox runs the ffmpeg and ffprobe it was built with (docs/adr/0089).
+TEST_F(LiveConfigTest, TheRetiredProgramPathsAreRefusedNotIgnored) {
+    for (const char* variable : {"ULW_FFMPEG", "ULW_FFPROBE"}) {
+        env[variable] = "ffmpeg";
+        EXPECT_EQ(refused_variable(), variable);
+        EXPECT_NE(load().error().reason.find("ULW_SANDBOX_FFPROBE"), std::string::npos);
+        env.erase(variable);
+    }
+    EXPECT_TRUE(load());
 }
 
 TEST_F(LiveConfigTest, RecordingIsOffUnlessADatabaseAndAnOwnerAreBothGiven) {

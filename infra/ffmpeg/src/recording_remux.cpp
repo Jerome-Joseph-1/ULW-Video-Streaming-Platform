@@ -30,8 +30,8 @@ std::string layout_of(std::uint32_t channels) {
     return channels == 1 ? "mono" : "stereo";
 }
 
-Args recording_remux_args(const std::string& ffmpeg, const RecordingRemuxJob& job) {
-    Args args{ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-nostats"};
+Args recording_remux_args(const RecordingRemuxJob& job) {
+    Args args{std::string(kFfmpeg), "-nostdin", "-hide_banner", "-loglevel", "error", "-nostats"};
     switch (job.from) {
     case RecordingInput::FragmentedMp4:
         args.insert(args.end(), {"-f", "mp4", "-i", "pipe:0"});
@@ -95,8 +95,8 @@ RecordingRemuxer::run(const RecordingRemuxJob& job,
                         .cpu = job.cpu,
                         .wall = std::chrono::duration_cast<core::Millis>(job.wall),
                         .file_size_bytes = kNoFiles};
-    const auto child = run_sandboxed(sandbox, limits, recording_remux_args(config_.ffmpeg, job),
-                                     clock_, on_output, stop, job.input);
+    const auto child = run_sandboxed(sandbox, limits, recording_remux_args(job), clock_, on_output,
+                                     stop, job.input);
     if (!child) {
         return std::unexpected(
             RemuxError{.kind = RemuxFailure::Unavailable, .detail = child.error()});
@@ -117,7 +117,7 @@ RecordingRemuxer::probe_audio(const std::filesystem::path& init,
                         .wall = std::chrono::duration_cast<core::Millis>(kProbeBudget),
                         .file_size_bytes = kNoFiles};
     std::string out;
-    const Args args{config_.ffprobe,
+    const Args args{std::string(kFfprobe),
                     "-v",
                     "error",
                     "-select_streams",

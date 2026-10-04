@@ -95,7 +95,8 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_CONFIG` | optional TOML file | same | | See above |
 | `ULW_NODE_ID` | | or `HOSTNAME` | or `HOSTNAME` | RFC 1123 label |
 | `ULW_PRESENCE_GRACE_MS` | | | 0 to 600000, default 10000 | How long a user whose last connection closed still shows online ([chat.md](chat.md#presence)) |
-| `ULW_SCRATCH_DIR`, `ULW_FFMPEG`, `ULW_FFPROBE`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks |
+| `ULW_SCRATCH_DIR`, `ULW_FFMPEG_THREADS`, `ULW_SANDBOX_BIN` | | optional | | Scratch defaults to `/var/cache/ulw-worker`, which must be a directory (not a symbolic link) owned by the worker's user or by root, as the image's, an emptyDir and a systemd `CacheDirectory=` one are; a missing one is created 0700. The node's directory in it, `<ULW_SCRATCH_DIR>/<node>`, is made 0700, and startup stops if that name is a symbolic link, not a directory, or another user's, or if the scratch directory itself fails those checks. The sandbox helper runs only the ffmpeg and ffprobe it was built with: `/usr/bin/ffmpeg` and `/usr/bin/ffprobe`, as the images install them, unless the image was built with the CMake variables `ULW_SANDBOX_FFMPEG` and `ULW_SANDBOX_FFPROBE` set to other absolute paths (ADR-0089). `PATH` is passed to the children but never used to find them. |
+| `ULW_FFMPEG`, `ULW_FFPROBE` | | refused | | Retired (ADR-0089). Any non-empty value, from the environment, `--ffmpeg-ffmpeg`/`--ffmpeg-ffprobe` or `ffmpeg.ffmpeg`/`ffmpeg.ffprobe` in `ULW_CONFIG`, stops the worker at startup (exit `2`), rather than being ignored; to run another ffmpeg, build the image with `ULW_SANDBOX_FFMPEG` and `ULW_SANDBOX_FFPROBE` |
 | `ULW_NODE_ADDRESS`, `ULW_NODE_SECRET` | | | required, required (32+ bytes) | The base sets the address to the pod's own, `$(POD_IP):9201`, and takes the secret from `CHAT_SECRET` (ADR-0083) |
 | `ULW_CALL_GROUP_PARTICIPANTS` | | | 3 to 16, default 8 | Devices in a group chat's call, the LiveKit room's cap ([calls.md](calls.md#group-calls)); ADR-0095 derives the default from the SFU's capacity. Out of range: chat exits `2` |
 | `LIVEKIT_API_KEY` | | | optional | Turns calls on (ADR-0087): unset or empty, chat starts with calls off and answers every `call` with `calls_disabled`, whatever the other three say. Set, the other three are required, or chat exits `2` naming the missing one. The base reads it from `SFU_SECRET`, as optional |
@@ -147,10 +148,11 @@ rows live in the gateway's database (`live_streams`, migration 0011).
 
 The live packager (one process per stream, environment only; on Kubernetes one Job per stream
 from `deploy/kubernetes/live-packager/job.yaml`, ADR-0083) takes
-`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below),
-`ULW_FFMPEG` and `ULW_FFPROBE`. `ULW_LIVE_CALLER_WAIT_SECONDS` (0 to 86400, default 0: no limit)
-is how long it waits for its SRT caller before it ends the stream without one, as SIGUSR1 would;
-the Job template sets 60 (ADR-0092). It records an ended stream as a video (ADR-0055) when given both of these, and is
+`ULW_STREAM_ID`, `ULW_LIVE_*`, the storage variables above, `ULW_SCRATCH_DIR` (below) and
+`ULW_SANDBOX_BIN`, and refuses `ULW_FFMPEG` and `ULW_FFPROBE` as the worker does.
+`ULW_LIVE_CALLER_WAIT_SECONDS` (0 to 86400, default 0: no limit) is how long it waits for its SRT
+caller before it ends the stream without one, as SIGUSR1 would; the Job template sets 60
+(ADR-0092). It records an ended stream as a video (ADR-0055) when given both of these, and is
 live-only with neither; one without the other stops it at startup:
 
 | Variable | Live packager | Notes |
@@ -321,6 +323,20 @@ The gateway and the worker write one JSON object per line to stdout:
 Tokens, keys, signed URLs, request targets, headers and bodies are never logged. The gateway
 writes one `request` line per response (request id, method, route name, status, milliseconds,
 body length): `info`, `warn` for a 5xx, `debug` for probes and scrapes.
+
+The gateway's first line, `starting`, carries `"allocator"`: what its malloc runs with
+(ADR-0094). Normally `"glibc arena_max=1 mmap_threshold=131072 trim_threshold=131072"`, set
+by the gateway itself before it starts a thread. An operator who sets any of those three in the
+environment (`MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_` or `MALLOC_TRIM_THRESHOLD_`, or
+`glibc.malloc.arena_max`, `.mmap_threshold` or `.trim_threshold` in `GLIBC_TUNABLES`; a
+threshold variable set to the empty string counts, as glibc reads it as 0) gets glibc with the
+environment's settings instead, none of the gateway's, and the field lists them
+(`"glibc MALLOC_ARENA_MAX=2"`). glibc's other malloc settings (`MALLOC_PERTURB_`,
+`MALLOC_CHECK_`, tcache and the like) are left to glibc and do not turn the gateway's off.
+`"jemalloc"` and `"sanitizer"` mean a build or preload whose allocator ignores glibc's settings;
+another preloaded allocator may stub `mallopt` and still read as tuned. The shipped units and
+manifests set none of these. A `mallopt` that glibc refuses stops the gateway at startup:
+`startup failed`, step `allocator`.
 
 The gateway never waits for its log reader: lines go to a 256 KiB buffer that a thread of its
 own writes out. When the reader falls behind and the buffer is full, lines are dropped and

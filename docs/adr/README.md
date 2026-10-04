@@ -54,7 +54,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0048](0048-seccomp-allowlist-for-the-ffmpeg-child.md) | The ffmpeg child runs under a syscall allowlist | Accepted |
 | [0049](0049-upload-reaper-as-a-cron-job.md) | Abandoned uploads are reaped by a CronJob | Accepted |
 | [0050](0050-clients-reach-the-sfu-with-a-ticket.md) | Clients reach the SFU with a ticket, not through our signalling | Accepted |
-| [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
+| [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted, amended by 0090 |
 | [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted, amended by 0088 |
 | [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted, amended by 0088 |
 | [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted, amended by 0075 and 0096 |
@@ -84,16 +84,19 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0078](0078-the-cookie-is-believed-only-from-trusted-pages.md) | The gateway believes the auth cookie only from pages it trusts | Accepted, amended by 0088 |
 | [0079](0079-sonarqube-cloud-analysis-in-ci.md) | SonarQube Cloud analysis in CI, with the compile database, on the Free plan | Accepted, amended by 0086 |
 | [0080](0080-coverage-floor.md) | Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory | Accepted, amended by 0086 |
-| [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted |
+| [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted, gateway's malloc amended by 0094 |
 | [0082](0082-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted, amended by 0088 |
 | [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085, deployment by 0088 |
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted, amended by 0088 |
 | [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted, amended by 0088 |
-| [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted |
+| [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted, amended by 0090 |
 | [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted, amended by 0091 and 0095 |
 | [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
+| [0089](0089-the-sandbox-runs-only-the-ffmpeg-it-was-built-with.md) | The sandbox runs only the ffmpeg and ffprobe it was built with | Accepted |
+| [0090](0090-io-uring-within-the-users-locked-memory.md) | The io_uring reactor stays within its user's locked memory: zero copy only where the limit cannot refuse it | Accepted |
 | [0091](0091-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md) | A call's ring lives on the room's owner and reaches each member through their presence room | Accepted, amended by 0095 |
 | [0092](0092-the-stream-service-lives-in-the-gateway.md) | The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word | Accepted, amended by 0093 |
 | [0093](0093-livekit-webhooks-on-an-internal-listener.md) | LiveKit's webhooks take a stream live and end it, on a listener of the gateway's own that only LiveKit reaches | Accepted |
+| [0094](0094-gateway-malloc-one-arena-and-a-fixed-mmap-threshold.md) | gateway_server's malloc: one arena and a fixed 128 KiB mmap threshold, set at startup | Accepted |
 | [0095](0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md) | Group calls from the room's owner, with a media generation moved by its fenced write | Accepted |
 | [0096](0096-member-lists-changed-by-their-users.md) | Member lists are changed by their users, over the room WebSocket, under the room's lock | Accepted |

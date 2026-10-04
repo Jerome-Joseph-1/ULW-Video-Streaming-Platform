@@ -216,6 +216,10 @@ public:
         void close(core::ports::MediaDone done) override {
             ++sfu_.closes;
             sfu_.closed.push_back(generation);
+            if (sfu_.hold_closes) {
+                sfu_.held_closes.push_back(std::move(done));
+                return;
+            }
             if (sfu_.close_error) {
                 done(std::unexpected(*sfu_.close_error));
                 return;
@@ -292,6 +296,18 @@ public:
     // The generations closed, in order.
     std::vector<std::uint64_t> closed;
     std::optional<MediaError> close_error;
+    // Closes answered by hand, oldest first.
+    bool hold_closes = false;
+    std::vector<core::ports::MediaDone> held_closes;
+    void release_close(std::optional<MediaError> error = std::nullopt) {
+        core::ports::MediaDone done = std::move(held_closes.front());
+        held_closes.erase(held_closes.begin());
+        if (error) {
+            done(std::unexpected(*error));
+            return;
+        }
+        done({});
+    }
     // Who participants() reports connected, or its error.
     std::vector<core::ports::MediaParticipant> connected;
     std::optional<MediaError> listing_error;
@@ -1043,15 +1059,65 @@ TEST_F(GroupCallHandlerTest, AnOldGenerationClosesOnlyOnceItsJoinsAreAnswered) {
     ASSERT_EQ(ticket("bob"), call);
     ask("carol");
     ASSERT_EQ(sfu_.joins.size(), 1U);
+    plane_.sent.clear();
+    const std::size_t answered = answers_.size();
     move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
-    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
     EXPECT_EQ(sfu_.closes, 0) << "closed under a join still being issued";
     EXPECT_EQ(handler_->retired(), 1U);
+    // Nobody hears of the move, and alice has no answer, while the old room still stands.
+    EXPECT_EQ(answers_.size(), answered);
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 0U);
     // The ticket names the old generation: it is not handed out, and carol asks again.
     sfu_.issue();
-    EXPECT_EQ(answers_.back().outcome, CallOutcome::Unavailable);
     EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
     EXPECT_EQ(handler_->retired(), 0U);
+    // Carol's answer, and alice's once the old room is closed.
+    std::vector<CallOutcome> since;
+    for (std::size_t i = answered; i < answers_.size(); ++i) {
+        since.push_back(answers_[i].outcome);
+    }
+    std::ranges::sort(since);
+    EXPECT_EQ(since, (std::vector{CallOutcome::Unavailable, CallOutcome::Done}));
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+}
+
+TEST_F(GroupCallHandlerTest, AMoveIsToldOnlyOnceTheSfuSaysTheOldRoomIsGone) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    sfu_.hold_closes = true;
+    const std::size_t answered = answers_.size();
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    ASSERT_EQ(sfu_.held_closes.size(), 1U);
+    // Until then, bob's old credential might still find the room: nobody is told to move on.
+    EXPECT_EQ(answers_.size(), answered);
+    EXPECT_TRUE(plane_.sent.empty());
+    // The others may still ask meanwhile; their tickets are for the new generation.
+    ask("carol");
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].generation, core::ports::MediaGeneration{2});
+    sfu_.release_close();
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+}
+
+TEST_F(GroupCallHandlerTest, AMoveIsToldWhenTheSfuCannotSayAndTheCloseIsTriedAgain) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    sfu_.hold_closes = true;
+    move("alice", chat::CallSignal::End, call);
+    sfu_.release_close(MediaError::Unavailable);
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(handler_->retired(), 1U);
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    ASSERT_EQ(sfu_.held_closes.size(), 1U);
+    sfu_.release_close();
+    EXPECT_EQ(handler_->retired(), 0U);
+    // Told once.
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
 }
 
 TEST_F(GroupCallHandlerTest, AnOldGenerationTheSfuCouldNotCloseIsTriedAgainThenGivenUp) {
