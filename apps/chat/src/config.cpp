@@ -94,6 +94,22 @@ std::expected<std::optional<core::Millis>, ConfigError> presence_grace(const Env
     return core::Millis{*value};
 }
 
+std::expected<std::optional<core::Millis>, ConfigError> ring_timeout(const EnvLookup& env) {
+    const auto text = lookup(env, "ULW_CALL_RING_TIMEOUT_MS");
+    if (!text) {
+        return std::nullopt;
+    }
+    // A second at least, for a ring anyone could answer (and the tests that wait for one to run
+    // out); five minutes at most, past which nobody is still waiting for an answer.
+    constexpr std::uint32_t kMinRingMs = 1'000;
+    constexpr std::uint32_t kMaxRingMs = 300'000;
+    const auto value = core::parse_integer<std::uint32_t>(*text);
+    if (!value || *value < kMinRingMs || *value > kMaxRingMs) {
+        return error("ULW_CALL_RING_TIMEOUT_MS", "expected milliseconds, 1000 to 300000");
+    }
+    return core::Millis{*value};
+}
+
 std::expected<std::uint32_t, ConfigError> jwks_max_stale_hours(const EnvLookup& env) {
     const auto text = lookup(env, "ULW_JWKS_MAX_STALE_HOURS");
     if (!text) {
@@ -287,6 +303,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!grace) {
         return std::unexpected(std::move(grace.error()));
     }
+    auto ring = ring_timeout(env);
+    if (!ring) {
+        return std::unexpected(std::move(ring.error()));
+    }
     auto limits = client_limits(env);
     if (!limits) {
         return std::unexpected(std::move(limits.error()));
@@ -315,6 +335,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
                   .allowed_origins = std::move(*allowed),
                   .presence_grace = *grace,
+                  .ring_timeout = *ring,
                   .client_limits = std::move(*limits),
                   .calls = std::move(*calls),
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
