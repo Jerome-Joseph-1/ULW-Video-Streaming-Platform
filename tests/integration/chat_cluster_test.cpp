@@ -1538,6 +1538,140 @@ TEST_P(ChatClusterTest, AGroupsAdminChangesItsListAndEveryNodeActsOnIt) {
     EXPECT_EQ(metric(nodes_[1], "membership_refusals_total{reason=\"not_admin\"}"), 1U);
 }
 
+// Who may see whose presence (ADR-0096), across the cluster: only someone who shares a direct or
+// group chat with the user. A watcher taken off the only chat they shared stops hearing at once,
+// on whichever node they watch from, whichever node changed the list.
+TEST_P(ChatClusterTest, PresenceIsSeenOnlyAcrossASharedChatAndARemovalEndsItOnEveryNode) {
+    const auto watch = [](Client& client, const std::string& who) {
+        const std::size_t from = client.seen().size();
+        EXPECT_TRUE(client.send(R"({"type":"watch","user":")" + who + R"("})"));
+        const auto at = client.wait_from(from, [&](const Seen& s) {
+            return (s.type == "watching" || s.type == "error") && s.user == who;
+        });
+        return at ? client.seen()[*at] : Seen{};
+    };
+    // The suite's room is a group of alice, bob and carol; dave is in none of hers.
+    auto dave = connect(nodes_[2], 3);
+    auto bob = connect(nodes_[1], 1);
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(dave && bob && carol);
+    const Seen refused = watch(*dave, "alice");
+    EXPECT_EQ(refused.type, "error");
+    EXPECT_EQ(refused.reason, "not_shared");
+    EXPECT_EQ(watch(*bob, "alice").type, "watching");
+    EXPECT_EQ(watch(*carol, "alice").type, "watching");
+    auto alice = connect(nodes_[0], 0);
+    ASSERT_TRUE(alice);
+    const auto online = [](const Seen& s) {
+        return s.type == "presence" && s.user == "alice" && s.status == "online";
+    };
+    ASSERT_TRUE(bob->wait_for(online));
+    ASSERT_TRUE(carol->wait_for(online));
+    EXPECT_EQ(dave->count(online), 0U);
+
+    // An operator takes bob off the group in the database: every node hears it, and bob's node
+    // drops his watch once the store says he shares nothing with alice any more.
+    auto conn = db_->session();
+    ASSERT_TRUE(
+        conn.exec("DELETE FROM chat_members WHERE room_id = $1::text::uuid AND user_id = $2",
+                  Params{}.add_text(room_).add_text("bob")));
+    const auto revoked = bob->wait_for([](const Seen& s) {
+        return s.type == "error" && s.reason == "not_shared" && s.user == "alice";
+    });
+    ASSERT_TRUE(revoked);
+    const std::size_t after_revoke = bob->seen().size();
+    // Alice leaves: carol, still in the group, hears it; bob's watch is gone.
+    alice.reset();
+    ASSERT_TRUE(carol->wait_for([](const Seen& s) {
+        return s.type == "presence" && s.user == "alice" && s.status == "offline";
+    }));
+    // A message to bob after carol heard the offline: bob's node had it in the same order, so
+    // anything presence still owed bob would be before it.
+    const auto marker = ask(*bob, R"({"type":"rooms"})", "rooms");
+    ASSERT_TRUE(marker);
+    for (std::size_t i = after_revoke; i < bob->seen().size(); ++i) {
+        EXPECT_NE(bob->seen()[i].type, "presence") << bob->seen()[i].raw;
+    }
+    EXPECT_GE(metric(nodes_[1], "presence_watches_revoked_total"), 1U);
+    EXPECT_GE(metric(nodes_[2], "presence_refusals_total{reason=\"not_shared\"}"), 1U);
+
+    // The operator's backend lists dave in the group through another node's service API: from
+    // then on he may watch her.
+    const auto added =
+        ulw::test::service_post(nodes_[0].service_port, "add_members",
+                                R"({"room":")" + room_ + R"(","users":["dave"]})", mint_service());
+    ASSERT_EQ(added.status, 200) << added.body;
+    ASSERT_TRUE(dave->wait_for([](const Seen& s) {
+        return s.type == "member" && s.user == "dave" && s.change == "added";
+    }));
+    const Seen allowed = watch(*dave, "alice");
+    EXPECT_EQ(allowed.type, "watching") << allowed.raw;
+}
+
+// The operator's backend manages member lists through any node's service API, with a token its
+// identity provider issued it (ADR-0096); every node tells the users concerned, and the rooms are
+// the ones the users' own commands name.
+TEST_P(ChatClusterTest, TheServiceApiListsAndUnlistsThroughAnyNodeAndEveryNodeTellsTheUsers) {
+    auto alice = connect(nodes_[0], 0);
+    auto dave = connect(nodes_[1], 3);
+    ASSERT_TRUE(alice && dave);
+    const std::string body = R"({"users":["alice","dave"]})";
+    EXPECT_EQ(ulw::test::service_post(nodes_[2].service_port, "open_direct", body, "").status, 401);
+    EXPECT_EQ(
+        ulw::test::service_post(nodes_[2].service_port, "open_direct", body, mint("alice")).status,
+        403);
+    EXPECT_EQ(ask(*alice, R"({"type":"rooms"})", "rooms")->raw.find(R"("kind":"direct")"),
+              std::string::npos)
+        << "refused requests list nobody";
+
+    const auto direct =
+        ulw::test::service_post(nodes_[2].service_port, "open_direct", body, mint_service());
+    ASSERT_EQ(direct.status, 200) << direct.body;
+    // The same room alice would have opened herself.
+    const std::string room = open_direct(*alice, "dave");
+    ASSERT_EQ(room.substr(0, 2), "03") << room;
+    EXPECT_NE(direct.body.find(R"("room":")" + room + '"'), std::string::npos) << direct.body;
+    ASSERT_TRUE(dave->wait_for([&](const Seen& s) {
+        return s.type == "member" && s.room == room && s.user == "dave" && s.change == "added";
+    }));
+    EXPECT_EQ(join_again(*dave, room), "joined");
+
+    const auto group = ulw::test::service_post(
+        nodes_[0].service_port, "create_group",
+        R"({"creator":"carol","id":"svc-1","users":["dave","alice"]})", mint_service());
+    ASSERT_EQ(group.status, 200) << group.body;
+    const auto json = core::json::parse(group.body);
+    ASSERT_TRUE(json);
+    const std::string team = std::string(json->find("room")->as_string().value_or(""));
+    ASSERT_EQ(team.substr(0, 2), "04") << group.body;
+    EXPECT_NE(group.body.find(R"("added":["alice","carol","dave"])"), std::string::npos)
+        << group.body;
+    EXPECT_EQ(join_again(*dave, team), "joined");
+    const auto members = ulw::test::service_post(nodes_[1].service_port, "members",
+                                                 R"({"room":")" + team + R"("})", mint_service());
+    EXPECT_NE(members.body.find(R"({"user":"carol","role":"admin"})"), std::string::npos)
+        << members.body;
+
+    // Taken off by the backend on one node, dave is out of the room on his at once.
+    const auto removed =
+        ulw::test::service_post(nodes_[2].service_port, "remove_member",
+                                R"({"room":")" + team + R"(","user":"dave"})", mint_service());
+    ASSERT_EQ(removed.status, 200) << removed.body;
+    ASSERT_TRUE(dave->wait_for([&](const Seen& s) {
+        return s.type == "error" && s.reason == "not_member" && s.room == team;
+    }));
+    const auto rooms = ulw::test::service_post(nodes_[1].service_port, "rooms",
+                                               R"({"user":"dave"})", mint_service());
+    EXPECT_EQ(rooms.status, 200);
+    EXPECT_NE(rooms.body.find(room), std::string::npos) << rooms.body;
+    EXPECT_EQ(rooms.body.find(team), std::string::npos) << rooms.body;
+    std::uint64_t changes = 0;
+    for (const Node& n : nodes_) {
+        changes += metric(n, "service_api_answers_total{result=\"changed\"}");
+    }
+    EXPECT_EQ(changes, 3U);
+}
+
 TEST_P(ChatClusterTest, ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsToOneRoom) {
     if (ulw::test::livekit_environment().empty()) {
         GTEST_SKIP() << "no LiveKit: set LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY "

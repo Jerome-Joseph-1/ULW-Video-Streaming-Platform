@@ -268,9 +268,17 @@ std::vector<std::uint64_t> seqs(const std::vector<std::string>& texts) {
     return out;
 }
 
+// The service as a deployment that lets users manage their own member lists has it
+// (ULW_CHAT_SELF_SERVICE=on): what these tests exercise.
+chat::ServiceLimits self_serving() {
+    chat::ServiceLimits limits;
+    limits.self_service = true;
+    return limits;
+}
+
 class ChatServiceTest : public ::testing::Test {
 protected:
-    explicit ChatServiceTest(chat::ServiceLimits limits = {})
+    explicit ChatServiceTest(chat::ServiceLimits limits = self_serving())
         : service_(std::make_unique<chat::ChatService>(rooms_, messages_, clock_, limits)) {}
 
     chat::ClientId attach(FakeClient& client, std::string_view user = "alice") {

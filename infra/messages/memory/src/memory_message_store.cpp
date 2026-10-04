@@ -319,14 +319,17 @@ void MemoryMessageStore::create_group(const core::RoomId& room, const core::User
                   MemberRole::Admin, std::move(done));
 }
 
-void MemoryMessageStore::add_members(const core::RoomId& room, const core::UserId& actor,
+void MemoryMessageStore::add_members(const core::RoomId& room, const core::ports::Actor& actor,
                                      std::vector<core::UserId> users,
                                      MessageCallback<MembershipChange> done) {
     const auto recorded = kinds_.find(room);
-    Members* listed = members_.contains(room) ? &members_[room] : nullptr;
+    const auto found = members_.find(room);
+    // The service acts as every group's admin, listed or not.
     std::optional<MemberRole> role;
-    if (listed != nullptr) {
-        if (const auto at = listed->find(actor); at != listed->end()) {
+    if (const std::optional<core::UserId>& asker = actor.user(); !asker) {
+        role = MemberRole::Admin;
+    } else if (found != members_.end()) {
+        if (const auto at = found->second.find(*asker); at != found->second.end()) {
             role = at->second;
         }
     }
@@ -338,6 +341,7 @@ void MemoryMessageStore::add_members(const core::RoomId& room, const core::UserI
     } else if (*role != MemberRole::Admin) {
         change = refusal(MembershipOutcome::NotAdmin);
     } else {
+        Members* listed = &members_[room];
         std::ranges::sort(users, ByteOrder{});
         const auto [first, last] = std::ranges::unique(users);
         users.erase(first, last);
@@ -450,12 +454,14 @@ void MemoryMessageStore::rooms_of(const core::UserId& user, std::optional<core::
     });
 }
 
-void MemoryMessageStore::roster(const core::RoomId& room, const core::UserId& asker,
+void MemoryMessageStore::roster(const core::RoomId& room, const core::ports::Actor& asker,
                                 std::optional<core::UserId> after, std::size_t limit,
                                 MessageCallback<core::ports::Roster> done) {
     core::ports::Roster out;
-    if (const auto it = members_.find(room); it != members_.end() && it->second.contains(asker)) {
-        out.asker_listed = true;
+    const auto it = members_.find(room);
+    const std::optional<core::UserId>& who = asker.user();
+    out.asker_listed = !who || (it != members_.end() && it->second.contains(*who));
+    if (out.asker_listed && it != members_.end()) {
         const std::size_t rows = std::min(limit, core::ports::kMaxListPage + 1);
         const Members& members = it->second;
         for (auto from = after ? members.upper_bound(*after) : members.begin();
@@ -464,6 +470,33 @@ void MemoryMessageStore::roster(const core::RoomId& room, const core::UserId& as
                 core::ports::MemberEntry{.user = from->first, .role = from->second});
         }
     }
+    defer([done = std::move(done), out = std::move(out)]() mutable noexcept {
+        done(std::move(out));
+    });
+}
+
+void MemoryMessageStore::shared_with(const core::UserId& user, std::vector<core::UserId> others,
+                                     MessageCallback<std::vector<core::UserId>> done) {
+    if (others.size() > core::ports::kMaxSharedAsked) {
+        others.erase(others.begin() + static_cast<std::ptrdiff_t>(core::ports::kMaxSharedAsked),
+                     others.end());
+    }
+    std::vector<core::UserId> out;
+    for (const auto& [room, members] : members_) {
+        const auto kind = kinds_.find(room);
+        if (!members.contains(user) ||
+            (kind != kinds_.end() && kind->second == core::ports::RoomKind::StreamLiveChat)) {
+            continue;
+        }
+        for (const core::UserId& other : others) {
+            if (other != user && members.contains(other)) {
+                out.push_back(other);
+            }
+        }
+    }
+    std::ranges::sort(out, ByteOrder{});
+    const auto [first, last] = std::ranges::unique(out);
+    out.erase(first, last);
     defer([done = std::move(done), out = std::move(out)]() mutable noexcept {
         done(std::move(out));
     });

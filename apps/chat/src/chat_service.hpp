@@ -9,6 +9,7 @@
 #include "envelope.hpp"
 #include "token_bucket.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -131,6 +132,11 @@ struct ServiceLimits {
     // hour, keeps a script from filling chat_members faster than anyone would notice.
     std::uint32_t membership_burst = 20;
     core::Millis membership_interval{3'000};
+    // ULW_CHAT_SELF_SERVICE: whether users open direct chats, create groups and add members
+    // themselves. Off by default: an embedding product decides who may talk to whom (its own
+    // request and accept), and lists them through the service API (ADR-0096). Leaving, an
+    // admin's removal of others and the listings stay with users either way.
+    bool self_service = false;
     // How long a room stays joined, and its messages kept, after its last client here left:
     // a page reload, a network switch, or a slow reader's reconnect take seconds; a client's
     // backoff reaches half a minute after a few failures.
@@ -170,6 +176,8 @@ struct ServiceCounters {
     std::uint64_t membership_room_limit = 0;
     std::uint64_t membership_gone = 0;
     std::uint64_t membership_rate_limited = 0;
+    // open_direct, create_group and add_members refused because self-service is off.
+    std::uint64_t membership_not_allowed = 0;
     // Answered unavailable: the store could not be reached, or answered with what it cannot
     // have written.
     std::uint64_t membership_unavailable = 0;
@@ -255,8 +263,22 @@ public:
     // checked again once it is let in, since the list it was let in by may predate the removal.
     void on_members_resync() noexcept override;
     // Who else hears the removals the store tells this service of, and its resyncs: the call
-    // handler, which puts a removed member out of the call (ADR-0095). nullptr: nobody.
-    void also_tell(core::ports::IMemberListener* listener) noexcept { also_ = listener; }
+    // handler, which puts a removed member out of the call (ADR-0095), and presence, which checks
+    // again who may still see whom (ADR-0096). Each call adds one, at most kMaxAlsoTold; nullptr
+    // stops telling all of them.
+    static constexpr std::size_t kMaxAlsoTold = 4;
+    void also_tell(core::ports::IMemberListener* listener) noexcept {
+        if (listener == nullptr) {
+            also_.fill(nullptr);
+            return;
+        }
+        for (auto& slot : also_) {
+            if (slot == nullptr) {
+                slot = listener;
+                return;
+            }
+        }
+    }
 
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
@@ -336,6 +358,9 @@ private:
                    core::ports::MessageResult<core::ports::Admission> result) noexcept;
     void answer(IClient& client, std::string_view reason, const core::RoomId& room,
                 const std::optional<rt::MessageKey>& id = std::nullopt) noexcept;
+    // Whether users may list others themselves (ServiceLimits::self_service); refuses the
+    // client with not_allowed when not.
+    [[nodiscard]] bool self_service(IClient& client, const ErrorContext& context) noexcept;
     // Takes one of the user's membership allowance, or says how long until there is one.
     [[nodiscard]] std::expected<void, core::Millis> admit_membership(const core::UserId& user);
     // A member-list change's answer, or its refusal, to the client that asked; `answered` writes
@@ -388,7 +413,7 @@ private:
     bool asking_rechecks_ = false;
     // stop(): the store is never called again.
     bool stopped_ = false;
-    core::ports::IMemberListener* also_ = nullptr;
+    std::array<core::ports::IMemberListener*, kMaxAlsoTold> also_{};
     bool resync_owed_ = false;
 };
 

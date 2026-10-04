@@ -479,6 +479,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/named_rooms_test.cpp
     unit/chat/presence_test.cpp
     unit/chat/ring_test.cpp
+    unit/chat/service_api_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
 target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os

@@ -335,7 +335,10 @@ Asked ask_upgrade(std::uint16_t port, const std::string& headers) {
 class ChatSessionTest : public ::testing::TestWithParam<net::ReactorKind> {
 protected:
     void SetUp() override {
-        node_ = std::make_unique<Node>(GetParam());
+        // Users manage their own member lists here (ULW_CHAT_SELF_SERVICE=on).
+        chat::Limits limits;
+        limits.service.self_service = true;
+        node_ = std::make_unique<Node>(GetParam(), limits);
         ASSERT_NE(node_->port(), 0);
     }
 

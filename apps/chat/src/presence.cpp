@@ -10,6 +10,8 @@
 #include <iterator>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace chat {
 
@@ -28,6 +30,9 @@ constexpr core::Millis kScanEvery{1'000};
 constexpr std::size_t kMaxNodesPerRoom = 64;
 // A kind byte, then the sender's tag in 8 bytes, big-endian.
 constexpr std::size_t kEventSize = 9;
+// Watches of one user asked for again while the first is checked that are each answered once it
+// is: past this many, a client asking in a loop is answered no more often.
+constexpr std::uint32_t kMaxOwed = 16;
 
 std::uint64_t incarnation_tag(const core::NodeId& self, core::WallTime started) {
     const auto digest =
@@ -101,6 +106,9 @@ struct Presence::Room final : rt::IMember {
 
     // The watchers' side: clients here that watch the user, and every node's announcement.
     std::vector<PresenceClientId> local;
+    // Of `local`, those held back while the store is asked again whether they may see the user:
+    // told nothing until it answers (ADR-0096).
+    std::vector<PresenceClientId> held;
     // This node's hello stands in the room.
     bool watching = false;
     bool ack = false;
@@ -108,9 +116,10 @@ struct Presence::Room final : rt::IMember {
     bool shown_online = false;
 };
 
-Presence::Presence(IRooms& rooms, net::IReactor& reactor, const core::ports::IClock& clock,
-                   const core::NodeId& self, PresenceLimits limits)
-    : rooms_plane_(rooms), reactor_(reactor), clock_(clock), limits_(limits),
+Presence::Presence(IRooms& rooms, IPresenceAccess& access, net::IReactor& reactor,
+                   const core::ports::IClock& clock, const core::NodeId& self,
+                   PresenceLimits limits)
+    : rooms_plane_(rooms), access_(access), reactor_(reactor), clock_(clock), limits_(limits),
       tag_(incarnation_tag(self, clock.wall_now())), next_scan_(clock.now()) {}
 
 Presence::~Presence() {
@@ -134,7 +143,8 @@ Presence::Room& Presence::room_of(const core::UserId& user) {
 PresenceClientId Presence::attach(IClient& client, const core::UserId& user) {
     Room& r = room_of(user);
     const PresenceClientId id{next_client_++};
-    clients_.emplace(id.value, Client{.client = &client, .user = user, .watching = {}});
+    clients_.emplace(id.value,
+                     Client{.client = &client, .user = user, .watching = {}, .checks = {}});
     ++r.connections;
     // Back within the grace: as far as anyone else can tell, the user never left.
     r.grace_ends.reset();
@@ -169,15 +179,23 @@ void Presence::watch(PresenceClientId id, const core::UserId& user) {
     Client& client = c->second;
     const auto known = rooms_.find(user);
     Room* room = known == rooms_.end() ? nullptr : known->second.get();
+    // Asked already: the store's answer answers this too.
+    if (const auto check = std::ranges::find(client.checks, user, &Check::user);
+        check != client.checks.end()) {
+        check->answers_owed = std::min(check->answers_owed + 1, kMaxOwed);
+        return;
+    }
     if (room != nullptr && std::ranges::find(client.watching, room) != client.watching.end()) {
         tell(*client.client, "watching", *room);
         return;
     }
+    const auto fresh =
+        static_cast<std::size_t>(std::ranges::count(client.checks, true, &Check::fresh));
     std::string refusal;
     if (user == client.user) {
         // The connection asking is itself the answer; watching it would only cost events.
         write_user_error(refusal, "watching_self", user);
-    } else if (client.watching.size() >= limits_.max_watches_per_client) {
+    } else if (client.watching.size() + fresh >= limits_.max_watches_per_client) {
         write_user_error(refusal, "too_many_watches", user);
     } else if (room == nullptr && rooms_.size() >= limits_.max_rooms) {
         write_user_error(refusal, "busy", user);
@@ -196,6 +214,147 @@ void Presence::watch(PresenceClientId id, const core::UserId& user) {
         client.client->push(refusal);
         return;
     }
+    // Nothing of the user reaches the client before the store says the two share a chat.
+    client.checks.push_back(Check{.user = user,
+                                  .seq = next_check_++,
+                                  .fresh = true,
+                                  .stale = false,
+                                  .answers_owed = 0,
+                                  .told_online = false});
+    try {
+        ask(id, client, {user});
+    } catch (...) {
+        std::erase_if(client.checks, [&](const Check& k) { return k.user == user; });
+        throw;
+    }
+}
+
+void Presence::ask(PresenceClientId id, Client& client, std::vector<core::UserId> users) {
+    std::vector<std::pair<core::UserId, std::uint64_t>> asked;
+    asked.reserve(users.size());
+    for (const core::UserId& user : users) {
+        const auto check = std::ranges::find(client.checks, user, &Check::user);
+        asked.emplace_back(user, check == client.checks.end() ? 0 : check->seq);
+    }
+    ++counters_.checks;
+    access_.shared_with(client.user, std::move(users),
+                        [this, id, asked = std::move(asked)](
+                            core::ports::MessageResult<std::vector<core::UserId>> result) noexcept {
+                            checked(id, asked, result);
+                        });
+}
+
+void Presence::checked(
+    PresenceClientId id, const std::vector<std::pair<core::UserId, std::uint64_t>>& asked,
+    const core::ports::MessageResult<std::vector<core::UserId>>& result) noexcept {
+    const auto c = clients_.find(id.value);
+    if (c == clients_.end()) {
+        return;
+    }
+    Client& client = c->second;
+    std::vector<core::UserId> again;
+    try {
+        for (const auto& [user, seq] : asked) {
+            const std::optional<Check> check = settle(client, user, seq, again);
+            if (!check) {
+                continue;
+            }
+            const bool allowed = result && std::ranges::find(*result, user) != result->end();
+            if (check->fresh) {
+                let_in(id, client, *check, result.has_value(), allowed);
+            } else {
+                let_back(id, client, *check, result.has_value(), allowed);
+            }
+        }
+        if (!again.empty()) {
+            ask(id, client, std::move(again));
+        }
+    } catch (const std::bad_alloc&) {
+        // What was not asked again is let go with the client's connection, so nothing stays held
+        // or let in on an answer read before a removal.
+        ++counters_.allocation_failures;
+        client.client->allocation_failed();
+    }
+}
+
+std::optional<Presence::Check> Presence::settle(Client& client, const core::UserId& user,
+                                                std::uint64_t seq,
+                                                std::vector<core::UserId>& again) {
+    const auto it = std::ranges::find_if(
+        client.checks, [&user, seq](const Check& k) { return k.seq == seq && k.user == user; });
+    // Unwatched meanwhile, or asked again since.
+    if (it == client.checks.end()) {
+        return std::nullopt;
+    }
+    if (it->stale) {
+        // Read perhaps before a removal that came while it was asked: asked again, and a held
+        // watch stays held until then.
+        again.push_back(user);
+        it->stale = false;
+        it->seq = next_check_++;
+        return std::nullopt;
+    }
+    Check check = *it;
+    client.checks.erase(it);
+    return check;
+}
+
+void Presence::let_in(PresenceClientId id, Client& client, const Check& check, bool answered,
+                      bool allowed) {
+    if (answered && allowed) {
+        start_watch(id, client, check.user);
+        const auto r = rooms_.find(check.user);
+        for (std::uint32_t i = 0; i < check.answers_owed && r != rooms_.end(); ++i) {
+            tell(*client.client, "watching", *r->second);
+        }
+        return;
+    }
+    std::string out;
+    if (answered) {
+        ++counters_.not_shared;
+    }
+    write_user_error(out, answered ? "not_shared" : "unavailable", check.user);
+    for (std::uint32_t i = 0; i <= check.answers_owed; ++i) {
+        client.client->push(out);
+    }
+}
+
+void Presence::let_back(PresenceClientId id, Client& client, const Check& check, bool answered,
+                        bool allowed) {
+    const auto r = rooms_.find(check.user);
+    if (r == rooms_.end()) {
+        return;
+    }
+    Room& room = *r->second;
+    std::erase(room.held, id);
+    if (answered && allowed) {
+        for (std::uint32_t i = 0; i < check.answers_owed; ++i) {
+            tell(*client.client, "watching", room);
+        }
+        if (check.answers_owed == 0 && room.shown_online != check.told_online) {
+            tell(*client.client, "presence", room);
+            ++counters_.notified;
+        }
+        return;
+    }
+    // No longer shared, or the store cannot say so: the watch goes, and the client is told why,
+    // as a removed member is told of the room it was in.
+    ++counters_.revoked;
+    std::erase(client.watching, &room);
+    drop_watch(room, id);
+    std::string out;
+    write_user_error(out, answered ? "not_shared" : "unavailable", check.user);
+    client.client->push(out);
+}
+
+void Presence::start_watch(PresenceClientId id, Client& client, const core::UserId& user) {
+    const auto known = rooms_.find(user);
+    if (known == rooms_.end() && rooms_.size() >= limits_.max_rooms) {
+        std::string refusal;
+        write_user_error(refusal, "busy", user);
+        client.client->push(refusal);
+        return;
+    }
     Room& r = room_of(user);
     // The room first: a room with a local watcher is never erased, so the pointer the client
     // keeps is never left dangling.
@@ -210,11 +369,69 @@ void Presence::watch(PresenceClientId id, const core::UserId& user) {
     wake(r);
 }
 
+void Presence::recheck(PresenceClientId id, Client& client, const core::UserId* only) noexcept {
+    std::vector<core::UserId> users;
+    try {
+        for (Check& check : client.checks) {
+            if (only == nullptr || check.user == *only) {
+                check.stale = true;
+            }
+        }
+        for (Room* room : client.watching) {
+            if ((only != nullptr && room->user != *only) || held(*room, id)) {
+                continue;
+            }
+            room->held.push_back(id);
+            client.checks.push_back(Check{.user = room->user,
+                                          .seq = next_check_++,
+                                          .fresh = false,
+                                          .stale = false,
+                                          .answers_owed = 0,
+                                          .told_online = room->shown_online});
+            users.push_back(room->user);
+        }
+        if (!users.empty()) {
+            ask(id, client, std::move(users));
+        }
+    } catch (const std::bad_alloc&) {
+        // A watch held back with nothing asked about it would stay held; the connection goes
+        // instead, which takes its watches with it.
+        ++counters_.allocation_failures;
+        client.client->allocation_failed();
+    }
+}
+
+void Presence::on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept {
+    // A stream's live chat lists nobody, and shares nothing.
+    if (core::ports::is_stream_chat(room)) {
+        return;
+    }
+    for (auto& [value, client] : clients_) {
+        // Everyone the removed user watches, and the removed user wherever watched: the room
+        // they shared may have been the only one.
+        recheck(PresenceClientId{value}, client, client.user == user ? nullptr : &user);
+    }
+}
+
+void Presence::on_members_resync() noexcept {
+    for (auto& [value, client] : clients_) {
+        recheck(PresenceClientId{value}, client, nullptr);
+    }
+}
+
+bool Presence::held(const Room& room, PresenceClientId id) noexcept {
+    return std::ranges::find(room.held, id) != room.held.end();
+}
+
 void Presence::unwatch(PresenceClientId id, const core::UserId& user) {
     const auto c = clients_.find(id.value);
+    if (c == clients_.end()) {
+        return;
+    }
+    // An answer still owed for it is ignored.
+    std::erase_if(c->second.checks, [&](const Check& k) { return k.user == user; });
     const auto r = rooms_.find(user);
-    if (c == clients_.end() || r == rooms_.end() ||
-        std::erase(c->second.watching, r->second.get()) == 0) {
+    if (r == rooms_.end() || std::erase(c->second.watching, r->second.get()) == 0) {
         return;
     }
     drop_watch(*r->second, id);
@@ -222,6 +439,7 @@ void Presence::unwatch(PresenceClientId id, const core::UserId& user) {
 
 void Presence::drop_watch(Room& room, PresenceClientId id) noexcept {
     std::erase(room.local, id);
+    std::erase(room.held, id);
     wake(room);
 }
 
@@ -487,6 +705,10 @@ void Presence::show(Room& room) noexcept {
     }
     room.shown_online = online;
     for (const PresenceClientId id : room.local) {
+        // Held back: told once the store says it may still see the user.
+        if (held(room, id)) {
+            continue;
+        }
         if (const auto c = clients_.find(id.value); c != clients_.end()) {
             tell(*c->second.client, "presence", room);
             ++counters_.notified;
