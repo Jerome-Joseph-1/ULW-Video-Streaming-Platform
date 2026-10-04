@@ -15,14 +15,6 @@ The soak sets `ULW_ALLOW_ROOT=1` for the processes it starts, since a developmen
 as root, and both services refuse root otherwise (ADR-0052). Started by hand as root, either
 service needs `ULW_ALLOW_ROOT=1`, or `ULW_RUN_AS_USER` naming the user to become.
 
-The gateway sets its own malloc at startup (one arena, a fixed 128 KiB mmap and trim threshold,
-ADR-0094), and its `starting` line in `gateway.log` says what it ran with. The soak passes the
-gateway none of its own environment beyond what it names, so an experiment with
-`GLIBC_TUNABLES` or `MALLOC_*` (which replace the gateway's settings whole when they set the
-arena limit or either threshold) needs a wrapper script at `apps/gateway/gateway_server` of a
-`--build` directory that sets them and execs the real binary. Check the `starting` line before
-reading such a run.
-
 `--rejudge` prints two verdicts: the per-unit criterion in force (the RSS slope's 95% upper end
 per request, per chunk request, per upload session and per job, against production ceilings),
 and the per-hour criterion it replaced. Pass `--clients` as the run used it; it sets the
@@ -154,6 +146,30 @@ Binaries from ee075b6, the current soak load (eight clients on TLS, about 30 req
 with slow clients, saturation, store faults and SIGHUPs) and criterion.
 
 Run 3 (full load) in progress; recorded when it ends at about 16:41 UTC.
+
+### 6 h with the gateway's malloc tuned (ADR-0094), two runs
+
+Both on the self-hosted runner (`soak-experiment`, `kind=gateway`), with the gateway calling
+`mallopt` for one arena and a fixed 128 KiB mmap and trim threshold at startup. On main before
+it, the gateway's steady RSS was about 30.9 MB and it crept by +0.53 MB after the warm-up.
+Per-unit values are the RSS slope's 95% upper end, against bounds of 0.315 bytes a request,
+0.315 a chunk request and 39.85 an upload session.
+
+| | run 37146904045 | run 37168049376 |
+|---|---|---|
+| Branch, commit | exp/soak-allocator, 6163f0d | demo/integration with #145, 3b138a3 |
+| Started (UTC) | 2026-10-03 19:11 | 2026-10-04 01:38 |
+| Gateway RSS, first / last | 49.6 / 50.0 MiB | 50.0 / 50.5 MiB |
+| Creep after the warm-up | +0.42 MiB | +0.5 MiB |
+| Slope | +48.9 KB/h (95% upper end +52.5) | +105.1 KB/h over the window, +5.4 KB/h over the last hour |
+| Per request | 0.379 B | 0.775 B |
+| Per chunk request | 8.23 B | 16.8 B |
+| Per upload session | 45.2 B | 92.4 B |
+| Verdict | fail | fail |
+
+In both, the worker's RSS and both processes' descriptors were flat, the run was not INVALID,
+and every 5xx was injected by the soak. The tuning raised the steady RSS by about 19 MB and
+barely changed the creep, which levels off late in each run; it was not adopted (ADR-0094).
 
 ## Chat
 

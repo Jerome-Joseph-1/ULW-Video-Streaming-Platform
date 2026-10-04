@@ -84,7 +84,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0078](0078-the-cookie-is-believed-only-from-trusted-pages.md) | The gateway believes the auth cookie only from pages it trusts | Accepted, amended by 0088 |
 | [0079](0079-sonarqube-cloud-analysis-in-ci.md) | SonarQube Cloud analysis in CI, with the compile database, on the Free plan | Accepted, amended by 0086 |
 | [0080](0080-coverage-floor.md) | Coverage is measured nightly, on main and on labelled pull requests, against a floor per top-level directory | Accepted, amended by 0086 |
-| [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted, gateway's malloc amended by 0094 |
+| [0081](0081-chat-server-allocates-with-jemalloc.md) | chat_server allocates with jemalloc | Accepted |
 | [0082](0082-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted, amended by 0088 |
 | [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085, deployment by 0088 |
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted, amended by 0088 |
@@ -97,5 +97,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0091](0091-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md) | A call's ring lives on the room's owner and reaches each member through their presence room | Accepted, amended by 0095 |
 | [0092](0092-the-stream-service-lives-in-the-gateway.md) | The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word | Accepted, amended by 0093 |
 | [0093](0093-livekit-webhooks-on-an-internal-listener.md) | LiveKit's webhooks take a stream live and end it, on a listener of the gateway's own that only LiveKit reaches | Accepted |
-| [0094](0094-gateway-malloc-one-arena-and-a-fixed-mmap-threshold.md) | gateway_server's malloc: one arena and a fixed 128 KiB mmap threshold, set at startup | Accepted |
+| [0094](0094-gateway-malloc-one-arena-and-a-fixed-mmap-threshold.md) | gateway_server's malloc: one arena and a fixed 128 KiB mmap threshold, tried and measured, not adopted | Rejected |
 | [0095](0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md) | Group calls from the room's owner, with a media generation moved by its fenced write | Accepted |
