@@ -1119,7 +1119,30 @@ goes live and ends it; `kubectl -n "$LIVE_NAMESPACE" get jobs -l app.kubernetes.
 lists its packagers, and each Job's log ends `recording: queued as video <id>`. The gateway's
 `live_streams_ended_total{reason="failed"}` or `{reason="timeout"}` rising means packagers that
 did not start or relays that never reached them: look at the Jobs' events and logs, and at
-egress's. To turn live streams off again, take the component out of the overlay and apply it:
+egress's.
+
+**LiveKit's webhooks** (docs/adr/0093) take a stream live when its publisher publishes and end
+it (`publisher_left`) once the publisher has been gone for `ULW_LIVE_PUBLISHER_GRACE_SECONDS`
+(10), so an encoder with a fixed token, or a client that crashed, needs nobody to call `start`
+or `end`. LiveKit posts them, signed with `SFU_SECRET`'s `LIVEKIT_API_KEY`, to the gateway's
+second listener (`ULW_LIVE_WEBHOOK_PORT`, 8081): the Service `video-gateway-hooks`, which no
+HTTPRoute names, admitted by the component's `hooks.yaml` NetworkPolicy from LiveKit's pods
+only. LiveKit's configuration names it in its `webhook` block (`base/livekit/deployment.yaml`).
+Check after a rollout that they arrive and are believed:
+
+```sh
+kubectl -n "$NAMESPACE" logs deploy/livekit | grep -m3 '"sent webhook"'        # statusCode 200
+kubectl -n "$NAMESPACE" exec deploy/video-gateway -- wget -qO- 127.0.0.1:8080/metrics \
+  | grep -E '^live_webhooks_total|^live_webhook_refusals_total'
+```
+
+`live_webhook_refusals_total{reason="signature"}` or `{reason="unknown_key"}` rising means
+LiveKit signs with a key the gateway does not have: both read the same pair from `SFU_SECRET`.
+LiveKit's own log saying `failed to send webhook` means the Service, the port or the policy is
+wrong (or the component is off); streams then still go live through `start` and end through
+`end` and the sweep, as before.
+
+To turn live streams off again, take the component out of the overlay and apply it:
 the stream routes answer `404`, and streams already running end with their publishers.
 
 ### Secrets and the database role

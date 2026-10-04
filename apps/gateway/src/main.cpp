@@ -135,6 +135,9 @@ struct Services {
     std::unique_ptr<core::ports::IPackagers> packagers;
     std::unique_ptr<infra::postgres::PgLiveStreams> live_store;
     std::unique_ptr<gateway::LiveStreams> live;
+    // LiveKit's webhooks, on their own listener, when it is configured (ADR-0093).
+    std::unique_ptr<gateway::PublisherWatch> watch;
+    std::unique_ptr<gateway::WebhookServer> webhooks;
     std::unique_ptr<gateway::Gateway> gateway;
     std::unique_ptr<net::SignalWatcher> signals;
     std::unique_ptr<infra::postgres::PgHealthCheck> database_check;
@@ -334,6 +337,13 @@ std::expected<void, std::string> make_live(const gateway::Config& config, Servic
                                                                       .log = s.log},
                                                     live.settings);
     s.live->start_sweeping();
+    if (live.webhook_port != 0) {
+        s.watch = std::make_unique<gateway::PublisherWatch>(*s.reactor, *s.live, s.log, live.watch);
+        s.webhooks = std::make_unique<gateway::WebhookServer>(
+            *s.reactor, s.clock,
+            gateway::WebhookKey{.id = live.livekit_api_key, .secret = live.livekit_api_secret},
+            *s.watch, s.log, gateway::WebhookLimits{});
+    }
     return {};
 }
 
@@ -356,8 +366,23 @@ gateway::ProbeChecks probe_checks(Services& s) {
             .store_paging_errors = s.paging_errors};
 }
 
+void reap_webhooks(Services& s) noexcept {
+    if (s.webhooks) {
+        s.webhooks->reap();
+    }
+}
+
+// LiveKit's webhooks, on their own listener, when the stream service has them (ADR-0093).
+std::expected<void, int> listen_for_webhooks(Services& s, os::UniqueFd listener) {
+    if (!s.webhooks) {
+        return {};
+    }
+    return s.reactor->listen(std::move(listener), *s.webhooks);
+}
+
 int serve(const gateway::Config& config, const os::NofileLimits& limits, os::UniqueFd listener,
-          ops::Logger& log, const std::optional<ops::Notifier>& notifier) {
+          os::UniqueFd webhook_listener, ops::Logger& log,
+          const std::optional<ops::Notifier>& notifier) {
     const auto info = core::build_info();
     Services s(log);
     auto choice = net::make_reactor_with_fallback(config.reactor, s.clock, limits.soft);
@@ -408,7 +433,9 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
                                                                  .random = s.random,
                                                                  .log = log,
                                                                  .health = s.health,
-                                                                 .live_streams = s.live.get()},
+                                                                 .live_streams = s.live.get(),
+                                                                 .webhooks = s.webhooks.get(),
+                                                                 .publisher_watch = s.watch.get()},
                                                    config.limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.gateway);
     if (!signals) {
@@ -417,6 +444,9 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
     s.signals = std::move(*signals);
     if (auto r = s.reactor->listen(std::move(listener), *s.gateway); !r) {
         return fail(log, "register listener", errno_text(r.error()));
+    }
+    if (auto r = listen_for_webhooks(s, std::move(webhook_listener)); !r) {
+        return fail(log, "register webhook listener", errno_text(r.error()));
     }
     s.database_check = std::make_unique<infra::postgres::PgHealthCheck>(config.database_url);
     s.probe = std::make_unique<gateway::HealthProbe>(s.health, probe_checks(s), s.clock, log);
@@ -427,6 +457,7 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
              {{"version", info.version},
               {"git_sha", info.git_sha},
               {"port", config.port},
+              {"webhook_port", config.live.webhook_port},
               {"transport", config.transport == gateway::Transport::Tls ? "tls" : "plain"},
               {"reactor", net::to_string(choice->kind)},
               {"io_uring_unavailable", choice->fell_back_from_io_uring.has_value()},
@@ -444,6 +475,7 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
     while (!s.gateway->finished()) {
         s.reactor->run_once(kLoopTick);
         s.gateway->reap();
+        reap_webhooks(s);
         // Only a loop that turns pings: a wedged loop is what the watchdog is for.
         if (watchdog && s.clock.now() >= next_ping) {
             notifier->watchdog();
@@ -508,12 +540,20 @@ int run(std::span<const std::string_view> args) {
     // Bound while still root, if started so: a port under 1024 needs the privilege the drop
     // gives up.
     os::UniqueFd listener;
+    os::UniqueFd webhook_listener;
     if (!cli->check) {
         auto bound = net::listen_tcp({.port = config->port});
         if (!bound) {
             return fail(boot, "listen", errno_text(bound.error()));
         }
         listener = std::move(*bound);
+        if (config->live.webhook_port != 0) {
+            auto hooks = net::listen_tcp({.port = config->live.webhook_port});
+            if (!hooks) {
+                return fail(boot, "listen for webhooks", errno_text(hooks.error()));
+            }
+            webhook_listener = std::move(*hooks);
+        }
     }
     // Before any thread exists: glibc then has no other thread to carry the change to.
     if (const auto code = leave_root(config->run_as_user, config->allow_root, boot)) {
@@ -535,7 +575,8 @@ int run(std::span<const std::string_view> args) {
     int code = EXIT_FAILURE;
     {
         ops::Logger log(**sink, clock, "gateway", config->log_level);
-        code = serve(*config, *limits, std::move(listener), log, *notifier);
+        code = serve(*config, *limits, std::move(listener), std::move(webhook_listener), log,
+                     *notifier);
     }
     const std::uint64_t dropped = (*sink)->close();
     if (dropped > 0) {

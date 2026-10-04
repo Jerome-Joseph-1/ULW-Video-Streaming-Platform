@@ -95,4 +95,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0089](0089-the-sandbox-runs-only-the-ffmpeg-it-was-built-with.md) | The sandbox runs only the ffmpeg and ffprobe it was built with | Accepted |
 | [0090](0090-io-uring-within-the-users-locked-memory.md) | The io_uring reactor stays within its user's locked memory: zero copy only where the limit cannot refuse it | Accepted |
 | [0091](0091-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md) | A call's ring lives on the room's owner and reaches each member through their presence room | Accepted |
-| [0092](0092-the-stream-service-lives-in-the-gateway.md) | The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word | Accepted |
+| [0092](0092-the-stream-service-lives-in-the-gateway.md) | The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word | Accepted, amended by 0093 |
+| [0093](0093-livekit-webhooks-on-an-internal-listener.md) | LiveKit's webhooks take a stream live and end it, on a listener of the gateway's own that only LiveKit reaches | Accepted |
