@@ -110,6 +110,24 @@ Restore: stop the stack (`down`), restore the dumps with `pg_restore --clean` in
 `postgres` / `keycloak-db` (`up -d postgres keycloak-db` first), untar into the `ulw-prod_minio`
 volume, put `.env` back, then `up -d`. Copy backups off the host.
 
+## Host settings
+
+The worker's and the packager's ffmpeg sandbox (`ulw_sandbox`) makes a user namespace. Ubuntu
+24.04 can refuse that to unprivileged processes with
+`kernel.apparmor_restrict_unprivileged_userns=1`; this host has it at `0` (and
+`kernel.unprivileged_userns_clone=1`), which every deploy prints and never changes. If an upgrade
+turns the restriction on, transcoding and live recordings fail in the sandbox; set it back with
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` and persist it in
+`/etc/sysctl.d/`, knowing that it loosens a hardening for every process on the host.
+
+The containers run with the seccomp profile `/opt/ulw/seccomp.json` (Docker's default plus
+`unshare`, `mount` and `mount_setattr`), `systempaths=unconfined` and `apparmor=unconfined`, as
+the Kubernetes pods get `procMount: Unmasked`; only the worker and the gateway (whose live
+packager children run the same sandbox).
+
+Docker publishes ports through its own iptables rules, ahead of ufw: the ufw rules the deploy
+adds document what is open rather than gate it.
+
 ## Limits
 
 - One host: one gateway, worker and chat node, one live stream at a time (the process packager

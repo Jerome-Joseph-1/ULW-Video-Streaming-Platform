@@ -54,14 +54,44 @@ jobs:
           IP: ${{ steps.host.outputs.ip }}
         run: deploy/vps/deploy.sh "$IP" "$ULW_IMAGE_GATEWAY" "$ULW_IMAGE_WORKER" "$ULW_IMAGE_CHAT"
 
+      # Playwright's own Chromium has no H.264 or AAC, which the platform's renditions are: the
+      # browser is the Chrome for Testing build the repository's suites pin (fetch-chrome.sh),
+      # run inside the Playwright image for its libraries.
+      - name: Fetch the pinned Chrome for Testing
+        id: chrome
+        env:
+          ULW_E2E_CACHE: ${{ runner.temp }}/browsers
+        run: |
+          if command -v unzip >/dev/null; then
+            chrome=$(tests/call/fetch-chrome.sh)
+          else
+            # The same download and SHA-256 as fetch-chrome.sh, unpacked with Python's zipfile.
+            v=$(sed -n 's/^chrome_version=//p' tests/call/fetch-chrome.sh)
+            sum=$(sed -n 's/^chrome_sha256=//p' tests/call/fetch-chrome.sh)
+            dir=$ULW_E2E_CACHE/chrome-headless-shell-$v
+            mkdir -p "$dir"
+            curl -fsSL --proto =https -o "$RUNNER_TEMP/chrome.zip" "https://storage.googleapis.com/chrome-for-testing-public/$v/linux64/chrome-headless-shell-linux64.zip"
+            echo "$sum  $RUNNER_TEMP/chrome.zip" | sha256sum --check --quiet -
+            python3 -m zipfile -e "$RUNNER_TEMP/chrome.zip" "$dir"
+            chmod -R a+rX "$dir"
+            chmod a+x "$dir"/chrome-headless-shell-linux64/chrome-headless-shell "$dir"/chrome-headless-shell-linux64/chrome_* 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/chrome.zip"
+            chrome=$dir/chrome-headless-shell-linux64/chrome-headless-shell
+          fi
+          echo "chrome=$chrome" >>"$GITHUB_OUTPUT"
+          echo "dir=$ULW_E2E_CACHE" >>"$GITHUB_OUTPUT"
+
       - name: Smoke (sign in, upload and play, chat, a 1:1 call)
         env:
           HOST: ${{ steps.host.outputs.host }}
+          CHROME: ${{ steps.chrome.outputs.chrome }}
+          CHROME_DIR: ${{ steps.chrome.outputs.dir }}
         run: |
           docker pull --quiet "$PLAYWRIGHT_IMAGE" >/dev/null
           docker run --rm --name "ulw-prod-smoke-$GITHUB_RUN_ID" --network host --ipc host \
               --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
-              -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc \
+              -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc -e ULW_E2E_CHROME="$CHROME" \
+              -v "$CHROME_DIR:$CHROME_DIR:ro" \
               -v "$GITHUB_WORKSPACE/demo/smoke:/smoke" -w /smoke "$PLAYWRIGHT_IMAGE" \
               bash -c 'npm ci --ignore-scripts --no-audit --no-fund >/dev/null &&
                        npx --no-install playwright test --reporter=list \
@@ -71,13 +101,23 @@ jobs:
         continue-on-error: true
         env:
           HOST: ${{ steps.host.outputs.host }}
+          CHROME: ${{ steps.chrome.outputs.chrome }}
+          CHROME_DIR: ${{ steps.chrome.outputs.dir }}
         run: |
           docker run --rm --name "ulw-prod-smoke-extra-$GITHUB_RUN_ID" --network host --ipc host \
               --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
-              -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc \
+              -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc -e ULW_E2E_CHROME="$CHROME" \
+              -v "$CHROME_DIR:$CHROME_DIR:ro" \
               -v "$GITHUB_WORKSPACE/demo/smoke:/smoke" -w /smoke "$PLAYWRIGHT_IMAGE" \
               bash -c 'npx --no-install playwright test --reporter=list \
                          --grep "encrypted chat|a group call|go live"'
+
+      - name: What the failed smoke's pages showed
+        if: failure()
+        run: |
+          for f in demo/smoke/results/*/error-context.md; do
+            [[ -f $f ]] && { echo "== $f"; head -c 6000 "$f"; echo; }
+          done
 
       - name: The stack's state and recent logs
         if: ${{ !cancelled() }}
