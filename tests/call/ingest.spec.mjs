@@ -247,10 +247,21 @@ test("a replaced session's DELETE leaves the session that replaced it", async ()
     const [first] = await producers(stream.name);
     const stale = sources[0].resource();
 
+    // The replacement alone and fully published, taken from the one listing that shows it so:
+    // it joins with no tracks and publishes them a moment later, so another listing could catch
+    // it in between. The producer is matched whole, not by its sid: toEqual takes [] for
+    // [undefined], and a not-matcher takes undefined, so a sid alone passes while the
+    // replacement has no tracks yet, and leaves nothing to compare after the DELETE.
     sources.push(whipsink(stream.ticket));
-    await expect.poll(async () => (await producers(stream.name)).map((p) => p.sid),
-      { timeout: 20_000 }).toEqual([expect.not.stringMatching(`^${first.sid}$`)]);
-    const [current] = await producers(stream.name);
+    let now = [];
+    await expect.poll(async () => {
+      now = await producers(stream.name);
+      return now;
+    }, { timeout: 20_000 }).toEqual([{ identity: stream.identity,
+      sid: expect.not.stringMatching(`^${first.sid}$`), kinds: ['AUDIO', 'VIDEO'] }]);
+    const [current] = now;
+    metrics.first = first.sid;
+    metrics.current = current.sid;
 
     metrics.staleDeleteStatus = await deleteSession(stale, await stream.fresh());
     expect(metrics.staleDeleteStatus).toBe(200);
