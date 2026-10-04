@@ -13,7 +13,7 @@ can sign in as any demo user, and every port listens on 127.0.0.1 only.
 
 Needs only Docker with Compose v2: no git, no checkout, no build. `demo/release/compose.yaml`
 names images that `demo-release.yml` built from one commit, tested together with the smoke test
-and published (tag `demo-2d552eb4dc94`). In an empty directory:
+and published (tag `demo-aaa2b8de370b`). In an empty directory:
 
 ```sh
 mkdir ulw-demo && cd ulw-demo
