@@ -56,7 +56,7 @@ enum class CallOutcome : std::uint8_t {
     Busy = 6,
     // A signal for a call the room does not have, or not in a state this member may move it
     // from: ended already, answered (for a decline or a cancel), ringing (for an end), or the
-    // caller's to cancel.
+    // caller's to cancel. Or a ticket answering a call that is over (CallRequest::answering).
     NoCall = 7,
     // A signal did what it asked.
     Done = 8,
@@ -73,6 +73,10 @@ enum class CallOutcome : std::uint8_t {
 struct CallRequest {
     core::UserId user;
     core::DeviceId device;
+    // The ringing call this ticket answers, when it answers one: a ticket that finds that call
+    // over (cancelled, declined, missed or ended) and the room with no call, or ringing from the
+    // asker, is refused NoCall instead of starting a ring of its own the other way.
+    std::optional<CallId> answering = std::nullopt;
 };
 
 // Decline, cancel, end, leave the room's call `call`, or put `target` out of it.

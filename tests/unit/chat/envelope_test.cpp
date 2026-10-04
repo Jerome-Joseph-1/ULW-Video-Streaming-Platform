@@ -296,6 +296,24 @@ TEST(Envelope, ACallNamesItsRoomAndTheAskingDevice) {
     EXPECT_EQ(chat::reason(EnvelopeError::BadDevice), "bad_device");
 }
 
+TEST(Envelope, ACallMayNameTheRingingCallItAnswers) {
+    const std::string head = R"({"type":"call","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd",)"
+                             R"("device":"01a0eb86-6cca-7dce-84cc-3bb47615f9aa")";
+    const auto c =
+        chat::parse_command(head + R"(,"answer":"01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192"})");
+    ASSERT_TRUE(c);
+    const auto& call = std::get<chat::Call>(*c);
+    ASSERT_TRUE(call.answering);
+    EXPECT_EQ(call.answering->to_string(), "01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192");
+    const auto plain = chat::parse_command(head + "}");
+    ASSERT_TRUE(plain);
+    EXPECT_FALSE(std::get<chat::Call>(*plain).answering);
+    EXPECT_EQ(chat::parse_command(head + R"(,"answer":"ringing"})"),
+              std::unexpected(EnvelopeError::BadCall));
+    EXPECT_EQ(chat::parse_command(head + R"(,"answer":7})"),
+              std::unexpected(EnvelopeError::Malformed));
+}
+
 TEST(Envelope, ADeclineCancelOrEndNamesItsRoomAndCall) {
     const std::string room_field = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
     const std::string call_field = R"("call":"01a0eb86-6cca-7dce-84cc-3bb47615f9cc")";
@@ -526,6 +544,12 @@ TEST(Envelope, RepliesAreTheDocumentedShapes) {
     EXPECT_EQ(
         out,
         R"({"type":"error","reason":"not_callable","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})");
+    out.clear();
+    chat::write_call_over(out, room(),
+                          *chat::CallId::parse("01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192"));
+    EXPECT_EQ(
+        out,
+        R"({"type":"error","reason":"no_call","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","call":"01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192"})");
 }
 
 } // namespace

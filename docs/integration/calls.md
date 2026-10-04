@@ -42,6 +42,19 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
 
    `device` is a canonical lowercase UUID the client makes once per install (or browser
    profile) and keeps: it tells two devices of one user apart.
+
+   To answer a ring, name the ringing call as `answer` ([Ringing](#ringing)):
+
+   ```json
+   {"type":"call","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","device":"0192f0c5-1b2c-7d3e-8f40-123456789abc","answer":"01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192"}
+   ```
+
+   If that call is over by the time chat has it (the caller cancelled, the ring ran out, or
+   your device never heard how it ended) and the room has no other call you could answer, the
+   answer is `{"type":"error","reason":"no_call","room":...,"call":"<the call you named>"}`:
+   stop ringing, and say the call ended before you answered. Without `answer`, the same ticket
+   would start a new call that rings the other member. If the caller has rung again meanwhile,
+   the ticket answers that call, and its `call` names it: take that id from then on.
 3. The answer is a ticket:
 
    ```json
@@ -129,7 +142,7 @@ counted with joins.
 there), *in call* on `call_answered`, back to idle on `call_declined`, `call_missed` or
 `call_ended`, or after its own `call_cancel`. The callee: *ringing* on `call_ringing` (show the
 caller, ring until `expires_at`); to answer, `join` the room if this socket has not, ask for a
-ticket (`call`) and connect: that is `call_answered` for everyone; to decline, `join` and
+ticket (`call`, with `answer` naming the ring) and connect: that is `call_answered` for everyone; to decline, `join` and
 `call_decline`. Every other device of the callee goes idle on `call_answered`, `call_declined`,
 `call_cancelled` or `call_missed`.
 
@@ -145,6 +158,10 @@ What the ring does not cover:
   devices should keep the call they answered even past `expires_at`.
 - **A member with no socket open hears nothing**: there are no push notifications yet. A
   device that connects while the call still rings hears the next announcement, within 15 s.
+  Nothing is replayed for a call that ended while a socket was away, including the moment a
+  socket reconnects with a fresh token (chat closes it when its token expires): a ring that
+  is not announced again within 15 s has most likely ended, and an answer naming it
+  (`answer`) is told so.
 - **Rejoining.** Asking for a ticket again within 2 minutes of the last one in an answered call
   joins it without ringing anyone. Later, it rings the other member: a client already connected
   to the room's LiveKit call that hears `call_ringing` for that room from the other member
@@ -253,7 +270,7 @@ Each is an `error` with the `room` of the call.
 | `call_full` | The group call holds as many devices as it takes | Tell the user; retry when someone has left |
 | `unavailable` | LiveKit, the member list or the room's owner could not be reached; `retry_after_ms` says when to ask again | Wait that long, then ask again |
 | `busy` | The call allowance (counted with joins: a burst of 64, then one a second per user) or the room's owner is at its limit (asks in flight, 4096 calls ringing or answered, 64 members in one group call, or moves waiting) | Back off and retry |
-| `no_call` | A `call_decline`, `call_cancel`, `call_end`, `call_leave` or `call_expel` for a call the room does not have in that state ([Ringing](#ringing), [Group calls](#group-calls)): for a direct chat's `call_end`, usually an answered call chat already forgot (2 minutes after its last ticket); in a group call, a `call_end` or `call_expel` from anyone but the caller | Treat the call as done; do not retry. The other member learns of a hang-up from LiveKit |
+| `no_call` | A `call_decline`, `call_cancel`, `call_end`, `call_leave` or `call_expel` for a call the room does not have in that state ([Ringing](#ringing), [Group calls](#group-calls)): for a direct chat's `call_end`, usually an answered call chat already forgot (2 minutes after its last ticket); in a group call, a `call_end` or `call_expel` from anyone but the caller. Or a ticket with `answer` for a call that is over, with `call` naming it | Treat the call as done; do not retry. The other member learns of a hang-up from LiveKit |
 | `ring_limited` | The ticket would ring the other member, and this direct chat may not ring yet: it rang 5 times in the last minute, or the other member declined your call less than 30 s ago. `retry_after_ms` says when it may | Do not ring again before then; tell the user. Nothing was rung and no ticket issued |
 | `call_failed` | LiveKit refused the request as made: a fault on the service's side | Retry much later; report it |
 | `calls_disabled` | Calls are not configured on this deployment | Do not retry |

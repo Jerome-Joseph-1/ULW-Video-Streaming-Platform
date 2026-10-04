@@ -259,6 +259,10 @@ public:
     // is told.
     void moved(const core::RoomId& room, const CallId& call, const std::optional<core::UserId>& by,
                const core::UserId& subject, bool everyone = true) noexcept;
+    // Whether a ticket answering a ring may join the room's call: the room has one, and it is
+    // not a direct call still ringing from `user` (CallRequest::answering).
+    [[nodiscard]] bool answerable(const core::RoomId& room,
+                                  const core::UserId& user) const noexcept;
     // The id of the room's call, if it has one, and whose it is.
     [[nodiscard]] std::optional<CallId> call_of(const core::RoomId& room) const noexcept;
     [[nodiscard]] std::optional<CallKind> kind_of(const core::RoomId& room) const noexcept;

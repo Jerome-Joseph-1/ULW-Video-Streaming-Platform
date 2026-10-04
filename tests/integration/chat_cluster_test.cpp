@@ -1321,14 +1321,17 @@ TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePasswor
 
 // A call's ticket, as the room WebSocket answers a call (docs/integration/calls.md): the ticket,
 // or an error.
-std::optional<Seen> call_answer(Client& client, const std::string& room,
-                                const std::string& device) {
+std::optional<Seen> call_answer(Client& client, const std::string& room, const std::string& device,
+                                const std::string& answering = {}) {
     const auto answers = [&](const Seen& s) {
         return s.room == room && (s.type == "ticket" || s.type == "error");
     };
     // This call's answer, not one an earlier call of the client's got.
     std::size_t earlier = client.count(answers);
-    if (!client.send(R"({"type":"call","room":")" + room + R"(","device":")" + device + R"("})")) {
+    const std::string answer =
+        answering.empty() ? std::string{} : R"(,"answer":")" + answering + '"';
+    if (!client.send(R"({"type":"call","room":")" + room + R"(","device":")" + device + '"' +
+                     answer + "}")) {
         return std::nullopt;
     }
     return client.wait_for([&](const Seen& s) {
@@ -1548,10 +1551,19 @@ TEST_P(ChatClusterTest, ACallRingsTheOtherMembersEverySocketOnAnyNodeAndEndsOnce
         ASSERT_TRUE(cancelled);
         EXPECT_EQ(cancelled->by, "alice");
     }
+    // A device that picks the cancelled call up after all (it never heard the cancel) is told
+    // that call is over, and rings nobody: alice's next call below is a new ring of hers.
+    const auto late = call_answer(*phone, direct, phone_device, cancelled_call->call);
+    ASSERT_TRUE(late);
+    EXPECT_EQ(late->type, "error");
+    EXPECT_EQ(late->reason, "no_call");
+    EXPECT_EQ(late->call, cancelled_call->call);
 
     // 3. Nobody answers: after the ring timeout both are told it was missed, once.
     const auto missed_call = call_answer(*alice, direct, alice_device);
     ASSERT_TRUE(missed_call && missed_call->type == "ticket");
+    ASSERT_TRUE(expect(*phone, at_phone, "call_ringing", missed_call->call));
+    EXPECT_EQ(phone->seen()[at_phone - 1].from, "alice") << "the late answer rang alice back";
     for (const auto& [client, at] : std::initializer_list<Ear>{
              {alice.get(), &at_alice}, {phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
         ASSERT_TRUE(expect(*client, *at, "call_missed", missed_call->call));

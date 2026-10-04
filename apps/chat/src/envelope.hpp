@@ -42,6 +42,9 @@
 //       device: the room must be a direct or group chat this connection has joined (ADR-0050,
 //       ADR-0095). The first rings the other members; another member's answers the ring
 //       (ADR-0091)
+//       "answer":"<call>"    optional: the ringing call this ticket answers. When that call is
+//                            over and the room has no call to answer, it is refused no_call
+//                            (with "call") instead of ringing the other members anew
 //   {"type":"call_decline"|"call_cancel"|"call_end"|"call_leave","room":"<uuid>",
 //    "call":"<uuid>"}   turn a ringing call down (a callee), give up ringing (the caller), end
 //       an answered call (either member of a direct chat, a group call's caller for everyone),
@@ -125,6 +128,8 @@ struct Unwatch {
 struct Call {
     core::RoomId room;
     core::DeviceId device;
+    // "answer": the ringing call this ticket answers (calls.md, Ringing).
+    std::optional<CallId> answering = std::nullopt;
 };
 
 // call_decline, call_cancel, call_end, call_leave or call_expel.
@@ -190,6 +195,8 @@ void write_ticket(std::string& out, const core::RoomId& room,
 // What a ring's notice tells each socket of its member, and what a member's own decline,
 // cancel or end is answered with.
 void write_call_event(std::string& out, const CallNotice& notice);
+// A ticket answering a call that is over: no_call, naming the call it answered.
+void write_call_over(std::string& out, const core::RoomId& room, const CallId& call);
 // A call refused, with a hint of when to ask again for a refusal a retry may cure.
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
                       std::optional<core::Millis> retry_after);
