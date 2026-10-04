@@ -1,0 +1,132 @@
+name: deploy-vps
+
+# Deploys the platform to the project's own host (the one that runs the self-hosted runners) as
+# https://<public ip with dashes>.sslip.io: deploy/vps/compose.yaml, through deploy/vps/deploy.sh,
+# into /opt/ulw as compose project `ulw-prod`, then signs in as alice and bob on Keycloak's page
+# and drives the product end to end against the public URL (demo/smoke). deploy/vps/README.md
+# says how to redeploy, read logs, back up and add users.
+#
+# The host is shared with CI jobs and soaks: the stack has its own project name, directory and
+# network, publishes only 80, 443 and LiveKit's media ports, and nothing here prunes or stops
+# anything that is not the project's own.
+on:
+  push:
+    branches: [deploy/vps]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+env:
+  # The tested build demo-release.yml published (demo-<12-digit commit>), by tag and digest.
+  ULW_IMAGE_GATEWAY: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:demo-2d552eb4dc94@sha256:7563494b0840d7741ec90b6fa731e4cba53a90f43d45481ca0c564bb229ee2e0
+  ULW_IMAGE_WORKER: ghcr.io/jerome-joseph-1/ulw-video-worker:demo-2d552eb4dc94@sha256:9e1e0006a60a733a43dd7f9305c5c2a4034142efae8d8a12bc6f29122a04984e
+  ULW_IMAGE_CHAT: ghcr.io/jerome-joseph-1/ulw-chat:demo-2d552eb4dc94@sha256:6c76f805e7a873c615df9de8261feee6e2d7fbff202c0feb3a1aedc188b180d0
+  # mcr.microsoft.com/playwright:v1.56.1-noble, the version demo/smoke/package-lock.json pins,
+  # with its browsers and their libraries, so nothing is installed on the host.
+  PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright@sha256:f1e7e01021efd65dd1a2c56064be399f3e4de00fd021ac561325f2bfbb2b837a
+
+jobs:
+  deploy:
+    runs-on: [self-hosted]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Find the public address
+        id: host
+        run: |
+          ip=$(curl -fsS --max-time 20 https://api.ipify.org)
+          [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]
+          echo "ip=$ip" >>"$GITHUB_OUTPUT"
+          echo "host=${ip//./-}.sslip.io" >>"$GITHUB_OUTPUT"
+          echo "public address $ip: https://${ip//./-}.sslip.io" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy
+        env:
+          IP: ${{ steps.host.outputs.ip }}
+        run: deploy/vps/deploy.sh "$IP" "$ULW_IMAGE_GATEWAY" "$ULW_IMAGE_WORKER" "$ULW_IMAGE_CHAT"
+
+      # The browsers run in a container on Docker's default bridge, so they reach the public
+      # address as an outside client does (through the published ports), not over the host's
+      # own loopback path, which Docker does not carry UDP on.
+      # Playwright's own Chromium has no H.264 or AAC, which the platform's renditions are: the
+      # browser is the Chrome for Testing build the repository's suites pin (fetch-chrome.sh),
+      # run inside the Playwright image for its libraries.
+      - name: Fetch the pinned Chrome for Testing
+        id: chrome
+        env:
+          ULW_E2E_CACHE: ${{ runner.temp }}/browsers
+        run: |
+          if command -v unzip >/dev/null; then
+            chrome=$(tests/call/fetch-chrome.sh)
+          else
+            # The same download and SHA-256 as fetch-chrome.sh, unpacked with Python's zipfile.
+            v=$(sed -n 's/^chrome_version=//p' tests/call/fetch-chrome.sh)
+            sum=$(sed -n 's/^chrome_sha256=//p' tests/call/fetch-chrome.sh)
+            dir=$ULW_E2E_CACHE/chrome-headless-shell-$v
+            mkdir -p "$dir"
+            curl -fsSL --proto =https -o "$RUNNER_TEMP/chrome.zip" "https://storage.googleapis.com/chrome-for-testing-public/$v/linux64/chrome-headless-shell-linux64.zip"
+            echo "$sum  $RUNNER_TEMP/chrome.zip" | sha256sum --check --quiet -
+            python3 -m zipfile -e "$RUNNER_TEMP/chrome.zip" "$dir"
+            chmod -R a+rX "$dir"
+            chmod a+x "$dir"/chrome-headless-shell-linux64/chrome-headless-shell "$dir"/chrome-headless-shell-linux64/chrome_* 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/chrome.zip"
+            chrome=$dir/chrome-headless-shell-linux64/chrome-headless-shell
+          fi
+          echo "chrome=$chrome" >>"$GITHUB_OUTPUT"
+          echo "dir=$ULW_E2E_CACHE" >>"$GITHUB_OUTPUT"
+
+      - name: Smoke (sign in, upload and play, chat, a 1:1 call)
+        env:
+          HOST: ${{ steps.host.outputs.host }}
+          CHROME: ${{ steps.chrome.outputs.chrome }}
+          CHROME_DIR: ${{ steps.chrome.outputs.dir }}
+        run: |
+          docker pull --quiet "$PLAYWRIGHT_IMAGE" >/dev/null
+          docker run --rm --name "ulw-prod-smoke-$GITHUB_RUN_ID" --ipc host \
+              --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
+              -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc -e ULW_E2E_CHROME="$CHROME" \
+              -v "$CHROME_DIR:$CHROME_DIR:ro" \
+              -v "$GITHUB_WORKSPACE/demo/smoke:/smoke" -w /smoke "$PLAYWRIGHT_IMAGE" \
+              bash -c 'npm ci --ignore-scripts --no-audit --no-fund >/dev/null &&
+                       npx --no-install playwright test --reporter=list \
+                         --grep "upload, transcode|chat between two users|1:1 call rings|declined call"'
+
+      # The whole suite, which the encrypted chat needs (it finds its rooms in the chat test):
+      # reported, not gating the deploy.
+      - name: Smoke (every tab, encrypted chat, group call and live included)
+        continue-on-error: true
+        env:
+          HOST: ${{ steps.host.outputs.host }}
+          CHROME: ${{ steps.chrome.outputs.chrome }}
+          CHROME_DIR: ${{ steps.chrome.outputs.dir }}
+        run: |
+          docker run --rm --name "ulw-prod-smoke-extra-$GITHUB_RUN_ID" --ipc host \
+              --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
+              -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc -e ULW_E2E_CHROME="$CHROME" \
+              -v "$CHROME_DIR:$CHROME_DIR:ro" \
+              -v "$GITHUB_WORKSPACE/demo/smoke:/smoke" -w /smoke "$PLAYWRIGHT_IMAGE" \
+              bash -c 'npx --no-install playwright test --reporter=list'
+
+      - name: What the failed smoke's pages showed
+        if: failure()
+        run: |
+          for f in demo/smoke/results/*/error-context.md; do
+            [[ -f $f ]] && { echo "== $f"; head -c 6000 "$f"; echo; }
+          done
+
+      - name: The stack's state and recent logs
+        if: ${{ !cancelled() }}
+        run: |
+          sudo /opt/ulw/compose.sh ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Health}}\t{{.Status}}' || true
+          # Services whose logs carry no configuration secrets (egress's would; it is left out).
+          sudo /opt/ulw/compose.sh logs --no-color --tail 60 caddy gateway chat worker keycloak livekit 2>&1 |
+              grep -v -E '"event":"request".*"status":2' | tail -300 || true

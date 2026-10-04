@@ -1,0 +1,433 @@
+# The platform on one host, as a product: https://<public ip with dashes>.sslip.io, with a
+# Let's Encrypt certificate, users signing in on a bundled Keycloak, and nothing published but
+# the web ports and LiveKit's media ports. Deployed by .github/workflows/deploy-vps.yml through
+# deploy/vps/deploy.sh into /opt/ulw, as compose project `ulw-prod`; README.md beside this file
+# says how to run, watch, back up and extend it.
+#
+# Layout. The services of the product share one network namespace (`netns`, a pause container),
+# as demo/compose.yaml's do, so each reaches the others on 127.0.0.1 and Postgres, MinIO, Redis,
+# the gateway's webhook port and LiveKit's server API listen on loopback only. Caddy runs in it
+# too: it terminates TLS for the public name and proxies to loopback. The namespace is also on
+# the `ulw` bridge network, at a fixed address (chat's node address), where Keycloak and its own
+# Postgres live; Caddy reaches Keycloak there. Inside the namespace the public name resolves to
+# 127.0.0.1 (extra_hosts), so the services' https calls to it (the JWK set, the object store)
+# reach Caddy without leaving the host, under the same certificate browsers see.
+#
+# Settings that vary per host come from two files in /opt/ulw, never from this repository:
+#   .env         secrets, generated on the host at the first deploy (deploy.sh), root only;
+#   deploy.env   ULW_HOST, ULW_PUBLIC_IP and the image tag, written by every deploy.
+#
+# Every image is pinned by digest; ours also by the tag of the commit they were built from.
+name: ulw-prod
+
+x-ulw-db: &db postgresql://ulw:${ULW_DB_PASSWORD:?}@127.0.0.1:5432/ulw
+
+# The object store, as every service and every browser reaches it: https://<host>/ulw-media/...,
+# path-style, through Caddy to MinIO. The gateway signs segment URLs for that address.
+x-store: &store
+  ULW_STORAGE: minio
+  ULW_S3_ENDPOINT: https://${ULW_HOST:?}
+  ULW_BUCKET: ulw-media
+  ULW_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?}
+  ULW_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
+
+# The identity provider: Keycloak's realm `ulw`, as browsers see it. The key set is fetched from
+# the same public URL, which inside the namespace is Caddy on loopback.
+x-auth: &auth
+  JWKS_URL: https://${ULW_HOST:?}/auth/realms/ulw/protocol/openid-connect/certs
+  JWT_ISSUER: https://${ULW_HOST:?}/auth/realms/ulw
+  JWT_AUDIENCE: ulw
+  # Keycloak's `sub` is a UUID; the platform's users (rooms, member lists, owners) are named by
+  # their user name.
+  ULW_JWT_SUBJECT_CLAIM: preferred_username
+  ULW_ALLOWED_ORIGINS: https://${ULW_HOST:?}
+  # Caddy, on loopback, is the only peer; the client is the last X-Forwarded-For entry.
+  ULW_TRUSTED_PROXIES: 127.0.0.1/32
+  ULW_REACTOR: epoll
+
+x-in-netns: &in-netns
+  network_mode: service:netns
+  restart: unless-stopped
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "5"
+
+# The worker's and the packager's ffmpeg sandbox (ulw_sandbox): Docker's default seccomp profile
+# plus unshare, mount and mount_setattr (deploy/kubernetes/cluster/seccomp's profile, copied to
+# /opt/ulw/seccomp.json by deploy.sh), and an unmasked /proc, as the Kubernetes pods get.
+x-sandboxed: &sandboxed
+  security_opt:
+    - seccomp=./seccomp.json
+    - systempaths=unconfined
+    - apparmor=unconfined
+
+services:
+  netns:
+    # registry.k8s.io/pause:3.10: holds the namespace and does nothing else.
+    image: registry.k8s.io/pause@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
+    restart: unless-stopped
+    logging: *logging
+    networks:
+      ulw:
+        ipv4_address: 10.213.77.10
+    extra_hosts:
+      - "${ULW_HOST:?}:127.0.0.1"
+    ports:
+      # Caddy: ACME's HTTP challenge and the redirect to https; https over TCP and QUIC.
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+      # LiveKit's media: ICE over TCP, the UDP mux, TURN over UDP and TURN over TLS.
+      - "7801:7801/tcp"
+      - "7802:7802/udp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      # TURN relay addresses: the SFU sends to a client's relay on the public address, which
+      # reaches this namespace only through a published port.
+      - "30000-30049:30000-30049/udp"
+
+  caddy:
+    <<: *in-netns
+    # caddy:2.11.6 (alpine).
+    image: docker.io/library/caddy@sha256:907efba736324e43f891ccb9d760fe5abe545e313419b3d18d63d4ec670dad8d
+    environment:
+      ULW_HOST: ${ULW_HOST:?}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The page and the OpenMLS client (site/web, site/mls), which each deploy replaces whole:
+      # the parent is mounted, so a replaced directory is seen without a restart.
+      - ./site:/srv:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      # Serving, with the public name's certificate in hand (LiveKit's TURN/TLS reads it).
+      test: ["CMD", "sh", "-c", "test -s /data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/$$ULW_HOST/$$ULW_HOST.crt && wget -q -O /dev/null http://127.0.0.1:2019/config/"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+    depends_on:
+      netns:
+        condition: service_started
+
+  postgres:
+    <<: *in-netns
+    # postgres:16 (16.15), the digest deploy/local/compose.yaml pins.
+    image: docker.io/library/postgres@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+    environment:
+      POSTGRES_USER: ulw
+      POSTGRES_DB: ulw
+      POSTGRES_PASSWORD: ${ULW_DB_PASSWORD:?}
+    # Loopback only. Bound parameters stay out of the log (operator contract, ADR-0054).
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "log_parameter_max_length=0",
+              "-c", "log_parameter_max_length_on_error=0"]
+    volumes:
+      - pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "ulw", "-d", "ulw"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      netns:
+        condition: service_started
+
+  minio:
+    <<: *in-netns
+    # The community MinIO build deploy/local/compose.yaml pins (RELEASE.2026-08-04T00-00-00Z).
+    image: docker.io/pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: ["server", "/data", "--address", "127.0.0.1:9900", "--console-address", "127.0.0.1:9901"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
+      MINIO_BROWSER: "off"
+    volumes:
+      - minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9900/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      netns:
+        condition: service_started
+
+  # One-time setup: the bucket (idempotent; exits 0 once it exists).
+  bucket:
+    network_mode: service:netns
+    logging: *logging
+    # node:22-alpine, 2026-10, the digest demo/compose.yaml pins.
+    image: docker.io/library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+    command: ["node", "/setup/setup-bucket.mjs"]
+    environment:
+      ULW_S3_ENDPOINT: http://127.0.0.1:9900
+      ULW_BUCKET: ulw-media
+      ULW_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?}
+      ULW_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
+    volumes:
+      - ./setup-bucket.mjs:/setup/setup-bucket.mjs:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  migrate:
+    network_mode: service:netns
+    logging: *logging
+    image: ${ULW_IMAGE_GATEWAY:?}
+    entrypoint: ["/usr/local/bin/ulw_migrate"]
+    environment:
+      ULW_DATABASE_URL: *db
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    <<: [*in-netns, *sandboxed]
+    # The gateway in the live packager's image (demo/build/gateway.Dockerfile), so the stream
+    # service's `process` runtime finds live_packager, ulw_sandbox and ffmpeg beside it.
+    image: ${ULW_IMAGE_GATEWAY:?}
+    environment:
+      <<: [*store, *auth]
+      ULW_DATABASE_URL: *db
+      ULW_LISTEN_PORT: "8081"
+      ULW_NODE_ID: gateway-1
+      # Caddy is the one direct peer: new connections are counted per peer, so it gets room;
+      # requests are counted per user and, behind it, per client.
+      ULW_MAX_CONNECTIONS_PER_IP: "256"
+      ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND: "1000"
+      ULW_LOG_LEVEL: info
+      # Live streams (ADR-0092): one packager child per stream in this container.
+      LIVEKIT_API_URL: http://127.0.0.1:7880
+      LIVEKIT_CLIENT_URL: wss://${ULW_HOST:?}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?}
+      ULW_LIVE_PACKAGER: process
+      ULW_LIVE_PACKAGER_BIN: /usr/local/bin/live_packager
+      ULW_LIVE_PACKAGER_SCRATCH_DIR: /var/cache/ulw-live
+      ULW_LIVE_PACKAGER_PORT: "9100"
+      ULW_LIVE_PACKAGER_SRT: srt://127.0.0.1:9100
+      ULW_LIVE_MAX_STREAMS: "1"
+      # LiveKit's webhooks (ADR-0093), on loopback only; never routed by Caddy.
+      ULW_LIVE_WEBHOOK_PORT: "8090"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8081 && printf 'GET /api/v1/readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      bucket:
+        condition: service_completed_successfully
+      caddy:
+        condition: service_started
+
+  worker:
+    <<: [*in-netns, *sandboxed]
+    image: ${ULW_IMAGE_WORKER:?}
+    environment:
+      <<: *store
+      ULW_DATABASE_URL: *db
+      ULW_NODE_ID: worker-1
+      # The host also runs CI and soaks: half its cores at most for transcoding.
+      ULW_FFMPEG_THREADS: "3"
+      ULW_LOG_LEVEL: info
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      bucket:
+        condition: service_completed_successfully
+
+  chat:
+    <<: *in-netns
+    image: ${ULW_IMAGE_CHAT:?}
+    environment:
+      <<: *auth
+      ULW_DATABASE_URL: *db
+      ULW_LISTEN_PORT: "9101"
+      # The namespace's own address on the `ulw` network (one node; others would dial it).
+      ULW_NODE_ADDRESS: 10.213.77.10:9201
+      ULW_NODE_SECRET: ${ULW_NODE_SECRET:?}
+      ULW_MAX_CONNECTIONS_PER_IP: "512"
+      ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND: "1000"
+      # Calls (ADR-0087).
+      LIVEKIT_API_URL: http://127.0.0.1:7880
+      LIVEKIT_CLIENT_URL: wss://${ULW_HOST:?}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?}
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9101 && printf 'GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      caddy:
+        condition: service_started
+
+  redis:
+    <<: *in-netns
+    # redis 7.4.6 (alpine), the digest deploy/local/compose.yaml pins: LiveKit's and egress's bus.
+    image: docker.io/library/redis@sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
+    command: ["redis-server", "--bind", "127.0.0.1", "--port", "6379", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      netns:
+        condition: service_started
+
+  livekit:
+    <<: *in-netns
+    # livekit/livekit-server v1.13.7, the digest deploy/local/compose.yaml pins (ADR-0020).
+    image: docker.io/livekit/livekit-server@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3
+    volumes:
+      # Caddy's certificate for the public name, for TURN over TLS.
+      - caddy-data:/caddy:ro
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        keys:
+          ${LIVEKIT_API_KEY:?}: ${LIVEKIT_API_SECRET:?}
+        redis:
+          address: 127.0.0.1:6379
+        rtc:
+          # Browsers reach the media ports on the host's public address, which Docker forwards
+          # to the namespace's address on the `ulw` network; egress, in the namespace, takes the
+          # same way back in. One local address only, so the public one maps to it unambiguously
+          # (with loopback as well, the agent answered on the wrong socket and no check succeeded).
+          node_ip: ${ULW_PUBLIC_IP:?}
+          use_external_ip: false
+          ips:
+            includes:
+              - 10.213.77.10/32
+          tcp_port: 7801
+          udp_port: 7802
+        turn:
+          enabled: true
+          domain: ${ULW_HOST:?}
+          udp_port: 3478
+          tls_port: 5349
+          relay_range_start: 30000
+          relay_range_end: 30049
+          external_tls: false
+          cert_file: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${ULW_HOST:?}/${ULW_HOST:?}.crt
+          key_file: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${ULW_HOST:?}/${ULW_HOST:?}.key
+        room:
+          # Chat and the stream service open rooms through the server API.
+          auto_create: false
+        api:
+          enable_psrpc_for_get_list_participants: true
+        webhook:
+          api_key: ${LIVEKIT_API_KEY:?}
+          urls:
+            - http://127.0.0.1:8090/livekit/webhook
+        logging:
+          level: info
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7880/"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      redis:
+        condition: service_healthy
+      caddy:
+        condition: service_healthy
+
+  egress:
+    <<: *in-netns
+    # livekit/egress v1.14.1, the digest deploy/local/compose.yaml pins (ADR-0046): relays a live
+    # stream's publisher to the packager over SRT.
+    image: docker.io/livekit/egress@sha256:bf2b648b947349c3e9ff7aa8c718f00378d5c06af7624652a3653318e00333ce
+    environment:
+      EGRESS_CONFIG_BODY: |
+        api_key: ${LIVEKIT_API_KEY:?}
+        api_secret: ${LIVEKIT_API_SECRET:?}
+        ws_url: ws://127.0.0.1:7880
+        redis:
+          address: 127.0.0.1:6379
+        health_port: 7981
+        template_port: 7980
+        log_level: info
+        # The host is shared with CI: admit a relay without waiting for an idle core (ADR-0053).
+        cpu_cost:
+          participant_cpu_cost: 0.5
+          max_cpu_utilization: 0.95
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7981/"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      livekit:
+        condition: service_healthy
+
+  keycloak-db:
+    # postgres:16 (16.15), as above: Keycloak's own database, on the `ulw` network only.
+    image: docker.io/library/postgres@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+    restart: unless-stopped
+    logging: *logging
+    networks: [ulw]
+    environment:
+      POSTGRES_USER: keycloak
+      POSTGRES_DB: keycloak
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:?}
+    volumes:
+      - keycloak-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "keycloak", "-d", "keycloak"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  keycloak:
+    # quay.io/keycloak/keycloak:26.8.0, in production mode behind Caddy at /auth.
+    image: quay.io/keycloak/keycloak@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc
+    restart: unless-stopped
+    logging: *logging
+    networks: [ulw]
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KC_HOSTNAME: https://${ULW_HOST:?}/auth
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?}
+    volumes:
+      # The realm, its client and the demo users (realm/ulw-realm.json, with the host filled in
+      # by deploy.sh). Imported once: a realm that exists is left as it is.
+      - ./keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+
+networks:
+  ulw:
+    ipam:
+      config:
+        - subnet: 10.213.77.0/24
+
+volumes:
+  pg:
+  minio:
+  caddy-data:
+  caddy-config:
+  keycloak-pg:

@@ -3,7 +3,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'smoke.spec.mjs',
+  testMatch: ['smoke.spec.mjs', 'calls.spec.mjs'],
   workers: 1,
   timeout: 6 * 60_000,
   expect: { timeout: 30_000 },

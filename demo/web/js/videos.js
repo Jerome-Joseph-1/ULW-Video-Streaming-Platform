@@ -188,12 +188,15 @@ function progress(done, total, what) {
 }
 
 // hls.js with the token on the gateway's playlist requests only: segment URLs are signed for
-// the store and take no credentials.
+// the store and take no credentials. The store may share the gateway's origin (deploy/vps
+// serves it at /ulw-media/), where a bearer header beside the signature would be refused, so the
+// gateway's requests are told apart by their path too.
 export function attachHls(video, src, options = {}) {
   const player = new Hls({
     ...options,
     xhrSetup: (xhr, url) => {
-      if (new URL(url, location.href).origin === apiOrigin) {
+      const u = new URL(url, location.href);
+      if (u.origin === apiOrigin && u.pathname.startsWith('/api/')) {
         xhr.setRequestHeader('authorization', `Bearer ${demoToken()}`);
       }
     },

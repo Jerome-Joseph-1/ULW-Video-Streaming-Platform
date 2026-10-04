@@ -196,6 +196,17 @@ std::optional<CallId> Ringer::call_of(const core::RoomId& room) const noexcept {
     return it->second.id;
 }
 
+bool Ringer::answerable(const core::RoomId& room, const core::UserId& user) const noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end()) {
+        return false;
+    }
+    const Call& call = it->second;
+    // A direct call still ringing from the asker is theirs, not one they could answer: the call
+    // they were answering crossed with a new one of their own.
+    return call.kind == CallKind::Group || call.answered || call.caller != user;
+}
+
 std::optional<CallKind> Ringer::kind_of(const core::RoomId& room) const noexcept {
     const auto it = calls_.find(room);
     if (it == calls_.end()) {

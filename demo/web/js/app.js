@@ -1,6 +1,7 @@
 // The page: pick a user, then the four tabs. Each window signs in on its own, so two windows
 // of one browser can be two users.
-import { $, chat, demo, directory, el, loadDirectory, signIn } from './core.js';
+import { $, chat, config, demo, directory, el, loadDirectory, oidcConfig, signIn, usesOidc } from './core.js';
+import * as oidc from './oidc.js';
 import { initVideos } from './videos.js';
 import { initChat, syncRooms } from './chat.js';
 import { initCalls, refreshCalls } from './calls.js';
@@ -13,8 +14,8 @@ function showTab(name) {
   try { sessionStorage.setItem('ulw-demo:tab', name); } catch { /* ignore */ }
 }
 
-async function start(user) {
-  await signIn(user);
+async function start(who) {
+  const user = await signIn(who);
   document.title = `${user} - ULW demo`;
   $('picker').hidden = true;
   $('tabs').hidden = false;
@@ -43,6 +44,8 @@ async function start(user) {
 async function main() {
   await loadDirectory();
   for (const b of document.querySelectorAll('#tabs button')) b.addEventListener('click', () => showTab(b.dataset.tab));
+  if (config.label !== undefined) $('label').textContent = config.label;
+  if (usesOidc()) return mainOidc();
   $('switch-user').addEventListener('click', () => {
     try { sessionStorage.removeItem('ulw-demo:user'); } catch { /* ignore */ }
     location.href = location.pathname;
@@ -55,6 +58,16 @@ async function main() {
   for (const u of directory.users) {
     $('user-buttons').append(el('button', { class: 'primary', dataset: { user: u }, onclick: () => start(u) }, u));
   }
+}
+
+// A real identity provider: its sign-in page decides who this window is (oidc.js).
+async function mainOidc() {
+  $('switch-user').textContent = 'sign out';
+  $('switch-user').addEventListener('click', () => oidc.logout(oidcConfig));
+  $('picker-title').textContent = 'Sign in';
+  $('picker-note').textContent = 'Sign in to upload and watch, chat, call and go live. Another user? Use another browser or a private window.';
+  if (await oidc.complete(oidcConfig) || oidc.current()) return start();
+  $('user-buttons').append(el('button', { class: 'primary', id: 'sign-in', onclick: () => oidc.login(oidcConfig) }, 'Sign in'));
 }
 
 main().catch((e) => {

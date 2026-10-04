@@ -1,5 +1,6 @@
 // What every tab shares: the signed-in user and their token, the gateway API, the chat socket,
 // and small UI helpers. window.demo exposes the state the smoke test reads.
+import * as oidc from './oidc.js';
 
 export const demo = (window.demo = { events: [] });
 export const $ = (id) => document.getElementById(id);
@@ -49,12 +50,32 @@ export const session = { user: null, token: null, expiresAt: 0 };
 // (the web image writes it at start from ULW_WEB_* variables, build/web-config.sh). Each empty
 // or missing value means this page's own origin and the demo's paths, as before.
 export const config = window.ULW_CONFIG ?? {};
+demo.config = config;
 // A gateway path (/api/v1/...) on the configured API base, or on this origin.
 export const apiUrl = (path) =>
   /^https?:/.test(path) ? path : `${(config.apiBase ?? '').replace(/\/$/, '')}${path}`;
 export const apiOrigin = new URL(apiUrl('/'), location.href).origin;
 
+// How users sign in: `dev` (the default), the demo's token issuer, which gives any demo user a
+// token on request; or `oidc`, a real identity provider's sign-in page (oidc.js), with the
+// issuer, the page's public client and the claim that names the user (the services'
+// ULW_JWT_SUBJECT_CLAIM).
+export const oidcConfig = {
+  issuer: config.oidcIssuer,
+  clientId: config.oidcClientId,
+  userClaim: config.oidcUserClaim || 'preferred_username',
+};
+export const usesOidc = () => config.auth === 'oidc';
+
+// dev: a token for `user` from the demo's issuer. oidc: the user the provider's token names.
 export async function signIn(user) {
+  if (usesOidc()) {
+    const t = await oidc.accessToken(oidcConfig);
+    session.user = String(oidc.claims(t)[oidcConfig.userClaim]);
+    session.token = t;
+    demo.user = session.user;
+    return session.user;
+  }
   const r = await fetch(`${config.tokenUrl || '/auth/token'}?sub=${encodeURIComponent(user)}`, { method: 'POST' });
   if (!r.ok) throw new Error(`token for ${user}: ${r.status}`);
   const body = await r.json();
@@ -63,10 +84,11 @@ export async function signIn(user) {
   session.expiresAt = Date.now() + body.expires_in * 1000;
   try { sessionStorage.setItem('ulw-demo:user', user); } catch { /* ignore */ }
   demo.user = user;
-  return body.token;
+  return user;
 }
 
 export async function token() {
+  if (usesOidc()) return (session.token = await oidc.accessToken(oidcConfig));
   if (Date.now() > session.expiresAt - 5 * 60_000) await signIn(session.user);
   return session.token;
 }
@@ -141,13 +163,22 @@ class ChatSocket extends EventTarget {
       log('chat_open');
       for (const [room, r] of this.rooms) this.join(room, r.kind, { rejoin: true });
       for (const user of this.watching) this.send({ type: 'watch', user });
-      for (const m of this.pending.splice(0)) this.send(m);
+      this.flush();
       this.dispatchEvent(new Event('open'));
     };
     ws.onmessage = (e) => {
       let m;
       try { m = JSON.parse(e.data); } catch { return; }
-      if (m.type === 'joined' && this.rooms.has(m.room)) this.rooms.get(m.room).joined = true;
+      if (m.type === 'joined' && this.rooms.has(m.room)) {
+        Object.assign(this.rooms.get(m.room), { joined: true, refused: false });
+        this.flush();
+      }
+      // A join refused: what waits for that room goes out, to be answered (not_joined) rather
+      // than kept for ever.
+      if (m.type === 'error' && this.rooms.has(m.room) && !this.rooms.get(m.room).joined) {
+        this.rooms.get(m.room).refused = true;
+        this.flush();
+      }
       if (m.type === 'message' && this.rooms.has(m.room)) {
         const r = this.rooms.get(m.room);
         r.lastSeq = Math.max(r.lastSeq ?? 0, m.seq);
@@ -167,13 +198,31 @@ class ChatSocket extends EventTarget {
     };
   }
 
+  // A command about a room this socket is (re)joining waits for the join's answer: sent before
+  // it, chat answers it not_joined (a call's ticket asked right after a reconnect, say).
   send(m) {
-    if (this.open && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
+    if (this.open && this.ws.readyState === WebSocket.OPEN && !this.waitsForJoin(m)) this.ws.send(JSON.stringify(m));
     else this.pending.push(m);
+  }
+
+  waitsForJoin(m) {
+    const r = m.type !== 'join' && m.room ? this.rooms.get(m.room) : null;
+    return !!r && !r.joined && !r.refused;
+  }
+
+  flush() {
+    if (!this.open || this.ws?.readyState !== WebSocket.OPEN) return;
+    const later = [];
+    for (const m of this.pending.splice(0)) {
+      if (this.waitsForJoin(m)) later.push(m);
+      else this.ws.send(JSON.stringify(m));
+    }
+    this.pending.push(...later);
   }
 
   join(room, kind, { rejoin = false } = {}) {
     const r = this.rooms.get(room) ?? { kind, lastSeq: 0, joined: false };
+    r.refused = false;
     this.rooms.set(room, r);
     const m = { type: 'join', room };
     if (kind) m.kind = kind;

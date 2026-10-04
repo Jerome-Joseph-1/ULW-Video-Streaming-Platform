@@ -8,6 +8,9 @@
 #   ULW_WEB_AUTH            dev (the demo's token issuer) or oidc
 #   ULW_WEB_OIDC_ISSUER     with oidc: the issuer, e.g. https://<ip>.sslip.io/realms/ulw
 #   ULW_WEB_OIDC_CLIENT_ID  with oidc: the page's public client id
+#   ULW_WEB_OIDC_USER_CLAIM with oidc: the claim naming the user, as the services'
+#                           ULW_JWT_SUBJECT_CLAIM (default preferred_username)
+#   ULW_WEB_LABEL           the text beside the page's title (default "local demo")
 set -eu
 out=${ULW_WEB_CONFIG_FILE:-/usr/share/nginx/html/config.js}
 json() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
@@ -19,7 +22,9 @@ json() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
     printf '"tokenUrl":"%s",' "$(json "${ULW_WEB_TOKEN_URL:-}")"
     printf '"auth":"%s",' "$(json "${ULW_WEB_AUTH:-dev}")"
     printf '"oidcIssuer":"%s",' "$(json "${ULW_WEB_OIDC_ISSUER:-}")"
-    printf '"oidcClientId":"%s"' "$(json "${ULW_WEB_OIDC_CLIENT_ID:-}")"
+    printf '"oidcClientId":"%s",' "$(json "${ULW_WEB_OIDC_CLIENT_ID:-}")"
+    printf '"oidcUserClaim":"%s"' "$(json "${ULW_WEB_OIDC_USER_CLAIM:-}")"
+    if [ -n "${ULW_WEB_LABEL+x}" ]; then printf ',"label":"%s"' "$(json "$ULW_WEB_LABEL")"; fi
     echo '};'
 } > "$out.tmp"
 mv "$out.tmp" "$out"

@@ -304,7 +304,7 @@ private:
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
-    void called(ClientId id, const core::RoomId& room,
+    void called(ClientId id, const core::RoomId& room, const std::optional<CallId>& answering,
                 std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
     void moved(ClientId id, const CallMove& move,
                std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
