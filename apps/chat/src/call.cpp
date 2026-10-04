@@ -15,8 +15,11 @@ namespace {
 // The layouts' first byte; a node that reads another is answered Unavailable, as for an owner
 // that cannot be reached. 2: an ask says what it asks for, and a ticket names its call.
 constexpr std::uint8_t kLayout = 2;
-// What an ask asks for: a ticket, or one of CallSignal's values.
+// What an ask asks for: a ticket, or one of CallSignal's values, or a ticket answering a call
+// it names (after Expel's value, so that a node without it reads it as a layout it does not
+// know and answers Unavailable, which the client retries).
 constexpr std::uint8_t kTicket = 0;
+constexpr std::uint8_t kAnswer = 6;
 
 // A direct chat lists two members; a few more are read, for a list that grew. A group call
 // rings at most kMaxGroupCallees others, the caller aside.
@@ -50,9 +53,12 @@ using layout::put_uuid;
 std::vector<std::byte> encode_request(const CallRequest& request) {
     std::vector<std::byte> out;
     put_u8(out, kLayout);
-    put_u8(out, kTicket);
+    put_u8(out, request.answering ? kAnswer : kTicket);
     put_short(out, request.user.view());
     put_uuid(out, request.device);
+    if (request.answering) {
+        put_uuid(out, *request.answering);
+    }
     return out;
 }
 
@@ -75,15 +81,26 @@ std::optional<CallAsk> decode_request(std::span<const std::byte> bytes) {
     }
     const auto what = in.u8();
     auto user = in.user();
-    if (!what || !user || *what > static_cast<std::uint8_t>(CallSignal::Expel)) {
+    if (!what || !user ||
+        (*what > static_cast<std::uint8_t>(CallSignal::Expel) && *what != kAnswer)) {
         return std::nullopt;
     }
-    if (*what == kTicket) {
+    if (*what == kTicket || *what == kAnswer) {
         const auto device = in.uuid<core::DeviceId>();
-        if (!device || !in.empty()) {
+        if (!device) {
             return std::nullopt;
         }
-        return CallRequest{.user = *user, .device = *device};
+        std::optional<CallId> answering;
+        if (*what == kAnswer) {
+            answering = in.uuid<CallId>();
+            if (!answering) {
+                return std::nullopt;
+            }
+        }
+        if (!in.empty()) {
+            return std::nullopt;
+        }
+        return CallRequest{.user = *user, .device = *device, .answering = answering};
     }
     const auto call = in.uuid<CallId>();
     if (!call) {
@@ -453,6 +470,15 @@ void CallHandler::checked(const core::RoomId& room, Waiter waiter,
     }
     waiter.kind =
         access->kind == core::ports::RoomKind::GroupChat ? CallKind::Group : CallKind::Direct;
+    // A ticket answering a ring that is over (cancelled while the callee reached for it, or
+    // rung out, or a ring the callee's device never heard end) answers nothing: it is refused,
+    // rather than starting a ring of its own that the caller, who just gave up, never asked for.
+    if (waiter.request.answering && !ringer_.answerable(room, waiter.request.user)) {
+        ++counters_.no_call;
+        --in_flight_;
+        finish(waiter.answer, {.outcome = CallOutcome::NoCall, .ticket = std::nullopt});
+        return;
+    }
     if (!ringer_.idle(room)) {
         if (ringer_.expelled(room, waiter.request.user)) {
             ++counters_.expelled;
