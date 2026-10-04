@@ -80,7 +80,7 @@ jobs:
           # the same name to the same pseudonym within this run, everywhere it appears.
           field = re.compile(r'"(user|by|caller|callee|identity|participant|participantIdentity|'
                              r'remoteParticipant|sub|preferred_username|username|expelled)"'
-                             r'(\s*:\s*)"([A-Za-z0-9._@\-]{1,64})"')
+                             r'(\s*:\s*)"([A-Za-z0-9._@\-]{1,64})(?:/[0-9a-f\-]{36})?"')
           names = set()
           for m in field.finditer(text):
               n = m.group(3)
@@ -110,9 +110,10 @@ jobs:
               echo "== $svc: $(printf '%s\n' "$logs" | wc -l) lines in the last $SINCE"
               echo "-- $svc: matching lines (last 1500)"
               printf '%s\n' "$logs" | grep -i -E "$pattern" |
-                  grep -v -E '"event":"request".*"status":2' | tail -n 1500 || true
+                  grep -v -E '"event":"request".*"status":2|"logger":"admin.api","msg":"received request"' |
+                  tail -n 1500 || true
               echo "-- $svc: last 150 lines"
-              printf '%s\n' "$logs" | tail -n 150
+              printf '%s\n' "$logs" | grep -v -E '"logger":"admin.api","msg":"received request"' | tail -n 150
             done
             echo
             echo "== web: the page is static files served by caddy (/srv/web), no container of its own"
