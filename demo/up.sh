@@ -2,6 +2,8 @@
 # Starts the demo: every service on this machine, the page on http://localhost:8080.
 #
 #   demo/up.sh                  pull the published :main images and start
+#   ULW_TAG=<sha> demo/up.sh    the published build of that main commit (40 hex digits)
+#   ULW_TAG=local-<sha> demo/up.sh   images loaded from an archive (demo/load.sh), not pulled
 #   DEMO_BUILD=1 demo/up.sh     build the images from this checkout instead (20-40 minutes)
 #   DEMO_LIVE=0 demo/up.sh      leave out the live recorder (egress, 1.5 GB to download)
 #
@@ -60,24 +62,28 @@ if [[ -n $free_kb ]]; then
 fi
 
 if [[ ${DEMO_BUILD:-0} == 1 ]]; then
-    say "Building the images from this checkout ($(git -C .. rev-parse --short=12 HEAD 2>/dev/null || echo unknown))"
     sha=$(git -C .. rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+    export DEMO_IMAGE_TAG=local-$sha
+    say "Building the images from this checkout ($sha), tagged :$DEMO_IMAGE_TAG"
     for target in gateway worker chat live-packager; do
         name=$target
         [[ $target == gateway || $target == worker ]] && name=video-$target
         say "  $target"
         docker build -f ../deploy/docker/Dockerfile --target "$target" \
-            --build-arg ULW_GIT_SHA="$sha" -t "ulw-demo/ulw-$name:local" ..
+            --build-arg ULW_GIT_SHA="$sha" -t "$registry/ulw-$name:$DEMO_IMAGE_TAG" ..
     done
-    export DEMO_GATEWAY_IMAGE=ulw-demo/ulw-video-gateway:local
-    export DEMO_WORKER_IMAGE=ulw-demo/ulw-video-worker:local
-    export DEMO_CHAT_IMAGE=ulw-demo/ulw-chat:local
-    export DEMO_PACKAGER_IMAGE=ulw-demo/ulw-live-packager:local
+elif [[ $DEMO_IMAGE_TAG == local-* ]]; then
+    # Images built elsewhere and loaded here (demo/load.sh), never pulled.
+    say "Using the loaded images ($registry/ulw-*:$DEMO_IMAGE_TAG)"
+    for name in video-gateway video-worker chat live-packager; do
+        docker image inspect "$registry/ulw-$name:$DEMO_IMAGE_TAG" >/dev/null 2>&1 ||
+            die "$registry/ulw-$name:$DEMO_IMAGE_TAG is not here: load the archive first (demo/load.sh <archive>)"
+    done
 else
     say "Pulling the platform's images ($registry/ulw-*:$DEMO_IMAGE_TAG)"
     for name in video-gateway video-worker chat live-packager; do
         docker pull -q "$registry/ulw-$name:$DEMO_IMAGE_TAG" >/dev/null ||
-            die "could not pull $registry/ulw-$name:$DEMO_IMAGE_TAG (offline? try again, or DEMO_BUILD=1)"
+            die "could not pull $registry/ulw-$name:$DEMO_IMAGE_TAG (offline? try again)"
     done
 fi
 
