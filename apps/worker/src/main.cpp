@@ -238,12 +238,9 @@ int run(std::span<const std::string_view> args) {
     }
     infra::postgres::PgJobQueue queue(config->database_url);
     infra::postgres::PgJobQueue lease_queue(config->database_url);
-    infra::ffmpeg::FfmpegTranscoder transcoder({.sandbox = sandbox,
-                                                .ffmpeg = config->ffmpeg,
-                                                .ffprobe = config->ffprobe,
-                                                .search_path = config->search_path,
-                                                .threads = config->ffmpeg_threads},
-                                               clock);
+    infra::ffmpeg::FfmpegTranscoder transcoder(
+        {.sandbox = sandbox, .search_path = config->search_path, .threads = config->ffmpeg_threads},
+        clock);
     // Beside the node's scratch directory rather than in it, which holds workspaces only; named
     // for the node, so two workers sharing a scratch root keep a heartbeat each.
     const worker::Heartbeat heartbeat(config->scratch.parent_path() /

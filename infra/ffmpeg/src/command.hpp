@@ -24,6 +24,12 @@ inline constexpr std::uint32_t kSegmentSeconds = 4;
 // argv, program name first.
 using Args = std::vector<std::string>;
 
+// The programs, by the names the sandbox helper runs them by. Names, not paths: the helper runs
+// the file it was built with for each (ULW_SANDBOX_FFMPEG, ULW_SANDBOX_FFPROBE; sandbox_main.cpp,
+// docs/adr/0089), and the name is the program's argv[0].
+inline constexpr std::string_view kFfmpeg = "ffmpeg";
+inline constexpr std::string_view kFfprobe = "ffprobe";
+
 // The demuxers an upload may be read with. Left to probe, ffmpeg picks among all of them, and
 // playlist and manifest formats (DASH, HLS, IMF, concat) open whatever local paths the upload
 // names, outside the workspace too. These are the containers cameras, phones and editors
@@ -42,22 +48,22 @@ inline constexpr core::Millis kMaxDuration{12LL * 3600 * 1000};
 // with fewer bits than this for each second it declares cannot hold what it declares.
 inline constexpr std::uint64_t kMinSourceBitsPerSecond = 128;
 
-[[nodiscard]] Args probe_args(const std::string& ffprobe, const std::filesystem::path& input);
+[[nodiscard]] Args probe_args(const std::filesystem::path& input);
 // What probe_args prints for a file of `source_bytes`, or why it describes nothing that can be
 // transcoded.
 [[nodiscard]] std::expected<core::ports::MediaInfo, std::string>
 parse_probe(std::string_view text, std::uint64_t source_bytes);
 
-[[nodiscard]] Args transcode_args(const std::string& ffmpeg, const std::filesystem::path& input,
+[[nodiscard]] Args transcode_args(const std::filesystem::path& input,
                                   const std::filesystem::path& out_dir,
                                   const core::ports::MediaInfo& media,
                                   std::span<const core::Rung> ladder, unsigned threads);
 
-[[nodiscard]] Args keyframe_args(const std::string& ffprobe, const std::filesystem::path& playlist);
+[[nodiscard]] Args keyframe_args(const std::filesystem::path& playlist);
 // The pts_time of every keyframe, in order; nullopt when a line is not a time.
 [[nodiscard]] std::optional<std::vector<std::string>> parse_keyframes(std::string_view text);
 
-[[nodiscard]] Args decode_args(const std::string& ffmpeg, const std::filesystem::path& master);
+[[nodiscard]] Args decode_args(const std::filesystem::path& master);
 
 // The master playlist with each variant's BANDWIDTH set from the ladder, as ffmpeg 6.1 wrote it
 // (the rung's video rate, plus the audio rate when there is audio, plus a tenth), and without
