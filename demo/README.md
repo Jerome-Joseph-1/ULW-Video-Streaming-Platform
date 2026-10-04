@@ -83,7 +83,7 @@ feat/group-calls"); everything else works.
 
 Use this if the features are not all on `main` by the morning. `<RUN>` is the run id and
 `<sha12>` the 12-digit commit we name: an `e2e` run of `demo/integration` with `demo_build`,
-green, whose summary lists the archive (`demo-images-<sha12>`, about 1 GB, kept 2 days).
+green, whose summary lists the archive (`demo-images-<sha12>`, about 250 MB, kept 2 days).
 
 ```sh
 git clone https://github.com/Jerome-Joseph-1/ULW-Video-Streaming-Platform.git ulw && cd ulw
