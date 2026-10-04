@@ -1,6 +1,6 @@
 # 0056. Presence over the room plane, with a grace and a lease
 
-Status: Accepted
+Status: Accepted, amended by ADR-0096
 Date: 2026-09-29
 
 ## Context
@@ -164,5 +164,4 @@ a word.
 - **Open before production: authorization.** Anyone signed in may watch anyone, and learn when
   they are online. Nothing in the brief asks for a rule, and the envelope has no place for one
   yet; whether watching needs a shared room, a contact, or a check with Askedin's platform must
-  be decided before presence is offered to real users. Decided by ADR-0096: a user may watch
-  another only while they share a direct or group chat, checked at the watcher's node.
+  be decided before presence is offered to real users.

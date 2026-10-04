@@ -54,6 +54,9 @@ constexpr auto kExplainBefore =
 constexpr auto kExplainAfter =
     explain_of<kExplain.size() + infra::postgres::message_sql::kHistoryAfterText.size() + 1>(
         infra::postgres::message_sql::kHistoryAfterText);
+constexpr auto kExplainShared =
+    explain_of<kExplain.size() + infra::postgres::message_sql::kSharedWithText.size() + 1>(
+        infra::postgres::message_sql::kSharedWithText);
 constexpr auto kExplainRooms =
     explain_of<kExplain.size() + infra::postgres::message_sql::kRoomsFirstText.size() + 1>(
         infra::postgres::message_sql::kRoomsFirstText);
@@ -751,6 +754,35 @@ TEST_F(MessageStoreTest, AUsersRoomsAreReadThroughTheirIndex) {
     });
     ASSERT_TRUE(rooms);
     EXPECT_EQ(rooms->size(), 40U);
+}
+
+// Who shares a chat with whom is read from the asker's rooms by their index, each probed for the
+// others by primary key: never a scan of every list, however many there are.
+TEST_F(MessageStoreTest, WhoSharesAChatIsReadThroughTheIndexesAlone) {
+    ASSERT_TRUE(conn_->exec("INSERT INTO chat_members (room_id, user_id) "
+                            "SELECT r, 'user' || ((n + k) % 500) "
+                            "FROM (SELECT gen_random_uuid() AS r, n FROM generate_series(1, 10000) "
+                            "AS n) rooms, generate_series(0, 1) AS k"));
+    ASSERT_TRUE(conn_->exec("ANALYZE chat_members"));
+    auto plan = conn_->exec(Sql{kExplainShared.data()},
+                            Params{}.add_text("user7").add_text("user8 user9 user300"));
+    ASSERT_TRUE(plan) << plan.error().message;
+    std::string text;
+    for (int row = 0; row < plan->rows(); ++row) {
+        text += plan->get(row, 0).value_or("");
+        text += '\n';
+    }
+    EXPECT_EQ(text.find("Seq Scan on chat_members"), std::string::npos) << text;
+    EXPECT_NE(text.find("chat_members_by_user"), std::string::npos) << text;
+    const auto shared = ask<std::vector<core::UserId>>([&](auto done) {
+        store_->shared_with(*core::UserId::parse("user7"),
+                            {*core::UserId::parse("user8"), *core::UserId::parse("user6"),
+                             *core::UserId::parse("user300")},
+                            std::move(done));
+    });
+    ASSERT_TRUE(shared);
+    EXPECT_EQ(*shared, (std::vector<core::UserId>{*core::UserId::parse("user6"),
+                                                  *core::UserId::parse("user8")}));
 }
 
 // A change is answered only once it committed: a commit that fails answers unavailable, and the

@@ -191,44 +191,74 @@ questions followed from them:
   admin's alone) and the listings are unchanged either way. Off is the default because it is the
   safe one for an embedder; the demo and the test stacks that use the commands set it on.
 - **The service API** (`apps/chat/src/service_api.cpp`, docs/integration/chat.md, "The service
-  API"). `ULW_SERVICE_PORT`, which needs `ULW_SERVICE_SCOPE` set (chat exits 2 otherwise).
+  API"). `ULW_SERVICE_PORT`, which needs `ULW_SERVICE_SCOPE` and `ULW_SERVICE_CLIENT_ID` set
+  (chat exits 2 otherwise): a scope alone admits whichever client the provider grants it to.
   `POST /service/v1/` `open_direct` (`users`: the pair), `create_group` (`creator`, `id`,
-  `users`), `add_members` (`room`, `users`), `remove_member` (`room`, `user`), `rooms` (`user`,
-  `after`, `limit`), `members` (`room`, `after`, `limit`), answered in JSON with the socket's
-  shapes. Each calls the store as the socket's commands do: `open_direct` and `create_group` with
-  the first user and the creator as the asker (so the per-user room cap counts them),
-  `add_members` and `roster` with `Actor::service()`, which the store treats as every group's
-  admin and as listed, under the same lock and in the same statements (`kAddMembers`' and
-  `kRoster`'s service flag), and `remove_member` as the user's `leave` (`kLeave`), so a group
-  keeps an admin. Rooms are the named rooms above: the same pair or request names the same room
-  whoever asks. Triggers tell every node, and every socket concerned gets its `member` frame, as
-  for a user's change. Calls and joins still check membership at the moment of asking.
+  `users`), `add_members` (`room`, `users`), `remove_member` (`room`, `user`), `close_direct`
+  (`room`), `rooms` (`user`, `after`, `limit`), `members` (`room`, `after`, `limit`), answered in
+  JSON with the socket's shapes. Each calls the store as the socket's commands do, under the
+  room's lock, with the same caps and triggers:
+  - `open_direct` and `create_group` with the first user and the creator as the asker (so the
+    per-user room cap counts them);
+  - `add_members` and `roster` with `Actor::service()`, which the store treats as every group's
+    admin and as listed (`kAddMembers`' and `kRoster`'s service flag). `add_members` takes only a
+    group's own id (`04`; anything else is `bad_room` before the store), and only a group that
+    lists someone: one nothing recorded, or a refused join recorded and nobody created, is
+    `no_room`, and one whose members all left over its history is `gone`, as `create_group` is;
+  - `remove_member` as the user's `leave` (`kLeave`), so a group keeps an admin; idempotent,
+    answering `removed: []` for someone not listed;
+  - `close_direct` (`kCloseDirect`, a `03` id only): both of a direct chat's pair unlisted under
+    its lock, so each removal is told to every node, their sockets leave the room and their
+    watches of each other are checked again. This is how a product unfriends or blocks: a direct
+    chat's pair otherwise never changes, and **a user may not leave a direct chat themselves**
+    (`not_group`, as before): a one-sided leave would leave the other in a room with nobody, and
+    whether the two may still talk is the product's to decide. A later `open_direct` lists the
+    pair again, in the same room with its history. With self-service on, either may do that, so
+    self-service on is also "anyone can reach and watch anyone whose id they know".
+  Rooms are the named rooms above: the same pair or request names the same room whoever asks.
   Authentication: `Authorization: Bearer` only (no cookie), the users' verifier, then
-  `Claims::is_service`, which `infra/auth` sets (`claim_holds`) when the claim
+  `Claims::is_service`, which `infra/auth` sets (`claim_holds`, `names_client`) when the claim
   `ULW_SERVICE_CLAIM` names (default `scope`) is a string equal to `ULW_SERVICE_SCOPE`, a
-  space-separated string holding it as a word, or an array holding it; never with no scope. `401` (with `WWW-Authenticate: Bearer`), `403` without the claim,
-  `503` when the keys cannot be fetched. Bounded per node: 32 connections, 100 requests at once
-  then 50 a second (`ServiceApiLimits`, `429` with `Retry-After`), 16 KiB bodies, 30 s idle,
-  10 s per request; one request at a time per connection, the next read once the answer is out.
-  Metrics `service_api_*`. `ULW_SERVICE_CLIENT_ID`, optional, also pins the client the token
-  was issued to (`azp` or `client_id`). The port has no HTTPRoute: nothing on the internet needs
-  it, and the token alone admits a caller; an operator whose backend is outside the cluster
-  routes it privately, or, through the public Gateway, only with a source restriction (RUNBOOK,
-  step 10).
+  space-separated string holding it as a word, or an array holding it, and `azp` or `client_id`
+  names `ULW_SERVICE_CLIENT_ID`; never with no scope. `401` (with `WWW-Authenticate: Bearer`),
+  `403` for a valid token that is not the service's, `503` when the keys cannot be fetched.
+  Bounded per node, in the order a request meets them: 32 connections, at most 8 from one
+  address, closed at accept past either; a first byte within 5 s; a whole request within 10 s,
+  16 KiB at most; a failures' budget per caller address (20 at once, 5 a second), charged before
+  the token is verified and given back once it is the service's, past which the address is
+  answered `429` without a verification; then the service's own rate, 100 at once and 50 a
+  second, taken only by verified service requests, so no stranger can spend it. 30 s idle; one
+  request at a time per connection, the next read once the answer is out. Metrics
+  `service_api_*`. The port has no HTTPRoute: nothing on the internet needs it, and the token
+  alone admits a caller; an operator whose backend is outside the cluster routes it privately,
+  or, through the public Gateway, only with a source restriction (RUNBOOK, step 10).
 - **Presence within shared chats** (`apps/chat/src/presence.cpp`, `IPresenceAccess`,
-  `IMessageStore::shared_with`, `kSharedWith`). A `watch` is let in only once the store says the
-  two share a direct or group chat now (a room with no kind recorded counts as a group; a stream's
+  `IMessageStore::shared_with`, `kSharedWith`, read through `chat_members_by_user` and the
+  primary key, which a test EXPLAINs). A `watch` is let in only once the store says the two
+  share a direct or group chat now (a room with no kind recorded counts as a group; a stream's
   live chat never does); until then the node neither answers nor joins the user's presence room,
   and a refusal is `not_shared` (`unavailable` if the store cannot say). The node is the
   watcher's, which alone knows its clients; every node enforces it for its own, so a cluster
-  needs no coordination beyond what removals already have. On a removal from any list (the
-  notification every node hears; `ChatService` passes it on, as it does to the call handler),
-  every watch on this node that involves the removed user, as watcher or as watched, is held
-  back at once (no `presence` reaches it), and its client's watches are asked about again in one
-  query; a watch no longer shared is dropped and its client told `not_shared` unasked, and one
-  still shared resumes with a `presence` for whatever changed while held. A removal that comes
-  while a check is out marks it stale, asked again when answered, so no answer read before a
-  removal lets a watch in or back. A resync (lost notifications) holds and checks every watch.
+  needs no coordination beyond what removals already have.
+  - **Cost and what it reveals.** Every watch the store is asked about costs the watcher's
+    allowance (128 at once, then 2 a second), whether or not anyone on the node watches the
+    target already, and the node's room cap is applied after the store's answer: neither a
+    refusal nor its timing says whether the target is watched there. A `not_shared` is
+    remembered per (watcher, target), up to 8192 pairs, and answered from memory until either is
+    listed in any chat (`on_member_added`, which `ChatService` now passes on too) or the node
+    resyncs, so asking again costs no query.
+  - **Removals.** On a removal from any list (the notification every node hears; `ChatService`
+    passes it on, as it does to the call handler), every watch on this node that involves the
+    removed user, as watcher or as watched, is held back at once (no `presence` reaches it), and
+    its client's watches are asked about again in one query; a watch no longer shared is dropped
+    and its client told `not_shared` unasked, and one still shared resumes with a `presence` for
+    whatever changed while held. A removal that comes while a check is out marks it stale, asked
+    again when answered, so no answer read before a removal lets a watch in or back.
+  - **Outages fail closed without dropping.** A held watch the store cannot check stays held,
+    telling nothing, and is asked again after 1 s, 2 s, 4 s, ... up to every 30 s, until the
+    store answers. A resync (lost notifications) holds every watch at once and asks about them
+    32 connections at a time, a wave each 100 ms, so a node coming back does not send its whole
+    load to a database that has just come back.
   Pending checks count against the 128 watches per connection. Metrics `presence_checks_total`,
   `presence_refusals_total{reason="not_shared"}`, `presence_watches_revoked_total`.
 - **Migration 0015**, after 0011 to 0014 (live streams, then group calls; the migrator refuses

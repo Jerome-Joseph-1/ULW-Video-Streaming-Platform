@@ -1075,6 +1075,60 @@ TEST_P(MembershipConformance, TheServiceAddsToAnyGroupAndReadsAnyListWithoutBein
     EXPECT_EQ(add(room, service, {user("one-more")}), refused(MembershipOutcome::Full));
 }
 
+// The service lists people only in a group someone created (ADR-0096): not in a room nothing
+// recorded, nor in one a refused join recorded that lists nobody, nor over an emptied group's
+// history.
+TEST_P(MembershipConformance, TheServiceAddsOnlyToAGroupSomeoneCreated) {
+    const core::ports::Actor service = core::ports::Actor::service();
+    EXPECT_EQ(add(named_room("04"), service, {dave_}), refused(MembershipOutcome::NotMember));
+    const core::RoomId joined = named_room("04");
+    ASSERT_EQ(ask<Admission>([&](auto d) {
+                  store().admits(joined, carol_, RoomKind::GroupChat, std::move(d));
+              }),
+              Admission::NotMember);
+    EXPECT_EQ(add(joined, service, {dave_}), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(members(joined, std::nullopt, 10), std::vector<core::UserId>{});
+    const core::RoomId emptied = named_room("04");
+    backend_->open(emptied);
+    ASSERT_EQ(create_group(emptied, alice_, {}), done({alice_}));
+    ASSERT_TRUE(write(emptied, alice_, bytes("kept")));
+    ASSERT_EQ(leave(emptied, alice_), done({alice_}));
+    EXPECT_EQ(add(emptied, service, {bob_}), refused(MembershipOutcome::Gone));
+    EXPECT_EQ(members(emptied, std::nullopt, 10), std::vector<core::UserId>{});
+}
+
+// The operator's backend takes a direct chat apart (an unfriend, a block): both unlisted, each
+// removal told, and a later open lists the pair again.
+TEST_P(MembershipConformance, AClosedDirectChatListsNobodyUntilOpenedAgain) {
+    Heard heard;
+    ASSERT_NO_FATAL_FAILURE(backend_->watch(heard, heard.resyncs));
+    const auto close = [&](const core::RoomId& room) {
+        return ask<MembershipChange>(
+            [&](auto done) { store().close_direct(room, std::move(done)); });
+    };
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    EXPECT_EQ(close(direct), done({alice_, bob_}));
+    EXPECT_EQ(close(direct), done({}));
+    EXPECT_EQ(members(direct, std::nullopt, 10), std::vector<core::UserId>{});
+    EXPECT_EQ(shared(alice_, {bob_}), std::vector<core::UserId>{});
+    EXPECT_EQ(ask<Admission>([&](auto d) {
+                  store().admits(direct, alice_, RoomKind::DirectChat, std::move(d));
+              }),
+              Admission::NotMember);
+    EXPECT_EQ(close(named_room("03")), done({}));
+    EXPECT_EQ(close(group()), refused(MembershipOutcome::NotGroup));
+    EXPECT_EQ(open_direct(direct, bob_, alice_), done({alice_, bob_}));
+    const std::string r = direct.to_string();
+    const auto told = [&](const std::string& change) {
+        return std::ranges::find(heard.changes, change) != heard.changes.end();
+    };
+    EXPECT_TRUE(ulw::test::pump_until(backend_->reactor(), [&] {
+        return told("- " + r + " auth0|alice") && told("- " + r + " auth0|bob");
+    }));
+    store().watch_members(nullptr);
+}
+
 // Whose presence a user may see (ADR-0096): those they share a direct or group chat with now.
 TEST_P(MembershipConformance, SharedWithAnswersWhoShareADirectOrGroupChatNow) {
     const core::RoomId direct = named_room("03");

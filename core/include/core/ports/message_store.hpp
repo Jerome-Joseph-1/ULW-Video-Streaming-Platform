@@ -366,14 +366,20 @@ public:
                               MessageCallback<MembershipChange> done) = 0;
     // `users` (at most kMaxMembersPerChange, distinct) listed in the group chat by its admin
     // `actor`, or by the service; those already listed are left as they are. Full when the group
-    // would pass kMaxGroupMembers, and then nobody is added. For the service, NotMember means the
-    // room is not recorded at all.
+    // would pass kMaxGroupMembers, and then nobody is added. The service lists only in a group
+    // someone created: NotMember when the room is not recorded or lists nobody, Gone when it
+    // lists nobody but holds messages (its members all left; new ones would get the history).
     virtual void add_members(const RoomId& room, const Actor& actor, std::vector<UserId> users,
                              MessageCallback<MembershipChange> done) = 0;
     // `user` taken off the group chat's list by its admin `actor`; someone not listed changes
     // nothing. `actor` itself leaves as leave_room does.
     virtual void expel(const RoomId& room, const UserId& actor, const UserId& user,
                        MessageCallback<MembershipChange> done) = 0;
+    // The direct chat at `room` taken apart for the operator's backend (an unfriend, a block):
+    // both of its members unlisted, under the room's lock, so every node hears each removal.
+    // NotGroup when the room is recorded as another kind; Done with nobody in `changed` when it
+    // lists nobody or is not recorded at all (a repeat). A later open_direct lists the pair again.
+    virtual void close_direct(const RoomId& room, MessageCallback<MembershipChange> done) = 0;
     // `user` leaves the group chat. When the last admin goes and anyone is left, the remaining
     // member whose id sorts first becomes admin. NotGroup for a direct chat, whose list does
     // not change.

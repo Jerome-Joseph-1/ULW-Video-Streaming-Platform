@@ -531,7 +531,7 @@ replacements:
         options:
           delimiter: "'"
           index: 1
-  # ULW_SERVICE_CLAIM and ULW_SERVICE_SCOPE of chat, as the gateway's (ADR-0096).
+  # ULW_SERVICE_CLAIM and ULW_SERVICE_SCOPE of chat (ADR-0096).
   - source:
       kind: ConfigMap
       name: ulw-operator-config

@@ -125,31 +125,31 @@ it is compared byte for byte. Two tokens with different subjects are two differe
 
 ## Service tokens
 
-<!-- infra/auth/src/service_claim.cpp (read_service_claim, claim_holds), infra/auth/src/claims.cpp (is_service), apps/gateway/src/connection.cpp (start_service_route), docs/adr/0097-videos-shared-by-visibility-and-service-grants.md -->
+<!-- infra/auth/src/service_claim.cpp (read_service_claim, claim_holds, names_client), infra/auth/src/claims.cpp (is_service), apps/chat/src/service_api.cpp, apps/gateway/src/connection.cpp (start_service_route), docs/adr/0096-member-lists-changed-by-their-users.md, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md -->
 
-The operator's own backend calls the service API (`/api/v1/service/...`,
-[videos-and-playback.md](videos-and-playback.md#service-api-grants)) with a token of its own,
+The operator's own backend calls chat's service API ([chat.md](chat.md#the-service-api)) and the
+gateway's grants API ([videos-and-playback.md](videos-and-playback.md#service-api-grants)) with a
+token of its own,
 which it obtains from the same identity provider with the OAuth client-credentials grant. Such
 a token must pass every check above (signature, `iss`, `aud`, `exp`, a subject: the client's
-id is fine), comes in the `Authorization: Bearer` header (never the cookie: a service token there
-is refused `403`), and is the service's when its claim `ULW_SERVICE_CLAIM` (default `scope`) holds
-`ULW_SERVICE_SCOPE`:
+id is fine), comes in the `Authorization: Bearer` header (the gateway refuses a service
+token in the cookie with `403`), and is the service's when its claim `ULW_SERVICE_CLAIM` (default `scope`) holds
+`ULW_SERVICE_SCOPE`, and, when `ULW_SERVICE_CLIENT_ID` is set (chat requires it with its
+service port), its `azp` or `client_id` claim names that client:
 
 - a string equal to it, or listing it among values separated by spaces, as OAuth's `scope` does
   (`"openid ulw:admin"`);
 - an array with a string that does either (`"roles": ["ulw:admin"]`);
 - `true`, when `ULW_SERVICE_SCOPE` is `true`.
 
-and, when `ULW_SERVICE_CLIENT_ID` is set, its `azp` (OpenID Connect) or its `client_id` (RFC 9068)
-names that client.
-
-**Set `ULW_SERVICE_CLIENT_ID`** to the backend's client id. Choose a scope only the backend's
-client is ever granted, too: an identity provider that lets a signed-in user ask for any scope
-would otherwise let that user act as the backend, and the client id binding closes that even
-where scopes are loosely granted. A service token is an ordinary token everywhere else: it may
-call every user route as the user its subject names, and is charged the per-user request limits
-under that subject. The same three settings, read the same way (`infra/auth/service_claim.hpp`),
-are what every ULW service that takes service calls uses.
+Set `ULW_SERVICE_CLIENT_ID` to the backend's client id (the gateway recommends it; chat requires
+it with its service port). Choose a scope only the backend's client is ever granted, too: an
+identity provider that lets a signed-in user ask for any scope would otherwise let that user act
+as the backend, and the client id binding closes that even where scopes are loosely granted. A
+service token is an ordinary token everywhere else: it may call every user route as the user its
+subject names, and is charged the per-user request limits under that subject. The same settings,
+read the same way (`infra/auth/service_claim.hpp`), are what every ULW service that takes service
+calls uses.
 
 ## Key set
 
@@ -164,7 +164,7 @@ are what every ULW service that takes service calls uses.
 | `ULW_AUTH_COOKIE` | Optional, default `auth_token`. |
 | `ULW_SERVICE_CLAIM` | Optional, default `scope`: the claim that marks the operator's backend ([Service tokens](#service-tokens)). 1 to 64 of `A-Z a-z 0-9 _ . : / -`, and not `iss`, `aud`, `exp`, `nbf`, `iat` or `jti`. Without `ULW_SERVICE_SCOPE`, `scope` (or unset) means service calls are off; any other name stops the process at startup. |
 | `ULW_SERVICE_SCOPE` | Optional, default none: the value that claim must hold, such as `ulw:admin`. 1 to 128 printable ASCII characters, no spaces. Unset: no token is a service's, and the service API answers `403` to all. |
-| `ULW_SERVICE_CLIENT_ID` | Optional, recommended: the backend's client id; only tokens whose `azp` or `client_id` is this are the service's. 1 to 128 printable ASCII characters, no spaces. Without `ULW_SERVICE_SCOPE` it changes nothing: service calls are off. |
+| `ULW_SERVICE_CLIENT_ID` | Optional, recommended (required by chat with `ULW_SERVICE_PORT`): the backend's client id; only tokens whose `azp` or `client_id` is this are the service's. 1 to 128 printable ASCII characters, no spaces. Without `ULW_SERVICE_SCOPE` it changes nothing: service calls are off. |
 | `ULW_JWKS_MAX_STALE_HOURS` | Optional, 1 to 168, default 24: how long keys stay trusted while every refetch fails (below). |
 | `ULW_DEV_JWKS_FILE` | Development only: a local Ed25519 key set instead of `JWKS_URL`. Setting both is a startup error. It is refused (exit 2) unless `ULW_DEV_MODE=1`, and refused regardless inside a Kubernetes pod (`KUBERNETES_SERVICE_HOST` set, as the kubelet does in every container), so a key set left in a real deployment's configuration stops the process instead of being trusted. The gateway and chat server both apply this. The first log line prints `keys=DEVELOPMENT <file>` so it cannot go unnoticed. |
 | `ULW_DEV_MODE` | `0` or `1`, default `0`. `1` says this is a development run, which development-only settings such as `ULW_DEV_JWKS_FILE` need. |

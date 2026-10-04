@@ -370,6 +370,11 @@ void ChatService::list_members(ClientId id, const ListMembers& list) {
 }
 
 void ChatService::on_member_added(const core::RoomId& room, const core::UserId& user) noexcept {
+    for (core::ports::IMemberListener* also : also_) {
+        if (also != nullptr) {
+            also->on_member_added(room, user);
+        }
+    }
     if (core::ports::is_stream_chat(room)) {
         return;
     }

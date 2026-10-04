@@ -262,7 +262,7 @@ public:
     // store that is still down loses no removal. A join still waiting for its member list is
     // checked again once it is let in, since the list it was let in by may predate the removal.
     void on_members_resync() noexcept override;
-    // Who else hears the removals the store tells this service of, and its resyncs: the call
+    // Who else hears the changes the store tells this service of, and its resyncs: the call
     // handler, which puts a removed member out of the call (ADR-0095), and presence, which checks
     // again who may still see whom (ADR-0096). Each call adds one, at most kMaxAlsoTold; nullptr
     // stops telling all of them.

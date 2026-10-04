@@ -40,6 +40,9 @@ struct MintRequest {
     // gives a backend (the service APIs, ULW_SERVICE_SCOPE): left out when empty.
     // NOLINTNEXTLINE(readability-redundant-member-init)
     std::string scope{};
+    // `azp`, the client the token was issued to (ULW_SERVICE_CLIENT_ID): left out when empty.
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    std::string client{};
 };
 
 // An Ed25519 signing key for local runs, kept on disk as a private JWK. It signs tokens only

@@ -48,6 +48,7 @@ enum class Op : std::uint8_t {
     CreateGroup,
     AddMembers,
     RemoveMember,
+    CloseDirect,
     Rooms,
     Members,
 };
@@ -57,11 +58,12 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 6> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 7> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
         {"remove_member", Op::RemoveMember},
+        {"close_direct", Op::CloseDirect},
         {"rooms", Op::Rooms},
         {"members", Op::Members},
     }};
@@ -212,9 +214,12 @@ public:
         conn_ = *conn;
         attached_ = true;
         api_.reactor_.start_receiving(conn_);
-        arm(api_.limits_.idle_timeout);
+        arm(api_.limits_.first_byte_timeout);
         return true;
     }
+
+    [[nodiscard]] const net::IpAddress& peer() const noexcept { return peer_; }
+    void set_peer(const net::IpAddress& peer) noexcept { peer_ = peer; }
 
     [[nodiscard]] bool released() const noexcept {
         return closed_ && (!attached_ || api_.reactor_.is_quiescent(conn_));
@@ -291,12 +296,6 @@ public:
         if (head.content_length > api_.limits_.max_body) {
             ++c.bad_requests;
             return http::HeadVerdict::reject(Status::ContentTooLarge);
-        }
-        const auto taken = api_.bucket_.take(api_.reactor_.now());
-        if (!taken) {
-            ++c.limited;
-            retry_after_ = taken.error();
-            return http::HeadVerdict::reject(Status::TooManyRequests);
         }
         // Only the header: a cookie is a browser's, and the backend is not one.
         if (const auto value = http::find_header(head.headers, "authorization")) {
@@ -404,10 +403,49 @@ private:
         authenticate();
     }
 
+    // A failure the request was charged for stands; a token that turned out to be the service's
+    // (or could not be checked for want of keys) is given its failure back.
+    void settle_failure(bool failed) noexcept {
+        if (charged_ && !failed) {
+            try {
+                api_.failures_of(peer_).give_back();
+            } catch (const std::bad_alloc&) {
+                // Never here: the budget charged is there while its connection is.
+                ++api_.counters_.unavailable;
+            }
+        }
+        charged_ = false;
+    }
+
+    void refuse_auth(Status status, std::string_view reason) noexcept {
+        settle_failure(true);
+        respond_error(status, reason);
+    }
+
     void authenticate() noexcept {
+        // Every request may fail its token, which costs a verification: it is charged a failure
+        // before, and given it back once it is the service's. Past the failures' budget nothing
+        // is looked at, whoever asks; the backend's own requests never spend it.
+        if (!charged_) {
+            std::expected<void, core::Millis> charged;
+            try {
+                charged = api_.failures_of(peer_).take(api_.reactor_.now());
+            } catch (const std::bad_alloc&) {
+                ++api_.counters_.unavailable;
+                respond_error(Status::ServiceUnavailable, "unavailable", true);
+                return;
+            }
+            if (!charged) {
+                ++api_.counters_.limited;
+                retry_after_ = charged.error();
+                respond_error(Status::TooManyRequests, "rate_limited", true);
+                return;
+            }
+            charged_ = true;
+        }
         if (!authorization_) {
             ++api_.counters_.unauthorized;
-            respond_error(Status::Unauthorized, "unauthorized");
+            refuse_auth(Status::Unauthorized, "unauthorized");
             return;
         }
         infra::auth::TokenExtractor extractor("");
@@ -415,7 +453,7 @@ private:
         const auto token = extractor.token();
         if (!token) {
             ++api_.counters_.unauthorized;
-            respond_error(Status::Unauthorized, "unauthorized");
+            refuse_auth(Status::Unauthorized, "unauthorized");
             return;
         }
         std::optional<core::ports::VerifyResult> result;
@@ -423,6 +461,7 @@ private:
             result = api_.verifier_.verify(*token, api_.clock_.wall_now(), *this);
         } catch (const std::bad_alloc&) {
             ++api_.counters_.unavailable;
+            settle_failure(false);
             respond_error(Status::ServiceUnavailable, "unavailable");
             return;
         }
@@ -434,17 +473,26 @@ private:
         if (!*result) {
             if (result->error() == core::ports::AuthError::KeysUnavailable) {
                 ++api_.counters_.unavailable;
+                settle_failure(false);
                 respond_error(Status::ServiceUnavailable, "unavailable");
                 return;
             }
             ++api_.counters_.unauthorized;
-            respond_error(Status::Unauthorized, "unauthorized");
+            refuse_auth(Status::Unauthorized, "unauthorized");
             return;
         }
         if (!(*result)->is_service) {
             // A user's token, however valid: users manage lists over the socket, if at all.
             ++api_.counters_.forbidden;
-            respond_error(Status::Forbidden, "forbidden");
+            refuse_auth(Status::Forbidden, "forbidden");
+            return;
+        }
+        settle_failure(false);
+        // The service's own allowance, which only its tokens reach.
+        if (const auto taken = api_.bucket_.take(api_.reactor_.now()); !taken) {
+            ++api_.counters_.limited;
+            retry_after_ = taken.error();
+            respond_error(Status::TooManyRequests, "rate_limited");
             return;
         }
         try {
@@ -475,6 +523,9 @@ private:
             break;
         case Op::RemoveMember:
             started = remove_member(*json);
+            break;
+        case Op::CloseDirect:
+            started = close_direct(*json);
             break;
         case Op::Rooms:
             started = rooms(*json);
@@ -632,6 +683,11 @@ private:
         if (!room) {
             return std::unexpected(room.error());
         }
+        // Only a group the users' own create_group names (04): the service lists people into a
+        // group someone made, never into a room id it picked.
+        if (core::ports::named_kind(*room) != core::ports::RoomKind::GroupChat) {
+            return std::unexpected(kBadRoom);
+        }
         auto users = users_of(body, 1, core::ports::kMaxMembersPerChange);
         if (!users) {
             return std::unexpected(users.error());
@@ -663,24 +719,56 @@ private:
             return std::unexpected(user.error());
         }
         // A removal by the operator is the user leaving: the group keeps an admin while it has
-        // members, and everyone concerned is told, as for any leave.
+        // members, and everyone concerned is told, as for any leave. Someone not listed (any
+        // more) is removed already: a repeat after a lost answer is answered as the first was,
+        // with nobody in `removed`.
         api_.store_.leave_room(
             *room, *user,
             reply<MembershipChange>([room = *room, user = *user](Connection& c, ServiceApi& api,
                                                                  MembershipChange change) {
-                c.change_answer(
-                    api, change,
-                    [&](std::string& out) {
-                        write_removed(out, room, user);
-                        if (change.promoted) {
-                            out.pop_back();
-                            out += R"(,"promoted":)";
-                            core::json::append_string(out, change.promoted->view());
-                            out += '}';
-                        }
-                    },
-                    Refusal{.status = Status::NotFound, .reason = "not_member"});
+                if (change.outcome == MembershipOutcome::NotMember) {
+                    change = MembershipChange{.outcome = MembershipOutcome::Done,
+                                              .changed = {},
+                                              .promoted = std::nullopt};
+                }
+                c.change_answer(api, change, [&](std::string& out) {
+                    write_removed(out, room, user);
+                    out.pop_back();
+                    append_users(out, "removed", change.changed);
+                    if (change.promoted) {
+                        out += R"(,"promoted":)";
+                        core::json::append_string(out, change.promoted->view());
+                    }
+                    out += '}';
+                });
             }));
+        return {};
+    }
+
+    Parsed<void> close_direct(const core::json::Value& body) {
+        if (!only(body, {"room"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto room = room_of(body, "room");
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        if (core::ports::named_kind(*room) != core::ports::RoomKind::DirectChat) {
+            return std::unexpected(kBadRoom);
+        }
+        // Both unlisted under the room's lock: every node takes their sockets out of the room and
+        // holds back their watches of each other at once. Closing again changes nothing.
+        api_.store_.close_direct(
+            *room, reply<MembershipChange>(
+                       [room = *room](Connection& c, ServiceApi& api, MembershipChange change) {
+                           c.change_answer(api, change, [&](std::string& out) {
+                               out += R"({"type":"closed","room":")";
+                               out += room.to_string();
+                               out += '"';
+                               append_users(out, "removed", change.changed);
+                               out += '}';
+                           });
+                       }));
         return {};
     }
 
@@ -834,6 +922,7 @@ private:
 
     ServiceApi& api_;
     std::uint64_t id_;
+    net::IpAddress peer_;
     http::RequestParser parser_;
     net::ConnId conn_;
     std::optional<net::TimerId> timer_;
@@ -849,6 +938,8 @@ private:
     bool busy_ = false;
     bool in_handle_ = false;
     bool waiting_keys_ = false;
+    // A failure is charged for the request under way (authenticate), to the peer's budget.
+    bool charged_ = false;
     // The answer is out and the write side shut: closed once the peer has read it.
     bool closing_ = false;
     bool attached_ = false;
@@ -860,6 +951,18 @@ ServiceApi::ServiceApi(net::IReactor& reactor, const core::ports::IClock& clock,
                        ServiceApiLimits limits)
     : reactor_(reactor), clock_(clock), verifier_(verifier), store_(store), limits_(limits),
       bucket_(limits.burst, limits.per_second, reactor.now()) {}
+
+TokenBucket& ServiceApi::failures_of(const net::IpAddress& peer) {
+    const auto it =
+        std::ranges::find(failures_, peer, &std::pair<net::IpAddress, TokenBucket>::first);
+    if (it != failures_.end()) {
+        return it->second;
+    }
+    return failures_
+        .emplace_back(
+            peer, TokenBucket(limits_.failure_burst, limits_.failures_per_second, reactor_.now()))
+        .second;
+}
 
 ServiceApi::~ServiceApi() {
     for (const auto& c : connections_) {
@@ -874,12 +977,25 @@ ServiceApi::Connection* ServiceApi::find(std::uint64_t id) noexcept {
 
 void ServiceApi::on_accept(os::UniqueFd conn) noexcept {
     reap();
-    if (stopped_ || connections_.size() >= limits_.max_connections) {
+    const auto peer = net::peer_address(conn.get());
+    if (stopped_ || !peer || connections_.size() >= limits_.max_connections) {
+        ++counters_.refused_connections;
+        return;
+    }
+    accept_from(std::move(conn), *peer);
+}
+
+void ServiceApi::accept_from(os::UniqueFd conn, const net::IpAddress& peer) noexcept {
+    const auto same = static_cast<std::size_t>(std::ranges::count_if(
+        connections_, [&](const std::unique_ptr<Connection>& c) { return c->peer() == peer; }));
+    if (stopped_ || connections_.size() >= limits_.max_connections ||
+        same >= limits_.max_connections_per_address) {
         ++counters_.refused_connections;
         return;
     }
     try {
         auto made = std::make_unique<Connection>(*this, next_id_++);
+        made->set_peer(peer);
         if (!made->attach(std::move(conn))) {
             ++counters_.refused_connections;
             return;
@@ -892,7 +1008,20 @@ void ServiceApi::on_accept(os::UniqueFd conn) noexcept {
 }
 
 void ServiceApi::reap() noexcept {
+    const std::size_t before = connections_.size();
     std::erase_if(connections_, [](const std::unique_ptr<Connection>& c) { return c->released(); });
+    if (connections_.size() == before) {
+        return;
+    }
+    // A budget that is full again, of an address with no connection left, is what a new one
+    // would be.
+    const core::MonoTime now = reactor_.now();
+    std::erase_if(failures_, [&](const std::pair<net::IpAddress, TokenBucket>& entry) {
+        return entry.second.full(now) &&
+               std::ranges::none_of(connections_, [&](const std::unique_ptr<Connection>& c) {
+                   return c->peer() == entry.first;
+               });
+    });
 }
 
 void ServiceApi::stop() noexcept {

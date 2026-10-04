@@ -167,9 +167,17 @@ std::string path(std::string_view op) {
     return std::string(chat::kServicePrefix) + std::string(op);
 }
 
+// The defaults, but room for the many connections one test makes from 127.0.0.1, each closed by
+// the client as soon as answered, perhaps before the API has seen it go.
+ServiceApiLimits roomy() {
+    ServiceApiLimits limits;
+    limits.max_connections_per_address = limits.max_connections;
+    return limits;
+}
+
 class ServiceApiTest : public ::testing::Test {
 protected:
-    void SetUp() override { start({}); }
+    void SetUp() override { start(roomy()); }
 
     void TearDown() override {
         clients_.clear();
@@ -204,6 +212,14 @@ protected:
     int connect() {
         clients_.push_back(ulw::test::connect_loopback(port_));
         EXPECT_TRUE(clients_.back());
+        return clients_.back().get();
+    }
+
+    // A connection the API takes to come from `peer`, which loopback cannot be.
+    int connect_from(std::string_view peer) {
+        auto [ours, theirs] = ulw::test::unix_pair();
+        api_->accept_from(std::move(theirs), *net::IpAddress::parse(peer));
+        clients_.push_back(std::move(ours));
         return clients_.back().get();
     }
 
@@ -385,23 +401,35 @@ TEST_F(ServiceApiTest, AGroupIsCreatedOnceForItsRequestAndManagedAsItsAdminWould
     // Removing the admin hands the group on, as a leave does.
     const Answer removed = ask("remove_member", R"({"room":")" + r + R"(","user":"alice"})");
     EXPECT_EQ(removed.status, 200) << removed.body;
-    EXPECT_EQ(
-        removed.body,
-        std::format(R"({{"type":"removed","room":"{}","user":"alice","promoted":"bob"}})", r));
+    EXPECT_EQ(removed.body, std::format(R"({{"type":"removed","room":"{}","user":"alice",)"
+                                        R"("removed":["alice"],"promoted":"bob"}})",
+                                        r));
     EXPECT_EQ(heard_.take(),
               (std::vector<std::string>{"- " + r + " alice", "* " + r + " admin bob"}));
     const Answer plain = ask("remove_member", R"({"room":")" + r + R"(","user":"carol"})");
-    EXPECT_EQ(plain.body, std::format(R"({{"type":"removed","room":"{}","user":"carol"}})", r));
+    EXPECT_EQ(plain.body, std::format(R"({{"type":"removed","room":"{}","user":"carol",)"
+                                      R"("removed":["carol"]}})",
+                                      r));
+    // Again, after a lost answer say: removed already, so answered alike, removing nobody.
+    const Answer again = ask("remove_member", R"({"room":")" + r + R"(","user":"carol"})");
+    EXPECT_EQ(again.status, 200);
+    EXPECT_EQ(again.body,
+              std::format(R"({{"type":"removed","room":"{}","user":"carol","removed":[]}})", r));
     EXPECT_EQ(api_->counters().reads, 3U);
 }
 
 TEST_F(ServiceApiTest, ChangesTheStoreRefusesAreAnsweredWithWhy) {
     ASSERT_EQ(ask("open_direct", R"({"users":["alice","bob"]})").status, 200);
     const std::string direct = chat::direct_room(user("alice"), user("bob")).to_string();
+    // A direct chat's pair never changes, and only a group's own id is a group's.
     const Answer not_group =
         ask("add_members", R"({"room":")" + direct + R"(","users":["carol"]})");
-    EXPECT_EQ(not_group.status, 409);
-    EXPECT_EQ(not_group.field("reason"), "not_group");
+    EXPECT_EQ(not_group.status, 400);
+    EXPECT_EQ(not_group.field("reason"), "bad_room");
+    const Answer v7 = ask("add_members", R"({"room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d",)"
+                                         R"("users":["carol"]})");
+    EXPECT_EQ(v7.status, 400);
+    EXPECT_EQ(v7.field("reason"), "bad_room");
     const Answer leave_direct =
         ask("remove_member", R"({"room":")" + direct + R"(","user":"bob"})");
     EXPECT_EQ(leave_direct.status, 409);
@@ -411,10 +439,25 @@ TEST_F(ServiceApiTest, ChangesTheStoreRefusesAreAnsweredWithWhy) {
     const Answer no_room = ask("add_members", R"({"room":")" + unknown + R"(","users":["carol"]})");
     EXPECT_EQ(no_room.status, 404);
     EXPECT_EQ(no_room.field("reason"), "no_room");
-    const Answer not_member =
-        ask("remove_member", R"({"room":")" + unknown + R"(","user":"carol"})");
-    EXPECT_EQ(not_member.status, 404);
-    EXPECT_EQ(not_member.field("reason"), "not_member");
+    const Answer nobody = ask("remove_member", R"({"room":")" + unknown + R"(","user":"carol"})");
+    EXPECT_EQ(nobody.status, 200);
+    EXPECT_NE(nobody.body.find(R"("removed":[])"), std::string::npos) << nobody.body;
+    // A group whose members all left over its history takes nobody new.
+    ASSERT_EQ(ask("create_group", R"({"creator":"alice","id":"old"})").status, 200);
+    const core::RoomId old = chat::group_room(user("alice"), *rt::MessageKey::parse("old"));
+    auto& memory = dynamic_cast<infra::messages::MemoryMessageStore&>(*store_);
+    bool stored = false;
+    memory.append(
+        old, 1, user("alice"), "k1", {std::byte{1}}, clock_.wall_now(),
+        [&](core::ports::MessageResult<std::uint64_t> r) noexcept { stored = r.has_value(); });
+    ASSERT_EQ(
+        ask("remove_member", R"({"room":")" + old.to_string() + R"(","user":"alice"})").status,
+        200);
+    ASSERT_TRUE(stored);
+    const Answer gone =
+        ask("add_members", R"({"room":")" + old.to_string() + R"(","users":["bob"]})");
+    EXPECT_EQ(gone.status, 409);
+    EXPECT_EQ(gone.field("reason"), "gone");
     // The cap holds: 100 members at most, the creator among them.
     ASSERT_EQ(ask("create_group", R"({"creator":"alice","id":"big"})").status, 200);
     const std::string big =
@@ -535,7 +578,10 @@ TEST_F(ServiceApiTest, OneConnectionCarriesRequestAfterRequestPipelinedOrNot) {
 }
 
 TEST_F(ServiceApiTest, PastTheRateRequestsAre429WithWhenToComeBack) {
-    start({.burst = 2, .per_second = 1});
+    ServiceApiLimits limits = roomy();
+    limits.burst = 2;
+    limits.per_second = 1;
+    start(limits);
     EXPECT_EQ(ask("rooms", R"({"user":"alice"})").status, 200);
     EXPECT_EQ(ask("rooms", R"({"user":"alice"})").status, 200);
     const Answer limited = ask("rooms", R"({"user":"alice"})");
@@ -549,7 +595,7 @@ TEST_F(ServiceApiTest, PastTheRateRequestsAre429WithWhenToComeBack) {
 }
 
 TEST_F(ServiceApiTest, AStoreThatCannotBeReachedIs503) {
-    start({}, true);
+    start(roomy(), true);
     const std::vector<std::pair<std::string_view, std::string>> requests{
         {"open_direct", R"({"users":["alice","bob"]})"},
         {"create_group", R"({"creator":"alice","id":"g"})"},
@@ -567,7 +613,9 @@ TEST_F(ServiceApiTest, AStoreThatCannotBeReachedIs503) {
 }
 
 TEST_F(ServiceApiTest, ConnectionsPastTheCapAndAfterAStopAreClosedAtAccept) {
-    start({.max_connections = 1});
+    ServiceApiLimits limits = roomy();
+    limits.max_connections = 1;
+    start(limits);
     const int first = connect();
     ASSERT_TRUE(pump_until(*reactor_, [&] { return api_->connections() == 1; }));
     const int second = connect();
@@ -599,12 +647,93 @@ TEST_F(ServiceApiTest, AConnectionGoneBeforeItsAnswerIsAnsweredNothing) {
     EXPECT_EQ(heard_.take().size(), 2U);
 }
 
-TEST_F(ServiceApiTest, AnIdleConnectionIsClosedAtItsTimeout) {
-    start({.idle_timeout = core::Millis{1'000}});
-    const int fd = connect();
-    ASSERT_TRUE(pump_until(*reactor_, [&] { return api_->connections() == 1; }));
+TEST_F(ServiceApiTest, AConnectionThatSaysNothingIsClosedSoonAndAnIdleOneAtItsTimeout) {
+    ServiceApiLimits limits = roomy();
+    limits.first_byte_timeout = core::Millis{1'000};
+    limits.idle_timeout = core::Millis{3'000};
+    start(limits);
+    const int silent = connect();
+    const int used = connect();
+    ASSERT_EQ(exchange(used, request(path("rooms"), R"({"user":"alice"})")).size(), 1U);
     clock_.advance(core::Millis{1'000});
-    EXPECT_TRUE(peer_closed(fd));
+    EXPECT_TRUE(peer_closed(silent));
+    std::string ignored;
+    EXPECT_FALSE(read_into(used, ignored)) << "a connection that asked keeps its idle time";
+    clock_.advance(core::Millis{2'000});
+    EXPECT_TRUE(peer_closed(used));
+}
+
+TEST_F(ServiceApiTest, OnePeerAddressHoldsAtMostItsShareOfConnections) {
+    ServiceApiLimits limits = roomy();
+    limits.max_connections_per_address = 1;
+    start(limits);
+    const int first = connect();
+    ASSERT_TRUE(pump_until(*reactor_, [&] { return api_->connections() == 1; }));
+    const int second = connect();
+    EXPECT_TRUE(peer_closed(second));
+    EXPECT_EQ(api_->counters().refused_connections, 1U);
+    EXPECT_EQ(exchange(first, request(path("rooms"), R"({"user":"alice"})")).at(0).status, 200);
+}
+
+// Failing tokens spend a small budget of the peer's own, before the service's allowance, which
+// only service tokens reach: a stranger can neither spend the backend's rate nor have tokens
+// verified without end.
+TEST_F(ServiceApiTest, FailedTokensSpendTheirOwnBudgetAndNeverTheServices) {
+    ServiceApiLimits limits = roomy();
+    limits.failure_burst = 2;
+    limits.failures_per_second = 1;
+    limits.burst = 3;
+    limits.per_second = 1;
+    start(limits);
+    const int fd = connect();
+    const std::string body = R"({"user":"alice"})";
+    // Service requests give their failure back: any number of them leave the budget whole.
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(exchange(fd, request(path("rooms"), body)).at(0).status, 200) << i;
+    }
+    EXPECT_EQ(exchange(fd, request(path("rooms"), body)).at(0).status, 429) << "the service's own";
+    clock_.advance(core::Millis{1'000});
+    const int stranger = connect_from("192.0.2.7");
+    EXPECT_EQ(exchange(stranger, request(path("rooms"), body, "bogus")).at(0).status, 401);
+    EXPECT_EQ(exchange(stranger, request(path("rooms"), body, "user.mallory")).at(0).status, 403);
+    const auto limited = exchange(stranger, request(path("rooms"), body, "service.backend"));
+    ASSERT_EQ(limited.size(), 1U);
+    EXPECT_EQ(limited[0].status, 429) << "past its failures, nothing is looked at";
+    EXPECT_TRUE(peer_closed(stranger));
+    EXPECT_EQ(api_->counters().unauthorized, 1U);
+    EXPECT_EQ(api_->counters().forbidden, 1U);
+    // The service's allowance was not touched by any of it.
+    EXPECT_EQ(exchange(fd, request(path("rooms"), body)).at(0).status, 200);
+}
+
+// The operator's backend takes a direct chat apart: an unfriend, a block (ADR-0096).
+TEST_F(ServiceApiTest, AClosedDirectChatListsNobodyAndClosingAgainChangesNothing) {
+    ASSERT_EQ(ask("open_direct", R"({"users":["alice","bob"]})").status, 200);
+    heard_.take();
+    const std::string room = chat::direct_room(user("alice"), user("bob")).to_string();
+    const Answer closed = ask("close_direct", R"({"room":")" + room + R"("})");
+    EXPECT_EQ(closed.status, 200) << closed.body;
+    EXPECT_EQ(closed.body,
+              std::format(R"({{"type":"closed","room":"{}","removed":["alice","bob"]}})", room));
+    EXPECT_EQ(heard_.take(),
+              (std::vector<std::string>{"- " + room + " alice", "- " + room + " bob"}));
+    const Answer again = ask("close_direct", R"({"room":")" + room + R"("})");
+    EXPECT_EQ(again.body, std::format(R"({{"type":"closed","room":"{}","removed":[]}})", room));
+    EXPECT_EQ(ask("members", R"({"room":")" + room + R"("})").body,
+              std::format(R"({{"type":"members","room":"{}","members":[],"more":false}})", room));
+    // Only a pair's room is one: a group's id, or anything else, is refused unasked.
+    const std::string group =
+        chat::group_room(user("alice"), *rt::MessageKey::parse("g")).to_string();
+    for (const std::string& bad : {group, std::string("0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d")}) {
+        const Answer refused = ask("close_direct", R"({"room":")" + bad + R"("})");
+        EXPECT_EQ(refused.status, 400) << bad;
+        EXPECT_EQ(refused.field("reason"), "bad_room");
+    }
+    EXPECT_EQ(ask("close_direct", R"({"room":")" + room + R"(","x":1})").status, 400);
+    // Opened again, the pair is listed again.
+    EXPECT_NE(
+        ask("open_direct", R"({"users":["bob","alice"]})").body.find(R"("added":["alice","bob"])"),
+        std::string::npos);
 }
 
 } // namespace

@@ -59,7 +59,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted, amended by 0088 |
 | [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted, amended by 0075 and 0096 |
 | [0055](0055-a-live-recording-is-remuxed-from-the-stored-segments.md) | A live recording is remuxed from its stored segments into one object, and queued once per stream | Accepted |
-| [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
+| [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted, amended by 0096 |
 | [0057](0057-the-probe-window-follows-the-configuration.md) | The packager's probe window follows its configuration | Accepted |
 | [0058](0058-group-calls-interfaces-now-implementation-deferred.md) | Group calls: interfaces now, implementation deferred | Accepted, implemented by 0095 |
 | [0059](0059-live-playlists-through-a-single-flight-cache.md) | Live playlists are served from a single-flight cache, to any signed-in viewer | Accepted |
@@ -99,5 +99,5 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0093](0093-livekit-webhooks-on-an-internal-listener.md) | LiveKit's webhooks take a stream live and end it, on a listener of the gateway's own that only LiveKit reaches | Accepted |
 | [0094](0094-gateway-malloc-one-arena-and-a-fixed-mmap-threshold.md) | gateway_server's malloc: one arena and a fixed 128 KiB mmap threshold, tried and measured, not adopted | Rejected |
 | [0095](0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md) | Group calls from the room's owner, with a media generation moved by its fenced write | Accepted |
-| [0096](0096-member-lists-changed-by-their-users.md) | Member lists are changed by their users, over the room WebSocket, under the room's lock | Accepted |
+| [0096](0096-member-lists-changed-by-their-users.md) | Member lists are changed under the room's lock, by their users where the operator allows it and by the operator's backend; presence is seen only within shared chats | Accepted |
 | [0097](0097-videos-shared-by-visibility-and-service-grants.md) | Videos are shared by a visibility their owner sets and by grants the operator's backend makes, checked against the catalog on every read | Accepted |

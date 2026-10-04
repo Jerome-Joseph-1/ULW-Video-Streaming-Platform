@@ -390,6 +390,22 @@ TEST_F(NoSelfService, OpeningCreatingAndAddingAreNotAllowedAndChangeNothing) {
     EXPECT_EQ(next(alice), R"({"type":"rooms","rooms":[],"more":false})");
 }
 
+// With nobody able to list themselves, a room id is no way in: a pair's or a group's named room
+// is refused to whoever is not listed, as any closed room is.
+TEST_F(NoSelfService, ANamedRoomIsRefusedToWhoeverIsNotListed) {
+    Client mallory;
+    const auto m = attach(mallory, "mallory");
+    for (const core::RoomId& room : {chat::direct_room(user("alice"), user("bob")),
+                                     chat::group_room(user("alice"), *rt::MessageKey::parse("g1")),
+                                     chat::direct_room(user("alice"), user("mallory"))}) {
+        service_->join(m, {.room = room,
+                           .after = std::nullopt,
+                           .delivery = chat::Delivery::Durable,
+                           .kind = *core::ports::named_kind(room)});
+        EXPECT_EQ(field(next(mallory), "reason"), "not_member") << room.to_string();
+    }
+}
+
 TEST_F(NoSelfService, MembersTheServiceListedStillLeaveAndAnAdminStillRemoves) {
     Client alice;
     Client bob;

@@ -28,11 +28,12 @@ constexpr std::string_view kUsage = R"(usage:
       Prints the public JWK set to hand the service's local verifier.
   ulw_devtoken mint <key-file> --iss <issuer> --sub <subject>
                     [--aud <audience>] [--email <email>] [--ttl <seconds>]
-                    [--scope <scopes>]
+                    [--scope <scopes>] [--client <client id>]
       Prints a token signed with the key. --aud defaults to ulw-dev, the
       audience a local key set is checked for unless JWT_AUDIENCE says
       otherwise; --ttl to 3600. --scope sets the space-separated scope claim,
-      as a client-credentials grant would (ULW_SERVICE_SCOPE).
+      as a client-credentials grant would (ULW_SERVICE_SCOPE); --client sets
+      azp, the client it was issued to (ULW_SERVICE_CLIENT_ID).
 )";
 
 // JWT_AUDIENCE's default with a local key set (ops::kDevAudience; ADR-0088).
@@ -123,6 +124,8 @@ int mint(const std::string& path, std::span<const std::string_view> options) {
             request.email = value;
         } else if (name == "--scope") {
             request.scope = value;
+        } else if (name == "--client") {
+            request.client = value;
         } else if (name == "--ttl") {
             const std::optional<core::Seconds> ttl = devtoken::parse_ttl(value);
             if (!ttl) {

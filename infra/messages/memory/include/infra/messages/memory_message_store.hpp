@@ -72,6 +72,8 @@ public:
                      core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void expel(const core::RoomId& room, const core::UserId& actor, const core::UserId& user,
                core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void close_direct(const core::RoomId& room,
+                      core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void leave_room(const core::RoomId& room, const core::UserId& user,
                     core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void rooms_of(const core::UserId& user, std::optional<core::RoomId> after, std::size_t limit,

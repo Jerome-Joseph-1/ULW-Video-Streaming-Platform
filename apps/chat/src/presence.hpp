@@ -24,13 +24,15 @@ struct PresenceLimits {
     // A contact list or a conversation sidebar shows a few dozen people at once; 128 bounds what
     // one socket makes this node join and track.
     std::size_t max_watches_per_client = 128;
-    // Watches that make this node start watching a user (the first here, each costing a hello
-    // and later an unwatch, and perhaps a join that creates the room's row), per watching user
-    // across their connections here. A fresh client may watch its whole list at once; after
-    // that one a second, as for chat joins (ServiceLimits::join_burst). Watching and
-    // unwatching in a loop is held to that too.
+    // Watches the database is asked about (each one a query, and perhaps the start of a watch:
+    // a hello, later an unwatch, a join that creates the room's row), per watching user across
+    // their connections here, whether or not anyone here watches the user already, so that a
+    // refusal says nothing of who is watched. A fresh client may watch its whole list at once;
+    // after that two a second. Watching and unwatching in a loop is held to that too, and a
+    // watch the database refused is refused again from memory, free, until either user is
+    // listed somewhere.
     std::uint32_t watch_burst = 128;
-    std::uint32_t watches_per_second = 1;
+    std::uint32_t watches_per_second = 2;
     // Presence rooms this node is in at once: half the router's rt::RouterConfig::max_rooms
     // (16384), so that watching cannot crowd out chat rooms. A user connected here always gets
     // theirs, and those are at most Limits::max_connections (1280); watches past the cap are
@@ -148,11 +150,11 @@ public:
 
     // Every watch here that involves `user`, watching or watched, is held back and checked again.
     void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
-    void on_member_added(const core::RoomId& /*room*/,
-                         const core::UserId& /*user*/) noexcept override {}
+    // Forgets the refusals the user was part of: they may share a chat now.
+    void on_member_added(const core::RoomId& room, const core::UserId& user) noexcept override;
     void on_member_role(const core::RoomId& /*room*/, const core::UserId& /*user*/,
                         core::ports::MemberRole /*role*/) noexcept override {}
-    // Every watch here is held back and checked again.
+    // Every watch here is held back at once and checked again, a wave of clients at a time.
     void on_members_resync() noexcept override;
 
     [[nodiscard]] const PresenceCounters& counters() const noexcept { return counters_; }
@@ -176,6 +178,10 @@ private:
         std::uint32_t answers_owed = 0;
         // What a held watch's client was last told.
         bool told_online = false;
+        // A held watch the store could not check: how often in a row, and when it is asked
+        // again (not in flight meanwhile). Also a resync's waves.
+        std::uint32_t attempts = 0;
+        std::optional<core::MonoTime> due;
     };
 
     struct Client {
@@ -208,7 +214,15 @@ private:
                  const core::ports::MessageResult<std::vector<core::UserId>>& result) noexcept;
     // The client's watch of `*only`, or every watch it has when `only` is null, held back and
     // asked about again; checks in flight for them are asked again once answered.
-    void recheck(PresenceClientId id, Client& client, const core::UserId* only) noexcept;
+    // With `due`, the watches are held now and asked at `due` (a resync's wave).
+    void recheck(PresenceClientId id, Client& client, const core::UserId* only,
+                 std::optional<core::MonoTime> due) noexcept;
+    [[nodiscard]] bool known_unshared(const core::UserId& watcher,
+                                      const core::UserId& target) const;
+    void remember_unshared(const core::UserId& watcher, const core::UserId& target);
+    void retry_at(PresenceClientId id, core::MonoTime at);
+    // Asks the checks whose time has come, a wave of clients at most.
+    void retry_due(core::MonoTime now) noexcept;
     // The check `asked` named, taken off the client's list to be answered; nullopt when it is
     // gone, asked again since, or stale (then queued in `again` to be asked anew).
     [[nodiscard]] std::optional<Check> settle(Client& client, const core::UserId& user,
@@ -240,6 +254,12 @@ private:
     std::unordered_map<std::uint64_t, Client> clients_;
     std::unordered_map<core::UserId, std::unique_ptr<Room>> rooms_;
     std::unordered_map<core::UserId, TokenBucket> watch_joins_;
+    // Who the store said shares nothing with whom (watcher to targets), until either is listed
+    // somewhere; at most kMaxUnshared pairs in all.
+    std::unordered_map<core::UserId, std::vector<core::UserId>> unshared_;
+    std::size_t unshared_entries_ = 0;
+    // When a client's held checks are asked again.
+    std::vector<std::pair<core::MonoTime, std::uint64_t>> retries_;
     // Rooms with something to do now, visited on the next timeout rather than inside the call
     // that found it: a delivery must not call back into the router (rt::IMember).
     std::vector<core::UserId> dirty_;

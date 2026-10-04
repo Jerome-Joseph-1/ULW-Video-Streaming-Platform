@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
@@ -569,6 +570,8 @@ TEST_F(PresenceTest, WatchesPastTheLimitsAreRefusedNamingTheUser) {
     EXPECT_EQ(carol.take(), std::vector{watching("u1", "offline")})
         << "a room already here is free";
     node(0).watch(c, user("u9"));
+    EXPECT_TRUE(carol.got.empty()) << "the node's room cap is applied after the store's answer";
+    run();
     EXPECT_EQ(carol.take(),
               std::vector{(Event{.type = "error", .user = "u9", .status = {}, .reason = "busy"})})
         << "bob, carol, u1 and u2 fill the node's four rooms";
@@ -706,8 +709,14 @@ TEST_F(PresenceTest, AWatchOfSomeoneWhoSharesNoChatIsRefusedAndCostsNoEvent) {
     EXPECT_EQ(sent(), 0U) << "no hello: the watch was never let in";
     EXPECT_EQ(plane_.members(chat::presence_room(user("alice"))), 1U) << "alice's own node only";
     EXPECT_EQ(node(1).counters().not_shared, 1U);
-    // Once they share a chat, the same watch is let in.
+    // Refused again from memory, without asking, until either is listed somewhere.
+    const std::size_t asked = shares_.asked;
     shares_.share("alice", "bob");
+    node(1).watch(b, user("alice"));
+    EXPECT_EQ(bob.take(), std::vector{refused("alice", "not_shared")});
+    EXPECT_EQ(shares_.asked, asked);
+    // Once they share a chat, the same watch is let in.
+    node(1).on_member_added(kGroup, user("bob"));
     node(1).watch(b, user("alice"));
     run();
     EXPECT_EQ(bob.take(), (std::vector{watching("alice", "offline"), presence("alice", "online")}));
@@ -793,6 +802,7 @@ TEST_F(PresenceTest, AHeldWatchStillSharedComesBackWithWhatChangedMeanwhile) {
     node(1).on_members_resync();
     node(1).watch(b, user("alice"));
     node(1).watch(b, user("alice"));
+    run();
     EXPECT_TRUE(bob.got.empty());
     shares_.release();
     run();
@@ -839,7 +849,9 @@ TEST_F(PresenceTest, AResyncChecksEveryWatchAgain) {
     EXPECT_EQ(alice.take(), std::vector{presence("bob", "online")});
 }
 
-TEST_F(PresenceTest, AStoreThatCannotSayRefusesTheWatchAndDropsAWatchInDoubt) {
+// Fail closed, but keep the watch: one the store cannot check stays held, telling nothing, and
+// is asked again later, later each time, until the store answers.
+TEST_F(PresenceTest, AStoreThatCannotSayRefusesANewWatchAndHoldsAWatchInDoubtUntilItCan) {
     Watcher bob;
     const auto b = connect(1, bob, "bob");
     node(1).watch(b, user("carol"));
@@ -849,10 +861,73 @@ TEST_F(PresenceTest, AStoreThatCannotSayRefusesTheWatchAndDropsAWatchInDoubt) {
     node(1).watch(b, user("alice"));
     run();
     EXPECT_EQ(bob.take(), std::vector{refused("alice", "unavailable")});
+    std::size_t asked = shares_.asked;
     node(1).on_member_removed(kGroup, user("carol"));
     run();
-    EXPECT_EQ(bob.take(), std::vector{refused("carol", "unavailable")});
-    EXPECT_EQ(node(1).counters().revoked, 1U);
+    EXPECT_EQ(shares_.asked, asked + 1);
+    Watcher carol;
+    const auto c = connect(0, carol, "carol");
+    EXPECT_TRUE(bob.got.empty()) << "held: nothing told, nothing dropped";
+    // Asked again after 1 s, then 2 s, then 4 s.
+    for (const auto wait : {Millis{1'000}, Millis{2'000}, Millis{4'000}}) {
+        asked = shares_.asked;
+        advance(wait - Millis{1'000});
+        EXPECT_EQ(shares_.asked, asked) << wait.count();
+        advance(Millis{1'000});
+        EXPECT_EQ(shares_.asked, asked + 1) << wait.count();
+    }
+    EXPECT_TRUE(bob.got.empty());
+    EXPECT_EQ(node(1).counters().revoked, 0U);
+    shares_.failing = false;
+    advance(Millis{8'000});
+    EXPECT_EQ(bob.take(), std::vector{presence("carol", "online")})
+        << "let back, with what changed while held";
+    node(0).detach(c);
+    advance(kGrace + Millis{1'000});
+    EXPECT_EQ(bob.take(), std::vector{presence("carol", "offline")});
+}
+
+// A resync holds every watch at once and asks about them a wave of clients at a time.
+TEST_F(PresenceTest, AResyncAsksAboutItsClientsInWaves) {
+    std::vector<Watcher> watchers(70);
+    for (std::size_t i = 0; i < watchers.size(); ++i) {
+        node(1).watch(connect(1, watchers[i], std::format("w{}", i)), user("alice"));
+    }
+    run();
+    const std::size_t asked = shares_.asked;
+    node(1).on_members_resync();
+    for (int i = 0; i < 16; ++i) {
+        reactor_->run_once(Millis{0});
+    }
+    EXPECT_EQ(shares_.asked - asked, 32U) << "the first wave";
+    advance(Millis{1'000});
+    EXPECT_EQ(shares_.asked - asked, 70U);
+    for (Watcher& w : watchers) {
+        EXPECT_EQ(w.take(), (std::vector{watching("alice", "offline")}));
+    }
+}
+
+// Every watch the store is asked about costs the allowance, whether or not anyone here watches
+// the user already, so a refusal says nothing of who is watched (and the room cap comes after
+// the store's answer).
+TEST_F(PresenceTest, TheAllowanceIsChargedAlikeWhetherTheUserIsWatchedHereOrNot) {
+    nodes_.clear();
+    chat::PresenceLimits limits;
+    limits.watch_burst = 2;
+    limits.watches_per_second = 1;
+    add_node("chat-1", limits);
+    Watcher carol;
+    node(0).watch(connect(0, carol, "carol"), user("alice"));
+    run();
+    ASSERT_EQ(carol.take(), std::vector{watching("alice", "offline")});
+    Watcher bob;
+    const auto b = connect(0, bob, "bob");
+    node(0).watch(b, user("alice"));
+    node(0).watch(b, user("dave"));
+    node(0).watch(b, user("erin"));
+    run();
+    EXPECT_EQ(bob.take(), (std::vector{refused("erin", "busy"), watching("alice", "offline"),
+                                       watching("dave", "offline")}));
 }
 
 TEST_F(PresenceTest, AWatchUnwatchedOrAClientGoneWhileAskedIsAnsweredNothing) {
