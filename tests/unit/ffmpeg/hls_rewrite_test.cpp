@@ -157,7 +157,7 @@ protected:
         for (const core::Rung& r : ladder_) {
             fs::create_directories(out_ / r.name);
         }
-        ASSERT_EQ(run(infra::ffmpeg::transcode_args("ffmpeg", clip, out_, media, ladder_, 1)), 0);
+        ASSERT_EQ(run(infra::ffmpeg::transcode_args(clip, out_, media, ladder_, 1)), 0);
     }
 
     ulw::test::TempDir dir_{"ulw-hls"};

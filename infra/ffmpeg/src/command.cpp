@@ -114,8 +114,8 @@ std::uint32_t gop_frames(FrameRate rate) noexcept {
     return std::max<std::uint32_t>(1, static_cast<std::uint32_t>(num / den));
 }
 
-Args probe_args(const std::string& ffprobe, const std::filesystem::path& input) {
-    return {ffprobe,
+Args probe_args(const std::filesystem::path& input) {
+    return {std::string(kFfprobe),
             "-v",
             "error",
             "-show_entries",
@@ -189,12 +189,18 @@ std::expected<MediaInfo, std::string> parse_probe(std::string_view text,
                      .has_audio = has_audio};
 }
 
-Args transcode_args(const std::string& ffmpeg, const std::filesystem::path& input,
-                    const std::filesystem::path& out_dir, const MediaInfo& media,
-                    std::span<const core::Rung> ladder, unsigned threads) {
-    Args args{ffmpeg,    "-nostdin",    "-hide_banner",      "-loglevel",
-              "warning", "-y",          "-format_whitelist", std::string(kSourceFormats),
-              "-i",      input.string()};
+Args transcode_args(const std::filesystem::path& input, const std::filesystem::path& out_dir,
+                    const MediaInfo& media, std::span<const core::Rung> ladder, unsigned threads) {
+    Args args{std::string(kFfmpeg),
+              "-nostdin",
+              "-hide_banner",
+              "-loglevel",
+              "warning",
+              "-y",
+              "-format_whitelist",
+              std::string(kSourceFormats),
+              "-i",
+              input.string()};
 
     std::string graph = "[0:v]split=" + std::to_string(ladder.size());
     for (std::size_t i = 1; i <= ladder.size(); ++i) {
@@ -267,8 +273,8 @@ Args transcode_args(const std::string& ffmpeg, const std::filesystem::path& inpu
     return args;
 }
 
-Args keyframe_args(const std::string& ffprobe, const std::filesystem::path& playlist) {
-    return {ffprobe,
+Args keyframe_args(const std::filesystem::path& playlist) {
+    return {std::string(kFfprobe),
             "-v",
             "error",
             "-skip_frame",
@@ -305,8 +311,8 @@ std::optional<std::vector<std::string>> parse_keyframes(std::string_view text) {
     return times;
 }
 
-Args decode_args(const std::string& ffmpeg, const std::filesystem::path& master) {
-    return {ffmpeg,
+Args decode_args(const std::filesystem::path& master) {
+    return {std::string(kFfmpeg),
             "-nostdin",
             "-v",
             "error",

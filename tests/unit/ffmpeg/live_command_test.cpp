@@ -24,7 +24,7 @@ LiveRemuxJob job() {
 
 // The command line as the remuxer builds it, with the probe its configuration gives.
 Args args_for(const LiveRemuxJob& j) {
-    return infra::ffmpeg::live_remux_args("ffmpeg", j,
+    return infra::ffmpeg::live_remux_args(j,
                                           infra::ffmpeg::live_probe(j.max_kbps, j.segment_seconds));
 }
 
@@ -114,8 +114,8 @@ TEST(LiveRemuxArgs, ProbeForASegmentLengthAndASecondAtTheMaximumBitrate) {
 }
 
 TEST(LiveRemuxArgs, ProbeWithWhatItIsGiven) {
-    const Args args = infra::ffmpeg::live_remux_args(
-        "ffmpeg", job(), {.window = core::Millis{4'500}, .bytes = 123'456});
+    const Args args =
+        infra::ffmpeg::live_remux_args(job(), {.window = core::Millis{4'500}, .bytes = 123'456});
     EXPECT_EQ(after(args, "-analyzeduration"), "4500000");
     EXPECT_EQ(after(args, "-probesize"), "123456");
 }
