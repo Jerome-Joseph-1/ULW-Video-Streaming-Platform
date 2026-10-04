@@ -17,6 +17,9 @@ configMapGenerator:
         config.kubernetes.io/local-config: "true"
 components:
   - ../../components/operator-config
+  # Live streams through the gateway stay off until the operator turns them on (RUNBOOK.md,
+  # step 9): with egress applied and LIVE_BROADCASTER_CLAIM set, list
+  #   - ../../components/live-streams
 patches:
   # The worker reserves two of the four cores its x264 threads can use, and 30 GiB of scratch
   # takes sources up to 10 GiB (base/video-worker/deployment.yaml says how).
@@ -52,3 +55,19 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/resources/limits/memory
         value: 1536Mi
+  # Room for the two concurrent streams egress takes here (LIVE_MAX_STREAMS), one more
+  # restarting, and the Jobs of about an hour of streams (base/live-packager/resourcequota.yaml).
+  - target:
+      kind: ResourceQuota
+      name: live-packagers
+    patch: |-
+      - op: replace
+        path: /spec/hard
+        value:
+          count/jobs.batch: "600"
+          count/secrets: "604"
+          pods: "4"
+          requests.cpu: 400m
+          requests.memory: 1Gi
+          limits.cpu: "4"
+          limits.memory: 2048Mi

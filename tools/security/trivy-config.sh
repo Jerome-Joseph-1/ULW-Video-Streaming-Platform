@@ -38,7 +38,30 @@ while IFS= read -r -d '' manifest; do
     fi
 done < <(find "$scan/deploy" -name '*.yaml' -print0)
 
-TRIVY_CACHE_DIR=${TRIVY_CACHE_DIR:-$root/build/security/trivy-cache} "$trivy" config \
-    --skip-check-update --quiet --exit-code 1 \
-    --config-data tools/security/trivy-data --ignorefile tools/security/trivyignore.yaml \
-    "$@" "$scan"
+# ResourceQuotas are scanned on their own. KSV-0040 selects ResourceQuota inputs, but Trivy
+# turns a check on for a whole scan once any input matches its selector and then runs it on
+# every resource, whose missing spec.hard fails it: one quota in the tree would fail every
+# other file with a finding about quotas that is false for all of them. Scanned apart, each
+# quota is held to KSV-0040 (hard CPU and memory requests and limits) and to every other check,
+# and the rest of the tree to every check KSV-0040 never applied to.
+quotas=()
+while IFS= read -r -d '' manifest; do
+    quotas+=("${manifest#"$scan"/}")
+done < <(grep -rlZ --include='*.yaml' '^kind: ResourceQuota$' "$scan" || true)
+run_trivy() {
+    TRIVY_CACHE_DIR=${TRIVY_CACHE_DIR:-$root/build/security/trivy-cache} "$trivy" config \
+        --skip-check-update --quiet --exit-code 1 \
+        --config-data "$root/tools/security/trivy-data" \
+        --ignorefile "$root/tools/security/trivyignore.yaml" \
+        "$@"
+}
+skips=()
+for quota in "${quotas[@]}"; do
+    skips+=(--skip-files "$quota")
+done
+status=0
+(cd "$scan" && run_trivy "${skips[@]}" "$@" .) || status=1
+for quota in "${quotas[@]}"; do
+    (cd "$scan" && run_trivy "$@" "$quota") || status=1
+done
+exit "$status"
