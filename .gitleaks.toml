@@ -66,3 +66,13 @@ paths = [
     '''^tests/unit/chat/envelope_test\.cpp$''',
     '''^tests/unit/webpush/ece_test\.cpp$''',
 ]
+
+# A JDBC URL naming a database host, port and database (jdbc:postgresql://host:5432/name); the
+# password comes from a separate variable. The rule fires on the port and name's entropy.
+[[allowlists]]
+description = "JDBC URLs without credentials in compose files"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^deploy/[a-z0-9-]+/compose\.yaml$''']
+regexTarget = "line"
+regexes = ['''^\s*[A-Z_]+_URL:\s*jdbc:postgresql://[a-z0-9-]+:[0-9]+/[a-z0-9_]+\s*$''']
