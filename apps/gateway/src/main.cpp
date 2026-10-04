@@ -22,7 +22,6 @@
 #include "gateway.hpp"
 #include "health.hpp"
 #include "key_fetcher.hpp"
-#include "ops/allocator.hpp"
 #include "ops/async_log.hpp"
 #include "ops/log.hpp"
 #include "ops/notify.hpp"
@@ -499,14 +498,7 @@ int run(std::span<const std::string_view> args) {
     const os::SystemClock clock;
     ops::StdoutSink direct;
     ops::Logger boot(direct, clock, "gateway", ops::Level::Info);
-    // Before any thread exists and before anything large is allocated, so every thread shares
-    // the one arena (ADR-0094); logged on the starting line, once the log level is known.
-    const auto allocator =
-        ops::tune_allocator(ops::MallocTuning{}, ops::process_allocator(read_env));
-    if (!allocator) {
-        return fail(boot, "allocator", allocator.error());
-    }
-    // Before the configuration and its secrets are read: see ops::disable_core_dumps.
+    // First, before the configuration and its secrets are read: see ops::disable_core_dumps.
     if (auto r = ops::disable_core_dumps(); !r) {
         return fail(boot, "disable core dumps", errno_text(r.error()));
     }
@@ -528,10 +520,11 @@ int run(std::span<const std::string_view> args) {
         return refuse(boot, config.error().variable, config.error().reason);
     }
     boot.set_threshold(config->log_level);
+    const std::string_view jemalloc = ops::jemalloc_version();
     boot.info("starting", {{"version", info.version},
                            {"git_sha", info.git_sha},
-                           {"allocator", allocator->description},
-                           {"allocator_version", ops::jemalloc_version()}});
+                           {"allocator", jemalloc.empty() ? "default" : "jemalloc"},
+                           {"allocator_version", jemalloc}});
     gateway::log_effective(*config, *layers, boot);
     // Before any thread exists, so every thread inherits the mask.
     if (auto r = net::block_shutdown_signals(); !r) {
