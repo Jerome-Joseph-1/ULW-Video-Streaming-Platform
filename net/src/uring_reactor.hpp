@@ -6,11 +6,16 @@
 #include "send_queue.hpp"
 #include "timing_wheel.hpp"
 
+#include <sys/resource.h>
+
 #include <array>
+#include <cstdint>
+#include <expected>
 #include <liburing.h>
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -20,12 +25,35 @@ namespace net::detail {
 // 2 disabled. io_uring_setup itself refuses the restricted case, so only an outright 2 counts.
 [[nodiscard]] bool io_uring_disabled(std::string_view sysctl) noexcept;
 
+// What decides whether the kernel may refuse this process locked memory, as read from it.
+struct LockedMemoryFacts {
+    // The soft RLIMIT_MEMLOCK, or the errno getrlimit failed with.
+    std::expected<rlim_t, int> memlock_limit;
+    // The low word of the effective capability set (CAP_IPC_LOCK's), or capget's errno.
+    std::expected<std::uint32_t, int> effective_caps;
+    // /proc/self/uid_map, empty where it could not be read.
+    std::string uid_map;
+};
+
+[[nodiscard]] LockedMemoryFacts read_locked_memory_facts() noexcept;
+
+// Whether `uid_map` is the initial user namespace's, which maps every id to itself: the only
+// namespace whose CAP_IPC_LOCK the kernel honours.
+[[nodiscard]] bool is_initial_user_namespace(std::string_view uid_map) noexcept;
+
+// True where the kernel cannot refuse the process locked memory: an unlimited RLIMIT_MEMLOCK, or
+// CAP_IPC_LOCK in the initial user namespace.
+[[nodiscard]] bool locked_memory_is_uncharged(const LockedMemoryFacts& facts) noexcept;
+
 // Must be created on the thread that will run it: SINGLE_ISSUER binds the ring to its
 // creator, and DEFER_TASKRUN only posts completions when that thread enters the kernel.
 class UringReactor final : public IReactor {
 public:
     [[nodiscard]] static std::expected<std::unique_ptr<UringReactor>, int>
     create(core::ports::IClock& clock, std::size_t max_fds);
+    // As above, with the process's locked-memory facts given rather than read, for tests.
+    [[nodiscard]] static std::expected<std::unique_ptr<UringReactor>, int>
+    create(core::ports::IClock& clock, std::size_t max_fds, const LockedMemoryFacts& locked);
 
     UringReactor(core::ports::IClock& clock, std::size_t max_fds);
     ~UringReactor() override;
@@ -183,7 +211,7 @@ private:
     [[nodiscard]] bool alive(int fd, std::uint32_t gen) const noexcept;
 
     [[nodiscard]] io_uring_sqe* next_sqe() noexcept;
-    [[nodiscard]] bool probe_zero_copy_send() noexcept;
+    [[nodiscard]] bool probe_zero_copy_send(const LockedMemoryFacts& locked) noexcept;
     void submit_send(std::uint32_t index, Slot& s, bool zero_copy) noexcept;
     static void prepare(io_uring_sqe* sqe, int fd, Slot& s, Op op) noexcept;
     void arm_recv(int fd, Slot& s) noexcept;

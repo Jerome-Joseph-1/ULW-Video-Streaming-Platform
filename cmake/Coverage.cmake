@@ -5,7 +5,10 @@
 # tools/coverage.sh merges the profiles and writes the reports.
 #
 # A process that ends in _exit or _Exit (the ffmpeg sandbox helper, on every path; a forked
-# child that does not exec) never runs the runtime's atexit writer and leaves no profile.
+# child that does not exec) never runs the runtime's atexit writer and leaves no profile. The
+# helper is not instrumented at all; what it decides without any confinement is in header-only
+# parts (infra/ffmpeg/src/program_check.hpp, seccomp_filter.hpp) that the unit tests include, so
+# that logic is measured there.
 #
 # The profile path is built into each binary rather than left to LLVM_PROFILE_FILE, because the
 # harnesses start the servers they test with an environment of their own. %8m merges each

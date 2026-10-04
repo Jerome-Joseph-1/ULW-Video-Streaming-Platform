@@ -1,6 +1,8 @@
 /* Reports which io_uring features the reactor relies on are usable on this host.
  * Build: cc -O2 tools/io_uring_probe.c -o io_uring_probe -luring
  * Exit status is 0 only when everything the primary reactor needs is present. */
+#include <sys/resource.h>
+
 #include <liburing.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,6 +21,14 @@ int main(void) {
         fclose(f);
     }
     printf("%-34s %d\n", "kernel.io_uring_disabled", disabled);
+    struct rlimit memlock;
+    if (getrlimit(RLIMIT_MEMLOCK, &memlock) == 0) {
+        if (memlock.rlim_cur == RLIM_INFINITY)
+            printf("%-34s %s\n", "RLIMIT_MEMLOCK", "unlimited");
+        else
+            printf("%-34s %llu KiB\n", "RLIMIT_MEMLOCK",
+                   (unsigned long long)memlock.rlim_cur / 1024);
+    }
 
     struct io_uring ring;
     struct io_uring_params p;

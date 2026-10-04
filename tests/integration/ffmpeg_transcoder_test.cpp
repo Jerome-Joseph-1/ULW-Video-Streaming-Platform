@@ -105,12 +105,8 @@ protected:
 
     os::SystemClock clock_;
     ulw::test::TempDir work_{"ulw-transcode"};
-    infra::ffmpeg::FfmpegTranscoder transcoder_{{.sandbox = ULW_SANDBOX_BIN,
-                                                 .ffmpeg = "ffmpeg",
-                                                 .ffprobe = "ffprobe",
-                                                 .search_path = search_path(),
-                                                 .threads = 2},
-                                                clock_};
+    infra::ffmpeg::FfmpegTranscoder transcoder_{
+        {.sandbox = ULW_SANDBOX_BIN, .search_path = search_path(), .threads = 2}, clock_};
     std::vector<core::Rung> ladder_;
     Recorder progress_;
 };

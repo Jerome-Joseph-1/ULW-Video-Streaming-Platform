@@ -40,9 +40,11 @@ struct Config {
     std::string bucket;
     // ULW_SCRATCH_DIR/<stream>: this packager's alone, which startup clears.
     std::filesystem::path scratch;
+    // The ulw_sandbox helper, which runs the ffmpeg and ffprobe it was built with and no other
+    // (docs/adr/0089); empty means the one installed beside this executable.
     std::filesystem::path sandbox;
-    std::string ffmpeg;
-    std::string ffprobe;
+    // PATH for the sandboxed children, which inherit nothing else. Nothing looks the programs
+    // up in it.
     std::string search_path;
     std::uint32_t segment_seconds = 0;
     std::size_t window_segments = 0;
