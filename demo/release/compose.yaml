@@ -1,0 +1,321 @@
+# The laptop demo from published images only: download this file and seccomp.json beside it,
+# then `docker compose pull` and `docker compose up -d` in that directory, and open
+# http://localhost:8080 (demo/README.md, "Pull and run"). Nothing here comes from a checkout:
+# the page, the token issuer, the seed and the demo's gateway are images too
+# (demo/build/*.Dockerfile), all built from one commit, tested together and pushed by
+# .github/workflows/demo-release.yml. Every service is linux/amd64, so an Apple Silicon Mac runs
+# it under Rosetta. Not for a real deployment: the passwords and keys are throwaway, the token
+# issuer signs for anyone who asks, and every port is published on 127.0.0.1 only.
+#
+# The design is demo/compose.yaml's: one network namespace (the `netns` pause container) shared by
+# every service, so each reaches the others on 127.0.0.1 and the browser reaches the same
+# addresses through the published ports. The ffmpeg sandbox's seccomp profile is read from
+# ./seccomp.json (a copy of demo/seccomp/ulw-worker.json), so run compose in this file's directory.
+#
+# ULW_DEMO_TAG is the tested build: demo-<12-digit commit> the images were built from.
+name: ulw-demo
+
+x-ulw-db: &db postgresql://postgres:testtest123@127.0.0.1:5432/postgres
+x-livekit-key: &livekit-key ulw-demo-key
+x-livekit-secret: &livekit-secret ulw-demo-secret-testtest123-not-a-real-secret
+
+x-store: &store
+  ULW_STORAGE: minio
+  ULW_S3_ENDPOINT: http://localhost:${DEMO_S3_PORT:-9900}
+  ULW_BUCKET: ulw-demo
+  ULW_S3_ACCESS_KEY_ID: ulw-demo
+  ULW_S3_SECRET_ACCESS_KEY: ulw-demo-testtest123
+
+x-in-netns: &in-netns
+  network_mode: service:netns
+  restart: unless-stopped
+  depends_on:
+    netns:
+      condition: service_started
+
+# The worker's and the packager's ffmpeg sandbox (ulw_sandbox) needs a user namespace, its own
+# /proc and read-only bind mounts: Docker's default seccomp profile plus unshare, mount and
+# mount_setattr (seccomp/ulw-worker.json, a copy of deploy/kubernetes/cluster/seccomp's), and an
+# unmasked /proc, as the Kubernetes pods get with procMount: Unmasked.
+x-sandboxed: &sandboxed
+  security_opt:
+    - seccomp=./seccomp.json
+    - systempaths=unconfined
+    - apparmor=unconfined
+
+services:
+  netns:
+    platform: linux/amd64
+    # registry.k8s.io/pause:3.10: holds the namespace and does nothing else.
+    image: registry.k8s.io/pause@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${DEMO_PORT:-8080}:8080"
+      - "127.0.0.1:${DEMO_S3_PORT:-9900}:${DEMO_S3_PORT:-9900}"
+      - "127.0.0.1:${DEMO_RTC_TCP_PORT:-7881}:${DEMO_RTC_TCP_PORT:-7881}"
+      - "127.0.0.1:${DEMO_RTC_UDP_PORT:-7882}:${DEMO_RTC_UDP_PORT:-7882}/udp"
+
+  postgres:
+    platform: linux/amd64
+    <<: *in-netns
+    # postgres:16 (16.15), the digest deploy/local/compose.yaml pins.
+    image: docker.io/library/postgres@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+    environment:
+      POSTGRES_PASSWORD: testtest123
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
+    volumes:
+      - pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio:
+    platform: linux/amd64
+    <<: *in-netns
+    # The community MinIO build deploy/local/compose.yaml pins (RELEASE.2026-08-04T00-00-00Z).
+    image: docker.io/pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: ["server", "/data", "--address", ":${DEMO_S3_PORT:-9900}", "--console-address", "127.0.0.1:9901"]
+    environment:
+      MINIO_ROOT_USER: ulw-demo
+      MINIO_ROOT_PASSWORD: ulw-demo-testtest123
+      # The page plays segments straight from the store (ADR-0028).
+      MINIO_API_CORS_ALLOW_ORIGIN: "*"
+    volumes:
+      - minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${DEMO_S3_PORT:-9900}/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # The identity provider's stand-in and the one-time setup: the signing key and its JWK set
+  # (the `keys` volume, which the gateway and chat read), and the bucket.
+  auth:
+    platform: linux/amd64
+    <<: *in-netns
+    # node:22-alpine, 2026-10.
+    image: ghcr.io/jerome-joseph-1/ulw-demo-auth:${ULW_DEMO_TAG:-demo-TAG}
+    environment:
+      <<: *store
+      ULW_S3_ENDPOINT: http://127.0.0.1:${DEMO_S3_PORT:-9900}
+      JWT_ISSUER: ulw-demo
+      JWT_AUDIENCE: ulw-dev
+    volumes:
+      - keys:/keys
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8070/auth/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  migrate:
+    platform: linux/amd64
+    network_mode: service:netns
+    image: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:${ULW_DEMO_TAG:-demo-TAG}
+    entrypoint: ["/usr/local/bin/ulw_migrate"]
+    environment:
+      ULW_DATABASE_URL: *db
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The demo's users' rooms and member lists (db/seed.sql), once the schema is there.
+  seed:
+    platform: linux/amd64
+    network_mode: service:netns
+    image: ghcr.io/jerome-joseph-1/ulw-demo-seed:${ULW_DEMO_TAG:-demo-TAG}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  gateway:
+    platform: linux/amd64
+    <<: [*in-netns, *sandboxed]
+    # The gateway in the live packager's image (demo/build/gateway.Dockerfile).
+    image: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:${ULW_DEMO_TAG:-demo-TAG}
+    environment:
+      <<: *store
+      ULW_DATABASE_URL: *db
+      ULW_LISTEN_PORT: "8081"
+      ULW_DEV_MODE: "1"
+      ULW_DEV_JWKS_FILE: /keys/jwks.json
+      JWT_ISSUER: ulw-demo
+      JWT_AUDIENCE: ulw-dev
+      ULW_REACTOR: epoll
+      ULW_ALLOWED_ORIGINS: http://localhost:${DEMO_PORT:-8080},http://127.0.0.1:${DEMO_PORT:-8080}
+      # Every browser request arrives from the web proxy's one address.
+      ULW_MAX_CONNECTIONS_PER_IP: "256"
+      ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND: "1000"
+      ULW_REQUESTS_PER_USER_PER_MINUTE: "3000"
+      ULW_LOG_LEVEL: info
+      # The stream service (feat/live-publish, ADR-0092); a gateway without it ignores these.
+      # The process runtime runs one live_packager child per stream in this container, hence
+      # one stream at a time.
+      LIVEKIT_API_URL: http://127.0.0.1:7880
+      LIVEKIT_CLIENT_URL: ws://localhost:${DEMO_PORT:-8080}
+      LIVEKIT_API_KEY: *livekit-key
+      LIVEKIT_API_SECRET: *livekit-secret
+      ULW_LIVE_PACKAGER: process
+      ULW_LIVE_PACKAGER_BIN: /usr/local/bin/live_packager
+      ULW_LIVE_PACKAGER_SCRATCH_DIR: /var/cache/ulw-live
+      ULW_LIVE_PACKAGER_PORT: "9100"
+      ULW_LIVE_PACKAGER_SRT: srt://127.0.0.1:9100
+      ULW_LIVE_MAX_STREAMS: "1"
+      ULW_LIVE_STREAMS_PER_USER_PER_HOUR: "1000"
+      # LiveKit's webhooks (feat/live-webhook, ADR-0093): live on the first track, ended when
+      # the publisher leaves.
+      ULW_LIVE_WEBHOOK_PORT: "8090"
+    volumes:
+      - keys:/keys:ro
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      auth:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker:
+    platform: linux/amd64
+    <<: [*in-netns, *sandboxed]
+    image: ghcr.io/jerome-joseph-1/ulw-video-worker:${ULW_DEMO_TAG:-demo-TAG}
+    environment:
+      <<: *store
+      ULW_DATABASE_URL: *db
+      ULW_NODE_ID: demo-worker
+      ULW_FFMPEG_THREADS: "2"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+
+  chat:
+    platform: linux/amd64
+    <<: *in-netns
+    image: ghcr.io/jerome-joseph-1/ulw-chat:${ULW_DEMO_TAG:-demo-TAG}
+    environment:
+      ULW_DATABASE_URL: *db
+      ULW_LISTEN_PORT: "9101"
+      ULW_NODE_ADDRESS: 127.0.0.1:9201
+      ULW_DEV_LOOPBACK_NODES: "1"
+      ULW_NODE_SECRET: ulw-demo-node-secret-testtest123-not-real
+      ULW_DEV_MODE: "1"
+      ULW_DEV_JWKS_FILE: /keys/jwks.json
+      JWT_ISSUER: ulw-demo
+      JWT_AUDIENCE: ulw-dev
+      ULW_REACTOR: epoll
+      ULW_ALLOWED_ORIGINS: http://localhost:${DEMO_PORT:-8080},http://127.0.0.1:${DEMO_PORT:-8080}
+      ULW_MAX_CONNECTIONS_PER_IP: "512"
+      ULW_MAX_CONNECTIONS_PER_IP_BLOCK: "1280"
+      ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND: "1000"
+      # Calls (ADR-0087): tickets for LiveKit, which the page reaches through the web proxy.
+      LIVEKIT_API_URL: http://127.0.0.1:7880
+      LIVEKIT_CLIENT_URL: ws://localhost:${DEMO_PORT:-8080}
+      LIVEKIT_API_KEY: *livekit-key
+      LIVEKIT_API_SECRET: *livekit-secret
+    volumes:
+      - keys:/keys:ro
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      auth:
+        condition: service_healthy
+
+  redis:
+    platform: linux/amd64
+    <<: *in-netns
+    # redis 7.4.6 (alpine), the digest deploy/local/compose.yaml pins: LiveKit's and egress's bus.
+    image: docker.io/library/redis@sha256:3b73847e72874be07e6657b129a94761662b79bc0f679273757d4218573b2a98
+    command: ["redis-server", "--bind", "127.0.0.1", "--port", "6379", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  livekit:
+    platform: linux/amd64
+    <<: *in-netns
+    # livekit/livekit-server v1.13.7, the digest deploy/local/compose.yaml pins (ADR-0020).
+    image: docker.io/livekit/livekit-server@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        keys:
+          ulw-demo-key: ulw-demo-secret-testtest123-not-a-real-secret
+        redis:
+          address: 127.0.0.1:6379
+        rtc:
+          # The browser is on this machine. LiveKit offers two candidates on the same port: its
+          # container address, which a Linux host reaches directly (Docker 28 does not carry UDP
+          # sent to a 127.0.0.1-published port to the container), and loopback, which reaches it
+          # through the published ports where the container network is out of reach (Docker
+          # Desktop on macOS and Windows). Egress, in the same namespace, uses either.
+          use_external_ip: false
+          enable_loopback_candidate: true
+          tcp_port: ${DEMO_RTC_TCP_PORT:-7881}
+          udp_port: ${DEMO_RTC_UDP_PORT:-7882}
+        room:
+          # Chat and the stream service open rooms through the server API.
+          auto_create: false
+        api:
+          enable_psrpc_for_get_list_participants: true
+        webhook:
+          api_key: ulw-demo-key
+          urls:
+            - http://127.0.0.1:8090/livekit/webhook
+        logging:
+          level: info
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7880/"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  egress:
+    platform: linux/amd64
+    <<: *in-netns
+    # livekit/egress v1.14.1, the digest deploy/local/compose.yaml pins (ADR-0046); about 1.5 GB
+    # to download, 4.8 GB on disk. It relays a live stream's publisher to the packager over SRT.
+    image: docker.io/livekit/egress@sha256:bf2b648b947349c3e9ff7aa8c718f00378d5c06af7624652a3653318e00333ce
+    depends_on:
+      livekit:
+        condition: service_healthy
+    environment:
+      EGRESS_CONFIG_BODY: |
+        api_key: ulw-demo-key
+        api_secret: ulw-demo-secret-testtest123-not-a-real-secret
+        ws_url: ws://127.0.0.1:7880
+        redis:
+          address: 127.0.0.1:6379
+        health_port: 7981
+        template_port: 7980
+        log_level: info
+        # A laptop is rarely idle enough for egress's default admission (ADR-0053).
+        cpu_cost:
+          participant_cpu_cost: 0.1
+          max_cpu_utilization: 0.99
+
+  web:
+    platform: linux/amd64
+    <<: *in-netns
+    # nginx with the page, the OpenMLS browser client (/mls/) and the proxy config baked in
+    # (demo/build/web.Dockerfile): one origin for the gateway, chat, LiveKit and the token issuer.
+    image: ghcr.io/jerome-joseph-1/ulw-demo-web:${ULW_DEMO_TAG:-demo-TAG}
+    healthcheck:
+      # Ready when every service the page talks to is.
+      test: ["CMD", "sh", "-c", "for u in /api/v1/readyz /_demo/chat/readyz /_demo/livekit/ /auth/healthz; do wget -q -O /dev/null http://127.0.0.1:8080$$u || exit 1; done"]
+      interval: 3s
+      timeout: 10s
+      retries: 200
+
+volumes:
+  pg:
+  minio:
+  keys:
