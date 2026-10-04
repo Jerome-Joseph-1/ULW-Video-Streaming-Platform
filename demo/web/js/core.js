@@ -163,13 +163,22 @@ class ChatSocket extends EventTarget {
       log('chat_open');
       for (const [room, r] of this.rooms) this.join(room, r.kind, { rejoin: true });
       for (const user of this.watching) this.send({ type: 'watch', user });
-      for (const m of this.pending.splice(0)) this.send(m);
+      this.flush();
       this.dispatchEvent(new Event('open'));
     };
     ws.onmessage = (e) => {
       let m;
       try { m = JSON.parse(e.data); } catch { return; }
-      if (m.type === 'joined' && this.rooms.has(m.room)) this.rooms.get(m.room).joined = true;
+      if (m.type === 'joined' && this.rooms.has(m.room)) {
+        Object.assign(this.rooms.get(m.room), { joined: true, refused: false });
+        this.flush();
+      }
+      // A join refused: what waits for that room goes out, to be answered (not_joined) rather
+      // than kept for ever.
+      if (m.type === 'error' && this.rooms.has(m.room) && !this.rooms.get(m.room).joined) {
+        this.rooms.get(m.room).refused = true;
+        this.flush();
+      }
       if (m.type === 'message' && this.rooms.has(m.room)) {
         const r = this.rooms.get(m.room);
         r.lastSeq = Math.max(r.lastSeq ?? 0, m.seq);
@@ -189,13 +198,31 @@ class ChatSocket extends EventTarget {
     };
   }
 
+  // A command about a room this socket is (re)joining waits for the join's answer: sent before
+  // it, chat answers it not_joined (a call's ticket asked right after a reconnect, say).
   send(m) {
-    if (this.open && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
+    if (this.open && this.ws.readyState === WebSocket.OPEN && !this.waitsForJoin(m)) this.ws.send(JSON.stringify(m));
     else this.pending.push(m);
+  }
+
+  waitsForJoin(m) {
+    const r = m.type !== 'join' && m.room ? this.rooms.get(m.room) : null;
+    return !!r && !r.joined && !r.refused;
+  }
+
+  flush() {
+    if (!this.open || this.ws?.readyState !== WebSocket.OPEN) return;
+    const later = [];
+    for (const m of this.pending.splice(0)) {
+      if (this.waitsForJoin(m)) later.push(m);
+      else this.ws.send(JSON.stringify(m));
+    }
+    this.pending.push(...later);
   }
 
   join(room, kind, { rejoin = false } = {}) {
     const r = this.rooms.get(room) ?? { kind, lastSeq: 0, joined: false };
+    r.refused = false;
     this.rooms.set(room, r);
     const m = { type: 'join', room };
     if (kind) m.kind = kind;
