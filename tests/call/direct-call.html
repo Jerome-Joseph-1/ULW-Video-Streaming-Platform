@@ -2,14 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ULW direct call client</title>
+<title>ULW call client</title>
 <script src="/livekit-client.umd.js"></script>
 </head>
 <body>
 <script>
   // A client of the product as docs/integration/calls.md describes it: the chat WebSocket
-  // (authenticated by the cookie, as a browser is), a join of the direct chat, a call ask, and
-  // the ticket it answers taken to LiveKit with the SDK. Nothing here holds a LiveKit key.
+  // (authenticated by the cookie, as a browser is), a join of the direct or group chat, a call
+  // ask, and the ticket it answers taken to LiveKit with the SDK. Nothing here holds a LiveKit
+  // key.
   const { Room, RoomEvent, Track } = LivekitClient;
   window.events = [];
   window.chatFrames = [];
@@ -38,9 +39,11 @@
   });
 
   // Sends a command and resolves with its answer: `joined` or an error for a join, `ticket` or
-  // an error for a call, matched by the room; `direct` or an error for opening a direct chat,
-  // matched by the other user.
+  // an error for a call, the event the others hear or an error for a group call's leave or
+  // expulsion, matched by the room; `direct` or an error for opening a direct chat, matched by
+  // the other user.
   const answers = { join: ['joined', 'error'], call: ['ticket', 'error'],
+    call_leave: ['call_left', 'error'], call_expel: ['call_moved', 'error'],
     open_direct: ['direct', 'error'] };
   window.command = (cmd) => new Promise((resolve) => {
     const same = cmd.type === 'open_direct' ? (f) => f.user === cmd.user
@@ -53,6 +56,8 @@
   // (and decodes) as a call's would.
   window.remote = {};
   window.connectCall = async ({ url, token }) => {
+    // Moved to a new generation: the old room is left first (LiveKit is closing it anyway).
+    if (window.room) await window.room.disconnect();
     // Off so that the receiver always gets the published layer: the decode checks below want
     // frames at a steady rate, not whatever adaptive streaming picks for a hidden element.
     const room = new Room({ adaptiveStream: false, dynacast: false });
@@ -94,6 +99,22 @@
   };
 
   window.leaveCall = () => window.room.disconnect();
+
+  // The remote streams this page receives and decodes: one inbound SSRC per remote track with
+  // packets received, by kind (M27: four peers each see three of each).
+  window.inboundSsrcs = async () => {
+    const out = { audio: new Set(), video: new Set() };
+    for (const tracks of Object.values(window.remote)) {
+      for (const kind of ['audio', 'video']) {
+        const entry = tracks[kind];
+        if (!entry) continue;
+        (await entry.track.receiver.getStats()).forEach((s) => {
+          if (s.type === 'inbound-rtp' && s.packetsReceived > 0) out[kind].add(s.ssrc);
+        });
+      }
+    }
+    return { audio: out.audio.size, video: out.video.size };
+  };
 
   // What this page has decoded of `who`'s media so far: the video element's size and play
   // position, and the receivers' own counters.

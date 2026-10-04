@@ -61,7 +61,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0055](0055-a-live-recording-is-remuxed-from-the-stored-segments.md) | A live recording is remuxed from its stored segments into one object, and queued once per stream | Accepted |
 | [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted |
 | [0057](0057-the-probe-window-follows-the-configuration.md) | The packager's probe window follows its configuration | Accepted |
-| [0058](0058-group-calls-interfaces-now-implementation-deferred.md) | Group calls: interfaces now, implementation deferred | Accepted |
+| [0058](0058-group-calls-interfaces-now-implementation-deferred.md) | Group calls: interfaces now, implementation deferred | Accepted, implemented by 0095 |
 | [0059](0059-live-playlists-through-a-single-flight-cache.md) | Live playlists are served from a single-flight cache, to any signed-in viewer | Accepted |
 | [0060](0060-pump-staging-is-appended-to-and-bounded.md) | Pump staging is appended to, bounded, and overflow is 413 | Accepted |
 | [0061](0061-cmake-3-28-presets-v6-and-the-ci-test-preset.md) | CMake 3.28, presets version 6, and a `ci` test preset | Accepted |
@@ -90,9 +90,10 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted, amended by 0088 |
 | [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted, amended by 0088 |
 | [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted |
-| [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted, amended by 0091 |
+| [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted, amended by 0091 and 0095 |
 | [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
-| [0091](0091-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md) | A call's ring lives on the room's owner and reaches each member through their presence room | Accepted |
+| [0091](0091-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md) | A call's ring lives on the room's owner and reaches each member through their presence room | Accepted, amended by 0095 |
 | [0092](0092-the-stream-service-lives-in-the-gateway.md) | The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word | Accepted, amended by 0093 |
 | [0093](0093-livekit-webhooks-on-an-internal-listener.md) | LiveKit's webhooks take a stream live and end it, on a listener of the gateway's own that only LiveKit reaches | Accepted |
+| [0095](0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md) | Group calls from the room's owner, with a media generation moved by its fenced write | Accepted |
 | [0096](0096-member-lists-changed-by-their-users.md) | Member lists are changed by their users, over the room WebSocket, under the room's lock | Accepted |

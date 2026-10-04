@@ -192,6 +192,16 @@ TEST_F(ChatConfigTest, TheRingTimeoutIsTheServicesUnlessSetInMilliseconds) {
     }
 }
 
+TEST_F(ChatConfigTest, AGroupCallsCapIsTheServicesUnlessSetWithinItsBounds) {
+    EXPECT_FALSE(load()->group_participants);
+    env["ULW_CALL_GROUP_PARTICIPANTS"] = "4";
+    EXPECT_EQ(load()->group_participants, std::uint16_t{4});
+    for (const char* bad : {"2", "17", "-1", "eight"}) {
+        env["ULW_CALL_GROUP_PARTICIPANTS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_CALL_GROUP_PARTICIPANTS") << bad;
+    }
+}
+
 TEST_F(ChatConfigTest, ADevelopmentKeySetReplacesTheJwksUrlButNotBoth) {
     env["ULW_DEV_JWKS_FILE"] = "/etc/ulw/dev-jwks.json";
     env["ULW_DEV_MODE"] = "1";

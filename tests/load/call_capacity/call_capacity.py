@@ -8,7 +8,14 @@ sent it, no more. This checks that claim on the pinned LiveKit, configured as th
 configures it (one UDP port, single-layer publishing as 1:1 calls use), and measures the CPU a
 call costs so the CPU ceiling can be set beside the bandwidth one:
 
-    tests/load/call_capacity/call_capacity.py [--calls 4] [--seconds 60] [--out DIR]
+    tests/load/call_capacity/call_capacity.py [--calls 4] [--participants 2] [--seconds 60]
+                                              [--out DIR]
+
+--participants n makes each call a group call of n (M29, ADR-0095): every participant publishes
+and receives the n - 1 others, so the derivation is n x (n - 1) x 700 kbps out per call, n x
+700 kbps in, and out over in is n - 1. The layer is stated, not left to chance: one layer,
+simulcast off, so every subscriber receives the top (and only) one, which is the most a group
+call can cost the SFU. tools/group_call_capacity_test.sh runs it for rooms of four.
 
 --calls rooms of two participants each publish a 640x360 video track capped at 700 kbps and
 subscribe to each other, every participant through the LiveKit Python SDK. LiveKit runs in a
@@ -50,8 +57,6 @@ API_KEY = "callcap"
 API_SECRET = "callcap-local-secret-at-least-32-characters"
 # Brief 8.1: 600 Mbit/s less 10%, and 700 kbps each way per participant.
 USABLE_MBPS = 540.0
-DERIVED_CALL_MBPS = 1.4
-DERIVED_CALLS = 385
 PUBLISH_BPS = 700_000
 TOLERANCE = 0.10
 # The base's cpu limit for the SFU (deploy/kubernetes/base/livekit/deployment.yaml).
@@ -159,7 +164,16 @@ class Participant:
         self.room = rtc.Room()
         self.source = rtc.VideoSource(WIDTH, HEIGHT)
         self.subscribed = asyncio.Event()
-        self.room.on("track_subscribed", lambda *_: self.subscribed.set())
+        self.tracks = 0
+        self.room.on("track_subscribed", self._subscribed)
+
+    def _subscribed(self, *_):
+        self.tracks += 1
+        self.subscribed.set()
+
+    async def all_subscribed(self, count):
+        while self.tracks < count:
+            await asyncio.sleep(0.1)
 
     async def join(self, url):
         await self.room.connect(url, token(self.identity, self.room_name),
@@ -189,16 +203,19 @@ def i420_noise():
             for _ in range(NOISE_FRAMES)]
 
 
-async def drive(sfu, calls, seconds):
+async def drive(sfu, calls, seconds, participants=2):
     frames = i420_noise()
     people = [Participant(f"call-{c}", f"call-{c}-{side}", frames)
-              for c in range(calls) for side in ("a", "b")]
+              for c in range(calls) for side in range(participants)]
     for p in people:
         await p.join(sfu.url())
     stop = asyncio.Event()
     senders = [asyncio.create_task(p.send(stop)) for p in people]
     try:
         await asyncio.wait_for(asyncio.gather(*(p.subscribed.wait() for p in people)), 30)
+        # Every one of the n - 1 others' tracks, not just the first, before anything is measured.
+        await asyncio.wait_for(asyncio.gather(*(p.all_subscribed(participants - 1)
+                                                for p in people)), 30)
     except asyncio.TimeoutError:
         missing = [p.identity for p in people if not p.subscribed.is_set()]
         raise RuntimeError(f"never received the peer's track: {missing}") from None
@@ -213,15 +230,21 @@ async def drive(sfu, calls, seconds):
     return first, last
 
 
-def judge(calls, first, last):
+def judge(calls, first, last, participants=2):
     elapsed = last["t"] - first["t"]
     in_mbps = (last["rx"] - first["rx"]) * 8 / elapsed / 1e6
     out_mbps = (last["tx"] - first["tx"]) * 8 / elapsed / 1e6
     cores = (last["cpu_usec"] - first["cpu_usec"]) / 1e6 / elapsed
     ratio = out_mbps / in_mbps if in_mbps > 0 else float("inf")
-    per_publisher_kbps = in_mbps * 1000 / (2 * calls)
+    n = participants
+    per_publisher_kbps = in_mbps * 1000 / (n * calls)
+    # Each of the n publishers' streams goes to the n - 1 others.
+    derived_call_mbps = n * (n - 1) * PUBLISH_BPS / 1e6
     report = {
         "calls": calls,
+        "participants_per_call": n,
+        "assumed_layer": "one layer, simulcast off: every subscriber receives the top one",
+        "derived_out_mbps_per_call": round(derived_call_mbps, 3),
         "seconds": round(elapsed, 1),
         "sfu_in_mbps": round(in_mbps, 3),
         "sfu_out_mbps": round(out_mbps, 3),
@@ -230,7 +253,7 @@ def judge(calls, first, last):
         "out_mbps_per_call": round(out_mbps / calls, 4),
         "sfu_cores": round(cores, 4),
         "sfu_cores_per_call": round(cores / calls, 5),
-        "derived_calls": DERIVED_CALLS,
+        "derived_calls": int(USABLE_MBPS / derived_call_mbps),
         "bandwidth_ceiling_calls": int(USABLE_MBPS / (out_mbps / calls)),
         "cpu_ceiling_calls": int(SFU_CORES / (cores / calls)) if cores > 0 else None,
     }
@@ -239,12 +262,12 @@ def judge(calls, first, last):
         failures.append(f"publishers sent {per_publisher_kbps:.0f} kbps each, under half the "
                         f"{PUBLISH_BPS // 1000} kbps the check needs")
     per_call = out_mbps / calls
-    if abs(per_call / DERIVED_CALL_MBPS - 1) > TOLERANCE:
+    if abs(per_call / derived_call_mbps - 1) > TOLERANCE:
         failures.append(f"a call cost the SFU {per_call:.3f} Mbit/s out against the derived "
-                        f"{DERIVED_CALL_MBPS}; the derivation holds within {TOLERANCE:.0%}")
-    if abs(ratio - 1) > TOLERANCE:
-        failures.append(f"the SFU sent {ratio:.3f}x what it received; the derivation holds "
-                        f"within {TOLERANCE:.0%}")
+                        f"{derived_call_mbps:.3f}; the derivation holds within {TOLERANCE:.0%}")
+    if abs(ratio / (n - 1) - 1) > TOLERANCE:
+        failures.append(f"the SFU sent {ratio:.3f}x what it received, against {n - 1}x; the "
+                        f"derivation holds within {TOLERANCE:.0%}")
     report["failures"] = failures
     return report
 
@@ -252,6 +275,7 @@ def judge(calls, first, last):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--calls", type=int, default=4)
+    parser.add_argument("--participants", type=int, default=2)
     parser.add_argument("--seconds", type=int, default=60)
     parser.add_argument("--out", type=pathlib.Path)
     args = parser.parse_args()
@@ -261,10 +285,12 @@ def main():
         pull()
         sfu = Sfu(name)
         sfu.wait_ready()
-        first, last = asyncio.run(drive(sfu, args.calls, args.seconds))
+        if args.participants < 2:
+            parser.error("--participants: a call has two at least")
+        first, last = asyncio.run(drive(sfu, args.calls, args.seconds, args.participants))
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    report = judge(args.calls, first, last)
+    report = judge(args.calls, first, last, args.participants)
     text = json.dumps(report, indent=2)
     print(text)
     if args.out:

@@ -304,7 +304,8 @@ TEST(Envelope, ADeclineCancelOrEndNamesItsRoomAndCall) {
     const std::vector<std::pair<std::string, chat::CallSignal>> moves{
         {"call_decline", chat::CallSignal::Decline},
         {"call_cancel", chat::CallSignal::Cancel},
-        {"call_end", chat::CallSignal::End}};
+        {"call_end", chat::CallSignal::End},
+        {"call_leave", chat::CallSignal::Leave}};
     // The command `type` with `fields` after its type.
     const auto command = [](const std::string& type,
                             std::initializer_list<std::string_view> fields) {
@@ -335,6 +336,81 @@ TEST(Envelope, ADeclineCancelOrEndNamesItsRoomAndCall) {
                   std::unexpected(EnvelopeError::BadRoom));
     }
     EXPECT_EQ(chat::reason(EnvelopeError::BadCall), "bad_call");
+}
+
+TEST(Envelope, AnExpulsionNamesItsRoomCallAndWhoIsPutOut) {
+    const std::string fields = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd",)"
+                               R"("call":"01a0eb86-6cca-7dce-84cc-3bb47615f9cc")";
+    const auto c = chat::parse_command(R"({"type":"call_expel",)" + fields + R"(,"user":"bob"})");
+    ASSERT_TRUE(c);
+    const auto& move = std::get<chat::CallMove>(*c);
+    EXPECT_EQ(move.signal, chat::CallSignal::Expel);
+    EXPECT_EQ(move.target, core::UserId::parse("bob").value());
+    EXPECT_EQ(chat::parse_command(R"({"type":"call_expel",)" + fields + "}"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"call_expel",)" + fields + R"(,"user":7})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"call_expel",)" + fields + R"(,"user":""})"),
+              std::unexpected(EnvelopeError::BadUser));
+    // Only an expulsion names a user.
+    EXPECT_EQ(chat::parse_command(R"({"type":"call_leave",)" + fields + R"(,"user":"bob"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"call_expel","room":"lobby",)"
+                                  R"("call":"01a0eb86-6cca-7dce-84cc-3bb47615f9cc","user":"bob"})"),
+              std::unexpected(EnvelopeError::BadRoom));
+    EXPECT_EQ(chat::parse_command(R"({"type":"call_expel",)"
+                                  R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd",)"
+                                  R"("call":"x","user":"bob"})"),
+              std::unexpected(EnvelopeError::BadCall));
+}
+
+TEST(Envelope, GroupCallEventsAreTheDocumentedShapes) {
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    const auto call = chat::CallId::generate(clock, random);
+    const std::string head = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","call":")" +
+                             call.to_string() + R"(","from":"alice")";
+    const auto alice = *core::UserId::parse("alice");
+    const auto bob = *core::UserId::parse("bob");
+    std::string out;
+    chat::write_call_event(out, {.event = chat::RingEvent::Left,
+                                 .to = alice,
+                                 .room = room(),
+                                 .call = call,
+                                 .from = alice,
+                                 .by = bob,
+                                 .expires_at = {}});
+    EXPECT_EQ(out, R"({"type":"call_left",)" + head + R"(,"by":"bob"})");
+    out.clear();
+    chat::write_call_event(out, {.event = chat::RingEvent::Moved,
+                                 .to = alice,
+                                 .room = room(),
+                                 .call = call,
+                                 .from = alice,
+                                 .by = alice,
+                                 .expires_at = {},
+                                 .subject = bob});
+    EXPECT_EQ(out, R"({"type":"call_moved",)" + head + R"(,"by":"alice","expelled":"bob"})");
+    // Put out by a removal from the chat, and a call nobody was left in: nobody did it.
+    out.clear();
+    chat::write_call_event(out, {.event = chat::RingEvent::Moved,
+                                 .to = alice,
+                                 .room = room(),
+                                 .call = call,
+                                 .from = alice,
+                                 .by = std::nullopt,
+                                 .expires_at = {},
+                                 .subject = bob});
+    EXPECT_EQ(out, R"({"type":"call_moved",)" + head + R"(,"expelled":"bob"})");
+    out.clear();
+    chat::write_call_event(out, {.event = chat::RingEvent::Ended,
+                                 .to = alice,
+                                 .room = room(),
+                                 .call = call,
+                                 .from = alice,
+                                 .by = std::nullopt,
+                                 .expires_at = {}});
+    EXPECT_EQ(out, R"({"type":"call_ended",)" + head + "}");
 }
 
 TEST(Envelope, CallEventsAreTheDocumentedShapes) {

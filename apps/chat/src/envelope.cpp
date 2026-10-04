@@ -426,7 +426,9 @@ void append_users(std::string& out, std::span<const core::UserId> users) {
 
 std::expected<Command, EnvelopeError> call_move_of(const core::json::Value& message,
                                                    CallSignal signal) {
-    if (!only(message, {"type", "room", "call"})) {
+    const bool expel = signal == CallSignal::Expel;
+    if (expel ? !only(message, {"type", "room", "call", "user"})
+              : !only(message, {"type", "room", "call"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     auto room = room_of(message);
@@ -441,7 +443,18 @@ std::expected<Command, EnvelopeError> call_move_of(const core::json::Value& mess
     if (!call) {
         return std::unexpected(EnvelopeError::BadCall);
     }
-    return CallMove{.room = *room, .signal = signal, .call = *call};
+    if (!expel) {
+        return CallMove{.room = *room, .signal = signal, .call = *call};
+    }
+    const auto named = string_of(message, "user");
+    if (!named) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto target = core::UserId::parse(*named);
+    if (!target) {
+        return std::unexpected(EnvelopeError::BadUser);
+    }
+    return CallMove{.room = *room, .signal = signal, .call = *call, .target = *target};
 }
 
 void append_room(std::string& out, const core::RoomId& room) {
@@ -511,6 +524,12 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     }
     if (name == "call_end") {
         return call_move_of(*message, CallSignal::End);
+    }
+    if (name == "call_leave") {
+        return call_move_of(*message, CallSignal::Leave);
+    }
+    if (name == "call_expel") {
+        return call_move_of(*message, CallSignal::Expel);
     }
     if (name == "watch" || name == "unwatch") {
         const auto user = user_of(*message);
@@ -652,6 +671,12 @@ void write_call_event(std::string& out, const CallNotice& notice) {
     case RingEvent::Ended:
         type = "call_ended";
         break;
+    case RingEvent::Left:
+        type = "call_left";
+        break;
+    case RingEvent::Moved:
+        type = "call_moved";
+        break;
     }
     out += R"({"type":")";
     out += type;
@@ -669,6 +694,10 @@ void write_call_event(std::string& out, const CallNotice& notice) {
     } else if (notice.by) {
         out += R"(,"by":)";
         core::json::append_string(out, notice.by->view());
+    }
+    if (notice.event == RingEvent::Moved && notice.subject) {
+        out += R"(,"expelled":)";
+        core::json::append_string(out, notice.subject->view());
     }
     out += '}';
 }

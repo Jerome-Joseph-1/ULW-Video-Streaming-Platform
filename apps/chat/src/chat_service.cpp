@@ -531,8 +531,8 @@ void ChatService::call_move(ClientId id, const CallMove& move) {
     }
     rooms_plane_.ask_owner(
         move.room, *r,
-        encode_request(
-            CallSignalRequest{.user = c->user, .signal = move.signal, .call = move.call}),
+        encode_request(CallSignalRequest{
+            .user = c->user, .signal = move.signal, .call = move.call, .target = move.target}),
         [this, id, move](std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
             moved(id, move, std::move(result));
         });
@@ -574,6 +574,12 @@ void ChatService::moved(ClientId id, const CallMove& move,
             case CallSignal::End:
                 event = RingEvent::Ended;
                 break;
+            case CallSignal::Leave:
+                event = RingEvent::Left;
+                break;
+            case CallSignal::Expel:
+                event = RingEvent::Moved;
+                break;
             }
             // decode_answer gives every Done its caller.
             write_call_event(out, {.event = event,
@@ -582,7 +588,8 @@ void ChatService::moved(ClientId id, const CallMove& move,
                                    .call = move.call,
                                    .from = answer->caller.value_or(c->user),
                                    .by = c->user,
-                                   .expires_at = {}});
+                                   .expires_at = {},
+                                   .subject = move.target});
             break;
         }
         case CallOutcome::NoCall:
@@ -604,6 +611,8 @@ void ChatService::moved(ClientId id, const CallMove& move,
         case CallOutcome::RingLimited:
         case CallOutcome::Unavailable:
         case CallOutcome::Failed:
+        case CallOutcome::Expelled:
+        case CallOutcome::Full:
             write_call_error(out, "unavailable", move.room, kCallRetry);
             break;
         }
@@ -664,6 +673,12 @@ void ChatService::called(ClientId id, const core::RoomId& room,
             break;
         case CallOutcome::RingLimited:
             write_call_error(out, "ring_limited", room, answer->retry_after.value_or(kCallRetry));
+            break;
+        case CallOutcome::Expelled:
+            write_call_error(out, "expelled", room, std::nullopt);
+            break;
+        case CallOutcome::Full:
+            write_call_error(out, "call_full", room, std::nullopt);
             break;
         // A signal's outcomes; no ticket is answered with them.
         case CallOutcome::NoCall:
@@ -1009,6 +1024,9 @@ void ChatService::leave(ClientId id, Client& c, const core::RoomId& room) noexce
 }
 
 void ChatService::on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept {
+    if (also_ != nullptr) {
+        also_->on_member_removed(room, user);
+    }
     if (core::ports::is_stream_chat(room)) {
         return;
     }
@@ -1051,6 +1069,9 @@ void ChatService::unconfirmed(const core::RoomId& room, const core::UserId& user
 void ChatService::on_members_resync() noexcept {
     if (stopped_) {
         return;
+    }
+    if (also_ != nullptr) {
+        also_->on_members_resync();
     }
     // Checks asked before now may have been read before a removal this resync is for: a failure
     // of one of them is not asked again (below, rechecked), since this resync asks anew. Those
