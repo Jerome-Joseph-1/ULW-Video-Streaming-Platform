@@ -1,5 +1,6 @@
 // What every tab shares: the signed-in user and their token, the gateway API, the chat socket,
 // and small UI helpers. window.demo exposes the state the smoke test reads.
+import * as oidc from './oidc.js';
 
 export const demo = (window.demo = { events: [] });
 export const $ = (id) => document.getElementById(id);
@@ -45,7 +46,29 @@ export const store = {
 
 export const session = { user: null, token: null, expiresAt: 0 };
 
+// How this deployment signs users in (config.json, which the deployment may replace at run
+// time): `demo`, the local demo's token issuer (/auth/token, any demo user on request), or
+// `oidc`, a real identity provider's sign-in page (oidc.js).
+export const config = { auth: 'demo' };
+demo.config = config;
+export async function loadConfig() {
+  try {
+    const r = await fetch('config.json', { cache: 'no-store' });
+    if (r.ok) Object.assign(config, await r.json());
+  } catch { /* the demo's default */ }
+  return config;
+}
+
+// demo: a token for `user` from the demo's issuer. oidc: the user the provider's token names
+// (config.userClaim, the claim the services read as ULW_JWT_SUBJECT_CLAIM).
 export async function signIn(user) {
+  if (config.auth === 'oidc') {
+    const t = await oidc.accessToken(config);
+    session.user = String(oidc.claims(t)[config.userClaim ?? 'sub']);
+    session.token = t;
+    demo.user = session.user;
+    return session.user;
+  }
   const r = await fetch(`/auth/token?sub=${encodeURIComponent(user)}`, { method: 'POST' });
   if (!r.ok) throw new Error(`token for ${user}: ${r.status}`);
   const body = await r.json();
@@ -54,10 +77,11 @@ export async function signIn(user) {
   session.expiresAt = Date.now() + body.expires_in * 1000;
   try { sessionStorage.setItem('ulw-demo:user', user); } catch { /* ignore */ }
   demo.user = user;
-  return body.token;
+  return user;
 }
 
 export async function token() {
+  if (config.auth === 'oidc') return (session.token = await oidc.accessToken(config));
   if (Date.now() > session.expiresAt - 5 * 60_000) await signIn(session.user);
   return session.token;
 }

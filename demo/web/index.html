@@ -14,7 +14,7 @@
 </head>
 <body>
 <header>
-  <h1>ULW <span class="muted">local demo</span></h1>
+  <h1>ULW <span class="muted" id="label">local demo</span></h1>
   <nav id="tabs" hidden>
     <button data-tab="videos" class="active">Upload &amp; Watch</button>
     <button data-tab="chat">Chat <span class="badge" id="chat-unread" hidden></span></button>
@@ -31,8 +31,8 @@
 <main>
   <!-- Who is using this window. Each window (or tab) signs in on its own. -->
   <section id="picker" class="card narrow">
-    <h2>Who are you?</h2>
-    <p class="muted">Pick a demo user. Open a second window and pick another to talk, call or
+    <h2 id="picker-title">Who are you?</h2>
+    <p class="muted" id="picker-note">Pick a demo user. Open a second window and pick another to talk, call or
       watch between them.</p>
     <div class="row" id="user-buttons"></div>
   </section>

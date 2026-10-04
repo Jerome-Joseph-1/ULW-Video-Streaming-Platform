@@ -1,4 +1,5 @@
-// Every tab of the demo page, end to end, against a running demo stack (run.sh starts one):
+// Every tab of the demo page, end to end, against a running demo stack (run.sh starts one), or
+// a deployment (DEMO_URL, with SMOKE_LOGIN=oidc to sign in on its identity provider's page):
 // two or three users, each in a browser context of their own, with Chrome's fake camera and
 // microphone. What a build does not serve yet (group calls before feat/group-calls, going live
 // before feat/live-publish) is checked to say so on the page, and annotated as skipped.
@@ -24,8 +25,18 @@ async function open(user) {
   const page = await context.newPage();
   page.on('console', (m) => { if (m.type() === 'error') console.log(`[${user}] ${m.text()}`); });
   page.on('pageerror', (e) => console.log(`[${user}] page error: ${e.message}`));
-  await page.goto(`/?user=${user}`);
+  if (process.env.SMOKE_LOGIN === 'oidc') {
+    // A deployment with a real identity provider (deploy/vps): its sign-in page, as a person.
+    await page.goto('/');
+    await page.locator('#sign-in').click();
+    await page.locator('#username').fill(user);
+    await page.locator('#password').fill(process.env.SMOKE_PASSWORD ?? 'testtest123');
+    await page.locator('#kc-login').click();
+  } else {
+    await page.goto(`/?user=${user}`);
+  }
   await page.waitForFunction(() => window.demo?.ready === true);
+  expect(await page.evaluate(() => window.demo.user)).toBe(user);
   await page.waitForFunction(() => window.demo.chat.open === true);
   pages[user] = page;
   return page;
