@@ -54,7 +54,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0048](0048-seccomp-allowlist-for-the-ffmpeg-child.md) | The ffmpeg child runs under a syscall allowlist | Accepted |
 | [0049](0049-upload-reaper-as-a-cron-job.md) | Abandoned uploads are reaped by a CronJob | Accepted |
 | [0050](0050-clients-reach-the-sfu-with-a-ticket.md) | Clients reach the SFU with a ticket, not through our signalling | Accepted |
-| [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted |
+| [0051](0051-datagram-mode-in-the-reactor.md) | Datagram mode in the reactor | Accepted, amended by 0090 |
 | [0052](0052-per-client-limits-refused-before-the-handshake.md) | Per-client limits, refused before the handshake, and dropping root | Accepted, amended by 0088 |
 | [0053](0053-live-ingest-over-whip-straight-to-the-sfu.md) | Live ingest is WHIP straight to the SFU, relayed to the packager by its recorder | Accepted, amended by 0088 |
 | [0054](0054-messages-stored-with-their-seq.md) | A message is stored with its seq, in one statement, before it is delivered | Accepted, amended by 0075 |
@@ -89,7 +89,8 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085, deployment by 0088 |
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted, amended by 0088 |
 | [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted, amended by 0088 |
-| [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted |
+| [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted, amended by 0090 |
 | [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted |
 | [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
 | [0089](0089-the-sandbox-runs-only-the-ffmpeg-it-was-built-with.md) | The sandbox runs only the ffmpeg and ffprobe it was built with | Accepted |
+| [0090](0090-io-uring-within-the-users-locked-memory.md) | The io_uring reactor stays within its user's locked memory: zero copy only where the limit cannot refuse it | Accepted |
