@@ -299,9 +299,12 @@ ulw_add_test_suite(gateway_tests unit
     gateway/key_fetcher_test.cpp
     gateway/live_manifest_cache_test.cpp
     gateway/live_streams_test.cpp
+    gateway/livekit_webhook_test.cpp
+    gateway/publisher_watch_test.cpp
     gateway/rate_limit_test.cpp
     gateway/send_window.cpp
-    gateway/upload_claim_test.cpp)
+    gateway/upload_claim_test.cpp
+    gateway/webhook_server_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
     ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)
@@ -401,10 +404,11 @@ target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
 
-# The stream service over the Postgres and LiveKit of deploy/local/compose.yaml; it skips when
-# LiveKit is not running.
+# The stream service over the Postgres and LiveKit of deploy/local/compose.yaml, and LiveKit's
+# webhooks to it; it skips when LiveKit is not running.
 ulw_add_test_suite(live_service_integration_tests integration
     integration/live_service_test.cpp
+    integration/live_webhook_test.cpp
     integration/postgres_harness.cpp)
 target_link_libraries(live_service_integration_tests PRIVATE ulw::gateway_lib ulw::pg_store
     ulw::sfu_livekit ulw::auth PkgConfig::LIBPQ OpenSSL::Crypto)
