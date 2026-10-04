@@ -204,9 +204,17 @@ public:
                 if (!change.carry) {
                     r.expelled.clear();
                 }
+                // As room_media_expelled: at most kMaxMediaExpelled, a move keeping the one it
+                // puts out, an expulsion alone adding nobody past the cap.
                 if (change.expel &&
                     std::ranges::find(r.expelled, *change.expel) == r.expelled.end()) {
-                    r.expelled.push_back(*change.expel);
+                    if (r.expelled.size() >= rt::kMaxMediaExpelled &&
+                        change.step == rt::MediaStep::Advance) {
+                        r.expelled.erase(r.expelled.begin());
+                    }
+                    if (r.expelled.size() < rt::kMaxMediaExpelled) {
+                        r.expelled.push_back(*change.expel);
+                    }
                 }
             }
             return Answer{rt::MediaState{.generation = r.media_generation, .expelled = r.expelled}};

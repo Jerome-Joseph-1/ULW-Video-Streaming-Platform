@@ -434,12 +434,14 @@ std::string ChatServer::render_metrics() const {
                        "call_occupancy_unavailable_total {}\n"
                        "call_resync_checks_total {}\n"
                        "call_expulsions_kept_total {}\n"
+                       "call_expulsions_cleared_total {}\n"
                        "call_announcements_dropped_total {}\n",
                        call.expelled, call.full, ring.left, ring.emptied, ring.expelled,
                        call.moves_expel, call.moves_removal, call.moves_end, call.moves_fenced,
                        call.moves_unavailable, call.retired_closed, call.retired_abandoned,
                        calls_.retired(), call.occupancy_checks, call.occupancy_unavailable,
-                       call.resync_checks, call.expulsions_kept, call.announcements_dropped) +
+                       call.resync_checks, call.expulsions_kept, call.expulsions_cleared,
+                       call.announcements_dropped) +
            // Member lists changed by their users (ADR-0096).
            std::format("directs_opened_total {}\n"
                        "groups_created_total {}\n"

@@ -373,6 +373,77 @@ TEST_P(RoomStoreTest, AnExpulsionAloneKeepsTheGenerationAndAddsToWhoIsOut) {
     EXPECT_EQ(media(room, 1, rt::MediaStep::Read), Seq{1});
 }
 
+TEST_P(RoomStoreTest, AnExpulsionWaitsOnAClaimInFlightAndIsFencedByIt) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    // Another node's claim, not committed yet: it holds room_state's row.
+    ASSERT_TRUE(conn_->exec("BEGIN"));
+    ASSERT_TRUE(conn_->exec(
+        "UPDATE room_state SET owner_generation = owner_generation + 1 WHERE room_id = $1",
+        Params{}.add_uuid(room.uuid())));
+    std::optional<StoreResult<std::optional<rt::MediaState>>> answer;
+    store_->media_generation(room, 1,
+                             rt::MediaChange{.step = rt::MediaStep::Expel,
+                                             .carry = true,
+                                             .expel = *core::UserId::parse("bob")},
+                             [&answer](StoreResult<std::optional<rt::MediaState>> r) noexcept {
+                                 answer = std::move(r);
+                             });
+    // The expulsion waits on the row, as an append would.
+    auto watcher = db_->session();
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] {
+        return answer.has_value() ||
+               scalar(watcher,
+                      "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                      "AND query LIKE '%room_media_expelled%'") != "0";
+    }));
+    EXPECT_FALSE(answer.has_value()) << "the expulsion did not wait for the claim";
+    ASSERT_TRUE(conn_->exec("COMMIT"));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return answer.has_value(); }));
+    EXPECT_EQ(*answer, (StoreResult<std::optional<rt::MediaState>>{std::nullopt}));
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM room_media_expelled WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "0");
+}
+
+TEST_P(RoomStoreTest, AFullListKeepsWhoIsPutOutNow) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    for (std::size_t i = 0; i < rt::kMaxMediaExpelled; ++i) {
+        const auto r =
+            change(room, 1,
+                   rt::MediaChange{.step = rt::MediaStep::Expel,
+                                   .carry = true,
+                                   .expel = *core::UserId::parse("user" + std::to_string(i))});
+        ASSERT_TRUE(r && *r);
+    }
+    // Past the cap an expulsion alone adds nobody; a move keeps the new one first.
+    const auto past = change(room, 1,
+                             rt::MediaChange{.step = rt::MediaStep::Expel,
+                                             .carry = true,
+                                             .expel = *core::UserId::parse("late")});
+    ASSERT_TRUE(past && *past);
+    EXPECT_EQ((*past)->expelled.size(), rt::kMaxMediaExpelled);
+    const auto moved = change(room, 1,
+                              rt::MediaChange{.step = rt::MediaStep::Advance,
+                                              .carry = true,
+                                              .expel = *core::UserId::parse("last")});
+    ASSERT_TRUE(moved && *moved);
+    EXPECT_EQ((*moved)->expelled.size(), rt::kMaxMediaExpelled);
+    EXPECT_NE(std::ranges::find((*moved)->expelled, *core::UserId::parse("last")),
+              (*moved)->expelled.end());
+    // Started again: an expulsion that does not carry the list keeps only its own.
+    const auto fresh = change(room, 1,
+                              rt::MediaChange{.step = rt::MediaStep::Expel,
+                                              .carry = false,
+                                              .expel = *core::UserId::parse("last")});
+    ASSERT_TRUE(fresh && *fresh);
+    EXPECT_EQ((*fresh)->expelled, std::vector{*core::UserId::parse("last")});
+    const auto read = change(room, 1, rt::MediaChange{.step = rt::MediaStep::Read});
+    ASSERT_TRUE(read && *read);
+    EXPECT_EQ(**read, **fresh);
+}
+
 TEST_P(RoomStoreTest, AnExpelledUserTheStoreCannotParseIsCorrupt) {
     const core::RoomId room = new_room();
     ASSERT_TRUE(resolve(room, a_));

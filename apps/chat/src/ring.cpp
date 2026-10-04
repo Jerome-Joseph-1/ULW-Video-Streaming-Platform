@@ -395,6 +395,15 @@ void Ringer::forget(Calls::iterator it) noexcept {
     calls_.erase(it);
 }
 
+void Ringer::forget_ended(Calls::iterator it) noexcept {
+    const bool group = it->second.kind == CallKind::Group;
+    const core::RoomId room = it->first;
+    forget(it);
+    if (group && group_ended_) {
+        group_ended_(room);
+    }
+}
+
 std::optional<core::UserId> Ringer::signal(const core::RoomId& room, const core::UserId& user,
                                            CallSignal signal, const CallId& call) noexcept {
     const auto it = calls_.find(room);
@@ -419,7 +428,7 @@ std::optional<core::UserId> Ringer::signal(const core::RoomId& room, const core:
             if (!c.answered && c.ringing.empty()) {
                 ++counters_.missed;
                 announce(room, c, RingEvent::Missed, std::nullopt);
-                forget(it);
+                forget_ended(it);
             }
             return caller;
         }
@@ -542,7 +551,7 @@ MediaStepNeeded Ringer::removed(const core::RoomId& room, const core::UserId& us
             // Nobody left to ring: the caller's call was missed.
             ++counters_.missed;
             announce(room, call, RingEvent::Missed, std::nullopt);
-            forget(it);
+            forget_ended(it);
         }
         return step;
     } catch (const std::bad_alloc&) {
@@ -591,8 +600,8 @@ std::vector<std::pair<core::RoomId, CallId>> Ringer::take_checks() {
     return std::exchange(checks_, {});
 }
 
-void Ringer::occupied(const core::RoomId& room, const CallId& call,
-                      std::optional<bool> anyone) noexcept {
+void Ringer::occupied(const core::RoomId& room, const CallId& call, std::optional<bool> anyone,
+                      bool asked) noexcept {
     const auto it = calls_.find(room);
     if (it == calls_.end() || it->second.id != call || !it->second.checking) {
         return;
@@ -601,11 +610,15 @@ void Ringer::occupied(const core::RoomId& room, const CallId& call,
     c.checking = false;
     // An SFU that cannot say, so many checks running, is taken to hold nobody: a room it has
     // dropped answers no better, and the call would otherwise never end.
-    c.unanswered = anyone ? 0 : c.unanswered + 1;
+    if (anyone) {
+        c.unanswered = 0;
+    } else if (asked) {
+        ++c.unanswered;
+    }
     if (anyone == false || c.unanswered >= kMaxUnansweredChecks) {
         ++counters_.emptied;
         announce(room, c, RingEvent::Ended, std::nullopt);
-        forget(it);
+        forget_ended(it);
         return;
     }
     c.hold_until = clock_.now() + limits_.occupancy_check;
@@ -614,7 +627,7 @@ void Ringer::occupied(const core::RoomId& room, const CallId& call,
     } catch (const std::bad_alloc&) {
         // Kept with nothing due would be kept for ever: forgotten without a word instead.
         ++counters_.allocation_failures;
-        forget(it);
+        forget_ended(it);
     }
 }
 
@@ -692,7 +705,7 @@ void Ringer::tick_group(const core::RoomId& room, Calls::iterator it, core::Mono
         } else if (!call.answered) {
             ++counters_.missed;
             announce(room, call, RingEvent::Missed, std::nullopt);
-            forget(it);
+            forget_ended(it);
             return;
         } else {
             // The call goes on; each member still rung missed it, and only they are told.
@@ -728,7 +741,7 @@ void Ringer::tick_group(const core::RoomId& room, Calls::iterator it, core::Mono
     } catch (const std::bad_alloc&) {
         // Kept with nothing due would be kept for ever: forgotten without a word instead.
         ++counters_.allocation_failures;
-        forget(it);
+        forget_ended(it);
     }
 }
 

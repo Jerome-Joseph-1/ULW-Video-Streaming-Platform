@@ -33,6 +33,12 @@ constexpr core::Millis kTicketLifetime{60'000};
 // Tickets remembered per generation, for the above.
 constexpr std::size_t kMaxTicketed = 64;
 
+// Between a close's tries: 1 s, 2 s, 4 s and so on after the first, 30 s at most.
+core::Millis backoff(std::uint32_t attempt) noexcept {
+    const std::uint32_t doublings = std::min<std::uint32_t>(attempt == 0 ? 0 : attempt - 1, 5);
+    return std::min(kRetryEvery * (1U << doublings), core::Millis{30'000});
+}
+
 } // namespace
 
 using layout::put_long;
@@ -179,6 +185,21 @@ CallHandler::CallHandler(core::ports::IMessageStore& messages, core::ports::ISfu
       ringer_(plane, clock, random, limits.ring), next_sweep_(clock.now()) {
     limits_.group_participants =
         std::clamp(limits_.group_participants, kMinGroupParticipants, kMaxGroupParticipants);
+    ringer_.on_group_ended([this](const core::RoomId& room) noexcept { group_ended(room); });
+}
+
+void CallHandler::group_ended(const core::RoomId& room) noexcept {
+    if (sfu_ == nullptr || !plane_.owns(room)) {
+        return;
+    }
+    // Queued behind any move still waiting, and ahead of the asks that start the next call.
+    enqueue(room, CallKind::Group,
+            Move{.step = MediaStepNeeded::None,
+                 .call = std::nullopt,
+                 .by = std::nullopt,
+                 .subject = std::nullopt,
+                 .answer = nullptr,
+                 .clear = true});
 }
 
 CallHandler::~CallHandler() = default;
@@ -317,11 +338,19 @@ void CallHandler::moderated(const core::RoomId& room, const CallSignalRequest& r
         finish(answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
         return;
     }
+    // The stored list holds kMaxMediaExpelled at most: one more is refused, not lost.
+    if (!end && it != rooms_.end() && it->second.expelled.size() >= rt::kMaxMediaExpelled &&
+        !expelled_from(it->second, *request.target)) {
+        ++counters_.busy;
+        finish(answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
+        return;
+    }
     Move move{.step = *step,
               .call = request.call,
               .by = request.user,
               .subject = request.target,
-              .answer = std::move(answer)};
+              .answer = std::move(answer),
+              .clear = false};
     if (*step == MediaStepNeeded::None) {
         // No ticket in this call; but a device may still be connected from before this node
         // owned the room, which only the SFU knows.
@@ -359,8 +388,19 @@ void CallHandler::move_if_connected(const core::RoomId& room, CallKind kind, Mov
         keep(std::move(move));
         return;
     }
+    std::shared_ptr<Move> slot;
     try {
-        auto slot = std::make_shared<Move>(std::move(move));
+        slot = std::make_shared<Move>();
+    } catch (const std::bad_alloc&) {
+        // Not asked: the asker is told to retry; a removal is found again by a later resync.
+        ++counters_.sfu_unavailable;
+        if (move.answer) {
+            finish(move.answer, {.outcome = CallOutcome::Unavailable, .ticket = std::nullopt});
+        }
+        return;
+    }
+    *slot = std::move(move);
+    try {
         it->second.media->participants(
             [this, room, kind, slot, keep](
                 std::expected<std::vector<core::ports::MediaParticipant>, core::ports::MediaError>
@@ -377,8 +417,10 @@ void CallHandler::move_if_connected(const core::RoomId& room, CallKind kind, Mov
                 keep(std::move(m));
             });
     } catch (const std::bad_alloc&) {
-        // The move, if any part of it is left, answers nothing; the asker times out.
         ++counters_.sfu_unavailable;
+        if (slot->answer) {
+            finish(slot->answer, {.outcome = CallOutcome::Unavailable, .ticket = std::nullopt});
+        }
     }
 }
 
@@ -546,6 +588,10 @@ void CallHandler::pump(const core::RoomId& room) noexcept {
     // A room taken again after another owner held it may have moved on meanwhile: what this
     // node knew of its generation holds only under the ownership it was read under.
     if (entry.generation == 0 || entry.reread || entry.owner_generation != *owner) {
+        if (entry.owner_generation != *owner) {
+            // Another owner may have ticketed it meanwhile.
+            entry.minted = false;
+        }
         entry.busy = true;
         entry.owner_generation = *owner;
         try {
@@ -561,17 +607,22 @@ void CallHandler::pump(const core::RoomId& room) noexcept {
         }
         return;
     }
+    // A call's end that has nobody put out to clear writes nothing.
+    while (!entry.moves.empty() && entry.moves.front().clear && entry.expelled.empty()) {
+        entry.moves.pop_front();
+    }
     if (!entry.moves.empty()) {
         entry.busy = true;
         try {
             // To put someone out: the generation moves on with the list of who is out of it,
             // or, with no device of theirs in it, stays with them added. To end the call: the
-            // next generation starts with nobody out.
+            // next generation starts with nobody out, or, ended without a move, the generation
+            // stays with nobody out.
             const Move& next = entry.moves.front();
             const rt::MediaChange change{
                 .step = next.step == MediaStepNeeded::None ? rt::MediaStep::Expel
                                                            : rt::MediaStep::Advance,
-                .carry = next.step != MediaStepNeeded::Close,
+                .carry = next.step != MediaStepNeeded::Close && !next.clear,
                 .expel = next.step == MediaStepNeeded::Close ? std::nullopt : next.subject};
             plane_.media_generation(room, change,
                                     [this, alive = std::weak_ptr<int>(alive_), room](
@@ -651,6 +702,7 @@ void CallHandler::read(const core::RoomId& room,
         // of it, unclosed.
         entry.media.reset();
         entry.generation = state->generation;
+        entry.minted = false;
         entry.ticketed.clear();
         entry.removing.clear();
     }
@@ -706,6 +758,11 @@ void CallHandler::advanced(const core::RoomId& room,
                              .caller = move.by});
         move.answer = nullptr;
     }
+    if (move.clear) {
+        ++counters_.expulsions_cleared;
+        pump(room);
+        return;
+    }
     if (move.step == MediaStepNeeded::None) {
         // Put out of the generation as it stands: nothing moves, and only they are told.
         ++counters_.expulsions_kept;
@@ -717,6 +774,7 @@ void CallHandler::advanced(const core::RoomId& room,
     }
     const std::uint64_t old = entry.generation;
     entry.generation = state.generation;
+    entry.minted = true;
     entry.ticketed.clear();
     entry.removing.clear();
     if (!move.by) {
@@ -859,6 +917,7 @@ void CallHandler::close_retired() noexcept {
             // tried again.
             if (r.closing && now >= r.attempt_deadline) {
                 r.closing = false;
+                r.next_try = now + backoff(r.attempt);
             }
             if (!r.closing && r.joining == 0 && now >= r.next_try) {
                 due.push_back(r.id);
@@ -941,9 +1000,7 @@ void CallHandler::retired_closed(std::uint64_t id, std::uint32_t attempt,
     }
     ++counters_.sfu_unavailable;
     it->closing = false;
-    // Backing off: 1 s, 2 s, 4 s and so on, 30 s at most between tries.
-    const std::uint32_t doublings = std::min<std::uint32_t>(it->attempt - 1, 5);
-    it->next_try = clock_.now() + std::min(kRetryEvery * (1U << doublings), core::Millis{30'000});
+    it->next_try = clock_.now() + backoff(it->attempt);
     // The SFU could not be reached: the others are not kept waiting on it. A room it still lists
     // is another matter: the move is told only once it has gone.
     if (r.error() == core::ports::MediaError::Unavailable) {
@@ -1182,7 +1239,8 @@ void CallHandler::on_member_removed(const core::RoomId& room, const core::UserId
                                    .call = std::nullopt,
                                    .by = std::nullopt,
                                    .subject = user,
-                                   .answer = nullptr});
+                                   .answer = nullptr,
+                                   .clear = false});
         }
         return;
     }
@@ -1195,7 +1253,8 @@ void CallHandler::on_member_removed(const core::RoomId& room, const core::UserId
                                .call = call,
                                .by = std::nullopt,
                                .subject = user,
-                               .answer = nullptr});
+                               .answer = nullptr,
+                               .clear = false});
         return;
     case MediaStepNeeded::Move:
     case MediaStepNeeded::Close:
@@ -1204,7 +1263,8 @@ void CallHandler::on_member_removed(const core::RoomId& room, const core::UserId
                      .call = call,
                      .by = std::nullopt,
                      .subject = user,
-                     .answer = nullptr});
+                     .answer = nullptr,
+                     .clear = false});
         return;
     }
 }
@@ -1242,8 +1302,22 @@ void CallHandler::check_occupancy() noexcept {
     }
     for (const auto& [room, call] : due) {
         const auto it = rooms_.find(room);
-        if (it == rooms_.end() || !it->second.media || it->second.busy) {
-            // Nothing to ask with yet: asked again at the next check.
+        if (it != rooms_.end() && it->second.busy) {
+            // Its generation is being read or written: asked again at the next check, and not
+            // counted as the SFU's silence.
+            ringer_.occupied(room, call, std::nullopt, false);
+            continue;
+        }
+        if (it != rooms_.end() && !it->second.media && it->second.minted &&
+            it->second.ticketed.empty() && it->second.joining == 0) {
+            // A generation this owner moved to and ticketed nobody into: nobody is in it.
+            ++counters_.occupancy_checks;
+            ringer_.occupied(room, call, false);
+            continue;
+        }
+        if (it == rooms_.end() || !it->second.media) {
+            // Nothing to ask with: someone may hold a ticket of an earlier owner's, which only
+            // the SFU knows of; counted as the SFU's silence, so that the call ends in time.
             ++counters_.occupancy_unavailable;
             ringer_.occupied(room, call, std::nullopt);
             continue;

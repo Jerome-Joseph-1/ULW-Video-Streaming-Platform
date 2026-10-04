@@ -1212,10 +1212,13 @@ TEST_F(GroupCallHandlerTest, ACloseThatNeverAnswersIsTriedAgainAfterItsDeadline)
     sfu_.hold_closes = true;
     move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
     ASSERT_EQ(sfu_.held_closes.size(), 1U);
-    // Its answer lost: given up on at the attempt's deadline, and asked again.
+    // Its answer lost: given up on at the attempt's deadline, and asked again after the backoff.
     auto lost = std::move(sfu_.held_closes.front());
     sfu_.held_closes.clear();
     clock_.advance(chat::CallLimits{}.close_attempt);
+    handler_->sweep();
+    EXPECT_TRUE(sfu_.held_closes.empty()) << "tried again before its backoff";
+    clock_.advance(core::Millis{1'000});
     handler_->sweep();
     ASSERT_EQ(sfu_.held_closes.size(), 1U);
     // The lost answer turning up late changes nothing.
@@ -1286,12 +1289,60 @@ TEST_F(GroupCallHandlerTest, ARoomTheSfuNeverLetsGoIsToldOfWhenTheRetriesGiveUp)
     move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
     EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
     EXPECT_TRUE(plane_.sent.empty());
+    // Alice is still in the call, in the new generation, all the while.
+    sfu_.connected = {in_call("alice", kDevice)};
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    plane_.sent.clear();
     clock_.advance(chat::CallLimits{}.close_retry_for);
     handler_->sweep();
     EXPECT_EQ(handler_->retired(), 0U);
     EXPECT_EQ(handler_->counters().retired_abandoned, 1U);
     // Held until then, and told once.
     EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+}
+
+TEST_F(GroupCallHandlerTest, WhoWasPutOutMayComeToTheNextCallOnceThisOneEnds) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    ASSERT_EQ(plane_.expelled, std::vector{*core::UserId::parse("bob")});
+    // Alice leaves: generation 2 is this owner's, and nobody was ticketed into it, so nobody is
+    // in it and the call ends without a move of its own.
+    move("alice", chat::CallSignal::Leave, call);
+    handler_->sweep();
+    ASSERT_EQ(handler_->calls(), 0U);
+    // Who was put out of it is cleared, and the generation stays.
+    EXPECT_EQ(plane_.changes.back().step, rt::MediaStep::Expel);
+    EXPECT_FALSE(plane_.changes.back().carry);
+    EXPECT_TRUE(plane_.expelled.empty());
+    EXPECT_EQ(plane_.generation, 2U);
+    EXPECT_EQ(handler_->counters().expulsions_cleared, 1U);
+    // Bob starts the next call.
+    const chat::CallId next = ticket("bob");
+    EXPECT_NE(next, call);
+}
+
+TEST_F(GroupCallHandlerTest, ACallEndingWithNobodyPutOutWritesNothing) {
+    const chat::CallId call = ticket("alice");
+    const auto writes = plane_.steps.size();
+    move("alice", chat::CallSignal::Leave, call);
+    handler_->sweep();
+    ASSERT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(plane_.steps.size(), writes);
+    EXPECT_EQ(handler_->counters().expulsions_cleared, 0U);
+}
+
+TEST_F(GroupCallHandlerTest, AFullListOfWhoIsPutOutRefusesOneMore) {
+    plane_.expelled.clear();
+    for (std::size_t i = 0; i < rt::kMaxMediaExpelled; ++i) {
+        plane_.expelled.push_back(*core::UserId::parse("gone" + std::to_string(i)));
+    }
+    const chat::CallId call = ticket("alice");
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Busy);
+    EXPECT_EQ(plane_.expelled.size(), rt::kMaxMediaExpelled);
 }
 
 TEST_F(GroupCallHandlerTest, WhoWasPutOutIsRefusedByAnOwnerThatTookTheRoomSince) {

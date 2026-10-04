@@ -479,7 +479,8 @@ TEST_P(ChatSessionTest, EveryMetricsLineIsANameAndANumberAndEveryFeatureHasItsLi
           "call_generations_closed_total", "call_generations_abandoned_total",
           "call_generations_closing", "call_occupancy_checks_total",
           "call_occupancy_unavailable_total", "call_resync_checks_total",
-          "call_expulsions_kept_total", "call_announcements_dropped_total",
+          "call_expulsions_kept_total", "call_expulsions_cleared_total",
+          "call_announcements_dropped_total",
           // Member lists (ADR-0096).
           "directs_opened_total", "groups_created_total", "members_changed_total{change=\"added\"}",
           "members_changed_total{change=\"removed\"}", "members_changed_total{change=\"left\"}",

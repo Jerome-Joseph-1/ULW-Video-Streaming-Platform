@@ -195,7 +195,9 @@ what differs is how many are in it, how it rings, and how it ends.
   are not `expelled`, ask for a ticket again (`call`) and connect with it**: the interruption is
   that round trip, under a second. If you are, the call is over for you: chat answers your
   tickets `expelled` while the call lasts, even after the room's owner changes, and LiveKit
-  admits no credential for the old room. A
+  admits no credential for the old room. Once that call has ended, however it ended, you may
+  start or join the next one. At most 64 people are put out of one call; past that, `call_expel`
+  is answered `busy`. A
   member removed from the group chat is put out the same way, by chat itself: `call_moved` has
   no `by`.
 
