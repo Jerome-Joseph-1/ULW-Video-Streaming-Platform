@@ -610,9 +610,6 @@ void CallHandler::advanced(const core::RoomId& room,
     entry.moves.pop_front();
     const std::uint64_t old = entry.generation;
     entry.generation = **result;
-    // The SFU hears of it only now that the write is done: the old generation closes once its
-    // joins are answered, and the next ask opens the new one.
-    retire(room, old, std::move(entry.media), std::exchange(entry.joining, 0));
     if (!move.answer) {
         ++counters_.moves_removal;
     } else if (move.step == MediaStepNeeded::Close) {
@@ -620,6 +617,15 @@ void CallHandler::advanced(const core::RoomId& room,
     } else {
         ++counters_.moves_expel;
     }
+    // The SFU hears of it only now that the write is done: the old generation closes once its
+    // joins are answered, and the next ask opens the new one. Nobody hears of the move until
+    // the SFU says the old room is gone: a client that acts on call_moved (the one put out
+    // trying its old credential among them) then finds nothing to join.
+    retire(room, old, std::move(entry.media), std::exchange(entry.joining, 0), std::move(move));
+    pump(room);
+}
+
+void CallHandler::announce(const core::RoomId& room, Move& move) noexcept {
     if (move.call && move.step == MediaStepNeeded::Close) {
         ringer_.ended(room, *move.call, move.by);
     } else if (move.call && move.subject) {
@@ -631,7 +637,16 @@ void CallHandler::advanced(const core::RoomId& room,
                              .call = move.call,
                              .caller = move.by});
     }
-    pump(room);
+}
+
+void CallHandler::announce_retired(Retired& retired) noexcept {
+    if (!retired.pending) {
+        return;
+    }
+    Move move = std::move(*retired.pending);
+    retired.pending.reset();
+    const core::RoomId room = retired.room;
+    announce(room, move);
 }
 
 void CallHandler::fail_waiting(Entry& entry, CallOutcome outcome) noexcept {
@@ -668,8 +683,8 @@ void CallHandler::drop(const core::RoomId& room) noexcept {
 }
 
 void CallHandler::retire(const core::RoomId& room, std::uint64_t generation,
-                         std::unique_ptr<core::ports::IMediaRoom> media,
-                         std::size_t joining) noexcept {
+                         std::unique_ptr<core::ports::IMediaRoom> media, std::size_t joining,
+                         Move move) noexcept {
     const core::MonoTime now = clock_.now();
     try {
         retired_.push_back(Retired{.id = ++next_retired_,
@@ -679,10 +694,13 @@ void CallHandler::retire(const core::RoomId& room, std::uint64_t generation,
                                    .joining = joining,
                                    .closing = false,
                                    .next_try = now,
-                                   .give_up = now + limits_.close_retry_for});
+                                   .give_up = now + limits_.close_retry_for,
+                                   .pending = std::nullopt});
+        retired_.back().pending.emplace(std::move(move));
     } catch (const std::bad_alloc&) {
         // Unclosed: whoever is still in it stays until they leave, as before expulsion existed.
         ++counters_.retired_abandoned;
+        announce(room, move);
         return;
     }
     close_retired();
@@ -708,7 +726,9 @@ void CallHandler::close_retired() noexcept {
         }
         if (now >= it->give_up) {
             ++counters_.retired_abandoned;
+            Retired gone = std::move(*it);
             retired_.erase(it);
+            announce_retired(gone);
             continue;
         }
         it->closing = true;
@@ -761,12 +781,17 @@ void CallHandler::retired_closed(std::uint64_t id,
         } else {
             ++counters_.retired_abandoned;
         }
+        Retired gone = std::move(*it);
         retired_.erase(it);
+        announce_retired(gone);
         return;
     }
     ++counters_.sfu_unavailable;
     it->closing = false;
     it->next_try = clock_.now() + kRetryEvery;
+    // The SFU could not say: the others are not kept waiting on it, and the close is tried again
+    // every second.
+    announce_retired(*it);
 }
 
 void CallHandler::abandon_open(const core::RoomId& room) noexcept {

@@ -425,6 +425,69 @@ private:
     std::map<std::string, std::vector<core::ports::RelayDone>, std::less<>> waiting_;
 };
 
+// How many times a close deletes its room before it gives up for now (Unavailable).
+constexpr int kCloseRounds = 3;
+constexpr CallLimits kCloseCheckLimits{.timeout = core::Millis{5000},
+                                       .max_response = std::size_t{16} * 1024};
+
+// Deletes `name`, then asks LiveKit whether it is gone, and deletes it again while it is not:
+// a client joining while LiveKit deletes the room can bring it back (it found the room before
+// it went, and LiveKit stores it again for the session), and a closed generation must stay
+// closed to keep out whoever was put out (ADR-0050, ADR-0095). `done` is told success only once
+// a listing has found no such room. Copies, not the room handle: it may be gone by then.
+void delete_until_gone(RoomService& service, const std::string& name, int rounds, MediaDone done) {
+    if (rounds <= 0) {
+        service.fail(MediaError::Unavailable, [done = std::move(done)](Answer) mutable noexcept {
+            done(std::unexpected(MediaError::Unavailable));
+        });
+        return;
+    }
+    std::string body = R"({"room":)";
+    core::json::append_string(body, name);
+    body += '}';
+    service.call("RoomService/DeleteRoom", std::move(body), kCreateRooms, IfAbsent::Succeed,
+                 [&service, name, rounds, done = std::move(done)](
+                     std::expected<void, MediaError> deleted) mutable noexcept {
+                     if (!deleted) {
+                         done(std::unexpected(deleted.error()));
+                         return;
+                     }
+                     std::string list = R"({"names":[)";
+                     core::json::append_string(list, name);
+                     list += "]}";
+                     try {
+                         service.fetch("RoomService/ListRooms", std::move(list), kListRooms,
+                                       kCloseCheckLimits,
+                                       [&service, name = std::move(name), rounds,
+                                        done = std::move(done)](Answer listed) mutable noexcept {
+                                           if (!listed) {
+                                               done(std::unexpected(listed.error()));
+                                               return;
+                                           }
+                                           const auto exists = room_listed(*listed);
+                                           if (!exists) {
+                                               done(std::unexpected(exists.error()));
+                                               return;
+                                           }
+                                           if (!*exists) {
+                                               done({});
+                                               return;
+                                           }
+                                           try {
+                                               delete_until_gone(service, name, rounds - 1,
+                                                                 std::move(done));
+                                           } catch (const std::bad_alloc&) {
+                                               // The callback went with the throw; the caller
+                                               // retries a close that never answers on its own
+                                               // deadline.
+                                           }
+                                       });
+                     } catch (const std::bad_alloc&) {
+                         // As above.
+                     }
+                 });
+}
+
 class LiveKitRoom final : public IMediaRoom {
 public:
     LiveKitRoom(RoomService& service, RelayStarts& relays, const Endpoints& endpoints,
@@ -532,11 +595,7 @@ public:
 
     void close(MediaDone done) override {
         closed_ = true;
-        std::string body = R"({"room":)";
-        core::json::append_string(body, name_);
-        body += '}';
-        service_.call("RoomService/DeleteRoom", std::move(body), kCreateRooms, IfAbsent::Succeed,
-                      std::move(done));
+        delete_until_gone(service_, name_, kCloseRounds, std::move(done));
     }
 
 private:
