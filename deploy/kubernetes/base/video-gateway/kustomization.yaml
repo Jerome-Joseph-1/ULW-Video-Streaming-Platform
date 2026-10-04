@@ -6,3 +6,4 @@ resources:
   - httproute.yaml
   - networkpolicy.yaml
   - service.yaml
+  - serviceaccount.yaml
