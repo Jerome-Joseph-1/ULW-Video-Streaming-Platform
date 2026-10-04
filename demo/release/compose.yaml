@@ -96,7 +96,7 @@ services:
     platform: linux/amd64
     <<: *in-netns
     # node:22-alpine, 2026-10.
-    image: ghcr.io/jerome-joseph-1/ulw-demo-auth:${ULW_DEMO_TAG:-demo-274b4439d10a}
+    image: ghcr.io/jerome-joseph-1/ulw-demo-auth:${ULW_DEMO_TAG:-demo-2d552eb4dc94}
     environment:
       <<: *store
       ULW_S3_ENDPOINT: http://127.0.0.1:${DEMO_S3_PORT:-9900}
@@ -113,7 +113,7 @@ services:
   migrate:
     platform: linux/amd64
     network_mode: service:netns
-    image: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:${ULW_DEMO_TAG:-demo-274b4439d10a}
+    image: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:${ULW_DEMO_TAG:-demo-2d552eb4dc94}
     entrypoint: ["/usr/local/bin/ulw_migrate"]
     environment:
       ULW_DATABASE_URL: *db
@@ -125,7 +125,7 @@ services:
   seed:
     platform: linux/amd64
     network_mode: service:netns
-    image: ghcr.io/jerome-joseph-1/ulw-demo-seed:${ULW_DEMO_TAG:-demo-274b4439d10a}
+    image: ghcr.io/jerome-joseph-1/ulw-demo-seed:${ULW_DEMO_TAG:-demo-2d552eb4dc94}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -134,7 +134,7 @@ services:
     platform: linux/amd64
     <<: [*in-netns, *sandboxed]
     # The gateway in the live packager's image (demo/build/gateway.Dockerfile).
-    image: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:${ULW_DEMO_TAG:-demo-274b4439d10a}
+    image: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:${ULW_DEMO_TAG:-demo-2d552eb4dc94}
     environment:
       <<: *store
       ULW_DATABASE_URL: *db
@@ -180,7 +180,7 @@ services:
   worker:
     platform: linux/amd64
     <<: [*in-netns, *sandboxed]
-    image: ghcr.io/jerome-joseph-1/ulw-video-worker:${ULW_DEMO_TAG:-demo-274b4439d10a}
+    image: ghcr.io/jerome-joseph-1/ulw-video-worker:${ULW_DEMO_TAG:-demo-2d552eb4dc94}
     environment:
       <<: *store
       ULW_DATABASE_URL: *db
@@ -195,7 +195,7 @@ services:
   chat:
     platform: linux/amd64
     <<: *in-netns
-    image: ghcr.io/jerome-joseph-1/ulw-chat:${ULW_DEMO_TAG:-demo-274b4439d10a}
+    image: ghcr.io/jerome-joseph-1/ulw-chat:${ULW_DEMO_TAG:-demo-2d552eb4dc94}
     environment:
       ULW_DATABASE_URL: *db
       ULW_LISTEN_PORT: "9101"
@@ -307,7 +307,9 @@ services:
     <<: *in-netns
     # nginx with the page, the OpenMLS browser client (/mls/) and the proxy config baked in
     # (demo/build/web.Dockerfile): one origin for the gateway, chat, LiveKit and the token issuer.
-    image: ghcr.io/jerome-joseph-1/ulw-demo-web:${ULW_DEMO_TAG:-demo-274b4439d10a}
+    # Unset ULW_WEB_* (demo/build/web-config.sh) keep the gateway, chat and the token issuer on
+    # this origin; another deployment sets them to its own URLs.
+    image: ghcr.io/jerome-joseph-1/ulw-demo-web:${ULW_DEMO_TAG:-demo-2d552eb4dc94}
     healthcheck:
       # Ready when every service the page talks to is.
       test: ["CMD", "sh", "-c", "for u in /api/v1/readyz /_demo/chat/readyz /_demo/livekit/ /auth/healthz; do wget -q -O /dev/null http://127.0.0.1:8080$$u || exit 1; done"]
