@@ -1,0 +1,242 @@
+# Live streams through the gateway (docs/adr/0092, RUNBOOK.md step 9). An overlay lists this
+# after components/operator-config to turn them on:
+#   components:
+#     - ../../components/operator-config
+#     - ../../components/live-streams
+# It gives the gateway LiveKit's server API and key pair, the packagers' settings, its account's
+# token and the egress to reach LiveKit and the API server, all from config.env. Without it the
+# gateway runs with live streams off (its stream routes answer 404), and the packagers'
+# namespace, Role and admission policy in base/live-packager grant nothing. It needs LiveKit,
+# egress and their Redis (RUNBOOK.md, step 7) and a Kubernetes v1.35 or later cluster.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - networkpolicy.yaml
+  # LiveKit's webhooks (docs/adr/0093): the listener's Service and who may reach it.
+  - hooks.yaml
+patches:
+  # Live streams on (docs/adr/0092, RUNBOOK.md step 9): LiveKit's server API in the cluster, the
+  # public host its tickets name (the /rtc and /whip routes of base/livekit/httproute.yaml), the
+  # key pair LiveKit and egress use, and packagers as Jobs from the template in the gateway's
+  # image, in the packagers' namespace, dialled by the relay through live-packager's headless
+  # Service. Every value here is an example that the replacements below fill from config.env.
+  # By kind and name: components/operator-config, before this, has set its namespace. Inline
+  # rather than a file of its own, so that nothing reads the fragment as a whole Deployment.
+  - target:
+      kind: Deployment
+      name: video-gateway
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: video-gateway
+        namespace: ulw
+      spec:
+        template:
+          spec:
+            containers:
+              - name: gateway
+                ports:
+                  # LiveKit's webhooks only (hooks.yaml, docs/adr/0093); no route reaches it.
+                  - name: hooks
+                    containerPort: 8081
+                env:
+                  - name: LIVEKIT_API_URL
+                    value: http://livekit.ulw.svc.cluster.local:7880
+                  - name: LIVEKIT_CLIENT_URL
+                    value: wss://video.example.com
+                  - name: LIVEKIT_API_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: sfu-secrets
+                        key: LIVEKIT_API_KEY
+                  - name: LIVEKIT_API_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: sfu-secrets
+                        key: LIVEKIT_API_SECRET
+                  - name: ULW_LIVE_PACKAGER
+                    value: kubernetes
+                  - name: ULW_LIVE_PACKAGER_SRT
+                    value: srt://{stream}.live-packager.ulw-live.svc.cluster.local:9000
+                  - name: ULW_LIVE_MAX_STREAMS
+                    value: "1"
+                  - name: ULW_LIVE_BROADCASTER_CLAIM
+                    value: ""
+                  # The Job template the image carries, filled with the packagers' namespace, image,
+                  # pull policy and Secret below and the gateway's own store.
+                  - name: ULW_LIVE_JOB_TEMPLATE
+                    value: /usr/local/share/ulw/live-packager-job.yaml
+                  - name: ULW_LIVE_PACKAGER_IMAGE_TAG
+                    value: main
+                  - name: ULW_LIVE_PACKAGER_PULL_POLICY
+                    value: IfNotPresent
+                  - name: ULW_LIVE_PACKAGER_SECRET
+                    value: live-packager-secrets
+                  # The packagers' namespace, and the account's token and the cluster's CA as the
+                  # kube-api volume projects them.
+                  - name: ULW_K8S_NAMESPACE
+                    value: ulw-live
+                  - name: ULW_K8S_TOKEN_FILE
+                    value: /var/run/ulw/kube-api/token
+                  - name: ULW_K8S_CA_FILE
+                    value: /var/run/ulw/kube-api/ca.crt
+                  # LiveKit's webhooks take a stream live when its publisher publishes and end it
+                  # once the publisher has been gone for the grace (docs/adr/0093), on a listener
+                  # of their own that only LiveKit's pods reach (hooks.yaml).
+                  - name: ULW_LIVE_WEBHOOK_PORT
+                    value: "8081"
+                  - name: ULW_LIVE_PUBLISHER_GRACE_SECONDS
+                    value: "10"
+                volumeMounts:
+                  - name: kube-api
+                    mountPath: /var/run/ulw/kube-api
+                    readOnly: true
+            volumes:
+              # What the API server needs of the gateway, for the stream service only: an hour's
+              # token of its account (the kubelet renews it; the gateway rereads it every minute),
+              # the cluster's CA, and the pod's namespace. Into the gateway's container alone; the
+              # pod's own automount stays off.
+              - name: kube-api
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        path: token
+                        expirationSeconds: 3600
+                    - configMap:
+                        name: kube-root-ca.crt
+                        items:
+                          - key: ca.crt
+                            path: ca.crt
+                    - downwardAPI:
+                        items:
+                          - path: namespace
+                            fieldRef:
+                              fieldPath: metadata.namespace
+
+replacements:
+  # Where this component's own policy goes.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NAMESPACE
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: video-gateway-live
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: NetworkPolicy
+          name: video-gateway-hooks
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: Service
+          name: video-gateway-hooks
+        fieldPaths:
+          - metadata.namespace
+      # LiveKit's Service, in the same namespace.
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_API_URL].value
+        options:
+          delimiter: "."
+          index: 1
+  # What a ticket names: wss://<PUBLIC_HOSTNAME>, where the /rtc and /whip routes answer.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.PUBLIC_HOSTNAME
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_CLIENT_URL].value
+        options:
+          delimiter: "/"
+          index: 2
+  # LiveKit's key pair, from the realtime plane's Secret.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SFU_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_API_KEY].valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_API_SECRET].valueFrom.secretKeyRef.name
+  # The packagers' namespace: where Jobs go, and the relay's address of each.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_NAMESPACE
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_K8S_NAMESPACE].value
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_PACKAGER_SRT].value
+        options:
+          delimiter: "."
+          index: 2
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_MAX_STREAMS
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_MAX_STREAMS].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_BROADCASTER_CLAIM
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_BROADCASTER_CLAIM].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_PACKAGER_IMAGE_TAG
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_PACKAGER_IMAGE_TAG].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.IMAGE_PULL_POLICY
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_PACKAGER_PULL_POLICY].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.LIVE_PACKAGER_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_LIVE_PACKAGER_SECRET].value

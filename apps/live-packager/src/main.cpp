@@ -255,8 +255,8 @@ int run() {
     const std::jthread signal_thread([&drain, &end, signals](const std::stop_token& stop) {
         watch_signals(stop, drain, end, signals);
     });
-    const infra::ffmpeg::LiveRemuxConfig ffmpeg{
-        .sandbox = sandbox, .ffmpeg = config->ffmpeg, .search_path = config->search_path};
+    const infra::ffmpeg::LiveRemuxConfig ffmpeg{.sandbox = sandbox,
+                                                .search_path = config->search_path};
     std::optional<PgCatalog> catalog;
     std::optional<live::RecorderSettings> recorder;
     if (const std::optional<live::RecordingTarget>& target = config->recording; target) {
@@ -269,11 +269,7 @@ int run() {
             .max_bytes = live::recording_bound(config->max_kbps, config->max_duration),
             .own_claim = std::nullopt});
     }
-    SandboxedCopier copier({.sandbox = sandbox,
-                            .ffmpeg = config->ffmpeg,
-                            .ffprobe = config->ffprobe,
-                            .search_path = config->search_path},
-                           clock);
+    SandboxedCopier copier({.sandbox = sandbox, .search_path = config->search_path}, clock);
     // A stream that has ended is recorded, never streamed again; the recording is repeated by
     // every run that finds it not yet done, so one killed before the job was queued is made
     // good by the next.
@@ -341,7 +337,8 @@ int run() {
                           .segment_seconds = config->segment_seconds,
                           .listed_segments = live::listed_segments(config->window_segments),
                           .max_kbps = config->max_kbps,
-                          .max_duration = config->max_duration},
+                          .max_duration = config->max_duration,
+                          .caller_wait = config->caller_wait},
                          {.drain = drain.get_token(), .end = end.get_token()});
     live::log("stopped");
     const bool drained = drain.stop_requested() && !end.stop_requested();

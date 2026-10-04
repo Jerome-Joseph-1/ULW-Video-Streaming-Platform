@@ -379,6 +379,7 @@ void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
     if (user_) {
         client_ = server_.chat().attach(*this, *user_);
         presence_ = server_.presence().attach(*this, *user_);
+        bell_ = server_.bell().attach(*this, *user_);
     }
     phase_ = Phase::Open;
     ++server_.counters().upgrades;
@@ -511,6 +512,10 @@ void Session::command(const codec::ws::Frame& frame) {
     }
     if (const auto* c = std::get_if<Call>(&*parsed)) {
         chat.call(*client_, *c);
+        return;
+    }
+    if (const auto* m = std::get_if<CallMove>(&*parsed)) {
+        chat.call_move(*client_, *m);
         return;
     }
     server_.presence().unwatch(*presence_, std::get<Unwatch>(*parsed).user);
@@ -782,6 +787,9 @@ void Session::close() noexcept {
     }
     if (presence_) {
         server_.presence().detach(*presence_);
+    }
+    if (bell_) {
+        server_.bell().detach(*bell_);
     }
     release_request_hold();
     if (peer_hold_) {

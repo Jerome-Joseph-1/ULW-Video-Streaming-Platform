@@ -10,8 +10,7 @@
 namespace infra::ffmpeg {
 
 // argv, program name first, probing as `probe` says (live_probe).
-[[nodiscard]] Args live_remux_args(const std::string& ffmpeg, const LiveRemuxJob& job,
-                                   const LiveProbe& probe);
+[[nodiscard]] Args live_remux_args(const LiveRemuxJob& job, const LiveProbe& probe);
 
 // Whether ffmpeg's stderr says it found no codec parameters for a video stream: the line
 // "Could not find codec parameters for stream N (Video: ...)" that it prints when the probe

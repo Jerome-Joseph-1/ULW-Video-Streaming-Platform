@@ -1,8 +1,12 @@
 #include "core/version.hpp"
 #include "infra/auth/local_verifier.hpp"
+#include "infra/packagers/kubernetes_packagers.hpp"
+#include "infra/packagers/process_packagers.hpp"
 #include "infra/postgres/health_check.hpp"
+#include "infra/postgres/live_streams.hpp"
 #include "infra/postgres/upload_catalog.hpp"
 #include "infra/s3util/credentials.hpp"
+#include "infra/sfu/livekit/livekit_sfu.hpp"
 #include "infra/storage/fs_store.hpp"
 #include "infra/storage/s3_store.hpp"
 #include "net/offload_pool.hpp"
@@ -124,6 +128,17 @@ struct Services {
     std::unique_ptr<infra::postgres::PgUploadCatalog> catalog;
     std::unique_ptr<gateway::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
+    // The stream service and what it drives, when live publishing is configured (ADR-0092).
+    // LiveKit and the Kubernetes API get a multi of their own, as key fetches do, so that no
+    // upload holding the store's connections delays a ticket.
+    std::unique_ptr<infra::curl::Multi> live_multi;
+    std::unique_ptr<core::ports::ISfu> sfu;
+    std::unique_ptr<core::ports::IPackagers> packagers;
+    std::unique_ptr<infra::postgres::PgLiveStreams> live_store;
+    std::unique_ptr<gateway::LiveStreams> live;
+    // LiveKit's webhooks, on their own listener, when it is configured (ADR-0093).
+    std::unique_ptr<gateway::PublisherWatch> watch;
+    std::unique_ptr<gateway::WebhookServer> webhooks;
     std::unique_ptr<gateway::Gateway> gateway;
     std::unique_ptr<net::SignalWatcher> signals;
     std::unique_ptr<infra::postgres::PgHealthCheck> database_check;
@@ -209,7 +224,9 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
 std::expected<void, std::string> make_verifier(const gateway::Config& config, Services& s) {
     infra::auth::ClaimRules rules{.issuer = config.jwt_issuer,
                                   .audience = config.jwt_audience,
-                                  .subject_claim = config.jwt_subject_claim};
+                                  .subject_claim = config.jwt_subject_claim,
+                                  .broadcaster_claim = config.live.broadcaster_claim,
+                                  .broadcaster_value = config.live.broadcaster_value};
     if (!config.dev_jwks_file.empty()) {
         auto local = infra::auth::Ed25519LocalVerifier::create(config.dev_jwks, std::move(rules));
         if (!local) {
@@ -239,6 +256,98 @@ std::expected<void, std::string> make_verifier(const gateway::Config& config, Se
     return {};
 }
 
+// The Job template's values (deploy/kubernetes/live-packager/job.yaml): the packagers'
+// namespace, image and Secret, and the gateway's own store.
+infra::packagers::JobValues live_job_values(const gateway::Config& config) {
+    const gateway::LiveConfig& live = config.live;
+    infra::packagers::JobValues values;
+    values.namespace_name = live.k8s_namespace;
+    values.image_tag = live.image_tag;
+    values.pull_policy = live.pull_policy;
+    values.bucket = config.bucket;
+    values.packager_secret = live.packager_secret;
+    switch (config.storage) {
+    case gateway::StorageBackend::R2:
+        values.storage = "r2";
+        values.r2_account_id = config.storage_location;
+        break;
+    case gateway::StorageBackend::Minio:
+        values.storage = "minio";
+        values.s3_endpoint = config.storage_location;
+        break;
+    // Refused with the kubernetes runtime (config.cpp); left empty, the Job is refused too.
+    case gateway::StorageBackend::Filesystem:
+        break;
+    }
+    return values;
+}
+
+std::expected<void, std::string> make_live(const gateway::Config& config, Services& s) {
+    const gateway::LiveConfig& live = config.live;
+    if (!live.enabled) {
+        return {};
+    }
+    auto multi = infra::curl::Multi::create(*s.reactor);
+    if (!multi) {
+        return std::unexpected("libcurl multi for the stream service failed to start");
+    }
+    s.live_multi = std::move(*multi);
+    auto sfu = infra::sfu::livekit::make_sfu(
+        *s.reactor, *s.live_multi, s.clock,
+        infra::sfu::livekit::Config{.api_url = live.livekit_api_url,
+                                    .client_url = live.livekit_client_url,
+                                    .api_key = live.livekit_api_key,
+                                    .api_secret = live.livekit_api_secret,
+                                    .packager_srt = live.packager_srt});
+    if (!sfu) {
+        return std::unexpected(std::string(infra::sfu::livekit::to_string(sfu.error())));
+    }
+    s.sfu = std::move(*sfu);
+    if (live.runtime == gateway::PackagerRuntime::Process) {
+        auto packagers = infra::packagers::ProcessPackagers::create(
+            *s.reactor, {.binary = live.packager_binary, .environment = live.packager_environment});
+        if (!packagers) {
+            return std::unexpected(std::move(packagers.error()));
+        }
+        s.packagers = std::move(*packagers);
+    } else {
+        auto packagers = infra::packagers::KubernetesPackagers::create(
+            *s.reactor, *s.live_multi, *s.pool, s.clock,
+            {.api_url = live.k8s_api_url,
+             .token_file = live.k8s_token_file,
+             .ca_file = live.k8s_ca_file,
+             .job_template = live.job_template,
+             .job = live_job_values(config)});
+        if (!packagers) {
+            return std::unexpected(std::move(packagers.error()));
+        }
+        s.packagers = std::move(*packagers);
+    }
+    auto store = infra::postgres::PgLiveStreams::create(
+        *s.reactor, *s.pool, infra::postgres::LiveStreamsConfig{.conninfo = config.database_url});
+    if (!store) {
+        return std::unexpected(std::move(store.error()));
+    }
+    s.live_store = std::move(*store);
+    s.live = std::make_unique<gateway::LiveStreams>(gateway::LiveDeps{.reactor = *s.reactor,
+                                                                      .store = *s.live_store,
+                                                                      .sfu = *s.sfu,
+                                                                      .packagers = *s.packagers,
+                                                                      .clock = s.clock,
+                                                                      .random = s.random,
+                                                                      .log = s.log},
+                                                    live.settings);
+    s.live->start_sweeping();
+    if (live.webhook_port != 0) {
+        s.watch = std::make_unique<gateway::PublisherWatch>(*s.reactor, *s.live, s.log, live.watch);
+        s.webhooks = std::make_unique<gateway::WebhookServer>(
+            *s.reactor, s.clock,
+            gateway::WebhookKey{.id = live.livekit_api_key, .secret = live.livekit_api_secret},
+            *s.watch, s.log, gateway::WebhookLimits{});
+    }
+    return {};
+}
+
 // A key nothing ever writes: NotFound proves the store answers, and costs one GET.
 constexpr std::string_view kProbeKey = "health/probe";
 
@@ -258,8 +367,23 @@ gateway::ProbeChecks probe_checks(Services& s) {
             .store_paging_errors = s.paging_errors};
 }
 
+void reap_webhooks(Services& s) noexcept {
+    if (s.webhooks) {
+        s.webhooks->reap();
+    }
+}
+
+// LiveKit's webhooks, on their own listener, when the stream service has them (ADR-0093).
+std::expected<void, int> listen_for_webhooks(Services& s, os::UniqueFd listener) {
+    if (!s.webhooks) {
+        return {};
+    }
+    return s.reactor->listen(std::move(listener), *s.webhooks);
+}
+
 int serve(const gateway::Config& config, const os::NofileLimits& limits, os::UniqueFd listener,
-          ops::Logger& log, const std::optional<ops::Notifier>& notifier) {
+          os::UniqueFd webhook_listener, ops::Logger& log,
+          const std::optional<ops::Notifier>& notifier) {
     const auto info = core::build_info();
     Services s(log);
     auto choice = net::make_reactor_with_fallback(config.reactor, s.clock, limits.soft);
@@ -294,6 +418,9 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
     if (auto r = make_verifier(config, s); !r) {
         return fail(log, "auth", r.error());
     }
+    if (auto r = make_live(config, s); !r) {
+        return fail(log, "live", r.error());
+    }
 
     s.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *s.reactor,
                                                                  .transports = *s.transports,
@@ -306,7 +433,10 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
                                                                  .clock = s.clock,
                                                                  .random = s.random,
                                                                  .log = log,
-                                                                 .health = s.health},
+                                                                 .health = s.health,
+                                                                 .live_streams = s.live.get(),
+                                                                 .webhooks = s.webhooks.get(),
+                                                                 .publisher_watch = s.watch.get()},
                                                    config.limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.gateway);
     if (!signals) {
@@ -315,6 +445,9 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
     s.signals = std::move(*signals);
     if (auto r = s.reactor->listen(std::move(listener), *s.gateway); !r) {
         return fail(log, "register listener", errno_text(r.error()));
+    }
+    if (auto r = listen_for_webhooks(s, std::move(webhook_listener)); !r) {
+        return fail(log, "register webhook listener", errno_text(r.error()));
     }
     s.database_check = std::make_unique<infra::postgres::PgHealthCheck>(config.database_url);
     s.probe = std::make_unique<gateway::HealthProbe>(s.health, probe_checks(s), s.clock, log);
@@ -325,6 +458,7 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
              {{"version", info.version},
               {"git_sha", info.git_sha},
               {"port", config.port},
+              {"webhook_port", config.live.webhook_port},
               {"transport", config.transport == gateway::Transport::Tls ? "tls" : "plain"},
               {"reactor", net::to_string(choice->kind)},
               {"io_uring_unavailable", choice->fell_back_from_io_uring.has_value()},
@@ -342,6 +476,7 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
     while (!s.gateway->finished()) {
         s.reactor->run_once(kLoopTick);
         s.gateway->reap();
+        reap_webhooks(s);
         // Only a loop that turns pings: a wedged loop is what the watchdog is for.
         if (watchdog && s.clock.now() >= next_ping) {
             notifier->watchdog();
@@ -412,12 +547,20 @@ int run(std::span<const std::string_view> args) {
     // Bound while still root, if started so: a port under 1024 needs the privilege the drop
     // gives up.
     os::UniqueFd listener;
+    os::UniqueFd webhook_listener;
     if (!cli->check) {
         auto bound = net::listen_tcp({.port = config->port});
         if (!bound) {
             return fail(boot, "listen", errno_text(bound.error()));
         }
         listener = std::move(*bound);
+        if (config->live.webhook_port != 0) {
+            auto hooks = net::listen_tcp({.port = config->live.webhook_port});
+            if (!hooks) {
+                return fail(boot, "listen for webhooks", errno_text(hooks.error()));
+            }
+            webhook_listener = std::move(*hooks);
+        }
     }
     // Before any thread exists: glibc then has no other thread to carry the change to.
     if (const auto code = leave_root(config->run_as_user, config->allow_root, boot)) {
@@ -439,7 +582,8 @@ int run(std::span<const std::string_view> args) {
     int code = EXIT_FAILURE;
     {
         ops::Logger log(**sink, clock, "gateway", config->log_level);
-        code = serve(*config, *limits, std::move(listener), log, *notifier);
+        code = serve(*config, *limits, std::move(listener), std::move(webhook_listener), log,
+                     *notifier);
     }
     const std::uint64_t dropped = (*sink)->close();
     if (dropped > 0) {

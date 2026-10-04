@@ -140,6 +140,24 @@ TEST(AccessToken, RecordGrantStartsARecorderAndJoinsNothing) {
     EXPECT_EQ(read.claims.find("sub"), nullptr);
 }
 
+TEST(AccessToken, AdminGrantReadsOneRoomAndJoinsNothing) {
+    const ReadToken read =
+        mint_and_read({.permission = Permission::AdminRoom, .room = "r:1", .identity = {}});
+    EXPECT_EQ(bool_at(read.claims, "video", "roomAdmin"), true);
+    EXPECT_EQ(string_at(read.claims, "video", "room"), "r:1");
+    EXPECT_EQ(bool_at(read.claims, "video", "roomCreate"), std::nullopt);
+    EXPECT_EQ(bool_at(read.claims, "video", "roomJoin"), std::nullopt);
+    EXPECT_EQ(read.claims.find("sub"), nullptr);
+}
+
+TEST(AccessToken, ListGrantListsRoomsAndJoinsNothing) {
+    const ReadToken read =
+        mint_and_read({.permission = Permission::ListRooms, .room = {}, .identity = {}});
+    EXPECT_EQ(bool_at(read.claims, "video", "roomList"), true);
+    EXPECT_EQ(bool_at(read.claims, "video", "roomCreate"), std::nullopt);
+    EXPECT_EQ(bool_at(read.claims, "video", "roomJoin"), std::nullopt);
+}
+
 TEST(AccessToken, NamesAreEscapedIntoTheClaims) {
     const ReadToken read =
         mint_and_read({.permission = Permission::JoinRoom, .room = R"(a"b\c)", .identity = "x\ny"});
