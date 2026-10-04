@@ -1,0 +1,76 @@
+# The one public origin, https://{$ULW_HOST} (compose.yaml): TLS with a Let's Encrypt certificate
+# Caddy obtains and renews itself, then everything the page talks to, proxied to loopback (Caddy
+# shares the services' network namespace) or to Keycloak on the `ulw` network. Nothing else is
+# routed: not LiveKit's /twirp server API, not the gateway's webhook port, not Keycloak's
+# management port, not MinIO's admin API.
+{
+	# Let's Encrypt only, so the certificate's path is known (LiveKit's TURN/TLS reads it).
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+	admin 127.0.0.1:2019
+}
+
+{$ULW_HOST} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	# The gateway: uploads (chunks up to 16 MiB), videos, playlists and live streams.
+	handle /api/* {
+		request_body {
+			max_size 17MB
+		}
+		reverse_proxy 127.0.0.1:8081 {
+			flush_interval -1
+		}
+	}
+
+	# Chat's WebSocket. A browser cannot set Authorization on a WebSocket, so the page sends its
+	# access token as ?token=; it becomes the bearer header chat takes and leaves the URL here.
+	# Caddy keeps no access log, so the token is written nowhere.
+	handle /rt {
+		route {
+			request_header Authorization "Bearer {http.request.uri.query.token}"
+			request_header -Cookie
+			uri query -token
+			reverse_proxy 127.0.0.1:9101
+		}
+	}
+
+	# LiveKit: the call SDK's signalling WebSocket and WHIP (live publishing).
+	@livekit path /rtc /rtc/* /whip /whip/*
+	handle @livekit {
+		reverse_proxy 127.0.0.1:7880
+	}
+
+	# The object store, path-style: the bucket only. The services sign their requests for this
+	# host, and the gateway signs the segment URLs browsers play from.
+	@store path /ulw-media /ulw-media/*
+	handle @store {
+		reverse_proxy 127.0.0.1:9900 {
+			flush_interval -1
+		}
+	}
+
+	# Keycloak (KC_HTTP_RELATIVE_PATH=/auth): sign-in pages, tokens, its key set, the admin
+	# console.
+	redir /auth /auth/
+	handle /auth/* {
+		reverse_proxy keycloak:8080
+	}
+
+	# The OpenMLS browser client (clients/web-mls/dist).
+	handle_path /mls/* {
+		root * /srv/mls
+		file_server
+	}
+
+	# The web app (demo/web), with the config.json deploy.sh writes: sign in on Keycloak.
+	handle {
+		header Cache-Control no-cache
+		root * /srv/web
+		file_server
+	}
+}

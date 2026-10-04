@@ -1,5 +1,14 @@
 name: deploy-vps
 
+# Deploys the platform to the project's own host (the one that runs the self-hosted runners) as
+# https://<public ip with dashes>.sslip.io: deploy/vps/compose.yaml, through deploy/vps/deploy.sh,
+# into /opt/ulw as compose project `ulw-prod`, then signs in as alice and bob on Keycloak's page
+# and drives the product end to end against the public URL (demo/smoke). deploy/vps/README.md
+# says how to redeploy, read logs, back up and add users.
+#
+# The host is shared with CI jobs and soaks: the stack has its own project name, directory and
+# network, publishes only 80, 443 and LiveKit's media ports, and nothing here prunes or stops
+# anything that is not the project's own.
 on:
   push:
     branches: [deploy/vps]
@@ -11,27 +20,69 @@ concurrency:
   group: deploy-vps
   cancel-in-progress: false
 
+env:
+  # The tested build demo-release.yml published (demo-<12-digit commit>), by tag and digest.
+  ULW_IMAGE_GATEWAY: ghcr.io/jerome-joseph-1/ulw-demo-gateway-live:demo-274b4439d10a@sha256:fa782b05e4dccdd097bf36bd1a0c9c88c9b97e7f4bc295747474e54207eb4317
+  ULW_IMAGE_WORKER: ghcr.io/jerome-joseph-1/ulw-video-worker:demo-274b4439d10a@sha256:15c5818ec1e1d0948acca1da84af2eba527ad896d317a0e0eada676b4431d656
+  ULW_IMAGE_CHAT: ghcr.io/jerome-joseph-1/ulw-chat:demo-274b4439d10a@sha256:1d4a8c238bc0d869cf9ea9fc07af229d84c220afcd3aa1fa2ec0e248a5f4b2f2
+  # mcr.microsoft.com/playwright:v1.56.1-noble, the version demo/smoke/package-lock.json pins,
+  # with its browsers and their libraries, so nothing is installed on the host.
+  PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright@sha256:f1e7e01021efd65dd1a2c56064be399f3e4de00fd021ac561325f2bfbb2b837a
+
 jobs:
-  survey:
+  deploy:
     runs-on: [self-hosted]
-    timeout-minutes: 10
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
-      - name: Survey the host (read only)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Find the public address
+        id: host
         run: |
-          set -u
-          echo "public ip: $(curl -fsS --max-time 10 https://api.ipify.org || echo unknown)"
-          uname -m; uname -r; nproc; free -m
-          df -h / /var/lib/docker /opt 2>/dev/null || true
-          docker version --format 'docker {{.Server.Version}} {{.Server.Arch}}'
-          docker compose version
-          docker info --format 'root={{.DockerRootDir}} driver={{.Driver}} cgroup={{.CgroupVersion}}'
-          docker system df || true
-          docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' || true
-          sudo -n ufw status verbose || echo "ufw: not available"
-          sudo -n ss -ltnup | awk 'NR==1 || /:(80|443|3478|5349|78[0-9][0-9]|79[0-9][0-9]) /' || true
-          ls -la /opt || true
-          id; echo "workspace: $GITHUB_WORKSPACE"
-          which node npm || true
-          dpkg -l | grep -E 'libnss3|libgbm1|libasound' || true
+          ip=$(curl -fsS --max-time 20 https://api.ipify.org)
+          [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]
+          echo "ip=$ip" >>"$GITHUB_OUTPUT"
+          echo "host=${ip//./-}.sslip.io" >>"$GITHUB_OUTPUT"
+          echo "public address $ip: https://${ip//./-}.sslip.io" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy
+        env:
+          IP: ${{ steps.host.outputs.ip }}
+        run: deploy/vps/deploy.sh "$IP" "$ULW_IMAGE_GATEWAY" "$ULW_IMAGE_WORKER" "$ULW_IMAGE_CHAT"
+
+      - name: Smoke (sign in, upload and play, chat, a 1:1 call)
+        env:
+          HOST: ${{ steps.host.outputs.host }}
+        run: |
+          docker pull --quiet "$PLAYWRIGHT_IMAGE" >/dev/null
+          docker run --rm --name "ulw-prod-smoke-$GITHUB_RUN_ID" --network host --ipc host \
+              --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
+              -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc \
+              -v "$GITHUB_WORKSPACE/demo/smoke:/smoke" -w /smoke "$PLAYWRIGHT_IMAGE" \
+              bash -c 'npm ci --ignore-scripts --no-audit --no-fund >/dev/null &&
+                       npx --no-install playwright test --reporter=list \
+                         --grep "upload, transcode|chat between two users|1:1 call rings|declined call"'
+
+      - name: Smoke (encrypted chat, group call, live)
+        continue-on-error: true
+        env:
+          HOST: ${{ steps.host.outputs.host }}
+        run: |
+          docker run --rm --name "ulw-prod-smoke-extra-$GITHUB_RUN_ID" --network host --ipc host \
+              --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
+              -e DEMO_URL="https://$HOST" -e SMOKE_LOGIN=oidc \
+              -v "$GITHUB_WORKSPACE/demo/smoke:/smoke" -w /smoke "$PLAYWRIGHT_IMAGE" \
+              bash -c 'npx --no-install playwright test --reporter=list \
+                         --grep "encrypted chat|a group call|go live"'
+
+      - name: The stack's state and recent logs
+        if: ${{ !cancelled() }}
+        run: |
+          sudo /opt/ulw/compose.sh ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Health}}\t{{.Status}}' || true
+          # Services whose logs carry no configuration secrets (egress's would; it is left out).
+          sudo /opt/ulw/compose.sh logs --no-color --tail 60 caddy gateway chat worker keycloak livekit 2>&1 |
+              grep -v -E '"event":"request".*"status":2' | tail -300 || true
