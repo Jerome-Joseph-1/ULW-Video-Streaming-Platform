@@ -207,6 +207,9 @@ chat::Limits limits_of(const chat::Config& config) {
     if (const std::optional<core::Millis> ring = config.ring_timeout) {
         chat_limits.calls.ring.ring_timeout = *ring;
     }
+    if (const std::optional<std::uint16_t> group = config.group_participants) {
+        chat_limits.calls.group_participants = *group;
+    }
     const chat::ClientLimits& per_client = config.client_limits;
     chat_limits.max_connections_per_ip =
         per_client.max_connections_per_ip.value_or(chat_limits.max_connections_per_ip);

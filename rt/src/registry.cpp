@@ -130,6 +130,23 @@ bool RoomRegistry::append(const core::RoomId& room, const Outgoing& message, App
     return true;
 }
 
+bool RoomRegistry::media_generation(const core::RoomId& room, MediaStep step,
+                                    StoreCallback<std::optional<std::uint64_t>> done) {
+    const auto generation = owned(room);
+    if (!generation) {
+        return false;
+    }
+    store_.media_generation(room, *generation, step,
+                            [this, room, generation = *generation, done = std::move(done)](
+                                StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
+                                if (r && !*r) {
+                                    fenced(room, generation, OwnerWrite::MediaGeneration);
+                                }
+                                done(r);
+                            });
+    return true;
+}
+
 void RoomRegistry::fenced(const core::RoomId& room, std::uint64_t generation, OwnerWrite write) {
     ++counters_.fenced_writes;
     if (owned(room) == generation) {

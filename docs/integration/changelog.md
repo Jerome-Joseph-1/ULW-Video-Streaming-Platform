@@ -3,6 +3,27 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-04: group calls
+
+<!-- apps/chat/src/call.cpp (CallHandler::callable, CallHandler::moderate), apps/chat/src/ring.cpp (Ringer::signal), apps/chat/src/envelope.cpp (call_move_of, write_call_event), docs/adr/0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md -->
+
+A group chat now has a call ([calls.md](calls.md#group-calls)). Not breaking for 1:1 calls, with
+one change: a member removed from a direct chat during its call ends it for both.
+
+| Before | Now |
+|---|---|
+| `call` in a group chat was `not_callable` | A ticket to the group's call, of up to 8 devices; past that, `call_full` |
+| Nothing put anyone out of a call | The caller's `call_expel`, or a removal from the chat, puts a member out: everyone hears `call_moved` and asks for a ticket again; the one put out gets `expelled` |
+| `call_end` ended a call for both members | Unchanged for a direct chat; in a group call only the caller ends it for everyone, and the others `call_leave` |
+| `call_ended` always had `by` | No `by` when nobody did it: a group call nobody was left in, or a call ended by a removal |
+| A member removed from a direct chat stayed in its call | The call ends (`call_ended` with no `by`) |
+
+What to do:
+
+- **Clients:** to offer group calls, handle `call_left` and `call_moved` (on `call_moved`, ask
+  for a ticket again unless you are `expelled`), the errors `expelled` and `call_full`, and a
+  `call_ended` with no `by`. Clients that only make 1:1 calls need do nothing.
+
 ## 2026-10-03: a live stream goes live and ends when its publisher does
 
 <!-- apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md -->

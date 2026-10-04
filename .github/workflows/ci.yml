@@ -413,7 +413,9 @@ jobs:
   # whipsink among them, against the LiveKit, Redis and egress of deploy/local/compose.yaml, and a
   # relayed stream through to the live packager's playlist. On the same LiveKit, 1:1 calls through
   # the product (tests/call/direct-call.spec.mjs, ADR-0087): two chat_server nodes issue the
-  # tickets, and two Chrome profiles connect with them and decode each other's media.
+  # tickets, and two Chrome profiles connect with them and decode each other's media; and a group
+  # call of four (tests/call/group-call.spec.mjs, ADR-0095) through an owner killed mid-call and
+  # an expulsion.
   ingest:
     runs-on: ubuntu-24.04
     services:
@@ -467,7 +469,7 @@ jobs:
       - run: >-
           cmake --build --preset ci --target ulw_call_harness live_packager ulw_sandbox
           chat_server ulw_migrate ulw_devtoken
-      - run: tests/call/run.sh build/ci ingest.spec.mjs direct-call.spec.mjs
+      - run: tests/call/run.sh build/ci ingest.spec.mjs direct-call.spec.mjs group-call.spec.mjs
       - if: failure()
         run: docker compose -f deploy/local/compose.yaml --profile calls logs livekit egress
 

@@ -1685,6 +1685,8 @@ TEST_F(ChatServiceTest, ACallTheOwnerRefusesOrCannotAnswerIsAnErrorWithARetryHin
             {answer(chat::CallOutcome::Failed), "call_failed"},
             {answer(chat::CallOutcome::Disabled), "calls_disabled"},
             {answer(chat::CallOutcome::Busy), "busy"},
+            {answer(chat::CallOutcome::Expelled), "expelled"},
+            {answer(chat::CallOutcome::Full), "call_full"},
             {chat::encode_answer({.outcome = chat::CallOutcome::RingLimited,
                                   .ticket = std::nullopt,
                                   .retry_after = core::Millis{2'000}}),
@@ -1706,6 +1708,76 @@ TEST_F(ChatServiceTest, ACallTheOwnerRefusesOrCannotAnswerIsAnErrorWithARetryHin
         EXPECT_EQ(s.retry_after_ms.has_value(), reason == "unavailable" || reason == "ring_limited")
             << reason;
     }
+}
+
+TEST_F(ChatServiceTest, LeavingAndPuttingOutAGroupCallsMemberAreAskedOfTheOwner) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    ulw::test::FakeRandom random;
+    const auto call = chat::CallId::generate(clock_, random);
+    service_->call_move(a, {.room = room_id(),
+                            .signal = chat::CallSignal::Expel,
+                            .call = call,
+                            .target = *core::UserId::parse("bob")});
+    ASSERT_EQ(rooms_.asks.size(), 1U);
+    const auto asked = chat::decode_request(rooms_.asks[0].request);
+    ASSERT_TRUE(asked);
+    const auto& request = std::get<chat::CallSignalRequest>(*asked);
+    EXPECT_EQ(request.signal, chat::CallSignal::Expel);
+    EXPECT_EQ(request.target, core::UserId::parse("bob").value());
+    auto finish = std::move(rooms_.asks.back().done);
+    rooms_.asks.pop_back();
+    finish(chat::encode_answer({.outcome = chat::CallOutcome::Done,
+                                .ticket = std::nullopt,
+                                .call = call,
+                                .caller = *core::UserId::parse("alice")}));
+    const auto moved = core::json::parse(alice.take().at(0));
+    ASSERT_TRUE(moved);
+    EXPECT_EQ(moved->find("type")->as_string(), "call_moved");
+    EXPECT_EQ(moved->find("expelled")->as_string(), "bob");
+    EXPECT_EQ(moved->find("by")->as_string(), "alice");
+
+    service_->call_move(a, {.room = room_id(), .signal = chat::CallSignal::Leave, .call = call});
+    finish = std::move(rooms_.asks.back().done);
+    rooms_.asks.pop_back();
+    finish(chat::encode_answer({.outcome = chat::CallOutcome::Done,
+                                .ticket = std::nullopt,
+                                .call = call,
+                                .caller = *core::UserId::parse("alice")}));
+    EXPECT_EQ(seen(alice.take().at(0)).type, "call_left");
+    // A signal answered with a ticket's refusals is not one.
+    for (const auto outcome : {chat::CallOutcome::Expelled, chat::CallOutcome::Full}) {
+        service_->call_move(a,
+                            {.room = room_id(), .signal = chat::CallSignal::Leave, .call = call});
+        finish = std::move(rooms_.asks.back().done);
+        rooms_.asks.pop_back();
+        finish(answer(outcome));
+        EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
+    }
+}
+
+TEST_F(ChatServiceTest, RemovalsAndResyncsAreToldToWhoeverElseListens) {
+    struct Listener final : core::ports::IMemberListener {
+        void on_member_removed(const core::RoomId& room,
+                               const core::UserId& user) noexcept override {
+            removed.emplace_back(room, user);
+        }
+        void on_members_resync() noexcept override { ++resyncs; }
+        std::vector<std::pair<core::RoomId, core::UserId>> removed;
+        int resyncs = 0;
+    } listener;
+    service_->also_tell(&listener);
+    messages_.watcher->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    messages_.watcher->on_members_resync();
+    ASSERT_EQ(listener.removed.size(), 1U);
+    EXPECT_EQ(listener.removed[0].second.view(), "bob");
+    EXPECT_EQ(listener.resyncs, 1);
+    service_->also_tell(nullptr);
+    messages_.watcher->on_members_resync();
+    EXPECT_EQ(listener.resyncs, 1);
 }
 
 TEST_F(ChatServiceTest, ACallIsChargedAsAJoinAndADetachedClientHearsNoAnswer) {

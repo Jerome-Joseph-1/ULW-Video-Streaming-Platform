@@ -101,6 +101,12 @@ protected:
         });
     }
 
+    StoreResult<std::optional<std::uint64_t>> media(const core::RoomId& room,
+                                                    std::uint64_t generation, rt::MediaStep step) {
+        return ask<std::optional<std::uint64_t>>(
+            [&](auto done) { store_->media_generation(room, generation, step, std::move(done)); });
+    }
+
     StoreResult<std::vector<core::RoomId>> heartbeat(const core::NodeId& by,
                                                      std::vector<OwnedRoom> rooms) {
         return ask<std::vector<core::RoomId>>(
@@ -267,6 +273,28 @@ TEST_P(RoomStoreTest, AFormerOwnersAppendUpdatesNoRowsAndTheNewOwnersCarriesOn) 
     EXPECT_EQ(last_seq(room), "1");
     EXPECT_EQ(append(room, 2), Seq{2});
     EXPECT_EQ(last_seq(room), "2");
+}
+
+TEST_P(RoomStoreTest, AMediaGenerationStartsAtOneAndOnlyItsOwnerMovesItOn) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(resolve(room, a_));
+    EXPECT_EQ(media(room, 1, rt::MediaStep::Read), Seq{1});
+    EXPECT_EQ(media(room, 1, rt::MediaStep::Advance), Seq{2});
+    EXPECT_EQ(media(room, 1, rt::MediaStep::Read), Seq{2});
+    go_quiet(room);
+    ASSERT_EQ(resolve(room, b_), (Ownership{.node = b_, .generation = 2}));
+
+    // The deposed owner neither reads nor moves it; the new one finds where it stands.
+    EXPECT_EQ(media(room, 1, rt::MediaStep::Advance), Seq{std::nullopt});
+    EXPECT_EQ(media(room, 1, rt::MediaStep::Read), Seq{std::nullopt});
+    EXPECT_EQ(media(room, 2, rt::MediaStep::Read), Seq{2});
+    EXPECT_EQ(media(room, 2, rt::MediaStep::Advance), Seq{3});
+    // Moving it is no message: the room's count stands.
+    EXPECT_EQ(last_seq(room), "0");
+}
+
+TEST_P(RoomStoreTest, ARoomNobodyResolvedHasNoMediaGeneration) {
+    EXPECT_EQ(media(new_room(), 1, rt::MediaStep::Read), Seq{std::nullopt});
 }
 
 TEST_P(RoomStoreTest, AHeartbeatRenewsOnlyRoomsStillHeldUnderTheirGeneration) {

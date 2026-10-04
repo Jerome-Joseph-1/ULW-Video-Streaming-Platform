@@ -867,6 +867,12 @@ tickets with the same pair LiveKit checks them with, and calls LiveKit's server 
 with `calls_disabled`. With calls on, the first ticket of a call rings the other member, for
 45 s unless the chat container's environment sets `ULW_CALL_RING_TIMEOUT_MS` (1000 to 300000;
 docs/adr/0091); the base leaves it unset, and an overlay that wants another ring patches it in.
+A group chat's call holds 8 devices unless `ULW_CALL_GROUP_PARTICIPANTS` says otherwise (3 to 16;
+docs/adr/0095 derives the default from one SFU pod's capacity, about four full calls of eight
+per 2-core pod), set the same way. Group calls need migration 0014 (the room's media
+generation), which the gateway's init container applies before chat's new pods matter; they
+change no node-channel frame, so chat rolls out as usual, with group calls answered `unavailable`
+or `not_callable` by an old pod until the rollout finishes.
 All of these read the Secret only at start, so after a change restart
 Redis first (LiveKit does not start without it); STUNner rereads its secret by itself:
 

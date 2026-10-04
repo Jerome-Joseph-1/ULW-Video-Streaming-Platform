@@ -80,6 +80,16 @@ struct Outgoing {
     std::span<const std::byte> body;
 };
 
+// What an owner does with a room's media generation: the number its call's media room is
+// opened under (ADR-0050). It moves only forward, and only by the owner's fenced write, to put
+// someone out of the call or to end it (ADR-0095).
+enum class MediaStep : std::uint8_t {
+    // A fenced read: the generation, as the owner holding `generation` sees it.
+    Read,
+    // An owner write: the generation moves on by one, and the new one is answered.
+    Advance,
+};
+
 template <class T> using StoreResult = std::expected<T, StoreError>;
 template <class T> using StoreCallback = std::move_only_function<void(StoreResult<T>) noexcept>;
 
@@ -125,6 +135,12 @@ public:
     // its message (ADR-0043).
     virtual void append(const core::RoomId& room, std::uint64_t generation, const Outgoing& message,
                         StoreCallback<std::optional<std::uint64_t>> done) = 0;
+    // A fenced read or an owner write of the room's media generation (MediaStep): the room's
+    // media generation after the step, or nullopt when `generation` is no longer the room's.
+    // Then nothing was written. A room starts at media generation 1.
+    virtual void media_generation(const core::RoomId& room, std::uint64_t generation,
+                                  MediaStep step,
+                                  StoreCallback<std::optional<std::uint64_t>> done) = 0;
     // An owner write, for a node about to stop: the rooms it still holds at these generations
     // become claimable at once instead of after kOwnerStaleAfter.
     virtual void release(const core::NodeId& node, std::vector<OwnedRoom> rooms,
