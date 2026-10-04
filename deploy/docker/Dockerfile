@@ -28,6 +28,11 @@
 ARG UBUNTU=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 # debian:trixie-slim (13.7), 2026-09-18.
 ARG DEBIAN=debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+# The only ffmpeg and ffprobe ulw_sandbox will run (docs/adr/0089): built into it in the build
+# stage, and checked for in ffmpeg-runtime, where Debian's package puts them. Another path needs
+# an ffmpeg-runtime that installs one there.
+ARG ULW_SANDBOX_FFMPEG=/usr/bin/ffmpeg
+ARG ULW_SANDBOX_FFPROBE=/usr/bin/ffprobe
 
 FROM ${UBUNTU} AS apt
 ENV UBUNTU_SNAPSHOT=20260930T000000Z
@@ -51,11 +56,16 @@ RUN --mount=type=bind,source=deploy/docker/apt-install.sh,target=/usr/local/sbin
 WORKDIR /src
 COPY . .
 ARG ULW_GIT_SHA=unknown
+ARG ULW_SANDBOX_FFMPEG
+ARG ULW_SANDBOX_FFPROBE
 # Only chat_server links jemalloc (ULW_JEMALLOC, docs/adr/0081): Ubuntu's 5.3.0-2build1, the
 # version its soaks measured, here and in the chat image's runtime. Every other binary keeps
-# glibc's malloc whatever the option says.
+# glibc's malloc whatever the option says. ulw_sandbox runs only the ffmpeg and ffprobe named
+# here (docs/adr/0089); no setting at run time can point it elsewhere. The tests' helper,
+# ulw_sandbox_test_helper, is never built here.
 RUN CC=gcc-14 CXX=g++-14 cmake --preset release -DULW_BUILD_TESTS=OFF -DULW_JEMALLOC=ON \
         -DULW_GIT_SHA=${ULW_GIT_SHA} \
+        -DULW_SANDBOX_FFMPEG=${ULW_SANDBOX_FFMPEG} -DULW_SANDBOX_FFPROBE=${ULW_SANDBOX_FFPROBE} \
  && cmake --build --preset release \
         --target gateway_server ulw_migrate ulw_reaper transcode_worker ulw_sandbox \
                  chat_server live_packager \
@@ -103,8 +113,11 @@ ENTRYPOINT ["/usr/local/bin/chat_server"]
 # pinned below (DSA-6361-1, in debian-security since 20260622T192543Z). Both run the same ffmpeg
 # under the same sandbox, so they share this stage and a bump reaches both. A new DSA for
 # ffmpeg, or for anything else here, is a bump of DEBIAN_SNAPSHOT and of the versions it names
-# (RUNBOOK.md, "Updating the worker's ffmpeg").
+# (RUNBOOK.md, "Updating the worker's ffmpeg"). The package must leave ffmpeg and ffprobe at the
+# paths ulw_sandbox is built with (the build stage), or the image fails to build here.
 FROM ${DEBIAN} AS ffmpeg-runtime
+ARG ULW_SANDBOX_FFMPEG
+ARG ULW_SANDBOX_FFPROBE
 ENV DEBIAN_SNAPSHOT=20260930T100000Z
 RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/local/sbin/apt-install-debian \
     --mount=type=secret,id=ca-bundle,mode=0444 \
@@ -116,6 +129,7 @@ RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/loc
         libssl3t64=3.5.7-1~deb13u3 \
         openssl-provider-legacy=3.5.7-1~deb13u3 \
         ffmpeg=7:7.1.5-0+deb13u1 \
+ && test -x "${ULW_SANDBOX_FFMPEG}" && test -x "${ULW_SANDBOX_FFPROBE}" \
  && useradd --system --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin ulw
 
 FROM ffmpeg-runtime AS worker
