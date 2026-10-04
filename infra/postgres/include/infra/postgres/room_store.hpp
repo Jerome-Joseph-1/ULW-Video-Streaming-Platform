@@ -67,9 +67,11 @@ public:
     // core::ports::kMaxMessageBody is refused as Unavailable, and nothing is written.
     void append(const core::RoomId& room, std::uint64_t generation, const rt::Outgoing& message,
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override;
-    // One statement on room_state (migrations/0014), matched on the owner's generation.
-    void media_generation(const core::RoomId& room, std::uint64_t generation, rt::MediaStep step,
-                          rt::StoreCallback<std::optional<std::uint64_t>> done) override;
+    // One statement on room_state and room_media_expelled (migrations/0014), matched on the
+    // owner's generation.
+    void media_generation(const core::RoomId& room, std::uint64_t generation,
+                          const rt::MediaChange& change,
+                          rt::StoreCallback<std::optional<rt::MediaState>> done) override;
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,
                  rt::StoreCallback<void> done) override;
     void advertise(const core::NodeId& node, std::string address, const core::Uuid& incarnation,

@@ -611,13 +611,47 @@ TEST_F(GroupRingerTest, AMembersLeavingIsHeardAndTheLastOneOutEndsTheCall) {
     EXPECT_EQ(plane_.take(), all(RingEvent::Left, "alice"));
     EXPECT_FALSE(ringer_.idle(room_id()));
     EXPECT_EQ(ringer_.signal(room_id(), user("bob"), CallSignal::Leave, call), user("alice"));
-    auto expected = all(RingEvent::Left, "bob");
-    const auto ended = all(RingEvent::Ended, "bob");
-    expected.insert(expected.end(), ended.begin(), ended.end());
-    EXPECT_EQ(plane_.take(), expected);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Left, "bob"));
+    // Nobody known in it: whether anyone still is, the SFU says, at once.
+    const auto checks = ringer_.take_checks();
+    ASSERT_EQ(checks.size(), 1U);
+    EXPECT_EQ(checks[0].second, call);
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    ringer_.occupied(room_id(), call, false);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
     EXPECT_TRUE(ringer_.idle(room_id()));
     EXPECT_EQ(ringer_.counters().left, 2U);
     EXPECT_EQ(ringer_.counters().emptied, 1U);
+}
+
+TEST_F(GroupRingerTest, ACheckTheSfuCannotAnswerSoOftenEndsTheCall) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    ASSERT_TRUE(ringer_.signal(room_id(), user("alice"), CallSignal::Leave, call));
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::Leave, call));
+    plane_.take();
+    const chat::RingLimits limits;
+    for (std::uint32_t i = 1; i < chat::kMaxUnansweredChecks; ++i) {
+        ASSERT_EQ(ringer_.take_checks().size(), 1U) << i;
+        ringer_.occupied(room_id(), call, std::nullopt);
+        EXPECT_FALSE(ringer_.idle(room_id()));
+        clock_.advance(limits.occupancy_check);
+        ringer_.tick();
+    }
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    // (carol and dave were rung meanwhile, and missed it.)
+    plane_.take();
+    ringer_.occupied(room_id(), call, std::nullopt);
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
+}
+
+TEST_F(GroupRingerTest, AnExpulsionThatMovedNothingIsToldOnlyToWhoWasPutOut) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    plane_.take();
+    ringer_.moved(room_id(), call, user("alice"), user("carol"), false);
+    EXPECT_EQ(plane_.take(), std::vector{line(RingEvent::Moved, "carol", "alice")});
 }
 
 TEST_F(GroupRingerTest, ADirectCallHasNoLeaveNorExpel) {

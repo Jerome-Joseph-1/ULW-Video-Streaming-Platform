@@ -88,6 +88,27 @@ enum class MediaStep : std::uint8_t {
     Read,
     // An owner write: the generation moves on by one, and the new one is answered.
     Advance,
+    // An owner write: `expel` is put out of the generation as it stands, which does not move.
+    Expel,
+};
+
+// A media generation step: a read, or an advance that either carries the generation's put-out
+// list over to the next one with `expel` added (to put someone out), or starts the next one with
+// an empty list (`carry` false: a call ended for everyone).
+struct MediaChange {
+    MediaStep step = MediaStep::Read;
+    bool carry = true;
+    std::optional<core::UserId> expel = std::nullopt;
+};
+
+// Who was put out of the room's call stays out of its media generation, kept with it so that a
+// new owner refuses them too (ADR-0095). At most kMaxMediaExpelled of them.
+inline constexpr std::size_t kMaxMediaExpelled = 64;
+struct MediaState {
+    std::uint64_t generation = 1;
+    std::vector<core::UserId> expelled = {};
+
+    friend bool operator==(const MediaState&, const MediaState&) = default;
 };
 
 template <class T> using StoreResult = std::expected<T, StoreError>;
@@ -135,12 +156,13 @@ public:
     // its message (ADR-0043).
     virtual void append(const core::RoomId& room, std::uint64_t generation, const Outgoing& message,
                         StoreCallback<std::optional<std::uint64_t>> done) = 0;
-    // A fenced read or an owner write of the room's media generation (MediaStep): the room's
-    // media generation after the step, or nullopt when `generation` is no longer the room's.
-    // Then nothing was written. A room starts at media generation 1.
+    // A fenced read or an owner write of the room's media generation (MediaChange): the room's
+    // media generation after the step and who is put out of it, or nullopt when `generation` is
+    // no longer the room's. Then nothing was written. A room starts at media generation 1, with
+    // nobody put out.
     virtual void media_generation(const core::RoomId& room, std::uint64_t generation,
-                                  MediaStep step,
-                                  StoreCallback<std::optional<std::uint64_t>> done) = 0;
+                                  const MediaChange& change,
+                                  StoreCallback<std::optional<MediaState>> done) = 0;
     // An owner write, for a node about to stop: the rooms it still holds at these generations
     // become claimable at once instead of after kOwnerStaleAfter.
     virtual void release(const core::NodeId& node, std::vector<OwnedRoom> rooms,

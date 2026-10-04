@@ -13,7 +13,11 @@
 
 namespace {
 
-using MediaAnswer = rt::StoreResult<std::optional<std::uint64_t>>;
+using MediaAnswer = rt::StoreResult<std::optional<rt::MediaState>>;
+
+MediaAnswer at(std::uint64_t generation) {
+    return std::optional<rt::MediaState>{rt::MediaState{.generation = generation, .expelled = {}}};
+}
 
 using rt::AppendError;
 using rt::OwnedRoom;
@@ -158,21 +162,22 @@ TEST_F(RegistryTest, AFencedAppendEndsOwnershipAtOnceAndIsReported) {
 
 TEST_F(RegistryTest, TheMediaGenerationIsReadAndMovedOnUnderTheOwnersGeneration) {
     const core::RoomId room = new_room();
-    EXPECT_FALSE(registry_.media_generation(room, rt::MediaStep::Read, [](auto) noexcept {}));
+    EXPECT_FALSE(registry_.media_generation(room, rt::MediaChange{.step = rt::MediaStep::Read},
+                                            [](auto) noexcept {}));
     EXPECT_TRUE(store_.media.empty());
     own(room, 4);
-    std::optional<rt::StoreResult<std::optional<std::uint64_t>>> result;
-    ASSERT_TRUE(registry_.media_generation(room, rt::MediaStep::Advance,
+    std::optional<MediaAnswer> result;
+    ASSERT_TRUE(registry_.media_generation(room, rt::MediaChange{.step = rt::MediaStep::Advance},
                                            [&](auto r) noexcept { result = r; }));
     ASSERT_EQ(store_.media.size(), 1U);
     EXPECT_EQ(store_.media.front().generation, 4U);
-    EXPECT_EQ(store_.media.front().step, rt::MediaStep::Advance);
-    FakeRoomStore::take(store_.media).done(MediaAnswer{std::optional<std::uint64_t>{7}});
-    EXPECT_EQ(result, MediaAnswer{std::optional<std::uint64_t>{7}});
+    EXPECT_EQ(store_.media.front().change.step, rt::MediaStep::Advance);
+    FakeRoomStore::take(store_.media).done(at(7));
+    EXPECT_EQ(result, at(7));
     EXPECT_EQ(registry_.owned(room), 4U);
 
     // The store not answering says nothing of the room's owner.
-    ASSERT_TRUE(registry_.media_generation(room, rt::MediaStep::Read,
+    ASSERT_TRUE(registry_.media_generation(room, rt::MediaChange{.step = rt::MediaStep::Read},
                                            [&](auto r) noexcept { result = r; }));
     FakeRoomStore::take(store_.media).done(std::unexpected(rt::StoreError::Unavailable));
     EXPECT_EQ(result, std::unexpected(rt::StoreError::Unavailable));
@@ -183,11 +188,11 @@ TEST_F(RegistryTest, TheMediaGenerationIsReadAndMovedOnUnderTheOwnersGeneration)
 TEST_F(RegistryTest, AFencedMediaGenerationEndsOwnershipAsAnyOwnerWriteDoes) {
     const core::RoomId room = new_room();
     own(room, 2);
-    std::optional<rt::StoreResult<std::optional<std::uint64_t>>> result;
-    ASSERT_TRUE(registry_.media_generation(room, rt::MediaStep::Advance,
+    std::optional<MediaAnswer> result;
+    ASSERT_TRUE(registry_.media_generation(room, rt::MediaChange{.step = rt::MediaStep::Advance},
                                            [&](auto r) noexcept { result = r; }));
-    FakeRoomStore::take(store_.media).done(MediaAnswer{std::optional<std::uint64_t>{}});
-    EXPECT_EQ(result, MediaAnswer{std::optional<std::uint64_t>{}});
+    FakeRoomStore::take(store_.media).done(MediaAnswer{std::optional<rt::MediaState>{}});
+    EXPECT_EQ(result, MediaAnswer{std::optional<rt::MediaState>{}});
     EXPECT_FALSE(registry_.owned(room));
     ASSERT_EQ(observer_.fences.size(), 1U);
     EXPECT_EQ(observer_.fences[0].write, OwnerWrite::MediaGeneration);

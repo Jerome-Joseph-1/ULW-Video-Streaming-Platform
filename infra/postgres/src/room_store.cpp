@@ -161,12 +161,53 @@ RETURNING last_seq, true)sql";
 
 // A room's media generation (migrations/0014), read or moved on under the owner's generation:
 // no row when another owner holds the room. Never touches last_seq.
+// Both answer one row per member put out of the generation, or one with a null user when there
+// is none; no row at all when the owner's generation is not the room's. $3 caps the rows.
 constexpr Sql kReadMediaGeneration = R"sql(
-SELECT media_generation FROM room_state WHERE room_id = $1 AND owner_generation = $2)sql";
+SELECT s.media_generation, e.user_id
+  FROM room_state s
+  LEFT JOIN room_media_expelled e
+         ON e.room_id = s.room_id AND e.media_generation = s.media_generation
+ WHERE s.room_id = $1 AND s.owner_generation = $2
+ LIMIT $3)sql";
+// The move and its put-out list in one statement, fenced as the move: the previous
+// generation's list carried over when $4, and $5 added unless empty. Older lists go.
 constexpr Sql kAdvanceMediaGeneration = R"sql(
-UPDATE room_state SET media_generation = media_generation + 1
- WHERE room_id = $1 AND owner_generation = $2
-RETURNING media_generation)sql";
+WITH moved AS (
+    UPDATE room_state SET media_generation = media_generation + 1
+     WHERE room_id = $1 AND owner_generation = $2
+    RETURNING media_generation),
+gone AS (
+    DELETE FROM room_media_expelled e USING moved
+     WHERE e.room_id = $1 AND e.media_generation < moved.media_generation - 1),
+listed AS (
+    INSERT INTO room_media_expelled (room_id, media_generation, user_id)
+    SELECT $1, moved.media_generation, e.user_id
+      FROM moved JOIN room_media_expelled e
+        ON e.room_id = $1 AND e.media_generation = moved.media_generation - 1
+     WHERE $4
+    UNION
+    SELECT $1, moved.media_generation, $5 FROM moved WHERE $5 <> ''
+    LIMIT $3
+    ON CONFLICT DO NOTHING
+    RETURNING user_id)
+SELECT moved.media_generation, listed.user_id FROM moved LEFT JOIN listed ON true)sql";
+// Someone put out of the generation as it stands, fenced as any owner write; answered as a read.
+constexpr Sql kExpelMediaGeneration = R"sql(
+WITH added AS (
+    INSERT INTO room_media_expelled (room_id, media_generation, user_id)
+    SELECT room_id, media_generation, $5 FROM room_state
+     WHERE room_id = $1 AND owner_generation = $2 AND $4 AND $5 <> ''
+    ON CONFLICT DO NOTHING)
+SELECT s.media_generation, e.user_id
+  FROM room_state s
+  LEFT JOIN room_media_expelled e
+         ON e.room_id = s.room_id AND e.media_generation = s.media_generation
+ WHERE s.room_id = $1 AND s.owner_generation = $2
+UNION
+SELECT s.media_generation, $5 FROM room_state s
+ WHERE s.room_id = $1 AND s.owner_generation = $2 AND $5 <> ''
+ LIMIT $3)sql";
 
 // '-infinity' is older than any staleness bound, so the rooms are claimable at once.
 constexpr Sql kRelease = R"sql(
@@ -507,14 +548,25 @@ private:
 
 class MediaGeneration final : public Operation {
 public:
-    MediaGeneration(const core::RoomId& room, std::uint64_t generation, rt::MediaStep step,
-                    StoreCallback<std::optional<std::uint64_t>> done)
-        : room_(room), generation_(generation), step_(step), done_(std::move(done)) {}
+    MediaGeneration(const core::RoomId& room, std::uint64_t generation,
+                    const rt::MediaChange& change,
+                    StoreCallback<std::optional<rt::MediaState>> done)
+        : room_(room), generation_(generation), change_(change),
+          expel_(change.expel ? std::string(change.expel->view()) : std::string{}),
+          done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
-        return Statement{.sql = step_ == rt::MediaStep::Advance ? kAdvanceMediaGeneration
-                                                                : kReadMediaGeneration,
-                         .params = Params{}.add_uuid(room_.uuid()).add_int(as_int(generation_))};
+        Params params;
+        params.add_uuid(room_.uuid())
+            .add_int(as_int(generation_))
+            .add_int(static_cast<std::int64_t>(rt::kMaxMediaExpelled));
+        if (change_.step == rt::MediaStep::Read) {
+            return Statement{.sql = kReadMediaGeneration, .params = params};
+        }
+        params.add_bool(change_.carry).add_text(expel_);
+        return Statement{.sql = change_.step == rt::MediaStep::Expel ? kExpelMediaGeneration
+                                                                     : kAdvanceMediaGeneration,
+                         .params = params};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -522,16 +574,7 @@ public:
             done_(std::unexpected(StoreError::Unavailable));
             return std::nullopt;
         }
-        if (outcome->rows() == 0) {
-            done_(std::optional<std::uint64_t>{});
-            return std::nullopt;
-        }
-        const auto media = generation_at(*outcome, 0, 0);
-        if (!media) {
-            done_(std::unexpected(StoreError::Corrupt));
-            return std::nullopt;
-        }
-        done_(std::optional<std::uint64_t>{*media});
+        done_(decode(*outcome));
         return std::nullopt;
     }
 
@@ -539,11 +582,40 @@ public:
         done_(std::unexpected(StoreError::Unavailable));
     }
 
+    // The generation of the first row, and the user of every row that has one.
+    static StoreResult<std::optional<rt::MediaState>> decode(const Result& r) noexcept {
+        if (r.rows() == 0) {
+            return std::optional<rt::MediaState>{};
+        }
+        const auto media = generation_at(r, 0, 0);
+        if (!media) {
+            return std::unexpected(StoreError::Corrupt);
+        }
+        rt::MediaState state{.generation = *media, .expelled = {}};
+        try {
+            for (int row = 0; row < r.rows(); ++row) {
+                const auto text = r.get(row, 1);
+                if (!text) {
+                    continue;
+                }
+                const auto user = core::UserId::parse(*text);
+                if (!user) {
+                    return std::unexpected(StoreError::Corrupt);
+                }
+                state.expelled.push_back(*user);
+            }
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(StoreError::Unavailable);
+        }
+        return std::optional<rt::MediaState>{std::move(state)};
+    }
+
 private:
     core::RoomId room_;
     std::uint64_t generation_;
-    rt::MediaStep step_;
-    StoreCallback<std::optional<std::uint64_t>> done_;
+    rt::MediaChange change_;
+    std::string expel_;
+    StoreCallback<std::optional<rt::MediaState>> done_;
 };
 
 class Advertise final : public Operation {
@@ -801,10 +873,10 @@ void PgRoomStore::append(const core::RoomId& room, std::uint64_t generation,
 }
 
 void PgRoomStore::media_generation(const core::RoomId& room, std::uint64_t generation,
-                                   rt::MediaStep step,
-                                   StoreCallback<std::optional<std::uint64_t>> done) {
+                                   const rt::MediaChange& change,
+                                   StoreCallback<std::optional<rt::MediaState>> done) {
     impl_->pool().submit(
-        std::make_unique<MediaGeneration>(room, generation, step, std::move(done)));
+        std::make_unique<MediaGeneration>(room, generation, change, std::move(done)));
 }
 
 void PgRoomStore::release(const core::NodeId& node, std::vector<OwnedRoom> rooms,

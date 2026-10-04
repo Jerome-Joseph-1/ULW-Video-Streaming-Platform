@@ -413,12 +413,14 @@ calls ended because nobody was left in them), `call_expulsions_total`,
 `call_moves_total{reason="expel"}`, `{reason="removal"}` and `{reason="end"}` (media generations
 moved on by the owner's fenced write), `call_moves_failed_total{why="fenced"}` (the room had
 changed hands; nothing reached LiveKit) and `{why="unavailable"}` (the database did not answer;
-a removal's move is retried each second), `call_generations_closed_total`,
+the move stays queued and the generation is read again), `call_generations_closed_total`,
 `call_generations_closing` (old generations LiveKit has not closed yet: someone put out may still
 be connected; a value that stays up means LiveKit is not answering) and
 `call_generations_abandoned_total` (given up after 5 minutes), `call_occupancy_checks_total` and
 `call_occupancy_unavailable_total` (LiveKit asked whether a quiet group call still has anyone in
-it), and `call_resync_checks_total`.
+it), `call_resync_checks_total`, `call_expulsions_kept_total` (put out of a call they were not
+in: stored, nothing moved) and `call_announcements_dropped_total` (`call_moved` or `call_ended`
+never sent because the room changed hands before the old generation's close was done).
 For member lists changed by their users (ADR-0096), counted on the node
 the asking client is on: `directs_opened_total` (direct chats whose pair an `open_direct`
 listed), `groups_created_total`, `members_changed_total{change="added"}`, `{change="removed"}`

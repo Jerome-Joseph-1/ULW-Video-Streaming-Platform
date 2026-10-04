@@ -176,20 +176,26 @@ what differs is how many are in it, how it rings, and how it ends.
   ran out, does everyone hear `call_missed`: the call is over. The caller may `call_cancel` before
   anyone joins.
 - **Leaving.** `call_leave` (`room`, `call`) takes you out of the call; everyone hears
-  `call_left` with `by`. Disconnect from LiveKit too. When the last one in the call leaves,
-  everyone hears `call_ended` with that `by`. A call everyone left without saying so (closed apps)
+  `call_left` with `by`. Disconnect from LiveKit too. When the last one the owner admitted
+  leaves, the owner asks LiveKit whether anyone is still connected (someone admitted before an
+  owner change may be); when nobody is, everyone hears `call_ended`. A call everyone left without saying so (closed apps)
   ends by itself: two minutes after its last ticket the owner asks LiveKit whether anyone is still
-  connected, and every 30 s after that; when nobody is, everyone hears `call_ended` with no `by`.
+  connected, and every 30 s after that; when nobody is, or LiveKit has not answered three times
+  in a row, everyone hears `call_ended` with no `by`.
 - **Ending for everyone.** The caller's `call_end` ends the call for everyone: LiveKit closes the
   call's room, which disconnects every device in it (`Disconnected` with `ROOM_DELETED`), and
   everyone hears `call_ended` with `by`. A `call_end` from anyone else is `no_call`; leave instead.
 - **Putting someone out.** The caller sends
-  `{"type":"call_expel","room":...,"call":...,"user":"<member>"}`. The call moves to a new media
-  room: everyone, the one put out included, hears `call_moved` with `expelled` (who) and `by` (the
-  caller), once LiveKit has closed the old room under every device in it. **On `call_moved`, if you
+  `{"type":"call_expel","room":...,"call":...,"user":"<member>"}` (`user` must be a member of
+  the chat). The caller is answered `call_moved` as soon as it is decided; the call moves to a new
+  media room, and everyone else, the one put out included, hears `call_moved` with `expelled`
+  (who) and `by` (the caller) once LiveKit has closed the old room under every device in it. If
+  the one put out was not in the call (no recent ticket, no device LiveKit lists), nothing
+  moves: only they and the caller hear `call_moved`, and the others stay connected. **On `call_moved`, if you
   are not `expelled`, ask for a ticket again (`call`) and connect with it**: the interruption is
   that round trip, under a second. If you are, the call is over for you: chat answers your
-  tickets `expelled` while the call lasts, and LiveKit admits no credential for the old room. A
+  tickets `expelled` while the call lasts, even after the room's owner changes, and LiveKit
+  admits no credential for the old room. A
   member removed from the group chat is put out the same way, by chat itself: `call_moved` has
   no `by`.
 
@@ -215,7 +221,8 @@ What a group call does not do:
 - **An owner change forgets the call** (as a direct chat's ring, [Ringing](#ringing)): media goes
   on untouched, and the next ticket starts a new call that rings the others; clients already
   connected answer it by asking for a ticket and keep their connections. Nothing is lost but the
-  call's id and who declined.
+  call's id and who declined: the media room and who was put out are stored, so anyone put out is
+  still refused `expelled` by the new owner.
 
 ### Client settings
 
