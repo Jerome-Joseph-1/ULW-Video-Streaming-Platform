@@ -55,6 +55,12 @@ spec:
                 secretKeyRef:
                   name: sfu-secrets
                   key: LIVEKIT_KEYS
+            # The key of that pair, by itself: webhooks are signed with it (below).
+            - name: LIVEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sfu-secrets
+                  key: LIVEKIT_API_KEY
             # STUNner's public address, and the shared secret of its ephemeral auth
             # (stunner-secrets in stunner-system holds the same value), expanded into the
             # configuration below.
@@ -112,6 +118,15 @@ spec:
                   # ListParticipants from the room itself, not from its copy in Redis, which can
                   # keep a stale snapshot of a participant (deploy/local/compose.yaml says how).
                   enable_psrpc_for_get_list_participants: true
+                # Room and participant events to the gateway's stream service, signed with the
+                # key it shares (docs/adr/0093): on the gateway's webhook listener, in this
+                # namespace, which only this pod may reach and no route exposes
+                # (components/live-streams/hooks.yaml). Without that component nothing listens
+                # there: each send fails and is dropped, which changes nothing else.
+                webhook:
+                  api_key: $(LIVEKIT_API_KEY)
+                  urls:
+                    - http://video-gateway-hooks:8081/livekit/webhook
                 logging:
                   level: info
           # CPU binds before bandwidth. tests/load/call_capacity measured 0.0158 cores per 1:1

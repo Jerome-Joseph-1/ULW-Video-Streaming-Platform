@@ -177,6 +177,13 @@ public:
         OpenDone done;
     };
 
+    // Calls never ask: only the stream service's webhook path does (ADR-0093).
+    void present(const core::RoomId& /*room*/, core::ports::MediaGeneration /*generation*/,
+                 const core::UserId& /*user*/, const core::DeviceId& /*device*/,
+                 core::ports::PresenceDone done) override {
+        done(std::unexpected(MediaError::NotImplemented));
+    }
+
     void open_room(const core::RoomId& room, core::ports::MediaGeneration generation,
                    core::ports::MediaRoomKind kind, std::uint16_t max_participants,
                    OpenDone done) override {
