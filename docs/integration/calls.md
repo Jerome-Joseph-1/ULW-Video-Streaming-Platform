@@ -186,7 +186,7 @@ what differs is how many are in it, how it rings, and how it ends.
 - **Putting someone out.** The caller sends
   `{"type":"call_expel","room":...,"call":...,"user":"<member>"}`. The call moves to a new media
   room: everyone, the one put out included, hears `call_moved` with `expelled` (who) and `by` (the
-  caller), and LiveKit closes the old room under every device in it. **On `call_moved`, if you
+  caller), once LiveKit has closed the old room under every device in it. **On `call_moved`, if you
   are not `expelled`, ask for a ticket again (`call`) and connect with it**: the interruption is
   that round trip, under a second. If you are, the call is over for you: chat answers your
   tickets `expelled` while the call lasts, and LiveKit admits no credential for the old room. A

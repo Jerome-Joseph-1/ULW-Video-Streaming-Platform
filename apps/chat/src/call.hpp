@@ -267,6 +267,9 @@ private:
         bool closing = false;
         core::MonoTime next_try;
         core::MonoTime give_up;
+        // The move that retired it, told to everyone and answered once the SFU says the room is
+        // gone (or could not say, the first time).
+        std::optional<Move> pending;
     };
 
     void checked(const core::RoomId& room, Waiter waiter,
@@ -297,7 +300,11 @@ private:
     // a removal's move stays, to be tried again.
     void fail_waiting(Entry& entry, CallOutcome outcome) noexcept;
     void retire(const core::RoomId& room, std::uint64_t generation,
-                std::unique_ptr<core::ports::IMediaRoom> media, std::size_t joining) noexcept;
+                std::unique_ptr<core::ports::IMediaRoom> media, std::size_t joining,
+                Move move) noexcept;
+    // Tells everyone of a move, and answers who asked for it.
+    void announce(const core::RoomId& room, Move& move) noexcept;
+    void announce_retired(Retired& retired) noexcept;
     void close_retired() noexcept;
     void retired_closed(std::uint64_t id, std::expected<void, core::ports::MediaError> r) noexcept;
     // A join asked of `generation` was answered.

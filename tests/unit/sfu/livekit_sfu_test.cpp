@@ -495,7 +495,8 @@ TEST_P(LiveKitSfuTest, AClosedRoomRelaysNothing) {
     const auto relayed = relay(**room, stream_target());
     ASSERT_FALSE(relayed);
     EXPECT_EQ(relayed.error(), MediaError::Closed);
-    EXPECT_EQ(server.request_count(), 2U);
+    // The create, and the close's delete and the listing that checks it took.
+    EXPECT_EQ(server.request_count(), 3U);
 }
 
 TEST_P(LiveKitSfuTest, ThePlainClientUrlGivesAPlainWhipUrl) {
@@ -677,7 +678,7 @@ TEST_P(LiveKitSfuTest, AClosedRoomListsNobodyAndAsksNothing) {
     const Listed listed = list_participants(*reactor, **room);
     ASSERT_FALSE(listed);
     EXPECT_EQ(listed.error(), MediaError::Closed);
-    EXPECT_EQ(server.requests().size(), 2U) << "only the create and the delete";
+    EXPECT_EQ(server.requests().size(), 3U) << "only the create, the delete and its check";
 }
 
 TEST_P(LiveKitSfuTest, AClosedRoomIssuesNoTicketAndIsNotRecreated) {
@@ -689,7 +690,7 @@ TEST_P(LiveKitSfuTest, AClosedRoomIssuesNoTicketAndIsNotRecreated) {
     const auto ticket = join(**room, "alice");
     ASSERT_FALSE(ticket);
     EXPECT_EQ(ticket.error(), MediaError::Closed);
-    EXPECT_EQ(server.request_count(), 2U) << "the closed generation was created again";
+    EXPECT_EQ(server.request_count(), 3U) << "the closed generation was created again";
 }
 
 TEST_P(LiveKitSfuTest, ClosingAGenerationDeletesItsRoom) {
@@ -699,17 +700,89 @@ TEST_P(LiveKitSfuTest, ClosingAGenerationDeletesItsRoom) {
     ASSERT_TRUE(room);
     ASSERT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
     const auto requests = server.requests();
-    ASSERT_EQ(requests.size(), 2U);
+    ASSERT_EQ(requests.size(), 3U);
     EXPECT_EQ(requests[1].path(), "/twirp/livekit.RoomService/DeleteRoom");
     EXPECT_EQ(string_at(body_of(requests[1]), "room"), std::string(kRoom) + ":3");
     EXPECT_EQ(bool_at(claims_of(requests[1]), "video", "roomCreate"), true);
+    // Then whether it is gone, by name, with a token that only lists.
+    EXPECT_EQ(requests[2].path(), "/twirp/livekit.RoomService/ListRooms");
+    const auto listed = body_of(requests[2]);
+    const auto* names = listed.find("names");
+    ASSERT_TRUE(names != nullptr && names->as_array() != nullptr && names->as_array()->size() == 1);
+    EXPECT_EQ(names->as_array()->at(0).as_string(), std::string(kRoom) + ":3");
+    EXPECT_EQ(bool_at(claims_of(requests[2]), "video", "roomList"), true);
+    EXPECT_EQ(bool_at(claims_of(requests[2]), "video", "roomCreate"), std::nullopt);
+}
+
+// A client joining while LiveKit deletes the room can bring it back: a close that still finds the
+// room listed deletes it again, and only says it closed once the listing comes back empty.
+TEST_P(LiveKitSfuTest, ARoomBroughtBackDuringItsDeleteIsDeletedAgain) {
+    std::atomic<int> lists{0};
+    const HttpTestServer server([&](const ServedRequest& request) {
+        if (request.path() == "/twirp/livekit.RoomService/ListRooms" && ++lists == 1) {
+            return Reply{.status = 200,
+                         .headers = {},
+                         .body = R"({"rooms":[{"name":")" + std::string(kRoom) + R"(:1"}]})"};
+        }
+        return Reply{.status = 200, .headers = {}, .body = "{}"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    ASSERT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
+    std::vector<std::string> paths;
+    for (const ServedRequest& r : server.requests()) {
+        paths.emplace_back(r.path());
+    }
+    EXPECT_EQ(paths, (std::vector<std::string>{"/twirp/livekit.RoomService/CreateRoom",
+                                               "/twirp/livekit.RoomService/DeleteRoom",
+                                               "/twirp/livekit.RoomService/ListRooms",
+                                               "/twirp/livekit.RoomService/DeleteRoom",
+                                               "/twirp/livekit.RoomService/ListRooms"}));
+}
+
+TEST_P(LiveKitSfuTest, ARoomThatWillNotGoIsReportedUnavailableForTheCallerToRetry) {
+    const HttpTestServer server([&](const ServedRequest& request) {
+        if (request.path() == "/twirp/livekit.RoomService/ListRooms") {
+            return Reply{.status = 200,
+                         .headers = {},
+                         .body = R"({"rooms":[{"name":")" + std::string(kRoom) + R"(:1"}]})"};
+        }
+        return Reply{.status = 200, .headers = {}, .body = "{}"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto closed = wait([&](auto done) { (*room)->close(std::move(done)); });
+    ASSERT_FALSE(closed);
+    EXPECT_EQ(closed.error(), MediaError::Unavailable);
+    // Three rounds of a delete and its check.
+    EXPECT_EQ(server.request_count(), 7U);
+}
+
+TEST_P(LiveKitSfuTest, ACloseWhoseCheckFailsSaysSo) {
+    std::atomic<int> served{0};
+    const HttpTestServer server([&](const ServedRequest& request) {
+        ++served;
+        if (request.path() == "/twirp/livekit.RoomService/ListRooms") {
+            return Reply{.status = 503, .headers = {}, .body = R"({"code":"unavailable"})"};
+        }
+        return Reply{.status = 200, .headers = {}, .body = "{}"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto closed = wait([&](auto done) { (*room)->close(std::move(done)); });
+    ASSERT_FALSE(closed);
+    EXPECT_EQ(closed.error(), MediaError::Unavailable);
 }
 
 TEST_P(LiveKitSfuTest, ClosingWhatIsAlreadyGoneSucceeds) {
     std::atomic<int> served{0};
-    // The room opens and has gone by the time it is closed.
-    const HttpTestServer server([&](const ServedRequest&) {
-        return ++served == 1
+    // The room opens and has gone by the time it is closed: its delete is not_found, and the
+    // listing that checks it finds nothing.
+    const HttpTestServer server([&](const ServedRequest& request) {
+        return ++served == 1 || request.path() == "/twirp/livekit.RoomService/ListRooms"
                    ? Reply{.status = 200, .headers = {}, .body = "{}"}
                    : Reply{.status = 404, .headers = {}, .body = R"({"code":"not_found"})"};
     });

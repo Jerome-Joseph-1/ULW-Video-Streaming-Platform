@@ -63,7 +63,14 @@ What a group adds to a 1:1 call, on the owner:
   and again whenever its ownership generation changed; tickets name the generation it last read
   or wrote. The SFU hears of a move only after the write: the old generation is closed once the
   joins in flight on it are answered (their tickets are not handed out), and retried every second
-  until LiveKit says it is gone, for up to 5 minutes; a generation another owner opened is
+  until LiveKit says it is gone, for up to 5 minutes. A close is a `DeleteRoom` followed by a
+  `ListRooms` of that name, and deleted again (three rounds at most) while LiveKit still lists it:
+  a client joining while LiveKit deletes a room can bring it back, since it found the room before
+  it went and LiveKit stores it again for the session. Nobody hears of the move (`call_moved`,
+  `call_ended`, the caller's answer) until the close has found the room gone, or could not say
+  the first time: whoever acts on the event, the one put out trying the old credential among
+  them, finds nothing to join. `RemoveParticipant` would add nothing (ADR-0050: the client
+  reconnects with its refreshed token while the room exists); a generation another owner opened is
   opened (idempotently) to be closed. The store not answering a move leaves the SFU untouched;
   a removal's move is retried each second, a caller's is answered `unavailable`.
 - **The ring of a group** (ADR-0091's ring, extended). The first ticket rings up to 32 other

@@ -16,10 +16,10 @@ namespace infra::ffmpeg {
 
 struct RecordingRemuxConfig {
     // The ulw_sandbox helper the children are started through (ADR-0025).
+    // It runs the ffmpeg and ffprobe it was built with, and no other file (ADR-0089).
     std::filesystem::path sandbox;
-    std::string ffmpeg = "ffmpeg";
-    std::string ffprobe = "ffprobe";
-    // PATH for the children, which get no other environment.
+    // PATH for the children, which get no other environment;
+    // nothing looks the programs up in it.
     std::string search_path;
 };
 

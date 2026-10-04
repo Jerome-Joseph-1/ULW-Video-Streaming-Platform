@@ -1,9 +1,13 @@
-// The sandbox as the transcoder uses it: ulw_sandbox started by run_sandboxed, with ordinary
-// programs standing in for ffmpeg so each layer can be probed directly.
+// The sandbox as the transcoder uses it: the helper started by run_sandboxed, with ordinary
+// programs standing in for ffmpeg so each layer can be probed directly. They are run by the test
+// helper, ulw_sandbox_test_helper: ulw_sandbox's source with a table of programs that adds them
+// (tests/CMakeLists.txt). The production helper, whose table holds only ffmpeg and ffprobe, is
+// run at the end.
 #include "infra/ffmpeg/transcoder.hpp"
 #include "os/system_clock.hpp"
 #include "os/unique_fd.hpp"
 
+#include "command.hpp"
 #include "live_command.hpp"
 #include "process.hpp"
 #include "support/temp_dir.hpp"
@@ -11,10 +15,12 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <fcntl.h>
@@ -24,11 +30,15 @@
 #include <grp.h>
 #include <gtest/gtest.h>
 #include <pthread.h>
+#include <spawn.h>
+#include <sstream>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -89,9 +99,8 @@ protected:
         }
         stdout_.clear();
         auto child = infra::ffmpeg::run_sandboxed(
-            Sandbox{.helper = kHelper,
-                    .environment = {"PATH=/usr/bin:/bin"},
-                    .syscall_filter = syscall_filter_},
+            Sandbox{
+                .helper = helper_, .environment = environment_, .syscall_filter = syscall_filter_},
             limits, args, clock_,
             [this](std::string_view bytes) {
                 stdout_.append(bytes);
@@ -104,11 +113,57 @@ protected:
         return child.value_or(ChildExit{});
     }
 
-    const fs::path kHelper{ULW_SANDBOX_BIN};
+    // The helper itself, not through run_sandboxed. Returns its exit code and what it wrote to
+    // stderr.
+    std::pair<int, std::string> run_helper(const std::vector<std::string>& program) {
+        std::vector<std::string> argv_text{helper_.string(),
+                                           "--writable",
+                                           writable_.path().string(),
+                                           "--address-space",
+                                           std::to_string(kGiB),
+                                           "--cpu-seconds",
+                                           "30",
+                                           "--no-syscall-filter",
+                                           "--"};
+        argv_text.insert(argv_text.end(), program.begin(), program.end());
+        std::vector<char*> argv;
+        argv.reserve(argv_text.size() + 1);
+        for (std::string& arg : argv_text) {
+            argv.push_back(arg.data());
+        }
+        argv.push_back(nullptr);
+        std::string path = "PATH=/usr/bin:/bin";
+        const std::array<char*, 2> envp{path.data(), nullptr};
+        const fs::path err = errors_.path() / "stderr";
+        posix_spawn_file_actions_t actions{};
+        EXPECT_EQ(::posix_spawn_file_actions_init(&actions), 0);
+        EXPECT_EQ(::posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, err.c_str(),
+                                                     O_WRONLY | O_CREAT | O_TRUNC, 0600),
+                  0);
+        pid_t pid = 0;
+        const int spawned =
+            ::posix_spawn(&pid, helper_.c_str(), &actions, nullptr, argv.data(), envp.data());
+        ::posix_spawn_file_actions_destroy(&actions);
+        EXPECT_EQ(spawned, 0);
+        if (spawned != 0) {
+            return {-1, "posix_spawn: " + std::to_string(spawned)};
+        }
+        int status = 0;
+        EXPECT_EQ(::waitpid(pid, &status, 0), pid);
+        std::ostringstream text;
+        text << std::ifstream(err).rdbuf();
+        return {WIFEXITED(status) ? WEXITSTATUS(status) : -1, std::move(text).str()};
+    }
+
+    const fs::path kHelper{ULW_SANDBOX_TEST_HELPER_BIN};
+    // The helper run and run_helper start.
+    fs::path helper_ = kHelper;
+    std::vector<std::string> environment_{"PATH=/usr/bin:/bin"};
     // Off here so that an ordinary shell can stand in for ffmpeg; SyscallFilterTest turns it on.
     bool syscall_filter_ = false;
     os::SystemClock clock_;
     ulw::test::TempDir writable_{"ulw-sandbox"};
+    ulw::test::TempDir errors_{"ulw-sandbox-stderr"};
     std::string stdout_;
     std::function<void(const std::string&)> on_stdout_;
 };
@@ -287,7 +342,9 @@ TEST_F(SandboxTest, TheProgramSeesOnlyItsOwnPidNamespace) {
     const auto child = run(
         {"sh", "-c", "echo $$; cat /proc/1/comm; test -e /proc/$0", std::to_string(::getpid())});
     EXPECT_EQ(child.exit_code, 1);
-    EXPECT_EQ(stdout_, "2\nulw_sandbox\n");
+    // The kernel keeps the first 15 bytes of an executable's name.
+    constexpr std::size_t kCommLength = 15;
+    EXPECT_EQ(stdout_, "2\n" + kHelper.filename().string().substr(0, kCommLength) + "\n");
 }
 
 TEST_F(SandboxTest, AStopRequestTerminatesTheProgramEvenWhenWeBlockSigterm) {
@@ -396,15 +453,130 @@ TEST_F(SandboxTest, TheHelpersOwnFailuresHaveTheirOwnCodes) {
     EXPECT_NE(child.stderr_tail.find("writable directory"), std::string::npos);
 }
 
+// The helper takes a program's name, never a path: the file it runs for the name is the one its
+// table holds, fixed when it was built. Each refusal comes before any confinement step: with a
+// writable directory that does not exist, which the first of them fails on (125), the refusal's
+// own code still stands.
+TEST_F(SandboxTest, ANameNotInTheTableIsRefusedBeforeConfinement) {
+    const auto child = run({"no-such-program"}, {.writable = writable_.path() / "missing",
+                                                 .address_space_bytes = 0,
+                                                 .cpu = {},
+                                                 .wall = {}});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kProgramNotFound);
+    EXPECT_NE(child.stderr_tail.find(
+                  "refusing to run no-such-program: not a program this helper was built to run"),
+              std::string::npos)
+        << child.stderr_tail;
+    EXPECT_EQ(child.stderr_tail.find("writable directory"), std::string::npos) << child.stderr_tail;
+}
+
+TEST_F(SandboxTest, APathIsRefusedEvenWhereItIsTheFileTheTableHolds) {
+    for (const std::string path : {"/usr/bin/sh", "/bin/sh", "bin/sh", "./sh", "sh/"}) {
+        const auto child = run({path, "-c", "exit 0"}, {.writable = writable_.path() / "missing",
+                                                        .address_space_bytes = 0,
+                                                        .cpu = {},
+                                                        .wall = {}});
+        EXPECT_EQ(child.exit_code, infra::ffmpeg::kCannotExecute) << path;
+        EXPECT_NE(
+            child.stderr_tail.find("refusing to run " + path + ": a path, not a program name"),
+            std::string::npos)
+            << path << ": " << child.stderr_tail;
+    }
+}
+
+TEST_F(SandboxTest, TheHelperRunsTheFileItsTableHoldsForAName) {
+    const auto [code, err] = run_helper({"sh", "-c", "exit 3"});
+    EXPECT_EQ(code, 3) << err;
+}
+
+// The name is the program's argv[0], and its arguments follow unchanged.
+TEST_F(SandboxTest, TheProgramGetsItsNameAndItsArguments) {
+    const auto child = run({"sh", "-c", R"(printf '%s|' "$0" "$@")", "zero", "a b", "", "--"});
+    EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
+    EXPECT_EQ(stdout_, "zero|a b||--|");
+}
+
+// Neither the PATH the program is given nor a file in the writable directory chooses what runs.
+TEST_F(SandboxTest, NoSearchPathChoosesTheProgram) {
+    const ulw::test::TempDir dir("ulw-sandbox-path");
+    for (const fs::path& planted : {dir.path() / "sh", writable_.path() / "sh"}) {
+        std::ofstream(planted) << "#!/usr/bin/sh\necho planted\n";
+        fs::permissions(planted, fs::perms::owner_all);
+    }
+    const fs::path relative = fs::relative(dir.path(), fs::current_path());
+    ASSERT_TRUE(relative.is_relative());
+    for (const std::string& path :
+         {dir.path().string(), relative.string(), std::string("."), writable_.path().string()}) {
+        environment_ = {"PATH=" + path + ":/usr/bin:/bin"};
+        const auto child = run({"sh", "-c", "echo real"});
+        EXPECT_EQ(child.exit_code, 0) << path << ": " << child.stderr_tail;
+        EXPECT_EQ(stdout_, "real\n") << path;
+    }
+    environment_ = {"PATH=" + dir.path().string()};
+    const auto child = run({"planted"});
+    EXPECT_EQ(child.exit_code, infra::ffmpeg::kProgramNotFound) << child.stderr_tail;
+    EXPECT_EQ(stdout_, "");
+}
+
+// The path the table holds is checked as well (program_check.hpp), and a refusal of it comes
+// before any confinement step too. The test helper's table holds one path wrong in each way.
+struct WrongPath {
+    std::string name;
+    int exit_code;
+    std::string reason;
+};
+
+TEST_F(SandboxTest, ATablePathThatFailsTheCheckIsRefusedBeforeConfinement) {
+    const std::vector<WrongPath> wrong{
+        {.name = "bare_name",
+         .exit_code = infra::ffmpeg::kProgramNotFound,
+         .reason = "bare_name: sh: not a path, and no PATH is searched"},
+        {.name = "relative",
+         .exit_code = infra::ffmpeg::kCannotExecute,
+         .reason = "relative: usr/bin/sh: not an absolute path"},
+        {.name = "dot_dot",
+         .exit_code = infra::ffmpeg::kCannotExecute,
+         .reason = "dot_dot: /usr/bin/../bin/sh: has a .. component"},
+        {.name = "dot",
+         .exit_code = infra::ffmpeg::kCannotExecute,
+         .reason = "dot: /usr/./bin/sh: not in normal form"},
+        {.name = "doubled_slash",
+         .exit_code = infra::ffmpeg::kCannotExecute,
+         .reason = "doubled_slash: /usr//bin/sh: not in normal form"},
+        {.name = "directory",
+         .exit_code = infra::ffmpeg::kCannotExecute,
+         .reason = "directory: /usr/bin: not a regular file"},
+        {.name = "missing",
+         .exit_code = infra::ffmpeg::kProgramNotFound,
+         .reason = "missing: /nonexistent/ulw-sandbox-test-program: " +
+                   std::generic_category().message(ENOENT)},
+        {.name = "not_executable",
+         .exit_code = infra::ffmpeg::kCannotExecute,
+         .reason = std::generic_category().message(EACCES)},
+    };
+    for (const WrongPath& path : wrong) {
+        const auto child = run({path.name}, {.writable = writable_.path() / "missing",
+                                             .address_space_bytes = 0,
+                                             .cpu = {},
+                                             .wall = {}});
+        EXPECT_EQ(child.exit_code, path.exit_code) << path.name << ": " << child.stderr_tail;
+        EXPECT_NE(child.stderr_tail.find("refusing to run " + path.name), std::string::npos)
+            << path.name << ": " << child.stderr_tail;
+        EXPECT_NE(child.stderr_tail.find(path.reason), std::string::npos)
+            << path.name << ": " << child.stderr_tail;
+    }
+}
+
 class SyscallFilterTest : public SandboxTest {
 protected:
     SyscallFilterTest() { syscall_filter_ = true; }
 
-    const fs::path kProbe{ULW_SYSCALL_PROBE_BIN};
+    // ulw_syscall_probe, by its name in the test helper's table.
+    const std::string kProbe{"syscall_probe"};
 };
 
 TEST_F(SyscallFilterTest, ACallTheTablesAllowRunsToTheEnd) {
-    const auto child = run({kProbe.string(), "getpid"});
+    const auto child = run({kProbe, "getpid"});
     EXPECT_EQ(child.exit_code, 0) << child.stderr_tail;
     EXPECT_EQ(child.signal, 0);
 }
@@ -412,7 +584,7 @@ TEST_F(SyscallFilterTest, ACallTheTablesAllowRunsToTheEnd) {
 TEST_F(SyscallFilterTest, EveryOtherCallKillsTheProgramWithSigsysAndClassifiesAsBlocked) {
     for (const std::string name : {"ptrace", "mount", "keyctl", "bpf", "io_uring_setup", "socket",
                                    "unshare", "setns", "kill", "process_vm_readv", "chroot"}) {
-        const auto child = run({kProbe.string(), name});
+        const auto child = run({kProbe, name});
         EXPECT_EQ(child.signal, SIGSYS) << name;
         EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
                   core::ports::TranscodeFailure::SyscallBlocked)
@@ -421,7 +593,7 @@ TEST_F(SyscallFilterTest, EveryOtherCallKillsTheProgramWithSigsysAndClassifiesAs
 }
 
 TEST_F(SyscallFilterTest, AnAbortStillEndsTheProgramWithSigabrtAndIsAPlainKill) {
-    const auto child = run({kProbe.string(), "abort"});
+    const auto child = run({kProbe, "abort"});
     EXPECT_EQ(child.signal, SIGABRT);
     EXPECT_EQ(infra::ffmpeg::classify(child.exit_code, child.signal, child.ending),
               core::ports::TranscodeFailure::Killed);
@@ -430,7 +602,7 @@ TEST_F(SyscallFilterTest, AnAbortStillEndsTheProgramWithSigabrtAndIsAPlainKill) 
 TEST_F(SyscallFilterTest, WithoutTheFilterTheSameCallsReturnAnError) {
     syscall_filter_ = false;
     for (const std::string name : {"ptrace", "mount", "keyctl", "bpf", "io_uring_setup"}) {
-        const auto child = run({kProbe.string(), name});
+        const auto child = run({kProbe, name});
         EXPECT_EQ(child.signal, 0) << name;
         EXPECT_EQ(child.exit_code, 0) << name;
     }
@@ -531,10 +703,9 @@ TEST_F(SyscallFilterTest, ALiveRemuxFromAPipeStillRuns) {
                                           .epoch = 7,
                                           .max_kbps = 8000,
                                           .max_duration = core::Seconds{30}};
-    const auto child =
-        run(infra::ffmpeg::live_remux_args(
-                "ffmpeg", job, infra::ffmpeg::live_probe(job.max_kbps, job.segment_seconds)),
-            {}, {}, read_end.get());
+    const auto child = run(infra::ffmpeg::live_remux_args(
+                               job, infra::ffmpeg::live_probe(job.max_kbps, job.segment_seconds)),
+                           {}, {}, read_end.get());
     // An ffmpeg that died early leaves the writer blocked on a full pipe until no reader is left.
     read_end.reset();
     publisher.join();
@@ -579,6 +750,33 @@ TEST_F(SyscallFilterTest, AnOrdinaryUsersFfprobeRunsToo) {
         GTEST_SKIP() << "no ffprobe on this host";
     }
     EXPECT_EQ(WEXITSTATUS(status), 0) << "159 is the filter killing it";
+}
+
+// The helper the images carry: ffmpeg and ffprobe, by name, and nothing else, whatever the test
+// helper would run.
+TEST_F(SandboxTest, TheProductionHelperRunsOnlyFfmpegAndFfprobe) {
+    helper_ = ULW_SANDBOX_BIN;
+    for (const std::string name : {"sh", "env", "true", "syscall_probe", "bare_name", "missing"}) {
+        const auto child = run({name, "-c", "exit 0"});
+        EXPECT_EQ(child.exit_code, infra::ffmpeg::kProgramNotFound) << name;
+        EXPECT_NE(child.stderr_tail.find("not a program this helper was built to run"),
+                  std::string::npos)
+            << name << ": " << child.stderr_tail;
+    }
+    for (const std::string_view path : {"/usr/bin/sh", ULW_SANDBOX_FFMPEG}) {
+        const auto child = run({std::string(path), "-version"});
+        EXPECT_EQ(child.exit_code, infra::ffmpeg::kCannotExecute) << path;
+        EXPECT_NE(child.stderr_tail.find("a path, not a program name"), std::string::npos)
+            << path << ": " << child.stderr_tail;
+    }
+    for (const std::string_view name : {infra::ffmpeg::kFfmpeg, infra::ffmpeg::kFfprobe}) {
+        const auto child = run({std::string(name), "-version"});
+        if (child.exit_code == infra::ffmpeg::kProgramNotFound) {
+            GTEST_SKIP() << "no " << name << " where this build looks for it";
+        }
+        EXPECT_EQ(child.exit_code, 0) << name << ": " << child.stderr_tail;
+        EXPECT_TRUE(stdout_.starts_with(std::string(name) + " version")) << stdout_;
+    }
 }
 
 TEST(SandboxCheck, NamesWhatWentWrong) {
