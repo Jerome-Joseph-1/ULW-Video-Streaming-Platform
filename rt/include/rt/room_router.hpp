@@ -85,6 +85,15 @@ public:
                         OwnerAnswer answer) noexcept = 0;
 };
 
+// What a node hears of the notices handed to rooms it has members in (RoomRouter::notify).
+// Called on the reactor thread, once per notice that reaches this node; the body is valid only
+// during the call, which must not call back into the router.
+class INoticeListener {
+public:
+    virtual ~INoticeListener() = default;
+    virtual void on_notice(const core::RoomId& room, std::span<const std::byte> body) noexcept = 0;
+};
+
 // What the router reports for the log and the metrics. Called on the reactor thread.
 class IRouterEvents {
 public:
@@ -157,6 +166,15 @@ struct RouterCounters {
     std::uint64_t ask_timeouts = 0;
     // Turns of the router's tick, which checks every deadline: four a second.
     std::uint64_t ticks = 0;
+    // Notices this node handed to another node, the room's owner, to pass on.
+    std::uint64_t notices_forwarded = 0;
+    // Notices this node, as the room's owner, passed to the room's nodes.
+    std::uint64_t notices_fanned_out = 0;
+    // Notices heard here for a room with members here (INoticeListener::on_notice).
+    std::uint64_t notices_heard = 0;
+    // Notices that went nowhere: no owner, an owner that let the room go, a lookup that failed
+    // or found the lookups full, a body past kMaxOwnerMessage.
+    std::uint64_t notices_dropped = 0;
 };
 
 // One node's share of the room plane (ADR-0015, ADR-0035). Members join rooms here, wherever
@@ -205,6 +223,20 @@ public:
                    OwnerAnswer done);
     // Who answers asks for the rooms this node owns; nullptr (the start) answers Unavailable.
     void serve(IOwnerService* service) noexcept;
+
+    // Hands `body` to the room's members on every node that has some, this one included,
+    // through the room's owner (ADR-0091): unsequenced, unstored, at most once to each node, and
+    // best effort. Any node may notify, joined or not. A room nobody has joined anywhere has no
+    // owner, and the notice goes nowhere: the owner is looked up without claiming the room. A
+    // notice whose owner is changing hands, or whose node link fails, is lost; nothing says so
+    // but RouterCounters::notices_dropped where it is noticed. At most kMaxOwnerMessage bytes.
+    void notify(const core::RoomId& room, std::span<const std::byte> body) noexcept;
+    // Who hears the notices for rooms with members on this node; nullptr (the start) hears
+    // none.
+    void hear(INoticeListener* listener) noexcept;
+    // Whether this node owns the room now, as far as it knows: until a write is fenced, a node
+    // that lost a room still thinks it owns it (ADR-0015).
+    [[nodiscard]] bool owns(const core::RoomId& room) const noexcept;
 
     // For a drain: stops owning rooms and makes them claimable at once.
     void release_rooms(StoreCallback<void> done);

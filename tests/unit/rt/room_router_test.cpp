@@ -108,6 +108,20 @@ private:
     std::string node_;
 };
 
+std::vector<std::byte> bytes_of(std::string_view text) {
+    const auto b = std::as_bytes(std::span{text});
+    return {b.begin(), b.end()};
+}
+
+// Every notice this node heard, as room and text.
+class Ear final : public rt::INoticeListener {
+public:
+    void on_notice(const core::RoomId& room, std::span<const std::byte> body) noexcept override {
+        heard.emplace_back(room, ulw::test::as_text(body));
+    }
+    std::vector<std::pair<core::RoomId, std::string>> heard;
+};
+
 // A test value, made up for these tests; real deployments take theirs from the environment.
 constexpr std::string_view kSecret = "unit-test-node-secret-000000000000000";
 
@@ -921,6 +935,111 @@ TEST_P(RoomRouterTest, AnAskWhoseMemberLeftIsAnsweredToNobody) {
     EXPECT_EQ(answered, 0);
 }
 
+TEST_P(RoomRouterTest, ANoticeFromAnyNodeReachesTheRoomsNodesWithMembersOnceEach) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Node& c = start("chat-c");
+    Ear on_a;
+    Ear on_b;
+    Ear on_c;
+    a.router->hear(&on_a);
+    b.router->hear(&on_b);
+    c.router->hear(&on_c);
+    Member alice;
+    Member bob;
+    Member bob_again;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    ASSERT_TRUE(join(b, bob_again));
+    EXPECT_TRUE(a.router->owns(room_));
+    EXPECT_FALSE(b.router->owns(room_));
+    EXPECT_FALSE(c.router->owns(room_));
+
+    // chat-c has nobody in the room and has never looked it up: it reads the owner, without
+    // claiming anything, and hands the notice to it.
+    const std::vector<std::pair<core::RoomId, std::string>> ring{{room_, "ring"}};
+    c.router->notify(room_, bytes_of("ring"));
+    ASSERT_TRUE(pump([&] { return on_b.heard.size() == 1; }));
+    EXPECT_EQ(on_a.heard, ring);
+    EXPECT_EQ(on_b.heard, ring);
+    EXPECT_TRUE(on_c.heard.empty());
+    EXPECT_EQ(c.router->counters().notices_forwarded, 1U);
+    EXPECT_EQ(a.router->counters().notices_fanned_out, 1U);
+    // Once per node, however many members it has there; the node tells them apart itself.
+    EXPECT_EQ(b.router->counters().notices_heard, 1U);
+    EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-a"));
+    // Unsequenced: nothing was stored or delivered as a message.
+    EXPECT_TRUE(alice.got.empty());
+    EXPECT_TRUE(bob.got.empty());
+    EXPECT_FALSE(db_.bodies.contains(room_));
+
+    // From a member's node, which knows the owner, and from the owner itself.
+    b.router->notify(room_, bytes_of("from b"));
+    a.router->notify(room_, bytes_of("from a"));
+    ASSERT_TRUE(pump([&] { return on_b.heard.size() == 3; }));
+    EXPECT_EQ(on_a.heard.size(), 3U);
+    EXPECT_EQ(b.router->counters().notices_forwarded, 1U);
+}
+
+TEST_P(RoomRouterTest, ANoticeForARoomNobodyIsInGoesNowhereAndTakesNoRoom) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Ear on_a;
+    Ear on_b;
+    a.router->hear(&on_a);
+    b.router->hear(&on_b);
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    const core::RoomId nobodys = core::RoomId::generate(clock_, random_);
+    b.router->notify(nobodys, bytes_of("ring"));
+    ASSERT_TRUE(pump([&] { return b.router->counters().notices_dropped == 1; }));
+    EXPECT_FALSE(db_.rooms.contains(nobodys));
+    EXPECT_EQ(b.router->rooms_owned(), 0U);
+    EXPECT_EQ(b.store->owner_reads, 1U);
+
+    // Past the bound it never leaves the node, and an owner whose members left hears nothing.
+    b.router->notify(room_, bytes_of(std::string(rt::kMaxOwnerMessage + 1, 'x')));
+    EXPECT_EQ(b.router->counters().notices_dropped, 2U);
+    a.router->leave(room_, alice);
+    a.router->notify(room_, bytes_of("late"));
+    EXPECT_TRUE(on_a.heard.empty());
+    EXPECT_TRUE(on_b.heard.empty());
+}
+
+TEST_P(RoomRouterTest, AnOwnerThatNoLongerHoldsTheRoomDropsANoticeItIsHanded) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Ear on_a;
+    a.router->hear(&on_a);
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    // chat-b reads chat-a as the owner, but chat-a has let the room go meanwhile.
+    bool released = false;
+    a.router->release_rooms([&](rt::StoreResult<void> r) noexcept { released = r.has_value(); });
+    ASSERT_TRUE(pump([&] { return released; }));
+    ASSERT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-a"));
+    b.router->notify(room_, bytes_of("ring"));
+    ASSERT_TRUE(pump([&] { return a.router->counters().notices_dropped == 1; }));
+    EXPECT_TRUE(on_a.heard.empty());
+    EXPECT_EQ(b.router->counters().notices_forwarded, 1U);
+}
+
+TEST_P(RoomRouterTest, NoticesWaitingForTheirOwnerAreBoundedPerRoom) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Ear on_a;
+    a.router->hear(&on_a);
+    Member alice;
+    ASSERT_TRUE(join(a, alice));
+    // All sent before the owner's lookup answers: eight wait for it, the ninth is dropped.
+    for (int i = 0; i < 9; ++i) {
+        b.router->notify(room_, bytes_of("n" + std::to_string(i)));
+    }
+    EXPECT_EQ(b.router->counters().notices_dropped, 1U);
+    ASSERT_TRUE(pump([&] { return on_a.heard.size() == 8; }));
+    EXPECT_EQ(b.store->owner_reads, 1U);
+}
+
 TEST_P(RoomRouterTest, AMemberWhoLeftReceivesNothingMore) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");
@@ -996,7 +1115,7 @@ TEST_P(RoomRouterTest, AHelloOfAnotherVersionIsRefusedAsSuch) {
     peer.send(hello);
     EXPECT_TRUE(peer.hung_up());
     EXPECT_EQ(a.events.refused,
-              std::vector<std::string>{"version mismatch: peer speaks 1, this node 4"});
+              std::vector<std::string>{"version mismatch: peer speaks 1, this node 5"});
 }
 
 TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {

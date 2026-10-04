@@ -14,11 +14,13 @@
 #include <csignal>
 #include <cstdint>
 #include <fcntl.h>
+#include <filesystem>
 #include <optional>
 #include <poll.h>
 #include <spawn.h>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <unistd.h>
 #include <utility>
@@ -144,6 +146,8 @@ std::vector<std::string> helper_argv(const Sandbox& sandbox, const Limits& limit
     if (!sandbox.syscall_filter) {
         argv.emplace_back("--no-syscall-filter");
     }
+    // The program by name ("ffmpeg", "ffprobe"): the helper runs the file it was built with
+    // for that name, and refuses a path (sandbox_main.cpp, docs/adr/0089).
     argv.emplace_back("--");
     argv.insert(argv.end(), args.begin(), args.end());
     return argv;
