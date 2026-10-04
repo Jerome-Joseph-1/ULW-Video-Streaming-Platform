@@ -56,8 +56,13 @@ SELECT $1, created.owner_generation, kind.kind,
 RETURNING owner_generation, last_seq)sql";
 
 // The kind of a room created without a chat join recording one first: closed, so that no room
-// is open by default. The one place a room's kind is chosen from the room alone.
-[[nodiscard]] std::string_view kind_of_unrecorded(const core::RoomId& /*room*/) noexcept {
+// is open by default, and the kind its id names for a room named by a pair or a creator
+// (core::ports::named_kind, ADR-0096), which chat_rooms accepts as nothing else. The one place a
+// room's kind is chosen from the room alone.
+[[nodiscard]] std::string_view kind_of_unrecorded(const core::RoomId& room) noexcept {
+    if (core::ports::named_kind(room) == core::ports::RoomKind::DirectChat) {
+        return "direct_chat";
+    }
     return "group_chat";
 }
 

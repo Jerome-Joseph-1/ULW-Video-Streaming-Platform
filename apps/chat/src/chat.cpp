@@ -437,7 +437,28 @@ std::string ChatServer::render_metrics() const {
                        call.moves_expel, call.moves_removal, call.moves_end, call.moves_fenced,
                        call.moves_unavailable, call.retired_closed, call.retired_abandoned,
                        calls_.retired(), call.occupancy_checks, call.occupancy_unavailable,
-                       call.resync_checks);
+                       call.resync_checks) +
+           // Member lists changed by their users (ADR-0096).
+           std::format("directs_opened_total {}\n"
+                       "groups_created_total {}\n"
+                       "members_changed_total{{change=\"added\"}} {}\n"
+                       "members_changed_total{{change=\"removed\"}} {}\n"
+                       "members_changed_total{{change=\"left\"}} {}\n"
+                       "membership_refusals_total{{reason=\"not_member\"}} {}\n"
+                       "membership_refusals_total{{reason=\"not_admin\"}} {}\n"
+                       "membership_refusals_total{{reason=\"not_group\"}} {}\n"
+                       "membership_refusals_total{{reason=\"too_many_members\"}} {}\n"
+                       "membership_refusals_total{{reason=\"room_limit\"}} {}\n"
+                       "membership_refusals_total{{reason=\"gone\"}} {}\n"
+                       "membership_refusals_total{{reason=\"rate_limited\"}} {}\n"
+                       "membership_refusals_total{{reason=\"unavailable\"}} {}\n"
+                       "member_events_total {}\n",
+                       chat.directs_opened, chat.groups_created, chat.members_added,
+                       chat.members_removed, chat.members_left, chat.membership_not_member,
+                       chat.membership_not_admin, chat.membership_not_group, chat.membership_full,
+                       chat.membership_room_limit, chat.membership_gone,
+                       chat.membership_rate_limited, chat.membership_unavailable,
+                       chat.member_events);
 }
 
 } // namespace chat

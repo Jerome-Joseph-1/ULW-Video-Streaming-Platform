@@ -40,12 +40,15 @@
 
   // Sends a command and resolves with its answer: `joined` or an error for a join, `ticket` or
   // an error for a call, the event the others hear or an error for a group call's leave or
-  // expulsion, matched by the room.
+  // expulsion, matched by the room; `direct` or an error for opening a direct chat, matched by
+  // the other user.
   const answers = { join: ['joined', 'error'], call: ['ticket', 'error'],
-    call_leave: ['call_left', 'error'], call_expel: ['call_moved', 'error'] };
+    call_leave: ['call_left', 'error'], call_expel: ['call_moved', 'error'],
+    open_direct: ['direct', 'error'] };
   window.command = (cmd) => new Promise((resolve) => {
-    waiting.push({ matches: (f) => f.room === cmd.room && answers[cmd.type].includes(f.type),
-      resolve });
+    const same = cmd.type === 'open_direct' ? (f) => f.user === cmd.user
+      : (f) => f.room === cmd.room;
+    waiting.push({ matches: (f) => same(f) && answers[cmd.type].includes(f.type), resolve });
     socket.send(JSON.stringify(cmd));
   });
 

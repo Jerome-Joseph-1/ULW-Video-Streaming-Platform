@@ -103,6 +103,14 @@ std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) 
             return std::unexpected(EnvelopeError::Malformed);
         }
     }
+    // A room named by a pair or a creator is the kind its id names (ADR-0096); a join that says
+    // otherwise names the wrong room.
+    if (const auto named = core::ports::named_kind(join.room)) {
+        if (message.find("kind") != nullptr && join.kind != *named) {
+            return std::unexpected(EnvelopeError::BadRoom);
+        }
+        join.kind = *named;
+    }
     return join;
 }
 
@@ -196,6 +204,226 @@ std::expected<Command, EnvelopeError> call_of(const core::json::Value& message) 
     return Call{.room = *room, .device = *device};
 }
 
+// A list of user ids, 1 (or 0, when `empty_ok`) to kMaxMembersPerChange of them, as given.
+std::expected<std::vector<core::UserId>, EnvelopeError> users_of(const core::json::Value& message,
+                                                                 bool empty_ok) {
+    const core::json::Value* list = message.find("users");
+    if (list == nullptr) {
+        return empty_ok ? std::expected<std::vector<core::UserId>, EnvelopeError>{}
+                        : std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto* items = list->as_array();
+    if (items == nullptr || (items->empty() && !empty_ok) ||
+        items->size() > core::ports::kMaxMembersPerChange) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    std::vector<core::UserId> users;
+    users.reserve(items->size());
+    for (const core::json::Value& item : *items) {
+        const auto text = item.as_string();
+        if (!text) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        const auto user = core::UserId::parse(*text);
+        if (!user) {
+            return std::unexpected(EnvelopeError::BadUser);
+        }
+        users.push_back(*user);
+    }
+    return users;
+}
+
+std::expected<core::UserId, EnvelopeError> one_user_of(const core::json::Value& message) {
+    const auto text = string_of(message, "user");
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto user = core::UserId::parse(*text);
+    if (!user) {
+        return std::unexpected(EnvelopeError::BadUser);
+    }
+    return *user;
+}
+
+// "limit", 1 to kMaxListLimit, kDefaultListLimit when absent; nullopt when out of range.
+std::optional<std::size_t> list_limit_of(const core::json::Value& message) {
+    const core::json::Value* limit = message.find("limit");
+    if (limit == nullptr) {
+        return kDefaultListLimit;
+    }
+    const auto n = limit->as_u64();
+    if (!n || *n == 0 || *n > kMaxListLimit) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(*n);
+}
+
+std::expected<Command, EnvelopeError> open_direct_of(const core::json::Value& message) {
+    if (!only(message, {"type", "user"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto user = one_user_of(message);
+    if (!user) {
+        return std::unexpected(user.error());
+    }
+    return OpenDirect{.user = *user};
+}
+
+std::expected<Command, EnvelopeError> create_group_of(const core::json::Value& message) {
+    if (!only(message, {"type", "id", "users"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto id_text = string_of(message, "id");
+    if (!id_text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto id = rt::MessageKey::parse(*id_text);
+    if (!id) {
+        return std::unexpected(EnvelopeError::BadId);
+    }
+    auto users = users_of(message, true);
+    if (!users) {
+        return std::unexpected(users.error());
+    }
+    return CreateGroup{.id = *id, .users = std::move(*users)};
+}
+
+std::expected<Command, EnvelopeError> add_members_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "users"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    auto users = users_of(message, false);
+    if (!users) {
+        return std::unexpected(users.error());
+    }
+    return AddMembers{.room = *room, .users = std::move(*users)};
+}
+
+std::expected<Command, EnvelopeError> remove_member_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "user"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    auto user = one_user_of(message);
+    if (!user) {
+        return std::unexpected(user.error());
+    }
+    return RemoveMember{.room = *room, .user = *user};
+}
+
+std::expected<Command, EnvelopeError> leave_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    return LeaveRoom{.room = *room};
+}
+
+std::expected<Command, EnvelopeError> rooms_of(const core::json::Value& message) {
+    if (!only(message, {"type", "after", "limit"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    ListRooms list{.after = std::nullopt, .limit = kDefaultListLimit};
+    if (message.find("after") != nullptr) {
+        const auto text = string_of(message, "after");
+        if (!text) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        const auto after = core::RoomId::parse(*text);
+        if (!after) {
+            return std::unexpected(EnvelopeError::BadRoom);
+        }
+        list.after = *after;
+    }
+    const auto limit = list_limit_of(message);
+    if (!limit) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    list.limit = *limit;
+    return list;
+}
+
+std::expected<Command, EnvelopeError> members_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "after", "limit"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    ListMembers list{.room = *room, .after = std::nullopt, .limit = kDefaultListLimit};
+    if (message.find("after") != nullptr) {
+        const auto text = string_of(message, "after");
+        if (!text) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        const auto after = core::UserId::parse(*text);
+        if (!after) {
+            return std::unexpected(EnvelopeError::BadUser);
+        }
+        list.after = *after;
+    }
+    const auto limit = list_limit_of(message);
+    if (!limit) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    list.limit = *limit;
+    return list;
+}
+
+[[nodiscard]] std::string_view kind_name(core::ports::RoomKind kind) noexcept {
+    switch (kind) {
+    case core::ports::RoomKind::DirectChat:
+        return "direct";
+    case core::ports::RoomKind::GroupChat:
+        return "group";
+    case core::ports::RoomKind::StreamLiveChat:
+        return "live";
+    }
+    return "group";
+}
+
+[[nodiscard]] std::string_view role_name(core::ports::MemberRole role) noexcept {
+    switch (role) {
+    case core::ports::MemberRole::Member:
+        return "member";
+    case core::ports::MemberRole::Admin:
+        return "admin";
+    }
+    return "member";
+}
+
+// User ids hold only characters that need no escaping; append_string checks all the same.
+void append_user(std::string& out, std::string_view key, const core::UserId& user) {
+    out += ",\"";
+    out += key;
+    out += "\":";
+    core::json::append_string(out, user.view());
+}
+
+void append_users(std::string& out, std::span<const core::UserId> users) {
+    out += R"(,"users":[)";
+    bool first = true;
+    for (const core::UserId& user : users) {
+        if (!first) {
+            out += ',';
+        }
+        first = false;
+        core::json::append_string(out, user.view());
+    }
+    out += ']';
+}
+
 std::expected<Command, EnvelopeError> call_move_of(const core::json::Value& message,
                                                    CallSignal signal) {
     const bool expel = signal == CallSignal::Expel;
@@ -266,6 +494,27 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     }
     if (name == "call") {
         return call_of(*message);
+    }
+    if (name == "open_direct") {
+        return open_direct_of(*message);
+    }
+    if (name == "create_group") {
+        return create_group_of(*message);
+    }
+    if (name == "add_members") {
+        return add_members_of(*message);
+    }
+    if (name == "remove_member") {
+        return remove_member_of(*message);
+    }
+    if (name == "leave") {
+        return leave_of(*message);
+    }
+    if (name == "rooms") {
+        return rooms_of(*message);
+    }
+    if (name == "members") {
+        return members_of(*message);
     }
     if (name == "call_decline") {
         return call_move_of(*message, CallSignal::Decline);
@@ -460,6 +709,104 @@ void write_call_error(std::string& out, std::string_view reason, const core::Roo
         out.pop_back();
         std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{}}})", retry_after->count());
     }
+}
+
+void write_direct(std::string& out, const core::RoomId& room, const core::UserId& user) {
+    out += R"({"type":"direct",)";
+    append_room(out, room);
+    append_user(out, "user", user);
+    out += '}';
+}
+
+void write_group(std::string& out, const core::RoomId& room, const rt::MessageKey& id) {
+    out += R"({"type":"group",)";
+    append_room(out, room);
+    append_id(out, id);
+    out += '}';
+}
+
+void write_added(std::string& out, const core::RoomId& room, std::span<const core::UserId> users) {
+    out += R"({"type":"added",)";
+    append_room(out, room);
+    append_users(out, users);
+    out += '}';
+}
+
+void write_removed(std::string& out, const core::RoomId& room, const core::UserId& user) {
+    out += R"({"type":"removed",)";
+    append_room(out, room);
+    append_user(out, "user", user);
+    out += '}';
+}
+
+void write_left(std::string& out, const core::RoomId& room,
+                const std::optional<core::UserId>& promoted) {
+    out += R"({"type":"left",)";
+    append_room(out, room);
+    if (promoted) {
+        append_user(out, "promoted", *promoted);
+    }
+    out += '}';
+}
+
+void write_rooms(std::string& out, std::span<const core::ports::RoomEntry> rooms, bool more) {
+    out += R"({"type":"rooms","rooms":[)";
+    bool first = true;
+    for (const core::ports::RoomEntry& entry : rooms) {
+        out += first ? "{" : ",{";
+        first = false;
+        append_room(out, entry.room);
+        out += R"(,"kind":")";
+        out += kind_name(entry.kind);
+        out += R"(","role":")";
+        out += role_name(entry.role);
+        out += '"';
+        if (entry.peer) {
+            append_user(out, "peer", *entry.peer);
+        }
+        out += '}';
+    }
+    out += more ? R"(],"more":true})" : R"(],"more":false})";
+}
+
+void write_members(std::string& out, const core::RoomId& room,
+                   std::span<const core::ports::MemberEntry> members, bool more) {
+    out += R"({"type":"members",)";
+    append_room(out, room);
+    out += R"(,"members":[)";
+    bool first = true;
+    for (const core::ports::MemberEntry& member : members) {
+        out += first ? R"({"user":)" : R"(,{"user":)";
+        first = false;
+        core::json::append_string(out, member.user.view());
+        out += R"(,"role":")";
+        out += role_name(member.role);
+        out += R"("})";
+    }
+    out += more ? R"(],"more":true})" : R"(],"more":false})";
+}
+
+void write_member_change(std::string& out, const core::RoomId& room, const core::UserId& user,
+                         std::string_view change) {
+    out += R"({"type":"member",)";
+    append_room(out, room);
+    append_user(out, "user", user);
+    out += R"(,"change":")";
+    out += change;
+    out += R"("})";
+}
+
+void write_error_with(std::string& out, std::string_view reason, const ErrorContext& context) {
+    write_error(out, reason, context.room, context.id);
+    out.pop_back();
+    if (context.user) {
+        append_user(out, "user", *context.user);
+    }
+    if (context.retry_after) {
+        std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{})",
+                       context.retry_after->count());
+    }
+    out += '}';
 }
 
 std::string_view reason(EnvelopeError e) noexcept {

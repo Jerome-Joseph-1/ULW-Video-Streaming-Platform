@@ -7,6 +7,8 @@ ulw_add_library(chat_lib
     src/envelope.cpp
     src/key_fetcher.cpp
     src/live_chat.cpp
+    src/membership.cpp
+    src/named_rooms.cpp
     src/presence.cpp
     src/presence_room.cpp
     src/ring.cpp

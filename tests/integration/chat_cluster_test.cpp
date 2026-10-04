@@ -1381,16 +1381,169 @@ std::optional<RtcClient> rtc_join(const std::string& token, std::string* refusal
 // WebSocket of whichever node it is on; the room's owner answers both, and LiveKit admits each
 // ticket into the same room, where the second finds the first. Needs a LiveKit
 // (LIVEKIT_API_URL and the rest, as tests/call/run.sh sets them); skipped without one.
+// Member lists their users change (ADR-0096), across the cluster: a direct chat opened on one
+// node is the same room on every node, its pair hear they were listed wherever they are
+// connected, and nobody else is let in.
+TEST_P(ChatClusterTest, ADirectChatOpenedOnOneNodeIsTheSameRoomOnEveryOtherAndTheirsAlone) {
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    auto carol = connect(nodes_[2], 2);
+    ASSERT_TRUE(alice && bob && carol);
+    const std::string room = open_direct(*alice, "bob");
+    ASSERT_EQ(room.find("error"), std::string::npos) << room;
+    ASSERT_EQ(room.substr(0, 2), "03") << "not a pair's room";
+    // Bob, on another node, hears he was listed, without having asked for anything.
+    const auto told = bob->wait_for(
+        [&](const Seen& s) { return s.type == "member" && s.room == room && s.user == "bob"; });
+    ASSERT_TRUE(told);
+    EXPECT_EQ(told->change, "added");
+    // From his side it is the same room, and opening it again lists nobody more.
+    EXPECT_EQ(open_direct(*bob, "alice"), room);
+    EXPECT_EQ(open_direct(*carol, "carol"), "error: self");
+
+    EXPECT_EQ(join_again(*alice, room), "joined");
+    EXPECT_EQ(join_again(*bob, room), "joined");
+    EXPECT_EQ(join_again(*carol, room), "not_member");
+    // A join that calls it a group names the wrong room.
+    EXPECT_EQ(join_again(*carol, room, R"(,"kind":"group")"), "bad_room");
+    ASSERT_TRUE(alice->send(send_command(room, "hello bob", "d1")));
+    ASSERT_TRUE(bob->message("hello bob"));
+    EXPECT_FALSE(carol->ever_saw("hello bob"));
+    EXPECT_EQ(metric(nodes_[0], "directs_opened_total") + metric(nodes_[1], "directs_opened_total"),
+              1U);
+
+    // Bob's list holds the room, with alice as its other member.
+    const auto rooms = ask(*bob, R"({"type":"rooms"})", "rooms");
+    ASSERT_TRUE(rooms);
+    EXPECT_NE(rooms->raw.find(R"({"room":")" + room +
+                              R"(","kind":"direct","role":"member","peer":"alice"})"),
+              std::string::npos)
+        << rooms->raw;
+    // A direct chat's pair is fixed: nobody is added, nobody leaves.
+    EXPECT_EQ(
+        ask(*alice, R"({"type":"add_members","room":")" + room + R"(","users":["carol"]})", "added")
+            ->reason,
+        "not_group");
+    EXPECT_EQ(ask(*alice, R"({"type":"leave","room":")" + room + R"("})", "left")->reason,
+              "not_group");
+}
+
+// A group made on one node, changed by its admin on another: each change reaches the user it
+// names and everyone in the room, whichever node they are on, and a removed member is out of the
+// room at once.
+TEST_P(ChatClusterTest, AGroupsAdminChangesItsListAndEveryNodeActsOnIt) {
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    auto carol = connect(nodes_[2], 2);
+    auto dave = connect(nodes_[2], 3);
+    ASSERT_TRUE(alice && bob && carol && dave);
+    const auto created =
+        ask(*alice, R"({"type":"create_group","id":"team-1","users":["bob"]})", "group");
+    ASSERT_TRUE(created);
+    ASSERT_EQ(created->type, "group") << created->reason;
+    const std::string room = created->room;
+    EXPECT_EQ(created->id, "team-1");
+    // The same request again names the same room.
+    EXPECT_EQ(
+        ask(*alice, R"({"type":"create_group","id":"team-1","users":["bob"]})", "group")->room,
+        room);
+    EXPECT_EQ(join_again(*alice, room), "joined");
+    EXPECT_EQ(join_again(*bob, room), "joined");
+
+    // Only the admin adds.
+    EXPECT_EQ(
+        ask(*bob, R"({"type":"add_members","room":")" + room + R"(","users":["carol"]})", "added")
+            ->reason,
+        "not_admin");
+    const auto added =
+        ask(*alice, R"({"type":"add_members","room":")" + room + R"(","users":["carol","bob"]})",
+            "added");
+    ASSERT_TRUE(added);
+    EXPECT_NE(added->raw.find(R"("users":["carol"])"), std::string::npos) << added->raw;
+    // Carol hears she was listed on her node, and bob, in the room, on his.
+    ASSERT_TRUE(carol->wait_for([&](const Seen& s) {
+        return s.type == "member" && s.user == "carol" && s.change == "added";
+    }));
+    ASSERT_TRUE(bob->wait_for([&](const Seen& s) {
+        return s.type == "member" && s.user == "carol" && s.change == "added";
+    }));
+    // Dave, on carol's node, is neither named nor in the room: the node told carol, and nothing
+    // reached him before the answer to what he asks next.
+    ASSERT_TRUE(ask(*dave, R"({"type":"rooms"})", "rooms"));
+    EXPECT_EQ(dave->count([](const Seen& s) { return s.type == "member"; }), 0U)
+        << "dave heard of a room he is not in";
+    EXPECT_EQ(join_again(*carol, room), "joined");
+    ASSERT_TRUE(alice->send(send_command(room, "welcome carol", "g1")));
+    ASSERT_TRUE(carol->message("welcome carol"));
+
+    const auto members = ask(*carol, R"({"type":"members","room":")" + room + R"("})", "members");
+    ASSERT_TRUE(members);
+    EXPECT_NE(
+        members->raw.find(
+            R"("members":[{"user":"alice","role":"admin"},{"user":"bob","role":"member"},{"user":"carol","role":"member"}],"more":false)"),
+        std::string::npos)
+        << members->raw;
+    EXPECT_EQ(ask(*dave, R"({"type":"members","room":")" + room + R"("})", "members")->reason,
+              "not_member");
+
+    // Removed by the admin on node 1, carol is out of the room on node 3 at once.
+    const auto removed = ask(
+        *alice, R"({"type":"remove_member","room":")" + room + R"(","user":"carol"})", "removed");
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(removed->type, "removed") << removed->reason;
+    ASSERT_TRUE(carol->wait_for([&](const Seen& s) {
+        return s.type == "error" && s.reason == "not_member" && s.room == room;
+    }));
+    ASSERT_TRUE(bob->wait_for([&](const Seen& s) {
+        return s.type == "member" && s.user == "carol" && s.change == "removed";
+    }));
+    ASSERT_TRUE(alice->send(send_command(room, "after carol", "g2")));
+    ASSERT_TRUE(bob->message("after carol"));
+    EXPECT_FALSE(carol->ever_saw("after carol"));
+    EXPECT_EQ(join_again(*carol, room), "not_member");
+
+    // The admin leaves; bob, the one left, is its admin now, on whichever node he asks.
+    // Her socket in the room is taken out of it as any removed member's is, told not_member and
+    // the change, before or after the answer: the notification and the commit's reply race.
+    const std::size_t before_leave = alice->seen().size();
+    ASSERT_TRUE(alice->send(R"({"type":"leave","room":")" + room + R"("})"));
+    const auto left =
+        alice->wait_from(before_leave, [](const Seen& s) { return s.type == "left"; });
+    ASSERT_TRUE(left);
+    EXPECT_NE(alice->seen()[*left].raw.find(R"("promoted":"bob")"), std::string::npos)
+        << alice->seen()[*left].raw;
+    ASSERT_TRUE(alice->wait_from(before_leave, [&](const Seen& s) {
+        return s.type == "error" && s.reason == "not_member" && s.room == room;
+    }));
+    ASSERT_TRUE(alice->wait_from(before_leave, [&](const Seen& s) {
+        return s.type == "member" && s.user == "alice" && s.change == "removed";
+    }));
+    // Bob, on another node, hears it from the database as everyone in the room would.
+    ASSERT_TRUE(bob->wait_for([&](const Seen& s) {
+        return s.type == "member" && s.user == "bob" && s.change == "promoted";
+    }));
+    const auto now = ask(*bob, R"({"type":"members","room":")" + room + R"("})", "members");
+    ASSERT_TRUE(now);
+    EXPECT_NE(now->raw.find(R"("members":[{"user":"bob","role":"admin"}])"), std::string::npos)
+        << now->raw;
+    EXPECT_EQ(metric(nodes_[0], "groups_created_total"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "members_changed_total{change=\"added\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "members_changed_total{change=\"removed\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "members_changed_total{change=\"left\"}"), 1U);
+    EXPECT_EQ(metric(nodes_[1], "membership_refusals_total{reason=\"not_admin\"}"), 1U);
+}
+
 TEST_P(ChatClusterTest, ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsToOneRoom) {
     if (ulw::test::livekit_environment().empty()) {
         GTEST_SKIP() << "no LiveKit: set LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY "
                         "and LIVEKIT_API_SECRET";
     }
-    const std::string direct = core::RoomId::generate(clock_, random_).to_string();
-    ASSERT_NO_FATAL_FAILURE(list_members(direct, {"alice", "bob"}, "direct_chat"));
     auto alice = connect(nodes_[0], 0);
     auto bob = connect(nodes_[1], 1);
     ASSERT_TRUE(alice && bob);
+    // Opened by alice, as a client does (ADR-0096).
+    const std::string direct = open_direct(*alice, "bob");
+    ASSERT_EQ(direct.substr(0, 2), "03") << direct;
     // Alice's join makes chat-1 the room's owner; bob's node forwards his call to it.
     ASSERT_EQ(join_answer(*alice, direct), "joined");
     ASSERT_EQ(join_answer(*bob, direct), "joined");

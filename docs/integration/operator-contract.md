@@ -402,7 +402,18 @@ a removal's move is retried each second), `call_generations_closed_total`,
 be connected; a value that stays up means LiveKit is not answering) and
 `call_generations_abandoned_total` (given up after 5 minutes), `call_occupancy_checks_total` and
 `call_occupancy_unavailable_total` (LiveKit asked whether a quiet group call still has anyone in
-it), and `call_resync_checks_total`. Chat is a draft ([chat.md](chat.md)).
+it), and `call_resync_checks_total`.
+For member lists changed by their users (ADR-0096), counted on the node
+the asking client is on: `directs_opened_total` (direct chats whose pair an `open_direct`
+listed), `groups_created_total`, `members_changed_total{change="added"}`, `{change="removed"}`
+and `{change="left"}`, `membership_refusals_total{reason="not_member"}`, `{reason="not_admin"}`,
+`{reason="not_group"}`, `{reason="too_many_members"}`, `{reason="room_limit"}` (a user listed
+in 1000 rooms opening another), `{reason="gone"}` (a group id reused over an emptied group's
+history), `{reason="rate_limited"}` and
+`{reason="unavailable"}` (the database could not be reached, or held a named room recorded as
+another kind: alert if it rises while the database is healthy), and `member_events_total`
+(`member` frames this node sent when a list changed, whichever node changed it). Chat is a
+draft ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

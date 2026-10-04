@@ -197,6 +197,12 @@ public:
     void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
     // Removals may have gone unheard: the members in every call here are checked again.
     void on_members_resync() noexcept override;
+    // Someone listed, or a role changed (ADR-0096), puts nobody out of a call: a new member asks
+    // for a ticket like any other, and who may expel is the call's caller, not the group's admin.
+    void on_member_added(const core::RoomId& /*room*/,
+                         const core::UserId& /*user*/) noexcept override {}
+    void on_member_role(const core::RoomId& /*room*/, const core::UserId& /*user*/,
+                        core::ports::MemberRole /*role*/) noexcept override {}
     // Lets go of the media rooms nobody asked for within CallLimits::idle, and runs the ring's
     // deadlines. Cheap to call often: it looks at the rooms once a second at most, and at the
     // ring's next deadline only.

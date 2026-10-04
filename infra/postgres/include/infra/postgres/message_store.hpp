@@ -14,7 +14,7 @@ namespace infra::postgres {
 struct MessageStoreConfig {
     std::string conninfo;
     // Mostly history pages, each one statement by primary key. Four, as the room store's: a
-    // chat node then holds 4 + 1 (listening for member removals) + 5 sessions, and three nodes
+    // chat node then holds 4 + 1 (listening for member list changes) + 5 sessions, and three nodes
     // 30 of Postgres' default 100.
     std::size_t connections = 4;
     core::Millis connect_timeout{5000};
@@ -25,9 +25,9 @@ struct MessageStoreConfig {
 };
 
 // IMessageStore on Postgres (migrations/0005_chat_messages.sql), driven by the reactor: no call
-// blocks the loop. One more session LISTENs for member removals (migrations/0009). It only reads
-// messages; PgRoomStore::append writes them. Bodies come back in bytea's hex text form, and neither
-// they nor anything derived from them reaches a log or an error.
+// blocks the loop. One more session LISTENs for member list changes (migrations/0015). It only
+// reads messages; PgRoomStore::append writes them. Bodies come back in bytea's hex text form, and
+// neither they nor anything derived from them reaches a log or an error.
 //
 // The offload pool resolves host names and must be stopped before this is destroyed. Calls
 // outstanding at destruction are dropped unanswered.
@@ -73,6 +73,23 @@ public:
                 core::ports::MessageCallback<core::ports::RoomAccess> done) override;
     void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
     void watch_members(core::ports::IMemberListener* listener) noexcept override;
+    void open_direct(const core::RoomId& room, const core::UserId& user, const core::UserId& peer,
+                     core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void create_group(const core::RoomId& room, const core::UserId& creator,
+                      std::vector<core::UserId> members,
+                      core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void add_members(const core::RoomId& room, const core::UserId& actor,
+                     std::vector<core::UserId> users,
+                     core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void expel(const core::RoomId& room, const core::UserId& actor, const core::UserId& user,
+               core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void leave_room(const core::RoomId& room, const core::UserId& user,
+                    core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void rooms_of(const core::UserId& user, std::optional<core::RoomId> after, std::size_t limit,
+                  core::ports::MessageCallback<std::vector<core::ports::RoomEntry>> done) override;
+    void roster(const core::RoomId& room, const core::UserId& asker,
+                std::optional<core::UserId> after, std::size_t limit,
+                core::ports::MessageCallback<core::ports::Roster> done) override;
 
 private:
     std::unique_ptr<Impl> impl_;
