@@ -1,5 +1,4 @@
 ulw_add_library(ops
-    src/allocator.cpp
     src/async_log.cpp
     src/dev_only.cpp
     src/log.cpp

@@ -1,6 +1,6 @@
 # 0081. chat_server allocates with jemalloc
 
-Status: Accepted, gateway_server's glibc malloc amended by 0094 (one arena, fixed mmap threshold)
+Status: Accepted
 Date: 2026-10-02
 
 ## Context
