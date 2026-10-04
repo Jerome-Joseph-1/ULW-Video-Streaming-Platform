@@ -52,6 +52,69 @@ emulation (Rosetta): everything works, but a transcode takes a few times longer.
 short (under a minute). In Docker Desktop, under Settings > General, "Use Rosetta for x86_64/amd64
 emulation" should be on.
 
+## Demo day
+
+Everything below runs on the presenting laptop: Docker Desktop (macOS or Windows) or Docker
+Engine (Linux), git, and Chrome. Run plan A or B the evening before; the first start downloads
+about 2.5 GB.
+
+**On Docker Desktop first:** Settings > Resources: 4 CPUs, 6 GB memory or more, 10 GB of free
+disk image space. On an Apple Silicon Mac, Settings > General: "Use Rosetta for x86_64/amd64
+emulation on Apple Silicon" on (our images are amd64).
+
+### Plan A: main, pinned to a checked build
+
+Use this once the features are merged to `main`. `<SHA>` is the full 40-digit commit we name
+for the demo: a `main` commit whose `publish-images` run succeeded and whose demo smoke run was
+green.
+
+```sh
+git clone https://github.com/Jerome-Joseph-1/ULW-Video-Streaming-Platform.git ulw && cd ulw
+git checkout <SHA>
+ULW_TAG=<SHA> demo/up.sh
+```
+
+`up.sh` checks the machine first (Docker running, memory, free ports, disk), pulls the images of
+exactly that build, starts everything, waits until it is ready and prints the URL. What `main`
+does not have yet, the page says so in place (for example "group calls arrive with
+feat/group-calls"); everything else works.
+
+### Plan B: the images a CI run built and tested, from an archive
+
+Use this if the features are not all on `main` by the morning. `<RUN>` is the run id and
+`<sha12>` the 12-digit commit we name: an `e2e` run of `demo/integration` with `demo_build`,
+green, whose summary lists the archive (`demo-images-<sha12>`, about 250 MB, kept 2 days).
+
+```sh
+git clone https://github.com/Jerome-Joseph-1/ULW-Video-Streaming-Platform.git ulw && cd ulw
+git checkout <sha12>
+gh run download <RUN> -n demo-images-<sha12>     # or: the run's page > Artifacts > demo-images-<sha12>, then unzip
+demo/load.sh demo-images-<sha12>.tar.gz
+ULW_TAG=local-<sha12> demo/up.sh
+```
+
+The archive holds the four images the run built from that commit and tested twice (once as
+built, once loaded back from the archive). `up.sh` uses them as they are and pulls only the
+third-party images (Postgres, MinIO, LiveKit, Redis, egress, nginx, node), all pinned by digest.
+Without `gh`, download the artifact from the run's page while signed in to GitHub.
+
+### Both plans, on the day
+
+1. Thirty minutes before: `demo/up.sh` with the same `ULW_TAG` as above (a minute when the
+   images are already there). It prints "The demo is up".
+2. Start clean if you rehearsed: `demo/down.sh --wipe`, then `up.sh` again, and in Chrome
+   clear the site's data for localhost:8080 (the address bar's site icon > Site settings >
+   Delete data). That forgets the rehearsal's videos, messages and the browsers' MLS devices.
+3. Open http://localhost:8080 in a normal Chrome window (alice) and in an Incognito window
+   (bob), side by side. Allow the camera and microphone in each. For the group call, a third
+   window as carol: a second Chrome profile, or another browser.
+4. Run [the 10-minute demo](#the-10-minute-demo) below.
+5. Afterwards: `demo/down.sh`.
+
+If something misbehaves during the demo, move on to the next part; each tab stands on its own.
+Calls or live with no picture usually mean a VPN is intercepting local UDP: disconnect it. The
+Troubleshooting table below covers the rest.
+
 ## What is running
 
 `compose.yaml`, one network namespace shared by every service, so each reaches the others on
