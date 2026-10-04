@@ -299,10 +299,15 @@ ALTER DATABASE ulw SET auto_explain.log_parameter_max_length = 0;
 as `ulw` then print `0`.
 
 Chat rooms other than a stream's live chat admit only their listed members (docs/adr/0054).
-Users manage the lists themselves over the chat WebSocket (`open_direct`, `create_group`,
-`add_members`, `remove_member`, `leave`; docs/integration/chat.md, docs/adr/0096): nothing here
-is needed to start a conversation. The lists are rows in `chat_members`, and an operator may
-still change them as the service's role, to repair a list or to moderate. Record a room as
+Who lists them is yours to choose (docs/adr/0096). By default (`ULW_CHAT_SELF_SERVICE` unset or
+`off`) users cannot start a conversation themselves: your product's backend lists them through
+chat's service API once its own request and accept allow it (step 10), and users may still
+leave, remove others from a group they administer, and list their rooms. With
+`ULW_CHAT_SELF_SERVICE=on` (a demo, a closed community) users open direct chats, create groups
+and add members over the chat WebSocket themselves (`open_direct`, `create_group`,
+`add_members`; docs/integration/chat.md). Either way presence is seen only between users who
+share a chat. The lists are rows in `chat_members`, and an operator may still change them as the
+service's role, to repair a list or to moderate. Record a room as
 closed in the same transaction, before its first member, as the service's own statements do, so
 that it can never be recorded live while it lists anyone:
 
@@ -514,6 +519,7 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `POD_CIDR` | The cluster's pod network | `ULW_TRUSTED_PROXIES` of the gateway and chat; the block the worker and packagers may not reach |
 | `JWKS_URL`, `JWT_ISSUER`, `JWT_AUDIENCE` | The identity provider (docs/integration/auth.md) | the gateway's and chat's settings of the same names |
 | `JWT_SUBJECT_CLAIM` | The claim that names the user, `sub` unless your provider uses another | `ULW_JWT_SUBJECT_CLAIM` |
+| `SERVICE_CLAIM`, `SERVICE_SCOPE` | Which tokens are your backend's, for the grants API (docs/integration/auth.md, "Service tokens"): the claim (`scope` by default) and the value only your backend's client-credentials client is granted. Empty `SERVICE_SCOPE`: no token is, and the API answers 403 | the gateway's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE` |
 | `AUTH_COOKIE`, `ALLOWED_ORIGINS` | The token cookie, and the web app's pages that may use it | `ULW_AUTH_COOKIE`, `ULW_ALLOWED_ORIGINS` |
 | `STORAGE`, `R2_ACCOUNT_ID`, `S3_ENDPOINT`, `BUCKET` | The object store: `r2` with an account id, or `minio` (any S3-compatible store) with an endpoint; the unused one empty | `ULW_STORAGE` and the rest, for the gateway, worker, reaper and packagers |
 | `VIDEO_GATEWAY_IMAGE_TAG`, `VIDEO_WORKER_IMAGE_TAG`, `CHAT_IMAGE_TAG`, `LIVE_PACKAGER_IMAGE_TAG` | Which build runs: `main`, a commit SHA, or `<sha>@sha256:<digest>` (4a) | each image's tag |
@@ -1283,3 +1289,152 @@ kubectl -n "$LIVE_NAMESPACE" delete secret "live-packager-$STREAM"
 
 Every packager runs ffmpeg under the worker's sandbox, so it needs what step 1 checks for the
 worker (user namespaces) and step 2's seccomp profile on the node it lands on.
+
+## 10. Chat's service API: your backend lists who talks to whom
+
+ULW keeps no directory of users and no contacts (docs/adr/0018). Out of the box, chat lets no
+user reach another just by knowing their id: `open_direct`, `create_group` and `add_members` on
+the socket are answered `not_allowed` (`ULW_CHAT_SELF_SERVICE` is `off`). Your product decides who
+may talk to whom (a friend request, an invitation, a match) and then lists them through chat's
+service API: HTTP on a port of chat's own, authenticated by your identity provider's token for
+your backend (docs/integration/chat.md, "The service API"; docs/adr/0096). ULW holds no secret
+for it.
+
+### The backend's client in the identity provider
+
+The backend needs its own confidential client, allowed the client-credentials grant, whose tokens
+carry a scope (or role) no user's token does, and ULW's audience. In **Keycloak** (the realm
+whose issuer is `JWT_ISSUER`; 24 and later, admin console):
+
+1. **Client scopes, Create client scope.** Name `ulw:admin`, type *None*, protocol *OpenID
+   Connect*, *Include in token scope* on. Save. (Type *None*: it is never added to any client
+   by default.)
+2. **Clients, Create client.** Client type *OpenID Connect*, client ID `ulw-backend`. Next:
+   *Client authentication* on, and of the authentication flows only *Service accounts roles*
+   (clear *Standard flow* and *Direct access grants*). Save. The *Credentials* tab now holds
+   its secret (or switch the authenticator to *Signed JWT* to use a key instead); give it to
+   the backend's secret store, never to ULW.
+3. **Clients, `ulw-backend`, Client scopes, Add client scope:** `ulw:admin`, as *Default* (in
+   every token of this client) or *Optional* (only when the request names it).
+4. **The audience.** Clients, `ulw-backend`, Client scopes, `ulw-backend-dedicated`,
+   *Configure a new mapper*, *Audience*: name `ulw-audience`, *Included Custom Audience* the
+   exact `JWT_AUDIENCE` of the environment, *Add to access token* on. Without it the token's
+   `aud` is `account` or nothing, and chat answers `401`.
+5. **The subject.** A client-credentials token's `sub` is the service account's id, a UUID,
+   which passes. If `JWT_SUBJECT_CLAIM` names another claim (`preferred_username`, say), the
+   service account has it as `service-account-ulw-backend`; a claim it lacks makes every request
+   `401`.
+6. **Check that no user client has `ulw:admin`:** Client scopes, `ulw:admin`, and every client
+   that lists it should be `ulw-backend` alone. A user's token decoded must not show the scope.
+
+Get a token and look at it:
+
+```sh
+TOKEN=$(curl -fsS https://id.example.com/realms/<realm>/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=ulw-backend \
+  --data-urlencode client_secret@<(cat /path/to/secret) -d scope=ulw:admin | jq -r .access_token)
+echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss, aud, sub, scope, exp}'
+```
+
+`iss` must be `JWT_ISSUER` byte for byte, `aud` must hold `JWT_AUDIENCE`, and `scope` must hold
+`ulw:admin` among its space-separated values. Keycloak issues these for 5 minutes by default;
+the backend fetches a new one before `exp`, and keeps the old one until then.
+
+Elsewhere, the same shape: **Auth0**, an API whose identifier is `JWT_AUDIENCE` with a permission
+`ulw:admin`, and a machine-to-machine application authorized for it with that permission (the
+token's `scope` holds it; `sub` is `<client id>@clients`, which passes). **Okta**, a custom
+authorization server whose audience is `JWT_AUDIENCE`, a custom scope `ulw:admin`, and a service
+app granted it by an access policy. **Microsoft Entra ID**, an app role on the API registration
+(value `ulw.admin`; Entra role values allow no `:`) assigned to the backend's application, which
+arrives in the `roles` array: `SERVICE_CLAIM=roles`, `SERVICE_SCOPE=ulw.admin`.
+
+### Turning it on
+
+In `config.env`, `SERVICE_CLAIM` (the claim, `scope` unless your provider uses `roles` or
+another) and `SERVICE_SCOPE` (`ulw:admin` above): `components/operator-config` copies them to
+chat's `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE`, as to the gateway's, since both read the
+backend's tokens the same way (docs/integration/auth.md, "Service tokens"). With
+`SERVICE_SCOPE` empty, no token is the service's. To also pin the client, set chat's
+`ULW_SERVICE_CLIENT_ID` to `ulw-backend` (Keycloak puts it in `azp`; Okta and RFC 9068 tokens in
+`client_id`): a token holding the scope but issued to any other client is then refused. Then
+open chat's port with a kustomize patch
+in your overlay (the base sets no port, so the API is off, and self-service is off, until you
+do):
+
+```yaml
+patches:
+  - target:
+      kind: Deployment
+      name: chat
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/ports/-
+        value: {name: service, containerPort: 9301}
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: ULW_SERVICE_PORT, value: "9301"}
+```
+
+and, beside it, a ClusterIP Service no HTTPRoute names, and a NetworkPolicy that admits your
+backend's pods (or its egress addresses) to that port and nothing else:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata: {name: chat-service, namespace: ulw}
+spec:
+  selector: {app.kubernetes.io/name: chat}
+  ports: [{name: service, port: 80, targetPort: service}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: chat-service-api, namespace: ulw}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: chat}}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: <backend namespace>}}
+      ports: [{port: service}]
+```
+
+The token is what admits a caller, so a port reached from elsewhere is not open to anyone; but
+nothing needs it reachable from the internet, and a route left off costs nothing, so the base
+ships no HTTPRoute for it. A backend outside the cluster reaches it through your own private
+ingress (a VPN, an internal load balancer). If you must route it through the public Gateway,
+add an HTTPRoute for `/service/v1/` to `chat-service` and restrict it to the backend's
+addresses, for example with Envoy Gateway's `SecurityPolicy`:
+
+```yaml
+# apiVersion: gateway.envoyproxy.io/v1alpha1
+# kind: SecurityPolicy
+# metadata: {name: chat-service-api, namespace: ulw}
+# spec:
+#   targetRefs: [{group: gateway.networking.k8s.io, kind: HTTPRoute, name: chat-service}]
+#   authorization:
+#     defaultAction: Deny
+#     rules:
+#       - action: Allow
+#         principal: {clientCIDRs: ["203.0.113.0/24"]}   # the backend's egress
+```
+
+and set `ULW_SERVICE_CLIENT_ID` as well. Keep
+`ULW_CHAT_SELF_SERVICE` unset (off). A demo whose web client opens chats itself needs
+`ULW_CHAT_SELF_SERVICE=on` (`value: "on"` in the same patch) and no service API.
+
+### Verify
+
+From a pod your NetworkPolicy admits:
+
+```sh
+curl -sS -X POST http://chat-service.ulw.svc/service/v1/rooms \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"user":"<a user id>"}'
+```
+
+answers `200` and the user's rooms. With a user's token instead, `403`; with none, `401`. Each
+chat pod's log line `"msg":"listening"` shows `"self_service":false` and `"service_port":9301`,
+and `/metrics` counts `service_api_answers_total{result="forbidden"}` (users trying the port:
+alert if it rises) and `{result="unauthorized"}` (a backend whose token stopped verifying:
+issuer, audience or key). After changing the claim, roll the chat pods (`kubectl -n ulw rollout
+restart deployment/chat`); after the provider rotates its signing key, step 8 covers the service
+tokens as it does users'.

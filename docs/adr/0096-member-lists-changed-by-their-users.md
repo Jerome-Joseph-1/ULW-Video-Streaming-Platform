@@ -1,9 +1,10 @@
-# 0096. Member lists are changed by their users, over the room WebSocket, under the room's lock
+# 0096. Member lists are changed under the room's lock, by their users where the operator allows it and by the operator's backend; presence is seen only within shared chats
 
 Status: Accepted
-Date: 2026-10-03
+Date: 2026-10-03, amended 2026-10-04 before merging (who may start a chat, the service API,
+presence)
 Amends: ADR-0054 (no client command changed a member list), ADR-0073 (the database tells nodes
-of removals only)
+of removals only), ADR-0056 (anyone signed in could watch anyone)
 
 ## Context
 
@@ -26,6 +27,24 @@ them in the shape of the existing envelope. Six things had to be settled:
 - **What a client may do with it.** A row per member per room, and a notification to every node
   per change, are what a script would try to multiply.
 
+An integrating product (an operator that embeds ULW) then found two holes, and three more
+questions followed from them:
+
+- **Anyone could reach anyone.** With the commands above, any signed-in user opens a chat with,
+  makes a group of, and so calls, anyone whose user id they know. A product that has its own
+  request-and-accept step (a friend request, an invitation, a match) cannot keep it: its users
+  bypass it by sending ULW the id. The ids are not secret; they are the identity provider's
+  subjects, and they show in every `sender` and `member` frame.
+- **Who lists people then.** If users may not, the product's backend must, and so needs a way in
+  that is neither a user's socket nor SQL against ULW's database.
+- **How the backend is known.** ULW keeps no credentials of its own (ADR-0018): users are whoever
+  the identity provider's token says.
+- **Presence was open.** ADR-0056 left "anyone signed in may watch anyone" as an open item:
+  anyone could learn when anyone else is online by knowing their id.
+- **Where presence would be checked, and what keeps it current.** Watches are answered by the
+  watcher's node from what it hears in the watched user's presence room (ADR-0056); member lists
+  live in the database, and change on any node or none.
+
 ## Options
 
 | Option | Why it was tempting | Verdict |
@@ -42,6 +61,37 @@ them in the shape of the existing envelope. Six things had to be settled:
 | Logic in a PL/pgSQL function per change | One round trip | Rejected: the statements live where the store's other statements do (`message_sql.hpp`), and change with the code rather than with a migration |
 | Notify additions through the room's owner, to the room's subscribers | Members of a room that is joined hear it in the room | Rejected: a user added to a room they have not joined is subscribed nowhere; a trigger on `chat_members`, as for removals, reaches every node whoever changed the row |
 
+**Who may start a chat** (added 2026-10-04)
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| Users always may, as above | Simplest; what the demo does | Rejected as the only mode: an embedding product cannot keep its own request and accept |
+| A request and accept of ULW's own (an `invite`, an `accept`) | Self-contained | Rejected: every product's rule differs (friends, matches, a company directory, a paid tier), and a second, different step beside the product's own is worse than none |
+| An operator setting, off by default, plus an API for the operator's backend that lists people | The product keeps its rule and lists the pair once it allows; a demo or closed community turns users on | Accepted ("backend API and switch") |
+
+**The backend's API**
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| SQL against `chat_members`, as the RUNBOOK's repairs | Exists already; the triggers notify every node | Rejected: a product would need ULW's database credentials and the store's statements (caps, kinds, roles, the room's lock and the creator's advisory lock) by heart; any mistake is a list no command could have made |
+| HTTP on the gateway | The public HTTP surface already | Rejected: the member-list logic and the message store's connection are chat's; the gateway would need both, and its public routes and their cookie and CSRF rules are no place for a server-to-server caller |
+| HTTP on chat's client port under a path | No new port | Rejected, as ADR-0093 rejected it for LiveKit's webhooks: chat's client port speaks one upgrade per connection with no body, one widened route makes it public, and its per-user limits do not fit a backend |
+| HTTP/1.1 on a listener of chat's own (`ULW_SERVICE_PORT`), off unless configured, POST with a JSON body per operation, keep-alive, one request at a time per connection | Any chat node takes any request; the operations call the store exactly as the socket's commands do; the transport mirrors ADR-0093's webhook listener | Accepted |
+| A static shared secret for the backend | Easy for an operator | Rejected: ULW keeps no credentials (ADR-0018); a secret in two places is one more to rotate and to leak |
+| The identity provider's token with a claim the operator names (`ULW_SERVICE_CLAIM`, default `scope`, holding `ULW_SERVICE_SCOPE`; OAuth's space-separated `scope` matched by word: the settings and `infra/auth/service_claim.hpp` every ULW service that takes service calls shares), from the client-credentials grant | The same verifier, keys, rotation and SIGHUP as users' tokens; every provider issues such tokens | Accepted |
+| The backend acting through an admin's identity (`add_members` "as" a user) | No new authority | Rejected: the product's rule, not a group admin's, decides; and a direct chat has no admin |
+
+**Who may see whose presence**
+
+| Option | Why it was tempting | Verdict |
+|---|---|---|
+| Anyone may watch anyone (ADR-0056) | Free | Rejected: an integrating product's users could watch strangers' online status by id |
+| A contact list kept by ULW | Explicit | Rejected: ULW keeps no directory (ADR-0018); the product already has one, and the shared chats are what it listed |
+| Users who share a direct or group chat now | Follows the lists the product (or the users) made, with nothing new to store | Accepted ("shared rooms only") |
+| Check at the watched user's node, filtering announcements | One place per user | Rejected: the presence room carries no client identities (ADR-0056), and a node would have to know every watcher's lists |
+| Check at the watcher's node, before a watch is let in; on any removal, hold back every watch here that involves the user removed and ask again | Each node polices its own clients; removals already reach every node (above); nothing is cached that could go stale | Accepted |
+| Cache each watch's basis (which shared room) and drop only those whose room lost a member | Fewer reads | Rejected: the reads are one indexed query per client affected, and a cache is one more thing to keep right across resyncs |
+
 ## Decision
 
 - **Commands** (docs/integration/chat.md, "Member lists"): `open_direct` (`user`), answered
@@ -52,10 +102,13 @@ them in the shape of the existing envelope. Six things had to be settled:
   first. A refusal is an `error` with `not_member`, `not_admin`, `not_group`,
   `too_many_members`, `room_limit`, `gone`, `self`, `rate_limited` (with `retry_after_ms`) or
   `unavailable`.
-- **Named rooms.** A direct chat's room is a version 8 UUID tagged `0x03`, the rest SHA-256 over
-  `ulw direct chat\n`, the two ids in byte order and a newline between them; a group chat's is
-  tagged `0x04`, over `ulw group chat\n`, the creator, a newline and the request's id
-  (`apps/chat/src/named_rooms.cpp`, `core::ports::NamedRoom`). Such a room is only ever its
+- **Named rooms.** A direct chat's room is the first 16 bytes of SHA-256 over
+  `ulw direct chat\n`, the two ids in byte order and a newline between them (none after), with
+  the first byte replaced by the tag `0x03` and the RFC 9562 version 8 and variant bits set
+  (byte 6's high nibble `8`, byte 8's high bits `10`); a group chat's likewise over
+  `ulw group chat\n`, the creator, a newline and the request's id, tagged `0x04`
+  (`apps/chat/src/named_rooms.cpp`, `core::ports::NamedRoom`). The tag replaces the digest's
+  first byte rather than preceding it, unlike a stream's chat (ADR-0070). Such a room is only ever its
   kind: a join of it asks for that kind whatever it says (`"kind"` naming the other is
   `bad_room`), the room plane creates an unrecorded one as it (`kind_of_unrecorded`), and the
   database refuses anything else (`chat_rooms_named_kind`, migration 0015). Nobody can take a
@@ -131,6 +184,53 @@ them in the shape of the existing envelope. Six things had to be settled:
 - **Metrics:** `directs_opened_total`, `groups_created_total`,
   `members_changed_total{change="added"|"removed"|"left"}`,
   `membership_refusals_total{reason=...}` and `member_events_total`.
+- **Self-service is the operator's** (`ULW_CHAT_SELF_SERVICE`, `on` or `off`, default `off`;
+  `ServiceLimits::self_service`). Off, `open_direct`, `create_group` and `add_members` from a
+  socket are refused at once with `not_allowed`, before the allowance or the store
+  (`membership_refusals_total{reason="not_allowed"}`). `leave`, `remove_member` (still an
+  admin's alone) and the listings are unchanged either way. Off is the default because it is the
+  safe one for an embedder; the demo and the test stacks that use the commands set it on.
+- **The service API** (`apps/chat/src/service_api.cpp`, docs/integration/chat.md, "The service
+  API"). `ULW_SERVICE_PORT`, which needs `ULW_SERVICE_SCOPE` set (chat exits 2 otherwise).
+  `POST /service/v1/` `open_direct` (`users`: the pair), `create_group` (`creator`, `id`,
+  `users`), `add_members` (`room`, `users`), `remove_member` (`room`, `user`), `rooms` (`user`,
+  `after`, `limit`), `members` (`room`, `after`, `limit`), answered in JSON with the socket's
+  shapes. Each calls the store as the socket's commands do: `open_direct` and `create_group` with
+  the first user and the creator as the asker (so the per-user room cap counts them),
+  `add_members` and `roster` with `Actor::service()`, which the store treats as every group's
+  admin and as listed, under the same lock and in the same statements (`kAddMembers`' and
+  `kRoster`'s service flag), and `remove_member` as the user's `leave` (`kLeave`), so a group
+  keeps an admin. Rooms are the named rooms above: the same pair or request names the same room
+  whoever asks. Triggers tell every node, and every socket concerned gets its `member` frame, as
+  for a user's change. Calls and joins still check membership at the moment of asking.
+  Authentication: `Authorization: Bearer` only (no cookie), the users' verifier, then
+  `Claims::is_service`, which `infra/auth` sets (`claim_holds`) when the claim
+  `ULW_SERVICE_CLAIM` names (default `scope`) is a string equal to `ULW_SERVICE_SCOPE`, a
+  space-separated string holding it as a word, or an array holding it; never with no scope. `401` (with `WWW-Authenticate: Bearer`), `403` without the claim,
+  `503` when the keys cannot be fetched. Bounded per node: 32 connections, 100 requests at once
+  then 50 a second (`ServiceApiLimits`, `429` with `Retry-After`), 16 KiB bodies, 30 s idle,
+  10 s per request; one request at a time per connection, the next read once the answer is out.
+  Metrics `service_api_*`. `ULW_SERVICE_CLIENT_ID`, optional, also pins the client the token
+  was issued to (`azp` or `client_id`). The port has no HTTPRoute: nothing on the internet needs
+  it, and the token alone admits a caller; an operator whose backend is outside the cluster
+  routes it privately, or, through the public Gateway, only with a source restriction (RUNBOOK,
+  step 10).
+- **Presence within shared chats** (`apps/chat/src/presence.cpp`, `IPresenceAccess`,
+  `IMessageStore::shared_with`, `kSharedWith`). A `watch` is let in only once the store says the
+  two share a direct or group chat now (a room with no kind recorded counts as a group; a stream's
+  live chat never does); until then the node neither answers nor joins the user's presence room,
+  and a refusal is `not_shared` (`unavailable` if the store cannot say). The node is the
+  watcher's, which alone knows its clients; every node enforces it for its own, so a cluster
+  needs no coordination beyond what removals already have. On a removal from any list (the
+  notification every node hears; `ChatService` passes it on, as it does to the call handler),
+  every watch on this node that involves the removed user, as watcher or as watched, is held
+  back at once (no `presence` reaches it), and its client's watches are asked about again in one
+  query; a watch no longer shared is dropped and its client told `not_shared` unasked, and one
+  still shared resumes with a `presence` for whatever changed while held. A removal that comes
+  while a check is out marks it stale, asked again when answered, so no answer read before a
+  removal lets a watch in or back. A resync (lost notifications) holds and checks every watch.
+  Pending checks count against the 128 watches per connection. Metrics `presence_checks_total`,
+  `presence_refusals_total{reason="not_shared"}`, `presence_watches_revoked_total`.
 - **Migration 0015**, after 0011 to 0014 (live streams, then group calls; the migrator refuses
   a version older than the newest applied, so it never runs before them). The migrator runs a migration
   in one transaction and holds every lock to its commit, so the order of its statements is the
@@ -144,8 +244,19 @@ them in the shape of the existing envelope. Six things had to be settled:
 
 ## Consequences
 
-- Clients open conversations, make groups and manage them without an operator; the RUNBOOK's
-  SQL remains for repairs and for granting admin.
+- Where the operator turns self-service on, clients open conversations, make groups and manage
+  them without an operator; where it is off (the default), the product's backend lists people
+  through the service API, and users still leave, remove as admins and list. The RUNBOOK's SQL
+  remains for repairs and for granting admin.
+- A deployment that used the commands before this amendment (a demo) must set
+  `ULW_CHAT_SELF_SERVICE=on`, or its clients get `not_allowed`.
+- Anyone holding a token with the service claim can list anyone in any chat: the claim must be
+  granted to the backend's client alone (RUNBOOK, step 10).
+- A `watch` costs one indexed read, and is answered a round trip later than before. A removal
+  costs, on each node, one read per connection whose watches involve the user removed; a resync
+  one per connection that watches anyone.
+- Adding someone to a chat does not start a watch; clients watch again after a `member`
+  `added`.
 - A change is four to six round trips to Postgres holding one row lock, a few milliseconds; at
   20 at once and one each 3 s per user, the lock is never the bottleneck of a room.
 - Every node hears every change and looks through its clients for those concerned, as it does

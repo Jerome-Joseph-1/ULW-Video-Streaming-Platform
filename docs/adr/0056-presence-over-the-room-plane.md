@@ -164,4 +164,5 @@ a word.
 - **Open before production: authorization.** Anyone signed in may watch anyone, and learn when
   they are online. Nothing in the brief asks for a rule, and the envelope has no place for one
   yet; whether watching needs a shared room, a contact, or a check with Askedin's platform must
-  be decided before presence is offered to real users.
+  be decided before presence is offered to real users. Decided by ADR-0096: a user may watch
+  another only while they share a direct or group chat, checked at the watcher's node.

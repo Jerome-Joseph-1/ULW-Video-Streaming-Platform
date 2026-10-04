@@ -286,3 +286,11 @@ Authentication happens after routing and after the per-route header checks, so a
 answers `404`, a wrong method `405`, and a malformed `Upload-Offset` `400`, whatever the token.
 
 `/api/v1/healthz`, `/api/v1/readyz` and `/metrics` need no token.
+
+Chat's service API ([chat.md](chat.md#the-service-api), on chat's own `ULW_SERVICE_PORT`) takes
+service tokens as [Service tokens](#service-tokens) describes, read from the same two settings,
+and only from `Authorization: Bearer`, never the cookie. It answers `401` (with
+`WWW-Authenticate: Bearer`) for a missing or failing token, `403` for a valid token that is not
+the service's, and `503` when the key set cannot be fetched, each with a JSON body naming the
+reason. Setting up the backend's client in an identity provider, step by step:
+deploy/kubernetes/RUNBOOK.md, step 10.
