@@ -186,7 +186,7 @@ std::expected<core::UserId, EnvelopeError> user_of(const core::json::Value& mess
 }
 
 std::expected<Command, EnvelopeError> call_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "device"})) {
+    if (!only(message, {"type", "room", "device", "answer"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     auto room = room_of(message);
@@ -201,7 +201,19 @@ std::expected<Command, EnvelopeError> call_of(const core::json::Value& message) 
     if (!device) {
         return std::unexpected(EnvelopeError::BadDevice);
     }
-    return Call{.room = *room, .device = *device};
+    std::optional<CallId> answering;
+    if (message.find("answer") != nullptr) {
+        const auto named = string_of(message, "answer");
+        if (!named) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        const auto parsed = CallId::parse(*named);
+        if (!parsed) {
+            return std::unexpected(EnvelopeError::BadCall);
+        }
+        answering = *parsed;
+    }
+    return Call{.room = *room, .device = *device, .answering = answering};
 }
 
 // A list of user ids, 1 (or 0, when `empty_ok`) to kMaxMembersPerChange of them, as given.
@@ -700,6 +712,14 @@ void write_call_event(std::string& out, const CallNotice& notice) {
         core::json::append_string(out, notice.subject->view());
     }
     out += '}';
+}
+
+void write_call_over(std::string& out, const core::RoomId& room, const CallId& call) {
+    write_error(out, "no_call", room);
+    out.pop_back();
+    out += R"(,"call":")";
+    out += call.to_string();
+    out += R"("})";
 }
 
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
