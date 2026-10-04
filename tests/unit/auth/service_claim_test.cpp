@@ -53,7 +53,7 @@ TEST(ServiceClaim, AClaimWithoutAScopeIsRefused) {
 TEST(ServiceClaim, RefusesClaimNamesNoProviderUsesForScopes) {
     using namespace std::string_view_literals;
     for (const std::string_view bad : {"iss"sv, "aud"sv, "exp"sv, "nbf"sv, "iat"sv, "jti"sv,
-                                       "has space"sv, "quote\""sv, "x\0y"sv}) {
+                                       "has space"sv, R"(quote")"sv, "x\0y"sv}) {
         const auto r = read_service_claim(bad, "ulw:admin");
         ASSERT_FALSE(r) << bad;
         EXPECT_EQ(r.error().variable, "ULW_SERVICE_CLAIM");

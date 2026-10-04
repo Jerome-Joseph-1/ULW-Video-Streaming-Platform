@@ -396,7 +396,9 @@ public:
     SetVisibility(const core::VideoId& video, const core::UserId& owner,
                   const core::Visibility& visibility, CatalogCallback<core::VideoRecord> done)
         : video_(video), owner_(owner.view()), kind_(visibility.kind_name()),
-          room_(visibility.room_id() ? visibility.room_id()->to_string() : std::string{}),
+          room_(visibility.room_id()
+                    .transform([](const core::RoomId& r) { return r.to_string(); })
+                    .value_or(std::string{})),
           done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
