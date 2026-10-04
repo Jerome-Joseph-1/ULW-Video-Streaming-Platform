@@ -4,18 +4,26 @@
 
 #include "sockaddr.hpp"
 
+#include <linux/capability.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <new>
 #include <poll.h>
+#include <string>
+#include <unistd.h>
 #include <utility>
 
 namespace net::detail {
@@ -98,8 +106,68 @@ bool io_uring_disabled(std::string_view sysctl) noexcept {
     return ec == std::errc{} && ptr == end && value == 2;
 }
 
+LockedMemoryFacts read_locked_memory_facts() noexcept {
+    rlimit limit{};
+    __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+    std::array<__user_cap_data_struct, _LINUX_CAPABILITY_U32S_3> caps{};
+    LockedMemoryFacts facts{
+        .memlock_limit = ::getrlimit(RLIMIT_MEMLOCK, &limit) == 0
+                             ? std::expected<rlim_t, int>(limit.rlim_cur)
+                             : std::unexpected(errno),
+        .effective_caps = ::syscall(SYS_capget, &header, caps.data()) == 0
+                              ? std::expected<std::uint32_t, int>(caps[0].effective)
+                              : std::unexpected(errno),
+        .uid_map = {},
+    };
+    std::ifstream map("/proc/self/uid_map");
+    for (std::string line; std::getline(map, line);) {
+        facts.uid_map += line;
+        facts.uid_map += '\n';
+    }
+    return facts;
+}
+
+bool is_initial_user_namespace(std::string_view uid_map) noexcept {
+    // Exactly one line, "0 0 4294967295", however it is padded.
+    constexpr std::array<std::uint64_t, 3> kIdentity{0, 0, 4'294'967'295U};
+    constexpr std::string_view kSpace = " \t\n";
+    for (const std::uint64_t expected : kIdentity) {
+        const auto first = uid_map.find_first_not_of(kSpace);
+        if (first == std::string_view::npos) {
+            return false;
+        }
+        uid_map.remove_prefix(first);
+        std::uint64_t value = 0;
+        const char* const begin = std::to_address(uid_map.begin());
+        const auto [ptr, ec] = std::from_chars(begin, std::to_address(uid_map.end()), value);
+        const auto parsed = static_cast<std::size_t>(ptr - begin);
+        if (ec != std::errc{} || value != expected ||
+            (parsed < uid_map.size() && kSpace.find(uid_map[parsed]) == std::string_view::npos)) {
+            return false;
+        }
+        uid_map.remove_prefix(parsed);
+    }
+    return uid_map.find_first_not_of(kSpace) == std::string_view::npos;
+}
+
+bool locked_memory_is_uncharged(const LockedMemoryFacts& facts) noexcept {
+    if (facts.memlock_limit == RLIM_INFINITY) {
+        return true;
+    }
+    const bool ipc_lock =
+        facts.effective_caps.has_value() &&
+        (*facts.effective_caps & (1U << static_cast<unsigned>(CAP_IPC_LOCK))) != 0;
+    return ipc_lock && is_initial_user_namespace(facts.uid_map);
+}
+
 std::expected<std::unique_ptr<UringReactor>, int> UringReactor::create(core::ports::IClock& clock,
                                                                        std::size_t max_fds) {
+    return create(clock, max_fds, read_locked_memory_facts());
+}
+
+std::expected<std::unique_ptr<UringReactor>, int>
+UringReactor::create(core::ports::IClock& clock, std::size_t max_fds,
+                     const LockedMemoryFacts& locked) {
     auto reactor = std::make_unique<UringReactor>(clock, max_fds);
     io_uring_params params{};
     params.flags =
@@ -131,7 +199,7 @@ std::expected<std::unique_ptr<UringReactor>, int> UringReactor::create(core::por
                               io_uring_buf_ring_mask(kDatagramBufCount), static_cast<int>(i));
     }
     io_uring_buf_ring_advance(reactor->dgram_ring_, kDatagramBufCount);
-    reactor->zero_copy_supported_ = reactor->probe_zero_copy_send();
+    reactor->zero_copy_supported_ = reactor->probe_zero_copy_send(locked);
     return reactor;
 }
 
@@ -223,7 +291,17 @@ io_uring_sqe* UringReactor::next_sqe() noexcept {
 // Zero copy is only used where the kernel also says whether it managed it
 // (IORING_SEND_ZC_REPORT_USAGE, 6.2): 6.1 has SENDMSG_ZC but rejects the flag with EINVAL, and
 // the opcode probe cannot tell the two apart, so one real send to ourselves decides.
-bool UringReactor::probe_zero_copy_send() noexcept {
+//
+// The SQ and CQ rings are charged to the locked-memory counter their user shares across all its
+// processes since 6.14, checked against RLIMIT_MEMLOCK unless the process has CAP_IPC_LOCK. So
+// is every SENDMSG_ZC in flight since 6.15 (SEND_ZC since 6.0): two pages for a datagram, so
+// kMaxSendsInFlight of them are 8 MiB, the whole of the usual default limit. The burst below
+// (or a busy socket) could then refuse another reactor of the same user its ring with ENOMEM,
+// so zero copy is only tried where the limit is unlimited or the process is exempt from it.
+bool UringReactor::probe_zero_copy_send(const LockedMemoryFacts& locked) noexcept {
+    if (!locked_memory_is_uncharged(locked)) {
+        return false;
+    }
     io_uring_probe* probe = io_uring_get_probe_ring(&ring_);
     if (probe == nullptr) {
         return false;
@@ -246,9 +324,8 @@ bool UringReactor::probe_zero_copy_send() noexcept {
     probe_.msg.msg_namelen = sizeof(sockaddr_in);
     probe_.msg.msg_iov = &probe_.iov;
     probe_.msg.msg_iovlen = 1;
-    // As many sends at once as the reactor ever holds: on the 6.8 kernel of CI's runners a single
-    // zero-copy send succeeds while a burst of them to one socket fails some, so only a burst
-    // confirms zero copy is safe to use.
+    // As many sends at once as the reactor ever holds, so that a kernel which refuses some of a
+    // burst (where one send alone succeeds) is never trusted with zero copy.
     for (std::size_t i = 0; i < kMaxSendsInFlight; ++i) {
         io_uring_sqe* sqe = next_sqe();
         io_uring_prep_sendmsg_zc(sqe, fd->get(), &probe_.msg, 0);
