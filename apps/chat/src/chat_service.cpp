@@ -513,10 +513,12 @@ void ChatService::call(ClientId id, const Call& call) {
         return;
     }
     rooms_plane_.ask_owner(
-        call.room, *r, encode_request(CallRequest{.user = c->user, .device = call.device}),
-        [this, id,
-         room = call.room](std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
-            called(id, room, std::move(result));
+        call.room, *r,
+        encode_request(
+            CallRequest{.user = c->user, .device = call.device, .answering = call.answering}),
+        [this, id, room = call.room, answering = call.answering](
+            std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
+            called(id, room, answering, std::move(result));
         });
 }
 
@@ -624,6 +626,7 @@ void ChatService::moved(ClientId id, const CallMove& move,
 }
 
 void ChatService::called(ClientId id, const core::RoomId& room,
+                         const std::optional<CallId>& answering,
                          std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
     Client* c = find(id);
     if (c == nullptr) {
@@ -680,8 +683,15 @@ void ChatService::called(ClientId id, const core::RoomId& room,
         case CallOutcome::Full:
             write_call_error(out, "call_full", room, std::nullopt);
             break;
-        // A signal's outcomes; no ticket is answered with them.
+        // The call this ticket was answering is over: nothing to join, nothing to retry.
         case CallOutcome::NoCall:
+            if (answering) {
+                write_call_over(out, room, *answering);
+            } else {
+                write_call_error(out, "unavailable", room, kCallRetry);
+            }
+            break;
+        // A signal's outcome; no ticket is answered with it.
         case CallOutcome::Done:
             write_call_error(out, "unavailable", room, kCallRetry);
             break;

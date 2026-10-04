@@ -366,9 +366,11 @@ protected:
 
     // Asks as `user` from `device`; the answer lands in answers_, in the order they come.
     void ask(std::string_view user = "alice", std::string_view device = kDevice,
-             std::string_view room = kRoom) {
-        const auto request = chat::encode_request(chat::CallRequest{
-            .user = *core::UserId::parse(user), .device = *core::DeviceId::parse(device)});
+             std::string_view room = kRoom, std::optional<chat::CallId> answering = std::nullopt) {
+        const auto request =
+            chat::encode_request(chat::CallRequest{.user = *core::UserId::parse(user),
+                                                   .device = *core::DeviceId::parse(device),
+                                                   .answering = answering});
         handler_->on_ask(room_id(room), request,
                          [this](std::expected<std::vector<std::byte>, rt::RouteError> r) noexcept {
                              if (!r) {
@@ -714,6 +716,76 @@ TEST_F(CallHandlerTest, ATicketForAnAnswerThatCameAfterTheRingEndedRingsNobody) 
     EXPECT_EQ(answers_[2].outcome, CallOutcome::Ticket);
     EXPECT_FALSE(answers_[2].call);
     EXPECT_TRUE(plane_.sent.empty());
+}
+
+TEST_F(CallHandlerTest, AnAnswerToARingTheCallerCancelledIsRefusedAndRingsNobodyBack) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    move("alice", chat::CallSignal::Cancel, call);
+    plane_.sent.clear();
+    const std::size_t joins = sfu_.joins.size();
+    const int lists = store_.lists;
+    // Bob's device never heard the cancel (its socket was reconnecting) and he picks up: that
+    // call is over, and his answer must not ring alice as a new call from him.
+    ask("bob", kOtherDevice, kRoom, call);
+    EXPECT_EQ(outcomes(),
+              (std::vector{CallOutcome::Ticket, CallOutcome::Done, CallOutcome::NoCall}));
+    EXPECT_TRUE(plane_.sent.empty()) << "a late answer rang the caller";
+    EXPECT_EQ(sfu_.joins.size(), joins) << "a late answer was given a ticket";
+    EXPECT_EQ(store_.lists, lists);
+    EXPECT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(handler_->ring_counters().started, 1U);
+    EXPECT_EQ(handler_->counters().no_call, 1U);
+    // Without the call it answers, the same ask starts a call, as it always did.
+    ask("bob", kOtherDevice);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(handler_->ring_counters().started, 2U);
+}
+
+TEST_F(CallHandlerTest, AnAnswerToACancelledRingAnswersTheCallersNewRing) {
+    // Cancel, ring again, answer: the callee's device may still name the first ring; the
+    // caller's new one is what it picks up.
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId first = *answers_.at(0).call;
+    move("alice", chat::CallSignal::Cancel, first);
+    ask("alice");
+    sfu_.issue();
+    const chat::CallId second = *answers_.back().call;
+    ASSERT_NE(first, second);
+    plane_.sent.clear();
+    ask("bob", kOtherDevice, kRoom, first);
+    sfu_.issue();
+    ASSERT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(answers_.back().call, second);
+    EXPECT_EQ(plane_.events(), std::vector(2, chat::RingEvent::Answered));
+    EXPECT_EQ(handler_->ring_counters().answered, 1U);
+    // And the answer naming the ring it answers works as plainly.
+    ask("bob", kOtherDevice, kRoom, second);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().call, second);
+}
+
+TEST_F(CallHandlerTest, AnAnswerThatCrossedTheAnswerersOwnRingIsRefused) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId alices = *answers_.at(0).call;
+    move("alice", chat::CallSignal::Cancel, alices);
+    // Bob calls back meanwhile; his device then answers alice's old ring.
+    ask("bob", kOtherDevice);
+    sfu_.issue();
+    const chat::CallId bobs = *answers_.back().call;
+    ask("bob", kOtherDevice, kRoom, alices);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::NoCall);
+    // His own call rings on, untouched.
+    EXPECT_EQ(handler_->calls(), 1U);
+    move("bob", chat::CallSignal::Cancel, bobs);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
 }
 
 TEST_F(CallHandlerTest, SignalsWithoutAnSfuAreDisabledAsTicketsAre) {
@@ -1591,8 +1663,17 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
         ASSERT_TRUE(refusal);
         EXPECT_EQ(refusal->outcome, outcome);
     }
+    const chat::CallRequest answer{
+        .user = request.user, .device = request.device, .answering = call};
+    const auto answer_back = chat::decode_request(chat::encode_request(answer));
+    ASSERT_TRUE(answer_back);
+    EXPECT_EQ(std::get<chat::CallRequest>(*answer_back).answering, call);
+    EXPECT_FALSE(std::get<chat::CallRequest>(*decoded).answering);
+    auto short_answer = chat::encode_request(answer);
+    short_answer.pop_back();
+    EXPECT_FALSE(chat::decode_request(short_answer));
     auto unknown_ask = chat::encode_request(request);
-    unknown_ask[1] = std::byte{6};
+    unknown_ask[1] = std::byte{7};
     EXPECT_FALSE(chat::decode_request(unknown_ask));
     auto short_ask = chat::encode_request(request);
     short_ask.pop_back();
