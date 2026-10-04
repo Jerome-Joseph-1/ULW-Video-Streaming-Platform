@@ -6,6 +6,7 @@
 #include "core/util/json.hpp"
 #include "core/util/time.hpp"
 #include "infra/auth/claim_rules.hpp"
+#include "infra/auth/service_claim.hpp"
 
 #include "json_member.hpp"
 #include "jwk.hpp"
@@ -144,6 +145,15 @@ bool matches(const core::json::Value& doc, const ClaimRules& rules) {
            });
 }
 
+// The service rule, read as leniently: a token that is not a service's still serves its user.
+bool is_service(const core::json::Value& doc, const ClaimRules& rules) noexcept {
+    if (rules.service_value.empty()) {
+        return false;
+    }
+    const core::json::Value* claim = doc.find(rules.service_claim);
+    return claim != nullptr && claim_holds(*claim, rules.service_value);
+}
+
 } // namespace
 
 VerifyResult check_claims(std::string_view payload, const ClaimRules& rules, core::WallTime now) {
@@ -193,7 +203,8 @@ VerifyResult check_claims(std::string_view payload, const ClaimRules& rules, cor
     return Claims{.subject = *subject,
                   .email = std::move(*email),
                   .expires_at = *expires_at,
-                  .may_broadcast = matches(*doc, rules)};
+                  .may_broadcast = matches(*doc, rules),
+                  .is_service = is_service(*doc, rules)};
 }
 
 VerifyResult authenticate(const CompactJws& jws, const PublicKey& key, const ClaimRules& rules,

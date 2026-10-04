@@ -593,6 +593,7 @@ ulw_add_test_suite(auth_unit_tests unit
     unit/auth/jws_test.cpp
     unit/auth/local_verifier_test.cpp
     unit/auth/result_cache_test.cpp
+    unit/auth/service_claim_test.cpp
     unit/auth/signature_test.cpp
     unit/auth/test_claims.cpp
     unit/auth/test_keys.cpp

@@ -22,6 +22,9 @@ struct Claims {
     // Whether the token carries what the deployment asks of a broadcaster (ADR-0092); true
     // where it asks nothing.
     bool may_broadcast = true;
+    // Whether the token is the operator's backend, by the claim the deployment names for it
+    // (ADR-0097); false where it names none.
+    bool is_service = false;
 };
 
 enum class AuthError : std::uint8_t {
