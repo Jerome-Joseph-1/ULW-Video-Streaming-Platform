@@ -55,7 +55,7 @@ emulation" should be on.
 ## Demo day
 
 Everything below runs on the presenting laptop: Docker Desktop (macOS or Windows) or Docker
-Engine (Linux), git, and Chrome. Do steps 1 to 3 the evening before; the first start downloads
+Engine (Linux), git, and Chrome. Run plan A or B the evening before; the first start downloads
 about 2.5 GB.
 
 **On Docker Desktop first:** Settings > Resources: 4 CPUs, 6 GB memory or more, 10 GB of free
