@@ -8,4 +8,7 @@ COPY demo/nginx/default.conf /etc/nginx/conf.d/default.conf
 COPY demo/web/ /usr/share/nginx/html/
 # The path demo/nginx/default.conf's /mls/ location aliases (the checkout's mount in demo/compose.yaml).
 COPY clients/web-mls/dist/ /repo/clients/web-mls/dist/
-RUN nginx -t
+# config.js, written at start from ULW_WEB_* (web-config.sh): where the page finds the gateway,
+# chat and the token issuer. Unset, it is the demo's: all on the page's own origin.
+COPY --chmod=0755 demo/build/web-config.sh /docker-entrypoint.d/40-ulw-web-config.sh
+RUN nginx -t && /docker-entrypoint.d/40-ulw-web-config.sh && cat /usr/share/nginx/html/config.js

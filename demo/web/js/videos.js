@@ -1,7 +1,7 @@
 // Upload & Watch: a resumable upload (docs/integration/uploads.md), the video's state polled
 // until ready, and HLS playback through the gateway's playlists and the store's signed segment
 // URLs (docs/integration/videos-and-playback.md).
-import { $, api, demo, el, log, store, toast, token } from './core.js';
+import { $, api, apiOrigin, apiUrl, demo, el, log, store, toast, token } from './core.js';
 
 let file = null;
 let upload = null; // { uploadId, videoId, size, name, chunk, offset, paused }
@@ -143,7 +143,7 @@ async function resume() {
     u.controller = new AbortController();
     let r;
     try {
-      r = await fetch(`/api/v1/uploads/${u.uploadId}`, {
+      r = await fetch(apiUrl(`/api/v1/uploads/${u.uploadId}`), {
         method: 'PATCH',
         signal: u.controller.signal,
         headers: { authorization: `Bearer ${await token()}`, 'upload-offset': String(u.offset),
@@ -193,7 +193,7 @@ export function attachHls(video, src, options = {}) {
   const player = new Hls({
     ...options,
     xhrSetup: (xhr, url) => {
-      if (new URL(url, location.href).origin === location.origin) {
+      if (new URL(url, location.href).origin === apiOrigin) {
         xhr.setRequestHeader('authorization', `Bearer ${demoToken()}`);
       }
     },
@@ -212,7 +212,7 @@ async function play(v) {
   const video = $('player');
   $('player-title').textContent = v.title;
   $('player-status').textContent = 'loading...';
-  hls = attachHls(video, `/api/v1/videos/${v.id}/master.m3u8`, { startLevel: -1 });
+  hls = attachHls(video, apiUrl(`/api/v1/videos/${v.id}/master.m3u8`), { startLevel: -1 });
   hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
     $('player-status').textContent = `${data.levels.length} renditions: ${data.levels.map((l) => `${l.height}p`).join(', ')}`;
     video.play().catch(() => {});

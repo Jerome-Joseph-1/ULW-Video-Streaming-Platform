@@ -45,8 +45,17 @@ export const store = {
 
 export const session = { user: null, token: null, expiresAt: 0 };
 
+// Where the page finds the gateway, chat and the token issuer: window.ULW_CONFIG, from config.js
+// (the web image writes it at start from ULW_WEB_* variables, build/web-config.sh). Each empty
+// or missing value means this page's own origin and the demo's paths, as before.
+export const config = window.ULW_CONFIG ?? {};
+// A gateway path (/api/v1/...) on the configured API base, or on this origin.
+export const apiUrl = (path) =>
+  /^https?:/.test(path) ? path : `${(config.apiBase ?? '').replace(/\/$/, '')}${path}`;
+export const apiOrigin = new URL(apiUrl('/'), location.href).origin;
+
 export async function signIn(user) {
-  const r = await fetch(`/auth/token?sub=${encodeURIComponent(user)}`, { method: 'POST' });
+  const r = await fetch(`${config.tokenUrl || '/auth/token'}?sub=${encodeURIComponent(user)}`, { method: 'POST' });
   if (!r.ok) throw new Error(`token for ${user}: ${r.status}`);
   const body = await r.json();
   session.user = user;
@@ -72,7 +81,7 @@ export async function api(method, path, { json, body, headers = {} } = {}) {
   } else if (body !== undefined) {
     init.body = body;
   }
-  const response = await fetch(path, init);
+  const response = await fetch(apiUrl(path), init);
   let data = null;
   if ((response.headers.get('content-type') ?? '').startsWith('application/json')) {
     data = await response.json().catch(() => null);
@@ -122,7 +131,8 @@ class ChatSocket extends EventTarget {
 
   async connect() {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${scheme}://${location.host}/rt?token=${encodeURIComponent(await token())}`);
+    const base = config.chatUrl || `${scheme}://${location.host}/rt`;
+    const ws = new WebSocket(`${base}?token=${encodeURIComponent(await token())}`);
     this.ws = ws;
     ws.onopen = () => {
       this.open = true;
