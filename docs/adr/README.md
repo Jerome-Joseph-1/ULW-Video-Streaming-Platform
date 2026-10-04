@@ -100,3 +100,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0094](0094-gateway-malloc-one-arena-and-a-fixed-mmap-threshold.md) | gateway_server's malloc: one arena and a fixed 128 KiB mmap threshold, tried and measured, not adopted | Rejected |
 | [0095](0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md) | Group calls from the room's owner, with a media generation moved by its fenced write | Accepted |
 | [0096](0096-member-lists-changed-by-their-users.md) | Member lists are changed by their users, over the room WebSocket, under the room's lock | Accepted |
+| [0097](0097-videos-shared-by-visibility-and-service-grants.md) | Videos are shared by a visibility their owner sets and by grants the operator's backend makes, checked against the catalog on every read | Accepted |

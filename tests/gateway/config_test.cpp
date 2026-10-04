@@ -926,3 +926,40 @@ TEST_F(ConfigTest, DevelopmentModeIsLoggedWithTheLocalKeySet) {
 }
 
 } // namespace
+
+namespace {
+
+// ADR-0097: the operator's backend, by a claim of its tokens.
+TEST_F(ConfigTest, NoTokenIsTheServiceUnlessAScopeIsSet) {
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->service_claim, "scope");
+    EXPECT_TRUE(config->service_value.empty());
+}
+
+TEST_F(ConfigTest, TheServiceScopeAndItsClaimAreReadAndLogged) {
+    env["ULW_SERVICE_SCOPE"] = "ulw:admin";
+    const auto scoped = load();
+    ASSERT_TRUE(scoped) << scoped.error().variable << ": " << scoped.error().reason;
+    EXPECT_EQ(scoped->service_claim, "scope");
+    EXPECT_EQ(scoped->service_value, "ulw:admin");
+    env["ULW_SERVICE_CLAIM"] = "roles";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->service_claim, "roles");
+    const std::string log = effective_log(*config);
+    EXPECT_NE(log.find(R"("name":"ULW_SERVICE_CLAIM","value":"roles")"), std::string::npos);
+    EXPECT_NE(log.find(R"("name":"ULW_SERVICE_SCOPE","value":"ulw:admin")"), std::string::npos);
+}
+
+TEST_F(ConfigTest, AServiceClaimOrScopeThatCannotWorkIsRefused) {
+    env["ULW_SERVICE_CLAIM"] = "roles";
+    EXPECT_EQ(refused_variable(), "ULW_SERVICE_CLAIM");
+    env["ULW_SERVICE_SCOPE"] = "ulw admin";
+    EXPECT_EQ(refused_variable(), "ULW_SERVICE_SCOPE");
+    env["ULW_SERVICE_SCOPE"] = "ulw:admin";
+    env["ULW_SERVICE_CLAIM"] = "exp";
+    EXPECT_EQ(refused_variable(), "ULW_SERVICE_CLAIM");
+}
+
+} // namespace

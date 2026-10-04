@@ -1,6 +1,8 @@
 #include "infra/catalog/memory_catalog.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <string>
 #include <utility>
 
 namespace infra::catalog {
@@ -201,6 +203,118 @@ void MemoryCatalog::find_video(const core::VideoId& id, CatalogCallback<core::Vi
     defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
         done(std::move(result));
     });
+}
+
+void MemoryCatalog::find_video_for(const core::VideoId& id, const core::UserId& viewer,
+                                   CatalogCallback<core::ports::VideoView> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<core::ports::VideoView> result =
+        std::unexpected(CatalogError::NotFound);
+    if (const auto it = videos_.find(id); it != videos_.end()) {
+        const core::VideoRecord& video = it->second;
+        const std::optional<core::RoomId>& room = video.visibility.room_id();
+        const auto granted = grants_.find(id);
+        result = core::ports::VideoView{
+            .video = video,
+            .viewer = {.room_member =
+                           room && members_.contains({*room, std::string(viewer.view())}),
+                       .granted = granted != grants_.end() &&
+                                  granted->second.contains(std::string(viewer.view()))}};
+    }
+    if (find_video_error_) {
+        result = std::unexpected(*find_video_error_);
+    }
+    defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
+        done(std::move(result));
+    });
+}
+
+void MemoryCatalog::set_visibility(const core::VideoId& id, const core::UserId& owner,
+                                   const core::Visibility& visibility,
+                                   CatalogCallback<core::VideoRecord> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<core::VideoRecord> result = std::unexpected(CatalogError::NotFound);
+    if (const auto it = videos_.find(id); it != videos_.end() && it->second.owner == owner) {
+        const std::optional<core::RoomId>& room = visibility.room_id();
+        if (room && !members_.contains({*room, std::string(owner.view())})) {
+            result = std::unexpected(CatalogError::Forbidden);
+        } else {
+            it->second.visibility = visibility;
+            result = it->second;
+        }
+    }
+    defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
+        done(std::move(result));
+    });
+}
+
+void MemoryCatalog::grant_access(const core::VideoId& id, const core::UserId& user,
+                                 CatalogCallback<void> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<void> result{};
+    if (!videos_.contains(id)) {
+        result = std::unexpected(CatalogError::NotFound);
+    } else {
+        grants_[id].try_emplace(
+            std::string(user.view()),
+            core::ports::VideoGrant{.user = user, .granted_at = std::chrono::system_clock::now()});
+    }
+    defer([done = std::move(done), result]() mutable noexcept { done(result); });
+}
+
+void MemoryCatalog::revoke_access(const core::VideoId& id, const core::UserId& user,
+                                  CatalogCallback<void> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<void> result{};
+    if (!videos_.contains(id)) {
+        result = std::unexpected(CatalogError::NotFound);
+    } else if (const auto it = grants_.find(id); it != grants_.end()) {
+        it->second.erase(std::string(user.view()));
+    }
+    defer([done = std::move(done), result]() mutable noexcept { done(result); });
+}
+
+void MemoryCatalog::list_grants(const core::VideoId& id, std::optional<core::UserId> after,
+                                std::size_t limit, CatalogCallback<core::ports::GrantPage> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<core::ports::GrantPage> result =
+        std::unexpected(CatalogError::NotFound);
+    if (videos_.contains(id)) {
+        core::ports::GrantPage page;
+        if (const auto it = grants_.find(id); it != grants_.end()) {
+            auto from =
+                after ? it->second.upper_bound(std::string(after->view())) : it->second.begin();
+            for (; from != it->second.end(); ++from) {
+                if (page.grants.size() == limit) {
+                    page.more = true;
+                    break;
+                }
+                page.grants.push_back(from->second);
+            }
+        }
+        result = std::move(page);
+    }
+    defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
+        done(std::move(result));
+    });
+}
+
+void MemoryCatalog::add_member(const core::RoomId& room, const core::UserId& user) {
+    members_.emplace(room, std::string(user.view()));
+}
+
+void MemoryCatalog::remove_member(const core::RoomId& room, const core::UserId& user) {
+    members_.erase({room, std::string(user.view())});
 }
 
 void MemoryCatalog::record_views(std::vector<core::ports::ViewEvent> batch,

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -75,6 +76,17 @@ public:
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
     void find_video(const core::VideoId& id,
                     core::ports::CatalogCallback<core::VideoRecord> done) override;
+    void find_video_for(const core::VideoId& id, const core::UserId& viewer,
+                        core::ports::CatalogCallback<core::ports::VideoView> done) override;
+    void set_visibility(const core::VideoId& id, const core::UserId& owner,
+                        const core::Visibility& visibility,
+                        core::ports::CatalogCallback<core::VideoRecord> done) override;
+    void grant_access(const core::VideoId& id, const core::UserId& user,
+                      core::ports::CatalogCallback<void> done) override;
+    void revoke_access(const core::VideoId& id, const core::UserId& user,
+                       core::ports::CatalogCallback<void> done) override;
+    void list_grants(const core::VideoId& id, std::optional<core::UserId> after, std::size_t limit,
+                     core::ports::CatalogCallback<core::ports::GrantPage> done) override;
     void record_views(std::vector<core::ports::ViewEvent> batch,
                       core::ports::CatalogCallback<void> done) override;
 

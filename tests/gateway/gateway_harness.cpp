@@ -408,6 +408,20 @@ void GatewayUnderTest::put_video(const core::VideoRecord& video) {
     on_loop([&] { loop_->catalog->put_video(video); });
 }
 
+void GatewayUnderTest::add_member(std::string_view room, std::string_view user) {
+    const auto r = core::RoomId::parse(room);
+    const auto u = core::UserId::parse(user);
+    ASSERT_TRUE(r && u) << room << " " << user;
+    on_loop([&] { loop_->catalog->add_member(*r, *u); });
+}
+
+void GatewayUnderTest::remove_member(std::string_view room, std::string_view user) {
+    const auto r = core::RoomId::parse(room);
+    const auto u = core::UserId::parse(user);
+    ASSERT_TRUE(r && u) << room << " " << user;
+    on_loop([&] { loop_->catalog->remove_member(*r, *u); });
+}
+
 void GatewayUnderTest::put_object(std::string_view key, std::string_view bytes) {
     core::ports::IObjectAdmin& admin = *loop_->admin;
     const auto parsed = core::StorageKey::parse(key);

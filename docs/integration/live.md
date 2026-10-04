@@ -191,7 +191,9 @@ source.
 
 - **Who may watch.** Any signed-in user (a valid token, as for every API route) may watch any
   stream by its id. A live stream is a broadcast; its recording is the broadcaster's own video
-  like any upload ([When a stream ends](#when-a-stream-ends)). `{id}` is the stream's `id`
+  like any upload ([When a stream ends](#when-a-stream-ends)). A stream has no visibility of its
+  own: the visibility and grants of [videos-and-playback.md](videos-and-playback.md#who-can-see-a-video)
+  apply to its recording, not to the stream while it is live (ADR-0097). `{id}` is the stream's `id`
   ([Starting a stream](#starting-a-stream)); a stream an operator started by hand has the id it
   was given, 1 to 64 of `A-Z a-z 0-9 _ -`.
 - **The playlist.** RFC 8216 live: `EXT-X-VERSION:7`, `EXT-X-TARGETDURATION` (the segment length,
@@ -249,7 +251,7 @@ times its end is observed:
 
 | Field | Value |
 |---|---|
-| `owner` | The broadcaster: the user id (the token's subject) the stream was started for. Only they can see or play it, as with an upload |
+| `owner` | The broadcaster: the user id (the token's subject) the stream was started for. It starts `private`, as an upload does: only they can see or play it until they set its visibility or the operator's backend grants it ([Who can see a video](videos-and-playback.md#who-can-see-a-video)) |
 | `title` | `Live stream <stream id>` |
 | `state` | `processing` as soon as the recording is stored, then `ready` (or `failed`) exactly as an upload's video ([videos-and-playback.md](videos-and-playback.md#lifecycle)) |
 | `duration_ms` | The whole stream. A stream whose packager restarted is one video: its parts are joined, without the gap between them; a part without audio is silent in it |

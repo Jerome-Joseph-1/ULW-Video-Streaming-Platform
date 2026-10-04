@@ -47,6 +47,17 @@ spec:
           port: 80
       timeouts:
         request: 15s
+    # The operator's backend's grants (docs/integration/videos-and-playback.md, ADR-0097): short
+    # requests that only a service token passes, so Envoy's ordinary bound stands here too.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/service/videos
+      backendRefs:
+        - name: video-gateway
+          port: 80
+      timeouts:
+        request: 15s
 ---
 # The gateway closes a keep-alive connection that sits idle for its 10 s header timeout. If
 # Envoy kept pooled upstream connections longer, it would sometimes send a request down one the

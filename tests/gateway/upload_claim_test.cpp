@@ -61,6 +61,27 @@ public:
     void find_video(const core::VideoId& /*id*/, CatalogCallback<core::VideoRecord> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
+    void find_video_for(const core::VideoId& /*id*/, const core::UserId& /*viewer*/,
+                        CatalogCallback<core::ports::VideoView> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void set_visibility(const core::VideoId& /*id*/, const core::UserId& /*owner*/,
+                        const core::Visibility& /*visibility*/,
+                        CatalogCallback<core::VideoRecord> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void grant_access(const core::VideoId& /*id*/, const core::UserId& /*user*/,
+                      CatalogCallback<void> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void revoke_access(const core::VideoId& /*id*/, const core::UserId& /*user*/,
+                       CatalogCallback<void> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void list_grants(const core::VideoId& /*id*/, std::optional<core::UserId> /*after*/,
+                     std::size_t /*limit*/, CatalogCallback<core::ports::GrantPage> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
 
     std::vector<core::UploadId> released;
     std::vector<ClaimToken> tokens;

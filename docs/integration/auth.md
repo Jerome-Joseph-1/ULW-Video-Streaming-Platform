@@ -123,6 +123,28 @@ The result must be 1 to 128 characters from `A-Z a-z 0-9 . _ : @ | + -`; anythin
 refused rather than cleaned up. This string is the owner of every video the user uploads, and
 it is compared byte for byte. Two tokens with different subjects are two different users.
 
+## Service tokens
+
+<!-- infra/auth/src/service_claim.cpp (read_service_claim, claim_holds), infra/auth/src/claims.cpp (is_service), apps/gateway/src/connection.cpp (start_service_route), docs/adr/0097-videos-shared-by-visibility-and-service-grants.md -->
+
+The operator's own backend calls the service API (`/api/v1/service/...`,
+[videos-and-playback.md](videos-and-playback.md#service-api-grants)) with a token of its own,
+which it obtains from the same identity provider with the OAuth client-credentials grant. Such
+a token must pass every check above (signature, `iss`, `aud`, `exp`, a subject: the client's
+id is fine), and is the service's when its claim `ULW_SERVICE_CLAIM` (default `scope`) holds
+`ULW_SERVICE_SCOPE`:
+
+- a string equal to it, or listing it among values separated by spaces, as OAuth's `scope` does
+  (`"openid ulw:admin"`);
+- an array with a string that does either (`"roles": ["ulw:admin"]`);
+- `true`, when `ULW_SERVICE_SCOPE` is `true`.
+
+Choose a value only the backend's client is ever granted: an identity provider that lets a
+signed-in user ask for any scope would otherwise let that user act as the backend. A service
+token is an ordinary token everywhere else: it may call every user route as the user its subject
+names, and is charged the per-user request limits under that subject. The same two settings,
+read the same way, are what every ULW service that takes service calls uses.
+
 ## Key set
 
 <!-- apps/gateway/src/config.cpp (load_auth), infra/auth/src/jwks_verifier.cpp, infra/auth/include/infra/auth/jwks_verifier.hpp, apps/gateway/src/gateway.cpp and apps/chat/src/chat.cpp (on_signal, drop_auth_caches) -->
@@ -134,6 +156,8 @@ it is compared byte for byte. Two tokens with different subjects are two differe
 | `JWT_AUDIENCE` | Required with `JWKS_URL`: the `aud` the provider puts in tokens meant for ULW. No default, since a guessed one would refuse every token or accept tokens meant for another service; the process refuses to start without it (exit 2). With `ULW_DEV_JWKS_FILE` it defaults to `ulw-dev`, what `ulw_devtoken` mints. |
 | `ULW_JWT_SUBJECT_CLAIM` | Optional, default `sub`: the claim that names the user ([How the user id is derived](#how-the-user-id-is-derived)). 1 to 64 of `A-Z a-z 0-9 _ . : / -`, and not `iss`, `aud`, `exp`, `nbf`, `iat` or `jti` (claims that name no user); anything else stops the process at startup. |
 | `ULW_AUTH_COOKIE` | Optional, default `auth_token`. |
+| `ULW_SERVICE_CLAIM` | Optional, default `scope`: the claim that marks the operator's backend ([Service tokens](#service-tokens)). 1 to 64 of `A-Z a-z 0-9 _ . : / -`, and not `iss`, `aud`, `exp`, `nbf`, `iat` or `jti`. Set without `ULW_SERVICE_SCOPE`, it stops the process at startup. |
+| `ULW_SERVICE_SCOPE` | Optional, default none: the value that claim must hold, such as `ulw:admin`. 1 to 128 printable ASCII characters, no spaces. Unset: no token is a service's, and the service API answers `403` to all. |
 | `ULW_JWKS_MAX_STALE_HOURS` | Optional, 1 to 168, default 24: how long keys stay trusted while every refetch fails (below). |
 | `ULW_DEV_JWKS_FILE` | Development only: a local Ed25519 key set instead of `JWKS_URL`. Setting both is a startup error. It is refused (exit 2) unless `ULW_DEV_MODE=1`, and refused regardless inside a Kubernetes pod (`KUBERNETES_SERVICE_HOST` set, as the kubelet does in every container), so a key set left in a real deployment's configuration stops the process instead of being trusted. The gateway and chat server both apply this. The first log line prints `keys=DEVELOPMENT <file>` so it cannot go unnoticed. |
 | `ULW_DEV_MODE` | `0` or `1`, default `0`. `1` says this is a development run, which development-only settings such as `ULW_DEV_JWKS_FILE` need. |

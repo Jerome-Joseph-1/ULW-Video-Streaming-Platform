@@ -461,6 +461,39 @@ CONSTRAINT`, which scans under a lock that lets reads and writes go on; and, onc
 older than 0015 runs, drops 0009's triggers (`chat_member_removed`, `chat_member_moved` on
 `chat_members`), which until then send every removal a second time on the old channel.
 
+**Migration 0016 (who may see a video, docs/adr/0097) comes after 0015**, for the same reason:
+the release that carries it carries 0011 to 0015. It is quick and needs no off-peak window: it
+creates `video_grants` and its index (an empty table), then alters `videos` in one statement (two
+columns, one with a constant default, and two checks added `NOT VALID`), which scans and rewrites
+nothing. Its locks on `videos` are held until its commit, a moment after they are taken: the
+foreign key's SHARE ROW EXCLUSIVE lock holds an upload's progress write or a worker's transition
+back for that moment, and the ALTER's ACCESS EXCLUSIVE lock every read of `videos`, playback
+included, only from the ALTER to the commit. Every video it finds becomes `private`, as before.
+The gateway now reads `chat_members` on each video request to decide who may see a video shared
+with a room; nothing else changes about chat's tables. Follow-up once 0016 is everywhere: a
+later migration validates `videos_visibility` and `videos_visibility_room` with
+`VALIDATE CONSTRAINT`.
+
+Who may see a video (docs/integration/videos-and-playback.md, "Who can see a video") is set by
+its owner and by your backend through the grants API. As the service's role, an operator may
+also look and repair:
+
+```sql
+SELECT visibility, visibility_room FROM videos WHERE id = '<video uuid>';
+SELECT user_id, granted_at FROM video_grants WHERE video_id = '<video uuid>' ORDER BY user_id;
+-- Take a video back to its owner alone, grants included:
+BEGIN;
+UPDATE videos SET visibility = 'private', visibility_room = NULL WHERE id = '<video uuid>';
+DELETE FROM video_grants WHERE video_id = '<video uuid>';
+COMMIT;
+-- Revoke everything a user was granted (video_grants_by_user):
+DELETE FROM video_grants WHERE user_id = '<user id>';
+```
+
+A change takes effect at the user's next request on every gateway: nothing is cached. Segment
+URLs a playlist handed out before stay valid until they expire (at most 7 days, usually an hour
+or two), as for any viewer.
+
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside
 the cluster. If their addresses are stable, patch them in as an `ipBlock` on the 5432 and 443
 rules.
@@ -514,6 +547,7 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `POD_CIDR` | The cluster's pod network | `ULW_TRUSTED_PROXIES` of the gateway and chat; the block the worker and packagers may not reach |
 | `JWKS_URL`, `JWT_ISSUER`, `JWT_AUDIENCE` | The identity provider (docs/integration/auth.md) | the gateway's and chat's settings of the same names |
 | `JWT_SUBJECT_CLAIM` | The claim that names the user, `sub` unless your provider uses another | `ULW_JWT_SUBJECT_CLAIM` |
+| `SERVICE_CLAIM`, `SERVICE_SCOPE` | Which tokens are your backend's, for the grants API (docs/integration/auth.md, "Service tokens"): the claim (`scope` by default) and the value only your backend's client-credentials client is granted. Empty `SERVICE_SCOPE`: no token is, and the API answers 403 | the gateway's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE` |
 | `AUTH_COOKIE`, `ALLOWED_ORIGINS` | The token cookie, and the web app's pages that may use it | `ULW_AUTH_COOKIE`, `ULW_ALLOWED_ORIGINS` |
 | `STORAGE`, `R2_ACCOUNT_ID`, `S3_ENDPOINT`, `BUCKET` | The object store: `r2` with an account id, or `minio` (any S3-compatible store) with an endpoint; the unused one empty | `ULW_STORAGE` and the rest, for the gateway, worker, reaper and packagers |
 | `VIDEO_GATEWAY_IMAGE_TAG`, `VIDEO_WORKER_IMAGE_TAG`, `CHAT_IMAGE_TAG`, `LIVE_PACKAGER_IMAGE_TAG` | Which build runs: `main`, a commit SHA, or `<sha>@sha256:<digest>` (4a) | each image's tag |
@@ -572,7 +606,8 @@ kubectl -n "$NS" rollout restart deployment/video-worker deployment/chat
 A pinned environment is not restarted onto a new build: its deploy is a change of the image
 tags in its `config.env` (4a) and an apply.
 
-The routes serve `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` (the gateway), `/rt`
+The routes serve `/api/v1/uploads`, `/api/v1/videos`, `/api/v1/live` and
+`/api/v1/service/videos` (the gateway), `/rt`
 (chat), and `/rtc` and `/whip` (LiveKit) on `PUBLIC_HOSTNAME` only. Environments often attach to
 one shared Gateway, so a route without `hostnames:` would answer the other environments' hosts
 too. To serve a second host, patch it into the three HTTPRoutes' `spec.hostnames`.
