@@ -152,23 +152,23 @@ TEST(TranscodeArgs, ReproduceTheSpecCommandForAFullLadder) {
                         "pipe:1",
                         "-nostats",
                         "out/%v/index.m3u8"};
-    EXPECT_EQ(transcode_args("ffmpeg", "in", "out", media(1080), ladder, 4), expected);
+    EXPECT_EQ(transcode_args("in", "out", media(1080), ladder, 4), expected);
 }
 
 TEST(TranscodeArgs, TheGopFollowsTheSourceRate) {
     const auto ladder = core::choose_ladder(720);
-    const Args args = transcode_args("ffmpeg", "in", "out",
-                                     media(720, true, {.num = 30000, .den = 1001}), ladder, 2);
+    const Args args =
+        transcode_args("in", "out", media(720, true, {.num = 30000, .den = 1001}), ladder, 2);
     EXPECT_EQ(after(args, "-g"), "120");
     EXPECT_EQ(after(args, "-keyint_min"), "120");
     const Args pal =
-        transcode_args("ffmpeg", "in", "out", media(720, true, {.num = 25, .den = 1}), ladder, 2);
+        transcode_args("in", "out", media(720, true, {.num = 25, .den = 1}), ladder, 2);
     EXPECT_EQ(after(pal, "-g"), "100");
 }
 
 TEST(TranscodeArgs, A480pSourceIsEncodedAt360pOnly) {
     const auto ladder = core::choose_ladder(480);
-    const Args args = transcode_args("ffmpeg", "in", "out", media(480), ladder, 2);
+    const Args args = transcode_args("in", "out", media(480), ladder, 2);
     EXPECT_EQ(after(args, "-filter_complex"), "[0:v]split=1[v1];[v1]scale=-2:360[v1o]");
     EXPECT_EQ(after(args, "-var_stream_map"), "v:0,a:0,name:360p");
     EXPECT_EQ(std::ranges::count(args, "-map"), 2);
@@ -179,35 +179,33 @@ TEST(TranscodeArgs, A480pSourceIsEncodedAt360pOnly) {
 TEST(TranscodeArgs, NoRungIsScaledAboveTheSource) {
     const auto ladder = core::choose_ladder(720);
     const std::string graph =
-        after(transcode_args("ffmpeg", "in", "out", media(720), ladder, 2), "-filter_complex");
+        after(transcode_args("in", "out", media(720), ladder, 2), "-filter_complex");
     EXPECT_EQ(graph, "[0:v]split=2[v1][v2];[v1]scale=-2:720[v1o];[v2]scale=-2:360[v2o]");
     EXPECT_EQ(graph.find("1080"), std::string::npos);
 }
 
 TEST(TranscodeArgs, ASilentSourceMapsNoAudio) {
     const auto ladder = core::choose_ladder(720);
-    const Args args = transcode_args("ffmpeg", "in", "out", media(720, false), ladder, 2);
+    const Args args = transcode_args("in", "out", media(720, false), ladder, 2);
     EXPECT_EQ(std::ranges::find(args, "a:0"), args.end());
     EXPECT_EQ(std::ranges::find(args, "-c:a"), args.end());
     EXPECT_EQ(after(args, "-var_stream_map"), "v:0,name:720p v:1,name:360p");
 }
 
 TEST(TranscodeArgs, NeverMixConstantQualityWithABitrate) {
-    const Args args =
-        transcode_args("ffmpeg", "in", "out", media(1080), core::choose_ladder(1080), 2);
+    const Args args = transcode_args("in", "out", media(1080), core::choose_ladder(1080), 2);
     EXPECT_EQ(std::ranges::find(args, "-crf"), args.end());
     EXPECT_EQ(std::ranges::find(args, "-qp"), args.end());
 }
 
 TEST(TranscodeArgs, PassesTheThreadCountExplicitly) {
-    const Args args =
-        transcode_args("ffmpeg", "in", "out", media(360), core::choose_ladder(360), 3);
+    const Args args = transcode_args("in", "out", media(360), core::choose_ladder(360), 3);
     EXPECT_EQ(after(args, "-threads"), "3");
 }
 
 TEST(TranscodeArgs, RungsBelow360pGetTheirOwnHeightAndName) {
     const auto ladder = core::choose_ladder(240);
-    const Args args = transcode_args("ffmpeg", "in", "out", media(240), ladder, 1);
+    const Args args = transcode_args("in", "out", media(240), ladder, 1);
     EXPECT_EQ(after(args, "-filter_complex"), "[0:v]split=1[v1];[v1]scale=-2:240[v1o]");
     EXPECT_EQ(after(args, "-var_stream_map"), "v:0,a:0,name:240p");
     EXPECT_EQ(after(args, "-maxrate:v:0"), "570k");
@@ -306,8 +304,8 @@ TEST(Demuxers, EveryInputIsOpenedWithAClosedListOfThem) {
         const auto list = std::ranges::find(args, "-format_whitelist");
         return list != args.end() && list < std::ranges::find(args, input);
     };
-    const Args probe = infra::ffmpeg::probe_args("ffprobe", "in");
-    const Args encode = transcode_args("ffmpeg", "in", "out", media(720), ladder, 2);
+    const Args probe = infra::ffmpeg::probe_args("in");
+    const Args encode = transcode_args("in", "out", media(720), ladder, 2);
     EXPECT_EQ(after(probe, "-format_whitelist"), "mov,matroska,mpegts,avi,flv,asf,mpeg,ogg");
     EXPECT_EQ(after(encode, "-format_whitelist"), after(probe, "-format_whitelist"));
     EXPECT_TRUE(source_first(probe, "in"));
@@ -317,8 +315,8 @@ TEST(Demuxers, EveryInputIsOpenedWithAClosedListOfThem) {
         EXPECT_EQ(after(probe, "-format_whitelist").find(format), std::string::npos) << format;
     }
 
-    const Args keyframes = infra::ffmpeg::keyframe_args("ffprobe", "out/360p/index.m3u8");
-    const Args decode = infra::ffmpeg::decode_args("ffmpeg", "out/master.m3u8");
+    const Args keyframes = infra::ffmpeg::keyframe_args("out/360p/index.m3u8");
+    const Args decode = infra::ffmpeg::decode_args("out/master.m3u8");
     EXPECT_EQ(after(keyframes, "-format_whitelist"), "hls,mov");
     EXPECT_EQ(after(decode, "-format_whitelist"), "hls,mov");
     EXPECT_TRUE(source_first(keyframes, "out/360p/index.m3u8"));
