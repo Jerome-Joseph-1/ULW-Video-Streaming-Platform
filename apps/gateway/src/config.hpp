@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace gateway {
 
@@ -21,6 +22,43 @@ enum class StorageBackend : std::uint8_t { R2, Minio, Filesystem };
 // Plain in the Kubernetes deployment, where Envoy terminates TLS in front of the gateway
 // (ADR-0001); TLS where the gateway faces clients itself.
 enum class Transport : std::uint8_t { Plain, Tls };
+
+// Where a stream's packager runs (ADR-0092): a child process of the gateway, for development
+// and the local stack, or a Kubernetes Job.
+enum class PackagerRuntime : std::uint8_t { Process, Kubernetes };
+
+// The stream service's settings. Live publishing is on when LIVEKIT_API_URL is set, and
+// everything it needs must be set with it.
+struct LiveConfig {
+    bool enabled = false;
+    std::string livekit_api_url;
+    std::string livekit_client_url;
+    std::string livekit_api_key;
+    std::string livekit_api_secret;
+    // Where the relay calls a stream's packager: srt://host:port, "{stream}" allowed in the host.
+    std::string packager_srt;
+    PackagerRuntime runtime = PackagerRuntime::Process;
+    // Process: the live_packager binary, and the environment each one starts with.
+    std::string packager_binary;
+    std::vector<std::string> packager_environment;
+    // Kubernetes: the Job template's text, read at start, and what fills it.
+    std::string job_template_file;
+    std::string job_template;
+    std::string image_tag;
+    // ULW_LIVE_PACKAGER_PULL_POLICY and ULW_LIVE_PACKAGER_SECRET: the template's
+    // ${IMAGE_PULL_POLICY} and ${LIVE_PACKAGER_SECRET}; its store is the gateway's own.
+    std::string pull_policy = "IfNotPresent";
+    std::string packager_secret = "live-packager-secrets";
+    std::string k8s_api_url = "https://kubernetes.default.svc";
+    std::string k8s_namespace;
+    std::string k8s_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+    std::string k8s_ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+    // ULW_LIVE_BROADCASTER_CLAIM, "<claim>=<value>": who may start a stream. Empty: anyone
+    // signed in.
+    std::string broadcaster_claim;
+    std::string broadcaster_value;
+    LiveSettings settings;
+};
 
 struct Config {
     std::uint16_t port = 8080;
@@ -60,6 +98,7 @@ struct Config {
     // ULW_DEV_MODE=1: a development run, which dev_jwks_file needs.
     bool dev_mode = false;
     Limits limits;
+    LiveConfig live;
 };
 
 struct ConfigError {

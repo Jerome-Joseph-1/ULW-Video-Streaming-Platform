@@ -90,7 +90,7 @@ jobs:
           persist-credentials: false
       - run: sudo apt-get install -y -qq --no-install-recommends python3-yaml
       - run: tools/security/trivy-config.sh
-      # The allowlist, image-pin and image-report scripts' own tests.
+      # The allowlist, image-pin, image-report and live-admission scripts' own tests.
       - run: python3 tools/security/security_tools_test.py
 
   # actionlint, with the run steps through shellcheck, and zizmor (.github/zizmor.yml).

@@ -80,6 +80,8 @@ std::string_view to_string(Method method) noexcept {
         return "PUT";
     case Method::Post:
         return "POST";
+    case Method::Patch:
+        return "PATCH";
     case Method::Delete:
         return "DELETE";
     }
