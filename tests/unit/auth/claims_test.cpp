@@ -118,6 +118,34 @@ TEST_F(ClaimsTest, NoOtherClaimStandsInForAMissingSubject) {
               AuthError::MissingSubject);
 }
 
+TEST_F(ClaimsTest, WithNoBroadcasterRuleEveryTokenMayBroadcast) {
+    const auto claims = check(test_payload());
+    ASSERT_TRUE(claims.has_value());
+    EXPECT_TRUE(claims->may_broadcast);
+}
+
+TEST_F(ClaimsTest, TheBroadcasterRuleTakesAStringAnArrayHoldingItOrTrue) {
+    ClaimRules rules = kRules;
+    rules.broadcaster_claim = "roles";
+    rules.broadcaster_value = "broadcaster";
+    const auto may = [&](std::initializer_list<ulw::test::ClaimChange> changes) {
+        const auto claims = check_claims(test_payload(changes), rules, clock_.wall_now());
+        EXPECT_TRUE(claims.has_value());
+        return claims && claims->may_broadcast;
+    };
+    EXPECT_TRUE(may({{"roles", R"("broadcaster")"}}));
+    EXPECT_TRUE(may({{"roles", R"(["viewer","broadcaster"])"}}));
+    // Anything else is not a match, and the token still serves everything else.
+    EXPECT_FALSE(may({}));
+    EXPECT_FALSE(may({{"roles", R"("viewer")"}}));
+    EXPECT_FALSE(may({{"roles", R"(["viewer"])"}}));
+    EXPECT_FALSE(may({{"roles", "true"}}));
+    EXPECT_FALSE(may({{"roles", "7"}}));
+    rules.broadcaster_value = "true";
+    EXPECT_TRUE(may({{"roles", "true"}}));
+    EXPECT_FALSE(may({{"roles", "false"}}));
+}
+
 TEST_F(ClaimsTest, AnAbsentOrEmptySubjectIsMissing) {
     EXPECT_EQ(error_of(test_payload({{"sub", std::nullopt}})), AuthError::MissingSubject);
     EXPECT_EQ(error_of(test_payload({{"sub", R"("")"}})), AuthError::MissingSubject);
