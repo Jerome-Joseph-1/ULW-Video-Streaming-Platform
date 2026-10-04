@@ -631,14 +631,18 @@ TEST_P(LiveKitSfuTest, ARoomLiveKitDroppedHoldsNobody) {
     const HttpTestServer server([&](const ServedRequest&) {
         return ++served == 1
                    ? Reply{.status = 200, .headers = {}, .body = "{}"}
-                   : Reply{.status = 404, .headers = {}, .body = R"({"code":"not_found"})"};
+                   : Reply{.status = 404,
+                           .headers = {},
+                           .body = R"({"code":"not_found","msg":"requested room does not exist"})"};
     });
     start(server.base_url());
     auto room = open();
     ASSERT_TRUE(room);
+    // LiveKit's Twirp not_found, handed over as the answer (IfAbsent::Succeed), is nobody.
     const Listed listed = list_participants(*reactor, **room);
     ASSERT_TRUE(listed);
     EXPECT_TRUE(listed->empty());
+    EXPECT_EQ(string_at(body_of(server.requests().at(1)), "room"), std::string(kRoom) + ":1");
 }
 
 TEST_P(LiveKitSfuTest, ListingParticipantsFailsByWhetherARetryCanHelp) {

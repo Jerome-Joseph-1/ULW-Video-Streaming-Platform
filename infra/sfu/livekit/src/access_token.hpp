@@ -23,13 +23,11 @@ enum class Permission : std::uint8_t {
     PublishToRoom,
     // RoomService.CreateRoom and DeleteRoom, which LiveKit guards with one permission.
     CreateRooms,
-    // RoomService.ListParticipants of `room`: the server reads who is in one room.
-    AdminRoom,
     // Egress.StartParticipantEgress: LiveKit's recorder joins `room` and sends one participant
     // on.
     RecordRoom,
-    // RoomService.GetParticipant in `room`: who is connected there, and nothing about any other
-    // room.
+    // RoomService.GetParticipant and ListParticipants in `room`: who is connected there, and
+    // nothing about any other room.
     AdminRoom,
     // RoomService.ListRooms: which rooms exist, for asking about one without recreating it.
     ListRooms,

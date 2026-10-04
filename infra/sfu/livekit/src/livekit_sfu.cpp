@@ -251,16 +251,19 @@ std::optional<std::int64_t> integer_of(const core::json::Value* value) noexcept 
 
 // The members connected to a room, from a ListParticipants answer: identities that are not
 // "<user>/<device>" (LiveKit's recorder, a WHIP source) are not members, and participants that
-// are leaving no longer count. A room LiveKit does not have answers with no list: nobody.
+// are leaving no longer count. A room LiveKit does not have holds nobody: IfAbsent::Succeed hands
+// over its Twirp not_found error, `{"code":"not_found","msg":...}`, as the answer, as it does for
+// present(). protojson leaves an empty list out.
 std::expected<std::vector<core::ports::MediaParticipant>, MediaError>
 participants_of(std::string_view answer) {
     std::vector<core::ports::MediaParticipant> out;
-    if (answer.empty()) {
-        return out;
-    }
     const auto parsed = core::json::parse(answer);
     if (!parsed) {
         return std::unexpected(MediaError::Unavailable);
+    }
+    if (const core::json::Value* code = parsed->find("code");
+        code != nullptr && code->as_string() == "not_found") {
+        return out;
     }
     const core::json::Value* list = parsed->find("participants");
     if (list == nullptr || list->as_array() == nullptr) {
