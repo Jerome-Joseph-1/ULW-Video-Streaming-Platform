@@ -92,6 +92,16 @@ TEST_F(LiveConfigTest, TheMaximumBitrateIsBounded) {
     EXPECT_EQ(load()->max_kbps, 8000U);
 }
 
+TEST_F(LiveConfigTest, TheWaitForACallerIsUnlimitedUnlessSetAndBounded) {
+    EXPECT_EQ(load()->caller_wait, core::Seconds{0});
+    env["ULW_LIVE_CALLER_WAIT_SECONDS"] = "60";
+    EXPECT_EQ(load()->caller_wait, core::Seconds{60});
+    for (const char* bad : {"86401", "-1", "soon"}) {
+        env["ULW_LIVE_CALLER_WAIT_SECONDS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_CALLER_WAIT_SECONDS") << bad;
+    }
+}
+
 TEST_F(LiveConfigTest, AStreamIdThatIsNotOneKeySegmentIsRefused) {
     env["ULW_STREAM_ID"] = "../other";
     EXPECT_EQ(refused_variable(), "ULW_STREAM_ID");

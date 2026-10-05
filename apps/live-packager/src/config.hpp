@@ -51,6 +51,10 @@ struct Config {
     core::Seconds max_duration{};
     // The most the publisher may send, in kbit/s; it bounds the size of a segment file.
     std::uint32_t max_kbps = 0;
+    // How long to wait for the relay's SRT caller before ending the stream without one; zero
+    // waits until a signal. A stream service sets it, so that a packager whose relay never
+    // came, or that restarted after its relay went, ends and records its stream by itself.
+    core::Seconds caller_wait{0};
     // Unset: the stream is live only, and nothing is recorded.
     std::optional<RecordingTarget> recording;
 };

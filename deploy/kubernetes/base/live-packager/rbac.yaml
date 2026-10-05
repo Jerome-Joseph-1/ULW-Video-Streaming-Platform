@@ -1,0 +1,37 @@
+# What the gateway's stream service may do in the packagers' namespace (docs/adr/0092): create a
+# stream's Job, read it back for its status, and create the stream's Secret owned by that Job.
+# Nothing else: no list, watch, update, patch or delete, no read of any Secret, no pods or exec.
+# The account itself is the gateway's (video-gateway/serviceaccount.yaml, in NAMESPACE);
+# admission-policy.yaml narrows what it may create to a packager's shape.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: video-gateway-live-packagers
+  namespace: ulw-live
+  labels:
+    app.kubernetes.io/name: video-gateway
+    app.kubernetes.io/part-of: ulw
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: video-gateway-live-packagers
+  namespace: ulw-live
+  labels:
+    app.kubernetes.io/name: video-gateway
+    app.kubernetes.io/part-of: ulw
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: video-gateway-live-packagers
+subjects:
+  - kind: ServiceAccount
+    name: video-gateway
+    namespace: ulw
