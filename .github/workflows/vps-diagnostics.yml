@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 15
     permissions: {}
     env:
-      SINCE: 3h
+      SINCE: 1h
     steps:
       - name: Write the redaction filter
         run: |
@@ -99,12 +99,12 @@ jobs:
         run: |
           compose() { sudo /opt/ulw/compose.sh "$@"; }
           redact() { python3 "$RUNNER_TEMP/redact.py" 3< <(sudo cat /opt/ulw/.env); }
-          pattern='call|ring|ticket|room|participant|error|warn|fail|refus|mute|track|disconnect|reconnect|ice|dtls|turn|signal|leave|join|kick|close|expire|denied|limit|panic|fatal'
+          pattern='upload|chunk|commit|video|transcode|job|ffmpeg|sandbox|storage|minio|s3|presign|playlist|segment|ready|processing|call|ring|ticket|room|participant|error|warn|fail|refus|mute|track|disconnect|reconnect|ice|dtls|turn|signal|leave|join|kick|close|expire|denied|limit|panic|fatal'
           {
             echo "== compose ps"
             compose ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Health}}\t{{.Status}}'
             echo "== now: $(date -u +%FT%TZ)"
-            for svc in chat gateway livekit caddy; do
+            for svc in gateway worker caddy minio chat livekit; do
               logs=$(compose logs --no-color --timestamps --since "$SINCE" "$svc" 2>&1 || true)
               echo
               echo "== $svc: $(printf '%s\n' "$logs" | wc -l) lines in the last $SINCE"
@@ -133,7 +133,7 @@ jobs:
             echo
             echo "== gateway /metrics"
             compose exec -T gateway bash -c "$scrape" 8081 2>&1 | grep -v '^# ' |
-                grep -i -E 'call|ring|ticket|live|webhook|auth|refus|reject|error|fail|conn|request' || true
+                grep -i -E 'upload|chunk|video|job|storage|s3|call|ring|ticket|live|webhook|auth|refus|reject|error|fail|conn|request' || true
           } | redact | head -c 1000000
 
       - name: Clean up
