@@ -2,7 +2,5 @@
 name: ulw
 queries:
   - uses: security-extended
-# The build tree holds the vendored sources FetchContent unpacks (llhttp, srt) and generated
-# files; alerts there are upstream's, and the dependencies job tracks their advisories.
-paths-ignore:
-  - build/**
+# No paths-ignore: a traced C++ build is extracted as it compiles, whatever the paths say. The
+# job keeps the configure and the FetchContent dependencies out of the trace instead.

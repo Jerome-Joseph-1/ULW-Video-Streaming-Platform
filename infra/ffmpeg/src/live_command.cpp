@@ -70,9 +70,9 @@ std::optional<std::uint32_t> live_init_epoch(std::string_view name) {
     return core::parse_integer<std::uint32_t>(name);
 }
 
-Args live_remux_args(const std::string& ffmpeg, const LiveRemuxJob& job, const LiveProbe& probe) {
+Args live_remux_args(const LiveRemuxJob& job, const LiveProbe& probe) {
     constexpr std::int64_t kMicrosPerMilli = 1000;
-    return {ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning", "-nostats",
+    return {std::string(kFfmpeg), "-nostdin", "-hide_banner", "-loglevel", "warning", "-nostats",
             // ffmpeg reads this much of the stream before it writes anything, which delays
             // the first segment; it must still hold the first video keyframe, which comes up
             // to a segment length after the publisher joined (live_probe).
