@@ -615,6 +615,25 @@ class ChatSocket:
                 return message
             check(message.get("type") != "error", f"chat answered {message} waiting for {kind}")
 
+    def ticket(self, request, attempts=3):
+        # A ticket, asked for again after an unavailable answer once retry_after_ms has passed,
+        # as docs/integration/calls.md tells clients to.
+        for attempt in range(attempts):
+            self.send(request)
+            while True:
+                message = self.recv(10)
+                check(message is not None, "no ticket from chat within 10 s")
+                if message.get("room") != request["room"]:
+                    continue
+                if message.get("type") == "ticket":
+                    return message
+                if message.get("type") == "error":
+                    retryable = (message.get("reason") == "unavailable"
+                                 and attempt + 1 < attempts)
+                    check(retryable, f"chat answered {message} waiting for ticket")
+                    time.sleep(message.get("retry_after_ms", 1000) / 1000)
+                    break
+
     def close(self):
         self.sock.close()
 
@@ -705,8 +724,7 @@ def scenario_call():
             s.send({"type": "join", "room": room})
             s.expect("joined")
             device = str(uuid.uuid4())
-            s.send({"type": "call", "room": room, "device": device})
-            ticket = s.expect("ticket")
+            ticket = s.ticket({"type": "call", "room": room, "device": device})
             check(ticket.get("room") == room, f"{user}'s ticket names another room: {ticket}")
             # The route the sandbox's LiveKit is reached on (deploy/stunner/up.sh).
             check(ticket.get("url") == SANDBOX_URL.replace("http", "ws", 1),
@@ -765,13 +783,12 @@ def check_group_call(alice, bob, sockets, rtc):
     for user, s in zip((alice, bob), sockets):
         device = str(uuid.uuid4())
         if call is None:
-            s.send({"type": "call", "room": group, "device": device})
+            ticket = s.ticket({"type": "call", "room": group, "device": device})
         else:
             ring = group_frame(s, user, "call_ringing")
             check(ring.get("call") == call and ring.get("from") == alice,
                   f"{user} was rung for another call: {ring}, not alice's {call}")
-            s.send({"type": "call", "room": group, "device": device, "answer": call})
-        ticket = group_frame(s, user, "ticket")
+            ticket = s.ticket({"type": "call", "room": group, "device": device, "answer": call})
         check(ticket.get("url") == SANDBOX_URL.replace("http", "ws", 1),
               f"{user}'s group ticket names {ticket.get('url')!r}")
         check(time.time() < ticket.get("expires_at", 0) <= time.time() + 61,

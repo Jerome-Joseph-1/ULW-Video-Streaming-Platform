@@ -493,10 +493,13 @@ target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 # The M16 acceptance: three chat_server processes on the Postgres the suites above use.
+# A direct chat's room is named by its two members, so both reactors' runs of the direct call
+# test would share one LiveKit room and identities: they run alone.
 ulw_add_test_suite(chat_cluster_tests integration
     integration/chat_cluster_test.cpp
     integration/postgres_harness.cpp
-    support/child_process.cpp)
+    support/child_process.cpp
+    SERIAL "*.ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsToOneRoom/*")
 target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::auth ulw::codec_ws
     ulw::net_lib ulw::os ulw::sfu_livekit ulw::test_tls PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
