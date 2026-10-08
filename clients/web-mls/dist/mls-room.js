@@ -130,7 +130,7 @@ export class MlsRoom {
         this.early = []; // group messages from before this device joined
         this.queue = []; // key packages waiting to be decided on
         this.draining = false;
-        this.chain = Promise.resolve(); // saves and posts, in order
+        this.chain = null; // the last save and post, which the next one waits for
         this.memo = this.#loadMemo();
         try {
             this.group = client.loadGroup(this.groupId);
@@ -175,7 +175,7 @@ export class MlsRoom {
         all[this.room] = this.memo;
         this.client.appData = utf8(JSON.stringify(all));
         const state = this.client.exportState();
-        const step = this.chain.then(async () => {
+        const step = (this.chain ?? Promise.resolve()).then(async () => {
             try {
                 await this.onState(state);
             } catch (e) {
