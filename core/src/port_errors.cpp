@@ -104,6 +104,8 @@ std::string_view to_string(LiveEnd e) noexcept {
         return "failed";
     case LiveEnd::Timeout:
         return "timeout";
+    case LiveEnd::PublisherLeft:
+        return "publisher_left";
     }
     return "failed";
 }
