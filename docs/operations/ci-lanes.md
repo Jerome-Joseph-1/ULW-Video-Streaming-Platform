@@ -44,32 +44,36 @@ that pull request (sonar-project.properties, ADR-0079, ADR-0086).
 
 **Two lanes in ci.yml**, chosen by the first job, `changes`:
 
-- **Quick lane** (`pull_request`). At most six jobs:
+- **Quick lane** (`pull_request`). At most seven jobs:
   - `changes`: on a pull request, `git diff --name-only --no-renames origin/<base>...HEAD`.
     `code` is false when every changed path (both sides of a rename) is under `docs/`,
-    `deploy/` or `.github/`, or ends in `.md`; `deploy` is whether any path is under `deploy/`.
+    `deploy/` or `.github/`, or ends in `.md`; `deploy` is whether any path is under `deploy/`;
+    `web-mls` is whether any is under `clients/web-mls/`. Everything else, `demo/` and
+    `clients/web-mls/` included, is code: the SonarQube scan in `coverage` analyses them.
   - `build-test (gcc/ci, unit)`: the ci preset with gcc, the unit label, then the binary
     hardening check and the privilege-drop tests as root, as the full lane's gcc job runs them.
     Only when `code`.
   - `boundaries + format + tidy (0/1)`: one lint shard over the changed files: boundaries, format, the E2EE diagnostic,
-    the OpenMLS bridge's checks, the shard self-check, clang-tidy on the changed files, and
-    check-docs. Always.
+    the OpenMLS bridge's checks, the browser MLS client's checks (only when `web-mls`), the
+    shard self-check, clang-tidy on the changed files, and check-docs. Always.
   - `coverage`: as before (ADR-0086), and the SonarQube Cloud scan, on pull requests from this
     repository and those labelled `coverage`. Only when `code`. It is part of the quick lane:
     the gate on new code is decided on the pull request's own analysis, and at 13-16 min it is
     the lane's longest job.
   - `secrets`: always.
   - `manifests`: only when `deploy`.
-  A pull request that changes code takes about 15 min (coverage) on five or six jobs; one that
+  - `web-mls-dist`: rebuilds `clients/web-mls/dist/` in its pinned image and compares it byte for
+    byte (ADR-0098), about two minutes. Only when `web-mls`.
+  A pull request that changes code takes about 15 min (coverage) on five to seven jobs; one that
   changes only docs, Markdown, deploy/ or .github/ runs `changes`, `lint` and `secrets` (and
   `manifests` for deploy/) in about five.
 - **Full lane** (`push` to `main` or `batch/**`, the nightly schedule, `workflow_dispatch`).
   `changes` and every job as before: `build-test` ×3, `tsan`, `reactor-matrix` ×2,
   `integration` ×2, `coverage`, `cluster`, `ingest`, `lint` ×4 over the full tree, `autobahn`
   ×2, `fuzz` (300 s per target; 1800 s on the nightly and manual runs), `secrets`,
-  `manifests`. No path filter applies. On a `batch/**` push `coverage` measures and reports
-  but does not scan: the batch's tree reaches main as squash commits, and main's push scans
-  them. `fuzz` no longer runs on pull requests.
+  `manifests`, `web-mls-dist`. No path filter applies. On a `batch/**` push `coverage` measures
+  and reports but does not scan: the batch's tree reaches main as squash commits, and main's
+  push scans them. `fuzz` no longer runs on pull requests.
 
 **security.yml** keeps its triggers: pull requests, pushes to main, weekly and manual. Its
 CodeQL job stays on pull requests for its alerts there; the other three take seconds. It does not

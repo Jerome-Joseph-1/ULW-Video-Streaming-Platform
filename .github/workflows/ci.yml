@@ -2,11 +2,12 @@ name: ci
 
 # Two lanes (docs/operations/ci-lanes.md). A pull request runs the quick lane: the `changes` job,
 # one build with the unit label (gcc/ci), lint as one job over the changed files, coverage and the
-# SonarQube scan, secrets, and manifests when deploy/ changed; a pull request that touches only
-# docs/, Markdown, deploy/ or .github/ skips the build and coverage. A push to main or to a batch/**
-# branch, the nightly run and a manual run run the full suite: every job below. The merge loop
-# pushes batch/N (main plus the queued pull requests' heads) and squash-merges them only once that
-# run is green, so every check runs on the tree main ends up with.
+# SonarQube scan, secrets, manifests when deploy/ changed, and the browser MLS client's checks
+# (web-mls-dist, and its step of lint) when clients/web-mls/ changed; a pull request that touches
+# only docs/, Markdown, deploy/ or .github/ skips the build and coverage. A push to main or to a
+# batch/** branch, the nightly run and a manual run run the full suite: every job below. The merge
+# loop pushes batch/N (main plus the queued pull requests' heads) and squash-merges them only once
+# that run is green, so every check runs on the tree main ends up with.
 on:
   push:
     branches: [main, "batch/**"]
@@ -31,8 +32,8 @@ jobs:
   # Which lane this run is, and on a pull request what it changed (docs/operations/ci-lanes.md).
   # Outside a pull request every output is the full lane's. On a pull request, `code` is false when
   # every changed path (both sides of a rename) is under docs/, deploy/ or .github/ or ends in .md,
-  # and `deploy` is whether any is under deploy/. The diff is against the merge base, as lint's
-  # clang-tidy step takes it.
+  # `deploy` is whether any is under deploy/, and `web-mls` whether any is under clients/web-mls/.
+  # The diff is against the merge base, as lint's clang-tidy step takes it.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -40,6 +41,7 @@ jobs:
       full: ${{ steps.lane.outputs.full }}
       code: ${{ steps.lane.outputs.code }}
       deploy: ${{ steps.lane.outputs.deploy }}
+      web-mls: ${{ steps.lane.outputs.web-mls }}
       build-test: ${{ steps.lane.outputs.build-test }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,6 +68,7 @@ jobs:
               echo "full=true"
               echo "code=true"
               echo "deploy=true"
+              echo "web-mls=true"
               echo "build-test=[$gcc_ci,$clang_ci,$clang_asan]"
             } >>"$GITHUB_OUTPUT"
             echo "full lane ($EVENT)"
@@ -74,10 +77,12 @@ jobs:
           changed=$(git -c core.quotePath=false diff --name-only --no-renames "origin/$BASE_REF...HEAD")
           code=false
           deploy=false
+          web_mls=false
           while IFS= read -r path; do
             [[ -n $path ]] || continue
             case $path in
               deploy/*) deploy=true ;;
+              clients/web-mls/*) code=true web_mls=true ;;
               docs/* | .github/* | *.md) ;;
               *) code=true ;;
             esac
@@ -86,9 +91,10 @@ jobs:
             echo "full=false"
             echo "code=$code"
             echo "deploy=$deploy"
+            echo "web-mls=$web_mls"
             echo "build-test=[$gcc_unit]"
           } >>"$GITHUB_OUTPUT"
-          echo "quick lane: code=$code deploy=$deploy, $(grep -c . <<<"$changed") paths changed"
+          echo "quick lane: code=$code deploy=$deploy web-mls=$web_mls, $(grep -c . <<<"$changed") paths changed"
 
   # The full lane: gcc and clang with every test, and clang's ASan/UBSan build with the unit
   # label. The quick lane: gcc with the unit label, on pull requests that change code.
@@ -571,6 +577,7 @@ jobs:
   # changed files.
   lint:
     name: boundaries + format + tidy (${{ strategy.job-index }}/${{ strategy.job-total }})
+    needs: changes
     runs-on: ubuntu-24.04
     # A quarter of the tree took 15-24 min (runner speed varies); well past that is a hang.
     timeout-minutes: 60
@@ -612,8 +619,9 @@ jobs:
           cargo test --locked --offline
       # The browser client (ADR-0098): the same checks, natively and for wasm32, and its room
       # logic against an in-memory room. Its lock adds crates the bridge's fetch does not cover.
+      # The quick lane runs them only when the pull request changed clients/web-mls/.
       - name: Browser MLS client (rustfmt, clippy, cargo test, room tests)
-        if: matrix.shard == 0
+        if: matrix.shard == 0 && needs.changes.outputs.web-mls == 'true'
         working-directory: clients/web-mls
         run: |
           rustup component add rustfmt clippy
@@ -774,8 +782,11 @@ jobs:
       - run: deploy/local/validate-manifests.sh
 
   # The browser client's dist/ is committed (ADR-0098); rebuilt in its pinned image it must
-  # match, byte for byte.
+  # match, byte for byte. The quick lane runs it only when the pull request changed
+  # clients/web-mls/ (docs/operations/ci-lanes.md).
   web-mls-dist:
+    needs: changes
+    if: needs.changes.outputs.web-mls == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
