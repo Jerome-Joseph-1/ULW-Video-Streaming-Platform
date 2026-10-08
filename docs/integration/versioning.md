@@ -16,6 +16,34 @@
 - **Playlists.** HLS as the worker writes it: fMP4 segments, an `EXT-X-MAP` init segment, a
   master with one variant per rendition. Rendition names are `<height>p`.
 
+## Releases
+
+<!-- .github/workflows/release.yml, .github/workflows/publish-images.yml, docs/adr/0099-releases-are-version-tags-on-published-images.md -->
+
+A release is a version, `vMAJOR.MINOR.PATCH`, given to a commit on `main` and to the four images
+already published for it (ADR-0085, ADR-0099). Each has a
+[GitHub Release](https://github.com/Jerome-Joseph-1/ULW-Video-Streaming-Platform/releases) listing:
+
+- the commit;
+- each image, `ghcr.io/jerome-joseph-1/ulw-<service>:<version>`, and the same image as
+  `<sha>@sha256:<digest>`, which is what a production environment pins
+  ([RUNBOOK](../../deploy/kubernetes/RUNBOOK.md), 4a);
+- how to check each digest's build provenance: `gh attestation verify oci://<image>@<digest>
+  --repo Jerome-Joseph-1/ULW-Video-Streaming-Platform`;
+- this directory and [changelog.md](changelog.md) as they were at that release, and the pull
+  requests merged since the previous one.
+
+A version never changes: its tag in the repository and its image tags name one commit and one
+digest each, and a fix ships as the next version. The number follows the policy below once it is
+agreed: a breaking change to a stable surface is a new major version, an addition a new minor, a
+fix a new patch.
+
+**Cutting one** (the repository's writers): publish-images must have published the commit
+(every push to `main` does, once `ci` succeeds). Then Actions, release, "Run workflow" from
+`main`, with `version` and, for anything but main's tip, `commit`. The run refuses a commit that
+is not on `main`, whose `ci` run did not succeed or whose images are missing, and a version that
+exists already; it builds nothing.
+
 ## Stable and draft
 
 | Surface | Status |
