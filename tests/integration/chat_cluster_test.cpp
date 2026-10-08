@@ -15,7 +15,9 @@
 // reading holds its node to no more memory and is counted as dropping; every other viewer, on
 // every node, gets every message in order.
 
+#include "access_token.hpp"
 #include "chat_cluster.hpp"
+#include "support/http_client.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1319,14 +1321,17 @@ TEST(ChatServerStartup, ARefusedDatabaseUrlIsNeverEchoedBecauseItHoldsThePasswor
 
 // A call's ticket, as the room WebSocket answers a call (docs/integration/calls.md): the ticket,
 // or an error.
-std::optional<Seen> call_answer(Client& client, const std::string& room,
-                                const std::string& device) {
+std::optional<Seen> call_answer(Client& client, const std::string& room, const std::string& device,
+                                const std::string& answering = {}) {
     const auto answers = [&](const Seen& s) {
         return s.room == room && (s.type == "ticket" || s.type == "error");
     };
     // This call's answer, not one an earlier call of the client's got.
     std::size_t earlier = client.count(answers);
-    if (!client.send(R"({"type":"call","room":")" + room + R"(","device":")" + device + R"("})")) {
+    const std::string answer =
+        answering.empty() ? std::string{} : R"(,"answer":")" + answering + '"';
+    if (!client.send(R"({"type":"call","room":")" + room + R"(","device":")" + device + '"' +
+                     answer + "}")) {
         return std::nullopt;
     }
     return client.wait_for([&](const Seen& s) {
@@ -1438,14 +1443,6 @@ TEST_P(ChatClusterTest, ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsT
     signed_char = signed_char == 'A' ? 'B' : 'A';
     EXPECT_FALSE(rtc_join(forged, &refusal));
     EXPECT_NE(refusal.find(" 401"), std::string::npos) << refusal;
-
-    // A group chat has no call (ADR-0058).
-    auto again = connect(nodes_[2], 0);
-    ASSERT_TRUE(again);
-    ASSERT_NO_FATAL_FAILURE(join(*again));
-    const auto group = call_answer(*again, room_, alice_device);
-    ASSERT_TRUE(group);
-    EXPECT_EQ(group->reason, "not_callable");
 }
 
 // Waits for `client` to hear `type` for `call` (any call when empty) after the `from`th thing it
@@ -1554,10 +1551,19 @@ TEST_P(ChatClusterTest, ACallRingsTheOtherMembersEverySocketOnAnyNodeAndEndsOnce
         ASSERT_TRUE(cancelled);
         EXPECT_EQ(cancelled->by, "alice");
     }
+    // A device that picks the cancelled call up after all (it never heard the cancel) is told
+    // that call is over, and rings nobody: alice's next call below is a new ring of hers.
+    const auto late = call_answer(*phone, direct, phone_device, cancelled_call->call);
+    ASSERT_TRUE(late);
+    EXPECT_EQ(late->type, "error");
+    EXPECT_EQ(late->reason, "no_call");
+    EXPECT_EQ(late->call, cancelled_call->call);
 
     // 3. Nobody answers: after the ring timeout both are told it was missed, once.
     const auto missed_call = call_answer(*alice, direct, alice_device);
     ASSERT_TRUE(missed_call && missed_call->type == "ticket");
+    ASSERT_TRUE(expect(*phone, at_phone, "call_ringing", missed_call->call));
+    EXPECT_EQ(phone->seen()[at_phone - 1].from, "alice") << "the late answer rang alice back";
     for (const auto& [client, at] : std::initializer_list<Ear>{
              {alice.get(), &at_alice}, {phone.get(), &at_phone}, {laptop.get(), &at_laptop}}) {
         ASSERT_TRUE(expect(*client, *at, "call_missed", missed_call->call));
@@ -1605,6 +1611,420 @@ TEST_P(ChatClusterTest, ACallRingsTheOtherMembersEverySocketOnAnyNodeAndEndsOnce
     EXPECT_EQ(metric(nodes_[0], "call_refusals_total{reason=\"ring_limited\"}"), 1U);
     EXPECT_EQ(metric(nodes_[1], "call_rings_total{outcome=\"started\"}"), 0U);
     EXPECT_GE(metric(nodes_[1], "call_events_pushed_total"), 10U);
+}
+
+// Whether LiveKit ends `rtc`'s connection within `limit`: what a client in a closed generation
+// sees.
+bool rtc_ended(RtcClient& rtc, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto frame =
+            rtc.socket.next_frame(std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()));
+        if (!frame) {
+            return !rtc.socket.connected();
+        }
+        if (frame->first == codec::ws::Opcode::Close) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Deletes LiveKit's room `name` behind chat's back, as LiveKit's own admin would: a Twirp
+// DeleteRoom with a token for that one room. True when LiveKit answered 200.
+bool livekit_delete_room(const std::string& name, core::WallTime now) {
+    // NOLINTBEGIN(concurrency-mt-unsafe): read before any thread starts.
+    const char* url = std::getenv("LIVEKIT_API_URL");
+    const char* id = std::getenv("LIVEKIT_API_KEY");
+    const char* secret = std::getenv("LIVEKIT_API_SECRET");
+    // NOLINTEND(concurrency-mt-unsafe)
+    if (url == nullptr || id == nullptr || secret == nullptr) {
+        return false;
+    }
+    namespace lk = infra::sfu::livekit::detail;
+    const auto token = lk::mint_token(
+        lk::ApiKey{.id = id, .secret = secret},
+        lk::Grant{.permission = lk::Permission::CreateRooms, .room = name, .identity = {}}, now,
+        core::Seconds{60});
+    if (!token) {
+        return false;
+    }
+    const std::string api(url);
+    const auto port =
+        core::parse_integer<std::uint16_t>(api.substr(api.rfind(':') + 1)).value_or(0);
+    ulw::test::HttpClient http(ulw::test::Endpoint{.port = port});
+    const std::string body = R"({"room":")" + name + R"("})";
+    const auto answer =
+        http.request("POST", "/twirp/livekit.RoomService/DeleteRoom", token->jwt,
+                     std::as_bytes(std::span(body)), {{"Content-Type", "application/json"}});
+    return answer && answer->status == 200;
+}
+
+// A group call expel on the room WebSocket.
+std::string expel_command(const std::string& room, const std::string& call,
+                          const std::string& user) {
+    return R"({"type":"call_expel","room":")" + room + R"(","call":")" + call + R"(","user":")" +
+           user + R"("})";
+}
+
+// M27 through chat (ADR-0095): four members of a group chat, on all three nodes, ask for the call
+// and LiveKit admits all four to one room, the fourth finding the other three in it; a fifth
+// device finds it full. The caller puts one out: the generation moves on, LiveKit closes the old
+// one under everyone, the others are let into the next with fresh tickets, and the one put out
+// is refused, by chat and by LiveKit. The owner is then killed: within a bounded time another
+// node owns the room and tickets the same generation, and a member removed from the chat is put
+// out of the call by it, while the one put out before stays refused: the expulsion was stored
+// with the generation. LiveKit's room deleted behind chat's back counts as nobody in it: the
+// last member's leave then ends the call. Needs a LiveKit, as the tickets do.
+TEST_P(ChatClusterTest, AGroupCallOfFourAcrossNodesPutsOneOutAndOutlivesItsOwner) {
+    if (ulw::test::livekit_environment().empty()) {
+        GTEST_SKIP() << "no LiveKit: set LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY "
+                        "and LIVEKIT_API_SECRET";
+    }
+    const std::string group = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(group, {"alice", "bob", "carol", "dave"}));
+    // Alice's join makes chat-1 the owner; the others are on chat-2 and chat-3.
+    std::vector<std::unique_ptr<Client>> clients;
+    clients.push_back(connect(nodes_[0], 0));
+    clients.push_back(connect(nodes_[1], 1));
+    clients.push_back(connect(nodes_[2], 2));
+    clients.push_back(connect(nodes_[1], 3));
+    for (const auto& c : clients) {
+        ASSERT_TRUE(c);
+    }
+    Client& alice = *clients[0];
+    Client& bob = *clients[1];
+    Client& carol = *clients[2];
+    Client& dave = *clients[3];
+    // Alice hears each of them online: their presence rooms, which carry the ring, are settled.
+    for (const char* who : {"bob", "carol", "dave"}) {
+        ASSERT_TRUE(alice.send(std::string(R"({"type":"watch","user":")") + who + R"("})"));
+        ASSERT_TRUE(alice.wait_for([&](const Seen& s) {
+            return (s.type == "watching" || s.type == "presence") && s.user == who &&
+                   s.status == "online";
+        }));
+    }
+    for (const auto& c : clients) {
+        ASSERT_EQ(join_answer(*c, group), "joined");
+    }
+    const std::array<std::string, 4> devices{
+        "01a0eb86-6cca-7dce-84cc-3bb47615f9a1", "01a0eb86-6cca-7dce-84cc-3bb47615f9b1",
+        "01a0eb86-6cca-7dce-84cc-3bb47615f9c1", "01a0eb86-6cca-7dce-84cc-3bb47615f9d1"};
+    std::array<std::size_t, 4> at{};
+    for (std::size_t i = 0; i < clients.size(); ++i) {
+        at.at(i) = clients[i]->seen().size();
+    }
+    const auto expect = [&](std::size_t who, const std::string& type,
+                            const std::string& call) -> std::optional<Seen> {
+        Client& c = *clients.at(who);
+        const auto where = heard(c, at.at(who), type, call);
+        if (!where) {
+            ADD_FAILURE() << c.name() << " never heard " << type;
+            return std::nullopt;
+        }
+        at.at(who) = *where + 1;
+        return c.seen()[*where];
+    };
+
+    // The call rings the three others; each answers with a ticket, and everyone hears it.
+    const auto first = call_answer(alice, group, devices[0]);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->type, "ticket") << first->reason;
+    const std::string call = first->call;
+    for (std::size_t i = 1; i < 4; ++i) {
+        const auto ringing = expect(i, "call_ringing", call);
+        ASSERT_TRUE(ringing);
+        EXPECT_EQ(ringing->from, "alice");
+    }
+    std::vector<std::string> tokens{first->token};
+    for (std::size_t i = 1; i < 4; ++i) {
+        const auto t = call_answer(*clients[i], group, devices.at(i));
+        ASSERT_TRUE(t);
+        ASSERT_EQ(t->type, "ticket") << t->reason;
+        EXPECT_EQ(t->call, call);
+        tokens.push_back(t->token);
+        const auto answered = expect(0, "call_answered", call);
+        ASSERT_TRUE(answered);
+        EXPECT_EQ(answered->by, clients[i]->name());
+    }
+    EXPECT_EQ(metric(nodes_[0], "call_tickets_total"), 4U);
+
+    // LiveKit admits the four to one room; the fourth finds the other three there.
+    std::vector<RtcClient> rtc;
+    std::string refusal;
+    for (std::size_t i = 0; i < 4; ++i) {
+        auto joined = rtc_join(tokens[i], &refusal);
+        ASSERT_TRUE(joined) << "LiveKit refused " << clients[i]->name() << ": " << refusal;
+        EXPECT_NE(joined->join.find(group + ":1"), std::string::npos);
+        rtc.push_back(std::move(*joined));
+    }
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_NE(rtc[3].join.find(clients[i]->name() + "/" + devices.at(i)), std::string::npos)
+            << "dave's join response does not name " << clients[i]->name();
+    }
+    // Four devices fill it: chat counts them and refuses a fifth before LiveKit has to.
+    const auto fifth = call_answer(alice, group, "01a0eb86-6cca-7dce-84cc-3bb47615f9a2");
+    ASSERT_TRUE(fifth);
+    EXPECT_EQ(fifth->type, "error");
+    EXPECT_EQ(fifth->reason, "call_full");
+    // Only the caller puts anyone out.
+    ASSERT_TRUE(bob.send(expel_command(group, call, "carol")));
+    const auto refused = bob.wait_from(at[1], [](const Seen& s) { return s.type == "error"; });
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(bob.seen()[*refused].reason, "no_call");
+    at[1] = *refused + 1;
+
+    // Alice puts dave out: everyone hears the move, and LiveKit closes generation 1 under them.
+    const auto expelled_at = std::chrono::steady_clock::now();
+    ASSERT_TRUE(alice.send(expel_command(group, call, "dave")));
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto moved = expect(i, "call_moved", call);
+        ASSERT_TRUE(moved);
+        EXPECT_EQ(moved->expelled, "dave");
+        EXPECT_EQ(moved->by, "alice");
+    }
+    EXPECT_TRUE(rtc_ended(rtc[3], std::chrono::seconds(10))) << "dave stayed in generation 1";
+    EXPECT_TRUE(rtc_ended(rtc[0], std::chrono::seconds(10)));
+    const auto closed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - expelled_at);
+    EXPECT_EQ(metric(nodes_[0], "call_moves_total{reason=\"expel\"}"), 1U);
+    // Neither chat nor LiveKit lets dave back in.
+    const auto dave_again = call_answer(dave, group, devices[3]);
+    ASSERT_TRUE(dave_again);
+    EXPECT_EQ(dave_again->reason, "expelled");
+    EXPECT_FALSE(rtc_join(tokens[3], &refusal)) << "a ticket for the closed generation admitted";
+    // The others come back into generation 2 with fresh tickets.
+    rtc.clear();
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto t = call_answer(*clients[i], group, devices.at(i));
+        ASSERT_TRUE(t);
+        ASSERT_EQ(t->type, "ticket") << t->reason;
+        auto joined = rtc_join(t->token, &refusal);
+        ASSERT_TRUE(joined) << refusal;
+        EXPECT_NE(joined->join.find(group + ":2"), std::string::npos);
+        rtc.push_back(std::move(*joined));
+    }
+    const auto back_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - expelled_at);
+    std::cout << "expelled: generation 1 closed after " << closed_ms.count()
+              << " ms, the other three back in generation 2 after " << back_ms.count() << " ms\n";
+
+    // The owner dies. Another node takes the room once its heartbeat is stale, and tickets the
+    // generation the store holds, not the one a call starts at.
+    nodes_[0].process->signal(SIGKILL);
+    const auto killed_at = std::chrono::steady_clock::now();
+    std::optional<Seen> after;
+    ASSERT_TRUE(nodes_[1].process->poll_until(
+        [&] {
+            after = call_answer(bob, group, devices[1]);
+            return after && after->type == "ticket";
+        },
+        std::chrono::seconds(30), std::chrono::milliseconds(500)))
+        << (after ? after->reason : "no answer");
+    const auto takeover_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - killed_at);
+    std::cout << "owner killed: a ticket again after " << takeover_ms.count() << " ms\n";
+    // ADR-0015's stale bound (5 s) and the router's look-up, with the poll's period on top.
+    EXPECT_LT(takeover_ms, std::chrono::seconds(15));
+    auto rejoined = rtc_join(after->token, &refusal);
+    ASSERT_TRUE(rejoined) << refusal;
+    EXPECT_NE(rejoined->join.find(group + ":2"), std::string::npos)
+        << "the new owner ticketed another generation";
+    // The new owner never saw dave put out, and refuses him all the same: it read the
+    // expulsion with the generation.
+    const auto dave_after = call_answer(dave, group, devices[3]);
+    ASSERT_TRUE(dave_after);
+    EXPECT_EQ(dave_after->type, "error");
+    EXPECT_EQ(dave_after->reason, "expelled");
+    // Media never passed through the owner: carol's connection to LiveKit is still up.
+    EXPECT_TRUE(rtc[2].socket.connected());
+    // The new owner knew no call: bob's ticket started one, which carol answers.
+    const std::string second = after->call;
+    ASSERT_FALSE(second.empty());
+    ASSERT_TRUE(expect(2, "call_ringing", second));
+    const auto carol_ticket = call_answer(carol, group, devices[2]);
+    ASSERT_TRUE(carol_ticket && carol_ticket->type == "ticket");
+    ASSERT_TRUE(expect(1, "call_answered", second));
+
+    // Carol leaves the chat: the new owner puts her out of the call, moving to generation 3.
+    {
+        auto conn = db_->session();
+        ASSERT_TRUE(conn.exec(
+            "DELETE FROM chat_members WHERE room_id = $1::text::uuid AND user_id = 'carol'",
+            infra::postgres::Params{}.add_text(group)));
+    }
+    const auto removed = expect(1, "call_moved", second);
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(removed->expelled, "carol");
+    EXPECT_TRUE(removed->by.empty());
+    EXPECT_TRUE(rtc_ended(rtc[2], std::chrono::seconds(10))) << "carol stayed in generation 2";
+    const auto bob_again = call_answer(bob, group, devices[1]);
+    ASSERT_TRUE(bob_again && bob_again->type == "ticket");
+    auto third = rtc_join(bob_again->token, &refusal);
+    ASSERT_TRUE(third) << refusal;
+    EXPECT_NE(third->join.find(group + ":3"), std::string::npos);
+
+    // LiveKit's room goes behind chat's back, taking bob's connection with it. Bob leaves: with
+    // nobody chat admitted left, the owner asks LiveKit, which no longer lists the room, so
+    // nobody is in it and the call ends for everyone still listening.
+    ASSERT_TRUE(livekit_delete_room(group + ":3", clock_.wall_now()));
+    EXPECT_TRUE(rtc_ended(*third, std::chrono::seconds(10))) << "bob stayed in a deleted room";
+    ASSERT_TRUE(bob.send(move_command("call_leave", group, second)));
+    const auto left = expect(1, "call_left", second);
+    ASSERT_TRUE(left);
+    EXPECT_EQ(left->by, "bob");
+    const auto ended = expect(1, "call_ended", second);
+    ASSERT_TRUE(ended);
+}
+
+// Whoever was put out of a call is refused only while it lasts: once everyone has left and the
+// call has ended, the one put out starts the next call, in the generation the expulsion moved
+// to. Needs a LiveKit, as the tickets do.
+TEST_P(ChatClusterTest, WhoWasPutOutStartsTheNextCallOnceEveryoneLeft) {
+    if (ulw::test::livekit_environment().empty()) {
+        GTEST_SKIP() << "no LiveKit: set LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY "
+                        "and LIVEKIT_API_SECRET";
+    }
+    const std::string group = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(group, {"alice", "bob", "dave"}));
+    std::vector<std::unique_ptr<Client>> clients;
+    clients.push_back(connect(nodes_[0], 0));
+    clients.push_back(connect(nodes_[1], 1));
+    clients.push_back(connect(nodes_[1], 3));
+    for (const auto& c : clients) {
+        ASSERT_TRUE(c);
+    }
+    Client& alice = *clients[0];
+    Client& dave = *clients[2];
+    for (const char* who : {"bob", "dave"}) {
+        ASSERT_TRUE(alice.send(std::string(R"({"type":"watch","user":")") + who + R"("})"));
+        ASSERT_TRUE(alice.wait_for([&](const Seen& s) {
+            return (s.type == "watching" || s.type == "presence") && s.user == who &&
+                   s.status == "online";
+        }));
+    }
+    for (const auto& c : clients) {
+        ASSERT_EQ(join_answer(*c, group), "joined");
+    }
+    const std::string alice_device = "01a0eb86-6cca-7dce-84cc-3bb47615fb01";
+    const std::string dave_device = "01a0eb86-6cca-7dce-84cc-3bb47615fb03";
+    const std::size_t alice_from = alice.seen().size();
+    const std::size_t dave_from = dave.seen().size();
+    const auto first = call_answer(alice, group, alice_device);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->type, "ticket") << first->reason;
+    const std::string call = first->call;
+    ASSERT_TRUE(heard(dave, dave_from, "call_ringing", call));
+    const auto dave_ticket = call_answer(dave, group, dave_device);
+    ASSERT_TRUE(dave_ticket && dave_ticket->type == "ticket");
+
+    // Dave is put out, which moves the call to generation 2; he is refused while it lasts.
+    ASSERT_TRUE(alice.send(expel_command(group, call, "dave")));
+    ASSERT_TRUE(heard(dave, dave_from, "call_moved", call));
+    const auto refused = call_answer(dave, group, dave_device);
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->reason, "expelled");
+
+    // Alice leaves, the last one in: nobody is in generation 2, and the call ends.
+    ASSERT_TRUE(alice.send(move_command("call_leave", group, call)));
+    ASSERT_TRUE(heard(alice, alice_from, "call_ended", call));
+
+    // Dave starts the next call, and LiveKit admits him to generation 2.
+    const auto next = call_answer(dave, group, dave_device);
+    ASSERT_TRUE(next);
+    ASSERT_EQ(next->type, "ticket") << next->reason;
+    EXPECT_NE(next->call, call);
+    // Asked behind the end's write, which cleared who was put out.
+    EXPECT_EQ(metric(nodes_[0], "call_expulsions_cleared_total"), 1U);
+    std::string refusal;
+    auto joined = rtc_join(next->token, &refusal);
+    ASSERT_TRUE(joined) << refusal;
+    EXPECT_NE(joined->join.find(group + ":2"), std::string::npos);
+}
+
+// Someone put out of a call they were not in moves nothing: the expulsion is only stored with
+// the generation, and only they hear of it. The owner is then killed: the node that takes the
+// room over never saw the expulsion, and refuses them all the same, while the one still in the
+// call is ticketed for the same generation. Needs a LiveKit, as the tickets do.
+TEST_P(ChatClusterTest, WhoWasPutOutStaysOutAfterTheOwnerDies) {
+    if (ulw::test::livekit_environment().empty()) {
+        GTEST_SKIP() << "no LiveKit: set LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY "
+                        "and LIVEKIT_API_SECRET";
+    }
+    const std::string group = core::RoomId::generate(clock_, random_).to_string();
+    ASSERT_NO_FATAL_FAILURE(list_members(group, {"alice", "bob", "dave"}));
+    // Alice's join makes chat-1 the owner; bob and dave are on chat-2.
+    std::vector<std::unique_ptr<Client>> clients;
+    clients.push_back(connect(nodes_[0], 0));
+    clients.push_back(connect(nodes_[1], 1));
+    clients.push_back(connect(nodes_[1], 3));
+    for (const auto& c : clients) {
+        ASSERT_TRUE(c);
+    }
+    Client& alice = *clients[0];
+    Client& bob = *clients[1];
+    Client& dave = *clients[2];
+    for (const char* who : {"bob", "dave"}) {
+        ASSERT_TRUE(alice.send(std::string(R"({"type":"watch","user":")") + who + R"("})"));
+        ASSERT_TRUE(alice.wait_for([&](const Seen& s) {
+            return (s.type == "watching" || s.type == "presence") && s.user == who &&
+                   s.status == "online";
+        }));
+    }
+    for (const auto& c : clients) {
+        ASSERT_EQ(join_answer(*c, group), "joined");
+    }
+    const std::array<std::string, 3> devices{"01a0eb86-6cca-7dce-84cc-3bb47615fa01",
+                                             "01a0eb86-6cca-7dce-84cc-3bb47615fa02",
+                                             "01a0eb86-6cca-7dce-84cc-3bb47615fa03"};
+    const std::size_t bob_from = bob.seen().size();
+    const std::size_t dave_from = dave.seen().size();
+    const auto first = call_answer(alice, group, devices[0]);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->type, "ticket") << first->reason;
+    const std::string call = first->call;
+    ASSERT_TRUE(heard(bob, bob_from, "call_ringing", call));
+    const auto bob_ticket = call_answer(bob, group, devices[1]);
+    ASSERT_TRUE(bob_ticket && bob_ticket->type == "ticket");
+
+    // Dave never asked for a ticket: putting him out moves nothing, and only he hears of it.
+    const std::size_t bob_before = bob.seen().size();
+    ASSERT_TRUE(alice.send(expel_command(group, call, "dave")));
+    const auto told = heard(dave, dave_from, "call_moved", call);
+    ASSERT_TRUE(told);
+    EXPECT_EQ(dave.seen()[*told].expelled, "dave");
+    EXPECT_EQ(metric(nodes_[0], "call_expulsions_kept_total"), 1U);
+    EXPECT_EQ(metric(nodes_[0], "call_moves_total{reason=\"expel\"}"), 0U);
+    const auto refused = call_answer(dave, group, devices[2]);
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->reason, "expelled");
+    // Bob's next answer from the owner is his own ticket: he heard no move in between.
+    const auto again = call_answer(bob, group, devices[1]);
+    ASSERT_TRUE(again && again->type == "ticket");
+    for (std::size_t i = bob_before; i < bob.seen().size(); ++i) {
+        EXPECT_NE(bob.seen()[i].type, "call_moved") << "bob was told of a move that was not";
+    }
+
+    // The owner dies, and chat-2 takes the room: bob is ticketed for the same generation, and
+    // dave is still refused.
+    nodes_[0].process->signal(SIGKILL);
+    std::optional<Seen> after;
+    ASSERT_TRUE(nodes_[1].process->poll_until(
+        [&] {
+            after = call_answer(bob, group, devices[1]);
+            return after && after->type == "ticket";
+        },
+        std::chrono::seconds(30), std::chrono::milliseconds(500)))
+        << (after ? after->reason : "no answer");
+    std::string refusal;
+    auto joined = rtc_join(after->token, &refusal);
+    ASSERT_TRUE(joined) << refusal;
+    EXPECT_NE(joined->join.find(group + ":1"), std::string::npos);
+    const auto dave_after = call_answer(dave, group, devices[2]);
+    ASSERT_TRUE(dave_after);
+    EXPECT_EQ(dave_after->type, "error");
+    EXPECT_EQ(dave_after->reason, "expelled");
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatClusterTest,

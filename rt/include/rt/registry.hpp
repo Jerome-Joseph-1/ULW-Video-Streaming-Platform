@@ -14,7 +14,7 @@
 
 namespace rt {
 
-enum class OwnerWrite : std::uint8_t { Append, Heartbeat };
+enum class OwnerWrite : std::uint8_t { Append, Heartbeat, MediaGeneration };
 
 // Called on the reactor thread, from the store's answers and notifications; never from inside
 // a call its user makes into the registry.
@@ -92,6 +92,12 @@ public:
     // under. false, and nothing is written, when this node does not own the room.
     [[nodiscard]] bool append(const core::RoomId& room, const Outgoing& message,
                               AppendCallback done);
+
+    // Reads or moves on the room's media generation, fenced on the generation this node owns
+    // it under: nullopt when the room changed hands. false, and nothing is asked, when this node
+    // does not own the room.
+    [[nodiscard]] bool media_generation(const core::RoomId& room, const MediaChange& change,
+                                        StoreCallback<std::optional<MediaState>> done);
 
     // Rooms with members on this node. Their owners are kept cached and watched: when one goes
     // quiet for kOwnerStaleAfter, this node takes the room over.

@@ -43,6 +43,8 @@ inline constexpr std::array kUsers{"alice", "bob", "carol", "dave"};
 inline constexpr std::chrono::milliseconds kGrace{2'000};
 // Short, so that the call test waits seconds for a ring nobody answers to run out.
 inline constexpr std::chrono::milliseconds kRingTimeout{3'000};
+// A group call of four devices: the group call test fills it.
+inline constexpr int kGroupParticipants = 4;
 
 // The LiveKit server calls go to, as tests/call/run.sh names it: LIVEKIT_API_URL,
 // LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET, all four or none. With them the
@@ -97,6 +99,8 @@ struct Seen {
     std::string call;
     std::string from;
     std::string by;
+    // Of call_moved (ADR-0095).
+    std::string expelled = {};
 };
 
 inline std::optional<Seen> parse_seen(const std::string& text) {
@@ -124,7 +128,8 @@ inline std::optional<Seen> parse_seen(const std::string& text) {
            .expires_at = 0,
            .call = string("call"),
            .from = string("from"),
-           .by = string("by")};
+           .by = string("by"),
+           .expelled = string("expelled")};
     if (const core::json::Value* expires = json->find("expires_at")) {
         s.expires_at = expires->as_u64().value_or(0);
     }
@@ -318,6 +323,7 @@ protected:
             "ULW_DEV_JWKS_FILE=" + jwks, "ULW_DEV_MODE=1", "JWT_ISSUER=" + std::string(kIssuer),
             "ULW_PRESENCE_GRACE_MS=" + std::to_string(kGrace.count()),
             "ULW_CALL_RING_TIMEOUT_MS=" + std::to_string(kRingTimeout.count()),
+            "ULW_CALL_GROUP_PARTICIPANTS=" + std::to_string(kGroupParticipants),
             "ULW_REACTOR=" +
                 std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),
             // Some runs start tests as root; this suite is not about that.

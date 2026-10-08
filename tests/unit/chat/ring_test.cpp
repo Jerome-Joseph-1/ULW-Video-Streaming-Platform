@@ -504,6 +504,397 @@ TEST_F(HistoryBoundedRingerTest, ARoomPastTheRememberedRoomsIsBusyUntilAnOldOneI
     EXPECT_TRUE(ringer_.ticketed(room_id(kOtherRoom), user("alice"), kPair).value_or(std::nullopt));
 }
 
+// A group chat's call (ADR-0095): alice calls bob, carol and dave.
+const std::vector<core::UserId> kGroup{user("alice"), user("bob"), user("carol"), user("dave")};
+
+class GroupRingerTest : public RingerTest {
+protected:
+    CallId ring_group(const std::vector<core::UserId>& members = kGroup) {
+        const auto call =
+            ringer_.ticketed(room_id(), user("alice"), members, chat::CallKind::Group);
+        EXPECT_TRUE(call && *call);
+        return call.value_or(std::nullopt).value_or(CallId::generate(clock_, random_));
+    }
+    std::optional<CallId> join(std::string_view who) {
+        return ringer_.ticketed(room_id(), user(who), std::nullopt, chat::CallKind::Group)
+            .value_or(std::nullopt);
+    }
+    // Everyone in kGroup hears `event` by `by`, in the list's order.
+    static std::vector<std::string> all(RingEvent event, std::string_view by = {}) {
+        std::vector<std::string> out;
+        for (const core::UserId& u : kGroup) {
+            out.push_back(line(event, u.view(), by));
+        }
+        return out;
+    }
+};
+
+TEST_F(GroupRingerTest, AGroupCallRingsEveryOtherMemberAndEachAnswerIsHeardByAll) {
+    const CallId call = ring_group();
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ringing));
+    EXPECT_EQ(ringer_.kind_of(room_id()), chat::CallKind::Group);
+    EXPECT_EQ(join("bob"), call);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Answered, "bob"));
+    EXPECT_EQ(join("carol"), call);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Answered, "carol"));
+    // Asking again, in the call already, says nothing.
+    EXPECT_EQ(join("bob"), call);
+    EXPECT_EQ(join("alice"), call);
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_EQ(ringer_.joined(room_id()), (std::vector{user("alice"), user("bob"), user("carol")}));
+    EXPECT_EQ(ringer_.counters().answered, 1U) << "a call is answered once";
+}
+
+TEST_F(GroupRingerTest, OnlyThoseStillRungHearItAgainAndMissItWhileTheCallGoesOn) {
+    const CallId call = ring_group();
+    plane_.take();
+    ASSERT_EQ(join("bob"), call);
+    plane_.take();
+    const chat::RingLimits limits;
+    clock_.advance(limits.announce_every);
+    ringer_.tick();
+    EXPECT_EQ(plane_.take(),
+              (std::vector{line(RingEvent::Ringing, "carol"), line(RingEvent::Ringing, "dave")}));
+    clock_.advance(limits.ring_timeout - limits.announce_every);
+    ringer_.tick();
+    // Each one's ring ran out; the call goes on for alice and bob.
+    EXPECT_EQ(plane_.take(),
+              (std::vector{line(RingEvent::Missed, "carol"), line(RingEvent::Missed, "dave")}));
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    EXPECT_EQ(ringer_.counters().missed, 2U);
+    // A member whose ring ran out may still come.
+    EXPECT_EQ(join("dave"), call);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Answered, "dave"));
+}
+
+TEST_F(GroupRingerTest, NobodyAnsweringRingsOutForEveryone) {
+    const CallId call = ring_group();
+    plane_.take();
+    clock_.advance(chat::RingLimits{}.ring_timeout);
+    ringer_.tick();
+    // The re-announcement due at the same time is not sent: the call rang out.
+    EXPECT_EQ(plane_.take(), all(RingEvent::Missed));
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(join("bob"), std::nullopt);
+    EXPECT_FALSE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call));
+}
+
+TEST_F(GroupRingerTest, ADeclineIsOneMembersAndEveryoneDecliningIsAMissedCall) {
+    const CallId call = ring_group();
+    plane_.take();
+    EXPECT_EQ(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call), user("alice"));
+    EXPECT_EQ(plane_.take(), all(RingEvent::Declined, "bob"));
+    // Once, and only by someone rung.
+    EXPECT_FALSE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call));
+    EXPECT_FALSE(ringer_.signal(room_id(), user("alice"), CallSignal::Decline, call));
+    ASSERT_EQ(ringer_.signal(room_id(), user("carol"), CallSignal::Decline, call), user("alice"));
+    plane_.take();
+    ASSERT_EQ(ringer_.signal(room_id(), user("dave"), CallSignal::Decline, call), user("alice"));
+    auto expected = all(RingEvent::Declined, "dave");
+    const auto missed = all(RingEvent::Missed);
+    expected.insert(expected.end(), missed.begin(), missed.end());
+    EXPECT_EQ(plane_.take(), expected);
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    // No cooldown on a group: a decline is one member's.
+    EXPECT_FALSE(ringer_.ring_limited(room_id(), user("alice")));
+}
+
+TEST_F(GroupRingerTest, AMembersLeavingIsHeardAndTheLastOneOutEndsTheCall) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    plane_.take();
+    // In a group call, ending is the caller's, for everyone, through may_end; leaving is anyone's.
+    EXPECT_FALSE(ringer_.signal(room_id(), user("bob"), CallSignal::End, call));
+    EXPECT_FALSE(ringer_.signal(room_id(), user("carol"), CallSignal::Leave, call));
+    EXPECT_FALSE(ringer_.signal(room_id(), user("bob"), CallSignal::Expel, call));
+    EXPECT_EQ(ringer_.signal(room_id(), user("alice"), CallSignal::Leave, call), user("alice"));
+    EXPECT_EQ(plane_.take(), all(RingEvent::Left, "alice"));
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    EXPECT_EQ(ringer_.signal(room_id(), user("bob"), CallSignal::Leave, call), user("alice"));
+    EXPECT_EQ(plane_.take(), all(RingEvent::Left, "bob"));
+    // Nobody known in it: whether anyone still is, the SFU says, at once.
+    const auto checks = ringer_.take_checks();
+    ASSERT_EQ(checks.size(), 1U);
+    EXPECT_EQ(checks[0].second, call);
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    ringer_.occupied(room_id(), call, false);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(ringer_.counters().left, 2U);
+    EXPECT_EQ(ringer_.counters().emptied, 1U);
+}
+
+TEST_F(GroupRingerTest, ACheckTheSfuCannotAnswerSoOftenEndsTheCall) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    ASSERT_TRUE(ringer_.signal(room_id(), user("alice"), CallSignal::Leave, call));
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::Leave, call));
+    plane_.take();
+    const chat::RingLimits limits;
+    for (std::uint32_t i = 1; i < chat::kMaxUnansweredChecks; ++i) {
+        ASSERT_EQ(ringer_.take_checks().size(), 1U) << i;
+        ringer_.occupied(room_id(), call, std::nullopt);
+        EXPECT_FALSE(ringer_.idle(room_id()));
+        clock_.advance(limits.occupancy_check);
+        ringer_.tick();
+    }
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    // (carol and dave were rung meanwhile, and missed it.)
+    plane_.take();
+    ringer_.occupied(room_id(), call, std::nullopt);
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
+}
+
+TEST_F(GroupRingerTest, AnExpulsionThatMovedNothingIsToldOnlyToWhoWasPutOut) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    plane_.take();
+    ringer_.moved(room_id(), call, user("alice"), user("carol"), false);
+    EXPECT_EQ(plane_.take(), std::vector{line(RingEvent::Moved, "carol", "alice")});
+}
+
+TEST_F(GroupRingerTest, ADirectCallHasNoLeaveNorExpel) {
+    const CallId call = ring();
+    EXPECT_EQ(ringer_.kind_of(room_id()), chat::CallKind::Direct);
+    EXPECT_FALSE(ringer_.signal(room_id(), user("alice"), CallSignal::Leave, call));
+    EXPECT_FALSE(ringer_.may_end(room_id(), user("alice"), call));
+    EXPECT_FALSE(ringer_.expel(room_id(), user("alice"), call, user("bob")));
+    EXPECT_TRUE(ringer_.fits(room_id(), user("carol")));
+}
+
+TEST_F(GroupRingerTest, OnlyTheCallerEndsAGroupCallForEveryone) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    plane_.take();
+    const CallId other = CallId::generate(clock_, random_);
+    EXPECT_FALSE(ringer_.may_end(room_id(), user("bob"), call));
+    EXPECT_FALSE(ringer_.may_end(room_id(), user("alice"), other));
+    EXPECT_EQ(ringer_.may_end(room_id(), user("alice"), call), chat::MediaStepNeeded::Close);
+    // Nothing is said until the handler's write is done.
+    EXPECT_TRUE(plane_.take().empty());
+    ringer_.ended(room_id(), other, user("alice"));
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    ringer_.ended(room_id(), call, user("alice"));
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended, "alice"));
+    EXPECT_TRUE(ringer_.idle(room_id()));
+}
+
+TEST_F(GroupRingerTest, TheCallerPutsAMemberOutWhoMayNotComeBackWhileTheCallLasts) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    plane_.take();
+    // Not by a member who is not the caller, not the caller, not another call.
+    EXPECT_FALSE(ringer_.expel(room_id(), user("bob"), call, user("carol")));
+    EXPECT_FALSE(ringer_.expel(room_id(), user("alice"), call, user("alice")));
+    EXPECT_FALSE(
+        ringer_.expel(room_id(), user("alice"), CallId::generate(clock_, random_), user("bob")));
+    EXPECT_FALSE(ringer_.expelled(room_id(), user("bob")));
+    // Bob holds a ticket: the media room must move. Carol does not: nothing to move.
+    EXPECT_EQ(ringer_.expel(room_id(), user("alice"), call, user("bob")),
+              chat::MediaStepNeeded::Move);
+    EXPECT_EQ(ringer_.expel(room_id(), user("alice"), call, user("carol")),
+              chat::MediaStepNeeded::None);
+    EXPECT_TRUE(ringer_.expelled(room_id(), user("bob")));
+    EXPECT_TRUE(plane_.take().empty());
+    ringer_.moved(room_id(), call, user("alice"), user("bob"));
+    // Everyone still in it, those still rung, and bob himself.
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Moved, "alice", "alice"),
+                                          line(RingEvent::Moved, "dave", "alice"),
+                                          line(RingEvent::Moved, "bob", "alice")}));
+    const auto refused =
+        ringer_.ticketed(room_id(), user("bob"), std::nullopt, chat::CallKind::Group);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().why, chat::RingRefusal::Why::Expelled);
+    EXPECT_EQ(ringer_.counters().expelled, 2U);
+    EXPECT_EQ(ringer_.joined(room_id()), std::vector{user("alice")});
+}
+
+TEST_F(GroupRingerTest, TheMovedNoticeNamesWhoWasPutOut) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    ASSERT_TRUE(ringer_.expel(room_id(), user("alice"), call, user("bob")));
+    plane_.sent.clear();
+    ringer_.moved(room_id(), call, std::nullopt, user("bob"));
+    ASSERT_FALSE(plane_.sent.empty());
+    for (const chat::CallNotice& n : plane_.sent) {
+        EXPECT_EQ(n.event, RingEvent::Moved);
+        EXPECT_EQ(n.subject, user("bob"));
+        EXPECT_FALSE(n.by);
+    }
+}
+
+TEST_F(GroupRingerTest, AMemberRemovedFromTheChatIsPutOutAsIfExpelled) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    plane_.take();
+    EXPECT_EQ(ringer_.removed(room_id(), user("mallory")), chat::MediaStepNeeded::None);
+    EXPECT_EQ(ringer_.removed(room_id(), user("bob")), chat::MediaStepNeeded::Move);
+    EXPECT_EQ(ringer_.removed(room_id(), user("carol")), chat::MediaStepNeeded::None);
+    EXPECT_TRUE(ringer_.expelled(room_id(), user("carol")));
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_EQ(ringer_.removed(room_id(kOtherRoom), user("bob")), chat::MediaStepNeeded::None);
+}
+
+TEST_F(GroupRingerTest, ARemovalThatLeavesNobodyToRingIsAMissedCall) {
+    ring_group({user("alice"), user("bob")});
+    plane_.take();
+    EXPECT_EQ(ringer_.removed(room_id(), user("bob")), chat::MediaStepNeeded::None);
+    EXPECT_EQ(plane_.take(), std::vector{line(RingEvent::Missed, "alice")});
+    EXPECT_TRUE(ringer_.idle(room_id()));
+}
+
+TEST_F(GroupRingerTest, ADirectCallLosingAMemberEnds) {
+    ring();
+    EXPECT_EQ(ringer_.removed(room_id(), user("bob")), chat::MediaStepNeeded::Close);
+    EXPECT_EQ(ringer_.joined(room_id()), std::vector{user("alice")});
+}
+
+TEST_F(GroupRingerTest, AQuietGroupCallAsksWhetherAnyoneIsStillInIt) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    plane_.take();
+    const chat::RingLimits limits;
+    // Past the ring, before the hold: nothing to check.
+    clock_.advance(limits.ring_timeout);
+    ringer_.tick();
+    plane_.take();
+    EXPECT_TRUE(ringer_.take_checks().empty());
+    clock_.advance(limits.answered_hold - limits.ring_timeout);
+    ringer_.tick();
+    const auto checks = ringer_.take_checks();
+    ASSERT_EQ(checks.size(), 1U);
+    EXPECT_EQ(checks[0].first, room_id());
+    EXPECT_EQ(checks[0].second, call);
+    // Asked once until answered.
+    ringer_.tick();
+    EXPECT_TRUE(ringer_.take_checks().empty());
+    // The SFU did not answer: asked again a check later. Someone is in it: again later too.
+    ringer_.occupied(room_id(), call, std::nullopt);
+    clock_.advance(limits.occupancy_check - core::Millis{1});
+    ringer_.tick();
+    EXPECT_TRUE(ringer_.take_checks().empty());
+    clock_.advance(core::Millis{1});
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, true);
+    EXPECT_TRUE(plane_.take().empty());
+    clock_.advance(limits.occupancy_check);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    // An answer for another call, or one nobody asked for, changes nothing.
+    ringer_.occupied(room_id(), CallId::generate(clock_, random_), false);
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    // Nobody: the call is over for everyone.
+    ringer_.occupied(room_id(), call, false);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(ringer_.counters().emptied, 1U);
+    ringer_.occupied(room_id(), call, false);
+}
+
+TEST_F(GroupRingerTest, ATicketPutsOffTheCheck) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    const chat::RingLimits limits;
+    clock_.advance(limits.answered_hold - core::Millis{1});
+    ASSERT_EQ(join("carol"), call);
+    clock_.advance(core::Millis{1});
+    ringer_.tick();
+    EXPECT_TRUE(ringer_.take_checks().empty());
+    clock_.advance(limits.answered_hold);
+    ringer_.tick();
+    EXPECT_EQ(ringer_.take_checks().size(), 1U);
+}
+
+TEST_F(GroupRingerTest, ABigGroupRingsItsFirstMembersAndAnyOtherMayJoin) {
+    std::vector<core::UserId> members{user("alice")};
+    for (std::size_t i = 0; i < chat::kMaxGroupCallees + 8; ++i) {
+        members.push_back(user("m" + std::to_string(100 + i)));
+    }
+    const CallId call = ring_group(members);
+    EXPECT_EQ(plane_.take().size(), chat::kMaxGroupCallees + 1);
+    // One not rung joins: everyone hears it, the newcomer too.
+    EXPECT_EQ(join("m139"), call);
+    const auto heard = plane_.take();
+    EXPECT_EQ(heard.size(), chat::kMaxGroupCallees + 2);
+    EXPECT_EQ(heard.back(), line(RingEvent::Answered, "m139", "m139"));
+}
+
+TEST_F(GroupRingerTest, AGroupCallHoldsSoManyMembersInIt) {
+    std::vector<core::UserId> members{user("alice")};
+    for (std::size_t i = 0; i < chat::kMaxGroupJoined + 1; ++i) {
+        members.push_back(user("m" + std::to_string(100 + i)));
+    }
+    const CallId call = ring_group(members);
+    for (std::size_t i = 0; i + 1 < chat::kMaxGroupJoined; ++i) {
+        ASSERT_EQ(join("m" + std::to_string(100 + i)), call);
+    }
+    const std::string last = "m" + std::to_string(100 + chat::kMaxGroupJoined);
+    EXPECT_FALSE(ringer_.fits(room_id(), user(last)));
+    EXPECT_TRUE(ringer_.fits(room_id(), user("m100")));
+    const auto refused =
+        ringer_.ticketed(room_id(), user(last), std::nullopt, chat::CallKind::Group);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().why, chat::RingRefusal::Why::Busy);
+}
+
+TEST_F(GroupRingerTest, AGroupCalleeAnsweringJustBeforeTheTimeoutIsHeld) {
+    const CallId call = ring_group();
+    plane_.take();
+    const chat::RingLimits limits;
+    clock_.advance(limits.ring_timeout - core::Millis{1});
+    ringer_.answering(room_id(), user("carol"));
+    clock_.advance(core::Millis{1});
+    ringer_.tick();
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_EQ(ringer_.counters().graced, 1U);
+    EXPECT_EQ(join("carol"), call);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Answered, "carol"));
+    clock_.advance(limits.answer_grace);
+    ringer_.tick();
+    EXPECT_EQ(plane_.take(),
+              (std::vector{line(RingEvent::Missed, "bob"), line(RingEvent::Missed, "dave")}));
+}
+
+TEST_F(GroupRingerTest, ADeposedOwnerForgetsAGroupCallToo) {
+    ring_group();
+    plane_.take();
+    plane_.owning = false;
+    clock_.advance(chat::RingLimits{}.announce_every);
+    ringer_.tick();
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(ringer_.rooms().size(), 0U);
+}
+
+TEST(CallNoticeCodec, AMovedNoticeCarriesWhoWasPutOut) {
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    const chat::CallNotice sent{.event = RingEvent::Moved,
+                                .to = user("alice"),
+                                .room = room_id(),
+                                .call = CallId::generate(clock, random),
+                                .from = user("alice"),
+                                .by = std::nullopt,
+                                .expires_at = core::WallTime{core::Millis{5}},
+                                .subject = user("bob")};
+    const auto bytes = chat::encode_notice(sent);
+    const auto back = chat::decode_notice(bytes);
+    ASSERT_TRUE(back);
+    EXPECT_EQ(back->event, RingEvent::Moved);
+    EXPECT_EQ(back->subject, user("bob"));
+    for (std::size_t cut = 0; cut < bytes.size(); ++cut) {
+        EXPECT_FALSE(chat::decode_notice(std::span(bytes).first(cut))) << cut;
+    }
+    // Any other event carries none, and reads none.
+    chat::CallNotice left = sent;
+    left.event = RingEvent::Left;
+    const auto left_back = chat::decode_notice(chat::encode_notice(left));
+    ASSERT_TRUE(left_back);
+    EXPECT_FALSE(left_back->subject);
+}
+
 TEST(CallNoticeCodec, ANoticeComesBackAsItWasSentAndAnythingElseIsRefused) {
     const ulw::test::FakeClock clock;
     ulw::test::FakeRandom random;
@@ -542,7 +933,7 @@ TEST(CallNoticeCodec, ANoticeComesBackAsItWasSentAndAnythingElseIsRefused) {
     other_layout[0] = std::byte{9};
     EXPECT_FALSE(chat::decode_notice(other_layout));
     auto unknown_event = bytes;
-    unknown_event[1] = std::byte{6};
+    unknown_event[1] = std::byte{8};
     EXPECT_FALSE(chat::decode_notice(unknown_event));
 }
 

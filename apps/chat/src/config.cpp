@@ -6,6 +6,7 @@
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
+#include "call.hpp"
 #include "ops/dev_only.hpp"
 #include "ops/root.hpp"
 
@@ -307,6 +308,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!ring) {
         return std::unexpected(std::move(ring.error()));
     }
+    auto group = bounded<std::uint16_t>(env, "ULW_CALL_GROUP_PARTICIPANTS", kMinGroupParticipants,
+                                        kMaxGroupParticipants);
+    if (!group) {
+        return std::unexpected(std::move(group.error()));
+    }
     auto limits = client_limits(env);
     if (!limits) {
         return std::unexpected(std::move(limits.error()));
@@ -336,6 +342,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .allowed_origins = std::move(*allowed),
                   .presence_grace = *grace,
                   .ring_timeout = *ring,
+                  .group_participants = *group,
                   .client_limits = std::move(*limits),
                   .calls = std::move(*calls),
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),

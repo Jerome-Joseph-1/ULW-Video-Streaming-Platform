@@ -39,11 +39,18 @@
 //   {"type":"watch","user":"<sub>"}     hear when the user comes online or goes offline
 //   {"type":"unwatch","user":"<sub>"}   stop; unanswered
 //   {"type":"call","room":"<uuid>","device":"<uuid>"}   a ticket to the room's call, for this
-//       device: the room must be a direct chat this connection has joined (ADR-0050). The first
-//       rings the other member; the other member's answers the ring (ADR-0091)
-//   {"type":"call_decline"|"call_cancel"|"call_end","room":"<uuid>","call":"<uuid>"}   turn a
-//       ringing call down (a callee), give up ringing (the caller), or end an answered call
-//       (either member); answered with the event the other member hears
+//       device: the room must be a direct or group chat this connection has joined (ADR-0050,
+//       ADR-0095). The first rings the other members; another member's answers the ring
+//       (ADR-0091)
+//       "answer":"<call>"    optional: the ringing call this ticket answers. When that call is
+//                            over and the room has no call to answer, it is refused no_call
+//                            (with "call") instead of ringing the other members anew
+//   {"type":"call_decline"|"call_cancel"|"call_end"|"call_leave","room":"<uuid>",
+//    "call":"<uuid>"}   turn a ringing call down (a callee), give up ringing (the caller), end
+//       an answered call (either member of a direct chat, a group call's caller for everyone),
+//       or leave a group call; answered with the event the other members hear
+//   {"type":"call_expel","room":"<uuid>","call":"<uuid>","user":"<sub>"}   a group call's caller
+//       puts a member out of the call; answered with call_moved
 // Server to client:
 //   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
 //                                                      whose last seq is lower missed messages
@@ -62,7 +69,12 @@
 //       unasked, on every socket of both members: from is calling, until expires_at
 //   {"type":"call_answered"|"call_declined"|"call_cancelled"|"call_ended","room":"<uuid>",
 //    "call":"<uuid>","from":"<sub>","by":"<sub>"}   unasked, on every socket of both members
-//   {"type":"call_missed","room":"<uuid>","call":"<uuid>","from":"<sub>"}   nobody answered
+//   {"type":"call_missed","room":"<uuid>","call":"<uuid>","from":"<sub>"}   nobody answered (in a
+//       group call that is on, only the members still rung hear it: their ring ran out)
+//   {"type":"call_left","room":"<uuid>","call":"<uuid>","from":"<sub>","by":"<sub>"}   a group
+//       call's member left it
+//   {"type":"call_moved","room":"<uuid>","call":"<uuid>","from":"<sub>","expelled":"<sub>"}
+//       with "by" when the caller put them out: everyone else asks for a ticket again
 //   {"type":"error","reason":"<code>"}          with "room" and "id" when known, "user" for a
 //                                               watch, and "retry_after_ms" when the reason is
 //                                               rate_limited, or unavailable for a call
@@ -116,13 +128,17 @@ struct Unwatch {
 struct Call {
     core::RoomId room;
     core::DeviceId device;
+    // "answer": the ringing call this ticket answers (calls.md, Ringing).
+    std::optional<CallId> answering = std::nullopt;
 };
 
-// call_decline, call_cancel or call_end.
+// call_decline, call_cancel, call_end, call_leave or call_expel.
 struct CallMove {
     core::RoomId room;
     CallSignal signal = CallSignal::Decline;
     CallId call;
+    // call_expel only: who is put out.
+    std::optional<core::UserId> target = std::nullopt;
 };
 
 using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove>;
@@ -179,6 +195,8 @@ void write_ticket(std::string& out, const core::RoomId& room,
 // What a ring's notice tells each socket of its member, and what a member's own decline,
 // cancel or end is answered with.
 void write_call_event(std::string& out, const CallNotice& notice);
+// A ticket answering a call that is over: no_call, naming the call it answered.
+void write_call_over(std::string& out, const core::RoomId& room, const CallId& call);
 // A call refused, with a hint of when to ask again for a refusal a retry may cure.
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
                       std::optional<core::Millis> retry_after);

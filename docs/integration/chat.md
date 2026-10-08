@@ -47,8 +47,10 @@ Client to server:
 | `join` | `room`, or `stream` for a live stream's chat; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, or `"direct"`; not with `stream`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names (see [Member lists](#member-lists)). `stream` names a live stream as its playback URL does, and joins its chat (see [A stream's live chat](#a-streams-live-chat)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
-| `call` | `room`, `device` (a UUID the client keeps per device) | A ticket to the room's 1:1 call, for a direct chat this connection has joined. See [calls.md](calls.md). |
-| `call_decline`, `call_cancel`, `call_end` | `room`, `call` | Turn a ringing call down (the callee), give up ringing (the caller), or end an answered call (either member), for a direct chat this connection has joined. See [calls.md](calls.md#ringing). |
+| `call` | `room`, `device` (a UUID the client keeps per device); `answer` (the ringing call it answers), optional | A ticket to the room's call, for a direct or group chat this connection has joined. See [calls.md](calls.md). |
+| `call_decline`, `call_cancel`, `call_end` | `room`, `call` | Turn a ringing call down (a callee), give up ringing (the caller), or end an answered call (either member of a direct chat; a group call's caller, for everyone), for a room this connection has joined. See [calls.md](calls.md#ringing). |
+| `call_leave` | `room`, `call` | Leave a group call, which goes on for the others. See [calls.md](calls.md#group-calls). |
+| `call_expel` | `room`, `call`, `user` | A group call's caller puts `user` out of the call. See [calls.md](calls.md#group-calls). |
 
 Server to client:
 
@@ -59,7 +61,7 @@ Server to client:
 | `message` | `room`, `seq`, `sender`, `id`, `body` | A message in the room, your own included, live, resumed or from history. `sender` is the poster's user id ([auth.md](auth.md)). |
 | `history` | `room`, `count` | Ends the answer to a `history` command, after its `count` messages. `0`: nothing more in that direction. |
 | `ticket` | `room`, `url`, `token`, `expires_at`, `call` when the ticket belongs to a call | The answer to `call`: connect LiveKit's SDK to `url` with `token` before `expires_at` (Unix seconds). See [calls.md](calls.md). |
-| `call_ringing`, `call_answered`, `call_declined`, `call_cancelled`, `call_missed`, `call_ended` | `room`, `call`, `from`; `expires_at` (ringing) or `by` (the others but missed) | Unasked, on every socket of both members of a direct chat, joined to the room or not: a call rings, or how it went. See [calls.md](calls.md#ringing). |
+| `call_ringing`, `call_answered`, `call_declined`, `call_cancelled`, `call_missed`, `call_ended`, `call_left`, `call_moved` | `room`, `call`, `from`; `expires_at` (ringing), `by` (who did it, when someone did), `expelled` (moved) | Unasked, on every socket of the call's members, joined to the room or not: a call rings, or how it went. See [calls.md](calls.md#ringing) and [calls.md](calls.md#group-calls). |
 | `error` | `reason`, plus `room` and `id` when known, `retry_after_ms` for `rate_limited` and for a call's `unavailable` | A command failed. |
 
 ```json
@@ -177,8 +179,8 @@ list never said no: join again.
 | `bad_body` | `body` is not base64url | Fix the client |
 | `bad_stream` | `stream` is not a stream name | Fix the client |
 | `bad_device` | A call's `device` is not a canonical lowercase UUID | Fix the client |
-| `bad_call` | A `call_decline`, `call_cancel` or `call_end` whose `call` is not a canonical lowercase UUID | Fix the client |
-| `not_callable`, `call_failed`, `calls_disabled`, `no_call`, `ring_limited` | A call was refused; see [calls.md](calls.md#errors) | As there |
+| `bad_call` | A `call_decline`, `call_cancel`, `call_end`, `call_leave` or `call_expel` whose `call` is not a canonical lowercase UUID | Fix the client |
+| `not_callable`, `call_failed`, `calls_disabled`, `no_call`, `ring_limited`, `expelled`, `call_full` | A call was refused; see [calls.md](calls.md#errors) | As there |
 | `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive | Do not retry |
 | `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |

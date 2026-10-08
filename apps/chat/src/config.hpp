@@ -72,6 +72,9 @@ struct Config {
     // ULW_CALL_RING_TIMEOUT_MS: how long a call rings with nobody answering (ADR-0091). Unset:
     // RingLimits::ring_timeout.
     std::optional<core::Millis> ring_timeout;
+    // ULW_CALL_GROUP_PARTICIPANTS: devices in a group chat's call, 3 to 16 (ADR-0095). Unset:
+    // CallLimits::group_participants.
+    std::optional<std::uint16_t> group_participants;
     ClientLimits client_limits;
     // Unset when LIVEKIT_API_KEY is: calls are not configured, and a call is answered
     // calls_disabled. With the key, the other three LIVEKIT_ variables are required.

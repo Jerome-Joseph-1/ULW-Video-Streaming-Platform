@@ -135,6 +135,8 @@ LiveFailure LiveStreams::media_failure(MediaError e) noexcept {
     ++counters_.media_failures;
     switch (e) {
     case MediaError::Unavailable:
+    // A room a close could not get rid of yet: a later one may.
+    case MediaError::Remains:
         return LiveFailure::Unavailable;
     // Only a handle closed through itself answers this, and every handle here is opened per
     // request; it means the stream's room was closed, which is its end.

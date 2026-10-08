@@ -176,7 +176,7 @@ private:
 };
 
 // The chat service's view of this node's RoomRouter.
-class RouterRooms final : public IRooms, public IRingPlane {
+class RouterRooms final : public IRooms, public ICallPlane {
 public:
     explicit RouterRooms(rt::RoomRouter& router) noexcept : router_(router) {}
 
@@ -200,6 +200,14 @@ public:
     }
     [[nodiscard]] bool owns(const core::RoomId& room) const noexcept override {
         return router_.owns(room);
+    }
+    [[nodiscard]] std::optional<std::uint64_t>
+    owner_generation(const core::RoomId& room) const noexcept override {
+        return router_.owner_generation(room);
+    }
+    void media_generation(const core::RoomId& room, const rt::MediaChange& change,
+                          rt::StoreCallback<std::optional<rt::MediaState>> done) override {
+        router_.media_generation(room, change, std::move(done));
     }
 
 private:

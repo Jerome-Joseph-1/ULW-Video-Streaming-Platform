@@ -206,6 +206,9 @@ public:
     // store that is still down loses no removal. A join still waiting for its member list is
     // checked again once it is let in, since the list it was let in by may predate the removal.
     void on_members_resync() noexcept override;
+    // Who else hears the removals the store tells this service of, and its resyncs: the call
+    // handler, which puts a removed member out of the call (ADR-0095). nullptr: nobody.
+    void also_tell(core::ports::IMemberListener* listener) noexcept { also_ = listener; }
 
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
@@ -253,7 +256,7 @@ private:
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
-    void called(ClientId id, const core::RoomId& room,
+    void called(ClientId id, const core::RoomId& room, const std::optional<CallId>& answering,
                 std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
     void moved(ClientId id, const CallMove& move,
                std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
@@ -321,6 +324,7 @@ private:
     bool asking_rechecks_ = false;
     // stop(): the store is never called again.
     bool stopped_ = false;
+    core::ports::IMemberListener* also_ = nullptr;
     bool resync_owed_ = false;
 };
 

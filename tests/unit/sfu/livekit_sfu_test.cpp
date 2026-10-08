@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -494,7 +495,8 @@ TEST_P(LiveKitSfuTest, AClosedRoomRelaysNothing) {
     const auto relayed = relay(**room, stream_target());
     ASSERT_FALSE(relayed);
     EXPECT_EQ(relayed.error(), MediaError::Closed);
-    EXPECT_EQ(server.request_count(), 2U);
+    // The create, and the close's delete and the listing that checks it took.
+    EXPECT_EQ(server.request_count(), 3U);
 }
 
 TEST_P(LiveKitSfuTest, ThePlainClientUrlGivesAPlainWhipUrl) {
@@ -573,18 +575,179 @@ TEST_P(LiveKitSfuTest, NoTicketIssuesForARoomThatCannotBeReopened) {
     EXPECT_EQ(ticket.error(), MediaError::Unavailable);
 }
 
-TEST_P(LiveKitSfuTest, ListingParticipantsIsNotImplementedAndTouchesNoServer) {
+using Listed = std::expected<std::vector<core::ports::MediaParticipant>, MediaError>;
+
+// A ListRooms answer naming the generation `generation` of kRoom.
+std::string listing(int generation) {
+    return R"({"rooms":[{"name":")" + std::string(kRoom) + ":" + std::to_string(generation) +
+           R"("}]})";
+}
+
+Listed list_participants(net::IReactor& reactor, IMediaRoom& room) {
+    std::optional<Listed> got;
+    room.participants([&](Listed r) noexcept { got = std::move(r); });
+    EXPECT_FALSE(got.has_value()) << "callback ran inside participants()";
+    EXPECT_TRUE(pump_until(reactor, [&] { return got.has_value(); }));
+    return got.value_or(std::unexpected(MediaError::Unavailable));
+}
+
+TEST_P(LiveKitSfuTest, ParticipantsAreTheMembersConnectedToTheGeneration) {
+    // LiveKit's protojson writes int64 as strings; a number is read as well.
+    const HttpTestServer server([](const ServedRequest& request) {
+        if (request.path() == "/twirp/livekit.RoomService/ListRooms") {
+            return Reply{.status = 200, .headers = {}, .body = listing(5)};
+        }
+        if (request.path() != "/twirp/livekit.RoomService/ListParticipants") {
+            return Reply{.status = 200, .headers = {}, .body = "{}"};
+        }
+        return Reply{
+            .status = 200,
+            .headers = {},
+            .body =
+                std::string(R"({"participants":[)") + R"({"identity":"alice/)" +
+                std::string(kDevice) +
+                R"(","state":"ACTIVE","joined_at":"1790000000","joined_at_ms":"1790000000123"},)" +
+                R"({"identity":"bob/0192f3a4-0000-7000-8000-00000000000e","state":"JOINED","joined_at":1790000001},)" +
+                R"({"identity":"carol/0192f3a4-0000-7000-8000-00000000000f","state":"DISCONNECTED"},)" +
+                R"({"identity":"EG_recorder","state":"ACTIVE"},)" +
+                R"({"identity":"mallory/not-a-uuid","state":"ACTIVE"}]})"};
+    });
+    start(server.base_url());
+    auto room = open(MediaGeneration{5});
+    ASSERT_TRUE(room);
+    const Listed listed = list_participants(*reactor, **room);
+    ASSERT_TRUE(listed);
+    ASSERT_EQ(listed->size(), 2U);
+    EXPECT_EQ((*listed)[0].user, *core::UserId::parse("alice"));
+    EXPECT_EQ((*listed)[0].device, *core::DeviceId::parse(kDevice));
+    EXPECT_EQ((*listed)[0].joined_at, core::WallTime{core::Millis{1'790'000'000'123}});
+    EXPECT_EQ((*listed)[1].user, *core::UserId::parse("bob"));
+    EXPECT_EQ((*listed)[1].joined_at, core::WallTime{core::Millis{1'790'000'001'000}});
+
+    const auto requests = server.requests();
+    ASSERT_EQ(requests.size(), 3U);
+    // Whether the room is there first, by name: LiveKit answers a listing of a room no node
+    // holds unavailable, not not_found.
+    EXPECT_EQ(requests[1].path(), "/twirp/livekit.RoomService/ListRooms");
+    const ServedRequest& list = requests[2];
+    EXPECT_EQ(string_at(body_of(list), "room"), std::string(kRoom) + ":5");
+    // Its token reads that one room, and does nothing else.
+    const auto claims = claims_of(list);
+    EXPECT_EQ(bool_at(claims, "video", "roomAdmin"), true);
+    EXPECT_EQ(string_at(claims, "video", "room"), std::string(kRoom) + ":5");
+    EXPECT_EQ(bool_at(claims, "video", "roomCreate"), std::nullopt);
+    EXPECT_EQ(bool_at(claims, "video", "roomJoin"), std::nullopt);
+}
+
+TEST_P(LiveKitSfuTest, ARoomLiveKitDroppedHoldsNobody) {
+    // Not listed: nobody, and ListParticipants is not asked (LiveKit would answer unavailable).
     auto server = answering(200);
     start(server.base_url());
     auto room = open();
     ASSERT_TRUE(room);
-    std::optional<std::expected<std::vector<core::ports::MediaParticipant>, MediaError>> got;
-    (*room)->participants([&](auto r) noexcept { got = std::move(r); });
-    EXPECT_FALSE(got.has_value()) << "callback ran inside participants()";
-    ASSERT_TRUE(pump_until(*reactor, [&] { return got.has_value(); }));
-    ASSERT_FALSE(*got);
-    EXPECT_EQ(got->error(), MediaError::NotImplemented);
-    EXPECT_EQ(server.requests().size(), 1U) << "only the CreateRoom of open()";
+    const Listed listed = list_participants(*reactor, **room);
+    ASSERT_TRUE(listed);
+    EXPECT_TRUE(listed->empty());
+    const auto requests = server.requests();
+    ASSERT_EQ(requests.size(), 2U);
+    EXPECT_EQ(requests[1].path(), "/twirp/livekit.RoomService/ListRooms");
+}
+
+TEST_P(LiveKitSfuTest, ARoomThatGoesBetweenTheTwoCallsHoldsNobody) {
+    // Listed, then gone by the time its participants are asked: LiveKit's Twirp not_found,
+    // handed over as the answer (IfAbsent::Succeed), is nobody.
+    const HttpTestServer server([&](const ServedRequest& request) {
+        if (request.path() == "/twirp/livekit.RoomService/ListRooms") {
+            return Reply{.status = 200, .headers = {}, .body = listing(1)};
+        }
+        if (request.path() == "/twirp/livekit.RoomService/ListParticipants") {
+            return Reply{.status = 404,
+                         .headers = {},
+                         .body = R"({"code":"not_found","msg":"requested room does not exist"})"};
+        }
+        return Reply{.status = 200, .headers = {}, .body = "{}"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const Listed listed = list_participants(*reactor, **room);
+    ASSERT_TRUE(listed);
+    EXPECT_TRUE(listed->empty());
+    EXPECT_EQ(string_at(body_of(server.requests().at(2)), "room"), std::string(kRoom) + ":1");
+}
+
+TEST_P(LiveKitSfuTest, AListingOfParticipantsReadsOnlyWhatLiveKitWrites) {
+    // Bodies past what ListParticipants answers: only an object without the list is nobody;
+    // anything else unreadable is a failure a retry may cure.
+    for (const auto& [body, ok, size] : std::vector<std::tuple<std::string, bool, std::size_t>>{
+             {"not json", false, 0},
+             {"[]", false, 0},
+             {"7", false, 0},
+             {"{}", true, 0},
+             {R"({"participants":7})", false, 0},
+             {R"({"participants":{}})", false, 0},
+             {R"({"participants":[{"identity":"bob/)" + std::string(kDevice) +
+                  R"(","joined_at":"1700000000"}]})",
+              true, 1},
+             {R"({"participants":[{"state":"ACTIVE"}]})", true, 0},
+             {R"({"participants":[{"identity":"nobody-at-all"}]})", true, 0},
+             {R"({"participants":[{"identity":"bob/)" + std::string(kDevice) + R"("}]})", true, 1},
+             {R"({"code":"not_found"})", true, 0}}) {
+        const HttpTestServer server([answer = body](const ServedRequest& request) {
+            if (request.path() == "/twirp/livekit.RoomService/ListRooms") {
+                return Reply{.status = 200, .headers = {}, .body = listing(1)};
+            }
+            if (request.path() == "/twirp/livekit.RoomService/ListParticipants") {
+                return Reply{.status = 200, .headers = {}, .body = answer};
+            }
+            return Reply{.status = 200, .headers = {}, .body = "{}"};
+        });
+        start(server.base_url());
+        auto room = open();
+        ASSERT_TRUE(room);
+        const Listed listed = list_participants(*reactor, **room);
+        EXPECT_EQ(listed.has_value(), ok) << body;
+        if (listed) {
+            EXPECT_EQ(listed->size(), size) << body;
+        }
+        room->reset();
+        sfu.reset();
+    }
+}
+
+TEST_P(LiveKitSfuTest, ListingParticipantsFailsByWhetherARetryCanHelp) {
+    for (const auto& [status, body, error] : std::vector<std::tuple<int, std::string, MediaError>>{
+             {503, R"({"code":"unavailable"})", MediaError::Unavailable},
+             {401, R"({"code":"unauthenticated"})", MediaError::Refused},
+             // A 404 that is not LiveKit's not_found: a route that is not there.
+             {404, R"({"code":"bad_route"})", MediaError::Refused},
+             {200, "not json", MediaError::Unavailable}}) {
+        std::atomic<int> served{0};
+        const HttpTestServer server([&served, code = status, answer = body](const ServedRequest&) {
+            return ++served == 1 ? Reply{.status = 200, .headers = {}, .body = "{}"}
+                                 : Reply{.status = code, .headers = {}, .body = answer};
+        });
+        start(server.base_url());
+        auto room = open();
+        ASSERT_TRUE(room);
+        const Listed listed = list_participants(*reactor, **room);
+        ASSERT_FALSE(listed) << status;
+        EXPECT_EQ(listed.error(), error) << status;
+        room->reset();
+        sfu.reset();
+    }
+}
+
+TEST_P(LiveKitSfuTest, AClosedRoomListsNobodyAndAsksNothing) {
+    auto server = answering(200);
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    ASSERT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
+    const Listed listed = list_participants(*reactor, **room);
+    ASSERT_FALSE(listed);
+    EXPECT_EQ(listed.error(), MediaError::Closed);
+    EXPECT_EQ(server.requests().size(), 3U) << "only the create, the delete and its check";
 }
 
 TEST_P(LiveKitSfuTest, AClosedRoomIssuesNoTicketAndIsNotRecreated) {
@@ -596,7 +759,7 @@ TEST_P(LiveKitSfuTest, AClosedRoomIssuesNoTicketAndIsNotRecreated) {
     const auto ticket = join(**room, "alice");
     ASSERT_FALSE(ticket);
     EXPECT_EQ(ticket.error(), MediaError::Closed);
-    EXPECT_EQ(server.request_count(), 2U) << "the closed generation was created again";
+    EXPECT_EQ(server.request_count(), 3U) << "the closed generation was created again";
 }
 
 TEST_P(LiveKitSfuTest, ClosingAGenerationDeletesItsRoom) {
@@ -606,17 +769,89 @@ TEST_P(LiveKitSfuTest, ClosingAGenerationDeletesItsRoom) {
     ASSERT_TRUE(room);
     ASSERT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
     const auto requests = server.requests();
-    ASSERT_EQ(requests.size(), 2U);
+    ASSERT_EQ(requests.size(), 3U);
     EXPECT_EQ(requests[1].path(), "/twirp/livekit.RoomService/DeleteRoom");
     EXPECT_EQ(string_at(body_of(requests[1]), "room"), std::string(kRoom) + ":3");
     EXPECT_EQ(bool_at(claims_of(requests[1]), "video", "roomCreate"), true);
+    // Then whether it is gone, by name, with a token that only lists.
+    EXPECT_EQ(requests[2].path(), "/twirp/livekit.RoomService/ListRooms");
+    const auto listed = body_of(requests[2]);
+    const auto* names = listed.find("names");
+    ASSERT_TRUE(names != nullptr && names->as_array() != nullptr && names->as_array()->size() == 1);
+    EXPECT_EQ(names->as_array()->at(0).as_string(), std::string(kRoom) + ":3");
+    EXPECT_EQ(bool_at(claims_of(requests[2]), "video", "roomList"), true);
+    EXPECT_EQ(bool_at(claims_of(requests[2]), "video", "roomCreate"), std::nullopt);
+}
+
+// A client joining while LiveKit deletes the room can bring it back: a close that still finds the
+// room listed deletes it again, and only says it closed once the listing comes back empty.
+TEST_P(LiveKitSfuTest, ARoomBroughtBackDuringItsDeleteIsDeletedAgain) {
+    std::atomic<int> lists{0};
+    const HttpTestServer server([&](const ServedRequest& request) {
+        if (request.path() == "/twirp/livekit.RoomService/ListRooms" && ++lists == 1) {
+            return Reply{.status = 200,
+                         .headers = {},
+                         .body = R"({"rooms":[{"name":")" + std::string(kRoom) + R"(:1"}]})"};
+        }
+        return Reply{.status = 200, .headers = {}, .body = "{}"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    ASSERT_TRUE(wait([&](auto done) { (*room)->close(std::move(done)); }));
+    std::vector<std::string> paths;
+    for (const ServedRequest& r : server.requests()) {
+        paths.emplace_back(r.path());
+    }
+    EXPECT_EQ(paths, (std::vector<std::string>{"/twirp/livekit.RoomService/CreateRoom",
+                                               "/twirp/livekit.RoomService/DeleteRoom",
+                                               "/twirp/livekit.RoomService/ListRooms",
+                                               "/twirp/livekit.RoomService/DeleteRoom",
+                                               "/twirp/livekit.RoomService/ListRooms"}));
+}
+
+TEST_P(LiveKitSfuTest, ARoomThatWillNotGoIsReportedAsRemainingForTheCallerToRetry) {
+    const HttpTestServer server([&](const ServedRequest& request) {
+        if (request.path() == "/twirp/livekit.RoomService/ListRooms") {
+            return Reply{.status = 200,
+                         .headers = {},
+                         .body = R"({"rooms":[{"name":")" + std::string(kRoom) + R"(:1"}]})"};
+        }
+        return Reply{.status = 200, .headers = {}, .body = "{}"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto closed = wait([&](auto done) { (*room)->close(std::move(done)); });
+    ASSERT_FALSE(closed);
+    EXPECT_EQ(closed.error(), MediaError::Remains);
+    // Three rounds of a delete and its check.
+    EXPECT_EQ(server.request_count(), 7U);
+}
+
+TEST_P(LiveKitSfuTest, ACloseWhoseCheckFailsSaysSo) {
+    std::atomic<int> served{0};
+    const HttpTestServer server([&](const ServedRequest& request) {
+        ++served;
+        if (request.path() == "/twirp/livekit.RoomService/ListRooms") {
+            return Reply{.status = 503, .headers = {}, .body = R"({"code":"unavailable"})"};
+        }
+        return Reply{.status = 200, .headers = {}, .body = "{}"};
+    });
+    start(server.base_url());
+    auto room = open();
+    ASSERT_TRUE(room);
+    const auto closed = wait([&](auto done) { (*room)->close(std::move(done)); });
+    ASSERT_FALSE(closed);
+    EXPECT_EQ(closed.error(), MediaError::Unavailable);
 }
 
 TEST_P(LiveKitSfuTest, ClosingWhatIsAlreadyGoneSucceeds) {
     std::atomic<int> served{0};
-    // The room opens and has gone by the time it is closed.
-    const HttpTestServer server([&](const ServedRequest&) {
-        return ++served == 1
+    // The room opens and has gone by the time it is closed: its delete is not_found, and the
+    // listing that checks it finds nothing.
+    const HttpTestServer server([&](const ServedRequest& request) {
+        return ++served == 1 || request.path() == "/twirp/livekit.RoomService/ListRooms"
                    ? Reply{.status = 200, .headers = {}, .body = "{}"}
                    : Reply{.status = 404, .headers = {}, .body = R"({"code":"not_found"})"};
     });
